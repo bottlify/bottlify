@@ -30,7 +30,7 @@
 
 import { EMPTY } from '../wasm/encoder.js';
 import { I32, I64 } from './flags.js';
-import { Exit, Local } from './region.js';
+import { Exit, LIBM, Local } from './region.js';
 import { registerLocal } from './width.js';
 import { pageFlagsAt } from '../runtime/layout.js';
 import { atState } from './bases.js';
@@ -1013,18 +1013,17 @@ function mathArgument(e, operation){
  */
 function hostResult(e, operation){
     const { b } = e;
-    const { math } = e.context;
     b.localGet(registerLocal(e, ESP)).i32const(8).op(I32.sub);
+    b.i32const(LIBM.indexOf(operation)).localGet(Local.d0);
     if (operation === 'cipow')
     {
-        b.localGet(Local.d1).localGet(Local.d0).call(math.pow);
+        b.localGet(Local.d1);
     }
     else
     {
-        b.localGet(Local.d0).call(math[/** @type {Record<string, string>} */ ({
-            cisin: 'sin', cicos: 'cos', citan: 'tan', ciatan: 'atan', ciasin: 'asin',
-            ciacos: 'acos', cilog: 'log', cilog10: 'log10', ciexp: 'exp' })[operation]]);
+        b.f64const(0);
     }
+    b.call(e.context.math.libm);
     b.store('f64', { guest: true, offset: e.layout.ramBase });
 }
 

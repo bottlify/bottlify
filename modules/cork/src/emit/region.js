@@ -84,8 +84,7 @@ import {
  * instantiation supplies each (`mathImports()`), from `Math`.
  */
 export const MATH_IMPORTS = Object.freeze([
-    'sin', 'cos', 'tan', 'atan2', 'exp2m1', 'log2', 'log1p', 'exp', 'pow', 'asin', 'acos', 'atan',
-    'log', 'log10',
+    'sin', 'cos', 'tan', 'atan2', 'exp2m1', 'log2', 'log1p', 'libm',
 ]);
 
 /**
@@ -126,10 +125,35 @@ export function mathImports(){
         sin: Math.sin, cos: Math.cos, tan: Math.tan, atan2: Math.atan2,
         /** @param {number} x */
         exp2m1: x=>Math.expm1(x * Math.LN2),
-        log2: Math.log2, log1p: Math.log1p, exp: Math.exp, pow: Math.pow, asin: Math.asin,
-        acos: Math.acos, atan: Math.atan, log: Math.log, log10: Math.log10,
+        log2: Math.log2, log1p: Math.log1p, libm,
     };
 }
+
+/**
+ * The C runtime's transcendentals a call to one is formed as (`emit/crt.js`), by
+ * its place in `LIBM`: one import for them all, as every module imports each.
+ *
+ * @param {number} kind @param {number} x @param {number} y
+ */
+function libm(kind, x, y){
+    switch (kind)
+    {
+        case 0: return Math.sin(x);
+        case 1: return Math.cos(x);
+        case 2: return Math.tan(x);
+        case 3: return Math.atan(x);
+        case 4: return Math.asin(x);
+        case 5: return Math.acos(x);
+        case 6: return Math.log(x);
+        case 7: return Math.log10(x);
+        case 8: return Math.exp(x);
+        default: return y ** x;
+    }
+}
+
+/** `libm`'s kinds: the `crt` operations, in order; pow's base is `y`. */
+export const LIBM = Object.freeze(['cisin', 'cicos', 'citan', 'ciatan', 'ciasin', 'ciacos',
+    'cilog', 'cilog10', 'ciexp', 'cipow']);
 
 /** How a run of translated code came back, as the low byte of the result. */
 export const Exit = Object.freeze({
@@ -498,7 +522,8 @@ export function prepareModule(m, layout, features, memory = {},
     /** @type {Record<string, number>} the others' types, by name */
     const types = {
         atan2: m.type({ params: [ValType.f64, ValType.f64], results: [ValType.f64] }),
-        pow: m.type({ params: [ValType.f64, ValType.f64], results: [ValType.f64] }),
+        libm: m.type({ params: [ValType.i32, ValType.f64, ValType.f64],
+            results: [ValType.f64] }),
     };
     /** @type {Record<string, number>} */
     const math = {};
