@@ -2734,3 +2734,23 @@ smaller ones cost Stockfish 10 %. No size won both; 256 kept.
   interpreted instructions go (`install-watch --cork-figures` with `timings`).
 - **Machine.** Linux container, 4 vCPU, 15 GB, Node 26.13; power plan not recorded.
 - **Decision.** Neither setting changed; the next step is the interpreted addresses themselves.
+
+### 2026-11-12: the shared translation store, measured again, pays for ngen's second assembly on (cork, multi-process)
+
+- **Idea.** The entry of 2026-11-11 found no gain from a store shared by the .NET Framework 4
+  setup's ngen workers. Conditions have changed since (Node 26, the translator pool, cork's
+  current runtime), and `--cork-figures` shows most of a worker's exits waiting for a translation
+  (`translated since`), each worker translating clr.dll and clrjit.dll again.
+- **Workload.** Bundle `net40b` (manifest sha256 d8ac6588...), `ngen.exe executeQueuedItems`
+  under `tools/install-watch.mjs`, `concurrency` 1, `{"worker":true}`, 2.6 min a run; the arms
+  alternate, two runs each: no store, and a run-wide `createDirectoryTranslationStore` over
+  `createMemoryDirectory` (`--store memory`). Seconds from ngen's `Compiling assembly X` to its
+  line for X done.
+- **Values.** System.Data (the first): none 52.0, 50.3; store 48.6, 53.1. System.Drawing: none
+  20.9, 21.6; store 16.4, 17.9. System.Windows.Forms: none not done within the run (over 69 s
+  both); store 72.1, 67.8.
+- **Why.** The first assembly's worker starts cold either way; each later one finds clr.dll's and
+  clrjit.dll's regions translated, about a fifth of its compile.
+- **Machine.** Linux container, 4 vCPU, 15 GB, Node 26.13; power plan not recorded.
+- **Decision.** `install-watch --store memory` again, as a page has its origin's store; the
+  2026-11-11 entry's decision is superseded by this one, not rewritten.
