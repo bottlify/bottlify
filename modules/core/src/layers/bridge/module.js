@@ -984,6 +984,13 @@ export function createBridgeModule(){
                  */
                 suspended: ()=>live() ? state.callbacks.pendingCalls() : 0,
 
+                /**
+                 * How many threads wait on a suspended call's answer from the
+                 * host. Fewer than `suspended` while a call runs guest code it
+                 * called back, whose thread is at work rather than waiting.
+                 */
+                waitingOnHost: ()=>live() ? state.callbacks.waitingOnHost() : 0,
+
                 /** The host call that suspended last, or '' when none has. */
                 lastSuspended: ()=>live() ? state.callbacks.lastSuspended() : '',
 

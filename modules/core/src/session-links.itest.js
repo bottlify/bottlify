@@ -55,8 +55,13 @@ function fakeDirectory(){
                     createWritable: async()=>{
                         let written = new Uint8Array(0);
                         return {
+                            // At the cursor, as a stream from createWritable writes: one
+                            // write after another adds to the file.
                             write: async(/** @type {Uint8Array} */ chunk)=>{
-                                written = chunk.slice();
+                                const longer = new Uint8Array(written.length + chunk.length);
+                                longer.set(written);
+                                longer.set(chunk, written.length);
+                                written = longer;
                             },
                             close: async()=>{
                                 here.set(name, written);
