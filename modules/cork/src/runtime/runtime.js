@@ -48,6 +48,7 @@ import { blockCounts, mechanismCounts, resetBlockCounts, topBlocks, transferTarg
 import { profileForms } from './profile-forms.js';
 import { createWeakInstances } from './weak-instances.js';
 import { sharedModulesOf } from './shared-modules.js';
+import { sharedFormsOf } from './shared-forms.js';
 import {
     CACHE_VERSION, cacheKey, moduleKey, packRegion, seedRecords, unpackRegion,
 } from './cache.js';
@@ -254,6 +255,12 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
         // sharing this one's store (`shared-modules.js`): a process started again
         // instantiates what an earlier one compiled (0: none kept).
         sharedModuleBytes: 256 << 20,
+        // The formed regions kept for every runtime sharing this one's store
+        // and forming as it does (`shared-forms.js`): a store hit whose bytes
+        // and pages answer as they did is not decoded again (0: none kept).
+        // Each is many small objects; 32 768 of them held 1.8 GB of the
+        // engine thread's heap, whose collections cost more than they saved.
+        sharedFormed: 8192,
         // A small leaf callee formed into its caller, the call and its return
         // jumps inside the region (false: every call crosses regions).
         leafCalls: true,
@@ -1129,7 +1136,7 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
         // precision, floats, the stack shape's tests).
         cacheHits: 0, cacheMisses: 0, missNoRecord: 0, missNoModule: 0, missChanged: 0,
         missBytes: 0, missFormedOther: 0, missModes: 0, missPrecision: 0, missFloats: 0,
-        hitsFormedAgain: 0, formedAsRecorded: 0, sharedModules: 0,
+        hitsFormedAgain: 0, formedAsRecorded: 0, sharedModules: 0, formedShared: 0,
         toStoredRegion: 0, precisionSwitches: 0,
         readSwitches: 0,
         stackCode: 0,
@@ -2935,6 +2942,84 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
         ...(one.checked === true ? { checked: true } : {}),
         ...(one.copies === true ? { copies: true } : {}) });
     /**
+     * The formed regions of the runtimes sharing the store and forming as this
+     * one does (`sharedFormed`), by entry and the callees formed in. None for a
+     * run that keeps no store, and for a diagnostic range left to the
+     * interpreter, which `translatable` answers by address rather than by page.
+     */
+    const sharedForms = settings.interpretRange || leaveOut.size > 0 || profiling ? null
+        : sharedFormsOf(settings.store ?? null, JSON.stringify(formOptions), settings.sharedFormed);
+    /**
+     * Whether a region formed earlier would be formed the same here now: every
+     * page forming asked about answers as it did, and every byte it read is as
+     * it was.
+     *
+     * @param {import('./shared-forms.js').Formed} formed
+     */
+    const formsAsBefore = ({ region, answers })=>{
+        for (const [page, yes] of answers)
+        {
+            if (translatable(page * 4096) !== yes)
+            {
+                return false;
+            }
+        }
+        for (const { start, bytes } of region.sources ?? [])
+        {
+            const now = readBytes?.(start, start + bytes.length);
+            for (let at = 0; at < bytes.length; at++)
+            {
+                if ((now === undefined ? read(start + at) : now[at]) !== bytes[at])
+                {
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
+    /**
+     * A region formed at `eip` with these callees formed in (`callTargets`), or
+     * the one a runtime sharing the store formed so where it forms the same
+     * (`formsAsBefore`). One formed to be kept is formed alone, without what
+     * other regions of the call decoded (`shared`): forming reads and asks
+     * about only what it did not find there, and the region's own reads must
+     * be all of them.
+     *
+     * @param {number} eip @param {[number, number[]][] | undefined} targets
+     * @param {import('../region.js').FormShared} [shared]
+     * @returns {import('../region.js').Region}
+     */
+    const formAt = (eip, targets, shared)=>{
+        const called = targets === undefined ? {} : { callTargets: new Map(targets) };
+        if (sharedForms === null)
+        {
+            return formRegion(read, eip, { ...formHere, translatable, shared, ...called });
+        }
+        const key = `${eip}/${targets === undefined ? '' : JSON.stringify(targets)}`;
+        const known = sharedForms.get(key);
+        if (known !== undefined && formsAsBefore(known))
+        {
+            counts.formedShared++;
+            return known.region;
+        }
+        /** @type {Map<number, boolean>} */
+        const answers = new Map();
+        const region = formRegion(read, eip, { ...formHere, ...called,
+            translatable: address=>{
+                const page = Math.floor(address / 4096);
+                let yes = answers.get(page);
+                if (yes === undefined)
+                {
+                    yes = translatable(address);
+                    answers.set(page, yes);
+                }
+                return yes;
+            } });
+        sharedForms.set(key, { region, answers });
+        return region;
+    };
+
+    /**
      * The stored region for a formed one, or null. Formed here beside other
      * regions than the run that stored it had, or before the callees it was
      * formed with were known, a region is formed again as its record says
@@ -2970,8 +3055,7 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
         }
         if (region.hash !== shape.hash)
         {
-            region = formRegion(read, region.entry, { ...formHere, translatable,
-                ...(shape.targets === undefined ? {} : { callTargets: new Map(shape.targets) }) });
+            region = formAt(region.entry, shape.targets);
             if (region.hash !== shape.hash)
             {
                 counts.missChanged++;
@@ -5018,9 +5102,7 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
             }
             // One the store holds is formed as its record says (`recordBefore`).
             const record = recordBefore(step, store, eip, entryTop);
-            const region = formRegion(read, eip, { ...formHere, translatable, shared,
-                ...(record?.shape.targets === undefined ? {}
-                    : { callTargets: new Map(record.shape.targets) }) });
+            const region = formAt(eip, record?.shape.targets, shared);
             // What the region calls directly lands in the same batch, so
             // the call and the return transfer without a miss -- each
             // callee at the top the call site has, which the tracker
@@ -5825,6 +5907,10 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
                 // compiled already, and what the shared modules hold.
                 sharedModules: counts.sharedModules,
                 sharedHeld: sharedModules?.stats() ?? null,
+                // Regions taken as a runtime sharing the store formed them, and
+                // what the shared regions hold.
+                formedShared: counts.formedShared,
+                sharedForms: sharedForms?.stats() ?? null,
                 // What the store holds and what its opening kept, where it says.
                 store: settings.store?.stats?.() ?? null,
                 lookedUpNow: counts.lookedUpNow,

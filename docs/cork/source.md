@@ -8,7 +8,7 @@
 | Region former | [`src/region.js`](../../modules/cork/src/region.js), [`src/helpers.js`](../../modules/cork/src/helpers.js), [`src/crt-dictionary.js`](../../modules/cork/src/crt-dictionary.js) | Forms a region from an entry. Recognises compiler helpers such as MSVC's `_ftol2`, and the C runtime's `memcpy`, `memmove`, `memset`, `strlen` and `sqrt` a program links in, by their bytes and puts what they do in place of the call (`emit/crt.js`), and forms a direct call to an import thunk (`jmp [slot]`) as the call through its slot. |
 | Emitter | [`src/emit/`](../../modules/cork/src/emit/) | Turns a region into one WebAssembly function: integer instructions, flags, memory, the x87, MMX and SSE (`simd.js`), `lock`-prefixed instructions as atomics (`locked.js`), each in a file of its own. It works straight from the decoded instructions, with no intermediate language. |
 | Encoder | [`src/wasm/`](../../modules/cork/src/wasm/) | Writes the WebAssembly bytes, and finds out what the engine supports (SIMD, tail calls). |
-| Runtime | [`src/runtime/`](../../modules/cork/src/runtime/) | Everything around translation: the candidate queue, batches, translation workers (`translator.worker.js`), the shared memory finished code is kept in (`arena.js`), publishing, the entry hash, page flags (`pages.js`), dropping rewritten code, indirect call prediction, gathering small modules into big ones, the records kept in the translation store (`cache.js`), and what the executors of one process share about code (`shared-code.js`). |
+| Runtime | [`src/runtime/`](../../modules/cork/src/runtime/) | Everything around translation: the candidate queue, batches, translation workers (`translator.worker.js`), the shared memory finished code is kept in (`arena.js`), publishing, the entry hash, page flags (`pages.js`), dropping rewritten code, indirect call prediction, gathering small modules into big ones, the records kept in the translation store (`cache.js`), the compiled modules and formed regions the processes sharing a store share (`shared-modules.js`, `shared-forms.js`), and what the executors of one process share about code (`shared-code.js`). |
 | Interpreters | [`src/interp.js`](../../modules/cork/src/interp.js), [`src/fast.js`](../../modules/cork/src/fast.js), [`src/interp-wasm.c`](../../modules/cork/src/interp-wasm.c) | An interpreter in JavaScript for the very first steps, then one built from C into WebAssembly (in Bottlify; cork's own machine keeps to the JavaScript one). |
 | Instruction model | [`src/ir.js`](../../modules/cork/src/ir.js), [`src/ir-x87.js`](../../modules/cork/src/ir-x87.js), [`src/ir-simd.js`](../../modules/cork/src/ir-simd.js) | A slow, simple account of what each instruction does. The JavaScript interpreter runs on it, and translated code is checked against it. |
 
@@ -38,7 +38,9 @@ node modules/cork/bench/run.mjs             # the benchmark (bench/README.md)
 - **Gates**: every fast path has a slow twin, and the two are compared on generated programs.
   Translated against interpreted (`machine.test.js`), a worker's translation against one on the
   same thread (`runtime/translators.test.js`), the shared arena (`runtime/arena.test.js`), a batch
-  formed and published in parts against one formed whole (`runtime/forming-parts.test.js`),
+  formed and published in parts against one formed whole (`runtime/forming-parts.test.js`), a
+  process started again on the modules an earlier one compiled and the regions it formed against
+  one making them (`runtime/run-shared.itest.js`),
   `lock`-prefixed instructions against the model (`emit/locked.test.js`), the corpus translated
   for a process's shared layout and run on its third executor against the hardware
   (`emit/corpus-shared.itest.js`).

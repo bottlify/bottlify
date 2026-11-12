@@ -5,10 +5,11 @@
  */
 
 /**
- * The gate of the compiled modules the runtimes sharing a store share
- * (`shared-modules.js`): a process started again instantiates the modules an
- * earlier one compiled, where one that shares nothing compiles them from the
- * store's bytes. Seeded programs of functions calling one another,
+ * The gate of what the runtimes sharing a store share: a process started
+ * again instantiates the modules an earlier one compiled (`shared-modules.js`)
+ * and takes the regions it formed (`shared-forms.js`), where one that shares
+ * nothing compiles them from the store's bytes and forms them again. Seeded
+ * programs of functions calling one another,
  * directly and through a register, one storing into another's code, are run
  * as a first process and then as a second over the same store, the second
  * with some of its bytes other than the first's -- every path down both: the
@@ -161,6 +162,7 @@ async function run(code, config){
                 code: code.map(([at, bytes])=>[...m.read(at, bytes.length)]),
             },
             shared: d.sharedModules ?? 0,
+            formed: d.formedShared ?? 0,
             hits: d.cacheHits ?? 0,
             misses: d.cacheMisses ?? 0,
         };
@@ -172,9 +174,10 @@ async function run(code, config){
 }
 
 test('a process started again observes the same whether it takes the earlier one\'s '
-    + 'compiled modules or compiles them', async()=>{
+    + 'compiled modules and formed regions or makes them', async()=>{
     const interpreted = { translate: false };
-    const apart = { sharedModuleBytes: 0 };
+    const apart = { sharedModuleBytes: 0, sharedFormed: 0 };
+    let formed = 0;
     let shared = 0;
     let hits = 0;
     for (let seed = 1; seed <= PROGRAMS; seed++)
@@ -195,11 +198,13 @@ test('a process started again observes the same whether it takes the earlier one
                 if (path === 'shared')
                 {
                     shared += again.shared;
+                    formed += again.formed;
                     hits += again.hits;
                 }
                 else
                 {
-                    assert.equal(again.shared, 0, 'nothing shared with sharing off');
+                    assert.deepEqual([again.shared, again.formed], [0, 0],
+                        'nothing shared with sharing off');
                 }
             }
             const name = `seed ${seed}, a store that answers ${now ? 'at once' : 'later'}`;
@@ -210,4 +215,5 @@ test('a process started again observes the same whether it takes the earlier one
     // The gate runs the paths it is for.
     assert.ok(hits > PROGRAMS, `store hits (${hits})`);
     assert.ok(shared > PROGRAMS / 2, `modules taken as compiled earlier (${shared})`);
+    assert.ok(formed > PROGRAMS, `regions taken as formed earlier (${formed})`);
 });
