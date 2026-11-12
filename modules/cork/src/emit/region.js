@@ -84,7 +84,8 @@ import {
  * instantiation supplies each (`mathImports()`), from `Math`.
  */
 export const MATH_IMPORTS = Object.freeze([
-    'sin', 'cos', 'tan', 'atan2', 'exp2m1', 'log2', 'log1p',
+    'sin', 'cos', 'tan', 'atan2', 'exp2m1', 'log2', 'log1p', 'exp', 'pow', 'asin', 'acos', 'atan',
+    'log', 'log10',
 ]);
 
 /**
@@ -125,7 +126,8 @@ export function mathImports(){
         sin: Math.sin, cos: Math.cos, tan: Math.tan, atan2: Math.atan2,
         /** @param {number} x */
         exp2m1: x=>Math.expm1(x * Math.LN2),
-        log2: Math.log2, log1p: Math.log1p,
+        log2: Math.log2, log1p: Math.log1p, exp: Math.exp, pow: Math.pow, asin: Math.asin,
+        acos: Math.acos, atan: Math.atan, log: Math.log, log10: Math.log10,
     };
 }
 
@@ -496,6 +498,7 @@ export function prepareModule(m, layout, features, memory = {},
     /** @type {Record<string, number>} the others' types, by name */
     const types = {
         atan2: m.type({ params: [ValType.f64, ValType.f64], results: [ValType.f64] }),
+        pow: m.type({ params: [ValType.f64, ValType.f64], results: [ValType.f64] }),
     };
     /** @type {Record<string, number>} */
     const math = {};

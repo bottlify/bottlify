@@ -131,6 +131,16 @@ export function emitCrt(e, instruction){
             finiteArgument(e);
             leaveUnless(e, instruction);
             return true;
+        case 'cisin': case 'cicos': case 'citan': case 'ciatan': case 'ciasin': case 'ciacos':
+        case 'cilog': case 'cilog10': case 'ciexp': case 'cipow':
+            if (isLong(e))
+            {
+                return false;
+            }
+            mathArgument(e, operation);
+            leaveUnless(e, instruction);
+            hostResult(e, operation);
+            return true;
         case 'gscookie': case 'gscookie64':
             if (isLong(e) !== (operation === 'gscookie64') || instruction.crtWord === undefined)
             {
@@ -927,6 +937,97 @@ function cookie(e, instruction, address){
     }
 }
 
+/** f64's compares and its absolute value, as wasm numbers them. */
+const F64_OP = Object.freeze({ eq: 0x61, lt: 0x63, gt: 0x64, le: 0x65, abs: 0x99, mul: 0xa2 });
+
+/**
+ * The argument of a call to the runtime's x87 transcendentals (`_CIsin` and
+ * kin, their argument in ST0, `_CIpow`'s base in ST1) tested where the x87
+ * sequence after it (`body`) answers it as the processor does and the
+ * function would only round differently: else `Local.addr` -1, and the call
+ * made as it was -- an argument out of the instruction's range (a sine of
+ * 2^63 or more), out of the function's domain or making an infinity or a
+ * zero by underflow, which the function reports through errno. The `lead`
+ * before this put ST0 at [esp-8], ST1 at [esp-16].
+ *
+ * @param {E} e @param {string} operation
+ */
+function mathArgument(e, operation){
+    const { b } = e;
+    const esp = registerLocal(e, ESP);
+    /** @param {number} below @param {number} local */
+    const read = (below, local)=>b.localGet(esp).i32const(below).op(I32.sub)
+        .load('f64', { guest: true, offset: e.layout.ramBase }).localSet(local);
+    read(8, Local.d0);
+    b.i32const(0).i32const(-1);
+    /** |d0| below `bound`. @param {number} bound */
+    const within = bound=>b.localGet(Local.d0).op(F64_OP.abs).f64const(bound).op(F64_OP.lt);
+    switch (operation)
+    {
+        case 'cisin': case 'cicos': case 'citan':
+            within(2 ** 63);
+            break;
+        case 'ciatan':
+            // The runtime's SSE2 code answers a tiny argument, and a huge one's pi/2,
+            // with the x87's arithmetic, at its precision control: left to it.
+            within(2 ** 50);
+            b.localGet(Local.d0).op(F64_OP.abs).f64const(2 ** -20).op(F64_OP.gt)
+                .localGet(Local.d0).f64const(0).op(F64_OP.eq).op(I32.or).op(I32.and);
+            break;
+        case 'ciasin': case 'ciacos':
+            b.localGet(Local.d0).op(F64_OP.abs).f64const(1).op(F64_OP.le);
+            break;
+        case 'cilog': case 'cilog10':
+            b.localGet(Local.d0).f64const(0).op(F64_OP.gt);
+            within(Infinity);
+            b.op(I32.and);
+            break;
+        case 'ciexp':
+            b.localGet(Local.d0).f64const(-708).op(F64_OP.gt)
+                .localGet(Local.d0).f64const(709).op(F64_OP.lt).op(I32.and);
+            break;
+        default:
+        {
+            // pow: ST1 the base, ST0 the power; the result's exponent well inside a double's.
+            read(16, Local.d1);
+            b.localGet(Local.d1).f64const(0).op(F64_OP.gt)
+                .localGet(Local.d1).op(F64_OP.abs).f64const(Infinity).op(F64_OP.lt).op(I32.and);
+            within(Infinity);
+            b.op(I32.and);
+            b.localGet(Local.d0).localGet(Local.d1).call(e.context.math.log2).op(F64_OP.mul)
+                .op(F64_OP.abs).f64const(1000).op(F64_OP.lt).op(I32.and);
+        }
+    }
+    b.select().localSet(Local.addr);
+}
+
+/**
+ * The function's result computed by the host's own, at [esp-8] for the body to
+ * load in the argument's place. The runtime's SSE2 code computes in doubles
+ * whatever the x87's precision control says, as these do; the x87's own
+ * instructions would round to it, and its way to `exp` and `pow`, `f2xm1` and
+ * `fscale` after a product by a logarithm, loses that product's rounding
+ * times the exponent.
+ *
+ * @param {E} e @param {string} operation
+ */
+function hostResult(e, operation){
+    const { b } = e;
+    const { math } = e.context;
+    b.localGet(registerLocal(e, ESP)).i32const(8).op(I32.sub);
+    if (operation === 'cipow')
+    {
+        b.localGet(Local.d1).localGet(Local.d0).call(math.pow);
+    }
+    else
+    {
+        b.localGet(Local.d0).call(math[/** @type {Record<string, string>} */ ({
+            cisin: 'sin', cicos: 'cos', citan: 'tan', ciatan: 'atan', ciasin: 'asin',
+            ciacos: 'acos', cilog: 'log', cilog10: 'log10', ciexp: 'exp' })[operation]]);
+    }
+    b.store('f64', { guest: true, offset: e.layout.ramBase });
+}
+
 /**
  * The runtime's flag at `address` (`crtWord`) read: `Local.addr` -1 where it is
  * 0, or its page is closed or past RAM -- the function's own other way.
@@ -978,7 +1079,12 @@ function finiteArgument(e){
 function leaveUnless(e, instruction){
     e.b.localGet(Local.addr).i32const(-1).op(I32.eq);
     e.openGuard('crt', EMPTY);
+    // What was formed before it for the call (`lead`) is the call's too: none
+    // of it ran when the call is left to run.
+    const lead = instruction.crtLead ?? 0;
+    e.blockRetired -= lead;
     e.exitBefore(instruction.eip, Exit.UNTRANSLATED);
+    e.blockRetired += lead;
     e.close();
 }
 

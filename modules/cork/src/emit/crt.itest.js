@@ -765,3 +765,123 @@ test('__security_check_cookie of every shape the dictionary knows returns where 
         }
     }
 });
+
+/** Where the transcendentals' test finds its arguments. */
+const ARGUMENTS = 0xa940;
+/** 2^ST0 of ST0 a whole power and its rest (`f2xm1`), as the x87 makes an exponential. */
+const EXP2 = [
+    0xd9, 0xc0, 0xd9, 0xfc,                 // fld st0; frndint
+    0xdc, 0xe9, 0xd9, 0xc9,                 // fsub st1, st0; fxch
+    0xd9, 0xf0, 0xd9, 0xe8, 0xde, 0xc1,     // f2xm1; fld1; faddp
+    0xd9, 0xfd, 0xdd, 0xd9,                 // fscale; fstp st1
+];
+/** The test's own transcendentals, the x87's way (the dictionary's take the host's result). */
+const X87_WAY = {
+    cisin: [0xd9, 0xfe],                                        // fsin
+    cicos: [0xd9, 0xff],                                        // fcos
+    citan: [0xd9, 0xf2, 0xdd, 0xd8],                            // fptan; fstp st0
+    ciatan: [0xd9, 0xe8, 0xd9, 0xf3],                           // fld1; fpatan
+    // atan2(x, sqrt(1 - x^2)) and atan2(sqrt(1 - x^2), x)
+    ciasin: [0xd9, 0xc0, 0xd8, 0xc8, 0xd9, 0xe8, 0xde, 0xe1, 0xd9, 0xfa, 0xd9, 0xf3],
+    ciacos: [0xd9, 0xc0, 0xd8, 0xc8, 0xd9, 0xe8, 0xde, 0xe1, 0xd9, 0xfa, 0xd9, 0xc9, 0xd9, 0xf3],
+    cilog: [0xd9, 0xed, 0xd9, 0xc9, 0xd9, 0xf1],                // fldln2; fxch; fyl2x
+    cilog10: [0xd9, 0xec, 0xd9, 0xc9, 0xd9, 0xf1],              // fldlg2; fxch; fyl2x
+    ciexp: [0xd9, 0xea, 0xde, 0xc9, ...EXP2],                   // fldl2e; fmulp; 2^
+    cipow: [0xd9, 0xc9, 0xd9, 0xf1, ...EXP2],                   // fxch; fyl2x; 2^
+};
+/** What each answers: the host's own. @type {Record<string, (x: number, y: number) => number>} */
+const HOST_WAY = {
+    cisin: Math.sin, cicos: Math.cos, citan: Math.tan, ciatan: Math.atan, ciasin: Math.asin,
+    ciacos: Math.acos, cilog: Math.log, cilog10: Math.log10, ciexp: Math.exp,
+    cipow: (x, y)=>y ** x,
+};
+
+test('the x87 transcendentals (_CI*) answer as the host\'s functions where the argument is in'
+    + ' their domain, and leave the call, its lead uncounted, where it is not', ()=>{
+    /** @type {Record<string, (x: number, y: number) => boolean>} */
+    const domains = {
+        cisin: x=>Math.abs(x) < 2 ** 63, cicos: x=>Math.abs(x) < 2 ** 63,
+        citan: x=>Math.abs(x) < 2 ** 63,
+        ciatan: x=>Math.abs(x) < 2 ** 50 && (Math.abs(x) > 2 ** -20 || x === 0),
+        ciasin: x=>Math.abs(x) <= 1, ciacos: x=>Math.abs(x) <= 1,
+        cilog: x=>x > 0 && x < Infinity, cilog10: x=>x > 0 && x < Infinity,
+        ciexp: x=>x > -708 && x < 709,
+        // pow: x the power (ST0), y the base (ST1).
+        cipow: (x, y)=>y > 0 && y < Infinity && Math.abs(x) < Infinity
+            && Math.abs(x * Math.log2(y)) < 1000,
+    };
+    const singles = [0, -0, 0.5, -0.5, 1, -1, 1.0000001, 2, 100, -100, 707.5, 708.5, 710,
+        -707.5, -709, 1e10, 2 ** 63, -(2 ** 63), 1e300, Infinity, -Infinity, NaN, 1e-300, 1e-7,
+        -1e-7, 2 ** 51];
+    const pairs = [[2, 10], [2, 0.5], [0.5, -3], [-8, 3], [0, 2], [10, 300], [10, 400],
+        [Infinity, 1], [3, NaN], [1e-300, 1.5], [7, -2.5], [1, 1e300]];
+    let formed = 0;
+    let left = 0;
+    for (const [does, inDomain] of Object.entries(domains))
+    {
+        const crt = /** @type {import('../helpers.js').Crt} */ (does);
+        const entry = CRT_DICTIONARY.find(one=>one.does === crt);
+        assert.ok(entry?.lead !== undefined, `${does}: the dictionary's entry has a lead`);
+        const fn = [...X87_WAY[/** @type {keyof X87_WAY} */ (does)], 0xc3];
+        const helpers = [{ name: does, does: crt, lead: entry.lead, body: CRT_BODIES[crt],
+            length: fn.length,
+            hash: fingerprint(at=>fn[at - HELPER_AT] ?? 0, HELPER_AT, fn.length) }];
+        for (const [base, power] of does === 'cipow' ? pairs : singles.map(x=>[0, x]))
+        {
+            /** @param {false | import('../helpers.js').RuntimeHelper[]} given */
+            const once = given=>{
+                const m = createTestMachine({ ramSize: RAM });
+                m.write(HELPER_AT, fn);
+                const bits = new DataView(new ArrayBuffer(16));
+                bits.setFloat64(0, base, true);
+                bits.setFloat64(8, power, true);
+                m.write(ARGUMENTS, [...new Uint8Array(bits.buffer)]);
+                const code = does === 'cipow' ? [0xdd, 0x05, ...u32(ARGUMENTS)] : [];
+                code.push(0xdd, 0x05, ...u32(ARGUMENTS + 8));
+                code.push(0xe8, ...rel(PROGRAM + code.length, HELPER_AT));
+                code.push(0xdd, 0x1d, ...u32(OUT),                 // fstp qword [OUT]
+                    0xdf, 0xe0, 0xa3, ...u32(OUT + 8), 0xf4);     // fnstsw ax; to OUT+8; hlt
+                m.write(PROGRAM, code);
+                m.setReg('esp', STACK);
+                let exit = m.runProgram(PROGRAM, { helpers: given });
+                let retired = exit.retired;
+                const gone = exit.kind === -2;
+                if (gone)
+                {
+                    exit = m.runProgram(exit.eip, { helpers: false });
+                    retired += exit.retired;
+                }
+                return { gone, retired, seen: { kind: exit.kind, out: [...m.read(OUT, 12)],
+                    esp: m.reg('esp') } };
+            };
+            const what = `${does}(${base}, ${power})`;
+            const body = once(false);
+            const made = once(helpers);
+            assert.equal(made.gone, !inDomain(power, base), `${what}: left to the call`);
+            if (!made.gone)
+            {
+                // The host's result exactly, where the x87's way may be a unit or a few
+                // off it; the rest as the x87's way leaves it.
+                const got = new DataView(Uint8Array.from(made.seen.out).buffer).getFloat64(0, true);
+                const want = HOST_WAY[does](power, base);
+                assert.ok(Object.is(got, want), `${what}: ${got}, not ${want}`);
+                assert.deepEqual({ ...made.seen, out: made.seen.out.slice(8) },
+                    { ...body.seen, out: body.seen.out.slice(8) }, what);
+            }
+            else
+            {
+                assert.deepEqual(made.seen, body.seen, what);
+            }
+            if (made.gone)
+            {
+                assert.equal(made.retired, body.retired, `${what}: retired as the call`);
+                left++;
+            }
+            else
+            {
+                formed++;
+            }
+        }
+    }
+    assert.ok(formed > 50 && left > 50, `${formed} formed, ${left} left`);
+});

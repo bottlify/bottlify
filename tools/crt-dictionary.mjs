@@ -47,8 +47,23 @@ import { CRT_BODIES, CRT_DICTIONARY } from '../modules/cork/src/crt-dictionary.j
 /** The operations on a double argument, returned in ST0. */
 const FLOATS = ['sqrt', 'floor', 'ceil'];
 
-/** The global a dictionary entry of these bytes reads (`word`). @param {string} hash */
-const wordOf = hash=>CRT_DICTIONARY.find(known=>known.hash === hash)?.word;
+/**
+ * What the dictionary's entry of these bytes and this operation adds to a signature:
+ * the global it reads (`word`), what it puts first (`lead`), and the code its jump
+ * leads to (`via`).
+ *
+ * @param {string} hash @param {string} operation
+ */
+const knownOf = (hash, operation)=>{
+    const known = CRT_DICTIONARY.find(entry=>entry.hash === hash && entry.does === operation)
+        ?? CRT_DICTIONARY.find(entry=>entry.hash === hash);
+    return Object.fromEntries(Object.entries({ word: known?.word, lead: known?.lead,
+        via: known?.via }).filter(([, value])=>value !== undefined));
+};
+
+/** The x87 transcendentals (`_CIsin` and kin): ST0 (ST1) in, ST0 out, compared within ulps. */
+const CI = ['cisin', 'cicos', 'citan', 'ciatan', 'ciasin', 'ciacos', 'cilog', 'cilog10', 'ciexp',
+    'cipow'];
 
 /** The comparisons and searches, whose cases are made by `scanCase`. */
 const SCANS = ['memcmp', 'strcmp', 'memchr', 'strchr'];
@@ -466,11 +481,10 @@ async function verify(library, specs){
             spans: signature.spans, masks: signature.masks, quick: signature.quick,
             hash: signature.hash, length: extent[1] - extent[0],
             ...CRT_BODIES[operation] === undefined ? {} : { body: CRT_BODIES[operation] },
-            // The global the operation reads, where the dictionary's entry of these bytes
-            // names one.
-            ...wordOf(signature.hash) === undefined ? {} : { word: wordOf(signature.hash) } };
+            ...knownOf(signature.hash, operation) };
         let apart = 0;
         let formed = 0;
+        let ulps = 0;
         const cases = 400;
         for (let seed = 1; seed <= cases; seed++)
         {
@@ -546,6 +560,34 @@ async function verify(library, specs){
                 call();
                 stores();
             }
+            else if (CI.includes(operation))
+            {
+                // ST0 (and for pow ST1, the base) from seeded doubles, the result to OUT.
+                const pick = ()=>{
+                    const kind = int(9);
+                    return kind === 0 ? [0, -0, NaN, Infinity, -Infinity, 1, -1, 1e20][int(8)]
+                        : kind === 1 ? (next() - 0.5) * 2.4
+                            : kind === 2 ? (next() - 0.5) * 2000
+                                : kind === 3 ? next() * 1e3
+                                    // Any size, 2^-70 to 2^70.
+                                    : kind === 4 ? (next() - 0.5) * 2 ** (int(141) - 70)
+                                        : (next() - 0.5) * 20;
+                };
+                const view = new DataView(data.buffer);
+                const two = operation === 'cipow';
+                view.setFloat64(0, two ? Math.abs(pick()) * (int(6) === 0 ? -1 : 1) : pick(), true);
+                view.setFloat64(8, pick(), true);
+                args = two ? [view.getFloat64(0, true), view.getFloat64(8, true)]
+                    : [view.getFloat64(0, true)];
+                program.push(0xdd, 0x05, ...u32(DATA));
+                if (two)
+                {
+                    program.push(0xdd, 0x05, ...u32(DATA + 8));
+                }
+                call();
+                program.push(0xdd, 0x1d, ...u32(OUT));             // fstp qword [OUT]
+                program.push(0x89, 0x25, ...u32(OUT + 8));          // mov [OUT+8], esp
+            }
             else if (operation === 'ftol2sse')
             {
                 // ST0 from a seeded double at DATA, the call, the registers, then the
@@ -599,14 +641,24 @@ async function verify(library, specs){
                 {
                     out.fill(0, 8, 12);
                 }
-                return { left, seen: JSON.stringify({ kind: exit.kind, out,
+                // A transcendental's result within ulps (`CI`): its bytes compared apart.
+                const value = new DataView(Uint8Array.from(out).buffer).getFloat64(0, true);
+                if (CI.includes(operation))
+                {
+                    out.fill(0, 0, 8);
+                }
+                return { left, value, seen: JSON.stringify({ kind: exit.kind, out,
                     data: [...m.read(DATA, DATA_BYTES)],
                     regs: ['ebx', 'ebp', 'esi', 'edi', 'esp'].map(r=>m.reg(r)) }) };
             };
             const body = run(false);
             const made = run([helper]);
             formed += made.left ? 0 : 1;
-            if (body.seen !== made.seen)
+            if (CI.includes(operation))
+            {
+                ulps = Math.max(ulps, ulpsApart(body.value, made.value));
+            }
+            if (body.seen !== made.seen || ulpsApart(body.value, made.value) > ULPS)
             {
                 apart++;
                 if (apart <= 3)
@@ -619,8 +671,32 @@ async function verify(library, specs){
                 }
             }
         }
-        console.log(`${name} as ${operation}: ${cases} cases, ${formed} formed, ${apart} apart`);
+        console.log(`${name} as ${operation}: ${cases} cases, ${formed} formed, ${apart} apart`
+            + (CI.includes(operation) ? `, results at most ${ulps} ulps apart` : ''));
     }
+}
+
+/** The ulps a transcendental's result may lie from the function's (`CI`). */
+const ULPS = 4;
+
+/**
+ * How many doubles lie between two results: 0 for the same, or both NaN.
+ * @param {number} a @param {number} b
+ */
+function ulpsApart(a, b){
+    if (Object.is(a, b) || Number.isNaN(a) && Number.isNaN(b))
+    {
+        return 0;
+    }
+    if (!Number.isFinite(a) || !Number.isFinite(b) || Math.sign(a) !== Math.sign(b))
+    {
+        return Infinity;
+    }
+    const view = new DataView(new ArrayBuffer(16));
+    view.setFloat64(0, Math.abs(a));
+    view.setFloat64(8, Math.abs(b));
+    const [x, y] = [view.getBigUint64(0), view.getBigUint64(8)];
+    return Number(x > y ? x - y : y - x);
 }
 
 /**

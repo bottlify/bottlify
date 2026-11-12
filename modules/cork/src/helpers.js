@@ -60,6 +60,12 @@ import { CRT_DICTIONARY } from './crt-dictionary.js';
  *     ones hold: a short stub too few of whose bytes are its own for a signature to tell it
  *     apart, formed as the test it makes of a global and of its argument, its other way
  *     (where the masked jump goes) made as the call was
+ * @property {RuntimeHelper & { at: number, offset?: number }} [via]  a second signature
+ *     the helper is told apart by: the code a rel32 at its offset `at` leads to, `offset`
+ *     bytes past there -- one entry point of a runtime whose stubs are alike to the byte
+ *     and differ only in where they jump (MSVC's `_CIsin`, `_CIcos`, ...)
+ * @property {readonly number[]} [lead]   what a call to it is formed as before its
+ *     operation's test (`does`): the argument put where the test reads it, below esp
  */
 
 /**
@@ -89,7 +95,8 @@ import { CRT_DICTIONARY } from './crt-dictionary.js';
  *     | 'allmul' | 'alldiv'
  *     | 'aulldiv' | 'allrem' | 'aullrem' | 'alldvrm' | 'aulldvrm' | 'allshl' | 'allshr'
  *     | 'aullshr' | 'chkstk' | 'chkstk64' | 'memcmp' | 'strcmp' | 'memchr' | 'strchr'
- *     | 'ftol2sse' | 'gscookie' | 'gscookie64'} Crt
+ *     | 'ftol2sse' | 'gscookie' | 'gscookie64' | 'cisin' | 'cicos' | 'citan' | 'ciatan'
+ *     | 'ciasin' | 'ciacos' | 'cilog' | 'cilog10' | 'ciexp' | 'cipow'} Crt
  */
 
 /**
@@ -112,7 +119,11 @@ export const CRT_EFFECTS = Object.freeze({
     memcmp: { writes: [0], esp: 0 }, strcmp: { writes: [0], esp: 0 },
     memchr: { writes: [0], esp: 0 }, strchr: { writes: [0], esp: 0 },
     ftol2sse: { writes: [], esp: 0 }, gscookie: { writes: [], esp: 0 },
-    gscookie64: { writes: [1], esp: 0 },
+    gscookie64: { writes: [1], esp: 0 }, cisin: { writes: [], esp: 0 },
+    cicos: { writes: [], esp: 0 }, citan: { writes: [], esp: 0 }, ciatan: { writes: [], esp: 0 },
+    ciasin: { writes: [], esp: 0 }, ciacos: { writes: [], esp: 0 },
+    cilog: { writes: [], esp: 0 }, cilog10: { writes: [], esp: 0 },
+    ciexp: { writes: [], esp: 0 }, cipow: { writes: [], esp: 0 },
 });
 
 /** @type {RuntimeHelper} MSVC 7.1 and 8's `_ftol2`. */
@@ -198,6 +209,7 @@ export function maskedFingerprint(read, address, spans, masks){
  *
  * @param {(address: number) => number} read
  * @param {number} target @param {RuntimeHelper} helper
+ * @returns {boolean}
  */
 function isAt(read, target, helper){
     const { spans, masks = [], quick } = helper;
@@ -208,7 +220,11 @@ function isAt(read, target, helper){
     return (quick === undefined
         || maskedFingerprint(read, target, [[0, Math.min(QUICK_BYTES, spans[0][1])]], masks)
             === quick)
-        && maskedFingerprint(read, target, spans, masks) === helper.hash;
+        && maskedFingerprint(read, target, spans, masks) === helper.hash
+        && (helper.via === undefined || isAt(read, target + helper.via.at + 4
+            + ([0, 1, 2, 3].reduce((word, k)=>word
+                + read(target + /** @type {any} */ (helper.via).at + k) * 2 ** (8 * k), 0) | 0)
+            + (helper.via.offset ?? 0), helper.via));
 }
 
 /**
@@ -281,6 +297,28 @@ export function helperInstructions(helper, call, target, read){
     const body = helper.body ?? [];
     /** @type {import('./decode/decoder.js').Instruction[]} */
     const out = [];
+    const mode = (helper.bits ?? 32) === 64 ? MODE_64 : undefined;
+    /**
+     * Bytes formed as instructions at the call's address, the last one's length the
+     * call's where it ends the call (`last`).
+     * @param {readonly number[]} bytes @param {boolean} last
+     */
+    const formed = (bytes, last)=>{
+        for (let at = 0; at < bytes.length;)
+        {
+            const offset = at;
+            const decoded = decode(address=>bytes[address - call.eip + offset] ?? 0, call.eip,
+                mode);
+            if ('refused' in decoded)
+            {
+                throw new Error(`cork: ${helper.name}'s bytes do not decode at byte ${offset}`);
+            }
+            at += decoded.length;
+            out.push({ ...decoded, length: last && at === bytes.length ? call.length : 0,
+                helper: named });
+        }
+    };
+    formed(helper.lead ?? [], false);
     if (helper.does !== undefined)
     {
         out.push({
@@ -288,22 +326,12 @@ export function helperInstructions(helper, call, target, read){
             crt: helper.does, operands: [], size: call.size,
             flagsRead: 0, flagsWritten: 0, flagsUndefined: ARITH_FLAGS, faults: 'none',
             memory: false, prefixes: call.prefixes, opcode: call.opcode, helper: named,
+            ...out.length === 0 ? {} : { crtLead: out.length },
             ...helper.word === undefined || read === undefined ? {}
                 : { crtWord: wordOf(helper, target, read),
                     ...helper.wordRip === true ? { crtWordInBlock: true } : {} },
         });
     }
-    const mode = (helper.bits ?? 32) === 64 ? MODE_64 : undefined;
-    for (let at = 0; at < body.length;)
-    {
-        const offset = at;
-        const decoded = decode(address=>body[address - call.eip + offset] ?? 0, call.eip, mode);
-        if ('refused' in decoded)
-        {
-            throw new Error(`cork: ${helper.name}'s body does not decode at byte ${offset}`);
-        }
-        at += decoded.length;
-        out.push({ ...decoded, length: at === body.length ? call.length : 0, helper: named });
-    }
+    formed(body, true);
     return out;
 }

@@ -59,6 +59,36 @@ const FTOL2_SSE_BODY = Object.freeze([
     0xf2, 0x0f, 0x2c, 0x44, 0x24, 0xf8,     // cvttsd2si eax, qword [esp-8]
 ]);
 
+/** The x87 transcendentals' argument put where their test reads it (`lead`): ST0 at [esp-8]. */
+const X87_LEAD = Object.freeze([0xdd, 0x54, 0x24, 0xf8]);   // fst qword [esp-8]
+/** And ST1 at [esp-16], for _CIpow. */
+const X87_LEAD2 = Object.freeze([0xdd, 0x54, 0x24, 0xf8, 0xd9, 0xc9,  // fst [esp-8]; fxch
+    0xdd, 0x54, 0x24, 0xf0, 0xd9, 0xc9]);                            // fst [esp-16]; fxch
+
+/**
+ * The transcendentals' bodies: the host's result, put at [esp-8] by the test
+ * (`emit/crt.js`), loaded in the argument's place -- `fstp st0; fld [esp-8]`,
+ * pow's two arguments popped first.
+ */
+const HOST_RESULT = [0xdd, 0xd8, 0xdd, 0x44, 0x24, 0xf8];
+const CI_BODIES = Object.freeze({
+    cisin: HOST_RESULT, cicos: HOST_RESULT, citan: HOST_RESULT, ciatan: HOST_RESULT,
+    ciasin: HOST_RESULT, ciacos: HOST_RESULT, cilog: HOST_RESULT, cilog10: HOST_RESULT,
+    ciexp: HOST_RESULT, cipow: [0xdd, 0xd8, ...HOST_RESULT],
+});
+
+/**
+ * The second signature of a stub told by where it jumps (`via`): the code
+ * `offset` bytes past where its rel32 at `at` leads.
+ *
+ * @param {number} at @param {number} offset
+ * @param {{ name: string, quick: string, hash: string, spans: number[][],
+ *     masks: number[][] }} given
+ */
+function viaJump(at, offset, given){
+    return Object.freeze({ ...entry({ ...given, does: 'cisin' }), at, offset });
+}
+
 /**
  * The body a call to a function doing `does` goes on with after its test
  * (`emit/crt.js`), for the operations that have one.
@@ -67,6 +97,7 @@ const FTOL2_SSE_BODY = Object.freeze([
  */
 export const CRT_BODIES = Object.freeze({
     sqrt: SQRT_BODY, floor: roundBody(1), ceil: roundBody(2), ftol2sse: FTOL2_SSE_BODY,
+    ...CI_BODIES,
 });
 
 /**
@@ -75,7 +106,8 @@ export const CRT_BODIES = Object.freeze({
  *
  * @param {{ name: string, does: import('./helpers.js').Crt, quick: string, hash: string,
  *     body?: readonly number[], spans: number[][], masks: number[][], bits?: 32 | 64,
- *     word?: number, wordRip?: boolean, shape?: boolean }} given
+ *     word?: number, wordRip?: boolean, shape?: boolean, lead?: readonly number[],
+ *     via?: RuntimeHelper & { at: number, offset?: number } }} given
  * @returns {RuntimeHelper}
  */
 function entry({ masks, ...given }){
@@ -291,4 +323,91 @@ export const CRT_DICTIONARY = Object.freeze([
     entry({ name: '__security_check_cookie', does: 'gscookie64', bits: 64, word: 3,
         wordRip: true, shape: true, quick: 'b05eca804d551dc2', hash: 'd413b6519e3eebc8',
         spans: [[0, 30]], masks: [[3, 4], [26, 4]] }),
+    // The x87 transcendentals MSVC 8 links into an image (`_CIsin` and kin): ST0's (and
+    // _CIpow's ST1) value taken by the instructions the function's own x87 path uses, where
+    // its SSE2 path would round differently by the last bit at most (`lead`, `body`,
+    // roadmap/decisions.md). Their stubs are alike to the byte but for where they jump: each
+    // is told by the SSE2 code its jump leads to, past that code's frame (`via`). PhysX
+    // 2.7-2.8's PhysXCore.dll and Call of Duty 4's iw3sp.exe link them.
+    entry({ name: '_CIsin', does: 'cisin', lead: X87_LEAD, quick: 'a94bd8e5df22f6e3',
+        hash: '45863a1a223a40e7', spans: [[0, 79]], masks: [[2, 4], [55, 4], [66, 4]],
+        via: viaJump(55, 24, { name: '_sin_pentium4', quick: 'd51167b0009625aa',
+            hash: '3f299c663f560aa3',
+            spans: [[0, 431]],
+            masks:
+                [[33, 4], [45, 4], [61, 4], [73, 4], [102, 4], [108, 4], [129, 4],
+                    [166, 4], [235, 4], [247, 4], [370, 4], [392, 4], [408, 4], [427, 4]] }) }),
+    entry({ name: '_CIcos', does: 'cicos', lead: X87_LEAD, quick: 'a94bd8e5df22f6e3',
+        hash: '45863a1a223a40e7', spans: [[0, 79]], masks: [[2, 4], [55, 4], [66, 4]],
+        via: viaJump(55, 24, { name: '_cos_pentium4', quick: 'd51167b0009625aa',
+            hash: '90c0e442521fa388',
+            spans: [[0, 401]],
+            masks:
+                [[33, 4], [45, 4], [61, 4], [73, 4], [102, 4], [108, 4], [129, 4],
+                    [166, 4], [235, 4], [247, 4], [374, 4], [397, 4]] }) }),
+    entry({ name: '_CItan', does: 'citan', lead: X87_LEAD, quick: 'a94bd8e5df22f6e3',
+        hash: '45863a1a223a40e7', spans: [[0, 79]], masks: [[2, 4], [55, 4], [66, 4]],
+        via: viaJump(55, 24, { name: '_tan_pentium4', quick: 'd51167b0009625aa',
+            hash: '2d4059bdaf930b0c',
+            spans: [[0, 570]],
+            masks:
+                [[37, 4], [53, 4], [65, 4], [77, 4], [91, 4], [122, 4], [149, 4],
+                    [158, 4], [166, 4], [403, 4], [523, 4], [531, 4], [547, 4], [566, 4]] }) }),
+    entry({ name: '_CIatan', does: 'ciatan', lead: X87_LEAD, quick: 'a94bd8e5df22f6e3',
+        hash: '45863a1a223a40e7', spans: [[0, 79]], masks: [[2, 4], [55, 4], [66, 4]],
+        via: viaJump(55, 24, { name: '_atan_pentium4', quick: 'd7e0fabc2f9fab26',
+            hash: 'a92f450864621509',
+            spans: [[0, 723]],
+            masks:
+                [[18, 4], [26, 4], [46, 4], [56, 4], [86, 4], [98, 4], [110, 4],
+                    [122, 4], [166, 4], [196, 4], [208, 4], [220, 4], [232, 4], [244, 4],
+                    [256, 4], [268, 4], [280, 4], [332, 4], [342, 4], [350, 4], [383, 4],
+                    [403, 4], [430, 4], [447, 4], [456, 4], [480, 4], [492, 4], [504, 4],
+                    [516, 4], [572, 4], [587, 4], [595, 4], [601, 4], [624, 4], [630, 4],
+                    [647, 4], [670, 4], [677, 4], [711, 4]] }) }),
+    entry({ name: '_CIasin', does: 'ciasin', lead: X87_LEAD, quick: 'a94bd8e5df22f6e3',
+        hash: '45863a1a223a40e7', spans: [[0, 79]], masks: [[2, 4], [55, 4], [66, 4]],
+        via: viaJump(55, 24, { name: '_asin_pentium4', quick: '1217aadf5e4d18c1',
+            hash: 'cfc1c8fe5fb764b0',
+            spans: [[0, 1384]],
+            masks:
+                [[10, 4], [18, 4], [30, 4], [124, 4], [137, 4], [181, 4], [189, 4],
+                    [224, 4], [333, 4], [350, 4], [413, 4], [425, 4], [457, 4], [473, 4],
+                    [485, 4], [494, 4], [609, 4], [621, 4], [629, 4], [742, 4], [755, 4],
+                    [767, 4], [827, 4], [874, 4], [882, 4], [890, 4], [943, 4], [1212, 4],
+                    [1246, 4], [1254, 4], [1262, 4]] }) }),
+    entry({ name: '_CIacos', does: 'ciacos', lead: X87_LEAD, quick: 'a94bd8e5df22f6e3',
+        hash: '45863a1a223a40e7', spans: [[0, 79]], masks: [[2, 4], [55, 4], [66, 4]],
+        via: viaJump(55, 24, { name: '_acos_pentium4', quick: '1217aadf5e4d18c1',
+            hash: '9848453cb454806a',
+            spans: [[0, 1340]],
+            masks:
+                [[10, 4], [18, 4], [30, 4], [124, 4], [137, 4], [181, 4], [189, 4],
+                    [224, 4], [251, 4], [428, 4], [452, 4], [472, 4], [488, 4], [500, 4],
+                    [509, 4], [641, 4], [653, 4], [661, 4], [673, 4], [799, 4], [807, 4],
+                    [815, 4], [827, 4], [839, 4], [878, 4], [912, 4], [1191, 4],
+                    [1244, 4], [1252, 4], [1289, 4], [1297, 4]] }) }),
+    entry({ name: '_CIlog', does: 'cilog', lead: X87_LEAD, quick: 'a94bd8e5df22f6e3',
+        hash: '45863a1a223a40e7', spans: [[0, 79]], masks: [[2, 4], [55, 4], [66, 4]],
+        via: viaJump(55, 24, { name: '_log_pentium4', quick: 'f52a450f289c314d',
+            hash: '1603149349ca5469',
+            spans: [[0, 596]],
+            masks:
+                [[33, 4], [41, 4], [49, 4], [57, 4], [87, 4], [95, 4], [193, 4],
+                    [205, 4], [225, 4], [237, 4], [249, 4], [336, 4], [378, 4], [386, 4],
+                    [415, 4], [431, 4], [443, 4], [458, 4], [539, 4]] }) }),
+    entry({ name: '_CIlog10', does: 'cilog10', lead: X87_LEAD, quick: 'a94bd8e5df22f6e3',
+        hash: '45863a1a223a40e7', spans: [[0, 79]], masks: [[2, 4], [55, 4], [66, 4]],
+        via: viaJump(55, 24, { name: '_log10_pentium4', quick: 'f52a450f289c314d',
+            hash: 'a96c61180da6b486',
+            spans: [[0, 620]],
+            masks:
+                [[33, 4], [41, 4], [49, 4], [57, 4], [65, 4], [95, 4], [103, 4],
+                    [201, 4], [213, 4], [233, 4], [245, 4], [257, 4], [289, 4], [360, 4],
+                    [402, 4], [410, 4], [439, 4], [455, 4], [467, 4], [482, 4], [563, 4]] }) }),
+    entry({ name: '_CIexp', does: 'ciexp', lead: X87_LEAD, quick: 'f1454e170f6c75b1',
+        hash: '4136b43b4b7607e1', spans: [[0, 59], [69, 10]],
+        masks: [[2, 4], [55, 4], [70, 4], [75, 4]] }),
+    entry({ name: '_CIpow', does: 'cipow', lead: X87_LEAD2, quick: 'a94bd8e5df22f6e3',
+        hash: 'a7e7bff9eb2f7b33', spans: [[0, 84]], masks: [[2, 4], [55, 4]] }),
 ]);

@@ -24,7 +24,9 @@ test('every entry of the dictionary is a signature that tells its function apart
     const hashes = new Set();
     for (const entry of CRT_DICTIONARY)
     {
-        const { name, spans = [], masks = [], hash } = entry;
+        const { name, spans = [], masks = [], via } = entry;
+        // Stubs alike to the byte are told apart by where they jump (`via`).
+        const hash = `${entry.hash}${via === undefined ? '' : ` ${via.at} ${via.hash}`}`;
         assert.ok(!hashes.has(hash), `${name}: one entry for each signature`);
         hashes.add(hash);
         assert.ok(spans.length > 0 && spans[0][0] === 0, `${name}: its first span is its entry's`);
@@ -62,6 +64,8 @@ test('every body of the dictionary is bytes that decode whole, ending where the 
         const formed = helperInstructions(entry, call, 0x500000);
         assert.equal(formed.reduce((sum, one)=>sum + one.length, 0), 5,
             `${entry.name}: what it is formed as goes on after the call`);
-        assert.equal(formed[0].op, 'crt');
+        // The `lead`'s instructions first, where there is one, then the operation's.
+        const operation = formed.findIndex(one=>one.op === 'crt');
+        assert.ok(entry.lead === undefined ? operation === 0 : operation > 0, entry.name);
     }
 });
