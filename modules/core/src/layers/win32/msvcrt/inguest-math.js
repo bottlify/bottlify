@@ -91,14 +91,6 @@ const SPLIT = 134217729;
 /** A double's upper 26 bits, by Veltkamp's split. */
 const highOf = (/** @type {number} */ a)=>SPLIT * a - (SPLIT * a - a);
 
-/** The rest of it: the two halves add to it exactly. */
-const lowOf = (/** @type {number} */ a)=>a - highOf(a);
-
-/** What a times b lost when rounded to p, exactly (Dekker). */
-const productError = (/** @type {number} */ a, /** @type {number} */ b, /** @type {number} */ p)=>
-    ((highOf(a) * highOf(b) - p) + highOf(a) * lowOf(b) + lowOf(a) * highOf(b))
-    + lowOf(a) * lowOf(b);
-
 /** A positive's exponent, `fxtract`'s: scaled by its negative, it is in [1, 2). */
 const exponentOf = (/** @type {number} */ a)=>X87.exponent(a);
 
@@ -512,7 +504,13 @@ export function pow({ host }, x, y){
             if (n - 2 * half === 1)
             {
                 const p = rh * bh;
-                const e = productError(rh, bh, p) + (rh * bl + rl * bh);
+                // What rh times bh lost when rounded to p, exactly (Dekker), a step a line.
+                const ah = highOf(rh);
+                const al = rh - ah;
+                const bh2 = highOf(bh);
+                const bl2 = bh - bh2;
+                const lost = (((ah * bh2 - p) + ah * bl2) + al * bh2) + al * bl2;
+                const e = lost + (rh * bl + rl * bh);
                 const h = p + e;
                 const k = exponentOf(h);
                 rh = X87.scale(h, -k);
@@ -523,7 +521,13 @@ export function pow({ host }, x, y){
             if (n > 0)
             {
                 const p = bh * bh;
-                const e = productError(bh, bh, p) + 2 * bh * bl;
+                // What bh times bh lost when rounded to p, exactly (Dekker), a step a line.
+                const ah = highOf(bh);
+                const al = bh - ah;
+                const bh2 = highOf(bh);
+                const bl2 = bh - bh2;
+                const lost = (((ah * bh2 - p) + ah * bl2) + al * bh2) + al * bl2;
+                const e = lost + 2 * bh * bl;
                 const h = p + e;
                 const k = exponentOf(h);
                 bh = X87.scale(h, -k);
@@ -537,7 +541,13 @@ export function pow({ host }, x, y){
             // it leaves of one, taken exactly.
             const q = 1 / rh;
             const p = q * rh;
-            const r = ((1 - p) - productError(q, rh, p)) - q * rl;
+            // What q times rh lost when rounded to p, exactly (Dekker), a step a line.
+            const ah = highOf(q);
+            const al = q - ah;
+            const bh2 = highOf(rh);
+            const bl2 = rh - bh2;
+            const lost = (((ah * bh2 - p) + ah * bl2) + al * bh2) + al * bl2;
+            const r = ((1 - p) - lost) - q * rl;
             rh = q + q * r;
             rl = 0;
             re = -re;
@@ -663,7 +673,13 @@ export function _CIpow({ host }, x, y){
             if (n - 2 * half === 1)
             {
                 const p = rh * bh;
-                const e = productError(rh, bh, p) + (rh * bl + rl * bh);
+                // What rh times bh lost when rounded to p, exactly (Dekker), a step a line.
+                const ah = highOf(rh);
+                const al = rh - ah;
+                const bh2 = highOf(bh);
+                const bl2 = bh - bh2;
+                const lost = (((ah * bh2 - p) + ah * bl2) + al * bh2) + al * bl2;
+                const e = lost + (rh * bl + rl * bh);
                 const h = p + e;
                 const k = exponentOf(h);
                 rh = X87.scale(h, -k);
@@ -674,7 +690,13 @@ export function _CIpow({ host }, x, y){
             if (n > 0)
             {
                 const p = bh * bh;
-                const e = productError(bh, bh, p) + 2 * bh * bl;
+                // What bh times bh lost when rounded to p, exactly (Dekker), a step a line.
+                const ah = highOf(bh);
+                const al = bh - ah;
+                const bh2 = highOf(bh);
+                const bl2 = bh - bh2;
+                const lost = (((ah * bh2 - p) + ah * bl2) + al * bh2) + al * bl2;
+                const e = lost + 2 * bh * bl;
                 const h = p + e;
                 const k = exponentOf(h);
                 bh = X87.scale(h, -k);
@@ -688,7 +710,13 @@ export function _CIpow({ host }, x, y){
             // it leaves of one, taken exactly.
             const q = 1 / rh;
             const p = q * rh;
-            const r = ((1 - p) - productError(q, rh, p)) - q * rl;
+            // What q times rh lost when rounded to p, exactly (Dekker), a step a line.
+            const ah = highOf(q);
+            const al = q - ah;
+            const bh2 = highOf(rh);
+            const bl2 = rh - bh2;
+            const lost = (((ah * bh2 - p) + ah * bl2) + al * bh2) + al * bl2;
+            const r = ((1 - p) - lost) - q * rl;
             rh = q + q * r;
             rl = 0;
             re = -re;
@@ -1086,4 +1114,54 @@ export function log10f({ host }, x){
         return host();
     }
     return Math.fround(X87.yl2x(LOG10_2, x));
+}
+
+/** The largest float, and the least normal one: a power past them is the handler's. */
+const FLOAT_MAX = 3.4028234663852886e38;
+const FLOAT_LEAST = 2 ** -126;
+
+/**
+ * How near halfway between two floats, as a share of the power, a double
+ * computed as powf computes it may lie and still round as x^y does: its error
+ * is under 2^-45 of it (y log2 x is below 2^8 in magnitude, its rounding
+ * under 2^-45 absolute), and a double nearer halfway may be on the wrong side.
+ */
+const FLOAT_HALFWAY = 2 ** -36;
+
+/**
+ * float powf(float x, float y), a 64-bit runtime's: a positive base to a
+ * finite power as 2^(y log2 x) in doubles, rounded to a float -- the float
+ * nearest x^y, which is the host's float of its double answer, wherever the
+ * double lies farther than FLOAT_HALFWAY from halfway between two floats
+ * (x^y exactly halfway, as the square of a float of 13 bits is, and those
+ * near it are the handler's); a base of zero or below, a power past the
+ * normal floats and a NaN the handler's.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x @param {f32} y
+ * @returns {f32}
+ */
+export function powf({ host }, x, y){
+    if (!(x > 0 && x <= FLOAT_MAX && Math.abs(y) <= FLOAT_MAX))
+    {
+        return host();
+    }
+    const power = pow2Of(X87.yl2x(y, x));
+    if (!(power >= FLOAT_LEAST && power <= FLOAT_MAX))
+    {
+        return host();
+    }
+    const nearest = Math.fround(power);
+    const past = power - nearest;
+    const e = exponentOf(nearest);
+    // Half a unit in the last place above the float, and below it: half
+    // that below a power of two.
+    const up = X87.scale(1, e - 24);
+    const down = X87.scale(nearest, -e) === 1 ? up * 0.5 : up;
+    const room = past >= 0 ? up - past : down + past;
+    if (room < power * FLOAT_HALFWAY)
+    {
+        return host();
+    }
+    return nearest;
 }

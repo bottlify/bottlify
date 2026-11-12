@@ -416,7 +416,7 @@ export function createMathFunctions(host){
             singles[name] = guestEntry(inGuest[name], COMPILED[name], host, singles[name]);
         }
     }
-    for (const name of /** @type {const} */ (['sinhf', 'coshf', 'tanhf', 'log10f']))
+    for (const name of /** @type {const} */ (['sinhf', 'coshf', 'tanhf', 'log10f', 'powf']))
     {
         if (singles[name])
         {

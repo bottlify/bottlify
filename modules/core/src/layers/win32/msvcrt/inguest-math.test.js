@@ -238,3 +238,61 @@ test('pow to a whole power is the power correctly rounded, in the guest and the 
         ]);
         both('pow', [...cases, [10, 308], [10, -307], [0.1, 300], [-3, 41], [1.0000001, 1e9]]);
     });
+
+test('powf: the float nearest x^y in the guest, as the handler rounds its double; near halfway'
+    + ' and the edges handed over', ()=>{
+    const bits = new DataView(new ArrayBuffer(4));
+    const wordOf = (/** @type {number} */ value)=>{
+        bits.setFloat32(0, value, true);
+        return bits.getUint32(0, true);
+    };
+    const floatOf = (/** @type {number} */ word)=>{
+        bits.setUint32(0, word, true);
+        return bits.getFloat32(0, true);
+    };
+    const powHandler = {
+        /** @type {(memory: Uint8Array, args: number[]) => { st0: number }} */
+        host: (memory, args)=>({ st0: Math.fround(Math.pow(floatOf(args[0]), floatOf(args[1]))) }),
+    };
+    const next = random(31);
+    const f = (/** @type {number} */ value)=>Math.fround(value);
+    /** @type {[number, number][]} */
+    const cases = [
+        // Exactly halfway: the square of 13 bits, the cube of 9, and 1.5 of a square of 9.
+        [f(1 + 2 ** -12), 2], [f(1 + 2 ** -8), 3], [f((1 + 2 ** -8) ** 2), 1.5],
+        [2, 10], [10, 3], [0.5, -3], [3, 0.5], [f(0.1), 2], [1, 1e30], [f(1.5), 200],
+        [f(1e-20), 3], [0, 2], [-2, 2], [f(Number.NaN), 1], [2, Infinity], [f(3e38), 1],
+        [f(3e38), 1.0001], [f(1e-38), 1],
+    ].map(([x, y])=>[f(x), f(y)]);
+    while (cases.length < 220)
+    {
+        const x = f((next() / 2 ** 32) * 2 ** ((next() % 40) - 20));
+        const y = next() % 3 === 0 ? (next() % 16) - 8 : f((next() / 2 ** 31 - 1) * 12);
+        cases.push([x, y]);
+    }
+    let handed = 0;
+    let kept = 0;
+    for (const control of CONTROLS)
+    {
+        for (const [x, y] of cases)
+        {
+            const result = same('powf', { stack: [wordOf(x), wordOf(y)], control }, powHandler);
+            if (result.handedOver)
+            {
+                handed++;
+            }
+            else if (control === 0x27f)
+            {
+                kept++;
+                assert.equal(result.st[0], Math.fround(Math.pow(x, y)), `powf(${x}, ${y})`);
+            }
+        }
+    }
+    for (const [x, y] of cases.slice(0, 3))
+    {
+        assert.ok(same('powf', { stack: [wordOf(x), wordOf(y)], control: 0x27f }, powHandler)
+            .handedOver, `powf(${x}, ${y}) is halfway: the handler's`);
+    }
+    assert.ok(kept > 150, `powf: ${kept} kept in the guest`);
+    assert.ok(handed > 0);
+});

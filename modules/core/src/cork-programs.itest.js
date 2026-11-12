@@ -657,12 +657,14 @@ test('a 64-bit program\'s calls to the engine\'s own msvcrt memset and strlen th
         `formed: ${JSON.stringify(formed)}`);
 });
 
-test('a 64-bit program\'s msvcrt sin, atan2 and acos run as guest code, with no call to the host',
+test('a 64-bit program\'s msvcrt sin, atan2, acos and pow run as guest code, crossing nothing',
     async()=>{
-        // xmm0 = sin(0.5) + atan2(0.25, 2) + acos(0.125); its low dword the exit code.
+        // xmm0 = sin(0.5) + atan2(0.25, 2) + acos(0.125) + pow(2, 0.25); its low dword the exit
+        // code.
         const exe = buildExe({
             bits: 64,
-            imports: { 'msvcrt.dll': ['sin', 'atan2', 'acos'], 'KERNEL32.dll': ['ExitProcess'] },
+            imports: { 'msvcrt.dll': ['sin', 'atan2', 'acos', 'pow'],
+                'KERNEL32.dll': ['ExitProcess'] },
             data: { half: [...new Uint8Array(new Float64Array([0.5]).buffer)],
                 quarter: [...new Uint8Array(new Float64Array([0.25]).buffer)],
                 two: [...new Uint8Array(new Float64Array([2]).buffer)],
@@ -686,6 +688,11 @@ test('a 64-bit program\'s msvcrt sin, atan2 and acos run as guest code, with no 
                 out.push(0xf2, 0x0f, 0x10, 0x05, ...rip(at('eighth'), 8));
                 out.push(0xff, 0x15, ...rip(iat('acos'), 6));
                 out.push(0xf2, 0x0f, 0x58, 0x05, ...rip(at('sum'), 8));
+                out.push(0xf2, 0x0f, 0x11, 0x05, ...rip(at('sum'), 8));
+                out.push(0xf2, 0x0f, 0x10, 0x05, ...rip(at('two'), 8));
+                out.push(0xf2, 0x0f, 0x10, 0x0d, ...rip(at('quarter'), 8)); // xmm1
+                out.push(0xff, 0x15, ...rip(iat('pow'), 6));
+                out.push(0xf2, 0x0f, 0x58, 0x05, ...rip(at('sum'), 8));
                 out.push(0x66, 0x48, 0x0f, 0x7e, 0xc1);                        // movq rcx, xmm0
                 out.push(0xff, 0x15, ...rip(iat('ExitProcess'), 6), 0xf4);
                 return out;
@@ -693,19 +700,21 @@ test('a 64-bit program\'s msvcrt sin, atan2 and acos run as guest code, with no 
         });
         const cork = await run(exe);
         const want = new Uint32Array(new Float64Array([Math.sin(0.5) + Math.atan2(0.25, 2)
-            + Math.acos(0.125)]).buffer)[0];
+            + Math.acos(0.125) + 2 ** 0.25]).buffer)[0];
         assert.equal(cork.code >>> 0, want);
-        const hosted = cork.trapsHot.map(([name])=>name).filter(name=>/sin|atan2|acos/.test(name));
+        const hosted = cork.trapsHot.map(([name])=>name).filter(name=>/sin|atan2|acos|pow/.test(name));
         assert.deepEqual(hosted, [], 'none of them crossed to the host');
     });
 
-test('a 64-bit program\'s msvcrt sinf, atan2f and sqrtf run as guest code, none calling the host',
+test('a 64-bit program\'s msvcrt sinf, atan2f, sqrtf and powf run as guest code, crossing nothing',
     async()=>{
-        // xmm0 = sinf(0.5f) + atan2f(0.25f, 2f) + sqrtf(2f), a float; its bits the exit code.
+        // xmm0 = sinf(0.5f) + atan2f(0.25f, 2f) + sqrtf(2f) + powf(2f, 0.25f), a float; its bits
+        // the exit code.
         const f32 = (/** @type {number} */ x)=>[...new Uint8Array(new Float32Array([x]).buffer)];
         const exe = buildExe({
             bits: 64,
-            imports: { 'msvcrt.dll': ['sinf', 'atan2f', 'sqrtf'], 'KERNEL32.dll': ['ExitProcess'] },
+            imports: { 'msvcrt.dll': ['sinf', 'atan2f', 'sqrtf', 'powf'],
+                'KERNEL32.dll': ['ExitProcess'] },
             data: { half: f32(0.5), quarter: f32(0.25), two: f32(2), sum: new Array(4).fill(0) },
             codeSize: 0xa0,
             code: ({ iat, at, code })=>{
@@ -725,6 +734,11 @@ test('a 64-bit program\'s msvcrt sinf, atan2f and sqrtf run as guest code, none 
                 out.push(0xf3, 0x0f, 0x10, 0x05, ...rip(at('two'), 8));
                 out.push(0xff, 0x15, ...rip(iat('sqrtf'), 6));
                 out.push(0xf3, 0x0f, 0x58, 0x05, ...rip(at('sum'), 8));
+                out.push(0xf3, 0x0f, 0x11, 0x05, ...rip(at('sum'), 8));
+                out.push(0xf3, 0x0f, 0x10, 0x05, ...rip(at('two'), 8));
+                out.push(0xf3, 0x0f, 0x10, 0x0d, ...rip(at('quarter'), 8)); // xmm1
+                out.push(0xff, 0x15, ...rip(iat('powf'), 6));
+                out.push(0xf3, 0x0f, 0x58, 0x05, ...rip(at('sum'), 8));
                 out.push(0x66, 0x0f, 0x7e, 0xc1);                              // movd ecx, xmm0
                 out.push(0xff, 0x15, ...rip(iat('ExitProcess'), 6), 0xf4);
                 return out;
@@ -733,8 +747,9 @@ test('a 64-bit program\'s msvcrt sinf, atan2f and sqrtf run as guest code, none 
         const cork = await run(exe);
         const sum = Math.fround(Math.fround(Math.fround(Math.sin(0.5))
             + Math.fround(Math.atan2(0.25, 2))) + Math.fround(Math.sqrt(2)));
-        assert.equal(cork.code >>> 0, new Uint32Array(new Float32Array([sum]).buffer)[0]);
+        const total = Math.fround(sum + Math.fround(2 ** 0.25));
+        assert.equal(cork.code >>> 0, new Uint32Array(new Float32Array([total]).buffer)[0]);
         const hosted = cork.trapsHot.map(([name])=>name)
-            .filter(name=>/sinf|atan2f|sqrtf/.test(name));
+            .filter(name=>/sinf|atan2f|sqrtf|powf/.test(name));
         assert.deepEqual(hosted, [], 'none of them crossed to the host');
     });
