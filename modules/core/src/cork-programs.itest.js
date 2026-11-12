@@ -753,3 +753,102 @@ test('a 64-bit program\'s msvcrt sinf, atan2f, sqrtf and powf run as guest code,
             .filter(name=>/sinf|atan2f|sqrtf|powf/.test(name));
         assert.deepEqual(hosted, [], 'none of them crossed to the host');
     });
+
+test('a 64-bit program\'s msvcrt sprintf and _snprintf run as guest code, crossing nothing',
+    async()=>{
+        // sprintf(buffer, "%d|%-4s|%5x|%c|%u", -42, "ab", 255, 'Z', 7) and _snprintf of the
+        // same into 6 bytes; the first held to its text by memcmp; the exit code the answers.
+        const text = (/** @type {string} */ value)=>[...value].map(c=>c.charCodeAt(0));
+        const exe = buildExe({
+            bits: 64,
+            imports: { 'msvcrt.dll': ['sprintf', '_snprintf', 'memcmp'],
+                'KERNEL32.dll': ['ExitProcess'] },
+            data: { format: [...text('%d|%-4s|%5x|%c|%u'), 0], word: [...text('ab'), 0],
+                want: [...text('-42|ab  |   ff|Z|7'), 0], buffer: new Array(32).fill(0x55) },
+            codeSize: 0x100,
+            code: ({ iat, at, code })=>{
+                /** @type {number[]} */
+                const out = [];
+                const rip = (/** @type {number} */ target, /** @type {number} */ rest)=>
+                    u32((target - code(out.length + rest)) >>> 0);
+                out.push(0x53);                                            // push rbx
+                out.push(0x48, 0x83, 0xec, 0x40);                          // sub rsp, 64
+                // -42 and "ab" in R8 and R9, 255, 'Z' and 7 past the home space.
+                out.push(0x48, 0xc7, 0x44, 0x24, 0x20, 255, 0, 0, 0);      // [rsp+32] = 255
+                out.push(0x48, 0xc7, 0x44, 0x24, 0x28, 0x5a, 0, 0, 0);     // [rsp+40] = 'Z'
+                out.push(0x48, 0xc7, 0x44, 0x24, 0x30, 7, 0, 0, 0);        // [rsp+48] = 7
+                out.push(0x48, 0x8d, 0x0d, ...rip(at('buffer'), 7));       // lea rcx, buffer
+                out.push(0x48, 0x8d, 0x15, ...rip(at('format'), 7));       // lea rdx, format
+                out.push(0x49, 0xc7, 0xc0, ...u32(-42 >>> 0));             // mov r8, -42
+                out.push(0x4c, 0x8d, 0x0d, ...rip(at('word'), 7));         // lea r9, word
+                out.push(0xff, 0x15, ...rip(iat('sprintf'), 6));
+                out.push(0x89, 0xc3);                                      // mov ebx, eax
+                out.push(0x48, 0x8d, 0x0d, ...rip(at('buffer'), 7));
+                out.push(0x48, 0x8d, 0x15, ...rip(at('want'), 7));
+                out.push(0x41, 0xb8, ...u32(19));                          // the text and its 0
+                out.push(0xff, 0x15, ...rip(iat('memcmp'), 6));
+                out.push(0xc1, 0xe0, 0x10, 0x01, 0xc3);                    // ebx += eax << 16
+                // _snprintf(buffer, 6, format, -42, "ab", ...): six bytes, no terminator, -1;
+                // -42 in R9, the rest past the home space.
+                out.push(0x48, 0x8d, 0x05, ...rip(at('word'), 7));         // lea rax, word
+                out.push(0x48, 0x89, 0x44, 0x24, 0x20);                    // mov [rsp+32], rax
+                out.push(0x48, 0xc7, 0x44, 0x24, 0x28, 255, 0, 0, 0);
+                out.push(0x48, 0xc7, 0x44, 0x24, 0x30, 0x5a, 0, 0, 0);
+                out.push(0x48, 0xc7, 0x44, 0x24, 0x38, 7, 0, 0, 0);
+                out.push(0x48, 0x8d, 0x0d, ...rip(at('buffer'), 7));
+                out.push(0xba, ...u32(6));                                 // mov edx, 6
+                out.push(0x4c, 0x8d, 0x05, ...rip(at('format'), 7));       // lea r8, format
+                out.push(0x49, 0xc7, 0xc1, ...u32(-42 >>> 0));             // mov r9, -42
+                out.push(0xff, 0x15, ...rip(iat('_snprintf'), 6));
+                out.push(0xc1, 0xe0, 0x08, 0x01, 0xc3);                    // ebx += eax << 8
+                out.push(0x89, 0xd9);                                      // mov ecx, ebx
+                out.push(0xff, 0x15, ...rip(iat('ExitProcess'), 6), 0xf4);
+                return out;
+            },
+        });
+        const cork = await run(exe);
+        // 18 bytes and memcmp 0, then _snprintf's -1 shifted in.
+        assert.equal(cork.code >>> 0, (18 + (-1 << 8)) >>> 0);
+        const hosted = cork.trapsHot.map(([name])=>name).filter(name=>/printf/.test(name));
+        assert.deepEqual(hosted, [], 'neither crossed to the host');
+    });
+
+test('a 64-bit program\'s sprintf of a double is the host\'s, its va_list the spilled home space',
+    async()=>{
+        // sprintf(buffer, "%d|%.1f|%s", 7, 2.5, "ok"): the double in R9 and XMM3 both, as a
+        // variadic call passes it; the exit code its length, 256 times memcmp's answer added.
+        const text = (/** @type {string} */ value)=>[...value].map(c=>c.charCodeAt(0));
+        const exe = buildExe({
+            bits: 64,
+            imports: { 'msvcrt.dll': ['sprintf', 'memcmp'], 'KERNEL32.dll': ['ExitProcess'] },
+            data: { format: [...text('%d|%.1f|%s'), 0], word: [...text('ok'), 0],
+                want: [...text('7|2.5|ok'), 0], buffer: new Array(32).fill(0x55) },
+            codeSize: 0xa0,
+            code: ({ iat, at, code })=>{
+                /** @type {number[]} */
+                const out = [];
+                const rip = (/** @type {number} */ target, /** @type {number} */ rest)=>
+                    u32((target - code(out.length + rest)) >>> 0);
+                out.push(0x53, 0x48, 0x83, 0xec, 0x30);                    // push rbx; sub rsp, 48
+                out.push(0x48, 0x8d, 0x0d, ...rip(at('buffer'), 7));
+                out.push(0x48, 0x8d, 0x15, ...rip(at('format'), 7));
+                out.push(0x41, 0xb8, ...u32(7));                           // mov r8d, 7
+                out.push(0x49, 0xb9, 0, 0, 0, 0, 0, 0, 0x04, 0x40);        // mov r9, 2.5's bits
+                out.push(0x66, 0x49, 0x0f, 0x6e, 0xd9);                    // movq xmm3, r9
+                out.push(0x48, 0x8d, 0x05, ...rip(at('word'), 7));         // lea rax, word
+                out.push(0x48, 0x89, 0x44, 0x24, 0x20);                    // mov [rsp+32], rax
+                out.push(0xff, 0x15, ...rip(iat('sprintf'), 6));
+                out.push(0x89, 0xc3);                                      // mov ebx, eax
+                out.push(0x48, 0x8d, 0x0d, ...rip(at('buffer'), 7));
+                out.push(0x48, 0x8d, 0x15, ...rip(at('want'), 7));
+                out.push(0x41, 0xb8, ...u32(9));
+                out.push(0xff, 0x15, ...rip(iat('memcmp'), 6));
+                out.push(0xc1, 0xe0, 0x08, 0x01, 0xc3);                    // ebx += eax << 8
+                out.push(0x89, 0xd9);
+                out.push(0xff, 0x15, ...rip(iat('ExitProcess'), 6), 0xf4);
+                return out;
+            },
+        });
+        const cork = await run(exe);
+        assert.equal(cork.code, 8, 'eight bytes, as the host printed them');
+    });

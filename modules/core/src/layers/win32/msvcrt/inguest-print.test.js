@@ -9,17 +9,23 @@
  * input, on cork's test machine; and its JavaScript renders what the host's
  * printer (`format.js`) renders, for random formats of every flag, width,
  * precision, modifier and conversion it takes -- the gate -- the text, its
- * length and what %n wrote, byte for byte.
+ * length and what %n wrote, byte for byte. Its x86-64 answers as its
+ * JavaScript run with pointers of eight bytes, the same cases laid out as a
+ * 64-bit `va_list` is: slots of eight bytes, an integer's upper half
+ * whatever the caller left there.
  */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { COMPILED } from './inguest-print.x86.js';
+import { COMPILED as LONG } from './inguest-print.x64.js';
 import * as sources from './inguest-print.js';
 import { formatToString } from './format.js';
 import { DATA, equivalence, random } from '../../../../scripts/guest-code/equivalence.mjs';
 
-const { same } = equivalence(COMPILED, sources);
+// The i386 alone, on 4-byte slots; the x86-64 apart, on its own layout.
+const { same } = equivalence(COMPILED, sources, undefined, {});
+const { sameAt64 } = equivalence(COMPILED, sources, undefined, LONG);
 /** The host's printer, as a stand-in: an answer of its own, nothing written. */
 const HANDED = { host: ()=>0x7ffffff0 };
 
@@ -110,14 +116,27 @@ function caseOf(next){
     return { format, slots };
 }
 
-/** The memory of a case: the format, the list, the strings. @param {string} format @param {number[]} slots */
-function memoryOf(format, slots){
+/**
+ * The memory of a case: the format, the list, the strings. A slot of eight
+ * bytes holds a pointer whole and an integer in its lower half, the upper
+ * one left as a caller may leave it.
+ *
+ * @param {string} format @param {number[]} slots @param {number} [slotBytes]
+ */
+function memoryOf(format, slots, slotBytes = 4){
     const bytes = new Uint8Array(SIZE);
     const view = new DataView(bytes.buffer);
     [...format, '\0'].forEach((c, i)=>{
         bytes[FORMAT - DATA + i] = c.charCodeAt(0);
     });
-    slots.forEach((slot, i)=>view.setUint32(LIST - DATA + 4 * i, slot >>> 0, true));
+    slots.forEach((slot, i)=>{
+        view.setUint32(LIST - DATA + slotBytes * i, slot >>> 0, true);
+        const pointer = slot === 0 || slot >= DATA && slot < DATA + SIZE;
+        if (slotBytes === 8 && !pointer)
+        {
+            view.setUint32(LIST - DATA + 8 * i + 4, Math.imul(slot, 0x9e3779b1) + i, true);
+        }
+    });
     TEXTS.forEach((text, k)=>[...text, '\0'].forEach((c, i)=>{
         bytes[STRINGS - DATA + 64 * k + i] = c.charCodeAt(0);
     }));
@@ -134,19 +153,28 @@ test('the printers in the guest answer, write and count as their JavaScript', ()
         same('vsprintf', { stack: [BUFFER, FORMAT, LIST], memory }, HANDED);
         same('_vsnprintf', { stack: [BUFFER, count, FORMAT, LIST], memory }, HANDED);
         same('_vscprintf', { stack: [FORMAT, LIST], memory }, HANDED);
-        same('_vsnprintf_s', { stack: [BUFFER, [1, 8, 64, 300][next() % 4],
-            [0xffffffff, 0, 7, 100][next() % 4], FORMAT, LIST], memory }, HANDED);
+        const size = [1, 8, 64, 300][next() % 4];
+        const limit = [0xffffffff, 0, 7, 100][next() % 4];
+        same('_vsnprintf_s', { stack: [BUFFER, size, limit, FORMAT, LIST], memory }, HANDED);
+        const wide = /** @type {[number, Uint8Array][]} */ ([[DATA, memoryOf(format, slots, 8)]]);
+        sameAt64('vsprintf', { stack: [BUFFER, FORMAT, LIST], memory: wide }, HANDED);
+        sameAt64('_vsnprintf', { stack: [BUFFER, count, FORMAT, LIST], memory: wide }, HANDED);
+        sameAt64('_vscprintf', { stack: [FORMAT, LIST], memory: wide }, HANDED);
+        sameAt64('_vsnprintf_s', { stack: [BUFFER, size, limit, FORMAT, LIST], memory: wide },
+            HANDED);
     }
 });
 
-test('printInto renders what the host\'s printer renders: the text, its length and %n',
-    ()=>{
+test('printInto renders what the host\'s printer renders: the text, its length and %n, on'
+    + ' slots of four bytes and of eight', ()=>{
+    for (const slotBytes of [4, 8])
+    {
         const next = random(43);
         let rendered = 0;
         for (let round = 0; round < 6000; round++)
         {
             const { format, slots } = caseOf(next);
-            const guestMemory = memoryOf(format, slots);
+            const guestMemory = memoryOf(format, slots, slotBytes);
             const hostMemory = guestMemory.slice();
             const view = new DataView(guestMemory.buffer);
             const at = (/** @type {number} */ address)=>address - DATA;
@@ -158,6 +186,7 @@ test('printInto renders what the host\'s printer renders: the text, its length a
                 },
                 setU32: (/** @type {number} */ a, /** @type {number} */ v)=>
                     view.setUint32(at(a), v >>> 0, true),
+                pointerBytes: slotBytes,
             };
             if (sources.formatInGuest(helpers, FORMAT) === 0)
             {
@@ -182,12 +211,13 @@ test('printInto renders what the host\'s printer renders: the text, its length a
                     }
                 },
             });
-            const label = `round ${round}: ${JSON.stringify(format)}`;
+            const label = `${slotBytes}-byte slots, round ${round}: ${JSON.stringify(format)}`;
             assert.equal(total, text.length, `${label}: the length`);
             assert.equal(String.fromCharCode(...guestMemory.subarray(at(BUFFER),
                 at(BUFFER) + Math.min(total, 0x180))), text.slice(0, 0x180), `${label}: the text`);
             assert.deepEqual([...guestMemory.subarray(at(COUNTS), at(COUNTS) + 32)],
                 [...hostMemory.subarray(at(COUNTS), at(COUNTS) + 32)], `${label}: what %n wrote`);
         }
-        assert.ok(rendered > 2000, `${rendered} formats rendered in the guest`);
-    });
+        assert.ok(rendered > 2000, `${slotBytes}: ${rendered} formats rendered in the guest`);
+    }
+});

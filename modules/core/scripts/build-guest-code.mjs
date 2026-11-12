@@ -43,6 +43,7 @@ const TAG = /^\s*\*?\s*@guestCode\b/m;
 export const LONG = new Map([
     ['layers/win32/msvcrt/inguest.js', {}],
     ['layers/win32/msvcrt/inguest-math.js', {}],
+    ['layers/win32/msvcrt/inguest-print.js', {}],
 ]);
 
 /** @param {string} dir @param {string[]} [found] @returns {Promise<string[]>} */

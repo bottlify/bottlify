@@ -364,8 +364,10 @@ export function equivalence(compiled, sources, model, long){
      *     The JavaScript's answer in doubles: the source's, whatever the control
      *     word, which SSE2's arithmetic has nothing of.
      * @param {string} what
+     * @param {boolean} [laidOut]  Whether the JavaScript ran with pointers of
+     *     eight bytes already, as `sameAt64` runs it.
      */
-    const sameLong = (name, input, double, js, what)=>{
+    const sameLong = (name, input, double, js, what, laidOut = false)=>{
         const fn = longOf(name);
         // An x87 argument has no x86-64 code to take it; a call through a
         // pointer reaches x86-64 only where the case gives some.
@@ -378,7 +380,7 @@ export function equivalence(compiled, sources, model, long){
         const at64 = `${what} at 64 bits`;
         // A source that lays memory out by the pointer's size is held, at 64
         // bits, to its own run with pointers of eight bytes.
-        const judge = fn.uses.includes('pointerBytes')
+        const judge = fn.uses.includes('pointerBytes') && !laidOut
             ? runJs(name, input, double, sources, undefined, 8) : js;
         assert.equal(x64.handedOver, judge.handedOver, `${at64}: handed to the host by both or by `
             + 'neither');
@@ -751,8 +753,10 @@ export function equivalence(compiled, sources, model, long){
             {
                 throw new Error(`no x86-64 code for ${name}`);
             }
-            const js = runJs(name, input, double, sources, bounds);
-            sameLong(name, input, double, js, `${name}(${JSON.stringify(input.stack ?? [])})`);
+            const js = runJs(name, input, double, sources, bounds,
+                longOf(name)?.uses.includes('pointerBytes') ? 8 : 4);
+            sameLong(name, input, double, js, `${name}(${JSON.stringify(input.stack ?? [])})`,
+                true);
             return js;
         },
     };

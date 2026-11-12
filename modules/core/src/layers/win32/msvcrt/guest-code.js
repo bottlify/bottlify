@@ -31,6 +31,8 @@ import { COMPILED as RUNTIME } from './inguest.x86.js';
 import { COMPILED as RUNTIME_LONG } from './inguest.x64.js';
 import { COMPILED as MATH } from './inguest-math.x86.js';
 import { COMPILED as MATH_LONG } from './inguest-math.x64.js';
+import { COMPILED as PRINT } from './inguest-print.x86.js';
+import { COMPILED as PRINT_LONG } from './inguest-print.x64.js';
 import { setSingle } from './float.js';
 
 /**
@@ -40,8 +42,9 @@ import { setSingle } from './float.js';
  * @type {Map<CompiledGuestCode, CompiledGuestCode>}
  */
 const LONG_CODE = new Map();
-for (const [i386, long] of /** @type {[Record<string, CompiledGuestCode>,
-    Record<string, CompiledGuestCode>][]} */ ([[RUNTIME, RUNTIME_LONG], [MATH, MATH_LONG]]))
+/** @type {[Record<string, CompiledGuestCode>, Record<string, CompiledGuestCode>][]} */
+const PAIRS = [[RUNTIME, RUNTIME_LONG], [MATH, MATH_LONG], [PRINT, PRINT_LONG]];
+for (const [i386, long] of PAIRS)
 {
     for (const [name, compiled] of Object.entries(long))
     {
@@ -553,8 +556,23 @@ export function guestEntry(source, compiled, host, fallback){
  * of its own, whose return is to the `add` above. `own` is the function's
  * handler as it was, the reference the code is held to.
  *
+ * Where the form has x86-64 code (`long`), so has the function: the four
+ * argument registers put in the home space the caller left above the return
+ * address, where the slots after them already are -- a 64-bit `va_list` is
+ * those slots in order -- and the address of the first past the fixed ones
+ * the form's next argument, in the register that takes it.
+ *
+ *     mov [rsp + 8], rcx ... mov [rsp + 32], r9
+ *     lea r8 / r9, [rsp + 8 + 8 * fixed]   ; fixed 2 or 3
+ *     sub rsp, 40                          ; home space for the form, RSP aligned
+ *     call form
+ *     add rsp, 40
+ *     ret
+ *   form:                                  ; the v form's x86-64
+ *
  * @param {number} fixed  the arguments before `...`
- * @param {{ code: Uint8Array | ((builder?: CodeBuilder) => Uint8Array) }} form
+ * @param {{ code: Uint8Array | ((builder?: CodeBuilder) => Uint8Array),
+ *     long?: (builder?: CodeBuilder) => Uint8Array }} form
  * @param {{ argBytes: number, handler: (args: number[]) => number }} own
  */
 export function variadicEntry(fixed, form, own){
@@ -566,19 +584,47 @@ export function variadicEntry(fixed, form, own){
     }
     // The form follows the `add` and the `ret`: four bytes past the call.
     head.push(0xe8, 4, 0, 0, 0, 0x83, 0xc4, reach, 0xc3);
-    /** @param {CodeBuilder} [builder] */
-    const code = builder=>{
-        // The form's jumps to its trap are counted from where it lies here.
+    /**
+     * The head, then the form's code, its jumps to its trap counted from
+     * where it lies here.
+     *
+     * @param {number[]} before
+     * @param {Uint8Array | ((builder?: CodeBuilder) => Uint8Array)} body
+     * @param {CodeBuilder} [builder]
+     */
+    const joined = (before, body, builder)=>{
         const shifted = builder && { register: builder.register,
             jump: (/** @type {number} */ at, /** @type {number} */ target)=>
-                builder.jump(at + head.length, target) };
-        const body = typeof form.code === 'function' ? form.code(shifted) : form.code;
-        const bytes = new Uint8Array(head.length + body.length);
-        bytes.set(head);
-        bytes.set(body, head.length);
+                builder.jump(at + before.length, target) };
+        const after = typeof body === 'function' ? body(shifted) : body;
+        const bytes = new Uint8Array(before.length + after.length);
+        bytes.set(before);
+        bytes.set(after, before.length);
         return bytes;
     };
-    return { convention: 'cdecl', argBytes: own.argBytes, handler: own.handler, code };
+    const { long } = form;
+    if (long !== undefined && fixed !== 2 && fixed !== 3)
+    {
+        throw new Error(`guest code: a variadic function of ${fixed} fixed arguments has no `
+            + 'x86-64 head');
+    }
+    // r8 for a va_list after two, r9 after three: the ModRM's reg field.
+    const listReg = fixed === 2 ? 0x44 : 0x4c;
+    const longHead = [
+        0x48, 0x89, 0x4c, 0x24, 0x08,                       // mov [rsp+8], rcx
+        0x48, 0x89, 0x54, 0x24, 0x10,                       // mov [rsp+16], rdx
+        0x4c, 0x89, 0x44, 0x24, 0x18,                       // mov [rsp+24], r8
+        0x4c, 0x89, 0x4c, 0x24, 0x20,                       // mov [rsp+32], r9
+        0x4c, 0x8d, listReg, 0x24, 8 + 8 * fixed,           // lea r8/r9, [rsp+8+8*fixed]
+        0x48, 0x83, 0xec, 0x28,                             // sub rsp, 40
+        0xe8, 5, 0, 0, 0,                                   // call form
+        0x48, 0x83, 0xc4, 0x28,                             // add rsp, 40
+        0xc3,                                               // ret
+    ];
+    return { convention: 'cdecl', argBytes: own.argBytes, handler: own.handler,
+        code: (/** @type {CodeBuilder | undefined} */ builder)=>joined(head, form.code, builder),
+        ...long ? { long: (/** @type {CodeBuilder | undefined} */ builder)=>
+            joined(longHead, long, builder) } : {} };
 }
 
 /** `mov eax, imm32`: a hand-over that jumps through EAX to the trap's address. */

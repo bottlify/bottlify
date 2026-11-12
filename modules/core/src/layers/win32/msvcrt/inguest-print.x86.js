@@ -13,7 +13,7 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'cdecl',
         params: ['u32'],
         returns: 'u32',
-        uses: ['u8'],
+        uses: ['u8', 'pointerBytes'],
         code: Uint8Array.of(
             0x53, 0x56, 0x57, 0x55, 0x83, 0xec, 0x20, 0x8b, 0x74, 0x24, 0x34, 0x0f,
             0xb6, 0x06, 0x89, 0x44, 0x24, 0x1c, 0x8b, 0x44, 0x24, 0x1c, 0x85, 0xc0,
@@ -86,7 +86,7 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'cdecl',
         params: ['u32', 'u32', 'u32', 'u32', 'u32'],
         returns: 'u32',
-        uses: ['u8', 'u32', 'setU8', 'setU32'],
+        uses: ['u8', 'u32', 'setU8', 'setU32', 'pointerBytes'],
         tables: { POWERS: 3072, NULL_TEXT: 3112 },
         code: Uint8Array.of(
             0x53, 0x56, 0x57, 0x55, 0x81, 0xec, 0xa8, 0x00, 0x00, 0x00, 0xe8, 0x00,
@@ -355,7 +355,7 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'cdecl',
         params: ['u32', 'u32', 'u32'],
         returns: 'i32',
-        uses: ['u8', 'u32', 'setU8', 'setU32', 'host'],
+        uses: ['u8', 'u32', 'setU8', 'setU32', 'host', 'pointerBytes'],
         host: 109,
         code: Uint8Array.of(
             0x8b, 0x44, 0x24, 0x04, 0x85, 0xc0, 0x74, 0x64, 0x8b, 0x44, 0x24, 0x08,
@@ -699,7 +699,7 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'cdecl',
         params: ['u32', 'u32', 'u32', 'u32'],
         returns: 'i32',
-        uses: ['u8', 'u32', 'setU8', 'setU32', 'host'],
+        uses: ['u8', 'u32', 'setU8', 'setU32', 'host', 'pointerBytes'],
         host: 127,
         code: Uint8Array.of(
             0x8b, 0x44, 0x24, 0x04, 0x85, 0xc0, 0x74, 0x76, 0x8b, 0x44, 0x24, 0x0c,
@@ -1044,7 +1044,7 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'cdecl',
         params: ['u32', 'u32'],
         returns: 'i32',
-        uses: ['u8', 'u32', 'setU8', 'setU32', 'host'],
+        uses: ['u8', 'u32', 'setU8', 'setU32', 'host', 'pointerBytes'],
         host: 79,
         code: Uint8Array.of(
             0x8b, 0x44, 0x24, 0x04, 0x85, 0xc0, 0x74, 0x46, 0x83, 0xec, 0x04, 0x8b,
@@ -1385,7 +1385,7 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'cdecl',
         params: ['u32', 'u32', 'u32', 'u32', 'u32'],
         returns: 'i32',
-        uses: ['u8', 'u32', 'setU8', 'setU32', 'host'],
+        uses: ['u8', 'u32', 'setU8', 'setU32', 'host', 'pointerBytes'],
         host: 229,
         code: Uint8Array.of(
             0x53, 0x56, 0x57, 0x55, 0x8b, 0x5c, 0x24, 0x14, 0x8b, 0x6c, 0x24, 0x1c,
