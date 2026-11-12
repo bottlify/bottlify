@@ -2716,3 +2716,21 @@ smaller ones cost Stockfish 10 %. No size won both; 256 kept.
 - **Machine.** Parallels ARM VM, Windows 11, 4 vCPU, Node 22.21; power plan not recorded.
 - **Decision.** No store flag in `install-watch`; the Framework is installed once and its layer
   reused, rather than the ngen pass made faster.
+
+### 2026-11-12: cork's interpreter and volatile-page levers do not speed up ngen's compile (cork)
+
+- **Idea.** A main-thread profile of `mscorsvw.exe` compiling an assembly put 14.3% of the thread
+  in the wasm interpreter (`runInteger`) and about 4.5% in the checks of code pages for writes
+  (`maskedFingerprint`, `isAt`, `noteRead`), so the guess was that code was interpreted for want
+  of translations, or for pages the CLR writes beside its code.
+- **Workload.** The installed .NET Framework 4 bundle `net40b` (manifest sha256 d8ac6588...),
+  `ngen.exe executeQueuedItems` under `tools/install-watch.mjs`, `concurrency` 1, translator pool
+  on (`{"worker":true}`); measured: the seconds between ngen's `Compiling assembly System.Data`
+  and its line for System.Data done. One run each arm.
+- **Values.** Default 52.9 s and, run again, 55.5 s (the noise between two runs: 2.6 s);
+  `volatileAfter` 10^9 (no page ever left to the interpreter for its writes) 50.9 s;
+  `wasmInterpreterAfter` 0 (the wasm interpreter from the first instruction) 53.8 s.
+- **Why.** Every arm is within the two default runs' spread; not measured yet is where the
+  interpreted instructions go (`install-watch --cork-figures` with `timings`).
+- **Machine.** Linux container, 4 vCPU, 15 GB, Node 26.13; power plan not recorded.
+- **Decision.** Neither setting changed; the next step is the interpreted addresses themselves.
