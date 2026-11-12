@@ -197,7 +197,32 @@ export async function serveProcess(start){
      * report that loses them unsaid looks like a process that had none. */
     const plainTables = ()=>plainOf(tables, message=>[{ name: 'diagnostics', status: 'error',
         metrics: { error: message } }]);
-    handlers.report = { diagnostics: ()=>(app ? plainTables() : null) };
+    handlers.report = {
+        diagnostics: ()=>(app ? plainTables() : null),
+        // Every process standing in this worker, its own first with the
+        // worker's tables: a child started beside it here runs on this
+        // thread, and a status of the worker alone says nothing of it.
+        standing: async(/** @type {number} */ journal = 0)=>{
+            if (!app)
+            {
+                return null;
+            }
+            const [own, ...beside] = await app.standing({ journal });
+            /** @param {any} each */
+            const lines = each=>(each.journal ? { journal: plainOf(()=>each.journal) } : {});
+            // Its own process's tables, not the facade's: the facade speaks for
+            // the child started last.
+            const ownTables = plainOf(()=>[...own.diagnostics,
+                { name: 'link', status: 'ready', metrics: link.diagnostics() },
+                { name: 'heap', status: 'ready', metrics: heapNow() }],
+            message=>[{ name: 'diagnostics', status: 'error', metrics: { error: message } }]);
+            return [{ image: own.image, diagnostics: ownTables, ...lines(own) },
+                ...beside.map((/** @type {any} */ each)=>({
+                    image: each.image, diagnostics: plainOf(()=>each.diagnostics,
+                        message=>[{ name: 'diagnostics', status: 'error',
+                            metrics: { error: message } }]), ...lines(each) }))];
+        },
+    };
     handlers.facade = {
         /** @param {string} path  a member of the machine, `debug.read` @param {any[]} args */
         call: async(path, args)=>{

@@ -54,6 +54,9 @@ export const SyncKind = {
  * @property {(processId: number) => ({ id: number, threadId: number, imagePath: string,
  *     exitCode: number | null } | null)} [process]  a process of the run by id: the
  *     number of the event its exit sets, and its code once it has one
+ * @property {() => number} [token]  the number the next wait is named by, unique on
+ *     the link: the run keeps a link's queued waits by it, and every process on
+ *     that link - a child beside its parent in one worker - hears every wake
  */
 
 /**
@@ -162,6 +165,9 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
     /** Waits on another process's object, queued there, by their token. @type {Map<number, any>} */
     const remoteWaits = new Map();
     let nextToken = 1;
+    /** A new wait's token: the link's own count where it keeps one, shared by
+     * every process that waits across it. */
+    const newToken = ()=>remote?.token?.() ?? nextToken++;
     /**
      * The wait being asked for across the link now, and the word that it
      * ended if that came first: the link answers what it is asked while it
@@ -490,7 +496,7 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
             {
                 continue;
             }
-            const token = nextToken++;
+            const token = newToken();
             asking = { token, result: null };
             let now;
             try
@@ -778,7 +784,7 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
         wait(object, thread, timed){
             if (object.remote && remote)
             {
-                const token = nextToken++;
+                const token = newToken();
                 asking = { token, result: null };
                 let now;
                 try

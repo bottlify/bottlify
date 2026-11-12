@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { objectHandlers } from './system-objects.js';
 import { createSyncObjects } from './layers/kernel/internal/sync.js';
+import { remoteObjects } from './system-link.js';
 
 const OBJECT_0 = 0;
 
@@ -195,4 +196,79 @@ test('a process of the run is found across the link by its id: its exit is an ob
     assert.deepEqual(woken, [[11, OBJECT_0]], 'its exit reached the waiter there');
     assert.equal(/** @type {any} */ (objects.process(8120)).exitCode, 3);
     assert.equal(objects.poll(found.id, 9), OBJECT_0, 'and stays signalled, as a process does');
+});
+
+/**
+ * Two processes on one link, as a child started beside its parent in one
+ * worker is: each kernel's objects over the same remote table, listening for
+ * wakes as the kernel module listens.
+ */
+function twoOnOneLink(){
+    /** @type {any} */
+    let link = null;
+    const { objects } = objectHandlers({ table: new Map(), wake: (token, result)=>{
+        link.deliver(token, result);
+        return Promise.resolve();
+    } });
+    link = remoteObjects((target, method, args)=>/** @type {any} */ (objects)[method](...args));
+    const one = ()=>{
+        /** @type {any[]} */
+        const woken = [];
+        /** @type {(thread: any) => void} */
+        let expire = ()=>{};
+        const scheduler = { block(){}, wake: (/** @type {any} */ thread)=>woken.push(thread),
+            onTimeout: (/** @type {(thread: any) => void} */ stop)=>{
+                expire = stop;
+            } };
+        const sync = createSyncObjects({ scheduler, remote: link });
+        const unwake = link.onWake((/** @type {number} */ token,
+            /** @type {number} */ result)=>sync.wakeRemote(token, result));
+        return { sync, woken, unwake, expire: (/** @type {any} */ thread)=>expire(thread) };
+    };
+    /** @param {any} sync @param {string} name */
+    const standIn = (sync, name)=>{
+        const { id } = /** @type {any} */ (objects.create('event', name, { manualReset: false,
+            signalled: false }));
+        const event = sync.createEvent({ name });
+        event.remote = id;
+        return { id, event };
+    };
+    return { objects, one, standIn };
+}
+
+test('two processes on one link (a child beside its parent in a worker): each one\'s wait on'
+    + ' the run\'s object is woken in that process, and their waits are kept apart there', ()=>{
+    // ngen waits on the event its worker process sets, and the worker
+    // process, beside it in ngen's worker, waits on events of its own.
+    const { objects, one, standIn } = twoOnOneLink();
+    const parent = one();
+    const child = one();
+    const ready = standIn(parent.sync, 'Local\\Event_Ready');
+    const own = standIn(child.sync, 'Local\\Mine');
+    const parentThread = { id: 10, suspendCount: 0, waitSet: null, queuedOn: null,
+        state: 'running' };
+    const childThread = { id: 20, suspendCount: 0, waitSet: null, queuedOn: null,
+        state: 'running' };
+    assert.equal(parent.sync.wait(ready.event, parentThread), null, 'the parent waits');
+    assert.equal(child.sync.wait(own.event, childThread), null, 'and the child waits');
+    objects.set(ready.id);
+    assert.deepEqual(parent.woken, [parentThread], 'the set woke the parent\'s thread');
+    assert.deepEqual(child.woken, [], 'and nobody of the child\'s');
+    objects.set(own.id);
+    assert.deepEqual(child.woken, [childThread], 'the child\'s own set woke it');
+    assert.deepEqual(parent.woken, [parentThread], 'the parent heard nothing more');
+
+    // A wait given up in one process takes back its own wait there, not the
+    // other's.
+    assert.equal(parent.sync.wait(ready.event, parentThread), null);
+    assert.equal(child.sync.wait(own.event, childThread), null);
+    parent.expire(parentThread);
+    objects.set(own.id);
+    assert.deepEqual(child.woken, [childThread, childThread], 'the child\'s wait stood');
+
+    // A process that ended hears nothing more.
+    child.unwake();
+    assert.equal(child.sync.wait(own.event, childThread), null);
+    objects.set(own.id);
+    assert.equal(child.woken.length, 2, 'gone from the link');
 });

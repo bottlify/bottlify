@@ -262,8 +262,11 @@ one run diffed (`report-diff.mjs`) are a scene's window.
 
 [`tools/install-watch.mjs`](../install-watch.mjs) is the same question for an installer in Node: it
 runs one unattended and prints every process's threads, waits and parked
-calls every few seconds (`app.standing()`), and with `--journal S` the last
-cross-process COM calls S seconds in. `--bundle ID` runs an installed
+calls every few seconds (`app.standing()`: with concurrency, every process in every worker,
+a child running beside its parent there included), and with `--journal S` the last
+cross-process COM calls S seconds in. `--trace S` also prints the live journal of every
+process still standing in a worker (`app.standing({ journal })`): a helper its parent kills
+hands no ring back as it ends. `--bundle ID` runs an installed
 program's launcher or entry the same way, with `--click`, `--key`, `--shots`
 and, with `--attended`, its message boxes left on the desktop to answer.
 `--copy DIR TO` writes a directory of the volume out once the run is over:

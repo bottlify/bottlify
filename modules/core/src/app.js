@@ -10964,10 +10964,13 @@ export async function createApp(options){
         && across < (options.concurrency ?? 1) - (rootAcross ? 0 : 1);
     /**
      * The children standing in workers of their own, each with the way its
-     * diagnostics are asked for across its link.
+     * diagnostics are asked for across its link, and those of every process
+     * running beside it there.
      *
      * @type {Set<{ image: string, id: number, link: ReturnType<typeof openLink>,
-     *     diagnostics: () => Promise<any> }>}
+     *     diagnostics: () => Promise<any>,
+     *     standing: (journal: number) => Promise<{ image: string, diagnostics: any }[]
+     *         | null> }>}
      */
     const standingAcross = new Set();
     /**
@@ -11345,7 +11348,9 @@ export async function createApp(options){
         }).catch(()=>{});
         // The page's input reaches it as the run routes it (`routedInput`).
         const asked = { image: request.imagePath, id: request.id, link,
-            diagnostics: ()=>link.call('report', 'diagnostics', []) };
+            diagnostics: ()=>link.call('report', 'diagnostics', []),
+            standing: (/** @type {number} */ journal)=>
+                link.call('report', 'standing', [journal]) };
         /** The code it exited with, once it has. @type {number | null} */
         let ended = null;
         standingAcross.add(asked);
@@ -12014,22 +12019,33 @@ export async function createApp(options){
          * the facade speaks for one of them, and an install several processes
          * deep that waits on itself shows nothing through one.
          *
-         * @returns {Promise<{ image: string, diagnostics: any }[]>}
+         * With `journal`, each also with the last that many entries of its
+         * own call journal: a process in a worker keeps its ring there, and
+         * one that never ends never hands it back.
+         *
+         * @param {{ journal?: number }} [asked]
+         * @returns {Promise<{ image: string, diagnostics: any, worker?: boolean,
+         *     journal?: { time: number, text: string }[] }[]>}
          */
-        async standing(){
+        async standing({ journal = 0 } = {}){
             const machines = new Set([...rootAcross ? [] : [current], ...processes.values()]);
             return Promise.all([
                 ...[...machines].map(async made=>({
                     image: images.get(made) || imagePath,
                     diagnostics: await made.diagnostics(),
+                    ...journal > 0 ? { journal: (made.log?.recent?.(journal) ?? [])
+                        .map((/** @type {any} */ entry)=>({ time: entry.time,
+                            text: String(entry.text) })) } : {},
                 })),
                 // A child in a worker of its own answers at its next look at
-                // its link; one that ends meanwhile answers nothing.
-                ...[...standingAcross].map(async child=>({
-                    image: child.image,
-                    diagnostics: await child.diagnostics().catch(()=>null),
-                })),
-            ]);
+                // its link, with every process running beside it there; one
+                // that ends meanwhile answers nothing.
+                ...[...standingAcross].map(async child=>{
+                    const there = await child.standing(journal).catch(()=>null);
+                    return (there ?? [{ image: child.image, diagnostics: null }])
+                        .map(each=>({ ...each, worker: true }));
+                }),
+            ]).then(found=>found.flat());
         },
 
         /**
