@@ -59,7 +59,10 @@ everyone's. The page flags are `INACCESSIBLE`, `HAS_CODE`, `VOLATILE`, `CLOSED`,
   entry there once that region is published. A region runs on through a block another region has
   an entry for: stopping there translated a function's code once, but the hot code it cut crossed
   between regions. A small leaf callee
-  is formed into each caller, for the call it saves. A call to a function cork knows by its bytes
+  is formed into each caller, for the call it saves; a conditional branch of the callee that
+  reaches farther than `coldReach` (4096 bytes) goes to cold code - an error path a compiler laid
+  out by profile megabytes away - and is a way out of the region rather than part of the callee,
+  so a small function whose rare path calls on is still formed in. A call to a function cork knows by its bytes
   (a compiler's helper, the C runtime's `memcpy`, `memset`, `strlen`, `sqrt` linked into the
   program) is formed as what the function does, and made as it is where that cannot be done whole
   ([cork's dictionary](../cork/how-it-works.md#functions-cork-knows-by-their-bytes)).

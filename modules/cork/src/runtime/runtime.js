@@ -407,6 +407,11 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
         // Levels of callees formed in that may keep direct calls of their own,
         // their small callees formed in as well (`formRegion`).
         formDepth: 1,
+        // How far a conditional branch of a callee formed in may reach and still be
+        // followed: a farther one goes to cold code, a way out of the region, so a small
+        // function with a far error path is formed in as a leaf (`coldBranch` in
+        // region.js; 0: every branch followed).
+        coldReach: 4096,
         // HACK until iOS ships https://github.com/WebKit/WebKit/pull/76671:
         // false keeps every tail call inside its own instance, a transfer to a
         // region of another module leaving for this loop, which enters it. iOS
@@ -523,6 +528,7 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
     /** How a region is formed, the same on this thread, in a batch and in a relink. */
     const formOptions = { maxBlocks: settings.maxRegionBlocks, leafCalls: settings.leafCalls,
         leafBytes: settings.leafBytes, formDepth: settings.formDepth,
+        coldReach: settings.coldReach,
         // Long mode's code formed as long mode's, the shared emitter's own cuts in it.
         ...layout.bits === 64 ? { mode: MODE_64 } : {},
         // A wide window's import slots are not checked as a call through one runs.

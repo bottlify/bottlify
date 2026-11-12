@@ -112,6 +112,25 @@ const LEAF_LIMITS = Object.freeze({ blocks: LEAF_BLOCKS, bytes: LEAF_BYTES });
 /** Past the caps, for the callees the runtime predicted: four of the largest leaves. */
 const PREDICTED_ROOM = Object.freeze({ blocks: 4 * LEAF_BLOCKS, bytes: 4 * LEAF_BYTES });
 const NO_ROOM = Object.freeze({ blocks: 0, bytes: 0 });
+/** How far a callee's conditional branch may reach and still be followed (`coldBranch`). */
+const COLD_REACH = 4096;
+
+/**
+ * Whether a conditional branch of a callee formed in goes to cold code: farther from the
+ * branch than `reach` (0: none does). A compiler that lays out by profile, or puts error
+ * paths in a section of their own, moves a function's rare paths far from its hot ones -- a
+ * bounds check's failure megabytes away, its call to a reporting routine there -- and a
+ * small function that keeps such a path is no leaf if the path is followed: its blocks,
+ * bytes and calls count, and the call to it stays a wasm call. Not followed, the branch is
+ * a way out of the region to its target, which returns past the call through the entry
+ * hash as any callee's `ret` does. `isLeaf` and `formRegion` ask the same question of
+ * the same instruction, so a callee found a leaf is formed as it was found.
+ *
+ * @param {Block['exit']} exit  of the instruction @param {number} eip  the instruction's
+ * @param {number} target @param {number} reach
+ */
+const coldBranch = (exit, eip, target, reach)=>reach > 0 && exit.kind === 'jcc'
+    && Math.abs(target - eip) > reach;
 
 /**
  * Whether the function at `target` is small enough to form into its caller:
@@ -131,10 +150,12 @@ const NO_ROOM = Object.freeze({ blocks: 0, bytes: 0 });
  * @param {(instruction: import('./decode/decoder.js').Instruction) => boolean} [translates]
  *     whether the emitter has a case for an instruction (`formRegion`'s)
  * @param {boolean} [wide]  long-mode code
+ * @param {number} [coldReach]  a conditional branch reaching farther is a way out
+ *     (`coldBranch`), its target not part of the callee
  * @returns {Apart | null}
  */
 function isLeaf(decodeAt, target, translatable, calls = false, limits = LEAF_LIMITS,
-    translates = undefined, wide = false)
+    translates = undefined, wide = false, coldReach = 0)
 {
     const seen = new Set();
     const work = [target];
@@ -177,7 +198,8 @@ function isLeaf(decodeAt, target, translatable, calls = false, limits = LEAF_LIM
             }
             if (exit.kind === 'jump' || exit.kind === 'jcc' || exit.kind === 'loop')
             {
-                work.push(...exit.targets);
+                work.push(...exit.targets.filter(to=>!coldBranch(exit, decoded.eip, to,
+                    coldReach)));
                 break;
             }
             // A jump through a register or memory leaves through the entry hash
@@ -611,7 +633,7 @@ export function formShared(){
  *     callTargets?: Map<number, number[]>, shared?: FormShared,
  *     helpers?: boolean | readonly import('./helpers.js').RuntimeHelper[],
  *     bytesOf?: (start: number, end: number) => Uint8Array,
- *     mode?: { bits: 32 | 64 }, slotHelpers?: boolean,
+ *     mode?: { bits: 32 | 64 }, slotHelpers?: boolean, coldReach?: number,
  *     translates?: (instruction: import('./decode/decoder.js').Instruction) => boolean,
  *     baseOf?: (reg: number) => number | null }} [options]
  *     leafCalls: a small leaf callee is formed into its caller (see `isLeaf`), of
@@ -638,6 +660,8 @@ export function formShared(){
  *     same `translatable` (`formShared`);
  *     bytesOf: `[start, end)` of what `read` answers, copied at once -- the region's
  *     `sources` are read so where given, a byte at a time through `read` otherwise;
+ *     coldReach: how far a conditional branch of a callee formed in may reach and still
+ *     be followed, a farther one a way out to cold code (`coldBranch`; 0: every one followed);
  *     slotHelpers: whether a long-mode call through an import slot to a function the
  *     dictionary knows is formed as it (not in a wide window, whose addresses the check of the
  *     slot does not take);
@@ -657,7 +681,7 @@ export function formRegion(read, entry,
         formDepth = 1, predictedRoom = PREDICTED_ROOM,
         ownRoom = { blocks: maxBlocks, bytes: maxBytes },
         switchEntries = SWITCH_ENTRIES, bytesOf, mode, translates, baseOf,
-        slotHelpers = true } = {})
+        slotHelpers = true, coldReach = COLD_REACH } = {})
 {
     const wide = mode?.bits === 64;
     const importThunks = !wide;
@@ -777,7 +801,8 @@ export function formRegion(read, entry,
         let leaf = leaves.get(key);
         if (leaf === undefined)
         {
-            leaf = isLeaf(decodeAt, target, translatable, calls, leafLimits, translates, wide);
+            leaf = isLeaf(decodeAt, target, translatable, calls, leafLimits, translates, wide,
+                coldReach);
             leaves.set(key, leaf);
         }
         return leaf;
@@ -1040,10 +1065,14 @@ export function formRegion(read, entry,
             else if (!TERMINAL.has(exit.kind))
             {
                 // The fall-through first, so a capped region keeps the code
-                // that follows in address order rather than a far target.
+                // that follows in address order rather than a far target. A
+                // callee's branch to cold code is a way out (`coldBranch`).
                 for (const target of [...exit.targets].reverse())
                 {
-                    follow(target, depth);
+                    if (depth === 0 || !coldBranch(exit, decoded.eip, target, coldReach))
+                    {
+                        follow(target, depth);
+                    }
                 }
             }
             else if (exit.kind === 'call' || exit.kind === 'trap' && decoded.op !== 'int3'
