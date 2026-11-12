@@ -814,31 +814,39 @@ test('a 64-bit program\'s msvcrt sprintf and _snprintf run as guest code, crossi
     });
 
 /**
- * The data of a program that formats "%d-%s" of 12345 and "ab" (8 bytes) through
- * the UCRT's printers into buffers of 12 bytes, and what each holds after.
+ * The data of a program that formats "%d-%s" of 12345 and "ab" (8 characters)
+ * through the UCRT's printers, narrow or wide, into buffers of 12, and what
+ * each holds after.
+ *
+ * @param {boolean} wide
  */
-const COMMON_PRINT_DATA = (()=>{
-    const text = (/** @type {string} */ value)=>[...value].map(c=>c.charCodeAt(0));
-    return { format: [...text('%d-%s'), 0], word: [...text('ab'), 0],
-        b1: new Array(12).fill(0x55), b2: new Array(12).fill(0x55),
-        b3: new Array(12).fill(0x55), b4: new Array(12).fill(0x55),
-        // C99's snprintf into 5: what fits and a terminator; _vsnprintf's: 5 bytes and the
-        // next untouched; under LEGACY_VSPRINTF_NULL_TERMINATION the fifth made the terminator.
-        w1: [...text('1234'), 0], w2: [...text('12345'), 0x55], w3: [...text('1234'), 0],
-        w4: [...text('12345-ab'), 0] };
-})();
+const commonPrintData = wide=>{
+    const text = (/** @type {string} */ value)=>[...value].flatMap(c=>(wide
+        ? [c.charCodeAt(0), 0] : [c.charCodeAt(0)]));
+    const unit = wide ? 2 : 1;
+    const untouched = new Array(unit).fill(0x55);
+    const zero = new Array(unit).fill(0);
+    return { format: [...text('%d-%s'), ...zero], word: [...text('ab'), ...zero],
+        b1: new Array(12 * unit).fill(0x55), b2: new Array(12 * unit).fill(0x55),
+        b3: new Array(12 * unit).fill(0x55), b4: new Array(12 * unit).fill(0x55),
+        // C99's snprintf into 5: what fits and a terminator; _vsnprintf's: 5 characters and
+        // the next untouched; under LEGACY_VSPRINTF_NULL_TERMINATION the fifth the terminator.
+        w1: [...text('1234'), ...zero], w2: [...text('12345'), ...untouched],
+        w3: [...text('1234'), ...zero], w4: [...text('12345-ab'), ...zero] };
+};
 
-/** The calls of that program: options, buffer (null for none), count, and the function. */
+/** The calls of that program: options, buffer (null for none), count, and whether `_s`. */
 const COMMON_PRINT_CALLS = /** @type {const} */ ([[2, 'b1', 5, 0], [0, 'b2', 5, 0],
     [1, 'b3', 5, 0], [2, null, 0, 0], [0, 'b4', 9, 1]]);
 
 /**
  * Where each call's answer goes in the exit code: 8 the first, -1 + 1 the two
- * legacy ones shifted, 8 << 8 the length asked for, 8 << 16 vsprintf_s's; each
- * memcmp of a buffer and what it should hold added << 24.
+ * legacy ones shifted, 8 << 8 the length asked for, 8 << 16 the `_s` one's;
+ * each memcmp of a buffer and what it should hold added << 24.
  */
 const COMMON_PRINT_CODE = 8 + (8 << 8) + (8 << 16);
 
+/** The buffers compared, what each should hold and how many characters. */
 const COMMON_PRINT_COMPARED = /** @type {const} */ ([['b1', 'w1', 5], ['b2', 'w2', 6],
     ['b3', 'w3', 5], ['b4', 'w4', 9]]);
 
@@ -851,92 +859,97 @@ const COMMON_PRINT_FOLD = {
     4: [0xc1, 0xe0, 0x10, 0x01, 0xc3],                                // ebx += eax << 16
 };
 
-test('a 32-bit program\'s UCRT printers run as guest code under each behaviour their options'
-    + ' pick, the options two slots', async()=>{
-    const exe = buildExe({
-        imports: { 'api-ms-win-crt-stdio-l1-1-0.dll': ['__stdio_common_vsprintf',
-            '__stdio_common_vsprintf_s'], 'api-ms-win-crt-string-l1-1-0.dll': ['memcmp'],
-        'KERNEL32.dll': ['ExitProcess'] },
-        data: COMMON_PRINT_DATA,
-        codeSize: 0x180,
-        code: ({ iat, at })=>{
-            /** @type {number[]} */
-            const out = [0x68, ...u32(at('word')), 0x68, ...u32(12345), 0x89, 0xe6];
-            COMMON_PRINT_CALLS.forEach(([options, buffer, count, secure], i)=>{
-                out.push(0x56, 0x6a, 0x00, 0x68, ...u32(at('format')), 0x6a, count);
-                out.push(...buffer === null ? [0x6a, 0x00] : [0x68, ...u32(at(buffer))]);
-                out.push(0x6a, 0x00, 0x6a, options);                    // the options' two halves
-                out.push(0xff, 0x15, ...u32(iat(secure ? '__stdio_common_vsprintf_s'
-                    : '__stdio_common_vsprintf')));
-                out.push(0x83, 0xc4, 0x1c, ...COMMON_PRINT_FOLD[i]);
-            });
-            for (const [buffer, want, length] of COMMON_PRINT_COMPARED)
-            {
-                out.push(0x6a, length, 0x68, ...u32(at(want)), 0x68, ...u32(at(buffer)));
-                out.push(0xff, 0x15, ...u32(iat('memcmp')), 0x83, 0xc4, 0x0c);
-                out.push(0xc1, 0xe0, 0x18, 0x01, 0xc3);                // ebx += eax << 24
-            }
-            out.push(0x53, 0xff, 0x15, ...u32(iat('ExitProcess')), 0xf4);
-            return out;
-        },
-    });
-    const cork = await run(exe);
-    assert.equal(cork.code >>> 0, COMMON_PRINT_CODE);
-    const hosted = cork.trapsHot.map(([name])=>name).filter(name=>/printf/.test(name));
-    assert.deepEqual(hosted, [], 'none crossed to the host');
-});
+/** @param {boolean} wide */
+const commonPrinters = wide=>(wide ? ['__stdio_common_vswprintf', '__stdio_common_vswprintf_s']
+    : ['__stdio_common_vsprintf', '__stdio_common_vsprintf_s']);
 
-test('a 64-bit program\'s UCRT printers run as guest code under each behaviour their options'
-    + ' pick, the options one register', async()=>{
-    const exe = buildExe({
-        bits: 64,
-        imports: { 'api-ms-win-crt-stdio-l1-1-0.dll': ['__stdio_common_vsprintf',
-            '__stdio_common_vsprintf_s'], 'api-ms-win-crt-string-l1-1-0.dll': ['memcmp'],
-        'KERNEL32.dll': ['ExitProcess'] },
-        data: COMMON_PRINT_DATA,
-        codeSize: 0x240,
-        code: ({ iat, at, code })=>{
-            /** @type {number[]} */
-            const out = [];
-            const rip = (/** @type {number} */ target, /** @type {number} */ rest)=>
-                u32((target - code(out.length + rest)) >>> 0);
-            out.push(0x53, 0x48, 0x83, 0xec, 0x50);                    // push rbx; sub rsp, 80
-            // The va_list: 12345 and "ab" in slots of eight bytes at [rsp+64].
-            out.push(0x48, 0xc7, 0x44, 0x24, 0x40, ...u32(12345));
-            out.push(0x48, 0x8d, 0x05, ...rip(at('word'), 7));        // lea rax, word
-            out.push(0x48, 0x89, 0x44, 0x24, 0x48);                    // mov [rsp+72], rax
-            COMMON_PRINT_CALLS.forEach(([options, buffer, count, secure], i)=>{
-                // The locale ([rsp+32]) a value of its own, the va_list at [rsp+40].
-                out.push(0x48, 0xc7, 0x44, 0x24, 0x20, ...u32(0x5eed));
-                out.push(0x48, 0x8d, 0x44, 0x24, 0x40);                // lea rax, [rsp+64]
-                out.push(0x48, 0x89, 0x44, 0x24, 0x28);                // mov [rsp+40], rax
-                out.push(0x48, 0xb9, options, 0, 0, 0, 0x34, 0x12, 0, 0); // mov rcx, options
-                out.push(...buffer === null ? [0x31, 0xd2]
-                    : [0x48, 0x8d, 0x15, ...rip(at(buffer), 7)]);   // rdx: the buffer
-                out.push(0x41, 0xb8, ...u32(count));                   // mov r8d, count
-                out.push(0x4c, 0x8d, 0x0d, ...rip(at('format'), 7));   // lea r9, format
-                out.push(0xff, 0x15, ...rip(iat(secure ? '__stdio_common_vsprintf_s'
-                    : '__stdio_common_vsprintf'), 6));
-                out.push(...COMMON_PRINT_FOLD[i]);
-            });
-            for (const [buffer, want, length] of COMMON_PRINT_COMPARED)
-            {
-                out.push(0x48, 0x8d, 0x0d, ...rip(at(buffer), 7));
-                out.push(0x48, 0x8d, 0x15, ...rip(at(want), 7));
-                out.push(0x41, 0xb8, ...u32(length));
-                out.push(0xff, 0x15, ...rip(iat('memcmp'), 6));
-                out.push(0xc1, 0xe0, 0x18, 0x01, 0xc3);
-            }
-            out.push(0x89, 0xd9);                                      // mov ecx, ebx
-            out.push(0xff, 0x15, ...rip(iat('ExitProcess'), 6), 0xf4);
-            return out;
-        },
+for (const wide of [false, true])
+{
+    const [counted, secured] = commonPrinters(wide);
+    const unit = wide ? 2 : 1;
+    test(`a 32-bit program's UCRT ${wide ? 'wide' : 'narrow'} printers run as guest code under`
+        + ' each behaviour their options pick, the options two slots', async()=>{
+        const exe = buildExe({
+            imports: { 'api-ms-win-crt-stdio-l1-1-0.dll': [counted, secured],
+                'api-ms-win-crt-string-l1-1-0.dll': ['memcmp'], 'KERNEL32.dll': ['ExitProcess'] },
+            data: commonPrintData(wide),
+            codeSize: 0x180,
+            code: ({ iat, at })=>{
+                /** @type {number[]} */
+                const out = [0x68, ...u32(at('word')), 0x68, ...u32(12345), 0x89, 0xe6];
+                COMMON_PRINT_CALLS.forEach(([options, buffer, count, secure], i)=>{
+                    out.push(0x56, 0x6a, 0x00, 0x68, ...u32(at('format')), 0x6a, count);
+                    out.push(...buffer === null ? [0x6a, 0x00] : [0x68, ...u32(at(buffer))]);
+                    out.push(0x6a, 0x00, 0x6a, options);                // the options' two halves
+                    out.push(0xff, 0x15, ...u32(iat(secure ? secured : counted)));
+                    out.push(0x83, 0xc4, 0x1c, ...COMMON_PRINT_FOLD[i]);
+                });
+                for (const [buffer, want, length] of COMMON_PRINT_COMPARED)
+                {
+                    out.push(0x6a, length * unit, 0x68, ...u32(at(want)), 0x68, ...u32(at(buffer)));
+                    out.push(0xff, 0x15, ...u32(iat('memcmp')), 0x83, 0xc4, 0x0c);
+                    out.push(0xc1, 0xe0, 0x18, 0x01, 0xc3);            // ebx += eax << 24
+                }
+                out.push(0x53, 0xff, 0x15, ...u32(iat('ExitProcess')), 0xf4);
+                return out;
+            },
+        });
+        const cork = await run(exe);
+        assert.equal(cork.code >>> 0, COMMON_PRINT_CODE);
+        const hosted = cork.trapsHot.map(([name])=>name).filter(name=>/printf/.test(name));
+        assert.deepEqual(hosted, [], 'none crossed to the host');
     });
-    const cork = await run(exe);
-    assert.equal(cork.code >>> 0, COMMON_PRINT_CODE);
-    const hosted = cork.trapsHot.map(([name])=>name).filter(name=>/printf/.test(name));
-    assert.deepEqual(hosted, [], 'none crossed to the host');
-});
+
+    test(`a 64-bit program's UCRT ${wide ? 'wide' : 'narrow'} printers run as guest code under`
+        + ' each behaviour their options pick, the options one register', async()=>{
+        const exe = buildExe({
+            bits: 64,
+            imports: { 'api-ms-win-crt-stdio-l1-1-0.dll': [counted, secured],
+                'api-ms-win-crt-string-l1-1-0.dll': ['memcmp'], 'KERNEL32.dll': ['ExitProcess'] },
+            data: commonPrintData(wide),
+            codeSize: 0x240,
+            code: ({ iat, at, code })=>{
+                /** @type {number[]} */
+                const out = [];
+                const rip = (/** @type {number} */ target, /** @type {number} */ rest)=>
+                    u32((target - code(out.length + rest)) >>> 0);
+                out.push(0x53, 0x48, 0x83, 0xec, 0x50);                // push rbx; sub rsp, 80
+                // The va_list: 12345 and "ab" in slots of eight bytes at [rsp+64].
+                out.push(0x48, 0xc7, 0x44, 0x24, 0x40, ...u32(12345));
+                out.push(0x48, 0x8d, 0x05, ...rip(at('word'), 7));    // lea rax, word
+                out.push(0x48, 0x89, 0x44, 0x24, 0x48);                // mov [rsp+72], rax
+                COMMON_PRINT_CALLS.forEach(([options, buffer, count, secure], i)=>{
+                    // The locale ([rsp+32]) a value of its own, the va_list at [rsp+40].
+                    out.push(0x48, 0xc7, 0x44, 0x24, 0x20, ...u32(0x5eed));
+                    out.push(0x48, 0x8d, 0x44, 0x24, 0x40);            // lea rax, [rsp+64]
+                    out.push(0x48, 0x89, 0x44, 0x24, 0x28);            // mov [rsp+40], rax
+                    out.push(0x48, 0xb9, options, 0, 0, 0, 0x34, 0x12, 0, 0); // mov rcx, options
+                    out.push(...buffer === null ? [0x31, 0xd2]
+                        : [0x48, 0x8d, 0x15, ...rip(at(buffer), 7)]); // rdx: the buffer
+                    out.push(0x41, 0xb8, ...u32(count));               // mov r8d, count
+                    out.push(0x4c, 0x8d, 0x0d, ...rip(at('format'), 7)); // lea r9, format
+                    out.push(0xff, 0x15, ...rip(iat(secure ? secured : counted), 6));
+                    out.push(...COMMON_PRINT_FOLD[i]);
+                });
+                for (const [buffer, want, length] of COMMON_PRINT_COMPARED)
+                {
+                    out.push(0x48, 0x8d, 0x0d, ...rip(at(buffer), 7));
+                    out.push(0x48, 0x8d, 0x15, ...rip(at(want), 7));
+                    out.push(0x41, 0xb8, ...u32(length * unit));
+                    out.push(0xff, 0x15, ...rip(iat('memcmp'), 6));
+                    out.push(0xc1, 0xe0, 0x18, 0x01, 0xc3);
+                }
+                out.push(0x89, 0xd9);                                  // mov ecx, ebx
+                out.push(0xff, 0x15, ...rip(iat('ExitProcess'), 6), 0xf4);
+                return out;
+            },
+        });
+        const cork = await run(exe);
+        assert.equal(cork.code >>> 0, COMMON_PRINT_CODE);
+        const hosted = cork.trapsHot.map(([name])=>name).filter(name=>/printf/.test(name));
+        assert.deepEqual(hosted, [], 'none crossed to the host');
+    });
+}
 
 test('a 64-bit program\'s sprintf of a double is the host\'s, its va_list the spilled home space',
     async()=>{

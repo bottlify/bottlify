@@ -587,6 +587,44 @@ export function createMsvcrtFunctions(host){
             boundedPrint(buffer, size, format, (format >>> 0) === 0 ? [] : varargsAt(list)),
     });
 
+    /**
+     * int _vsnwprintf(wchar_t *buffer, size_t count, const wchar_t *format,
+     *                 va_list args) -- in the guest (`inguest-print.js`); a
+     * format with a narrow string, a double or a 64-bit integer, no format
+     * and no buffer for a count the handler's: _vsnprintf in wide characters,
+     * where %s is a wide string, at most `count` characters, terminated only
+     * when there is room, and -1 when the text does not fit. With no buffer
+     * and a count of zero it answers how many the text needs (Wine's msvcrt
+     * test_vsnwprintf).
+     */
+    const _vsnwprintf = guestEntry(inGuestPrint._vsnwprintf, PRINT_CODE._vsnwprintf, host, {
+        argBytes: 16,
+        /** @param {number[]} args */
+        handler: ([buffer, count, format, list])=>
+            countedWide(buffer, count, format, (format >>> 0) === 0 ? [] : varargsAt(list)),
+    });
+
+    /**
+     * int vswprintf(wchar_t *buffer, const wchar_t *format, va_list args) --
+     * msvcrt's own, with no count: the text and its terminator however long;
+     * in the guest as _vsnwprintf is. `_vswprintf` is the same function.
+     */
+    const vswprintf = guestEntry(inGuestPrint.vswprintf, PRINT_CODE.vswprintf, host, {
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: ([buffer, format, list])=>{
+            const text = wideText(format, varargsAt(list));
+            host.writeMemory(buffer, bytesOfUnits([...unitsOfText(text), 0]));
+            return text.length;
+        },
+    });
+
+    /**
+     * int swprintf(wchar_t *buffer, const wchar_t *format, ...) -- vswprintf's
+     * code after the instructions that make its arguments a list.
+     */
+    const swprintf = variadicEntry(2, vswprintf, uncountedWide);
+
     const table = {
         /**
          * int _set_error_mode(int mode)
@@ -848,22 +886,13 @@ export function createMsvcrtFunctions(host){
          * how many the text needs (Wine's msvcrt test_vsnwprintf); no format,
          * or no buffer for a count, is -1 and EINVAL.
          */
-        _vsnwprintf: {
-            convention: 'cdecl',
-            argBytes: 16,
-            /** @param {number[]} args */
-            handler: ([buffer, count, format, list])=>
-                countedWide(buffer, count, format, (format >>> 0) === 0 ? [] : varargsAt(list)),
-        },
-
+        _vsnwprintf,
         /** int _snwprintf(wchar_t *buffer, size_t count, const wchar_t *format, ...) */
-        _snwprintf: {
-            convention: 'cdecl',
+        _snwprintf: variadicEntry(3, _vsnwprintf, {
             argBytes: 12 + VARIADIC_SLOTS * 4,
             /** @param {number[]} args */
             handler: args=>countedWide(args[0], args[1], args[2], args.slice(3)),
-        },
-
+        }),
         /**
          * int swprintf(wchar_t *buffer, const wchar_t *format, ...)
          *
@@ -871,8 +900,8 @@ export function createMsvcrtFunctions(host){
          * however long, and the count of its characters. `_swprintf` is
          * the same function.
          */
-        swprintf: uncountedWide,
-        _swprintf: uncountedWide,
+        swprintf,
+        _swprintf: swprintf,
 
         /**
          * int vswprintf(wchar_t *buffer, const wchar_t *format, va_list args)
@@ -880,29 +909,9 @@ export function createMsvcrtFunctions(host){
          * swprintf with its arguments in memory: msvcrt's own, with no count,
          * the text and its terminator however long.
          */
-        vswprintf: {
-            convention: 'cdecl',
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([buffer, format, list])=>{
-                const text = wideText(format, varargsAt(list));
-                host.writeMemory(buffer, bytesOfUnits([...unitsOfText(text), 0]));
-                return text.length;
-            },
-        },
-
+        vswprintf,
         /** int _vswprintf(wchar_t *buffer, const wchar_t *format, va_list args) -- vswprintf */
-        _vswprintf: {
-            convention: 'cdecl',
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([buffer, format, list])=>{
-                const text = wideText(format, varargsAt(list));
-                host.writeMemory(buffer, bytesOfUnits([...unitsOfText(text), 0]));
-                return text.length;
-            },
-        },
-
+        _vswprintf: vswprintf,
         /**
          * int _vswprintf_l(wchar_t *buffer, const wchar_t *format, _locale_t locale,
          *                  va_list args)
@@ -952,8 +961,7 @@ export function createMsvcrtFunctions(host){
         },
 
         /** int _vscwprintf(const wchar_t *format, va_list args) -- the length of the text */
-        _vscwprintf: {
-            convention: 'cdecl',
+        _vscwprintf: guestEntry(inGuestPrint._vscwprintf, PRINT_CODE._vscwprintf, host, {
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([format, list])=>{
@@ -964,8 +972,7 @@ export function createMsvcrtFunctions(host){
                 }
                 return wideText(format, varargsAt(list)).length;
             },
-        },
-
+        }),
         /**
          * int _vsnwprintf_s(wchar_t *buffer, size_t size, size_t count,
          *                   const wchar_t *format, va_list args)

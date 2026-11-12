@@ -147,6 +147,37 @@ test('__stdio_common_vsprintf is C99 snprintf or the legacy _vsnprintf, as its o
     assert.equal(textAt(buffer), 'abcdef', 'what fits is the whole text');
 });
 
+test('__stdio_common_vswprintf is C99 snprintf or the legacy _vsnwprintf in units, as its'
+    + ' options say', ()=>{
+    const format = 0x200;
+    const buffer = 0x2000;
+    const { ucrt, memory } = setup();
+    const view = new DataView(memory.buffer);
+    [...'abcdef', '\0'].forEach((c, i)=>view.setUint16(format + 2 * i, c.charCodeAt(0), true));
+    const print = (/** @type {number} */ options, /** @type {number} */ to,
+        /** @type {number} */ count)=>
+        ucrt.__stdio_common_vswprintf.handler([options, 0, to, count, format, 0, 0]);
+    const units = (/** @type {number} */ n)=>Array.from({ length: n },
+        (_, i)=>view.getUint16(buffer + 2 * i, true));
+    const text = (/** @type {string} */ value)=>[...value].map(c=>c.charCodeAt(0));
+
+    assert.equal(print(STANDARD_SNPRINTF_BEHAVIOR, 0, 0), 6, 'no buffer: the length it needs');
+    memory.fill(0xff, buffer, buffer + 32);
+    assert.equal(print(STANDARD_SNPRINTF_BEHAVIOR, buffer, 4), 6,
+        'C99: the length it would have had');
+    assert.deepEqual(units(4), [...text('abc'), 0], 'cut to fit and terminated');
+
+    memory.fill(0xff, buffer, buffer + 32);
+    assert.equal(print(0, buffer, 4), -1, 'legacy: -1 when it does not fit');
+    assert.deepEqual(units(5), [...text('abcd'), 0xffff], 'and no terminator');
+    memory.fill(0xff, buffer, buffer + 32);
+    assert.equal(print(LEGACY_VSPRINTF_NULL_TERMINATION, buffer, 4), -1);
+    assert.deepEqual(units(4), [...text('abc'), 0], 'unless asked to terminate it after all');
+
+    assert.equal(print(STANDARD_SNPRINTF_BEHAVIOR, buffer, 16), 6);
+    assert.deepEqual(units(7), [...text('abcdef'), 0], 'what fits is the whole text');
+});
+
 test('a DLL\'s exit table grows as it is registered to, and runs last first, once', async()=>{
     const { ucrt, called, readU32 } = setup();
     const table = 0x300;

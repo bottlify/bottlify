@@ -347,14 +347,16 @@ export function createUcrtbaseFunctions(crt, host){
             }),
 
         /** The same in wide characters. */
-        __stdio_common_vswprintf: {
-            convention: 'cdecl',
-            argBytes: 28,
-            quadwords: [0],
-            /** @param {number[]} args */
-            handler: ([options, , buffer, count, format, , list])=>
-                wideCounted(options, buffer, count, format, list),
-        },
+        __stdio_common_vswprintf: guestEntry(inGuestPrint.__stdio_common_vswprintf,
+            PRINT_CODE.__stdio_common_vswprintf, host, {
+                argBytes: 28,
+                /** @param {number[]} args */
+                handler: args=>{
+                    const [options, , buffer, count, format, , list] = optionsFirst(args);
+                    return wideCounted(options, buffer, count, format, list);
+                },
+            }),
+
 
         /**
          * int __stdio_common_vsprintf_s(unsigned __int64 options, char *buffer,
@@ -835,14 +837,16 @@ export function createUcrtbaseFunctions(crt, host){
          * int __stdio_common_vswprintf_s(unsigned __int64 options, wchar_t *buffer,
          *     size_t size, const wchar_t *format, _locale_t locale, va_list args)
          */
-        __stdio_common_vswprintf_s: {
-            convention: 'cdecl',
-            argBytes: 28,
-            quadwords: [0],
-            /** @param {number[]} args */
-            handler: ([, , buffer, size, format, , list])=>
-                crt.vswprintf_s.handler([buffer, size, format, list]),
-        },
+        __stdio_common_vswprintf_s: guestEntry(inGuestPrint.__stdio_common_vswprintf_s,
+            PRINT_CODE.__stdio_common_vswprintf_s, host, {
+                argBytes: 28,
+                /** @param {number[]} args */
+                handler: args=>{
+                    const [, , buffer, size, format, , list] = optionsFirst(args);
+                    return crt.vswprintf_s.handler([buffer, size, format, list]);
+                },
+            }),
+
 
         /**
          * int __stdio_common_vsnwprintf_s(unsigned __int64 options, wchar_t *buffer,

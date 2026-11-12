@@ -387,8 +387,7 @@ export function createMsvcr80Functions(crt, host){
          * The text whole and its length; when it does not fit, the buffer
          * emptied, -1 and ERANGE. No buffer, size or format is EINVAL.
          */
-        vswprintf_s: {
-            convention: 'cdecl',
+        vswprintf_s: guestEntry(inGuestPrint.vswprintf_s, PRINT_CODE.vswprintf_s, host, {
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([buffer, size, format, list])=>{
@@ -408,7 +407,7 @@ export function createMsvcr80Functions(crt, host){
                 host.writeMemory((buffer >>> 0) + length * 2, Uint8Array.of(0, 0));
                 return length;
             },
-        },
+        }),
 
         // std::exception: msvcrt's exception class, which Visual C++ 2005
         // moved into the namespace without changing it.
