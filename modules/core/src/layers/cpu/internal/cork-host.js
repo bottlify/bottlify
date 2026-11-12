@@ -2310,11 +2310,14 @@ export function createCorkHost(config){
         },
         x87State(){
             const registers = new Float64Array(8);
+            // As bytes: a signalling NaN read as a double and stored as one may
+            // come back quieted where the engine compiled the store so.
+            const registerBytes = new Uint8Array(registers.buffer);
             const raw = new Uint8Array(128);
             for (let index = 0; index < 8; index++)
             {
                 const at = x87At(index);
-                registers[index] = blockView.getFloat64(at, true);
+                registerBytes.set(block.subarray(at, at + 8), index * 8);
                 raw.set(block.subarray(at, at + 16), index * 16);
             }
             const top = x87Top();

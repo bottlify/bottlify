@@ -96,8 +96,9 @@ const AREA = 0x3000;
 /**
  * An area of the bytes strings are made of: letters of both cases, digits,
  * white space, signs, the upper half, and a terminator often enough that
- * strings end; and runs copied from one place to another (`twins`, each the
- * run's two places), so two pointers can find the same bytes for a while.
+ * strings end; runs copied from one place to another (`twins`, each the
+ * run's two places), so two pointers can find the same bytes for a while;
+ * and runs of wide ASCII text.
  *
  * @param {() => number} next
  * @returns {{ bytes: Uint8Array, twins: [number, number][] }}
@@ -120,6 +121,24 @@ function area(next){
         bytes.set(run, to);
         bytes.set(run, from);
         twins.push([from, to]);
+    }
+    // Runs of wide ASCII text, a unit a character and its high byte 0, some
+    // ending in a wide terminator: what a wide function reads to its end.
+    const ascii = [0x30, 0x31, 0x37, 0x39, 0x41, 0x61, 0x66, 0x7a, 0x20, 0x2d, 0x2b, 0x78];
+    for (let i = 0; i < 24; i++)
+    {
+        const at = (next() % (AREA - 0x100)) & ~1;
+        const units = 2 + next() % 30;
+        for (let u = 0; u < units; u++)
+        {
+            bytes[at + 2 * u] = ascii[next() % ascii.length];
+            bytes[at + 2 * u + 1] = 0;
+        }
+        if (next() % 2 === 0)
+        {
+            bytes[at + 2 * units] = 0;
+            bytes[at + 2 * units + 1] = 0;
+        }
     }
     return { bytes, twins };
 }
@@ -189,23 +208,29 @@ const DOUBLE_EDGES = [0, -0, 0.5, -0.5, 1, -1, 1.5, -2.5, 0.49999999999999994, -
     4294967295.5];
 
 /**
- * A double of a shape a function of doubles meets: an edge, a fraction of
- * either sign and any size, a whole number one unit off, bits at random.
+ * A double of a shape a function of doubles meets: a NaN, one call in
+ * sixteen (what a float function hands its handler alone, so 200 calls find
+ * some whatever the seed), an edge, a fraction of either sign and any size,
+ * a whole number one unit off, bits at random.
  *
  * @param {() => number} next
  */
 function doubleOf(next){
-    const pick = next() % 8;
-    if (pick < 2)
+    const pick = next() % 16;
+    if (pick === 0)
+    {
+        return NaN;
+    }
+    if (pick < 4)
     {
         return DOUBLE_EDGES[next() % DOUBLE_EDGES.length];
     }
     const sign = next() % 2 === 0 ? 1 : -1;
-    if (pick < 5)
+    if (pick < 10)
     {
         return sign * (next() / 2 ** 32) * 2 ** (next() % 70 - 4);
     }
-    if (pick < 7)
+    if (pick < 14)
     {
         const whole = sign * Math.floor(next() * 2 ** 21 / 2 ** (next() % 54));
         return whole + [0, 2 ** -40, -(2 ** -40)][next() % 3] * Math.max(1, Math.abs(whole));

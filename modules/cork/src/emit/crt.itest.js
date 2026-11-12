@@ -24,7 +24,7 @@ import { createTestMachine } from '../testing/machine.js';
 import { fingerprint, maskedFingerprint, QUICK_BYTES } from '../helpers.js';
 import { PageFlag } from '../runtime/pages.js';
 import { formRegion } from '../region.js';
-import { CRT_BODIES } from '../crt-dictionary.js';
+import { CRT_BODIES, CRT_DICTIONARY } from '../crt-dictionary.js';
 
 const PROGRAM = 0x8000;
 const FUNCTION = 0x9000;
@@ -640,4 +640,306 @@ test('floor, ceil and sqrt answer as the x87 would at the control word\'s precis
             }
         }
     }
+});
+
+/** Where the test's `_ftol2_sse` finds the runtime's SSE2 flag. */
+const SSE2_FLAG = 0xa800;
+/** A double for `_ftol2_sse`'s ST0. */
+const VALUE = 0xa900;
+
+/**
+ * The test's own `_ftol2_sse`, as the compiler's does it: with the runtime's
+ * SSE2 flag set, ST0 stored as a double and truncated to eax by `cvttsd2si`;
+ * else its own `_ftol2`, the quadword in edx:eax by `fisttp`.
+ */
+const FTOL2_SSE = [
+    0x83, 0x3d, ...u32(SSE2_FLAG), 0x00,    // cmp dword [flag], 0
+    0x74, 0x13,                             // je slow
+    0x55, 0x8b, 0xec,                       // push ebp; mov ebp, esp
+    0x83, 0xec, 0x08, 0x83, 0xe4, 0xf8,     // sub esp, 8; and esp, -8
+    0xdd, 0x1c, 0x24,                       // fstp qword [esp]
+    0xf2, 0x0f, 0x2c, 0x04, 0x24,           // cvttsd2si eax, qword [esp]
+    0xc9, 0xc3,                             // leave; ret
+    0x83, 0xec, 0x08,                       // slow: sub esp, 8
+    0xdd, 0x0c, 0x24,                       // fisttp qword [esp]
+    0x58, 0x5a, 0xc3,                       // pop eax; pop edx; ret
+];
+
+test('_ftol2_sse made as cvttsd2si where the runtime\'s flag is set answers as its body,'
+    + ' and with the flag clear leaves the call to it', ()=>{
+    const helpers = [{ name: '_ftol2_sse', does: /** @type {'ftol2sse'} */ ('ftol2sse'),
+        word: 2, length: FTOL2_SSE.length, body: CRT_BODIES.ftol2sse,
+        hash: fingerprint(at=>FTOL2_SSE[at - HELPER_AT] ?? 0, HELPER_AT, FTOL2_SSE.length) }];
+    const values = [0, -0, 0.5, -0.5, 1.5, -2.5, 2147483647.75, 2147483648, -2147483648.5,
+        -2147483649, 1e300, -1e300, Infinity, -Infinity, NaN, 1e-310, 123456.789];
+    let formed = 0;
+    for (const flag of [1, 0])
+    {
+        for (const value of values)
+        {
+            /** @param {false | import('../helpers.js').RuntimeHelper[]} given */
+            const once = given=>{
+                const m = createTestMachine({ ramSize: RAM });
+                m.write(HELPER_AT, FTOL2_SSE);
+                m.write(SSE2_FLAG, u32(flag));
+                const bits = new DataView(new ArrayBuffer(8));
+                bits.setFloat64(0, value, true);
+                m.write(VALUE, [...new Uint8Array(bits.buffer)]);
+                const code = [0xdd, 0x05, ...u32(VALUE)];          // fld qword [value]
+                code.push(0xe8, ...rel(PROGRAM + code.length, HELPER_AT));
+                code.push(0xa3, ...u32(OUT), 0x89, 0x15, ...u32(OUT + 4),  // eax, edx
+                    0xdf, 0xe0, 0xa3, ...u32(OUT + 8),             // fnstsw ax; to OUT+8
+                    0x0f, 0xae, 0x1d, ...u32(OUT + 12), 0xf4);     // stmxcsr [OUT+12]; hlt
+                m.write(PROGRAM, code);
+                m.setReg('esp', STACK);
+                m.setReg('edx', 0x5eed);
+                let exit = m.runProgram(PROGRAM, { helpers: given });
+                const left = exit.kind === -2;
+                if (left)
+                {
+                    exit = m.runProgram(exit.eip, { helpers: false });
+                }
+                return { left, seen: { kind: exit.kind, out: [...m.read(OUT, 16)],
+                    esp: m.reg('esp'), ebp: m.reg('ebp') } };
+            };
+            const body = once(false);
+            const made = once(helpers);
+            assert.deepEqual(made.seen, body.seen, `flag ${flag}, ${value}`);
+            assert.equal(made.left, flag === 0, `flag ${flag}, ${value}: made as the call`);
+            formed += made.left ? 0 : 1;
+        }
+    }
+    assert.equal(formed, values.length);
+});
+
+/** Where the cookie checks find the runtime's cookie, and their report. */
+const COOKIE = 0xa880;
+const REPORT = 0x9f00;
+
+test('__security_check_cookie of every shape the dictionary knows returns where ecx is the'
+    + ' cookie and leaves the call to its report where it is not, or its page is closed', ()=>{
+    const entries = CRT_DICTIONARY.filter(entry=>entry.does === 'gscookie');
+    assert.equal(entries.length, 2);
+    for (const entry of entries)
+    {
+        const at = HELPER_AT;
+        // The shape's own bytes: cmp ecx, [cookie]; jne +n; (rep) ret; jmp report.
+        const ret = entry.length === 15 ? [0xf3, 0xc3] : [0xc3];
+        const head = [0x3b, 0x0d, ...u32(COOKIE), 0x75, ret.length, ...ret];
+        const stub = [...head, 0xe9, ...rel(at + head.length, REPORT)];
+        assert.equal(stub.length, entry.length);
+        for (const [cookieValue, argument, closed] of /** @type {[number, number, boolean][]} */ (
+            [[0xbb40e64e, 0xbb40e64e, false], [0xbb40e64e, 0xbb40e64f, false],
+                [0x12345678, 0x12345678, true], [0, 0, false]]))
+        {
+            /** @param {false | import('../helpers.js').RuntimeHelper[]} given */
+            const once = given=>{
+                const m = createTestMachine({ ramSize: RAM });
+                m.write(at, stub);
+                // The report: a mark, then a halt.
+                m.write(REPORT, [0xc7, 0x05, ...u32(OUT + 4), ...u32(0xdead), 0xf4]);
+                m.write(COOKIE, u32(cookieValue));
+                const code = [0xb9, ...u32(argument)];
+                code.push(0xe8, ...rel(PROGRAM + code.length, at));
+                code.push(0x89, 0x0d, ...u32(OUT), 0xf4);           // mov [OUT], ecx; hlt
+                m.write(PROGRAM, code);
+                m.setReg('esp', STACK);
+                if (closed)
+                {
+                    m.pages.markRange(COOKIE, 4, PageFlag.INACCESSIBLE);
+                }
+                let exit = m.runProgram(PROGRAM, { helpers: given });
+                const left = exit.kind === -2;
+                if (left)
+                {
+                    exit = m.runProgram(exit.eip, { helpers: false });
+                }
+                return { left, seen: { kind: exit.kind, eip: m.eip(), out: [...m.read(OUT, 8)],
+                    esp: m.reg('esp') } };
+            };
+            const body = once(false);
+            const made = once([entry]);
+            const label = `${entry.length} bytes, cookie ${cookieValue}, ecx ${argument}`;
+            assert.deepEqual(made.seen, body.seen, label);
+            assert.equal(made.left, closed || cookieValue !== argument, label);
+        }
+    }
+});
+
+/** Where the transcendentals' test finds its arguments. */
+const ARGUMENTS = 0xa940;
+/** 2^ST0 of ST0 a whole power and its rest (`f2xm1`), as the x87 makes an exponential. */
+const EXP2 = [
+    0xd9, 0xc0, 0xd9, 0xfc,                 // fld st0; frndint
+    0xdc, 0xe9, 0xd9, 0xc9,                 // fsub st1, st0; fxch
+    0xd9, 0xf0, 0xd9, 0xe8, 0xde, 0xc1,     // f2xm1; fld1; faddp
+    0xd9, 0xfd, 0xdd, 0xd9,                 // fscale; fstp st1
+];
+/** The test's own transcendentals, the x87's way (the dictionary's take the host's result). */
+const X87_WAY = {
+    cisin: [0xd9, 0xfe],                                        // fsin
+    cicos: [0xd9, 0xff],                                        // fcos
+    citan: [0xd9, 0xf2, 0xdd, 0xd8],                            // fptan; fstp st0
+    ciatan: [0xd9, 0xe8, 0xd9, 0xf3],                           // fld1; fpatan
+    // atan2(x, sqrt(1 - x^2)) and atan2(sqrt(1 - x^2), x)
+    ciasin: [0xd9, 0xc0, 0xd8, 0xc8, 0xd9, 0xe8, 0xde, 0xe1, 0xd9, 0xfa, 0xd9, 0xf3],
+    ciacos: [0xd9, 0xc0, 0xd8, 0xc8, 0xd9, 0xe8, 0xde, 0xe1, 0xd9, 0xfa, 0xd9, 0xc9, 0xd9, 0xf3],
+    cilog: [0xd9, 0xed, 0xd9, 0xc9, 0xd9, 0xf1],                // fldln2; fxch; fyl2x
+    cilog10: [0xd9, 0xec, 0xd9, 0xc9, 0xd9, 0xf1],              // fldlg2; fxch; fyl2x
+    ciexp: [0xd9, 0xea, 0xde, 0xc9, ...EXP2],                   // fldl2e; fmulp; 2^
+    cipow: [0xd9, 0xc9, 0xd9, 0xf1, ...EXP2],                   // fxch; fyl2x; 2^
+};
+/** What each answers: the host's own. @type {Record<string, (x: number, y: number) => number>} */
+const HOST_WAY = {
+    cisin: Math.sin, cicos: Math.cos, citan: Math.tan, ciatan: Math.atan, ciasin: Math.asin,
+    ciacos: Math.acos, cilog: Math.log, cilog10: Math.log10, ciexp: Math.exp,
+    cipow: (x, y)=>y ** x,
+};
+
+test('the x87 transcendentals (_CI*) answer as the host\'s functions where the argument is in'
+    + ' their domain, and leave the call, its lead uncounted, where it is not', ()=>{
+    /** @type {Record<string, (x: number, y: number) => boolean>} */
+    const domains = {
+        cisin: x=>Math.abs(x) < 2 ** 63, cicos: x=>Math.abs(x) < 2 ** 63,
+        citan: x=>Math.abs(x) < 2 ** 63,
+        ciatan: x=>Math.abs(x) < 2 ** 50 && (Math.abs(x) > 2 ** -20 || x === 0),
+        ciasin: x=>Math.abs(x) <= 1, ciacos: x=>Math.abs(x) <= 1,
+        cilog: x=>x > 0 && x < Infinity, cilog10: x=>x > 0 && x < Infinity,
+        ciexp: x=>x > -708 && x < 709,
+        // pow: x the power (ST0), y the base (ST1).
+        cipow: (x, y)=>y > 0 && y < Infinity && Math.abs(x) < Infinity
+            && Math.abs(x * Math.log2(y)) < 1000,
+    };
+    const singles = [0, -0, 0.5, -0.5, 1, -1, 1.0000001, 2, 100, -100, 707.5, 708.5, 710,
+        -707.5, -709, 1e10, 2 ** 63, -(2 ** 63), 1e300, Infinity, -Infinity, NaN, 1e-300, 1e-7,
+        -1e-7, 2 ** 51];
+    const pairs = [[2, 10], [2, 0.5], [0.5, -3], [-8, 3], [0, 2], [10, 300], [10, 400],
+        [Infinity, 1], [3, NaN], [1e-300, 1.5], [7, -2.5], [1, 1e300]];
+    let formed = 0;
+    let left = 0;
+    for (const [does, inDomain] of Object.entries(domains))
+    {
+        const crt = /** @type {import('../helpers.js').Crt} */ (does);
+        const entry = CRT_DICTIONARY.find(one=>one.does === crt);
+        assert.ok(entry?.lead !== undefined, `${does}: the dictionary's entry has a lead`);
+        const fn = [...X87_WAY[/** @type {keyof X87_WAY} */ (does)], 0xc3];
+        const helpers = [{ name: does, does: crt, lead: entry.lead, body: CRT_BODIES[crt],
+            length: fn.length,
+            hash: fingerprint(at=>fn[at - HELPER_AT] ?? 0, HELPER_AT, fn.length) }];
+        for (const [base, power] of does === 'cipow' ? pairs : singles.map(x=>[0, x]))
+        {
+            /** @param {false | import('../helpers.js').RuntimeHelper[]} given */
+            const once = given=>{
+                const m = createTestMachine({ ramSize: RAM });
+                m.write(HELPER_AT, fn);
+                const bits = new DataView(new ArrayBuffer(16));
+                bits.setFloat64(0, base, true);
+                bits.setFloat64(8, power, true);
+                m.write(ARGUMENTS, [...new Uint8Array(bits.buffer)]);
+                const code = does === 'cipow' ? [0xdd, 0x05, ...u32(ARGUMENTS)] : [];
+                code.push(0xdd, 0x05, ...u32(ARGUMENTS + 8));
+                code.push(0xe8, ...rel(PROGRAM + code.length, HELPER_AT));
+                code.push(0xdd, 0x1d, ...u32(OUT),                 // fstp qword [OUT]
+                    0xdf, 0xe0, 0xa3, ...u32(OUT + 8), 0xf4);     // fnstsw ax; to OUT+8; hlt
+                m.write(PROGRAM, code);
+                m.setReg('esp', STACK);
+                let exit = m.runProgram(PROGRAM, { helpers: given });
+                let retired = exit.retired;
+                const gone = exit.kind === -2;
+                if (gone)
+                {
+                    exit = m.runProgram(exit.eip, { helpers: false });
+                    retired += exit.retired;
+                }
+                return { gone, retired, seen: { kind: exit.kind, out: [...m.read(OUT, 12)],
+                    esp: m.reg('esp') } };
+            };
+            const what = `${does}(${base}, ${power})`;
+            const body = once(false);
+            const made = once(helpers);
+            assert.equal(made.gone, !inDomain(power, base), `${what}: left to the call`);
+            if (!made.gone)
+            {
+                // The host's result exactly, where the x87's way may be a unit or a few
+                // off it; the rest as the x87's way leaves it.
+                const got = new DataView(Uint8Array.from(made.seen.out).buffer).getFloat64(0, true);
+                const want = HOST_WAY[does](power, base);
+                assert.ok(Object.is(got, want), `${what}: ${got}, not ${want}`);
+                assert.deepEqual({ ...made.seen, out: made.seen.out.slice(8) },
+                    { ...body.seen, out: body.seen.out.slice(8) }, what);
+            }
+            else
+            {
+                assert.deepEqual(made.seen, body.seen, what);
+            }
+            if (made.gone)
+            {
+                assert.equal(made.retired, body.retired, `${what}: retired as the call`);
+                left++;
+            }
+            else
+            {
+                formed++;
+            }
+        }
+    }
+    assert.ok(formed > 50 && left > 50, `${formed} formed, ${left} left`);
+});
+
+test('a transcendental formed only at double precision (`precise`) is left to the function'
+    + ' under single precision, and formed under double and extended', ()=>{
+    const fn = [...X87_WAY.ciasin, 0xc3];
+    const entry = CRT_DICTIONARY.find(one=>one.does === 'ciasin' && one.precise === true);
+    assert.ok(entry !== undefined, 'the dictionary has an asin formed only at double precision');
+    const helpers = [{ name: 'asin', does: /** @type {'ciasin'} */ ('ciasin'), lead: entry.lead,
+        precise: true, body: CRT_BODIES.ciasin, length: fn.length,
+        hash: fingerprint(at=>fn[at - HELPER_AT] ?? 0, HELPER_AT, fn.length) }];
+    for (const control of [0x7f, 0x27f, 0x37f])
+    {
+        const m = createTestMachine({ ramSize: RAM });
+        m.write(HELPER_AT, fn);
+        const bits = new DataView(new ArrayBuffer(8));
+        bits.setFloat64(0, 0.25, true);
+        m.write(ARGUMENTS, [...new Uint8Array(bits.buffer)]);
+        const code = [0xdd, 0x05, ...u32(ARGUMENTS)];
+        code.push(0xe8, ...rel(PROGRAM + code.length, HELPER_AT));
+        code.push(0xdd, 0x1d, ...u32(OUT), 0xf4);
+        m.write(PROGRAM, code);
+        m.setReg('esp', STACK);
+        new DataView(m.memory.buffer).setUint16(m.layout.x87Control, control, true);
+        const exit = m.runProgram(PROGRAM, { helpers });
+        assert.equal(exit.kind === -2, control === 0x7f, `control ${control.toString(16)}`);
+    }
+});
+
+/** An import slot, and a function written into it later. */
+const SLOT = 0xa9c0;
+const OTHER = 0x9a00;
+
+test('a call through an import slot to a function the dictionary knows is formed as its'
+    + ' operation, and calls whatever function the slot holds once it is written', ()=>{
+    // Twice: memset(DATA, ebx, 64) through the slot, then another function into the slot.
+    // The test's memset does nothing itself: the bytes are filled only where it is formed.
+    const code = [0xbb, ...u32(2)];                                  // mov ebx, 2
+    const loop = PROGRAM + code.length;
+    code.push(0x6a, 64, 0x53, 0x68, ...u32(DATA));                  // push 64; push ebx; push DATA
+    code.push(0xff, 0x15, ...u32(SLOT));                             // call [SLOT]
+    code.push(0x83, 0xc4, 12);                                       // add esp, 12
+    code.push(0xc7, 0x05, ...u32(SLOT), ...u32(OTHER));              // mov dword [SLOT], OTHER
+    code.push(0x4b, 0x75, (loop - (PROGRAM + code.length + 3)) & 0xff, 0xf4);  // dec; jnz; hlt
+    /** @param {boolean} formed */
+    const once = formed=>{
+        const m = createTestMachine({ ramSize: RAM });
+        m.write(HELPER_AT, FILLER);
+        m.write(OTHER, [0xc3]);
+        m.write(SLOT, u32(HELPER_AT));
+        m.write(PROGRAM, code);
+        m.setReg('esp', STACK);
+        const exit = m.runProgram(PROGRAM, { helpers: formed ? [helperOf('memset')] : false });
+        assert.equal(exit.kind, 3);
+        return [...m.read(DATA, 65)];
+    };
+    assert.deepEqual(once(false), new Array(65).fill(0), 'the test\'s memset fills nothing');
+    // The first call formed (2), the second the function written into the slot (nothing).
+    assert.deepEqual(once(true), [...new Array(64).fill(2), 0]);
 });

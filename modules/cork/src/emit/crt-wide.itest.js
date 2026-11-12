@@ -19,6 +19,7 @@ import assert from 'node:assert/strict';
 import { CORPUS, load, machine, run } from '../testing/long-machine.js';
 import { fingerprint } from '../helpers.js';
 import { codeRangesAt, pageFlagsAt } from '../runtime/layout.js';
+import { CRT_DICTIONARY } from '../crt-dictionary.js';
 import { PageFlag } from '../runtime/pages.js';
 
 /** The functions, each the plain loop a compiler might make of it (x64, Microsoft's convention). */
@@ -41,10 +42,10 @@ const FUNCTIONS = {
         0x74, 0x05, 0x48, 0xff, 0xc0, 0xeb, 0xee, 0x31, 0xc0, 0xc3],
 };
 
-/** What forms where: a wide window takes the copies, fills and lengths alone. */
+/** Where the operations are formed: in 4 GiB, and in a wide window past it. */
 const WHERE = [
     { title: 'a wide window\'s', window: 2 ** 33, high: 2 ** 32,
-        names: ['memmove', 'memcpy', 'memset', 'strlen'] },
+        names: ['memmove', 'memcpy', 'memset', 'strlen', 'memcmp', 'memchr', 'strchr'] },
     { title: 'long mode\'s', window: undefined, high: 0,
         names: ['memmove', 'memcpy', 'memset', 'strlen', 'memcmp', 'memchr', 'strchr'] },
 ];
@@ -389,3 +390,118 @@ for (const where of [{ high: 0 }, { window: 2 ** 33, high: 2 ** 32 }])
         assert.ok(formed > 8 && made > 8, `${formed} formed, ${made} made as they were`);
     });
 }
+
+/**
+ * One call to long mode's `__security_check_cookie` of the dictionary's shape,
+ * translated, with `helpers` or through the body: rcx `argument`, the cookie
+ * `cookieValue` in the area, its report a `ud2`.
+ *
+ * @param {{ window?: number, high: number, codeHigh?: number }} where
+ * @param {bigint} cookieValue @param {bigint} argument @param {false | object[]} helpers
+ */
+function runCookie(where, cookieValue, argument, helpers){
+    const m = machine({ ...where, config: { helpers } });
+    const { high } = where;
+    const flags = new Uint8Array(m.memory.buffer, pageFlagsAt(m.layout),
+        (where.window ?? 2 ** 32) / 4096);
+    const ram = new Uint8Array((m.ram ?? m.memory).buffer);
+    const from = AREA + high;
+    flags.fill(0, from / 4096, (from + AREA_BYTES) / 4096);
+    const cookieAt = from + 0x100;
+    new DataView(ram.buffer).setBigUint64(cookieAt, cookieValue, true);
+    const codeAt = CORPUS.codeAt + (where.codeHigh ?? 0);
+    const fn = codeAt + FUNCTION_OFFSET;
+    const report = fn + 0x40;
+    const stub = [0x48, 0x3b, 0x0d, ...quad(cookieAt - (fn + 7)).slice(0, 4), 0x75, 0x10,
+        0x48, 0xc1, 0xc1, 0x10, 0x66, 0xf7, 0xc1, 0xff, 0xff, 0x75, 0x01, 0xc3,
+        0x48, 0xc1, 0xc9, 0x10, 0xe9, ...quad(report - (fn + 30)).slice(0, 4)];
+    /** @type {number[]} */
+    const program = [0x48, 0xb9, ...new Uint8Array(new BigUint64Array([argument]).buffer)];
+    program.push(0xe8, ...quad(FUNCTION_OFFSET - (program.length + 5)).slice(0, 4));
+    program.push(0xe9, ...quad(0x50 + FUNCTION_OFFSET - (program.length + 5)).slice(0, 4));
+    while (program.length < FUNCTION_OFFSET)
+    {
+        program.push(0x90);
+    }
+    const code = [...program, ...stub];
+    while (code.length < FUNCTION_OFFSET + 0x40)
+    {
+        code.push(0xcc);
+    }
+    code.push(0x0f, 0x0b);                                  // the report: ud2
+    while (code.length < FUNCTION_OFFSET + 0x50)
+    {
+        code.push(0xcc);
+    }
+    const regs = Array.from({ length: 16 },
+        (unused, i)=>(BigInt(i) * 0x1111111111111n).toString(16));
+    regs[4] = BigInt(from + 0x6000).toString(16);
+    load(m, { code: Buffer.from(code).toString('hex'), regs, flags: 0, seed: 1, fresh: true });
+    const seen = run(m, true, 100000);
+    return { fault: seen.fault, regs: seen.regs, rip: seen.rip, retired: Number(seen.retired) };
+}
+
+for (const where of [{ high: 0 }, { window: 2 ** 33, high: 2 ** 32, codeHigh: 2 ** 32 }])
+{
+    test(`long mode's __security_check_cookie${where.window === undefined ? ''
+        : ' in a wide window'}: made as the test as through the body`, ()=>{
+        const [entry] = CRT_DICTIONARY.filter(one=>one.does === 'gscookie64');
+        let formed = 0;
+        for (const [cookieValue, argument] of /** @type {[bigint, bigint][]} */ ([
+            [0x00002b992ddfa232n, 0x00002b992ddfa232n], [0x00002b992ddfa232n, 0x00002b992ddfa233n],
+            [0x12342b992ddfa232n, 0x12342b992ddfa232n], [0n, 0n], [0n, 1n << 63n]]))
+        {
+            const { retired: bodyRetired, ...body } = runCookie(where, cookieValue, argument,
+                false);
+            const { retired, ...seen } = runCookie(where, cookieValue, argument, [entry]);
+            assert.deepEqual(seen, body, `cookie ${cookieValue}, rcx ${argument}`);
+            formed += retired < bodyRetired ? 1 : 0;
+        }
+        assert.equal(formed, 2, 'the two calls whose rcx is the cookie, its high 16 bits clear');
+    });
+}
+
+test('long mode\'s call through an import slot to a memset the dictionary knows is made as the'
+    + ' operation, and calls whatever function the slot holds once it is written', ()=>{
+    const codeAt = CORPUS.codeAt;
+    const slot = AREA + 0x900;
+    const target = AREA + 0x1000;
+    const other = codeAt + FUNCTION_OFFSET - 1;       // a `ret` in the padding
+    // Twice: memset(target, r12, 64) through the slot, then another function into the slot.
+    const program = [0x41, 0xbc, ...quad(2).slice(0, 4)];               // mov r12d, 2
+    const loop = program.length;
+    program.push(0x48, 0xb9, ...quad(target), 0x4c, 0x89, 0xe2,         // rcx; rdx = r12
+        0x49, 0xc7, 0xc0, 64, 0, 0, 0);                                 // mov r8, 64
+    program.push(0xff, 0x15, ...quad(slot - (codeAt + program.length + 6)).slice(0, 4));
+    program.push(0x48, 0xc7, 0x05, ...quad(slot - (codeAt + program.length + 11)).slice(0, 4),
+        ...quad(other).slice(0, 4));                                    // mov qword [slot], other
+    program.push(0x49, 0xff, 0xcc, 0x75, (loop - (program.length + 5)) & 0xff);  // dec; jnz
+    const over = FUNCTION_OFFSET + FUNCTIONS.memset.length - (program.length + 5);
+    program.push(0xe9, ...quad(over).slice(0, 4));
+    while (program.length < FUNCTION_OFFSET - 1)
+    {
+        program.push(0x90);
+    }
+    program.push(0xc3);
+    const code = Buffer.from([...program, ...FUNCTIONS.memset]).toString('hex');
+    /** @param {false | object[]} helpers */
+    const once = helpers=>{
+        const m = machine({ config: { helpers } });
+        const ram = new Uint8Array((m.ram ?? m.memory).buffer);
+        const flags = new Uint8Array(m.memory.buffer, pageFlagsAt(m.layout), 2 ** 32 / 4096);
+        flags.fill(0, AREA / 4096, (AREA + AREA_BYTES) / 4096);
+        ram.fill(0, AREA, AREA + AREA_BYTES);
+        new DataView(ram.buffer).setBigUint64(slot, BigInt(codeAt + FUNCTION_OFFSET), true);
+        const regs = Array.from({ length: 16 }, ()=>'0');
+        regs[4] = STACK.toString(16);
+        load(m, { code, regs, flags: 0, seed: 1, fresh: true });
+        const seen = run(m, true, 100000);
+        return { fault: seen.fault, bytes: [...ram.subarray(target, target + 65)],
+            retired: Number(seen.retired) };
+    };
+    const body = once(false);
+    const made = once([entryOf('memset')]);
+    assert.deepEqual(body.bytes, [...new Array(64).fill(2), 0], 'the first call fills, then none');
+    assert.deepEqual({ ...made, retired: 0 }, { ...body, retired: 0 });
+    assert.ok(made.retired < body.retired, `formed: ${made.retired} of ${body.retired} retired`);
+});

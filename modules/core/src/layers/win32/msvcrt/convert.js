@@ -496,28 +496,6 @@ export function createConversionFunctions(host){
         },
     });
 
-    /**
-     * int _wtoi(const wchar_t *str) and long _wtol: atoi's reading over a
-     * wide string -- white space, a sign, ASCII digits -- and atoi's
-     * overflow, which wraps in 32 bits rather than clamping.
-     */
-    const wideAtoi = {
-        convention: 'cdecl',
-        argBytes: 4,
-        /** @param {number[]} args */
-        handler: ([string])=>{
-            const text = wideStringAt(/** @type {(address: number, length: number)
-                => Uint8Array} */ (host.readMemory), string);
-            const match = /^[ \t\n\v\f\r]*([+-]?)([0-9]*)/.exec(text);
-            let total = 0;
-            for (const digit of match?.[2] ?? '')
-            {
-                total = (Math.imul(total, 10) + digit.charCodeAt(0) - 0x30) | 0;
-            }
-            return match?.[1] === '-' ? (0 - total) | 0 : total;
-        },
-    };
-
     /** long strtol(const char *str, char **end, int base) */
     /** @param {bigint} magnitude @param {boolean} negative */
     const toLong = (magnitude, negative)=>{
@@ -657,6 +635,7 @@ export function createConversionFunctions(host){
     });
 
     const { readMemory, writeMemory } = host;
+    const entryHost = { readMemory, writeMemory, pointerSize: host.pointerSize };
     const table = {
         /**
          * int $I10_OUTPUT(_LDOUBLE value, int precision, int flags, I10_OUTPUT_data *out)
@@ -732,10 +711,10 @@ export function createConversionFunctions(host){
         _strtoui64: strtoInteger(12, toUint64, uint64Limit, false, true),
 
         strtol: readMemory
-            ? guestEntry(inGuest.strtol, COMPILED.strtol, { readMemory, writeMemory }, strtol)
+            ? guestEntry(inGuest.strtol, COMPILED.strtol, entryHost, strtol)
             : strtol,
         strtoul: readMemory
-            ? guestEntry(inGuest.strtoul, COMPILED.strtoul, { readMemory, writeMemory }, strtoul)
+            ? guestEntry(inGuest.strtoul, COMPILED.strtoul, entryHost, strtoul)
             : strtoul,
 
         ...readMemory ? {
@@ -743,10 +722,13 @@ export function createConversionFunctions(host){
              * long wcstol(const wchar_t *str, wchar_t **end, int base) and
              * unsigned long wcstoul: strtol and strtoul over a wide string,
              * reading the decimal digits of the scripts msvcrt reads and the
-             * separators Unicode has as white space.
+             * separators Unicode has as white space -- in the guest, which
+             * hands this handler a unit past ASCII where its reading stops.
              */
-            wcstol: strtoInteger(12, toLong, longLimit, true),
-            wcstoul: strtoInteger(12, toUnsignedLong, unsignedLongLimit, true),
+            wcstol: guestEntry(inGuest.wcstol, COMPILED.wcstol, entryHost,
+                strtoInteger(12, toLong, longLimit, true)),
+            wcstoul: guestEntry(inGuest.wcstoul, COMPILED.wcstoul, entryHost,
+                strtoInteger(12, toUnsignedLong, unsignedLongLimit, true)),
 
             /**
              * __int64 _wcstoi64(const wchar_t *str, wchar_t **end, int base)
@@ -764,27 +746,32 @@ export function createConversionFunctions(host){
                 handler: ([string])=>wideInt64.handler([string, 0, 10]),
             },
 
-            _wtoi: wideAtoi,
-            _wtol: wideAtoi,
+            _wtoi: guestEntry(inGuest._wtoi, COMPILED._wtoi, entryHost),
+            _wtol: guestEntry(inGuest._wtoi, COMPILED._wtoi, entryHost),
         } : {},
 
         /** wchar_t *_itow(int value, wchar_t *buffer, int radix) -- _ltoa's text, wide */
-        _itow: toText(1, true, true),
+        _itow: readMemory ? guestEntry(inGuest._itow, COMPILED._itow, entryHost,
+            toText(1, true, true)) : toText(1, true, true),
 
         /** wchar_t *_ltow(long value, wchar_t *buffer, int radix) */
-        _ltow: toText(1, true, true),
+        _ltow: readMemory ? guestEntry(inGuest._itow, COMPILED._itow, entryHost,
+            toText(1, true, true)) : toText(1, true, true),
 
         /** wchar_t *_ultow(unsigned long value, wchar_t *buffer, int radix) */
-        _ultow: toText(1, false, true),
+        _ultow: readMemory ? guestEntry(inGuest._ultow, COMPILED._ultow, entryHost,
+            toText(1, false, true)) : toText(1, false, true),
 
         /** char *_ltoa(long value, char *buffer, int radix) */
-        _ltoa: toText(1, true),
+        _ltoa: readMemory ? guestEntry(inGuest._itoa, COMPILED._itoa, entryHost,
+            toText(1, true)) : toText(1, true),
 
         /** char *ltoa(long, char *, int) -- the name without the underscore */
         ltoa: toText(1, true),
 
         /** char *_ultoa(unsigned long value, char *buffer, int radix) */
-        _ultoa: toText(1, false),
+        _ultoa: readMemory ? guestEntry(inGuest._ultoa, COMPILED._ultoa, entryHost,
+            toText(1, false)) : toText(1, false),
 
         /** char *_ui64toa(unsigned __int64 value, char *buffer, int radix) */
         _ui64toa: toText(2, false),
@@ -1010,7 +997,7 @@ export function createConversionFunctions(host){
     // Code in the guest (`inguest-float.js`), which reads the number and
     // computes the values Clinger's fast path makes exact; the handlers above
     // answer the rest, and set errno for an overflow or an underflow.
-    const guest = { readMemory, writeMemory, fpu: host.fpu };
+    const guest = { readMemory, writeMemory, fpu: host.fpu, pointerSize: host.pointerSize };
     return {
         ...table,
         ...readMemory ? {

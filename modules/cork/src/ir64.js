@@ -87,7 +87,7 @@ const signOf = size=>1n << BigInt(size * 8 - 1);
  * registers as doubles (and their bytes), and the quadwords a `fild` left exact.
  *
  * @typedef {{ top: number, empty: number, status: number, control: number,
- *     f80: Float64Array, f80bits: BigInt64Array, x87Exact: number,
+ *     f80: Float64Array, f80bits: BigInt64Array, f80words: Uint32Array, x87Exact: number,
  *     x87Shadow: BigInt64Array }} X87State
  */
 
@@ -95,7 +95,8 @@ const signOf = size=>1n << BigInt(size * 8 - 1);
 export function freshX87(){
     const bytes = new ArrayBuffer(64);
     return { top: 0, empty: 0xff, status: 0, control: 0x37f, f80: new Float64Array(bytes),
-        f80bits: new BigInt64Array(bytes), x87Exact: 0, x87Shadow: new BigInt64Array(8) };
+        f80bits: new BigInt64Array(bytes), f80words: new Uint32Array(bytes), x87Exact: 0,
+        x87Shadow: new BigInt64Array(8) };
 }
 
 /**

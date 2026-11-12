@@ -292,9 +292,9 @@ export const COMPILED = /** @type {const} */ ({
     },
     _copysign: {
         convention: 'cdecl',
-        params: ['f64', 'u32', 'i32'],
+        params: ['f64', 'f64'],
         returns: 'f64',
-        uses: [],
+        uses: ['doubleHigh'],
         code: Uint8Array.of(
             0x83, 0xec, 0x08, 0xdd, 0x44, 0x24, 0x0c, 0xd9, 0xe1, 0xdd, 0x1c, 0x24,
             0x8b, 0x44, 0x24, 0x18, 0x85, 0xc0, 0x7d, 0x07, 0xdd, 0x04, 0x24, 0xd9,
@@ -312,9 +312,9 @@ export const COMPILED = /** @type {const} */ ({
     },
     _finite: {
         convention: 'cdecl',
-        params: ['u32', 'i32'],
+        params: ['f64'],
         returns: 'i32',
-        uses: [],
+        uses: ['doubleHigh'],
         code: Uint8Array.of(
             0x8b, 0x44, 0x24, 0x08, 0x81, 0xe0, 0x00, 0x00, 0xf0, 0x7f, 0x81, 0xf8,
             0x00, 0x00, 0xf0, 0x7f, 0x74, 0x07, 0xb8, 0x01, 0x00, 0x00, 0x00, 0xeb,
@@ -323,9 +323,9 @@ export const COMPILED = /** @type {const} */ ({
     },
     _isnan: {
         convention: 'cdecl',
-        params: ['u32', 'i32'],
+        params: ['f64'],
         returns: 'i32',
-        uses: [],
+        uses: ['doubleLow', 'doubleHigh'],
         code: Uint8Array.of(
             0x8b, 0x44, 0x24, 0x08, 0x81, 0xe0, 0xff, 0xff, 0xff, 0x7f, 0x89, 0xc2,
             0x81, 0xfa, 0x00, 0x00, 0xf0, 0x7f, 0x7f, 0x10, 0x81, 0xfa, 0x00, 0x00,
@@ -430,7 +430,7 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'cdecl',
         params: ['u32', 'u32'],
         returns: 'f64',
-        uses: ['u8', 'setU32', 'controlWord', 'setControlWord', 'host'],
+        uses: ['u8', 'setU32', 'controlWord', 'setControlWord', 'host', 'pointerBytes'],
         host: 822,
         code: Uint8Array.of(
             0x53, 0x56, 0x57, 0x55, 0x83, 0xec, 0x48, 0xe8, 0x30, 0x03, 0x00, 0x00,
@@ -509,7 +509,7 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'cdecl',
         params: ['u32'],
         returns: 'f64',
-        uses: ['u8', 'controlWord', 'setControlWord', 'host'],
+        uses: ['u8', 'controlWord', 'setControlWord', 'host', 'pointerBytes'],
         host: 698,
         code: Uint8Array.of(
             0x53, 0x56, 0x57, 0x55, 0x83, 0xec, 0x40, 0xe8, 0xb4, 0x02, 0x00, 0x00,

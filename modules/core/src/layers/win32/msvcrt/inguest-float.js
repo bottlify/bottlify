@@ -218,15 +218,15 @@ export function _clearfp({ statusWord, clearExceptions, mxcsr, setMxcsr }){
 
 /**
  * double _copysign(double x, double y) -- x's magnitude, y's sign bit,
- * which a zero and a NaN carry too.
+ * which a zero and a NaN carry too, read from its bits.
  *
  * @guestCode cdecl
- * @param {f64} x @param {u32} low @param {i32} high
+ * @param {Pick<Guest, 'doubleHigh'>} guest @param {f64} x @param {f64} y
  * @returns {f64}
  */
-export function _copysign(x, low, high){
+export function _copysign({ doubleHigh }, x, y){
     const magnitude = Math.abs(x);
-    return high < 0 ? -magnitude : magnitude;
+    return (doubleHigh(y) | 0) < 0 ? -magnitude : magnitude;
 }
 
 /**
@@ -241,31 +241,35 @@ export function _chgsign(x){
 }
 
 /**
- * int _finite(double x) -- nonzero unless the exponent is all ones.
+ * int _finite(double x) -- nonzero unless the exponent is all ones. The
+ * classifiers read a double's bits and never load it: an `fld` would quiet a
+ * signalling NaN and raise the invalid flag.
  *
  * @guestCode cdecl
- * @param {u32} low @param {i32} high
+ * @param {Pick<Guest, 'doubleHigh'>} guest @param {f64} x
  * @returns {i32}
  */
-export function _finite(low, high){
-    return (high & 0x7ff00000) !== 0x7ff00000 ? 1 : 0;
+export function _finite({ doubleHigh }, x){
+    return (doubleHigh(x) & 0x7ff00000) !== 0x7ff00000 ? 1 : 0;
 }
 
 /**
  * int _isnan(double x) -- the exponent all ones and a fraction.
  *
  * @guestCode cdecl
- * @param {u32} low @param {i32} high
+ * @param {Pick<Guest, 'doubleLow' | 'doubleHigh'>} guest @param {f64} x
  * @returns {i32}
  */
-export function _isnan(low, high){
-    const magnitude = high & 0x7fffffff;
-    return magnitude > 0x7ff00000 || magnitude === 0x7ff00000 && low !== 0 ? 1 : 0;
+export function _isnan({ doubleLow, doubleHigh }, x){
+    const magnitude = doubleHigh(x) & 0x7fffffff;
+    return magnitude > 0x7ff00000 || magnitude === 0x7ff00000 && doubleLow(x) !== 0 ? 1 : 0;
 }
 
 /**
  * int _fpclass(double x) -- signalling or quiet NaN, an infinity, a normal,
- * a denormal or a zero, each of either sign.
+ * a denormal or a zero, each of either sign. Its halves are its arguments:
+ * a signalling NaN in a JavaScript double, as its handler would hold one,
+ * is quieted on the way.
  *
  * @guestCode cdecl
  * @param {u32} low @param {i32} high
@@ -386,7 +390,9 @@ export function _nextafter({ controlWord, setControlWord, host }, x, y){
  * @param {Guest} guest @param {u32} text @param {u32} end
  * @returns {f64}
  */
-export function strtod({ u8, setU32, controlWord, setControlWord, host }, text, end){
+export function strtod({ u8, setU32, controlWord, setControlWord, host, pointerBytes }, text,
+    end)
+{
     if (text === 0)
     {
         return host();
@@ -453,6 +459,10 @@ export function strtod({ u8, setU32, controlWord, setControlWord, host }, text, 
         if (end !== 0)
         {
             setU32(end, text);
+            if (pointerBytes === 8)
+            {
+                setU32(end + 4, 0);
+            }
         }
         return 0;
     }
@@ -486,6 +496,10 @@ export function strtod({ u8, setU32, controlWord, setControlWord, host }, text, 
         if (end !== 0)
         {
             setU32(end, at);
+            if (pointerBytes === 8)
+            {
+                setU32(end + 4, 0);
+            }
         }
         return negative !== 0 ? -0 : 0;
     }
@@ -493,8 +507,12 @@ export function strtod({ u8, setU32, controlWord, setControlWord, host }, text, 
     {
         return host();
     }
-    const word = controlWord();
-    setControlWord(exactly(word));
+    // The i386's x87 rounds to doubles for the computation; x86-64's SSE2 does already.
+    const word = pointerBytes === 4 ? controlWord() : 0;
+    if (pointerBytes === 4)
+    {
+        setControlWord(exactly(word));
+    }
     /** @type {f64} */
     let whole = +high;
     let k = (digits - 9) | 0;
@@ -513,10 +531,17 @@ export function strtod({ u8, setU32, controlWord, setControlWord, host }, text, 
         k--;
     }
     const value = scale < 0 ? whole / power : whole * power;
-    setControlWord(word);
+    if (pointerBytes === 4)
+    {
+        setControlWord(word);
+    }
     if (end !== 0)
     {
         setU32(end, at);
+        if (pointerBytes === 8)
+        {
+            setU32(end + 4, 0);
+        }
     }
     return negative !== 0 ? -value : value;
 }
@@ -529,7 +554,7 @@ export function strtod({ u8, setU32, controlWord, setControlWord, host }, text, 
  * @param {Guest} guest @param {u32} text
  * @returns {f64}
  */
-export function atof({ u8, controlWord, setControlWord, host }, text){
+export function atof({ u8, controlWord, setControlWord, host, pointerBytes }, text){
     if (text === 0)
     {
         return host();
@@ -617,8 +642,12 @@ export function atof({ u8, controlWord, setControlWord, host }, text){
     {
         return host();
     }
-    const word = controlWord();
-    setControlWord(exactly(word));
+    // The i386's x87 rounds to doubles for the computation; x86-64's SSE2 does already.
+    const word = pointerBytes === 4 ? controlWord() : 0;
+    if (pointerBytes === 4)
+    {
+        setControlWord(exactly(word));
+    }
     /** @type {f64} */
     let whole = +high;
     let k = (digits - 9) | 0;
@@ -637,6 +666,9 @@ export function atof({ u8, controlWord, setControlWord, host }, text){
         k--;
     }
     const value = scale < 0 ? whole / power : whole * power;
-    setControlWord(word);
+    if (pointerBytes === 4)
+    {
+        setControlWord(word);
+    }
     return negative !== 0 ? -value : value;
 }

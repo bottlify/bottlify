@@ -88,6 +88,16 @@ export const SEGMENTS = Object.freeze(['es', 'cs', 'ss', 'ds', 'fs', 'gs']);
  * @property {number} [thunk]       that thunk's address: the call retires its jump as well
  * @property {import('../helpers.js').Crt} [crt]  of a `crt`: the C runtime operation a call
  *           to a function the dictionary knows is formed as (`emit/crt.js`)
+ * @property {number} [crtWord]  of a `crt`: the address its helper reads a dword at as it
+ *           runs (`RuntimeHelper.word`)
+ * @property {number} [crtSlot]  of a `crt` formed for a `call [slot]`: that slot, which
+ *           must still hold `crtTarget`, the function's address, as it runs
+ * @property {number} [crtTarget]
+ * @property {boolean} [crtPrecise]  of a `crt`: its helper's `precise`
+ * @property {number} [crtLead]  of a `crt`: the instructions formed for the call before it
+ *           (`RuntimeHelper.lead`), uncounted where it leaves before the call
+ * @property {boolean} [crtWordInBlock]  that address is RIP-relative's: an offset in a wide
+ *           window's code block, as the code's addresses are (`codeBase`)
  */
 
 /**

@@ -195,13 +195,16 @@
  * argument or result hands nothing to the host: the 64-bit trap carries no
  * XMM register.
  *
- * What only the x87 does -- `%`, `Math.sin` and the other transcendentals,
- * `X87`, x87 arguments, the control and status words, an i64 in EDX:EAX --
+ * `Math.sin`, `cos`, `tan`, `atan`, `atan2` and `log2`, and `X87`'s
+ * operations, and `%` of doubles (`fprem`'s loop), are the x87's over doubles
+ * stored below RSP and taken back (`x87OverXmm`). What only the x87 does past
+ * that -- x87 arguments, the control and status words, an i64 in EDX:EAX --
  * is refused at 64 bits with its reason (`onRefused`), and the function
  * stays a trap into its handler there.
  */
 
 import * as espree from 'espree';
+import { X87 } from '../../src/layers/win32/msvcrt/x87.js';
 import {
     ALU, ARGUMENTS_64, Assembler, CC, EAX, EBP, EBX, ECX, EDI, EDX, ESI, ESP, LEGACY_PREFIXES,
     R10, R11, R8, R9, Rex, fitsByte, invert, le32, loadDword, loadQuad, memory, moveRegister,
@@ -339,13 +342,24 @@ const X87_WORDS = new Set(['controlWord', 'statusWord', 'setControlWord', 'clear
  * A float's bits and back: `floatBits(x)` the dword of `Math.fround(x)`,
  * `floatOfBits(n)` the float a dword is -- `movd` between an XMM register and
  * EAX at 64 bits, a dword of the stack at 32. What a maths routine takes a
- * float apart by, into its exponent and mantissa.
+ * float apart by, into its exponent and mantissa. `doubleLow(x)` and
+ * `doubleHigh(x)` are a double's two dwords, bit for bit: `movq` from its XMM
+ * register at 64 bits; at 32 the dword of a double variable where it lies in
+ * the frame -- a parameter's slot among them -- with no `fld`, which would
+ * quiet a signalling NaN and raise the invalid flag.
  */
-const FLOAT_BITS = ['floatBits', 'floatOfBits'];
+const FLOAT_BITS = ['floatBits', 'floatOfBits', 'doubleLow', 'doubleHigh'];
+
+/**
+ * `pointerBytes`, the size of a pointer: 4 in the i386 and 8 in the x86-64,
+ * a constant of each; what a source lays out a pointer it writes, or a slot
+ * of a `va_list`, by.
+ */
+const POINTER_BYTES = 'pointerBytes';
 
 const HELPERS = new Set([...Object.keys(LOADS), ...Object.keys(STORES),
     'call', 'callStd', 'copyUp', 'copyDown', 'fill', 'host', 'compareExchange', ...X87_WORDS,
-    ...FLOAT_BITS]);
+    ...FLOAT_BITS, POINTER_BYTES]);
 
 const TABLE_KINDS = /** @type {const} */ ([
     ['Uint8Array', 1, false], ['Int8Array', 1, true], ['Uint16Array', 2, false],
@@ -373,6 +387,11 @@ const MATH_REFUSED = /** @type {Record<string, string>} */ ({
     log: 'X87.yl2x(X87.LN2, x)',
     log10: 'X87.yl2x(X87.LG2, x)',
     pow: 'X87.yl2x and the power of two, or leaves it to the handler',
+});
+
+/** Those constants as the doubles x86-64 code holds them, the source's own X87's. */
+const X87_VALUES = /** @type {Record<string, number>} */ ({
+    L2T: X87.L2T, L2E: X87.L2E, PI: X87.PI, LG2: X87.LG2, LN2: X87.LN2,
 });
 
 /** The constants the x87 loads by name, through `X87`: the instruction's second byte. */
@@ -1016,10 +1035,9 @@ class FunctionCompiler {
                 }
                 uses.push(property.key.name);
                 this.helpers.add(property.key.name);
-                if (this.long && X87_WORDS.has(property.key.name))
+                if (property.key.name === POINTER_BYTES)
                 {
-                    this.fail(property, `${property.key.name}: the x87's control and status `
-                        + 'words are the 32-bit runtime\'s, refused at 64 bits');
+                    this.bind(property.key, { constant: this.word });
                 }
                 if (this.long && property.key.name === 'compareExchange')
                 {
@@ -1913,6 +1931,52 @@ class FunctionCompiler {
         }
     }
 
+    /**
+     * A comparison of two constants -- `pointerBytes === 8` -- as the
+     * condition it is, or undefined when it is not one: an `if` or a `?:` on
+     * it keeps only the way it takes.
+     *
+     * @param {any} node
+     * @returns {boolean | undefined}
+     */
+    foldTest(node){
+        if (node.type !== 'BinaryExpression')
+        {
+            return undefined;
+        }
+        const left = this.fold(node.left);
+        const right = left === undefined ? undefined : this.fold(node.right);
+        if (left === undefined || right === undefined)
+        {
+            return undefined;
+        }
+        switch (node.operator)
+        {
+            case '===': return left === right;
+            case '!==': return left !== right;
+            case '<': return left < right;
+            case '<=': return left <= right;
+            case '>': return left > right;
+            case '>=': return left >= right;
+            default: return undefined;
+        }
+    }
+
+    /**
+     * The x87's words are the 32-bit runtime's: a use of one in x86-64 code is
+     * refused where it is made, so a source may take them and use them only
+     * in a way `pointerBytes` keeps from the x86-64.
+     *
+     * @param {any} node @param {string} name
+     */
+    wordsAt64(node, name){
+        if (this.long)
+        {
+            this.fail(node, `${name}: the x87's control and status words are the 32-bit `
+                + 'runtime\'s, refused at 64 bits');
+        }
+    }
+
     // --- statements ------------------------------------------------------
 
     /** @param {any[]} list */
@@ -1950,6 +2014,16 @@ class FunctionCompiler {
                 return;
             case 'IfStatement':
             {
+                const known = this.foldTest(node.test);
+                if (known !== undefined)
+                {
+                    const taken = known ? node.consequent : node.alternate;
+                    if (taken)
+                    {
+                        this.statement(taken);
+                    }
+                    return;
+                }
                 const only = node.alternate ? null : this.jumpOnly(node.consequent);
                 if (only !== null)
                 {
@@ -2386,6 +2460,7 @@ class FunctionCompiler {
                 if (name === 'setControlWord' && this.helpers.has(name))
                 {
                     this.arity(node, 1);
+                    this.wordsAt64(node, name);
                     const value = this.expr(node.arguments[0]);
                     this.integer(value, node.arguments[0], 'typed');
                     this.toEax(value, node.arguments[0]);
@@ -2396,6 +2471,7 @@ class FunctionCompiler {
                 if (name === 'setMxcsr' && this.helpers.has(name))
                 {
                     this.arity(node, 1);
+                    this.wordsAt64(node, name);
                     const value = this.expr(node.arguments[0]);
                     this.integer(value, node.arguments[0], 'typed');
                     this.toEax(value, node.arguments[0]);
@@ -2405,6 +2481,7 @@ class FunctionCompiler {
                 if (name === 'clearExceptions' && this.helpers.has(name))
                 {
                     this.arity(node, 0);
+                    this.wordsAt64(node, name);
                     a.emit(0xdb, 0xe2);                                    // fnclex
                     this.x87Used = true;
                     return;
@@ -3081,6 +3158,39 @@ class FunctionCompiler {
         }
     }
 
+    /**
+     * At 64 bits, an x87 instruction over the `count` doubles on top of the XMM
+     * stack: each stored below RSP and loaded onto the x87's in order, the first
+     * deepest, as the 32-bit code brings them; `bytes` leaves the one answer in
+     * ST0, which goes back into the first one's register, the others popped.
+     * No call lies between, and the x87 is empty before and after, as the
+     * convention leaves it.
+     *
+     * @param {number} count @param {number[]} bytes
+     * @param {number} [spare]  quadwords past the arguments' the instruction may use
+     * @returns {Value}
+     */
+    x87OverXmm(count, bytes, spare = 0){
+        const first = this.fpu - count;
+        // RSP moved: the function is no leaf, and has its unwind data.
+        this.pushedAny = true;
+        this.a.emit(0x48, 0x83, 0xec, 8 * (count + spare));                // sub rsp, 8n
+        for (let i = 0; i < count; i++)
+        {
+            this.a.emit(0xf2, 0x0f, 0x11, 0x44 | (first + i) << 3, 0x24, 8 * i);  // movsd [rsp+8i]
+        }
+        for (let i = 0; i < count; i++)
+        {
+            this.a.emit(0xdd, 0x44, 0x24, 8 * i);                          // fld qword [rsp+8i]
+        }
+        this.a.emit(...bytes);
+        this.a.emit(0xdd, 0x1c, 0x24);                                     // fstp qword [rsp]
+        this.a.emit(0xf2, 0x0f, 0x10, 0x04 | first << 3, 0x24);            // movsd xmm, [rsp]
+        this.a.emit(0x48, 0x83, 0xc4, 8 * (count + spare));                // add rsp, 8n
+        this.fpu = first + 1;
+        return { where: 'st0', type: 'f64' };
+    }
+
     // --- doubles at 64 bits: SSE2 --------------------------------------------
     //
     // The x87's stack of doubles, as XMM registers: the value `fpu` deep in
@@ -3224,7 +3334,16 @@ class FunctionCompiler {
     floatBinaryXmm(node){
         if (node.operator === '%')
         {
-            this.x87Only(node, '% of a double, the exact remainder of `fprem`,');
+            // `fprem`, exact, repeated until C2 says the remainder is whole, as the
+            // i386 does it (`floatBinary`).
+            this.toXmm(this.expr(node.left), node.left);
+            this.toXmm(this.expr(node.right), node.right);
+            return this.x87OverXmm(2, [
+                0xd9, 0xc9,                                                // fxch
+                0xd9, 0xf8, 0xdf, 0xe0, 0xf6, 0xc4, 0x04,                  // fprem; fnstsw; test
+                0x75, 0xf7,                                                // jnz the fprem
+                0xdd, 0xd9,                                                // fstp st1
+            ]);
         }
         this.note(node, 'rounds');
         this.toXmm(this.expr(node.left), node.left);
@@ -3367,6 +3486,12 @@ class FunctionCompiler {
                     + 'write c ? 1 : 0');
             case 'ConditionalExpression':
             {
+                // A comparison of constants keeps only the value it takes.
+                const known = this.foldTest(node.test);
+                if (known !== undefined)
+                {
+                    return this.expr(known ? node.consequent : node.alternate);
+                }
                 const otherwise = a.fresh('else');
                 const end = a.fresh('end');
                 this.branch(node.test, otherwise, false);
@@ -3402,7 +3527,12 @@ class FunctionCompiler {
                         this.fail(node, `X87.${node.property.name} is not a constant the x87 `
                             + `loads: ${Object.keys(X87_CONSTANTS).join(', ')}`);
                     }
-                    this.x87Only(node, `X87.${node.property.name}`);
+                    if (this.long)
+                    {
+                        // The double the source's own X87 holds, as a constant.
+                        return { where: 'imm', type: 'f64',
+                            value: X87_VALUES[/** @type {'PI'} */ (node.property.name)] };
+                    }
                     this.x87Used = true;
                     if (++this.fpu > X87_DEPTH)
                     {
@@ -3867,7 +3997,10 @@ class FunctionCompiler {
      */
     x87Intrinsic(node, name){
         const a = this.a;
-        this.x87Only(node, `X87.${name}`);
+        if (this.long)
+        {
+            return this.x87IntrinsicXmm(node, name);
+        }
         /** @param {number} count */
         const pushed = count=>node.arguments.slice(0, count).forEach((/** @type {any} */ arg)=>
             this.toSt0(this.expr(arg), arg));
@@ -3915,6 +4048,49 @@ class FunctionCompiler {
                 return this.fail(node, `X87.${name} is not one of the x87's here: rint, f2xm1, `
                     + 'yl2x, scale, exponent, significand');
         }
+    }
+
+    /**
+     * At 64 bits, `X87.name(...)`: its arguments onto the XMM stack, then the
+     * same instruction over them on the x87 (`x87OverXmm`).
+     *
+     * @param {any} node @param {string} name @returns {Value}
+     */
+    x87IntrinsicXmm(node, name){
+        /** @type {Record<string, [number, number[]]>} arguments, the instruction */
+        const forms = {
+            f2xm1: [1, [0xd9, 0xf0]],
+            yl2x: [2, [0xd9, 0xf1]],
+            scale: [2, [0xd9, 0xc9, 0xd9, 0xfd, 0xdd, 0xd9]],              // fxch; fscale; fstp st1
+            exponent: [1, [0xd9, 0xf4, 0xdd, 0xd8]],                       // fxtract; fstp st0
+            significand: [1, [0xd9, 0xf4, 0xdd, 0xd9]],                    // fxtract; fstp st1
+        };
+        if (name !== 'rint' && !Object.hasOwn(forms, name))
+        {
+            return this.fail(node, `X87.${name} is not one of the x87's here: rint, f2xm1, `
+                + 'yl2x, scale, exponent, significand');
+        }
+        const [count, bytes] = name === 'rint' ? [1, []] : forms[name];
+        this.arity(node, count);
+        for (const argument of node.arguments)
+        {
+            this.toXmm(this.expr(argument), argument);
+        }
+        if (name !== 'rint')
+        {
+            return this.x87OverXmm(count, bytes);
+        }
+        // frndint to nearest, the control word with only its rounding changed and put
+        // back, as `round(0)` does; the words in the slot past the argument's.
+        return this.x87OverXmm(1, [
+            0xd9, 0x7c, 0x24, 0x08,                                        // fnstcw [rsp+8]
+            0x0f, 0xb7, 0x44, 0x24, 0x08,                                  // movzx eax, [rsp+8]
+            0x80, 0xe4, 0xf3,                                              // and ah, 0xf3
+            0x66, 0x89, 0x44, 0x24, 0x0a,                                  // mov [rsp+10], ax
+            0xd9, 0x6c, 0x24, 0x0a,                                        // fldcw [rsp+10]
+            0xd9, 0xfc,                                                    // frndint
+            0xd9, 0x6c, 0x24, 0x08,                                        // fldcw [rsp+8]
+        ], 1);
     }
 
     /**
@@ -4000,7 +4176,16 @@ class FunctionCompiler {
             if (this.long && (Object.hasOwn(MATH_UNARY, name) || name === 'atan2'
                 || name === 'log2'))
             {
-                this.x87Only(node, `Math.${name}`);
+                // The x87's one instruction for it, over doubles held in XMM registers.
+                const unary = Object.hasOwn(MATH_UNARY, name);
+                this.arity(node, unary || name === 'log2' ? 1 : 2);
+                for (const argument of node.arguments)
+                {
+                    this.toXmm(this.expr(argument), argument);
+                }
+                return this.x87OverXmm(node.arguments.length, unary ? MATH_UNARY[name]
+                    : name === 'atan2' ? [0xd9, 0xf3]                     // fpatan
+                        : [0xd9, 0xe8, 0xd9, 0xc9, 0xd9, 0xf1]);         // fld1; fxch; fyl2x
             }
             if (Object.hasOwn(ROUNDING, name) || name === 'abs')
             {
@@ -4133,6 +4318,33 @@ class FunctionCompiler {
                 this.fpu--;
                 return { where: 'eax', type: 'u32' };
             }
+            if (name === 'doubleLow' || name === 'doubleHigh')
+            {
+                this.arity(node, 1);
+                const value = this.expr(node.arguments[0]);
+                const high = name === 'doubleHigh';
+                if (this.long)
+                {
+                    this.toXmm(value, node.arguments[0]);
+                    const x = this.fpu - 1;
+                    // movq rax, xmm
+                    a.emit(0x66, x >= 8 ? 0x4c : 0x48, 0x0f, 0x7e, 0xc0 | (x & 7) << 3);
+                    if (high)
+                    {
+                        a.emit(0x48, 0xc1, 0xe8, 0x20);                    // shr rax, 32
+                    }
+                    this.fpu--;
+                    return { where: 'eax', type: 'u32' };
+                }
+                if (value.where !== 'var' || value.type !== 'f64' || value.v.onStack
+                    || this.x87.includes(value.v))
+                {
+                    this.fail(node.arguments[0], `${name}: at 32 bits a double variable, read `
+                        + 'where it lies in the frame');
+                }
+                this.op(0x8b, ...this.frameAt(EAX, value.v.disp + (high ? 4 : 0))); // mov eax, [v]
+                return { where: 'eax', type: 'u32' };
+            }
             if (name === 'floatOfBits')
             {
                 this.arity(node, 1);
@@ -4168,6 +4380,7 @@ class FunctionCompiler {
             if (name === 'mxcsr')
             {
                 this.arity(node, 0);
+                this.wordsAt64(node, name);
                 a.emit(0x83, 0xec, 0x04);                                  // sub esp, 4
                 a.emit(0x0f, 0xae, 0x1c, 0x24);                            // stmxcsr [esp]
                 a.emit(0x8b, 0x04, 0x24);                                  // mov eax, [esp]
@@ -4177,6 +4390,7 @@ class FunctionCompiler {
             if (name === 'controlWord' || name === 'statusWord')
             {
                 this.arity(node, 0);
+                this.wordsAt64(node, name);
                 this.x87Used = true;
                 if (name === 'controlWord')
                 {
@@ -5021,6 +5235,15 @@ function parallelMove(moves){
             {
                 move.from = EAX;
             }
+        }
+    }
+    // A dword left in its own register still has its high half cleared: the
+    // caller's was undefined, and the code takes the whole register as an address.
+    for (const { from, to, quad } of moves)
+    {
+        if (from === to && !quad)
+        {
+            bytes.push(...moveRegister(to, from, false));
         }
     }
     return bytes;

@@ -42,6 +42,7 @@ import { createProcessBlocks, TEB, TEB64 } from './layers/win32/kernel32/teb.js'
 import { KUSER, KUSER_REGION, SHARED_USER_DATA, createSharedUserData, sharedPageAt }
     from './layers/win32/kernel32/shared-data.js';
 import { supportedOsOf, windowsVersion } from './layers/win32/kernel32/versions.js';
+import { KNOWN_ROUTINES } from './layers/win32/msvcrt/known-routines.js';
 import { GRAPHICS_CHOICES, graphicsChoice } from './layers/graphics/choice.js';
 import { searchesBesideProgram } from './layers/win32/kernel32/modules.js';
 import { synthesiseProcessInit, DLL_PROCESS_ATTACH, DLL_PROCESS_DETACH }
@@ -1962,6 +1963,20 @@ export function mobileOrSafari(navigator = /** @type {any} */ (globalThis).navig
  * its callers return through the entry hash.
  */
 const IOS_CALL_DEPTH = 64;
+
+/**
+ * The engine's own C runtime routines handed to the translator to form as
+ * their operations (cork's `helpersAlso`, `known-routines.js`), unless the
+ * caller named its own.
+ *
+ * @template {AppOptions} T
+ * @param {T} options
+ * @returns {T & { cork?: any }}
+ */
+export function withKnownRoutines(options){
+    return { ...options, cork: { ...options.cork,
+        config: { helpersAlso: KNOWN_ROUTINES, ...options.cork?.config } } };
+}
 
 /**
  * HACK until iOS ships https://github.com/WebKit/WebKit/pull/76671 (see
@@ -5972,6 +5987,8 @@ async function buildApp(options){
             ...(/** @type {() => string[]} */ (audio.runtimes)?.() ?? []),
             ...(/** @type {() => string[]} */ (core.api('media').runtimes)?.() ?? []),
         ]);
+    /** An export's x86-64 as its code, with the pointers laid out in it. @param {any} fn */
+    const longOf = fn=>({ ...fn, code: fn.long, pointers: fn.longPointers ?? fn.pointers });
     /**
      * An export that is code of its own, with the traps it jumps to registered
      * and the jumps to them for the loader to fill in.
@@ -6035,9 +6052,9 @@ async function buildApp(options){
             // A long-mode process runs no i386: an export that is guest code
             // runs its x86-64 there (`long`), where the build made any, and
             // is a trap into its host handler where it did not.
+            // A long export's pointers are its own: its code lays them out apart.
             ...long && fn.long || fn.code && !(long && fn.handler)
-                ? codeExport(long && fn.long ? { ...fn, code: fn.long } : fn,
-                    `${name}!${exported}`)
+                ? codeExport(long && fn.long ? longOf(fn) : fn, `${name}!${exported}`)
                 : fn.data ? {
                     data: fn.data(), pointers: fn.pointers, entry: fn.entry,
                 } : {
@@ -10218,7 +10235,7 @@ export async function createApp(options){
     // fails later somewhere that says nothing about why.
     windowsVersion(options.windows);
     // Settled once, here, so every process the run makes is built in it.
-    options = withRunMode(withCpuSetup(withoutFaultingTailCalls(options)));
+    options = withRunMode(withCpuSetup(withoutFaultingTailCalls(withKnownRoutines(options))));
     options = { ...options, processId: options.processId ?? runProcessId() };
     graphicsChoice(options.graphicsApi);
     // Both outlive every process: subscriptions a caller made before the first

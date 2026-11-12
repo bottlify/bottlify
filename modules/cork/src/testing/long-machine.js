@@ -13,8 +13,8 @@
  */
 
 import { readFileSync } from 'node:fs';
-import v8 from 'node:v8';
 import { gunzipSync } from 'node:zlib';
+import { allowMemory64 } from './memory64.js';
 import { ownLayout, pageFlagsAt, pagesFor, tablesSize } from '../runtime/layout.js';
 import { PageFlag } from '../runtime/pages.js';
 import { blockState64, interpret64 } from '../interp64.js';
@@ -77,7 +77,7 @@ export function machine({ config = {}, trapPort = undefined, tiered = false,
 {
     if (window !== undefined)
     {
-        v8.setFlagsFromString('--experimental-wasm-memory64');
+        allowMemory64();
     }
     const layout = window === undefined ? ownLayout({ ramSize, ramBase: 0, bits: 64 })
         : ownLayout({ ramSize: window - 4096, ramBase: 0, bits: 64, window,

@@ -609,3 +609,36 @@ test('the x87 memory forms by words: single precision, a negative quadword, a si
     assert.equal(nan.state.status & 1, 1);
     assert.equal(nan.view.getBigUint64(0x2008, true), 0x7ff8000020000000n);
 });
+
+test('x87 loads, moves, sign changes and extended stores keep a signalling NaN\'s bits,'
+    + ' however often they run', ()=>{
+    // fld tword [0x2020] (a signalling NaN); fld st0; fchs; fxch st1; fxch st1;
+    // fabs; fchs; fst st2; fstp tword [0x2008]; fcmove st0, st1; frndint;
+    // fucomi st0, st1; fstp qword [0x2000]. The processor moves and changes
+    // the sign of a signalling NaN without quieting it; a double store quiets
+    // it. Rounds enough for the engine to optimize the steps: V8 14's Maglev
+    // quiets a signalling NaN a JavaScript number stores.
+    const code = [0xdb, 0x2d, 0x20, 0x20, 0, 0, 0xd9, 0xc0, 0xd9, 0xe0, 0xd9, 0xc9, 0xd9, 0xc9,
+        0xd9, 0xe1, 0xd9, 0xe0, 0xdd, 0xd2, 0xdb, 0x3d, 0x08, 0x20, 0, 0, 0xda, 0xc9, 0xd9, 0xfc,
+        0xdb, 0xe9, 0xdd, 0x1d, 0x00, 0x20, 0, 0];
+    /** @type {string[]} */
+    const wrong = [];
+    for (let round = 0; round < 3000 && wrong.length < 4; round++)
+    {
+        const m = run(code, state=>{
+            state.memory.write(0x2024, 4, 0xa0000000);
+            state.memory.write(0x2028, 2, 0x7fff);
+            state.eflags |= 0x40;
+        });
+        const seen = [m.state.f80bits[7], m.state.f80bits[0], m.view.getBigInt64(0x2000, true),
+            m.view.getBigInt64(0x2008, true), BigInt(m.view.getUint16(0x2010, true)),
+            BigInt(m.state.status & 1), BigInt(m.state.eflags & 0x45)]
+            .map(word=>BigInt.asUintN(64, word).toString(16)).join(' ');
+        if (seen !== 'fff4000000000000 fff4000000000000 fffc000000000000 a000000000000000 ffff'
+            + ' 1 45')
+        {
+            wrong.push(`round ${round}: ${seen}`);
+        }
+    }
+    assert.deepEqual(wrong, []);
+});

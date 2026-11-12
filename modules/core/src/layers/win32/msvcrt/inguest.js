@@ -892,16 +892,17 @@ export const BELOW_CARRY = Uint32Array.from({ length: 37 },
  * White space, a sign, `0x` or `0X` in base 16 or 0 (a leading 0 is octal in
  * base 0), and the digits of the base, each letter of either case from ten;
  * `*end` set to where the digits stopped, or to the text itself when none
- * converted. A value out of range is the host's: it clamps and sets errno,
- * which is the calling thread's own; so is a base outside 2..36 other than 0,
- * which the handler reads as it reads any other. Neither case writes before
+ * converted, a pointer of the process's size. A value out of range is the
+ * host's: it clamps and sets errno, which is the calling thread's own; so is
+ * a base outside 2..36 other than 0, which the handler reads as it reads any
+ * other. Neither case writes before
  * it goes, so the host answers the call as it came.
  *
  * @guestCode cdecl
  * @param {Guest} guest @param {u32} text @param {u32} end @param {i32} base
  * @returns {i32}
  */
-export function strtol({ u8, setU32, host }, text, end, base){
+export function strtol({ u8, setU32, host, pointerBytes }, text, end, base){
     if (base !== 0 && (base < 2 || base > 36))
     {
         return host();
@@ -956,6 +957,10 @@ export function strtol({ u8, setU32, host }, text, end, base){
         if (end !== 0)
         {
             setU32(end, text);
+            if (pointerBytes === 8)
+            {
+                setU32(end + 4, 0);
+            }
         }
         return 0;
     }
@@ -966,6 +971,10 @@ export function strtol({ u8, setU32, host }, text, end, base){
     if (end !== 0)
     {
         setU32(end, at);
+        if (pointerBytes === 8)
+        {
+            setU32(end + 4, 0);
+        }
     }
     return negative !== 0 ? (0 - magnitude) | 0 : magnitude | 0;
 }
@@ -980,7 +989,7 @@ export function strtol({ u8, setU32, host }, text, end, base){
  * @param {Guest} guest @param {u32} text @param {u32} end @param {i32} base
  * @returns {u32}
  */
-export function strtoul({ u8, setU32, host }, text, end, base){
+export function strtoul({ u8, setU32, host, pointerBytes }, text, end, base){
     if (base !== 0 && (base < 2 || base > 36))
     {
         return host();
@@ -1035,12 +1044,20 @@ export function strtoul({ u8, setU32, host }, text, end, base){
         if (end !== 0)
         {
             setU32(end, text);
+            if (pointerBytes === 8)
+            {
+                setU32(end + 4, 0);
+            }
         }
         return 0;
     }
     if (end !== 0)
     {
         setU32(end, at);
+        if (pointerBytes === 8)
+        {
+            setU32(end + 4, 0);
+        }
     }
     return negative !== 0 ? (0 - magnitude) >>> 0 : magnitude;
 }
@@ -1969,4 +1986,1000 @@ export function expf({ floatBits, floatOfBits, host }, x){
         + FACTORIAL7) * r + FACTORIAL6) * r + FACTORIAL5) * r + FACTORIAL4) * r + FACTORIAL3) * r
         + FACTORIAL2) * r + 1) * r + 1;
     return Math.fround(p * floatOfBits(k + 127 << 23));
+}
+
+/** Below it in magnitude `fsin`, `fcos` and `fptan` reduce their argument themselves. */
+const FLOAT_REDUCED = 2 ** 63;
+
+/**
+ * sinf, cosf and tanf: the double form's instruction on the float, the answer
+ * rounded to a float as the host's handler rounds the double one; past the
+ * instruction's reduction, an infinity and a NaN the host's.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x
+ * @returns {f32}
+ */
+export function sinf({ host }, x){
+    if (!(Math.abs(x) < FLOAT_REDUCED))
+    {
+        return host();
+    }
+    return Math.fround(Math.sin(x));
+}
+
+/**
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x
+ * @returns {f32}
+ */
+export function cosf({ host }, x){
+    if (!(Math.abs(x) < FLOAT_REDUCED))
+    {
+        return host();
+    }
+    return Math.fround(Math.cos(x));
+}
+
+/**
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x
+ * @returns {f32}
+ */
+export function tanf({ host }, x){
+    if (!(Math.abs(x) < FLOAT_REDUCED))
+    {
+        return host();
+    }
+    return Math.fround(Math.tan(x));
+}
+
+/**
+ * asinf and acosf: atan2 of the float and its cosine's (sine's) square root, in
+ * doubles; past one in magnitude (EDOM) and a NaN the host's.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x
+ * @returns {f32}
+ */
+export function asinf({ host }, x){
+    if (!(Math.abs(x) <= 1))
+    {
+        return host();
+    }
+    return Math.fround(Math.atan2(x, Math.sqrt(1 - x * x)));
+}
+
+/**
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x
+ * @returns {f32}
+ */
+export function acosf({ host }, x){
+    if (!(Math.abs(x) <= 1))
+    {
+        return host();
+    }
+    return Math.fround(Math.atan2(Math.sqrt(1 - x * x), x));
+}
+
+/**
+ * atanf and atan2f: `fpatan`; a NaN the host's.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x
+ * @returns {f32}
+ */
+export function atanf({ host }, x){
+    if (Number.isNaN(x))
+    {
+        return host();
+    }
+    return Math.fround(Math.atan(x));
+}
+
+/**
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} y @param {f32} x
+ * @returns {f32}
+ */
+export function atan2f({ host }, y, x){
+    if (Number.isNaN(y) || Number.isNaN(x))
+    {
+        return host();
+    }
+    return Math.fround(Math.atan2(y, x));
+}
+
+/**
+ * sqrtf: the double's root rounded to a float, which is the float's own
+ * correctly rounded root; a negative (EDOM) and a NaN the host's.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x
+ * @returns {f32}
+ */
+export function sqrtf({ host }, x){
+    if (!(x >= 0))
+    {
+        return host();
+    }
+    return Math.fround(Math.sqrt(x));
+}
+
+/**
+ * floorf and ceilf, exact; a NaN the host's, which hands its payload through.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x
+ * @returns {f32}
+ */
+export function floorf({ host }, x){
+    if (Number.isNaN(x))
+    {
+        return host();
+    }
+    return Math.fround(Math.floor(x));
+}
+
+/**
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x
+ * @returns {f32}
+ */
+export function ceilf({ host }, x){
+    if (Number.isNaN(x))
+    {
+        return host();
+    }
+    return Math.fround(Math.ceil(x));
+}
+
+/**
+ * fmodf: the exact remainder, the dividend's sign; an infinite dividend or a
+ * zero divisor (EDOM) and a NaN the host's.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x @param {f32} y
+ * @returns {f32}
+ */
+export function fmodf({ host }, x, y){
+    if (!(Math.abs(x) <= 3.4028234663852886e38) || y === 0 || Number.isNaN(y))
+    {
+        return host();
+    }
+    return Math.fround(x % y);
+}
+
+/**
+ * void *memchr(const void *buffer, int value, size_t count)
+ *
+ * The first of `count` bytes that is `value`'s low byte, or null.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} buffer @param {u32} value @param {u32} count
+ * @returns {u32}
+ */
+export function memchr({ u8 }, buffer, value, count){
+    const wanted = value & 0xff;
+    for (/** @type {u32} */ let i = 0; i < count; i++)
+    {
+        if (u8(buffer + i) === wanted)
+        {
+            return (buffer + i) >>> 0;
+        }
+    }
+    return 0;
+}
+
+/**
+ * char *strncat(char *destination, const char *source, size_t count)
+ *
+ * At most `count` bytes of the source after the destination's text, the
+ * source read no further than that, and always a terminator: as if read
+ * first, as strcat copies.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} destination @param {u32} source @param {u32} count
+ * @returns {u32}
+ */
+export function strncat({ u8, setU8, copyUp, copyDown }, destination, source, count){
+    /** @type {u32} */
+    let end = destination;
+    while (u8(end) !== 0)
+    {
+        end++;
+    }
+    /** @type {u32} */
+    let length = 0;
+    while (length < count && u8(source + length) !== 0)
+    {
+        length++;
+    }
+    if ((end - source) >>> 0 < length)
+    {
+        copyDown(end, source, length);
+    }
+    else
+    {
+        copyUp(end, source, length);
+    }
+    setU8(end + length, 0);
+    return destination;
+}
+
+/**
+ * wchar_t *wcschr(const wchar_t *text, wchar_t c)
+ *
+ * The first unit that is `c`, the terminator among them.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} text @param {u32} c
+ * @returns {u32}
+ */
+export function wcschr({ u16 }, text, c){
+    const wanted = c & 0xffff;
+    for (/** @type {u32} */ let at = text; ; at += 2)
+    {
+        const unit = u16(at);
+        if (unit === wanted)
+        {
+            return at;
+        }
+        if (unit === 0)
+        {
+            return 0;
+        }
+    }
+}
+
+/**
+ * wchar_t *wcsrchr(const wchar_t *text, wchar_t c)
+ *
+ * The last unit that is `c`, the terminator among them, as strrchr's.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} text @param {u32} c
+ * @returns {u32}
+ */
+export function wcsrchr({ u16 }, text, c){
+    const wanted = c & 0xffff;
+    /** @type {u32} */
+    let found = 0;
+    for (/** @type {u32} */ let at = text; ; at += 2)
+    {
+        const unit = u16(at);
+        if (unit === wanted)
+        {
+            found = at;
+        }
+        if (unit === 0)
+        {
+            return found;
+        }
+    }
+}
+
+/**
+ * int wcsncmp(const wchar_t *left, const wchar_t *right, size_t count)
+ *
+ * At most `count` units, as unsigned sixteen-bit values, the answer -1, 0
+ * or 1.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} left @param {u32} right @param {u32} count
+ * @returns {i32}
+ */
+export function wcsncmp({ u16 }, left, right, count){
+    for (/** @type {u32} */ let i = 0; i < count; i++)
+    {
+        const a = u16(left + i * 2);
+        const b = u16(right + i * 2);
+        if (a !== b)
+        {
+            return a < b ? -1 : 1;
+        }
+        if (a === 0)
+        {
+            return 0;
+        }
+    }
+    return 0;
+}
+
+/**
+ * wchar_t *wcscat(wchar_t *destination, const wchar_t *source)
+ *
+ * The source and its terminator after the destination's text, as if read
+ * whole first.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} destination @param {u32} source
+ * @returns {u32}
+ */
+export function wcscat({ u16, copyUp, copyDown }, destination, source){
+    /** @type {u32} */
+    let end = destination;
+    while (u16(end) !== 0)
+    {
+        end += 2;
+    }
+    /** @type {u32} */
+    let length = 2;
+    while (u16(source + length - 2) !== 0)
+    {
+        length += 2;
+    }
+    if ((end - source) >>> 0 < length)
+    {
+        copyDown(end, source, length);
+    }
+    else
+    {
+        copyUp(end, source, length);
+    }
+    return destination;
+}
+
+/**
+ * wchar_t *wcsncat(wchar_t *destination, const wchar_t *source, size_t count)
+ *
+ * At most `count` units of the source after the destination's text, and
+ * always a terminator.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} destination @param {u32} source @param {u32} count
+ * @returns {u32}
+ */
+export function wcsncat({ u16, setU16, copyUp, copyDown }, destination, source, count){
+    /** @type {u32} */
+    let end = destination;
+    while (u16(end) !== 0)
+    {
+        end += 2;
+    }
+    /** @type {u32} */
+    let units = 0;
+    while (units < count && u16(source + units * 2) !== 0)
+    {
+        units++;
+    }
+    const length = (units * 2) >>> 0;
+    if ((end - source) >>> 0 < length)
+    {
+        copyDown(end, source, length);
+    }
+    else
+    {
+        copyUp(end, source, length);
+    }
+    setU16(end + length, 0);
+    return destination;
+}
+
+/**
+ * wchar_t *wcsstr(const wchar_t *haystack, const wchar_t *needle)
+ *
+ * The first place the needle's units are, the haystack itself for an empty one.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} haystack @param {u32} needle
+ * @returns {u32}
+ */
+export function wcsstr({ u16 }, haystack, needle){
+    for (/** @type {u32} */ let at = haystack; ; at += 2)
+    {
+        /** @type {u32} */
+        let i = 0;
+        while (u16(needle + i) !== 0 && u16(at + i) === u16(needle + i))
+        {
+            i += 2;
+        }
+        if (u16(needle + i) === 0)
+        {
+            return at;
+        }
+        if (u16(at) === 0)
+        {
+            return 0;
+        }
+    }
+}
+
+/**
+ * size_t wcsspn(const wchar_t *text, const wchar_t *accept)
+ *
+ * How many units from the start are each a unit of `accept`.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} text @param {u32} accept
+ * @returns {u32}
+ */
+export function wcsspn({ u16 }, text, accept){
+    for (/** @type {u32} */ let at = text; ; at += 2)
+    {
+        const unit = u16(at);
+        let found = 0;
+        for (/** @type {u32} */ let set = accept; found === 0 && u16(set) !== 0; set += 2)
+        {
+            if (u16(set) === unit)
+            {
+                found = 1;
+            }
+        }
+        if (unit === 0 || found === 0)
+        {
+            return (at - text) >>> 1;
+        }
+    }
+}
+
+/**
+ * size_t wcscspn(const wchar_t *text, const wchar_t *reject)
+ *
+ * How many units from the start are none of `reject`'s.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} text @param {u32} reject
+ * @returns {u32}
+ */
+export function wcscspn({ u16 }, text, reject){
+    for (/** @type {u32} */ let at = text; ; at += 2)
+    {
+        const unit = u16(at);
+        let found = 0;
+        for (/** @type {u32} */ let set = reject; found === 0 && u16(set) !== 0; set += 2)
+        {
+            if (u16(set) === unit)
+            {
+                found = 1;
+            }
+        }
+        if (unit === 0 || found !== 0)
+        {
+            return (at - text) >>> 1;
+        }
+    }
+}
+
+/**
+ * wchar_t *wcspbrk(const wchar_t *text, const wchar_t *accept)
+ *
+ * The first unit the set has, or null; the terminator is never one of it.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} text @param {u32} accept
+ * @returns {u32}
+ */
+export function wcspbrk({ u16 }, text, accept){
+    for (/** @type {u32} */ let at = text; ; at += 2)
+    {
+        const unit = u16(at);
+        if (unit === 0)
+        {
+            return 0;
+        }
+        for (/** @type {u32} */ let set = accept; u16(set) !== 0; set += 2)
+        {
+            if (u16(set) === unit)
+            {
+                return at;
+            }
+        }
+    }
+}
+
+/**
+ * size_t strnlen(const char *text, size_t most)
+ *
+ * The bytes before the terminator, `most` at the most: no byte past them read.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} text @param {u32} most
+ * @returns {u32}
+ */
+export function strnlen({ u8 }, text, most){
+    /** @type {u32} */
+    let length = 0;
+    while (length < most && u8(text + length) !== 0)
+    {
+        length++;
+    }
+    return length;
+}
+
+/**
+ * size_t wcsnlen(const wchar_t *text, size_t most)
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} text @param {u32} most
+ * @returns {u32}
+ */
+export function wcsnlen({ u16 }, text, most){
+    /** @type {u32} */
+    let length = 0;
+    while (length < most && u16(text + length * 2) !== 0)
+    {
+        length++;
+    }
+    return length;
+}
+
+/** A unit with the ASCII capitals folded to lower case, the C locale's. */
+const lowerUnit = (/** @type {number} */ unit)=>(unit < 0x80 ? LOWER[unit] : unit);
+
+/**
+ * int _wcsicmp(const wchar_t *left, const wchar_t *right)
+ *
+ * wcscmp with the ASCII letters folded to lower case, the answer -1, 0 or 1.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} left @param {u32} right
+ * @returns {i32}
+ */
+export function _wcsicmp({ u16 }, left, right){
+    for (/** @type {u32} */ let i = 0; ; i += 2)
+    {
+        const a = lowerUnit(u16(left + i));
+        const b = lowerUnit(u16(right + i));
+        if (a !== b)
+        {
+            return a < b ? -1 : 1;
+        }
+        if (a === 0)
+        {
+            return 0;
+        }
+    }
+}
+
+/**
+ * int _wcsnicmp(const wchar_t *left, const wchar_t *right, size_t count)
+ *
+ * At most `count` units with the ASCII letters folded to lower case, the
+ * answer the difference of the first two that differ, the terminator
+ * ending both.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} left @param {u32} right @param {u32} count
+ * @returns {i32}
+ */
+export function _wcsnicmp({ u16 }, left, right, count){
+    for (/** @type {u32} */ let i = 0; i < count; i++)
+    {
+        const a = lowerUnit(u16(left + i * 2));
+        const b = lowerUnit(u16(right + i * 2));
+        if (a !== b || a === 0)
+        {
+            return (a - b) | 0;
+        }
+    }
+    return 0;
+}
+
+/**
+ * int _memicmp(const void *left, const void *right, size_t count)
+ *
+ * memcmp with the ASCII letters folded to lower case, the answer the
+ * difference of the first two bytes that differ; no buffer for a count is
+ * the handler's (_NLSCMPERROR and EINVAL, errno being the thread's).
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} left @param {u32} right @param {u32} count
+ * @returns {i32}
+ */
+export function _memicmp({ u8, host }, left, right, count){
+    if (count === 0)
+    {
+        return 0;
+    }
+    if (left === 0 || right === 0)
+    {
+        return host();
+    }
+    for (/** @type {u32} */ let i = 0; i < count; i++)
+    {
+        const a = LOWER[u8(left + i)];
+        const b = LOWER[u8(right + i)];
+        if (a !== b)
+        {
+            return (a - b) | 0;
+        }
+    }
+    return 0;
+}
+
+/**
+ * int _wtoi(const wchar_t *text), and _wtol: atoi's reading over a wide
+ * string -- white space, a sign, ASCII digits -- and atoi's overflow, which
+ * wraps in 32 bits.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} text
+ * @returns {i32}
+ */
+export function _wtoi({ u16 }, text){
+    let at = text;
+    let c = u16(at);
+    while (c === 0x20 || c >= 0x09 && c <= 0x0d)
+    {
+        at += 2;
+        c = u16(at);
+    }
+    let negative = 0;
+    if (c === 0x2d || c === 0x2b)
+    {
+        negative = c === 0x2d ? 1 : 0;
+        at += 2;
+        c = u16(at);
+    }
+    /** @type {i32} */
+    let total = 0;
+    while (c >= 0x30 && c <= 0x39)
+    {
+        total = (Math.imul(total, 10) + c - 0x30) | 0;
+        at += 2;
+        c = u16(at);
+    }
+    return negative !== 0 ? (0 - total) | 0 : total;
+}
+
+/** A unit's value as a digit, ASCII alone; 99 for any other, past every radix. */
+const wideDigit = (/** @type {number} */ unit)=>(unit < 0x80 ? DIGITS[unit] : 99);
+
+/**
+ * long wcstol(const wchar_t *text, wchar_t **end, int base)
+ *
+ * strtol's reading over a wide string. The host reads the white space and
+ * the digits of every script msvcrt knows: a unit past ASCII where the
+ * reading stops -- after the white space, after the sign, after the digits
+ * -- is the handler's, and so are strtol's: a value out of range, a base it
+ * does not take.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} text @param {u32} end @param {i32} base
+ * @returns {i32}
+ */
+export function wcstol({ u16, setU32, host, pointerBytes }, text, end, base){
+    if (base !== 0 && (base < 2 || base > 36))
+    {
+        return host();
+    }
+    let at = text;
+    let c = u16(at);
+    while (c === 0x20 || c >= 0x09 && c <= 0x0d)
+    {
+        at += 2;
+        c = u16(at);
+    }
+    let negative = 0;
+    if (c === 0x2d || c === 0x2b)
+    {
+        negative = c === 0x2d ? 1 : 0;
+        at += 2;
+        c = u16(at);
+    }
+    if (c >= 0x80)
+    {
+        return host();
+    }
+    let radix = base;
+    if ((radix === 0 || radix === 16) && c === 0x30 && (u16(at + 2) | 0x20) === 0x78)
+    {
+        radix = 16;
+        at += 4;
+        c = u16(at);
+    }
+    else if (radix === 0)
+    {
+        radix = c === 0x30 ? 8 : 10;
+    }
+    const start = at;
+    const most = BELOW_CARRY[radix];
+    /** @type {u32} */
+    let magnitude = 0;
+    let digit = wideDigit(c);
+    while (digit < radix)
+    {
+        if (magnitude > most)
+        {
+            return host();
+        }
+        const product = Math.imul(magnitude, radix) >>> 0;
+        magnitude = (product + digit) >>> 0;
+        if (magnitude < product)
+        {
+            return host();
+        }
+        at += 2;
+        digit = wideDigit(u16(at));
+    }
+    if (u16(at) >= 0x80)
+    {
+        return host();
+    }
+    if (at === start)
+    {
+        if (end !== 0)
+        {
+            setU32(end, text);
+            if (pointerBytes === 8)
+            {
+                setU32(end + 4, 0);
+            }
+        }
+        return 0;
+    }
+    if (magnitude > (negative !== 0 ? 0x80000000 : 0x7fffffff))
+    {
+        return host();
+    }
+    if (end !== 0)
+    {
+        setU32(end, at);
+        if (pointerBytes === 8)
+        {
+            setU32(end + 4, 0);
+        }
+    }
+    return negative !== 0 ? (0 - magnitude) | 0 : magnitude | 0;
+}
+
+/**
+ * unsigned long wcstoul(const wchar_t *text, wchar_t **end, int base)
+ *
+ * As wcstol reads, and a minus sign negates the magnitude within 32 bits,
+ * as strtoul does.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} text @param {u32} end @param {i32} base
+ * @returns {u32}
+ */
+export function wcstoul({ u16, setU32, host, pointerBytes }, text, end, base){
+    if (base !== 0 && (base < 2 || base > 36))
+    {
+        return host();
+    }
+    let at = text;
+    let c = u16(at);
+    while (c === 0x20 || c >= 0x09 && c <= 0x0d)
+    {
+        at += 2;
+        c = u16(at);
+    }
+    let negative = 0;
+    if (c === 0x2d || c === 0x2b)
+    {
+        negative = c === 0x2d ? 1 : 0;
+        at += 2;
+        c = u16(at);
+    }
+    if (c >= 0x80)
+    {
+        return host();
+    }
+    let radix = base;
+    if ((radix === 0 || radix === 16) && c === 0x30 && (u16(at + 2) | 0x20) === 0x78)
+    {
+        radix = 16;
+        at += 4;
+        c = u16(at);
+    }
+    else if (radix === 0)
+    {
+        radix = c === 0x30 ? 8 : 10;
+    }
+    const start = at;
+    const most = BELOW_CARRY[radix];
+    /** @type {u32} */
+    let magnitude = 0;
+    let digit = wideDigit(c);
+    while (digit < radix)
+    {
+        if (magnitude > most)
+        {
+            return host();
+        }
+        const product = Math.imul(magnitude, radix) >>> 0;
+        magnitude = (product + digit) >>> 0;
+        if (magnitude < product)
+        {
+            return host();
+        }
+        at += 2;
+        digit = wideDigit(u16(at));
+    }
+    if (u16(at) >= 0x80)
+    {
+        return host();
+    }
+    if (at === start)
+    {
+        if (end !== 0)
+        {
+            setU32(end, text);
+            if (pointerBytes === 8)
+            {
+                setU32(end + 4, 0);
+            }
+        }
+        return 0;
+    }
+    if (end !== 0)
+    {
+        setU32(end, at);
+        if (pointerBytes === 8)
+        {
+            setU32(end + 4, 0);
+        }
+    }
+    return negative !== 0 ? (0 - magnitude) >>> 0 : magnitude;
+}
+
+/** Each power of ten a 32-bit unsigned value reaches, the largest last. */
+export const TENS = Uint32Array.of(1, 10, 100, 1000, 10000, 100000, 1000000, 10000000,
+    100000000, 1000000000);
+
+/**
+ * Whether the `_*toa` code renders a radix itself: ten, by subtracting
+ * powers of ten (the subset has no integer division), and the powers of two,
+ * by shifts; any other is the handler's.
+ */
+const rendersRadix = (/** @type {number} */ radix)=>(radix === 10 || radix === 2 || radix === 4
+    || radix === 8 || radix === 16 || radix === 32 ? 1 : 0);
+
+/**
+ * The `_*toa` family's text, bytes or units (`wide`), and a terminator, at
+ * `buffer`: the value signed where `signed` is 1 and the radix ten, every
+ * other the bit pattern; digits past nine from 'a'. The radix is one
+ * `rendersRadix` takes. Answers the buffer.
+ *
+ * @guestCode cdecl
+ * @param {Pick<Guest, 'setU8' | 'setU16'>} guest @param {u32} value @param {u32} buffer
+ * @param {i32} radix @param {i32} signed @param {i32} wide
+ * @returns {u32}
+ */
+export function radixText({ setU8, setU16 }, value, buffer, radix, signed, wide){
+    const step = wide !== 0 ? 2 : 1;
+    let at = buffer;
+    let rest = value;
+    if (signed !== 0 && radix === 10 && (value | 0) < 0)
+    {
+        if (wide !== 0)
+        {
+            setU16(at, 0x2d);
+        }
+        else
+        {
+            setU8(at, 0x2d);
+        }
+        at = (at + step) >>> 0;
+        rest = (0 - value) >>> 0;
+    }
+    if (radix === 10)
+    {
+        let started = 0;
+        for (let p = 9; p >= 0; p--)
+        {
+            const power = TENS[p];
+            let digit = 0;
+            while (rest >= power)
+            {
+                rest = (rest - power) >>> 0;
+                digit++;
+            }
+            if (digit !== 0 || started !== 0 || p === 0)
+            {
+                started = 1;
+                if (wide !== 0)
+                {
+                    setU16(at, (0x30 + digit) | 0);
+                }
+                else
+                {
+                    setU8(at, (0x30 + digit) | 0);
+                }
+                at = (at + step) >>> 0;
+            }
+        }
+    }
+    else
+    {
+        const shift = radix === 2 ? 1 : radix === 4 ? 2 : radix === 8 ? 3 : radix === 16 ? 4 : 5;
+        // The top digit's place: the first multiple of the shift past the
+        // value's highest bit, below 32.
+        let top = 0;
+        while (((top + shift) | 0) < 32 && (rest >>> ((top + shift) | 0)) !== 0)
+        {
+            top = (top + shift) | 0;
+        }
+        for (let place = top; place >= 0; place = (place - shift) | 0)
+        {
+            const digit = (rest >>> place) & (radix - 1);
+            const c = digit < 10 ? (0x30 + digit) | 0 : (0x57 + digit) | 0;
+            if (wide !== 0)
+            {
+                setU16(at, c);
+            }
+            else
+            {
+                setU8(at, c);
+            }
+            at = (at + step) >>> 0;
+        }
+    }
+    if (wide !== 0)
+    {
+        setU16(at, 0);
+    }
+    else
+    {
+        setU8(at, 0);
+    }
+    return buffer;
+}
+
+/**
+ * char *_itoa(int value, char *buffer, int radix), and _ltoa, the same
+ * function on a 32-bit long: signed in base ten alone. A radix other than
+ * ten or a power of two is the handler's -- below two it writes nothing and
+ * answers null, past thirty-six msvcrt's _itoa goes on counting from 'a'.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} value @param {u32} buffer @param {i32} radix
+ * @returns {u32}
+ */
+export function _itoa({ setU8, setU16, host }, value, buffer, radix){
+    if (rendersRadix(radix) === 0)
+    {
+        return host();
+    }
+    return radixText({ setU8, setU16 }, value, buffer, radix, 1, 0);
+}
+
+/**
+ * char *_ultoa(unsigned long value, char *buffer, int radix): unsigned in
+ * every radix.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} value @param {u32} buffer @param {i32} radix
+ * @returns {u32}
+ */
+export function _ultoa({ setU8, setU16, host }, value, buffer, radix){
+    if (rendersRadix(radix) === 0)
+    {
+        return host();
+    }
+    return radixText({ setU8, setU16 }, value, buffer, radix, 0, 0);
+}
+
+/**
+ * wchar_t *_itow(int value, wchar_t *buffer, int radix), and _ltow: _itoa's
+ * text in units.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} value @param {u32} buffer @param {i32} radix
+ * @returns {u32}
+ */
+export function _itow({ setU8, setU16, host }, value, buffer, radix){
+    if (rendersRadix(radix) === 0)
+    {
+        return host();
+    }
+    return radixText({ setU8, setU16 }, value, buffer, radix, 1, 1);
+}
+
+/**
+ * wchar_t *_ultow(unsigned long value, wchar_t *buffer, int radix)
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} value @param {u32} buffer @param {i32} radix
+ * @returns {u32}
+ */
+export function _ultow({ setU8, setU16, host }, value, buffer, radix){
+    if (rendersRadix(radix) === 0)
+    {
+        return host();
+    }
+    return radixText({ setU8, setU16 }, value, buffer, radix, 0, 1);
 }

@@ -50,13 +50,54 @@ const roundBody = mode=>Object.freeze([
 ]);
 
 /**
+ * `_ftol2_sse`'s own way with the runtime's SSE2 flag set: ST0 stored as a
+ * double, popped, and truncated to eax by `cvttsd2si` (0x80000000 past an
+ * int's range or for a NaN); edx as it was.
+ */
+const FTOL2_SSE_BODY = Object.freeze([
+    0xdd, 0x5c, 0x24, 0xf8,                 // fstp qword [esp-8]
+    0xf2, 0x0f, 0x2c, 0x44, 0x24, 0xf8,     // cvttsd2si eax, qword [esp-8]
+]);
+
+/** The x87 transcendentals' argument put where their test reads it (`lead`): ST0 at [esp-8]. */
+const X87_LEAD = Object.freeze([0xdd, 0x54, 0x24, 0xf8]);   // fst qword [esp-8]
+/** And ST1 at [esp-16], for _CIpow. */
+const X87_LEAD2 = Object.freeze([0xdd, 0x54, 0x24, 0xf8, 0xd9, 0xc9,  // fst [esp-8]; fxch
+    0xdd, 0x54, 0x24, 0xf0, 0xd9, 0xc9]);                            // fst [esp-16]; fxch
+
+/**
+ * The transcendentals' bodies: the host's result, put at [esp-8] by the test
+ * (`emit/crt.js`), loaded in the argument's place -- `fstp st0; fld [esp-8]`,
+ * pow's two arguments popped first.
+ */
+const HOST_RESULT = [0xdd, 0xd8, 0xdd, 0x44, 0x24, 0xf8];
+const CI_BODIES = Object.freeze({
+    cisin: HOST_RESULT, cicos: HOST_RESULT, citan: HOST_RESULT, ciatan: HOST_RESULT,
+    ciasin: HOST_RESULT, ciacos: HOST_RESULT, cilog: HOST_RESULT, cilog10: HOST_RESULT,
+    ciexp: HOST_RESULT, cipow: [0xdd, 0xd8, ...HOST_RESULT],
+});
+
+/**
+ * The second signature of a stub told by where it jumps (`via`): the code
+ * `offset` bytes past where its rel32 at `at` leads.
+ *
+ * @param {number} at @param {number} offset
+ * @param {{ name: string, quick: string, hash: string, spans: number[][],
+ *     masks: number[][] }} given
+ */
+function viaJump(at, offset, given){
+    return Object.freeze({ ...entry({ ...given, does: 'cisin' }), at, offset });
+}
+
+/**
  * The body a call to a function doing `does` goes on with after its test
  * (`emit/crt.js`), for the operations that have one.
  *
  * @type {Readonly<Partial<Record<import('./helpers.js').Crt, readonly number[]>>>}
  */
 export const CRT_BODIES = Object.freeze({
-    sqrt: SQRT_BODY, floor: roundBody(1), ceil: roundBody(2),
+    sqrt: SQRT_BODY, floor: roundBody(1), ceil: roundBody(2), ftol2sse: FTOL2_SSE_BODY,
+    ...CI_BODIES,
 });
 
 /**
@@ -64,7 +105,9 @@ export const CRT_BODIES = Object.freeze({
  * spans.
  *
  * @param {{ name: string, does: import('./helpers.js').Crt, quick: string, hash: string,
- *     body?: readonly number[], spans: number[][], masks: number[][], bits?: 32 | 64 }} given
+ *     body?: readonly number[], spans: number[][], masks: number[][], bits?: 32 | 64,
+ *     word?: number, wordRip?: boolean, shape?: boolean, lead?: readonly number[],
+ *     via?: RuntimeHelper & { at: number, offset?: number } }} given
  * @returns {RuntimeHelper}
  */
 function entry({ masks, ...given }){
@@ -78,6 +121,122 @@ function entry({ masks, ...given }){
         masks: Object.freeze(masks.flatMap(([offset, length])=>
             Array.from({ length }, (unused, k)=>/** @type {number} */ (offset + k)))),
     });
+}
+
+/**
+ * The SSE2 code the `_CI*` stubs jump to (`via`), by function: Visual C++ 8,
+ * 9 and 10 share all but `sin` and `cos`, which 9 and 10 share.
+ */
+const SIN_VC8 = { name: '_sin_pentium4', quick: 'd51167b0009625aa',
+    hash: '3f299c663f560aa3',
+    spans: [[0, 431]],
+    masks:
+            [[33, 4], [45, 4], [61, 4], [73, 4], [102, 4], [108, 4], [129, 4],
+                [166, 4], [235, 4], [247, 4], [370, 4], [392, 4], [408, 4], [427, 4]] };
+const COS_VC8 = { name: '_cos_pentium4', quick: 'd51167b0009625aa',
+    hash: '90c0e442521fa388',
+    spans: [[0, 401]],
+    masks:
+            [[33, 4], [45, 4], [61, 4], [73, 4], [102, 4], [108, 4], [129, 4],
+                [166, 4], [235, 4], [247, 4], [374, 4], [397, 4]] };
+const TAN = { name: '_tan_pentium4', quick: 'd51167b0009625aa',
+    hash: '2d4059bdaf930b0c',
+    spans: [[0, 570]],
+    masks:
+            [[37, 4], [53, 4], [65, 4], [77, 4], [91, 4], [122, 4], [149, 4],
+                [158, 4], [166, 4], [403, 4], [523, 4], [531, 4], [547, 4], [566, 4]] };
+const ATAN = { name: '_atan_pentium4', quick: 'd7e0fabc2f9fab26',
+    hash: 'a92f450864621509',
+    spans: [[0, 723]],
+    masks:
+            [[18, 4], [26, 4], [46, 4], [56, 4], [86, 4], [98, 4], [110, 4],
+                [122, 4], [166, 4], [196, 4], [208, 4], [220, 4], [232, 4], [244, 4],
+                [256, 4], [268, 4], [280, 4], [332, 4], [342, 4], [350, 4], [383, 4],
+                [403, 4], [430, 4], [447, 4], [456, 4], [480, 4], [492, 4], [504, 4],
+                [516, 4], [572, 4], [587, 4], [595, 4], [601, 4], [624, 4], [630, 4],
+                [647, 4], [670, 4], [677, 4], [711, 4]] };
+const ASIN = { name: '_asin_pentium4', quick: '1217aadf5e4d18c1',
+    hash: 'cfc1c8fe5fb764b0',
+    spans: [[0, 1384]],
+    masks:
+            [[10, 4], [18, 4], [30, 4], [124, 4], [137, 4], [181, 4], [189, 4],
+                [224, 4], [333, 4], [350, 4], [413, 4], [425, 4], [457, 4], [473, 4],
+                [485, 4], [494, 4], [609, 4], [621, 4], [629, 4], [742, 4], [755, 4],
+                [767, 4], [827, 4], [874, 4], [882, 4], [890, 4], [943, 4], [1212, 4],
+                [1246, 4], [1254, 4], [1262, 4]] };
+const ACOS = { name: '_acos_pentium4', quick: '1217aadf5e4d18c1',
+    hash: '9848453cb454806a',
+    spans: [[0, 1340]],
+    masks:
+            [[10, 4], [18, 4], [30, 4], [124, 4], [137, 4], [181, 4], [189, 4],
+                [224, 4], [251, 4], [428, 4], [452, 4], [472, 4], [488, 4], [500, 4],
+                [509, 4], [641, 4], [653, 4], [661, 4], [673, 4], [799, 4], [807, 4],
+                [815, 4], [827, 4], [839, 4], [878, 4], [912, 4], [1191, 4],
+                [1244, 4], [1252, 4], [1289, 4], [1297, 4]] };
+const LOG = { name: '_log_pentium4', quick: 'f52a450f289c314d',
+    hash: '1603149349ca5469',
+    spans: [[0, 596]],
+    masks:
+            [[33, 4], [41, 4], [49, 4], [57, 4], [87, 4], [95, 4], [193, 4],
+                [205, 4], [225, 4], [237, 4], [249, 4], [336, 4], [378, 4], [386, 4],
+                [415, 4], [431, 4], [443, 4], [458, 4], [539, 4]] };
+const LOG10 = { name: '_log10_pentium4', quick: 'f52a450f289c314d',
+    hash: 'a96c61180da6b486',
+    spans: [[0, 620]],
+    masks:
+            [[33, 4], [41, 4], [49, 4], [57, 4], [65, 4], [95, 4], [103, 4],
+                [201, 4], [213, 4], [233, 4], [245, 4], [257, 4], [289, 4], [360, 4],
+                [402, 4], [410, 4], [439, 4], [455, 4], [467, 4], [482, 4], [563, 4]] };
+const SIN_VC9 = { name: '_sin_pentium4', quick: 'd51167b0009625aa',
+    hash: 'daba3aaa8ec1885f',
+    spans: [[0, 431]],
+    masks:
+        [[33, 4], [45, 4], [61, 4], [73, 4], [102, 4], [108, 4], [129, 4],
+            [166, 4], [235, 4], [247, 4], [370, 4], [392, 4], [408, 4], [427, 4]] };
+const COS_VC9 = { name: '_cos_pentium4', quick: 'd51167b0009625aa',
+    hash: 'd481ce065e927a6c',
+    spans: [[0, 401]],
+    masks:
+        [[33, 4], [45, 4], [61, 4], [73, 4], [102, 4], [108, 4], [129, 4],
+            [166, 4], [235, 4], [247, 4], [374, 4], [397, 4]] };
+
+/**
+ * Visual C++ 7.1's x87 code its `_CI*` stubs of `sin`, `cos`, `tan`, `asin` and
+ * `acos` call: right past each stub, at the standard's precision (0x27f).
+ */
+const SIN_VC71 = { name: '_sin_x87', quick: '15badf18948964ba',
+    hash: 'f0eccf102ddbc32e', spans: [[0, 145]],
+    masks: [[17, 4], [31, 4], [38, 4], [49, 4], [54, 4], [60, 4], [81, 4], [105, 4],
+        [116, 4], [123, 4], [134, 4], [139, 4]] };
+const COS_VC71 = { name: '_cos_x87', quick: '15badf18948964ba',
+    hash: 'c8c9f02617068bf8', spans: [[0, 145]],
+    masks: [[17, 4], [31, 4], [38, 4], [49, 4], [54, 4], [60, 4], [81, 4], [105, 4],
+        [116, 4], [123, 4], [134, 4], [139, 4]] };
+const TAN_VC71 = { name: '_tan_x87', quick: 'fa6be034eca7a006',
+    hash: '527e264adf3b7138', spans: [[0, 149]],
+    masks: [[17, 4], [33, 4], [40, 4], [51, 4], [56, 4], [62, 4], [85, 4], [109, 4],
+        [120, 4], [127, 4], [138, 4], [143, 4]] };
+const ASIN_VC71 = { name: '_asin_x87', quick: 'a40a1d6dc3871d0f',
+    hash: '76db078eadbff2db', spans: [[0, 174]],
+    masks: [[16, 4], [43, 4], [50, 4], [61, 4], [66, 4], [99, 4], [110, 4], [134, 4],
+        [145, 4], [152, 4], [163, 4], [168, 4]] };
+const ACOS_VC71 = { name: '_acos_x87', quick: 'a40a1d6dc3871d0f',
+    hash: '7db8db65ebf73c9c', spans: [[0, 174]],
+    masks: [[16, 4], [45, 4], [52, 4], [63, 4], [68, 4], [110, 4], [134, 4], [145, 4],
+        [152, 4], [163, 4], [168, 4]] };
+
+/**
+ * A runtime's `_CI*` stubs of one argument: alike to the byte (its `hash`) but
+ * for where they jump, each told by the SSE2 code that jump leads to.
+ *
+ * @param {string} hash  the stubs' own
+ * @param {Record<string, any>} cores  the SSE2 code, by operation
+ */
+function ciStubs(hash, cores){
+    return Object.entries(cores).map(([does, core])=>entry({
+        name: `_CI${does.slice(2)}`, does: /** @type {import('./helpers.js').Crt} */ (does),
+        lead: X87_LEAD, quick: 'a94bd8e5df22f6e3', hash, spans: [[0, 79]],
+        masks: [[2, 4], [55, 4], [66, 4]], via: viaJump(55, 24, core) }));
 }
 
 /** @type {readonly RuntimeHelper[]} */
@@ -258,4 +417,56 @@ export const CRT_DICTIONARY = Object.freeze([
     // strchr, MSVC 14 (2015-2022), x86-64
     entry({ name: 'strchr', does: 'strchr', bits: 64, quick: '3984ba71f976343b',
         hash: 'b90c34bebd4489c7', spans: [[0, 126]], masks: [] }),
+    // _ftol2_sse, the compiler's own (ftol2.obj), MSVC 8 to 10 alike (Call of Duty 4's,
+    // 3DMark 11's): with the runtime's __sse2_available (`word`) set, ST0 truncated by
+    // cvttsd2si; else its _ftol2, made as the call was.
+    entry({ name: '_ftol2_sse', does: 'ftol2sse', word: 2, quick: 'b06f592c2e902cee',
+        hash: '643f053f63789de9', spans: [[0, 28], [54, 117]], masks: [[2, 4]] }),
+    // __security_check_cookie (gs_report.obj), as every function a /GS build guards with a
+    // buffer calls it on its way out: ecx against the runtime's cookie (`word`), a return
+    // when equal, else a jump to the report (masked). Its own bytes are too few for a
+    // signature, and the shape is the operation: what these bytes do whatever the cookie's
+    // address and the report's (`shape`). MSVC 8 to 14 (`rep ret`, 130 images here: Call
+    // of Duty 4, its Miles and Bink libraries) and MSVC 7.1 (`ret`, 21: PhysX, Miles' filters).
+    entry({ name: '__security_check_cookie', does: 'gscookie', word: 2, shape: true,
+        quick: '765e53d60506e257', hash: '765e53d60506e257', spans: [[0, 15]],
+        masks: [[2, 4], [11, 4]] }),
+    entry({ name: '__security_check_cookie', does: 'gscookie', word: 2, shape: true,
+        quick: 'ee0754fe65c7d77b', hash: 'ee0754fe65c7d77b', spans: [[0, 14]],
+        masks: [[2, 4], [10, 4]] }),
+    // __security_check_cookie, x86-64, MSVC 14: rcx against the cookie (`word`, RIP-relative),
+    // its high 16 bits clear, returned rotated left by 16 as the function leaves it.
+    entry({ name: '__security_check_cookie', does: 'gscookie64', bits: 64, word: 3,
+        wordRip: true, shape: true, quick: 'b05eca804d551dc2', hash: 'd413b6519e3eebc8',
+        spans: [[0, 30]], masks: [[3, 4], [26, 4]] }),
+    // The x87 transcendentals MSVC 8 and 10 link into an image (`_CIsin` and kin): ST0's
+    // (and _CIpow's ST1) value taken by the host's own functions, where the runtime's SSE2
+    // path would round differently by the last bit at most (`lead`, `body`,
+    // roadmap/decisions.md). PhysX 2.7-2.8's PhysXCore.dll and Call of Duty 4's iw3sp.exe
+    // link Visual C++ 8's.
+    ...ciStubs('45863a1a223a40e7', { cisin: SIN_VC8, cicos: COS_VC8, citan: TAN, ciatan: ATAN,
+        ciasin: ASIN, ciacos: ACOS, cilog: LOG, cilog10: LOG10 }),
+    // Visual C++ 7.1's (3DMark06's PhysXCore.dll): `sub esp, 12; fst [esp]`, a call to
+    // its check of the argument, then to its own x87 code, which tells it.
+    ...Object.entries({ cisin: SIN_VC71, cicos: COS_VC71, citan: TAN_VC71, ciasin: ASIN_VC71,
+        ciacos: ACOS_VC71 }).map(([does, core])=>entry({
+        name: `_CI${does.slice(2)}`, does: /** @type {import('./helpers.js').Crt} */ (does),
+        lead: X87_LEAD, quick: '6e3bba6787d6fe75', hash: '34eaaf6d5cb1a55b', spans: [[0, 20]],
+        masks: [[7, 4], [12, 4]], via: viaJump(12, 0, core),
+        // Its asin and acos compute 1 - x^2 and its root at the precision control.
+        ...does === 'ciasin' || does === 'ciacos' ? { precise: true } : {} })),
+    // Visual C++ 9's: VC8's stubs, VC10's sin and cos.
+    ...ciStubs('45863a1a223a40e7', { cisin: SIN_VC9, cicos: COS_VC9 }),
+    ...ciStubs('9ea4bc7ae8223fc7', { cisin: SIN_VC9, cicos: COS_VC9, citan: TAN,
+        ciatan: ATAN, ciasin: ASIN, ciacos: ACOS, cilog: LOG, cilog10: LOG10 }),
+    entry({ name: '_CIexp', does: 'ciexp', lead: X87_LEAD, quick: 'f1454e170f6c75b1',
+        hash: '4136b43b4b7607e1', spans: [[0, 59], [69, 10]],
+        masks: [[2, 4], [55, 4], [70, 4], [75, 4]] }),
+    entry({ name: '_CIexp', does: 'ciexp', lead: X87_LEAD, quick: 'f1454e170f6c75b1',
+        hash: '4ca067765e9ba5d3', spans: [[0, 59], [69, 10], [226, 61]],
+        masks: [[2, 4], [55, 4], [70, 4], [245, 4], [253, 4]] }),
+    entry({ name: '_CIpow', does: 'cipow', lead: X87_LEAD2, quick: 'a94bd8e5df22f6e3',
+        hash: 'a7e7bff9eb2f7b33', spans: [[0, 84]], masks: [[2, 4], [55, 4]] }),
+    entry({ name: '_CIpow', does: 'cipow', lead: X87_LEAD2, quick: 'a94bd8e5df22f6e3',
+        hash: '8283acd9b02e7c93', spans: [[0, 84]], masks: [[2, 4], [55, 4]] }),
 ]);

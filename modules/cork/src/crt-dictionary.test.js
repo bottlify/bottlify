@@ -24,7 +24,9 @@ test('every entry of the dictionary is a signature that tells its function apart
     const hashes = new Set();
     for (const entry of CRT_DICTIONARY)
     {
-        const { name, spans = [], masks = [], hash } = entry;
+        const { name, spans = [], masks = [], via } = entry;
+        // Stubs alike to the byte are told apart by where they jump (`via`).
+        const hash = `${entry.hash}${via === undefined ? '' : ` ${via.at} ${via.hash}`}`;
         assert.ok(!hashes.has(hash), `${name}: one entry for each signature`);
         hashes.add(hash);
         assert.ok(spans.length > 0 && spans[0][0] === 0, `${name}: its first span is its entry's`);
@@ -35,9 +37,19 @@ test('every entry of the dictionary is a signature that tells its function apart
         const inSpans = (/** @type {number} */ at)=>spans.some(([o, n])=>at >= o && at < o + n);
         assert.ok(masks.every((at, i)=>inSpans(at) && (i === 0 || at > masks[i - 1])),
             `${name}: masks in order, each in a span`);
-        const code = spans.reduce((sum, [, n])=>sum + n, 0);
-        assert.ok(code - masks.length >= SIGNIFICANT_BYTES && masks.length <= code * MASKED_SHARE,
-            `${name}: ${code - masks.length} bytes unmasked of ${code}`);
+        // A stub told by where it jumps is told by both signatures' bytes together.
+        const code = [spans, via?.spans ?? []].flat().reduce((sum, [, n])=>sum + n, 0);
+        const masked = masks.length + (via?.masks?.length ?? 0);
+        // A stub whose shape is its operation (`shape`) is told by its every unmasked byte:
+        // masked, only addresses its operation reads or makes the call to. Four times the
+        // bytes it takes tell a function apart whatever share its addresses take (the x87
+        // code of Visual C++ 7.1's `_CI*`, a third of it the runtime's globals).
+        const significant = code - masked >= 4 * SIGNIFICANT_BYTES
+            || code - masked >= SIGNIFICANT_BYTES && masked <= code * MASKED_SHARE;
+        assert.ok(entry.shape === true || significant,
+            `${name}: ${code - masked} bytes unmasked of ${code}`);
+        assert.ok(entry.shape !== true || entry.word !== undefined,
+            `${name}: a shape is a test of a global`);
         const [first, end] = helperExtent(entry);
         assert.equal(entry.length, end - first);
         assert.ok(entry.does !== undefined && entry.does in CRT_EFFECTS, `${name}: does what`);
@@ -56,6 +68,8 @@ test('every body of the dictionary is bytes that decode whole, ending where the 
         const formed = helperInstructions(entry, call, 0x500000);
         assert.equal(formed.reduce((sum, one)=>sum + one.length, 0), 5,
             `${entry.name}: what it is formed as goes on after the call`);
-        assert.equal(formed[0].op, 'crt');
+        // The `lead`'s instructions first, where there is one, then the operation's.
+        const operation = formed.findIndex(one=>one.op === 'crt');
+        assert.ok(entry.lead === undefined ? operation === 0 : operation > 0, entry.name);
     }
 });

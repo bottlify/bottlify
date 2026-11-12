@@ -55,6 +55,22 @@ const STATUS_INTEGER_OVERFLOW = 0xc0000095;
 const DIVIDE_CODE = Uint8Array.of(0x8b, 0x44, 0x24, 0x04, 0x99, 0xf7, 0x7c, 0x24, 0x08, 0xc3);
 
 /**
+ * div and ldiv for a 64-bit process, whose div_t of two ints comes back
+ * whole in RAX, the quotient low and the remainder high:
+ *
+ *     mov eax, ecx
+ *     mov ecx, edx
+ *     cdq
+ *     idiv ecx
+ *     shl rdx, 32
+ *     mov eax, eax
+ *     or rax, rdx
+ *     ret
+ */
+const DIVIDE_LONG = Uint8Array.of(0x89, 0xc8, 0x89, 0xd1, 0x99, 0xf7, 0xf9, 0x48, 0xc1, 0xe2, 0x20,
+    0x89, 0xc0, 0x48, 0x09, 0xd0, 0xc3);
+
+/**
  * The double next to x toward y, from its bits: what `_nextafter`'s code
  * hands over, a step past the largest double.
  *
@@ -407,6 +423,22 @@ export function createMathFunctions(host){
     {
         singles.expf = guestEntry(inGuest.expf, COMPILED.expf, host, singles.expf);
     }
+    // The float forms of one instruction, or of a few, in the guest too.
+    for (const name of /** @type {const} */ (['sinf', 'cosf', 'tanf', 'asinf', 'acosf',
+        'atanf', 'atan2f', 'sqrtf', 'floorf', 'ceilf', 'fmodf']))
+    {
+        if (singles[name])
+        {
+            singles[name] = guestEntry(inGuest[name], COMPILED[name], host, singles[name]);
+        }
+    }
+    for (const name of /** @type {const} */ (['sinhf', 'coshf', 'tanhf', 'log10f', 'powf']))
+    {
+        if (singles[name])
+        {
+            singles[name] = guestEntry(inGuestMath[name], MATH_CODE[name], host, singles[name]);
+        }
+    }
 
     const guest = {
         readMemory: host.readMemory,
@@ -451,6 +483,7 @@ export function createMathFunctions(host){
         convention: 'cdecl',
         argBytes: 8,
         code: ()=>DIVIDE_CODE,
+        long: ()=>DIVIDE_LONG,
         ...setRegisters ? {
             /** @param {number[]} args */
             handler: ([numerator, denominator])=>{
@@ -495,8 +528,8 @@ export function createMathFunctions(host){
         ldiv: divide,
 
         /**
-         * double _copysign(double x, double y) -- in the guest, which reads y
-         * as its two halves; a 64-bit caller passes it in XMM1.
+         * double _copysign(double x, double y) -- in the guest, which reads y's
+         * sign bit from its bits (`doubleHigh`); a 64-bit caller passes it in XMM1.
          */
         _copysign: { ...guestEntry(inGuestFloat._copysign, FLOAT_CODE._copysign, guest),
             floats: TWO_DOUBLES },

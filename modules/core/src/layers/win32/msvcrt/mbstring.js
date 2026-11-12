@@ -25,7 +25,7 @@ import {
     CT_BLANK, CT_HEX, CT_LETTER, CT_ALPHA,
 } from './inguest.js';
 import { COMPILED } from './inguest.x86.js';
-import { compareUnitsAt, wideStringAt } from './widetext.js';
+import { wideStringAt } from './widetext.js';
 import { createMultiByteHandlers, createMultiBytePage } from './mbcs.js';
 import { pointerWidth } from '../common/pointers.js';
 import {
@@ -138,12 +138,6 @@ export function createWideFunctions(host){
         host.writeMemory(pointer, bytes);
     };
 
-    /** @param {string} a @param {string} b */
-    const compare = (a, b)=>(a === b ? 0 : (a < b ? -1 : 1));
-
-    /** @param {string} text */
-    const foldCase = text=>text.replace(/[A-Z]/g, letter=>letter.toLowerCase());
-
     /**
      * wcstok's saved position: one stream for the runtime, apart from
      * strtok's, kept as strtok keeps its own (`strings.js`).
@@ -179,23 +173,6 @@ export function createWideFunctions(host){
             return string;
         },
     });
-
-    /**
-     * Where the first unit a set covers -- or, `inSet` false, the first it
-     * does not -- stands in a string: its length when there is none.
-     *
-     * @param {number} string @param {number} set @param {boolean} inSet
-     */
-    const spanOf = (string, set, inSet)=>{
-        const text = readWide(string);
-        const members = new Set(readWide(set));
-        let at = 0;
-        while (at < text.length && members.has(text[at]) !== inSet)
-        {
-            at++;
-        }
-        return { at, found: at < text.length };
-    };
 
     const wide = {
         /** size_t wcslen(const wchar_t *) -- in the guest */
@@ -275,107 +252,29 @@ export function createWideFunctions(host){
             },
         } : {},
 
-        /** wchar_t *wcscat(wchar_t *dest, const wchar_t *src) */
-        wcscat: {
-            convention: 'cdecl',
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([destination, source])=>{
-                const existing = readWide(destination);
-                writeWide(destination + existing.length * 2, readWide(source));
-                return destination;
-            },
-        },
+        /** wchar_t *wcscat(wchar_t *dest, const wchar_t *src) -- in the guest */
+        wcscat: guestEntry(inGuest.wcscat, COMPILED.wcscat, host),
 
-        /**
-         * wchar_t *wcsncat(wchar_t *dest, const wchar_t *src, size_t count)
-         *
-         * At most `count` characters of the source after the destination's
-         * end, and always a terminator -- unlike wcsncpy, no padding.
-         */
-        wcsncat: {
-            convention: 'cdecl',
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([destination, source, count])=>{
-                const existing = readWide(destination);
-                writeWide(destination + existing.length * 2,
-                    readWideUpTo(source, count >>> 0));
-                return destination;
-            },
-        },
+        /** wchar_t *wcsncat(wchar_t *dest, const wchar_t *src, size_t count) -- in the guest */
+        wcsncat: guestEntry(inGuest.wcsncat, COMPILED.wcsncat, host),
 
         /** int wcscmp(const wchar_t *, const wchar_t *) -- in the guest */
         wcscmp: guestEntry(inGuest.wcscmp, COMPILED.wcscmp, host),
 
-        /** int wcsncmp(const wchar_t *, const wchar_t *, size_t) */
-        wcsncmp: {
-            convention: 'cdecl',
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([left, right, count])=>Math.sign(
-                compareUnitsAt(host.readMemory, left, right, 2, count >>> 0)),
-        },
+        /** int wcsncmp(const wchar_t *, const wchar_t *, size_t) -- in the guest */
+        wcsncmp: guestEntry(inGuest.wcsncmp, COMPILED.wcsncmp, host),
 
-        /** int _wcsicmp(const wchar_t *, const wchar_t *) */
-        _wcsicmp: {
-            convention: 'cdecl',
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([left, right])=>compare(
-                foldCase(readWide(left)), foldCase(readWide(right))),
-        },
+        /** int _wcsicmp(const wchar_t *, const wchar_t *) -- in the guest, ASCII folded */
+        _wcsicmp: guestEntry(inGuest._wcsicmp, COMPILED._wcsicmp, host),
 
-        /** wchar_t *wcschr(const wchar_t *, wchar_t) */
-        wcschr: {
-            convention: 'cdecl',
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([string, unit])=>{
-                const text = readWide(string);
-                const wanted = unit & 0xffff;
-                if (wanted === 0)
-                {
-                    return string + text.length * 2;
-                }
-                const index = text.indexOf(String.fromCharCode(wanted));
-                return index === -1 ? 0 : string + index * 2;
-            },
-        },
+        /** wchar_t *wcschr(const wchar_t *, wchar_t) -- in the guest */
+        wcschr: guestEntry(inGuest.wcschr, COMPILED.wcschr, host),
 
-        /** wchar_t *wcsrchr(const wchar_t *, wchar_t) */
-        wcsrchr: {
-            convention: 'cdecl',
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([string, unit])=>{
-                const text = readWide(string);
-                const index = text.lastIndexOf(String.fromCharCode(unit & 0xffff));
-                return index === -1 ? 0 : string + index * 2;
-            },
-        },
+        /** wchar_t *wcsrchr(const wchar_t *, wchar_t) -- in the guest */
+        wcsrchr: guestEntry(inGuest.wcsrchr, COMPILED.wcsrchr, host),
 
-        /**
-         * int _wcsnicmp(const wchar_t *left, const wchar_t *right, size_t count)
-         *
-         * At most `count` units compared with ASCII folded to lower case, as
-         * `_wcsicmp` folds; the answer is the difference of the first two
-         * that differ, the terminator ending both.
-         */
-        _wcsnicmp: {
-            convention: 'cdecl',
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([left, right, count])=>{
-                const limit = count >>> 0;
-                if (limit === 0)
-                {
-                    return 0;
-                }
-                return compareUnitsAt(host.readMemory, left, right, 2, limit,
-                    unit=>folded(LOWER, unit));
-            },
-        },
+        /** int _wcsnicmp(const wchar_t *left, const wchar_t *right, size_t count) -- in the guest, ASCII folded */
+        _wcsnicmp: guestEntry(inGuest._wcsnicmp, COMPILED._wcsnicmp, host),
 
         /** wchar_t *_wcslwr(wchar_t *text) -- ASCII lowered in place, as the C locale has it */
         _wcslwr: foldInPlace(LOWER),
@@ -444,48 +343,17 @@ export function createWideFunctions(host){
             },
         },
 
-        /** size_t wcsspn(const wchar_t *text, const wchar_t *accept) */
-        wcsspn: {
-            convention: 'cdecl',
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([string, accept])=>spanOf(string, accept, false).at,
-        },
+        /** size_t wcsspn(const wchar_t *text, const wchar_t *accept) -- in the guest */
+        wcsspn: guestEntry(inGuest.wcsspn, COMPILED.wcsspn, host),
 
-        /** size_t wcscspn(const wchar_t *text, const wchar_t *reject) */
-        wcscspn: {
-            convention: 'cdecl',
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([string, reject])=>spanOf(string, reject, true).at,
-        },
+        /** size_t wcscspn(const wchar_t *text, const wchar_t *reject) -- in the guest */
+        wcscspn: guestEntry(inGuest.wcscspn, COMPILED.wcscspn, host),
 
-        /**
-         * wchar_t *wcspbrk(const wchar_t *text, const wchar_t *accept)
-         *
-         * A pointer into the caller's string at the first unit the set has,
-         * or null; the terminator is never one of the set.
-         */
-        wcspbrk: {
-            convention: 'cdecl',
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([string, accept])=>{
-                const { at, found } = spanOf(string, accept, true);
-                return found ? string + at * 2 : 0;
-            },
-        },
+        /** wchar_t *wcspbrk(const wchar_t *text, const wchar_t *accept) -- in the guest */
+        wcspbrk: guestEntry(inGuest.wcspbrk, COMPILED.wcspbrk, host),
 
-        /** wchar_t *wcsstr(const wchar_t *, const wchar_t *) */
-        wcsstr: {
-            convention: 'cdecl',
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([haystack, needle])=>{
-                const index = readWide(haystack).indexOf(readWide(needle));
-                return index === -1 ? 0 : haystack + index * 2;
-            },
-        },
+        /** wchar_t *wcsstr(const wchar_t *, const wchar_t *) -- in the guest */
+        wcsstr: guestEntry(inGuest.wcsstr, COMPILED.wcsstr, host),
 
         /**
          * size_t mbstowcs(wchar_t *dest, const char *src, size_t count)
