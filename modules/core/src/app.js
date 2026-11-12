@@ -3838,14 +3838,36 @@ export function createKernelGl(opengl, journalCall, traced, counters){
  * The session storage holds for a run, its registry laid into `registry`
  * before the program's first instruction, and what saves it from then on.
  *
+ * One saver a run, on the thread that holds its volume and hive, with one
+ * store. Every process of a thread hears every write to the volume, whichever
+ * process made it, and a store's first save of a run writes the whole volume:
+ * a saver a process made every process's write saved as many times as
+ * processes stood, and each new process rewrote the whole volume -- ngen's
+ * dozens of mscorsvw rewrote .NET 4's 600 MB of setup files ~25 times a minute,
+ * ~3 GB a minute into the origin's storage. So the run's first process here
+ * saves, a later one takes the saving over (the same store) when it ends, and a
+ * process that joined the run's system across a link saves nothing: its
+ * writes land on the volume that thread's saver hears.
+ *
  * @param {{ options: AppOptions, events: any, filesystem: any, registry: any,
- *     inherited: boolean, standing?: boolean }} deps
+ *     inherited: boolean, standing?: boolean, system?: any }} deps
  *     `standing`: the volume is the run's already, its files laid on it.
  *     `inherited`: the registry is the run's already, made by a process before
- *     this one
+ *     this one. `system`: the run's system on this thread, whose saving it is
  */
-async function openSession({ options, events, filesystem, registry, inherited, standing = false }){
-    const storage = resolveStorage(options.storage, options.id ?? 'session');
+async function openSession(deps){
+    const { options, events, filesystem, registry, inherited, standing = false } = deps;
+    const system = deps.system ?? null;
+    const remote = system?.remote === true;
+    /** @type {{ storage: any, owner: object | null,
+     *     waiting: { self: object, start: () => void }[] } | null} */
+    const run = system && !remote
+        ? (system.session ??= { storage: null, owner: null, waiting: [] }) : null;
+    const storage = run?.storage ?? resolveStorage(options.storage, options.id ?? 'session');
+    if (run)
+    {
+        run.storage = storage;
+    }
 
     // Seeded before the program's first instruction, and awaited: a save that
     // arrives after the program has looked for it is a save that was not there.
@@ -3869,12 +3891,15 @@ async function openSession({ options, events, filesystem, registry, inherited, s
 
     // One way out. What the program writes is announced once the writes settle;
     // nothing is ever pulled back in while it runs.
-    const persist = storage.save;
+    const persist = remote ? null : storage.save;
     /** @type {ReturnType<typeof coalescedSaver> | null} */
     let saver = null;
-    let stopSavingRegistry = ()=>{};
-    if (persist)
-    {
+    let stopSaving = ()=>{};
+    const start = ()=>{
+        if (!persist)
+        {
+            return;
+        }
         saver = coalescedSaver({
             snapshot: ()=>({
                 files: filesystem.export(),
@@ -3898,9 +3923,48 @@ async function openSession({ options, events, filesystem, registry, inherited, s
         // announced without a path: the whole hive travels with every save.
         // The hive is the run's and outlives this machine: the subscription
         // goes with it (`dispose`).
-        stopSavingRegistry = registry.onChanged(()=>save([{ kind: 'registry' }]));
+        const stopRegistry = registry.onChanged(()=>save([{ kind: 'registry' }]));
+        stopSaving = ()=>{
+            filesystem.onChanged(()=>{});
+            stopRegistry();
+        };
+    };
+    const self = {};
+    if (!run || run.owner === null)
+    {
+        if (run)
+        {
+            run.owner = self;
+        }
+        start();
     }
-    return { seeded, saver, stopSavingRegistry };
+    else
+    {
+        run.waiting.push({ self, start });
+    }
+    // Its machine is about to go: what it noted is saved now, and the saving
+    // passes to the next process standing here, the store with it.
+    const stopSavingRegistry = ()=>{
+        saver?.flush();
+        stopSaving();
+        saver = null;
+        if (run && run.owner === self)
+        {
+            run.owner = null;
+            const next = run.waiting.shift();
+            if (next)
+            {
+                run.owner = next.self;
+                next.start();
+            }
+        }
+        else if (run)
+        {
+            run.waiting = run.waiting.filter(waiting=>waiting.self !== self);
+        }
+    };
+    const flush = ()=>saver?.flush() ?? Promise.resolve();
+    return { seeded, saver: { flush }, stopSavingRegistry };
 }
 
 /**
@@ -5790,7 +5854,7 @@ async function buildApp(options){
     const registryInherited = core.api('win32').registryInherited?.() ?? false;
     const { seeded, saver, stopSavingRegistry } = await openSession({ options, events, filesystem,
         registry: core.api('win32').registry(), inherited: registryInherited,
-        standing: filesystem.inherited?.() ?? false });
+        standing: filesystem.inherited?.() ?? false, system: options.system });
 
     const journal = core.api('log');
     // The run's processes share one event bus and one journal, so only the
@@ -9496,7 +9560,7 @@ async function buildSystemHost(deps){
     });
     system.windows = createWindowDirectory();
     const { seeded, saver, stopSavingRegistry } = await openSession({ options, events,
-        filesystem, registry: system.registry, inherited: false });
+        filesystem, registry: system.registry, inherited: false, system });
     // Cork's own decoder reads the bundle's blocks: no processor is asked.
     const blocks = await mountBundle({ options, events, translationStore });
     system.bundle = blocks;
