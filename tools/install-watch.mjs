@@ -734,6 +734,10 @@ setInterval(async()=>{
             {
                 const figures = cpu.cork ?? {};
                 console.log(seconds(), 'CORK', image.split('\\').pop(), JSON.stringify({
+                    // The instructions it retired, which a rate is read off, and
+                    // the run loop's busiest phases: where its wall time went.
+                    instructions: cpu.instructions,
+                    phases: (metrics('log').topPhases ?? []).slice(0, 12),
                     translatedShare: figures.translatedShare, regions: figures.regions,
                     translateMs: figures.translateMs, workerBusyMs: figures.workerBusyMs,
                     invalidations: figures.invalidations, dropped: figures.dropped,
