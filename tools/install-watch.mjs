@@ -75,6 +75,10 @@
  *
  * `--debug-strings` prints what the programs say through OutputDebugString.
  *
+ * `--cork-figures` adds a CORK line to each process's status: the share of its
+ * instructions translated code retired, the translator's time, what threw
+ * translations away, and (with cork's `timings`) where the interpreter ran.
+ *
  * `--type 'text@S'` types text into whatever has the focus S seconds in.
  *
  * `--watch-import 'lib.dll!Name=0+$1*8'` stands a watch in front of an import
@@ -686,6 +690,23 @@ setInterval(async()=>{
                 traps: `${cpu.traps}/${cpu.trapCapacity}`,
                 refused: bridge.comInterfacesRefused, because: bridge.comRefusedBecause,
             }));
+            // `--cork-figures`: where the process's instructions ran - the share
+            // translated code retired, what the translator spent, what threw
+            // translations away, and where the interpreter's instructions went
+            // (those need `--cork '{"timings":true}'`).
+            if (argv.includes('--cork-figures'))
+            {
+                const figures = cpu.cork ?? {};
+                console.log(seconds(), 'CORK', image.split('\\').pop(), JSON.stringify({
+                    translatedShare: figures.translatedShare, regions: figures.regions,
+                    translateMs: figures.translateMs, workerBusyMs: figures.workerBusyMs,
+                    invalidations: figures.invalidations, dropped: figures.dropped,
+                    volatilePages: figures.volatilePages, volatileNow: figures.volatileNow,
+                    exits: figures.exits, untranslatedBy: figures.untranslatedBy,
+                    interpretedFrom: (figures.interpretedFrom ?? []).slice(0, 8),
+                    exitsByTarget: (figures.exitsByTarget ?? []).slice(0, 6),
+                }));
+            }
             // What the devices drew against what reached the screen: a
             // picture that stops changing while the program still presents
             // is a device that stopped replaying, and only these say so.
