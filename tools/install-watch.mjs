@@ -72,12 +72,6 @@
  *
  * `--debug-strings` prints what the programs say through OutputDebugString.
  *
- * `--store memory` keeps cork's translations for the whole run in memory, in
- * the store's own format, as the origin's file system keeps them for a page:
- * a process started later (a setup's tenth child, ngen's next worker) finds
- * the regions an earlier one translated. Without it each process translates
- * its libraries again.
- *
  * `--type 'text@S'` types text into whatever has the focus S seconds in.
  *
  * `--watch-import 'lib.dll!Name=0+$1*8'` stands a watch in front of an import
@@ -106,8 +100,6 @@ import { diskDirectory } from './disk-directory.mjs';
 import { createOpfsStore } from '../modules/core/src/layers/filesystem/internal/opfs-store.js';
 import { isButtonClass, label } from './wizard-buttons.mjs';
 import { createApp } from '../modules/core/src/app.js';
-import { createDirectoryTranslationStore, createMemoryDirectory }
-    from '../modules/core/src/layers/cpu/internal/translation-store.js';
 import { createFakeDevice } from '../modules/core/src/layers/graphics/webgpu/internal/fake-device.js';
 import { archiveDisc, collectFrom, discOptions, placementOf, prefixOptions, readZip }
     from '../modules/installer/src/index.js';
@@ -345,12 +337,6 @@ const app = await createApp({
     cork: { config: {
         ...argv.includes('--cork') ? JSON.parse(argv[argv.indexOf('--cork') + 1]) : {},
         ...argv.includes('--unshared') ? { sharedMemory: false } : {},
-        // `--store memory`: the translations kept for the whole run in memory,
-        // in the store's own format - what the origin's file system gives a
-        // page, so every process of the run finds what an earlier one made.
-        ...argv.includes('--store') && argv[argv.indexOf('--store') + 1] === 'memory'
-            ? { store: await createDirectoryTranslationStore(createMemoryDirectory(), 'run') }
-            : {},
     } },
     // `--graphics JSON`: the graphics layer's settings beside these, `guestCode` among them.
     graphics: { raster: false,
