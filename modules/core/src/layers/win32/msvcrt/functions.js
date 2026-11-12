@@ -132,20 +132,54 @@ export const SRAND_CODE = Object.freeze({
 });
 
 /**
+ * rand and srand for a 64-bit process: the same, the variable's address an
+ * absolute disp32 (`[disp32]` through a SIB byte, which long mode does not
+ * read as RIP-relative) -- the library lies below 2 GiB -- and srand's seed
+ * in ECX.
+ *
+ *     mov eax, [seed]                  mov [seed], ecx
+ *     imul eax, eax, 214013            ret
+ *     add eax, 2531011
+ *     mov [seed], eax
+ *     shr eax, 16
+ *     and eax, RAND_MAX
+ *     ret
+ */
+export const RAND_LONG = Object.freeze({
+    code: new Uint8Array([
+        0x8b, 0x04, 0x25, 0, 0, 0, 0,
+        0x69, 0xc0, 0xfd, 0x43, 0x03, 0x00,
+        0x05, 0xc3, 0x9e, 0x26, 0x00,
+        0x89, 0x04, 0x25, 0, 0, 0, 0,
+        0xc1, 0xe8, 0x10,
+        0x25, 0xff, 0x7f, 0x00, 0x00,
+        0xc3,
+    ]),
+    seedAt: [3, 21],
+});
+export const SRAND_LONG = Object.freeze({
+    code: new Uint8Array([0x89, 0x0c, 0x25, 0, 0, 0, 0, 0xc3]),
+    seedAt: [3],
+});
+
+/**
  * An export whose body is `code` with the generator's variable written at
  * `seedAt`, and whose handler answers as the code does where a handler is
- * asked for directly.
+ * asked for directly; `long` the same for a 64-bit process.
  *
  * @template {(...args: any[]) => number} H
  * @param {{ code: Uint8Array, seedAt: readonly number[] }} made
+ * @param {{ code: Uint8Array, seedAt: readonly number[] }} long
  * @param {number} argBytes @param {H} handler
  */
-const seededCode = (made, argBytes, handler)=>({
+const seededCode = (made, long, argBytes, handler)=>({
     convention: 'cdecl',
     argBytes,
     handler,
     code: ()=>made.code,
     pointers: made.seedAt.map(at=>({ at, to: RAND_SEED })),
+    long: ()=>long.code,
+    longPointers: long.seedAt.map(at=>({ at, to: RAND_SEED })),
 });
 
 
@@ -726,12 +760,12 @@ export function createMsvcrtFunctions(host){
          * for an instruction's worth of work. The handlers are the reference
          * the code is tested against, with a sequence of their own.
          */
-        srand: seededCode(SRAND_CODE, 4, ([seed])=>{
+        srand: seededCode(SRAND_CODE, SRAND_LONG, 4, ([seed])=>{
             randomSeed = seed >>> 0;
             return 0; // void
         }),
 
-        rand: seededCode(RAND_CODE, 0, ()=>{
+        rand: seededCode(RAND_CODE, RAND_LONG, 0, ()=>{
             randomSeed = (Math.imul(randomSeed, 214013) + 2531011) >>> 0;
             return (randomSeed >>> 16) & RAND_MAX;
         }),

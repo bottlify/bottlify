@@ -941,3 +941,62 @@ test('a 64-bit program\'s msvcrt _isnan, _finite and _copysign read XMM bits in 
             .filter(name=>/_isnan|_finite|_copysign/.test(name));
         assert.deepEqual(hosted, [], 'none crossed to the host');
     });
+
+test('a 64-bit program\'s msvcrt srand, rand, div and ldiv run as guest code, div_t whole in RAX',
+    async()=>{
+        // srand(42); a = rand(); b = rand(); div(-7, 2) = { -3, -1 }; ldiv(9, -4) = { -2, 1 }.
+        // The exit code: (a ^ b << 3) & 0xffff, then div's quotient and remainder plus 8
+        // in bits 16-19 and 20-23, ldiv's in 24-27 and 28-31.
+        const exe = buildExe({
+            bits: 64,
+            imports: { 'msvcrt.dll': ['srand', 'rand', 'div', 'ldiv'],
+                'KERNEL32.dll': ['ExitProcess'] },
+            data: {},
+            codeSize: 0xc0,
+            code: ({ iat, code })=>{
+                /** @type {number[]} */
+                const out = [];
+                const rip = (/** @type {number} */ target, /** @type {number} */ rest)=>
+                    u32((target - code(out.length + rest)) >>> 0);
+                // The div_t in RAX into its two halves plus 8, each in a nibble at `shift`.
+                const nibbles = (/** @type {number} */ shift)=>{
+                    out.push(0x48, 0x89, 0xc2);                            // mov rdx, rax
+                    out.push(0x83, 0xc0, 0x08, 0x83, 0xe0, 0x0f);          // eax = (eax + 8) & 15
+                    out.push(0xc1, 0xe0, shift, 0x09, 0xc3);               // ebx |= eax << shift
+                    out.push(0x48, 0xc1, 0xea, 0x20);                      // shr rdx, 32
+                    out.push(0x83, 0xc2, 0x08, 0x83, 0xe2, 0x0f);          // edx = (edx + 8) & 15
+                    out.push(0xc1, 0xe2, shift + 4, 0x09, 0xd3);           // ebx |= edx << shift+4
+                };
+                out.push(0x53, 0x56, 0x48, 0x83, 0xec, 0x28);              // push rbx, rsi; sub rsp
+                out.push(0xb9, ...u32(42));                                // mov ecx, 42
+                out.push(0xff, 0x15, ...rip(iat('srand'), 6));
+                out.push(0xff, 0x15, ...rip(iat('rand'), 6));
+                out.push(0x89, 0xc6);                                      // mov esi, eax
+                out.push(0xff, 0x15, ...rip(iat('rand'), 6));
+                out.push(0xc1, 0xe0, 0x03, 0x31, 0xf0);                    // eax = b << 3 ^ a
+                out.push(0x0f, 0xb7, 0xd8);                                // movzx ebx, ax
+                out.push(0xb9, ...u32(-7 >>> 0), 0xba, ...u32(2));         // ecx -7, edx 2
+                out.push(0xff, 0x15, ...rip(iat('div'), 6));
+                nibbles(16);
+                out.push(0xb9, ...u32(9), 0xba, ...u32(-4 >>> 0));         // ecx 9, edx -4
+                out.push(0xff, 0x15, ...rip(iat('ldiv'), 6));
+                nibbles(24);
+                out.push(0x89, 0xd9);                                      // mov ecx, ebx
+                out.push(0xff, 0x15, ...rip(iat('ExitProcess'), 6), 0xf4);
+                return out;
+            },
+        });
+        const cork = await run(exe);
+        let seed = 42;
+        const draw = ()=>{
+            seed = (Math.imul(seed, 214013) + 2531011) >>> 0;
+            return (seed >>> 16) & 0x7fff;
+        };
+        const a = draw();
+        const b = draw();
+        const want = ((a ^ b << 3) & 0xffff | (-3 + 8) << 16 | (-1 + 8) << 20 | (-2 + 8) << 24
+            | (1 + 8) << 28) >>> 0;
+        assert.equal(cork.code >>> 0, want);
+        const hosted = cork.trapsHot.map(([name])=>name).filter(name=>/rand|div/.test(name));
+        assert.deepEqual(hosted, [], 'none crossed to the host');
+    });

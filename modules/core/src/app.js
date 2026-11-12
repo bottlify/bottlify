@@ -5925,6 +5925,8 @@ async function buildApp(options){
             ...(/** @type {() => string[]} */ (audio.runtimes)?.() ?? []),
             ...(/** @type {() => string[]} */ (core.api('media').runtimes)?.() ?? []),
         ]);
+    /** An export's x86-64 as its code, with the pointers laid out in it. @param {any} fn */
+    const longOf = fn=>({ ...fn, code: fn.long, pointers: fn.longPointers ?? fn.pointers });
     /**
      * An export that is code of its own, with the traps it jumps to registered
      * and the jumps to them for the loader to fill in.
@@ -5988,9 +5990,9 @@ async function buildApp(options){
             // A long-mode process runs no i386: an export that is guest code
             // runs its x86-64 there (`long`), where the build made any, and
             // is a trap into its host handler where it did not.
+            // A long export's pointers are its own: its code lays them out apart.
             ...long && fn.long || fn.code && !(long && fn.handler)
-                ? codeExport(long && fn.long ? { ...fn, code: fn.long } : fn,
-                    `${name}!${exported}`)
+                ? codeExport(long && fn.long ? longOf(fn) : fn, `${name}!${exported}`)
                 : fn.data ? {
                     data: fn.data(), pointers: fn.pointers, entry: fn.entry,
                 } : {
