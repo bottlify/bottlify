@@ -920,8 +920,17 @@ export function formRegion(read, entry,
             // A call through an import slot to a function the dictionary knows, in a
             // runtime the program loads as a library: formed as its operation while the
             // slot still holds it (`crtSlot`, emit/crt.js).
-            const slot = helper === null && helpers !== false && (!wide || slotHelpers)
+            const direct = helper === null && helpers !== false && (!wide || slotHelpers)
                 && !('refused' in decoded) ? importSlot(decoded, wide) : -1;
+            // Or a call to an import's thunk, `jmp [slot]`, as a compiler links a call
+            // to an import not declared one: seen through to its slot, the thunk's
+            // bytes taken with the region's (`stub`).
+            const thunk = direct < 0 && called >= 0 && helper === null && helpers !== false
+                && (!wide || slotHelpers) && !('refused' in decoded) && translatable(called)
+                ? decodeAt(called) : null;
+            const thunkSlot = thunk !== null && !('refused' in thunk)
+                ? importSlot({ ...thunk, op: thunk.op === 'jmp' ? 'call' : thunk.op }, wide) : -1;
+            const slot = direct >= 0 ? direct : thunkSlot;
             /** @param {number} at */
             const dword = at=>(read(at) | read(at + 1) << 8 | read(at + 2) << 16
                 | read(at + 3) << 24) >>> 0;
@@ -934,9 +943,11 @@ export function formRegion(read, entry,
                 : null;
             if (through !== null && through.does !== undefined && !('refused' in decoded))
             {
+                const stub = thunkSlot >= 0 && thunk !== null
+                    ? { name: 'thunk', address: called, length: thunk.length } : undefined;
                 block.instructions.push(...helperInstructions(through, decoded, slotted, read)
-                    .map(one=>(one.op === 'crt' ? { ...one, crtSlot: slot, crtTarget: slotted }
-                        : one)));
+                    .map(one=>(one.op === 'crt' ? { ...one, crtSlot: slot, crtTarget: slotted,
+                        ...stub ? { stub } : {} } : one)));
                 bytes += decoded.length;
                 eip = wide ? eip + decoded.length : (eip + decoded.length) >>> 0;
                 block.end = eip;
@@ -1210,6 +1221,10 @@ function helpersOf(blocks){
             if (instruction.helper !== undefined)
             {
                 found.set(instruction.helper.address, instruction.helper);
+            }
+            if (instruction.stub !== undefined)
+            {
+                found.set(instruction.stub.address, instruction.stub);
             }
         }
     }

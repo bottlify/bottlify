@@ -90,6 +90,8 @@ export const SEGMENTS = Object.freeze(['es', 'cs', 'ss', 'ds', 'fs', 'gs']);
  *           to a function the dictionary knows is formed as (`emit/crt.js`)
  * @property {number} [crtWord]  of a `crt`: the address its helper reads a dword at as it
  *           runs (`RuntimeHelper.word`)
+ * @property {{ name: string, address: number, length: number }} [stub]  of a `crt` formed
+ *     for a call to an import's thunk (`jmp [slot]`): the thunk's bytes, which the region takes
  * @property {number} [crtSlot]  of a `crt` formed for a `call [slot]`: that slot, which
  *           must still hold `crtTarget`, the function's address, as it runs
  * @property {number} [crtTarget]

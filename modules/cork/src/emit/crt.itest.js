@@ -943,3 +943,49 @@ test('a call through an import slot to a function the dictionary knows is formed
     // The first call formed (2), the second the function written into the slot (nothing).
     assert.deepEqual(once(true), [...new Array(64).fill(2), 0]);
 });
+
+/** An import's thunk, `jmp [SLOT]`, as a compiler links a call to an import not declared one. */
+const THUNK = 0xa900;
+
+test('a call to an import\'s thunk, jmp [slot], to a function the dictionary knows is formed as'
+    + ' its operation, and calls whatever function the slot holds once it is written', ()=>{
+    const code = [0xbb, ...u32(2)];                                  // mov ebx, 2
+    const loop = PROGRAM + code.length;
+    code.push(0x6a, 64, 0x53, 0x68, ...u32(DATA));                  // push 64; push ebx; push DATA
+    code.push(0xe8, ...rel(PROGRAM + code.length, THUNK));           // call THUNK
+    code.push(0x83, 0xc4, 12);                                       // add esp, 12
+    code.push(0xc7, 0x05, ...u32(SLOT), ...u32(OTHER));              // mov dword [SLOT], OTHER
+    code.push(0x4b, 0x75, (loop - (PROGRAM + code.length + 3)) & 0xff, 0xf4);  // dec; jnz; hlt
+    /** @param {boolean} formed */
+    const once = formed=>{
+        const m = createTestMachine({ ramSize: RAM });
+        m.write(HELPER_AT, FILLER);
+        m.write(OTHER, [0xc3]);
+        m.write(SLOT, u32(HELPER_AT));
+        m.write(THUNK, [0xff, 0x25, ...u32(SLOT)]);                  // jmp [SLOT]
+        m.write(PROGRAM, code);
+        m.setReg('esp', STACK);
+        const exit = m.runProgram(PROGRAM, { helpers: formed ? [helperOf('memset')] : false });
+        assert.equal(exit.kind, 3);
+        return [...m.read(DATA, 65)];
+    };
+    assert.deepEqual(once(false), new Array(65).fill(0), 'the test\'s memset fills nothing');
+    assert.deepEqual(once(true), [...new Array(64).fill(2), 0]);
+});
+
+test('a region formed through an import\'s thunk takes the thunk\'s bytes: a thunk written since'
+    + ' is a region formed again', ()=>{
+    const code = [0x6a, 64, 0x6a, 2, 0x68, ...u32(DATA)];            // push 64; push 2; push DATA
+    code.push(0xe8, ...rel(PROGRAM + code.length, THUNK), 0xf4);     // call THUNK; hlt
+    const m = createTestMachine({ ramSize: RAM });
+    m.write(HELPER_AT, FILLER);
+    m.write(SLOT, u32(HELPER_AT));
+    m.write(THUNK, [0xff, 0x25, ...u32(SLOT)]);
+    m.write(PROGRAM, code);
+    const read = (/** @type {number} */ address)=>m.read(address, 1)[0];
+    const region = formRegion(read, PROGRAM, { helpers: [helperOf('memset')] });
+    const pages = [...region.pages];
+    assert.ok(pages.includes(THUNK >>> 12), 'the thunk\'s page is one of the region\'s');
+    assert.ok(region.blocks.some(block=>block.instructions.some(one=>one.op === 'crt')),
+        'formed as the operation');
+});
