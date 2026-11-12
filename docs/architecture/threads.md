@@ -109,7 +109,7 @@ section 4), and what the page asks of the program it asks the program's thread.
 
 What the processes of a run share stays on the engine thread: the registry, the volume and the
 sharing of its open files, the window directory, ids, named events, semaphores and mutexes, the
-bundle, COM's class table ([`core/src/com-link.js`](../../modules/core/src/com-link.js)), the translation store ([`core/src/layers/cpu/internal/store-link.js`](../../modules/core/src/layers/cpu/internal/store-link.js)).
+bundle, COM's class table and the services it started ([`core/src/com-link.js`](../../modules/core/src/com-link.js)), the run's directory of processes, the translation store ([`core/src/layers/cpu/internal/store-link.js`](../../modules/core/src/layers/cpu/internal/store-link.js)).
 The engine thread answers a process thread across a link: two rings in shared memory, one each
 way, with a doorbell word per side ([`core/src/system/link.js`](../../modules/core/src/system/link.js), values encoded by `codec.js`). The
 process thread blocks on its doorbell for each answer and answers what it is asked meanwhile (the
