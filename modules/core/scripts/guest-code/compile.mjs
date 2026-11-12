@@ -4311,6 +4311,14 @@ class FunctionCompiler {
                     this.fpu--;
                     return { where: 'eax', type: 'u32' };
                 }
+                // A float variable's bits where it lies: no fld, which would
+                // quiet a signalling NaN and flag a denormal operand.
+                if (value.where === 'var' && value.type === 'f32' && !value.v.onStack
+                    && !this.x87.includes(value.v))
+                {
+                    this.op(0x8b, ...this.frameAt(EAX, value.v.disp));      // mov eax, [v]
+                    return { where: 'eax', type: 'u32' };
+                }
                 this.toSt0(value, node.arguments[0]);
                 a.emit(0x83, 0xec, 0x04);                                  // sub esp, 4
                 a.emit(0xd9, 0x1c, 0x24);                                  // fstp dword [esp]

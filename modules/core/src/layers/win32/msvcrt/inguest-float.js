@@ -34,6 +34,7 @@ import { X87 } from './x87.js';
 
 /** @typedef {import('./guest-code.js').Guest} Guest */
 /** @typedef {import('./guest-code.js').f64} f64 */
+/** @typedef {import('./guest-code.js').f32} f32 */
 /** @typedef {import('./guest-code.js').i32} i32 */
 /** @typedef {import('./guest-code.js').u32} u32 */
 
@@ -671,4 +672,86 @@ export function atof({ u8, controlWord, setControlWord, host, pointerBytes }, te
         setControlWord(word);
     }
     return negative !== 0 ? -value : value;
+}
+
+/**
+ * A double's class as the UCRT's `_dclass` answers it, as a short:
+ * FP_INFINITE 1, FP_NAN 2, FP_NORMAL -1, FP_SUBNORMAL -2, FP_ZERO 0, from its
+ * high and low dwords.
+ */
+const doubleClass = (/** @type {number} */ high, /** @type {number} */ low)=>(
+    (high & 0x7ff00000) === 0x7ff00000 ? ((high & 0xfffff) !== 0 || low !== 0 ? 2 : 1)
+        : (high & 0x7ff00000) === 0 ? ((high & 0xfffff) !== 0 || low !== 0 ? 0xfffe : 0)
+            : 0xffff);
+
+/** A float's class from its bits, as `doubleClass`. */
+const floatClass = (/** @type {number} */ bits)=>(
+    (bits & 0x7f800000) === 0x7f800000 ? ((bits & 0x7fffff) !== 0 ? 2 : 1)
+        : (bits & 0x7f800000) === 0 ? ((bits & 0x7fffff) !== 0 ? 0xfffe : 0) : 0xffff);
+
+/**
+ * short _dclass(double x) -- the UCRT's classifier behind fpclassify, isnan
+ * and isfinite, from the double's bits.
+ *
+ * @guestCode cdecl
+ * @param {Pick<Guest, 'doubleLow' | 'doubleHigh'>} guest @param {f64} x
+ * @returns {i32}
+ */
+export function _dclass({ doubleLow, doubleHigh }, x){
+    return doubleClass(doubleHigh(x), doubleLow(x));
+}
+
+/**
+ * short _fdclass(float x)
+ *
+ * @guestCode cdecl
+ * @param {Pick<Guest, 'floatBits'>} guest @param {f32} x
+ * @returns {i32}
+ */
+export function _fdclass({ floatBits }, x){
+    return floatClass(floatBits(x));
+}
+
+/**
+ * short _dtest(double *x) -- the class of the double it points at.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} at
+ * @returns {i32}
+ */
+export function _dtest({ u32 }, at){
+    return doubleClass(u32(at + 4), u32(at));
+}
+
+/**
+ * short _fdtest(float *x)
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} at
+ * @returns {i32}
+ */
+export function _fdtest({ u32 }, at){
+    return floatClass(u32(at));
+}
+
+/**
+ * int _dsign(double x) -- the sign bit, as 0x8000 or zero.
+ *
+ * @guestCode cdecl
+ * @param {Pick<Guest, 'doubleHigh'>} guest @param {f64} x
+ * @returns {i32}
+ */
+export function _dsign({ doubleHigh }, x){
+    return (doubleHigh(x) | 0) < 0 ? 0x8000 : 0;
+}
+
+/**
+ * int _fdsign(float x)
+ *
+ * @guestCode cdecl
+ * @param {Pick<Guest, 'floatBits'>} guest @param {f32} x
+ * @returns {i32}
+ */
+export function _fdsign({ floatBits }, x){
+    return (floatBits(x) | 0) < 0 ? 0x8000 : 0;
 }
