@@ -185,6 +185,21 @@ export const QUICK_BYTES = 16;
  * @param {readonly number[]} masks
  */
 export function maskedFingerprint(read, address, spans, masks){
+    const [high, low] = maskedHash(read, address, spans, masks);
+    return high.toString(16).padStart(8, '0') + low.toString(16).padStart(8, '0');
+}
+
+/**
+ * `maskedFingerprint`'s two lanes as numbers, high first: what a lookup that
+ * compares many keys takes, without a string made for each.
+ *
+ * @param {(address: number) => number} read
+ * @param {number} address
+ * @param {readonly (readonly number[])[]} spans
+ * @param {readonly number[]} masks
+ * @returns {[number, number]}
+ */
+function maskedHash(read, address, spans, masks){
     let low = 0x811c9dc5;
     let high = 0x050c5d1f;
     let at = 0;
@@ -203,7 +218,7 @@ export function maskedFingerprint(read, address, spans, masks){
             high = Math.imul(high ^ byte ^ at & 0xff, 0x01000193);
         }
     }
-    return (high >>> 0).toString(16).padStart(8, '0') + (low >>> 0).toString(16).padStart(8, '0');
+    return [high >>> 0, low >>> 0];
 }
 
 /**
@@ -239,9 +254,28 @@ function isAt(read, target, helper){
  * @returns {RuntimeHelper | null}
  */
 export function helperAt(read, target, helpers = RUNTIME_HELPERS, bits = 32){
-    for (const helper of helpers)
+    const { looks, keys } = lookupOf(helpers);
+    // Each look's key taken once for this target, when a helper first needs it.
+    const taken = new Array(looks.length).fill(null);
+    for (let index = 0; index < helpers.length; index++)
     {
-        if ((helper.bits ?? 32) === bits && isAt(read, target, helper))
+        const helper = helpers[index];
+        if ((helper.bits ?? 32) !== bits)
+        {
+            continue;
+        }
+        const key = keys[index];
+        if (key !== null)
+        {
+            const look = looks[key.look];
+            const hash = taken[key.look] ??= maskedHash(read, target, look.spans, look.masks);
+            if (hash[0] !== key.high || hash[1] !== key.low)
+            {
+                continue;
+            }
+        }
+        // Past its quick key, or a helper with none: the whole look.
+        if (isAt(read, target, helper))
         {
             return helper;
         }
@@ -268,6 +302,53 @@ export function routineHelper({ name, does, code, bits }){
     return Object.freeze({ name, does: /** @type {Crt} */ (does), length: code.length,
         ...bits === 64 ? { bits: /** @type {64} */ (64) } : {},
         hash: fingerprint(at=>code[at] ?? 0, 0, code.length) });
+}
+
+/**
+ * The quick looks a list of helpers turns a call away by: helpers whose quick
+ * keys cover the same bytes under the same masks share one look, so a target
+ * is read and hashed once a look, not once a helper -- formRegion asks this of
+ * every call it meets, and the dictionary's forty-odd keys taken one by one
+ * were a twentieth of the thread that ran ngen's compiler. `keys[i]` is
+ * helper i's look and quick key as numbers, or null for one with no quick key.
+ *
+ * @type {WeakMap<readonly RuntimeHelper[], { looks: { spans: number[][], masks: number[] }[],
+ *     keys: ({ look: number, high: number, low: number } | null)[] }>}
+ */
+const lookups = new WeakMap();
+
+/** @param {readonly RuntimeHelper[]} helpers */
+function lookupOf(helpers){
+    let made = lookups.get(helpers);
+    if (made)
+    {
+        return made;
+    }
+    /** @type {{ spans: number[][], masks: number[] }[]} */
+    const looks = [];
+    /** @type {Map<string, number>} */
+    const byShape = new Map();
+    const keys = helpers.map(helper=>{
+        const { spans, masks = [], quick } = helper;
+        if (spans === undefined || quick === undefined)
+        {
+            return null;
+        }
+        const length = Math.min(QUICK_BYTES, spans[0][1]);
+        const within = masks.filter(mask=>mask < length);
+        const shape = `${length}:${within.join(',')}`;
+        let look = byShape.get(shape);
+        if (look === undefined)
+        {
+            look = looks.length;
+            looks.push({ spans: [[0, length]], masks: within });
+            byShape.set(shape, look);
+        }
+        return { look, high: parseInt(quick.slice(0, 8), 16), low: parseInt(quick.slice(8), 16) };
+    });
+    made = { looks, keys };
+    lookups.set(helpers, made);
+    return made;
 }
 
 /**
