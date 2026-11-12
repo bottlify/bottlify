@@ -10,6 +10,7 @@
  *
  *   node tools/cork-calls.mjs <blocks.json> [--bundle id] [--image name.dll@0x2b3b000]...
  *       [--file path.exe@0x400000]... [--exclude 0x2b50c40-0x2b50cd2]... [--out profile.json]
+ *       [--top 20]
  *
  * The blocks file is what `tools/cdp_test/game.mjs` writes for a run with
  * `--cork-config '{"blockProfile":true}'` (or any `{ blocks: [[address, count,
@@ -28,7 +29,8 @@
  * block reads before writing (`liveIn`). A block ends before every register is
  * decided, so each count is a lower bound and the undecided ones are counted
  * beside it. esp is always live and counted in neither. How deep the calls
- * nest is not in a block profile: it is written `not measured`.
+ * nest is not in a block profile: it is written `not measured`. `--top N` lists the N
+ * direct callees called most (20 by default).
  */
 
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -304,6 +306,9 @@ const result = {
     liveIn: { histogram: liveIn, mean: mean(liveIn) },
     calleesFor90: covering(0.9),
     callees: callees.size,
+    topCallees: [...callees].sort((a, b)=>b[1] - a[1]).slice(0, Number(flag('--top', '20')))
+        .map(([address, count])=>({ address: `0x${address.toString(16)}`, calls: count,
+            share: calls.direct > 0 ? count / calls.direct : 0 })),
     depth: 'not measured',
 };
 const text = JSON.stringify(result, null, 1);

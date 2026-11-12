@@ -79,6 +79,9 @@
  * page's origin file system keeps them: a process started later finds what an
  * earlier one translated, as it would in a browser.
  *
+ * `--cork-blocks DIR` writes, with cork's `blockProfile`, each process's counted blocks
+ * and its images' bases at every status, for tools/cork-calls.mjs.
+ *
  * `--cork-figures` adds a CORK line to each process's status: the share of its
  * instructions translated code retired, the translator's time, what threw
  * translations away, and (with cork's `timings`) where the interpreter ran.
@@ -730,6 +733,18 @@ setInterval(async()=>{
             // translated code retired, what the translator spent, what threw
             // translations away, and where the interpreter's instructions went
             // (those need `--cork '{"timings":true}'`).
+            // `--cork-blocks DIR`: with cork's `blockProfile`, each process's
+            // counted blocks and where its images lie, a file per status, for
+            // tools/cork-calls.mjs and tools/cork-mix.mjs.
+            if (argv.includes('--cork-blocks') && cpu.cork?.blockCounts)
+            {
+                const into = argv[argv.indexOf('--cork-blocks') + 1];
+                mkdirSync(into, { recursive: true });
+                const name = `${image.split('\\').pop()}-${cpu.instructions}-${seconds()}.json`;
+                writeFileSync(join(into, name), JSON.stringify({ image,
+                    bases: metrics('loader').bases ?? [], blocks: cpu.cork.blockCounts,
+                    mechanisms: cpu.cork.mechanisms, transferTargets: cpu.cork.transferTargets }));
+            }
             if (argv.includes('--cork-figures'))
             {
                 const figures = cpu.cork ?? {};

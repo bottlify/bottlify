@@ -153,7 +153,7 @@ function bindSiteHook(entry, image, memory, register, resolveHandler, allocate, 
 export function createLoaderModule(){
     // What this graph's loader has loaded and bound. Every graph is given module
     // objects of its own (`defaultModules`), so a child's images are not its parent's.
-    /** @type {{ base: number, entryPoint: number, unresolved: string[] }[]} */
+    /** @type {{ name?: string, base: number, entryPoint: number, unresolved: string[] }[]} */
     let loaded = [];
     /** @type {{ bound: string[], refused: string[], pending: string[] }} */
     let hookResults = { bound: [], refused: [], pending: [] };
@@ -487,6 +487,9 @@ export function createLoaderModule(){
                 status: 'ready',
                 metrics: {
                     images: loaded.length,
+                    // Where each image lies, as [name, base]: what reads a block
+                    // profile back to its code (tools/cork-calls.mjs).
+                    bases: loaded.map(record=>[record.name ?? '', record.base]),
                     // An import nothing implements is not fatal at load time, so the
                     // list is the only place it surfaces before the guest calls it.
                     unresolved: loaded.flatMap(image=>image.unresolved),
