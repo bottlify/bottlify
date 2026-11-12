@@ -152,3 +152,29 @@ test('_wcsicmp, _wcsnicmp and _memicmp: ASCII folded, every other unit as it is;
         same('_memicmp', { stack: [0, 0, 0], memory }, handed);
     }
 });
+
+test('_wtoi, wcstol and wcstoul: signs, bases, prefixes, wraps and limits; a unit past ASCII where'
+    + ' the reading stops the handler\'s', ()=>{
+    const next = random(47);
+    const handed = { host: ()=>0x5eed };
+    const pieces = ['', ' ', '\t', '-', '+', '0', '0x', '0X', '7', '12', '4294967295', '2147483648',
+        'ff', 'Zz', '99999999999', '　', '１', '١', 'é', 'g'];
+    for (let i = 0; i < 300; i++)
+    {
+        let text = '';
+        for (let p = next() % 4; p >= 0; p--)
+        {
+            text += pieces[next() % pieces.length];
+        }
+        const units = [...text].map(c=>c.charCodeAt(0));
+        const memory = /** @type {[number, number[]][]} */ ([[DATA, wide(units)],
+            [DATA + 0x100, [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x11, 0x22]]]);
+        same('_wtoi', { stack: [DATA], memory });
+        const base = [0, 10, 16, 8, 2, 36, 1, 37][next() % 8];
+        for (const end of [0, DATA + 0x100])
+        {
+            same('wcstol', { stack: [DATA, end, base], memory }, handed);
+            same('wcstoul', { stack: [DATA, end, base], memory }, handed);
+        }
+    }
+});

@@ -496,28 +496,6 @@ export function createConversionFunctions(host){
         },
     });
 
-    /**
-     * int _wtoi(const wchar_t *str) and long _wtol: atoi's reading over a
-     * wide string -- white space, a sign, ASCII digits -- and atoi's
-     * overflow, which wraps in 32 bits rather than clamping.
-     */
-    const wideAtoi = {
-        convention: 'cdecl',
-        argBytes: 4,
-        /** @param {number[]} args */
-        handler: ([string])=>{
-            const text = wideStringAt(/** @type {(address: number, length: number)
-                => Uint8Array} */ (host.readMemory), string);
-            const match = /^[ \t\n\v\f\r]*([+-]?)([0-9]*)/.exec(text);
-            let total = 0;
-            for (const digit of match?.[2] ?? '')
-            {
-                total = (Math.imul(total, 10) + digit.charCodeAt(0) - 0x30) | 0;
-            }
-            return match?.[1] === '-' ? (0 - total) | 0 : total;
-        },
-    };
-
     /** long strtol(const char *str, char **end, int base) */
     /** @param {bigint} magnitude @param {boolean} negative */
     const toLong = (magnitude, negative)=>{
@@ -744,10 +722,13 @@ export function createConversionFunctions(host){
              * long wcstol(const wchar_t *str, wchar_t **end, int base) and
              * unsigned long wcstoul: strtol and strtoul over a wide string,
              * reading the decimal digits of the scripts msvcrt reads and the
-             * separators Unicode has as white space.
+             * separators Unicode has as white space -- in the guest, which
+             * hands this handler a unit past ASCII where its reading stops.
              */
-            wcstol: strtoInteger(12, toLong, longLimit, true),
-            wcstoul: strtoInteger(12, toUnsignedLong, unsignedLongLimit, true),
+            wcstol: guestEntry(inGuest.wcstol, COMPILED.wcstol, entryHost,
+                strtoInteger(12, toLong, longLimit, true)),
+            wcstoul: guestEntry(inGuest.wcstoul, COMPILED.wcstoul, entryHost,
+                strtoInteger(12, toUnsignedLong, unsignedLongLimit, true)),
 
             /**
              * __int64 _wcstoi64(const wchar_t *str, wchar_t **end, int base)
@@ -765,8 +746,8 @@ export function createConversionFunctions(host){
                 handler: ([string])=>wideInt64.handler([string, 0, 10]),
             },
 
-            _wtoi: wideAtoi,
-            _wtol: wideAtoi,
+            _wtoi: guestEntry(inGuest._wtoi, COMPILED._wtoi, entryHost),
+            _wtol: guestEntry(inGuest._wtoi, COMPILED._wtoi, entryHost),
         } : {},
 
         /** wchar_t *_itow(int value, wchar_t *buffer, int radix) -- _ltoa's text, wide */

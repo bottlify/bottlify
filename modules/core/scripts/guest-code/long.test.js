@@ -96,8 +96,9 @@ const AREA = 0x3000;
 /**
  * An area of the bytes strings are made of: letters of both cases, digits,
  * white space, signs, the upper half, and a terminator often enough that
- * strings end; and runs copied from one place to another (`twins`, each the
- * run's two places), so two pointers can find the same bytes for a while.
+ * strings end; runs copied from one place to another (`twins`, each the
+ * run's two places), so two pointers can find the same bytes for a while;
+ * and runs of wide ASCII text.
  *
  * @param {() => number} next
  * @returns {{ bytes: Uint8Array, twins: [number, number][] }}
@@ -120,6 +121,24 @@ function area(next){
         bytes.set(run, to);
         bytes.set(run, from);
         twins.push([from, to]);
+    }
+    // Runs of wide ASCII text, a unit a character and its high byte 0, some
+    // ending in a wide terminator: what a wide function reads to its end.
+    const ascii = [0x30, 0x31, 0x37, 0x39, 0x41, 0x61, 0x66, 0x7a, 0x20, 0x2d, 0x2b, 0x78];
+    for (let i = 0; i < 24; i++)
+    {
+        const at = (next() % (AREA - 0x100)) & ~1;
+        const units = 2 + next() % 30;
+        for (let u = 0; u < units; u++)
+        {
+            bytes[at + 2 * u] = ascii[next() % ascii.length];
+            bytes[at + 2 * u + 1] = 0;
+        }
+        if (next() % 2 === 0)
+        {
+            bytes[at + 2 * units] = 0;
+            bytes[at + 2 * units + 1] = 0;
+        }
     }
     return { bytes, twins };
 }

@@ -2588,3 +2588,230 @@ export function _memicmp({ u8, host }, left, right, count){
     }
     return 0;
 }
+
+/**
+ * int _wtoi(const wchar_t *text), and _wtol: atoi's reading over a wide
+ * string -- white space, a sign, ASCII digits -- and atoi's overflow, which
+ * wraps in 32 bits.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} text
+ * @returns {i32}
+ */
+export function _wtoi({ u16 }, text){
+    let at = text;
+    let c = u16(at);
+    while (c === 0x20 || c >= 0x09 && c <= 0x0d)
+    {
+        at += 2;
+        c = u16(at);
+    }
+    let negative = 0;
+    if (c === 0x2d || c === 0x2b)
+    {
+        negative = c === 0x2d ? 1 : 0;
+        at += 2;
+        c = u16(at);
+    }
+    /** @type {i32} */
+    let total = 0;
+    while (c >= 0x30 && c <= 0x39)
+    {
+        total = (Math.imul(total, 10) + c - 0x30) | 0;
+        at += 2;
+        c = u16(at);
+    }
+    return negative !== 0 ? (0 - total) | 0 : total;
+}
+
+/** A unit's value as a digit, ASCII alone; 99 for any other, past every radix. */
+const wideDigit = (/** @type {number} */ unit)=>(unit < 0x80 ? DIGITS[unit] : 99);
+
+/**
+ * long wcstol(const wchar_t *text, wchar_t **end, int base)
+ *
+ * strtol's reading over a wide string. The host reads the white space and
+ * the digits of every script msvcrt knows: a unit past ASCII where the
+ * reading stops -- after the white space, after the sign, after the digits
+ * -- is the handler's, and so are strtol's: a value out of range, a base it
+ * does not take.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} text @param {u32} end @param {i32} base
+ * @returns {i32}
+ */
+export function wcstol({ u16, setU32, host, pointerBytes }, text, end, base){
+    if (base !== 0 && (base < 2 || base > 36))
+    {
+        return host();
+    }
+    let at = text;
+    let c = u16(at);
+    while (c === 0x20 || c >= 0x09 && c <= 0x0d)
+    {
+        at += 2;
+        c = u16(at);
+    }
+    let negative = 0;
+    if (c === 0x2d || c === 0x2b)
+    {
+        negative = c === 0x2d ? 1 : 0;
+        at += 2;
+        c = u16(at);
+    }
+    if (c >= 0x80)
+    {
+        return host();
+    }
+    let radix = base;
+    if ((radix === 0 || radix === 16) && c === 0x30 && (u16(at + 2) | 0x20) === 0x78)
+    {
+        radix = 16;
+        at += 4;
+        c = u16(at);
+    }
+    else if (radix === 0)
+    {
+        radix = c === 0x30 ? 8 : 10;
+    }
+    const start = at;
+    const most = BELOW_CARRY[radix];
+    /** @type {u32} */
+    let magnitude = 0;
+    let digit = wideDigit(c);
+    while (digit < radix)
+    {
+        if (magnitude > most)
+        {
+            return host();
+        }
+        const product = Math.imul(magnitude, radix) >>> 0;
+        magnitude = (product + digit) >>> 0;
+        if (magnitude < product)
+        {
+            return host();
+        }
+        at += 2;
+        digit = wideDigit(u16(at));
+    }
+    if (u16(at) >= 0x80)
+    {
+        return host();
+    }
+    if (at === start)
+    {
+        if (end !== 0)
+        {
+            setU32(end, text);
+            if (pointerBytes === 8)
+            {
+                setU32(end + 4, 0);
+            }
+        }
+        return 0;
+    }
+    if (magnitude > (negative !== 0 ? 0x80000000 : 0x7fffffff))
+    {
+        return host();
+    }
+    if (end !== 0)
+    {
+        setU32(end, at);
+        if (pointerBytes === 8)
+        {
+            setU32(end + 4, 0);
+        }
+    }
+    return negative !== 0 ? (0 - magnitude) | 0 : magnitude | 0;
+}
+
+/**
+ * unsigned long wcstoul(const wchar_t *text, wchar_t **end, int base)
+ *
+ * As wcstol reads, and a minus sign negates the magnitude within 32 bits,
+ * as strtoul does.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} text @param {u32} end @param {i32} base
+ * @returns {u32}
+ */
+export function wcstoul({ u16, setU32, host, pointerBytes }, text, end, base){
+    if (base !== 0 && (base < 2 || base > 36))
+    {
+        return host();
+    }
+    let at = text;
+    let c = u16(at);
+    while (c === 0x20 || c >= 0x09 && c <= 0x0d)
+    {
+        at += 2;
+        c = u16(at);
+    }
+    let negative = 0;
+    if (c === 0x2d || c === 0x2b)
+    {
+        negative = c === 0x2d ? 1 : 0;
+        at += 2;
+        c = u16(at);
+    }
+    if (c >= 0x80)
+    {
+        return host();
+    }
+    let radix = base;
+    if ((radix === 0 || radix === 16) && c === 0x30 && (u16(at + 2) | 0x20) === 0x78)
+    {
+        radix = 16;
+        at += 4;
+        c = u16(at);
+    }
+    else if (radix === 0)
+    {
+        radix = c === 0x30 ? 8 : 10;
+    }
+    const start = at;
+    const most = BELOW_CARRY[radix];
+    /** @type {u32} */
+    let magnitude = 0;
+    let digit = wideDigit(c);
+    while (digit < radix)
+    {
+        if (magnitude > most)
+        {
+            return host();
+        }
+        const product = Math.imul(magnitude, radix) >>> 0;
+        magnitude = (product + digit) >>> 0;
+        if (magnitude < product)
+        {
+            return host();
+        }
+        at += 2;
+        digit = wideDigit(u16(at));
+    }
+    if (u16(at) >= 0x80)
+    {
+        return host();
+    }
+    if (at === start)
+    {
+        if (end !== 0)
+        {
+            setU32(end, text);
+            if (pointerBytes === 8)
+            {
+                setU32(end + 4, 0);
+            }
+        }
+        return 0;
+    }
+    if (end !== 0)
+    {
+        setU32(end, at);
+        if (pointerBytes === 8)
+        {
+            setU32(end + 4, 0);
+        }
+    }
+    return negative !== 0 ? (0 - magnitude) >>> 0 : magnitude;
+}
