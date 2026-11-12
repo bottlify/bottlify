@@ -5841,8 +5841,25 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
                 relaxedFlagReads: { ...relaxedFlagReads },
                 forcedSteps,
                 // Where the interpreted instructions went, busiest first.
+                // and why no translation took each start over: the tops it has
+                // entries at (a bit each), a formed region not yet published that
+                // will cover it (`coveredOut`, the regions holding it), a loop it
+                // is closed in, and the miss's reason.
                 interpretedFrom: [...interpretedFrom].sort((a, b)=>b[1].count - a[1].count)
-                    .slice(0, 24).map(([address, one])=>({ address, ...one })),
+                    .slice(0, 24).map(([address, one])=>{
+                        let tops = 0;
+                        for (let top = 0; top < 8; top++)
+                        {
+                            tops |= entries.entryOf(address, top) >= 0 ? 1 << top : 0;
+                        }
+                        let pending = coveredOut.get(keyOf(address, ANY_TOP)) ?? 0;
+                        for (let top = 0; top < 8; top++)
+                        {
+                            pending += coveredOut.get(keyOf(address, top)) ?? 0;
+                        }
+                        return { address, ...one, tops, coveredOut: pending,
+                            closed: closedIn.has(address), why: missReason(address) };
+                    }),
                 // The addresses most forced, busiest first, as "0x401000 x5000 top 3 why".
                 forcedAt: [...forcedAt].sort((a, b)=>b[1].count - a[1].count).slice(0, 10)
                     .map(([at, one])=>`0x${at.toString(16)} x${one.count}`
