@@ -132,6 +132,7 @@ export function remoteSystem(ask, handlers = {}, call, volume = null, windowCell
             /** @param {number} processId @param {any} endpoint */
             attach(processId, endpoint){
                 endpoints.set(processId >>> 0, endpoint);
+                // Once per link: what finds each machine's endpoint by its id.
                 handlers.endpoint ??= Object.fromEntries(ENDPOINT.map(name=>
                     [name, (/** @type {number} */ id, /** @type {any[]} */ ...args)=>
                         endpoints.get(id >>> 0)?.[name](...args) ?? null]));
@@ -193,6 +194,7 @@ export function remoteSystem(ask, handlers = {}, call, volume = null, windowCell
                 : Promise.resolve(ask('processes', 'ask', [id, request]))),
             /** @param {Record<string, (...args: any[]) => any>} parent */
             answer(parent){
+                // Once per link: the worker's one app answers for its children.
                 handlers.parent = parent;
             },
         },

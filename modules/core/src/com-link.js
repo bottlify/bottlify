@@ -198,6 +198,8 @@ export function remoteClassTable(link, hooks = {}){
     const local = new Map();
     /** A server the run started, by the promise of its end. @type {WeakMap<Promise<unknown>, number>} */
     const started = new WeakMap();
+    // Once per link: the worker's one app keeps one class table, which holds
+    // every endpoint of every machine on the link.
     link.handlers.com = {
         /** @param {number} id @param {any} message */
         deliver: (id, message)=>local.get(id)?.deliver(message) ?? GONE,
