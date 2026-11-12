@@ -3624,6 +3624,7 @@ async function mountBundle({ options, events, translationStore }){
         ranges: ()=>({ ...ranges }),
         stop(){
             stopped = true;
+            cache.close();
         },
     };
 }
@@ -10352,8 +10353,6 @@ export async function createApp(options){
             canvas: options.device.canvas,
             now: options.device.now,
             maxFps: options.maxFps ?? SETTINGS.frame.maxFps,
-            // A picture read out of guest memory goes at the display's rate at most.
-            later: (fn, ms)=>setTimeout(fn, ms),
             // One bound for the run: every machine's frames go onto one queue.
             maxFrameLatency: options.graphics?.maxFrameLatency,
             // A build with no canvas but with a sink of its own -- a test
@@ -10381,8 +10380,7 @@ export async function createApp(options){
         })
         // A process in a worker of its own has no GPU: its surfaces' pictures
         // go to the thread that has one, as bytes, each burst as it flushes.
-        : options.graphics?.display ? createPresenter({ sendFrame: options.graphics.display,
-            maxFps: options.maxFps ?? SETTINGS.frame.maxFps, later: (fn, ms)=>setTimeout(fn, ms) })
+        : options.graphics?.display ? createPresenter({ sendFrame: options.graphics.display })
             : null);
 
     // The translation store is the run's as well: a child's machine is built

@@ -657,6 +657,44 @@ test('a process is found by id in the run\'s directory, whichever process starte
     assert.equal(other.processes.find(0x9998), null);
 });
 
+test('a gone process\'s record in the run\'s directory keeps its exit, not its memory', async()=>{
+    const { setFlagsFromString } = await import('node:v8');
+    const { runInNewContext } = await import('node:vm');
+    setFlagsFromString('--expose-gc');
+    const gc = runInNewContext('gc');
+    const { createKernelModule } = await import('./module.js');
+    const directory = new Map();
+    const ids = { thread: 1, process: 0x3000 };
+    /** @type {WeakRef<object>} */
+    let memoryOfGone = new WeakRef({});
+    await (async()=>{
+        const module = createKernelModule();
+        const memory = fakeMemory();
+        memoryOfGone = new WeakRef(memory);
+        const kernel = /** @type {any} */ (await module.create(
+            { stacks: { base: STACK_BASE, size: STACK_SIZE }, processDirectory: directory, ids },
+            /** @type {any} */ ({
+                /** @param {string} name */
+                requireApi: name=>(name === 'cpu' ? fakeCpu() : memory),
+                provide: ()=>{},
+            })));
+        // As a COM server enters itself: its own record, its own exit event.
+        const self = { kind: 'process', id: 0x3004, completed: false,
+            exited: kernel.createEvent({ manualReset: true, signalled: false,
+                name: 'process 0x3004' }) };
+        directory.set(self.id, self);
+        kernel.setEvent(self.exited);
+        self.completed = true;
+        await module.dispose();
+    })();
+    await new Promise(done=>setImmediate(done));
+    gc();
+    const record = directory.get(0x3004);
+    assert.equal(record.exited.signalled, true, 'a wait on its exit still returns at once');
+    assert.equal(record.exited.manualReset, true);
+    assert.equal(memoryOfGone.deref(), undefined, 'and its memory is nobody\'s');
+});
+
 test('a process in a worker of its own finds a process of the run by id across the link: its'
     + ' exit is a stand-in for the run\'s event, and its code is asked there', async()=>{
     const { objectHandlers } = await import('../../system-objects.js');

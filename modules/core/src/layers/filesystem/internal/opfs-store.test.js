@@ -334,6 +334,19 @@ test('the pool drops the least recently used handle and can take it back', async
     assert.equal(store.diagnostics().open, 2);
 });
 
+test('opens of one path at once are one open, not a lock taken twice', async()=>{
+    // The handle is made after an await, so a second open that came in
+    // meanwhile found none yet and asked for its own lock - its own store's
+    // lock, refused as a file open somewhere else. A block cache filling a
+    // bundle six requests at once rolled onto a new segment from several of
+    // them together, and the refusal stopped its preload for the run.
+    const store = await createOpfsStore({ root: fakeRoot({}) });
+    const path = 'war.pack.1';
+    await Promise.all([store.open(path), store.open(path), store.open(path)]);
+    store.write(path, 0, bytes('abc'));
+    assert.equal(text(store.read(path, 0, 3)), 'abc');
+});
+
 test('the exclusive lock on a file is respected in both directions', async()=>{
     const root = fakeRoot({ 'a.dat': 'abc' });
     const first = await createOpfsStore({ root });
@@ -401,4 +414,19 @@ test('a build without synchronous access says so instead of hanging', async()=>{
     const store = await createOpfsStore({ root: mainThread });
 
     await assert.rejects(store.open('a.dat'), { code: 'ACCESS_DENIED' });
+});
+
+test('a closed store lets its files go, so they can be removed, and opens nothing after', async()=>{
+    const root = fakeRoot({ 'a.blocks': 'abc', 'b.blocks': 'def' });
+    const store = await createOpfsStore({ root, maxOpenHandles: Number.MAX_SAFE_INTEGER });
+    await store.open('a.blocks');
+    await store.open('b.blocks');
+    await assert.rejects(root.removeEntry('a.blocks'), { name: 'NoModificationAllowedError' });
+
+    await store.close();
+
+    await root.removeEntry('a.blocks');
+    await root.removeEntry('b.blocks');
+    assert.deepEqual(store.diagnostics().open, 0);
+    await assert.rejects(store.open('c.blocks'), { code: 'ACCESS_DENIED' });
 });

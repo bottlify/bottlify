@@ -292,6 +292,41 @@ const bytesHeldOf = (worker, seam)=>{
 const DISPLAY_RAMP = 'display';
 
 /**
+ * Who hears that a GPU device went away, by device. The device is the run's
+ * and every machine of the run is built on it, but a reaction on its `lost`
+ * promise can never be taken back: one made in a machine's own scope held
+ * that machine - its memory with it - for as long as the device lived, every
+ * process the run had ever started (an installer's, 560 MB each). So each
+ * device is listened to once, from here, and a machine joins and leaves.
+ *
+ * @type {WeakMap<object, { happened: boolean, hearing: Set<() => void> }>}
+ */
+const deviceLosses = new WeakMap();
+
+/** @param {any} gpu  a GPUDevice @returns {{ happened: boolean, hearing: Set<() => void> }} */
+function lossOf(gpu){
+    let loss = deviceLosses.get(gpu);
+    if (!loss)
+    {
+        const made = { happened: false, hearing: new Set() };
+        loss = made;
+        deviceLosses.set(gpu, made);
+        gpu.lost?.then?.((/** @type {{ reason?: string }} */ info)=>{
+            // A device the host destroyed is the run ending, not the GPU failing.
+            if (info?.reason !== 'destroyed')
+            {
+                made.happened = true;
+                for (const one of [...made.hearing])
+                {
+                    one();
+                }
+            }
+        });
+    }
+    return loss;
+}
+
+/**
  * What a layer offers that graphics can go without, asked as it is built: a
  * disabled layer's stub refuses every call, and that refusal means the layer
  * has none to give, as a method it does not have does.
@@ -400,7 +435,8 @@ export function createGraphicsModule(){
              *
              * @type {{ backend: any, factories: any, created: string[], seam: any,
              *     presenter: any, presenterGiven: boolean, shown: any, disposed: boolean,
-             *     gammaOwners: Set<any>, remote: any, blockCompression: any }}
+             *     gammaOwners: Set<any>, remote: any, blockCompression: any,
+             *     leaveLoss: (() => void) | null }}
              */
             const state = {
                 remote: null,
@@ -414,6 +450,7 @@ export function createGraphicsModule(){
                 shown: null,
                 disposed: false,
                 gammaOwners: new Set(),
+                leaveLoss: null,
             };
 
             /**
@@ -498,12 +535,16 @@ export function createGraphicsModule(){
                 }
                 loss.watchers.clear();
             };
-            device?.device?.lost?.then?.((/** @type {{ reason?: string }} */ info)=>{
-                if (info?.reason !== 'destroyed')
+            if (device?.device)
+            {
+                const runLoss = lossOf(device.device);
+                if (runLoss.happened)
                 {
                     lose();
                 }
-            });
+                runLoss.hearing.add(lose);
+                state.leaveLoss = ()=>runLoss.hearing.delete(lose);
+            }
             /**
              * @param {() => void} watcher
              * @returns {() => void} how to stop watching
@@ -1757,6 +1798,7 @@ export function createGraphicsModule(){
                 // made itself -- a build assembled without one -- is disposed
                 // here.
                 instance.shown?.detach();
+                instance.leaveLoss?.();
                 if (instance.presenter && !instance.presenterGiven)
                 {
                     instance.presenter.dispose?.();
