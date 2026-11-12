@@ -23,6 +23,7 @@
 import { createDigestFor } from '../crypto/signature.js';
 import { bytesSource, CompoundError, openCompound } from '../msi/compound.js';
 import { parseGuid } from '../ole32/guid.js';
+import { sameBytes } from '../crypto/x509.js';
 
 /**
  * @typedef {Object} Subject
@@ -179,9 +180,16 @@ const MSI_SIGNATURE_EX = '\u0005MsiDigitalSignatureEx';
  * UTF-16LE bytes - a shorter name first where one starts the other - and its
  * class after them. That order was measured: Microsoft's own signed
  * databases (Visual C++ 2010's, PhysX's) digest to their stated value in it,
- * not in the directory's. A database signed with \x05MsiDigitalSignatureEx,
- * which prehashes the streams' metadata, is not one this reads: its digest is
- * null, as for an algorithm not known.
+ * not in the directory's. A database signed with \x05MsiDigitalSignatureEx
+ * also signs the entries' metadata: that stream holds a digest of every entry
+ * but the two signature streams -- its name's UTF-16LE (none for the root), a
+ * storage's class or a stream's size (four bytes), its state bits, and its
+ * creation and modification times (none for the root) -- each storage before
+ * its children, taken in the contents' order (measured too: the .NET Framework
+ * 4.8 setup's databases match it, not the directory's); the signed digest is
+ * then of that stream's bytes first, the contents after them. A stream whose
+ * bytes differ from the metadata digest computed afresh says the database
+ * was changed: its digest is that of nothing (TRUST_E_BAD_DIGEST).
  *
  * @param {Uint8Array} bytes
  * @returns {Promise<Subject | null>} null for bytes that are no compound file
@@ -228,7 +236,8 @@ export async function msiSubject(bytes){
     /** The pieces the digest covers, in order. @type {Uint8Array[]} */
     const covered = [];
     let signature = null;
-    let extended = false;
+    /** The metadata digest the database was signed with, when it was. @type {Uint8Array | null} */
+    let extended = null;
     /** @param {import('../msi/compound.js').CompoundNode} storage @param {boolean} root */
     const walk = async(storage, root)=>{
         const children = [...storage.children.values()]
@@ -243,7 +252,7 @@ export async function msiSubject(bytes){
             }
             if (root && node.name === MSI_SIGNATURE_EX)
             {
-                extended = true;
+                extended = await compound.readAll(node);
                 continue;
             }
             if (node.kind === 'stream')
@@ -259,14 +268,57 @@ export async function msiSubject(bytes){
             ?? '{00000000-0000-0000-0000-000000000000}')));
     };
     await walk(compound.root, true);
+    /**
+     * The entries' metadata, in the directory's order, each storage before its
+     * children; the signature streams left out.
+     *
+     * @param {import('../msi/compound.js').CompoundNode} node @param {boolean} root
+     * @param {(piece: Uint8Array) => void} take
+     */
+    const metadata = (node, root, take)=>{
+        const entry = node.entry ?? new Uint8Array(0x80);
+        if (!root)
+        {
+            take(nameBytes(node.name));
+        }
+        take(node.kind === 'stream' ? entry.subarray(0x78, 0x7c) : entry.subarray(0x50, 0x60));
+        take(entry.subarray(0x60, 0x64));
+        if (!root)
+        {
+            take(entry.subarray(0x64, 0x74));
+        }
+        if (node.kind === 'storage')
+        {
+            const children = [...node.children.values()]
+                .sort((one, two)=>byBytes(nameBytes(one.name), nameBytes(two.name)));
+            for (const child of children)
+            {
+                if (!(root && (child.name === MSI_SIGNATURE || child.name === MSI_SIGNATURE_EX)))
+                {
+                    metadata(child, false, take);
+                }
+            }
+        }
+    };
     return {
         form: 'msi',
         signature,
         digest: digestOid=>{
-            const digest = extended ? null : createDigestFor(digestOid);
+            const digest = createDigestFor(digestOid);
             if (!digest)
             {
                 return null;
+            }
+            if (extended)
+            {
+                const prehash = /** @type {NonNullable<typeof digest>} */ (
+                    createDigestFor(digestOid));
+                metadata(compound.root, true, piece=>prehash.update(piece));
+                if (!sameBytes(prehash.digest(), extended))
+                {
+                    return new Uint8Array(0);
+                }
+                digest.update(extended);
             }
             covered.forEach(piece=>digest.update(piece));
             return digest.digest();

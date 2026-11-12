@@ -656,3 +656,36 @@ test('a process is found by id in the run\'s directory, whichever process starte
     assert.equal(other.processes.find(child.id), child, 'and so does a process beside it');
     assert.equal(other.processes.find(0x9998), null);
 });
+
+test('a process in a worker of its own finds a process of the run by id across the link: its'
+    + ' exit is a stand-in for the run\'s event, and its code is asked there', async()=>{
+    const { objectHandlers } = await import('../../system-objects.js');
+    const { createSyncObjects } = await import('./internal/sync.js');
+    const run = createSyncObjects({ scheduler: { block(){}, wake(){}, onTimeout(){} } });
+    const record = { kind: 'process', id: 0x1fb8, threadId: 0x1fb9, imagePath: 'C:\\ngen.exe',
+        completed: false, exitCode: 259,
+        exited: run.createEvent({ manualReset: true, signalled: false, name: 'process 8120' }) };
+    const { objects } = objectHandlers({ table: new Map(),
+        processes: new Map([[record.id, record]]), wake: ()=>Promise.resolve() });
+    const kernel = /** @type {any} */ (await kernelModule.create(
+        { stacks: { base: STACK_BASE, size: STACK_SIZE },
+            remoteObjects: { ...objects, onWake(){} } },
+        /** @type {any} */ ({
+            /** @param {string} name */
+            requireApi: name=>(name === 'cpu' ? fakeCpu() : fakeMemory()),
+            provide: ()=>{},
+        })));
+    const found = kernel.processes.find(0x1fb8);
+    assert.equal(found.kind, 'process');
+    assert.equal(found.imagePath, 'C:\\ngen.exe');
+    assert.equal(typeof found.exited.remote, 'number', 'its exit is the run\'s object');
+    assert.equal(found.exitCode, 259, 'still active');
+    assert.equal(found.completed, false);
+    assert.equal(kernel.processes.find(0x1fb8), found, 'one record however often it is opened');
+    record.completed = true;
+    record.exitCode = 5;
+    run.setEvent(record.exited);
+    assert.equal(found.exitCode, 5, 'its code once it has exited');
+    assert.equal(found.completed, true);
+    assert.equal(kernel.processes.find(0x2222), null, 'an id no process of the run has');
+});

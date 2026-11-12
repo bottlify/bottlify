@@ -18,12 +18,12 @@
  * and creating one writes exactly the values the real manager writes, so a
  * program that reads its own service back through the registry finds it.
  *
- * A process the manager starts for a service -- COM starting a class's
- * LocalService -- connects its dispatcher and runs the service's ServiceMain.
- * StartService itself starts no process yet: it fails the way a service that
- * never reported back fails, and controlling one fails the way a stopped
- * service does; both are results a program is written to handle, and both
- * are reported as a divergence.
+ * A process the manager starts for a service -- StartService, or COM starting
+ * a class's LocalService -- connects its dispatcher and runs the service's
+ * ServiceMain; the run's manager (`ole32/remote.js`) starts each service once.
+ * Where the run can start no process, StartService fails the way a service
+ * that never reported back fails, said as a divergence. Controlling a service
+ * fails the way a stopped service does.
  */
 
 import {
@@ -47,6 +47,7 @@ const ERROR_INVALID_LEVEL = 124;
 const ERROR_MORE_DATA = 234;
 const ERROR_INVALID_ADDRESS = 487;
 const ERROR_SERVICE_REQUEST_TIMEOUT = 1053;
+const ERROR_SERVICE_ALREADY_RUNNING = 1056;
 const ERROR_SERVICE_DISABLED = 1058;
 const ERROR_SERVICE_DOES_NOT_EXIST = 1060;
 const ERROR_SERVICE_NOT_ACTIVE = 1062;
@@ -88,6 +89,7 @@ const SERVICE_ACTIVE = 1;
 const SERVICE_STATE_ALL = 3;
 const SERVICE_STOPPED = 1;
 const SERVICE_START_PENDING = 2;
+const SERVICE_RUNNING = 4;
 /** QueryServiceConfig2's levels: the description, failure actions, preshutdown. */
 const SERVICE_CONFIG_DESCRIPTION = 1;
 const SERVICE_CONFIG_FAILURE_ACTIONS = 2;
@@ -195,6 +197,13 @@ const HANDLE_STRIDE = 4;
  *           Whether a service's image is on the volume, which a start looks
  *           for first. Absent, every image is taken as there.
  * @property {string} [computerName]  This machine's name, which a program may pass for it.
+ * @property {(name: string, command: string) => 'started' | 'running' | null} [startService]
+ *           Starts a service's process on its command line, as the manager does: the
+ *           run's service control manager, the table of COM's class objects
+ *           (`ole32/remote.js`). 'running' for one whose process stands already; null
+ *           where no process can be started. Absent, a start times out.
+ * @property {(name: string) => boolean} [serviceRunning]  Whether a service's process,
+ *           started by the run, stands.
  * @property {string | null} [service]  The service this process was started to run, by
  *           the manager (COM starts a class's LocalService so): its dispatcher connects.
  * @property {(entry: number, args: number[]) => unknown} [call]
@@ -784,6 +793,15 @@ export function createServiceFunctions(host){
             {
                 return fail(ERROR_FILE_NOT_FOUND);
             }
+            const started = host.startService?.(name, textOf(key, 'ImagePath') ?? '') ?? null;
+            if (started === 'running')
+            {
+                return fail(ERROR_SERVICE_ALREADY_RUNNING);
+            }
+            if (started === 'started')
+            {
+                return 1;
+            }
             host.divergence?.(wide ? 'StartServiceW' : 'StartServiceA',
                 `${name}: no process hosts a service here; reported as timed out`);
             return fail(ERROR_SERVICE_REQUEST_TIMEOUT);
@@ -821,8 +839,12 @@ export function createServiceFunctions(host){
         view.setUint32(0, key ? numberOf(key, 'Type', SERVICE_WIN32_OWN_PROCESS)
             : SERVICE_WIN32_OWN_PROCESS, true);
         const ours = running !== null && running.name.toLowerCase() === name.toLowerCase();
-        view.setUint32(4, ours ? running?.state ?? SERVICE_STOPPED : SERVICE_STOPPED, true);
-        view.setUint32(12, ours ? 0 : ERROR_SERVICE_NEVER_STARTED, true);
+        // Another process's service the run started stands as running: the state it
+        // reports is its own process's, which this one does not see.
+        const elsewhere = !ours && host.serviceRunning?.(name) === true;
+        view.setUint32(4, ours ? running?.state ?? SERVICE_STOPPED
+            : elsewhere ? SERVICE_RUNNING : SERVICE_STOPPED, true);
+        view.setUint32(12, ours || elsewhere ? 0 : ERROR_SERVICE_NEVER_STARTED, true);
         return bytes;
     };
 

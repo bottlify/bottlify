@@ -322,3 +322,26 @@ test('DecryptFile: a file that is there is in the clear already; one that is not
     assert.equal(answered.DecryptFileW.handler([wide('C:\\WINDOWS\\gone.ini'), 0]), 0);
     assert.deepEqual(errors, [ERROR_FILE_NOT_FOUND]);
 });
+
+test('RegGetKeySecurity gives an open key the shape Windows gives its keys; a set is taken', ()=>{
+    // ASP.NET's registration (webengine4.dll) reads a key's descriptor, adds
+    // an entry and writes it back.
+    const ERROR_INSUFFICIENT_BUFFER = 122;
+    const HKEY = 0x80000002;
+    const SIZE = 0x600;
+    const BUFFER = 0x700;
+    const { bytes, fns, dword } = setup();
+    const view = new DataView(bytes.buffer);
+    view.setUint32(SIZE, 4, true);
+    assert.equal(fns.RegGetKeySecurity.handler([HKEY, OWNER | DACL, BUFFER, SIZE]),
+        ERROR_INSUFFICIENT_BUFFER);
+    const needed = dword(SIZE);
+    assert.ok(needed > 20, 'told the size');
+    assert.equal(fns.RegGetKeySecurity.handler([HKEY, OWNER | DACL, BUFFER, SIZE]), 0);
+    assert.equal(bytes[BUFFER], 1, 'SECURITY_DESCRIPTOR_REVISION');
+    assert.equal(view.getUint16(BUFFER + 2, true) & SE_SELF_RELATIVE, SE_SELF_RELATIVE);
+    const owner = BUFFER + dword(BUFFER + 4);
+    assert.deepEqual([...bytes.subarray(owner, owner + 16)], ADMINISTRATORS);
+    assert.equal(fns.RegSetKeySecurity.handler([HKEY, DACL, BUFFER]), 0);
+    assert.equal(fns.RegGetKeySecurity.handler([0, DACL, BUFFER, SIZE]), 6, 'no key');
+});

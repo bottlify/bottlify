@@ -184,6 +184,49 @@ export function createClassTable(hooks = {}){
     const running = new Map();
     let nextRunning = 1;
     /**
+     * The services whose processes the manager started, by name in lower
+     * case: the promise of each one's end. A service runs once, whoever asks
+     * for it -- StartService, or COM for a class it serves.
+     *
+     * @type {Map<string, Promise<unknown>>}
+     */
+    const services = new Map();
+    /** The ends of services held for processes across links (`holdService`). @type {Map<string, () => void>} */
+    const heldServices = new Map();
+    /**
+     * A service's process: the one standing, or one started now with `launch`
+     * (the table's own by default) on the service's command line. Null when
+     * there is none and none can be started.
+     *
+     * @param {{ command: string, service: string, clsid?: string }} request
+     * @param {unknown} process  the process that asked
+     * @param {ClassTableHooks['launch']} [launch]
+     * @returns {{ exited: Promise<unknown>, fresh: boolean } | null}
+     */
+    const serviceProcess = (request, process, launch = hooks.launch)=>{
+        const key = String(request.service).toLowerCase();
+        const standing = services.get(key);
+        if (standing)
+        {
+            return { exited: standing, fresh: false };
+        }
+        const launched = launch?.({ command: request.command, service: request.service,
+            clsid: request.clsid ?? '' }, process) ?? null;
+        if (!launched)
+        {
+            return null;
+        }
+        services.set(key, launched.exited);
+        const forget = ()=>{
+            if (services.get(key) === launched.exited)
+            {
+                services.delete(key);
+            }
+        };
+        launched.exited.then(forget, forget);
+        return { exited: launched.exited, fresh: true };
+    };
+    /**
      * The RPC endpoints processes listen on -- the protocol sequence and the
      * endpoint a server named, as one key -- and the endpoint of the process
      * that has each: what Windows' endpoint mapper is to its service control
@@ -306,6 +349,60 @@ export function createClassTable(hooks = {}){
                     listening.delete(held);
                 }
             }
+        },
+
+        /** A service's process, standing or started now (`serviceProcess`). */
+        serviceProcess,
+
+        /**
+         * StartService's answer: 'started', 'running' for a service whose
+         * process stands, null when no process can be started.
+         *
+         * @param {{ command: string, service: string }} request @param {unknown} process
+         * @returns {'started' | 'running' | null}
+         */
+        startService(request, process){
+            const one = serviceProcess(request, process);
+            return one === null ? null : one.fresh ? 'started' : 'running';
+        },
+
+        /** Whether a service's process the manager started stands. @param {string} name */
+        serviceRunning: name=>services.has(String(name).toLowerCase()),
+
+        /**
+         * A service a process across a link started beside itself, where the run
+         * had no room for it: standing from now until `releaseService`. False
+         * when it stands already.
+         *
+         * @param {string} name
+         */
+        holdService(name){
+            const key = String(name).toLowerCase();
+            if (services.has(key))
+            {
+                return false;
+            }
+            /** @type {() => void} */
+            let end = ()=>{};
+            const exited = new Promise(resolve=>{
+                end = ()=>resolve(undefined);
+            });
+            heldServices.set(key, end);
+            services.set(key, exited);
+            exited.then(()=>{
+                if (services.get(key) === exited)
+                {
+                    services.delete(key);
+                }
+            });
+            return true;
+        },
+
+        /** The process of a service `holdService` stood for is gone. @param {string} name */
+        releaseService(name){
+            const key = String(name).toLowerCase();
+            heldServices.get(key)?.();
+            heldServices.delete(key);
         },
 
         /**
@@ -1922,7 +2019,12 @@ export function createRemoting(host){
                 }
                 const request = typeof command === 'string' ? { command, clsid }
                     : { ...command, clsid };
-                const launched = host.table.hooks.launch?.(request, host.process) ?? null;
+                // A class's LocalService runs once: one StartService started is
+                // waited on for its registration rather than started again.
+                const launched = 'service' in request && request.service
+                    ? host.table.serviceProcess?.(/** @type {any} */ (request), host.process)
+                        ?? null
+                    : host.table.hooks.launch?.(request, host.process) ?? null;
                 if (!launched)
                 {
                     report(`the server of ${clsid} (${request.command}) cannot be started here`);

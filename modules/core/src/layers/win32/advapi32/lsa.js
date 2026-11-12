@@ -16,6 +16,7 @@
  */
 
 import { COMPUTER_NAME } from '../kernel32/drives.js';
+import { toDosError } from '../ntdll/status.js';
 import {
     PRIVILEGES, USER_NAME, accountNamed, accountOfSid, isThisMachine, sidBytes, sidText,
 } from './tokens.js';
@@ -35,6 +36,55 @@ const PolicyPrimaryDomainInformation = 3;
 const PolicyAccountDomainInformation = 5;
 const PolicyDnsDomainInformation = 12;
 
+/** Where Windows keeps the LSA's secrets, a key each, its value under CurrVal. */
+const SECRETS_KEY = 'SECURITY\\Policy\\Secrets';
+const HKEY_LOCAL_MACHINE = 0x80000002;
+const REG_BINARY = 3;
+
+/**
+ * The machine's LSA secrets: in its registry where there is one (every
+ * process of the run reaching the same ones, as the one LSA of a machine is),
+ * else in this process alone.
+ *
+ * @param {any} [hive]  The registry service.
+ * @returns {{ get: (name: string) => Uint8Array | null,
+ *     set: (name: string, bytes: Uint8Array) => void, remove: (name: string) => boolean }}
+ */
+function secretStore(hive){
+    if (!hive)
+    {
+        /** @type {Map<string, Uint8Array>} */
+        const kept = new Map();
+        return {
+            get: name=>kept.get(name.toUpperCase()) ?? null,
+            set: (name, bytes)=>void kept.set(name.toUpperCase(), bytes),
+            remove: name=>kept.delete(name.toUpperCase()),
+        };
+    }
+    const machine = hive.root(HKEY_LOCAL_MACHINE);
+    /** @param {string} name */
+    const valueKey = name=>hive.open(machine, `${SECRETS_KEY}\\${name}\\CurrVal`);
+    return {
+        get: name=>{
+            const key = valueKey(name);
+            return key ? hive.getValue(key, '')?.data ?? new Uint8Array(0) : null;
+        },
+        set: (name, bytes)=>{
+            const { key } = hive.create(machine, `${SECRETS_KEY}\\${name}\\CurrVal`);
+            hive.setValue(key, '', REG_BINARY, bytes);
+        },
+        remove: name=>{
+            const secret = hive.open(machine, `${SECRETS_KEY}\\${name}`);
+            if (!secret)
+            {
+                return false;
+            }
+            hive.remove(secret, 'CurrVal');
+            return hive.remove(hive.open(machine, SECRETS_KEY), name) === 'deleted';
+        },
+    };
+}
+
 /** SID_NAME_USE of a name that maps to nothing. */
 const SidTypeUnknown = 8;
 
@@ -47,6 +97,7 @@ const WORKGROUP = 'WORKGROUP';
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(bytes: number) => number} allocate  What LsaFreeMemory gives back.
  * @property {(address: number) => void} [release]
+ * @property {any} [hive]  The registry service, where the secrets are kept.
  */
 
 /**
@@ -147,6 +198,7 @@ const domainSidOf = sid=>{
  * @param {LsaHost} host
  */
 export function createLsaFunctions(host){
+    const secrets = secretStore(host.hive);
     /** The policy handles open, by the address that names each. */
     const policies = new Set();
 
@@ -334,6 +386,90 @@ export function createLsaFunctions(host){
                 host.release?.(handle >>> 0);
                 return STATUS_SUCCESS;
             },
+        },
+
+        /**
+         * NTSTATUS LsaStorePrivateData(LSA_HANDLE PolicyHandle,
+         *   PLSA_UNICODE_STRING KeyName, PLSA_UNICODE_STRING PrivateData)
+         *
+         * Keeps a secret under its name, its bytes as given; NULL data deletes
+         * it, and deleting one there is not is not found. Kept where Windows
+         * keeps them, HKLM\\SECURITY\\Policy\\Secrets, so every process reaches them.
+         */
+        LsaStorePrivateData: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([policy, key, data])=>{
+                if (!policies.has(policy >>> 0))
+                {
+                    return STATUS_INVALID_HANDLE;
+                }
+                const name = unicodeAt(key);
+                if (name === null)
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+                if ((data >>> 0) === 0)
+                {
+                    return secrets.remove(name) ? STATUS_SUCCESS : STATUS_OBJECT_NAME_NOT_FOUND;
+                }
+                const head = host.readMemory(data >>> 0, 8);
+                const length = head[0] | head[1] << 8;
+                const buffer = (head[4] | head[5] << 8 | head[6] << 16 | head[7] << 24) >>> 0;
+                secrets.set(name, buffer === 0 ? new Uint8Array(0)
+                    : host.readMemory(buffer, length).slice());
+                return STATUS_SUCCESS;
+            },
+        },
+
+        /**
+         * NTSTATUS LsaRetrievePrivateData(LSA_HANDLE PolicyHandle,
+         *   PLSA_UNICODE_STRING KeyName, PLSA_UNICODE_STRING *PrivateData)
+         *
+         * A secret's bytes, in one block -- the LSA_UNICODE_STRING and its
+         * buffer after it -- that LsaFreeMemory gives back.
+         */
+        LsaRetrievePrivateData: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([policy, key, out])=>{
+                if (!policies.has(policy >>> 0))
+                {
+                    return STATUS_INVALID_HANDLE;
+                }
+                const name = unicodeAt(key);
+                if (name === null || (out >>> 0) === 0)
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+                const secret = secrets.get(name);
+                if (!secret)
+                {
+                    return STATUS_OBJECT_NAME_NOT_FOUND;
+                }
+                const block = host.allocate(8 + secret.length + 2) >>> 0;
+                const bytes = new Uint8Array(8 + secret.length + 2);
+                const view = new DataView(bytes.buffer);
+                view.setUint16(0, secret.length, true);
+                view.setUint16(2, secret.length, true);
+                view.setUint32(4, block + 8, true);
+                bytes.set(secret, 8);
+                host.writeMemory(block, bytes);
+                writeDword(out, block);
+                return STATUS_SUCCESS;
+            },
+        },
+
+        /**
+         * ULONG LsaNtStatusToWinError(NTSTATUS Status)
+         *
+         * The Win32 error an LSA call's status is, as RtlNtStatusToDosError
+         * maps it.
+         */
+        LsaNtStatusToWinError: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([status])=>toDosError(status >>> 0),
         },
 
         /** NTSTATUS LsaFreeMemory(PVOID Buffer): a block an LSA call handed out. */

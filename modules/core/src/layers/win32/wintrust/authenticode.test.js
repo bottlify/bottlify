@@ -131,3 +131,17 @@ test('a PE image\'s signature is found in its certificate table and covers all b
         'the table cut off');
     assert.equal(verify(signedImage({ unsigned: true })), TRUST.TRUST_E_NOSIGNATURE);
 });
+
+test('an RFC 3161 time-stamp token dates the signature as a countersignature does', ()=>{
+    // Microsoft has stamped its signatures so since 2011: the .NET Framework
+    // 4.5 to 4.8 packages are judged at their tokens' time, their publishers'
+    // certificates long expired.
+    assert.equal(verify(signedCabinet({ token: true })), TRUST.OK);
+    assert.equal(verify(signedCabinet({ token: true, stamped: SIGNED + 2 * YEAR })),
+        TRUST.CERT_E_EXPIRED, 'stamped after the publisher\'s certificate ended');
+    assert.equal(verify(signedCabinet({ token: true, countersigned: new Uint8Array(8) })),
+        TRUST.TRUST_E_COUNTER_SIGNER, 'a token over something else');
+    assert.equal(verify(signedCabinet({ token: true, chain: certificates({ tsa: {
+        extensions: [ext.extendedKeyUsage(OIDS.codeSigning)] } }) })), TRUST.CERT_E_WRONG_USAGE,
+    'an authority not allowed to stamp time');
+});

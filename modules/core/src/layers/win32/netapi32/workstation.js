@@ -12,7 +12,8 @@
  * version of Windows that really runs: the call answers the system's own
  * version, not the one a compatibility shim gives GetVersionEx. Its answer is
  * one buffer the call allocates, structure and strings together, which the
- * caller hands back with NetApiBufferFree.
+ * caller hands back with NetApiBufferFree. NetGetJoinInformation answers the
+ * same workgroup, in a buffer of its own.
  */
 
 const NERR_SUCCESS = 0;
@@ -24,6 +25,8 @@ const ERROR_NOT_ENOUGH_MEMORY = 8;
 const PLATFORM_ID_NT = 500;
 /** The workgroup a machine not joined to a domain is in, as LsaQueryInformationPolicy says. */
 const WORKGROUP = 'WORKGROUP';
+/** NETSETUP_JOIN_STATUS: in a workgroup, not a domain. */
+const NET_SETUP_WORKGROUP_NAME = 2;
 
 /**
  * @typedef {Object} WorkstationHost
@@ -120,6 +123,46 @@ export function createWorkstationFunctions(host){
                     return ERROR_INVALID_PARAMETER;
                 }
                 writeU32(out, size);
+                return NERR_SUCCESS;
+            },
+        },
+
+        /**
+         * NET_API_STATUS NetGetJoinInformation(LPCWSTR lpServer, LPWSTR *lpNameBuffer,
+         *   PNETSETUP_JOIN_STATUS BufferType)
+         *
+         * This machine is joined to no domain: it is in its workgroup, whose
+         * name comes back in a buffer the caller frees with NetApiBufferFree.
+         * Another machine is not on any network here.
+         */
+        NetGetJoinInformation: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([server, out, status])=>{
+                if ((out >>> 0) === 0 || (status >>> 0) === 0)
+                {
+                    return ERROR_INVALID_PARAMETER;
+                }
+                const name = serverName(server);
+                if (name !== '' && name.toUpperCase() !== host.computerName.toUpperCase())
+                {
+                    return ERROR_BAD_NETPATH;
+                }
+                const size = (WORKGROUP.length + 1) * 2;
+                const at = allocate(size);
+                if (at === 0)
+                {
+                    writeU32(out, 0);
+                    return ERROR_NOT_ENOUGH_MEMORY;
+                }
+                const bytes = new Uint8Array(size);
+                for (let index = 0; index < WORKGROUP.length; index++)
+                {
+                    bytes[index * 2] = WORKGROUP.charCodeAt(index);
+                }
+                host.writeMemory(at, bytes);
+                writeU32(out, at);
+                writeU32(status, NET_SETUP_WORKGROUP_NAME);
                 return NERR_SUCCESS;
             },
         },

@@ -51,6 +51,9 @@ export const SyncKind = {
  * @property {(id: number) => void} reset
  * @property {(id: number, count: number) => number} release
  * @property {(id: number, threadId: number) => boolean} releaseMutex
+ * @property {(processId: number) => ({ id: number, threadId: number, imagePath: string,
+ *     exitCode: number | null } | null)} [process]  a process of the run by id: the
+ *     number of the event its exit sets, and its code once it has one
  */
 
 /**

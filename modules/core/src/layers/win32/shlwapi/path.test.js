@@ -594,3 +594,42 @@ test('PathQuoteSpaces quotes a path with a space; PathCompactPathEx cuts one to 
             'no flags are defined');
     }
 });
+
+test('PathGetArgs and PathRemoveArgs split a command line at its first space outside quotes',
+    ()=>{
+        // Wine's test_PathGetArgs and the .NET Framework 4.5 setups' engine,
+        // which takes its own command line apart so.
+        const m = shlwapiMachine();
+        for (const wide of [false, true])
+        {
+            const unit = wide ? 2 : 1;
+            const spell = wide ? 'W' : 'A';
+            const line = m.put('"C:\\Program Files\\a.exe" /q /norestart', wide);
+            assert.equal(m.fns[`PathGetArgs${spell}`].handler([line]), line + 25 * unit);
+            const bare = m.put('C:\\a.exe', wide);
+            assert.equal(m.fns[`PathGetArgs${spell}`].handler([bare]), bare + 8 * unit);
+            m.fns[`PathRemoveArgs${spell}`].handler([line]);
+            assert.equal(m.read(line, wide), '"C:\\Program Files\\a.exe"');
+            const trailing = m.put('C:\\a.exe ', wide);
+            m.fns[`PathRemoveArgs${spell}`].handler([trailing]);
+            assert.equal(m.read(trailing, wide), 'C:\\a.exe');
+            m.fns[`PathRemoveArgs${spell}`].handler([bare]);
+            assert.equal(m.read(bare, wide), 'C:\\a.exe');
+        }
+    });
+
+test('PathIsSameRoot is whether the second path begins with the first one\'s root', ()=>{
+    const m = shlwapiMachine();
+    for (const wide of [false, true])
+    {
+        const call = (/** @type {string} */ one, /** @type {string} */ other)=>
+            m.fns[`PathIsSameRoot${wide ? 'W' : 'A'}`]
+                .handler([m.put(one, wide), m.put(other, wide)]);
+        assert.equal(call('C:\\Windows\\a', 'c:\\temp'), 1);
+        assert.equal(call('C:\\', 'C:'), 1);
+        assert.equal(call('C:\\a', 'D:\\a'), 0);
+        assert.equal(call('\\\\server\\share\\a', '\\\\server\\share\\b'), 1);
+        assert.equal(call('\\\\server\\share\\a', '\\\\server\\other'), 0);
+        assert.equal(call('relative', 'relative'), 0);
+    }
+});

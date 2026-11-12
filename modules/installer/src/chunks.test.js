@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { atPath, blocksOf, chunkedFile, sha256Blocks, sizeOf } from './chunks.js';
 import { packBundle } from './pack.js';
+import { filesystemModule } from '../../core/src/layers/filesystem/module.js';
 
 const PIECE = 1 << 20;
 
@@ -76,4 +77,31 @@ test('a bottle packed from pieces is the bottle packed from the whole file', asy
     const chunked = await pack([chunkedFile('big', data.length, pieces)]);
     assert.deepEqual(chunked.written, whole.written, 'the same blocks');
     assert.deepEqual(chunked.index, whole.index, 'and the same index, hashes and all');
+});
+
+test('a file a volume exports is read in its own pieces, as the bytes it holds', async()=>{
+    // What the engine's volume hands out beside a file's bytes is its own:
+    // a reader here takes the file's pieces from it and nothing of the same
+    // name means anything else - a save that read a writer's function as
+    // pieces could not collect an installation at all.
+    const volume = await filesystemModule.create({ drives: { C: {} } });
+    volume.createDirectory('C:\\Setup');
+    const handle = volume.open('C:\\Setup\\data.cab',
+        { write: true, disposition: volume.Disposition.CREATE_NEW });
+    const written = new Uint8Array((2 << 20) + 5).map((_, i)=>i * 7);
+    volume.write(handle, written);
+    volume.close(handle);
+    const [file] = volume.export();
+    await filesystemModule.dispose();
+    assert.equal(sizeOf(file), written.length);
+    const read = new Uint8Array(written.length);
+    let at = 0;
+    for (const block of blocksOf(file, 1 << 16))
+    {
+        read.set(block, at);
+        at += block.length;
+    }
+    assert.equal(at, written.length);
+    assert.deepEqual(read, written);
+    assert.deepEqual(atPath(file, 'C:\\Other\\data.cab').bytes, written);
 });

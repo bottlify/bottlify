@@ -6,7 +6,7 @@
 
 import { COUNTERS, criticalLayout, enterCode, enterLongCode, leaveCode, leaveLongCode, tryEnterCode,
     tryEnterLongCode } from './critical.js';
-import { INTERLOCKED } from './interlocked.js';
+import { INTERLOCKED, INTERLOCKED_64 } from './interlocked.js';
 import { createSlimSync } from './slimsync.js';
 import { createSListFunctions } from './slist.js';
 import { isStandardHandle, untagged } from './handle-tags.js';
@@ -352,16 +352,17 @@ export function createSyncFunctions(host){
      * @type {Map<string, number> | null}
      */
     let interlocked = null;
-    /** @param {keyof typeof INTERLOCKED} name */
+    /** @param {keyof typeof INTERLOCKED | keyof typeof INTERLOCKED_64} name */
     const interlockedAt = name=>{
         if (!interlocked)
         {
             const allocate = host.allocateCode ?? host.allocate;
-            interlocked = new Map(Object.entries(INTERLOCKED).map(([exported, { code }])=>{
-                const at = allocate(code.length);
-                host.writeMemory(at, code);
-                return [exported, at];
-            }));
+            interlocked = new Map(Object.entries({ ...INTERLOCKED, ...INTERLOCKED_64 })
+                .map(([exported, { code }])=>{
+                    const at = allocate(code.length);
+                    host.writeMemory(at, code);
+                    return [exported, at];
+                }));
         }
         return /** @type {number} */ (interlocked.get(name));
     };
@@ -371,13 +372,14 @@ export function createSyncFunctions(host){
      * program's dword (`interlocked.js`), with nothing to trap into; in a
      * 64-bit process its x86-64 (`long`).
      *
-     * @param {keyof typeof INTERLOCKED} name
+     * @param {keyof typeof INTERLOCKED | keyof typeof INTERLOCKED_64} name
      */
-    const interlockedExport = name=>({
-        argBytes: INTERLOCKED[name].argBytes,
-        guest: ()=>interlockedAt(name),
-        long: ()=>INTERLOCKED[name].long,
-    });
+    const interlockedExport = name=>{
+        const { argBytes, long } = name in INTERLOCKED
+            ? INTERLOCKED[/** @type {keyof typeof INTERLOCKED} */ (name)]
+            : INTERLOCKED_64[/** @type {keyof typeof INTERLOCKED_64} */ (name)];
+        return { argBytes, guest: ()=>interlockedAt(name), long: ()=>long };
+    };
 
     /**
      * Resolves a handle to a kernel object, or null. A bad handle is a return
@@ -946,6 +948,7 @@ export function createSyncFunctions(host){
         InterlockedExchange: interlockedExport('InterlockedExchange'),
         InterlockedExchangeAdd: interlockedExport('InterlockedExchangeAdd'),
         InterlockedCompareExchange: interlockedExport('InterlockedCompareExchange'),
+        InterlockedCompareExchange64: interlockedExport('InterlockedCompareExchange64'),
 
         /** DWORD WaitForMultipleObjects(DWORD nCount, const HANDLE *lpHandles, BOOL bWaitAll, DWORD dwMilliseconds) */
         WaitForMultipleObjects: {

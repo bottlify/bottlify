@@ -197,7 +197,7 @@ export function remoteSystem(ask, handlers = {}, call, volume = null, windowCell
 
 /** What a process asks of the run's named objects (`system-objects.js`). */
 const OBJECTS = ['peek', 'create', 'reference', 'close', 'wait', 'cancel', 'poll', 'set', 'reset',
-    'release', 'releaseMutex'];
+    'release', 'releaseMutex', 'process'];
 
 /**
  * The run's named objects, asked across a link; and where the word that one

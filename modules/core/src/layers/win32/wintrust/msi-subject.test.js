@@ -73,3 +73,72 @@ test('bytes that are no compound file are no installer database', async()=>{
     assert.equal(await msiSubject(new Uint8Array(0)), null);
     assert.equal(await msiSubject(Uint8Array.of(0xd0, 0xcf, 0x11, 0xe0, 0, 0, 0, 0, 1)), null);
 });
+
+test('a database signed with its metadata digests that first, and a changed entry fails', async()=>{
+    // \x05MsiDigitalSignatureEx holds a digest of every entry's name (none for
+    // the root), a storage's class or a stream's four size bytes, its state
+    // bits and its two times (none for the root), storages before their
+    // children, in the contents' order; the signed digest is of that stream's
+    // bytes, then the contents. The .NET Framework 4.5 to 4.8 setups' databases
+    // are signed so.
+    /** @param {Uint8Array} extended @param {bigint} [stamp] */
+    const build = (extended, stamp = 0x01d2_0000_1234_5678n)=>{
+        const root = createRoot();
+        root.clsid = ROOT_CLASS;
+        root.stateBits = 0x11;
+        /** @param {Map<string, any>} into @param {string} name @param {Uint8Array} data */
+        const stream = (into, name, data)=>{
+            const entry = createEntry(name, 'stream');
+            entry.data = data;
+            entry.stateBits = 3;
+            into.set(nameKey(name), entry);
+        };
+        stream(root.children, 'B', bytesOf(2, 20));
+        stream(root.children, 'a', bytesOf(1, 10));
+        stream(root.children, '\u0005DigitalSignature', Uint8Array.of(0x30, 0x00));
+        stream(root.children, '\u0005MsiDigitalSignatureEx', extended);
+        const inner = createEntry('ab', 'storage');
+        inner.clsid = INNER_CLASS;
+        inner.created = stamp;
+        inner.modified = stamp + 1n;
+        stream(inner.children, 'x', bytesOf(4, 40));
+        root.children.set(nameKey('ab'), inner);
+        return serializeCompoundFile(root);
+    };
+    /** @param {string} name */
+    const utf16 = name=>Uint8Array.from([...name].flatMap(c=>[c.charCodeAt(0) & 0xff,
+        c.charCodeAt(0) >> 8]));
+    /** @param {number} value @param {number} size */
+    const little = (value, size)=>Uint8Array.from({ length: size },
+        (_, i)=>Number((BigInt(value) >> BigInt(i * 8)) & 0xffn));
+    const times = (/** @type {bigint} */ stamp)=>Uint8Array.from([...little(Number(stamp & 0xffffffffn), 4),
+        ...little(Number(stamp >> 32n), 4), ...little(Number((stamp + 1n) & 0xffffffffn), 4),
+        ...little(Number((stamp + 1n) >> 32n), 4)]);
+    const zeroTimes = new Uint8Array(16);
+    const prehash = createSha1();
+    // The root: its class and state bits. Then 'B', 'a', 'ab' and its 'x', by bytes.
+    const rootClass = /** @type {Uint8Array} */ (parseGuid(ROOT_CLASS));
+    for (const piece of [rootClass, little(0x11, 4),
+        utf16('B'), little(20, 4), little(3, 4), zeroTimes,
+        utf16('a'), little(10, 4), little(3, 4), zeroTimes,
+        utf16('ab'), /** @type {Uint8Array} */ (parseGuid(INNER_CLASS)), little(0, 4),
+        times(0x01d2_0000_1234_5678n),
+        utf16('x'), little(40, 4), little(3, 4), zeroTimes])
+    {
+        prehash.update(piece);
+    }
+    const extended = prehash.digest();
+    const subject = await msiSubject(build(extended));
+    const expected = createSha1();
+    for (const piece of [extended, bytesOf(2, 20), bytesOf(1, 10), bytesOf(4, 40),
+        /** @type {Uint8Array} */ (parseGuid(INNER_CLASS)),
+        /** @type {Uint8Array} */ (parseGuid(ROOT_CLASS))])
+    {
+        expected.update(piece);
+    }
+    assert.deepEqual([...subject?.digest(SHA1) ?? []], [...expected.digest()]);
+
+    const touched = await msiSubject(build(extended, 0x01d2_0000_1234_5679n));
+    assert.deepEqual([...touched?.digest(SHA1) ?? [1]], [],
+        'a storage whose times changed since it was signed digests to nothing');
+});

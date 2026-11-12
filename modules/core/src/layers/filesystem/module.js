@@ -55,7 +55,9 @@ const handedOut = (tree, components, path)=>{
     // carries the bytes and not the store's pieces.
     Object.defineProperty(entry, 'contents', { value: contents });
     // The bytes as the store keeps them, for a writer that takes them in parts.
-    Object.defineProperty(entry, 'pieces', { value: ()=>(whole ? [whole] : piecesOf(contents)) });
+    // Named apart from an installation's `pieces` (`@bottlify/installer`), an
+    // array a reader takes this entry's for when it has one.
+    Object.defineProperty(entry, 'parts', { value: ()=>(whole ? [whole] : piecesOf(contents)) });
     return entry;
 };
 

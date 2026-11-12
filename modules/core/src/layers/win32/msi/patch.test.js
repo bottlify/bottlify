@@ -37,8 +37,11 @@ const CLSID_PATCH = '{000C1086-0000-0000-C000-000000000046}';
  *
  * @param {string} version @param {number} size @param {number} sequence
  * @param {boolean} [delta]
+ * @param {boolean} [added]  the file marked as a patch adds it (PatchAdded), not
+ *   compressed, and the patch's Media row naming its source -- as the .NET
+ *   Framework 4.8 update lays its files out
  */
-const tables = (version, size, sequence, delta = false)=>/** @type {import('./install.fixture.js').Tables} */ ({
+const tables = (version, size, sequence, delta = false, added = false)=>/** @type {import('./install.fixture.js').Tables} */ ({
     Property: [['Property', 'Value'], [['ProductCode', PRODUCT], ['ProductName', 'Game'],
         ['ProductVersion', version], ['Manufacturer', 'Maker'], ['ProductLanguage', '1033'],
         ['ProgramFilesFolder', 'C:\\Program Files\\']]],
@@ -55,12 +58,13 @@ const tables = (version, size, sequence, delta = false)=>/** @type {import('./in
         // The patched file is compressed into the patch's cabinet, as a patch
         // tool marks it.
         'Sequence'], [['exe', 'Core', 'game.exe', size, null, null,
-        sequence === 1 || delta ? 0 : 0x4000, delta ? 1 : sequence]]],
+        sequence === 1 || delta ? 0 : added ? 0x1000 : 0x4000, delta ? 1 : sequence]]],
     ...delta ? { Patch: [['File_', 'Sequence', 'PatchSize', 'Attributes', 'Header',
         'StreamRef_'], [['exe', 2, 0, 0, null, null]]] } : {},
     Media: [['DiskId', 'LastSequence', 'DiskPrompt', 'Cabinet', 'VolumeLabel', 'Source'],
         sequence === 1 ? [[1, 1, null, null, null, null]]
-            : [[1, 1, null, null, null, null], [2, 2, null, '#PATCH_CAB', null, null]]],
+            : [[1, 1, null, null, null, null],
+                [2, 2, null, '#PATCH_CAB', null, added ? 'PATCH_SOURCE' : null]]],
     InstallExecuteSequence: [['Action', 'Condition', 'Sequence'], EXECUTE_SEQUENCE],
 });
 
@@ -76,16 +80,17 @@ async function asStorage(name, bytes){
 }
 
 /** The .msp: the product transform, its "#" companion, and the cabinet with the new file. */
-/** @param {boolean} [delta] */
-async function makePatch(delta = false){
+/** @param {boolean} [delta] @param {boolean} [added] */
+async function makePatch(delta = false, added = false){
     const base = typed(packageDatabase(tables('1.0', 4, 1)));
-    const patched = typed(packageDatabase(tables('1.1', 6, 2, delta)));
+    const patched = typed(packageDatabase(tables('1.1', 6, 2, delta, added)));
     const product = await generateTransform(patched, base);
     assert.equal(product.code, 0);
-    const companionTables = { ...tables('1.1', 6, 2, delta),
+    const companionTables = { ...tables('1.1', 6, 2, delta, added),
         PatchPackage: [['PatchId', 'Media_'], [[PATCH, 2]]] };
     const companion = await generateTransform(typed(packageDatabase(
-        /** @type {any} */ (companionTables))), typed(packageDatabase(tables('1.1', 6, 2, delta))));
+        /** @type {any} */ (companionTables))),
+    typed(packageDatabase(tables('1.1', 6, 2, delta, added))));
     assert.equal(companion.code, 0);
     const content = delta ? buildPatch({ newBytes: encodeAnsi('MZ.v11'),
         oldFiles: [{ bytes: encodeAnsi('MZ..'), stream: storedStream(encodeAnsi('MZ.v11')) }] })
@@ -111,8 +116,9 @@ async function makePatch(delta = false){
  * removes it.
  *
  * @param {boolean} delta  A patch carrying a delta rather than the whole file.
+ * @param {boolean} [added]  The file one the patch adds, not marked compressed.
  */
-async function patchedAndRemoved(delta){
+async function patchedAndRemoved(delta, added = false){
     const host = await machine(['C:\\src', 'C:\\src\\Game'],
         { 'C:\\src\\Game\\game.exe': 'MZ..' });
     const { files } = host;
@@ -123,7 +129,7 @@ async function patchedAndRemoved(delta){
         files.close(node);
     };
     write('C:\\src\\game.msi', await databaseBytes(typed(packageDatabase(tables('1.0', 4, 1)))));
-    write('C:\\src\\fix.msp', await makePatch(delta));
+    write('C:\\src\\fix.msp', await makePatch(delta, added));
 
     const memory = new Uint8Array(0x40000);
     let next = 0x20000;
@@ -186,4 +192,11 @@ test('a patch is applied to the installed product, listed, and removed again', a
 
 test('a patch\'s delta brings the installed file up to date through the Patch API', async()=>{
     await patchedAndRemoved(true);
+});
+
+test('a file a patch adds comes from the patch\'s cabinet, though not marked compressed', async()=>{
+    // The .NET Framework 4.8 setup's update adds mscorlib.dll so: PatchAdded,
+    // in a Media row the patch's companion transform adds; read as a loose
+    // file it was looked for beside the package, and the install failed.
+    await patchedAndRemoved(false, true);
 });

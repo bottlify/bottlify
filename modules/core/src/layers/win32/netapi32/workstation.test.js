@@ -104,3 +104,26 @@ test('a buffer allocated is sized and freed', ()=>{
     assert.equal(held.size, 0);
     assert.equal(fns.NetApiBufferSize.handler([buffer, OUT + 4]), ERROR_INVALID_PARAMETER);
 });
+
+test('NetGetJoinInformation says the machine is in its workgroup, in a buffer it frees',
+    ()=>{
+        // What the .NET Framework 4.5 and later setups ask before anything else:
+        // a machine joined to no domain is in a workgroup, NetSetupWorkgroupName.
+        const NET_SETUP_WORKGROUP_NAME = 2;
+        const STATUS = 0x300;
+        const { fns, view, held, wide, putWide } = setup();
+        assert.equal(fns.NetGetJoinInformation.argBytes, 12);
+        assert.equal(fns.NetGetJoinInformation.handler([0, OUT, STATUS]), NERR_SUCCESS);
+        assert.equal(wide(view.getUint32(OUT, true)), 'WORKGROUP');
+        assert.equal(view.getUint32(STATUS, true), NET_SETUP_WORKGROUP_NAME);
+        putWide(NAME, '\\\\bottlify');
+        assert.equal(fns.NetGetJoinInformation.handler([NAME, OUT + 4, STATUS]), NERR_SUCCESS,
+            'its own name is this machine');
+        assert.equal(fns.NetApiBufferFree.handler([view.getUint32(OUT, true)]), NERR_SUCCESS);
+        assert.equal(fns.NetApiBufferFree.handler([view.getUint32(OUT + 4, true)]), NERR_SUCCESS);
+        assert.equal(held.size, 0);
+        putWide(NAME, '\\\\ELSEWHERE');
+        assert.equal(fns.NetGetJoinInformation.handler([NAME, OUT, STATUS]), ERROR_BAD_NETPATH);
+        assert.equal(fns.NetGetJoinInformation.handler([0, 0, STATUS]), ERROR_INVALID_PARAMETER);
+        assert.equal(fns.NetGetJoinInformation.handler([0, OUT, 0]), ERROR_INVALID_PARAMETER);
+    });

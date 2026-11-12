@@ -271,3 +271,64 @@ test('LoadLibrary refuses a library one of whose own libraries is nowhere, as Wi
         const code = await app.run({ timeoutMs: 40000 });
         assert.equal(code, EVERY, `missing bits 0x${(EVERY & ~code).toString(16)}`);
     });
+
+test('a library loaded by its path is that file, though one of the same name is loaded',
+    { timeout: 60000 }, async t=>{
+        // Windows looks a path up among the loaded modules by the whole path:
+        // a second file of the same name is a module of its own, and a bare
+        // name finds the one loaded first. The .NET Framework loads a mixed
+        // assembly's native image by its path while the assembly, of the same
+        // name, is loaded; given the assembly back, its setup could not
+        // install the image. Exit code bits: the two handles differ (1), the
+        // bare name is the first (2), the first path again is the first (4),
+        // the second path again is the second (8), each DllMain ran (0x10,
+        // 0x20).
+        const EVERY = 0x3f;
+        let where = { one: 0, two: 0 };
+        const program = (/** @type {(at: (name: string) => number) => void} */ placed)=>buildExe({
+            imports: { 'KERNEL32.dll': ['LoadLibraryA', 'GetModuleHandleA', 'ExitProcess'] },
+            data: {
+                first: cString('C:\\App\\one\\same.dll'), second: cString('C:\\App\\two\\same.dll'),
+                bare: cString('same.dll'), one: [0, 0, 0, 0], two: [0, 0, 0, 0],
+            },
+            codeSize: 0x100,
+            code: ({ iat, at })=>{
+                placed(at);
+                /** @param {string} fn */
+                const call = fn=>[0xff, 0x15, ...u32(iat(fn))];
+                const flag = (/** @type {number} */ bit)=>[0x81, 0xcb, ...u32(bit)];
+                const push = (/** @type {number} */ value)=>[0x68, ...u32(value)];
+                const JNE = 0x75;
+                return [
+                    0x31, 0xdb, //                                   xor ebx, ebx
+                    ...push(at('first')), ...call('LoadLibraryA'),
+                    0x89, 0xc6, //                                   mov esi, eax
+                    ...push(at('second')), ...call('LoadLibraryA'),
+                    0x89, 0xc7, //                                   mov edi, eax
+                    0x39, 0xfe, 0x74, 6, ...flag(0x1), //            cmp esi, edi; je
+                    ...push(at('bare')), ...call('GetModuleHandleA'),
+                    0x39, 0xf0, JNE, 6, ...flag(0x2), //             cmp eax, esi
+                    ...push(at('first')), ...call('LoadLibraryA'),
+                    0x39, 0xf0, JNE, 6, ...flag(0x4), //             cmp eax, esi
+                    ...push(at('second')), ...call('LoadLibraryA'),
+                    0x39, 0xf8, JNE, 6, ...flag(0x8), //             cmp eax, edi
+                    0x83, 0x3d, ...u32(at('one')), 0x00, 0x74, 6, ...flag(0x10),
+                    0x83, 0x3d, ...u32(at('two')), 0x00, 0x74, 6, ...flag(0x20),
+                    0x53, ...call('ExitProcess'), //                 push ebx
+                ];
+            },
+        });
+        program(at=>{ where = { one: at('one'), two: at('two') }; });
+        const executable = program(()=>{});
+        const app = await createApp({
+            executable,
+            imagePath: 'C:\\App\\Same.exe',
+            files: [
+                { path: 'C:\\App\\one\\same.dll', bytes: library(image(where.one).file) },
+                { path: 'C:\\App\\two\\same.dll', bytes: library(image(where.two).file) },
+            ],
+        });
+        t.after(()=>app.dispose());
+        const code = await app.run({ timeoutMs: 40000 });
+        assert.equal(code, EVERY, `missing bits 0x${(EVERY & ~code).toString(16)}`);
+    });

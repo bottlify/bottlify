@@ -25,8 +25,8 @@
 
 import { childrenOf, contents, DerError, expect, readOid, TAG } from '../crypto/der.js';
 import {
-    checkSigner, parseSignedData, parseSignerInfo, PKCS7, signedContent, signerCertificate,
-    signingTime,
+    checkSigner, checkTimeStampToken, parseSignedData, parseSignerInfo, PKCS7, signedContent,
+    signerCertificate, signingTime,
 } from '../crypto/pkcs7.js';
 import { isSelfIssued, isSignedBy, sameBytes, USAGE } from '../crypto/x509.js';
 import { readSubject } from './subject.js';
@@ -271,6 +271,41 @@ export function verifyAuthenticode(bytes, options, subject = readSubject(bytes))
         const lifetime = options.lifetime
             || certificate.extendedKeyUsage?.includes(USAGE.LIFETIME_SIGNING);
         time = lifetime ? options.now : stamped;
+    }
+    else
+    {
+        // A time-stamp token (RFC 3161), as Microsoft has stamped its
+        // signatures since the PKCS #9 countersignature went out of use.
+        const token = signer.unauthenticated.get(PKCS7.RFC3161_TIME_STAMP)?.[0];
+        if (token)
+        {
+            let stamp;
+            try
+            {
+                stamp = checkTimeStampToken(token, signer.encryptedDigest);
+            }
+            catch (e){
+                if (e instanceof DerError)
+                {
+                    return TRUST.TRUST_E_TIME_STAMP;
+                }
+                throw e;
+            }
+            if (stamp.result !== 'ok' || stamp.time === null || !stamp.authority)
+            {
+                return TRUST.TRUST_E_COUNTER_SIGNER;
+            }
+            const timestamp = judgeChain(stamp.authority,
+                [...stamp.certificates, ...signed.certificates], options.roots, stamp.time,
+                USAGE.TIME_STAMPING);
+            if (timestamp !== TRUST.OK)
+            {
+                return timestamp;
+            }
+            const lifetime = options.lifetime
+                || certificate.extendedKeyUsage?.includes(USAGE.LIFETIME_SIGNING);
+            time = lifetime ? options.now : stamp.time;
+        }
     }
     return judgeChain(certificate, signed.certificates, options.roots, time, USAGE.CODE_SIGNING);
 }

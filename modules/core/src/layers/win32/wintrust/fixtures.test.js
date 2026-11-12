@@ -24,6 +24,10 @@ export const ISSUED = Date.UTC(2005, 0, 1);
 export const SIGNED = Date.UTC(2010, 5, 1);
 export const NOW = Date.UTC(2026, 8, 26);
 
+/** Microsoft's attribute for an RFC 3161 token, and the token's content type. */
+const RFC3161_TIME_STAMP = '1.3.6.1.4.1.311.3.3.1';
+const TST_INFO = '1.2.840.113549.1.9.16.1.4';
+
 export const KEYS = {
     root: makeKey(),
     pca: makeKey(),
@@ -73,6 +77,8 @@ export function certificates(change = {}){
  * @property {Uint8Array} [countersigned]  What the countersignature covers, in place
  *   of the signer's encrypted digest.
  * @property {string} [dataType]         SpcAttributeTypeAndOptionalValue's type.
+ * @property {boolean} [token]  The timestamp as an RFC 3161 time-stamp token
+ *   (Microsoft's attribute 1.3.6.1.4.1.311.3.3.1), not a PKCS #9 countersignature.
  */
 
 /**
@@ -93,7 +99,21 @@ export function authenticode(digest, options = {}){
         attributes: [[OIDS.contentType, der.oid(OIDS.spcIndirectData)]] });
     /** @type {[string, Uint8Array][]} */
     const unauthenticated = [];
-    if (options.stamped !== null)
+    if (options.stamped !== null && options.token)
+    {
+        // TSTInfo: version, policy, its imprint of what it stamps, serial, genTime.
+        const info = der.seq(der.int(1), der.oid('1.2.3.4'),
+            der.seq(der.seq(der.oid(OIDS.sha1), der.nul()),
+                der.octets(sha1([options.countersigned ?? first.encryptedDigest]))),
+            der.int(7), der.generalized(options.stamped ?? SIGNED));
+        const authority = makeSignerInfo({ issuer: 'Stamp PCA', serial: 5, key: KEYS.tsa,
+            covered: info,
+            attributes: [[OIDS.contentType, der.oid(TST_INFO)]] });
+        unauthenticated.push([RFC3161_TIME_STAMP, makeSignedData({ contentType: TST_INFO,
+            content: der.octets(info), certificates: [chain.tsa, chain.tspca],
+            signers: [authority.encoded] })]);
+    }
+    else if (options.stamped !== null)
     {
         const counter = makeSignerInfo({ issuer: 'Stamp PCA', serial: 5, key: KEYS.tsa,
             covered: options.countersigned ?? first.encryptedDigest,
@@ -105,7 +125,9 @@ export function authenticode(digest, options = {}){
         key: options.signerKey ?? KEYS.publisher, covered,
         attributes: [[OIDS.contentType, der.oid(OIDS.spcIndirectData)]], unauthenticated });
     const carried = /** @type {const} */ (['pca', 'publisher', 'tspca', 'tsa'])
-        .filter(name=>name !== options.leave).map(name=>chain[name]);
+        .filter(name=>name !== options.leave
+            && !(options.token && (name === 'tspca' || name === 'tsa')))
+        .map(name=>chain[name]);
     return makeSignedData({ contentType: OIDS.spcIndirectData, content,
         certificates: options.withRoot ? [chain.root, ...carried] : carried,
         signers: [signer.encoded] });

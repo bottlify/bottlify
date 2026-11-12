@@ -25,7 +25,10 @@
  * message waits from the call journal (every call area on); `--trace S` prints
  * the last three thousand calls of every kind instead (`--trace-lines N`), with their first
  * arguments -- what a process that loops without waiting keeps calling;
- * `--trace-match REGEX` keeps only the lines that match. A run
+ * `--trace-match REGEX` keeps only the lines that match. A process that ran in a
+ * worker of its own (`--concurrency`) keeps its calls in its own ring, which
+ * it hands back as it ends: the first `--trace-worker N` (3) of those are
+ * printed after the run's, each under its image. A run
  * that ends sooner prints either when it ends. `--strings` peeks every pointer
  * argument for a string, so those lines name the paths and texts themselves.
  *
@@ -72,6 +75,14 @@
  *
  * `--debug-strings` prints what the programs say through OutputDebugString.
  *
+ * `--store memory` keeps cork's translations for the whole run in memory, as a
+ * page's origin file system keeps them: a process started later finds what an
+ * earlier one translated, as it would in a browser.
+ *
+ * `--cork-figures` adds a CORK line to each process's status: the share of its
+ * instructions translated code retired, the translator's time, what threw
+ * translations away, and (with cork's `timings`) where the interpreter ran.
+ *
  * `--type 'text@S'` types text into whatever has the focus S seconds in.
  *
  * `--watch-import 'lib.dll!Name=0+$1*8'` stands a watch in front of an import
@@ -100,6 +111,8 @@ import { diskDirectory } from './disk-directory.mjs';
 import { createOpfsStore } from '../modules/core/src/layers/filesystem/internal/opfs-store.js';
 import { isButtonClass, label } from './wizard-buttons.mjs';
 import { createApp } from '../modules/core/src/app.js';
+import { createDirectoryTranslationStore, createMemoryDirectory }
+    from '../modules/core/src/layers/cpu/internal/translation-store.js';
 import { createFakeDevice } from '../modules/core/src/layers/graphics/webgpu/internal/fake-device.js';
 import { archiveDisc, collectFrom, discOptions, placementOf, prefixOptions, readZip }
     from '../modules/installer/src/index.js';
@@ -337,6 +350,12 @@ const app = await createApp({
     cork: { config: {
         ...argv.includes('--cork') ? JSON.parse(argv[argv.indexOf('--cork') + 1]) : {},
         ...argv.includes('--unshared') ? { sharedMemory: false } : {},
+        // `--store memory`: the translations kept for the whole run in memory, in
+        // the store's own format, as the origin's file system keeps them for a
+        // page, so ngen's next worker finds what the last translated.
+        ...argv.includes('--store') && argv[argv.indexOf('--store') + 1] === 'memory'
+            ? { store: await createDirectoryTranslationStore(createMemoryDirectory(), 'run') }
+            : {},
     } },
     // `--graphics JSON`: the graphics layer's settings beside these, `guestCode` among them.
     graphics: { raster: false,
@@ -636,10 +655,34 @@ const ranSince = (image, cpu)=>{
         .sort((left, right)=>right[1] - left[1])
         .slice(0, 6)
         .map(([address, grew])=>{
-            const at = app.debug.moduleAt(address);
+            // Named from the modules of the process the engine's debug window
+            // stands for, and only for that process: another process maps other
+            // images at the same addresses (ngen's mscorsvc.dll is mscorsvw's
+            // clr.dll), and a name read from the wrong table is worse than none.
+            const own = speaksFor(image);
+            const at = own ? app.debug.moduleAt(address) : null;
             return `0x${address.toString(16)}${at ? `(${at.name.split('\\').pop()}`
-                + `+0x${at.offset.toString(16)})` : ''}:${grew}`;
+                + `+0x${at.offset.toString(16)})` : own ? '' : '(another process\'s module)'}`
+                + `:${grew}`;
         });
+};
+
+/**
+ * Whether the engine's debug window (`app.debug`) reads the memory of the
+ * process running `image`: its main module is that image's file.
+ *
+ * @param {string} image
+ */
+const speaksFor = image=>{
+    const named = image.split('\\').pop()?.toLowerCase() ?? '';
+    try
+    {
+        return app.debug.modules().some((/** @type {any} */ one)=>
+            String(one.name).toLowerCase() === named);
+    }
+    catch {
+        return false;
+    }
 };
 
 setInterval(async()=>{
@@ -683,6 +726,26 @@ setInterval(async()=>{
                 traps: `${cpu.traps}/${cpu.trapCapacity}`,
                 refused: bridge.comInterfacesRefused, because: bridge.comRefusedBecause,
             }));
+            // `--cork-figures`: where the process's instructions ran - the share
+            // translated code retired, what the translator spent, what threw
+            // translations away, and where the interpreter's instructions went
+            // (those need `--cork '{"timings":true}'`).
+            if (argv.includes('--cork-figures'))
+            {
+                const figures = cpu.cork ?? {};
+                console.log(seconds(), 'CORK', image.split('\\').pop(), JSON.stringify({
+                    translatedShare: figures.translatedShare, regions: figures.regions,
+                    translateMs: figures.translateMs, workerBusyMs: figures.workerBusyMs,
+                    invalidations: figures.invalidations, dropped: figures.dropped,
+                    volatilePages: figures.volatilePages, volatileNow: figures.volatileNow,
+                    exits: figures.exits, untranslatedBy: figures.untranslatedBy,
+                    interpretedFrom: (figures.interpretedFrom ?? []).slice(0, 8),
+                    refused: figures.refused, refusedWhy: figures.refusedWhy,
+                    forcedSteps: figures.forcedSteps, forcedAt: figures.forcedAt,
+                    crtFormed: figures.crtFormed,
+                    exitsByTarget: (figures.exitsByTarget ?? []).slice(0, 32),
+                }));
+            }
             // What the devices drew against what reached the screen: a
             // picture that stops changing while the program still presents
             // is a device that stopped replaying, and only these say so.
@@ -732,6 +795,17 @@ setInterval(async()=>{
 
 // Printed once: at S seconds, or when the run ends first -- an installer that
 // quits on an error it just showed has its last calls in the journal still.
+/**
+ * The journals of processes that ran in workers of their own, each given as
+ * it ended (`process-journal`): their calls are in their own rings, not the run's.
+ *
+ * @type {{ image: string, id: number, entries: { time: number, text: string }[] }[]}
+ */
+const workerJournals = [];
+app.on('process-journal', (/** @type {any} */ event)=>{
+    workerJournals.push(event);
+});
+
 let journalPrinted = false;
 const printJournal = ()=>{
     if (journalAt <= 0 || journalPrinted)
@@ -751,6 +825,17 @@ const printJournal = ()=>{
     for (const entry of trail.slice(whole ? -number('--trace-lines', 3000) : -150))
     {
         console.log('JOURNAL', (entry.time / 1000).toFixed(2), entry.text.slice(0, 400));
+    }
+    // `--trace-worker N`: the journals of the first N processes that ran in
+    // workers of their own, each under its image and id.
+    for (const { image, id, entries } of workerJournals.slice(0, number('--trace-worker', 3)))
+    {
+        console.log(`JOURNAL of ${image} (process ${id}, in a worker of its own)`);
+        const kept = entries.filter(entry=>!match || match.test(entry.text));
+        for (const entry of kept.slice(whole ? -number('--trace-lines', 3000) : -150))
+        {
+            console.log('JOURNAL', (entry.time / 1000).toFixed(2), entry.text.slice(0, 400));
+        }
     }
 };
 if (traceOnFault)

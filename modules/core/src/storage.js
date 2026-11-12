@@ -407,10 +407,10 @@ export function opfsSession(key, directory){
      * two copies of all of it each time.
      *
      * @param {any} folder @param {string} path
-     * @param {Uint8Array | { bytes: Uint8Array, pieces?: () => Uint8Array[] }} file
+     * @param {Uint8Array | { bytes: Uint8Array, parts?: () => Uint8Array[] }} file
      */
     const put = async(folder, path, file)=>{
-        const parts = file instanceof Uint8Array ? [file] : file.pieces?.() ?? [file.bytes];
+        const parts = file instanceof Uint8Array ? [file] : file.parts?.() ?? [file.bytes];
         const handle = await folder.getFileHandle(await entryName(path), { create: true });
         const stream = await handle.createWritable();
         await stream.write(entryHeader(path));

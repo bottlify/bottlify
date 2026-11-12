@@ -707,15 +707,19 @@ test('the launcher every spelling shares finds one image and opens the handles',
 });
 
 test('the redistributables the engine stands in for are recognised by what they are', ()=>{
-    for (const name of ['dotnetfx35.exe', 'ndp48-x86-x64.exe',
-        'C:\\Install\\dotnet\\dotnetfx35.EXE', 'oalinst.exe'])
+    for (const name of ['oalinst.exe', 'C:\\Install\\OpenAL\\OALINST.EXE'])
     {
         assert.equal(isRedistributableInstaller(name), true, name);
     }
-    // The Visual C++ redistributable and the DirectX End-User Runtime are not
-    // among them: the engine carries no copy of MSVCR100 and the rest, nor of
-    // the d3dx libraries, so their setups are programs like any other.
-    for (const name of ['vcredist_x86.exe', 'vc_redist.x86.exe',
+    // The .NET Framework's setups are not among them: the engine carries no
+    // runtime of its own, so a bottle has the Framework only as its own setup
+    // installs it. Nor are the Visual C++ redistributable and the DirectX
+    // End-User Runtime: the engine carries no copy of MSVCR100 and the rest,
+    // nor of the d3dx libraries, so their setups are programs like any other.
+    for (const name of ['dotnetfx35.exe', 'dotNetFx40_Full_x86_x64.exe',
+        'ndp48-x86-x64-allos-enu.exe',
+        'NDP462-KB3151800-x86-x64-AllOS-ENU.exe', 'C:\\Install\\dotnet\\dotnetfx35.EXE',
+        'netfx_Core_x86.msi', 'vcredist_x86.exe', 'vc_redist.x86.exe',
         'C:\\Install\\vcredist\\vcredist_x86.EXE', 'speedDemo.exe', 'War3.exe', 'launcher.exe',
         'DXSETUP.exe',
         'dxwebsetup.exe', 'directx_Jun2010_redist.exe', 'C:\\Install\\DirectX\\DXSETUP.EXE',
@@ -726,29 +730,42 @@ test('the redistributables the engine stands in for are recognised by what they 
 });
 
 test('a redistributable child is answered as a process that already ran and exited 0', ()=>{
-    // An installer starts the .NET redistributable and waits for it. The engine
-    // answers for that runtime itself, so the child is over before it begins -
-    // and it must not be what this process hands over to.
-    const host = fakeHost({ files: ['C:\\App\\dotnetfx35.exe'] });
+    // An installer starts OpenAL's and waits for it. The engine answers for
+    // that runtime itself, so the child is over before it begins - and it must
+    // not be what this process hands over to.
+    const host = fakeHost({ files: ['C:\\App\\oalinst.exe'] });
     const fns = createSpawnFunctions(host);
 
     assert.equal(fns.CreateProcessA.handler(
-        [putAnsi(host, 0x100, 'dotnetfx35.exe'), 0, 0, 0, 0, 0, 0, 0, 0, 0]), 1);
+        [putAnsi(host, 0x100, 'oalinst.exe'), 0, 0, 0, 0, 0, 0, 0, 0, 0]), 1);
     const made = host.kernel.processes.all()[0];
     assert.equal(made.completed, true);
     assert.equal(made.exitCode, 0, 'it exited cleanly');
     assert.equal(host.kernel.processes.pending(), null, 'nothing to replace this process with');
     assert.notEqual(made.handle, 0, 'and the caller still gets a process to wait on');
     assert.deepEqual(host.requests.map((/** @type {any} */ r)=>r.imagePath),
-        ['C:\\App\\dotnetfx35.exe'], 'reported like any other child');
+        ['C:\\App\\oalinst.exe'], 'reported like any other child');
 
     // WinExec is the other spelling an SFX stub uses for the same child.
-    const viaExec = fakeHost({ files: ['C:\\App\\dotnetfx35.exe'] });
+    const viaExec = fakeHost({ files: ['C:\\App\\oalinst.exe'] });
     const execFns = createSpawnFunctions(viaExec);
     assert.equal(execFns.WinExec.handler(
-        [putAnsi(viaExec, 0x100, 'dotnetfx35.exe /Q'), 0]), WINEXEC_SUCCESS);
+        [putAnsi(viaExec, 0x100, 'oalinst.exe /s'), 0]), WINEXEC_SUCCESS);
     assert.equal(viaExec.kernel.processes.pending(), null);
     assert.equal(viaExec.kernel.processes.all()[0].exitCode, 0);
+});
+
+test('the .NET Framework setup a title starts runs as the child it is', ()=>{
+    // A game's installer starts the Framework's setup and waits for it: the
+    // runtime is what that setup installs, so it runs.
+    const host = fakeHost({ files: ['C:\\App\\_CommonRedist\\dotNetFx40_Full_x86_x64.exe'] });
+    const fns = createSpawnFunctions(host);
+    assert.equal(fns.CreateProcessA.handler([0, putAnsi(host, 0x100,
+        'C:\\App\\_CommonRedist\\dotNetFx40_Full_x86_x64.exe /q /norestart'),
+    0, 0, 0, 0, 0, 0, 0, 0]), 1);
+    const made = host.kernel.processes.all()[0];
+    assert.equal(made.completed, false);
+    assert.equal(host.kernel.processes.pending(), made, 'it is a process to run');
 });
 
 test('DXSETUP runs as the child it is, and installs the runtime itself', ()=>{

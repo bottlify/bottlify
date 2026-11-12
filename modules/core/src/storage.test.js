@@ -158,6 +158,7 @@ test('a file the volume keeps in pieces is saved a piece at a time and read back
     volume.close(handle);
     const files = volume.export();
     await filesystemModule.dispose();
+    assert.equal(files[0].parts().length, 3, 'handed out as the store keeps it, a piece each');
     const disk = fakeDirectory();
     const store = opfsSession('pieces', async()=>disk.root);
     await store.save({ files, registry: null });

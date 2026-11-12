@@ -45,6 +45,7 @@ export const RECORD_SECURITY = Symbol('recordSecurity');
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
 const ERROR_PATH_NOT_FOUND = 3;
+const ERROR_INVALID_HANDLE = 6;
 const ERROR_NOT_ENOUGH_MEMORY = 8;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_CALL_NOT_IMPLEMENTED = 120;
@@ -641,6 +642,60 @@ export function createNamedSecurityFunctions(host){
     });
 
     /**
+     * LONG RegGetKeySecurity(HKEY hKey, SECURITY_INFORMATION SecurityInformation,
+     *   PSECURITY_DESCRIPTOR pSecurityDescriptor, LPDWORD lpcbSecurityDescriptor)
+     *
+     * An open key's descriptor, self-relative, in the shape Windows gives its
+     * own keys (as GetNamedSecurityInfo answers one by name); a buffer too
+     * small is told the size, ERROR_INSUFFICIENT_BUFFER. The error is the
+     * return value.
+     */
+    const regGetKeySecurity = {
+        argBytes: 16,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [key, wanted, descriptor, size])=>{
+            if ((key >>> 0) === 0)
+            {
+                return ERROR_INVALID_HANDLE;
+            }
+            if ((size >>> 0) === 0)
+            {
+                return ERROR_INVALID_PARAMETER;
+            }
+            const { bytes } = descriptorOf('key', '', wanted >>> 0);
+            const room = new DataView(host.readMemory(size >>> 0, 4).slice().buffer)
+                .getUint32(0, true);
+            writeDword(size, bytes.length);
+            if (room < bytes.length || (descriptor >>> 0) === 0)
+            {
+                return ERROR_INSUFFICIENT_BUFFER;
+            }
+            host.writeMemory(descriptor >>> 0, bytes);
+            return ERROR_SUCCESS;
+        },
+    };
+
+    /**
+     * LONG RegSetKeySecurity(HKEY hKey, SECURITY_INFORMATION SecurityInformation,
+     *   PSECURITY_DESCRIPTOR pSecurityDescriptor)
+     *
+     * A descriptor that reads as one is accepted and kept nowhere, as a key's
+     * set by name is: the one account is an administrator, and nothing here
+     * enforces a key's security.
+     */
+    const regSetKeySecurity = {
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [key, , descriptor])=>{
+            if ((key >>> 0) === 0)
+            {
+                return ERROR_INVALID_HANDLE;
+            }
+            return codec.partsOf(descriptor) === null ? ERROR_INVALID_PARAMETER : ERROR_SUCCESS;
+        },
+    };
+
+    /**
      * BOOL DecryptFile(LPCTSTR lpFileName, DWORD dwReserved)
      *
      * No file on this volume is encrypted (there is no EFS), so a file that is
@@ -670,6 +725,8 @@ export function createNamedSecurityFunctions(host){
         GetFileSecurityW: getFileSecurity(true),
         SetFileSecurityA: setFileSecurity(false),
         SetFileSecurityW: setFileSecurity(true),
+        RegGetKeySecurity: regGetKeySecurity,
+        RegSetKeySecurity: regSetKeySecurity,
         /**
          * Keeps the descriptor CreateFile or CreateDirectory was given, as
          * SetFileSecurity keeps one: the owner, group and DACL it holds, under
