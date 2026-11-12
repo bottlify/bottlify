@@ -657,6 +657,7 @@ export function createConversionFunctions(host){
     });
 
     const { readMemory, writeMemory } = host;
+    const entryHost = { readMemory, writeMemory, pointerSize: host.pointerSize };
     const table = {
         /**
          * int $I10_OUTPUT(_LDOUBLE value, int precision, int flags, I10_OUTPUT_data *out)
@@ -732,10 +733,10 @@ export function createConversionFunctions(host){
         _strtoui64: strtoInteger(12, toUint64, uint64Limit, false, true),
 
         strtol: readMemory
-            ? guestEntry(inGuest.strtol, COMPILED.strtol, { readMemory, writeMemory }, strtol)
+            ? guestEntry(inGuest.strtol, COMPILED.strtol, entryHost, strtol)
             : strtol,
         strtoul: readMemory
-            ? guestEntry(inGuest.strtoul, COMPILED.strtoul, { readMemory, writeMemory }, strtoul)
+            ? guestEntry(inGuest.strtoul, COMPILED.strtoul, entryHost, strtoul)
             : strtoul,
 
         ...readMemory ? {

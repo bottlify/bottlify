@@ -892,16 +892,17 @@ export const BELOW_CARRY = Uint32Array.from({ length: 37 },
  * White space, a sign, `0x` or `0X` in base 16 or 0 (a leading 0 is octal in
  * base 0), and the digits of the base, each letter of either case from ten;
  * `*end` set to where the digits stopped, or to the text itself when none
- * converted. A value out of range is the host's: it clamps and sets errno,
- * which is the calling thread's own; so is a base outside 2..36 other than 0,
- * which the handler reads as it reads any other. Neither case writes before
+ * converted, a pointer of the process's size. A value out of range is the
+ * host's: it clamps and sets errno, which is the calling thread's own; so is
+ * a base outside 2..36 other than 0, which the handler reads as it reads any
+ * other. Neither case writes before
  * it goes, so the host answers the call as it came.
  *
  * @guestCode cdecl
  * @param {Guest} guest @param {u32} text @param {u32} end @param {i32} base
  * @returns {i32}
  */
-export function strtol({ u8, setU32, host }, text, end, base){
+export function strtol({ u8, setU32, host, pointerBytes }, text, end, base){
     if (base !== 0 && (base < 2 || base > 36))
     {
         return host();
@@ -956,6 +957,10 @@ export function strtol({ u8, setU32, host }, text, end, base){
         if (end !== 0)
         {
             setU32(end, text);
+            if (pointerBytes === 8)
+            {
+                setU32(end + 4, 0);
+            }
         }
         return 0;
     }
@@ -966,6 +971,10 @@ export function strtol({ u8, setU32, host }, text, end, base){
     if (end !== 0)
     {
         setU32(end, at);
+        if (pointerBytes === 8)
+        {
+            setU32(end + 4, 0);
+        }
     }
     return negative !== 0 ? (0 - magnitude) | 0 : magnitude | 0;
 }
@@ -980,7 +989,7 @@ export function strtol({ u8, setU32, host }, text, end, base){
  * @param {Guest} guest @param {u32} text @param {u32} end @param {i32} base
  * @returns {u32}
  */
-export function strtoul({ u8, setU32, host }, text, end, base){
+export function strtoul({ u8, setU32, host, pointerBytes }, text, end, base){
     if (base !== 0 && (base < 2 || base > 36))
     {
         return host();
@@ -1035,12 +1044,20 @@ export function strtoul({ u8, setU32, host }, text, end, base){
         if (end !== 0)
         {
             setU32(end, text);
+            if (pointerBytes === 8)
+            {
+                setU32(end + 4, 0);
+            }
         }
         return 0;
     }
     if (end !== 0)
     {
         setU32(end, at);
+        if (pointerBytes === 8)
+        {
+            setU32(end + 4, 0);
+        }
     }
     return negative !== 0 ? (0 - magnitude) >>> 0 : magnitude;
 }

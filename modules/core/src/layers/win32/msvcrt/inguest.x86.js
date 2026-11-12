@@ -1673,7 +1673,7 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'cdecl',
         params: ['u32', 'u32', 'i32'],
         returns: 'i32',
-        uses: ['u8', 'setU32', 'host'],
+        uses: ['u8', 'setU32', 'host', 'pointerBytes'],
         host: 394,
         tables: { BELOW_CARRY: 400, DIGITS: 548 },
         code: Uint8Array.of(
@@ -1750,7 +1750,7 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'cdecl',
         params: ['u32', 'u32', 'i32'],
         returns: 'u32',
-        uses: ['u8', 'setU32', 'host'],
+        uses: ['u8', 'setU32', 'host', 'pointerBytes'],
         host: 362,
         tables: { BELOW_CARRY: 368, DIGITS: 516 },
         code: Uint8Array.of(

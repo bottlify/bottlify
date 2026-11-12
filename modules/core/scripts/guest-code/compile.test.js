@@ -1367,3 +1367,37 @@ export function exchange({ u32, compareExchange }, at, expected, value){
         'the table it reads, and where');
     assert.match(refusedAt64.exchange, /compareExchange: .*refused at 64 bits/);
 });
+
+test('pointerBytes: 4 in the i386 and 8 in the x86-64, a constant of each; an if on it keeps only'
+    + ' the way it takes', async()=>{
+    const source = (/** @type {string} */ condition)=>`
+/**
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} at @param {u32} value
+ * @returns {u32}
+ */
+export function store({ setU32, pointerBytes }, at, value){
+    setU32(at, value);
+    if (${condition})
+    {
+        setU32(at + 4, 0);
+    }
+    return (pointerBytes * 3) >>> 0;
+}
+`;
+    const { same, compiled, long } = await load(source('pointerBytes === 8'));
+    const next = random(33);
+    for (let i = 0; i < 20; i++)
+    {
+        const bytes = Array.from({ length: 8 }, ()=>next() & 0xff);
+        // The i386 against the source run with 4, the x86-64 against it run with 8.
+        const js = same('store', { stack: [DATA, next()], memory: [[DATA, bytes]] });
+        assert.equal(js.eax, 12, 'the i386 counts a pointer as four bytes');
+        assert.deepEqual([...js.data.slice(4, 8)], bytes.slice(4, 8), 'the next dword left be');
+    }
+    // The way not taken is no code: the same bytes as a source without the if.
+    // (`same` held the x86-64 to the source run with 8: its second store made.)
+    const { compiled: without } = await load(source('pointerBytes === 9'));
+    assert.deepEqual(compiled.store.code, without.store.code, 'the i386 holds no compare');
+    assert.ok(long.store, 'x86-64 code made');
+});

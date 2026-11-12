@@ -346,9 +346,16 @@ const X87_WORDS = new Set(['controlWord', 'statusWord', 'setControlWord', 'clear
  */
 const FLOAT_BITS = ['floatBits', 'floatOfBits'];
 
+/**
+ * `pointerBytes`, the size of a pointer: 4 in the i386 and 8 in the x86-64,
+ * a constant of each; what a source lays out a pointer it writes, or a slot
+ * of a `va_list`, by.
+ */
+const POINTER_BYTES = 'pointerBytes';
+
 const HELPERS = new Set([...Object.keys(LOADS), ...Object.keys(STORES),
     'call', 'callStd', 'copyUp', 'copyDown', 'fill', 'host', 'compareExchange', ...X87_WORDS,
-    ...FLOAT_BITS]);
+    ...FLOAT_BITS, POINTER_BYTES]);
 
 const TABLE_KINDS = /** @type {const} */ ([
     ['Uint8Array', 1, false], ['Int8Array', 1, true], ['Uint16Array', 2, false],
@@ -1024,6 +1031,10 @@ class FunctionCompiler {
                 }
                 uses.push(property.key.name);
                 this.helpers.add(property.key.name);
+                if (property.key.name === POINTER_BYTES)
+                {
+                    this.bind(property.key, { constant: this.word });
+                }
                 if (this.long && X87_WORDS.has(property.key.name))
                 {
                     this.fail(property, `${property.key.name}: the x87's control and status `
@@ -1921,6 +1932,37 @@ class FunctionCompiler {
         }
     }
 
+    /**
+     * A comparison of two constants -- `pointerBytes === 8` -- as the
+     * condition it is, or undefined when it is not one: an `if` on it keeps
+     * only the way it takes.
+     *
+     * @param {any} node
+     * @returns {boolean | undefined}
+     */
+    foldTest(node){
+        if (node.type !== 'BinaryExpression')
+        {
+            return undefined;
+        }
+        const left = this.fold(node.left);
+        const right = left === undefined ? undefined : this.fold(node.right);
+        if (left === undefined || right === undefined)
+        {
+            return undefined;
+        }
+        switch (node.operator)
+        {
+            case '===': return left === right;
+            case '!==': return left !== right;
+            case '<': return left < right;
+            case '<=': return left <= right;
+            case '>': return left > right;
+            case '>=': return left >= right;
+            default: return undefined;
+        }
+    }
+
     // --- statements ------------------------------------------------------
 
     /** @param {any[]} list */
@@ -1958,6 +2000,16 @@ class FunctionCompiler {
                 return;
             case 'IfStatement':
             {
+                const known = this.foldTest(node.test);
+                if (known !== undefined)
+                {
+                    const taken = known ? node.consequent : node.alternate;
+                    if (taken)
+                    {
+                        this.statement(taken);
+                    }
+                    return;
+                }
                 const only = node.alternate ? null : this.jumpOnly(node.consequent);
                 if (only !== null)
                 {

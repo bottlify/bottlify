@@ -376,26 +376,30 @@ export function equivalence(compiled, sources, model, long){
         }
         const x64 = runLong(name, fn, input, double);
         const at64 = `${what} at 64 bits`;
-        assert.equal(x64.handedOver, js.handedOver, `${at64}: handed to the host by both or by `
+        // A source that lays memory out by the pointer's size is held, at 64
+        // bits, to its own run with pointers of eight bytes.
+        const judge = fn.uses.includes('pointerBytes')
+            ? runJs(name, input, double, sources, undefined, 8) : js;
+        assert.equal(x64.handedOver, judge.handedOver, `${at64}: handed to the host by both or by `
             + 'neither');
         assert.deepEqual(x64.kept, x64.given, `${at64}: the registers a callee keeps kept`);
         assert.equal(x64.rsp, BigInt(STACK_64 + 8), `${at64}: RSP past the return address`);
         assert.equal(x64.df, false, `${at64}: the direction flag clear`);
         if (fn.returns === 'f64' || fn.returns === 'f32')
         {
-            assert.ok(sameDouble(/** @type {number} */ (x64.xmm0), js.st[0]),
-                `${at64}: XMM0 ${x64.xmm0} against ${js.st[0]}`);
+            assert.ok(sameDouble(/** @type {number} */ (x64.xmm0), judge.st[0]),
+                `${at64}: XMM0 ${x64.xmm0} against ${judge.st[0]}`);
         }
         else if (fn.returns !== 'void')
         {
-            assert.equal(x64.rax, BigInt.asUintN(64, BigInt(js.eax | 0)),
+            assert.equal(x64.rax, BigInt.asUintN(64, BigInt(judge.eax | 0)),
                 `${at64}: RAX, EAX extended by its sign`);
         }
-        const at = firstDifference(x64.data, js.data);
+        const at = firstDifference(x64.data, judge.data);
         if (at >= 0)
         {
             assert.fail(`${at64}: memory differs first at 0x${(DATA + at).toString(16)}: `
-                + `${x64.data[at]} against ${js.data[at]}`);
+                + `${x64.data[at]} against ${judge.data[at]}`);
         }
     };
 
@@ -558,8 +562,10 @@ export function equivalence(compiled, sources, model, long){
      * @param {Record<string, unknown>} module  The source, or the model's copy of it.
      * @param {[number, number]} [bounds]  The addresses the JavaScript may reach,
      *     [from, to): past them a RangeError, as past the test's memory.
+     * @param {number} [pointerSize]  The `pointerBytes` the source runs with:
+     *     8 for what the x86-64 is held to.
      */
-    const runJs = (name, input, double, module, bounds = [0, Infinity])=>{
+    const runJs = (name, input, double, module, bounds = [0, Infinity], pointerSize = 4)=>{
         // The x87's words as the call finds them; a control word the source
         // loads is the one the model's arithmetic rounds to from there on.
         let control = input.control ?? 0x37f;
@@ -595,6 +601,7 @@ export function equivalence(compiled, sources, model, long){
             }
         };
         const entry = guestEntry(source, compiledOf(name), {
+            pointerSize,
             readMemory: (address, length)=>{
                 reach(address, length, 'read');
                 return memory.subarray(address, address + length);

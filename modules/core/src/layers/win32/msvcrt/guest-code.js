@@ -156,6 +156,7 @@ const FLOAT_BIT_HELPERS = {
  * @property {() => number} host
  *     The call answered by the host's handler, with the arguments it came
  *     with: only as `return host()`.
+ * @property {number} pointerBytes  A pointer's size, 4 or 8: the process's.
  * @property {() => number} controlWord  The x87 control word (`fnstcw`).
  * @property {(word: number) => void} setControlWord  `fldcw`.
  * @property {() => number} statusWord  The x87 status word, the stack's top
@@ -212,7 +213,7 @@ function x87Words(fpu){
  * Guest but the x87's words.
  *
  * @typedef {Omit<Guest, 'controlWord' | 'setControlWord' | 'statusWord' | 'clearExceptions'
- *     | 'mxcsr' | 'setMxcsr'>} GuestMemory
+ *     | 'mxcsr' | 'setMxcsr' | 'pointerBytes'>} GuestMemory
  */
 
 /**
@@ -329,6 +330,8 @@ export function guestMemory(host){
  * @property {(fn: number, args: number[]) => number} [call]
  *     A guest function run to its return, synchronously; without it a
  *     function that calls one has no handler.
+ * @property {number} [pointerSize]  8 in a 64-bit process, the `pointerBytes`
+ *     its handler runs the source with; absent, 4.
  */
 
 /**
@@ -438,14 +441,17 @@ export function guestEntry(source, compiled, host, fallback){
             + '(guestExport)');
     }
     const { readMemory, writeMemory, fillMemory, call } = host;
-    const memoryUsed = uses.some(use=>use !== 'host' && !X87_WORDS.includes(use)
-        && !FLOAT_BITS.includes(use));
+    const memoryUsed = uses.some(use=>use !== 'host' && use !== 'pointerBytes'
+        && !X87_WORDS.includes(use) && !FLOAT_BITS.includes(use));
     if (memoryUsed && (!readMemory || !writeMemory))
     {
         throw new Error('guest code: a function that reads the guest wants its memory');
     }
     const words = uses.some(use=>X87_WORDS.includes(use)) ? x87Words(host.fpu) : {};
-    const bits = uses.some(use=>FLOAT_BITS.includes(use)) ? FLOAT_BIT_HELPERS : {};
+    const bits = {
+        ...uses.some(use=>FLOAT_BITS.includes(use)) ? FLOAT_BIT_HELPERS : {},
+        ...uses.includes('pointerBytes') ? { pointerBytes: host.pointerSize === 8 ? 8 : 4 } : {},
+    };
     /** @type {Guest | null} */
     const guest = uses.length === 0 ? null : readMemory && writeMemory
         ? /** @type {Guest} */ ({ ...guestMemory({ readMemory, writeMemory,

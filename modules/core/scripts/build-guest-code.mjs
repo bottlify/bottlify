@@ -41,10 +41,7 @@ const TAG = /^\s*\*?\s*@guestCode\b/m;
  * @type {ReadonlyMap<string, Readonly<Record<string, string>>>}
  */
 export const LONG = new Map([
-    ['layers/win32/msvcrt/inguest.js', {
-        strtol: '`*end` is a pointer, eight bytes at 64 bits, which the source writes as four',
-        strtoul: '`*end` is a pointer, eight bytes at 64 bits, which the source writes as four',
-    }],
+    ['layers/win32/msvcrt/inguest.js', {}],
     ['layers/win32/msvcrt/inguest-math.js', {}],
 ]);
 

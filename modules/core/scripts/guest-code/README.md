@@ -89,6 +89,10 @@ the i386 one: `inguest.js` into `inguest.x64.js` (and `inguest-math.js` into `in
   back into its XMM register; a function that does so moves RSP and is no leaf. `X87`'s
   constants are the doubles the source's own `X87` holds, and `%` of doubles is the i386's
   loop of `fprem`.
+- **The pointer's size**: `pointerBytes`, taken from the guest like the helpers, is 4 in the i386
+  and 8 in the x86-64, a constant of each (and the process's in the handler): a pointer the source
+  writes, or a slot it steps by, is laid out by it, and an `if` comparing it keeps only the way
+  it takes.
 - **Refused at 64 bits**: x87 arguments, the x87's control and status words, an `i64` result, more
   than four doubles at once, and a function `LONG` names for a pointer its source lays out as four
   bytes. Each stays a trap into its handler there.
