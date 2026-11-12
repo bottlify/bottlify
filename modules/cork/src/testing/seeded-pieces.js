@@ -112,13 +112,13 @@ export function random(seed){
  * @returns {Promise<{ runs: string[], workerMs: number, formedInPart: number,
  *     publishedInPart: number, cacheHits: number, compiledApart: number,
  *     lookedUpInPart: number, relinked: number, answeredFirst: number,
- *     sharedModules: number, formedRemembered: number }>} each start's exit
+ *     sharedModules: number }>} each start's exit
  *     kind, retired count and registers, or 'untranslated'; the milliseconds translators
  *     emitted for it; the calls that formed or published part of a batch (`holdMs`); the
  *     store's hits, their modules compiled off the thread and the calls that left a batch's
  *     answers half read; the regions relinks moved; and the calls forming or looking up cut
- *     short for another executor's ask (`awaited`); the hits whose modules and regions a
- *     runtime sharing the store had made already (`run-shared.js`)
+ *     short for another executor's ask (`awaited`); the hits whose modules a runtime sharing
+ *     the store had compiled already (`shared-modules.js`)
  */
 export async function observe(seed, config, attach = undefined){
     const next = random(seed);
@@ -172,7 +172,7 @@ export async function observe(seed, config, attach = undefined){
             publishedInPart: d.publishedInPart, cacheHits: d.cacheHits,
             compiledApart: d.compiledApart, lookedUpInPart: d.lookedUpInPart,
             relinked: d.relinked, answeredFirst: d.answeredFirst,
-            sharedModules: d.sharedModules, formedRemembered: d.formedRemembered };
+            sharedModules: d.sharedModules };
     }
     finally
     {

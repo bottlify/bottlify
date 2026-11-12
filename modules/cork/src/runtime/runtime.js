@@ -47,7 +47,7 @@ import { blockCounts, mechanismCounts, resetBlockCounts, topBlocks, transferTarg
     from './block-profile.js';
 import { profileForms } from './profile-forms.js';
 import { createWeakInstances } from './weak-instances.js';
-import { formedMemo, runSharedOf } from './run-shared.js';
+import { sharedModulesOf } from './shared-modules.js';
 import {
     CACHE_VERSION, cacheKey, moduleKey, packRegion, seedRecords, unpackRegion,
 } from './cache.js';
@@ -212,11 +212,6 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
         // translator's own: the slice sampler sees only where budgets run
         // out, and a stub reached through such exits alone never appears there.
         missThreshold: 64,
-        // The same for an address a runtime sharing the store had an entry at
-        // (its map of blocks, `storedBlocks`): a process started again finds the
-        // store holding what it runs, and each exit the threshold waited for
-        // ran interpreted while the region was there to take.
-        storedThreshold: 1,
         // Test-only: a run with the translator off, so the whole program is
         // the interpreter tier's and the corpus can judge it alone.
         translate: true,
@@ -256,13 +251,9 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
         // (`EVICT_HOLD`).
         cacheBytes: 256 << 20,
         // The wasm bytes of compiled batch modules kept for every runtime
-        // sharing this one's store (`run-shared.js`): a process started again
+        // sharing this one's store (`shared-modules.js`): a process started again
         // instantiates what an earlier one compiled (0: none kept).
         sharedModuleBytes: 256 << 20,
-        // The formed regions kept for every runtime sharing this one's store
-        // and forming as it does: a store hit whose bytes and pages answer as
-        // they did is not decoded again (0: none kept).
-        sharedFormed: 32768,
         // A small leaf callee formed into its caller, the call and its return
         // jumps inside the region (false: every call crosses regions).
         leafCalls: true,
@@ -658,11 +649,10 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
     const instanceKeys = new WeakMap();
     /** A module compiled off the thread, by its bytes. @type {WeakMap<WebAssembly.Module, number>} */
     const compiledBytes = new WeakMap();
-    /** What every runtime sharing the store shares (`run-shared.js`). */
-    const runShared = runSharedOf(leaveOut.size > 0 || settings.blockProfile === true
-        ? null : settings.store ?? null, { moduleBytes: settings.sharedModuleBytes });
-    /** The compiled modules of every runtime sharing the store, by store key. */
-    const sharedModules = runShared?.modules ?? null;
+    /** The compiled modules of every runtime sharing the store, by store key
+     * (`shared-modules.js`): none for a run that keeps no store. */
+    const sharedModules = sharedModulesOf(leaveOut.size > 0 || settings.blockProfile === true
+        ? null : settings.store ?? null, settings.sharedModuleBytes);
     // Past three quarters of the entry hash's slots live, a block start is kept
     // in the host's map alone (`createEntries`' own share).
     const entries = createEntries(
@@ -1139,7 +1129,7 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
         // precision, floats, the stack shape's tests).
         cacheHits: 0, cacheMisses: 0, missNoRecord: 0, missNoModule: 0, missChanged: 0,
         missBytes: 0, missFormedOther: 0, missModes: 0, missPrecision: 0, missFloats: 0,
-        hitsFormedAgain: 0, formedAsRecorded: 0, sharedModules: 0, formedRemembered: 0,
+        hitsFormedAgain: 0, formedAsRecorded: 0, sharedModules: 0,
         toStoredRegion: 0, precisionSwitches: 0,
         readSwitches: 0,
         stackCode: 0,
@@ -2945,95 +2935,6 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
         ...(one.checked === true ? { checked: true } : {}),
         ...(one.copies === true ? { copies: true } : {}) });
     /**
-     * The formed regions of the runtimes sharing the store and forming as this
-     * one does (`sharedFormed`), by entry and the callees formed in. None for a
-     * diagnostic range left to the interpreter, which `translatable` answers by
-     * address rather than by page.
-     */
-    const formedKept = (()=>{
-        if (settings.interpretRange)
-        {
-            return null;
-        }
-        try
-        {
-            return formedMemo(runShared, JSON.stringify(formOptions), settings.sharedFormed);
-        }
-        catch {
-            return null;
-        }
-    })();
-    /**
-     * Whether a region formed earlier would be formed the same here now: every
-     * page forming asked about answers as it did, and every byte it read is as
-     * it was. A region is a function of those and of the forming options.
-     *
-     * @param {{ region: import('../region.js').Region, answers: Map<number, boolean> }} known
-     */
-    const formsAsBefore = ({ region, answers })=>{
-        for (const [page, yes] of answers)
-        {
-            if (translatable(page * 4096) !== yes)
-            {
-                return false;
-            }
-        }
-        for (const { start, bytes } of region.sources ?? [])
-        {
-            const now = readBytes?.(start, start + bytes.length);
-            for (let at = 0; at < bytes.length; at++)
-            {
-                if ((now === undefined ? read(start + at) : now[at]) !== bytes[at])
-                {
-                    return false;
-                }
-            }
-        }
-        return true;
-    };
-    /**
-     * A region formed at `eip` with these callees formed in (`callTargets`), or
-     * the one a runtime sharing the store formed so where it forms the same
-     * (`formsAsBefore`). One formed to be kept is formed alone, without what
-     * other regions of the call decoded (`shared`): forming reads and asks
-     * about only what it did not find there, and the region's own reads must
-     * be all of them.
-     *
-     * @param {number} eip @param {[number, number[]][] | undefined} targets
-     * @param {import('../region.js').FormShared} [shared]
-     * @returns {import('../region.js').Region}
-     */
-    const formAt = (eip, targets, shared)=>{
-        const called = targets === undefined ? {} : { callTargets: new Map(targets) };
-        if (formedKept === null)
-        {
-            return formRegion(read, eip, { ...formHere, translatable, shared, ...called });
-        }
-        const key = `${eip}/${targets === undefined ? '' : JSON.stringify(targets)}`;
-        const known = formedKept.get(key)?.value;
-        if (known !== undefined && formsAsBefore(known))
-        {
-            counts.formedRemembered++;
-            return known.region;
-        }
-        /** @type {Map<number, boolean>} */
-        const answers = new Map();
-        const region = formRegion(read, eip, { ...formHere, ...called,
-            translatable: address=>{
-                const page = Math.floor(address / 4096);
-                let yes = answers.get(page);
-                if (yes === undefined)
-                {
-                    yes = translatable(address);
-                    answers.set(page, yes);
-                }
-                return yes;
-            } });
-        formedKept.set(key, { region, answers }, 1);
-        return region;
-    };
-
-    /**
      * The stored region for a formed one, or null. Formed here beside other
      * regions than the run that stored it had, or before the callees it was
      * formed with were known, a region is formed again as its record says
@@ -3069,7 +2970,8 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
         }
         if (region.hash !== shape.hash)
         {
-            region = formAt(region.entry, shape.targets);
+            region = formRegion(read, region.entry, { ...formHere, translatable,
+                ...(shape.targets === undefined ? {} : { callTargets: new Map(shape.targets) }) });
             if (region.hash !== shape.hash)
             {
                 counts.missChanged++;
@@ -3169,10 +3071,6 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
         }
         return blocks;
     };
-    /** Whether the store's map has an entry of a region at an address and top: a
-     * runtime sharing the store had one there. @param {number} eip @param {number} top */
-    const storedEntryAt = (eip, top)=>storedBlocks !== null
-        && (storedBlocks.has(keyOf(eip, top)) || storedBlocks.has(keyOf(eip, ANY_TOP)));
     /** The read of `storedBlocks`, which a flush waits for before it writes them back. */
     const blocksRead = (async()=>{
         const store = storeHere();
@@ -3231,8 +3129,8 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
             return undefined;
         }
         counts.sharedModules++;
-        compiledBytes.set(one.value, one.size);
-        return one.value;
+        compiledBytes.set(one.module, one.bytes);
+        return one.module;
     };
 
     /**
@@ -5120,7 +5018,9 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
             }
             // One the store holds is formed as its record says (`recordBefore`).
             const record = recordBefore(step, store, eip, entryTop);
-            const region = formAt(eip, record?.shape.targets, shared);
+            const region = formRegion(read, eip, { ...formHere, translatable, shared,
+                ...(record?.shape.targets === undefined ? {}
+                    : { callTargets: new Map(record.shape.targets) }) });
             // What the region calls directly lands in the same batch, so
             // the call and the return transfer without a miss -- each
             // callee at the top the call site has, which the tracker
@@ -5492,8 +5392,7 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
             }
             const key = keyOf(address, at);
             const seen = (misses.get(key) ?? 0) + 1;
-            if (seen >= settings.missThreshold || seen >= settings.storedThreshold
-                && storedEntryAt(address, at))
+            if (seen >= settings.missThreshold)
             {
                 misses.delete(key);
                 const holders = closedIn.get(address);
@@ -5925,7 +5824,6 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
                 // Store hits whose batch module a runtime sharing the store had
                 // compiled already, and what the shared modules hold.
                 sharedModules: counts.sharedModules,
-                formedRemembered: counts.formedRemembered,
                 sharedHeld: sharedModules?.stats() ?? null,
                 // What the store holds and what its opening kept, where it says.
                 store: settings.store?.stats?.() ?? null,

@@ -747,6 +747,8 @@ setInterval(async()=>{
                         noRecord: figures.missNoRecord, changed: figures.missChanged,
                         formedAgain: figures.hitsFormedAgain,
                         asRecorded: figures.formedAsRecorded,
+                        // Modules taken as a runtime sharing the store compiled them.
+                        sharedModules: figures.sharedModules,
                     },
                     ms: {
                         forming: figures.formingMs, lookup: figures.lookupMs,

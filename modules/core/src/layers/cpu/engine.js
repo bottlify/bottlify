@@ -203,9 +203,6 @@ export function engineContractProblem(engineModule, url){
  *     oldest is evicted (the interpreter notes it again should it get hot). Default 8192.
  * @property {number} [missThreshold]    Untranslated exits to one address before the engine
  *     queues it as a candidate of its own. Default 64.
- * @property {number} [storedThreshold]  The same for an address the store's map of blocks says a
- *     runtime sharing the store had an entry at: a process started again takes its regions
- *     from the store at once rather than interpreting them meanwhile. Default 1.
  * @property {('x87' | 'mmx' | 'sse')[]} [leaveOut]  Instruction classes the translator leaves
  *     to the other executor (a region exits before one), so a defect can be localised by
  *     class from a run; a run with any class left out keeps no translation store. Default none.
@@ -325,9 +322,6 @@ export function engineContractProblem(engineModule, url){
  * @property {number} [sharedModuleBytes]  Wasm bytes of compiled batch modules kept for every
  *     runtime handed the same `store`: a process the run starts again instantiates the modules
  *     an earlier one compiled, without compiling them (0: none kept). Default 256 MiB.
- * @property {number} [sharedFormed]  Formed regions kept for every runtime handed the same
- *     `store` that forms as this one does: a store hit whose bytes and pages answer as they
- *     did for the region formed earlier is not formed again (0: none kept). Default 32768.
  * @property {number} [holdMs]  Where a translation worker is wanted, the engine thread's
  *     time the translator's work may take at a stretch: a batch is formed over several calls,
  *     the store's hits compiled off the thread, their compiles started and they and a worker's
@@ -481,11 +475,9 @@ export function engineContractProblem(engineModule, url){
  *     here otherwise (beside other regions, or before its callees were known).
  * @property {number} [formedAsRecorded]  Hits formed once, as their record says: the store
  *     answered before the region was formed.
- * @property {number} [formedRemembered]  Regions taken as a runtime sharing the store formed
- *     them (`sharedFormed`): every byte and page forming read answered as it did.
  * @property {number} [sharedModules]  Store hits whose batch module a runtime sharing the store
  *     had compiled already (`sharedModuleBytes`), instantiated without compiling.
- * @property {{ held: number, size: number, hits: number, added: number, dropped: number }
+ * @property {{ held: number, bytes: number, hits: number, added: number, dropped: number }
  *     | null} [sharedHeld]  The compiled modules the runtimes sharing the store hold: how
  *     many, their wasm bytes, and what was found, added and let go since the store's first.
  * @property {number} [toStoredRegion]  Candidates at a block of a region the store holds, formed
