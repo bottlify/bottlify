@@ -136,3 +136,44 @@ export const INTERLOCKED = Object.freeze({
     InterlockedCompareExchange: { argBytes: 12, code: COMPARE_EXCHANGE_CODE,
         long: LONG_COMPARE_EXCHANGE_CODE },
 });
+
+/**
+ * LONGLONG InterlockedCompareExchange64(LONGLONG volatile *Destination,
+ * LONGLONG Exchange, LONGLONG Comparand): the value before, in EDX:EAX,
+ * whether or not it was exchanged. The exchange goes in ECX:EBX, so EBX is
+ * kept around it, and ESI with it for the pointer.
+ *     push ebx
+ *     push esi
+ *     mov esi, [esp+12]
+ *     mov ebx, [esp+16]
+ *     mov ecx, [esp+20]
+ *     mov eax, [esp+24]
+ *     mov edx, [esp+28]
+ *     lock cmpxchg8b [esi]
+ *     pop esi
+ *     pop ebx
+ *     ret 20
+ * At 64 bits: mov rax, r8; lock cmpxchg [rcx], rdx; ret.
+ */
+export const COMPARE_EXCHANGE64_CODE = Uint8Array.of(
+    0x53, 0x56,
+    0x8b, 0x74, 0x24, 0x0c,
+    0x8b, 0x5c, 0x24, 0x10,
+    0x8b, 0x4c, 0x24, 0x14,
+    0x8b, 0x44, 0x24, 0x18,
+    0x8b, 0x54, 0x24, 0x1c,
+    0xf0, 0x0f, 0xc7, 0x0e,
+    0x5e, 0x5b,
+    0xc2, 0x14, 0x00,
+);
+export const LONG_COMPARE_EXCHANGE64_CODE = Uint8Array.of(
+    0x4c, 0x89, 0xc0, 0xf0, 0x48, 0x0f, 0xb1, 0x11, 0xc3);
+
+/**
+ * The quadword one, beside the five: Windows Vista's, which a library built
+ * for it imports (ASP.NET's webengine4.dll).
+ */
+export const INTERLOCKED_64 = Object.freeze({
+    InterlockedCompareExchange64: { argBytes: 20, code: COMPARE_EXCHANGE64_CODE,
+        long: LONG_COMPARE_EXCHANGE64_CODE },
+});

@@ -117,10 +117,10 @@ const KEPT = { esi: 0x51515151, edi: 0x7e7e7e7e, ebp: 0x3c3c3c3c };
  */
 function buildInterlockedExe(){
     const names = ['InterlockedIncrement', 'InterlockedDecrement', 'InterlockedExchange',
-        'InterlockedExchangeAdd', 'InterlockedCompareExchange'];
+        'InterlockedExchangeAdd', 'InterlockedCompareExchange', 'InterlockedCompareExchange64'];
     return buildExe({
         imports: { 'KERNEL32.dll': [...names, 'ExitProcess'] },
-        data: { counter: [0, 0, 0, 0], stack: [0, 0, 0, 0] },
+        data: { counter: [0, 0, 0, 0], stack: [0, 0, 0, 0], wide: [0, 0, 0, 0, 0, 0, 0, 0] },
         codeSize: 0x600,
         code: context=>{
             const { call, push, pushValue, store, compare, check, exit, fail } = toolkit(context);
@@ -157,6 +157,25 @@ function buildInterlockedExe(){
                 ...step([...pushValue(42), ...pushValue(9)], 'InterlockedCompareExchange', 7, 7),
                 ...step(pushValue(10), 'InterlockedExchangeAdd', 7, 17),
                 ...step(pushValue(-20 >>> 0), 'InterlockedExchangeAdd', 17, -3 >>> 0),
+                // The quadword: 0x00000001_00000002 in it, compared with that
+                // and exchanged for 0x00000003_00000004; then compared with what
+                // it no longer holds, and left. EDX:EAX the value before.
+                store('wide', 2), [0xc7, 0x05, ...u32(context.at('wide') + 4), ...u32(1)],
+                ...[[1, 2, 3, 4, 3, 4], [1, 2, 9, 9, 3, 4]].flatMap(([compareHigh, compareLow,
+                    exchangeHigh, exchangeLow, leftHigh, leftLow], index)=>[
+                    check(++number),
+                    [0x89, 0x25, ...u32(context.at('stack'))],          // mov [stack], esp
+                    pushValue(compareHigh), pushValue(compareLow),
+                    pushValue(exchangeHigh), pushValue(exchangeLow), push('wide'),
+                    call('InterlockedCompareExchange64'),
+                    [0x3b, 0x25, ...u32(context.at('stack'))], { jump: JNE, to: 'fail' },
+                    [0x3d, ...u32(index === 0 ? 2 : 4)], { jump: JNE, to: 'fail' },
+                    [0x81, 0xfa, ...u32(index === 0 ? 1 : 3)], { jump: JNE, to: 'fail' },
+                    compare('wide', leftLow), { jump: JNE, to: 'fail' },
+                    [0x81, 0x3d, ...u32(context.at('wide') + 4), ...u32(leftHigh)],
+                    { jump: JNE, to: 'fail' },
+                    [0x81, 0xfe, ...u32(KEPT.esi)], { jump: JNE, to: 'fail' },
+                ]),
                 exit(),
                 ...fail(),
             ]);

@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createSyncFunctions } from './sync.js';
 import { createCriticalSections, enterCode, leaveCode, tryEnterCode } from './critical.js';
-import { INTERLOCKED } from './interlocked.js';
+import { INTERLOCKED, INTERLOCKED_64 } from './interlocked.js';
 import { childThread } from './cross-process.js';
 
 const CS_LOCK_COUNT = 0x04;
@@ -467,17 +467,19 @@ test('the interlocked exports are guest code, placed once where the host keeps c
     };
     const fns = createSyncFunctions(/** @type {any} */ (host));
     const builder = fakeBuilder();
-    const names = /** @type {(keyof typeof INTERLOCKED)[]} */ (Object.keys(INTERLOCKED));
-    assert.deepEqual(names.sort(), ['InterlockedCompareExchange', 'InterlockedDecrement',
-        'InterlockedExchange', 'InterlockedExchangeAdd', 'InterlockedIncrement']);
+    const every = { ...INTERLOCKED, ...INTERLOCKED_64 };
+    const names = /** @type {(keyof typeof every)[]} */ (Object.keys(every));
+    assert.deepEqual(names.sort(), ['InterlockedCompareExchange',
+        'InterlockedCompareExchange64', 'InterlockedDecrement', 'InterlockedExchange',
+        'InterlockedExchangeAdd', 'InterlockedIncrement']);
     for (const name of names)
     {
         const entry = /** @type {any} */ (fns[name]);
         assert.equal('handler' in entry, false, `${name} has nothing to trap into`);
-        assert.equal(entry.argBytes, INTERLOCKED[name].argBytes);
+        assert.equal(entry.argBytes, every[name].argBytes);
         const at = entry.guest(builder);
         assert.ok(placed.includes(at), `${name} is in the code pages`);
-        const { code } = INTERLOCKED[name];
+        const { code } = every[name];
         assert.deepEqual([...host.bytes.slice(at, at + code.length)], [...code]);
         assert.equal(entry.guest(builder), at, 'the same place again');
     }
@@ -525,6 +527,13 @@ test('each interlocked routine is its one locked instruction, and pops what it w
         {
             assert.equal(long[long.length - 1], 0xc3, 'ret');
         }
+        const { InterlockedCompareExchange64 } = INTERLOCKED_64;
+        assert.ok(holds(InterlockedCompareExchange64.code, [0xf0, 0x0f, 0xc7, 0x0e]),
+            'lock cmpxchg8b [esi]');
+        assert.deepEqual([...InterlockedCompareExchange64.code.slice(-5)],
+            [0x5e, 0x5b, 0xc2, 20, 0x00], 'esi and ebx back, ret 20');
+        assert.ok(holds(InterlockedCompareExchange64.long, [0xf0, 0x48, 0x0f, 0xb1, 0x11]),
+            'lock cmpxchg [rcx], rdx');
     });
 
 test('waiting for all of several objects reports one answer, not an index', ()=>{
