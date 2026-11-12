@@ -17,6 +17,8 @@ function regionOf(bytes, base = 0x1000, options = {}){
 
 /** @param {number} value */
 const rel8 = value=>value & 0xff;
+/** @param {number} value */
+const le32 = value=>[value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, value >>> 24];
 
 test('a countdown loop forms three blocks with one back-edge into the loop head', ()=>{
     // 1000: mov ecx, 10   (b9 0a 00 00 00)
@@ -253,6 +255,36 @@ test('a small leaf callee is formed into its caller, and only its rets return in
     const deeper = regionOf([0xe8, 1, 0, 0, 0, 0xc3, 0xe8, 1, 0, 0, 0, 0xc3,
         0xe8, 0xef, 0x0f, 0, 0, 0xc3]);
     assert.deepEqual(deeper.entries, [0x1000, 0x1005, 0x1006, 0x100b]);
+});
+
+test('a callee whose far conditional branch goes to cold code is formed in without it', ()=>{
+    // 1000: call F; ret   F = 1006: test ecx, ecx; je COLD (0f 84 rel32); inc eax; ret
+    // COLD = 3000: call 4000; jmp back to F's ret -- a reporting routine's call, far away.
+    const image = new Map();
+    const place = (/** @type {number} */ at, /** @type {number[]} */ bytes)=>bytes
+        .forEach((one, index)=>image.set(at + index, one));
+    const cold = 0x3000;
+    place(0x1000, [0xe8, 1, 0, 0, 0, 0xc3, 0x85, 0xc9,
+        0x0f, 0x84, ...le32(cold - 0x100e), 0x40, 0xc3]);
+    // call 4000 (e8 rel32); jmp 100f (e9 rel32)
+    place(cold, [0xe8, ...le32(0x4000 - (cold + 5)), 0xe9, ...le32(0x100f - (cold + 10))]);
+    place(0x4000, [0xc3]);
+    const form = (/** @type {object} */ options)=>formRegion(address=>image.get(address) ?? 0xcc,
+        0x1000, { formDepth: 0, ...options });
+    const formed = form({});
+    assert.deepEqual(formed.entries, [0x1000, 0x1005, 0x1006, 0x100e],
+        'F formed in, its cold path left out');
+    const branch = formed.blocks.find(block=>block.start === 0x1006)?.exit;
+    assert.deepEqual(branch?.targets, [cold, 0x100e], 'the branch still names its cold target');
+    assert.deepEqual([...inlineReturns(formed)], [[0x100e, [0x1005]]]);
+    // Followed, the cold path's call makes F no leaf: the call stays a call out.
+    const followed = form({ coldReach: 0 });
+    assert.deepEqual(followed.entries, [0x1000, 0x1005]);
+    assert.equal(followed.blocks[0].exit.apart, 'nested');
+    // A branch within the reach is the callee's own and is followed.
+    assert.deepEqual(form({ coldReach: 0x3000 }).entries, [0x1000, 0x1005]);
+    // The entry's own function follows its far branches: 1006 as an entry.
+    assert.ok(formRegion(address=>image.get(address) ?? 0xcc, 0x1006).entries.includes(cold));
 });
 
 test('an indirect call\'s predicted callees are formed in as a direct call\'s are, and'

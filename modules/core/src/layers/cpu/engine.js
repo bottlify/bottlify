@@ -280,6 +280,9 @@ export function engineContractProblem(engineModule, url){
  * @property {number} [leafBytes]  Its bytes at most. Default 512.
  * @property {number} [formDepth]  How many levels of callees formed in may keep direct calls
  *     of their own, those callees formed in as well when small; 0 forms leaves alone. Default 1.
+ * @property {number} [coldReach]  How far a conditional branch of a callee formed in may reach
+ *     and still be followed; a farther one is a way out to cold code, so a small function with
+ *     a far error path is formed in as a leaf. 0 follows every branch. Default 4096.
  * @property {boolean} [callTargets]  Indirect calls sampled and their few small callees formed
  *     in. Default true.
  * @property {number} [predictAfter]  Samples of one call before its callees are looked at.

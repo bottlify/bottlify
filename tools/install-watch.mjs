@@ -81,7 +81,11 @@
  *
  * `--cork-figures` adds a CORK line to each process's status: the share of its
  * instructions translated code retired, the translator's time, what threw
- * translations away, and (with cork's `timings`) where the interpreter ran.
+ * translations away, and (with cork's `timings`) where the interpreter ran;
+ * with cork's `blockProfile`, how its calls went (`mechanisms`), and
+ * `--profile-out DIR` writes each standing process's block profile there at
+ * every status (`IMAGE-N.json`, N its place among those standing), for
+ * tools/cork-calls.mjs and tools/cork-asm.mjs.
  *
  * `--type 'text@S'` types text into whatever has the focus S seconds in.
  *
@@ -134,6 +138,7 @@ if (!file)
 }
 const every = number('--every', 30);
 const shotsAt = argv.includes('--shots') ? argv[argv.indexOf('--shots') + 1] : null;
+const profileOut = argv.includes('--profile-out') ? argv[argv.indexOf('--profile-out') + 1] : null;
 
 /**
  * Every value a repeatable flag was given.
@@ -695,7 +700,7 @@ setInterval(async()=>{
         console.log(seconds(), 'MEM', JSON.stringify({ rss: mb(usage.rss),
             heapUsed: mb(usage.heapUsed), external: mb(usage.external),
             arrayBuffers: mb(usage.arrayBuffers) }));
-        for (const standing of await app.standing())
+        for (const [place, standing] of (await app.standing()).entries())
         {
             // A process standing in a worker of its own may not have said
             // its image or its figures yet.
@@ -748,7 +753,19 @@ setInterval(async()=>{
                     forcedSteps: figures.forcedSteps, forcedAt: figures.forcedAt,
                     crtFormed: figures.crtFormed,
                     exitsByTarget: (figures.exitsByTarget ?? []).slice(0, 32),
+                    // With cork's `blockProfile`: how its calls and returns went.
+                    ...figures.mechanisms ? { mechanisms: figures.mechanisms } : {},
                 }));
+                // `--profile-out DIR`: the process's block profile as it stands, for
+                // tools/cork-calls.mjs and tools/cork-asm.mjs, one file a process.
+                if (profileOut !== null && Array.isArray(figures.blockCounts))
+                {
+                    mkdirSync(profileOut, { recursive: true });
+                    writeFileSync(join(profileOut,
+                        `${image.split('\\').pop()}-${place}.json`),
+                    JSON.stringify({ seconds: Number(seconds()), instructions: cpu.instructions,
+                        mechanisms: figures.mechanisms, blocks: figures.blockCounts }));
+                }
             }
             // What the devices drew against what reached the screen: a
             // picture that stops changing while the program still presents

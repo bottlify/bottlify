@@ -9,9 +9,10 @@
  * calling one another, directly and through a register -- leaves and not,
  * `ret imm` with an argument pushed, a return moved past two bytes of its
  * caller, a thunk jumping on through a register, a store into another
- * function's code -- run interpreted alone, then translated with nothing formed in, with
- * leaves alone, with one, two and three levels of callees formed in
- * (`formDepth`), and with the callees of calls through a register sampled and
+ * function's code, a branch to a cold path far away that calls on -- run interpreted
+ * alone, then translated with nothing formed in, with leaves alone, with one, two and
+ * three levels of callees formed in (`formDepth`), with the cold paths followed into
+ * (`coldReach` 0), and with the callees of calls through a register sampled and
  * formed in behind a compare (`callTargets`). Everything a program observes
  * must come out the same: the registers, the flags, its data and its code.
  */
@@ -24,6 +25,8 @@ const MAIN = 0x1000;
 const FUNCTIONS = 0x2000;
 const SPAN = 0x100;
 const DATA = 0x80000;
+/** Each function's cold path, `SPAN` apart, far past every reach (`coldReach`). */
+const COLD = 0x40000;
 const STACK = 0xf0000;
 const PROGRAMS = 120;
 
@@ -59,6 +62,8 @@ function program(seed){
     const returns = Array.from({ length: count }, ()=>[0, 0, 1, 2][pick(4)]);
     /** @type {[number, number[]][]} */
     const code = [];
+    /** Each function's cold paths, by its index. @type {Map<number, number[]>} */
+    const colds = new Map();
     for (let index = 0; index < count; index++)
     {
         const at = FUNCTIONS + index * SPAN;
@@ -67,7 +72,7 @@ function program(seed){
         for (let op = 0; op < ops; op++)
         {
             const callee = index + 1 + pick(count - index - 1);
-            const kind = pick(12);
+            const kind = pick(13);
             if (kind < 3 && callee < count)
             {
                 if (returns[callee] === 1)
@@ -111,6 +116,26 @@ function program(seed){
                 case 8: body.push(0x03, 0x1d, ...le32(DATA + 4 * pick(16))); break;
                 case 9: body.push(0x50, 0x5a); break;
                 case 10: body.push(0x83, 0xf8, pick(256), 0x7c, 0x01, 0x43); break;
+                case 11:
+                {
+                    // test cl, 7; jz COLD -- a branch to the function's cold path, far
+                    // away, taken one turn of the loop's eight (ecx is its count); the
+                    // path adds to ebx, may call a later function that returns plainly,
+                    // and jumps back after the branch.
+                    const path = COLD + index * SPAN + (colds.get(index)?.length ?? 0);
+                    body.push(0xf6, 0xc1, 0x07, 0x0f, 0x84);
+                    const back = at + body.length + 4;
+                    body.push(...le32(path - back));
+                    const out = [0x83, 0xc3, pick(256)];
+                    const plain = returns.findIndex((how, which)=>which > index && how === 0);
+                    if (plain > 0 && pick(2) === 0)
+                    {
+                        out.push(0xe8, ...le32(FUNCTIONS + plain * SPAN - (path + out.length + 5)));
+                    }
+                    out.push(0xe9, ...le32(back - (path + out.length + 5)));
+                    colds.set(index, [...colds.get(index) ?? [], ...out]);
+                    break;
+                }
                 default:
                     // mov byte [f + 2], imm8: another function's first add, rewritten.
                     body.push(0xc6, 0x05, ...le32(FUNCTIONS + pick(count) * SPAN + 2), pick(4));
@@ -129,6 +154,12 @@ function program(seed){
         }
         assert.ok(body.length <= SPAN, 'a function fits its span');
         code.push([at, body]);
+        const cold = colds.get(index);
+        if (cold !== undefined)
+        {
+            assert.ok(cold.length <= SPAN, 'its cold paths fit theirs');
+            code.push([COLD + index * SPAN, cold]);
+        }
     }
     // mov ecx, turns; L: push ecx; [push eax;] call f0; [inc eax; inc eax;] pop ecx;
     // dec ecx; jnz L; hlt
@@ -191,6 +222,8 @@ test('callees formed in, to any depth, run as the interpreter runs them', async(
         'one level': { formDepth: 1, hotThreshold: 2 },
         'two levels': { formDepth: 2, hotThreshold: 2 },
         'three levels': { formDepth: 3, hotThreshold: 2 },
+        // Every callee's branch followed, its cold paths formed in with it.
+        'cold paths followed': { formDepth: 1, hotThreshold: 2, coldReach: 0 },
         // Calls through a register sampled and their callees formed in behind a
         // compare (`callTargets`), a site due at its first sample.
         'predicted calls': { formDepth: 1, hotThreshold: 2, callTargets: true, predictAfter: 1 },

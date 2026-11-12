@@ -267,7 +267,10 @@ cross-process COM calls S seconds in. `--bundle ID` runs an installed
 program's launcher or entry the same way, with `--click`, `--key`, `--shots`
 and, with `--attended`, its message boxes left on the desktop to answer.
 `--copy DIR TO` writes a directory of the volume out once the run is over:
-what a setup unpacked, for the audit below. `--watch-import 'lib.dll!Name=0+$1*8'` prints
+what a setup unpacked, for the audit below. `--cork-figures` adds each process's translator
+figures; with `--cork '{"blockProfile":true}'` they hold how its calls went (`mechanisms`), and
+`--profile-out DIR` writes every standing process's block profile there at each status, for
+`tools/cork-calls.mjs` and `tools/cork-asm.mjs`. `--watch-import 'lib.dll!Name=0+$1*8'` prints
 each call a program makes to an import of a library of its own, as it returns, with the
 arguments read as it was made (`modules/core/src/watch-arguments.js`: strings, bytes
 through a pointer or a field, `$N*len` the stack itself, a double passed by value) - what a

@@ -83,6 +83,7 @@ default is the product's.
 | `volatileAfter`, `volatileWindowMs`, `volatileHoldMs` | 8, 100, 2000 | Writes dropping a page's code within the window before the page is interpreted, and for how long. |
 | `maxRegionBlocks` | 128 | Blocks of the largest region. |
 | `leafBytes` | 512 | Bytes of a leaf callee formed in. |
+| `coldReach` | 4096 | Bytes a callee's conditional branch may reach and still be followed; a farther one is a way out to cold code, not part of the callee (0: every branch followed). |
 | `predictAfter`, `callWindow` | 48, 1024 | Samples of an indirect call before its callees are looked at, and the readings they are kept for. |
 | `relinkAfter`, `relinkRegions`, `relinkCold` | 16, 512, 128 | Batch modules before running regions are gathered into large ones (0: never), regions in each, and in each module of the cold. |
 | `mergeAfter` | 2^16 | Transfers between two modules before they are merged (0: never). |
