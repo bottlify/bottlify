@@ -1001,9 +1001,11 @@ export function createConversionFunctions(host){
     return {
         ...table,
         ...readMemory ? {
-            wcstod: returningDouble(host.fpu, 8, wcstod),
+            wcstod: guestEntry(inGuestFloat.wcstod, FLOAT_CODE.wcstod, guest,
+                returningDouble(host.fpu, 8, wcstod)),
             /** double _wtof(const wchar_t *str): `wcstod`, no end. */
-            _wtof: returningDouble(host.fpu, 4, args=>wcstod([args[0], 0])),
+            _wtof: guestEntry(inGuestFloat._wtof, FLOAT_CODE._wtof, guest,
+                returningDouble(host.fpu, 4, args=>wcstod([args[0], 0]))),
         } : {},
         atof: readMemory
             ? guestEntry(inGuestFloat.atof, FLOAT_CODE.atof, guest, handlers.atof)
