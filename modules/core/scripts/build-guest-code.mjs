@@ -45,6 +45,7 @@ export const LONG = new Map([
         strtol: '`*end` is a pointer, eight bytes at 64 bits, which the source writes as four',
         strtoul: '`*end` is a pointer, eight bytes at 64 bits, which the source writes as four',
     }],
+    ['layers/win32/msvcrt/inguest-math.js', {}],
 ]);
 
 /** @param {string} dir @param {string[]} [found] @returns {Promise<string[]>} */

@@ -105,6 +105,11 @@ export function longMachine(){
             v.setBigUint64(layout.eip, BigInt(at), true);
             v.setUint32(layout.eflags, 0x202, true);
             v.setUint32(layout.mxcsr, 0x1f80, true);
+            // The x87 as the convention leaves it at a call: every register empty, the
+            // control word Windows sets for a 64-bit thread (double precision).
+            v.setUint8(layout.x87Empty, 0xff);
+            v.setUint8(layout.x87Top, 0);
+            v.setUint16(layout.x87Control, 0x27f, true);
             state.syncIn();
             state.halted = false;
             state.trapped.length = 0;

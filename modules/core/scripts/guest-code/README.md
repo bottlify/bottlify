@@ -55,7 +55,7 @@ its place in the source rather than approximated. The full rules are in the head
 A 64-bit process runs no i386. For the modules `LONG` names in
 [`../build-guest-code.mjs`](../build-guest-code.mjs), the same source is also compiled to
 x86-64 under the x64 convention (`compileModule(text, { bits: 64 })`), into a module beside
-the i386 one: `inguest.js` into `inguest.x64.js`, whose `COMPILED` has the code and whose
+the i386 one: `inguest.js` into `inguest.x64.js` (and `inguest-math.js` into `inguest-math.x64.js`), whose `COMPILED` has the code and whose
 `REFUSED` names each function with none and why.
 
 - **Convention**: the arguments in RCX, RDX, R8 and R9 and the stack past the 32 bytes of home
@@ -83,8 +83,12 @@ the i386 one: `inguest.js` into `inguest.x64.js`, whose `COMPILED` has the code 
   `floatOfBits(n)` the double a `u32`'s single holds - what a libm routine splits an argument
   into exponent and mantissa with. Both run in the handler as well, taken from the first
   parameter like the memory helpers.
-- **Refused at 64 bits**: what only the x87 does (`%` of doubles, `Math.sin` and the other
-  transcendentals, `X87`), x87 arguments, the x87's control and status words, an `i64`
+- **The x87's one instruction for it**: `Math.sin`, `cos`, `tan`, `atan`, `atan2` and `log2`
+  store their doubles below RSP, load them onto the x87 (empty at a call, as the convention
+  leaves it), run the instruction the i386 runs and take the answer back into its XMM register;
+  a function that does so moves RSP and is no leaf.
+- **Refused at 64 bits**: what only the x87 does past one instruction (`%` of doubles, `X87`,
+  so `exp`, `log` and `pow`), x87 arguments, the x87's control and status words, an `i64`
   result, more than four doubles at once, and a function `LONG` names for a pointer its
   source lays out as four bytes. Each stays a trap into its handler there.
 

@@ -656,3 +656,45 @@ test('a 64-bit program\'s calls to the engine\'s own msvcrt memset and strlen th
     assert.ok((formed.memset ?? 0) >= 1 && (formed.strlen ?? 0) >= 1,
         `formed: ${JSON.stringify(formed)}`);
 });
+
+test('a 64-bit program\'s msvcrt sin, atan2 and acos run as guest code, with no call to the host',
+    async()=>{
+        // xmm0 = sin(0.5) + atan2(0.25, 2) + acos(0.125); its low dword the exit code.
+        const exe = buildExe({
+            bits: 64,
+            imports: { 'msvcrt.dll': ['sin', 'atan2', 'acos'], 'KERNEL32.dll': ['ExitProcess'] },
+            data: { half: [...new Uint8Array(new Float64Array([0.5]).buffer)],
+                quarter: [...new Uint8Array(new Float64Array([0.25]).buffer)],
+                two: [...new Uint8Array(new Float64Array([2]).buffer)],
+                eighth: [...new Uint8Array(new Float64Array([0.125]).buffer)],
+                sum: new Array(8).fill(0) },
+            codeSize: 0xa0,
+            code: ({ iat, at, code })=>{
+                /** @type {number[]} */
+                const out = [];
+                const rip = (/** @type {number} */ target, /** @type {number} */ rest)=>
+                    u32((target - code(out.length + rest)) >>> 0);
+                out.push(0x48, 0x83, 0xec, 0x28);                              // sub rsp, 40
+                out.push(0xf2, 0x0f, 0x10, 0x05, ...rip(at('half'), 8));       // movsd xmm0, [half]
+                out.push(0xff, 0x15, ...rip(iat('sin'), 6));
+                out.push(0xf2, 0x0f, 0x11, 0x05, ...rip(at('sum'), 8));        // movsd [sum], xmm0
+                out.push(0xf2, 0x0f, 0x10, 0x05, ...rip(at('quarter'), 8));
+                out.push(0xf2, 0x0f, 0x10, 0x0d, ...rip(at('two'), 8));        // movsd xmm1, [two]
+                out.push(0xff, 0x15, ...rip(iat('atan2'), 6));
+                out.push(0xf2, 0x0f, 0x58, 0x05, ...rip(at('sum'), 8));        // addsd xmm0, [sum]
+                out.push(0xf2, 0x0f, 0x11, 0x05, ...rip(at('sum'), 8));
+                out.push(0xf2, 0x0f, 0x10, 0x05, ...rip(at('eighth'), 8));
+                out.push(0xff, 0x15, ...rip(iat('acos'), 6));
+                out.push(0xf2, 0x0f, 0x58, 0x05, ...rip(at('sum'), 8));
+                out.push(0x66, 0x48, 0x0f, 0x7e, 0xc1);                        // movq rcx, xmm0
+                out.push(0xff, 0x15, ...rip(iat('ExitProcess'), 6), 0xf4);
+                return out;
+            },
+        });
+        const cork = await run(exe);
+        const want = new Uint32Array(new Float64Array([Math.sin(0.5) + Math.atan2(0.25, 2)
+            + Math.acos(0.125)]).buffer)[0];
+        assert.equal(cork.code >>> 0, want);
+        const hosted = cork.trapsHot.map(([name])=>name).filter(name=>/sin|atan2|acos/.test(name));
+        assert.deepEqual(hosted, [], 'none of them crossed to the host');
+    });

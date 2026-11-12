@@ -195,8 +195,10 @@
  * argument or result hands nothing to the host: the 64-bit trap carries no
  * XMM register.
  *
- * What only the x87 does -- `%`, `Math.sin` and the other transcendentals,
- * `X87`, x87 arguments, the control and status words, an i64 in EDX:EAX --
+ * `Math.sin`, `cos`, `tan`, `atan`, `atan2` and `log2` are the x87's one
+ * instruction over doubles stored below RSP and taken back (`x87OverXmm`).
+ * What only the x87 does past that -- `%`, `X87`, x87 arguments, the control
+ * and status words, an i64 in EDX:EAX --
  * is refused at 64 bits with its reason (`onRefused`), and the function
  * stays a trap into its handler there.
  */
@@ -3081,6 +3083,37 @@ class FunctionCompiler {
         }
     }
 
+    /**
+     * At 64 bits, an x87 instruction over the `count` doubles on top of the XMM
+     * stack: each stored below RSP and loaded onto the x87's in order, the first
+     * deepest, as the 32-bit code brings them; `bytes` leaves the one answer in
+     * ST0, which goes back into the first one's register, the others popped.
+     * No call lies between, and the x87 is empty before and after, as the
+     * convention leaves it.
+     *
+     * @param {number} count @param {number[]} bytes @returns {Value}
+     */
+    x87OverXmm(count, bytes){
+        const first = this.fpu - count;
+        // RSP moved: the function is no leaf, and has its unwind data.
+        this.pushedAny = true;
+        this.a.emit(0x48, 0x83, 0xec, 8 * count);                          // sub rsp, 8n
+        for (let i = 0; i < count; i++)
+        {
+            this.a.emit(0xf2, 0x0f, 0x11, 0x44 | (first + i) << 3, 0x24, 8 * i);  // movsd [rsp+8i]
+        }
+        for (let i = 0; i < count; i++)
+        {
+            this.a.emit(0xdd, 0x44, 0x24, 8 * i);                          // fld qword [rsp+8i]
+        }
+        this.a.emit(...bytes);
+        this.a.emit(0xdd, 0x1c, 0x24);                                     // fstp qword [rsp]
+        this.a.emit(0xf2, 0x0f, 0x10, 0x04 | first << 3, 0x24);            // movsd xmm, [rsp]
+        this.a.emit(0x48, 0x83, 0xc4, 8 * count);                          // add rsp, 8n
+        this.fpu = first + 1;
+        return { where: 'st0', type: 'f64' };
+    }
+
     // --- doubles at 64 bits: SSE2 --------------------------------------------
     //
     // The x87's stack of doubles, as XMM registers: the value `fpu` deep in
@@ -4000,7 +4033,16 @@ class FunctionCompiler {
             if (this.long && (Object.hasOwn(MATH_UNARY, name) || name === 'atan2'
                 || name === 'log2'))
             {
-                this.x87Only(node, `Math.${name}`);
+                // The x87's one instruction for it, over doubles held in XMM registers.
+                const unary = Object.hasOwn(MATH_UNARY, name);
+                this.arity(node, unary || name === 'log2' ? 1 : 2);
+                for (const argument of node.arguments)
+                {
+                    this.toXmm(this.expr(argument), argument);
+                }
+                return this.x87OverXmm(node.arguments.length, unary ? MATH_UNARY[name]
+                    : name === 'atan2' ? [0xd9, 0xf3]                     // fpatan
+                        : [0xd9, 0xe8, 0xd9, 0xc9, 0xd9, 0xf1]);         // fld1; fxch; fyl2x
             }
             if (Object.hasOwn(ROUNDING, name) || name === 'abs')
             {

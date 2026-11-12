@@ -29,6 +29,8 @@
 
 import { COMPILED as RUNTIME } from './inguest.x86.js';
 import { COMPILED as RUNTIME_LONG } from './inguest.x64.js';
+import { COMPILED as MATH } from './inguest-math.x86.js';
+import { COMPILED as MATH_LONG } from './inguest-math.x64.js';
 import { setSingle } from './float.js';
 
 /**
@@ -39,7 +41,7 @@ import { setSingle } from './float.js';
  */
 const LONG_CODE = new Map();
 for (const [i386, long] of /** @type {[Record<string, CompiledGuestCode>,
-    Record<string, CompiledGuestCode>][]} */ ([[RUNTIME, RUNTIME_LONG]]))
+    Record<string, CompiledGuestCode>][]} */ ([[RUNTIME, RUNTIME_LONG], [MATH, MATH_LONG]]))
 {
     for (const [name, compiled] of Object.entries(long))
     {

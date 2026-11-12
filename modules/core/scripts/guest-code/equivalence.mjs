@@ -339,11 +339,14 @@ export function equivalence(compiled, sources, model, long){
                     : [Number(BigInt.asUintN(32, bits))];
             });
             const answer = double.host(memory, trapWords, []);
-            // The trap answers as the bridge does: the dword extended by its sign.
+            // The trap answers as the bridge does: the dword extended by its sign, a
+            // double's or a float's answer in XMM0.
             return {
                 rax: BigInt.asUintN(64, BigInt(typeof answer === 'number' ? answer | 0 : 0)),
                 rsp: BigInt(STACK_64 + 8), kept, given, df,
                 data: memory.slice(DATA, DATA + data.length), handedOver: true,
+                ...typeof answer === 'number' ? {} : { xmm0: fn.returns === 'f32'
+                    ? Math.fround(answer.st0) : answer.st0 },
             };
         }
         assert.equal(m.rip(), HALT + 1, `${what} returns to its caller's address`);
