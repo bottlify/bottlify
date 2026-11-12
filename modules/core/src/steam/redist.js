@@ -610,9 +610,12 @@ async function finder(tree){
  * @param {AppTree} tree  The installed app, mounted at `INSTALL_DIRECTORY`.
  * @param {string[]} scripts  The scripts, as paths in it.
  * @param {'x86' | 'amd64'} machine  The bottle's machine: its program's width.
+ * @param {string[]} [programs]  Installers named outright rather than by a
+ *     script, as paths in it: a store that lists each redistributable's
+ *     program (GOG's dependencies) where Steam has a script run it.
  * @returns {Promise<string[]>}
  */
-export async function installRedistributables(tree, scripts, machine){
+export async function installRedistributables(tree, scripts, machine, programs = []){
     const { paths, find } = await finder(tree);
     /** @type {string[]} */
     const said = [];
@@ -647,6 +650,17 @@ export async function installRedistributables(tree, scripts, machine){
                 }
             }
         }
+    }
+
+    for (const program of programs)
+    {
+        const inside = find(program);
+        if (!inside)
+        {
+            said.push(`${program} is not in the app`);
+            continue;
+        }
+        declared.set(inside.toLowerCase(), inside);
     }
 
     /** @type {{ version: string, files: { path: string, bytes: Uint8Array }[], registry: RegistryWrite[] }[]} */

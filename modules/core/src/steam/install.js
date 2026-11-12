@@ -14,7 +14,10 @@
  */
 
 import { FILE_FLAG_DIRECTORY, adler32, downloadChunk, manifest } from './depot.js';
-import { finishBundle, placeFiles } from '../bundle-in-place.js';
+import { comparePaths, downloadChunks, fillInPlace, finishBundle, treeInPlace, wrongChunksOf }
+    from '../bundle-in-place.js';
+
+export { comparePaths };
 import { installSteamRedistributables } from './redist.js';
 
 /** @typedef {import('./depot.js').ContentServer} ContentServer */
@@ -62,25 +65,6 @@ export async function depotManifest(servers, opening, get){
  * @property {number} depot @property {Uint8Array} key
  * @property {ManifestChunk[]} chunks
  */
-
-/**
- * Paths in the order a directory's files are packed (tools/make-btl.mjs): each
- * folder's entries by name, as code units, a folder's files where its name falls.
- *
- * @param {string} a @param {string} b
- */
-export function comparePaths(a, b){
-    const left = a.split('\\');
-    const right = b.split('\\');
-    for (let at = 0; at < Math.min(left.length, right.length); at++)
-    {
-        if (left[at] !== right[at])
-        {
-            return left[at] < right[at] ? -1 : 1;
-        }
-    }
-    return left.length - right.length;
-}
 
 /**
  * The files an install of depots leaves, in the order a directory's are
@@ -153,10 +137,7 @@ export function installedFiles(depots){
 
 /**
  * Downloads files' chunks, `jobs` at a time, each from the first content
- * server that gives it -- each chunk starting from another server, so the
- * load spreads -- and hands each to `write`. Chunks are numbered across the
- * files in order; `done` says which are in place already. A failure, or the
- * signal, stops the chunks not started; those started finish first.
+ * server that gives it (`downloadChunks`), and hands each to `write`.
  *
  * @param {Object} options
  * @param {InstalledFile[]} options.files
@@ -171,77 +152,27 @@ export function installedFiles(depots){
  * @param {AbortSignal} [options.signal]
  * @param {(bytes: number, task: number) => unknown} [options.onChunk]  A chunk in place.
  */
-export async function downloadFiles({ files, servers, write, done = ()=>false,
-    decode = downloadChunk, jobs = 16, signal, onChunk })
+export async function downloadFiles({ files, servers, write, done, decode = downloadChunk, jobs,
+    signal, onChunk })
 {
     if (servers.length === 0)
     {
         throw new Error('steam: no content server offered');
     }
-    /** @type {{ file: InstalledFile, chunk: ManifestChunk, task: number }[]} */
-    const tasks = [];
-    let number = 0;
-    for (const file of files)
-    {
-        for (const chunk of file.chunks)
-        {
-            const task = number++;
-            if (!done(task))
-            {
-                tasks.push({ file, chunk, task });
-            }
-        }
-    }
-    let next = 0;
-    /** @type {{ error: unknown } | null} */
-    let failed = null;
-    const worker = async()=>{
-        while (next < tasks.length && !failed && !signal?.aborted)
-        {
-            const { file, chunk, task } = tasks[next++];
-            try
-            {
-                /** @type {Uint8Array | null} */
-                let bytes = null;
-                /** @type {unknown} */
-                let last;
-                for (let attempt = 0; attempt < servers.length * 2 && !bytes; attempt++)
-                {
-                    try
-                    {
-                        bytes = await decode(servers[(task + attempt) % servers.length],
-                            file.depot, chunk, file.key);
-                    }
-                    catch (e){
-                        last = e;
-                    }
-                }
-                if (!bytes)
-                {
-                    throw last;
-                }
-                await write(file, chunk, bytes, task);
-                await onChunk?.(chunk.size, task);
-            }
-            catch (e){
-                failed ??= { error: e };
-            }
-        }
-    };
-    await Promise.all(Array.from({ length: Math.min(jobs, tasks.length) }, worker));
-    if (failed)
-    {
-        throw /** @type {{ error: unknown }} */ (failed).error;
-    }
-    signal?.throwIfAborted();
+    await downloadChunks({ files, sources: servers, write, done, jobs, signal, onChunk,
+        fetchChunk: (server, file, chunk)=>decode(server, file.depot, chunk, file.key) });
 }
 
 /**
  * What a run of `installBundle` that stopped part way has done: the depots at
  * their manifests it was installing (`stamp`), and a bit a chunk in place.
  *
- * @typedef {{ stamp: string, done: Uint8Array }} InstallProgress
+ * @typedef {import('../bundle-in-place.js').FillProgress} InstallProgress
  */
+
+/** Whether a chunk's bytes are what the manifest says: its length and Adler-32. */
+const adlerIntact = (/** @type {Uint8Array} */ bytes, /** @type {ManifestChunk} */ chunk)=>
+    bytes.length === chunk.size && adler32(bytes) === chunk.crc;
 
 /**
  * The chunks whose bytes in place are not what the manifest says (length and
@@ -251,34 +182,8 @@ export async function downloadFiles({ files, servers, write, done = ()=>false,
  * @param {RandomAccess} handle
  * @param {(task: number) => boolean} [which]  The chunks to read back; every one by default.
  */
-export function wrongChunks(files, at, handle, which = ()=>true){
-    /** @type {number[]} */
-    const tasks = [];
-    /** @type {Set<string>} */
-    const paths = new Set();
-    let task = 0;
-    for (const file of files)
-    {
-        for (const chunk of file.chunks)
-        {
-            if (!which(task))
-            {
-                task++;
-                continue;
-            }
-            const bytes = new Uint8Array(chunk.size);
-            const read = handle.read(bytes, { at: /** @type {number} */ (at.get(file.path))
-                + chunk.offset });
-            if (read !== chunk.size || adler32(bytes) !== chunk.crc)
-            {
-                tasks.push(task);
-                paths.add(file.path);
-            }
-            task++;
-        }
-    }
-    return { tasks, paths: [...paths] };
-}
+export const wrongChunks = (files, at, handle, which)=>
+    wrongChunksOf(files, at, handle, adlerIntact, which);
 
 /**
  * Installs depots into a bundle written in place (bundle-in-place.js) -- a
@@ -307,7 +212,7 @@ export function wrongChunks(files, at, handle, which = ()=>true){
  *     entry: Uint8Array | null, said: string[] }>}
  */
 export async function installBundle({ handle, depots, servers, installscript, executable,
-    resume = null, onSave, decode, fetch: get, jobs, signal, onProgress })
+    resume = null, onSave, decode = downloadChunk, fetch: get, jobs, signal, onProgress })
 {
     const listed = [];
     for (const opening of depots)
@@ -317,155 +222,27 @@ export async function installBundle({ handle, depots, servers, installscript, ex
     }
     const { files, directories } = installedFiles(
         listed.map(({ opening, manifest: one })=>({ manifest: one, key: opening.key })));
-    const placed = placeFiles(files);
-    const chunks = files.reduce((sum, file)=>sum + file.chunks.length, 0);
-    const stamp = JSON.stringify(depots.map(({ depot, gid })=>[depot, String(gid)]));
-    const going = resume?.stamp === stamp && resume.done.length === Math.ceil(chunks / 8)
-        && handle.getSize() >= placed.end;
-    const done = going ? /** @type {InstallProgress} */ (resume).done
-        : new Uint8Array(Math.ceil(chunks / 8));
-    if (!going)
+    if (servers.length === 0)
     {
-        // Zeros where a file has no chunk, not what an earlier build left.
-        await handle.truncate(0);
-        await handle.truncate(placed.end);
+        throw new Error('steam: no content server offered');
     }
-
-    let total = 0;
-    let installed = 0;
-    let task = 0;
-    for (const file of files)
-    {
-        for (const chunk of file.chunks)
-        {
-            total += chunk.size;
-            installed += done[task >> 3] & (1 << (task & 7)) ? chunk.size : 0;
-            task++;
-        }
-    }
-    let saved = Date.now();
-    /**
-     * One save at a time: chunks land from several downloads at once, and a
-     * second save while the first still holds its file (a browser's sync
-     * access handle) is refused.
-     *
-     * @type {Promise<void> | null}
-     */
-    let saving = null;
-    const save = ()=>(saving ??= (async()=>{
-        try
-        {
-            await handle.flush();
-            await onSave?.({ stamp, done });
-            saved = Date.now();
-        }
-        finally
-        {
-            saving = null;
-        }
-    })());
-    const at = new Map(placed.files.map(file=>[file.path, file.at]));
-    onProgress?.({ stage: 'downloading', done: installed, total });
-    const fetchMissing = async()=>{
-        try
-        {
-            await downloadFiles({ files, servers, decode, jobs, signal,
-                done: number=>(done[number >> 3] & (1 << (number & 7))) !== 0,
-                write: (file, chunk, bytes)=>handle.write(bytes,
-                    { at: /** @type {number} */ (at.get(file.path)) + chunk.offset }),
-                onChunk: async(bytes, number)=>{
-                    done[number >> 3] |= 1 << (number & 7);
-                    installed += bytes;
-                    onProgress?.({ stage: 'downloading', done: installed, total });
-                    if (saving === null && Date.now() - saved > 2000)
-                    {
-                        await save();
-                    }
-                } });
-        }
-        finally
-        {
-            await saving;
-            await save();
-        }
-    };
-    // What this run fetched was checked as it was opened; what it took up from
-    // an earlier run is only what that run wrote down.
-    const takenUp = going ? Uint8Array.from(done) : null;
-    await fetchMissing();
-    // Those chunks are read back against the manifest's Adler-32, and one that
-    // differs is fetched again, once.
-    /** @type {string[]} */
-    const rewritten = [];
-    for (let round = 0; ; round++)
-    {
-        signal?.throwIfAborted();
-        const wrong = takenUp ? wrongChunks(files, at, handle,
-            number=>(takenUp[number >> 3] & (1 << (number & 7))) !== 0) : { tasks: [], paths: [] };
-        if (wrong.tasks.length === 0)
-        {
-            break;
-        }
-        if (round > 0)
-        {
-            throw new Error(`steam: ${wrong.paths.length} file(s) still differ from the manifest`
-                + ` after being fetched again: ${wrong.paths.slice(0, 5).join(', ')}`);
-        }
-        for (const wrongTask of wrong.tasks)
-        {
-            done[wrongTask >> 3] &= ~(1 << (wrongTask & 7));
-        }
-        rewritten.push(`${wrong.tasks.length} chunk(s) of ${wrong.paths.length} file(s) were not`
-            + ` what the manifest says and were fetched again:`
-            + ` ${wrong.paths.slice(0, 5).join(', ')}`);
-        await fetchMissing();
-    }
+    const { placed, rewritten } = await fillInPlace({ handle, files, sources: servers,
+        fetchChunk: (server, file, chunk)=>decode(server, file.depot, chunk, file.key),
+        intact: adlerIntact, store: 'steam',
+        stamp: JSON.stringify(depots.map(({ depot, gid })=>[depot, String(gid)])),
+        resume, onSave, jobs, signal, onProgress });
 
     // The redistributables, over the files in place; what they write goes after them.
-    /** @type {Map<string, Uint8Array>} By folded path. */
-    const added = new Map();
-    /** @type {Map<string, string>} */
-    const spelt = new Map();
-    const byPath = new Map(placed.files.map(file=>[file.path.toLowerCase(), file]));
-    /** @type {import('./redist.js').AppTree} */
-    const tree = {
-        list: async()=>[...new Set([...placed.files.map(file=>file.path), ...spelt.values()])],
-        read: async path=>{
-            const fresh = added.get(path.toLowerCase());
-            const file = byPath.get(path.toLowerCase());
-            if (fresh || !file)
-            {
-                if (!fresh)
-                {
-                    throw new Error(`steam: ${path} is not in the app`);
-                }
-                return fresh;
-            }
-            const bytes = new Uint8Array(file.size);
-            handle.read(bytes, { at: file.at });
-            return bytes;
-        },
-        write: async(path, bytes)=>{
-            added.set(path.toLowerCase(), bytes);
-            spelt.set(path.toLowerCase(), byPath.get(path.toLowerCase())?.path ?? path);
-        },
-    };
+    const { tree, settle, find } = treeInPlace(handle, placed, 'steam');
     const said = await installSteamRedistributables(tree, { installscript, executable,
         shared: listed.filter(({ opening })=>opening.shared)
             .flatMap(({ manifest: one })=>one.files.map(file=>file.name)) });
-    const extra = placeFiles([...added].map(([folded, bytes])=>({
-        path: /** @type {string} */ (spelt.get(folded)), size: bytes.length })), placed.end);
-    for (const file of extra.files)
-    {
-        handle.write(/** @type {Uint8Array} */ (added.get(file.path.toLowerCase())), { at: file.at });
-    }
-    const bundled = [...placed.files.filter(file=>!added.has(file.path.toLowerCase())),
-        ...extra.files].sort((a, b)=>comparePaths(a.path, b.path));
+    const bundled = settle();
     // Every file's bytes were checked against Steam's own sums as they landed
     // and again where a run was taken up: no SHA-256 of each besides.
     const bundle = await finishBundle(handle, bundled, directories, { hashFiles: false,
         onProgress: (read, all)=>onProgress?.({ stage: 'finishing', done: read, total: all }) });
-    const program = executable ? byPath.get(executable.replace(/\//g, '\\').toLowerCase()) : null;
-    return { bundle, entry: program ? await tree.read(program.path) : null,
+    const program = find(executable);
+    return { bundle, entry: program ? await tree.read(program) : null,
         said: [...rewritten, ...said] };
 }
