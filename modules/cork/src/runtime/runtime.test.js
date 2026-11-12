@@ -2407,6 +2407,36 @@ test('a block profile counts how calls and returns went, transfers and rdtscs', 
         'a run without the profile counts nothing');
 });
 
+test('a ret that both answers the call waiting for it and returns to a call its region formed in '
+    + 'answers the call: the waiting call never stays behind', async()=>{
+    // mov ecx, 100; L: call F; dec ecx; jnz L; hlt
+    // F: call G; ret -- G formed into F's region; in the loop's region F is formed in and its
+    // call to G, nested, is a wasm call into F's region at G, whose ret goes back to the
+    // address after F's call, which F's region formed in too. G: call H; ret. H: inc eax; ret
+    const m = machine({ blockProfile: true });
+    m.write(CODE, [0xb9, 100, 0, 0, 0, 0xe8, 0xf6, 0x00, 0, 0, 0x49, 0x75, 0xf8, 0xf4]);
+    m.write(0x1100, [0xe8, 0xfb, 0, 0, 0, 0xc3]);
+    m.write(0x1200, [0xe8, 0xfb, 0, 0, 0, 0xc3]);
+    m.write(0x1300, [0x40, 0xc3]);
+    m.setReg(4, 0x80000);
+    m.runtime.noteHot(0x1100);
+    await m.runtime.translatePending();
+    m.runtime.noteHot(CODE);
+    await m.runtime.translatePending();
+    const exit = m.runtime.run(m.runtime.entryOf(CODE), 1_000_000);
+    assert.equal(exit.kind, 'halt');
+    assert.equal(m.reg(0), 100);
+    const { mechanisms } = /** @type {any} */ (m.runtime.diagnostics());
+    assert.equal(mechanisms.APART_NESTED, 100, 'call G inside F formed in: apart, a wasm call');
+    assert.equal(mechanisms.CALL_LINKED, 100, 'into F\'s region at G');
+    assert.equal(mechanisms.RET_TO_CALL, 100, 'G\'s ret answered the call waiting for it');
+    assert.equal(mechanisms.RET_FORMED, 200, 'H\'s ret in G, and F\'s in the loop\'s region');
+    assert.equal(mechanisms.RET_LEFT + mechanisms.CALL_ELSEWHERE + mechanisms.TRANSFER, 0,
+        'no call left behind to come back up through the transfer');
+    assert.equal(new DataView(m.memory.buffer).getUint32(m.layout.regs + CallStack.DEPTH, true),
+        0, 'no call left waiting');
+});
+
 test('a block profile counts each jump back by how it is taken: to a loop\'s head, or through'
     + ' the dispatch where the region is laid out flat', async()=>{
     // mov ecx, 100; L: inc eax; test cl, 1; jz S; inc edx; S: dec ecx; jnz L; hlt -- a loop

@@ -543,6 +543,15 @@ function countLinked(e){
  * what is left of the budget, the registers back in the state block, for the
  * caller to go on.
  *
+ * Looked at before the calls the region formed in: a callee entered by a wasm
+ * call can return to an address its region also formed a call to it at (the
+ * caller formed into that region too). Taken as a jump there, the `ret` left
+ * the call waiting -- its entry on the stack and its frame on the host's --
+ * so every `ret` below it in the guest missed the stack's top and went
+ * through the transfer, and a few hundred such made the stack full, every
+ * later call a plain transfer: a third of the returns in ngen's compile of
+ * mscorlib went that way.
+ *
  * @param {import('./region.js').RegionEmitter} e
  * @param {() => void} [taken]  long mode's: what the `ret` does on this way alone, rsp
  *     moved (`returnLong`)
@@ -1355,12 +1364,17 @@ export function emitInstruction(e, instruction, flagsLive){
             b.localGet(registerLocal(e, 4))
                 .i32const(4 + (dst ? /** @type {number} */ (dst.value) : 0))
                 .op(I32.add).localSet(registerLocal(e, 4));
-            // Back to a call of this region whose callee it formed in: a jump.
             // Charged once, here at the block's depth, for every way out below:
             // a charge inside the `if` left the block's count standing, and the
             // jump's own budget or untranslated exit charged it a second time
             // (+2 a spent budget for `inc edx; ret`).
             e.charge();
+            // To the wasm call waiting for it first (`returnToCall`), then back
+            // to a call of this region whose callee it formed in: a jump.
+            if (e.context.callReturn)
+            {
+                returnToCall(e);
+            }
             for (const at of e.returns.get(e.region.blocks[e.blockIndex].start) ?? [])
             {
                 b.localGet(Local.eip).i32const(at).op(I32.eq);
@@ -1368,10 +1382,6 @@ export function emitInstruction(e, instruction, flagsLive){
                 e.countMechanism(Mechanism.RET_FORMED);
                 e.jumpTo(at);
                 e.close();
-            }
-            if (e.context.callReturn)
-            {
-                returnToCall(e);
             }
             e.countMechanism(Mechanism.RET_LEFT);
             e.exitDynamic(Exit.UNTRANSLATED);
@@ -1801,6 +1811,11 @@ function returnLong(e, instruction){
     stackAccess(e, 8);
     b.localGet(Local.addr).load('i64', ram(e)).localTee(Local.t64b)
         .op(I64.wrap).localSet(Local.eip);
+    // The wasm call waiting for it first, as `ret`'s 32-bit form does.
+    if (e.context.callReturn)
+    {
+        returnToCall(e, ()=>addStack(e, popped));
+    }
     for (const at of e.returns.get(e.region.blocks[e.blockIndex].start) ?? [])
     {
         b.localGet(Local.t64b).i64const(codeAddress(e, at)).op(I64.eq);
@@ -1814,10 +1829,6 @@ function returnLong(e, instruction){
         e.jumpTo(at);
         e.blockRetired = retired;
         e.close();
-    }
-    if (e.context.callReturn)
-    {
-        returnToCall(e, ()=>addStack(e, popped));
     }
     b.localGet(Local.t64b);
     outsideBlock(e);
