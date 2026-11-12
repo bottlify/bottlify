@@ -1165,3 +1165,242 @@ export function powf({ host }, x, y){
     }
     return nearest;
 }
+
+/*
+ * C99's rounding and comparing functions, the UCRT's. Each is made of the
+ * operations exact at any x87 precision -- floor and ceil (`frndint`), the
+ * remainder (`fprem`), comparisons, `fabs`, `fchs` and the bits -- so a
+ * program that set the x87 to single precision, as Direct3D does, gets what
+ * the runtime's SSE2 code gives it; no sum or difference rounds on the way.
+ */
+
+/** From it on in magnitude a double, or a float, is whole: rounding leaves it be. */
+const ALL_WHOLE = 2 ** 52;
+
+/** |x| rounded half away from zero, for |x| below ALL_WHOLE. */
+const roundedMagnitude = (/** @type {number} */ a)=>(a % 1 >= 0.5 ? Math.ceil(a) : Math.floor(a));
+
+/**
+ * double round(double x) -- half away from zero, the sign of a zero kept.
+ *
+ * @guestCode cdecl
+ * @param {Pick<Guest, 'doubleHigh'>} guest @param {f64} x
+ * @returns {f64}
+ */
+export function round({ doubleHigh }, x){
+    const a = Math.abs(x);
+    if (!(a < ALL_WHOLE))
+    {
+        return x;
+    }
+    const whole = roundedMagnitude(a);
+    return (doubleHigh(x) | 0) < 0 ? -whole : whole;
+}
+
+/**
+ * float roundf(float x)
+ *
+ * @guestCode cdecl
+ * @param {Pick<Guest, 'floatBits'>} guest @param {f32} x
+ * @returns {f32}
+ */
+export function roundf({ floatBits }, x){
+    const a = Math.abs(x);
+    if (!(a < ALL_WHOLE))
+    {
+        return Math.fround(x);
+    }
+    const whole = roundedMagnitude(a);
+    return Math.fround((floatBits(x) | 0) < 0 ? -whole : whole);
+}
+
+/**
+ * double trunc(double x) -- toward zero.
+ *
+ * @guestCode cdecl
+ * @param {f64} x
+ * @returns {f64}
+ */
+export function trunc(x){
+    return x < 0 ? Math.ceil(x) : Math.floor(x);
+}
+
+/**
+ * float truncf(float x)
+ *
+ * @guestCode cdecl
+ * @param {f32} x
+ * @returns {f32}
+ */
+export function truncf(x){
+    return Math.fround(x < 0 ? Math.ceil(x) : Math.floor(x));
+}
+
+/**
+ * long lround(double x) -- rounded half away from zero; a NaN or a value no
+ * long holds is the handler's (0 and EDOM).
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f64} x
+ * @returns {i32}
+ */
+export function lround({ host }, x){
+    const a = Math.abs(x);
+    if (!(a < 2147483648))
+    {
+        return host();
+    }
+    const whole = roundedMagnitude(a);
+    if (x < 0)
+    {
+        return (-whole) | 0;
+    }
+    if (whole > 2147483647)
+    {
+        return host();
+    }
+    return whole | 0;
+}
+
+/**
+ * long lroundf(float x)
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x
+ * @returns {i32}
+ */
+export function lroundf({ host }, x){
+    const a = Math.abs(x);
+    if (!(a < 2147483648))
+    {
+        return host();
+    }
+    const whole = roundedMagnitude(a);
+    if (x < 0)
+    {
+        return (-whole) | 0;
+    }
+    if (whole > 2147483647)
+    {
+        return host();
+    }
+    return whole | 0;
+}
+
+/**
+ * double copysign(double x, double y) -- x's magnitude, y's sign bit.
+ *
+ * @guestCode cdecl
+ * @param {Pick<Guest, 'doubleHigh'>} guest @param {f64} x @param {f64} y
+ * @returns {f64}
+ */
+export function copysign({ doubleHigh }, x, y){
+    const magnitude = Math.abs(x);
+    return (doubleHigh(y) | 0) < 0 ? -magnitude : magnitude;
+}
+
+/**
+ * float copysignf(float x, float y)
+ *
+ * @guestCode cdecl
+ * @param {Pick<Guest, 'floatBits'>} guest @param {f32} x @param {f32} y
+ * @returns {f32}
+ */
+export function copysignf({ floatBits }, x, y){
+    const magnitude = Math.abs(x);
+    return Math.fround((floatBits(y) | 0) < 0 ? -magnitude : magnitude);
+}
+
+/**
+ * double fmax(double x, double y) -- a NaN loses to a number; of two zeros
+ * the positive.
+ *
+ * @guestCode cdecl
+ * @param {Pick<Guest, 'doubleHigh'>} guest @param {f64} x @param {f64} y
+ * @returns {f64}
+ */
+export function fmax({ doubleHigh }, x, y){
+    if (Number.isNaN(x))
+    {
+        return y;
+    }
+    if (Number.isNaN(y))
+    {
+        return x;
+    }
+    if (x === y)
+    {
+        return (doubleHigh(x) | 0) < 0 ? y : x;
+    }
+    return x > y ? x : y;
+}
+
+/**
+ * double fmin(double x, double y) -- a NaN loses to a number; of two zeros
+ * the negative.
+ *
+ * @guestCode cdecl
+ * @param {Pick<Guest, 'doubleHigh'>} guest @param {f64} x @param {f64} y
+ * @returns {f64}
+ */
+export function fmin({ doubleHigh }, x, y){
+    if (Number.isNaN(x))
+    {
+        return y;
+    }
+    if (Number.isNaN(y))
+    {
+        return x;
+    }
+    if (x === y)
+    {
+        return (doubleHigh(x) | 0) < 0 ? x : y;
+    }
+    return x < y ? x : y;
+}
+
+/**
+ * float fmaxf(float x, float y)
+ *
+ * @guestCode cdecl
+ * @param {Pick<Guest, 'floatBits'>} guest @param {f32} x @param {f32} y
+ * @returns {f32}
+ */
+export function fmaxf({ floatBits }, x, y){
+    if (Number.isNaN(x))
+    {
+        return Math.fround(y);
+    }
+    if (Number.isNaN(y))
+    {
+        return Math.fround(x);
+    }
+    if (x === y)
+    {
+        return Math.fround((floatBits(x) | 0) < 0 ? y : x);
+    }
+    return Math.fround(x > y ? x : y);
+}
+
+/**
+ * float fminf(float x, float y)
+ *
+ * @guestCode cdecl
+ * @param {Pick<Guest, 'floatBits'>} guest @param {f32} x @param {f32} y
+ * @returns {f32}
+ */
+export function fminf({ floatBits }, x, y){
+    if (Number.isNaN(x))
+    {
+        return Math.fround(y);
+    }
+    if (Number.isNaN(y))
+    {
+        return Math.fround(x);
+    }
+    if (x === y)
+    {
+        return Math.fround((floatBits(x) | 0) < 0 ? x : y);
+    }
+    return Math.fround(x < y ? x : y);
+}

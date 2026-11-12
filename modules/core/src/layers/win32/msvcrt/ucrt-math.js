@@ -21,6 +21,8 @@
 import { guestException } from '../common/raise.js';
 import { guestEntry } from './guest-code.js';
 import * as inGuestFloat from './inguest-float.js';
+import * as inGuestMath from './inguest-math.js';
+import { COMPILED as MATH_CODE } from './inguest-math.x86.js';
 import { COMPILED as FLOAT_CODE } from './inguest-float.x86.js';
 import { readDouble, readSingle, returningDouble, returningSingle } from './float.js';
 import { EDOM, ERANGE } from './globals.js';
@@ -272,6 +274,19 @@ export function createUcrtMathFunctions(host){
         handler: (/** @type {number[]} */ args)=>exponentOf(readDouble(args, 0)) >>> 0 };
     table.ilogbf = { convention: 'cdecl', argBytes: 4, floats: ONE_FLOAT,
         handler: (/** @type {number[]} */ args)=>exponentOf(readSingle(args, 0)) >>> 0 };
+
+    /**
+     * C99's rounding and comparing (`inguest-math.js`): code in the guest, made
+     * of operations exact at any x87 precision; lround hands a value no long
+     * holds to the handler above (0 and EDOM).
+     */
+    for (const name of /** @type {const} */ (['round', 'roundf', 'trunc', 'truncf', 'copysign',
+        'copysignf', 'fmax', 'fmin', 'fmaxf', 'fminf']))
+    {
+        table[name] = guestEntry(inGuestMath[name], MATH_CODE[name], { fpu });
+    }
+    table.lround = guestEntry(inGuestMath.lround, MATH_CODE.lround, { fpu }, table.lround);
+    table.lroundf = guestEntry(inGuestMath.lroundf, MATH_CODE.lroundf, { fpu }, table.lroundf);
 
     /**
      * short _dclass(double x), short _fdclass(float x), short _dtest(double *x),
