@@ -2091,3 +2091,16 @@ an empty page) and there is no document, so `get_Document` answers NULL and the 
 commands (`QueryStatusWB`, `ExecWB`) E_UNEXPECTED, as IE answers before a document is there. The
 page not drawn is said as a loss once for each address. The class's type information is its
 coclass attributes alone; the InternetExplorer application object is not there. *2026-11-09.*
+
+**A241. A GOG build is installed as Galaxy lays it out, without Galaxy's install script.** A
+generation-2 build is installed in one language - the browser's, else English, else the first the
+build has - with the depots for that language or every one (`*`) and for a 64-bit machine, of the
+products the account owns; its dependencies' files beside the game's, a game's file over a
+dependency's of the same path, and the redistributables among them applied by their packages as
+Steam's are (A67), the program each names taken as named. A file GOG flags `support` (settings,
+icons, the script interpreter's own) goes under `__support\` by its path, not over the game's
+tree. The build's `goggame-<id>.script`, which Galaxy's script interpreter runs on a person's
+machine (registry values, copies of support files), is not run: the install says so. The program
+started is the primary play task of `goggame-<id>.info`, with its arguments; its working folder
+is not carried, the program starting in its own folder. Generation-1 builds are refused with what
+they are. *2026-11-12.*

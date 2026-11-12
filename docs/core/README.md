@@ -130,6 +130,7 @@ await app.dispose();
 | `@bottlify/core` | `createApp`, `assembleModules` (the layers without a program), `createLogReader` |
 | `@bottlify/core/bundle`, `/bundle/node` | the `.btl` format's constants, a bundle written in place (`placeFiles`, `finishBundle`); reading and writing bundles in Node |
 | `@bottlify/core/steam`, `/steam/install` | Steam's file formats (a depot's manifest and chunks, KeyValues, the QR code) and an app installed into a bundle in place (`installBundle`) with what GameHub's `download` answers; speaking to Steam is GameHub's (the launcher's extension, `gamehub/` in bottlify-ui); `/steam/protobuf`, `/steam/keyvalues`, `/steam/qr` and `/steam/redist` are the codecs and the redistributables' steps it and its tools import |
+| `@bottlify/core/gog`, `/gog/install` | GOG's content system, generation 2 (a build's manifest, the depots one language and a 64-bit machine take, chunks by their MD5, the primary play task of `goggame-<id>.info`) and a build installed into a bundle in place (`installGogBundle`) with what GameHub's `download` answers, its dependencies' redistributables applied as Steam's are; generation-1 builds are not read |
 | `@bottlify/core/iso` | reading ISO 9660 disc images |
 | `@bottlify/core/worklet.js` | the sound output's `AudioWorklet` |
 
