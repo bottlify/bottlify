@@ -111,3 +111,6 @@ of an argument with a global and return, is known by its shape instead: those by
 test whatever global and report they name, and only the test is formed, the report left to the
 call. Functions that share one entry stub, as the `_CI*` ones do, are told apart by a second
 signature: of the code the stub's jump leads to. The `helpers` setting turns the dictionary off.
+Bottlify's own C runtime (which stands in for `msvcrt.dll` and `MSVCR80.dll`) has its `memmove`,
+`memset`, `strlen`, `strcmp`, `memcmp` and `strchr` compiled to x86 as guest code; the app hands
+their bytes to cork (`helpersAlso`), so a program's call to them is formed the same way.

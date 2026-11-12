@@ -37,6 +37,7 @@ import { SHARED_MAX_PAGES } from '../wasm/shared-import.js';
 import { arenaEmitCache, createEmitCache, emitBatch, relinkBatch } from './emit-built.js';
 import { createArena, openArena } from './arena.js';
 import { buildHelpersModule } from '../emit/helpers.js';
+import { RUNTIME_HELPERS, routineHelper } from '../helpers.js';
 import { openTranslationWorker } from './translator.js';
 import { ANY_TOP, createEntries } from './entries.js';
 import { PageFlag, codeBlockPages, createPageTable } from './pages.js';
@@ -255,6 +256,10 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
         // knows by its bytes formed as what it does (`helpers.js`, `emit/crt.js`;
         // false: every such call made as it is; a list of entries: those alone).
         helpers: true,
+        // Routines known by their whole code ({ name, does, code }) beside the
+        // dictionary: an engine's own in place of a runtime's (`routineHelper`).
+        helpersAlso: /** @type {readonly import('../helpers.js').KnownRoutine[] | undefined} */ (
+            undefined),
         // Indirect calls sampled while the translator runs, and a region whose
         // indirect call keeps going to a few small leaf callees formed again
         // with them in it: the call compares its target with each and jumps
@@ -522,7 +527,9 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
         ...layout.bits === 64 ? { mode: MODE_64 } : {},
         // The dictionary's functions formed as what they do (`emit/crt.js`), or
         // none; a list of entries in place of the dictionary is a test's.
-        ...settings.helpers === true || settings.helpers === undefined ? {}
+        ...settings.helpers === true || settings.helpers === undefined
+            ? settings.helpersAlso === undefined ? {}
+                : { helpers: [...RUNTIME_HELPERS, ...settings.helpersAlso.map(routineHelper)] }
             : { helpers: settings.helpers } };
     /** The same on this thread, with the host's copy of a span at once where it has one; a
      * worker is sent `formOptions`, which a function cannot cross in. */

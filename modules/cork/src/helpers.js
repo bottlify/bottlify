@@ -250,6 +250,26 @@ export function helperAt(read, target, helpers = RUNTIME_HELPERS, bits = 32){
 }
 
 /**
+ * A function known by its whole code: its name, the operation it does (a `Crt`),
+ * its bytes.
+ *
+ * @typedef {{ name: string, does: string, code: ArrayLike<number> }} KnownRoutine
+ */
+
+/**
+ * An entry for a function whose whole code is known as bytes -- an engine's own
+ * routine in place of a runtime's, written where its export lies -- told by all
+ * of them (`helpersAlso`).
+ *
+ * @param {KnownRoutine} routine
+ * @returns {RuntimeHelper}
+ */
+export function routineHelper({ name, does, code }){
+    return Object.freeze({ name, does: /** @type {Crt} */ (does), length: code.length,
+        hash: fingerprint(at=>code[at] ?? 0, 0, code.length) });
+}
+
+/**
  * Where a helper's bytes lie from its entry: `[first, end)` as offsets.
  *
  * @param {RuntimeHelper} helper

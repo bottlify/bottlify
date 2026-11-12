@@ -593,3 +593,31 @@ test('a call area switched on mid-run is traced from the next call on',
             await app.dispose();
         }
     });
+
+test('a program\'s calls to the engine\'s own msvcrt memset and strlen are formed as their'
+    + ' operations, and answer as the routines do', async()=>{
+    // 1000 times: memset(buffer, 0x41 + (i & 7), 100); then strlen(buffer) as the exit code.
+    const exe = buildExe({
+        imports: { 'msvcrt.dll': ['memset', 'strlen'], 'KERNEL32.dll': ['ExitProcess'] },
+        data: { buffer: new Array(128).fill(0) },
+        codeSize: 0x60,
+        code: ({ iat, at })=>[
+            0xbe, ...u32(1000),                                   // mov esi, 1000
+            0x89, 0xf0, 0x83, 0xe0, 0x07, 0x83, 0xc0, 0x41,       // eax = 0x41 + (esi & 7)
+            0x6a, 100, 0x50, 0x68, ...u32(at('buffer')),          // push 100; push eax; push buf
+            0xff, 0x15, ...u32(iat('memset')),                    // call [memset]
+            0x83, 0xc4, 12,                                       // add esp, 12
+            0x4e, 0x75, 0xe4,                                     // dec esi; jnz
+            0x68, ...u32(at('buffer')),
+            0xff, 0x15, ...u32(iat('strlen')),                    // call [strlen]
+            0x83, 0xc4, 4,
+            0x50, 0xff, 0x15, ...u32(iat('ExitProcess')),         // ExitProcess(strlen)
+            0xf4,
+        ],
+    });
+    const cork = await run(exe);
+    assert.equal(cork.code, 100);
+    const formed = /** @type {Record<string, number>} */ (cork.cork.crtFormed ?? {});
+    assert.ok((formed.memset ?? 0) >= 1 && (formed.strlen ?? 0) >= 1,
+        `formed: ${JSON.stringify(formed)}`);
+});

@@ -274,6 +274,9 @@ export function engineContractProblem(engineModule, url){
  * @property {boolean} [leafCalls]  A small leaf callee formed into its caller. Default true.
  * @property {boolean} [helpers]  A call to a compiler's or C runtime's function the dictionary
  *     knows by its bytes formed as what it does (`memcpy` as one `memory.copy`). Default true.
+ * @property {readonly { name: string, does: string, code: ArrayLike<number> }[]} [helpersAlso]
+ *     Routines told by their whole code formed so too, beside the dictionary: the engine's own
+ *     C runtime's (`win32/msvcrt/known-routines.js`, which the app hands it).
  * @property {number} [leafBytes]  Its bytes at most. Default 512.
  * @property {number} [formDepth]  How many levels of callees formed in may keep direct calls
  *     of their own, those callees formed in as well when small; 0 forms leaves alone. Default 1.
