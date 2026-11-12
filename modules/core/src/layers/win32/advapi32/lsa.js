@@ -16,6 +16,7 @@
  */
 
 import { COMPUTER_NAME } from '../kernel32/drives.js';
+import { toDosError } from '../ntdll/status.js';
 import {
     PRIVILEGES, USER_NAME, accountNamed, accountOfSid, isThisMachine, sidBytes, sidText,
 } from './tokens.js';
@@ -457,6 +458,18 @@ export function createLsaFunctions(host){
                 writeDword(out, block);
                 return STATUS_SUCCESS;
             },
+        },
+
+        /**
+         * ULONG LsaNtStatusToWinError(NTSTATUS Status)
+         *
+         * The Win32 error an LSA call's status is, as RtlNtStatusToDosError
+         * maps it.
+         */
+        LsaNtStatusToWinError: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([status])=>toDosError(status >>> 0),
         },
 
         /** NTSTATUS LsaFreeMemory(PVOID Buffer): a block an LSA call handed out. */

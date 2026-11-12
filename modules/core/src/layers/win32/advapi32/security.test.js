@@ -430,3 +430,10 @@ test('the LSA secrets are the machine\'s: one process stores what another retrie
     assert.equal(first.call('LsaRetrievePrivateData', first.u32(OUT), 0x8100, 0x8300),
         0xc0000034);
 });
+
+test('LsaNtStatusToWinError maps a status as RtlNtStatusToDosError does', ()=>{
+    const env = setup();
+    assert.equal(env.call('LsaNtStatusToWinError', 0), 0);
+    assert.equal(env.call('LsaNtStatusToWinError', 0xc0000034), 2, 'ERROR_FILE_NOT_FOUND');
+    assert.equal(env.call('LsaNtStatusToWinError', 0xc0000022), 5, 'ERROR_ACCESS_DENIED');
+});
