@@ -144,10 +144,9 @@
 - No DirectX redistributables ship with the engine: a program brings `d3dx9_*`, XAudio2 and the
   rest itself (through its installer's DirectX setup, or as DLLs beside its exe); without them the
   engine's own `d3dx9` table answers.
-- `maxFps` is the display rate a program's vertical sync keeps to. A picture the engine reads out
-  of guest memory (the GDI desktop, a DirectDraw primary) is uploaded at most `maxFps` times a
-  second, the presents in between shown as one; a frame a GPU drew reaches the canvas as fast as
-  the program presents it.
+- `maxFps` is the display rate a program's vertical sync keeps to; the presenter is given no
+  scheduler of its own, so a program presenting without vertical sync reaches the canvas as fast
+  as it presents.
 - DirectWrite's system fonts are gdi32's outline faces, each a TrueType file made from the font
   engine's measurements with a glyph for each character (`roadmap/decisions.md` A239). Text
   formats and layouts (`CreateTextFormat`, `CreateTextLayout`, typography, trimming signs) and

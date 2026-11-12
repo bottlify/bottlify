@@ -365,13 +365,6 @@ export function expandRow(row, width, bitCount, palette, out, rowAt = 0, outAt =
  * @param {() => number} [options.now]  Monotonic milliseconds, for the pacer and
  *     for the record of each presented frame.
  * @param {number} [options.maxFps]     Frames a second the pacer may deliver.
- * @param {(fn: () => void, ms: number) => void} [options.later]
- *        Runs `fn` after `ms`. Given, a picture read from guest memory (the
- *        GDI desktop, a DirectDraw primary) is uploaded at most `maxFps` times
- *        a second, as a display shows it: a present sooner than that waits for
- *        its turn and the presents before it are its burst. An installer's
- *        progress dialog repainted the 1920 x 1080 desktop three hundred times
- *        a second, and each one was converted, uploaded and allocated.
  * @param {(payload: any) => void} [options.onFrame]
  *        A frame reached the canvas, the first or after a resize.
  * @param {(record: any) => void} [options.onPresented]
@@ -479,11 +472,6 @@ export function createPresenter(options = {}){
     let burst = null;
     /** @type {Uint8Array | null} */
     let converted = null;
-    /** When a picture was last read out of guest memory and sent on. */
-    let uploadedAt = -Infinity;
-    /** The least time between two such pictures, when `later` is given. */
-    const uploadEveryMs = options.later && (options.maxFps ?? 60) > 0
-        ? 1000 / (options.maxFps ?? 60) : 0;
     const counters = {
         presents: 0, uploads: 0, bytes: 0, shownByOwner: 0, shown: 0, gammaShown: 0,
         dropped: 0, layered: 0, composed: 0, unshown: 0,
@@ -709,7 +697,6 @@ export function createPresenter(options = {}){
             convert(from, surface, pixels);
             counters.uploads++;
             counters.bytes += pixels.byteLength;
-            uploadedAt = now();
             options.sendFrame({ pixels, width: surface.width, height: surface.height,
                 bytesPerRow: surface.width * 4, format: FORMAT });
             return undefined;
@@ -750,7 +737,6 @@ export function createPresenter(options = {}){
         });
         counters.uploads++;
         counters.bytes += needed;
-        uploadedAt = now();
         const by = from.source === undefined ? 'unnamed' : String(from.source);
         uploadsFrom[by] = (uploadsFrom[by] ?? 0) + 1;
         // Nothing recorded rides on it: the cuts the renderers made are
@@ -1073,18 +1059,7 @@ export function createPresenter(options = {}){
             lastBuffer = surface.buffer;
             const first = pending === null;
             pending = { surface, from };
-            if (!first)
-            {
-                return;
-            }
-            // A picture a GPU owns is that GPU's frame, and is never held.
-            const early = uploadEveryMs > 0 && !from.claims.has(surface.buffer >>> 0)
-                ? uploadedAt + uploadEveryMs - now() : 0;
-            if (early > 0)
-            {
-                /** @type {(fn: () => void, ms: number) => void} */ (options.later)(flush, early);
-            }
-            else
+            if (first)
             {
                 schedule(flush);
             }
