@@ -895,3 +895,49 @@ test('a 64-bit program\'s msvcrt strtod and atof run as guest code, *end a whole
         const hosted = cork.trapsHot.map(([name])=>name).filter(name=>/strtod|atof/.test(name));
         assert.deepEqual(hosted, [], 'neither crossed to the host');
     });
+
+test('a 64-bit program\'s msvcrt _isnan, _finite and _copysign read XMM bits in the guest',
+    async()=>{
+        // _isnan(NaN) + 2 * _finite(Infinity) + 4 * _finite(1.5) + 8 * (copysign(3, -0) < 0):
+        // 1 + 0 + 4 + 8.
+        const f64 = (/** @type {number} */ x)=>[...new Uint8Array(new Float64Array([x]).buffer)];
+        const exe = buildExe({
+            bits: 64,
+            imports: { 'msvcrt.dll': ['_isnan', '_finite', '_copysign'],
+                'KERNEL32.dll': ['ExitProcess'] },
+            data: { nan: f64(NaN), inf: f64(Infinity), one: f64(1.5), three: f64(3),
+                zero: f64(-0) },
+            codeSize: 0xc0,
+            code: ({ iat, at, code })=>{
+                /** @type {number[]} */
+                const out = [];
+                const rip = (/** @type {number} */ target, /** @type {number} */ rest)=>
+                    u32((target - code(out.length + rest)) >>> 0);
+                const load = (/** @type {string} */ name, /** @type {number} */ reg)=>
+                    out.push(0xf2, 0x0f, 0x10, 0x05 | reg << 3, ...rip(at(name), 8));
+                out.push(0x53, 0x48, 0x83, 0xec, 0x20);                    // push rbx; sub rsp, 32
+                load('nan', 0);
+                out.push(0xff, 0x15, ...rip(iat('_isnan'), 6));
+                out.push(0x89, 0xc3);                                      // mov ebx, eax
+                load('inf', 0);
+                out.push(0xff, 0x15, ...rip(iat('_finite'), 6));
+                out.push(0x8d, 0x1c, 0x43);                                // lea ebx, [rbx+rax*2]
+                load('one', 0);
+                out.push(0xff, 0x15, ...rip(iat('_finite'), 6));
+                out.push(0x8d, 0x1c, 0x83);                                // lea ebx, [rbx+rax*4]
+                load('three', 0);
+                load('zero', 1);
+                out.push(0xff, 0x15, ...rip(iat('_copysign'), 6));
+                out.push(0x66, 0x48, 0x0f, 0x7e, 0xc0);                    // movq rax, xmm0
+                out.push(0x48, 0xc1, 0xe8, 0x3f);                          // shr rax, 63
+                out.push(0x8d, 0x0c, 0xc3);                                // lea ecx, [rbx+rax*8]
+                out.push(0xff, 0x15, ...rip(iat('ExitProcess'), 6), 0xf4);
+                return out;
+            },
+        });
+        const cork = await run(exe);
+        assert.equal(cork.code, 13);
+        const hosted = cork.trapsHot.map(([name])=>name)
+            .filter(name=>/_isnan|_finite|_copysign/.test(name));
+        assert.deepEqual(hosted, [], 'none crossed to the host');
+    });

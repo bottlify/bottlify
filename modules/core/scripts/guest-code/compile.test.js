@@ -1401,3 +1401,42 @@ export function store({ setU32, pointerBytes }, at, value){
     assert.deepEqual(compiled.store.code, without.store.code, 'the i386 holds no compare');
     assert.ok(long.store, 'x86-64 code made');
 });
+
+test('doubleLow and doubleHigh: a double\'s dwords, from its slot at 32 bits and by movq at 64;'
+    + ' at 32 only a double variable', async()=>{
+    const { same } = await load(`
+/**
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f64} x @param {i32} k
+ * @returns {u32}
+ */
+export function bits({ doubleLow, doubleHigh }, x, k){
+    const y = x * 0.5;
+    return (doubleHigh(x) ^ Math.imul(doubleLow(y), k)) >>> 0;
+}
+`);
+    const next = random(51);
+    const view = new DataView(new ArrayBuffer(8));
+    for (let i = 0; i < 200; i++)
+    {
+        // Any double but a signalling NaN, which a JavaScript double does not keep.
+        const high = i % 4 === 0 ? next() | 0x7ff00000 : next();
+        view.setUint32(0, next(), true);
+        view.setUint32(4, (high & 0x7ff00000) === 0x7ff00000 ? high | 0x80000 : high, true);
+        const x = view.getFloat64(0, true);
+        for (const control of [0x27f, 0x07f])
+        {
+            same('bits', { stack: [...doubleWords(x), next()], control });
+        }
+    }
+    await assert.rejects(load(`
+/**
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f64} x
+ * @returns {u32}
+ */
+export function sum({ doubleHigh }, x){
+    return doubleHigh(x * 2);
+}
+`), /doubleHigh: at 32 bits a double variable/);
+});

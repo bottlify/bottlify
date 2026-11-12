@@ -342,9 +342,13 @@ const X87_WORDS = new Set(['controlWord', 'statusWord', 'setControlWord', 'clear
  * A float's bits and back: `floatBits(x)` the dword of `Math.fround(x)`,
  * `floatOfBits(n)` the float a dword is -- `movd` between an XMM register and
  * EAX at 64 bits, a dword of the stack at 32. What a maths routine takes a
- * float apart by, into its exponent and mantissa.
+ * float apart by, into its exponent and mantissa. `doubleLow(x)` and
+ * `doubleHigh(x)` are a double's two dwords, bit for bit: `movq` from its XMM
+ * register at 64 bits; at 32 the dword of a double variable where it lies in
+ * the frame -- a parameter's slot among them -- with no `fld`, which would
+ * quiet a signalling NaN and raise the invalid flag.
  */
-const FLOAT_BITS = ['floatBits', 'floatOfBits'];
+const FLOAT_BITS = ['floatBits', 'floatOfBits', 'doubleLow', 'doubleHigh'];
 
 /**
  * `pointerBytes`, the size of a pointer: 4 in the i386 and 8 in the x86-64,
@@ -4312,6 +4316,33 @@ class FunctionCompiler {
                 a.emit(0xd9, 0x1c, 0x24);                                  // fstp dword [esp]
                 a.emit(0x58);                                              // pop eax
                 this.fpu--;
+                return { where: 'eax', type: 'u32' };
+            }
+            if (name === 'doubleLow' || name === 'doubleHigh')
+            {
+                this.arity(node, 1);
+                const value = this.expr(node.arguments[0]);
+                const high = name === 'doubleHigh';
+                if (this.long)
+                {
+                    this.toXmm(value, node.arguments[0]);
+                    const x = this.fpu - 1;
+                    // movq rax, xmm
+                    a.emit(0x66, x >= 8 ? 0x4c : 0x48, 0x0f, 0x7e, 0xc0 | (x & 7) << 3);
+                    if (high)
+                    {
+                        a.emit(0x48, 0xc1, 0xe8, 0x20);                    // shr rax, 32
+                    }
+                    this.fpu--;
+                    return { where: 'eax', type: 'u32' };
+                }
+                if (value.where !== 'var' || value.type !== 'f64' || value.v.onStack
+                    || this.x87.includes(value.v))
+                {
+                    this.fail(node.arguments[0], `${name}: at 32 bits a double variable, read `
+                        + 'where it lies in the frame');
+                }
+                this.op(0x8b, ...this.frameAt(EAX, value.v.disp + (high ? 4 : 0))); // mov eax, [v]
                 return { where: 'eax', type: 'u32' };
             }
             if (name === 'floatOfBits')

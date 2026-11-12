@@ -65,8 +65,8 @@ for (const [i386, long] of PAIRS)
 export const longCodeOf = compiled=>LONG_CODE.get(compiled);
 
 /** The helpers that take a float apart, which read no guest memory. */
-const FLOAT_BITS = ['floatBits', 'floatOfBits'];
-const bitsView = new DataView(new ArrayBuffer(4));
+const FLOAT_BITS = ['floatBits', 'floatOfBits', 'doubleLow', 'doubleHigh'];
+const bitsView = new DataView(new ArrayBuffer(8));
 const FLOAT_BIT_HELPERS = {
     /** @param {number} value */
     floatBits: value=>{
@@ -77,6 +77,16 @@ const FLOAT_BIT_HELPERS = {
     floatOfBits: bits=>{
         bitsView.setUint32(0, bits >>> 0, true);
         return bitsView.getFloat32(0, true);
+    },
+    /** @param {number} value */
+    doubleLow: value=>{
+        bitsView.setFloat64(0, value, true);
+        return bitsView.getUint32(0, true);
+    },
+    /** @param {number} value */
+    doubleHigh: value=>{
+        bitsView.setFloat64(0, value, true);
+        return bitsView.getUint32(4, true);
     },
 };
 
@@ -140,6 +150,8 @@ const FLOAT_BIT_HELPERS = {
  * @property {(address: number) => number} f64
  * @property {(value: number) => number} floatBits  the dword of `Math.fround(value)`
  * @property {(bits: number) => number} floatOfBits  the float a dword is
+ * @property {(value: number) => number} doubleLow  a double's low dword
+ * @property {(value: number) => number} doubleHigh  a double's high dword
  * @property {(address: number, value: number) => void} setU8
  * @property {(address: number, value: number) => void} setU16
  * @property {(address: number, value: number) => void} setU32

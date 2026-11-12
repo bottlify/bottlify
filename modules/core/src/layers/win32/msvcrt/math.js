@@ -511,8 +511,8 @@ export function createMathFunctions(host){
         ldiv: divide,
 
         /**
-         * double _copysign(double x, double y) -- in the guest, which reads y
-         * as its two halves; a 64-bit caller passes it in XMM1.
+         * double _copysign(double x, double y) -- in the guest, which reads y's
+         * sign bit from its bits (`doubleHigh`); a 64-bit caller passes it in XMM1.
          */
         _copysign: { ...guestEntry(inGuestFloat._copysign, FLOAT_CODE._copysign, guest),
             floats: TWO_DOUBLES },

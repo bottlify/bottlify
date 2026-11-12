@@ -45,10 +45,8 @@ export const LONG = new Map([
     ['layers/win32/msvcrt/inguest-math.js', {}],
     ['layers/win32/msvcrt/inguest-print.js', {}],
     ['layers/win32/msvcrt/inguest-float.js', {
-        _copysign: 'its sign is a double passed as two dwords, which x86-64 passes in XMM1',
-        _finite: 'a double passed as two dwords, which x86-64 passes in XMM0',
-        _isnan: 'a double passed as two dwords, which x86-64 passes in XMM0',
-        _fpclass: 'a double passed as two dwords, which x86-64 passes in XMM0',
+        _fpclass: 'a double passed as two dwords, which x86-64 passes in XMM0: as a double '
+            + 'its handler would hold a signalling NaN quieted',
     }],
 ]);
 

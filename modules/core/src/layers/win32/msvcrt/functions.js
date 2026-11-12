@@ -671,10 +671,11 @@ export function createMsvcrtFunctions(host){
         /**
          * int _isnan(double x), int _finite(double x), int _fpclass(double x)
          *
-         * Questions about the bits of a double on the stack, answered in EAX
-         * by code in the guest (`inguest-float.js`) that reads them as integers:
-         * no FPU, so they are here rather than with the maths. The code takes
-         * the double as its two halves; a 64-bit caller passes it in XMM0.
+         * Questions about the bits of a double, answered in EAX by code in the
+         * guest (`inguest-float.js`) that reads them as integers: no FPU, so
+         * they are here rather than with the maths. A 64-bit caller passes the
+         * double in XMM0: _isnan and _finite read it there too; _fpclass, whose
+         * code takes the double as its two halves, is the handler's at 64 bits.
          */
         _isnan: { ...guestEntry(inGuestFloat._isnan, FLOAT_CODE._isnan, {}),
             floats: DOUBLE_HALVES },

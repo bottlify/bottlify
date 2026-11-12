@@ -218,15 +218,15 @@ export function _clearfp({ statusWord, clearExceptions, mxcsr, setMxcsr }){
 
 /**
  * double _copysign(double x, double y) -- x's magnitude, y's sign bit,
- * which a zero and a NaN carry too.
+ * which a zero and a NaN carry too, read from its bits.
  *
  * @guestCode cdecl
- * @param {f64} x @param {u32} low @param {i32} high
+ * @param {Pick<Guest, 'doubleHigh'>} guest @param {f64} x @param {f64} y
  * @returns {f64}
  */
-export function _copysign(x, low, high){
+export function _copysign({ doubleHigh }, x, y){
     const magnitude = Math.abs(x);
-    return high < 0 ? -magnitude : magnitude;
+    return (doubleHigh(y) | 0) < 0 ? -magnitude : magnitude;
 }
 
 /**
@@ -241,31 +241,35 @@ export function _chgsign(x){
 }
 
 /**
- * int _finite(double x) -- nonzero unless the exponent is all ones.
+ * int _finite(double x) -- nonzero unless the exponent is all ones. The
+ * classifiers read a double's bits and never load it: an `fld` would quiet a
+ * signalling NaN and raise the invalid flag.
  *
  * @guestCode cdecl
- * @param {u32} low @param {i32} high
+ * @param {Pick<Guest, 'doubleHigh'>} guest @param {f64} x
  * @returns {i32}
  */
-export function _finite(low, high){
-    return (high & 0x7ff00000) !== 0x7ff00000 ? 1 : 0;
+export function _finite({ doubleHigh }, x){
+    return (doubleHigh(x) & 0x7ff00000) !== 0x7ff00000 ? 1 : 0;
 }
 
 /**
  * int _isnan(double x) -- the exponent all ones and a fraction.
  *
  * @guestCode cdecl
- * @param {u32} low @param {i32} high
+ * @param {Pick<Guest, 'doubleLow' | 'doubleHigh'>} guest @param {f64} x
  * @returns {i32}
  */
-export function _isnan(low, high){
-    const magnitude = high & 0x7fffffff;
-    return magnitude > 0x7ff00000 || magnitude === 0x7ff00000 && low !== 0 ? 1 : 0;
+export function _isnan({ doubleLow, doubleHigh }, x){
+    const magnitude = doubleHigh(x) & 0x7fffffff;
+    return magnitude > 0x7ff00000 || magnitude === 0x7ff00000 && doubleLow(x) !== 0 ? 1 : 0;
 }
 
 /**
  * int _fpclass(double x) -- signalling or quiet NaN, an infinity, a normal,
- * a denormal or a zero, each of either sign.
+ * a denormal or a zero, each of either sign. Its halves are its arguments:
+ * a signalling NaN in a JavaScript double, as its handler would hold one,
+ * is quieted on the way.
  *
  * @guestCode cdecl
  * @param {u32} low @param {i32} high

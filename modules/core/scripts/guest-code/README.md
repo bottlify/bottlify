@@ -81,8 +81,11 @@ the i386 one: `inguest.js` into `inguest.x64.js` (and `inguest-math.js` into `in
   the bridge's 64-bit trap reads it (the export declares `floats`).
 - **A float's bits**: `floatBits(x)` is the IEEE single of a double as a `u32`, and
   `floatOfBits(n)` the double a `u32`'s single holds - what a libm routine splits an argument
-  into exponent and mantissa with. Both run in the handler as well, taken from the first
-  parameter like the memory helpers.
+  into exponent and mantissa with. `doubleLow(x)` and `doubleHigh(x)` are a double's two
+  dwords bit for bit: `movq` at 64 bits, and at 32 the dword of a double variable where it
+  lies in the frame (a parameter's slot), never through `fld`, which would quiet a signalling
+  NaN and raise the invalid flag. All run in the handler as well, taken from the first
+  parameter like the memory helpers; a JavaScript double may quiet a signalling NaN there.
 - **The x87's one instruction for it**: `Math.sin`, `cos`, `tan`, `atan`, `atan2` and `log2`,
   and `X87`'s operations, store their doubles below RSP, load them onto the x87 (empty at a
   call, as the convention leaves it), run the instruction the i386 runs and take the answer

@@ -42,7 +42,9 @@ test('the runtime\'s code says where a 64-bit caller passes its floating-point a
     assert.deepEqual(guestExport(FLOAT_CODE._nextafter, fallback).floats,
         { 0: 'f64', 2: 'f64' });
     assert.deepEqual(guestExport(FLOAT_CODE._logb, fallback).floats, { 0: 'f64' });
-    assert.deepEqual(guestExport(FLOAT_CODE._copysign, fallback).floats, { 0: 'f64' },
+    assert.deepEqual(guestExport(FLOAT_CODE._copysign, fallback).floats, { 0: 'f64', 2: 'f64' },
+        'y a double whose bits the code reads');
+    assert.deepEqual(guestExport(FLOAT_CODE._fpclass, fallback).floats, undefined,
         'a double the code reads as two integers is not one by its types');
     assert.equal(guestExport(FLOAT_CODE._statusfp, fallback).floats, undefined);
     const onStack = Object.values(MATH_CODE).filter(entry=>
