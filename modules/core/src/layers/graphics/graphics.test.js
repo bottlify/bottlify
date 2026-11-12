@@ -667,6 +667,56 @@ test('a GPU device the host destroys does not lose the program\'s devices', asyn
     await graphicsModule.dispose();
 });
 
+test('a machine gone from the run\'s GPU device leaves nothing of itself on the device', async()=>{
+    // The device is the run's and outlives every process; a reaction on its
+    // lost promise cannot be taken back, so one made per machine held each
+    // machine, its memory with it, until the run ended. A machine still built
+    // on it is lost when it goes; one gone is not reached at all.
+    const { setFlagsFromString } = await import('node:v8');
+    const { runInNewContext } = await import('node:vm');
+    const { createGraphicsModule } = await import('./module.js');
+    setFlagsFromString('--expose-gc');
+    const gc = runInNewContext('gc');
+    const gpu = createFakeDevice();
+    const gpuDevice = /** @type {any} */ (gpu.device);
+    gpuDevice.features = new Set();
+    gpuDevice.createSampler = (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor });
+    /** @type {(info: any) => void} */
+    let lose = ()=>{};
+    gpuDevice.lost = new Promise(resolve=>{
+        lose = resolve;
+    });
+    /** @type {WeakRef<object>} */
+    let memoryOfGone = new WeakRef({});
+    await (async()=>{
+        const module = createGraphicsModule();
+        const memory = ramMemory();
+        memoryOfGone = new WeakRef(memory);
+        await module.create({ device: { device: gpu.device, queue: gpu.queue, presentTo: ()=>{} } },
+            hostWith(memory));
+        await module.dispose();
+    })();
+    const staying = createGraphicsModule();
+    const api = await staying.create({
+        device: { device: gpu.device, queue: gpu.queue, presentTo: ()=>{} },
+    }, hostWith(ramMemory()));
+    await new Promise(done=>setImmediate(done));
+    gc();
+    assert.equal(memoryOfGone.deref(), undefined, 'the gone machine\'s memory is nobody\'s');
+    /** @type {{ device?: any }} */
+    const out = {};
+    assert.equal(api.create('d3d9').CreateDevice({
+        swapEffect: 1, backBufferCount: 1, backBufferWidth: 4, backBufferHeight: 4,
+        backBufferFormat: D3DFMT.X8R8G8B8,
+    }, out), D3D_OK);
+    lose({ reason: 'unknown', message: 'the GPU process went away' });
+    await gpuDevice.lost;
+    await Promise.resolve();
+    assert.equal(out.device.TestCooperativeLevel(), D3DERR_DEVICELOST,
+        'and the one still standing hears the loss');
+    await staying.dispose();
+});
+
 test('GDI drawing binds a memory context to the bytes of its bitmap in guest memory', async()=>{
     // A program draws into a DIB section and reads the pixels back through the
     // pointer it was given, so the surface has to be the bytes themselves; a
