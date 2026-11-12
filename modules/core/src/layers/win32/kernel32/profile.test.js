@@ -672,3 +672,50 @@ test('the win.ini section calls are the private ones on win.ini, in both widths'
     assert.equal(files.text('C:\\WINDOWS\\win.ini'), '', 'a NULL list removes it');
     assert.equal(fns.GetProfileSectionA.handler([SECTION, OUT, 64]), 0);
 });
+
+test('a file that begins with a byte order mark is read in its encoding and written back in it',
+    ()=>{
+    // Windows reads a profile in UTF-16 (either order) or UTF-8 when the file
+    // says so with its mark, and a write keeps the file as it was (Wine's
+    // profile tests): the .NET Framework 3.5 setup keeps its setup.sdb in
+    // UTF-16, and read as ANSI it ended at its first zero byte, empty.
+        const { memory, files, fns } = setup();
+        /** @param {string} text */
+        const utf16le = text=>Uint8Array.from([0xff, 0xfe,
+            ...[...text].flatMap(character=>[character.charCodeAt(0) & 0xff,
+                character.charCodeAt(0) >> 8])]);
+        /** @param {string} text */
+        const utf16be = text=>Uint8Array.from([0xfe, 0xff,
+            ...[...text].flatMap(character=>[character.charCodeAt(0) >> 8,
+                character.charCodeAt(0) & 0xff])]);
+        files.nodes.set('C:\\setup.sdb',
+            utf16le('[Product Information]\r\nNullString=\u00e9t\u00e9\r\n'));
+        files.nodes.set('C:\\big.ini', utf16be('[S]\r\nK=Big\r\n'));
+        files.nodes.set('C:\\eight.ini',
+            Uint8Array.from([0xef, 0xbb, 0xbf, ...new TextEncoder().encode('[S]\r\nK=Eight\r\n')]));
+        memory.put(SECTION, 'Product Information');
+        memory.put(KEY, 'NullString');
+        memory.put(DEFAULT, '');
+        memory.put(FILE, 'C:\\setup.sdb');
+        assert.equal(fns.GetPrivateProfileStringA.handler([SECTION, KEY, DEFAULT, OUT, 64, FILE]),
+            3);
+        assert.equal(decodeAnsi(memory.bytes.subarray(OUT, OUT + 3)), '\u00e9t\u00e9');
+        memory.put(SECTION, 'S');
+        memory.put(KEY, 'K');
+        for (const [file, value] of [['C:\\big.ini', 'Big'], ['C:\\eight.ini', 'Eight']])
+        {
+            memory.put(FILE, file);
+            assert.equal(fns.GetPrivateProfileStringA.handler(
+                [SECTION, KEY, DEFAULT, OUT, 64, FILE]), value.length, file);
+            assert.equal(memory.readCString(OUT, 64), value, file);
+        }
+
+        memory.put(FILE, 'C:\\setup.sdb');
+        memory.put(SECTION, 'Product Information');
+        memory.put(KEY, 'Added');
+        memory.put(VALUE, 'yes');
+        assert.equal(fns.WritePrivateProfileStringA.handler([SECTION, KEY, VALUE, FILE]), 1);
+        assert.deepEqual([...files.nodes.get('C:\\setup.sdb') ?? []],
+            [...utf16le('[Product Information]\r\nNullString=\u00e9t\u00e9\r\nAdded=yes\r\n')],
+            'still UTF-16, its mark first');
+    });

@@ -30,7 +30,9 @@
  *   where the system's own profile files are, and where an installer that
  *   names its file bare expects to find it again.
  * - The file is text in the ANSI page, the page a program's own strings are
- *   read in, so a name it asks for is found by the bytes it was written with.
+ *   read in, so a name it asks for is found by the bytes it was written with --
+ *   unless it begins with a byte order mark: then it is UTF-16 (either order)
+ *   or UTF-8, and a write keeps it so.
  */
 
 import { decodeAnsi, encodeAnsi } from './locale.js';
@@ -109,6 +111,55 @@ const parseLine = text=>{
 };
 
 /**
+ * The encodings a profile can be in: the ANSI page, unless the file begins
+ * with a byte order mark, which Windows reads it by and keeps it in.
+ *
+ * @typedef {'ansi' | 'utf-16le' | 'utf-16be' | 'utf-8'} ProfileEncoding
+ */
+
+/** Each marked encoding's mark. */
+const BOMS = Object.freeze({
+    'utf-16le': Uint8Array.of(0xff, 0xfe),
+    'utf-16be': Uint8Array.of(0xfe, 0xff),
+    'utf-8': Uint8Array.of(0xef, 0xbb, 0xbf),
+});
+
+/** @param {Uint8Array} bytes @returns {ProfileEncoding} */
+const encodingOf = bytes=>/** @type {ProfileEncoding | undefined} */ (Object.keys(BOMS)
+    .find(name=>BOMS[/** @type {keyof typeof BOMS} */ (name)]
+        .every((byte, at)=>bytes[at] === byte))) ?? 'ansi';
+
+/**
+ * Text as a file in this encoding holds it, its mark first.
+ *
+ * @param {ProfileEncoding} encoding @param {string} text
+ * @returns {Uint8Array}
+ */
+const encodeIn = (encoding, text)=>{
+    if (encoding === 'ansi')
+    {
+        return encodeAnsi(text);
+    }
+    const mark = BOMS[encoding];
+    if (encoding === 'utf-8')
+    {
+        const body = new TextEncoder().encode(text);
+        const out = new Uint8Array(mark.length + body.length);
+        out.set(mark);
+        out.set(body, mark.length);
+        return out;
+    }
+    const out = new Uint8Array(mark.length + text.length * 2);
+    out.set(mark);
+    const view = new DataView(out.buffer);
+    for (let at = 0; at < text.length; at++)
+    {
+        view.setUint16(mark.length + at * 2, text.charCodeAt(at), encoding === 'utf-16le');
+    }
+    return out;
+};
+
+/**
  * @param {ProfileHost} host
  */
 export function createProfileFunctions(host){
@@ -148,6 +199,14 @@ export function createProfileFunctions(host){
     };
 
     /**
+     * The encoding each file was in when it was last read, which a write that
+     * follows the read keeps it in.
+     *
+     * @type {Map<string, ProfileEncoding>}
+     */
+    const encodings = new Map();
+
+    /**
      * The file's lines, or none when it is not there. A file whose bytes are
      * not resident is answered late, which the bridge turns into a wait.
      *
@@ -168,11 +227,17 @@ export function createProfileFunctions(host){
         /** @param {Uint8Array} bytes */
         const parse = bytes=>{
             files.close(node);
+            const encoding = encodingOf(bytes);
+            encodings.set(path.toLowerCase(), encoding);
+            const body = encoding === 'ansi' ? bytes : bytes.subarray(BOMS[encoding].length);
             // The text ends at a NUL: a file written with its C string's
             // terminator holds one, and a rewrite leaves it behind
             // (Wine's shlwapi ordinal.c write_inifile).
-            const end = bytes.indexOf(0);
-            const whole = decodeAnsi(end < 0 ? bytes : bytes.subarray(0, end));
+            const decoded = encoding === 'ansi' ? null
+                : new TextDecoder(encoding).decode(body);
+            const end = decoded === null ? body.indexOf(0) : decoded.indexOf('\0');
+            const whole = decoded === null ? decodeAnsi(end < 0 ? body : body.subarray(0, end))
+                : end < 0 ? decoded : decoded.slice(0, end);
             const lines = whole.split(/\r?\n/);
             // A trailing newline is the end of the last line, not an empty one.
             if (lines.length > 0 && lines[lines.length - 1] === '')
@@ -193,7 +258,7 @@ export function createProfileFunctions(host){
             return false;
         }
         const body = lines.map(line=>`${line.text}\r\n`).join('');
-        files.write(node, 0, encodeAnsi(body));
+        files.write(node, 0, encodeIn(encodings.get(path.toLowerCase()) ?? 'ansi', body));
         files.close(node);
         return true;
     };
