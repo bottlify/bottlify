@@ -121,7 +121,8 @@ export function createKernelModule(){
              *          processes: any, stacks: any, disposed: boolean, resumeLog: string[],
              *          refreshClock: (() => void) | undefined,
              *          hostAnswering: (() => boolean) | undefined, readyWord: number,
-             *          mutexWords: any, eventWords: any, semaphoreWords: any }}
+             *          mutexWords: any, eventWords: any, semaphoreWords: any,
+             *          directory: Map<number, any> | null }}
              */
             const state = {
                 stacks,
@@ -145,6 +146,8 @@ export function createKernelModule(){
                 // The last parks, holds and scheduled resumes, newest last: what a
                 // thread that sits in the park loop is read by.
                 resumeLog: [],
+                // The run's directory of processes, which outlives this one (`settleRecords`).
+                directory: config?.processDirectory ?? null,
             };
             /** @param {string} entry */
             const noteResume = entry=>{
@@ -1165,10 +1168,33 @@ export function createKernelModule(){
             if (current)
             {
                 current.disposed = true;
+                settleRecords(current);
             }
             current = null;
         },
     };
+}
+
+/**
+ * A process's records stay in the run's directory after it is gone - another
+ * process opens one by id and waits on its exit - but an exit event this
+ * kernel made writes its guest word through this process's memory, so a record
+ * holding it held the whole memory of every process that ever ended (a COM
+ * server started per assembly, 560 MB each). Each is left as it stands, an
+ * event of no process: its state, and nothing of this one.
+ *
+ * @param {any} state
+ */
+function settleRecords(state){
+    for (const record of state.directory?.values() ?? [])
+    {
+        const exited = record.exited;
+        if (exited && state.sync?.owns(exited))
+        {
+            record.exited = { kind: exited.kind, name: exited.name,
+                manualReset: exited.manualReset, signalled: exited.signalled, waiters: [] };
+        }
+    }
 }
 
 /** One graph's worth, for the boundary check and for a test that builds this layer alone. */
