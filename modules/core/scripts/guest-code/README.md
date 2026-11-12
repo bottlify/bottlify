@@ -87,10 +87,11 @@ the i386 one: `inguest.js` into `inguest.x64.js` (and `inguest-math.js` into `in
   and `X87`'s operations, store their doubles below RSP, load them onto the x87 (empty at a
   call, as the convention leaves it), run the instruction the i386 runs and take the answer
   back into its XMM register; a function that does so moves RSP and is no leaf. `X87`'s
-  constants are the doubles the source's own `X87` holds.
-- **Refused at 64 bits**: `%` of doubles (a loop of `fprem`), x87 arguments, the x87's control and
-  status words, an `i64` result, more than four doubles at once, and a function `LONG` names for a
-  pointer its source lays out as four bytes. Each stays a trap into its handler there.
+  constants are the doubles the source's own `X87` holds, and `%` of doubles is the i386's
+  loop of `fprem`.
+- **Refused at 64 bits**: x87 arguments, the x87's control and status words, an `i64` result, more
+  than four doubles at once, and a function `LONG` names for a pointer its source lays out as four
+  bytes. Each stays a trap into its handler there.
 
 `guestEntry` and `guestExport` carry the x86-64 as the export's `long`, bound as `code` is;
 `longCodeOf` finds it by the i386 record. [`long.mjs`](long.mjs) is cork's long-mode machine

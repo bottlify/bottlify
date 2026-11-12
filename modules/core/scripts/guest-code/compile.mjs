@@ -196,9 +196,9 @@
  * XMM register.
  *
  * `Math.sin`, `cos`, `tan`, `atan`, `atan2` and `log2`, and `X87`'s
- * operations, are the x87's one instruction over doubles stored below RSP
- * and taken back (`x87OverXmm`). What only the x87 does past that -- `%`,
- * x87 arguments, the control and status words, an i64 in EDX:EAX --
+ * operations, and `%` of doubles (`fprem`'s loop), are the x87's over doubles
+ * stored below RSP and taken back (`x87OverXmm`). What only the x87 does past
+ * that -- x87 arguments, the control and status words, an i64 in EDX:EAX --
  * is refused at 64 bits with its reason (`onRefused`), and the function
  * stays a trap into its handler there.
  */
@@ -3265,7 +3265,16 @@ class FunctionCompiler {
     floatBinaryXmm(node){
         if (node.operator === '%')
         {
-            this.x87Only(node, '% of a double, the exact remainder of `fprem`,');
+            // `fprem`, exact, repeated until C2 says the remainder is whole, as the
+            // i386 does it (`floatBinary`).
+            this.toXmm(this.expr(node.left), node.left);
+            this.toXmm(this.expr(node.right), node.right);
+            return this.x87OverXmm(2, [
+                0xd9, 0xc9,                                                // fxch
+                0xd9, 0xf8, 0xdf, 0xe0, 0xf6, 0xc4, 0x04,                  // fprem; fnstsw; test
+                0x75, 0xf7,                                                // jnz the fprem
+                0xdd, 0xd9,                                                // fstp st1
+            ]);
         }
         this.note(node, 'rounds');
         this.toXmm(this.expr(node.left), node.left);
