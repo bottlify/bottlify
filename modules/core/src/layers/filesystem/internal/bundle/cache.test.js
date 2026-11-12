@@ -522,6 +522,28 @@ test('a block the store refuses is held in the heap, and the cache says it is fu
     assert.equal(again.has(6), false, 'nothing recorded that is not on disk');
 });
 
+test('a refusal the store gets over is not a full store', async()=>{
+    // A preload stops while the cache says it is full; one refused write,
+    // followed by writes taken, left it saying so for the run.
+    const store = fakeStore();
+    let refuse = true;
+    /** @param {string} path @param {number} at @param {Uint8Array} bytes */
+    const write = (path, at, bytes)=>{
+        if (/\.pack\.\d+$/.test(path) && at > 0 && refuse)
+        {
+            refuse = false;
+            throw new DOMException('in use', 'NoModificationAllowedError');
+        }
+        store.write(path, at, bytes);
+    };
+    const cache = await createBlockCache({ store: { ...store, write }, ...OPTIONS });
+    await cache.put(6, new Uint8Array(16).fill(6));
+    assert.equal(cache.diagnostics().full, 'in use', 'the refusal is said while it stands');
+    await cache.put(7, new Uint8Array(16).fill(7));
+    assert.equal(cache.diagnostics().full, undefined, 'and gone once a write is taken');
+    assert.deepEqual(cache.read(7, 16), new Uint8Array(16).fill(7));
+});
+
 /**
  * A store with room for `limit` bytes in all, refusing a write past it as the
  * origin's file system does.

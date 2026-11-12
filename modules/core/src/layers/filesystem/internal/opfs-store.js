@@ -113,6 +113,8 @@ export async function createOpfsStore({ root, maxOpenHandles = 16 }){
     const handles = new Map();
 
     let pending = Promise.resolve();
+    /** Whether `close` let every handle go: nothing opens after it. */
+    let closed = false;
     /** @type {Error | null} */
     let failure = null;
 
@@ -273,8 +275,28 @@ export async function createOpfsStore({ root, maxOpenHandles = 16 }){
      *
      * @param {string} path
      */
-    const open = async path=>{
+    const open = path=>{
+        // One open of a path at a time: the handle is made after an await, and
+        // a second open meanwhile asked for a lock of its own, which this
+        // store's first one refused as a file open somewhere else.
+        const underWay = opening.get(path);
+        if (underWay)
+        {
+            return underWay;
+        }
+        const started = openNow(path).finally(()=>opening.delete(path));
+        opening.set(path, started);
+        return started;
+    };
+    /** Opens under way, by path. @type {Map<string, Promise<void>>} */
+    const opening = new Map();
+    /** @param {string} path */
+    const openNow = async path=>{
         await settle();
+        if (closed)
+        {
+            throw fsError(ErrorCode.ACCESS_DENIED, `"${path}" asked of a store that was closed`);
+        }
         if (handles.has(path))
         {
             resident(path);
@@ -287,6 +309,11 @@ export async function createOpfsStore({ root, maxOpenHandles = 16 }){
         }
         requireParent(path);
         const access = await acquireAccess(await fileHandle(path, true), path);
+        if (closed)
+        {
+            access.close();
+            throw fsError(ErrorCode.ACCESS_DENIED, `"${path}" asked of a store that was closed`);
+        }
         handles.set(path, access);
         evict();
         if (!known)
@@ -437,8 +464,14 @@ export async function createOpfsStore({ root, maxOpenHandles = 16 }){
             }
         },
 
-        /** The pool emptied, so another mount of the same tree can take over. */
+        /**
+         * The pool emptied, so another mount of the same tree can take over. An
+         * open handle is the origin's exclusive lock on its file: a store left
+         * open after its run holds files nothing else may remove, clearing a
+         * cache from the same tab among them. Nothing opens after it.
+         */
         async close(){
+            closed = true;
             await settle();
             for (const path of [...handles.keys()])
             {

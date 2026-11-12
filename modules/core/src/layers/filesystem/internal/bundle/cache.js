@@ -69,7 +69,7 @@ import { Codec, HEADER_SIZE, openBundle, withManifest } from './format.js';
  * lets nothing go.
  *
  * @typedef {{ read: Function, write: Function, truncate: Function, stat: Function,
- *     open: Function, remove: Function, flush?: Function,
+ *     open: Function, remove: Function, flush?: Function, close?: Function,
  *     list?: () => { path: string, directory: boolean, modified?: number }[] }} BlockStore
  */
 
@@ -555,6 +555,7 @@ function createMemoryCache(maxBytes, reason){
 
         // `heapBytes`: what of it the tab's heaps hold (`memory-zones.js`), all of it here.
         diagnostics: ()=>({ backed: false, resident: held.size, bytes, heapBytes: bytes }),
+        close(){},
     };
 }
 
@@ -828,6 +829,8 @@ export async function createBlockCache(options){
     let full = null;
     /** Whether `onFull` was told: once a run. */
     let saidFull = false;
+    /** Whether the store refused a write for room this run, which stands. */
+    let fullForRoom = false;
 
     return {
         backed: true,
@@ -908,6 +911,13 @@ export async function createBlockCache(options){
                 try
                 {
                     await place(index, record);
+                    // A refusal that was not for room and that the store got
+                    // over is not a full store, and a preload would stop at
+                    // it; one for room stands, as the room it asked for does.
+                    if (!fullForRoom)
+                    {
+                        full = null;
+                    }
                     return;
                 }
                 catch (e){
@@ -916,6 +926,7 @@ export async function createBlockCache(options){
                     // Only a store out of room is helped by room: any other
                     // refusal lets nothing go.
                     const room = /** @type {Error} */ (e).name === 'QuotaExceededError';
+                    fullForRoom ||= room;
                     if (!room || !await letOldestGo())
                     {
                         if (room && !saidFull)
@@ -976,6 +987,11 @@ export async function createBlockCache(options){
                 heapBytes: table.byteLength + inHeap.heapBytes, diskBytes: segments
                     + tableBytes(blockCount), letGo: { ...letGo },
                 ...full === null ? {} : { full } };
+        },
+
+        /** Gives the store's files back once the run is over: see the store's `close`. */
+        close(){
+            Promise.resolve(store.close?.()).catch(()=>{});
         },
     };
 }

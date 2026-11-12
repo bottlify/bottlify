@@ -3624,6 +3624,7 @@ async function mountBundle({ options, events, translationStore }){
         ranges: ()=>({ ...ranges }),
         stop(){
             stopped = true;
+            cache.close();
         },
     };
 }
