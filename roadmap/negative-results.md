@@ -2811,3 +2811,21 @@ smaller ones cost Stockfish 10 %. No size won both; 256 kept.
   ask for.
 - **Machine.** Linux container, 4 vCPU, 15 GB, Node 26.13.1; GPU and power plan not recorded.
 - **Decision.** 256 MiB stays.
+
+### 2026-11-12: the shared formed regions (`sharedFormed` 8192) cost ngen's short processes what they save its long ones (cork, multi-process)
+
+- **Idea.** The entry above kept the formed regions at 8 192 on three runs of commit baa8d5a; the
+  commit that keeps them (0d43f09) measured again at its defaults, alternated with the same build
+  sharing no regions (`sharedFormed` 0), to see where the gain lies.
+- **Workload.** As the entries above, to the 62nd `mscorsvw.exe` start; the gaps split by their
+  length in a run sharing nothing: 36 under 6 s (the short assemblies), 23 longer.
+- **Values.** At 0d43f09: 685.2 and 618.7 s with the regions shared, 654.8 without. All runs with
+  the regions shared (five) against the modules alone (five): totals 603.6-685.2 s, median 618.7,
+  against 648.7-691.2, median 655.1; the short gaps 89.7-101.8 s against 81.0-84.9, the long ones
+  513.4-583.4 s against 567.7-607.5. Heap at the end 1.17-1.26 GB against 0.54-0.61.
+- **Why.** A short process takes few regions from the others and still pays for the heap their
+  collections mark; a long one forms thousands it now takes. The two arms overlap in one run of
+  five.
+- **Machine.** Linux container, 4 vCPU, 15 GB, Node 26.13.1; GPU and power plan not recorded.
+- **Decision.** Kept at 8 192: the median is 36 s (5.5%) shorter. What a short process pays is the
+  next thing to take back - a region kept in fewer objects than its decoded instructions.
