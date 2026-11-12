@@ -61,7 +61,7 @@ import { createCallRepeats } from './call-repeats.js';
 import { canShareMemory, withRunMode } from './mode.js';
 import { createLinkMemory, openLink } from './system/link.js';
 import { systemHandlers } from './system-link.js';
-import { storeHandlers } from './layers/cpu/internal/store-link.js';
+import { SHARED_MODULE_BYTES, storeHandlers, withHeldModules } from './layers/cpu/internal/store-link.js';
 import { eventFrom } from './system/events-across.js';
 import { defaultModules } from './layers/index.js';
 import { createRunRegistry } from './layers/win32/module.js';
@@ -9808,7 +9808,11 @@ async function buildSystemHost(deps){
                     metrics: system.windows.manager.diagnostics() },
                 // The bundle, mounted here for every process to read.
                 { name: 'system-bundle', status: 'ready',
-                    metrics: { bytesHeld: { heaps: blocks?.held?.() ?? {} } } }];
+                    metrics: { bytesHeld: { heaps: blocks?.held?.() ?? {} } } },
+                // The run's translation store, which only this thread holds, and the
+                // compiled modules it keeps alive for the processes in workers.
+                { name: 'system-store', status: 'ready', metrics: translationStore?.stats?.()
+                    ?? { measured: false, reason: 'the run has no translation store' } }];
             const theirs = programTables.filter(table=>ownTables.get(table.name) !== table.name);
             const named = new Set(theirs.map(table=>table.name));
             // The zones' sums over both threads' tables, the process's own sums
@@ -10462,8 +10466,15 @@ export async function createApp(options){
     // synchronous handle -- the child stopped at its first append.
     const runStoreSpec = options.cork?.config?.store === undefined ? 'local'
         : options.cork.config.store;
-    const translationStore = await resolveTranslationStore(runStoreSpec,
+    const openedStore = await resolveTranslationStore(runStoreSpec,
         options.bundle?.id ?? options.id ?? 'bundle');
+    // Processes in workers of their own: the batch modules they compile are
+    // kept alive here, beside the store they are stored in, for the next ones
+    // to find compiled (`withHeldModules`). Not in a process joined to a run
+    // across a link: its store is the run's, kept alive where the run is.
+    const heldModuleBytes = options.cork?.config?.sharedModuleBytes ?? SHARED_MODULE_BYTES;
+    const translationStore = openedStore && !options.system && (options.concurrency ?? 1) > 1
+        && heldModuleBytes > 0 ? withHeldModules(openedStore, heldModuleBytes) : openedStore;
 
     const translationPool = await openTranslationPool(options);
     /** What a machine's translator is told where the run lends it its translators. */
@@ -11515,6 +11526,10 @@ export async function createApp(options){
                     {
                         reject(Object.assign(new Error(data.message),
                             { diagnostics: data.diagnostics }));
+                    }
+                    else if (data?.type === 'module')
+                    {
+                        translationStore?.hold?.(data.key, data.module, data.bytes);
                     }
                 });
                 worker.onLost(reason=>reject(new Error(reason)));

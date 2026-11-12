@@ -266,7 +266,8 @@ export async function serveProcess(start){
                 // The run's store, kept by the system's thread.
                 store: options.cork?.config?.store === 'run'
                     ? remoteStore({ ask: (method, args)=>ask('store', method, args),
-                        call: (method, args)=>link.call('store', method, args) })
+                        call: (method, args)=>link.call('store', method, args),
+                        post: toRun ?? undefined })
                     : options.cork?.config?.store,
                 doorbell: { posted, bell: link.bell } } },
             pacing: ringPacing({ inbound: { bell: link.bell, drain: link.pump },
@@ -356,28 +357,39 @@ const journalOf = (app, options)=>{
 const lendings = [];
 
 /**
+ * What posts a message to the thread that started this worker, the run's,
+ * once bound: a message, unlike the link, can carry a compiled module.
+ *
+ * @type {((message: any) => void) | null}
+ */
+let toRun = null;
+
+/**
  * @param {(handler: (data: any) => void) => void} listen
  * @param {(message: any) => void} send
  */
-const bind = (listen, send)=>listen(data=>{
-    // A worker of the run's translation pool, lent to this process or asked
-    // back: taken by the machine, or kept until the machine is built.
-    if (data?.type === 'translator' || data?.type === 'recall')
-    {
-        lendings.push(data);
-        lendings.apply?.();
-        return;
-    }
-    if (data?.type !== 'start')
-    {
-        return;
-    }
-    serveProcess(data).then(
-        ({ code, diagnostics, systemLibraries, journal })=>
-            send({ type: 'exited', code, diagnostics, systemLibraries, journal }),
-        (/** @type {any} */ e)=>send({ type: 'failed', message: String(e?.stack ?? e),
-            diagnostics: e?.diagnostics ?? null }));
-});
+const bind = (listen, send)=>{
+    toRun = send;
+    listen(data=>{
+        // A worker of the run's translation pool, lent to this process or asked
+        // back: taken by the machine, or kept until the machine is built.
+        if (data?.type === 'translator' || data?.type === 'recall')
+        {
+            lendings.push(data);
+            lendings.apply?.();
+            return;
+        }
+        if (data?.type !== 'start')
+        {
+            return;
+        }
+        serveProcess(data).then(
+            ({ code, diagnostics, systemLibraries, journal })=>
+                send({ type: 'exited', code, diagnostics, systemLibraries, journal }),
+            (/** @type {any} */ e)=>send({ type: 'failed', message: String(e?.stack ?? e),
+                diagnostics: e?.diagnostics ?? null }));
+    });
+};
 
 if (typeof self !== 'undefined' && typeof (/** @type {any} */ (self)).postMessage === 'function')
 {

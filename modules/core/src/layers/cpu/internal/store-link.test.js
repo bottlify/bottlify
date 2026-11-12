@@ -15,7 +15,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { decodeValue, encodeValue } from '../../../system/codec.js';
 import { createDirectoryTranslationStore, createMemoryDirectory } from './translation-store.js';
-import { remoteStore, storeHandlers } from './store-link.js';
+import { remoteStore, storeHandlers, withHeldModules } from './store-link.js';
 
 /** @param {any} value */
 const across = value=>decodeValue(encodeValue(value));
@@ -117,3 +117,32 @@ test('a lookup the link cannot answer is no answer, and the translator asks agai
         assert.equal(remote.getNow?.('anything'), undefined);
         assert.equal(remote.getManyNow(['a', 'b']), undefined);
     });
+
+test('a process across the link sends each module it compiles to the store\'s thread, which '
+    + 'keeps the ones used last up to its cap and still answers as the store it wraps', async()=>{
+    const store = await opened();
+    const kept = withHeldModules(store, 300);
+    /** @type {any[]} */
+    const sent = [];
+    const remote = remoteStore({ ask: (method, args)=>across(/** @type {any} */ (
+        storeHandlers(kept).store)[method](...args)), call: async()=>null,
+    post: message=>sent.push(message) });
+    const module = new WebAssembly.Module(new Uint8Array([0, 0x61, 0x73, 0x6d, 1, 0, 0, 0]));
+    remote.hold?.('a', module, 100);
+    assert.deepEqual(sent, [{ type: 'module', key: 'a', module, bytes: 100 }]);
+    assert.equal(remoteStore({ ask: ()=>null, call: async()=>null }).hold, undefined,
+        'a link that cannot carry a module offers none');
+    for (const key of ['a', 'b', 'c'])
+    {
+        kept.hold(key, module, 100);
+    }
+    // Used again, `a` is the last to go: `d` takes `b`'s room.
+    kept.hold('a', module, 100);
+    kept.hold('d', module, 100);
+    kept.hold('e', module, 400);
+    assert.deepEqual(kept.stats().heldModules,
+        { held: 3, bytes: 300, added: 4, again: 1, dropped: 1 });
+    await kept.put('k', new Uint8Array([1, 2, 3]));
+    assert.deepEqual([...await kept.get('k') ?? []], [1, 2, 3], 'the store it wraps answers');
+    assert.ok(kept.stats().records >= 1, 'with the store\'s own figures');
+});

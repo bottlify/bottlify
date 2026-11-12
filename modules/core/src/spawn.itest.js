@@ -271,6 +271,61 @@ test('a process in a worker of its own takes its translations from the run\'s st
     assert.equal(second.cork.cacheMisses, 0);
 });
 
+test('a process in a worker finds the modules an earlier one compiled kept alive by the run\'s '
+    + 'store, to compile them again from its bytes', { timeout: 180000 }, async t=>{
+    // Each process in a worker compiled the store's modules anew, and the
+    // wasm engine, finding none of their bytes alive, started their code over
+    // in its baseline tier: ngen's every `mscorsvw.exe` tiered clr.dll up again.
+    withOrigin(t, createMemoryDirectory());
+    const loop = buildExe({
+        imports: { 'KERNEL32.dll': ['ExitProcess'] },
+        code: ({ iat })=>[
+            0xb9, ...u32(3000000), 0x31, 0xc0,
+            0x01, 0xc8, 0x35, ...u32(0x55), 0xc1, 0xc0, 0x03, 0x49, 0x75, 0x100 - 13,
+            0x25, ...u32(0x7f), 0x50, 0xff, 0x15, ...u32(iat('ExitProcess')),
+        ],
+    });
+    /** @param {string} text */
+    const ascii = text=>[...text].map(character=>character.charCodeAt(0)).concat(0);
+    // Starts C:\App\loop.exe, waits for it, and starts it again.
+    const twice = buildExe({
+        imports: { 'KERNEL32.dll': ['CreateProcessA', 'WaitForSingleObject', 'ExitProcess'] },
+        data: { command: ascii('C:\\App\\loop.exe'),
+            startup: [...u32(68), ...new Array(64).fill(0)], info: new Array(16).fill(0) },
+        codeSize: 0x80,
+        code: ({ iat, at })=>{
+            const once = [
+                0x68, ...u32(at('info')), 0x68, ...u32(at('startup')),
+                0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0,
+                0x68, ...u32(at('command')), 0x6a, 0,
+                0xff, 0x15, ...u32(iat('CreateProcessA')),
+                // WaitForSingleObject(info.hProcess, INFINITE)
+                0x6a, 0xff, 0xff, 0x35, ...u32(at('info')),
+                0xff, 0x15, ...u32(iat('WaitForSingleObject')),
+            ];
+            return [...once, ...once, 0x6a, 0, 0xff, 0x15, ...u32(iat('ExitProcess'))];
+        },
+    });
+    const app = await createApp({ executable: twice, imagePath: 'C:\\App\\twice.exe',
+        concurrency: 2, storage: { load: async()=>({ files: [
+            { path: 'C:\\App\\loop.exe', bytes: loop }] }), save: ()=>{} } });
+    /** @type {any} */
+    let store;
+    try
+    {
+        assert.equal(await app.run({ timeoutMs: 150_000 }), 0);
+        store = app.diagnostics().find((/** @type {any} */ table)=>table.name === 'system-store')
+            ?.metrics;
+    }
+    finally
+    {
+        await app.dispose();
+    }
+    const held = store?.heldModules;
+    assert.ok(held?.added > 0, `the first kept its modules alive: ${JSON.stringify(held)}`);
+    assert.ok(held?.again > 0, `the second compiled the same ones: ${JSON.stringify(held)}`);
+});
+
 test('the run\'s translation store keeps its records file open past a child, until the run goes',
     { timeout: 120000 }, async t=>{
         // A child's machine going let go of the store every process shares:
