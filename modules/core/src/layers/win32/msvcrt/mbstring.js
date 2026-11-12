@@ -25,7 +25,7 @@ import {
     CT_BLANK, CT_HEX, CT_LETTER, CT_ALPHA,
 } from './inguest.js';
 import { COMPILED } from './inguest.x86.js';
-import { compareUnitsAt, wideStringAt } from './widetext.js';
+import { wideStringAt } from './widetext.js';
 import { createMultiByteHandlers, createMultiBytePage } from './mbcs.js';
 import { pointerWidth } from '../common/pointers.js';
 import {
@@ -137,12 +137,6 @@ export function createWideFunctions(host){
         }
         host.writeMemory(pointer, bytes);
     };
-
-    /** @param {string} a @param {string} b */
-    const compare = (a, b)=>(a === b ? 0 : (a < b ? -1 : 1));
-
-    /** @param {string} text */
-    const foldCase = text=>text.replace(/[A-Z]/g, letter=>letter.toLowerCase());
 
     /**
      * wcstok's saved position: one stream for the runtime, apart from
@@ -270,14 +264,8 @@ export function createWideFunctions(host){
         /** int wcsncmp(const wchar_t *, const wchar_t *, size_t) -- in the guest */
         wcsncmp: guestEntry(inGuest.wcsncmp, COMPILED.wcsncmp, host),
 
-        /** int _wcsicmp(const wchar_t *, const wchar_t *) */
-        _wcsicmp: {
-            convention: 'cdecl',
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([left, right])=>compare(
-                foldCase(readWide(left)), foldCase(readWide(right))),
-        },
+        /** int _wcsicmp(const wchar_t *, const wchar_t *) -- in the guest, ASCII folded */
+        _wcsicmp: guestEntry(inGuest._wcsicmp, COMPILED._wcsicmp, host),
 
         /** wchar_t *wcschr(const wchar_t *, wchar_t) -- in the guest */
         wcschr: guestEntry(inGuest.wcschr, COMPILED.wcschr, host),
@@ -285,27 +273,8 @@ export function createWideFunctions(host){
         /** wchar_t *wcsrchr(const wchar_t *, wchar_t) -- in the guest */
         wcsrchr: guestEntry(inGuest.wcsrchr, COMPILED.wcsrchr, host),
 
-        /**
-         * int _wcsnicmp(const wchar_t *left, const wchar_t *right, size_t count)
-         *
-         * At most `count` units compared with ASCII folded to lower case, as
-         * `_wcsicmp` folds; the answer is the difference of the first two
-         * that differ, the terminator ending both.
-         */
-        _wcsnicmp: {
-            convention: 'cdecl',
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([left, right, count])=>{
-                const limit = count >>> 0;
-                if (limit === 0)
-                {
-                    return 0;
-                }
-                return compareUnitsAt(host.readMemory, left, right, 2, limit,
-                    unit=>folded(LOWER, unit));
-            },
-        },
+        /** int _wcsnicmp(const wchar_t *left, const wchar_t *right, size_t count) -- in the guest, ASCII folded */
+        _wcsnicmp: guestEntry(inGuest._wcsnicmp, COMPILED._wcsnicmp, host),
 
         /** wchar_t *_wcslwr(wchar_t *text) -- ASCII lowered in place, as the C locale has it */
         _wcslwr: foldInPlace(LOWER),

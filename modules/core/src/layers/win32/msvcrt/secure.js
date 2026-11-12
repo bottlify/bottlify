@@ -19,7 +19,10 @@
  */
 
 import { EINVAL, ERANGE } from './globals.js';
+import * as inGuest from './inguest.js';
 import { LOWER, UPPER } from './inguest.js';
+import { guestEntry } from './guest-code.js';
+import { COMPILED } from './inguest.x86.js';
 import { unitsAt } from './widetext.js';
 
 /**
@@ -307,19 +310,6 @@ export function createSecureFunctions(host){
     });
 
     /**
-     * size_t strnlen(const char *str, size_t max), and wcsnlen.
-     *
-     * @param {number} unit
-     */
-    const lengthBounded = unit=>({
-        convention: /** @type {'cdecl'} */ ('cdecl'),
-        argBytes: 8,
-        /** @param {number[]} args */
-        handler: (/** @type {number[]} */ [string, max])=>readUnits(string, unit, max >>> 0)
-            .units.length,
-    });
-
-    /**
      * _strlwr_s, _strupr_s, _wcslwr_s and _wcsupr_s: the C locale's ASCII
      * folded in place. The string is measured before it is changed, so one
      * with no terminator within its size is only cleared, EINVAL -- and so
@@ -441,8 +431,9 @@ export function createSecureFunctions(host){
         wcsncpy_s: copyCounted(2),
         strncat_s: appendCounted(1),
         wcsncat_s: appendCounted(2),
-        strnlen: lengthBounded(1),
-        wcsnlen: lengthBounded(2),
+        /** size_t strnlen(const char *str, size_t max) and wcsnlen -- in the guest */
+        strnlen: guestEntry(inGuest.strnlen, COMPILED.strnlen, host),
+        wcsnlen: guestEntry(inGuest.wcsnlen, COMPILED.wcsnlen, host),
 
         /**
          * errno_t memcpy_s(void *dst, size_t size, const void *src, size_t count)

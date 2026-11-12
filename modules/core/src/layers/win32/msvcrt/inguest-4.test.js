@@ -101,3 +101,54 @@ test('wcsncmp, wcscat and wcsncat: counts short, equal and past, joins over them
         same('wcscat', { stack: [at + 0x80, at + 4], memory });
     }
 });
+
+test('strnlen and wcsnlen: bounded short of the terminator, at it and past it', ()=>{
+    const next = random(45);
+    const text = letters(next);
+    const units = wideUnits(next);
+    for (let i = 0; i < 100; i++)
+    {
+        const bytes = text(next() % 20);
+        const list = units(next() % 20);
+        for (const most of [0, 1, bytes.length, bytes.length + 1, 0xffffffff])
+        {
+            same('strnlen', { stack: [DATA, most], memory: [[DATA, [...bytes, 0]]] });
+        }
+        for (const most of [0, 1, list.length, list.length + 1, 0xffffffff])
+        {
+            same('wcsnlen', { stack: [DATA, most], memory: [[DATA, wide(list)]] });
+        }
+    }
+});
+
+test('_wcsicmp, _wcsnicmp and _memicmp: ASCII folded, every other unit as it is; no buffer the'
+    + ' handler\'s', ()=>{
+    const next = random(46);
+    const mixed = (/** @type {number} */ length)=>Array.from({ length },
+        ()=>[0x41, 0x61, 0x5a, 0x7a, 0x40, 0x5b, 0xc9, 0xe9, 0x100, 0xffff][next() % 10]);
+    const handed = { host: ()=>0x7fffffff };
+    for (let i = 0; i < 150; i++)
+    {
+        const a = mixed(next() % 12);
+        const b = next() % 2 === 0 ? a.map(u=>(u >= 0x41 && u <= 0x5a ? u + 0x20
+            : u >= 0x61 && u <= 0x7a ? u - 0x20 : u)) : mixed(next() % 12);
+        if (b.length > 0 && next() % 3 === 0)
+        {
+            b[next() % b.length] = mixed(1)[0];
+        }
+        const memory = /** @type {[number, number[]][]} */ ([[DATA, wide(a)],
+            [DATA + 0x100, wide(b)], [DATA + 0x200, [...a, 0].map(u=>u & 0xff)],
+            [DATA + 0x300, [...b, 0].map(u=>u & 0xff)]]);
+        same('_wcsicmp', { stack: [DATA, DATA + 0x100], memory });
+        for (const count of [0, 1, a.length, a.length + 1, 0xffffffff])
+        {
+            same('_wcsnicmp', { stack: [DATA, DATA + 0x100, count], memory });
+        }
+        for (const count of [0, 1, Math.min(a.length, b.length) + 1])
+        {
+            same('_memicmp', { stack: [DATA + 0x200, DATA + 0x300, count], memory }, handed);
+        }
+        same('_memicmp', { stack: [0, DATA + 0x300, 3], memory }, handed);
+        same('_memicmp', { stack: [0, 0, 0], memory }, handed);
+    }
+});

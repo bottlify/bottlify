@@ -2468,3 +2468,123 @@ export function wcspbrk({ u16 }, text, accept){
         }
     }
 }
+
+/**
+ * size_t strnlen(const char *text, size_t most)
+ *
+ * The bytes before the terminator, `most` at the most: no byte past them read.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} text @param {u32} most
+ * @returns {u32}
+ */
+export function strnlen({ u8 }, text, most){
+    /** @type {u32} */
+    let length = 0;
+    while (length < most && u8(text + length) !== 0)
+    {
+        length++;
+    }
+    return length;
+}
+
+/**
+ * size_t wcsnlen(const wchar_t *text, size_t most)
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} text @param {u32} most
+ * @returns {u32}
+ */
+export function wcsnlen({ u16 }, text, most){
+    /** @type {u32} */
+    let length = 0;
+    while (length < most && u16(text + length * 2) !== 0)
+    {
+        length++;
+    }
+    return length;
+}
+
+/** A unit with the ASCII capitals folded to lower case, the C locale's. */
+const lowerUnit = (/** @type {number} */ unit)=>(unit < 0x80 ? LOWER[unit] : unit);
+
+/**
+ * int _wcsicmp(const wchar_t *left, const wchar_t *right)
+ *
+ * wcscmp with the ASCII letters folded to lower case, the answer -1, 0 or 1.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} left @param {u32} right
+ * @returns {i32}
+ */
+export function _wcsicmp({ u16 }, left, right){
+    for (/** @type {u32} */ let i = 0; ; i += 2)
+    {
+        const a = lowerUnit(u16(left + i));
+        const b = lowerUnit(u16(right + i));
+        if (a !== b)
+        {
+            return a < b ? -1 : 1;
+        }
+        if (a === 0)
+        {
+            return 0;
+        }
+    }
+}
+
+/**
+ * int _wcsnicmp(const wchar_t *left, const wchar_t *right, size_t count)
+ *
+ * At most `count` units with the ASCII letters folded to lower case, the
+ * answer the difference of the first two that differ, the terminator
+ * ending both.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} left @param {u32} right @param {u32} count
+ * @returns {i32}
+ */
+export function _wcsnicmp({ u16 }, left, right, count){
+    for (/** @type {u32} */ let i = 0; i < count; i++)
+    {
+        const a = lowerUnit(u16(left + i * 2));
+        const b = lowerUnit(u16(right + i * 2));
+        if (a !== b || a === 0)
+        {
+            return (a - b) | 0;
+        }
+    }
+    return 0;
+}
+
+/**
+ * int _memicmp(const void *left, const void *right, size_t count)
+ *
+ * memcmp with the ASCII letters folded to lower case, the answer the
+ * difference of the first two bytes that differ; no buffer for a count is
+ * the handler's (_NLSCMPERROR and EINVAL, errno being the thread's).
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} left @param {u32} right @param {u32} count
+ * @returns {i32}
+ */
+export function _memicmp({ u8, host }, left, right, count){
+    if (count === 0)
+    {
+        return 0;
+    }
+    if (left === 0 || right === 0)
+    {
+        return host();
+    }
+    for (/** @type {u32} */ let i = 0; i < count; i++)
+    {
+        const a = LOWER[u8(left + i)];
+        const b = LOWER[u8(right + i)];
+        if (a !== b)
+        {
+            return (a - b) | 0;
+        }
+    }
+    return 0;
+}

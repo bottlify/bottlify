@@ -327,11 +327,10 @@ export function createStringFunctions(host){
          * int _memicmp(const void *left, const void *right, size_t count)
          *
          * memcmp with the ASCII letters folded to lower case, the answer the
-         * difference of the first two bytes that differ; no buffer for a
-         * count is _NLSCMPERROR and EINVAL.
+         * difference of the first two bytes that differ -- in the guest; no
+         * buffer for a count is this handler's, _NLSCMPERROR and EINVAL.
          */
-        _memicmp: {
-            convention: 'cdecl',
+        _memicmp: guestEntry(inGuest._memicmp, COMPILED._memicmp, host, {
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([left, right, count])=>{
@@ -357,7 +356,7 @@ export function createStringFunctions(host){
                 }
                 return 0;
             },
-        },
+        }),
 
         /** void *memchr(const void *buffer, int value, size_t count) -- in the guest */
         memchr: guestEntry(inGuest.memchr, COMPILED.memchr, host),
