@@ -1731,24 +1731,24 @@ been the default since 2026-10-21; the placement on gains, the trade and `cpu.fr
 the one way into them, are gone. `cpu.placement: 'concentrate'`, every thread taking turns on the
 process's executor, stays as a debugging switch. *2026-10-31.*
 
-**Visual C++ 8's and 10's x87 transcendentals are the host's functions, not the runtime's SSE2
-code.** A call to `_CIsin`, `_CIcos`, `_CItan`, `_CIatan`, `_CIasin`, `_CIacos`, `_CIlog`,
-`_CIlog10`, `_CIexp` or `_CIpow` in a program linked with either runtime (PhysX 2.7-2.8, Call of
-Duty 4's executable, 3DMark 11's workloads) is formed as the host's own function for it
-(JavaScript's `Math.sin` and the rest), its result put on the x87 stack in the argument's place,
-where the runtime takes its SSE2 routines, as it does on every processor with SSE2 and so on the one
-cork reports. Against the runtime's own code (`msvcr80.dll` 8.0.50727.42 and `msvcr100.dll`,
-`tools/crt-dictionary.mjs --verify`, 400 seeded arguments from 2^-70 to 2^70 a function, its SSE2
-path at full and at single precision) the results lie at most a unit in the last place apart, and
-agree in everything else the caller sees. The x87's own instructions were not taken: they round to
-the precision control, which the SSE2 code ignores, and their way to `exp` and `pow`, `f2xm1` and
-`fscale` after a product by a logarithm, lost hundreds of units in the last place. An argument where
-the runtime reports an error through `errno` or its result would overflow or underflow (a logarithm
-of zero or less, an arcsine past 1, a power of a base of zero or less, `exp` past 709 or below -708,
-a power whose result's exponent passes 1000, a sine of 2^63 or more, a NaN or an infinity) is left
-to the function's own code, and so is an arctangent of a magnitude past 2^50 or, unless zero, below
-2^-20, which the runtime's SSE2 code answers with the x87's arithmetic at its precision control.
-*2026-11-12.*
+**Visual C++ 7.1's, 8's and 10's x87 transcendentals are the host's functions, not the runtime's
+SSE2 code.** A call to `_CIsin`, `_CIcos`, `_CItan`, `_CIatan`, `_CIasin`, `_CIacos`, `_CIlog`,
+`_CIlog10`, `_CIexp` or `_CIpow` in a program linked with one of those runtimes (PhysX 2.7-2.8,
+3DMark06's PhysX, Call of Duty 4's executable, 3DMark 11's workloads) is formed as the host's own
+function for it (JavaScript's `Math.sin` and the rest), its result put on the x87 stack in the
+argument's place, where the runtime takes its SSE2 routines, as it does on every processor with SSE2
+and so on the one cork reports. Against the runtime's own code (`msvcr71.dll`, `msvcr80.dll`
+8.0.50727.42 and `msvcr100.dll`, `tools/crt-dictionary.mjs --verify`, 400 seeded arguments from
+2^-70 to 2^70 a function, its SSE2 path at full and at single precision) the results lie at most a
+unit in the last place apart, and agree in everything else the caller sees. The x87's own
+instructions were not taken: they round to the precision control, which the SSE2 code ignores, and
+their way to `exp` and `pow`, `f2xm1` and `fscale` after a product by a logarithm, lost hundreds of
+units in the last place. An argument where the runtime reports an error through `errno` or its
+result would overflow or underflow (a logarithm of zero or less, an arcsine past 1, a power of a
+base of zero or less, `exp` past 709 or below -708, a power whose result's exponent passes 1000, a
+sine of 2^63 or more, a NaN or an infinity) is left to the function's own code, and so is an
+arctangent of a magnitude past 2^50 or, unless zero, below 2^-20, which the runtime's SSE2 code
+answers with the x87's arithmetic at its precision control. *2026-11-12.*
 
 ## C. Process model and porting
 

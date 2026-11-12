@@ -201,6 +201,31 @@ const COS_VC10 = { name: '_cos_pentium4', quick: 'd51167b0009625aa',
             [166, 4], [235, 4], [247, 4], [374, 4], [397, 4]] };
 
 /**
+ * Visual C++ 7.1's x87 code its `_CI*` stubs of `sin`, `cos`, `tan`, `asin` and
+ * `acos` call: right past each stub, at the standard's precision (0x27f).
+ */
+const SIN_VC71 = { name: '_sin_x87', quick: '15badf18948964ba',
+    hash: 'f0eccf102ddbc32e', spans: [[0, 145]],
+    masks: [[17, 4], [31, 4], [38, 4], [49, 4], [54, 4], [60, 4], [81, 4], [105, 4],
+        [116, 4], [123, 4], [134, 4], [139, 4]] };
+const COS_VC71 = { name: '_cos_x87', quick: '15badf18948964ba',
+    hash: 'c8c9f02617068bf8', spans: [[0, 145]],
+    masks: [[17, 4], [31, 4], [38, 4], [49, 4], [54, 4], [60, 4], [81, 4], [105, 4],
+        [116, 4], [123, 4], [134, 4], [139, 4]] };
+const TAN_VC71 = { name: '_tan_x87', quick: 'fa6be034eca7a006',
+    hash: '527e264adf3b7138', spans: [[0, 149]],
+    masks: [[17, 4], [33, 4], [40, 4], [51, 4], [56, 4], [62, 4], [85, 4], [109, 4],
+        [120, 4], [127, 4], [138, 4], [143, 4]] };
+const ASIN_VC71 = { name: '_asin_x87', quick: 'a40a1d6dc3871d0f',
+    hash: '76db078eadbff2db', spans: [[0, 174]],
+    masks: [[16, 4], [43, 4], [50, 4], [61, 4], [66, 4], [99, 4], [110, 4], [134, 4],
+        [145, 4], [152, 4], [163, 4], [168, 4]] };
+const ACOS_VC71 = { name: '_acos_x87', quick: 'a40a1d6dc3871d0f',
+    hash: '7db8db65ebf73c9c', spans: [[0, 174]],
+    masks: [[16, 4], [45, 4], [52, 4], [63, 4], [68, 4], [110, 4], [134, 4], [145, 4],
+        [152, 4], [163, 4], [168, 4]] };
+
+/**
  * A runtime's `_CI*` stubs of one argument: alike to the byte (its `hash`) but
  * for where they jump, each told by the SSE2 code that jump leads to.
  *
@@ -421,6 +446,15 @@ export const CRT_DICTIONARY = Object.freeze([
     // link Visual C++ 8's.
     ...ciStubs('45863a1a223a40e7', { cisin: SIN_VC8, cicos: COS_VC8, citan: TAN, ciatan: ATAN,
         ciasin: ASIN, ciacos: ACOS, cilog: LOG, cilog10: LOG10 }),
+    // Visual C++ 7.1's (3DMark06's PhysXCore.dll): `sub esp, 12; fst [esp]`, a call to
+    // its check of the argument, then to its own x87 code, which tells it.
+    ...Object.entries({ cisin: SIN_VC71, cicos: COS_VC71, citan: TAN_VC71, ciasin: ASIN_VC71,
+        ciacos: ACOS_VC71 }).map(([does, core])=>entry({
+        name: `_CI${does.slice(2)}`, does: /** @type {import('./helpers.js').Crt} */ (does),
+        lead: X87_LEAD, quick: '6e3bba6787d6fe75', hash: '34eaaf6d5cb1a55b', spans: [[0, 20]],
+        masks: [[7, 4], [12, 4]], via: viaJump(12, 0, core),
+        // Its asin and acos compute 1 - x^2 and its root at the precision control.
+        ...does === 'ciasin' || does === 'ciacos' ? { precise: true } : {} })),
     ...ciStubs('9ea4bc7ae8223fc7', { cisin: SIN_VC10, cicos: COS_VC10, citan: TAN,
         ciatan: ATAN, ciasin: ASIN, ciacos: ACOS, cilog: LOG, cilog10: LOG10 }),
     entry({ name: '_CIexp', does: 'ciexp', lead: X87_LEAD, quick: 'f1454e170f6c75b1',

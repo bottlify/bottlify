@@ -66,6 +66,8 @@ import { CRT_DICTIONARY } from './crt-dictionary.js';
  *     and differ only in where they jump (MSVC's `_CIsin`, `_CIcos`, ...)
  * @property {readonly number[]} [lead]   what a call to it is formed as before its
  *     operation's test (`does`): the argument put where the test reads it, below esp
+ * @property {boolean} [precise]  formed only while the x87's precision control is double
+ *     or extended: the function computes at it, single precision rounding its result
  */
 
 /**
@@ -327,6 +329,7 @@ export function helperInstructions(helper, call, target, read){
             flagsRead: 0, flagsWritten: 0, flagsUndefined: ARITH_FLAGS, faults: 'none',
             memory: false, prefixes: call.prefixes, opcode: call.opcode, helper: named,
             ...out.length === 0 ? {} : { crtLead: out.length },
+            ...helper.precise === true ? { crtPrecise: true } : {},
             ...helper.word === undefined || read === undefined ? {}
                 : { crtWord: wordOf(helper, target, read),
                     ...helper.wordRip === true ? { crtWordInBlock: true } : {} },

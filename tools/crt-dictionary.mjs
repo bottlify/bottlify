@@ -49,8 +49,8 @@ const FLOATS = ['sqrt', 'floor', 'ceil'];
 
 /**
  * What the dictionary's entry of these bytes and this operation adds to a signature:
- * the global it reads (`word`), what it puts first (`lead`), and the code its jump
- * leads to (`via`).
+ * the global it reads (`word`), what it puts first (`lead`), the code its jump
+ * leads to (`via`), and whether it is formed only at double precision (`precise`).
  *
  * @param {string} hash @param {string} operation
  */
@@ -58,7 +58,7 @@ const knownOf = (hash, operation)=>{
     const known = CRT_DICTIONARY.find(entry=>entry.hash === hash && entry.does === operation)
         ?? CRT_DICTIONARY.find(entry=>entry.hash === hash);
     return Object.fromEntries(Object.entries({ word: known?.word, lead: known?.lead,
-        via: known?.via }).filter(([, value])=>value !== undefined));
+        via: known?.via, precise: known?.precise }).filter(([, value])=>value !== undefined));
 };
 
 /** The x87 transcendentals (`_CIsin` and kin): ST0 (ST1) in, ST0 out, compared within ulps. */

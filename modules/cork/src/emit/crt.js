@@ -138,6 +138,13 @@ export function emitCrt(e, instruction){
                 return false;
             }
             mathArgument(e, operation);
+            if (instruction.crtPrecise === true)
+            {
+                // Left to the function under single precision (`precise`).
+                e.b.localGet(Local.addr).i32const(-1)
+                    .localGet(Local.x87Control).i32const(0x200).op(I32.and).select()
+                    .localSet(Local.addr);
+            }
             leaveUnless(e, instruction);
             hostResult(e, operation);
             return true;

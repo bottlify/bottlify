@@ -37,13 +37,17 @@ test('every entry of the dictionary is a signature that tells its function apart
         const inSpans = (/** @type {number} */ at)=>spans.some(([o, n])=>at >= o && at < o + n);
         assert.ok(masks.every((at, i)=>inSpans(at) && (i === 0 || at > masks[i - 1])),
             `${name}: masks in order, each in a span`);
-        const code = spans.reduce((sum, [, n])=>sum + n, 0);
+        // A stub told by where it jumps is told by both signatures' bytes together.
+        const code = [spans, via?.spans ?? []].flat().reduce((sum, [, n])=>sum + n, 0);
+        const masked = masks.length + (via?.masks?.length ?? 0);
         // A stub whose shape is its operation (`shape`) is told by its every unmasked byte:
-        // masked, only addresses its operation reads or makes the call to.
-        const significant = code - masks.length >= SIGNIFICANT_BYTES
-            && masks.length <= code * MASKED_SHARE;
+        // masked, only addresses its operation reads or makes the call to. Four times the
+        // bytes it takes tell a function apart whatever share its addresses take (the x87
+        // code of Visual C++ 7.1's `_CI*`, a third of it the runtime's globals).
+        const significant = code - masked >= 4 * SIGNIFICANT_BYTES
+            || code - masked >= SIGNIFICANT_BYTES && masked <= code * MASKED_SHARE;
         assert.ok(entry.shape === true || significant,
-            `${name}: ${code - masks.length} bytes unmasked of ${code}`);
+            `${name}: ${code - masked} bytes unmasked of ${code}`);
         assert.ok(entry.shape !== true || entry.word !== undefined,
             `${name}: a shape is a test of a global`);
         const [first, end] = helperExtent(entry);

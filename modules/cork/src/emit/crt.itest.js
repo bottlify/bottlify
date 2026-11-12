@@ -885,3 +885,29 @@ test('the x87 transcendentals (_CI*) answer as the host\'s functions where the a
     }
     assert.ok(formed > 50 && left > 50, `${formed} formed, ${left} left`);
 });
+
+test('a transcendental formed only at double precision (`precise`) is left to the function'
+    + ' under single precision, and formed under double and extended', ()=>{
+    const fn = [...X87_WAY.ciasin, 0xc3];
+    const entry = CRT_DICTIONARY.find(one=>one.does === 'ciasin' && one.precise === true);
+    assert.ok(entry !== undefined, 'the dictionary has an asin formed only at double precision');
+    const helpers = [{ name: 'asin', does: /** @type {'ciasin'} */ ('ciasin'), lead: entry.lead,
+        precise: true, body: CRT_BODIES.ciasin, length: fn.length,
+        hash: fingerprint(at=>fn[at - HELPER_AT] ?? 0, HELPER_AT, fn.length) }];
+    for (const control of [0x7f, 0x27f, 0x37f])
+    {
+        const m = createTestMachine({ ramSize: RAM });
+        m.write(HELPER_AT, fn);
+        const bits = new DataView(new ArrayBuffer(8));
+        bits.setFloat64(0, 0.25, true);
+        m.write(ARGUMENTS, [...new Uint8Array(bits.buffer)]);
+        const code = [0xdd, 0x05, ...u32(ARGUMENTS)];
+        code.push(0xe8, ...rel(PROGRAM + code.length, HELPER_AT));
+        code.push(0xdd, 0x1d, ...u32(OUT), 0xf4);
+        m.write(PROGRAM, code);
+        m.setReg('esp', STACK);
+        new DataView(m.memory.buffer).setUint16(m.layout.x87Control, control, true);
+        const exit = m.runProgram(PROGRAM, { helpers });
+        assert.equal(exit.kind === -2, control === 0x7f, `control ${control.toString(16)}`);
+    }
+});

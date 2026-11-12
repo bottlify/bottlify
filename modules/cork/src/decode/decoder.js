@@ -90,6 +90,7 @@ export const SEGMENTS = Object.freeze(['es', 'cs', 'ss', 'ds', 'fs', 'gs']);
  *           to a function the dictionary knows is formed as (`emit/crt.js`)
  * @property {number} [crtWord]  of a `crt`: the address its helper reads a dword at as it
  *           runs (`RuntimeHelper.word`)
+ * @property {boolean} [crtPrecise]  of a `crt`: its helper's `precise`
  * @property {number} [crtLead]  of a `crt`: the instructions formed for the call before it
  *           (`RuntimeHelper.lead`), uncounted where it leaves before the call
  * @property {boolean} [crtWordInBlock]  that address is RIP-relative's: an offset in a wide
