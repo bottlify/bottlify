@@ -43,8 +43,10 @@ const MAX_STRING = 1 << 20;
 
 /**
  * @param {SecureHost} host
+ * @param {{ inGuest?: boolean }} [options]  `inGuest: false` answers every
+ *     copy and append on the host, the path the guest's is gated against.
  */
-export function createSecureFunctions(host){
+export function createSecureFunctions(host, { inGuest: guestCode = true } = {}){
     /** @param {number} code */
     const fail = code=>{
         host.errno?.(code);
@@ -422,15 +424,27 @@ export function createSecureFunctions(host){
         },
     });
 
+    /**
+     * A secure copy in the guest (`inguest.js`): the copy that fits there,
+     * every refusal the handler's, as the call came.
+     *
+     * @param {keyof typeof COMPILED & keyof typeof inGuest} name
+     * @param {{ argBytes: number, handler: (args: number[]) => number }} fallback
+     */
+    const inGuestWith = (name, fallback)=>(guestCode
+        ? guestEntry(/** @type {Function} */ (inGuest[name]), COMPILED[name], host,
+            { argBytes: fallback.argBytes, handler: fallback.handler })
+        : { convention: 'cdecl', ...fallback });
+
     return {
-        strcpy_s: copy(1),
-        wcscpy_s: copy(2),
-        strcat_s: append(1),
-        wcscat_s: append(2),
-        strncpy_s: copyCounted(1),
-        wcsncpy_s: copyCounted(2),
-        strncat_s: appendCounted(1),
-        wcsncat_s: appendCounted(2),
+        strcpy_s: inGuestWith('strcpy_s', copy(1)),
+        wcscpy_s: inGuestWith('wcscpy_s', copy(2)),
+        strcat_s: inGuestWith('strcat_s', append(1)),
+        wcscat_s: inGuestWith('wcscat_s', append(2)),
+        strncpy_s: inGuestWith('strncpy_s', copyCounted(1)),
+        wcsncpy_s: inGuestWith('wcsncpy_s', copyCounted(2)),
+        strncat_s: inGuestWith('strncat_s', appendCounted(1)),
+        wcsncat_s: inGuestWith('wcsncat_s', appendCounted(2)),
         /** size_t strnlen(const char *str, size_t max) and wcsnlen -- in the guest */
         strnlen: guestEntry(inGuest.strnlen, COMPILED.strnlen, host),
         wcsnlen: guestEntry(inGuest.wcsnlen, COMPILED.wcsnlen, host),
@@ -441,8 +455,7 @@ export function createSecureFunctions(host){
          * Nothing to copy is no error, whatever the pointers; no source, or
          * more than the destination holds, zeroes the whole destination.
          */
-        memcpy_s: {
-            convention: 'cdecl',
+        memcpy_s: inGuestWith('memcpy_s', {
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([destination, size, source, count])=>{
@@ -467,15 +480,14 @@ export function createSecureFunctions(host){
                 host.writeMemory(destination, host.readMemory(source, length).slice());
                 return 0;
             },
-        },
+        }),
 
         /**
          * errno_t memmove_s(void *dst, size_t size, const void *src, size_t count)
          *
          * memcpy_s's refusals, the destination left as it was.
          */
-        memmove_s: {
-            convention: 'cdecl',
+        memmove_s: inGuestWith('memmove_s', {
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([destination, size, source, count])=>{
@@ -495,7 +507,7 @@ export function createSecureFunctions(host){
                 host.writeMemory(destination, host.readMemory(source, length).slice());
                 return 0;
             },
-        },
+        }),
 
         /** errno_t _strlwr_s(char *str, size_t size) */
         _strlwr_s: fold(1, LOWER),

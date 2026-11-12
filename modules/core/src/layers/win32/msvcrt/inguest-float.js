@@ -34,6 +34,7 @@ import { X87 } from './x87.js';
 
 /** @typedef {import('./guest-code.js').Guest} Guest */
 /** @typedef {import('./guest-code.js').f64} f64 */
+/** @typedef {import('./guest-code.js').f32} f32 */
 /** @typedef {import('./guest-code.js').i32} i32 */
 /** @typedef {import('./guest-code.js').u32} u32 */
 
@@ -635,6 +636,380 @@ export function atof({ u8, controlWord, setControlWord, host, pointerBytes }, te
                 : exponent;
             at++;
             c = u8(at);
+        }
+        scale = minus !== 0 ? (scale - exponent) | 0 : (scale + exponent) | 0;
+    }
+    if (scale > 22 || scale < -22)
+    {
+        return host();
+    }
+    // The i386's x87 rounds to doubles for the computation; x86-64's SSE2 does already.
+    const word = pointerBytes === 4 ? controlWord() : 0;
+    if (pointerBytes === 4)
+    {
+        setControlWord(exactly(word));
+    }
+    /** @type {f64} */
+    let whole = +high;
+    let k = (digits - 9) | 0;
+    while (k > 0)
+    {
+        whole = whole * 10;
+        k--;
+    }
+    whole = whole + low;
+    /** @type {f64} */
+    let power = 1;
+    k = scale < 0 ? (0 - scale) | 0 : scale;
+    while (k > 0)
+    {
+        power = power * 10;
+        k--;
+    }
+    const value = scale < 0 ? whole / power : whole * power;
+    if (pointerBytes === 4)
+    {
+        setControlWord(word);
+    }
+    return negative !== 0 ? -value : value;
+}
+
+/**
+ * A double's class as the UCRT's `_dclass` answers it, as a short:
+ * FP_INFINITE 1, FP_NAN 2, FP_NORMAL -1, FP_SUBNORMAL -2, FP_ZERO 0, from its
+ * high and low dwords.
+ */
+const doubleClass = (/** @type {number} */ high, /** @type {number} */ low)=>(
+    (high & 0x7ff00000) === 0x7ff00000 ? ((high & 0xfffff) !== 0 || low !== 0 ? 2 : 1)
+        : (high & 0x7ff00000) === 0 ? ((high & 0xfffff) !== 0 || low !== 0 ? 0xfffe : 0)
+            : 0xffff);
+
+/** A float's class from its bits, as `doubleClass`. */
+const floatClass = (/** @type {number} */ bits)=>(
+    (bits & 0x7f800000) === 0x7f800000 ? ((bits & 0x7fffff) !== 0 ? 2 : 1)
+        : (bits & 0x7f800000) === 0 ? ((bits & 0x7fffff) !== 0 ? 0xfffe : 0) : 0xffff);
+
+/**
+ * short _dclass(double x) -- the UCRT's classifier behind fpclassify, isnan
+ * and isfinite, from the double's bits.
+ *
+ * @guestCode cdecl
+ * @param {Pick<Guest, 'doubleLow' | 'doubleHigh'>} guest @param {f64} x
+ * @returns {i32}
+ */
+export function _dclass({ doubleLow, doubleHigh }, x){
+    return doubleClass(doubleHigh(x), doubleLow(x));
+}
+
+/**
+ * short _fdclass(float x)
+ *
+ * @guestCode cdecl
+ * @param {Pick<Guest, 'floatBits'>} guest @param {f32} x
+ * @returns {i32}
+ */
+export function _fdclass({ floatBits }, x){
+    return floatClass(floatBits(x));
+}
+
+/**
+ * short _dtest(double *x) -- the class of the double it points at.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} at
+ * @returns {i32}
+ */
+export function _dtest({ u32 }, at){
+    return doubleClass(u32(at + 4), u32(at));
+}
+
+/**
+ * short _fdtest(float *x)
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} at
+ * @returns {i32}
+ */
+export function _fdtest({ u32 }, at){
+    return floatClass(u32(at));
+}
+
+/**
+ * int _dsign(double x) -- the sign bit, as 0x8000 or zero.
+ *
+ * @guestCode cdecl
+ * @param {Pick<Guest, 'doubleHigh'>} guest @param {f64} x
+ * @returns {i32}
+ */
+export function _dsign({ doubleHigh }, x){
+    return (doubleHigh(x) | 0) < 0 ? 0x8000 : 0;
+}
+
+/**
+ * int _fdsign(float x)
+ *
+ * @guestCode cdecl
+ * @param {Pick<Guest, 'floatBits'>} guest @param {f32} x
+ * @returns {i32}
+ */
+export function _fdsign({ floatBits }, x){
+    return (floatBits(x) | 0) < 0 ? 0x8000 : 0;
+}
+
+/**
+ * double wcstod(const wchar_t *text, wchar_t **end) -- strtod over units:
+ * the number is ASCII as it is in a narrow string, a unit past it stopping
+ * the reading, the end two bytes a character.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} text @param {u32} end
+ * @returns {f64}
+ */
+export function wcstod({ u16, setU32, controlWord, setControlWord, host, pointerBytes }, text,
+    end)
+{
+    if (text === 0)
+    {
+        return host();
+    }
+    let at = text;
+    let c = u16(at);
+    while (c === 0x20 || c >= 0x09 && c <= 0x0d)
+    {
+        at += 2;
+        c = u16(at);
+    }
+    let negative = 0;
+    if (c === 0x2d || c === 0x2b)
+    {
+        negative = c === 0x2d ? 1 : 0;
+        at += 2;
+        c = u16(at);
+    }
+    let seen = 0;
+    let point = 0;
+    let digits = 0;
+    let high = 0;
+    let low = 0;
+    let scale = 0;
+    for (;;)
+    {
+        if (c >= 0x30 && c <= 0x39)
+        {
+            seen = 1;
+            // A leading zero is no significant digit; after the point it
+            // moves the scale as any digit there does.
+            if (digits !== 0 || c !== 0x30)
+            {
+                if (digits < 9)
+                {
+                    high = (Math.imul(high, 10) + (c - 0x30)) | 0;
+                }
+                else if (digits < 15)
+                {
+                    low = (Math.imul(low, 10) + (c - 0x30)) | 0;
+                }
+                else
+                {
+                    // A sixteenth significant digit, past the fast path.
+                    return host();
+                }
+                digits++;
+            }
+            scale = (scale - point) | 0;
+        }
+        else if (c === 0x2e && point === 0)
+        {
+            point = 1;
+        }
+        else
+        {
+            break;
+        }
+        at += 2;
+        c = u16(at);
+    }
+    if (seen === 0)
+    {
+        if (end !== 0)
+        {
+            setU32(end, text);
+            if (pointerBytes === 8)
+            {
+                setU32(end + 4, 0);
+            }
+        }
+        return 0;
+    }
+    if ((c | 0x20) === 0x65 || (c | 0x20) === 0x64)
+    {
+        let after = (at + 2) >>> 0;
+        let d = u16(after);
+        let minus = 0;
+        if (d === 0x2d || d === 0x2b)
+        {
+            minus = d === 0x2d ? 1 : 0;
+            after += 2;
+            d = u16(after);
+        }
+        if (d >= 0x30 && d <= 0x39)
+        {
+            let exponent = 0;
+            while (d >= 0x30 && d <= 0x39)
+            {
+                exponent = exponent < 100000 ? (Math.imul(exponent, 10) + (d - 0x30)) | 0
+                    : exponent;
+                after += 2;
+                d = u16(after);
+            }
+            scale = minus !== 0 ? (scale - exponent) | 0 : (scale + exponent) | 0;
+            at = after;
+        }
+    }
+    if (digits === 0)
+    {
+        if (end !== 0)
+        {
+            setU32(end, at);
+            if (pointerBytes === 8)
+            {
+                setU32(end + 4, 0);
+            }
+        }
+        return negative !== 0 ? -0 : 0;
+    }
+    if (scale > 22 || scale < -22)
+    {
+        return host();
+    }
+    // The i386's x87 rounds to doubles for the computation; x86-64's SSE2 does already.
+    const word = pointerBytes === 4 ? controlWord() : 0;
+    if (pointerBytes === 4)
+    {
+        setControlWord(exactly(word));
+    }
+    /** @type {f64} */
+    let whole = +high;
+    let k = (digits - 9) | 0;
+    while (k > 0)
+    {
+        whole = whole * 10;
+        k--;
+    }
+    whole = whole + low;
+    /** @type {f64} */
+    let power = 1;
+    k = scale < 0 ? (0 - scale) | 0 : scale;
+    while (k > 0)
+    {
+        power = power * 10;
+        k--;
+    }
+    const value = scale < 0 ? whole / power : whole * power;
+    if (pointerBytes === 4)
+    {
+        setControlWord(word);
+    }
+    if (end !== 0)
+    {
+        setU32(end, at);
+        if (pointerBytes === 8)
+        {
+            setU32(end + 4, 0);
+        }
+    }
+    return negative !== 0 ? -value : value;
+}
+
+/**
+ * double _wtof(const wchar_t *text) -- wcstod's reading, and its value, with
+ * no end to report. No text is the handler's: zero and EINVAL.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} text
+ * @returns {f64}
+ */
+export function _wtof({ u16, controlWord, setControlWord, host, pointerBytes }, text){
+    if (text === 0)
+    {
+        return host();
+    }
+    let at = text;
+    let c = u16(at);
+    while (c === 0x20 || c >= 0x09 && c <= 0x0d)
+    {
+        at += 2;
+        c = u16(at);
+    }
+    let negative = 0;
+    if (c === 0x2d || c === 0x2b)
+    {
+        negative = c === 0x2d ? 1 : 0;
+        at += 2;
+        c = u16(at);
+    }
+    let seen = 0;
+    let point = 0;
+    let digits = 0;
+    let high = 0;
+    let low = 0;
+    let scale = 0;
+    for (;;)
+    {
+        if (c >= 0x30 && c <= 0x39)
+        {
+            seen = 1;
+            if (digits !== 0 || c !== 0x30)
+            {
+                if (digits < 9)
+                {
+                    high = (Math.imul(high, 10) + (c - 0x30)) | 0;
+                }
+                else if (digits < 15)
+                {
+                    low = (Math.imul(low, 10) + (c - 0x30)) | 0;
+                }
+                else
+                {
+                    return host();
+                }
+                digits++;
+            }
+            scale = (scale - point) | 0;
+        }
+        else if (c === 0x2e && point === 0)
+        {
+            point = 1;
+        }
+        else
+        {
+            break;
+        }
+        at += 2;
+        c = u16(at);
+    }
+    if (digits === 0)
+    {
+        return negative !== 0 && seen !== 0 ? -0 : 0;
+    }
+    if ((c | 0x20) === 0x65 || (c | 0x20) === 0x64)
+    {
+        at += 2;
+        c = u16(at);
+        let minus = 0;
+        if (c === 0x2d || c === 0x2b)
+        {
+            minus = c === 0x2d ? 1 : 0;
+            at += 2;
+            c = u16(at);
+        }
+        let exponent = 0;
+        while (c >= 0x30 && c <= 0x39)
+        {
+            exponent = exponent < 100000 ? (Math.imul(exponent, 10) + (c - 0x30)) | 0
+                : exponent;
+            at += 2;
+            c = u16(at);
         }
         scale = minus !== 0 ? (scale - exponent) | 0 : (scale + exponent) | 0;
     }

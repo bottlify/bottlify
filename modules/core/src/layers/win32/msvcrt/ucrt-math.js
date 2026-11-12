@@ -19,6 +19,11 @@
  */
 
 import { guestException } from '../common/raise.js';
+import { guestEntry } from './guest-code.js';
+import * as inGuestFloat from './inguest-float.js';
+import * as inGuestMath from './inguest-math.js';
+import { COMPILED as MATH_CODE } from './inguest-math.x86.js';
+import { COMPILED as FLOAT_CODE } from './inguest-float.x86.js';
 import { readDouble, readSingle, returningDouble, returningSingle } from './float.js';
 import { EDOM, ERANGE } from './globals.js';
 
@@ -43,13 +48,6 @@ const TWO_DOUBLES = Object.freeze({ 0: /** @type {'f64'} */ ('f64'),
 const ONE_FLOAT = Object.freeze({ 0: /** @type {'f32'} */ ('f32') });
 const TWO_FLOATS = Object.freeze({ 0: /** @type {'f32'} */ ('f32'),
     1: /** @type {'f32'} */ ('f32') });
-
-/** `_dclass`'s answers: FP_INFINITE, FP_NAN, FP_NORMAL, FP_SUBNORMAL, FP_ZERO. */
-const FP_INFINITE = 1;
-const FP_NAN = 2;
-const FP_NORMAL = -1;
-const FP_SUBNORMAL = -2;
-const FP_ZERO = 0;
 
 /** C's round: halves away from zero, which Math.round is not for negatives. */
 const roundAway = (/** @type {number} */ x)=>(Number.isFinite(x) ? Math.sign(x)
@@ -185,29 +183,6 @@ const EXCEPT1 = [
     { bit: 0x10, mask: 0x20, status: 0xc000008f, errno: 0 }, //      inexact
 ];
 
-/** @param {number} value */
-function classOf(value){
-    if (Number.isNaN(value))
-    {
-        return FP_NAN;
-    }
-    if (!Number.isFinite(value))
-    {
-        return FP_INFINITE;
-    }
-    if (value === 0)
-    {
-        return FP_ZERO;
-    }
-    return Math.abs(value) < 2.2250738585072014e-308 ? FP_SUBNORMAL : FP_NORMAL;
-}
-
-/** @param {number} value  A float's value, read as one. */
-function floatClassOf(value){
-    const kind = classOf(value);
-    return kind === FP_NORMAL && Math.abs(value) < 1.1754943508222875e-38 ? FP_SUBNORMAL : kind;
-}
-
 /**
  * @param {UcrtMathHost} host
  * @returns {Record<string, any>}
@@ -233,8 +208,6 @@ export function createUcrtMathFunctions(host){
         return result;
     };
 
-    /** A short's answer, as the caller reads AX. @param {number} value */
-    const short = value=>value & 0xffff;
 
     /** @type {Record<string, any>} */
     const table = {};
@@ -302,25 +275,31 @@ export function createUcrtMathFunctions(host){
     table.ilogbf = { convention: 'cdecl', argBytes: 4, floats: ONE_FLOAT,
         handler: (/** @type {number[]} */ args)=>exponentOf(readSingle(args, 0)) >>> 0 };
 
-    /** short _dclass(double x), short _fdclass(float x) */
-    table._dclass = { convention: 'cdecl', argBytes: 8, floats: ONE_DOUBLE,
-        handler: (/** @type {number[]} */ args)=>short(classOf(readDouble(args, 0))) };
-    table._fdclass = { convention: 'cdecl', argBytes: 4, floats: ONE_FLOAT,
-        handler: (/** @type {number[]} */ args)=>short(floatClassOf(readSingle(args, 0))) };
+    /**
+     * C99's rounding and comparing (`inguest-math.js`): code in the guest, made
+     * of operations exact at any x87 precision; lround hands a value no long
+     * holds to the handler above (0 and EDOM).
+     */
+    for (const name of /** @type {const} */ (['round', 'roundf', 'trunc', 'truncf', 'copysign',
+        'copysignf', 'fmax', 'fmin', 'fmaxf', 'fminf']))
+    {
+        table[name] = guestEntry(inGuestMath[name], MATH_CODE[name], { fpu });
+    }
+    table.lround = guestEntry(inGuestMath.lround, MATH_CODE.lround, { fpu }, table.lround);
+    table.lroundf = guestEntry(inGuestMath.lroundf, MATH_CODE.lroundf, { fpu }, table.lroundf);
 
-    /** short _dtest(double *x), short _fdtest(float *x): the class of what they point at. */
-    table._dtest = { convention: 'cdecl', argBytes: 4,
-        handler: (/** @type {number[]} */ [at])=>short(classOf(new DataView(
-            host.readMemory(at >>> 0, 8).slice().buffer).getFloat64(0, true))) };
-    table._fdtest = { convention: 'cdecl', argBytes: 4,
-        handler: (/** @type {number[]} */ [at])=>short(floatClassOf(new DataView(
-            host.readMemory(at >>> 0, 4).slice().buffer).getFloat32(0, true))) };
-
-    /** int _dsign(double x), int _fdsign(float x): the sign bit, as 0x8000 or zero. */
-    table._dsign = { convention: 'cdecl', argBytes: 8, floats: ONE_DOUBLE,
-        handler: (/** @type {number[]} */ args)=>((args[1] >>> 31) === 1 ? 0x8000 : 0) };
-    table._fdsign = { convention: 'cdecl', argBytes: 4, floats: ONE_FLOAT,
-        handler: (/** @type {number[]} */ args)=>((args[0] >>> 31) === 1 ? 0x8000 : 0) };
+    /**
+     * short _dclass(double x), short _fdclass(float x), short _dtest(double *x),
+     * short _fdtest(float *x), int _dsign(double x), int _fdsign(float x): the
+     * class and the sign from the bits, in the guest (`inguest-float.js`).
+     */
+    const memory = { readMemory: host.readMemory, writeMemory: host.writeMemory,
+        pointerSize: host.pointerSize };
+    for (const name of /** @type {const} */ (['_dclass', '_fdclass', '_dtest', '_fdtest',
+        '_dsign', '_fdsign']))
+    {
+        table[name] = guestEntry(inGuestFloat[name], FLOAT_CODE[name], memory);
+    }
 
     /**
      * double _except1(DWORD fpe, _FP_OPERATION_CODE op, double arg,

@@ -83,6 +83,11 @@ function setup(texts = {}){
             return block;
         } },
     };
+    // The texts in memory too, where the printers in the guest read their formats.
+    for (const [at, text] of Object.entries(texts))
+    {
+        writeText(Number(at), `${text}\0`);
+    }
     const ucrt = createUcrtbaseFunctions(crt, {
         readMemory: (address, length)=>memory.slice(address, address + length),
         writeMemory: (address, bytes)=>memory.set(bytes, address),
@@ -140,6 +145,37 @@ test('__stdio_common_vsprintf is C99 snprintf or the legacy _vsnprintf, as its o
 
     assert.equal(print(STANDARD_SNPRINTF_BEHAVIOR, buffer, 16), 6);
     assert.equal(textAt(buffer), 'abcdef', 'what fits is the whole text');
+});
+
+test('__stdio_common_vswprintf is C99 snprintf or the legacy _vsnwprintf in units, as its'
+    + ' options say', ()=>{
+    const format = 0x200;
+    const buffer = 0x2000;
+    const { ucrt, memory } = setup();
+    const view = new DataView(memory.buffer);
+    [...'abcdef', '\0'].forEach((c, i)=>view.setUint16(format + 2 * i, c.charCodeAt(0), true));
+    const print = (/** @type {number} */ options, /** @type {number} */ to,
+        /** @type {number} */ count)=>
+        ucrt.__stdio_common_vswprintf.handler([options, 0, to, count, format, 0, 0]);
+    const units = (/** @type {number} */ n)=>Array.from({ length: n },
+        (_, i)=>view.getUint16(buffer + 2 * i, true));
+    const text = (/** @type {string} */ value)=>[...value].map(c=>c.charCodeAt(0));
+
+    assert.equal(print(STANDARD_SNPRINTF_BEHAVIOR, 0, 0), 6, 'no buffer: the length it needs');
+    memory.fill(0xff, buffer, buffer + 32);
+    assert.equal(print(STANDARD_SNPRINTF_BEHAVIOR, buffer, 4), 6,
+        'C99: the length it would have had');
+    assert.deepEqual(units(4), [...text('abc'), 0], 'cut to fit and terminated');
+
+    memory.fill(0xff, buffer, buffer + 32);
+    assert.equal(print(0, buffer, 4), -1, 'legacy: -1 when it does not fit');
+    assert.deepEqual(units(5), [...text('abcd'), 0xffff], 'and no terminator');
+    memory.fill(0xff, buffer, buffer + 32);
+    assert.equal(print(LEGACY_VSPRINTF_NULL_TERMINATION, buffer, 4), -1);
+    assert.deepEqual(units(4), [...text('abc'), 0], 'unless asked to terminate it after all');
+
+    assert.equal(print(STANDARD_SNPRINTF_BEHAVIOR, buffer, 16), 6);
+    assert.deepEqual(units(7), [...text('abcdef'), 0], 'what fits is the whole text');
 });
 
 test('a DLL\'s exit table grows as it is registered to, and runs last first, once', async()=>{
@@ -232,7 +268,8 @@ test('C99\'s 64-bit readings are the runtime\'s own, narrow and wide', ()=>{
     const narrow = { handler: ()=>3 };
     const crt = /** @type {any} */ ({ _strtoi64: narrow, _strtoui64: narrow, _wcstoi64: wide,
         _wcstoui64: wideUnsigned });
-    const ucrt = createUcrtbaseFunctions(crt, /** @type {any} */ ({}));
+    const ucrt = createUcrtbaseFunctions(crt, /** @type {any} */ ({
+        readMemory: ()=>new Uint8Array(0), writeMemory: ()=>{} }));
     assert.equal(ucrt.wcstoll, wide);
     assert.equal(ucrt.wcstoull, wideUnsigned);
     assert.equal(ucrt.strtoll, narrow);

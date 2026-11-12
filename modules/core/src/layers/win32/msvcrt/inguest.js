@@ -2983,3 +2983,452 @@ export function _ultow({ setU8, setU16, host }, value, buffer, radix){
     }
     return radixText({ setU8, setU16 }, value, buffer, radix, 0, 1);
 }
+
+/*
+ * The secure copies and appends (`secure.js`): the copy that fits in the
+ * guest, every refusal -- which clears the destination, sets errno and calls
+ * the invalid-parameter handler -- the handler's, found before anything is
+ * written. A destination inside the source ahead of it is the handler's too:
+ * msvcrt's loop reads back what it wrote there.
+ */
+
+/** The longest string the handlers read: one that reaches it is theirs. */
+const SECURE_MOST = 0x100000;
+
+/** _TRUNCATE's answer when the text was cut. */
+const STRUNCATE = 80;
+
+/**
+ * errno_t strcpy_s(char *destination, size_t size, const char *source): the
+ * source and its terminator when they fit in `size` bytes. No destination,
+ * size or source, a source that does not fit, one past the handler's longest
+ * string and a destination inside the source are the handler's (`secure.js`),
+ * found before a byte is written.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} destination @param {u32} size @param {u32} source
+ * @returns {u32}
+ */
+export function strcpy_s({ u8, copyUp, host }, destination, size, source){
+    if (destination === 0 || size === 0 || source === 0)
+    {
+        return host();
+    }
+    const most = size < SECURE_MOST ? size : SECURE_MOST;
+    /** @type {u32} */
+    let length = 0;
+    while (length < most && u8(source + length) !== 0)
+    {
+        length++;
+    }
+    const gap = (destination - source) >>> 0;
+    if (length >= most || gap !== 0 && gap < ((length + 1) >>> 0))
+    {
+        return host();
+    }
+    copyUp(destination, source, (length + 1) >>> 0);
+    return 0;
+}
+
+/**
+ * errno_t strcat_s(char *destination, size_t size, const char *source): the
+ * source and its terminator after the destination's text, when they fit in
+ * `size` bytes with it. A destination with no terminator within its size
+ * and every refusal strcpy_s hands over are the handler's.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} destination @param {u32} size @param {u32} source
+ * @returns {u32}
+ */
+export function strcat_s({ u8, copyUp, host }, destination, size, source){
+    if (destination === 0 || size === 0 || source === 0)
+    {
+        return host();
+    }
+    const most = size < SECURE_MOST ? size : SECURE_MOST;
+    /** @type {u32} */
+    let end = 0;
+    while (end < most && u8(destination + end) !== 0)
+    {
+        end++;
+    }
+    if (end >= most)
+    {
+        return host();
+    }
+    const left = (size - end) >>> 0;
+    const rest = left < SECURE_MOST ? left : SECURE_MOST;
+    /** @type {u32} */
+    let length = 0;
+    while (length < rest && u8(source + length) !== 0)
+    {
+        length++;
+    }
+    const to = (destination + end) >>> 0;
+    const gap = (to - source) >>> 0;
+    if (length >= rest || gap !== 0 && gap < ((length + 1) >>> 0))
+    {
+        return host();
+    }
+    copyUp(to, source, (length + 1) >>> 0);
+    return 0;
+}
+
+/**
+ * errno_t strncpy_s(char *destination, size_t size, const char *source,
+ * size_t count): at most `count` bytes and a terminator; under _TRUNCATE
+ * what fits of `size`, STRUNCATE when that is not all. No destination, size
+ * or source, a count past the size but not _TRUNCATE, a string past the
+ * handler's longest and a destination inside the source are the handler's.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} destination @param {u32} size @param {u32} source
+ * @param {u32} count
+ * @returns {u32}
+ */
+export function strncpy_s({ u8, setU8, copyUp, host }, destination, size, source, count){
+    if (destination === 0 || size === 0 || source === 0)
+    {
+        return host();
+    }
+    const limit = count < size ? count : size;
+    const most = limit < SECURE_MOST ? limit : SECURE_MOST;
+    /** @type {u32} */
+    let copied = 0;
+    while (copied < most && u8(source + copied) !== 0)
+    {
+        copied++;
+    }
+    /** @type {u32} */
+    let answer = 0;
+    if (copied >= most)
+    {
+        if (most < limit || count >= size && count !== 0xffffffff)
+        {
+            return host();
+        }
+        if (count >= size)
+        {
+            copied = (size - 1) >>> 0;
+            answer = STRUNCATE;
+        }
+    }
+    const gap = (destination - source) >>> 0;
+    if (gap !== 0 && gap <= copied)
+    {
+        return host();
+    }
+    copyUp(destination, source, copied);
+    setU8(destination + copied, 0);
+    return answer;
+}
+
+/**
+ * errno_t strncat_s(char *destination, size_t size, const char *source,
+ * size_t count): at most `count` bytes and a terminator after the
+ * destination's text; under _TRUNCATE what fits, STRUNCATE when that is not
+ * all. A destination with no terminator within its size and every refusal
+ * strncpy_s hands over are the handler's.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} destination @param {u32} size @param {u32} source
+ * @param {u32} count
+ * @returns {u32}
+ */
+export function strncat_s({ u8, setU8, copyUp, host }, destination, size, source, count){
+    if (destination === 0 || size === 0 || source === 0)
+    {
+        return host();
+    }
+    const whole = size < SECURE_MOST ? size : SECURE_MOST;
+    /** @type {u32} */
+    let end = 0;
+    while (end < whole && u8(destination + end) !== 0)
+    {
+        end++;
+    }
+    if (end >= whole)
+    {
+        return host();
+    }
+    const room = (size - end) >>> 0;
+    const limit = count < room ? count : room;
+    const most = limit < SECURE_MOST ? limit : SECURE_MOST;
+    /** @type {u32} */
+    let copied = 0;
+    while (copied < most && u8(source + copied) !== 0)
+    {
+        copied++;
+    }
+    /** @type {u32} */
+    let answer = 0;
+    if (copied >= most)
+    {
+        if (most < limit || count >= room && count !== 0xffffffff)
+        {
+            return host();
+        }
+        if (count >= room)
+        {
+            copied = (room - 1) >>> 0;
+            answer = STRUNCATE;
+        }
+    }
+    const to = (destination + end) >>> 0;
+    const gap = (to - source) >>> 0;
+    if (gap !== 0 && gap <= copied)
+    {
+        return host();
+    }
+    copyUp(to, source, copied);
+    setU8(to + copied, 0);
+    return answer;
+}
+
+/**
+ * errno_t wcscpy_s(wchar_t *destination, size_t size, const wchar_t *source): the
+ * source and its terminator when they fit in `size` units. No destination,
+ * size or source, a source that does not fit, one past the handler's longest
+ * string and a destination inside the source are the handler's (`secure.js`),
+ * found before a unit is written.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} destination @param {u32} size @param {u32} source
+ * @returns {u32}
+ */
+export function wcscpy_s({ u16, copyUp, host }, destination, size, source){
+    if (destination === 0 || size === 0 || source === 0)
+    {
+        return host();
+    }
+    const most = size < SECURE_MOST ? size : SECURE_MOST;
+    /** @type {u32} */
+    let length = 0;
+    while (length < most && u16(source + length * 2) !== 0)
+    {
+        length++;
+    }
+    const gap = (destination - source) >>> 0;
+    if (length >= most || gap !== 0 && gap < ((length * 2 + 2) >>> 0))
+    {
+        return host();
+    }
+    copyUp(destination, source, (length * 2 + 2) >>> 0);
+    return 0;
+}
+
+/**
+ * errno_t wcscat_s(wchar_t *destination, size_t size, const wchar_t *source): the
+ * source and its terminator after the destination's text, when they fit in
+ * `size` units with it. A destination with no terminator within its size
+ * and every refusal wcscpy_s hands over are the handler's.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} destination @param {u32} size @param {u32} source
+ * @returns {u32}
+ */
+export function wcscat_s({ u16, copyUp, host }, destination, size, source){
+    if (destination === 0 || size === 0 || source === 0)
+    {
+        return host();
+    }
+    const most = size < SECURE_MOST ? size : SECURE_MOST;
+    /** @type {u32} */
+    let end = 0;
+    while (end < most && u16(destination + end * 2) !== 0)
+    {
+        end++;
+    }
+    if (end >= most)
+    {
+        return host();
+    }
+    const left = (size - end) >>> 0;
+    const rest = left < SECURE_MOST ? left : SECURE_MOST;
+    /** @type {u32} */
+    let length = 0;
+    while (length < rest && u16(source + length * 2) !== 0)
+    {
+        length++;
+    }
+    const to = (destination + end * 2) >>> 0;
+    const gap = (to - source) >>> 0;
+    if (length >= rest || gap !== 0 && gap < ((length * 2 + 2) >>> 0))
+    {
+        return host();
+    }
+    copyUp(to, source, (length * 2 + 2) >>> 0);
+    return 0;
+}
+
+/**
+ * errno_t wcsncpy_s(wchar_t *destination, size_t size, const wchar_t *source,
+ * size_t count): at most `count` units and a terminator; under _TRUNCATE
+ * what fits of `size`, STRUNCATE when that is not all. No destination, size
+ * or source, a count past the size but not _TRUNCATE, a string past the
+ * handler's longest and a destination inside the source are the handler's.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} destination @param {u32} size @param {u32} source
+ * @param {u32} count
+ * @returns {u32}
+ */
+export function wcsncpy_s({ u16, setU16, copyUp, host }, destination, size, source, count){
+    if (destination === 0 || size === 0 || source === 0)
+    {
+        return host();
+    }
+    const limit = count < size ? count : size;
+    const most = limit < SECURE_MOST ? limit : SECURE_MOST;
+    /** @type {u32} */
+    let copied = 0;
+    while (copied < most && u16(source + copied * 2) !== 0)
+    {
+        copied++;
+    }
+    /** @type {u32} */
+    let answer = 0;
+    if (copied >= most)
+    {
+        if (most < limit || count >= size && count !== 0xffffffff)
+        {
+            return host();
+        }
+        if (count >= size)
+        {
+            copied = (size - 1) >>> 0;
+            answer = STRUNCATE;
+        }
+    }
+    const gap = (destination - source) >>> 0;
+    if (gap !== 0 && gap < ((copied * 2 + 2) >>> 0))
+    {
+        return host();
+    }
+    copyUp(destination, source, copied * 2);
+    setU16(destination + copied * 2, 0);
+    return answer;
+}
+
+/**
+ * errno_t wcsncat_s(wchar_t *destination, size_t size, const wchar_t *source,
+ * size_t count): at most `count` units and a terminator after the
+ * destination's text; under _TRUNCATE what fits, STRUNCATE when that is not
+ * all. A destination with no terminator within its size and every refusal
+ * wcsncpy_s hands over are the handler's.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} destination @param {u32} size @param {u32} source
+ * @param {u32} count
+ * @returns {u32}
+ */
+export function wcsncat_s({ u16, setU16, copyUp, host }, destination, size, source, count){
+    if (destination === 0 || size === 0 || source === 0)
+    {
+        return host();
+    }
+    const whole = size < SECURE_MOST ? size : SECURE_MOST;
+    /** @type {u32} */
+    let end = 0;
+    while (end < whole && u16(destination + end * 2) !== 0)
+    {
+        end++;
+    }
+    if (end >= whole)
+    {
+        return host();
+    }
+    const room = (size - end) >>> 0;
+    const limit = count < room ? count : room;
+    const most = limit < SECURE_MOST ? limit : SECURE_MOST;
+    /** @type {u32} */
+    let copied = 0;
+    while (copied < most && u16(source + copied * 2) !== 0)
+    {
+        copied++;
+    }
+    /** @type {u32} */
+    let answer = 0;
+    if (copied >= most)
+    {
+        if (most < limit || count >= room && count !== 0xffffffff)
+        {
+            return host();
+        }
+        if (count >= room)
+        {
+            copied = (room - 1) >>> 0;
+            answer = STRUNCATE;
+        }
+    }
+    const to = (destination + end * 2) >>> 0;
+    const gap = (to - source) >>> 0;
+    if (gap !== 0 && gap < ((copied * 2 + 2) >>> 0))
+    {
+        return host();
+    }
+    copyUp(to, source, copied * 2);
+    setU16(to + copied * 2, 0);
+    return answer;
+}
+
+/**
+ * errno_t memcpy_s(void *destination, size_t size, const void *source,
+ * size_t count): the bytes as if read whole first, when they fit; nothing
+ * to copy no error. No destination or source, or more than the destination
+ * holds (which the handler zeroes), are the handler's.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} destination @param {u32} size @param {u32} source
+ * @param {u32} count
+ * @returns {u32}
+ */
+export function memcpy_s({ copyUp, copyDown, host }, destination, size, source, count){
+    if (count === 0)
+    {
+        return 0;
+    }
+    if (destination === 0 || source === 0 || count > size)
+    {
+        return host();
+    }
+    if ((destination - source) >>> 0 < count)
+    {
+        copyDown(destination, source, count);
+    }
+    else
+    {
+        copyUp(destination, source, count);
+    }
+    return 0;
+}
+
+/**
+ * errno_t memmove_s(void *destination, size_t size, const void *source,
+ * size_t count): memcpy_s's copy; its refusals, the destination left as it
+ * was, the handler's.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} destination @param {u32} size @param {u32} source
+ * @param {u32} count
+ * @returns {u32}
+ */
+export function memmove_s({ copyUp, copyDown, host }, destination, size, source, count){
+    if (count === 0)
+    {
+        return 0;
+    }
+    if (destination === 0 || source === 0 || count > size)
+    {
+        return host();
+    }
+    if ((destination - source) >>> 0 < count)
+    {
+        copyDown(destination, source, count);
+    }
+    else
+    {
+        copyUp(destination, source, count);
+    }
+    return 0;
+}

@@ -162,6 +162,32 @@ test('the printers in the guest answer, write and count as their JavaScript', ()
         sameAt64('_vscprintf', { stack: [FORMAT, LIST], memory: wide }, HANDED);
         sameAt64('_vsnprintf_s', { stack: [BUFFER, size, limit, FORMAT, LIST], memory: wide },
             HANDED);
+        same('vsprintf_s', { stack: [BUFFER, size, FORMAT, LIST], memory }, HANDED);
+        sameAt64('vsprintf_s', { stack: [BUFFER, size, FORMAT, LIST], memory: wide }, HANDED);
+    }
+});
+
+test('the UCRT\'s printers take their options quadword as two slots at 32 bits and one register'
+    + ' at 64, and answer as their JavaScript under every behaviour the options pick', ()=>{
+    const next = random(44);
+    for (let round = 0; round < 300; round++)
+    {
+        const { format, slots } = caseOf(next);
+        const memory = /** @type {[number, Uint8Array][]} */ ([[DATA, memoryOf(format, slots)]]);
+        const wide = /** @type {[number, Uint8Array][]} */ ([[DATA, memoryOf(format, slots, 8)]]);
+        // The upper half of the options, and a locale, are whatever the caller left.
+        const options = [0, 1, 2, 3][next() % 4];
+        const high = next();
+        const buffer = next() % 6 === 0 ? 0 : BUFFER;
+        const count = [0, 1, 5, 16, 200, 0xffffffff][next() % 6];
+        const format_ = next() % 30 === 0 ? 0 : FORMAT;
+        for (const name of ['__stdio_common_vsprintf', '__stdio_common_vsprintf_s'])
+        {
+            same(name, { stack: [options, high, buffer, count, format_, 0x5eed, LIST], memory },
+                HANDED);
+            sameAt64(name, { stack: [options, buffer, count, format_, 0x5eed, LIST, high],
+                memory: wide }, HANDED);
+        }
     }
 });
 
@@ -219,5 +245,121 @@ test('printInto renders what the host\'s printer renders: the text, its length a
                 [...hostMemory.subarray(at(COUNTS), at(COUNTS) + 32)], `${label}: what %n wrote`);
         }
         assert.ok(rendered > 2000, `${slotBytes}: ${rendered} formats rendered in the guest`);
+    }
+});
+
+/**
+ * The memory of a wide case: the format and the strings in units, the list as
+ * `memoryOf` lays it.
+ *
+ * @param {string} format @param {number[]} slots @param {number} [slotBytes]
+ */
+function wideMemoryOf(format, slots, slotBytes = 4){
+    const bytes = memoryOf('', slots, slotBytes);
+    const view = new DataView(bytes.buffer);
+    [...format, '\0'].forEach((c, i)=>view.setUint16(FORMAT - DATA + 2 * i, c.charCodeAt(0), true));
+    bytes.fill(0, STRINGS - DATA, COUNTS - DATA);
+    TEXTS.forEach((text, k)=>[...text, '\0'].forEach((c, i)=>{
+        view.setUint16(STRINGS - DATA + 64 * k + 2 * i, c.charCodeAt(0), true);
+    }));
+    return bytes;
+}
+
+test('printIntoWide renders what the host\'s wide printer renders: the text in units, its'
+    + ' length and %n, on slots of four bytes and of eight; a narrow string the host\'s', ()=>{
+    for (const slotBytes of [4, 8])
+    {
+        const next = random(45);
+        let rendered = 0;
+        for (let round = 0; round < 6000; round++)
+        {
+            const { format, slots } = caseOf(next);
+            const guestMemory = wideMemoryOf(format, slots, slotBytes);
+            const hostMemory = guestMemory.slice();
+            const view = new DataView(guestMemory.buffer);
+            const at = (/** @type {number} */ address)=>address - DATA;
+            const helpers = {
+                u16: (/** @type {number} */ a)=>view.getUint16(at(a), true),
+                u32: (/** @type {number} */ a)=>view.getUint32(at(a), true),
+                setU16: (/** @type {number} */ a, /** @type {number} */ v)=>
+                    view.setUint16(at(a), v, true),
+                setU32: (/** @type {number} */ a, /** @type {number} */ v)=>
+                    view.setUint32(at(a), v >>> 0, true),
+                pointerBytes: slotBytes,
+            };
+            if (sources.formatInGuestWide(helpers, FORMAT) === 0)
+            {
+                continue;
+            }
+            rendered++;
+            const total = sources.printIntoWide(helpers, BUFFER, 0x100, FORMAT, LIST, 1);
+            const hostView = new DataView(hostMemory.buffer);
+            const readWide = (/** @type {number} */ pointer)=>{
+                let text = '';
+                for (let a = at(pointer); hostView.getUint16(a, true) !== 0; a += 2)
+                {
+                    text += String.fromCharCode(hostView.getUint16(a, true));
+                }
+                return text;
+            };
+            const text = formatToString(format, slots.map(slot=>slot | 0), ()=>{
+                throw new Error('a narrow string reached the host in a format the guest took');
+            }, {
+                cLocale: true,
+                wide: true,
+                readWideString: readWide,
+                writeCount: (pointer, value)=>{
+                    if (pointer !== 0)
+                    {
+                        hostView.setInt32(at(pointer), value, true);
+                    }
+                },
+            });
+            const label = `${slotBytes}-byte slots, round ${round}: ${JSON.stringify(format)}`;
+            assert.equal(total, text.length, `${label}: the length`);
+            const units = [];
+            for (let i = 0; i < Math.min(total, 0x100); i++)
+            {
+                units.push(view.getUint16(at(BUFFER) + 2 * i, true));
+            }
+            assert.equal(String.fromCharCode(...units), text.slice(0, 0x100), `${label}: the text`);
+            assert.deepEqual([...guestMemory.subarray(at(COUNTS), at(COUNTS) + 32)],
+                [...hostMemory.subarray(at(COUNTS), at(COUNTS) + 32)], `${label}: what %n wrote`);
+        }
+        assert.ok(rendered > 1500, `${slotBytes}: ${rendered} formats rendered in the guest`);
+    }
+});
+
+test('the wide printers in the guest answer, write and count as their JavaScript, the UCRT\'s'
+    + ' options two slots at 32 bits and one register at 64', ()=>{
+    const next = random(46);
+    for (let round = 0; round < 300; round++)
+    {
+        const { format, slots } = caseOf(next);
+        const memory = /** @type {[number, Uint8Array][]} */ ([[DATA, wideMemoryOf(format,
+            slots)]]);
+        const wide = /** @type {[number, Uint8Array][]} */ ([[DATA, wideMemoryOf(format, slots,
+            8)]]);
+        const buffer = next() % 6 === 0 ? 0 : BUFFER;
+        const count = [0, 1, 5, 16, 200, 0xffffffff][next() % 6];
+        const size = [1, 8, 64, 200][next() % 4];
+        const options = [0, 1, 2, 3][next() % 4];
+        const high = next();
+        const format_ = next() % 30 === 0 ? 0 : FORMAT;
+        same('_vsnwprintf', { stack: [buffer, count, format_, LIST], memory }, HANDED);
+        sameAt64('_vsnwprintf', { stack: [buffer, count, format_, LIST], memory: wide }, HANDED);
+        same('vswprintf', { stack: [buffer, format_, LIST], memory }, HANDED);
+        sameAt64('vswprintf', { stack: [buffer, format_, LIST], memory: wide }, HANDED);
+        same('_vscwprintf', { stack: [format_, LIST], memory }, HANDED);
+        sameAt64('_vscwprintf', { stack: [format_, LIST], memory: wide }, HANDED);
+        same('vswprintf_s', { stack: [buffer, size, format_, LIST], memory }, HANDED);
+        sameAt64('vswprintf_s', { stack: [buffer, size, format_, LIST], memory: wide }, HANDED);
+        for (const name of ['__stdio_common_vswprintf', '__stdio_common_vswprintf_s'])
+        {
+            same(name, { stack: [options, high, buffer, count, format_, 0x5eed, LIST], memory },
+                HANDED);
+            sameAt64(name, { stack: [options, buffer, count, format_, 0x5eed, LIST, high],
+                memory: wide }, HANDED);
+        }
     }
 });
