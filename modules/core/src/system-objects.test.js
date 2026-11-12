@@ -11,11 +11,11 @@ import { createSyncObjects } from './layers/kernel/internal/sync.js';
 
 const OBJECT_0 = 0;
 
-/** @param {Map<string, any>} [table] */
-const service = (table = new Map())=>{
+/** @param {Map<string, any>} [table] @param {Map<number, any>} [processes] */
+const service = (table = new Map(), processes = new Map())=>{
     /** @type {[number, number][]} */
     const woken = [];
-    const { objects, dispose } = objectHandlers({ table, wake: (token, result)=>{
+    const { objects, dispose } = objectHandlers({ table, processes, wake: (token, result)=>{
         woken.push([token, result]);
         return Promise.resolve();
     } });
@@ -175,4 +175,24 @@ test('an object of another process handed over after the wait had ended goes bac
     wake(...late[0]);
     assert.equal(/** @type {any} */ (one.thread).waitResult, 0, 'the late word changes nothing');
     assert.equal(one.objects.poll(one.id, 9), OBJECT_0, 'and the other event was set again');
+});
+
+test('a process of the run is found across the link by its id: its exit is an object a thread'
+    + ' there waits on, and its code is read once it has one', ()=>{
+    const here = createSyncObjects({ scheduler: { block(){}, wake(){}, onTimeout(){} } });
+    const record = { kind: 'process', id: 8120, threadId: 8121, imagePath: 'C:\\ngen.exe',
+        completed: false, exitCode: 259,
+        exited: here.createEvent({ manualReset: true, signalled: false, name: 'process 8120' }) };
+    const { objects, woken } = service(new Map(), new Map([[8120, record]]));
+    assert.equal(objects.process(8200), null, 'an id no process of the run has');
+    const found = /** @type {any} */ (objects.process(8120));
+    assert.deepEqual({ ...found, id: typeof found.id }, { id: 'number', threadId: 8121,
+        imagePath: 'C:\\ngen.exe', exitCode: null }, 'running: no code yet');
+    assert.equal(objects.wait(found.id, 9, 11), null, 'a wait on a running process is queued');
+    record.completed = true;
+    record.exitCode = 3;
+    here.setEvent(record.exited);
+    assert.deepEqual(woken, [[11, OBJECT_0]], 'its exit reached the waiter there');
+    assert.equal(/** @type {any} */ (objects.process(8120)).exitCode, 3);
+    assert.equal(objects.poll(found.id, 9), OBJECT_0, 'and stays signalled, as a process does');
 });

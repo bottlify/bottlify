@@ -242,6 +242,57 @@ export function createKernelModule(){
                 /** @type {number} */ result)=>state.sync?.wakeRemote(token, result));
             state.handles = createHandleTable({ watch: mirror });
             state.processes = createProcessTable(config?.ids);
+            /**
+             * The processes of the run this one opened by id across its link,
+             * one record each: in a worker of its own the run's directory is
+             * not here, and a helper opens the process that started it (the
+             * .NET runtime's shim in an ngen worker opens ngen to watch it).
+             *
+             * @type {Map<number, any>}
+             */
+            const acrossProcesses = new Map();
+            /**
+             * A process of the run that runs elsewhere, by id, or null: its
+             * exit a stand-in for the event the run sets when it ends, so a
+             * wait on its handle is asked there, and its code asked there
+             * until it has one.
+             *
+             * @param {number} id
+             */
+            const acrossProcess = id=>{
+                const remote = config?.remoteObjects;
+                if (typeof remote?.process !== 'function' || !state.sync)
+                {
+                    return null;
+                }
+                const known = acrossProcesses.get(id);
+                if (known)
+                {
+                    return known;
+                }
+                const found = remote.process(id);
+                if (!found)
+                {
+                    return null;
+                }
+                /** The code it exited with, once it has. @type {number | null} */
+                let code = found.exitCode;
+                const ended = ()=>(code ??= remote.process(id)?.exitCode ?? null);
+                const exited = state.sync.createEvent({ manualReset: true,
+                    signalled: code !== null, name: `process ${id}` });
+                exited.remote = found.id;
+                const record = { kind: 'process', id, threadId: found.threadId,
+                    imagePath: found.imagePath, commandLine: '', suspended: false, started: true,
+                    exited,
+                    get completed(){
+                        return ended() !== null;
+                    },
+                    get exitCode(){
+                        return ended() ?? STILL_ACTIVE;
+                    } };
+                acrossProcesses.set(id, record);
+                return record;
+            };
 
             /**
              * Whether this instance is still open. A call still in flight when the
@@ -1046,7 +1097,7 @@ export function createKernelModule(){
                         }
                         return state.processes.all().find(
                             (/** @type {any} */ record)=>record.id === id)
-                            ?? config?.processDirectory?.get(id) ?? null;
+                            ?? config?.processDirectory?.get(id) ?? acrossProcess(id);
                     },
                     pending: ()=>live() ? state.processes.pending() : null,
                     all: ()=>live() ? state.processes.all() : [],

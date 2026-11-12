@@ -291,7 +291,8 @@ export async function serveProcess(start){
         return { code, diagnostics: plainTables(),
             // What an installer's output is sorted against, read while the
             // machine that knows it still stands.
-            systemLibraries: plainOf(()=>app.systemLibraries?.() ?? []) };
+            systemLibraries: plainOf(()=>app.systemLibraries?.() ?? []),
+            journal: journalOf(app, options) };
     }
     finally
     {
@@ -303,6 +304,21 @@ export async function serveProcess(start){
         display?.close();
     }
 }
+
+/**
+ * The tail of the process's own journal, where the run asked for calls to be
+ * traced: its ring is this worker's, and the run's journal holds none of its
+ * calls, so a trace of a process that failed in a worker of its own would say
+ * nothing of what it called. Null when nothing is traced.
+ *
+ * @param {any} app @param {any} options
+ * @returns {{ time: number, text: string }[] | null}
+ */
+const journalOf = (app, options)=>{
+    const traced = Object.values(options.log?.categories ?? {}).includes('trace');
+    return traced ? plainOf(()=>app.log.recent(options.log?.capacity ?? 4096)
+        .map((/** @type {any} */ entry)=>({ time: entry.time, text: String(entry.text) }))) : null;
+};
 
 /**
  * The pool's lendings and recalls, in the order they came, and what hands them
@@ -329,8 +345,8 @@ const bind = (listen, send)=>listen(data=>{
         return;
     }
     serveProcess(data).then(
-        ({ code, diagnostics, systemLibraries })=>
-            send({ type: 'exited', code, diagnostics, systemLibraries }),
+        ({ code, diagnostics, systemLibraries, journal })=>
+            send({ type: 'exited', code, diagnostics, systemLibraries, journal }),
         (/** @type {any} */ e)=>send({ type: 'failed', message: String(e?.stack ?? e),
             diagnostics: e?.diagnostics ?? null }));
 });

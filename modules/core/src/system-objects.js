@@ -33,8 +33,11 @@ const KINDS = new Set(['event', 'semaphore', 'mutex']);
  *     the run's named objects, every process's
  * @param {(token: number, result: number) => Promise<unknown>} deps.wake
  *     tells the process across the link that one of its waits ended
+ * @param {Map<number, any>} [deps.processes]
+ *     the run's directory of processes by id, each with the event its exit
+ *     sets: what a process across the link opens another by
  */
-export function objectHandlers({ table, wake }){
+export function objectHandlers({ table, wake, processes }){
     // Made only for what a process across a link names first; its scheduler
     // never blocks anyone, since nothing waits through it.
     const sync = createSyncObjects({ scheduler: {
@@ -261,6 +264,27 @@ export function objectHandlers({ table, wake }){
                     return null;
                 }
                 return ended.get(token) ?? null;
+            },
+
+            /**
+             * A process of the run by its id, wherever it runs: the number of
+             * the event its exit sets, which the process across the link waits
+             * on as on any object of the run's, and its exit code once it has
+             * one. Null for an id no process of the run has.
+             *
+             * @param {number} processId
+             * @returns {{ id: number, threadId: number, imagePath: string,
+             *     exitCode: number | null } | null}
+             */
+            process(processId){
+                const record = processes?.get(processId >>> 0);
+                if (!record?.exited)
+                {
+                    return null;
+                }
+                return { id: numberOf(record.exited), threadId: record.threadId ?? 0,
+                    imagePath: String(record.imagePath ?? ''),
+                    exitCode: record.completed ? (record.exitCode ?? 0) >>> 0 : null };
             },
 
             /** @param {number} id @param {number} threadId @returns {number | null} */

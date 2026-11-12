@@ -25,7 +25,10 @@
  * message waits from the call journal (every call area on); `--trace S` prints
  * the last three thousand calls of every kind instead (`--trace-lines N`), with their first
  * arguments -- what a process that loops without waiting keeps calling;
- * `--trace-match REGEX` keeps only the lines that match. A run
+ * `--trace-match REGEX` keeps only the lines that match. A process that ran in a
+ * worker of its own (`--concurrency`) keeps its calls in its own ring, which
+ * it hands back as it ends: the first `--trace-worker N` (3) of those are
+ * printed after the run's, each under its image. A run
  * that ends sooner prints either when it ends. `--strings` peeks every pointer
  * argument for a string, so those lines name the paths and texts themselves.
  *
@@ -732,6 +735,17 @@ setInterval(async()=>{
 
 // Printed once: at S seconds, or when the run ends first -- an installer that
 // quits on an error it just showed has its last calls in the journal still.
+/**
+ * The journals of processes that ran in workers of their own, each given as
+ * it ended (`process-journal`): their calls are in their own rings, not the run's.
+ *
+ * @type {{ image: string, id: number, entries: { time: number, text: string }[] }[]}
+ */
+const workerJournals = [];
+app.on('process-journal', (/** @type {any} */ event)=>{
+    workerJournals.push(event);
+});
+
 let journalPrinted = false;
 const printJournal = ()=>{
     if (journalAt <= 0 || journalPrinted)
@@ -751,6 +765,17 @@ const printJournal = ()=>{
     for (const entry of trail.slice(whole ? -number('--trace-lines', 3000) : -150))
     {
         console.log('JOURNAL', (entry.time / 1000).toFixed(2), entry.text.slice(0, 400));
+    }
+    // `--trace-worker N`: the journals of the first N processes that ran in
+    // workers of their own, each under its image and id.
+    for (const { image, id, entries } of workerJournals.slice(0, number('--trace-worker', 3)))
+    {
+        console.log(`JOURNAL of ${image} (process ${id}, in a worker of its own)`);
+        const kept = entries.filter(entry=>!match || match.test(entry.text));
+        for (const entry of kept.slice(whole ? -number('--trace-lines', 3000) : -150))
+        {
+            console.log('JOURNAL', (entry.time / 1000).toFixed(2), entry.text.slice(0, 400));
+        }
     }
 };
 if (traceOnFault)
