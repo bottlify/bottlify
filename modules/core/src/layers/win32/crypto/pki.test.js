@@ -86,6 +86,11 @@ export const der = {
         const text = new Date(ms).toISOString().replace(/[-:T]/g, '').slice(2, 14);
         return der.node(0x17, new Uint8Array(Buffer.from(`${text}Z`, 'latin1')));
     },
+    /** @param {number} ms */
+    generalized(ms){
+        const text = new Date(ms).toISOString().replace(/[-:T]/g, '').slice(0, 14);
+        return der.node(0x18, new Uint8Array(Buffer.from(`${text}Z`, 'latin1')));
+    },
     /** @param {string} text */
     printable: text=>der.node(0x13, new Uint8Array(Buffer.from(text, 'latin1'))),
 };
@@ -157,6 +162,9 @@ export const ext = {
         der.octets(der.seq(...usages.map(der.oid)))),
     /** A critical extension this build cannot read. */
     unknownCritical: ()=>der.seq(der.oid('1.2.3.4.5'), der.bool(true), der.octets(der.nul())),
+    /** Critical certificate policies: anyPolicy (2.5.29.32.0). */
+    anyPolicy: ()=>der.seq(der.oid('2.5.29.32'), der.bool(true),
+        der.octets(der.seq(der.seq(der.oid('2.5.29.32.0'))))),
 };
 
 const YEAR = 365 * 24 * 3600 * 1000;

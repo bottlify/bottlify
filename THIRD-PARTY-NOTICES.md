@@ -64,6 +64,26 @@ FFmpeg's full license text is in that tree (`COPYING.LGPLv2.1`).
   Windows installation carries; it is included so that a signature Windows would accept is
   accepted here, and it grants nothing beyond that.
 
+## Microsoft Root Certificate Authority certificates (2001, 2010, 2011): default trust anchors
+
+- What they are: the root certificates "Microsoft Root Certificate Authority" (2001-05-09 to
+  2021-05-09, SHA-1 thumbprint CDD4EEAE6000AC7F40C3802C171E30148030C072), "Microsoft Root
+  Certificate Authority 2010" (2010-06-23 to 2035-06-23, 3B1EFD3A66EA28B16697394703A72CA340A05BD5)
+  and "Microsoft Root Certificate Authority 2011" (2011-03-22 to 2036-03-22,
+  8F43288AD272F3103B6FB1428485EA3014C0BCFE), Microsoft Corporation's. The code signing and
+  timestamping certificates of the .NET Framework 4 and later chain to them.
+- Source: Microsoft's PKI publication, the addresses the certificates below them name for their
+  issuer (`http://www.microsoft.com/pki/certs/MicrosoftRootCert.crt`,
+  `MicRooCerAut_2010-06-23.crt`, `MicRooCerAut2011_2011_03_22.crt`), taken unmodified. Before
+  they were committed each thumbprint was checked against the one above and each self-signature
+  verified.
+- Location in this repository: `modules/core/src/layers/win32/wintrust/roots.js`, as base64
+  DER.
+- What is used: their names and public keys, as data, as the root above: the default content of
+  the root store, which the `trustedRoots` configuration replaces. Every Windows 7 installation
+  whose roots are kept up to date carries them; they grant nothing beyond accepting a signature
+  Windows would accept.
+
 ## Thawte Timestamping CA certificate: a default Authenticode trust anchor
 
 - What it is: the root certificate "Thawte Timestamping CA" (issued 1997-01-01, expired

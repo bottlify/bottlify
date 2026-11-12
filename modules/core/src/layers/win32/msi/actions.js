@@ -313,7 +313,13 @@ async function copyFiles(engine){
         {
             continue;
         }
-        const compressed = inRange.filter(file=>(file.attributes & FILE_COMPRESSED) !== 0
+        // A patch's Media row (its Source names the patch) holds what the
+        // patch delivers in its cabinet: a file it adds is read from there
+        // whatever the package says of its own files' compression.
+        const fromPatch = row[5] !== null && row[5] !== undefined && row[5] !== ''
+            && row[3] !== null && row[3] !== undefined && row[3] !== '';
+        const compressed = inRange.filter(file=>fromPatch
+            || (file.attributes & FILE_COMPRESSED) !== 0
             || (compressedByDefault && (file.attributes & FILE_NONCOMPRESSED) === 0));
         const loose = inRange.filter(file=>!compressed.includes(file));
         for (const file of loose)

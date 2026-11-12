@@ -27,6 +27,7 @@ export const EXTENSION = Object.freeze({
     BASIC_CONSTRAINTS: '2.5.29.19',
     EXTENDED_KEY_USAGE: '2.5.29.37',
     SUBJECT_ALT_NAME: '2.5.29.17',
+    CERTIFICATE_POLICIES: '2.5.29.32',
 });
 
 /** Extended key usages a TLS chain is judged for. */
@@ -350,6 +351,11 @@ export function parseCertificate(der){
                         dnsNames.push(String.fromCharCode(...contents(general)));
                     }
                 }
+                break;
+            case EXTENSION.CERTIFICATE_POLICIES:
+                // Recognised, as RFC 5280 has every application recognise them:
+                // a chain judged for Authenticode or TLS asks for no policy, so
+                // what they say restricts nothing here.
                 break;
             default:
                 if (critical)

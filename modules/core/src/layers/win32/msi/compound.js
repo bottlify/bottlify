@@ -57,6 +57,8 @@ const TYPE_ROOT = 5;
  * @property {Map<string, CompoundNode>} children  By `nameKey`; empty for a stream.
  * @property {string} [clsid]  A storage's class, as a GUID string: what says a
  *           storage is a transform rather than any other docfile.
+ * @property {Uint8Array} [entry]  Its directory entry as the file holds it: the
+ *           128 bytes a signature's metadata digest reads (`\x05MsiDigitalSignatureEx`).
  */
 
 /**
@@ -251,6 +253,7 @@ export async function openCompound(source){
             start: u32(directory, at + 0x74),
             size: u32(directory, at + 0x78) + high * 0x1_0000_0000,
             clsid: formatGuid(directory.subarray(at + 0x50, at + 0x60)),
+            entry: directory.slice(at, at + 0x80),
         };
     };
 
@@ -295,6 +298,7 @@ export async function openCompound(source){
                 size: entry.size,
                 start: entry.start,
                 clsid: entry.clsid,
+                entry: entry.entry,
                 children: entry.type === TYPE_STORAGE
                     ? childrenOf(entry.child, visited) : new Map(),
             });
@@ -308,7 +312,8 @@ export async function openCompound(source){
     /** @type {CompoundNode} */
     const root = {
         name: rootEntry.name, kind: 'storage', size: rootEntry.size, start: rootEntry.start,
-        clsid: rootEntry.clsid, children: childrenOf(rootEntry.child, new Set([0])),
+        clsid: rootEntry.clsid, entry: rootEntry.entry,
+        children: childrenOf(rootEntry.child, new Set([0])),
     };
 
     // The mini stream: the root's own chain, cut into 64-byte sectors that a
