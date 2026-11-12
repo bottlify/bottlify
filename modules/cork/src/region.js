@@ -944,7 +944,8 @@ export function formRegion(read, entry,
             if (through !== null && through.does !== undefined && !('refused' in decoded))
             {
                 const stub = thunkSlot >= 0 && thunk !== null
-                    ? { name: 'thunk', address: called, length: thunk.length } : undefined;
+                    ? { name: 'thunk', address: called,
+                        length: /** @type {any} */ (thunk).length } : undefined;
                 block.instructions.push(...helperInstructions(through, decoded, slotted, read)
                     .map(one=>(one.op === 'crt' ? { ...one, crtSlot: slot, crtTarget: slotted,
                         ...stub ? { stub } : {} } : one)));
