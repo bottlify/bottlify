@@ -621,3 +621,38 @@ test('a program\'s calls to the engine\'s own msvcrt memset and strlen are forme
     assert.ok((formed.memset ?? 0) >= 1 && (formed.strlen ?? 0) >= 1,
         `formed: ${JSON.stringify(formed)}`);
 });
+
+test('a 64-bit program\'s calls to the engine\'s own msvcrt memset and strlen through its import'
+    + ' slots are formed as their operations, and answer as the routines do', async()=>{
+    const exe = buildExe({
+        bits: 64,
+        imports: { 'msvcrt.dll': ['memset', 'strlen'], 'KERNEL32.dll': ['ExitProcess'] },
+        data: { buffer: new Array(128).fill(0) },
+        codeSize: 0x80,
+        code: ({ iat, at, code })=>{
+            /** @type {number[]} */
+            const out = [];
+            /** A rip-relative displacement to `target` from the end of an instruction `rest`
+             * bytes past here. @param {number} target @param {number} rest */
+            const rip = (target, rest)=>u32((target - code(out.length + rest)) >>> 0);
+            out.push(0x48, 0x83, 0xec, 0x28);                         // sub rsp, 40
+            out.push(0xbb, ...u32(1000));                             // mov ebx, 1000
+            const loop = out.length;
+            out.push(0x48, 0x8d, 0x0d, ...rip(at('buffer'), 7));      // lea rcx, [buffer]
+            out.push(0x89, 0xda, 0x83, 0xe2, 0x07, 0x83, 0xc2, 0x41); // edx = 0x41 + (ebx & 7)
+            out.push(0x41, 0xb8, ...u32(100));                        // mov r8d, 100
+            out.push(0xff, 0x15, ...rip(iat('memset'), 6));           // call [memset]
+            out.push(0xff, 0xcb, 0x75, (loop - (out.length + 4)) & 0xff);  // dec ebx; jnz
+            out.push(0x48, 0x8d, 0x0d, ...rip(at('buffer'), 7));
+            out.push(0xff, 0x15, ...rip(iat('strlen'), 6));           // call [strlen]
+            out.push(0x89, 0xc1);                                     // mov ecx, eax
+            out.push(0xff, 0x15, ...rip(iat('ExitProcess'), 6), 0xf4);
+            return out;
+        },
+    });
+    const cork = await run(exe);
+    assert.equal(cork.code, 100);
+    const formed = /** @type {Record<string, number>} */ (cork.cork.crtFormed ?? {});
+    assert.ok((formed.memset ?? 0) >= 1 && (formed.strlen ?? 0) >= 1,
+        `formed: ${JSON.stringify(formed)}`);
+});

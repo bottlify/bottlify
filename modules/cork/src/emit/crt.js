@@ -73,9 +73,22 @@ export function emitCrt(e, instruction){
     const ram = e.layout.ramMemory ?? 0;
     if (instruction.crtSlot !== undefined)
     {
+        if (isWide(e))
+        {
+            return false;
+        }
         // Through an import slot: another function written there since is called.
-        b.i32const(instruction.crtSlot).load('i32', { guest: true, offset: e.layout.ramBase })
-            .i32const(/** @type {number} */ (instruction.crtTarget) | 0).op(I32.ne);
+        b.i32const(instruction.crtSlot);
+        if (isLong(e))
+        {
+            b.load('i64', { guest: true, offset: e.layout.ramBase })
+                .i64const(BigInt(/** @type {number} */ (instruction.crtTarget))).op(I64.ne);
+        }
+        else
+        {
+            b.load('i32', { guest: true, offset: e.layout.ramBase })
+                .i32const(/** @type {number} */ (instruction.crtTarget) | 0).op(I32.ne);
+        }
         leaveIf(e, instruction);
     }
     switch (operation)

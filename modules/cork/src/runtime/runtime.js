@@ -525,6 +525,8 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
         leafBytes: settings.leafBytes, formDepth: settings.formDepth,
         // Long mode's code formed as long mode's, the shared emitter's own cuts in it.
         ...layout.bits === 64 ? { mode: MODE_64 } : {},
+        // A wide window's import slots are not checked as a call through one runs.
+        ...layout.window !== undefined ? { slotHelpers: false } : {},
         // The dictionary's functions formed as what they do (`emit/crt.js`), or
         // none; a list of entries in place of the dictionary is a test's.
         ...settings.helpers === true || settings.helpers === undefined

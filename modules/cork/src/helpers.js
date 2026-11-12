@@ -253,7 +253,7 @@ export function helperAt(read, target, helpers = RUNTIME_HELPERS, bits = 32){
  * A function known by its whole code: its name, the operation it does (a `Crt`),
  * its bytes.
  *
- * @typedef {{ name: string, does: string, code: ArrayLike<number> }} KnownRoutine
+ * @typedef {{ name: string, does: string, code: ArrayLike<number>, bits?: 32 | 64 }} KnownRoutine
  */
 
 /**
@@ -264,8 +264,9 @@ export function helperAt(read, target, helpers = RUNTIME_HELPERS, bits = 32){
  * @param {KnownRoutine} routine
  * @returns {RuntimeHelper}
  */
-export function routineHelper({ name, does, code }){
+export function routineHelper({ name, does, code, bits }){
     return Object.freeze({ name, does: /** @type {Crt} */ (does), length: code.length,
+        ...bits === 64 ? { bits: /** @type {64} */ (64) } : {},
         hash: fingerprint(at=>code[at] ?? 0, 0, code.length) });
 }
 

@@ -16,6 +16,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createTestMachine } from '../../../../../cork/src/testing/machine.js';
 import { routineHelper } from '../../../../../cork/src/helpers.js';
+import { CORPUS, load, machine, run as runLong }
+    from '../../../../../cork/src/testing/long-machine.js';
+import { pageFlagsAt } from '../../../../../cork/src/runtime/layout.js';
 import { KNOWN_ROUTINES } from './known-routines.js';
 
 const PROGRAM = 0x8000;
@@ -43,8 +46,9 @@ function random(seed){
 
 test('the engine\'s routines a translator knows answer as their own code on seeded arguments',
     ()=>{
-        assert.ok(KNOWN_ROUTINES.length >= 6, 'memmove, memset, strlen, strcmp, memcmp, strchr');
-        for (const routine of KNOWN_ROUTINES)
+        const i386 = KNOWN_ROUTINES.filter(routine=>routine.bits === undefined);
+        assert.ok(i386.length >= 6, 'memmove, memset, strlen, strcmp, memcmp, strchr');
+        for (const routine of i386)
         {
             const next = random(0x5eed + routine.code.length);
             const int = (/** @type {number} */ n)=>Math.floor(next() * n);
@@ -98,5 +102,76 @@ test('the engine\'s routines a translator knows answer as their own code on seed
                 formed += !made.left && made.retired < body.retired ? 1 : 0;
             }
             assert.ok(formed > 200, `${routine.name}: ${formed} of 300 formed`);
+        }
+    });
+
+test('the x86-64 builds of the routines a translator knows answer as their own code in long mode',
+    ()=>{
+        const long = KNOWN_ROUTINES.filter(routine=>routine.bits === 64);
+        assert.ok(long.length >= 6, 'memmove, memset, strlen, strcmp, memcmp, strchr');
+        const area = CORPUS.dataAt + 0x10000;
+        const stack = area + 0x800;
+        const spans = area + 0x1000;
+        const bytes = 0x1000;
+        const offset = 0x80;
+        /** @param {number} value */
+        const quad = value=>[...new Uint8Array(new BigUint64Array([BigInt(value)]).buffer)];
+        for (const routine of long)
+        {
+            const next = random(0x6eed + routine.code.length);
+            const int = (/** @type {number} */ n)=>Math.floor(next() * n);
+            const helpers = [routineHelper(routine)];
+            let formed = 0;
+            for (let c = 0; c < 120; c++)
+            {
+                const data = Array.from({ length: bytes }, ()=>(int(5) === 0 ? 0 : 0x61 + int(3)));
+                const at = ()=>spans + int(bytes - 0x140);
+                const size = ()=>(int(4) === 0 ? int(8) : int(0x130));
+                const value = ()=>[0, 0x61, 0x62, 0x161, 0xffffff62, int(256)][int(6)];
+                const args = {
+                    memmove: ()=>[at(), at(), size()], memset: ()=>[at(), value(), size()],
+                    strlen: ()=>[at()], strcmp: ()=>[at(), at()], memcmp: ()=>[at(), at(), size()],
+                    strchr: ()=>[at(), value()],
+                }[/** @type {'strlen'} */ (routine.does)]();
+                // rcx, rdx, r8; the call; then past the routine to the exit after the code.
+                const program = [0x48, 0xb9, ...quad(args[0]), 0x48, 0xba, ...quad(args[1] ?? 0),
+                    0x49, 0xb8, ...quad(args[2] ?? 0)];
+                program.push(0xe8, ...quad(offset - (program.length + 5)).slice(0, 4));
+                program.push(0xe9,
+                    ...quad(offset + routine.code.length - (program.length + 5)).slice(0, 4));
+                while (program.length < offset)
+                {
+                    program.push(0x90);
+                }
+                const code = Buffer.from([...program, ...routine.code]).toString('hex');
+                /** @param {false | object[]} given */
+                const once = given=>{
+                    const m = machine({ config: { helpers: given } });
+                    const ram = new Uint8Array((m.ram ?? m.memory).buffer);
+                    // The pages past the corpus's data, closed by default, opened.
+                    new Uint8Array(m.memory.buffer, pageFlagsAt(m.layout), 2 ** 20)
+                        .fill(0, area / 4096, (spans + bytes) / 4096 + 1);
+                    ram.set(data, spans);
+                    const regs = Array.from({ length: 16 },
+                        (unused, i)=>(BigInt(i) * 0x1111111111111n).toString(16));
+                    regs[4] = stack.toString(16);
+                    load(m, { code, regs, flags: 0, seed: 1, fresh: true });
+                    const seen = runLong(m, true, 100000);
+                    // An int's answer is eax (the convention's): the routines leave -1
+                    // sign-extended through rax, the operations as Microsoft's do, the high
+                    // half zero.
+                    const answer = ['strcmp', 'memcmp'].includes(routine.does)
+                        ? (BigInt(`0x${seen.regs[0]}`) & 0xffffffffn).toString(16) : seen.regs[0];
+                    return { retired: Number(seen.retired), seen: { fault: seen.fault,
+                        // rax, and the registers a callee keeps.
+                        kept: [answer, ...[3, 4, 5, 6, 7, 12, 13, 14, 15].map(i=>seen.regs[i])],
+                        bytes: [...ram.subarray(spans, spans + bytes)] } };
+                };
+                const body = once(false);
+                const made = once(helpers);
+                assert.deepEqual(made.seen, body.seen, `${routine.name}(${args.join(', ')})`);
+                formed += made.retired < body.retired ? 1 : 0;
+            }
+            assert.ok(formed > 80, `${routine.name}: ${formed} of 120 formed`);
         }
     });

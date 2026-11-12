@@ -257,17 +257,25 @@ function thunkCall(decodeAt, translatable, call){
 }
 
 /**
- * The slot a 32-bit `call [address]` reads its target from -- an import's call
+ * The slot a `call [address]` reads its target from -- an import's call
  * through the import table -- or -1 for any other instruction.
  *
  * @param {import('./decode/decoder.js').Instruction} call
+ * @param {boolean} [wide]  long-mode code
  */
-function importSlot(call){
+function importSlot(call, wide = false){
     const [operand] = call.operands;
-    return call.op !== 'call' || call.prefixes.operand || operand?.kind !== 'mem'
-        || operand.size !== 4 || (operand.base ?? -1) >= 0 || (operand.index ?? -1) >= 0
-        || operand.segment === 4 || operand.segment === 5 || operand.addressSize === 16
-        ? -1 : (operand.disp ?? 0) >>> 0;
+    if (call.op !== 'call' || call.prefixes.operand || operand?.kind !== 'mem'
+        || operand.size !== (wide ? 8 : 4) || (operand.base ?? -1) >= 0
+        || (operand.index ?? -1) >= 0 || operand.segment === 4 || operand.segment === 5
+        || operand.addressSize === 16 || wide && operand.addressSize !== 64)
+    {
+        return -1;
+    }
+    // A long-mode slot, `call [rip + d]` as an import's call is, within the 4 GiB its
+    // code may be translated in.
+    const slot = wide ? operand.disp ?? 0 : (operand.disp ?? 0) >>> 0;
+    return slot < 0 || slot > 2 ** 32 - 8 ? -1 : slot;
 }
 
 /**
@@ -603,7 +611,7 @@ export function formShared(){
  *     callTargets?: Map<number, number[]>, shared?: FormShared,
  *     helpers?: boolean | readonly import('./helpers.js').RuntimeHelper[],
  *     bytesOf?: (start: number, end: number) => Uint8Array,
- *     mode?: { bits: 32 | 64 },
+ *     mode?: { bits: 32 | 64 }, slotHelpers?: boolean,
  *     translates?: (instruction: import('./decode/decoder.js').Instruction) => boolean,
  *     baseOf?: (reg: number) => number | null }} [options]
  *     leafCalls: a small leaf callee is formed into its caller (see `isLeaf`), of
@@ -630,6 +638,9 @@ export function formShared(){
  *     same `translatable` (`formShared`);
  *     bytesOf: `[start, end)` of what `read` answers, copied at once -- the region's
  *     `sources` are read so where given, a byte at a time through `read` otherwise;
+ *     slotHelpers: whether a long-mode call through an import slot to a function the
+ *     dictionary knows is formed as it (not in a wide window, whose addresses the check of the
+ *     slot does not take);
  *     mode: the decoder's (`MODE_64` for long-mode code: no address past the 4 GiB
  *     window is translatable, and only a 64-bit runtime helper is formed); translates: whether the
  *     emitter has a case for an instruction -- one it has none for ends its block,
@@ -645,7 +656,8 @@ export function formRegion(read, entry,
         callTargets, shared, helpers = true, leafBlocks = LEAF_BLOCKS, leafBytes = LEAF_BYTES,
         formDepth = 1, predictedRoom = PREDICTED_ROOM,
         ownRoom = { blocks: maxBlocks, bytes: maxBytes },
-        switchEntries = SWITCH_ENTRIES, bytesOf, mode, translates, baseOf } = {})
+        switchEntries = SWITCH_ENTRIES, bytesOf, mode, translates, baseOf,
+        slotHelpers = true } = {})
 {
     const wide = mode?.bits === 64;
     const importThunks = !wide;
@@ -908,13 +920,17 @@ export function formRegion(read, entry,
             // A call through an import slot to a function the dictionary knows, in a
             // runtime the program loads as a library: formed as its operation while the
             // slot still holds it (`crtSlot`, emit/crt.js).
-            const slot = helper === null && !wide && helpers !== false && !('refused' in decoded)
-                ? importSlot(decoded) : -1;
-            const slotted = slot < 0 ? -1 : (read(slot) | read(slot + 1) << 8
-                | read(slot + 2) << 16 | read(slot + 3) << 24) >>> 0;
+            const slot = helper === null && helpers !== false && (!wide || slotHelpers)
+                && !('refused' in decoded) ? importSlot(decoded, wide) : -1;
+            /** @param {number} at */
+            const dword = at=>(read(at) | read(at + 1) << 8 | read(at + 2) << 16
+                | read(at + 3) << 24) >>> 0;
+            // A long-mode slot holds a quadword: a function past 4 GiB is none formed.
+            const slotted = slot < 0 || wide && dword(slot + 4) !== 0 ? -1 : dword(slot);
             const through = slotted > 0 && translatable(slotted)
                 ? helperAt(read, slotted, helpers === true ? RUNTIME_HELPERS
-                    : /** @type {readonly import('./helpers.js').RuntimeHelper[]} */ (helpers), 32)
+                    : /** @type {readonly import('./helpers.js').RuntimeHelper[]} */ (helpers),
+                wide ? 64 : 32)
                 : null;
             if (through !== null && through.does !== undefined && !('refused' in decoded))
             {
@@ -922,7 +938,7 @@ export function formRegion(read, entry,
                     .map(one=>(one.op === 'crt' ? { ...one, crtSlot: slot, crtTarget: slotted }
                         : one)));
                 bytes += decoded.length;
-                eip = (eip + decoded.length) >>> 0;
+                eip = wide ? eip + decoded.length : (eip + decoded.length) >>> 0;
                 block.end = eip;
                 continue;
             }

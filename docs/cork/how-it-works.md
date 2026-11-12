@@ -80,8 +80,9 @@ linked with the runtime statically, and Visual C++ 7.1's to 10's x87 transcenden
 `_CItan`, `_CIatan`, `_CIasin`, `_CIacos`, `_CIlog`, `_CIlog10`, `_CIexp` and `_CIpow`. cork keeps a dictionary of them (`modules/cork/src/crt-dictionary.js`,
 `helpers.js`), each a signature of its code: the bytes reachable from its entry, with the bytes
 that differ where it is linked (relocated addresses, RIP-relative offsets, calls out of it)
-left out. A direct call whose target matches is not made, nor (in 32-bit code) a call through an
-import slot to one in a runtime the program loads as a library, while the slot still holds it:
+left out. A direct call whose target matches is not made, nor a call through an import slot to
+one in a runtime the program loads as a library, while the slot still holds it (not in a wide
+window):
 it is formed as what the function does, a copy as one `memory.copy`, a fill as one `memory.fill`, a string's length as a loop over
 its bytes, a comparison or a search as a loop over the bytes to the first that decides it, a
 square root as the x87's at the precision the control word says (as the runtime
@@ -112,5 +113,5 @@ test whatever global and report they name, and only the test is formed, the repo
 call. Functions that share one entry stub, as the `_CI*` ones do, are told apart by a second
 signature: of the code the stub's jump leads to. The `helpers` setting turns the dictionary off.
 Bottlify's own C runtime (which stands in for `msvcrt.dll` and `MSVCR80.dll`) has its `memmove`,
-`memset`, `strlen`, `strcmp`, `memcmp` and `strchr` compiled to x86 as guest code; the app hands
-their bytes to cork (`helpersAlso`), so a program's call to them is formed the same way.
+`memset`, `strlen`, `strcmp`, `memcmp` and `strchr` compiled to x86 and x86-64 as guest code; the
+app hands their bytes to cork (`helpersAlso`), so a program's call to them is formed the same way.

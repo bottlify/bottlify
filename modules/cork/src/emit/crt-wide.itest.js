@@ -460,3 +460,48 @@ for (const where of [{ high: 0 }, { window: 2 ** 33, high: 2 ** 32, codeHigh: 2 
         assert.equal(formed, 2, 'the two calls whose rcx is the cookie, its high 16 bits clear');
     });
 }
+
+test('long mode\'s call through an import slot to a memset the dictionary knows is made as the'
+    + ' operation, and calls whatever function the slot holds once it is written', ()=>{
+    const codeAt = CORPUS.codeAt;
+    const slot = AREA + 0x900;
+    const target = AREA + 0x1000;
+    const other = codeAt + FUNCTION_OFFSET - 1;       // a `ret` in the padding
+    // Twice: memset(target, r12, 64) through the slot, then another function into the slot.
+    const program = [0x41, 0xbc, ...quad(2).slice(0, 4)];               // mov r12d, 2
+    const loop = program.length;
+    program.push(0x48, 0xb9, ...quad(target), 0x4c, 0x89, 0xe2,         // rcx; rdx = r12
+        0x49, 0xc7, 0xc0, 64, 0, 0, 0);                                 // mov r8, 64
+    program.push(0xff, 0x15, ...quad(slot - (codeAt + program.length + 6)).slice(0, 4));
+    program.push(0x48, 0xc7, 0x05, ...quad(slot - (codeAt + program.length + 11)).slice(0, 4),
+        ...quad(other).slice(0, 4));                                    // mov qword [slot], other
+    program.push(0x49, 0xff, 0xcc, 0x75, (loop - (program.length + 5)) & 0xff);  // dec; jnz
+    const over = FUNCTION_OFFSET + FUNCTIONS.memset.length - (program.length + 5);
+    program.push(0xe9, ...quad(over).slice(0, 4));
+    while (program.length < FUNCTION_OFFSET - 1)
+    {
+        program.push(0x90);
+    }
+    program.push(0xc3);
+    const code = Buffer.from([...program, ...FUNCTIONS.memset]).toString('hex');
+    /** @param {false | object[]} helpers */
+    const once = helpers=>{
+        const m = machine({ config: { helpers } });
+        const ram = new Uint8Array((m.ram ?? m.memory).buffer);
+        const flags = new Uint8Array(m.memory.buffer, pageFlagsAt(m.layout), 2 ** 32 / 4096);
+        flags.fill(0, AREA / 4096, (AREA + AREA_BYTES) / 4096);
+        ram.fill(0, AREA, AREA + AREA_BYTES);
+        new DataView(ram.buffer).setBigUint64(slot, BigInt(codeAt + FUNCTION_OFFSET), true);
+        const regs = Array.from({ length: 16 }, ()=>'0');
+        regs[4] = STACK.toString(16);
+        load(m, { code, regs, flags: 0, seed: 1, fresh: true });
+        const seen = run(m, true, 100000);
+        return { fault: seen.fault, bytes: [...ram.subarray(target, target + 65)],
+            retired: Number(seen.retired) };
+    };
+    const body = once(false);
+    const made = once([entryOf('memset')]);
+    assert.deepEqual(body.bytes, [...new Array(64).fill(2), 0], 'the first call fills, then none');
+    assert.deepEqual({ ...made, retired: 0 }, { ...body, retired: 0 });
+    assert.ok(made.retired < body.retired, `formed: ${made.retired} of ${body.retired} retired`);
+});
