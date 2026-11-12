@@ -8401,10 +8401,17 @@ async function buildApp(options){
                         // where only such threads exist means the machine is
                         // waiting on us, and the wait above is where that is
                         // paid for.
-                        if (bridge.suspended() > 0 || fetching > 0 || idlers.length > 0)
+                        if (bridge.waitingOnHost() > 0 || fetching > 0 || idlers.length > 0)
                         {
                             continue;
                         }
+                        // A call whose guest code runs and waits in the kernel
+                        // -- a ServiceMain under StartServiceCtrlDispatcher, a
+                        // callback that waits on an event -- waits as its
+                        // thread does, and the wait above does not count it:
+                        // passed over here too, the loop turned round the
+                        // event loop without sleeping for as long as it waited.
+                        const nested = bridge.suspended() > 0;
                         // Or every thread is in a timed wait and the clock has
                         // caught up with the host's, so the only thing left to
                         // do is let real time reach the deadline. That is a
@@ -8429,15 +8436,17 @@ async function buildApp(options){
                         }
                         // Or another process of the run is running beside this
                         // one, and what every thread here waits on -- a child's
-                        // exit, an object it sets -- is its to answer.
-                        if (options.othersRunning?.())
+                        // exit, an object it sets -- is its to answer; or a
+                        // thread waits inside a call, on what whoever sets
+                        // its object answers.
+                        if (options.othersRunning?.() || nested)
                         {
                             journal.begin('idle-host-wait', journal.PhaseKind.HOST);
                             await pacing.wait({
                                 timer: true, sleep: true, deadlineMs: null, wakes: [],
                             });
-                            journal.note('idle-host-wait other process',
-                                journal.end('idle-host-wait'));
+                            journal.note(nested ? 'idle-host-wait inside a call'
+                                : 'idle-host-wait other process', journal.end('idle-host-wait'));
                             continue;
                         }
                         // Either everything finished without the program exiting,
