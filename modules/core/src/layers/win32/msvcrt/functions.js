@@ -700,7 +700,8 @@ export function createMsvcrtFunctions(host){
         atol: atoi,
 
         itoa,
-        _itoa: itoa,
+        /** char *_itoa(int value, char *buffer, int radix) -- in the guest, ten and the powers of two */
+        _itoa: guestEntry(inGuest._itoa, COMPILED._itoa, host, itoa),
 
         /**
          * int _isnan(double x), int _finite(double x), int _fpclass(double x)

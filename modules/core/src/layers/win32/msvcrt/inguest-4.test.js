@@ -178,3 +178,21 @@ test('_wtoi, wcstol and wcstoul: signs, bases, prefixes, wraps and limits; a uni
         }
     }
 });
+
+test('_itoa, _ultoa, _itow and _ultow: ten signed or not, the powers of two as bit patterns,'
+    + ' every other radix the handler\'s', ()=>{
+    const next = random(48);
+    const handed = { host: ()=>0 };
+    const values = [0, 1, 9, 10, 99, 100, 0x7fffffff, 0x80000000, 0xffffffff, 1000000000,
+        4294967295, 123456789];
+    for (let i = 0; i < 200; i++)
+    {
+        const value = i % 3 === 0 ? values[next() % values.length] : next();
+        const radix = [10, 16, 2, 8, 4, 32, 10, 16, 3, 36, 1, 0, 37][next() % 13];
+        const memory = /** @type {[number, number[]][]} */ ([[DATA, new Array(80).fill(0xcc)]]);
+        for (const name of ['_itoa', '_ultoa', '_itow', '_ultow'])
+        {
+            same(name, { stack: [value, DATA + 4, radix], memory }, handed);
+        }
+    }
+});

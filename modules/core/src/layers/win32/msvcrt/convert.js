@@ -751,22 +751,27 @@ export function createConversionFunctions(host){
         } : {},
 
         /** wchar_t *_itow(int value, wchar_t *buffer, int radix) -- _ltoa's text, wide */
-        _itow: toText(1, true, true),
+        _itow: readMemory ? guestEntry(inGuest._itow, COMPILED._itow, entryHost,
+            toText(1, true, true)) : toText(1, true, true),
 
         /** wchar_t *_ltow(long value, wchar_t *buffer, int radix) */
-        _ltow: toText(1, true, true),
+        _ltow: readMemory ? guestEntry(inGuest._itow, COMPILED._itow, entryHost,
+            toText(1, true, true)) : toText(1, true, true),
 
         /** wchar_t *_ultow(unsigned long value, wchar_t *buffer, int radix) */
-        _ultow: toText(1, false, true),
+        _ultow: readMemory ? guestEntry(inGuest._ultow, COMPILED._ultow, entryHost,
+            toText(1, false, true)) : toText(1, false, true),
 
         /** char *_ltoa(long value, char *buffer, int radix) */
-        _ltoa: toText(1, true),
+        _ltoa: readMemory ? guestEntry(inGuest._itoa, COMPILED._itoa, entryHost,
+            toText(1, true)) : toText(1, true),
 
         /** char *ltoa(long, char *, int) -- the name without the underscore */
         ltoa: toText(1, true),
 
         /** char *_ultoa(unsigned long value, char *buffer, int radix) */
-        _ultoa: toText(1, false),
+        _ultoa: readMemory ? guestEntry(inGuest._ultoa, COMPILED._ultoa, entryHost,
+            toText(1, false)) : toText(1, false),
 
         /** char *_ui64toa(unsigned __int64 value, char *buffer, int radix) */
         _ui64toa: toText(2, false),

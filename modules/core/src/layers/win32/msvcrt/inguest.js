@@ -2815,3 +2815,171 @@ export function wcstoul({ u16, setU32, host, pointerBytes }, text, end, base){
     }
     return negative !== 0 ? (0 - magnitude) >>> 0 : magnitude;
 }
+
+/** Each power of ten a 32-bit unsigned value reaches, the largest last. */
+export const TENS = Uint32Array.of(1, 10, 100, 1000, 10000, 100000, 1000000, 10000000,
+    100000000, 1000000000);
+
+/**
+ * Whether the `_*toa` code renders a radix itself: ten, by subtracting
+ * powers of ten (the subset has no integer division), and the powers of two,
+ * by shifts; any other is the handler's.
+ */
+const rendersRadix = (/** @type {number} */ radix)=>(radix === 10 || radix === 2 || radix === 4
+    || radix === 8 || radix === 16 || radix === 32 ? 1 : 0);
+
+/**
+ * The `_*toa` family's text, bytes or units (`wide`), and a terminator, at
+ * `buffer`: the value signed where `signed` is 1 and the radix ten, every
+ * other the bit pattern; digits past nine from 'a'. The radix is one
+ * `rendersRadix` takes. Answers the buffer.
+ *
+ * @guestCode cdecl
+ * @param {Pick<Guest, 'setU8' | 'setU16'>} guest @param {u32} value @param {u32} buffer
+ * @param {i32} radix @param {i32} signed @param {i32} wide
+ * @returns {u32}
+ */
+export function radixText({ setU8, setU16 }, value, buffer, radix, signed, wide){
+    const step = wide !== 0 ? 2 : 1;
+    let at = buffer;
+    let rest = value;
+    if (signed !== 0 && radix === 10 && (value | 0) < 0)
+    {
+        if (wide !== 0)
+        {
+            setU16(at, 0x2d);
+        }
+        else
+        {
+            setU8(at, 0x2d);
+        }
+        at = (at + step) >>> 0;
+        rest = (0 - value) >>> 0;
+    }
+    if (radix === 10)
+    {
+        let started = 0;
+        for (let p = 9; p >= 0; p--)
+        {
+            const power = TENS[p];
+            let digit = 0;
+            while (rest >= power)
+            {
+                rest = (rest - power) >>> 0;
+                digit++;
+            }
+            if (digit !== 0 || started !== 0 || p === 0)
+            {
+                started = 1;
+                if (wide !== 0)
+                {
+                    setU16(at, (0x30 + digit) | 0);
+                }
+                else
+                {
+                    setU8(at, (0x30 + digit) | 0);
+                }
+                at = (at + step) >>> 0;
+            }
+        }
+    }
+    else
+    {
+        const shift = radix === 2 ? 1 : radix === 4 ? 2 : radix === 8 ? 3 : radix === 16 ? 4 : 5;
+        // The top digit's place: the first multiple of the shift past the
+        // value's highest bit, below 32.
+        let top = 0;
+        while (((top + shift) | 0) < 32 && (rest >>> ((top + shift) | 0)) !== 0)
+        {
+            top = (top + shift) | 0;
+        }
+        for (let place = top; place >= 0; place = (place - shift) | 0)
+        {
+            const digit = (rest >>> place) & (radix - 1);
+            const c = digit < 10 ? (0x30 + digit) | 0 : (0x57 + digit) | 0;
+            if (wide !== 0)
+            {
+                setU16(at, c);
+            }
+            else
+            {
+                setU8(at, c);
+            }
+            at = (at + step) >>> 0;
+        }
+    }
+    if (wide !== 0)
+    {
+        setU16(at, 0);
+    }
+    else
+    {
+        setU8(at, 0);
+    }
+    return buffer;
+}
+
+/**
+ * char *_itoa(int value, char *buffer, int radix), and _ltoa, the same
+ * function on a 32-bit long: signed in base ten alone. A radix other than
+ * ten or a power of two is the handler's -- below two it writes nothing and
+ * answers null, past thirty-six msvcrt's _itoa goes on counting from 'a'.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} value @param {u32} buffer @param {i32} radix
+ * @returns {u32}
+ */
+export function _itoa({ setU8, setU16, host }, value, buffer, radix){
+    if (rendersRadix(radix) === 0)
+    {
+        return host();
+    }
+    return radixText({ setU8, setU16 }, value, buffer, radix, 1, 0);
+}
+
+/**
+ * char *_ultoa(unsigned long value, char *buffer, int radix): unsigned in
+ * every radix.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} value @param {u32} buffer @param {i32} radix
+ * @returns {u32}
+ */
+export function _ultoa({ setU8, setU16, host }, value, buffer, radix){
+    if (rendersRadix(radix) === 0)
+    {
+        return host();
+    }
+    return radixText({ setU8, setU16 }, value, buffer, radix, 0, 0);
+}
+
+/**
+ * wchar_t *_itow(int value, wchar_t *buffer, int radix), and _ltow: _itoa's
+ * text in units.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} value @param {u32} buffer @param {i32} radix
+ * @returns {u32}
+ */
+export function _itow({ setU8, setU16, host }, value, buffer, radix){
+    if (rendersRadix(radix) === 0)
+    {
+        return host();
+    }
+    return radixText({ setU8, setU16 }, value, buffer, radix, 1, 1);
+}
+
+/**
+ * wchar_t *_ultow(unsigned long value, wchar_t *buffer, int radix)
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} value @param {u32} buffer @param {i32} radix
+ * @returns {u32}
+ */
+export function _ultow({ setU8, setU16, host }, value, buffer, radix){
+    if (rendersRadix(radix) === 0)
+    {
+        return host();
+    }
+    return radixText({ setU8, setU16 }, value, buffer, radix, 0, 1);
+}
