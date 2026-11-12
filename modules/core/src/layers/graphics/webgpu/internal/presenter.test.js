@@ -759,6 +759,40 @@ test('a sending presenter hands each frame its own bytes, which the receiver may
     assert.deepEqual([sent[0].pixels[0], sent[1].pixels[0]], [0, 0x7f]);
 });
 
+test('a picture read from guest memory goes at the display\'s rate, one a GPU owns at once', ()=>{
+    /** @type {any[]} */
+    const sent = [];
+    /** @type {(() => void)[]} */
+    const scheduled = [];
+    /** @type {{ fn: () => void, ms: number }[]} */
+    const timers = [];
+    let clock = 1000;
+    const ram = new Uint8Array(64);
+    const presenter = createPresenter({
+        readMemory: (address, length)=>ram.slice(address, address + length),
+        schedule: flush=>scheduled.push(flush),
+        later: (fn, ms)=>timers.push({ fn, ms }),
+        now: ()=>clock,
+        maxFps: 50,
+        sendFrame: frame=>sent.push(frame),
+    });
+    const surface = { buffer: 0, width: 2, height: 2, pitch: 8, bitCount: 32, palette: null };
+    presenter.present(surface);
+    scheduled.splice(0).forEach(flush=>flush());
+    assert.equal(sent.length, 1, 'the first goes at once');
+    clock += 5;
+    presenter.present(surface);
+    presenter.present(surface);
+    assert.deepEqual([scheduled.length, timers.map(timer=>timer.ms)], [0, [15]],
+        'one sooner than a fiftieth of a second waits the rest of it, with what follows it');
+    timers.splice(0).forEach(timer=>timer.fn());
+    assert.equal(sent.length, 2, 'and is shown then');
+
+    presenter.claim(0x20, ()=>undefined);
+    presenter.present({ ...surface, buffer: 0x20 });
+    assert.deepEqual([scheduled.length, timers.length], [1, 0], 'a GPU\'s frame is not held');
+});
+
 test('with a GPU and no canvas the screen is still composed of every process\'s picture, and'
     + ' that is what the frames\' sink is handed', ()=>{
     // A page with no canvas of its own (a harness reading frames back) was

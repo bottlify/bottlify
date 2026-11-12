@@ -7873,7 +7873,7 @@ async function buildApp(options){
     kernel.refreshClockWith?.(()=>creditClock());
     // Callers parked on the guest's own queue are suspended calls too, answered
     // at the look each turn gives them.
-    kernel.hostAnsweringWith?.(()=>bridge.suspended() > idlers.length);
+    kernel.hostAnsweringWith?.(()=>bridge.waitingOnHost() > idlers.length);
 
     const breathe = createMacrotask();
     const jsSampler = options.sampleJs ? createJsSampler() : null;
@@ -8091,7 +8091,11 @@ async function buildApp(options){
                     // host. Counted before the look, when every such caller is
                     // parked rather than halfway through looking.
                     const queued = idlers.length;
-                    const onHost = Math.max(0, bridge.suspended() - queued);
+                    // A call running guest code it called back -- a window procedure,
+                    // a COM method a server's message window dispatches -- is not
+                    // one: counted, a server compiling under such a call went to
+                    // the event loop every turn and waited there longer than it ran.
+                    const onHost = Math.max(0, bridge.waitingOnHost() - queued);
                     const turnYield = pacing.yield({
                         suspended: onHost, fetching, idlers: queued, spun,
                     });
@@ -10329,6 +10333,8 @@ export async function createApp(options){
             canvas: options.device.canvas,
             now: options.device.now,
             maxFps: options.maxFps ?? SETTINGS.frame.maxFps,
+            // A picture read out of guest memory goes at the display's rate at most.
+            later: (fn, ms)=>setTimeout(fn, ms),
             // One bound for the run: every machine's frames go onto one queue.
             maxFrameLatency: options.graphics?.maxFrameLatency,
             // A build with no canvas but with a sink of its own -- a test
@@ -10356,7 +10362,8 @@ export async function createApp(options){
         })
         // A process in a worker of its own has no GPU: its surfaces' pictures
         // go to the thread that has one, as bytes, each burst as it flushes.
-        : options.graphics?.display ? createPresenter({ sendFrame: options.graphics.display })
+        : options.graphics?.display ? createPresenter({ sendFrame: options.graphics.display,
+            maxFps: options.maxFps ?? SETTINGS.frame.maxFps, later: (fn, ms)=>setTimeout(fn, ms) })
             : null);
 
     // The translation store is the run's as well: a child's machine is built
