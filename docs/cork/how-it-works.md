@@ -76,7 +76,7 @@ A compiler links the same functions into every program it builds: its own helper
 the quadword shifts, `__chkstk` and `__security_check_cookie`, 32-bit and x86-64), and the C
 runtime's `memcpy`, `memmove`,
 `memset`, `strlen`, `memcmp`, `strcmp`, `memchr`, `strchr`, `sqrt`, `floor` and `ceil` in a program
-linked with the runtime statically, and Visual C++ 8's x87 transcendentals `_CIsin`, `_CIcos`,
+linked with the runtime statically, and Visual C++ 8's and 10's x87 transcendentals `_CIsin`, `_CIcos`,
 `_CItan`, `_CIatan`, `_CIasin`, `_CIacos`, `_CIlog`, `_CIlog10`, `_CIexp` and `_CIpow`. cork keeps a dictionary of them (`modules/cork/src/crt-dictionary.js`,
 `helpers.js`), each a signature of its code: the bytes reachable from its entry, with the bytes
 that differ where it is linked (relocated addresses, RIP-relative offsets, calls out of it)
