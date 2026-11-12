@@ -9,6 +9,8 @@ import assert from 'node:assert/strict';
 import { createSecurityFunctions } from './security.js';
 import { createLsaFunctions } from './lsa.js';
 import { USER_SID_TEXT, aceBytes, aclBytes, parseSid } from './tokens.js';
+import { createHive } from './registry.js';
+import { createRegistryService } from './registry-service.js';
 
 /* The contract's numbers, restated so a wrong constant in the module cannot
  * hide behind the test importing it. */
@@ -33,7 +35,8 @@ const STATUS_NO_SUCH_PRIVILEGE = 0xc0000060;
 const SidTypeWellKnownGroup = 5;
 const SidTypeUnknown = 8;
 
-function setup(){
+/** @param {Record<string, any>} [extra] */
+function setup(extra = {}){
     const memory = new Uint8Array(0x40000);
     const view = new DataView(memory.buffer);
     let next = 0x20000;
@@ -62,6 +65,7 @@ function setup(){
             next += bytes + 7 & ~7;
             return at;
         },
+        ...extra,
     };
     /** @type {Record<string, { handler: (args: number[]) => number }>} */
     const fns = { ...createSecurityFunctions(host), ...createLsaFunctions(host) };
@@ -386,3 +390,43 @@ test('GetEffectiveRightsFromAcl walks the ACEs in order for the trustee, Everyon
         assert.equal(u32(RIGHTS), 0x1fffff, 'a NULL DACL gives everything');
         assert.equal(call('GetEffectiveRightsFromAclW', ACL, 0, RIGHTS), 87);
     });
+
+test('LsaStorePrivateData keeps a secret LsaRetrievePrivateData gives back, NULL deletes it', ()=>{
+    // ASP.NET's registration (webengine4.dll, run by the .NET Framework 4.8
+    // setup) keeps its keys as LSA secrets.
+    const STATUS_OBJECT_NAME_NOT_FOUND = 0xc0000034;
+    const STATUS_INVALID_HANDLE = 0xc0000008;
+    const env = setup();
+    env.call('LsaOpenPolicy', 0, 0x8000, 0, OUT);
+    const policy = env.u32(OUT);
+    env.putUnicode(0x8100, 'L$ASP.NETAutoGenKeysV44.0.30319.0');
+    env.putUnicode(0x8200, 'key bytes');
+    assert.equal(env.call('LsaRetrievePrivateData', policy, 0x8100, OUT),
+        STATUS_OBJECT_NAME_NOT_FOUND);
+    assert.equal(env.call('LsaStorePrivateData', policy, 0x8100, 0x8200), 0);
+    assert.equal(env.call('LsaRetrievePrivateData', policy, 0x8100, OUT), 0);
+    assert.equal(env.unicode(env.u32(OUT)), 'key bytes');
+    assert.equal(env.call('LsaFreeMemory', env.u32(OUT)), 0);
+    assert.equal(env.call('LsaStorePrivateData', policy, 0x8100, 0), 0, 'NULL deletes it');
+    assert.equal(env.call('LsaRetrievePrivateData', policy, 0x8100, OUT),
+        STATUS_OBJECT_NAME_NOT_FOUND);
+    assert.equal(env.call('LsaStorePrivateData', 0x1234, 0x8100, 0x8200), STATUS_INVALID_HANDLE);
+});
+
+test('the LSA secrets are the machine\'s: one process stores what another retrieves', ()=>{
+    const hive = createRegistryService(createHive());
+    const first = setup({ hive });
+    const second = setup({ hive });
+    for (const env of [first, second])
+    {
+        env.call('LsaOpenPolicy', 0, 0x8000, 0, OUT);
+        env.putUnicode(0x8100, 'L$Shared');
+    }
+    first.putUnicode(0x8200, 'shared');
+    assert.equal(first.call('LsaStorePrivateData', first.u32(OUT), 0x8100, 0x8200), 0);
+    assert.equal(second.call('LsaRetrievePrivateData', second.u32(OUT), 0x8100, 0x8300), 0);
+    assert.equal(second.unicode(second.u32(0x8300)), 'shared');
+    assert.equal(second.call('LsaStorePrivateData', second.u32(OUT), 0x8100, 0), 0);
+    assert.equal(first.call('LsaRetrievePrivateData', first.u32(OUT), 0x8100, 0x8300),
+        0xc0000034);
+});
