@@ -911,3 +911,35 @@ test('a transcendental formed only at double precision (`precise`) is left to th
         assert.equal(exit.kind === -2, control === 0x7f, `control ${control.toString(16)}`);
     }
 });
+
+/** An import slot, and a function written into it later. */
+const SLOT = 0xa9c0;
+const OTHER = 0x9a00;
+
+test('a call through an import slot to a function the dictionary knows is formed as its'
+    + ' operation, and calls whatever function the slot holds once it is written', ()=>{
+    // Twice: memset(DATA, ebx, 64) through the slot, then another function into the slot.
+    // The test's memset does nothing itself: the bytes are filled only where it is formed.
+    const code = [0xbb, ...u32(2)];                                  // mov ebx, 2
+    const loop = PROGRAM + code.length;
+    code.push(0x6a, 64, 0x53, 0x68, ...u32(DATA));                  // push 64; push ebx; push DATA
+    code.push(0xff, 0x15, ...u32(SLOT));                             // call [SLOT]
+    code.push(0x83, 0xc4, 12);                                       // add esp, 12
+    code.push(0xc7, 0x05, ...u32(SLOT), ...u32(OTHER));              // mov dword [SLOT], OTHER
+    code.push(0x4b, 0x75, (loop - (PROGRAM + code.length + 3)) & 0xff, 0xf4);  // dec; jnz; hlt
+    /** @param {boolean} formed */
+    const once = formed=>{
+        const m = createTestMachine({ ramSize: RAM });
+        m.write(HELPER_AT, FILLER);
+        m.write(OTHER, [0xc3]);
+        m.write(SLOT, u32(HELPER_AT));
+        m.write(PROGRAM, code);
+        m.setReg('esp', STACK);
+        const exit = m.runProgram(PROGRAM, { helpers: formed ? [helperOf('memset')] : false });
+        assert.equal(exit.kind, 3);
+        return [...m.read(DATA, 65)];
+    };
+    assert.deepEqual(once(false), new Array(65).fill(0), 'the test\'s memset fills nothing');
+    // The first call formed (2), the second the function written into the slot (nothing).
+    assert.deepEqual(once(true), [...new Array(64).fill(2), 0]);
+});

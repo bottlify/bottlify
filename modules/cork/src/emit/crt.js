@@ -71,6 +71,13 @@ export function emitCrt(e, instruction){
     const { b } = e;
     // The RAM's memory: a wide window's own (`wideLayout`), else the one.
     const ram = e.layout.ramMemory ?? 0;
+    if (instruction.crtSlot !== undefined)
+    {
+        // Through an import slot: another function written there since is called.
+        b.i32const(instruction.crtSlot).load('i32', { guest: true, offset: e.layout.ramBase })
+            .i32const(/** @type {number} */ (instruction.crtTarget) | 0).op(I32.ne);
+        leaveIf(e, instruction);
+    }
     switch (operation)
     {
         case 'memmove': case 'memcpy': case 'memset':
@@ -1084,6 +1091,16 @@ function finiteArgument(e){
  */
 function leaveUnless(e, instruction){
     e.b.localGet(Local.addr).i32const(-1).op(I32.eq);
+    leaveIf(e, instruction);
+}
+
+/**
+ * Leaves before the call where the i32 on the stack is not zero: the call is
+ * made as it was.
+ *
+ * @param {E} e @param {Instruction} instruction
+ */
+function leaveIf(e, instruction){
     e.openGuard('crt', EMPTY);
     // What was formed before it for the call (`lead`) is the call's too: none
     // of it ran when the call is left to run.

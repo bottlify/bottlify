@@ -257,6 +257,20 @@ function thunkCall(decodeAt, translatable, call){
 }
 
 /**
+ * The slot a 32-bit `call [address]` reads its target from -- an import's call
+ * through the import table -- or -1 for any other instruction.
+ *
+ * @param {import('./decode/decoder.js').Instruction} call
+ */
+function importSlot(call){
+    const [operand] = call.operands;
+    return call.op !== 'call' || call.prefixes.operand || operand?.kind !== 'mem'
+        || operand.size !== 4 || (operand.base ?? -1) >= 0 || (operand.index ?? -1) >= 0
+        || operand.segment === 4 || operand.segment === 5 || operand.addressSize === 16
+        ? -1 : (operand.disp ?? 0) >>> 0;
+}
+
+/**
  * The callee of a call through a fixed slot -- `call [address]`, an import's
  * call through the import table -- when it is a leaf to form in: predicted
  * from the slot as it reads now, as the runtime predicts an indirect call
@@ -891,6 +905,27 @@ export function formRegion(read, entry,
                     : /** @type {readonly import('./helpers.js').RuntimeHelper[]} */ (helpers),
                 wide ? 64 : 32)
                 : null;
+            // A call through an import slot to a function the dictionary knows, in a
+            // runtime the program loads as a library: formed as its operation while the
+            // slot still holds it (`crtSlot`, emit/crt.js).
+            const slot = helper === null && !wide && helpers !== false && !('refused' in decoded)
+                ? importSlot(decoded) : -1;
+            const slotted = slot < 0 ? -1 : (read(slot) | read(slot + 1) << 8
+                | read(slot + 2) << 16 | read(slot + 3) << 24) >>> 0;
+            const through = slotted > 0 && translatable(slotted)
+                ? helperAt(read, slotted, helpers === true ? RUNTIME_HELPERS
+                    : /** @type {readonly import('./helpers.js').RuntimeHelper[]} */ (helpers), 32)
+                : null;
+            if (through !== null && through.does !== undefined && !('refused' in decoded))
+            {
+                block.instructions.push(...helperInstructions(through, decoded, slotted, read)
+                    .map(one=>(one.op === 'crt' ? { ...one, crtSlot: slot, crtTarget: slotted }
+                        : one)));
+                bytes += decoded.length;
+                eip = (eip + decoded.length) >>> 0;
+                block.end = eip;
+                continue;
+            }
             if (helper !== null && !('refused' in decoded))
             {
                 // A compiler's runtime helper: its call is formed as the
