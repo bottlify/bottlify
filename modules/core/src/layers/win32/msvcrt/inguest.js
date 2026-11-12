@@ -2150,3 +2150,321 @@ export function fmodf({ host }, x, y){
     }
     return Math.fround(x % y);
 }
+
+/**
+ * void *memchr(const void *buffer, int value, size_t count)
+ *
+ * The first of `count` bytes that is `value`'s low byte, or null.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} buffer @param {u32} value @param {u32} count
+ * @returns {u32}
+ */
+export function memchr({ u8 }, buffer, value, count){
+    const wanted = value & 0xff;
+    for (/** @type {u32} */ let i = 0; i < count; i++)
+    {
+        if (u8(buffer + i) === wanted)
+        {
+            return (buffer + i) >>> 0;
+        }
+    }
+    return 0;
+}
+
+/**
+ * char *strncat(char *destination, const char *source, size_t count)
+ *
+ * At most `count` bytes of the source after the destination's text, the
+ * source read no further than that, and always a terminator: as if read
+ * first, as strcat copies.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} destination @param {u32} source @param {u32} count
+ * @returns {u32}
+ */
+export function strncat({ u8, setU8, copyUp, copyDown }, destination, source, count){
+    /** @type {u32} */
+    let end = destination;
+    while (u8(end) !== 0)
+    {
+        end++;
+    }
+    /** @type {u32} */
+    let length = 0;
+    while (length < count && u8(source + length) !== 0)
+    {
+        length++;
+    }
+    if ((end - source) >>> 0 < length)
+    {
+        copyDown(end, source, length);
+    }
+    else
+    {
+        copyUp(end, source, length);
+    }
+    setU8(end + length, 0);
+    return destination;
+}
+
+/**
+ * wchar_t *wcschr(const wchar_t *text, wchar_t c)
+ *
+ * The first unit that is `c`, the terminator among them.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} text @param {u32} c
+ * @returns {u32}
+ */
+export function wcschr({ u16 }, text, c){
+    const wanted = c & 0xffff;
+    for (/** @type {u32} */ let at = text; ; at += 2)
+    {
+        const unit = u16(at);
+        if (unit === wanted)
+        {
+            return at;
+        }
+        if (unit === 0)
+        {
+            return 0;
+        }
+    }
+}
+
+/**
+ * wchar_t *wcsrchr(const wchar_t *text, wchar_t c)
+ *
+ * The last unit that is `c`, the terminator among them, as strrchr's.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} text @param {u32} c
+ * @returns {u32}
+ */
+export function wcsrchr({ u16 }, text, c){
+    const wanted = c & 0xffff;
+    /** @type {u32} */
+    let found = 0;
+    for (/** @type {u32} */ let at = text; ; at += 2)
+    {
+        const unit = u16(at);
+        if (unit === wanted)
+        {
+            found = at;
+        }
+        if (unit === 0)
+        {
+            return found;
+        }
+    }
+}
+
+/**
+ * int wcsncmp(const wchar_t *left, const wchar_t *right, size_t count)
+ *
+ * At most `count` units, as unsigned sixteen-bit values, the answer -1, 0
+ * or 1.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} left @param {u32} right @param {u32} count
+ * @returns {i32}
+ */
+export function wcsncmp({ u16 }, left, right, count){
+    for (/** @type {u32} */ let i = 0; i < count; i++)
+    {
+        const a = u16(left + i * 2);
+        const b = u16(right + i * 2);
+        if (a !== b)
+        {
+            return a < b ? -1 : 1;
+        }
+        if (a === 0)
+        {
+            return 0;
+        }
+    }
+    return 0;
+}
+
+/**
+ * wchar_t *wcscat(wchar_t *destination, const wchar_t *source)
+ *
+ * The source and its terminator after the destination's text, as if read
+ * whole first.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} destination @param {u32} source
+ * @returns {u32}
+ */
+export function wcscat({ u16, copyUp, copyDown }, destination, source){
+    /** @type {u32} */
+    let end = destination;
+    while (u16(end) !== 0)
+    {
+        end += 2;
+    }
+    /** @type {u32} */
+    let length = 2;
+    while (u16(source + length - 2) !== 0)
+    {
+        length += 2;
+    }
+    if ((end - source) >>> 0 < length)
+    {
+        copyDown(end, source, length);
+    }
+    else
+    {
+        copyUp(end, source, length);
+    }
+    return destination;
+}
+
+/**
+ * wchar_t *wcsncat(wchar_t *destination, const wchar_t *source, size_t count)
+ *
+ * At most `count` units of the source after the destination's text, and
+ * always a terminator.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} destination @param {u32} source @param {u32} count
+ * @returns {u32}
+ */
+export function wcsncat({ u16, setU16, copyUp, copyDown }, destination, source, count){
+    /** @type {u32} */
+    let end = destination;
+    while (u16(end) !== 0)
+    {
+        end += 2;
+    }
+    /** @type {u32} */
+    let units = 0;
+    while (units < count && u16(source + units * 2) !== 0)
+    {
+        units++;
+    }
+    const length = (units * 2) >>> 0;
+    if ((end - source) >>> 0 < length)
+    {
+        copyDown(end, source, length);
+    }
+    else
+    {
+        copyUp(end, source, length);
+    }
+    setU16(end + length, 0);
+    return destination;
+}
+
+/**
+ * wchar_t *wcsstr(const wchar_t *haystack, const wchar_t *needle)
+ *
+ * The first place the needle's units are, the haystack itself for an empty one.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} haystack @param {u32} needle
+ * @returns {u32}
+ */
+export function wcsstr({ u16 }, haystack, needle){
+    for (/** @type {u32} */ let at = haystack; ; at += 2)
+    {
+        /** @type {u32} */
+        let i = 0;
+        while (u16(needle + i) !== 0 && u16(at + i) === u16(needle + i))
+        {
+            i += 2;
+        }
+        if (u16(needle + i) === 0)
+        {
+            return at;
+        }
+        if (u16(at) === 0)
+        {
+            return 0;
+        }
+    }
+}
+
+/**
+ * size_t wcsspn(const wchar_t *text, const wchar_t *accept)
+ *
+ * How many units from the start are each a unit of `accept`.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} text @param {u32} accept
+ * @returns {u32}
+ */
+export function wcsspn({ u16 }, text, accept){
+    for (/** @type {u32} */ let at = text; ; at += 2)
+    {
+        const unit = u16(at);
+        let found = 0;
+        for (/** @type {u32} */ let set = accept; found === 0 && u16(set) !== 0; set += 2)
+        {
+            if (u16(set) === unit)
+            {
+                found = 1;
+            }
+        }
+        if (unit === 0 || found === 0)
+        {
+            return (at - text) >>> 1;
+        }
+    }
+}
+
+/**
+ * size_t wcscspn(const wchar_t *text, const wchar_t *reject)
+ *
+ * How many units from the start are none of `reject`'s.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} text @param {u32} reject
+ * @returns {u32}
+ */
+export function wcscspn({ u16 }, text, reject){
+    for (/** @type {u32} */ let at = text; ; at += 2)
+    {
+        const unit = u16(at);
+        let found = 0;
+        for (/** @type {u32} */ let set = reject; found === 0 && u16(set) !== 0; set += 2)
+        {
+            if (u16(set) === unit)
+            {
+                found = 1;
+            }
+        }
+        if (unit === 0 || found !== 0)
+        {
+            return (at - text) >>> 1;
+        }
+    }
+}
+
+/**
+ * wchar_t *wcspbrk(const wchar_t *text, const wchar_t *accept)
+ *
+ * The first unit the set has, or null; the terminator is never one of it.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} text @param {u32} accept
+ * @returns {u32}
+ */
+export function wcspbrk({ u16 }, text, accept){
+    for (/** @type {u32} */ let at = text; ; at += 2)
+    {
+        const unit = u16(at);
+        if (unit === 0)
+        {
+            return 0;
+        }
+        for (/** @type {u32} */ let set = accept; u16(set) !== 0; set += 2)
+        {
+            if (u16(set) === unit)
+            {
+                return at;
+            }
+        }
+    }
+}

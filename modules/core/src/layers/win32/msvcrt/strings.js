@@ -18,11 +18,10 @@
  * position between calls, because that is what the C library promises.
  */
 
-import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
+import { encodeAnsi } from '../kernel32/locale.js';
 import { EINVAL } from './globals.js';
 import { guestEntry } from './guest-code.js';
 import * as inGuest from './inguest.js';
-import { unitsAt } from './widetext.js';
 import { COMPILED } from './inguest.x86.js';
 
 /**
@@ -132,22 +131,8 @@ export function createStringFunctions(host){
         /** size_t strcspn(const char *str, const char *reject) -- in the guest */
         strcspn: guestEntry(inGuest.strcspn, COMPILED.strcspn, host),
 
-        /** char *strncat(char *dest, const char *src, size_t count) */
-        strncat: {
-            convention: 'cdecl',
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([destination, source, count])=>{
-                const existing = readString(destination);
-                // Unlike strncpy, this one always terminates: the count bounds
-                // what is appended, not what is written.
-                // The source is read no further than the count: it need not be
-                // terminated within it.
-                writeString(destination + existing.length, decodeAnsi(Uint8Array.from(
-                    unitsAt(host.readMemory, source, 1, Math.min(count >>> 0, MAX_STRING)))));
-                return destination;
-            },
-        },
+        /** char *strncat(char *dest, const char *src, size_t count) -- in the guest */
+        strncat: guestEntry(inGuest.strncat, COMPILED.strncat, host),
 
         /** int _strnicmp(const char *l, const char *r, size_t count) -- in the guest */
         _strnicmp: guestEntry(inGuest._strnicmp, COMPILED._strnicmp, host),
@@ -374,25 +359,8 @@ export function createStringFunctions(host){
             },
         },
 
-        /** void *memchr(const void *buffer, int value, size_t count) */
-        memchr: {
-            convention: 'cdecl',
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([buffer, value, count])=>{
-                const length = count >>> 0;
-                const bytes = host.readMemory(buffer, length);
-                const wanted = value & 0xff;
-                for (let at = 0; at < length; at++)
-                {
-                    if (bytes[at] === wanted)
-                    {
-                        return buffer + at;
-                    }
-                }
-                return 0;
-            },
-        },
+        /** void *memchr(const void *buffer, int value, size_t count) -- in the guest */
+        memchr: guestEntry(inGuest.memchr, COMPILED.memchr, host),
 
         // The classifiers, under the C locale, in the guest (`inguest.js`):
         // 1 for a byte of the class, 0 for anything else, EOF included.
