@@ -388,6 +388,11 @@ export function engineContractProblem(engineModule, url){
  *     module whose instance the run holds already). Optional.
  * @property {() => any} [stats]  What the store holds and what its opening kept, for the
  *     report. Optional.
+ * @property {(key: string, module: WebAssembly.Module, bytes: number) => void} [hold]  Keeps a
+ *     batch's compiled module (stored under `key`, `bytes` of wasm) alive for the run, where the
+ *     store is shared by threads: a runtime elsewhere compiling the same bytes is handed the code
+ *     already compiled and tiered up, by the wasm engine's cache of live modules, rather than
+ *     starting it over in its baseline tier. Optional.
  * @property {(key: string) => Uint8Array | null | undefined} [getNow]  The record at once,
  *     without a turn of the event loop, where the store can answer so; undefined where it
  *     cannot yet, and the translator asks `get`. Optional.

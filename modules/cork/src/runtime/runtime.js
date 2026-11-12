@@ -3206,6 +3206,10 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
         {
             compiledBytes.set(module, bytes);
             sharedModules.set(key, module, bytes);
+            // Kept alive where the store is kept too, for runtimes in other
+            // threads: one compiling the same bytes is handed this code,
+            // tiered up as it is, by the wasm engine's own cache.
+            settings.store?.hold?.(key, module, bytes);
         }
     };
     /**
