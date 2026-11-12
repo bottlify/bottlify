@@ -124,8 +124,8 @@ function entry({ masks, ...given }){
 }
 
 /**
- * The SSE2 code the `_CI*` stubs jump to (`via`), by function: Visual C++ 8
- * and 10 share all but `sin` and `cos`.
+ * The SSE2 code the `_CI*` stubs jump to (`via`), by function: Visual C++ 8,
+ * 9 and 10 share all but `sin` and `cos`, which 9 and 10 share.
  */
 const SIN_VC8 = { name: '_sin_pentium4', quick: 'd51167b0009625aa',
     hash: '3f299c663f560aa3',
@@ -187,13 +187,13 @@ const LOG10 = { name: '_log10_pentium4', quick: 'f52a450f289c314d',
             [[33, 4], [41, 4], [49, 4], [57, 4], [65, 4], [95, 4], [103, 4],
                 [201, 4], [213, 4], [233, 4], [245, 4], [257, 4], [289, 4], [360, 4],
                 [402, 4], [410, 4], [439, 4], [455, 4], [467, 4], [482, 4], [563, 4]] };
-const SIN_VC10 = { name: '_sin_pentium4', quick: 'd51167b0009625aa',
+const SIN_VC9 = { name: '_sin_pentium4', quick: 'd51167b0009625aa',
     hash: 'daba3aaa8ec1885f',
     spans: [[0, 431]],
     masks:
         [[33, 4], [45, 4], [61, 4], [73, 4], [102, 4], [108, 4], [129, 4],
             [166, 4], [235, 4], [247, 4], [370, 4], [392, 4], [408, 4], [427, 4]] };
-const COS_VC10 = { name: '_cos_pentium4', quick: 'd51167b0009625aa',
+const COS_VC9 = { name: '_cos_pentium4', quick: 'd51167b0009625aa',
     hash: 'd481ce065e927a6c',
     spans: [[0, 401]],
     masks:
@@ -455,7 +455,9 @@ export const CRT_DICTIONARY = Object.freeze([
         masks: [[7, 4], [12, 4]], via: viaJump(12, 0, core),
         // Its asin and acos compute 1 - x^2 and its root at the precision control.
         ...does === 'ciasin' || does === 'ciacos' ? { precise: true } : {} })),
-    ...ciStubs('9ea4bc7ae8223fc7', { cisin: SIN_VC10, cicos: COS_VC10, citan: TAN,
+    // Visual C++ 9's: VC8's stubs, VC10's sin and cos.
+    ...ciStubs('45863a1a223a40e7', { cisin: SIN_VC9, cicos: COS_VC9 }),
+    ...ciStubs('9ea4bc7ae8223fc7', { cisin: SIN_VC9, cicos: COS_VC9, citan: TAN,
         ciatan: ATAN, ciasin: ASIN, ciacos: ACOS, cilog: LOG, cilog10: LOG10 }),
     entry({ name: '_CIexp', does: 'ciexp', lead: X87_LEAD, quick: 'f1454e170f6c75b1',
         hash: '4136b43b4b7607e1', spans: [[0, 59], [69, 10]],

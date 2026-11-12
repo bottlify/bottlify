@@ -1731,8 +1731,8 @@ been the default since 2026-10-21; the placement on gains, the trade and `cpu.fr
 the one way into them, are gone. `cpu.placement: 'concentrate'`, every thread taking turns on the
 process's executor, stays as a debugging switch. *2026-10-31.*
 
-**Visual C++ 7.1's, 8's and 10's x87 transcendentals are the host's functions, not the runtime's
-SSE2 code.** A call to `_CIsin`, `_CIcos`, `_CItan`, `_CIatan`, `_CIasin`, `_CIacos`, `_CIlog`,
+**Visual C++ 7.1's to 10's x87 transcendentals are the host's functions, not the runtime's SSE2
+code.** A call to `_CIsin`, `_CIcos`, `_CItan`, `_CIatan`, `_CIasin`, `_CIacos`, `_CIlog`,
 `_CIlog10`, `_CIexp` or `_CIpow` in a program linked with one of those runtimes (PhysX 2.7-2.8,
 3DMark06's PhysX, Call of Duty 4's executable, 3DMark 11's workloads) is formed as the host's own
 function for it (JavaScript's `Math.sin` and the rest), its result put on the x87 stack in the

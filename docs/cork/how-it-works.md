@@ -76,7 +76,7 @@ A compiler links the same functions into every program it builds: its own helper
 the quadword shifts, `__chkstk` and `__security_check_cookie`, 32-bit and x86-64), and the C
 runtime's `memcpy`, `memmove`,
 `memset`, `strlen`, `memcmp`, `strcmp`, `memchr`, `strchr`, `sqrt`, `floor` and `ceil` in a program
-linked with the runtime statically, and Visual C++ 7.1's, 8's and 10's x87 transcendentals `_CIsin`, `_CIcos`,
+linked with the runtime statically, and Visual C++ 7.1's to 10's x87 transcendentals `_CIsin`, `_CIcos`,
 `_CItan`, `_CIatan`, `_CIasin`, `_CIacos`, `_CIlog`, `_CIlog10`, `_CIexp` and `_CIpow`. cork keeps a dictionary of them (`modules/cork/src/crt-dictionary.js`,
 `helpers.js`), each a signature of its code: the bytes reachable from its entry, with the bytes
 that differ where it is linked (relocated addresses, RIP-relative offsets, calls out of it)
@@ -102,7 +102,8 @@ watched page marked written as a store marks it. A process over a wide window (a
 window, past 4 GiB too.
 
 The dictionary holds Microsoft's runtimes from Visual C++ 7.1 to 14 (2015 to 2022), 32-bit and
-x86-64. `tools/crt-dictionary.mjs` reads a signature out of a runtime's DLL, looks it up in other
+x86-64; Visual C++ 9's (2008) is checked against it too. `tools/crt-dictionary.mjs` reads a
+signature out of a runtime's DLL, looks it up in other
 images (`--find`), and runs the DLL's own function against its operation on seeded arguments
 (`--verify`). An entry goes in only once `--verify` finds no difference on any of the function's
 paths. A stub too short for its bytes to tell it apart, `__security_check_cookie`'s compare
