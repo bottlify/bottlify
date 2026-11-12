@@ -142,6 +142,10 @@ flowchart TD
   the current folder. Static imports are looked up the same way, without the current folder. For
   a name the engine has a table for, the system directories are skipped: a copy an installer put
   there would be a second library of the name in the process beside the engine's.
+- **A DLL already loaded** is handed back with its count raised. A bare name finds the first module
+  of that name; a path finds only the module read from that file, so a second file of a loaded
+  module's name is a module of its own (the .NET Framework loads a mixed assembly's native image
+  so while the assembly is loaded).
 - **A real DLL** is parsed and relocated by the loader, its dependencies are loaded first, its
   imports (delayed ones included) are bound, and its `DllMain` is called through the bridge as
   program code. Every image's TLS is supported, a library's loaded at run time too: a slot, a

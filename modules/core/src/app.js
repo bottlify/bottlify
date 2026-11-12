@@ -4340,13 +4340,73 @@ async function buildApp(options){
         }
     };
 
+    /** A path as the loader compares two: one separator, any case. @param {string} path */
+    const pathKey = path=>path.replace(/\//g, '\\').replace(/\\{2,}/g, '\\').toLowerCase();
+
+    /**
+     * The module loaded from a file at this path, whichever name it has: a
+     * path names a file, and two files of one name are two modules.
+     *
+     * @param {string} path
+     */
+    const moduleAtPath = path=>{
+        const wanted = pathKey(resolveLibraryPath(path, options.imagePath ?? 'C:\\app.exe'));
+        for (const module of byBase.values())
+        {
+            if (module.file && module.path && pathKey(module.path) === wanted)
+            {
+                return module;
+            }
+        }
+        return null;
+    };
+
     /** @param {string | null} name */
     const findModule = name=>{
         if (name === null || name === '')
         {
             return mainModule;
         }
-        return byName.get(moduleKeyOf(name)) ?? null;
+        return (/[\\/]/.test(name) ? moduleAtPath(name) : null)
+            ?? byName.get(moduleKeyOf(name)) ?? null;
+    };
+
+    /**
+     * Whether a load by this name is answered by `module`: a bare name by the
+     * first module of that name, a path only by the module read from that
+     * file. Windows looks a path up among the loaded modules by the whole of
+     * it, so a second file of a loaded module's name -- the .NET Framework's
+     * native image of a mixed assembly, beside the assembly itself -- is
+     * loaded as a module of its own.
+     *
+     * @param {string} name @param {any} module
+     */
+    const answersPath = (name, module)=>!/[\\/]/.test(name) || !module?.file || !module.path
+        || pathKey(module.path)
+            === pathKey(resolveLibraryPath(name, options.imagePath ?? 'C:\\app.exe'));
+
+    /**
+     * Takes a module's name off the bare-name index when it is the one there,
+     * and puts in its place another loaded module of that name, the next a
+     * bare name finds.
+     *
+     * @param {any} held
+     */
+    const forgetName = held=>{
+        const key = moduleKeyOf(held.name);
+        if (byName.get(key) !== held)
+        {
+            return;
+        }
+        byName.delete(key);
+        for (const other of byBase.values())
+        {
+            if (other !== held && moduleKeyOf(other.name) === key)
+            {
+                byName.set(key, other);
+                return;
+            }
+        }
     };
 
     // Where input goes when nobody names a window: the active one, and while
@@ -6304,8 +6364,8 @@ async function buildApp(options){
             }
             if (held.file)
             {
-                byName.delete(moduleKeyOf(held.name));
                 byBase.delete(held.base);
+                forgetName(held);
                 memory.unregister(held.name);
                 librarySpace.giveBack(held.base);
                 // Room given back: a library refused for want of it may fit now.
@@ -6468,7 +6528,8 @@ async function buildApp(options){
         // space fills until there is no room left, and re-reading, re-parsing,
         // re-mapping and re-binding a megabyte of library is most of what the
         // machine then does with its time.
-        const loaded = findModule(name);
+        const named = findModule(name);
+        const loaded = answersPath(name, named) ? named : null;
         const searched = searchesBesideProgram(isKnownDll(name), Boolean(loaded?.file));
         // A bare name an activation context redirects is that assembly's
         // file -- or the engine's own, when the engine answers it -- and is
@@ -6600,7 +6661,12 @@ async function buildApp(options){
                         /** @returns {number | Promise<number>} */
                         release: ()=>releaseLibrary(held),
                     }, inert ? { inert, attached: false } : {});
-                    byName.set(moduleKeyOf(name), held);
+                    // A bare name finds the first module of its name, as
+                    // Windows walks its modules in the order they loaded.
+                    if (!byName.has(moduleKeyOf(name)))
+                    {
+                        byName.set(moduleKeyOf(name), held);
+                    }
                     byBase.set(base, held);
                     // Joins PEB->Ldr's own module list the same moment: a
                     // program that walks it right after this LoadLibraryA
@@ -6655,8 +6721,8 @@ async function buildApp(options){
                         /** @param {string} reason */
                         const refuse = async reason=>{
                             threadBlocks?.removeModule(base);
-                            byName.delete(moduleKeyOf(name));
                             byBase.delete(base);
+                            forgetName(held);
                             memory.unregister(name);
                             librarySpace.giveBack(base);
                             for (const other of brought)
