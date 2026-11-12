@@ -747,6 +747,24 @@ setInterval(async()=>{
                     phases: (metrics('log').topPhases ?? []).slice(0, 12),
                     translatedShare: figures.translatedShare, regions: figures.regions,
                     translateMs: figures.translateMs, workerBusyMs: figures.workerBusyMs,
+                    // Of a process started again: what the run's store answered,
+                    // and where the engine thread's translating went.
+                    store: {
+                        hits: figures.cacheHits, misses: figures.cacheMisses,
+                        noRecord: figures.missNoRecord, changed: figures.missChanged,
+                        formedAgain: figures.hitsFormedAgain,
+                        asRecorded: figures.formedAsRecorded,
+                        // Modules taken as a runtime sharing the store compiled them.
+                        sharedModules: figures.sharedModules, sharedHeld: figures.sharedHeld,
+                        formedShared: figures.formedShared, sharedForms: figures.sharedForms,
+                    },
+                    ms: {
+                        forming: figures.formingMs, lookup: figures.lookupMs,
+                        emit: figures.emitMs, encode: figures.encodeMs,
+                        instantiate: figures.instantiateMs, publish: figures.publishMs,
+                        workerEmit: figures.workerEmitMs, workerCompile: figures.workerCompileMs,
+                    },
+                    modules: figures.modules, compiledApart: figures.compiledApart,
                     invalidations: figures.invalidations, dropped: figures.dropped,
                     volatilePages: figures.volatilePages, volatileNow: figures.volatileNow,
                     exits: figures.exits, untranslatedBy: figures.untranslatedBy,

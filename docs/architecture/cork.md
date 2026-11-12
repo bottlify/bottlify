@@ -77,8 +77,15 @@ everyone's. The page flags are `INACCESSIBLE`, `HAS_CODE`, `VOLATILE`, `CLOSED`,
   ([cork's README](../cork/how-it-works.md)). Every process of a run adds its
   regions to that map when it flushes, to the map as the store holds it then, and writes it back
   only when it adds a 64th of it: a tool a game starts many times a run would otherwise write the
-  whole map each time. A bundle may bring translations along (`CORKSEED`); they are seeded before
-  the first instruction.
+  whole map each time. The processes of a run handed one store also share the batch modules they
+  compiled, in the engine's thread
+  ([`shared-modules.js`](../../modules/cork/src/runtime/shared-modules.js)): a store hit whose
+  module an earlier process compiled is instantiated without compiling its bytes again, and with
+  the code V8 has compiled and tiered up for it since (`sharedModuleBytes`); and the regions they
+  formed ([`shared-forms.js`](../../modules/cork/src/runtime/shared-forms.js)): a hit whose every
+  byte and page forming read answer as they did takes the region an earlier process formed rather
+  than decoding it again (`sharedFormed`). A bundle may bring
+  translations along (`CORKSEED`); they are seeded before the first instruction.
 
 ## Execution in Bottlify
 

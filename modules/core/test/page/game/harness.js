@@ -1570,7 +1570,7 @@ export function createHarness(canvas, how = {}){
      *           clickTimes?: { x: number, y: number, atMs: number, holdMs?: number }[],
      *           moveTimes?: { x: number, y: number, atMs: number }[],
      *           files?: { path: string, base64: string }[],
-     *           wholeFiles?: boolean,
+     *           wholeFiles?: boolean, session?: 'opfs',
      *           store?: string, prefetch?: boolean, bundleId?: string, fakeGpu?: boolean,
      *           fakeFeatures?: string[],
      *           watch?: { libraries: Record<string, number[] | null>,
@@ -1931,8 +1931,11 @@ export function createHarness(canvas, how = {}){
                 ...bundleStoreOptions(request),
             },
             // Seeded from the request when it carries files; nothing goes
-            // back out either way, the result carries what was written.
-            storage: request.files?.length ? ()=>seedFiles(request.files) : null,
+            // back out either way, the result carries what was written --
+            // unless the run saves its session where a launcher does
+            // (`session: 'opfs'`), which a fresh profile starts empty.
+            storage: request.session
+                ?? (request.files?.length ? ()=>seedFiles(request.files) : null),
             // This page has a device, in the only sense the engine cares about:
             // something reads the other end of the ring at the rate a device would.
             audio: { drained: true, ...request.audio ?? {} },

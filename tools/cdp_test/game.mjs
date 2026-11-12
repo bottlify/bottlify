@@ -26,7 +26,7 @@
  *                                  [--graphics-worker] [--fake-gpu] [--journal-calls]
  *                                  [--command-line STRING] [--args STRING] [--windows NAME]
  *                                  [--gpu sm1|sm2|sm3|sm4|host]
- *                                  [--file HOST=GUEST] [--save-files]
+ *                                  [--file HOST=GUEST] [--save-files] [--session opfs]
  *                                  [--user-data-dir DIR] [--port N] [--store local] [--quota MB]
  *                                  [--prefetch]
  *                                  [--cpu-profile SECONDS] [--heap-profile [old]]
@@ -305,6 +305,9 @@ function parse(argv){
         // Keep what the program wrote as the bytes it wrote, whole, rather
         // than as text: a file meant to be fed back in must survive the trip.
         saveFiles: argv.includes('--save-files'),
+        // `--session opfs`: the run saves its session into the profile's origin
+        // file system as a launcher does, every save the store's to make.
+        session: argv.includes('--session') ? argv[argv.indexOf('--session') + 1] : null,
         // `--output FILE`: what the program printed, as it printed it - each
         // write whole, the streams together - for a reader that parses it
         // (tools/wine-tests.mjs --browser); the report has it a write a line.
@@ -2131,6 +2134,7 @@ export async function game(options){
             keys: options.keys,
             files: options.files,
             wholeFiles: options.saveFiles,
+            session: options.session ?? undefined,
             store: options.store ?? undefined,
             prefetch: options.prefetch,
             exportTranslations: options.exportTranslations !== null,

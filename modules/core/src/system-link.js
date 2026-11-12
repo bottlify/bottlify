@@ -108,6 +108,9 @@ export function remoteSystem(ask, handlers = {}, call, volume = null, windowCell
      */
     const endpoints = new Map();
     return {
+        // Joined across a link: the run's session is saved by the thread that
+        // holds its volume (`openSession`).
+        remote: true,
         // The run's named objects are asked there (`objects`); this table is
         // not consulted.
         namedObjects: new Map(),

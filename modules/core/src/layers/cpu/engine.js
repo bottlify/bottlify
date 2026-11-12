@@ -322,6 +322,13 @@ export function engineContractProblem(engineModule, url){
  *     when asked for (0: no ceiling). Default 256 MiB; the cpu layer gives each executor's
  *     runtime its part of what the translation zone (`TRANSLATION_ZONE_BYTES`) leaves after
  *     the engine's tables (`cacheShare`). Its diagnostics say what it holds (`heldBytes`).
+ * @property {number} [sharedModuleBytes]  Wasm bytes of compiled batch modules kept for every
+ *     runtime handed the same `store`: a process the run starts again instantiates the modules
+ *     an earlier one compiled, without compiling them (0: none kept). Default 256 MiB.
+ * @property {number} [sharedFormed]  Formed regions kept for every runtime handed the same
+ *     `store` that forms as this one does: a store hit whose every byte and page forming read
+ *     answer as they did for the region formed earlier is not formed again (0: none kept).
+ *     Default 8192.
  * @property {number} [holdMs]  Where a translation worker is wanted, the engine thread's
  *     time the translator's work may take at a stretch: a batch is formed over several calls,
  *     the store's hits compiled off the thread, their compiles started and they and a worker's
@@ -475,6 +482,15 @@ export function engineContractProblem(engineModule, url){
  *     here otherwise (beside other regions, or before its callees were known).
  * @property {number} [formedAsRecorded]  Hits formed once, as their record says: the store
  *     answered before the region was formed.
+ * @property {number} [formedShared]  Regions taken as a runtime sharing the store formed them
+ *     (`sharedFormed`): every byte and page forming read answered as it did.
+ * @property {{ held: number, hits: number, added: number, dropped: number } | null}
+ *     [sharedForms]  The formed regions the runtimes sharing the store and forming alike hold.
+ * @property {number} [sharedModules]  Store hits whose batch module a runtime sharing the store
+ *     had compiled already (`sharedModuleBytes`), instantiated without compiling.
+ * @property {{ held: number, bytes: number, hits: number, added: number, dropped: number }
+ *     | null} [sharedHeld]  The compiled modules the runtimes sharing the store hold: how
+ *     many, their wasm bytes, and what was found, added and let go since the store's first.
  * @property {number} [toStoredRegion]  Candidates at a block of a region the store holds, formed
  *     as that region instead.
  * @property {number} [lookedUpNow]    Batches the store answered without a turn of the event loop.
