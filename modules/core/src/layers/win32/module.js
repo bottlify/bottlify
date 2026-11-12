@@ -148,7 +148,7 @@ import { createDpnhpastFunctions } from './dpnhpast/functions.js';
 import { createSetupapiFunctions } from './setupapi/functions.js';
 import { createMsiFunctions } from './msi/functions.js';
 import { createProgramFunctions } from './programs/functions.js';
-import { PROGRAMS_LIBRARY } from './programs/table.js';
+import { PROGRAMS_LIBRARY, systemProgramAt, systemProgramImage } from './programs/table.js';
 import { createEventLogFunctions } from './advapi32/eventlog.js';
 import { createCabinetFunctions } from './cabinet/functions.js';
 import { MSI_ORDINALS } from './msi/ordinals.js';
@@ -187,6 +187,9 @@ import { CLSID_MF_READ_WRITE_CLASS_FACTORY, createMfReadWriteFunctions }
 import { createPropsysFunctions } from './propsys/functions.js';
 import { SHARED_RESOURCE_HANDLE } from './ntdll/query.js';
 
+
+/** The programs this build runs in place of the system's, standing as files where Windows keeps them. */
+const SYSTEM_PROGRAM_FILES = Object.freeze({ at: systemProgramAt, image: systemProgramImage });
 /**
  * win32 — the API surface the guest was compiled against.
  *
@@ -890,7 +893,7 @@ export function createWin32Module(){
             const volume = withSystemLibraries(
                 createVolume(filesystem, config?.fetchBlocks ?? null),
                 ()=>systemLibraryNames(),
-                { homeOf: libraryHome,
+                { homeOf: libraryHome, programs: SYSTEM_PROGRAM_FILES,
                     imageOf: name=>(libraryHome(name) !== null
                         ? config?.steam?.clientFiles?.[name] : null)
                         ?? modules.systemImage?.(name) ?? null });
@@ -3135,6 +3138,7 @@ export function createWin32Module(){
                         drives: ()=>filesystem.drives(),
                         volume: (/** @type {string} */ letter)=>filesystem.volume?.(letter) ?? null,
                         systemLibraries: systemLibraryNames,
+                        systemPrograms: SYSTEM_PROGRAM_FILES,
                         directories: shellFolderDirectories(windows),
                         imagePath: ()=>modules.imagePath(),
                         setLastError: setError,

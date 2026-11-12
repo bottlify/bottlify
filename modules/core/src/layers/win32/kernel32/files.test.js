@@ -10,6 +10,7 @@ import { volumeName } from './drives.js';
 import { createFileFunctions, WIN32_FIND_DATAA } from './files.js';
 import { HANDLE_STDOUT } from './console.js';
 import { decodeAnsi } from './locale.js';
+import { systemProgramAt, systemProgramImage } from '../programs/table.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -2737,6 +2738,38 @@ test('a library this build implements stands in the system folder as a file', ()
     assert.equal(fns.CreateFileA.handler([at(NAME, 'C:\\WINDOWS\\system32\\shell32.dll'),
         GENERIC_READ, 0, 0, OPEN_EXISTING, 0, 0]) === INVALID_HANDLE_VALUE, false,
     'a file on the volume is the file');
+});
+
+test('a program this build runs in the system folder stands there as a file too', ()=>{
+    // The .NET Framework 4.5 and later setups refuse a machine whose Windows
+    // Installer service has no msiexec.exe behind it; Notepad stands in the
+    // Windows folder as well, where setups name it.
+    const { files, memory, fns, at } = setup({ systemLibraries: ()=>['SHELL32.dll'],
+        systemPrograms: { at: systemProgramAt, image: systemProgramImage } });
+    const INVALID_FILE_ATTRIBUTES = 0xffffffff;
+    const FILE_ATTRIBUTE_ARCHIVE = 0x20;
+    for (const path of ['C:\\WINDOWS\\system32\\msiexec.exe', 'c:\\windows\\SYSTEM32\\MsiExec.EXE',
+        'C:\\WINDOWS\\system32\\rundll32.exe', 'C:\\WINDOWS\\notepad.exe'])
+    {
+        assert.equal(fns.GetFileAttributesA.handler([at(NAME, path)]), FILE_ATTRIBUTE_ARCHIVE,
+            path);
+    }
+    assert.equal(fns.GetFileAttributesA.handler([at(NAME, 'C:\\WINDOWS\\msiexec.exe')]),
+        INVALID_FILE_ATTRIBUTES, 'only where Windows keeps it');
+    const handle = fns.FindFirstFileA.handler(
+        [at(NAME, 'C:\\WINDOWS\\system32\\msiexec.exe'), FIND_DATA]);
+    assert.notEqual(handle, INVALID_HANDLE_VALUE);
+    assert.equal(memory.string(FIND_DATA + 44).toLowerCase(), 'msiexec.exe');
+    assert.equal(fns.FindClose.handler([handle]), 1);
+    const read = fns.CreateFileA.handler([at(NAME, 'C:\\WINDOWS\\system32\\msiexec.exe'),
+        GENERIC_READ, 1, 0, OPEN_EXISTING, 0, 0]);
+    assert.notEqual(read, INVALID_HANDLE_VALUE, 'and it reads as its image');
+    assert.equal(fns.ReadFile.handler([read, 0x600, 2, 0x700, 0]), 1);
+    assert.equal(memory.readCString(0x600, 2), 'MZ');
+    assert.equal(fns.CloseHandle.handler([read]), 1);
+    files.put('C:\\WINDOWS\\system32\\msiexec.exe', 'a real one');
+    assert.equal(files.stat('C:\\WINDOWS\\system32\\msiexec.exe')?.size, 10,
+        'a file there wins');
 });
 
 test('a library standing in the system folder is replaced by a setup that writes it', ()=>{

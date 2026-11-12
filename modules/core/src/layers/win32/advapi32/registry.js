@@ -408,7 +408,8 @@ const PROCESSORS_KEY = 'HARDWARE\\DESCRIPTION\\System\\CentralProcessor';
 /**
  * Services Windows XP's setup installs, among them the ones a program is
  * found asking for -- the print spooler, the event log, the task scheduler,
- * WMI -- with the values the service control manager keeps: sharing a
+ * WMI, and the Windows Installer, Automatic Updates and BITS a setup checks
+ * for -- with the values the service control manager keeps: sharing a
  * process (0x20) or with one of their own (0x10), started automatically
  * (2), errors logged (1), running as the system, in the host XP runs them in.
  */
@@ -444,12 +445,32 @@ const BUILT_IN_SERVICES = Object.freeze([
     { name: 'Themes', values: { Type: 0x20, Start: 2, ErrorControl: 1,
         ImagePath: 'C:\\WINDOWS\\system32\\svchost.exe -k netsvcs',
         DisplayName: 'Themes', ObjectName: 'LocalSystem', Group: 'UIGroup' } },
+    { name: 'BITS', values: { Type: 0x20, Start: 3, ErrorControl: 1,
+        ImagePath: 'C:\\WINDOWS\\system32\\svchost.exe -k netsvcs',
+        DisplayName: 'Background Intelligent Transfer Service', ObjectName: 'LocalSystem' } },
+    { name: 'msiserver', values: { Type: 0x10, Start: 3, ErrorControl: 1,
+        ImagePath: 'C:\\WINDOWS\\system32\\msiexec.exe /V',
+        DisplayName: 'Windows Installer', ObjectName: 'LocalSystem' } },
     { name: 'W32Time', values: { Type: 0x20, Start: 2, ErrorControl: 1,
         ImagePath: 'C:\\WINDOWS\\system32\\svchost.exe -k netsvcs',
         DisplayName: 'Windows Time', ObjectName: 'LocalSystem' } },
     { name: 'winmgmt', values: { Type: 0x20, Start: 2, ErrorControl: 1,
         ImagePath: 'C:\\WINDOWS\\system32\\svchost.exe -k netsvcs',
         DisplayName: 'Windows Management Instrumentation', ObjectName: 'LocalSystem' } },
+    { name: 'wuauserv', values: { Type: 0x20, Start: 2, ErrorControl: 1,
+        ImagePath: 'C:\\WINDOWS\\system32\\svchost.exe -k netsvcs',
+        DisplayName: 'Automatic Updates', ObjectName: 'LocalSystem' } },
+]);
+
+/**
+ * The services Windows Vista added that a setup asks after: the modules
+ * installer, which installs a system's updates and components and which the
+ * .NET Framework 4.5 and later setups expect on a machine of 6.0 or later.
+ */
+const VISTA_SERVICES = Object.freeze([
+    { name: 'TrustedInstaller', values: { Type: 0x10, Start: 3, ErrorControl: 1,
+        ImagePath: 'C:\\WINDOWS\\servicing\\TrustedInstaller.exe',
+        DisplayName: 'Windows Modules Installer', ObjectName: 'LocalSystem' } },
 ]);
 
 /**
@@ -604,8 +625,9 @@ const machineKeys = (windows, directx, processors)=>{
         // asks for one by name -- the spooler, to learn whether it may print --
         // and the event log's logs are its subkeys, each source a key under
         // its log.
-        ...BUILT_IN_SERVICES.map(({ name, values })=>({ root: HKEY_LOCAL_MACHINE,
-            path: `SYSTEM\\CurrentControlSet\\Services\\${name}`, values })),
+        ...[...BUILT_IN_SERVICES, ...windows.major >= 6 ? VISTA_SERVICES : []]
+            .map(({ name, values })=>({ root: HKEY_LOCAL_MACHINE,
+                path: `SYSTEM\\CurrentControlSet\\Services\\${name}`, values })),
         ...CRYPTO_PROVIDERS.map(([name, type, image])=>({ root: HKEY_LOCAL_MACHINE,
             path: `SOFTWARE\\Microsoft\\Cryptography\\Defaults\\Provider\\${name}`,
             values: { Type: type, 'Image Path': image } })),

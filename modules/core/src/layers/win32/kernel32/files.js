@@ -507,6 +507,9 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write', 'p
  *           The libraries this build implements, by file name: each stands in
  *           the system folder as a file of its own, where a setup looks for it
  *           before loading it. Absent, the folder shows only what is on it.
+ * @property {SystemPrograms} [systemPrograms]
+ *           The programs this build runs in place of the system's, which stand
+ *           where Windows keeps them beside the libraries.
  * @property {{ forget: (object: any) => void }} [namedObjects]
  *           Told when a handle closes, so a named mutex, event, semaphore,
  *           timer or file mapping can free its name once nothing holds it any
@@ -544,12 +547,24 @@ const SYSTEM_LIBRARY_SIZE = 0x10000;
  *           folder -- the Steam client's, in Steam's -- or null.
  * @property {(name: string) => Uint8Array | null} [imageOf]
  *           The library's image as the engine made it, which its file holds.
+ * @property {SystemPrograms} [programs]  The programs that stand as files beside them.
+ */
+
+/**
+ * The programs this build runs in place of the system's (`programs/table.js`):
+ * which one a path names, and its image.
+ *
+ * @typedef {Object} SystemPrograms
+ * @property {(path: string) => string | null} at  its routine, or null for none there
+ * @property {(path: string) => Uint8Array | null} image
  */
 
 /**
  * A volume on which the system folder -- or the folder a library is
  * installed in (`homeOf`) -- also holds the libraries this build implements,
- * each by its own name, unless a file of that name is there.
+ * each by its own name, unless a file of that name is there; and the programs
+ * it runs in place of the system's (`SYSTEM_PROGRAMS`: msiexec, rundll32 and
+ * the rest) stand where Windows keeps them, their images the ones it starts.
  *
  * Is it there, what are its attributes, a search for its exact name
  * (InstallShield's UseDLL looks with FindFirstFile first), and its bytes: the
@@ -584,9 +599,22 @@ export function withSystemLibraries(real, libraries, where = {}){
         const home = where.homeOf?.(library)?.toLowerCase() ?? system;
         return lower.slice(0, cut) === home ? library : null;
     };
-    /** @param {string} library */
-    const entryOf = library=>({ exists: true, isDirectory: false,
-        size: where.imageOf?.(library)?.length ?? SYSTEM_LIBRARY_SIZE,
+    /**
+     * The program this build runs in place of a system one there (`SYSTEM_PROGRAMS`):
+     * its file name as the path spells it, or null.
+     *
+     * @param {string} path
+     */
+    const programAt = path=>((where.programs?.at(path) ?? null) === null ? null
+        : path.slice(path.lastIndexOf('\\') + 1));
+    /** @param {string} path @returns {string | null} what stands there, by its own spelling */
+    const standingAt = path=>libraryAt(path) ?? programAt(path);
+    /** @param {string} name @param {string} path @returns {Uint8Array | null} */
+    const imageAt = (name, path)=>(programAt(path) !== null && libraryAt(path) === null
+        ? where.programs?.image(path) ?? null : where.imageOf?.(name) ?? null);
+    /** @param {string} name @param {string} path */
+    const entryOf = (name, path)=>({ exists: true, isDirectory: false,
+        size: imageAt(name, path)?.length ?? SYSTEM_LIBRARY_SIZE,
         modified: SYSTEM_LIBRARY_TIME });
     /** The open stand-ins, each its library's image. @type {WeakMap<object, Uint8Array>} */
     const opened = new WeakMap();
@@ -594,14 +622,14 @@ export function withSystemLibraries(real, libraries, where = {}){
         /** @param {string} path */
         stat: path=>{
             const found = real.stat(path);
-            const library = found ? null : libraryAt(path);
-            return found ?? (library ? entryOf(library) : null);
+            const name = found ? null : standingAt(path);
+            return found ?? (name ? entryOf(name, path) : null);
         },
         /** @param {string} path @param {any} options */
         open: (path, options)=>{
             const node = real.open(path, options);
-            const library = node || real.stat(path) ? null : libraryAt(path);
-            if (node || !library)
+            const name = node || real.stat(path) ? null : standingAt(path);
+            if (node || !name)
             {
                 return node;
             }
@@ -609,7 +637,7 @@ export function withSystemLibraries(real, libraries, where = {}){
             {
                 return real.open(path, { ...options, create: true });
             }
-            const image = where.imageOf?.(library) ?? null;
+            const image = imageAt(name, path);
             if (!image)
             {
                 return null;
@@ -646,9 +674,10 @@ export function withSystemLibraries(real, libraries, where = {}){
         /** @param {string} path @param {string} pattern */
         list: (path, pattern)=>{
             const found = real.list(path, pattern);
+            const at = `${path.replace(/\\$/, '')}\\${pattern}`;
             const name = (found?.length ?? 0) === 0 && !/[*?]/.test(pattern ?? '')
-                ? libraryAt(`${path.replace(/\\$/, '')}\\${pattern}`) : null;
-            return name ? [{ ...entryOf(name), name }] : found;
+                ? standingAt(at) : null;
+            return name ? [{ ...entryOf(name, at), name }] : found;
         },
     });
 }
@@ -665,7 +694,8 @@ export function withSystemLibraries(real, libraries, where = {}){
  */
 export function createFileFunctions(host){
     const layout = overlappedLayout(host.pointerSize);
-    const files = withSystemLibraries(host.files, host.systemLibraries);
+    const files = withSystemLibraries(host.files, host.systemLibraries,
+        { programs: host.systemPrograms });
 
     // A machine has these directories before any program runs: GetTempPath
     // and GetSystemDirectory promise them, the registry names the program

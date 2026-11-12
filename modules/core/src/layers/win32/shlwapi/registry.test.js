@@ -197,3 +197,16 @@ test('SHRegGetUSValue reads the user\'s value, then the machine\'s, then the def
     assert.equal(given.data, 7, 'the default copied in');
     assert.equal(m.fns.SHRegGetUSValueA.argBytes, 32);
 });
+
+test('AssocQueryString answers that nothing is associated, and says so once', ()=>{
+    const m = shlwapiMachine();
+    const E_NO_ASSOCIATION = 0x80070483 | 0;
+    for (const name of ['AssocQueryStringA', 'AssocQueryStringW'])
+    {
+        assert.equal(m.fns[name].argBytes, 24);
+        assert.equal(m.fns[name].handler([0, 2, m.put('.htm', name.endsWith('W')), 0, 0,
+            m.count(0)]), E_NO_ASSOCIATION);
+    }
+    assert.ok(m.divergences.some((/** @type {any} */ one)=>
+        JSON.stringify(one).includes('associations')));
+});

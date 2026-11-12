@@ -159,7 +159,10 @@ flowchart TD
   included. D3DX 10 and 11 are one library over two devices: the image loaders make their
   textures through the device's own creates, the compiles go to `D3DCompile`.
 - **Where an engine library stands as a file:** in the system folder, as a file a setup or a
-  program can find, read and replace (`withSystemLibraries`).
+  program can find, read and replace (`withSystemLibraries`). The programs the engine runs in
+  place of the system's (`msiexec`, `rundll32`, `regsvr32`, `reg`, `notepad`) stand the same way
+  where Windows keeps them: a setup checks that the Windows Installer service's `msiexec.exe` is
+  there before it installs anything.
 - **The Windows Imaging Component** (`windowscodecs.dll`) is the engine's too, its factory a COM
   class as on Windows: its decoders reuse the D3DX and media layers' readers, and a bitmap's
   pixels live in guest memory, since its lock hands the program a pointer into them. The

@@ -750,7 +750,35 @@ export function createStringFunctions(host, { A, W }){
          */
         wnsprintfA: printer(A),
         wnsprintfW: printer(W),
+
+        /**
+         * int wvnsprintfA(PSTR pszDest, int cchDest, PCSTR pszFmt, va_list arglist)
+         *
+         * wnsprintf's text with its arguments read from the list the caller
+         * passes (the stack words it points at), as Watson's dw20 formats its
+         * report.
+         */
+        wvnsprintfA: listPrinter(A),
+        wvnsprintfW: listPrinter(W),
     };
+
+    /**
+     * The `va_list` variant: up to 32 argument words from the list.
+     *
+     * @param {import('./text.js').Width} width
+     */
+    function listPrinter(width){
+        const { handler } = printer(width);
+        return {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [destination, room, format, list])=>{
+                const words = (list >>> 0) === 0 || !host.readMemory ? []
+                    : [...new Uint32Array(host.readMemory(list >>> 0, 4 * 32).slice().buffer)];
+                return handler([destination, room, format, ...words]);
+            },
+        };
+    }
 
     /** @param {import('./text.js').Width} width */
     function printer(width){

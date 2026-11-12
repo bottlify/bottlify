@@ -126,6 +126,29 @@ export const skipRoot = path=>{
 };
 
 /**
+ * PathGetArgs: the index just past a command line's first space outside
+ * quotes, or its length when there is none.
+ *
+ * @param {string} path
+ * @returns {number}
+ */
+const argumentsAt = path=>{
+    let quoted = false;
+    for (let at = 0; at < path.length; at++)
+    {
+        if (path[at] === ' ' && !quoted)
+        {
+            return at + 1;
+        }
+        if (path[at] === '"')
+        {
+            quoted = !quoted;
+        }
+    }
+    return path.length;
+};
+
+/**
  * PathRemoveFileSpec: where the path is cut, or null when nothing would be.
  * The cut is at the last backslash, except that the backslash after a drive
  * and the one or two a path starts with are kept: `C:\file` becomes `C:\`,
@@ -774,6 +797,56 @@ export function createPathFunctions(host, { A, W }){
         ...both('PathIsURL', 4, (width, [pointer])=>{
             const path = width.read(pointer);
             return path !== null && hasScheme(path) ? 1 : 0;
+        }),
+
+        /**
+         * LPSTR PathGetArgsA(LPCSTR pszPath)
+         *
+         * Where a command line's arguments start: just past its first space
+         * outside quotes, or at its end when it has none.
+         */
+        ...both('PathGetArgs', 4, (width, [pointer])=>{
+            const path = width.read(pointer);
+            return path === null ? pointer >>> 0
+                : (pointer >>> 0) + argumentsAt(path) * width.unit;
+        }),
+
+        /**
+         * void PathRemoveArgsA(LPSTR pszPath)
+         *
+         * Cuts a command line at the space before its arguments, in place; a
+         * line with no arguments keeps a trailing space only when it has none.
+         */
+        ...both('PathRemoveArgs', 4, (width, [pointer])=>{
+            const path = width.read(pointer);
+            if (path === null)
+            {
+                return 0;
+            }
+            const at = argumentsAt(path);
+            if (at > 0 && (at < path.length || path[at - 1] === ' '))
+            {
+                host.writeMemory((pointer >>> 0) + (at - 1) * width.unit, width.sz(''));
+            }
+            return 0;
+        }),
+
+        /**
+         * BOOL PathIsSameRootA(LPCSTR pszPath1, LPCSTR pszPath2)
+         *
+         * Whether the second path begins with the first one's root: a drive's
+         * `X:\` or a UNC server and share, in any case. A first path with no
+         * root is on no root at all.
+         */
+        ...both('PathIsSameRoot', 8, (width, [first, second])=>{
+            const one = width.read(first);
+            const other = width.read(second);
+            if (one === null || other === null)
+            {
+                return 0;
+            }
+            const root = skipRoot(one);
+            return root !== null && commonPrefixLength(one, other) + 1 >= root ? 1 : 0;
         }),
 
         /** void PathRemoveBlanksA(LPSTR pszPath): spaces off both ends, in place. */

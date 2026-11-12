@@ -28,6 +28,8 @@ const REG_DWORD = 4;
 const ERROR_MORE_DATA = 234;
 const ERROR_OUTOFMEMORY = 14;
 const ERROR_CALL_NOT_IMPLEMENTED = 120;
+/** HRESULT_FROM_WIN32(ERROR_NO_ASSOCIATION): nothing is associated with the type asked. */
+const E_NO_ASSOCIATION = 0x80070483 | 0;
 /** How long an expanded value may grow, in characters: as far as a registry string goes. */
 const EXPAND_ROOM = 0x8000;
 
@@ -458,6 +460,15 @@ export function createRegistryHelpers(host){
         },
     });
 
+    /** @param {string} name */
+    const noAssociation = name=>({
+        argBytes: 24,
+        handler: ()=>{
+            host.divergence?.(name, 'file associations are not looked up: none is answered');
+            return E_NO_ASSOCIATION;
+        },
+    });
+
     return {
         /**
          * DWORD SHQueryValueExA(HKEY hkey, LPCSTR pszValue, DWORD *pdwReserved,
@@ -478,6 +489,18 @@ export function createRegistryHelpers(host){
          */
         SHGetValueA: getValue('A'),
         SHGetValueW: getValue('W'),
+
+        /**
+         * HRESULT AssocQueryStringA(ASSOCF flags, ASSOCSTR str, LPCSTR pszAssoc,
+         *   LPCSTR pszExtra, LPSTR pszOut, DWORD *pcchOut)
+         *
+         * No association is looked up: every query is answered as one for a
+         * type nothing is associated with, HRESULT_FROM_WIN32(ERROR_NO_ASSOCIATION),
+         * which a caller is written to handle (the .NET Framework setups' interface
+         * asks it which program opens a link), and said once.
+         */
+        AssocQueryStringA: noAssociation('AssocQueryStringA'),
+        AssocQueryStringW: noAssociation('AssocQueryStringW'),
 
         /**
          * LSTATUS SHRegGetUSValueA(LPCSTR pszSubKey, LPCSTR pszValue, DWORD *pdwType,

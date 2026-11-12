@@ -445,3 +445,21 @@ test('wnsprintf formats as the C runtime does, and says when it did not fit', ()
     assert.equal(m.read(wide, true), 'hi!');
     assert.equal(/** @type {any} */ (m.fns.wnsprintfW).convention, 'cdecl');
 });
+
+test('wvnsprintf formats as wnsprintf does, its arguments read from the list it is given', ()=>{
+    // Watson's dw20 formats its report so; a list is the stack words it points at.
+    const m = shlwapiMachine();
+    const buffer = m.put('', false, 0x40);
+    const list = m.put('', false, 0x40);
+    m.view.setUint32(list, 42, true);
+    m.view.setUint32(list + 4, m.put('x', false), true);
+    assert.equal(m.fns.wvnsprintfA.argBytes, 16);
+    assert.equal(m.fns.wvnsprintfA.handler([buffer, 0x40, m.put('%d-%s', false), list]), 4);
+    assert.equal(m.read(buffer, false), '42-x');
+    assert.equal(m.fns.wvnsprintfA.handler([buffer, 3, m.put('%d-%s', false), list]), -1);
+    assert.equal(m.read(buffer, false), '42');
+    const wide = m.put('', true, 0x40);
+    m.view.setUint32(list + 4, m.put('y', true), true);
+    assert.equal(m.fns.wvnsprintfW.handler([wide, 0x20, m.put('%d %s', true), list]), 4);
+    assert.equal(m.read(wide, true), '42 y');
+});
