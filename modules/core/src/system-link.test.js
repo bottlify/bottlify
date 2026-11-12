@@ -135,13 +135,8 @@ test('a system joined across a link says so, and the run\'s session is not its t
     // writes land on the volume the run's own thread saves, and a saver there
     // rewrote the whole volume in every process ngen started.
     // No drives to join: the volume's first question answers an empty list.
-    const system = remoteSystem((target, method)=>(method === 'drives' ? [] : null), {}, null,
-        null, null);
+    const system = remoteSystem((target, method)=>(method === 'drives' ? [] : null));
     assert.equal(system.remote, true);
-    let heard = 0;
-    const stop = system.registry.onChanged(()=>{
-        heard++;
-    });
-    assert.equal(typeof stop, 'function');
-    assert.equal(heard, 0);
+    // Its hive's changes are the system's to save: nothing here listens.
+    assert.equal(typeof system.registry.onChanged(), 'function');
 });

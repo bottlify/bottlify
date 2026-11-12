@@ -79,7 +79,7 @@ function launcher(){
     });
 }
 
-for (const concurrency of [1, 4])
+for (const concurrency of /** @type {(1 | 4)[]} */ ([1, 4]))
 {
     test(`a run of three processes saves each write once, with one saver (concurrency `
         + `${concurrency})`, async()=>{
