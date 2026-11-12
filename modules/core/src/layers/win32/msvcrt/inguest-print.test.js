@@ -162,6 +162,32 @@ test('the printers in the guest answer, write and count as their JavaScript', ()
         sameAt64('_vscprintf', { stack: [FORMAT, LIST], memory: wide }, HANDED);
         sameAt64('_vsnprintf_s', { stack: [BUFFER, size, limit, FORMAT, LIST], memory: wide },
             HANDED);
+        same('vsprintf_s', { stack: [BUFFER, size, FORMAT, LIST], memory }, HANDED);
+        sameAt64('vsprintf_s', { stack: [BUFFER, size, FORMAT, LIST], memory: wide }, HANDED);
+    }
+});
+
+test('the UCRT\'s printers take their options quadword as two slots at 32 bits and one register'
+    + ' at 64, and answer as their JavaScript under every behaviour the options pick', ()=>{
+    const next = random(44);
+    for (let round = 0; round < 300; round++)
+    {
+        const { format, slots } = caseOf(next);
+        const memory = /** @type {[number, Uint8Array][]} */ ([[DATA, memoryOf(format, slots)]]);
+        const wide = /** @type {[number, Uint8Array][]} */ ([[DATA, memoryOf(format, slots, 8)]]);
+        // The upper half of the options, and a locale, are whatever the caller left.
+        const options = [0, 1, 2, 3][next() % 4];
+        const high = next();
+        const buffer = next() % 6 === 0 ? 0 : BUFFER;
+        const count = [0, 1, 5, 16, 200, 0xffffffff][next() % 6];
+        const format_ = next() % 30 === 0 ? 0 : FORMAT;
+        for (const name of ['__stdio_common_vsprintf', '__stdio_common_vsprintf_s'])
+        {
+            same(name, { stack: [options, high, buffer, count, format_, 0x5eed, LIST], memory },
+                HANDED);
+            sameAt64(name, { stack: [options, buffer, count, format_, 0x5eed, LIST, high],
+                memory: wide }, HANDED);
+        }
     }
 });
 

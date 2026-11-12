@@ -755,3 +755,126 @@ export function _vsnprintf_s({ u8, u32, setU8, setU32, host, pointerBytes }, buf
     setU8(buffer + limit, 0);
     return -1;
 }
+
+/**
+ * int vsprintf_s(char *buffer, size_t size, const char *format, va_list args):
+ * the text and its terminator when both fit in `size`; a text that does not
+ * fit (the buffer emptied, ERANGE) and an invalid parameter (EINVAL) are the
+ * host's, found before a byte is written.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} buffer @param {u32} size @param {u32} format
+ * @param {u32} list
+ * @returns {i32}
+ */
+export function vsprintf_s({ u8, u32, setU8, setU32, host, pointerBytes }, buffer, size, format,
+    list)
+{
+    if (buffer === 0 || size === 0 || format === 0
+        || formatInGuest({ u8, pointerBytes }, format) === 0
+        || printInto({ u8, u32, setU8, setU32, pointerBytes }, 0, 0, format, list, 0) >= size)
+    {
+        return host();
+    }
+    const total = printInto({ u8, u32, setU8, setU32, pointerBytes }, buffer, size, format, list,
+        1);
+    setU8(buffer + total, 0);
+    return total | 0;
+}
+
+/*
+ * The UCRT's printers take an options quadword first: two slots before the
+ * buffer at 32 bits, one register at 64, so each argument after it is a slot
+ * nearer at 64 bits -- the source names the slots and picks by the width.
+ */
+
+/**
+ * int __stdio_common_vsprintf(unsigned __int64 options, char *buffer,
+ * size_t count, const char *format, _locale_t locale, va_list args): every
+ * narrow sprintf, snprintf and _vsnprintf of a program built since 2015. The
+ * options' STANDARD_SNPRINTF_BEHAVIOR (2) is C99's snprintf -- what fits of
+ * `count` and a terminator, the whole text's length; without it _vsnprintf's
+ * -- `count` bytes, a terminator only when the text is shorter, -1 when it
+ * did not fit -- the last byte made the terminator under
+ * LEGACY_VSPRINTF_NULL_TERMINATION (1). No buffer and no count asks for the
+ * length; no buffer with a count, or no format, is EINVAL, the host's.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} options @param {u32} second @param {u32} third
+ * @param {u32} fourth @param {u32} fifth @param {u32} sixth @param {u32} seventh
+ * @returns {i32}
+ */
+export function __stdio_common_vsprintf({ u8, u32, setU8, setU32, host, pointerBytes }, options,
+    second, third, fourth, fifth, sixth, seventh)
+{
+    const buffer = pointerBytes === 4 ? third : second;
+    const count = pointerBytes === 4 ? fourth : third;
+    const format = pointerBytes === 4 ? fifth : fourth;
+    const list = pointerBytes === 4 ? seventh : sixth;
+    if (format === 0 || formatInGuest({ u8, pointerBytes }, format) === 0
+        || buffer === 0 && count !== 0)
+    {
+        return host();
+    }
+    if (buffer === 0)
+    {
+        return printInto({ u8, u32, setU8, setU32, pointerBytes }, 0, 0, format, list, 0) | 0;
+    }
+    if ((options & 2) !== 0)
+    {
+        if (count === 0)
+        {
+            return printInto({ u8, u32, setU8, setU32, pointerBytes }, 0, 0, format, list, 0)
+                | 0;
+        }
+        const room = (count - 1) >>> 0;
+        const whole = printInto({ u8, u32, setU8, setU32, pointerBytes }, buffer, room, format,
+            list, 1);
+        setU8(buffer + (whole < room ? whole : room), 0);
+        return whole | 0;
+    }
+    const total = printInto({ u8, u32, setU8, setU32, pointerBytes }, buffer, count, format, list,
+        1);
+    if (total < count)
+    {
+        setU8(buffer + total, 0);
+    }
+    if (total <= count)
+    {
+        return total | 0;
+    }
+    if ((options & 1) !== 0 && count !== 0)
+    {
+        setU8((buffer + count - 1) >>> 0, 0);
+    }
+    return -1;
+}
+
+/**
+ * int __stdio_common_vsprintf_s(unsigned __int64 options, char *buffer,
+ * size_t size, const char *format, _locale_t locale, va_list args):
+ * vsprintf_s, the UCRT's.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} options @param {u32} second @param {u32} third
+ * @param {u32} fourth @param {u32} fifth @param {u32} sixth @param {u32} seventh
+ * @returns {i32}
+ */
+export function __stdio_common_vsprintf_s({ u8, u32, setU8, setU32, host, pointerBytes },
+    options, second, third, fourth, fifth, sixth, seventh)
+{
+    const buffer = pointerBytes === 4 ? third : second;
+    const size = pointerBytes === 4 ? fourth : third;
+    const format = pointerBytes === 4 ? fifth : fourth;
+    const list = pointerBytes === 4 ? seventh : sixth;
+    if (buffer === 0 || size === 0 || format === 0
+        || formatInGuest({ u8, pointerBytes }, format) === 0
+        || printInto({ u8, u32, setU8, setU32, pointerBytes }, 0, 0, format, list, 0) >= size)
+    {
+        return host();
+    }
+    const total = printInto({ u8, u32, setU8, setU32, pointerBytes }, buffer, size, format, list,
+        1);
+    setU8(buffer + total, 0);
+    return total | 0;
+}

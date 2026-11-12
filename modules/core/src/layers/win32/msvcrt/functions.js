@@ -575,6 +575,18 @@ export function createMsvcrtFunctions(host){
             countedPrint(buffer, count, narrowText(format, varargsAt(list))),
     });
 
+    /**
+     * int vsprintf_s(char *buffer, size_t size, const char *format, va_list args)
+     * -- in the guest (`inguest-print.js`) when the text and its terminator
+     * fit; one that does not, and an invalid parameter, the handler's.
+     */
+    const vsprintf_s = guestEntry(inGuestPrint.vsprintf_s, PRINT_CODE.vsprintf_s, host, {
+        argBytes: 16,
+        /** @param {number[]} args */
+        handler: ([buffer, size, format, list])=>
+            boundedPrint(buffer, size, format, (format >>> 0) === 0 ? [] : varargsAt(list)),
+    });
+
     const table = {
         /**
          * int _set_error_mode(int mode)
@@ -1018,21 +1030,13 @@ export function createMsvcrtFunctions(host){
          * string, and the answer is -1 with ERANGE. A null buffer or format
          * is -1 and EINVAL.
          */
-        sprintf_s: {
-            convention: 'cdecl',
+        sprintf_s: variadicEntry(3, vsprintf_s, {
             argBytes: 12 + VARIADIC_SLOTS * 4,
             /** @param {number[]} args */
             handler: args=>boundedPrint(args[0], args[1], args[2], args.slice(3)),
-        },
+        }),
 
-        /** int vsprintf_s(char *buffer, size_t size, const char *format, va_list args) */
-        vsprintf_s: {
-            convention: 'cdecl',
-            argBytes: 16,
-            /** @param {number[]} args */
-            handler: ([buffer, size, format, list])=>
-                boundedPrint(buffer, size, format, (format >>> 0) === 0 ? [] : varargsAt(list)),
-        },
+        vsprintf_s,
 
         /**
          * void *bsearch(const void *key, const void *base, size_t num,

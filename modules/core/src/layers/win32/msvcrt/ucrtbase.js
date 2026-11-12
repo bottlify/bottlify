@@ -30,6 +30,9 @@ import { SYSTEM_ERRORS } from './errors.js';
 import { setSingle } from './float.js';
 import { VARIADIC_SLOTS } from './scan.js';
 import { fileLayout } from './stdio.js';
+import { guestEntry } from './guest-code.js';
+import * as inGuestPrint from './inguest-print.js';
+import { COMPILED as PRINT_CODE } from './inguest-print.x86.js';
 import { createUcrtMathFunctions } from './ucrt-math.js';
 
 const EINVAL = 22;
@@ -122,6 +125,16 @@ export function createUcrtbaseFunctions(crt, host){
         fail(EINVAL);
         return -1;
     };
+
+    /**
+     * The arguments of a printer in the guest whose options quadword comes
+     * first, as 32 bits lay them out: its code reads them as one register at
+     * 64 bits and takes no quadwords, so the slots after it come a slot
+     * nearer there.
+     *
+     * @param {number[]} args
+     */
+    const optionsFirst = args=>(pointer === 8 ? [args[0], 0, ...args.slice(1)] : args);
 
     /**
      * A narrow `_vsnprintf`-family answer under either behaviour the options
@@ -323,14 +336,15 @@ export function createUcrtbaseFunctions(crt, host){
          * `sprintf`, `snprintf` and `_vsnprintf` all come here; the options
          * word says which of them the caller is.
          */
-        __stdio_common_vsprintf: {
-            convention: 'cdecl',
-            argBytes: 28,
-            quadwords: [0],
-            /** @param {number[]} args */
-            handler: ([options, , buffer, count, format, , list])=>
-                narrowCounted(options, buffer, count, format, list),
-        },
+        __stdio_common_vsprintf: guestEntry(inGuestPrint.__stdio_common_vsprintf,
+            PRINT_CODE.__stdio_common_vsprintf, host, {
+                argBytes: 28,
+                /** @param {number[]} args */
+                handler: args=>{
+                    const [options, , buffer, count, format, , list] = optionsFirst(args);
+                    return narrowCounted(options, buffer, count, format, list);
+                },
+            }),
 
         /** The same in wide characters. */
         __stdio_common_vswprintf: {
@@ -346,14 +360,15 @@ export function createUcrtbaseFunctions(crt, host){
          * int __stdio_common_vsprintf_s(unsigned __int64 options, char *buffer,
          *     size_t size, const char *format, _locale_t locale, va_list args)
          */
-        __stdio_common_vsprintf_s: {
-            convention: 'cdecl',
-            argBytes: 28,
-            quadwords: [0],
-            /** @param {number[]} args */
-            handler: ([, , buffer, size, format, , list])=>
-                crt.vsprintf_s.handler([buffer, size, format, list]),
-        },
+        __stdio_common_vsprintf_s: guestEntry(inGuestPrint.__stdio_common_vsprintf_s,
+            PRINT_CODE.__stdio_common_vsprintf_s, host, {
+                argBytes: 28,
+                /** @param {number[]} args */
+                handler: args=>{
+                    const [, , buffer, size, format, , list] = optionsFirst(args);
+                    return crt.vsprintf_s.handler([buffer, size, format, list]);
+                },
+            }),
 
         /**
          * int __stdio_common_vsnprintf_s(unsigned __int64 options, char *buffer,

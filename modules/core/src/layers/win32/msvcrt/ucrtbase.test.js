@@ -83,6 +83,11 @@ function setup(texts = {}){
             return block;
         } },
     };
+    // The texts in memory too, where the printers in the guest read their formats.
+    for (const [at, text] of Object.entries(texts))
+    {
+        writeText(Number(at), `${text}\0`);
+    }
     const ucrt = createUcrtbaseFunctions(crt, {
         readMemory: (address, length)=>memory.slice(address, address + length),
         writeMemory: (address, bytes)=>memory.set(bytes, address),
@@ -232,7 +237,8 @@ test('C99\'s 64-bit readings are the runtime\'s own, narrow and wide', ()=>{
     const narrow = { handler: ()=>3 };
     const crt = /** @type {any} */ ({ _strtoi64: narrow, _strtoui64: narrow, _wcstoi64: wide,
         _wcstoui64: wideUnsigned });
-    const ucrt = createUcrtbaseFunctions(crt, /** @type {any} */ ({}));
+    const ucrt = createUcrtbaseFunctions(crt, /** @type {any} */ ({
+        readMemory: ()=>new Uint8Array(0), writeMemory: ()=>{} }));
     assert.equal(ucrt.wcstoll, wide);
     assert.equal(ucrt.wcstoull, wideUnsigned);
     assert.equal(ucrt.strtoll, narrow);
