@@ -288,15 +288,17 @@ export async function serveProcess(start){
         app.terminate(terminated);
     }
     lendings.apply = ()=>{
-        for (const { type, port, token } of lendings.splice(0))
+        // Each to the process it names: this worker's own, or a child
+        // beside it here.
+        for (const { type, port, token, process } of lendings.splice(0))
         {
             if (type === 'translator')
             {
-                app.lendTranslator(port, token);
+                app.lendTranslatorTo(process, port, token);
             }
             else
             {
-                app.recallTranslator(token);
+                app.recallTranslatorFrom(process, token);
             }
         }
     };

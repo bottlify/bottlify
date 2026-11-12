@@ -10619,6 +10619,13 @@ export async function createApp(options){
             recall: token=>built.recallTranslator(token),
             demand: ()=>built.translatedHere(),
         }).catch(()=>{});
+        // A child beside its parent in a worker, whose run lends translators
+        // to its own machines only: told to lend to this one too, or it
+        // interprets every instruction, being told it is lent them.
+        if (!translationPool && extra)
+        {
+            options.system?.translators?.add(id);
+        }
         return built;
     };
 
@@ -10632,6 +10639,10 @@ export async function createApp(options){
         standing.delete(ended);
         translationPool?.removeProcess(processIds.get(ended)
             ?? options.processId ?? FIRST_PROCESS_ID);
+        if (!translationPool && ended !== current && processIds.has(ended))
+        {
+            options.system?.translators?.remove(processIds.get(ended));
+        }
         await classTable.ended(names.get(ended));
         processes.delete(names.get(ended));
         names.delete(ended);
@@ -11279,6 +11290,14 @@ export async function createApp(options){
             table: system.namedObjects,
             processes: system.processDirectory,
             wake: (token, result)=>link.call('kernel', 'wake', [token, result]) });
+        /**
+         * Its worker, once open: what the pool lends a process there through.
+         *
+         * @type {{ worker: import('./host/process-worker.js').ProcessWorker | null }}
+         */
+        const lending = { worker: null };
+        /** The processes beside it in its worker the run's pool lends to, by id. */
+        const lentBeside = new Set();
         const link = openLink(memory.a, {
             ...systemHandlers(/** @type {any} */ (system),
                 (target, method, args)=>link.callWaiting(target, method, args)),
@@ -11295,6 +11314,33 @@ export async function createApp(options){
             events: {
                 emit: (/** @type {string} */ name, /** @type {any} */ payload)=>{
                     events.emit(name, eventFrom(payload));
+                },
+            },
+            // A child it started beside itself in its worker, which the run had
+            // no worker for: lent translators by the run's pool as any process
+            // is, through its worker, named by its id.
+            translators: {
+                /** @param {number} id */
+                add: id=>{
+                    const through = lending.worker;
+                    if (!translationPool || !through || lentBeside.has(id))
+                    {
+                        return false;
+                    }
+                    lentBeside.add(id);
+                    translationPool.addProcess(id, {
+                        lend: (port, token)=>through.post({ type: 'translator', port, token,
+                            process: id }, [port]),
+                        recall: token=>through.post({ type: 'recall', token, process: id }),
+                    }).catch(()=>{});
+                    return true;
+                },
+                /** @param {number} id */
+                remove: id=>{
+                    if (lentBeside.delete(id))
+                    {
+                        translationPool?.removeProcess(id);
+                    }
                 },
             },
             // Its own children, which the run starts, counted with the rest.
@@ -11351,6 +11397,7 @@ export async function createApp(options){
         // the run's sound is mixed on this thread, and the child has none.
         const sound = from.sound();
         const worker = await openProcessWorker();
+        lending.worker = worker;
         translationPool?.addProcess(request.id, {
             lend: (port, token)=>worker.post({ type: 'translator', port, token }, [port]),
             recall: token=>worker.post({ type: 'recall', token }),
@@ -11450,6 +11497,11 @@ export async function createApp(options){
             }
             standingAcross.delete(asked);
             translationPool?.removeProcess(request.id);
+            for (const id of lentBeside)
+            {
+                translationPool?.removeProcess(id);
+            }
+            lentBeside.clear();
             forgetObjects();
             forgetPipes();
             await com.gone();
@@ -12009,6 +12061,27 @@ export async function createApp(options){
         return lastBesideCode;
     };
 
+    /**
+     * A machine of this app by its process id; its first, the app's own, for
+     * none.
+     *
+     * @param {number | null | undefined} processId
+     */
+    const machineOf = processId=>{
+        if (processId === null || processId === undefined)
+        {
+            return current;
+        }
+        for (const built of [current, ...processes.values()])
+        {
+            if (processIds.get(built) === processId)
+            {
+                return built;
+            }
+        }
+        return null;
+    };
+
     const own = {
         /**
          * The run's translation pool as it stands: its workers, the idle ones,
@@ -12016,6 +12089,29 @@ export async function createApp(options){
          * null where the run has none.
          */
         translationPool: ()=>translationPool?.diagnostics() ?? null,
+        /**
+         * A worker of the run's pool lent to a process of this app: its own
+         * (no id) or a child beside it, by id - not the facade's, which speaks
+         * for the child started last. One gone already gives the port back.
+         *
+         * @param {number | null | undefined} processId
+         * @param {MessagePort} port @param {number} token
+         */
+        lendTranslatorTo(processId, port, token){
+            const to = machineOf(processId);
+            if (to)
+            {
+                to.lendTranslator(port, token);
+            }
+            else
+            {
+                port.close();
+            }
+        },
+        /** @param {number | null | undefined} processId @param {number} token */
+        recallTranslatorFrom(processId, token){
+            machineOf(processId)?.recallTranslator(token);
+        },
         /**
          * A call this process's parent makes in it (`cross-process.js`): the
          * process the run was started for, not a child it stands for now.

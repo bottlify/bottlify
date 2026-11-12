@@ -170,6 +170,14 @@ export function remoteSystem(ask, handlers = {}, call, volume = null, windowCell
                 call('com', method, args),
             handlers,
         } : undefined,
+        // A child it starts beside itself, in its worker, lent translators by
+        // the run's pool through the worker, by its id; and given back.
+        translators: call ? {
+            /** @param {number} id */
+            add: id=>void call('translators', 'add', [id]).catch(()=>{}),
+            /** @param {number} id */
+            remove: id=>void call('translators', 'remove', [id]).catch(()=>{}),
+        } : undefined,
         // Its children, which the run starts in workers of their own while it
         // has room, asking back here for what only their parent has.
         processes: {
