@@ -122,7 +122,8 @@ export function createKernelModule(){
              *          refreshClock: (() => void) | undefined,
              *          hostAnswering: (() => boolean) | undefined, readyWord: number,
              *          mutexWords: any, eventWords: any, semaphoreWords: any,
-             *          directory: Map<number, any> | null }}
+             *          directory: Map<number, any> | null,
+             *          unwake: (() => void) | null }}
              */
             const state = {
                 stacks,
@@ -133,6 +134,8 @@ export function createKernelModule(){
                 switcher: null,
                 processes: null,
                 disposed: false,
+                // Stops this machine hearing the link's wakes (`onWake`).
+                unwake: null,
                 refreshClock: undefined,
                 hostAnswering: undefined,
                 // The guest word the scheduler keeps its ready count in (`mirrorReady`).
@@ -240,9 +243,11 @@ export function createKernelModule(){
                 eventChanged: event=>mirror.changed(event), mutexWords, eventWords,
                 semaphoreWords });
             // A wait of this process on another's object, across a link,
-            // ends there; the word comes back here.
-            config?.remoteObjects?.onWake?.((/** @type {number} */ token,
-                /** @type {number} */ result)=>state.sync?.wakeRemote(token, result));
+            // ends there; the word comes back here. Every machine of a
+            // worker hears every word on the link and takes its own: a child
+            // started beside its parent there shares the link.
+            state.unwake = config?.remoteObjects?.onWake?.((/** @type {number} */ token,
+                /** @type {number} */ result)=>state.sync?.wakeRemote(token, result)) ?? null;
             state.handles = createHandleTable({ watch: mirror });
             state.processes = createProcessTable(config?.ids);
             /**
@@ -1169,6 +1174,7 @@ export function createKernelModule(){
             {
                 current.disposed = true;
                 settleRecords(current);
+                current.unwake?.();
             }
             current = null;
         },

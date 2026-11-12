@@ -28,7 +28,8 @@
  * `--trace-match REGEX` keeps only the lines that match. A process that ran in a
  * worker of its own (`--concurrency`) keeps its calls in its own ring, which
  * it hands back as it ends: the first `--trace-worker N` (3) of those are
- * printed after the run's, each under its image. A run
+ * printed after the run's, each under its image, and then the journal of
+ * every process still standing in a worker, asked of it then. A run
  * that ends sooner prints either when it ends. `--strings` peeks every pointer
  * argument for a string, so those lines name the paths and texts themselves.
  *
@@ -847,15 +848,29 @@ const printJournal = ()=>{
     }
     // `--trace-worker N`: the journals of the first N processes that ran in
     // workers of their own, each under its image and id.
-    for (const { image, id, entries } of workerJournals.slice(0, number('--trace-worker', 3)))
-    {
-        console.log(`JOURNAL of ${image} (process ${id}, in a worker of its own)`);
+    /** @param {{ time: number, text: string }[]} entries */
+    const printEntries = entries=>{
         const kept = entries.filter(entry=>!match || match.test(entry.text));
         for (const entry of kept.slice(whole ? -number('--trace-lines', 3000) : -150))
         {
             console.log('JOURNAL', (entry.time / 1000).toFixed(2), entry.text.slice(0, 400));
         }
+    };
+    for (const { image, id, entries } of workerJournals.slice(0, number('--trace-worker', 3)))
+    {
+        console.log(`JOURNAL of ${image} (process ${id}, in a worker of its own)`);
+        printEntries(entries);
     }
+    // And those of every process still standing in a worker - its own or
+    // beside its parent there - asked of it now: one that never ends (a
+    // helper its parent waits on, then kills) hands no ring back.
+    app.standing({ journal: Math.max(3000, number('--trace-lines', 0)) }).then((/** @type {any[]} */ standing)=>{
+        for (const { image, journal } of standing.filter(each=>each.worker && each.journal))
+        {
+            console.log(`JOURNAL of ${image} (still standing in a worker)`);
+            printEntries(journal);
+        }
+    }, (/** @type {any} */ e)=>console.log('standing journals failed:', e?.message ?? e));
 };
 if (traceOnFault)
 {

@@ -69,9 +69,11 @@ export function systemHandlers(system, askBack){
         windows: {
             ...answering(system.windows, WINDOWS),
             /** @param {number} processId */
+            // Asked back with the process it is for: a child started beside
+            // its parent in one worker answers for its windows on the same link.
             attach: processId=>system.windows.attach(processId, Object.fromEntries(
                 ENDPOINT.map(name=>[name, (/** @type {any[]} */ ...args)=>
-                    (askBack ? askBack('endpoint', name, args) : null)]))),
+                    (askBack ? askBack('endpoint', name, [processId, ...args]) : null)]))),
         },
     };
 }
@@ -98,6 +100,13 @@ export function remoteSystem(ask, handlers = {}, call, volume = null, windowCell
     /** @param {string} target @param {string[]} names */
     const asking = (target, names)=>Object.fromEntries(names.map(name=>
         [name, (/** @type {any[]} */ ...args)=>ask(target, name, args)]));
+    /**
+     * What each process on this link answers for its windows, by its id:
+     * a child started beside its parent in one worker shares the link.
+     *
+     * @type {Map<number, any>}
+     */
+    const endpoints = new Map();
     return {
         // The run's named objects are asked there (`objects`); this table is
         // not consulted.
@@ -122,9 +131,17 @@ export function remoteSystem(ask, handlers = {}, call, volume = null, windowCell
             } : {},
             /** @param {number} processId @param {any} endpoint */
             attach(processId, endpoint){
-                handlers.endpoint = Object.fromEntries(ENDPOINT.map(name=>
-                    [name, (/** @type {any[]} */ ...args)=>endpoint[name](...args)]));
+                endpoints.set(processId >>> 0, endpoint);
+                // Once per link: what finds each machine's endpoint by its id.
+                handlers.endpoint ??= Object.fromEntries(ENDPOINT.map(name=>
+                    [name, (/** @type {number} */ id, /** @type {any[]} */ ...args)=>
+                        endpoints.get(id >>> 0)?.[name](...args) ?? null]));
                 ask('windows', 'attach', [processId]);
+            },
+            /** @param {number} processId */
+            detach(processId){
+                endpoints.delete(processId >>> 0);
+                return ask('windows', 'detach', [processId]);
             },
         },
         objects: remoteObjects(ask),
@@ -153,6 +170,14 @@ export function remoteSystem(ask, handlers = {}, call, volume = null, windowCell
                 call('com', method, args),
             handlers,
         } : undefined,
+        // A child it starts beside itself, in its worker, lent translators by
+        // the run's pool through the worker, by its id; and given back.
+        translators: call ? {
+            /** @param {number} id */
+            add: id=>void call('translators', 'add', [id]).catch(()=>{}),
+            /** @param {number} id */
+            remove: id=>void call('translators', 'remove', [id]).catch(()=>{}),
+        } : undefined,
         // Its children, which the run starts in workers of their own while it
         // has room, asking back here for what only their parent has.
         processes: {
@@ -177,6 +202,7 @@ export function remoteSystem(ask, handlers = {}, call, volume = null, windowCell
                 : Promise.resolve(ask('processes', 'ask', [id, request]))),
             /** @param {Record<string, (...args: any[]) => any>} parent */
             answer(parent){
+                // Once per link: the worker's one app answers for its children.
                 handlers.parent = parent;
             },
         },
@@ -206,19 +232,37 @@ const OBJECTS = ['peek', 'create', 'reference', 'close', 'wait', 'cancel', 'poll
  *
  * @param {(target: string, method: string, args: any[]) => any} ask
  */
-function remoteObjects(ask){
-    /** @type {((token: number, result: number) => void) | null} */
-    let listener = null;
+export function remoteObjects(ask){
+    /**
+     * Every machine on this link: a child started beside its parent in one
+     * worker shares its parent's link, and the run keeps the link's waits by
+     * token alone, so the tokens are counted here, once for all of them,
+     * and each word goes to every machine, which takes the tokens it holds.
+     *
+     * @type {Set<(token: number, result: number) => void>}
+     */
+    const listeners = new Set();
+    let nextToken = 1;
     return {
         ...Object.fromEntries(OBJECTS.map(name=>
             [name, (/** @type {any[]} */ ...args)=>ask('objects', name, args)])),
-        /** @param {(token: number, result: number) => void} handler */
+        token: ()=>nextToken++,
+        /**
+         * @param {(token: number, result: number) => void} handler
+         * @returns {() => void} what stops it hearing them
+         */
         onWake(handler){
-            listener = handler;
+            listeners.add(handler);
+            return ()=>{
+                listeners.delete(handler);
+            };
         },
         /** @param {number} token @param {number} result */
         deliver(token, result){
-            listener?.(token, result);
+            for (const listener of [...listeners])
+            {
+                listener(token, result);
+            }
         },
     };
 }

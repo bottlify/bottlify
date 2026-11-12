@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Worker } from 'node:worker_threads';
 import { createLinkMemory, openLink } from './system/link.js';
-import { REGISTRY, systemHandlers } from './system-link.js';
+import { REGISTRY, remoteSystem, systemHandlers } from './system-link.js';
 import { createRegistryService } from './layers/win32/advapi32/registry-service.js';
 import { HKEY_LOCAL_MACHINE, createHive } from './layers/win32/advapi32/registry.js';
 import { createWindowDirectory } from './layers/win32/user32/directory.js';
@@ -90,4 +90,42 @@ test('every registry call a process makes reaches the run\'s registry from a wor
     const service = createRegistryService(createHive());
     assert.deepEqual(Object.keys(service).filter(name=>!systemOnly.has(name)).sort(),
         [...REGISTRY].sort());
+});
+
+test('two processes on one link (a child beside its parent in a worker) each answer for their'
+    + ' own windows', ()=>{
+    const windows = createWindowDirectory();
+    const system = {
+        registry: createRegistryService(createHive()),
+        ids: { thread: 1, process: 0x2008 },
+        volume: { drives: new Map(), volumes: new Map(), writables: new Map(),
+            watchers: new Set() },
+        windows,
+    };
+    /** @type {Record<string, any>} */
+    const across = {};
+    const engine = /** @type {Record<string, any>} */ (systemHandlers(system,
+        (target, method, args)=>across[target][method](...args)));
+    const remote = /** @type {any} */ (remoteSystem((target, method, args)=>
+        engine[target][method](...args), across));
+    /** @param {number} hwnd @param {string} title */
+    const endpoint = (hwnd, title)=>({
+        find: ()=>0,
+        describe: (/** @type {number} */ asked)=>(asked === hwnd
+            ? { threadId: 1, className: 'OleMainThreadWndClass', title } : null),
+        post: ()=>true, send: ()=>null, answer: ()=>null, withdraw: ()=>{},
+        lostForeground: ()=>{}, activate: ()=>false,
+    });
+    // ngen, then the worker process it started beside it: each makes a
+    // window, and attaches after the other.
+    const parentWindow = remote.windows.open(0x2000);
+    remote.windows.attach(0x2000, endpoint(parentWindow, 'ngen'));
+    const childWindow = remote.windows.open(0x2010);
+    remote.windows.attach(0x2010, endpoint(childWindow, 'worker'));
+    assert.equal(windows.describe(parentWindow, 0x3000)?.title, 'ngen',
+        'the parent answers for its window though the child attached after it');
+    assert.equal(windows.describe(childWindow, 0x3000)?.title, 'worker');
+    remote.windows.detach(0x2010);
+    assert.equal(windows.describe(parentWindow, 0x3000)?.title, 'ngen',
+        'and still does once the child is gone');
 });

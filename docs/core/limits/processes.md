@@ -90,6 +90,10 @@
   run's, kept on the engine thread: a server COM starts runs in a worker of its own while the run
   has room for one, and otherwise beside the process that asked, in its worker; a call from one
   worker to another goes through the engine thread and back.
+- With `concurrency` 2 or 4 a child of a process in a worker runs in a worker of its own while
+  the run has room, and otherwise beside its parent in the parent's worker, sharing its link to
+  the engine thread: each process there waits on the run's named objects, answers for its own
+  windows and is lent translation workers by the run's pool as one in a worker of its own does.
 - Views of one page-file section (a named or inherited `CreateFileMapping` of no file) agree
   across the processes on the engine's thread at the edges of their turns: what one writes the
   other reads from its next turn on, and two views in one process agree from one turn to the next,
