@@ -397,37 +397,55 @@ export function createSeh(host){
      * @param {number} pointers  EXCEPTION_POINTERS
      */
     const traceLastChance = pointers=>{
-        if (!host.trace || !host.isMapped(pointers))
+        if (!host.trace)
         {
             return;
         }
-        const record = readU32(pointers);
-        const context = readU32(pointers + 4);
-        const words = (/** @type {number} */ from, /** @type {number} */ count)=>
-            Array.from({ length: count }, (_, at)=>(host.isMapped(from + at * 4)
-                ? hex(readU32(from + at * 4)) : '-')).join(' ');
-        const lines = [`last chance: code ${host.isMapped(record) ? hex(readU32(record)) : '?'}`
-            + ` at ${host.isMapped(record) ? hex(readU32(record + RECORD.ADDRESS)) : '?'}`];
-        if (host.isMapped(context))
+        // Every read on its own: a page the memory calls mapped may still
+        // refuse a read - a stack's guard page, a range reserved and never
+        // committed - and one word refused is one word left out.
+        const word = (/** @type {number} */ at)=>{
+            try
+            {
+                return host.isMapped(at >>> 0) ? readU32(at >>> 0) : null;
+            }
+            catch {
+                return null;
+            }
+        };
+        const shown = (/** @type {number | null} */ value)=>(value === null ? '-' : hex(value));
+        const record = word(pointers);
+        const context = word(pointers + 4);
+        const lines = [`last chance: code ${record === null ? '?' : shown(word(record))}`
+            + ` at ${record === null ? '?' : shown(word(record + RECORD.ADDRESS))}`];
+        if (context !== null)
         {
             const names = /** @type {const} */ (['EAX', 'EBX', 'ECX', 'EDX', 'ESI', 'EDI',
                 'EBP', 'ESP', 'EIP']);
-            const values = names.map(name=>readU32(context + CONTEXT[name]));
-            lines.push(names.map((name, at)=>`${name.toLowerCase()}=${hex(values[at])}`)
+            const values = names.map(name=>word(context + CONTEXT[name]));
+            lines.push(names.map((name, at)=>`${name.toLowerCase()}=${shown(values[at])}`)
                 .join(' '));
             for (const [at, value] of values.entries())
             {
-                if (value >= 64 && value <= 0xffffffbf && host.isMapped(value - 64)
-                    && host.isMapped(value + 63))
+                if (value !== null && value >= 64 && value <= 0xffffffbf
+                    && word(value) !== null)
                 {
-                    lines.push(`  [${names[at].toLowerCase()}-64] ${words(value - 64, 32)}`);
+                    lines.push(`  [${names[at].toLowerCase()}-64] ${Array.from({ length: 32 },
+                        (_, index)=>shown(word(value - 64 + index * 4))).join(' ')}`);
                 }
             }
         }
-        const thread = host.currentThread?.();
-        const { frames, damaged } = chain(thread);
-        lines.push(`  chain of ${thread?.name ?? 'the thread'}: ${frames.map(({ frame, handler })=>
-            `${hex(frame)}>${hex(handler)}`).join(' ')}${damaged ? ' (damaged)' : ''}`);
+        try
+        {
+            const thread = host.currentThread?.();
+            const { frames, damaged } = chain(thread);
+            lines.push(`  chain of ${thread?.name ?? 'the thread'}: ${frames.map(
+                ({ frame, handler })=>`${hex(frame)}>${hex(handler)}`).join(' ')}`
+                + `${damaged ? ' (damaged)' : ''}`);
+        }
+        catch (e){
+            lines.push(`  chain: not read (${String(e)})`);
+        }
         host.trace(lines.join('\n'));
     };
 
@@ -1036,8 +1054,8 @@ export function createSeh(host){
                     {
                         traceLastChance(pointers >>> 0);
                     }
-                    catch {
-                        host.trace?.('last chance: its context could not be read whole');
+                    catch (e){
+                        host.trace?.(`last chance: not traced (${String(e)})`);
                     }
                     if (topLevelFilter === 0)
                     {
