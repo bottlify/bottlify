@@ -758,3 +758,31 @@ test('what a program hands its last-chance filter is traced: registers, chain an
     assert.ok(text.includes('[ebp-64] 0xfeedface'), text);
     assert.ok(text.includes('0x20000>0x51000'), 'the handler chain');
 });
+
+test('the last-chance trace reads nothing below a small register, and never fails the call',
+    async()=>{
+    // A register holding 3 named 3 - 64 as a place to read from: unsigned,
+    // the top of the address space, which a memory may say is mapped.
+        const m = machine({ answer: ()=>1 });
+        /** @type {string[]} */
+        const said = [];
+        const seh = createSeh({ ...m.host,
+            isMapped: (/** @type {number} */ at)=>m.host.isMapped(at) || (at >>> 0) >= 0xffffff00,
+            readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>{
+                if ((at >>> 0) >= 0xffffff00)
+                {
+                    throw new Error('access violation');
+                }
+                return m.host.readMemory(at, length);
+            },
+            trace: (/** @type {string} */ line)=>said.push(line) });
+        m.put(0x30000, 0xc0000409);
+        m.put(0x31000 + 0xb0, 3);
+        m.put(0x2000, 0x30000);
+        m.put(0x2004, 0x31000);
+        seh.table.SetUnhandledExceptionFilter.handler([0x61000]);
+
+        assert.equal(await seh.table.UnhandledExceptionFilter.handler([0x2000]), 1,
+            'the filter answered');
+        assert.ok(said.some(line=>line.includes('eax=0x3')), said.join('\n'));
+    });

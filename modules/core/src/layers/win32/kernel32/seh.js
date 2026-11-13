@@ -417,7 +417,8 @@ export function createSeh(host){
                 .join(' '));
             for (const [at, value] of values.entries())
             {
-                if (host.isMapped(value - 64) && host.isMapped(value + 63))
+                if (value >= 64 && value <= 0xffffffbf && host.isMapped(value - 64)
+                    && host.isMapped(value + 63))
                 {
                     lines.push(`  [${names[at].toLowerCase()}-64] ${words(value - 64, 32)}`);
                 }
@@ -1029,7 +1030,15 @@ export function createSeh(host){
                 argBytes: 4,
                 /** @param {number[]} args */
                 handler: ([pointers])=>{
-                    traceLastChance(pointers >>> 0);
+                    // A diagnostic: what it could not read is left out, and the
+                    // program's call goes on as if it had not looked.
+                    try
+                    {
+                        traceLastChance(pointers >>> 0);
+                    }
+                    catch {
+                        host.trace?.('last chance: its context could not be read whole');
+                    }
                     if (topLevelFilter === 0)
                     {
                         return EXCEPTION_EXECUTE_HANDLER;
