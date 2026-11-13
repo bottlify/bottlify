@@ -272,3 +272,58 @@ test('two processes on one link (a child beside its parent in a worker): each on
     objects.set(own.id);
     assert.equal(child.woken.length, 2, 'gone from the link');
 });
+
+/** Collects what nothing reaches, as far as a test can ask it to. */
+const collect = async()=>{
+    const { setFlagsFromString } = await import('node:v8');
+    const { runInNewContext } = await import('node:vm');
+    setFlagsFromString('--expose-gc');
+    const gc = runInNewContext('gc');
+    for (let round = 0; round < 3; round++)
+    {
+        await new Promise(done=>setImmediate(done));
+        gc();
+    }
+};
+
+test('a process across a link that ends gives its names back, and a name another holds keeps'
+    + ' nothing of the gone link', async()=>{
+    const table = new Map();
+    /** @type {WeakRef<object>} */
+    let ringsOfGone = new WeakRef({});
+    /** @type {any} */
+    let other = null;
+    /** @type {number} */
+    let found = 0;
+    (()=>{
+        // The link's own context, as runAcross's closure: its rings.
+        const rings = new SharedArrayBuffer(1 << 16);
+        ringsOfGone = new WeakRef(rings);
+        const { objects, dispose } = objectHandlers({ table, processes: new Map(),
+            wake: ()=>Promise.resolve(rings) });
+        const only = /** @type {any} */ (objects.create('event', 'Local\\Only',
+            { manualReset: true }));
+        const shared = /** @type {any} */ (objects.create('mutex', 'Local\\Shared',
+            { owner: 3 }));
+        objects.reference(only.id);
+        // Another process, still running, opens the second name and waits on
+        // the mutex the first one's thread holds.
+        other = service(table);
+        const opened = /** @type {any} */ (other.objects.create('mutex', 'Local\\Shared', {}));
+        assert.equal(opened.reused, true);
+        found = opened.id;
+        assert.equal(other.objects.wait(found, 8, 41), null);
+        assert.equal(objects.poll(shared.id, 3), OBJECT_0, 'its owner takes it again');
+        dispose();
+    })();
+    assert.deepEqual([...table.keys()], ['Local\\Shared'],
+        'a name only the gone process held is free again');
+    assert.equal(table.get('Local\\Shared').refs, 1, 'the one left is the other\'s');
+    assert.deepEqual(other.woken, [[41, 0x80]],
+        'the mutex its thread held went to the waiter, abandoned');
+    await collect();
+    assert.equal(ringsOfGone.deref(), undefined, 'and nothing keeps the gone link alive');
+    assert.equal(other.objects.releaseMutex(found, 8), true, 'the mutex works on');
+    other.objects.close(found);
+    assert.equal(table.size, 0, 'and the last close frees its name');
+});

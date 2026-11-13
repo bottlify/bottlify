@@ -130,6 +130,37 @@ test('two processes on one link (a child beside its parent in a worker) each ans
         'and still does once the child is gone');
 });
 
+test('the run keeps which processes answer for their windows across a link, to detach those a'
+    + ' gone link never did', ()=>{
+    const windows = createWindowDirectory();
+    const system = {
+        registry: createRegistryService(createHive()),
+        ids: { thread: 1, process: 0x2008 },
+        volume: { drives: new Map(), volumes: new Map(), writables: new Map(),
+            watchers: new Set() },
+        windows,
+    };
+    /** @type {Set<number>} */
+    const attached = new Set();
+    let asked = 0;
+    const engine = /** @type {Record<string, any>} */ (systemHandlers(system, ()=>{
+        asked++;
+        return { threadId: 1, className: 'X', title: 'gone' };
+    }, attached));
+    const hwnd = engine.windows.open(0x2000);
+    engine.windows.attach(0x2000);
+    engine.windows.attach(0x2010);
+    engine.windows.detach(0x2010);
+    assert.deepEqual([...attached], [0x2000], 'one said it ended; the other died');
+    // What the run does as the link ends: nothing asks the gone process again.
+    for (const id of attached)
+    {
+        windows.detach(id);
+    }
+    assert.equal(windows.describe(hwnd, 0x3000), null);
+    assert.equal(asked, 0);
+});
+
 test('a system joined across a link says so, and the run\'s session is not its to save', ()=>{
     // `openSession` makes no saver for a process whose system is remote: its
     // writes land on the volume the run's own thread saves, and a saver there

@@ -225,5 +225,5 @@ counts the frames that went so.
 | `bundle`, `bundle-*` | details | The bundle was opened; a fetch is retried, a block is unavailable, prefetch, translations it carries. |
 | `storage-full` | `{ bundle, reason }` | A block could not be kept for lack of room, with nothing left the engine may remove; said once a run. The run goes on, the block held in memory. |
 | `libraries`, `libraries-missing`, `library-*`, `import-unresolved`, `unimplemented` | names | Which DLLs were bound, which are missing, which imports nothing implements. |
-| `process-*` | details | A child process was created, started or ended. |
+| `process-*` | details | A child process was created, started or ended. `process-resumed` carries its exit code and, as `diagnostics`, each of its layers' name, status and the numbers and flags of its metrics (and of a metric's fields), not their lists or text; an `error` about a process in a worker carries the same on its error. |
 | `session` | `{ changes }` | The program changed files on the volume; the session is saved shortly after. |

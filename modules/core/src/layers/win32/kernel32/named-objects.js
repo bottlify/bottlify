@@ -40,6 +40,27 @@ export const TAKEN = Symbol('taken');
  *        with nothing to carry across.
  */
 export function createNamedObjects({ table = new Map() } = {}){
+    /**
+     * The references this process holds, by name: what its end takes back,
+     * since a process's exit closes every handle it held and closes none of
+     * them one by one. A name it opened and an ended process kept would keep
+     * that process's object - and through it the process - for the run.
+     *
+     * @type {Map<string, number>}
+     */
+    const mine = new Map();
+    /** @param {string} name @param {number} by */
+    const count = (name, by)=>{
+        const now = (mine.get(name) ?? 0) + by;
+        if (now > 0)
+        {
+            mine.set(name, now);
+        }
+        else
+        {
+            mine.delete(name);
+        }
+    };
     return {
         /**
          * The object this name already stands for, TAKEN if another kind holds
@@ -78,6 +99,7 @@ export function createNamedObjects({ table = new Map() } = {}){
                 {
                     table.set(name, { kind, object: made, refs: 1 });
                 }
+                count(name, 1);
             }
             setLastError(reused ? ERROR_ALREADY_EXISTS : ERROR_SUCCESS);
         },
@@ -91,11 +113,12 @@ export function createNamedObjects({ table = new Map() } = {}){
          * @param {any} object
          */
         reference(object){
-            for (const held of table.values())
+            for (const [name, held] of table)
             {
                 if (held.object === object)
                 {
                     held.refs++;
+                    count(name, 1);
                     return;
                 }
             }
@@ -115,11 +138,44 @@ export function createNamedObjects({ table = new Map() } = {}){
                 if (held.object === object)
                 {
                     held.refs--;
+                    count(name, -1);
                     if (held.refs <= 0)
                     {
                         table.delete(name);
                     }
                     return;
+                }
+            }
+        },
+
+        /**
+         * The process has ended: every reference it still held goes, as its
+         * handles close, and a name nobody else holds is free again. What
+         * another process still holds stays, and is told this process is gone
+         * (`forsake`): its threads leave the object's queue, a mutex they
+         * hold is abandoned. Once is enough; a second call finds nothing.
+         *
+         * @param {(object: any) => void} [forsake]
+         */
+        ended(forsake){
+            for (const [name, held] of mine)
+            {
+                const entry = table.get(name);
+                if (entry)
+                {
+                    entry.refs -= Math.min(held, entry.refs);
+                    if (entry.refs <= 0)
+                    {
+                        table.delete(name);
+                    }
+                }
+            }
+            mine.clear();
+            if (forsake)
+            {
+                for (const entry of table.values())
+                {
+                    forsake(entry.object);
                 }
             }
         },
@@ -146,6 +202,20 @@ export function createRemoteNamedObjects({ objects, kernel }){
     const own = createNamedObjects();
     /** @param {string} kind */
     const across = kind=>kind === 'event' || kind === 'semaphore' || kind === 'mutex';
+    /** The references this process holds there, by number, for its end to close. @type {Map<number, number>} */
+    const mine = new Map();
+    /** @param {number} id @param {number} by */
+    const count = (id, by)=>{
+        const now = (mine.get(id) ?? 0) + by;
+        if (now > 0)
+        {
+            mine.set(id, now);
+        }
+        else
+        {
+            mine.delete(id);
+        }
+    };
     /** @param {string} kind @param {number} id @param {string} name */
     const standInFor = (kind, id, name)=>{
         let made = standIns.get(id);
@@ -193,6 +263,7 @@ export function createRemoteNamedObjects({ objects, kernel }){
                 if (reused)
                 {
                     objects.reference(made.remote);
+                    count(made.remote, 1);
                 }
                 else
                 {
@@ -203,6 +274,7 @@ export function createRemoteNamedObjects({ objects, kernel }){
                     });
                     made.remote = answer.id;
                     standIns.set(answer.id, made);
+                    count(answer.id, 1);
                     reused = answer.reused === true;
                 }
             }
@@ -214,6 +286,7 @@ export function createRemoteNamedObjects({ objects, kernel }){
             if (object.remote)
             {
                 objects.reference(object.remote);
+                count(object.remote, 1);
                 return;
             }
             own.reference(object);
@@ -224,9 +297,37 @@ export function createRemoteNamedObjects({ objects, kernel }){
             if (object.remote)
             {
                 objects.close(object.remote);
+                count(object.remote, -1);
                 return;
             }
             own.forget(object);
+        },
+
+        /**
+         * The process has ended: the references it held there close, as its
+         * handles do, so a name only it held is free in the run again.
+         *
+         * @param {(object: any) => void} [forsake]
+         */
+        ended(forsake){
+            const held = [...mine];
+            mine.clear();
+            for (const [id, times] of held)
+            {
+                try
+                {
+                    for (let left = times; left > 0; left--)
+                    {
+                        objects.close(id);
+                    }
+                }
+                catch {
+                    // Gone there already (the run let the name go with a
+                    // duplicate's last close): nothing of this process's is.
+                }
+            }
+            standIns.clear();
+            own.ended(forsake);
         },
     };
 }

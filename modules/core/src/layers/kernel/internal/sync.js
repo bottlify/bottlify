@@ -93,14 +93,17 @@ export function signalledNow(object){
  * @param {(event: any) => void} [options.eventChanged]  told each time an
  *     event's signalled state is written, for the words the guest reads it by
  *     (`event-mirror.js`)
- * @param {{ made: (mutex: any) => void, settle: () => void } | null} [options.mutexWords]
+ * @param {{ made: (mutex: any) => void, settle: () => void,
+ *     detach?: () => void } | null} [options.mutexWords]
  *     The words the guest takes and releases mutexes by (`mutex-words.js`): told of
  *     each mutex made, and asked after every call here and every wait run out to
  *     hand back to the guest the words of mutexes nobody waits for
- * @param {{ made: (event: any) => void, settle: () => void } | null} [options.eventWords]
+ * @param {{ made: (event: any) => void, settle: () => void,
+ *     detach?: () => void } | null} [options.eventWords]
  *     The words the guest sets, resets and takes events by (`event-words.js`), as
  *     `mutexWords` for mutexes
- * @param {{ made: (semaphore: any) => void, settle: () => void } | null}
+ * @param {{ made: (semaphore: any) => void, settle: () => void,
+ *     detach?: () => void } | null}
  *     [options.semaphoreWords]  The words the guest releases and takes
  *     semaphores by (`semaphore-words.js`), the same way
  */
@@ -283,6 +286,77 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
     /** @param {any} object @param {any} thread */
     const owns = (object, thread)=>
         object.kind === SyncKind.MUTEX && object.owner === thread;
+
+    /**
+     * An ending process's threads out of the object's queue, and a mutex one
+     * of them holds abandoned to the next waiter.
+     *
+     * @param {any} object @param {(thread: any) => boolean} ours
+     */
+    const forsake = (object, ours)=>{
+        // A name is not always a sync object's: a section's has no queue.
+        if (!Array.isArray(object?.waiters))
+        {
+            return;
+        }
+        for (let at = object.waiters.length - 1; at >= 0; at--)
+        {
+            if (ours(object.waiters[at]))
+            {
+                object.waiters.splice(at, 1);
+            }
+        }
+        if (object.kind === SyncKind.MUTEX && object.owner && ours(object.owner))
+        {
+            object.owner = null;
+            object.recursion = 0;
+            object.abandoned = true;
+            releaseTo(object);
+        }
+    };
+
+    /**
+     * The object's state as plain values, read once out of whatever kept it
+     * (a word in this process's memory, the mirror of its handles), and
+     * nothing of this process left on it: no word, no clock entry.
+     *
+     * @param {any} object
+     */
+    const settle = object=>{
+        /** @param {string} key */
+        const plain = key=>{
+            const value = object[key];
+            Object.defineProperty(object, key, { value, writable: true, enumerable: true,
+                configurable: true });
+        };
+        switch (object.kind)
+        {
+            case SyncKind.EVENT:
+                plain('signalled');
+                delete object.heldSignalled;
+                break;
+            case SyncKind.MUTEX:
+                plain('owner');
+                plain('recursion');
+                delete object.heldOwner;
+                delete object.heldRecursion;
+                break;
+            case SyncKind.SEMAPHORE:
+                plain('count');
+                delete object.heldCount;
+                break;
+            case SyncKind.TIMER:
+                // Its clock was this process's: it comes due no more.
+                object.fired = null;
+                object.token = null;
+                object.due = null;
+                break;
+            default:
+                break;
+        }
+        delete object.word;
+        delete object.hostKeeps;
+    };
 
     /** @param {any} thread @param {any} object  What woke it, when it waited alone. */
     const leaveQueues = (thread, object)=>{
@@ -1054,6 +1128,53 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
                     releaseTo(object);
                 }
             }
+        },
+
+        /**
+         * A process is ending and the object outlives it, held by another
+         * process of the run: its threads leave the object's queue, and a
+         * mutex one of them holds is abandoned to the next waiter, as Windows
+         * does with a dead thread's. Whichever process made the object.
+         *
+         * @param {any} object
+         * @param {(thread: any) => boolean} ours  whether a thread is the ending process's
+         */
+        forsake(object, ours){
+            forsake(object, ours);
+        },
+
+        /**
+         * This process is gone: every object it made is left as it stands,
+         * an object of no process. Another process of the run may still hold
+         * one (by name, or a handle duplicated into it), and an object kept
+         * its state in this process's guest memory (`event-words.js` and the
+         * like) and reached its threads and its scheduler: through it a gone
+         * process's whole machine stayed alive, and its memory, handed to the
+         * next process built, would have been written by the object. Its
+         * threads also leave every queue they are in, another process's too.
+         *
+         * @param {(thread: any) => boolean} ours  whether a thread is this process's
+         * @param {Iterable<any>} threads  this process's threads
+         */
+        settleAll(ours, threads){
+            mutexWords?.detach?.();
+            eventWords?.detach?.();
+            semaphoreWords?.detach?.();
+            for (const thread of threads)
+            {
+                for (const object of thread.queuedOn ?? [])
+                {
+                    forsake(object, ours);
+                }
+                thread.queuedOn = null;
+                thread.waitSet = null;
+            }
+            for (const object of objects)
+            {
+                forsake(object, ours);
+                settle(object);
+            }
+            objects.length = 0;
         },
 
         /**

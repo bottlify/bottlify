@@ -8,7 +8,7 @@ import { visibleCursor } from './cursor.js';
 import { createJsSampler } from './host/js-samples.js';
 import { fitFrame, isShown, placementOf, stretchFrame } from './letterbox.js';
 import { assembleModules } from './core.js';
-import { createEvents } from './events.js';
+import { createEvents, diagnosticsSummary } from './events.js';
 import { watchedArgument } from './watch-arguments.js';
 import { frameDrops } from './frame-drops.js';
 import { captureTrace, describeAddress, formatTrace } from './trace.js';
@@ -74,6 +74,7 @@ import { pipeStandIn } from './layers/win32/kernel32/pipes.js';
 import { pipeHandlers } from './system-pipes.js';
 import { createMixer } from './layers/audio/output/mixer.js';
 import { objectHandlers } from './system-objects.js';
+import { teardown } from './teardown.js';
 import { createSyncObjects } from './layers/kernel/internal/sync.js';
 import { STILL_ACTIVE } from './layers/kernel/internal/processes.js';
 import { openProcessWorker } from './host/process-worker.js';
@@ -11512,9 +11513,11 @@ export async function createApp(options){
         const lending = { worker: null };
         /** The processes beside it in its worker the run's pool lends to, by id. */
         const lentBeside = new Set();
+        /** The processes whose windows it answers for, by id: detached as it goes. @type {Set<number>} */
+        const windowsAcross = new Set();
         const link = openLink(memory.a, {
             ...systemHandlers(/** @type {any} */ (system),
-                (target, method, args)=>link.callWaiting(target, method, args)),
+                (target, method, args)=>link.callWaiting(target, method, args), windowsAcross),
             ...objects,
             com: com.handlers,
             pipes,
@@ -11581,53 +11584,68 @@ export async function createApp(options){
             },
         });
         const answering = link.serve();
-        if (reach)
-        {
-            reach.link = link;
-            reach.opened?.();
-            if (reach.code !== null)
-            {
-                terminateAcross(link, reach.code);
-            }
-        }
-        // Its own way in to the run's graphics worker, where its Direct3D
-        // devices draw; what they present comes back here, to the run's
-        // presenter, as every root's frames do.
-        const graphicsWorker = options.device?.worker;
-        const graphics = graphicsWorker ? new MessageChannel() : null;
-        if (graphics)
-        {
-            graphicsWorker.postMessage({ type: 'client', port: graphics.port2 }, [graphics.port2]);
-        }
-        // And the pictures of its own surfaces -- a DirectDraw primary, the
-        // desktop its windows are drawn on -- which come in as the graphics
-        // worker's frames do and are shown by the run's presenter.
-        const display = presenter && options.device?.device ? new MessageChannel() : null;
-        const shown = display ? connectGraphicsWorker({ worker: portEnd(display.port1),
-            device: options.device.device,
-            presentTo: frame=>presenter.show({ ...frame, source: request.id }) }) : null;
-        // Its sound goes onto the run's table, in a span its parent lends it,
-        // where the table is shared memory a worker can be handed; elsewhere
-        // the run's sound is mixed on this thread, and the child has none.
-        const sound = from.sound();
-        const worker = await openProcessWorker();
-        lending.worker = worker;
-        translationPool?.addProcess(request.id, {
-            lend: (port, token)=>worker.post({ type: 'translator', port, token }, [port]),
-            recall: token=>worker.post({ type: 'recall', token }),
-        }).catch(()=>{});
-        // The page's input reaches it as the run routes it (`routedInput`).
-        const asked = { image: request.imagePath, id: request.id, link,
-            diagnostics: ()=>link.call('report', 'diagnostics', []),
-            standing: (/** @type {number} */ journal)=>
-                link.call('report', 'standing', [journal]) };
+        /**
+         * What the teardown lets go, as far as the start got: a start that
+         * failed half-way - its worker refused - leaves nothing standing either.
+         *
+         * @type {{ worker: import('./host/process-worker.js').ProcessWorker | null,
+         *     sound: { giveBack: () => void } | null, shown: { dispose: () => void } | null,
+         *     display: MessageChannel | null, asked: any }}
+         */
+        const held = { worker: null, sound: null, shown: null, display: null, asked: null };
         /** The code it exited with, once it has. @type {number | null} */
         let ended = null;
-        standingAcross.add(asked);
-        events.emit('process-started', { image: request.imagePath, sequenceBase: logSequence,
-            worker: true });
         try
         {
+            if (reach)
+            {
+                reach.link = link;
+                reach.opened?.();
+                if (reach.code !== null)
+                {
+                    terminateAcross(link, reach.code);
+                }
+            }
+            // Its own way in to the run's graphics worker, where its Direct3D
+            // devices draw; what they present comes back here, to the run's
+            // presenter, as every root's frames do.
+            const graphicsWorker = options.device?.worker;
+            const graphics = graphicsWorker ? new MessageChannel() : null;
+            if (graphics)
+            {
+                // Named by its id, which its end below tells the worker to forget.
+                graphicsWorker.postMessage({ type: 'client', port: graphics.port2,
+                    client: request.id }, [graphics.port2]);
+            }
+            // And the pictures of its own surfaces -- a DirectDraw primary, the
+            // desktop its windows are drawn on -- which come in as the graphics
+            // worker's frames do and are shown by the run's presenter.
+            const display = presenter && options.device?.device ? new MessageChannel() : null;
+            held.display = display;
+            held.shown = display ? connectGraphicsWorker({ worker: portEnd(display.port1),
+                device: options.device.device,
+                presentTo: frame=>presenter.show({ ...frame, source: request.id }) }) : null;
+            // Its sound goes onto the run's table, in a span its parent lends it,
+            // where the table is shared memory a worker can be handed; elsewhere
+            // the run's sound is mixed on this thread, and the child has none.
+            const sound = from.sound();
+            held.sound = sound;
+            const worker = await openProcessWorker();
+            held.worker = worker;
+            lending.worker = worker;
+            translationPool?.addProcess(request.id, {
+                lend: (port, token)=>worker.post({ type: 'translator', port, token }, [port]),
+                recall: token=>worker.post({ type: 'recall', token }),
+            }).catch(()=>{});
+            // The page's input reaches it as the run routes it (`routedInput`).
+            const asked = { image: request.imagePath, id: request.id, link,
+                diagnostics: ()=>link.call('report', 'diagnostics', []),
+                standing: (/** @type {number} */ journal)=>
+                    link.call('report', 'standing', [journal]) };
+            held.asked = asked;
+            standingAcross.add(asked);
+            events.emit('process-started', { image: request.imagePath, sequenceBase: logSequence,
+                worker: true });
             return await new Promise((resolve, reject)=>{
                 worker.onMessage(data=>{
                     if (data?.type === 'exited')
@@ -11707,29 +11725,50 @@ export async function createApp(options){
         }
         finally
         {
-            if (listed)
-            {
-                listed.completed = true;
-                listed.exitCode = (ended ?? -1) >>> 0;
-                processEvents.setEvent(listed.exited);
-            }
-            standingAcross.delete(asked);
-            translationPool?.removeProcess(request.id);
-            for (const id of lentBeside)
-            {
-                translationPool?.removeProcess(id);
-            }
-            lentBeside.clear();
-            forgetObjects();
-            forgetPipes();
-            await com.gone();
-            link.close();
-            await answering;
-            worker.terminate();
-            sound?.giveBack();
-            shown?.dispose();
-            display?.port1.close();
-            presenter?.forget?.(request.id);
+            // Each step whatever the one before did: a step that threw and
+            // took the rest with it left the worker standing - its machine and
+            // its memory - and the sound span lent, for the rest of the run.
+            // The worker goes first.
+            await teardown([
+                ()=>held.worker?.terminate(),
+                ()=>{
+                    if (listed)
+                    {
+                        listed.completed = true;
+                        listed.exitCode = (ended ?? -1) >>> 0;
+                        processEvents.setEvent(listed.exited);
+                    }
+                },
+                ()=>standingAcross.delete(held.asked),
+                ()=>{
+                    translationPool?.removeProcess(request.id);
+                    for (const id of lentBeside)
+                    {
+                        translationPool?.removeProcess(id);
+                    }
+                    lentBeside.clear();
+                },
+                ()=>forgetObjects(),
+                ()=>forgetPipes(),
+                // Its windows, if it ended without saying so: this thread would
+                // block for good asking a gone process about one.
+                ()=>{
+                    for (const id of windowsAcross)
+                    {
+                        system.windows?.detach(id);
+                    }
+                },
+                ()=>com.gone(),
+                async()=>{
+                    link.close();
+                    await answering;
+                },
+                ()=>held.sound?.giveBack(),
+                ()=>held.shown?.dispose(),
+                ()=>held.display?.port1.close(),
+                ()=>options.device?.worker?.postMessage({ type: 'forget', client: request.id }),
+                ()=>presenter?.forget?.(request.id),
+            ], e=>events.emit('error', { reason: 'teardown', error: e }));
         }
     };
     /**
@@ -11804,8 +11843,14 @@ export async function createApp(options){
                 ended = await runAcross(from, request, reach);
             }
             catch (e){
+                const whole = /** @type {any} */ (e)?.diagnostics;
+                if (whole !== undefined)
+                {
+                    // Its layers' numbers in the event; the whole goes on below.
+                    /** @type {any} */ (e).diagnostics = diagnosticsSummary(whole);
+                }
                 events.emit('error', { reason: 'process', error: e });
-                ended = { code: -1, diagnostics: /** @type {any} */ (e)?.diagnostics };
+                ended = { code: -1, diagnostics: whole };
             }
             finally
             {
@@ -11819,7 +11864,8 @@ export async function createApp(options){
             if (exited)
             {
                 exited(code, ended);
-                events.emit('process-resumed', { image: request.imagePath, code, diagnostics });
+                events.emit('process-resumed', { image: request.imagePath, code,
+                    diagnostics: diagnosticsSummary(diagnostics) });
             }
             return code;
         })();

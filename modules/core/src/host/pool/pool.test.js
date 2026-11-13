@@ -197,6 +197,29 @@ test('no more than perProcess for one process; a process\'s exit trims the idle 
     }
 });
 
+test('a process gone without giving its workers back has each forget what it served it',
+    async()=>{
+        const { pool, workers, add, window } = fakePool(2);
+        try
+        {
+            await add(1);
+            await window(500, [1]);
+            await window(500, [1, 1]);
+            await window(500, [1, 1]);
+            assert.equal(workers.length, 2);
+            pool.removeProcess(1);
+            for (const worker of workers)
+            {
+                assert.deepEqual(worker.posts.at(-1), { forget: true },
+                    'its runtime never says done: the pool says it for it');
+            }
+        }
+        finally
+        {
+            pool.dispose();
+        }
+    });
+
 test('a batch under way counts in the window it runs in, not only once it is done', async()=>{
     const { pool, workers, seen, add, window } = fakePool();
     try

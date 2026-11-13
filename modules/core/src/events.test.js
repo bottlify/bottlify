@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createEvents, REPLAY_LIMIT } from './events.js';
+import { REPLAY_LIMIT, createEvents, diagnosticsSummary } from './events.js';
 
 test('handlers run in registration order until one answers', ()=>{
     const events = createEvents();
@@ -198,4 +198,21 @@ test('what nobody has subscribed to yet is kept only up to REPLAY_LIMIT per name
     assert.equal(seen.length, REPLAY_LIMIT, 'the oldest one, past the bound, was dropped');
     assert.equal(seen[0].name, 'dll1', 'dll0 is the one the bound dropped');
     assert.equal(seen[seen.length - 1].name, `dll${REPLAY_LIMIT}`);
+});
+
+test('an event about a process carries its layers\' numbers and flags, not their lists', ()=>{
+    const whole = [
+        { name: 'audio', status: 'ready', metrics: { arenaFree: 4 << 20, voices: 2,
+            recent: ['a', 'b'], table: { big: new Array(1000).fill(1), shared: null,
+                on: true, deeper: { gone: 1 } }, summary: 'x' } },
+        { name: 'kernel', status: 'created', metrics: {} },
+        { name: 'odd' },
+    ];
+    assert.deepEqual(diagnosticsSummary(whole), [
+        { name: 'audio', status: 'ready', metrics: { arenaFree: 4 << 20, voices: 2,
+            table: { shared: null, on: true } } },
+        { name: 'kernel', status: 'created', metrics: {} },
+        { name: 'odd', status: '', metrics: {} },
+    ]);
+    assert.equal(diagnosticsSummary(undefined), null, 'none for a process that said nothing');
 });
