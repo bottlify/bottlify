@@ -8,7 +8,7 @@ import { visibleCursor } from './cursor.js';
 import { createJsSampler } from './host/js-samples.js';
 import { fitFrame, isShown, placementOf, stretchFrame } from './letterbox.js';
 import { assembleModules } from './core.js';
-import { createEvents } from './events.js';
+import { createEvents, diagnosticsSummary } from './events.js';
 import { watchedArgument } from './watch-arguments.js';
 import { frameDrops } from './frame-drops.js';
 import { captureTrace, describeAddress, formatTrace } from './trace.js';
@@ -11724,8 +11724,14 @@ export async function createApp(options){
                 ended = await runAcross(from, request, reach);
             }
             catch (e){
+                const whole = /** @type {any} */ (e)?.diagnostics;
+                if (whole !== undefined)
+                {
+                    // Its layers' numbers in the event; the whole goes on below.
+                    /** @type {any} */ (e).diagnostics = diagnosticsSummary(whole);
+                }
                 events.emit('error', { reason: 'process', error: e });
-                ended = { code: -1, diagnostics: /** @type {any} */ (e)?.diagnostics };
+                ended = { code: -1, diagnostics: whole };
             }
             finally
             {
@@ -11739,7 +11745,8 @@ export async function createApp(options){
             if (exited)
             {
                 exited(code, ended);
-                events.emit('process-resumed', { image: request.imagePath, code, diagnostics });
+                events.emit('process-resumed', { image: request.imagePath, code,
+                    diagnostics: diagnosticsSummary(diagnostics) });
             }
             return code;
         })();

@@ -40,6 +40,31 @@
  */
 export const REPLAY_LIMIT = 32;
 
+/**
+ * What a process's diagnostics come to in an event about it: each layer's
+ * name, status and numbers, not its tables. An event is kept for a subscriber
+ * yet to come (`REPLAY_LIMIT` of each name) and written into the run's journal
+ * as text, once per process gone: the whole of a process's diagnostics, every
+ * layer's lists and strings, was megabytes a child, kept and written each time
+ * a setup's helper ended. The whole is the run's report's to read, not an
+ * event's.
+ *
+ * @param {unknown} diagnostics  a process's layers, as `diagnostics()` answers them
+ * @returns {{ name: string, status: string, metrics: Record<string, number> }[] | null}
+ */
+export function diagnosticsSummary(diagnostics){
+    if (!Array.isArray(diagnostics))
+    {
+        return null;
+    }
+    return diagnostics.map(layer=>({
+        name: String(layer?.name ?? ''),
+        status: String(layer?.status ?? ''),
+        metrics: Object.fromEntries(Object.entries(layer?.metrics ?? {})
+            .filter(([, value])=>typeof value === 'number')),
+    }));
+}
+
 export function createEvents(){
     /** @type {Map<string, EventHandler[]>} */
     const handlers = new Map();
