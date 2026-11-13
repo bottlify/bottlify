@@ -36,6 +36,8 @@ async function openWorker(url){
                 worker.postMessage(message, transfer),
             onMessage: (/** @type {(data: any) => void} */ handler)=>worker.addEventListener(
                 'message', (/** @type {any} */ event)=>handler(event.data)),
+            onLost: (/** @type {(reason: string) => void} */ handler)=>worker.addEventListener(
+                'error', (/** @type {any} */ event)=>handler(event?.message || 'the worker failed')),
             // The page's worker runs nothing more once terminated: there is no
             // exit to wait for.
             terminate: async()=>worker.terminate(),
@@ -47,6 +49,10 @@ async function openWorker(url){
         post: (/** @type {any} */ message, /** @type {any[]} */ transfer = [])=>
             worker.postMessage(message, transfer),
         onMessage: (/** @type {(data: any) => void} */ handler)=>worker.on('message', handler),
+        onLost: (/** @type {(reason: string) => void} */ handler)=>{
+            worker.on('error', error=>handler(error?.message ?? String(error)));
+            worker.on('exit', code=>handler(`the worker exited (${code})`));
+        },
         terminate: async()=>{
             await worker.terminate();
         },
@@ -188,10 +194,23 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
         Promise.resolve(now !== undefined ? now : store.get(ask.key)).catch(()=>null)
             .then(bytes=>worker.post({ type: 'store', id: ask.id, bytes })).catch(()=>{});
     };
-    await new Promise((resolve, reject)=>{
+    /** Whether it said it is ready: a worker lost after that is the process's to notice. */
+    let ready = false;
+    const started = new Promise((resolve, reject)=>{
+        // A worker that fails to load or dies before it is ready says
+        // nothing of its own: without this the process waited for its
+        // `ready` for good, and so did its dispose.
+        worker.onLost(reason=>{
+            if (!ready)
+            {
+                failed ??= reason;
+                reject(new Error(`executor ${index}: ${reason}`));
+            }
+        });
         worker.onMessage(data=>{
             if (data?.type === 'ready')
             {
+                ready = true;
                 resolve(undefined);
             }
             else if (data?.type === 'failed')
@@ -213,6 +232,15 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
             unbroken, store: store !== null, emittedHere: emittedHere.buffer,
             config: { ...config, executor: index } });
     });
+    try
+    {
+        await started;
+    }
+    catch (e){
+        // What failed to start holds the process's memory: let it go.
+        await worker.terminate().catch(()=>{});
+        throw e;
+    }
     const own = /** @type {Uint8Array} */ (host.block());
     const theirs = new Uint8Array(memory.buffer, host.executorBase(index), own.length);
     const aside = new Uint8Array(own.length);
