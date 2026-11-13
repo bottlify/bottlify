@@ -440,6 +440,12 @@ export function createWin32Module(){
      * as long as it lasts, a gigabyte of guest memory a process.
      */
     let leaveTable = ()=>{};
+    /**
+     * Gives back the names this process held in the run's namespace when it
+     * ends: an exit closes every handle at once, and a name an ended process
+     * kept would keep its object, and through it the machine, for the run.
+     */
+    let leaveNames = ()=>{};
 
     return {
         name: 'win32',
@@ -543,6 +549,7 @@ export function createWin32Module(){
             const runObjects = system?.objects
                 ? createRemoteNamedObjects({ objects: system.objects, kernel })
                 : createNamedObjects({ table: system?.namedObjects });
+            leaveNames = ()=>runObjects.ended(object=>kernel.forsake?.(object));
             // The objects a running Steam client offers by name (its
             // SteamStart lock and section), made when a process first opens
             // one, as the client made them before the game ran.
@@ -962,7 +969,7 @@ export function createWin32Module(){
             leaveWindows = ()=>windowDirectory.detach(processId);
             // A process's windows end with it, for every other process too,
             // and so does the table a handle is duplicated into.
-            endTasks.push(()=>leaveWindows(), ()=>leaveTable());
+            endTasks.push(()=>leaveWindows(), ()=>leaveTable(), ()=>leaveNames());
             // The guest's clock, because a timer is due against the clock the
             // program itself reads, and the input layer's key state, because a
             // hot key fires on a combination and only the layer that sees the
@@ -5923,6 +5930,8 @@ export function createWin32Module(){
             leaveWindows = ()=>{};
             leaveTable();
             leaveTable = ()=>{};
+            leaveNames();
+            leaveNames = ()=>{};
             current = null;
         },
     };
