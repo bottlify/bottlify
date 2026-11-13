@@ -167,3 +167,37 @@ test('the store never invents a directory it was not told about', ()=>{
     assert.throws(()=>store.remove('Save\\missing'), { code: 'NOT_FOUND' });
     assert.throws(()=>store.write('Save', 0, bytes), { code: 'IS_A_DIRECTORY' });
 });
+
+test('what the store holds is counted as it is written, cut, handed on and removed', ()=>{
+    const store = createMemoryStore({ 'seed.ini': 'abc' });
+    assert.equal(store.heldBytes?.(), 3);
+    store.write('log.txt', 0, new Uint8Array(100));
+    assert.equal(store.heldBytes?.(), 3 + 4096, 'a small file holds its first piece');
+    store.write('log.txt', 5000, new Uint8Array(10));
+    assert.equal(store.heldBytes?.(), 3 + 8192, 'and doubles it as it grows');
+    store.write('big.bin', 0, new Uint8Array(PIECE_SIZE + 1));
+    assert.equal(store.heldBytes?.(), 3 + 8192 + 2 * PIECE_SIZE);
+    store.truncate('big.bin', 10);
+    assert.equal(store.heldBytes?.(), 3 + 8192 + PIECE_SIZE, 'a piece cut away is let go of');
+    store.share?.('log.txt');
+    assert.equal(store.heldBytes?.(), 3 + 5010 + PIECE_SIZE, 'shared whole, it holds its size');
+    store.adopt?.('seed.ini', new Uint8Array(20));
+    assert.equal(store.heldBytes?.(), 20 + 5010 + PIECE_SIZE);
+    store.remove('big.bin');
+    store.remove('log.txt');
+    store.remove('seed.ini');
+    assert.equal(store.heldBytes?.(), 0);
+});
+
+test('a first write into a file kept whole copies the piece it reaches, not the file', ()=>{
+    const whole = new Uint8Array(3 * PIECE_SIZE).fill(4);
+    const store = createMemoryStore();
+    store.adopt?.('archive.pak', whole);
+    store.write('archive.pak', PIECE_SIZE + 1, Uint8Array.of(9));
+
+    assert.equal(whole[PIECE_SIZE + 1], 4, 'what was adopted is never written into');
+    assert.equal(store.read('archive.pak', PIECE_SIZE + 1, 1)[0], 9);
+    const contents = store.contents?.('archive.pak');
+    assert.equal(contents?.pieces[0]?.buffer, whole.buffer, 'the pieces not written are views');
+    assert.notEqual(contents?.pieces[1]?.buffer, whole.buffer, 'the one written is a copy');
+});

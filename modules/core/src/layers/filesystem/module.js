@@ -7,6 +7,7 @@
 import { ErrorCode, fsError } from './internal/errors.js';
 import { Disposition, SeekFrom, createFileTable, createSharing } from './internal/handles.js';
 import { bytesOf, createMemoryStore, piecesOf } from './internal/memory-store.js';
+import { createPageFileStore } from './internal/page-file.js';
 import { createOverlay } from './internal/tree.js';
 import {
     createDirectoryState,
@@ -62,6 +63,43 @@ const handedOut = (tree, components, path)=>{
 };
 
 /**
+ * What the drives' writable layers hold of the tab's memory, and of its disk:
+ * each store's own pieces, and those of the page file they stand on, once
+ * however many drives share it.
+ *
+ * @param {Iterable<any>} writables
+ * @returns {{ heaps: { writable: number }, disk?: { pageFile: number },
+ *     pageFile?: Record<string, any> }}
+ */
+const writableHeld = writables=>{
+    let memory = 0;
+    /** @type {Set<any>} */
+    const pageFiles = new Set();
+    for (const store of writables)
+    {
+        if (store?.pageFile)
+        {
+            pageFiles.add(store.pageFile);
+        }
+        else
+        {
+            memory += store?.heldBytes?.() ?? 0;
+        }
+    }
+    let disk = 0;
+    /** @type {Record<string, any> | undefined} */
+    let described;
+    for (const pageFile of pageFiles)
+    {
+        described = pageFile.diagnostics();
+        memory += described?.residentBytes ?? 0;
+        disk += described?.fileBytes ?? 0;
+    }
+    return { heaps: { writable: memory }, ...described ? { disk: { pageFile: disk } } : {},
+        ...described ? { pageFile: described } : {} };
+};
+
+/**
  * filesystem -- the volume a Win32 program sees: drive letters, Windows path
  * rules, a read-only source under a writable layer, and open files.
  *
@@ -72,8 +110,9 @@ const handedOut = (tree, components, path)=>{
  * agreeing on numbering first.
  *
  * The backing stores are injected. A build with persistence supplies its own;
- * a build without one gets the in-memory store here, and behaves identically
- * until it is closed.
+ * a build without one gets a writable layer here: on the run's page file
+ * (`page-file.js`) where it was handed one, in memory otherwise, and either
+ * behaves identically until it is closed.
  */
 
 /** The filesystem layer's module for one graph; see `defaultModules`. */
@@ -175,9 +214,19 @@ export function createFilesystemModule(){
              *     writables: Map<string, any>,
              *     watchers: Set<(key: string, change: any) => void>,
              *     sharing?: import('./internal/handles.js').Sharing,
-             *     revisions?: Int32Array } | null}
+             *     revisions?: Int32Array,
+             *     pageFile?: import('./internal/page-file.js').PageFile | null } | null}
              */
             const shared = config?.volume ?? null;
+            /**
+             * Where a writable layer made here keeps its pieces: the run's page
+             * file on the disk, or this thread's memory where there is none.
+             *
+             * @type {import('./internal/page-file.js').PageFile | null}
+             */
+            const pageFile = shared?.pageFile ?? config?.pageFile ?? null;
+            const newWritable = ()=>(pageFile
+                ? createPageFileStore(pageFile) : createMemoryStore());
             // Every process's open files, which sharing is settled against:
             // a file one process holds on terms that share nothing is refused
             // to every other, as CreateFile's terms are the system's.
@@ -270,7 +319,7 @@ export function createFilesystemModule(){
                 // the one a later writable mount of the letter finds.
                 const writable = readOnly
                     ? createMemoryStore()
-                    : stores?.writable ?? state.writables.get(key) ?? createMemoryStore();
+                    : stores?.writable ?? state.writables.get(key) ?? newWritable();
                 if (!readOnly)
                 {
                     state.writables.set(key, writable);
@@ -1149,11 +1198,16 @@ export function createFilesystemModule(){
                     ...described?.kind ? { kind: described.kind, label: described.label } : {},
                 };
             }
+            const { pageFile, ...bytesHeld } = writableHeld(instance.writables.values());
             return {
                 name: 'filesystem',
                 version: '0.1.0',
                 status: 'ready',
                 metrics: {
+                    // The writable layers' pieces in memory (`memory-zones.js`);
+                    // the disk is no zone of the tab's, reported beside them.
+                    bytesHeld,
+                    ...pageFile ? { pageFile } : {},
                     volumes,
                     handles: instance.files.diagnostics(),
                     // A relative path that resolves somewhere unexpected is one
