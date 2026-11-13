@@ -1909,6 +1909,8 @@ export function createCorkHost(config){
         cacheBytes: ()=>cacheBytes ?? null,
         corkDiagnostics: ()=>({
             ...runtime.diagnostics(),
+            // Whether this process runs in a gone one's memory rather than a new one.
+            memoryReused: taken !== undefined,
             ...wasmTier === null ? {} : { interpretedRelaxedReads: wasmTier.relaxedReads() },
             // What the JavaScript interpreter retired, a hundred times slower than the tier.
             interpretedByScript: interpreter?.retired ?? 0,
