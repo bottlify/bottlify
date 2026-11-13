@@ -126,15 +126,19 @@ function digestBlocks(bytes){
     compressedDigest.bytes += bytes.length;
 }
 
-/** The targets a unit can have textures bound to, lowest priority first. */
-const TARGETS = [GL.TEXTURE_1D, GL.TEXTURE_2D, GL.TEXTURE_RECTANGLE, GL.TEXTURE_CUBE_MAP];
+/**
+ * The targets a unit enables, lowest priority first (2.1 section 3.8.16,
+ * the rectangle's place by ARB_texture_rectangle).
+ */
+const TARGETS = [GL.TEXTURE_1D, GL.TEXTURE_2D, GL.TEXTURE_3D, GL.TEXTURE_RECTANGLE,
+    GL.TEXTURE_CUBE_MAP];
 /** The targets from the highest precedence down, as a unit's enabled target is chosen. */
 const TARGETS_HIGHEST_FIRST = [...TARGETS].reverse();
 /**
  * Every target a unit binds a texture to: the enabled ones, and those only a
- * program samples -- 3D textures and the arrays of OpenGL 3.0.
+ * program samples -- the arrays of OpenGL 3.0 and later.
  */
-const BIND_TARGETS = [...TARGETS, GL.TEXTURE_3D, TEX.TEXTURE_1D_ARRAY, TEX.TEXTURE_2D_ARRAY,
+const BIND_TARGETS = [...TARGETS, TEX.TEXTURE_1D_ARRAY, TEX.TEXTURE_2D_ARRAY,
     TEX.TEXTURE_CUBE_MAP_ARRAY, GL.TEXTURE_BUFFER, GL.TEXTURE_2D_MULTISAMPLE,
     GL.TEXTURE_2D_MULTISAMPLE_ARRAY];
 
@@ -305,6 +309,22 @@ export function samplingRefusal(parameter, value){
         || SWIZZLE_PARAMETERS.includes(parameter) && !SWIZZLE_SOURCES.has(value)
         ? GL.INVALID_ENUM
         : parameter === GL.TEXTURE_MAX_ANISOTROPY && !(value >= 1) ? GL.INVALID_VALUE : 0;
+}
+
+/**
+ * What a texture or sampler wrapped GL_CLAMP is told: it is sampled as
+ * GL_CLAMP_TO_EDGE, on the device and the processor alike
+ * (`roadmap/decisions.md` A244).
+ *
+ * @param {number} parameter @param {number} value
+ * @returns {string | null}
+ */
+export function clampDivergence(parameter, value){
+    return value === GL.CLAMP && (parameter === GL.TEXTURE_WRAP_S
+        || parameter === GL.TEXTURE_WRAP_T || parameter === GL.TEXTURE_WRAP_R)
+        ? 'a texture wrapped GL_CLAMP is sampled as GL_CLAMP_TO_EDGE: a linear filter at its'
+            + ' edge reads the edge texel where GL blends half the border colour in'
+        : null;
 }
 
 /** @type {Set<number>} */
@@ -543,6 +563,56 @@ export function installTextureCalls(context, kernel){
      * @type {import('./objects.js').TextureObject | null}
      */
     let named = null;
+    /**
+     * The proxy state of this context (3.8.1): the levels the last image
+     * call of each proxy target would have made, read by
+     * glGetTexLevelParameter and never sampled.
+     *
+     * @type {Map<number, import('./objects.js').TextureObject>}
+     */
+    const proxies = new Map();
+
+    /** @param {number} target @returns {import('./objects.js').TextureObject} */
+    function proxyOf(target){
+        let proxy = proxies.get(target);
+        if (!proxy)
+        {
+            proxy = createTextureObject(0, PROXY_TARGETS.get(target) ?? target);
+            proxies.set(target, proxy);
+        }
+        return proxy;
+    }
+
+    /**
+     * A level no image may have (3.8.1): below zero, or past log2 of the
+     * largest texture - which would also be another cube face's level, the
+     * faces being kept FACE_STRIDE levels apart.
+     *
+     * @param {number} level @returns {boolean}
+     */
+    function badLevel(level){
+        return level < 0 || level >= mipLevels(record(GL.MAX_TEXTURE_SIZE).values[0]);
+    }
+
+    /**
+     * What a proxy image call leaves: the level it describes, or, where the
+     * image could not be supported, no level - every state of it zero, and
+     * no error (3.8.1).
+     *
+     * @param {number} target @param {number} level
+     * @param {import('./objects.js').TextureLevel | null} stored
+     */
+    function setProxyLevel(target, level, stored){
+        const levels = proxyOf(target).levels;
+        if (stored)
+        {
+            levels.set(levelKey(level), stored);
+        }
+        else
+        {
+            levels.delete(levelKey(level));
+        }
+    }
 
     Object.assign(kernel.side, {
         units,
@@ -633,7 +703,15 @@ export function installTextureCalls(context, kernel){
                         continue;
                     }
                     const texture = textureBound(index, target);
-                    if (texture && isTextureComplete(texture))
+                    if (texture && isTextureComplete(texture) && target === GL.TEXTURE_3D)
+                    {
+                        // ponytail: the fixed pipeline samples 2D, rectangle and cube
+                        // images only; a 3D texture needs a texture_3d binding and
+                        // an r coordinate in wgsl.js and the processor's sampler.
+                        lose('a 3D texture enabled on the fixed pipeline was not sampled: the'
+                            + ' unit draws as if disabled');
+                    }
+                    else if (texture && isTextureComplete(texture))
                     {
                         out.push({ index, texture, unit });
                     }
@@ -644,10 +722,11 @@ export function installTextureCalls(context, kernel){
         },
 
         /**
-         * The texture actually bound to a unit's target, or null. Unlike the
-         * internal reader this never falls back to the unit's default: a
-         * fragment program sampling a unit with nothing bound has to be told
-         * so, and answers the incomplete-texture value.
+         * The texture bound to a unit's target: a named one, or texture
+         * object 0, the target's default, which is a texture as any other
+         * (2.1 section 3.8.12) - a program samples the images loaded into it,
+         * and with none it is incomplete and answers the incomplete-texture
+         * value.
          *
          * @param {number} unitIndex
          * @param {number} target
@@ -663,7 +742,8 @@ export function installTextureCalls(context, kernel){
                 return null;
             }
             const name = unit.bindings.get(target) ?? 0;
-            return name === 0 ? null : kernel.shareGroup().textures.objects.get(name) ?? null;
+            return name === 0 ? unit.defaults.get(target) ?? null
+                : kernel.shareGroup().textures.objects.get(name) ?? null;
         },
 
         /** @param {number} mask @returns {any} */
@@ -1270,16 +1350,36 @@ export function installTextureCalls(context, kernel){
             setError(GL.INVALID_VALUE);
             return;
         }
+        if (internal >= GL.SLUMINANCE_ALPHA && internal <= GL.SLUMINANCE8)
+        {
+            diverge('an sRGB luminance texture (2.1) is kept as luminance and sampled without'
+                + ' its sRGB decode');
+        }
         const maxSize = record(GL.MAX_TEXTURE_SIZE).values[0];
-        if (level < 0 || border < 0 || border > 1
-            || width < 0 || height < 0 || width > maxSize || height > maxSize)
+        if (badLevel(level) || border < 0 || border > 1 || width < 0 || height < 0)
         {
             setError(GL.INVALID_VALUE);
             return;
         }
+        const fits = width <= maxSize && height <= maxSize;
         if (isProxy)
         {
+            setProxyLevel(target, level, fits ? { width, height, internalFormat: internal,
+                border, baseFormat, texels: null, compressed: null } : null);
             return;
+        }
+        if (!fits)
+        {
+            setError(GL.INVALID_VALUE);
+            return;
+        }
+        if (border === 1)
+        {
+            // ponytail: the border is kept as the image's outer texels; a
+            // wrap that reads it needs the interior uploaded alone and the
+            // border sampled beside it, in both samplers.
+            diverge('an image with a border keeps its border texels as part of the image: a'
+                + ' draw samples them inside it, not as the border');
         }
         // The data is read before the list decides anything: a compiled
         // glTexImage2D holds the pixels as they were, not the pointer.
@@ -1370,9 +1470,14 @@ export function installTextureCalls(context, kernel){
             : target === TEX.TEXTURE_1D_ARRAY || target === TEX.PROXY_TEXTURE_1D_ARRAY
                 ? layers : max;
         const maxDepth = solid ? size3d : three ? layers : 1;
-        if (level < 0 || border !== 0 || width < 0 || height < 0 || depth < 0
-            || width > maxWidth || height > maxHeight || depth > maxDepth
-            || !cubeArrayFits(target, width, height, depth))
+        // A shape no texture has is an error for a proxy too; a size past
+        // the limits is what a proxy answers by leaving no level.
+        const fits = width <= maxWidth && height <= maxHeight && depth <= maxDepth
+            && (!CUBE_ARRAYS.has(target)
+                || width <= record(GL.MAX_CUBE_MAP_TEXTURE_SIZE).values[0]);
+        if (badLevel(level) || border !== 0 || width < 0 || height < 0 || depth < 0
+            || (CUBE_ARRAYS.has(target) && (width !== height || depth % 6 !== 0))
+            || (!fits && !PROXIES.has(target)))
         {
             // A border is OpenGL 1.x's alone: the sized formats of 3.0 refuse
             // one, and so does every image kept here as bytes.
@@ -1387,6 +1492,8 @@ export function installTextureCalls(context, kernel){
         }
         if (PROXIES.has(target))
         {
+            setProxyLevel(target, level, fits ? sizedLevel(internal, kept, width, height, depth,
+                null, legacyBase) : null);
             return;
         }
         const stored = readStored(pixels, width, height, depth, format, type, kept, legacyBase);
@@ -1519,7 +1626,7 @@ export function installTextureCalls(context, kernel){
             setError(GL.INVALID_OPERATION);
             return;
         }
-        if (level < 0 || width < 0 || height < 0 || x0 < 0 || y0 < 0
+        if (badLevel(level) || width < 0 || height < 0 || x0 < 0 || y0 < 0
             || x0 + width > existing.width || y0 + height > existing.height)
         {
             setError(GL.INVALID_VALUE);
@@ -1569,7 +1676,7 @@ export function installTextureCalls(context, kernel){
             return;
         }
         const layersOf = existing.depth ?? 1;
-        if (level < 0 || box.width < 0 || box.height < 0 || box.depth < 0 || box.x < 0
+        if (badLevel(level) || box.width < 0 || box.height < 0 || box.depth < 0 || box.x < 0
             || box.y < 0 || box.z < 0 || box.x + box.width > existing.width
             || box.y + box.height > existing.height || box.z + box.depth > layersOf)
         {
@@ -1628,8 +1735,38 @@ export function installTextureCalls(context, kernel){
             kernel.side.transferSkipped?.(`a read of a texture of ${sized.name}`);
         }
         const data = stored.data ?? blankStorage(sized, stored.width, stored.height, depth);
-        return packFromStorage(data, stored.width, stored.height, depth, format, type,
-            transferState(true), sized);
+        // A legacy format kept as RGBA8 bytes (a 3D or array level) reads
+        // back as its own base format does.
+        return packFromStorage(sized === RGBA8 ? returnedTexels(data, stored.baseFormat) : data,
+            stored.width, stored.height, depth, format, type, transferState(true), sized);
+    }
+
+    /**
+     * A level's RGBA texels as glGetTexImage returns them (2.1 table 6.1):
+     * luminance and intensity are red, green and blue zero, and alpha one
+     * where the format has none - not luminance spread over red, green and
+     * blue as the level is sampled. A copy where that changes anything.
+     *
+     * @param {Uint8Array} texels @param {number} baseFormat
+     * @returns {Uint8Array}
+     */
+    function returnedTexels(texels, baseFormat){
+        if (baseFormat !== GL.LUMINANCE && baseFormat !== GL.LUMINANCE_ALPHA
+            && baseFormat !== GL.INTENSITY)
+        {
+            return texels;
+        }
+        const out = texels.slice();
+        for (let at = 0; at < out.length; at += 4)
+        {
+            out[at + 1] = 0;
+            out[at + 2] = 0;
+            if (baseFormat === GL.INTENSITY)
+            {
+                out[at + 3] = 255;
+            }
+        }
+        return out;
     }
 
     /**
@@ -1666,7 +1803,7 @@ export function installTextureCalls(context, kernel){
      */
     function copySizedImage(args, image, level, internal, kept, x, y, width, height, border){
         const max = record(GL.MAX_TEXTURE_SIZE).values[0];
-        if (level < 0 || border !== 0 || width < 0 || height < 0 || width > max
+        if (badLevel(level) || border !== 0 || width < 0 || height < 0 || width > max
             || height > max)
         {
             setError(GL.INVALID_VALUE);
@@ -1825,6 +1962,16 @@ export function installTextureCalls(context, kernel){
     }
 
     /**
+     * A LOD bias (1.4, section 3.8.8), a texture's or a unit's, is kept and
+     * answered, and not applied: neither the device nor the processor biases
+     * the level a sample reads.
+     */
+    function divergeLodBias(){
+        diverge('a GL_TEXTURE_LOD_BIAS was set and is not applied: textures are sampled at the'
+            + ' level their footprint gives, unbiased');
+    }
+
+    /**
      * @param {string} name
      * @param {number} target
      * @param {number} parameter
@@ -1912,6 +2059,20 @@ export function installTextureCalls(context, kernel){
             setError(GL.INVALID_ENUM);
             return;
         }
+        if (parameter === GL.TEXTURE_LOD_BIAS && value !== 0)
+        {
+            divergeLodBias();
+        }
+        if (parameter === TEX.DEPTH_TEXTURE_MODE && value !== GL.LUMINANCE)
+        {
+            diverge('a GL_DEPTH_TEXTURE_MODE was set and is not read: a depth texture is sampled'
+                + ' the same whatever its mode');
+        }
+        const clamped = clampDivergence(parameter, value);
+        if (clamped)
+        {
+            diverge(clamped);
+        }
         texture.parameters.set(parameter, value);
         texture.parametersVersion++;
     }
@@ -1989,6 +2150,35 @@ export function installTextureCalls(context, kernel){
         {
             return;
         }
+        if (target === GL.POINT_SPRITE)
+        {
+            if (parameter !== GL.COORD_REPLACE || (values[0] !== GL.TRUE && values[0] !== GL.FALSE))
+            {
+                setError(GL.INVALID_ENUM);
+                return;
+            }
+            if (values[0] === GL.TRUE)
+            {
+                diverge('GL_COORD_REPLACE was set and is not done: a point sprite is sampled at'
+                    + ' the texture coordinate of its vertex, not across the sprite');
+            }
+            units[active].env.coordReplace = values[0];
+            return;
+        }
+        if (target === GL.TEXTURE_FILTER_CONTROL)
+        {
+            if (parameter !== GL.TEXTURE_LOD_BIAS)
+            {
+                setError(GL.INVALID_ENUM);
+                return;
+            }
+            if (values[0] !== 0)
+            {
+                divergeLodBias();
+            }
+            units[active].env.lodBias = values[0];
+            return;
+        }
         if (target !== GL.TEXTURE_ENV)
         {
             setError(GL.INVALID_ENUM);
@@ -2036,10 +2226,21 @@ export function installTextureCalls(context, kernel){
             default:
             {
                 const slot = COMBINE_SLOTS.get(parameter);
-                if (!slot || !slot[2].has(value))
+                // A source may name a unit, GL_TEXTUREn (1.4, ARB_texture_env_crossbar).
+                const crossbar = slot?.[2] === COMBINE_SOURCES && value >= GL.TEXTURE0
+                    && value < GL.TEXTURE0 + CONVENTIONAL_UNITS;
+                if (!slot || (!slot[2].has(value) && !crossbar))
                 {
                     setError(GL.INVALID_ENUM);
                     return;
+                }
+                if (crossbar)
+                {
+                    // ponytail: kept and answered; wgsl.js and texture.js read a
+                    // source they do not know as GL_PREVIOUS. Sampling every
+                    // unit before the first combines is what reading one takes.
+                    diverge('a combiner source naming a texture unit (GL_TEXTUREn) reads the'
+                        + ' result of the unit before instead of the texture of the unit named');
                 }
                 combine[slot[0]][slot[1]] = value;
             }
@@ -2056,6 +2257,14 @@ export function installTextureCalls(context, kernel){
         if (!enter(name, [target, parameter]))
         {
             return null;
+        }
+        if (target === GL.TEXTURE_FILTER_CONTROL && parameter === GL.TEXTURE_LOD_BIAS)
+        {
+            return [units[active].env.lodBias];
+        }
+        if (target === GL.POINT_SPRITE && parameter === GL.COORD_REPLACE)
+        {
+            return [units[active].env.coordReplace];
         }
         if (target !== GL.TEXTURE_ENV)
         {
@@ -2193,8 +2402,9 @@ export function installTextureCalls(context, kernel){
      * @param {number | Uint8Array | null} data
      */
     function compressedTexImage(name, target, level, internal, width, height, border, size, data){
-        const image = imageTarget(target);
-        if (!image)
+        const isProxy = PROXIES.has(target) && IMAGE_TARGETS[2].has(target);
+        const image = isProxy ? null : imageTarget(target);
+        if (!image && !isProxy)
         {
             setError(GL.INVALID_ENUM);
             return;
@@ -2212,10 +2422,17 @@ export function installTextureCalls(context, kernel){
             return;
         }
         const maxSize = record(GL.MAX_TEXTURE_SIZE).values[0];
-        if (level < 0 || border !== 0 || width < 0 || height < 0 || width > maxSize
-            || height > maxSize || size !== compressedBytes(internal, width, height))
+        const fits = width <= maxSize && height <= maxSize;
+        if (badLevel(level) || border !== 0 || width < 0 || height < 0 || (!fits && !isProxy)
+            || size !== compressedBytes(internal, width, height))
         {
             setError(GL.INVALID_VALUE);
+            return;
+        }
+        if (isProxy)
+        {
+            setProxyLevel(target, level, fits ? s3tcLevel(internal, width, height, border, null)
+                : null);
             return;
         }
         const bytes = guestBytes(data, size);
@@ -2229,7 +2446,7 @@ export function installTextureCalls(context, kernel){
         {
             return;
         }
-        if (immutable(image.texture))
+        if (!image || immutable(image.texture))
         {
             return;
         }
@@ -2299,10 +2516,18 @@ export function installTextureCalls(context, kernel){
         }
         const max = record(GL.MAX_TEXTURE_SIZE).values[0];
         const layers = record(TEX.MAX_ARRAY_TEXTURE_LAYERS)?.values[0] ?? 256;
-        if (level < 0 || border !== 0 || width < 0 || height < 0 || depth < 0 || width > max
-            || height > max || depth > layers || size !== storageBytes(sized, width, height, depth))
+        const fits = width <= max && height <= max && depth <= layers;
+        const isProxy = PROXIES.has(target);
+        if (badLevel(level) || border !== 0 || width < 0 || height < 0 || depth < 0
+            || (!fits && !isProxy) || size !== storageBytes(sized, width, height, depth))
         {
             setError(GL.INVALID_VALUE);
+            return;
+        }
+        if (isProxy)
+        {
+            setProxyLevel(target, level, fits ? sizedLevel(internal, sized, width, height, depth,
+                null, null) : null);
             return;
         }
         const bytes = guestBytes(data, size);
@@ -2482,10 +2707,15 @@ export function installTextureCalls(context, kernel){
             : width <= max && (oneArray ? height <= layers : height <= max)
                 && (dimensions === 3 ? depth <= layers : true))
             && cubeArrayFits(real, width, height, depth);
+        const proxy = PROXIES.has(target);
         if (!fits || (cube && width !== height))
         {
             // A proxy answers by what it leaves, not by an error.
-            if (!PROXIES.has(target))
+            if (proxy)
+            {
+                proxyOf(target).levels.clear();
+            }
+            else
             {
                 setError(GL.INVALID_VALUE);
             }
@@ -2499,12 +2729,8 @@ export function installTextureCalls(context, kernel){
             setError(GL.INVALID_OPERATION);
             return;
         }
-        if (PROXIES.has(target))
-        {
-            return;
-        }
-        const texture = textureBound(active, target);
-        if (!texture || texture.name === 0)
+        const texture = proxy ? proxyOf(target) : textureBound(active, target);
+        if (!texture || (texture.name === 0 && !proxy))
         {
             setError(GL.INVALID_OPERATION);
             return;
@@ -2525,6 +2751,10 @@ export function installTextureCalls(context, kernel){
                 texture.levels.set(levelKey(level, face), blankLevel(internal, real, w, h, d));
                 markDirty(texture, levelKey(level, face), null);
             }
+        }
+        if (proxy)
+        {
+            return;
         }
         immutableLevels.set(texture, levels);
         kernel.shareGroup().used = true;
@@ -3106,8 +3336,9 @@ export function installTextureCalls(context, kernel){
         {
             return bufferLevelParameter(level, parameter);
         }
-        const image = imageTarget(target);
-        if (!image || level < 0)
+        const image = PROXIES.has(target) ? { texture: proxyOf(target), face: 0 }
+            : imageTarget(target);
+        if (!image || badLevel(level))
         {
             setError(image ? GL.INVALID_VALUE : GL.INVALID_ENUM);
             return null;
@@ -3139,7 +3370,11 @@ export function installTextureCalls(context, kernel){
         const base = stored?.baseFormat ?? GL.RGBA;
         const hasAlpha = base === GL.RGBA || base === GL.LUMINANCE_ALPHA || base === GL.ALPHA
             || base === GL.INTENSITY;
-        const hasColour = base !== GL.ALPHA;
+        // Luminance and intensity are components of their own, not red,
+        // green and blue (6.1.3).
+        const colours = base === GL.RGB || base === GL.RGBA ? 3 : base === TEX.RG ? 2
+            : base === GL.RED ? 1 : 0;
+        const colourAt = (/** @type {number} */ k)=>!!stored && k < colours;
         switch (parameter)
         {
             case GL.TEXTURE_WIDTH:
@@ -3148,10 +3383,12 @@ export function installTextureCalls(context, kernel){
                 return [height];
             case GL.TEXTURE_INTERNAL_FORMAT:
                 return [stored?.internalFormat ?? 1];
+            case GL.TEXTURE_BORDER:
+                return [stored?.border ?? 0];
             case GL.TEXTURE_RED_SIZE:
             case GL.TEXTURE_GREEN_SIZE:
             case GL.TEXTURE_BLUE_SIZE:
-                return [stored && hasColour ? 8 : 0];
+                return [colourAt(parameter - GL.TEXTURE_RED_SIZE) ? 8 : 0];
             case GL.TEXTURE_ALPHA_SIZE:
                 return [stored && hasAlpha ? 8 : 0];
             case TEX.TEXTURE_LUMINANCE_SIZE:
@@ -3166,8 +3403,7 @@ export function installTextureCalls(context, kernel){
             case TEX.TEXTURE_RED_TYPE:
             case TEX.TEXTURE_GREEN_TYPE:
             case TEX.TEXTURE_BLUE_TYPE:
-                return [stored && hasColour && base !== GL.LUMINANCE
-                    && base !== GL.LUMINANCE_ALPHA && base !== GL.INTENSITY
+                return [colourAt(parameter - TEX.TEXTURE_RED_TYPE)
                     ? GL.UNSIGNED_NORMALIZED : GL.NONE];
             case TEX.TEXTURE_ALPHA_TYPE:
                 return [stored && hasAlpha && base !== GL.INTENSITY
@@ -3449,10 +3685,11 @@ export function installTextureCalls(context, kernel){
          */
         bufferTextureAt(unitIndex){
             const texture = kernel.side.textureBoundAt(unitIndex, GL.TEXTURE_BUFFER);
-            if (texture)
+            if (!texture || (texture.name === 0 && !texture.store))
             {
-                refreshBufferLevel(texture);
+                return null;
             }
+            refreshBufferLevel(texture);
             return texture;
         },
     });
@@ -4093,8 +4330,9 @@ export function installTextureCalls(context, kernel){
                     width, height, border);
                 return;
             }
-            if (baseFormat === null || level < 0 || border < 0 || border > 1 || width < 0
-                || height < 0 || width > record(GL.MAX_TEXTURE_SIZE).values[0])
+            if (baseFormat === null || badLevel(level) || border < 0 || border > 1 || width < 0
+                || height < 0 || width > record(GL.MAX_TEXTURE_SIZE).values[0]
+                || height > record(GL.MAX_TEXTURE_SIZE).values[0])
             {
                 setError(GL.INVALID_VALUE);
                 return;
@@ -4178,9 +4416,10 @@ export function installTextureCalls(context, kernel){
                 }
                 const packed = stored.sized ? packSized(stored, format, type)
                     : checkTransfer(RGBA8, format, type)
-                        ? packFromStorage(transferredCopy(stored.texels
-                            ?? new Uint8Array(stored.width * stored.height * 4)), stored.width,
-                        stored.height, 1, format, type, transferState(true), RGBA8)
+                        ? packFromStorage(returnedTexels(transferredCopy(stored.texels
+                            ?? new Uint8Array(stored.width * stored.height * 4)),
+                        stored.baseFormat), stored.width, stored.height, 1, format, type,
+                        transferState(true), RGBA8)
                         : null;
                 return packed ? { packed } : null;
             }
@@ -4198,8 +4437,8 @@ export function installTextureCalls(context, kernel){
                 diverge('glGetTexImage was accepted and read black: the texels live with'
                     + ' the context that draws, in the graphics worker, and are not read back');
             }
-            return transferredCopy(stored.texels
-                ?? new Uint8Array(stored.width * stored.height * 4));
+            return returnedTexels(transferredCopy(stored.texels
+                ?? new Uint8Array(stored.width * stored.height * 4)), stored.baseFormat);
         },
 
         /** @param {number} target @param {number} parameter @param {number} value */
@@ -4422,29 +4661,28 @@ export function installTextureCalls(context, kernel){
 
     // GL_GENERATE_MIPMAP (1.4, section 3.8.8): a texture that asks for it has
     // its levels below the base remade whenever an image of its base level is
-    // specified or changed, by any of these calls. Without it a texture that
-    // sets a mipmap filter and loads only its top level is incomplete, and
-    // what samples it reads the placeholder: text drawn as blank boxes.
-    for (const name of /** @type {const} */ (['glTexImage2D', 'glTexSubImage2D',
-        'glCopyTexImage2D', 'glCopyTexSubImage2D']))
+    // specified or changed, by any of these calls, on any target - a cube
+    // map's face alone. Without it a texture that sets a mipmap filter and
+    // loads only its top level is incomplete, and what samples it reads the
+    // placeholder: text drawn as blank boxes. A named call (`withTexture`)
+    // goes through these too, its texture standing in for the bound one.
+    for (const name of /** @type {const} */ (['glTexImage1D', 'glTexImage2D', 'glTexImage3D',
+        'glTexSubImage1D', 'glTexSubImage2D', 'glTexSubImage3D', 'glCopyTexImage2D',
+        'glCopyTexSubImage2D', 'glCopyTexSubImage3D', 'glCompressedTexImage2DARB',
+        'glCompressedTexImage3DARB', 'glCompressedTexSubImage2DARB',
+        'glCompressedTexSubImage3DARB']))
     {
         const plain = /** @type {(...args: any[]) => any} */ (context[name]);
         context[name] = /** @type {any} */ ((/** @type {any[]} */ ...args)=>{
             const result = plain(...args);
             const [target, level] = args;
-            // ponytail: TEXTURE_2D bound on the active unit only: a cube face, a
-            // DSA call naming another texture, or another target keeps the levels
-            // it was given.
-            if (target === GL.TEXTURE_2D && named === null)
+            const image = PROXIES.has(target) ? null : imageOf(target);
+            const texture = image?.texture;
+            if (image && texture?.parameters.get(GL.GENERATE_MIPMAP)
+                && level === (texture.parameters.get(GL.TEXTURE_BASE_LEVEL) ?? 0)
+                && texture.levels.has(levelKey(level, image.face)))
             {
-                const texture = kernel.side.textureBoundAt(active, GL.TEXTURE_2D)
-                    ?? units[active].defaults.get(GL.TEXTURE_2D);
-                if (texture?.parameters.get(GL.GENERATE_MIPMAP)
-                    && level === (texture.parameters.get(GL.TEXTURE_BASE_LEVEL) ?? 0)
-                    && texture.levels.has(levelKey(level)))
-                {
-                    context.glGenerateMipmap(GL.TEXTURE_2D);
-                }
+                kernel.side.generateLevels(texture, image.cube ? image.face : undefined);
             }
             return result;
         });

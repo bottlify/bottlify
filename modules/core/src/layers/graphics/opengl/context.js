@@ -527,10 +527,10 @@ export function createGlContext(options = {}){
                 : gpu.drawArrays(context, request, scenes.scene))
             : null,
         generateMipmap: gpu
-            ? texture=>{
+            ? (texture, face)=>{
                 if (attached)
                 {
-                    gpu.generateMipmap?.(context, texture);
+                    gpu.generateMipmap?.(context, texture, face);
                 }
             }
             : null,

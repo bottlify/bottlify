@@ -164,6 +164,7 @@ export const DEFAULT_ENABLES = Object.freeze([
     },
     { query: GL.TEXTURE_1D, name: 'GL_TEXTURE_1D', kind: 'bool', value: [0] },
     { query: GL.TEXTURE_2D, name: 'GL_TEXTURE_2D', kind: 'bool', value: [0] },
+    { query: GL.TEXTURE_3D, name: 'GL_TEXTURE_3D', kind: 'bool', value: [0] },
     { query: GL.TEXTURE_RECTANGLE, name: 'GL_TEXTURE_RECTANGLE', kind: 'bool', value: [0] },
     { query: GL.LIGHT1, name: 'GL_LIGHT1', kind: 'bool', value: [0] },
     { query: GL.LIGHT2, name: 'GL_LIGHT2', kind: 'bool', value: [0] },
@@ -660,6 +661,10 @@ export const DEFAULT_STATE = Object.freeze([
     {
         query: GL.MAX_TEXTURE_MAX_ANISOTROPY, name: 'GL_MAX_TEXTURE_MAX_ANISOTROPY',
         kind: 'float', value: [16],
+    },
+    {
+        query: GL.MAX_TEXTURE_LOD_BIAS, name: 'GL_MAX_TEXTURE_LOD_BIAS', kind: 'float',
+        value: [16],
     },
     {
         query: GL.MAX_CUBE_MAP_TEXTURE_SIZE, name: 'GL_MAX_CUBE_MAP_TEXTURE_SIZE', kind: 'int',

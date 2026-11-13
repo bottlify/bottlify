@@ -48,8 +48,8 @@ import { createBufferReads } from './buffer-reads.js';
 import { identity, invert, multiply, transpose } from './matrix.js';
 import { normalMatrix } from './lighting.js';
 import {
-    FACE_STRIDE, attachedLevelKey, attachmentImage, attachmentLayers, createTextureObject,
-    isTextureComplete, levelKey, swizzleCode, unionRect,
+    FACE_STRIDE, attachedLevelKey, attachmentImage, attachmentLayers, baseLevelOf,
+    createTextureObject, isTextureComplete, levelKey, swizzleCode, unionRect,
 } from './objects.js';
 import { dxt1ToAstc, dxt1Transcodes } from '../webgpu/internal/astc.js';
 import { depthWriteWords } from '../webgpu/internal/depth.js';
@@ -345,6 +345,33 @@ export function describeSnapshot(shot, rect){
         }
     }
     return `${points.map(([x, y])=>at(x, y)).join(',')} distinct=${seen.size}`;
+}
+
+/**
+ * The lod range a sampler clamps to (3.8.8): GL_TEXTURE_MIN_LOD and
+ * GL_TEXTURE_MAX_LOD, and no level past GL_TEXTURE_MAX_LEVEL, each counted
+ * from the base level, where the view a draw samples starts. A filter
+ * without a mipmap reads the base level alone; WebGPU clamps no lod below
+ * zero, so a negative GL_TEXTURE_MIN_LOD is zero.
+ *
+ * @param {Map<number, number>} parameters  a texture's, or a sampler object's (3.3),
+ *     which has no levels of its own
+ * @param {boolean} mipmapped
+ * @returns {{ lodMinClamp?: number, lodMaxClamp: number }}
+ */
+function lodRange(parameters, mipmapped){
+    if (!mipmapped)
+    {
+        return { lodMaxClamp: 0 };
+    }
+    const least = Math.max(0, parameters.get(GL.TEXTURE_MIN_LOD) ?? -1000);
+    const levels = parameters.has(GL.TEXTURE_MAX_LEVEL)
+        ? (parameters.get(GL.TEXTURE_MAX_LEVEL) ?? 1000)
+            - (parameters.get(GL.TEXTURE_BASE_LEVEL) ?? 0)
+        : 32;
+    const most = Math.max(least, Math.min(32, parameters.get(GL.TEXTURE_MAX_LOD) ?? 1000,
+        levels));
+    return least > 0 ? { lodMinClamp: least, lodMaxClamp: most } : { lodMaxClamp: most };
 }
 
 /**
@@ -1011,6 +1038,8 @@ export function createGpuRenderer(services){
      *           filtered (a 32-bit float without float32-filterable, a depth), or not at
      *           all (an integer); a texture of RGBA bytes is 'f'
      * @property {any} [sampleView]  the view a sampler reads, where it is not the surface's
+     * @property {Map<number, any>} [baseViews]  the views a draw samples through from a
+     *           GL_TEXTURE_BASE_LEVEL above zero, by that level
      */
     /** @type {WeakMap<import('./objects.js').TextureObject, TextureRecord>} */
     const textures = new WeakMap();
@@ -1163,8 +1192,7 @@ export function createGpuRenderer(services){
             minFilter: filtered ? min.filter : 'nearest',
             mipmapFilter: anisotropic ? 'linear' : filtered ? min.mip ?? 'nearest' : 'nearest',
             ...anisotropic ? { maxAnisotropy: anisotropy } : {},
-            // A filter without a mipmap reads the base level only.
-            lodMaxClamp: min.mip === null ? 0 : 32,
+            ...lodRange(parameters, min.mip !== null),
             addressModeU: wrap(GL.TEXTURE_WRAP_S),
             addressModeV: wrap(GL.TEXTURE_WRAP_T),
             addressModeW: wrap(GL.TEXTURE_WRAP_R),
@@ -1467,17 +1495,17 @@ export function createGpuRenderer(services){
             return textureFor(incompleteTexture(cube), recording);
         }
         const chain = Math.floor(Math.log2(Math.max(1, base.width, height, volume))) + 1;
+        /** @param {import('./objects.js').TextureLevel | undefined} level @param {number} at */
+        const fits = (level, at)=>!!level && level.sized === sized
+            && level.width === Math.max(1, base.width >> at)
+            && level.height === (oneArray ? base.height : Math.max(1, base.height >> at))
+            && (level.depth ?? 1) === (solid ? Math.max(1, baseDepth >> at) : baseDepth);
+        // A level below GL_TEXTURE_BASE_LEVEL is in the chain where it fits.
+        const first = texture.parameters.get(GL.TEXTURE_BASE_LEVEL) ?? 0;
         let levels = 0;
-        while (levels < chain)
+        while (levels < chain && (levels < first || fits(texture.levels.get(levelKey(levels)),
+            levels)))
         {
-            const level = texture.levels.get(levelKey(levels));
-            if (!level || level.sized !== sized
-                || level.width !== Math.max(1, base.width >> levels)
-                || level.height !== (oneArray ? base.height : Math.max(1, base.height >> levels))
-                || (level.depth ?? 1) !== (solid ? Math.max(1, baseDepth >> levels) : baseDepth))
-            {
-                break;
-            }
             levels++;
         }
         const format = storage.format;
@@ -1555,7 +1583,7 @@ export function createGpuRenderer(services){
             const level = key % FACE_STRIDE;
             const face = (key - level) / FACE_STRIDE;
             const image = texture.levels.get(key);
-            if (!image || level >= levels || face >= (cube ? 6 : 1))
+            if (!image || level >= levels || face >= (cube ? 6 : 1) || !fits(image, level))
             {
                 continue;
             }
@@ -1719,6 +1747,68 @@ export function createGpuRenderer(services){
     };
 
     /**
+     * The view a draw samples a texture through: from GL_TEXTURE_BASE_LEVEL
+     * down (3.8.8), so magnification reads the base level and a lod counts
+     * from it, as WebGPU's counts from a view's first level.
+     *
+     * @param {import('./objects.js').TextureObject} texture @param {TextureRecord} copy
+     * @returns {any}
+     */
+    const sampledView = (texture, copy)=>{
+        const first = texture.view ? 0
+            : Math.min(texture.parameters.get(GL.TEXTURE_BASE_LEVEL) ?? 0, copy.levels - 1);
+        if (first <= 0)
+        {
+            return copy.sampleView ?? copy.gpu.view;
+        }
+        copy.baseViews ??= new Map();
+        let view = copy.baseViews.get(first);
+        if (!view)
+        {
+            const cubeArray = texture.target === TEX.TEXTURE_CUBE_MAP_ARRAY;
+            view = copy.gpu.texture.createView({
+                label: `gl-texture:${texture.name}:base${first}`,
+                dimension: copy.shape?.endsWith('|3d') ? '3d' : cubeArray ? 'cube-array'
+                    : copy.cube ? 'cube' : copy.shape?.endsWith('2d-array') ? '2d-array' : '2d',
+                baseMipLevel: first, mipLevelCount: copy.levels - first,
+                aspect: copy.storage?.depth ? 'depth-only' : 'all',
+            });
+            copy.baseViews.set(first, view);
+        }
+        return view;
+    };
+
+    /**
+     * The level a texture's GPU copy is made from as its level 0: its own,
+     * or, where it has none or one the base level is not a mipmap of (a
+     * program that loads levels from GL_TEXTURE_BASE_LEVEL down only), a
+     * level of that shape the base level is a mipmap of, which nothing
+     * samples and nothing is uploaded into.
+     *
+     * @param {import('./objects.js').TextureObject} texture
+     * @returns {import('./objects.js').TextureLevel}
+     */
+    const surfaceTopOf = texture=>{
+        const zero = texture.levels.get(levelKey(0));
+        const first = texture.parameters.get(GL.TEXTURE_BASE_LEVEL) ?? 0;
+        const base = first > 0 ? texture.levels.get(levelKey(first)) : undefined;
+        const rows = texture.target === TEX.TEXTURE_1D_ARRAY;
+        const solid = texture.target === GL.TEXTURE_3D;
+        if (!base || (zero && zero.sized === base.sized
+            && Math.max(1, zero.width >> first) === base.width
+            && (rows ? zero.height : Math.max(1, zero.height >> first)) === base.height
+            && (solid ? Math.max(1, (zero.depth ?? 1) >> first) : zero.depth ?? 1)
+                === (base.depth ?? 1)))
+        {
+            return /** @type {import('./objects.js').TextureLevel} */ (zero);
+        }
+        return { width: base.width << first, height: rows ? base.height : base.height << first,
+            depth: solid ? (base.depth ?? 1) << first : base.depth, sized: base.sized,
+            internalFormat: base.internalFormat, border: 0, baseFormat: base.baseFormat,
+            texels: null };
+    };
+
+    /**
      * The GPU copy of a texture, uploaded or brought up to date for a command
      * of `recording`.
      *
@@ -1732,8 +1822,7 @@ export function createGpuRenderer(services){
             return viewRecordFor(texture, recording);
         }
         const cube = texture.target === GL.TEXTURE_CUBE_MAP;
-        const base = /** @type {import('./objects.js').TextureLevel} */ (
-            texture.levels.get(levelKey(0)));
+        const base = surfaceTopOf(texture);
         if (base.sized)
         {
             return sizedTextureFor(texture, recording, base);
@@ -1742,17 +1831,17 @@ export function createGpuRenderer(services){
         // each level half the one above, down to 1x1 and no further. A level
         // past that, or one of another size, is not in the chain -- three 1x1
         // levels on a 1x1 texture are one level -- and a surface given it is
-        // refused, and with it every frame that samples the texture.
+        // refused, and with it every frame that samples the texture. A level
+        // below GL_TEXTURE_BASE_LEVEL is in it where it fits, and else left out.
         const chain = Math.floor(Math.log2(Math.max(1, base.width, base.height))) + 1;
+        /** @param {import('./objects.js').TextureLevel | undefined} level @param {number} at */
+        const fits = (level, at)=>!!level && level.width === Math.max(1, base.width >> at)
+            && level.height === Math.max(1, base.height >> at);
+        const first = texture.parameters.get(GL.TEXTURE_BASE_LEVEL) ?? 0;
         let levels = 0;
-        while (levels < chain)
+        while (levels < chain && (levels < first || fits(texture.levels.get(levelKey(levels)),
+            levels)))
         {
-            const level = texture.levels.get(levelKey(levels));
-            if (!level || level.width !== Math.max(1, base.width >> levels)
-                || level.height !== Math.max(1, base.height >> levels))
-            {
-                break;
-            }
             levels++;
         }
         const bcFormat = bcFormatOf(texture, levels, cube);
@@ -1847,7 +1936,7 @@ export function createGpuRenderer(services){
             const level = key % FACE_STRIDE;
             const face = (key - level) / FACE_STRIDE;
             const image = texture.levels.get(key);
-            if (!image || level >= levels || face >= (cube ? 6 : 1))
+            if (!image || level >= levels || face >= (cube ? 6 : 1) || !fits(image, level))
             {
                 continue;
             }
@@ -3060,7 +3149,7 @@ export function createGpuRenderer(services){
                     + ' black instead');
                 texture = incompleteTexture(entry.cube);
             }
-            const sized = texture.levels.get(levelKey(0))?.sized;
+            const sized = baseLevelOf(texture)?.sized;
             // What the texture holds against what the shader declares: a
             // float sampler reads a float or depth texture, an isampler an
             // int one, a usampler a uint one, a shadow sampler a depth one.
@@ -3123,7 +3212,7 @@ export function createGpuRenderer(services){
                 plan.fragmentBlock) : -1;
             return {
                 binding: entry.binding,
-                view: copy.sampleView ?? copy.gpu.view,
+                view: sampledView(texture, copy),
                 // A comparison filters a depth texture as any other is.
                 sampler: samplerFor(scene.samplers?.[unit] ?? texture,
                     kind === 'f' || compared || loaded, compared),
@@ -3215,10 +3304,10 @@ export function createGpuRenderer(services){
                 { binding: entry.binding + 1, visibility: COMPUTE_STAGE, sampler: {
                     type: compared ? 'comparison' : unfilterable ? 'non-filtering'
                         : 'filtering' } });
-                entries.push({ binding: entry.binding, resource: copy.sampleView
-                    ?? copy.gpu.view },
-                { binding: entry.binding + 1, resource: samplerFor(texture,
-                    kind === 'f' || compared || loaded, compared) });
+                entries.push({ binding: entry.binding, resource: sampledView(texture, copy) }, {
+                    binding: entry.binding + 1,
+                    resource: samplerFor(texture, kind === 'f' || compared || loaded, compared),
+                });
             }
             for (const index of stage.blocks)
             {
@@ -3568,7 +3657,10 @@ export function createGpuRenderer(services){
             const bound = scene.boundTextures[entry.unit];
             const texture = entry.cube ? bound?.cube : entry.rectangle ? bound?.rectangle
                 : bound?.twoD;
-            return texture ?? incompleteTexture(entry.cube);
+            // An incomplete texture samples (0, 0, 0, 1) in a fragment
+            // program, as in a GLSL one (ARB_fragment_program issue 23).
+            return texture && isTextureComplete(texture) ? texture
+                : incompleteTexture(entry.cube);
         }
         const position = samplerIndex(entry.binding);
         return scene.units[position]?.texture ?? incompleteTexture(entry.cube);
@@ -4630,19 +4722,26 @@ export function createGpuRenderer(services){
     };
 
     /**
-     * glGenerateMipmap on the device: each level drawn from the one above
-     * it, filtered, once the texture's copy holds them all.
+     * glGenerateMipmap on the device: each level below the base level drawn
+     * from the one above it, filtered, once the texture's copy holds them
+     * all - down to GL_TEXTURE_MAX_LEVEL, of one cube face where `only`
+     * names it.
      *
      * @param {object} context @param {import('./objects.js').TextureObject} texture
+     * @param {number} [only]
      */
-    const generateMipmap = (context, texture)=>{
+    const generateMipmap = (context, texture, only)=>{
         if (!drawables.has(context))
         {
             return;
         }
         const recording = recordingOf(context);
         const copy = textureFor(texture, recording);
-        if ((copy.kind ?? 'f') !== 'f' || copy.shape?.endsWith('3d'))
+        // The draw renders into the texture's own format: one of blocks, or
+        // a sized one the device does not render, takes none.
+        if ((copy.kind ?? 'f') !== 'f' || copy.shape?.endsWith('3d')
+            || copy.format.startsWith('bc') || copy.format.startsWith('astc')
+            || (copy.storage && !copy.storage.renderable))
         {
             lose(`glGenerateMipmap of a texture of ${copy.format}: its levels are made by a`
                 + ' filtered draw of one 2D level, which this texture does not take');
@@ -4654,9 +4753,12 @@ export function createGpuRenderer(services){
             ? texture.levels.get(levelKey(0))?.depth ?? 1 : 1;
         const pipeline = pipelineFor(blitKey(copy.format), generateBlit(),
             showDescriptor(copy.format), SINGLE_TEXTURE_PLAN);
-        for (let face = 0; face < faces; face++)
+        const first = texture.parameters.get(GL.TEXTURE_BASE_LEVEL) ?? 0;
+        const end = Math.min(copy.levels,
+            (texture.parameters.get(GL.TEXTURE_MAX_LEVEL) ?? 1000) + 1);
+        for (let face = only ?? 0; face < (only === undefined ? faces : only + 1); face++)
         {
-            for (let level = 1; level < copy.levels; level++)
+            for (let level = first + 1; level < end; level++)
             {
                 const from = levelView(texture, level - 1, face, recording);
                 const to = levelView(texture, level, face, recording);

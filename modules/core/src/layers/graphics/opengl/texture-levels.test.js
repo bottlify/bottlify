@@ -191,8 +191,9 @@ test('a legacy format given a 3D target keeps its own components, as a 2D level 
     context.glBindTexture(GL.TEXTURE_3D, name);
     context.glTexImage3D(GL.TEXTURE_3D, 0, GL.LUMINANCE, 1, 1, 2, 0, GL.LUMINANCE_ALPHA,
         GL.UNSIGNED_BYTE, Uint8Array.from([10, 20, 30, 40]));
+    // Read back by table 6.1 of 2.1: luminance is red, green and blue zero.
     assert.deepEqual(Array.from(read(context, GL.TEXTURE_3D, GL.RGBA, GL.UNSIGNED_BYTE)),
-        [10, 10, 10, 255, 30, 30, 30, 255]);
+        [10, 0, 0, 255, 30, 0, 0, 255]);
     assert.equal(level(context, GL.TEXTURE_3D, GL.TEXTURE_INTERNAL_FORMAT), GL.LUMINANCE);
 });
 

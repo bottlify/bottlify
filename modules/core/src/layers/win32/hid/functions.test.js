@@ -39,3 +39,19 @@ test('with no HID device, a call on a device fails as one on a handle that is no
     assert.equal(fns.HidP_GetCaps.handler(), 0xc0110001, 'HIDP_STATUS_INVALID_PREPARSED_DATA');
     assert.equal(fns.HidD_GetProductString.argBytes, 12);
 });
+
+test('every name hid.dll exports that a HID library binds at once resolves, each failing as on a'
+    + ' handle that is no device', ()=>{
+    const { errors, fns } = setup();
+    // SDL's HIDAPI binds these together and takes hid.dll as missing when one does not resolve.
+    const names = /** @type {const} */ ([['HidD_GetIndexedString', 16],
+        ['HidD_GetPhysicalDescriptor', 12], ['HidD_GetInputReport', 12],
+        ['HidD_SetOutputReport', 12], ['HidD_GetNumInputBuffers', 8],
+        ['HidD_SetNumInputBuffers', 8], ['HidD_FlushQueue', 4]]);
+    for (const [name, argBytes] of names)
+    {
+        assert.equal(fns[name]?.argBytes, argBytes, name);
+        assert.equal(fns[name].handler(), 0, name);
+    }
+    assert.deepEqual(errors, names.map(()=>6), 'ERROR_INVALID_HANDLE each time');
+});

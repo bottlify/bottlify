@@ -369,6 +369,8 @@ export function baseFormatOf(internalFormat){
         case GL.LUMINANCE12:
         case GL.LUMINANCE16:
         case GL.COMPRESSED_LUMINANCE:
+        case GL.SLUMINANCE:
+        case GL.SLUMINANCE8:
             return GL.LUMINANCE;
         case 2:
         case GL.LUMINANCE_ALPHA:
@@ -379,6 +381,8 @@ export function baseFormatOf(internalFormat){
         case GL.LUMINANCE12_ALPHA12:
         case GL.LUMINANCE16_ALPHA16:
         case GL.COMPRESSED_LUMINANCE_ALPHA:
+        case GL.SLUMINANCE_ALPHA:
+        case GL.SLUMINANCE8_ALPHA8:
             return GL.LUMINANCE_ALPHA;
         case 3:
         case GL.RGB:
@@ -547,9 +551,8 @@ function wrapTexel(i, size, wrap){
             return m < size ? m : period - 1 - m;
         }
         default:
-            // GL_CLAMP would read the border colour half a texel out; the
-            // edge is what a program that asked for it actually sees on the
-            // hardware of the era, and it is what GL_CLAMP_TO_EDGE says.
+            // GL_CLAMP is sampled as GL_CLAMP_TO_EDGE, as on the device,
+            // which has no border to blend in (`roadmap/decisions.md` A244).
             return i < 0 ? 0 : i >= size ? size - 1 : i;
     }
 }
@@ -673,6 +676,8 @@ export function cubeFaceOf(x, y, z){
  * @typedef {Object} TextureEnvironment
  * @property {number} mode        GL_TEXTURE_ENV_MODE
  * @property {number[]} colour    GL_TEXTURE_ENV_COLOR, 0..1
+ * @property {number} lodBias     GL_TEXTURE_FILTER_CONTROL's GL_TEXTURE_LOD_BIAS (1.4)
+ * @property {number} coordReplace  GL_POINT_SPRITE's GL_COORD_REPLACE (2.0)
  * @property {CombineState} combine
  */
 
@@ -681,6 +686,10 @@ export function createTextureEnvironment(){
     return {
         mode: GL.MODULATE,
         colour: [0, 0, 0, 0],
+        // GL_TEXTURE_FILTER_CONTROL's GL_TEXTURE_LOD_BIAS (1.4), the unit's.
+        lodBias: 0,
+        // GL_POINT_SPRITE's GL_COORD_REPLACE (2.0).
+        coordReplace: GL.FALSE,
         combine: {
             rgb: GL.MODULATE,
             alpha: GL.MODULATE,

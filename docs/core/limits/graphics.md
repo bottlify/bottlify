@@ -58,6 +58,14 @@
   `GL_FRAMEBUFFER_UNSUPPORTED`; `glBlitFramebuffer` copies colour only. Some limits are below
   4.6's minimums: 8192 texels a side (2048 for 3D, 256 layers), 16 texture units, 4 draw
   buffers, 32 varying components, 4 image uniforms a stage, WebGPU's compute limits.
+- OpenGL texturing departs from 2.1 where WebGPU or the fixed pipeline here has no way to follow,
+  each said as a divergence: `GL_TEXTURE_LOD_BIAS` (a texture's or a unit's) and
+  `GL_DEPTH_TEXTURE_MODE` are kept and not applied; `GL_CLAMP` and `GL_CLAMP_TO_BORDER` clamp to the
+  edge (decisions A244, A186); a combiner source naming another unit (`GL_TEXTUREn`) reads the
+  previous unit's result; `GL_COORD_REPLACE` is not done; a 3D texture enabled on the fixed pipeline
+  is not sampled (a loss); an image's border texels are sampled as part of the image; the sRGB
+  luminance formats are sampled without their decode; the mipmaps generated of a compressed sized
+  format are not made on the device.
 - OpenGL SPIR-V shaders (`glShaderBinary` with `GL_SHADER_BINARY_FORMAT_SPIR_V`,
   `glSpecializeShader`) are written back as GLSL and compiled as a source shader is, so they take
   what GLSL takes here and no more. Refused at specialization, with the reason in the shader's log:

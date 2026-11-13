@@ -2133,3 +2133,11 @@ hears as an exit. What a process's start needs (its memory up to the heap's firs
 first executor's engine pages) is taken before it is built, so siblings growing at once cannot
 leave a start half done. The engine's own memory (tables above the RAM, translated code, the
 graphics worker's buffers) is not counted. *2026-11-13.*
+
+**A244. GL_CLAMP clamps to the edge, as GL_CLAMP_TO_EDGE does,** said when a texture or a
+sampler is given it: GL_CLAMP clamps a coordinate to [0, 1], so a linear filter at the edge takes
+half its weight from the border (the border colour, for an image without border texels). WebGPU
+has no border to address, and the device and the processor both sample GL_CLAMP as
+GL_CLAMP_TO_EDGE, so the two paths agree; the difference from GL is the outer half texel of a
+linearly filtered texture, which keeps the edge texel here where GL fades it toward the border
+colour. Emulating it is the coordinate test in every shader that A186 would need. *2026-11-13.*

@@ -7436,7 +7436,8 @@ async function buildApp(options){
         (highest, library)=>Math.max(highest, library.base + library.size), systemModulesEnd);
 
     const image = loader.load(options.executable, { resolveImport, missing: missingImport,
-        bits: processBits, ...long ? { base: programLoaded.imageBase } : {} });
+        bits: processBits,
+        ...long || programLoaded.moved ? { base: programLoaded.imageBase } : {} });
 
     // An executable exports too: a library a program ships imports from the
     // program that loads it, by name or by ordinal, and is bound to those
@@ -10493,11 +10494,22 @@ const LONG_IMAGE_BASE = 0x00400000;
  * @param {Uint8Array} executable
  * @param {{ hostMemory?: number }} [machine]  the host's memory in bytes, which a 16 GiB
  *     window needs 32 GB of
+ * A 32-bit program linked for ASLR with its base in the heap's span (mscorsvw.exe at
+ * 0x10000000) is placed where a program usually is, 0x00400000, as Windows places such a one
+ * anywhere: at its own base it made the memory of every process of it as large as its base,
+ * 512 MiB for a few hundred kilobytes, the memory being as large as the highest address it
+ * holds. One not linked for ASLR stays at its base, as Windows keeps it.
+ *
  * @returns {import('./layers/loader/internal/pe.js').PeImage
- *     & { wide?: { window: number, codeBase: number } }}
+ *     & { wide?: { window: number, codeBase: number }, moved?: boolean }}
  */
 function programImage(executable, machine = {}){
     const image = parsePe(executable, { wide: true });
+    if (image.bits === 32 && image.relocatable && image.dynamicBase
+        && image.imageBase >= HEAP_FLOOR && 0x00400000 + image.sizeOfImage <= HEAP_FLOOR)
+    {
+        return { ...image, imageBase: 0x00400000, moved: true };
+    }
     if (image.bits !== 64 || image.imageBase + image.sizeOfImage <= 0x80000000)
     {
         return image;

@@ -215,6 +215,7 @@ export const DEFAULT_TEXTURE_PARAMETERS = Object.freeze([
     [GL.TEXTURE_MAX_LEVEL, 1000],
     [GL.TEXTURE_MIN_LOD, -1000],
     [GL.TEXTURE_MAX_LOD, 1000],
+    [GL.TEXTURE_LOD_BIAS, 0],
     [GL.TEXTURE_PRIORITY, 1],
     [GL.GENERATE_MIPMAP, 0],
     // OpenGL 1.4's depth textures (ARB_shadow, ARB_depth_texture): no
@@ -390,56 +391,90 @@ export function createBufferObject(name){
 }
 
 /**
- * Whether a texture can be sampled at all. Only the mipmap chain is checked
- * here: a level whose dimensions do not halve, or whose format differs, is the
- * same kind of defect and the same answer.
+ * Whether a texture can be sampled at all (2.1 section 3.8.10): its base
+ * level, GL_TEXTURE_BASE_LEVEL, defined; a cube's six base images square, of
+ * one size, internal format and border; and, where the minification filter
+ * wants mipmaps, every level from the base to the last the chain or
+ * GL_TEXTURE_MAX_LEVEL allows, each half the one above (a border not
+ * counted) in the base's format and border. Levels below the base are not
+ * looked at.
  *
  * @param {TextureObject} texture
  * @returns {boolean}
  */
 export function isTextureComplete(texture){
     const faces = texture.target === GL.TEXTURE_CUBE_MAP ? 6 : 1;
-    const base = texture.levels.get(levelKey(0));
+    const first = texture.parameters.get(GL.TEXTURE_BASE_LEVEL) ?? 0;
+    const base = texture.levels.get(levelKey(first));
     if (!base || base.width === 0 || base.height === 0)
     {
         return false;
     }
+    const [width, height, depth] = interiorOf(texture.target, base);
+    const mipmapped = MIPMAP_FILTERS.has(texture.parameters.get(GL.TEXTURE_MIN_FILTER) ?? 0);
+    const last = texture.parameters.get(GL.TEXTURE_MAX_LEVEL) ?? 1000;
+    if (mipmapped && first > last)
+    {
+        return false;
+    }
+    // A 3D texture's depth halves with its levels; an array's layers do not.
+    const solid = texture.target === GL.TEXTURE_3D;
+    const layeredRows = texture.target === 0x8c18;
+    /** @param {TextureLevel | undefined} image @param {number[]} size */
+    const matches = (image, size)=>!!image && image.internalFormat === base.internalFormat
+        && (image.border ?? 0) === (base.border ?? 0)
+        && interiorOf(texture.target, image).every((extent, k)=>extent === size[k]);
     for (let face = 0; face < faces; face++)
     {
-        const first = texture.levels.get(levelKey(0, face));
-        // A cube map's faces have to be square and all the same size, or
-        // there is no cube to sample.
-        if (!first || first.width !== base.width || first.height !== base.height
-            || (faces > 1 && first.width !== first.height))
+        if (!matches(texture.levels.get(levelKey(first, face)), [width, height, depth])
+            || (faces > 1 && width !== height))
         {
             return false;
         }
-        if (!MIPMAP_FILTERS.has(texture.parameters.get(GL.TEXTURE_MIN_FILTER) ?? 0))
+        if (!mipmapped)
         {
             continue;
         }
-        let width = base.width;
-        let height = base.height;
-        let level = 0;
-        // The levels sampled end at GL_TEXTURE_MAX_LEVEL (1.2, section 3.8.10):
-        // a chain a program stops short of 1x1 and says so is complete.
-        // ponytail: the base level is taken as level 0; a texture that moves
-        // GL_TEXTURE_BASE_LEVEL is judged from level 0 still.
-        const last = texture.parameters.get(GL.TEXTURE_MAX_LEVEL) ?? 1000;
-        while ((width > 1 || height > 1) && level < last)
+        // The chain ends at 1 on every axis that halves, or at MAX_LEVEL.
+        const levels = Math.floor(Math.log2(Math.max(width, layeredRows ? 1 : height,
+            solid ? depth : 1)));
+        for (let step = 1; step <= Math.min(levels, last - first); step++)
         {
-            level++;
-            width = Math.max(1, width >> 1);
-            height = Math.max(1, height >> 1);
-            const image = texture.levels.get(levelKey(level, face));
-            if (!image || image.width !== width || image.height !== height
-                || image.internalFormat !== base.internalFormat)
+            const size = [Math.max(1, width >> step),
+                layeredRows ? height : Math.max(1, height >> step),
+                solid ? Math.max(1, depth >> step) : depth];
+            if (!matches(texture.levels.get(levelKey(first + step, face)), size))
             {
                 return false;
             }
         }
     }
     return true;
+}
+
+/**
+ * The level a texture is sampled from first, GL_TEXTURE_BASE_LEVEL (3.8.8).
+ *
+ * @param {TextureObject} texture @param {number} [face]
+ * @returns {TextureLevel | undefined}
+ */
+export function baseLevelOf(texture, face = 0){
+    return texture.levels.get(levelKey(texture.parameters.get(GL.TEXTURE_BASE_LEVEL) ?? 0, face));
+}
+
+/**
+ * A level's extent without its border (1.x, section 3.8.1): the border is
+ * on both sides of each dimension the target has, so a 1D image's height
+ * and an array's layers carry none.
+ *
+ * @param {number} target @param {TextureLevel} image
+ * @returns {number[]} width, height and depth
+ */
+export function interiorOf(target, image){
+    const border = image.border ?? 0;
+    const flat = target === GL.TEXTURE_1D || target === 0x8c18;
+    return [image.width - 2 * border, image.height - (flat ? 0 : 2 * border),
+        (image.depth ?? 1) - (target === GL.TEXTURE_3D ? 2 * border : 0)];
 }
 
 /**

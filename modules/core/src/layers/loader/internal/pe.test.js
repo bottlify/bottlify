@@ -144,6 +144,45 @@ test('an image without relocations refuses to move', ()=>{
     assert.throws(()=>buildImage(file, { resolveImport: ()=>0, base: 0x800000 }), /carries no relocations/);
 });
 
+/**
+ * The fixture made a library of resources alone: a DLL with no entry point, no section that
+ * executes and none of the directories that hold addresses - or with its entry point kept.
+ *
+ * @param {{ entryPoint?: boolean }} [keep]
+ */
+function resourceLibrary({ entryPoint = false } = {}){
+    const bytes = new Uint8Array(file);
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const pe = view.getUint32(0x3c, true);
+    view.setUint16(pe + 22, view.getUint16(pe + 22, true) | 0x2000, true);
+    const optional = pe + 24;
+    if (!entryPoint)
+    {
+        view.setUint32(optional + 16, 0, true);
+    }
+    for (const index of [1, 9, 10, 12, 13])
+    {
+        view.setUint32(optional + 96 + index * 8, 0, true);
+        view.setUint32(optional + 96 + index * 8 + 4, 0, true);
+    }
+    const sections = optional + view.getUint16(pe + 20, true);
+    for (let at = 0; at < view.getUint16(pe + 6, true); at++)
+    {
+        const flags = sections + at * 40 + 36;
+        view.setUint32(flags, view.getUint32(flags, true) & ~(0x20000000 | 0x20), true);
+    }
+    return bytes;
+}
+
+test('a library that holds no address moves though it carries no relocations, and one with'
+    + ' code does not', ()=>{
+    assert.equal(parsePe(resourceLibrary()).relocatable, true, 'nothing in it to fix up');
+    const moved = mapImage(resourceLibrary(), 0x02100000);
+    assert.equal(moved.base, 0x02100000);
+    assert.equal(parsePe(resourceLibrary({ entryPoint: true })).relocatable, false,
+        'an entry point is code, and code holds addresses');
+});
+
 test('building the image binds every import into the IAT', ()=>{
     /** @type {string[]} */
     const asked = [];

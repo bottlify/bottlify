@@ -18,7 +18,7 @@
 import { GL } from './constants.js';
 import { TEX } from './formats.js';
 import { colourMaterialTargets, lightVertex, normalMatrix, normalise } from './lighting.js';
-import { levelKey, swizzleCode } from './objects.js';
+import { baseLevelOf, swizzleCode } from './objects.js';
 import { compare, drawPrimitive } from './pipeline.js';
 import { TESS } from './context-tessellation.js';
 
@@ -213,7 +213,8 @@ export function createSceneBuilder(kernel){
             const images = [];
             for (let face = 0; face < (cube ? 6 : 1); face++)
             {
-                const level = texture.levels.get(levelKey(0, face));
+                const level = /** @type {import('./objects.js').TextureLevel} */ (
+                    baseLevelOf(texture, face));
                 images.push({
                     width: level.width,
                     height: level.height,
@@ -232,7 +233,8 @@ export function createSceneBuilder(kernel){
                 images,
                 cube,
                 rectangle,
-                baseFormat: texture.levels.get(levelKey(0)).baseFormat,
+                baseFormat: /** @type {import('./objects.js').TextureLevel} */ (
+                    baseLevelOf(texture)).baseFormat,
                 parameters: {
                     magFilter: texture.parameters.get(GL.TEXTURE_MAG_FILTER),
                     minFilter: texture.parameters.get(GL.TEXTURE_MIN_FILTER),
