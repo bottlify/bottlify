@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createMemoryStore } from './memory-store.js';
+import { PIECE_SIZE, createMemoryStore } from './memory-store.js';
 import { createOverlay } from './tree.js';
 
 /** @param {string} text */
@@ -422,4 +422,25 @@ test('verify names every place the tree and its stores disagree', ()=>{
         'the writable layer holds "Stray.DAT", which the tree does not hold there',
     ]);
     assert.equal(tree.diagnostics().disagreements, 2);
+});
+
+test('a source file is copied up a piece at a time, never read whole', ()=>{
+    const whole = new Uint8Array(2 * PIECE_SIZE + 77).map((_, at)=>at % 253);
+    const source = createMemoryStore({ 'Data': null, 'Data\\Archive.pak': whole });
+    /** @type {number[]} */
+    const asked = [];
+    const read = source.read;
+    source.read = (path, offset, length)=>{
+        asked.push(length);
+        return read(path, offset, length);
+    };
+    const writable = createMemoryStore();
+    const tree = createOverlay({ source, writable });
+
+    tree.write(['Data', 'Archive.pak'], PIECE_SIZE + 5, Uint8Array.of(255));
+
+    assert.ok(asked.every(length=>length <= PIECE_SIZE), `asked for ${asked.join(', ')}`);
+    const expected = whole.slice();
+    expected[PIECE_SIZE + 5] = 255;
+    assert.deepEqual(writable.read('Data\\Archive.pak', 0, whole.length), expected);
 });

@@ -56,14 +56,14 @@ more (`src/memory-zones.js`):
 | --- | --- | --- |
 | guest | 1 GiB | What the program took of its RAM: its images, its threads' stacks and its heap up to the highest address the heap ever handed out (a page touched once is the tab's for good: a browser cannot give it back, and zeroing it frees nothing). The RAM itself (`memorySize`) is an address space: a page the program never touched costs the tab nothing. |
 | translation | 256 MiB | The translator's tables past the RAM, every executor's, and its modules with their compiled code. The cpu layer gives cork what the tables leave, split among the executors' runtimes: all of it to one executor, else three quarters to the process's own executor and the rest shared by the others. Past its part a runtime lets the modules gone longest without running go, and brings one back from the translation store when it is reached again. |
-| heaps | 256 MiB | The engine's own memory: the bundle's blocks held where no storage takes them (64 MiB at most, the least recently read let go first), its decoded blocks (16 MiB at most), mirrors of guest memory behind a played device, kept texels, sound rings, the translation store's index. |
+| heaps | 256 MiB | The engine's own memory: the bundle's blocks held where no storage takes them (64 MiB at most, the least recently read let go first), its decoded blocks (16 MiB at most), what the program wrote (64 MiB at most where the run has a page file, the least recently used written out first; all of it where it has none: see `pageFile` in [api.md](api.md)), mirrors of guest memory behind a played device, kept texels, sound rings, the translation store's index. |
 
 Each layer says what it holds in its diagnostics as `bytesHeld`, by zone and pool; a pool nothing
 measures says `not measured`. The last table of a run's diagnostics, `zones`, sums them: each zone's
 ceiling, bytes, pools and unmeasured pools, the layers that report nothing (`unreported`), and the
 device's buffers and textures apart (`outside.device`), held by the GPU's process rather than the
-tab unless the device is one in JavaScript. Its status is `over` when a zone or the total is past
-its ceiling.
+tab unless the device is one in JavaScript, and the page file's bytes on the disk
+(`outside.disk`). Its status is `over` when a zone or the total is past its ceiling.
 
 Storage has a budget too. When a run mounts a bundle on the origin's file system, the origin is
 kept to 80% of the quota the browser gives it (`navigator.storage.estimate()`, which each browser

@@ -49,7 +49,9 @@ The order matters in three places.
   receives the graphics thread in its device options (`device.worker`), so the `graphics` layer knows
   while it is being built where Direct3D and OpenGL will draw.
 - **The session is applied before the program's first instruction,** so the program sees its saves
-  and registry from the very start.
+  and registry from the very start. A session in the origin's file system is read and laid on the
+  volume a file at a time, and the volume's writable layer stands on the run's page file
+  ([storage.md](storage.md)) where the engine's thread has one.
 - **The program starts only on `run`,** once the page has attached the log, input and sound.
   Libraries' `DllMain` and TLS callbacks are the program's code too: a stub at the start of the main
   thread calls them, not the host. Every thread made later begins in a stub of its own that calls

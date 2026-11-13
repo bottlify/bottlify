@@ -130,3 +130,93 @@ test('a session arriving from outside is there before the first instruction',
         const { printed } = await runOnce(seeded);
         assert.equal(printed, 'RESTORED');
     });
+
+/**
+ * The origin's file system as a worker sees it, in memory: a folder of files,
+ * each with a synchronous access handle. `files` is every file made, by name.
+ */
+function originDirectory(){
+    /** @type {Map<string, { bytes: Uint8Array, open: boolean }>} */
+    const files = new Map();
+    const folder = {
+        /** @param {string} name */
+        getFileHandle: async name=>{
+            const file = files.get(name) ?? { bytes: new Uint8Array(0), open: false };
+            files.set(name, file);
+            return {
+                createSyncAccessHandle: async()=>{
+                    file.open = true;
+                    return {
+                        getSize: ()=>file.bytes.length,
+                        /** @param {Uint8Array} into @param {{ at: number }} where */
+                        read: (into, { at })=>{
+                            into.set(file.bytes.subarray(at, at + into.length));
+                            return into.length;
+                        },
+                        /** @param {Uint8Array} from @param {{ at: number }} where */
+                        write: (from, { at })=>{
+                            if (at + from.length > file.bytes.length)
+                            {
+                                const grown = new Uint8Array(at + from.length);
+                                grown.set(file.bytes);
+                                file.bytes = grown;
+                            }
+                            file.bytes.set(from, at);
+                            return from.length;
+                        },
+                        close: ()=>{
+                            file.open = false;
+                        },
+                    };
+                },
+            };
+        },
+        async* entries(){
+            yield* files;
+        },
+        /** @param {string} name */
+        removeEntry: async name=>{
+            files.delete(name);
+        },
+    };
+    return { files, root: { getDirectoryHandle: async()=>folder } };
+}
+
+test('on a page file, what the program wrote is saved, counted, and the file goes with the run',
+    { timeout: 30000 }, async()=>{
+        const exe = await readFile(FIXTURE);
+        const origin = originDirectory();
+        /** @type {any[]} */
+        let saved = [];
+        const app = await createApp({
+            executable: new Uint8Array(exe),
+            pageFile: { root: origin.root },
+            storage: {
+                load: async()=>[],
+                readsWithinSave: true,
+                /** @param {{ files: any[] }} session */
+                save: session=>{
+                    saved = session.files.map(file=>({ path: file.path,
+                        bytes: file.bytes.slice() }));
+                },
+            },
+        });
+        try
+        {
+            assert.equal(await app.run({ maxTurns: 20000, timeoutMs: 20000 }), 0);
+            const filesystem = app.diagnostics().find((/** @type {any} */ table)=>
+                table.name === 'filesystem');
+            assert.equal(filesystem.metrics.pageFile?.disk, true,
+                'the run stands on its page file');
+            assert.ok(filesystem.metrics.bytesHeld.heaps.writable >= PAYLOAD.length);
+            assert.equal(typeof filesystem.metrics.bytesHeld.disk.pageFile, 'number');
+            assert.equal(origin.files.size, 1);
+        }
+        finally
+        {
+            await app.dispose();
+        }
+        assert.deepEqual(saved.map(file=>[file.path, String.fromCharCode(...file.bytes)]),
+            [['C:\\save.dat', PAYLOAD]]);
+        assert.equal(origin.files.size, 0, 'the run\'s page file is taken away with it');
+    });
