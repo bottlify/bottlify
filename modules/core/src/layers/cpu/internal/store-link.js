@@ -27,8 +27,20 @@
  * code the first one compiled and tiered up: the wasm engine keeps one
  * compiled module for the bytes of any module alive in its process. Without
  * it each process of the run, ngen's `mscorsvw.exe` once an assembly, ran its
- * hot code in the baseline tier again until it tiered up anew.
+ * hot code in the baseline tier again until it tiered up anew. Only where the
+ * engine is V8: JavaScriptCore is not known to hand a module compiled in one
+ * worker to another by its bytes, and there the modules kept would cost up to
+ * their cap and pay nothing.
+ *
+ * The proxy is made for one process (`alone`): cork keeps no formed regions or
+ * compiled modules beside it for other runtimes of its thread
+ * (`sharedFormed`, `sharedModuleBytes`) until a child runs beside the process
+ * in its worker, which the run starts there only when it has no room for
+ * another worker: kept for the process alone, they are heap and wasm no one
+ * takes.
  */
+
+import { runsJavaScriptCore } from './gc-nudge.js';
 
 /** @typedef {import('../engine.js').TranslationStore} TranslationStore */
 
@@ -71,15 +83,31 @@ export function storeHandlers(store){
 export const SHARED_MODULE_BYTES = 256 << 20;
 
 /**
+ * Whether a module kept alive in one thread hands its compiled code to another
+ * thread compiling the same bytes: V8 keeps one compiled module for the bytes
+ * of any module alive in its process; JavaScriptCore is not known to.
+ *
+ * @param {string} [agent]  the thread's agent string
+ */
+export function keepsCodeByBytes(agent = globalThis.navigator?.userAgent ?? ''){
+    return !runsJavaScriptCore(agent);
+}
+
+/**
  * The run's store, its batch modules kept alive for the run by the thread
  * that holds it, up to `cap` bytes of wasm: those used longest ago go first,
- * a module held again counts as used.
+ * a module held again counts as used. The store as it is where the engine
+ * hands no code by bytes (`keepsCodeByBytes`), or with a cap of 0.
  *
  * @template {TranslationStore} T
- * @param {T} store @param {number} cap
- * @returns {T & { hold: NonNullable<TranslationStore['hold']> }}
+ * @param {T} store @param {number} cap @param {string} [agent]  the thread's agent string
+ * @returns {T | (T & { hold: NonNullable<TranslationStore['hold']> })}
  */
-export function withHeldModules(store, cap){
+export function withHeldModules(store, cap, agent = undefined){
+    if (!(cap > 0) || !keepsCodeByBytes(agent))
+    {
+        return store;
+    }
     /** @type {Map<string, { module: WebAssembly.Module, bytes: number }>} */
     const held = new Map();
     let bytes = 0;
@@ -126,7 +154,10 @@ export function withHeldModules(store, cap){
 }
 
 /**
- * The run's store as a process across a link sees it.
+ * The run's store as a process across a link sees it: made for it (`alone`),
+ * and for the children it runs beside itself. It sends the store's thread the
+ * modules it compiles only where that thread keeps them for others
+ * (`keepsCodeByBytes`).
  *
  * @param {{ ask: (method: string, args: any[]) => any,
  *     call: (method: string, args: any[]) => Promise<any>,
@@ -134,11 +165,12 @@ export function withHeldModules(store, cap){
  *         bytes: number }) => void }} link
  *     `ask` blocks for `storeHandlers`' answer, `call` does not; `post` sends a message to the
  *     store's thread, which can carry a compiled module
+ * @param {string} [agent]  the thread's agent string
  * @returns {TranslationStore & {
  *     getManyNow: (keys: string[]) => (Uint8Array | null)[] | undefined }}
  */
-export function remoteStore(link){
-    const post = link.post;
+export function remoteStore(link, agent = undefined){
+    const post = keepsCodeByBytes(agent) ? link.post : undefined;
     /**
      * @param {string[]} keys
      * @returns {(Uint8Array | null)[] | undefined} undefined where the link cannot answer, and
@@ -154,6 +186,7 @@ export function remoteStore(link){
         }
     };
     return {
+        alone: true,
         getManyNow,
         /** @param {string} key */
         getNow: key=>getManyNow([key])?.[0],

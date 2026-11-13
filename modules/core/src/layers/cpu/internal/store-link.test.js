@@ -122,6 +122,8 @@ test('a process across the link sends each module it compiles to the store\'s th
     + 'keeps the ones used last up to its cap and still answers as the store it wraps', async()=>{
     const store = await opened();
     const kept = withHeldModules(store, 300);
+    const hold = kept.hold;
+    assert.ok(hold, 'held where V8 runs');
     /** @type {any[]} */
     const sent = [];
     const remote = remoteStore({ ask: (method, args)=>across(/** @type {any} */ (
@@ -134,15 +136,39 @@ test('a process across the link sends each module it compiles to the store\'s th
         'a link that cannot carry a module offers none');
     for (const key of ['a', 'b', 'c'])
     {
-        kept.hold(key, module, 100);
+        hold(key, module, 100);
     }
     // Used again, `a` is the last to go: `d` takes `b`'s room.
-    kept.hold('a', module, 100);
-    kept.hold('d', module, 100);
-    kept.hold('e', module, 400);
+    hold('a', module, 100);
+    hold('d', module, 100);
+    hold('e', module, 400);
     assert.deepEqual(kept.stats().heldModules,
         { held: 3, bytes: 300, added: 4, again: 1, dropped: 1 });
     await kept.put('k', new Uint8Array([1, 2, 3]));
     assert.deepEqual([...await kept.get('k') ?? []], [1, 2, 3], 'the store it wraps answers');
     assert.ok(kept.stats().records >= 1, 'with the store\'s own figures');
+});
+
+test('a process across the link has a store made for it, and where JavaScriptCore runs the run '
+    + 'keeps no modules alive for later processes and the process sends none', async()=>{
+    // JavaScriptCore is not known to hand one worker's compiled code to another
+    // by its bytes: the modules kept would be up to their cap for nothing.
+    const webKit = 'Mozilla/5.0 (iPhone; CPU iPhone OS 27_0 like Mac OS X) AppleWebKit/605.1.15 '
+        + '(KHTML, like Gecko) Version/27.0 Mobile/15E148 Safari/604.1';
+    const chrome = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 '
+        + '(KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36';
+    const store = await opened();
+    assert.equal(withHeldModules(store, 300, webKit), store, 'none held on JavaScriptCore');
+    assert.equal(typeof withHeldModules(store, 300, chrome).hold, 'function', 'held on V8');
+    assert.equal(withHeldModules(store, 0, chrome), store, 'none held with a cap of 0');
+    /** @type {any[]} */
+    const sent = [];
+    const link = { ask: ()=>null, call: async()=>null,
+        post: (/** @type {any} */ message)=>sent.push(message) };
+    assert.equal(remoteStore(link, webKit).hold, undefined, 'none sent on JavaScriptCore');
+    const remote = remoteStore(link, chrome);
+    assert.equal(remote.alone, true, 'made for the process: nothing kept beside it for others');
+    remote.hold?.('a', new WebAssembly.Module(new Uint8Array([0, 0x61, 0x73, 0x6d, 1, 0, 0, 0])),
+        8);
+    assert.equal(sent.length, 1, 'sent on V8');
 });

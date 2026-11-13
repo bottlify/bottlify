@@ -393,6 +393,11 @@ export function engineContractProblem(engineModule, url){
  *     store is shared by threads: a runtime elsewhere compiling the same bytes is handed the code
  *     already compiled and tiered up, by the wasm engine's cache of live modules, rather than
  *     starting it over in its baseline tier. Optional.
+ * @property {boolean} [alone]  Made for one runtime (a proxy a process or an executor in a
+ *     worker made for itself): cork keeps formed regions and compiled modules beside it for
+ *     other runtimes of its thread (`sharedFormed`, `sharedModuleBytes`) only from the second
+ *     runtime handed it on, a child run beside its parent; `hold` is called all the same.
+ *     Optional.
  * @property {(key: string) => Uint8Array | null | undefined} [getNow]  The record at once,
  *     without a turn of the event loop, where the store can answer so; undefined where it
  *     cannot yet, and the translator asks `get`. Optional.
