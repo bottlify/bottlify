@@ -1366,8 +1366,26 @@ async function standingOf(app, journal = 0){
         const win32 = metrics('win32');
         const cpu = metrics('cpu');
         const log = metrics('log');
+        // What the process's layers say they hold, by zone (`memory-zones.js`):
+        // what the tab's memory is measured against.
+        /** @type {Record<string, number>} */
+        const held = {};
+        for (const entry of diagnostics ?? [])
+        {
+            for (const [zone, pools] of Object.entries(entry.metrics?.bytesHeld ?? {}))
+            {
+                for (const [pool, bytes] of Object.entries(pools ?? {}))
+                {
+                    if (typeof bytes === 'number')
+                    {
+                        held[`${zone}.${entry.name}.${pool}`] = bytes;
+                    }
+                }
+            }
+        }
         return {
             image,
+            held,
             phases: (log.topPhases ?? []).slice(0, 8),
             threads: kernel.byState, waiting: kernel.waiting, turns: kernel.turns,
             calls: bridge.calls, lastCall: bridge.lastCall, suspended: bridge.suspendedCalls,
