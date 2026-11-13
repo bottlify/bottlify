@@ -20,6 +20,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
+import { createHive, HKEY_LOCAL_MACHINE, REG_SZ } from './layers/win32/advapi32/registry.js';
+import { buildExe } from '../../../tools/make-pe.mjs';
 
 for (const concurrency of /** @type {const} */ ([1, 2, 4]))
 {
@@ -189,5 +191,70 @@ for (const concurrency of /** @type {const} */ ([1, 2]))
         assert.doesNotMatch(lines, /FAIL/);
         assert.ok(said.some(detail=>/service BottlifyServed is ended with the run/.test(detail)),
             said.join('\n'));
+    });
+}
+
+/** @param {number} value */
+const u32 = value=>[value & 255, value >>> 8 & 255, value >>> 16 & 255, value >>> 24 & 255];
+/** @param {number} a @param {number} b @param {number} c @param {number[]} d */
+const guid = (a, b, c, d)=>[...u32(a), b & 255, b >>> 8, c & 255, c >>> 8, ...d];
+
+for (const concurrency of /** @type {const} */ ([1, 2]))
+{
+    test('the run\'s code is its program\'s, not that of a server COM started for it and that'
+        + ` outlived it (concurrency ${concurrency})`, { timeout: 60000 }, async t=>{
+        // A thread asks for an instance of a class served out of process; the
+        // program leaves with 0 while the server it started still runs, which
+        // ends later with 7 - an installer gone while the ngen service it woke
+        // winds down.
+        const client = buildExe({
+            imports: {
+                'KERNEL32.dll': ['CreateThread', 'Sleep', 'ExitProcess'],
+                'ole32.dll': ['CoInitialize', 'CoCreateInstance'],
+            },
+            data: {
+                clsid: guid(0x3C1A7E52, 0x9D04, 0x4B6F,
+                    [0xA1, 0xE8, 0x5F, 0x0B, 0x2D, 0x7C, 0x9A, 0x31]),
+                iid: guid(0, 0, 0, [0xC0, 0, 0, 0, 0, 0, 0, 0x46]),
+                out: u32(0),
+            },
+            codeSize: 0x80,
+            code: ({ iat, at, code })=>[
+                0x6a, 0, 0x6a, 0, 0x6a, 0, 0x68, ...u32(code(0x40)), 0x6a, 0, 0x6a, 0,
+                0xff, 0x15, ...u32(iat('CreateThread')),
+                0x68, ...u32(500), 0xff, 0x15, ...u32(iat('Sleep')),
+                0x6a, 0, 0xff, 0x15, ...u32(iat('ExitProcess')),
+                ...new Array(0x40 - 40).fill(0xcc),
+                0x6a, 0, 0xff, 0x15, ...u32(iat('CoInitialize')),
+                0x68, ...u32(at('out')), 0x68, ...u32(at('iid')), 0x6a, 4, 0x6a, 0,
+                0x68, ...u32(at('clsid')), 0xff, 0x15, ...u32(iat('CoCreateInstance')),
+                0xc2, 4, 0,
+            ],
+        });
+        const server = buildExe({
+            imports: { 'KERNEL32.dll': ['Sleep', 'ExitProcess'] },
+            code: ({ iat })=>[0x68, ...u32(3000), 0xff, 0x15, ...u32(iat('Sleep')),
+                0x6a, 7, 0xff, 0x15, ...u32(iat('ExitProcess'))],
+        });
+        const hive = createHive();
+        hive.setValue(hive.create(/** @type {any} */ (hive.root(HKEY_LOCAL_MACHINE)),
+            'SOFTWARE\\Classes\\CLSID\\{3C1A7E52-9D04-4B6F-A1E8-5F0B2D7C9A31}\\LocalServer32').key,
+        '', REG_SZ, new TextEncoder().encode('C:\\App\\server.exe\0'));
+        const app = await createApp({
+            executable: client,
+            imagePath: 'C:\\App\\client.exe',
+            concurrency,
+            storage: { load: async()=>({ files: [{ path: 'C:\\App\\server.exe', bytes: server }],
+                registry: hive.toJSON() }) },
+        });
+        t.after(()=>app.dispose());
+        /** @type {number[]} */
+        const serverCodes = [];
+        app.on('process-server-exit', (/** @type {any} */ event)=>serverCodes.push(event.code));
+        assert.equal(await app.run({ timeoutMs: 30000 }), 0);
+        if (concurrency > 1)
+        {
+            assert.deepEqual(serverCodes, [7], 'the server ran, and ended after its client');
+        }
     });
 }

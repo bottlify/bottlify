@@ -247,8 +247,10 @@ const ASTC_FORMATS = Object.freeze({
  * @property {boolean} [dumpDraws]  describe every draw of the last frame
  * @property {number} [maxDraws]    stop a frame after this many draws
  * @property {string | null} [skipTexture]  drop draws sampling these ids
- * @property {{ dumpFrames: number, skipTexture?: string,
- *     written?: (lines: string[], frame: number) => void } | null} [liveDump]
+ * @property {{ dumpFrames: number, skipTexture?: string, snapshot?: string,
+ *     written?: (lines: string[], frame: number) => void,
+ *     snapped?: (id: string, shot: { width: number, height: number, data: Uint8Array,
+ *         format: string, info?: string }) => void } | null} [liveDump]
  *           the graphics worker's switches a running program's page sets
  *           (`app.debug.dumpFrames`, `app.debug.skipTexture`), read at each
  *           frame's end for the next
@@ -1012,6 +1014,15 @@ export function createGpuRenderer(services){
      */
     /** @type {WeakMap<import('./objects.js').TextureObject, TextureRecord>} */
     const textures = new WeakMap();
+    /**
+     * The texture a dump's `t5` names, the last one of that name given a GPU
+     * texture: what `app.debug.snapshot` reads.
+     *
+     * @type {Map<number, WeakRef<import('./objects.js').TextureObject>>}
+     */
+    const byName = new Map();
+    /** @type {string[] | null} the ids a snapshot asked for, read at the next frame's end */
+    let snapshotWanted = null;
 
     /**
      * A ring over one dynamic buffer for bytes that exist for one draw. Writes
@@ -1510,6 +1521,7 @@ export function createGpuRenderer(services){
                     : null,
             };
             textures.set(texture, record);
+            byName.set(texture.name, new WeakRef(texture));
             for (const [key, image] of texture.levels)
             {
                 if (!releasedLevels.has(image))
@@ -3378,6 +3390,21 @@ export function createGpuRenderer(services){
         }
         stats.draws++;
         recording.counts.draws++;
+        if (snapshotWanted)
+        {
+            // An incomplete texture is never given a GPU texture, and it is
+            // the one a snapshot is asked for: what the draws bind is named.
+            for (const bound of scene.boundTextures)
+            {
+                for (const one of [bound?.twoD, bound?.cube, bound?.rectangle])
+                {
+                    if (one)
+                    {
+                        byName.set(one.name, new WeakRef(one));
+                    }
+                }
+            }
+        }
         const rects = rectangles(scene, target);
         let probe = -1;
         if (dumpDraws)
@@ -4748,6 +4775,55 @@ export function createGpuRenderer(services){
 
     /** @type {Promise<void>} replays run one after another, in swap order */
     let chain = Promise.resolve();
+
+    /**
+     * A texture `app.debug.snapshot` names (`t5`, as a dump names it), its top
+     * level read off the GPU once the frame just presented is drawn, with what
+     * GL holds of it: the levels defined, the filters, the levels sampled and
+     * whether it is complete - what a draw that samples a placeholder instead
+     * of it (`bound=[0:t5!]`) is decided by.
+     *
+     * @param {string} id
+     */
+    const snapshotTexture = id=>{
+        const texture = byName.get(Number(id.replace(/^t/, '')))?.deref();
+        const held = texture ? textures.get(texture) : undefined;
+        const info = texture ? describeTexture(texture) : 'no texture of that name has been drawn';
+        if (!texture || !held)
+        {
+            liveDump?.snapped?.(id, { width: 0, height: 0, format: 'missing',
+                data: new Uint8Array(0), info });
+            return;
+        }
+        chain = chain.then(async()=>{
+            const frame = backend.beginFrame();
+            const read = frame.snapshot(held.gpu);
+            frame.end();
+            liveDump?.snapped?.(id, { ...await read(), format: held.format, info });
+        }).catch(error=>{
+            liveDump?.snapped?.(id, { width: 0, height: 0, format: 'missing',
+                data: new Uint8Array(0), info: `${info}; not read: ${error?.message ?? error}` });
+        });
+    };
+
+    /**
+     * What GL holds of a texture, in a line: each level defined, the filters
+     * and the levels it may sample.
+     *
+     * @param {import('./objects.js').TextureObject} texture
+     */
+    const describeTexture = texture=>{
+        const p = (/** @type {number} */ name)=>texture.parameters.get(name) ?? 0;
+        const levels = [...texture.levels].sort(([a], [b])=>a - b)
+            .map(([key, image])=>`${key}:${image.width}x${image.height}`
+                + `/${hex(image.internalFormat)}`
+                + `${image.texels || image.compressed ? '' : '(no texels here)'}`);
+        return `target=${hex(texture.target)} levels=[${levels.join(' ')}]`
+            + ` min=${hex(p(GL.TEXTURE_MIN_FILTER))} mag=${hex(p(GL.TEXTURE_MAG_FILTER))}`
+            + ` base=${p(GL.TEXTURE_BASE_LEVEL)} max=${p(GL.TEXTURE_MAX_LEVEL)}`
+            + ` generateMipmap=${p(GL.GENERATE_MIPMAP)}`
+            + ` complete=${isTextureComplete(texture)}`;
+    };
     /**
      * The recording most recently presented. A probe is two read-backs a
      * replay waits for, and a replay that has fallen behind the recording
@@ -5449,6 +5525,21 @@ export function createGpuRenderer(services){
                     unflushed.delete(recording.id);
                     lose(error instanceof Error ? error.message : String(error));
                 });
+            // Asked, the next frame's draws name what they bind; at its end the
+            // textures are read.
+            if (snapshotWanted)
+            {
+                for (const id of snapshotWanted)
+                {
+                    snapshotTexture(id);
+                }
+                snapshotWanted = null;
+            }
+            else if (liveDump?.snapshot)
+            {
+                snapshotWanted = liveDump.snapshot.split(',').filter(Boolean);
+                liveDump.snapshot = '';
+            }
             return { width: target.width, height: target.height };
         },
 
