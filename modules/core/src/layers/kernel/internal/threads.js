@@ -2563,6 +2563,19 @@ export function createScheduler(options){
          * @param {any} thread
          * @returns {boolean} whether the thread runs nowhere now
          */
+        /**
+         * The other executors' traps answered between turns, as a turn begins
+         * by answering them: for a caller that waits through its event loop
+         * between turns, which would otherwise answer them only when the next
+         * turn begins.
+         */
+        answerOthers(){
+            if (!inSlice)
+            {
+                answerExecutors();
+            }
+        },
+
         settle(thread){
             const runs = ()=>placedElsewhere(thread);
             if (!runs())
