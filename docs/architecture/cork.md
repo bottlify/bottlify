@@ -21,10 +21,11 @@ kernel, and where a system call would be, a trap into the bridge fires instead (
 **Memory.** All of the program's memory is one `WebAssembly.Memory`, shared in the `isolated`
 mode: up to 1 GiB for the program by default. In a 32-bit process over shared memory it holds only
 the RAM the program has been given and grows as it is given more, by powers of two (256 MiB at the
-start on one to three executors, 512 MiB on more); cork's tables and the other executors' pages
-then lie in a range of the program's own space the process keeps from it (at the top of the
-libraries' space under the thread stacks, at the heap's start, or cut out of the heap at
-0x14000000 for four executors or more). A 64-bit process, a run without shared memory and one
+start); cork's tables and the other executors' pages then lie in a range of the program's own
+space the process keeps from it (at the top of the libraries' space under the thread stacks, or at
+the heap's start). With four executors or more the first executor's tables stay there and the
+other executors' pages are cut out of the heap at 0x14000000, which the memory reaches only when
+one of them opens: a process whose threads open none holds what it would on one executor. A 64-bit process, a run without shared memory and one
 with `cpu.grow: false` hold the whole of it from the start, cork's tables past it. Nothing in a
 memory just made is cleared: its pages are zero until touched. A process that takes the memory of
 one gone before it zeroes the first executor's tables at once and another executor's pages as that

@@ -1996,9 +1996,12 @@ guest's own space, about 20 MiB an executor and 8 more: at the top of the librar
 the thread stacks, or at the heap's start where it ends short of 0x10000000. Four executors or more
 fit neither, and without a range every process committed its whole RAM at its start (2.1 GiB a
 process on eight). Past 0x10000000 and the few megabytes above it, the bases a library is most
-often linked for, the heap gives the range up as it gives a library that cannot move its span, and
-the memory starts at 512 MiB on eight executors. A library linked to load inside the range cannot
-be loaded; one that can move is moved. *2026-11-07.*
+often linked for, the heap gives the range up as it gives a library that cannot move its span. A
+library linked to load inside the range cannot be loaded; one that can move is moved. *2026-11-07.*
+Since 2026-11-13 only the other executors' pages are cut out there, the first executor's tables
+and their shared record staying at the top of the libraries' space: the memory starts as it does
+on one executor and reaches the cut range when another executor opens, where every process on
+eight executors started at 512 MiB.
 
 **A234. D3DX 10 asked for a size its file holds as a level takes that level, where the format
 has no codec here.** D3DX 10 and 11 filter the first level down to a size asked; this loader does

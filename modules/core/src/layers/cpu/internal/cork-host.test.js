@@ -1099,3 +1099,26 @@ test('a memory taken with the ranges to zero named is zeroed there and in its fi
     assert.ok(all(2 * MIB, 20 * MIB, 0x5a) && all(21 * MIB, 32 * MIB, 0x5a),
         'the rest as the gone process left it, for the heap to zero as it hands it out');
 });
+
+test('the other executors\' pages apart from the first\'s: the memory starts holding the first'
+    + ' range\'s floor, and reaches an executor\'s pages as it opens, the RAM held as it was', ()=>{
+    const MIB = 1 << 20;
+    const grown = host({ memorySize: 1024 * MIB, executors: 8,
+        engineArea: { at: 32 * MIB, span: 28 * MIB, others: { at: 320 * MIB, span: 140 * MIB } } });
+    assert.equal(grown.growing(), true);
+    assert.equal(grown.ramHeld(), 64 * MIB, 'up to the first range, a power of two');
+    assert.equal(grown.wasmMemory().buffer.byteLength, 64 * MIB + engine.WRAP_SLACK,
+        'not the other executors\' pages');
+    grown.makeRoomFor(2);
+    const reached = grown.wasmMemory().buffer.byteLength;
+    assert.ok(reached > 320 * MIB && reached <= 360 * MIB,
+        `executor 2's pages and no further: ${reached}`);
+    assert.equal(grown.ramHeld(), 64 * MIB, 'the RAM held and its wrap as they were');
+    assert.equal(grown.wrappedAddress(0x7ffe0000), 0x7ffe0000 & (64 * MIB - 1));
+    grown.makeRoomFor(1);
+    assert.equal(grown.wasmMemory().buffer.byteLength, reached, 'executor 1 lies below it');
+    const ranges = grown.engineLeft().ranges;
+    assert.equal(ranges.length, 4, 'the first executor, 1 and 2, and the shared record');
+    assert.ok(ranges.every((/** @type {[number, number]} */ [from, to])=>to <= reached
+        && from < to));
+});

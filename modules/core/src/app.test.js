@@ -2167,10 +2167,16 @@ test('the engine keeps a range under the stacks, short of 0x10000000, cut out of
     assert.deepEqual(area(1), { at: 0x08000000 - 28 * MIB, span: 28 * MIB, inHeap: false },
         'twenty MiB an executor and eight shared, at the top of the libraries\' space');
     assert.deepEqual(area(3), { at: 0x08000000 - 68 * MIB, span: 68 * MIB, inHeap: false });
-    assert.deepEqual(area(4), { at: ENGINE_CUT_AT, span: 88 * MIB, inHeap: false, cut: true },
-        'too large for the libraries\' space, and at the heap\'s start it would reach'
-        + ' 0x10000000: cut out of the heap past it');
-    assert.deepEqual(area(16), { at: ENGINE_CUT_AT, span: 328 * MIB, inHeap: false, cut: true });
+    const four = { at: 0x08000000 - 28 * MIB, span: 28 * MIB, inHeap: false,
+        others: { at: ENGINE_CUT_AT, span: 60 * MIB } };
+    assert.deepEqual(area(4), four, 'too large for the libraries\' space, and at the heap\'s start'
+        + ' it would reach 0x10000000: the first executor\'s part at the top, the others\' cut out'
+        + ' of the heap past it, so the memory starts as small as one executor\'s');
+    assert.deepEqual(area(16), { at: 0x08000000 - 28 * MIB, span: 28 * MIB, inHeap: false,
+        others: { at: ENGINE_CUT_AT, span: 300 * MIB } });
+    assert.deepEqual(area(8, { moduleBase: 0x06000000, stackPoolStart: 0x07800000 }),
+        { at: ENGINE_CUT_AT, span: 168 * MIB, inHeap: false, cut: true },
+        'no room at the top for the first part either: all of it cut out of the heap');
     assert.deepEqual(area(8, { heapStart: 0x20000000 }),
         { at: 0x20000000, span: 168 * MIB, inHeap: true },
         'a heap that starts past it already: its start');

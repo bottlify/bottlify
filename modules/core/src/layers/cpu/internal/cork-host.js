@@ -181,11 +181,14 @@ const hex = (value, width = 8)=>(value >>> 0).toString(16).padStart(width, '0');
  * @property {{ everyMs: number, bytes: number } | false} [gcNudge]  How the threads holding
  *     the guest's memory bring JavaScriptCore's collections forward (`gc-nudge.js`), as the
  *     process settled it; an executor's worker nudges by it.
- * @property {{ at: number, span: number }} [engineArea]  A range of the guest's own space the
- *     process keeps from the program, `at` a MiB boundary: the memory then grows as the guest
- *     is given more (`growTo`), the engine's tables and other executors' pages kept there,
- *     where the whole `memorySize` was committed at the start. Only over shared memory, for
- *     a 32-bit process and a `memorySize` a power of two; a fixed memory otherwise.
+ * @property {{ at: number, span: number, others?: { at: number, span: number } }} [engineArea]
+ *     A range of the guest's own space the process keeps from the program, `at` a MiB
+ *     boundary: the memory then grows as the guest is given more (`growTo`), the engine's
+ *     tables and other executors' pages kept there, where the whole `memorySize` was committed
+ *     at the start. With `others`, the other executors' pages lie there instead, apart, and the
+ *     memory reaches them as each opens (`makeRoomFor`): it starts holding the first range.
+ *     Only over shared memory, for a 32-bit process and a `memorySize` a power of two; a fixed
+ *     memory otherwise.
  * @property {32 | 64} [bits]  64 for a long-mode (x86-64) process: the engine's 64-bit state
  *     block, run on its long-mode interpreter, on one executor. Default 32.
  */
@@ -334,13 +337,24 @@ export function createCorkHost(config){
     // growth leaves every view taken as it was; a 32-bit process; a RAM a power
     // of two; an engine that knows the layout (`WRAP_SLACK`).
     const area = config.engineArea;
-    const areaBytes = Math.ceil(past / 65536) * 65536
-        + ((executors - 1) * executorPages + sharedPages) * 65536;
+    // Where the other executors' pages lie apart from the first's (`others`), the
+    // first's range holds its tables and the record they share; otherwise all
+    // of them, the record last.
+    const apart = area?.others;
+    const othersBytes = (executors - 1) * executorPages * 65536;
+    const areaBytes = Math.ceil(past / 65536) * 65536 + sharedPages * 65536
+        + (apart ? 0 : othersBytes);
     const growing = area !== undefined && shared && !long
         && typeof engine.WRAP_SLACK === 'number' && (memorySize & memorySize - 1) === 0
         && area.at % 0x100000 === 0 && area.at >= 0x100000 && areaBytes <= area.span
-        && area.at + areaBytes <= memorySize;
-    /** The RAM a growing memory always holds: up to its engine's range, a power of two. */
+        && area.at + areaBytes <= memorySize
+        && (apart === undefined || (apart.at % 0x100000 === 0 && othersBytes <= apart.span
+            && apart.at >= area.at + areaBytes && apart.at + othersBytes <= memorySize));
+    /**
+     * The RAM a growing memory always holds: up to its engine's range, a power
+     * of two -- the first executor's range alone where the others' lie apart,
+     * which the memory reaches as each opens (`makeRoomFor`).
+     */
     const ramFloor = growing
         ? Math.max(0x100000, 2 ** Math.ceil(Math.log2(area.at + areaBytes))) : memorySize;
     if (growing)
@@ -349,9 +363,12 @@ export function createCorkHost(config){
     }
     /** The engine's range inside the guest's space, empty where it has none. */
     const engineArea = growing ? { from: area.at, to: area.at + areaBytes } : { from: 0, to: 0 };
+    /** The other executors' pages where they lie apart from the first's, empty otherwise. */
+    const othersArea = growing && apart ? { from: apart.at, to: apart.at + othersBytes }
+        : { from: 0, to: 0 };
     /** Every guest range the engine holds, in address order: closed to the program. */
-    const engineRanges = [enginePages, engineArea].filter(range=>range.to > range.from)
-        .sort((a, b)=>a.from - b.from);
+    const engineRanges = [enginePages, engineArea, othersArea]
+        .filter(range=>range.to > range.from).sort((a, b)=>a.from - b.from);
     // Every field from the start of a state block, as the block's views read
     // it: the same on every executor, whose blocks a thread's context moves
     // between (`blockLayout`).
@@ -359,13 +376,16 @@ export function createCorkHost(config){
     const firstPages = growing ? Math.ceil((own.tables + past) / 65536) : pagesFor(own, past);
     /** Where an executor's state page begins. @param {number} index */
     const executorBase = index=>(index === 0 ? own.regs
-        : (firstPages + (index - 1) * executorPages) * 65536);
+        : othersArea.to > othersArea.from ? othersArea.from + (index - 1) * executorPages * 65536
+            : (firstPages + (index - 1) * executorPages) * 65536);
     const stateBase = executorBase(executor);
     const layout = executor === 0 ? own : executorLayout(own, stateBase, executor);
     const wasmArea = layout.tables + tables + profileSize;
     // Past every executor's pages, the record they keep together of who holds
     // code where and which stores reached it (`shared-code.js`).
-    const sharedAt = executors > 1 ? (firstPages + (executors - 1) * executorPages) * 65536 : -1;
+    const sharedAt = executors < 2 ? -1
+        : othersArea.to > othersArea.from ? firstPages * 65536
+            : (firstPages + (executors - 1) * executorPages) * 65536;
     // A growing memory starts with its floor and the slack past it, and may
     // grow to its whole RAM's (wasm's 4 GiB at most).
     const pages = growing ? (ramFloor + engine.WRAP_SLACK) / 65536
@@ -395,8 +415,9 @@ export function createCorkHost(config){
     // The memory past the guest's RAM, or a growing memory's engine range: the
     // engine's tables and pages for every executor, which the translator's zone
     // holds before any module of it.
-    const engineBytes = growing ? areaBytes : ramMemory !== undefined ? memory.buffer.byteLength
-        : memory.buffer.byteLength - own.ramBase - memorySize;
+    const engineBytes = growing ? areaBytes + othersArea.to - othersArea.from
+        : ramMemory !== undefined ? memory.buffer.byteLength
+            : memory.buffer.byteLength - own.ramBase - memorySize;
     // A ceiling only where the iOS hack runs (`crossTailCalls` false): a phone's tab is
     // what it is for. Elsewhere it let a desktop's other executors, a sixteenth of the
     // zone each, let modules go and bring them back without end: CoD4 on four cores
@@ -2074,9 +2095,17 @@ export function createCorkHost(config){
             {
                 return;
             }
+            const range = executorRange(index);
+            // Its pages apart from the first's, past what the memory holds: the
+            // memory reaches them now, the RAM held and its wrap as they were.
+            const want = Math.ceil(range.to / 65536);
+            const have = memory.buffer.byteLength / 65536;
+            if (want > have)
+            {
+                memory.grow(want - have);
+            }
             if (index < dirtyExecutors && !readied.has(index))
             {
-                const range = executorRange(index);
                 new Uint8Array(memory.buffer).fill(0, range.from, range.to);
             }
             readied.add(index);

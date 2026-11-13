@@ -1495,6 +1495,12 @@ const HEAP_FLOOR = 0x0c000000;
 export const ENGINE_CUT_AT = 0x14000000;
 
 /**
+ * The engine's range of one executor, in MiB: its tables and what lies past
+ * them, and the record the executors keep together (`engineAreaFor`).
+ */
+const ENGINE_FIRST_MIB = 28;
+
+/**
  * The guest ranges a process taking a gone one's memory zeroes at its start
  * (`CorkHostConfig.reused`'s `written`): what it finds in place before anything
  * hands it out -- the thunk table and the first thread's stack under the image,
@@ -1546,14 +1552,20 @@ const LARGE_ADDRESS_TOP = 0xfffe0000;
  * most often linked for; otherwise cut out of the heap past the bases libraries
  * are linked for (`ENGINE_CUT_AT`, `cut`): four executors or more fit neither
  * place, and without a range every process committed its whole RAM at its start
- * (2.1 GiB a process on an eight-core machine). None for a 64-bit process, a RAM
- * that is not a power of two, or an image of the program's own lying where the
- * range would.
+ * (2.1 GiB a process on an eight-core machine). There the first executor's
+ * tables and the record the executors share stay at the top of the libraries'
+ * space and only the other executors' pages are cut out (`others`): the memory
+ * holds the RAM up to the first range from the start, as with one executor, and
+ * reaches the others' when one opens -- a process whose threads open none (most
+ * of a run's helpers) never does, where every process started at 512 MiB. None
+ * for a 64-bit process, a RAM that is not a power of two, or an image of the
+ * program's own lying where the range would.
  *
  * @param {{ long: boolean, memorySize: number, moduleBase: number, stackPoolStart: number,
  *     heapStart: number, executors: number,
  *     image: { imageBase: number, sizeOfImage: number } }} what
- * @returns {{ at: number, span: number, inHeap: boolean, cut?: true } | undefined}
+ * @returns {{ at: number, span: number, inHeap: boolean, cut?: true,
+ *     others?: { at: number, span: number } } | undefined}
  */
 export function engineAreaFor({ long, memorySize, moduleBase, stackPoolStart, heapStart,
     executors, image })
@@ -1578,6 +1590,20 @@ export function engineAreaFor({ long, memorySize, moduleBase, stackPoolStart, he
     if (heapStart >= ENGINE_CUT_AT)
     {
         return clear(heapStart) ? { at: heapStart, span, inHeap: true } : undefined;
+    }
+    // The first executor's part where one executor's whole range goes, the
+    // others' cut out of the heap.
+    const first = ENGINE_FIRST_MIB * MIB;
+    const othersSpan = span - first;
+    const firstTop = Math.floor((stackPoolStart - first) / MIB) * MIB;
+    /** @param {number} at @param {number} bytes */
+    const free = (at, bytes)=>at + bytes < memorySize
+        && !(image.imageBase < at + bytes && image.imageBase + image.sizeOfImage > at);
+    if (othersSpan > 0 && firstTop >= moduleBase + 16 * MIB && free(firstTop, first)
+        && free(ENGINE_CUT_AT, othersSpan))
+    {
+        return { at: firstTop, span: first, inHeap: false,
+            others: { at: ENGINE_CUT_AT, span: othersSpan } };
     }
     return clear(ENGINE_CUT_AT) ? { at: ENGINE_CUT_AT, span, inHeap: false, cut: true }
         : undefined;
@@ -4898,7 +4924,11 @@ async function buildApp(options){
                 // The image's low dword span: a handler's pointer into it lands there.
                 hostAlias: { at: programLoaded.imageBase % 2 ** 32,
                     size: programLoaded.sizeOfImage } },
-            eagerExecutors: options.cpu?.eager === true,
+            // Not for a process started beside another: its executors open as its
+            // threads want them (`startedBeside`), each another executor's pages
+            // the memory reaches and a worker -- a launcher's every short child
+            // opened all of them at its start.
+            eagerExecutors: options.cpu?.eager === true && options.startedBeside !== true,
             executorTranslators: options.cpu?.executorTranslators,
             learnExecutors: options.startedBeside !== true,
             // The threads holding the guest's memory bring JavaScriptCore's
@@ -6045,11 +6075,13 @@ async function buildApp(options){
     // The engine's range where it is cut out of the heap (`engineAreaFor`'s
     // `cut`): never handed out, and the heap's region two, on either side of it,
     // as a span a library claims leaves it.
-    const cutArea = engineArea?.cut && engineArea.at > HEAP_BASE
-        && engineArea.at + engineArea.span < HEAP_BASE + HEAP_SIZE ? engineArea : null;
-    if (engineArea?.cut && !cutArea)
+    // The other executors' pages, where only they are cut out (`others`).
+    const cutRange = engineArea?.cut ? engineArea : engineArea?.others ?? null;
+    const cutArea = cutRange && cutRange.at > HEAP_BASE
+        && cutRange.at + cutRange.span < HEAP_BASE + HEAP_SIZE ? cutRange : null;
+    if (cutRange && !cutArea)
     {
-        throw new Error(`app: the engine's range at 0x${engineArea.at.toString(16)} lies`
+        throw new Error(`app: the engine's range at 0x${cutRange.at.toString(16)} lies`
             + ` outside the heap's span 0x${HEAP_BASE.toString(16)}+0x${HEAP_SIZE.toString(16)}`);
     }
     /** @type {{ name: string, base: number, end: number }[]} */

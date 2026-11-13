@@ -120,7 +120,7 @@ what every run uses.
 | `quantum` | see [configuration.md](configuration.md#kernel) | Every scheduler turn exactly this many guest instructions, for a profile fine enough to say something. |
 | `heapSize` | the rest of RAM | How much the program's heaps may allocate, to find out what runs out first. |
 | `driveGuestCalls` | `true` | `false` runs the host calls written as steps through promises, each guest call they make a turn of its own, rather than in the slice they came in. |
-| `cpu.eager` | `true` with `cpu.cores` named, else `false` | `true` opens every executor before the program starts, `false` as threads want them. |
+| `cpu.eager` | `true` with `cpu.cores` named, else `false` | `true` opens every executor before the program starts, `false` as threads want them. A process the program starts opens its executors as its threads want them either way. |
 | `cpu.placement` | `'spread'` | `'concentrate'`: every thread takes turns on the process's own executor, as on one processor. |
 | `cpu.gcNudge` | on where JavaScriptCore runs (Safari, every browser on iOS) | The threads that hold the guest's memory, and the graphics worker, make and drop an untouched buffer every 20 ms (64 MB, or a quarter of the guest's memory past 256 MB), which JavaScriptCore counts as allocated and so collects their garbage sooner; the engine's thread makes one between the guest's slices too. `false` turns it off, `true` on in any browser, `{ everyMs, bytes }` sets it. |
 | `cork.config` | | cork's own diagnostics and paths left out ([cork settings](../cork/settings.md)). `sharedMemory: false` keeps guest memory the engine's alone, as `compatible` does. |
