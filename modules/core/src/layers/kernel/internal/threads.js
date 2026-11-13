@@ -2603,6 +2603,7 @@ export function createScheduler(options){
             }
         },
 
+        /** @param {any} thread */
         settle(thread){
             const runs = ()=>placedElsewhere(thread);
             if (!runs())
