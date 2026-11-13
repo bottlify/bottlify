@@ -126,7 +126,10 @@ way, with a doorbell word per side ([`core/src/system/link.js`](../../modules/co
 process thread blocks on its doorbell for each answer and answers what it is asked meanwhile (the
 engine asks it about its windows); a message longer than a ring holds goes in parts. Each side
 looks at its doorbell for a few microseconds before it sleeps on it, since a thread woken from
-sleep costs far more than the answer.
+sleep costs far more than the answer. When a process ends, however it ends, its link is closed:
+every call still waiting on it fails (a COM call into it answers `RPC_E_SERVER_DIED`), a call made
+after fails at once, and the run detaches the windows the process answered for, so nothing asks a
+gone process again.
 
 A process thread seldom asks the volume: every change to a drive moves that drive's word in shared
 memory (one word per drive letter), and the process thread keeps what it read of a drive (64 KB

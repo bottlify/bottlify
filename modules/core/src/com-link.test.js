@@ -187,3 +187,23 @@ async()=>{
     await new Promise(resolve=>setTimeout(resolve, 0));
     assert.equal(first.table.serviceRunning('Svc'), false);
 });
+
+test('a wait for a server the run no longer knows ends: one that ended already never registers',
+    async()=>{
+        const table = createClassTable();
+        const client = processOn(table);
+        assert.equal(await client.side.handlers.whenRegistered(CLSID, 42), false,
+            'an unknown number is a server that ended, not one to wait on for good');
+    });
+
+test('a call into a process whose link closed while it was delivered answers that the server'
+    + ' died', async()=>{
+    const table = createClassTable();
+    const side = comHandlers(table, {
+        call: ()=>Promise.reject(Object.assign(new Error('link: closed'), { closed: true })),
+    });
+    const id = side.handlers.attach();
+    const reply = await /** @type {any} */ (table.endpoint(id)).deliver({ kind: 'call' });
+    assert.equal(reply.hr, 0x80010007 | 0, 'RPC_E_SERVER_DIED');
+    assert.equal(reply.disconnected, true, 'and the proxy takes the server as gone');
+});

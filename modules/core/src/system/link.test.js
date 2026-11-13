@@ -298,3 +298,25 @@ test('an answer that cannot cross reaches the caller as a failure, and the link 
         assert.match(answer.failed, /cannot|codec|encode/i);
         assert.equal(answer.after, 42);
     });
+
+test('a closed link fails the calls still waiting on it and every call after, on both sides',
+    { timeout: 20000 }, async()=>{
+        const { a, b } = createLinkMemory();
+        const system = openLink(a, {});
+        const serving = system.serve();
+        // The process side never answers: a process that died.
+        const process = openLink(b, {});
+        const asked = system.call('endpoint', 'find', [7]);
+        const told = process.call('events', 'emit', [1]);
+        system.close();
+        await serving;
+        await assert.rejects(asked, (/** @type {any} */ e)=>e.closed === true
+            && /endpoint\.find/.test(e.message), 'the run\'s waiting call fails');
+        await assert.rejects(system.call('endpoint', 'find', [8]), { closed: true },
+            'and a call after the close fails at once');
+        assert.throws(()=>system.callWaiting('endpoint', 'find', [9]), { closed: true },
+            'a blocking one too, rather than waiting for good');
+        process.close();
+        await assert.rejects(told, { closed: true },
+            'the side that serves nothing fails its own at the close');
+    });

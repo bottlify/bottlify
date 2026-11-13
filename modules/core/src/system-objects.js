@@ -105,7 +105,9 @@ export function objectHandlers({ table, wake, processes }){
                         queued.delete(token);
                         woken.state = 'running';
                         ended.set(token, woken.waitResult);
-                        wake(token, woken.waitResult).finally(()=>ended.delete(token));
+                        // A process gone meanwhile hears nothing; its link said so.
+                        wake(token, woken.waitResult).catch(()=>{})
+                            .finally(()=>ended.delete(token));
                     },
                 } };
             standIns.set(threadId, standIn);

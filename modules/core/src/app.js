@@ -11393,9 +11393,11 @@ export async function createApp(options){
         const lending = { worker: null };
         /** The processes beside it in its worker the run's pool lends to, by id. */
         const lentBeside = new Set();
+        /** The processes whose windows it answers for, by id: detached as it goes. @type {Set<number>} */
+        const windowsAcross = new Set();
         const link = openLink(memory.a, {
             ...systemHandlers(/** @type {any} */ (system),
-                (target, method, args)=>link.callWaiting(target, method, args)),
+                (target, method, args)=>link.callWaiting(target, method, args), windowsAcross),
             ...objects,
             com: com.handlers,
             pipes,
@@ -11603,6 +11605,12 @@ export async function createApp(options){
             lentBeside.clear();
             forgetObjects();
             forgetPipes();
+            // Its windows, if it ended without saying so: this thread would
+            // block for good asking a gone process about one.
+            for (const id of windowsAcross)
+            {
+                system.windows?.detach(id);
+            }
             await com.gone();
             link.close();
             await answering;
