@@ -200,15 +200,17 @@ test('what nobody has subscribed to yet is kept only up to REPLAY_LIMIT per name
     assert.equal(seen[seen.length - 1].name, `dll${REPLAY_LIMIT}`);
 });
 
-test('an event about a process carries its layers\' numbers, not their tables', ()=>{
+test('an event about a process carries its layers\' numbers and flags, not their lists', ()=>{
     const whole = [
         { name: 'audio', status: 'ready', metrics: { arenaFree: 4 << 20, voices: 2,
-            recent: ['a', 'b'], table: { big: new Array(1000).fill(1) }, summary: 'x' } },
+            recent: ['a', 'b'], table: { big: new Array(1000).fill(1), shared: null,
+                on: true, deeper: { gone: 1 } }, summary: 'x' } },
         { name: 'kernel', status: 'created', metrics: {} },
         { name: 'odd' },
     ];
     assert.deepEqual(diagnosticsSummary(whole), [
-        { name: 'audio', status: 'ready', metrics: { arenaFree: 4 << 20, voices: 2 } },
+        { name: 'audio', status: 'ready', metrics: { arenaFree: 4 << 20, voices: 2,
+            table: { shared: null, on: true } } },
         { name: 'kernel', status: 'created', metrics: {} },
         { name: 'odd', status: '', metrics: {} },
     ]);
