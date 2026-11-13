@@ -196,7 +196,11 @@ test('glGenerateMipmap makes the levels the base level\'s size calls for', ()=>{
         gl.glGetTexLevelParameteriv(GL.TEXTURE_2D, level, GL.TEXTURE_HEIGHT)[0]]);
     assert.deepEqual(sizes, [[8, 4], [4, 2], [2, 1], [1, 1]]);
     assert.ok(name > 0);
+    // 3.0 section 3.8.8 takes 1D, 2D, 3D, the arrays and cube maps; a
+    // rectangle has no mipmaps.
     gl.glGenerateMipmap(GL.TEXTURE_1D);
+    assert.equal(gl.glGetError(), GL.NO_ERROR);
+    gl.glGenerateMipmap(GL.TEXTURE_RECTANGLE);
     assert.equal(gl.glGetError(), GL.INVALID_ENUM);
 });
 

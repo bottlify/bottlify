@@ -65,8 +65,10 @@
  *           glCopyImageSubData on the device: true when the device copies the
  *           box itself (both images live there in one format), false when the
  *           copy is to be made from this side's bytes and uploaded.
- * @property {((texture: import('./objects.js').TextureObject) => void) | null} [generateMipmap]
- *           glGenerateMipmap's levels made on the device from the base level
+ * @property {((texture: import('./objects.js').TextureObject, face?: number) => void)
+ *             | null} [generateMipmap]
+ *           the levels below the base level made on the device from it, of
+ *           one cube face where `face` names it
  * @property {((request: { srcX0: number, srcY0: number, srcX1: number, srcY1: number,
  *             dstX0: number, dstY0: number, dstX1: number, dstY1: number,
  *             linear: boolean }) => void) | null} [blit]

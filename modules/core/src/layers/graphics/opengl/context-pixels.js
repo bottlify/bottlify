@@ -19,6 +19,8 @@ import { transform } from './matrix.js';
 import { readPixel, writeFragment } from './raster.js';
 import { fogFactor } from './pipeline.js';
 import { imageBytes } from './texture.js';
+import { packFromStorage } from './texture-transfer.js';
+import { SIZED_FORMATS } from './formats.js';
 
 /** @type {Set<number>} */
 const COLOUR_FORMATS = new Set([
@@ -61,19 +63,18 @@ const COMPONENTS = Object.freeze({
  * @param {number} format
  * @param {number} type
  * @param {PackState} pack
- * @returns {Uint8Array | null} null for a layout this does not write
+ * @returns {Uint8Array | null} null for a layout no reader writes
  */
 export function packImage(texels, width, height, format, type, pack){
     const components = /** @type {any} */ (COMPONENTS)[format];
-    if (!components)
-    {
-        return null;
-    }
     const componentBytes = type === GL.UNSIGNED_BYTE ? 1 : type === GL.UNSIGNED_SHORT ? 2
         : type === GL.UNSIGNED_INT || type === GL.FLOAT ? 4 : 0;
-    if (componentBytes === 0)
+    if (!components || componentBytes === 0)
     {
-        return null;
+        // A packed type, a signed one, a format of 3.0: the general writer's.
+        return packFromStorage(texels, width, height, 1, format, type,
+            { ...pack, swapBytes: false },
+            /** @type {import('./formats.js').SizedFormat} */ (SIZED_FORMATS.get(GL.RGBA8)));
     }
     const pixelBytes = components.length * componentBytes;
     const groups = pack.rowLength > 0 ? pack.rowLength : width;

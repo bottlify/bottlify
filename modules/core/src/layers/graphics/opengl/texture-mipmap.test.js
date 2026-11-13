@@ -16,6 +16,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { GL } from './constants.js';
 import { createGlContext } from './context.js';
+import { TEX } from './formats.js';
 
 function gl(){
     const bytes = new Uint8Array(0x10000);
@@ -85,5 +86,104 @@ test('a chain stopped short of 1x1 is complete when GL_TEXTURE_MAX_LEVEL ends it
         new Uint8Array(4 * 2 * 4));
     assert.equal(context.isTextureComplete(GL.TEXTURE_2D), false, 'levels 2 and 3 missing');
     context.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MAX_LEVEL, 1);
+    assert.equal(context.isTextureComplete(GL.TEXTURE_2D), true);
+});
+
+/** @param {any} context @param {number} target */
+function bindNew(context, target){
+    const [name] = context.glGenTextures(1);
+    context.glBindTexture(target, name);
+    return name;
+}
+
+/** @param {number} w @param {number} h */
+const rgba = (w, h)=>new Uint8Array(w * h * 4).fill(200);
+
+test('3.8.8 (1.4): GL_GENERATE_MIPMAP makes the levels of a cube face', ()=>{
+    const context = gl();
+    bindNew(context, GL.TEXTURE_CUBE_MAP);
+    context.glTexParameteri(GL.TEXTURE_CUBE_MAP, GL.GENERATE_MIPMAP, GL.TRUE);
+    for (let face = 0; face < 6; face++)
+    {
+        context.glTexImage2D(GL.TEXTURE_CUBE_MAP_POSITIVE_X + face, 0, GL.RGBA, 4, 4, 0, GL.RGBA,
+            GL.UNSIGNED_BYTE, rgba(4, 4));
+    }
+    assert.deepEqual(context.glGetTexLevelParameteriv(GL.TEXTURE_CUBE_MAP_NEGATIVE_Z, 2,
+        GL.TEXTURE_WIDTH), [1]);
+    assert.equal(context.isTextureComplete(GL.TEXTURE_CUBE_MAP), true);
+});
+
+test('3.8.8 (1.4): GL_GENERATE_MIPMAP makes the levels of a compressed base image', ()=>{
+    const context = gl();
+    bindNew(context, GL.TEXTURE_2D);
+    context.glTexParameteri(GL.TEXTURE_2D, GL.GENERATE_MIPMAP, GL.TRUE);
+    context.glCompressedTexImage2DARB(GL.TEXTURE_2D, 0, GL.COMPRESSED_RGBA_S3TC_DXT1_EXT, 8, 8,
+        0, 32, new Uint8Array(32));
+    assert.equal(context.glGetError(), GL.NO_ERROR);
+    assert.equal(context.isTextureComplete(GL.TEXTURE_2D), true);
+});
+
+test('3.8.8 (1.4): GL_GENERATE_MIPMAP makes the levels of a 1D image', ()=>{
+    const context = gl();
+    bindNew(context, GL.TEXTURE_1D);
+    context.glTexParameteri(GL.TEXTURE_1D, GL.GENERATE_MIPMAP, GL.TRUE);
+    context.glTexImage1D(GL.TEXTURE_1D, 0, GL.RGBA, 4, 0, GL.RGBA, GL.UNSIGNED_BYTE, rgba(4, 1));
+    assert.equal(context.glGetError(), GL.NO_ERROR);
+    assert.equal(context.isTextureComplete(GL.TEXTURE_1D), true);
+});
+
+test('3.8.8 (1.4): GL_GENERATE_MIPMAP makes levels from BASE_LEVEL down, not from level 0', ()=>{
+    const context = gl();
+    bindNew(context, GL.TEXTURE_2D);
+    context.glTexImage2D(GL.TEXTURE_2D, 0, GL.RGBA, 8, 8, 0, GL.RGBA, GL.UNSIGNED_BYTE, rgba(8, 8));
+    context.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_BASE_LEVEL, 1);
+    context.glTexParameteri(GL.TEXTURE_2D, GL.GENERATE_MIPMAP, GL.TRUE);
+    context.glTexImage2D(GL.TEXTURE_2D, 1, GL.RGBA, 2, 2, 0, GL.RGBA, GL.UNSIGNED_BYTE, rgba(2, 2));
+    assert.deepEqual(context.glGetTexLevelParameteriv(GL.TEXTURE_2D, 2, GL.TEXTURE_WIDTH), [1]);
+});
+
+test('3.8.8 (1.4): GL_GENERATE_MIPMAP of one cube face remakes that face alone', ()=>{
+    const context = gl();
+    bindNew(context, GL.TEXTURE_CUBE_MAP);
+    for (let face = 0; face < 6; face++)
+    {
+        context.glTexImage2D(GL.TEXTURE_CUBE_MAP_POSITIVE_X + face, 0, GL.RGBA, 2, 2, 0, GL.RGBA,
+            GL.UNSIGNED_BYTE, rgba(2, 2));
+        context.glTexImage2D(GL.TEXTURE_CUBE_MAP_POSITIVE_X + face, 1, GL.RGBA, 1, 1, 0, GL.RGBA,
+            GL.UNSIGNED_BYTE, Uint8Array.of(face, 0, 0, 255));
+    }
+    context.glTexParameteri(GL.TEXTURE_CUBE_MAP, GL.GENERATE_MIPMAP, GL.TRUE);
+    context.glTexSubImage2D(GL.TEXTURE_CUBE_MAP_NEGATIVE_X, 0, 0, 0, 2, 2, GL.RGBA,
+        GL.UNSIGNED_BYTE, new Uint8Array(16).fill(100));
+    /** @param {number} face */
+    const small = face=>Array.from(context.glGetTexImage(GL.TEXTURE_CUBE_MAP_POSITIVE_X + face, 1,
+        GL.RGBA, GL.UNSIGNED_BYTE));
+    assert.deepEqual(small(1), [100, 100, 100, 100], 'the face written');
+    assert.deepEqual(small(0), [0, 0, 0, 255], 'another face keeps its own level');
+    assert.deepEqual(small(5), [5, 0, 0, 255]);
+});
+
+test('3.0 3.8.8: glGenerateMipmap of a 3D texture halves its slices too, averaging them', ()=>{
+    const context = gl();
+    bindNew(context, GL.TEXTURE_3D);
+    context.glTexImage3D(GL.TEXTURE_3D, 0, GL.RGBA8, 2, 2, 2, 0, GL.RGBA, GL.UNSIGNED_BYTE,
+        Uint8Array.from({ length: 32 }, (_, k)=>(k < 16 ? 0 : 200)));
+    context.glGenerateMipmap(GL.TEXTURE_3D);
+    assert.equal(context.glGetError(), GL.NO_ERROR);
+    assert.deepEqual(context.glGetTexLevelParameteriv(GL.TEXTURE_3D, 1, TEX.TEXTURE_DEPTH), [1]);
+    const answer = context.glGetTexImage(GL.TEXTURE_3D, 1, GL.RGBA, GL.UNSIGNED_BYTE);
+    assert.deepEqual(Array.from(answer.packed), [100, 100, 100, 100]);
+    context.glTexParameteri(GL.TEXTURE_3D, GL.TEXTURE_MIN_FILTER, GL.LINEAR_MIPMAP_LINEAR);
+    assert.equal(context.isTextureComplete(GL.TEXTURE_3D), true);
+});
+
+test('3.8.8: generated levels end at GL_TEXTURE_MAX_LEVEL', ()=>{
+    const context = gl();
+    context.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MAX_LEVEL, 1);
+    context.glTexParameteri(GL.TEXTURE_2D, GL.GENERATE_MIPMAP, GL.TRUE);
+    context.glTexImage2D(GL.TEXTURE_2D, 0, GL.RGBA, 8, 8, 0, GL.RGBA, GL.UNSIGNED_BYTE,
+        rgba(8, 8));
+    assert.equal(widthAt(context, 1), 4);
+    assert.equal(widthAt(context, 2), 0, 'no level past MAX_LEVEL');
     assert.equal(context.isTextureComplete(GL.TEXTURE_2D), true);
 });

@@ -2104,3 +2104,11 @@ machine (registry values, copies of support files), is not run: the install says
 started is the primary play task of `goggame-<id>.info`, with its arguments; its working folder
 is not carried, the program starting in its own folder. Generation-1 builds are refused with what
 they are. *2026-11-12.*
+
+**A242. GL_CLAMP clamps to the edge, as GL_CLAMP_TO_EDGE does,** said when a texture or a
+sampler is given it: GL_CLAMP clamps a coordinate to [0, 1], so a linear filter at the edge takes
+half its weight from the border (the border colour, for an image without border texels). WebGPU
+has no border to address, and the device and the processor both sample GL_CLAMP as
+GL_CLAMP_TO_EDGE, so the two paths agree; the difference from GL is the outer half texel of a
+linearly filtered texture, which keeps the edge texel here where GL fades it toward the border
+colour. Emulating it is the coordinate test in every shader that A186 would need. *2026-11-13.*

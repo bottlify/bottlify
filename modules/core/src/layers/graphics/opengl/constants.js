@@ -246,6 +246,7 @@ export const GL = Object.freeze({
     MIRRORED_REPEAT: 0x8370,
     TEXTURE_WIDTH: 0x1000,
     TEXTURE_HEIGHT: 0x1001,
+    TEXTURE_BORDER: 0x1005,
     TEXTURE_INTERNAL_FORMAT: 0x1003,
     TEXTURE_RED_SIZE: 0x805c,
     TEXTURE_GREEN_SIZE: 0x805d,
@@ -618,6 +619,10 @@ export const GL = Object.freeze({
     MIN_SAMPLE_SHADING_VALUE: 0x8c37,
     TEXTURE_MAX_ANISOTROPY: 0x84fe,
     MAX_TEXTURE_MAX_ANISOTROPY: 0x84ff,
+    // OpenGL 1.4's LOD bias (EXT_texture_lod_bias).
+    MAX_TEXTURE_LOD_BIAS: 0x84fd,
+    TEXTURE_FILTER_CONTROL: 0x8500,
+    TEXTURE_LOD_BIAS: 0x8501,
 
     // --- GL_ARB_multitexture ---
     TEXTURE0: 0x84c0,
@@ -1246,6 +1251,10 @@ export const GL = Object.freeze({
     SRGB8: 0x8c41,
     SRGB_ALPHA: 0x8c42,
     SRGB8_ALPHA8: 0x8c43,
+    SLUMINANCE_ALPHA: 0x8c44,
+    SLUMINANCE8_ALPHA8: 0x8c45,
+    SLUMINANCE: 0x8c46,
+    SLUMINANCE8: 0x8c47,
     CURRENT_RASTER_SECONDARY_COLOR: 0x845f,
 });
 

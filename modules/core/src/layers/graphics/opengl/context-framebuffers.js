@@ -40,6 +40,16 @@ import {
 } from './objects.js';
 import { TEX, componentTypeOf } from './formats.js';
 import { rgbaOf } from './texture-levels.js';
+import { compressedBytes } from './texture.js';
+
+/**
+ * The targets glGenerateMipmap takes (3.0 section 3.8.8, and 4.0's cube map
+ * arrays).
+ *
+ * @type {ReadonlySet<number>}
+ */
+const MIPMAP_TARGETS = new Set([GL.TEXTURE_1D, GL.TEXTURE_2D, GL.TEXTURE_3D, GL.TEXTURE_CUBE_MAP,
+    TEX.TEXTURE_1D_ARRAY, TEX.TEXTURE_2D_ARRAY, TEX.TEXTURE_CUBE_MAP_ARRAY]);
 
 /**
  * @typedef {import('./objects.js').RenderbufferObject} RenderbufferObject
@@ -352,6 +362,75 @@ export function installFramebufferCalls(context, kernel){
         setState(GL.READ_FRAMEBUFFER_BINDING, [readFbo?.name ?? 0]);
         setState(GL.RENDERBUFFER_BINDING, [boundRenderbuffer?.name ?? 0]);
     };
+
+    /**
+     * The levels from GL_TEXTURE_BASE_LEVEL + 1 down to the last the base's
+     * size or GL_TEXTURE_MAX_LEVEL allows, each made from the base image in
+     * its internal format (3.8.8): glGenerateMipmap's work, and
+     * GL_GENERATE_MIPMAP's (1.4) on every target and every image call. A
+     * cube map's faces are each their own chain; `only` names the one face
+     * an image call changed. On a device the levels are drawn there, from
+     * what it holds of the base - a framebuffer may have drawn it - except a
+     * 3D texture's, which no 2D draw makes and are averaged here.
+     *
+     * @param {import('./objects.js').TextureObject} texture
+     * @param {number} [only]  the face, where one face changed
+     */
+    function generateLevels(texture, only){
+        const first = texture.parameters.get(GL.TEXTURE_BASE_LEVEL) ?? 0;
+        const base = texture.levels.get(levelKey(first, only ?? 0));
+        if (!base)
+        {
+            return;
+        }
+        if ((base.border ?? 0) !== 0)
+        {
+            kernel.lose('a mipmap of an image with a border was not made: its levels are not'
+                + ' generated here');
+            return;
+        }
+        const solid = texture.target === GL.TEXTURE_3D;
+        const rows = texture.target === TEX.TEXTURE_1D_ARRAY;
+        const extent = Math.max(base.width, rows ? 1 : base.height,
+            solid ? base.depth ?? 1 : 1);
+        const last = Math.min(first + Math.floor(Math.log2(extent)),
+            texture.parameters.get(GL.TEXTURE_MAX_LEVEL) ?? 1000);
+        const device = kernel.gpuBacked() && !solid;
+        if (device && base.sized?.compressed)
+        {
+            kernel.lose(`the mipmap of a ${base.sized.name} texture was not made on the device:`
+                + ' no draw writes blocks, and the device samples its base level alone');
+        }
+        const faces = only !== undefined ? [only]
+            : texture.target === GL.TEXTURE_CUBE_MAP ? [0, 1, 2, 3, 4, 5] : [0];
+        for (const face of faces)
+        {
+            const top = texture.levels.get(levelKey(first, face));
+            if (!top)
+            {
+                continue;
+            }
+            for (let level = first + 1; level <= last; level++)
+            {
+                const made = derivedLevel(top, level - first, device, solid, rows);
+                if (made.lost)
+                {
+                    kernel.lose(`a mipmap of ${top.sized?.name ?? 'a'} format made no texels on`
+                        + ' the processor: only 8-bit components are averaged here');
+                }
+                texture.levels.set(levelKey(level, face), made.level);
+                if (!device)
+                {
+                    texture.dirty.set(levelKey(level, face), null);
+                }
+            }
+        }
+        if (device && last > first)
+        {
+            kernel.generateMipmap?.(texture, only);
+        }
+    }
+    kernel.side.generateLevels = generateLevels;
 
     Object.assign(kernel.side, {
         /**
@@ -1213,7 +1292,7 @@ export function installFramebufferCalls(context, kernel){
 
         /**
          * The levels below the base level of the texture bound to `target`,
-         * each half the one above, made from it on the device.
+         * each half the one above, made from it (3.0 section 3.8.8).
          *
          * @param {number} target
          */
@@ -1222,9 +1301,7 @@ export function installFramebufferCalls(context, kernel){
             {
                 return;
             }
-            const layered = target === TEX.TEXTURE_2D_ARRAY
-                || target === TEX.TEXTURE_CUBE_MAP_ARRAY;
-            if (target !== GL.TEXTURE_2D && target !== GL.TEXTURE_CUBE_MAP && !layered)
+            if (!MIPMAP_TARGETS.has(target))
             {
                 setError(GL.INVALID_ENUM);
                 return;
@@ -1232,59 +1309,23 @@ export function installFramebufferCalls(context, kernel){
             const unit = kernel.side.activeUnit();
             const texture = kernel.side.textureBoundAt(unit, target)
                 ?? kernel.side.units[unit].defaults.get(target);
-            const faces = target === GL.TEXTURE_CUBE_MAP ? 6 : 1;
-            const base = texture?.levels.get(levelKey(0));
+            const first = texture?.parameters.get(GL.TEXTURE_BASE_LEVEL) ?? 0;
+            const base = texture?.levels.get(levelKey(first));
             if (!texture || !base)
             {
                 return;
             }
-            if (faces === 6 && (base.width !== base.height
-                || [1, 2, 3, 4, 5].some(face=>!texture.levels.get(levelKey(0, face)))))
+            const square = base.width === base.height;
+            if ((target === GL.TEXTURE_CUBE_MAP && (!square || [1, 2, 3, 4, 5].some(face=>{
+                const image = texture.levels.get(levelKey(first, face));
+                return !image || image.width !== base.width
+                    || image.internalFormat !== base.internalFormat;
+            }))) || (target === TEX.TEXTURE_CUBE_MAP_ARRAY && !square))
             {
                 setError(GL.INVALID_OPERATION);
                 return;
             }
-            if (target === TEX.TEXTURE_CUBE_MAP_ARRAY && base.width !== base.height)
-            {
-                setError(GL.INVALID_OPERATION);
-                return;
-            }
-            const levels = Math.floor(Math.log2(Math.max(base.width, base.height))) + 1;
-            if (layered)
-            {
-                // An array's levels keep its layers; each layer is its own image.
-                for (let level = 1; level < levels; level++)
-                {
-                    const made = layeredLevel(base, level, kernel.gpuBacked());
-                    if (made.lost)
-                    {
-                        kernel.lose(`glGenerateMipmap of an array of ${base.sized?.name ?? 'a'}`
-                            + ' format made no texels on the processor: only 8-bit components'
-                            + ' are averaged here');
-                    }
-                    texture.levels.set(levelKey(level), made.level);
-                }
-                kernel.generateMipmap?.(texture);
-                return;
-            }
-            for (let face = 0; face < faces; face++)
-            {
-                const top = texture.levels.get(levelKey(0, face));
-                for (let level = 1; level < levels; level++)
-                {
-                    texture.levels.set(levelKey(level, face), {
-                        width: Math.max(1, base.width >> level),
-                        height: Math.max(1, base.height >> level),
-                        internalFormat: top.internalFormat, border: 0,
-                        baseFormat: top.baseFormat,
-                        // On a device the levels are made there, from what it holds.
-                        texels: kernel.gpuBacked() ? null
-                            : downsample(top.texels, base.width, base.height, level),
-                        compressed: null,
-                    });
-                }
-            }
-            kernel.generateMipmap?.(texture);
+            generateLevels(texture);
         },
 
         /**
@@ -1337,86 +1378,90 @@ export function installFramebufferCalls(context, kernel){
 }
 
 /**
- * A mipmap level of an array (2D or of cube maps) made from its base level:
- * the base's layers each averaged down, where the context keeps the base's
- * bytes and they are 8-bit components; on a device the level is made there
- * and holds none here. `lost` says the processor's could not be made.
+ * A mipmap level made from a base level, `step` levels below it, in its
+ * internal format: its bytes averaged from the base's where they are here
+ * and the device does not make them. An array's layers (a 1D array's rows)
+ * stay, a 3D texture's slices halve.
  *
- * @param {import('./objects.js').TextureLevel} base @param {number} level
- * @param {boolean} device
+ * @param {import('./objects.js').TextureLevel} top  the base level
+ * @param {number} step @param {boolean} device  the levels are drawn on the device
+ * @param {boolean} solid  a 3D texture @param {boolean} rows  a 1D array
  * @returns {{ level: import('./objects.js').TextureLevel, lost: boolean }}
  */
-function layeredLevel(base, level, device){
-    const width = Math.max(1, base.width >> level);
-    const height = Math.max(1, base.height >> level);
-    const layers = base.depth ?? 1;
-    const sized = base.sized ?? null;
-    const channels = sized && !sized.compressed && sized.packing === null
-        && sized.bits.every(bits=>bits === 0 || bits === 8) && sized.depth === 0
-        && sized.stencil === 0 ? sized.bits.filter(bits=>bits > 0).length : 0;
-    /** @type {Uint8Array | null} */
-    let data = null;
-    if (!device && base.data && channels > 0)
+function derivedLevel(top, step, device, solid, rows){
+    const width = Math.max(1, top.width >> step);
+    const height = rows ? top.height : Math.max(1, top.height >> step);
+    const layers = top.depth ?? 1;
+    const depth = solid ? Math.max(1, layers >> step) : layers;
+    const shape = { width, height, internalFormat: top.internalFormat, border: 0,
+        baseFormat: top.baseFormat, compressed: null };
+    /** @param {Uint8Array} bytes @param {number} channels */
+    const average = (bytes, channels)=>downsampleBytes(bytes, top.width, top.height, layers,
+        [step, rows ? 0 : step, solid ? step : 0], channels);
+    const sized = top.sized ?? null;
+    if (sized && !sized.compressed)
     {
-        const slice = base.width * base.height * channels;
-        const made = width * height * channels;
-        data = new Uint8Array(made * layers);
-        for (let layer = 0; layer < layers; layer++)
-        {
-            data.set(downsampleBytes(base.data.subarray(layer * slice, (layer + 1) * slice),
-                base.width, base.height, level, channels), layer * made);
-        }
+        const channels = sized.packing === null && sized.depth === 0 && sized.stencil === 0
+            && sized.bits.every(bits=>bits === 0 || bits === 8)
+            ? sized.bits.filter(bits=>bits > 0).length : 0;
+        const data = !device && top.data && channels > 0 ? average(top.data, channels) : null;
+        return { level: { ...shape, depth, sized, data,
+            texels: data ? rgbaOf(data, sized, width, height, depth) : null },
+        lost: !device && !!top.data && !data };
     }
-    /** @type {import('./objects.js').TextureLevel} */
-    const made = { width, height, depth: layers, internalFormat: base.internalFormat,
-        border: 0, baseFormat: base.baseFormat, sized, data, compressed: null,
-        texels: data && sized ? rgbaOf(data, sized, width, height, layers) : null };
-    return { level: made, lost: !device && !!base.data && !data };
+    // A legacy level, or one of blocks: averaged from its RGBA texels (the
+    // blocks decoded), and kept as texels - no block is encoded here, so a
+    // device samples the texture uncompressed.
+    const texels = device ? null : top.texels ? average(top.texels, 4) : null;
+    if (sized)
+    {
+        return { level: { ...shape, depth, sized: null, texels }, lost: false };
+    }
+    return { level: top.compressedFormat === undefined ? { ...shape, texels }
+        : { ...shape, texels, compressedFormat: top.compressedFormat,
+            compressedBytes: compressedBytes(top.compressedFormat, width, height) },
+    lost: false };
 }
 
 /**
- * A mipmap level's texels made from the base level's by averaging, where
- * the context keeps the base level's: the processor's half of
- * glGenerateMipmap. A level rendered on the device has none here, and is
- * made there.
- *
- * @param {Uint8Array | null} texels @param {number} width @param {number} height
- * @param {number} level
- * @returns {Uint8Array | null}
- */
-function downsample(texels, width, height, level){
-    return texels ? downsampleBytes(texels, width, height, level, 4) : null;
-}
-
-/**
- * An image of `channels` bytes a texel, averaged down to `level`.
+ * An image of `channels` bytes a texel and `depth` slices, each texel of
+ * the result the mean of the box of 2^shift texels of each axis it covers.
  *
  * @param {Uint8Array} texels @param {number} width @param {number} height
- * @param {number} level @param {number} channels
+ * @param {number} depth @param {number[]} shifts  of x, y and z
+ * @param {number} channels
  * @returns {Uint8Array}
  */
-function downsampleBytes(texels, width, height, level, channels){
-    const w = Math.max(1, width >> level);
-    const h = Math.max(1, height >> level);
-    const step = 1 << level;
-    const out = new Uint8Array(w * h * channels);
-    for (let y = 0; y < h; y++)
+function downsampleBytes(texels, width, height, depth, shifts, channels){
+    const [sx, sy, sz] = shifts.map(shift=>1 << shift);
+    const w = Math.max(1, width >> shifts[0]);
+    const h = Math.max(1, height >> shifts[1]);
+    const d = Math.max(1, depth >> shifts[2]);
+    const out = new Uint8Array(w * h * d * channels);
+    for (let z = 0; z < d; z++)
     {
-        for (let x = 0; x < w; x++)
+        for (let y = 0; y < h; y++)
         {
-            for (let c = 0; c < channels; c++)
+            for (let x = 0; x < w; x++)
             {
-                let sum = 0;
-                let count = 0;
-                for (let dy = 0; dy < step && y * step + dy < height; dy++)
+                for (let c = 0; c < channels; c++)
                 {
-                    for (let dx = 0; dx < step && x * step + dx < width; dx++)
+                    let sum = 0;
+                    let count = 0;
+                    for (let k = z * sz; k < Math.min(depth, (z + 1) * sz); k++)
                     {
-                        sum += texels[((y * step + dy) * width + x * step + dx) * channels + c];
-                        count++;
+                        for (let j = y * sy; j < Math.min(height, (y + 1) * sy); j++)
+                        {
+                            for (let i = x * sx; i < Math.min(width, (x + 1) * sx); i++)
+                            {
+                                sum += texels[((k * height + j) * width + i) * channels + c];
+                                count++;
+                            }
+                        }
                     }
+                    out[((z * h + y) * w + x) * channels + c] = Math.round(sum
+                        / Math.max(1, count));
                 }
-                out[(y * w + x) * channels + c] = Math.round(sum / Math.max(1, count));
             }
         }
     }

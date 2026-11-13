@@ -20,7 +20,7 @@
  */
 
 import { GL } from './constants.js';
-import { samplingRefusal } from './context-textures.js';
+import { clampDivergence, samplingRefusal } from './context-textures.js';
 import { TEX } from './formats.js';
 
 /** The calls of this file a display list does not record: all of them. */
@@ -194,6 +194,11 @@ export function installSamplerCalls(context, kernel){
             {
                 setError(refusal);
                 return;
+            }
+            const clamped = clampDivergence(parameter, values[0]);
+            if (clamped)
+            {
+                kernel.diverge(clamped);
             }
             sampler.parameters.set(parameter, values[0]);
             sampler.parametersVersion++;
