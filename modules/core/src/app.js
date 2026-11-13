@@ -383,6 +383,12 @@ const hashText = (hash, text)=>{
  * @property {SpareMemory | null} [reusedMemory]
  *           The memory of a process of the run that has gone, for this one to
  *           take: set by the run, not something a caller supplies.
+ * @property {SpareMemory[]} [spareMemories]
+ *           The run's memories of gone processes, where this run is a process the
+ *           run put in a worker of its own: each process built here takes one,
+ *           each gone puts its own back, and they are kept past `dispose` for the
+ *           worker to hand back to the run's thread. Set by the run, not something
+ *           a caller supplies.
  * @property {boolean} [exitNotice]
  *           Whether a run the program ended with exit code 0 says so to the
  *           player: a `message-box` of the engine's own (`exit: { code }`,
@@ -10756,13 +10762,15 @@ export async function createApp(options){
      * at once -- would hold one memory per child until the page ran out. A
      * process hands its memory back as it goes and the next one takes it, so
      * a run holds as many as it ever ran at once, and `SPARE_MEMORIES` more.
+     * The run's, where a process is put in a worker of its own: a worker hands
+     * its process's back as it ends (`runAcross`), and a process in a worker
+     * keeps those it was handed there (`spareMemories`).
      *
      * @type {SpareMemory[]}
      */
-    const spareMemories = [];
-    /** @param {any} gone  a machine disposed */
-    const keepMemory = gone=>{
-        const spare = gone?.spareMemory?.();
+    const spareMemories = options.spareMemories ?? [];
+    /** @param {SpareMemory | null | undefined} spare */
+    const keepSpare = spare=>{
         if (spare && !spareMemories.some(one=>one.memory === spare.memory))
         {
             spareMemories.push(spare);
@@ -10772,6 +10780,8 @@ export async function createApp(options){
             }
         }
     };
+    /** @param {any} gone  a machine disposed */
+    const keepMemory = gone=>keepSpare(gone?.spareMemory?.());
 
     /**
      * A machine for a process, named to the class table.
@@ -11638,6 +11648,11 @@ export async function createApp(options){
                 worker.onMessage(data=>{
                     if (data?.type === 'exited')
                     {
+                        // The memories it ran in, for the next process the run starts.
+                        for (const spare of data.memories ?? [])
+                        {
+                            keepSpare(spare);
+                        }
                         ended = data.code;
                         if (data.journal)
                         {
@@ -11662,9 +11677,19 @@ export async function createApp(options){
                 // callback: neither crosses, and the child shows nothing itself.
                 const knobs = Object.fromEntries(Object.entries(options.graphics ?? {})
                     .filter(([key, value])=>key !== 'presenter' && typeof value !== 'function'));
+                // A gone process's memory to run in, where the run keeps one: a
+                // shared memory crosses to the worker, and comes back as it ends.
+                const shareable = spareMemories.filter(spare=>typeof SharedArrayBuffer
+                    === 'function' && spare.memory.buffer instanceof SharedArrayBuffer);
+                const handed = shareable.at(-1);
+                if (handed)
+                {
+                    spareMemories.splice(spareMemories.indexOf(handed), 1);
+                }
                 worker.post({
                     type: 'start',
                     end: memory.b,
+                    memories: handed ? [handed] : [],
                     volume: { revisions: system.volume.revisions ?? null,
                         sharing: system.volume.sharingMemory ?? null },
                     // The run's foreground window, focus and captured window,
@@ -12400,6 +12425,13 @@ export async function createApp(options){
         dispose: ()=>Promise.all([...serving].map(line=>line.current.dispose()))
             .then(()=>current.dispose())
             .then(()=>{
+                // A process in a worker of its own keeps its memories for the
+                // worker to hand back to the run's thread.
+                if (options.spareMemories)
+                {
+                    [...serving].forEach(line=>keepMemory(line.current));
+                    keepMemory(current);
+                }
                 system.bundle?.stop();
                 // The run's store outlives each machine it was handed to, and
                 // goes with the last of them.
@@ -12409,7 +12441,10 @@ export async function createApp(options){
                 }
             })
             .finally(()=>{
-                spareMemories.length = 0;
+                if (!options.spareMemories)
+                {
+                    spareMemories.length = 0;
+                }
                 shownHere?.dispose();
                 presenter?.dispose?.();
                 translationPool?.dispose();

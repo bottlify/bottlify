@@ -215,28 +215,62 @@ function parentOf(commands){
 }
 
 /**
+ * Whether a process's diagnostics say it ran in a gone process's memory
+ * (the cpu layer's `memoryReused`), wherever in its tables that is.
+ *
+ * @param {any} tables
+ * @returns {boolean | undefined}
+ */
+const memoryReused = tables=>{
+    if (tables === null || typeof tables !== 'object')
+    {
+        return undefined;
+    }
+    if (typeof tables.memoryReused === 'boolean')
+    {
+        return tables.memoryReused;
+    }
+    for (const value of Object.values(tables))
+    {
+        const found = memoryReused(value);
+        if (found !== undefined)
+        {
+            return found;
+        }
+    }
+    return undefined;
+};
+
+/**
  * Runs the commands one after another in one run, and answers each child's
  * exit code and whether it ran in a gone process's memory.
  *
  * @param {string[]} commands
  * @param {{ path: string, bytes: Uint8Array }[]} files
  * @param {number} cores
+ * @param {import('./mode.js').Concurrency} [concurrency]  2: each child in a worker of its own
  */
-async function runChildren(commands, files, cores){
+async function runChildren(commands, files, cores, concurrency = 1){
     const app = await createApp({
         executable: parentOf(commands),
         imagePath: 'C:\\App\\parent.exe',
         cpu: { cores },
+        concurrency,
         storage: { load: async()=>({ files }) },
     });
     try
     {
         /** @type {number[]} */
         const codes = [];
-        app.on('process-resumed', (/** @type {any} */ event)=>codes.push(event.code >>> 0));
+        /** @type {(boolean | undefined)[]} */
+        const reused = [];
+        app.on('process-resumed', (/** @type {any} */ event)=>{
+            codes.push(event.code >>> 0);
+            reused.push(memoryReused(event.diagnostics));
+        });
         assert.equal(await app.run({ timeoutMs: 120_000 }), 0);
         assert.equal(codes.length, commands.length, 'every child ran');
-        return codes;
+        return Object.assign(codes, { reused });
     }
     finally
     {
@@ -244,10 +278,12 @@ async function runChildren(commands, files, cores){
     }
 }
 
-for (const [seed, cores] of [[1, 1], [2, 1], [3, 3], [4, 1], [5, 3], [6, 8]])
+for (const [seed, cores, concurrency] of /** @type {[number, number, 1 | 2][]} */ ([[1, 1, 1],
+    [2, 1, 1], [3, 3, 1], [4, 1, 1], [5, 3, 1], [6, 8, 1], [7, 1, 2], [8, 3, 2]]))
 {
     test(`seeded program ${seed} reads in a gone program's memory what it reads in a new one`
-        + ` (${cores} executor${cores > 1 ? 's' : ''})`, { timeout: 600_000 }, async()=>{
+        + ` (${cores} executor${cores > 1 ? 's' : ''}${concurrency > 1
+            ? ', each in a worker of its own' : ''})`, { timeout: 600_000 }, async()=>{
         // The writer is handed more and wider than the reader, and writes over
         // all of it: whatever of it the reader is handed again it reads.
         const writer = stepsProgram(stepsOf(seed * 7919, 24, true)
@@ -257,11 +293,19 @@ for (const [seed, cores] of [[1, 1], [2, 1], [3, 3], [4, 1], [5, 3], [6, 8]])
         const reader = stepsProgram(stepsOf(seed, 16, false).concat(Op.THREAD, 6 * 1024, 0));
         const files = [{ path: 'C:\\App\\writer.exe', bytes: writer },
             { path: 'C:\\App\\reader.exe', bytes: reader }];
-        const [alone] = await runChildren(['C:\\App\\reader.exe'], files, cores);
+        const [alone] = await runChildren(['C:\\App\\reader.exe'], files, cores, concurrency);
         // And once more, in the memory the reader itself left: what a gone
         // process's bytes are must carry from one taker to the next.
-        const [, after, again] = await runChildren(['C:\\App\\writer.exe',
-            'C:\\App\\reader.exe', 'C:\\App\\reader.exe'], files, cores);
+        const chain = await runChildren(['C:\\App\\writer.exe',
+            'C:\\App\\reader.exe', 'C:\\App\\reader.exe'], files, cores, concurrency);
+        const [, after, again] = chain;
+        if (concurrency > 1)
+        {
+            // A child in a worker of its own says what it ran in as it exits;
+            // one on the engine's thread is counted by spawn-children's test.
+            assert.deepEqual(chain.reused, [false, true, true],
+                'each child after the first in the memory the one before it left, across workers');
+        }
         assert.equal(after, alone, 'the same reads after the writer as in a memory just made');
         assert.equal(again, alone, 'and after the reader');
     });
