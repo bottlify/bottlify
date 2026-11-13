@@ -24,6 +24,9 @@ import { createCodeArena } from './kernel32/code-arena.js';
 import { createGuestHeap } from './kernel32/guest-heap.js';
 import { createCriticalSections } from './kernel32/critical.js';
 import { createLocaleFunctions, decodeAnsi, encodeAnsi } from './kernel32/locale.js';
+import { guestEntry } from './msvcrt/guest-code.js';
+import * as kernel32InGuest from './kernel32/inguest.js';
+import { COMPILED as KERNEL32_COMPILED } from './kernel32/inguest.x86.js';
 import {
     ENVIRONMENT_NOW, createEnvironmentFunctions, createUserenvFunctions, defaultEnvironment,
     machineArchitecture, sessionEnvironment,
@@ -187,6 +190,24 @@ import { CLSID_MF_READ_WRITE_CLASS_FACTORY, createMfReadWriteFunctions }
 import { createPropsysFunctions } from './propsys/functions.js';
 import { SHARED_RESOURCE_HANDLE } from './ntdll/query.js';
 
+/**
+ * The locale functions with MultiByteToWideChar and WideCharToMultiByte
+ * answered in the guest over ASCII (`kernel32/inguest.js`), their handlers in
+ * `kernel32/locale.js` taking everything else through a trap the code jumps to.
+ *
+ * @param {Record<string, any>} table
+ * @param {{ readMemory: (address: number, length: number) => Uint8Array,
+ *     writeMemory: (address: number, bytes: Uint8Array) => void }} memory
+ */
+export function conversionsInGuest(table, memory){
+    return {
+        ...table,
+        MultiByteToWideChar: guestEntry(kernel32InGuest.MultiByteToWideChar,
+            KERNEL32_COMPILED.MultiByteToWideChar, memory, table.MultiByteToWideChar),
+        WideCharToMultiByte: guestEntry(kernel32InGuest.WideCharToMultiByte,
+            KERNEL32_COMPILED.WideCharToMultiByte, memory, table.WideCharToMultiByte),
+    };
+}
 
 /** The programs this build runs in place of the system's, standing as files where Windows keeps them. */
 const SYSTEM_PROGRAM_FILES = Object.freeze({ at: systemProgramAt, image: systemProgramImage });
@@ -2807,7 +2828,7 @@ export function createWin32Module(){
                         setRegisters,
                         divergence: config?.divergence,
                     }),
-                    ...createLocaleFunctions({
+                    ...conversionsInGuest(createLocaleFunctions({
                         readMemory, writeMemory, stringLength,
                         setLastError: setError,
                         divergence: config?.divergence,
@@ -2819,7 +2840,7 @@ export function createWin32Module(){
                         allocate: bytes=>heap.allocate(bytes),
                         /** @param {number} address */
                         free: address=>heap.free(address),
-                    }),
+                    }), { readMemory, writeMemory }),
                     ...createResourceFunctions({
                         readCString,
                         readWideString,

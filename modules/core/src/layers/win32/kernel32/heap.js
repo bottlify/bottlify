@@ -21,6 +21,9 @@
 
 import { pointerArg } from '../common/pointers.js';
 import { askChild } from './cross-process.js';
+import { guestEntry } from '../msvcrt/guest-code.js';
+import * as inGuest from './inguest.js';
+import { COMPILED } from './inguest.x86.js';
 import {
     globalAllocCode, globalFreeCode, heapAllocCode, heapFreeCode, heapReAllocCode, heapSizeCode,
 } from './guest-heap.js';
@@ -942,6 +945,11 @@ export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT, 
  *           PAGE_NOACCESS, fault on any access, as on Windows. False where the
  *           processor does not fault a read, and then every page reads.
  */
+
+/**
+ * FlushInstructionCache's handler, the reference of its guest code (`inguest.js`).
+ */
+const flushInstructionCache = { argBytes: 12, handler: ()=>1 };
 
 /**
  * Builds the function table: name -> { argBytes, handler }.
@@ -2586,10 +2594,8 @@ export function createHeapFunctions(host){
          * a reason not to jump. The processor here notices a written code page
          * on its own, so the request is already satisfied by the time it arrives.
          */
-        FlushInstructionCache: {
-            argBytes: 12,
-            handler: ()=>1,
-        },
+        FlushInstructionCache: guestEntry(inGuest.FlushInstructionCache,
+            COMPILED.FlushInstructionCache, {}, flushInstructionCache),
 
         /**
          * SIZE_T VirtualQuery(LPCVOID lpAddress, PMEMORY_BASIC_INFORMATION lpBuffer,
