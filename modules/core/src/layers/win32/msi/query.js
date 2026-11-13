@@ -360,17 +360,20 @@ function bindTables(db, names){
 
 /**
  * A WHERE clause as a function of the joined rows and the parameters, the
- * parameters taken in the order the clause names them.
+ * parameters taken in the order the clause names them. Its `parts` are the
+ * clause's terms joined by AND at its top, in order, each with the last of the
+ * joined tables it reads (`last`, -1 for none): a join tests each as soon as
+ * that table is joined (`selectRows`).
  *
  * @param {import('./sql.js').Expression | null} expression
  * @param {(ref: import('./sql.js').ColumnRef) => { table: number, index: number,
  *     column: Column }} resolve
- * @returns {(rows: Row[], params: Record | null) => boolean}
+ * @returns {Where}
  */
 function compileWhere(expression, resolve){
     if (!expression)
     {
-        return ()=>true;
+        return Object.assign(()=>true, { parts: [] });
     }
     /** @type {{ next: number }} */
     const cursor = { next: 0 };
@@ -461,35 +464,93 @@ function compileWhere(expression, resolve){
             }
         };
     };
-    return compile(expression);
+    /**
+     * The last joined table a term reads.
+     *
+     * @param {import('./sql.js').Expression} node
+     * @returns {number}
+     */
+    const lastTable = node=>{
+        if (node.kind === 'and' || node.kind === 'or')
+        {
+            return Math.max(lastTable(node.left), lastTable(node.right));
+        }
+        if (node.kind === 'null' || node.kind === 'notnull')
+        {
+            return resolve(node.column).table;
+        }
+        if (node.kind !== 'compare')
+        {
+            return -1;
+        }
+        return Math.max(resolve(node.left).table,
+            'column' in node.right ? resolve(node.right.column).table : -1);
+    };
+    /** @type {import('./sql.js').Expression[]} */
+    const terms = [];
+    /** @param {import('./sql.js').Expression} node */
+    const split = node=>{
+        if (node.kind === 'and')
+        {
+            split(node.left);
+            split(node.right);
+            return;
+        }
+        terms.push(node);
+    };
+    split(expression);
+    // Compiled left to right, as the whole clause would be: its parameters
+    // numbered in the order it names them.
+    const parts = terms.map(node=>({ test: compile(node), last: lastTable(node) }));
+    return Object.assign((/** @type {Row[]} */ rows, /** @type {Record | null} */ params)=>
+        parts.every(part=>part.test(rows, params)), { parts });
 }
 
 /**
+ * @typedef {((rows: Row[], params: Record | null) => boolean)
+ *     & { parts: { test: (rows: Row[], params: Record | null) => boolean, last: number }[] }} Where
+ */
+
+/**
  * The rows of the tables joined, filtered by the clause, in the order the
- * statement asks for.
+ * statement asks for. Each term of the clause is tested as soon as the last
+ * table it reads is joined, so a join holds only the combinations still
+ * matching: the .NET Framework 4 setup's join of three tables of thousands of
+ * rows made every combination first, eleven million of them, two gigabytes
+ * of arrays for one view.
  *
  * @param {Database} db @param {Table[]} tables
- * @param {(rows: Row[], params: Record | null) => boolean} where
+ * @param {Where} where
  * @param {{ table: number, index: number, column: Column }[]} order
  * @param {Record | null} params
  */
 function selectRows(db, tables, where, order, params){
     /** @type {Row[][]} */
-    let results = [[]];
-    for (const table of tables)
+    let matched = [[]];
+    for (const [at, table] of tables.entries())
     {
+        const tests = where.parts.filter(part=>Math.max(part.last, 0) === at);
         /** @type {Row[][]} */
         const next = [];
-        for (const partial of results)
+        /** @type {Row[]} */
+        const probe = new Array(at + 1);
+        for (const partial of matched)
         {
+            for (let index = 0; index < at; index++)
+            {
+                probe[index] = partial[index];
+            }
             for (const row of table.rows)
             {
-                next.push([...partial, row]);
+                probe[at] = row;
+                if (tests.every(part=>part.test(probe, params)))
+                {
+                    next.push(probe.slice());
+                }
             }
         }
-        results = next;
+        matched = next;
     }
-    const matched = results.filter(rows=>where(rows, params));
     if (order.length > 0)
     {
         const positions = new Map(matched.map((rows, index)=>[rows, index]));
