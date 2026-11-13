@@ -57,6 +57,7 @@ import { CdpEndpoint, openPage } from './cdp.mjs';
 import { pausedStack, reportTimeout } from './timeout-report.mjs';
 import { serveStatic } from './server.mjs';
 import { describeProfile, profileWorkers, summarise, summariseAllocations } from './profile.mjs';
+import { censusWorkers } from './census.mjs';
 import { describeDevice, watchDevice } from './device-lag.mjs';
 import { openBundle } from '../btl.mjs';
 import { placementOf } from '../../modules/installer/src/prefix.js';
@@ -392,6 +393,9 @@ function parse(argv){
         // same window, garbage included (`old`: only what lived to be
         // promoted), and their heaps read every second -- what a long
         // collection pause was paid for.
+        // Every worker's large buffers by where they were made (`census.mjs`),
+        // written beside the report every minute and at the end.
+        census: argv.includes('--census'),
         heapProfile: argv.includes('--heap-profile')
             ? argv[argv.indexOf('--heap-profile') + 1] === 'old' ? 'old' : 'all'
             : null,
@@ -2159,7 +2163,26 @@ export async function game(options){
         /** @type {Awaited<ReturnType<typeof profileWorkers>> | null} */
         const profiler = options.cpuProfile > 0 && options.worker
             ? await profileWorkers(cdp, sessionId, { heap: options.heapProfile }) : null;
-        const deviceWatched = await device.install({ attach: profiler === null });
+        const census = options.census && options.worker
+            ? await censusWorkers(cdp, sessionId) : null;
+        const censusFile = join(REPORTS_DIR,
+            `game-${new Date().toISOString().replace(/[:.]/g, '-')}-census.json`);
+        const censusFrom = Date.now();
+        const writeCensus = async()=>{
+            const read = await census?.read().catch(()=>null);
+            if (read)
+            {
+                writeFileSync(censusFile, JSON.stringify({ at: Date.now() - censusFrom, ...read },
+                    null, 1));
+            }
+        };
+        const censusTimer = census ? setInterval(()=>{ writeCensus(); }, 60000) : null;
+        if (census)
+        {
+            say(`  census: ${censusFile}`);
+        }
+        const deviceWatched = await device.install({
+            attach: profiler === null && census === null });
         let profilingFrom = Date.now();
         /** @type {{ url: string, profile: any, allocations: any, windowMs: number, from: number }[] | null} */
         let cpuProfiles = null;
@@ -2484,6 +2507,11 @@ export async function game(options){
             }, options.dumpAt * 1000)
             : null;
         let result;
+        if (censusTimer)
+        {
+            clearInterval(censusTimer);
+            await writeCensus();
+        }
         try
         {
             result = await readResult(cdp, sessionId, options.waitMs + RESULT_GRACE_MS,
