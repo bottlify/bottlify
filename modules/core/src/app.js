@@ -11494,8 +11494,9 @@ export async function createApp(options){
             const graphics = graphicsWorker ? new MessageChannel() : null;
             if (graphics)
             {
-                graphicsWorker.postMessage({ type: 'client', port: graphics.port2 },
-                    [graphics.port2]);
+                // Named by its id, which its end below tells the worker to forget.
+                graphicsWorker.postMessage({ type: 'client', port: graphics.port2,
+                    client: request.id }, [graphics.port2]);
             }
             // And the pictures of its own surfaces -- a DirectDraw primary, the
             // desktop its windows are drawn on -- which come in as the graphics
@@ -11646,6 +11647,7 @@ export async function createApp(options){
                 ()=>held.sound?.giveBack(),
                 ()=>held.shown?.dispose(),
                 ()=>held.display?.port1.close(),
+                ()=>options.device?.worker?.postMessage({ type: 'forget', client: request.id }),
                 ()=>presenter?.forget?.(request.id),
             ], e=>events.emit('error', { reason: 'teardown', error: e }));
         }

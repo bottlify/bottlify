@@ -41,11 +41,15 @@
  *                                    presents may leave the GPU drawing (`latency.js`;
  *                                    absent, Direct3D's three, 0 no bound);
  *                                    `{ type: 'close' }` on the port ends it
- *   { type: 'client', port }         a way in for a process on another thread: `root`
+ *   { type: 'client', port, client } a way in for a process on another thread: `root`
  *                                    on the port is taken as it is here, and `lost`
  *                                    is told there too; its frames come here, as every
  *                                    root's do, to the thread that shows them.
  *                                    `{ type: 'close' }` on the port ends it
+ *   { type: 'forget', client }       the process on the other end of client `client`
+ *                                    is gone, however it went: the port goes, and
+ *                                    every root made through it, as each one's
+ *                                    `close` would
  * Messages from it:
  *   { type: 'opened', adapter } | { type: 'failed', message }
  *   { type: 'frame', bitmap, frameIndex, format, dropped, source, serial, sentAt, waitedMs,
@@ -115,6 +119,13 @@ export function serveGraphics(scope, deps){
     let lost = false;
     /** The ports of processes on other threads, told when the GPU goes away. @type {Set<MessagePort>} */
     const clients = new Set();
+    /**
+     * Each client's port and the ends of the roots made through it, by the
+     * number the run named it with: what `forget` lets go of.
+     *
+     * @type {Map<number, { port: MessagePort, ends: Set<() => void> }>}
+     */
+    const byClient = new Map();
     /**
      * What this worker is sent, written down when it was opened to (`capture`):
      * every root made after that and every batch played.
@@ -485,8 +496,9 @@ export function serveGraphics(scope, deps){
      * @param {number | undefined} source  the process it draws for
      * @param {number | undefined} frameLatency  the frames its presents may leave the GPU
      *     drawing; absent, Direct3D's default
+     * @param {Set<() => void>} [ends]  where the client it came through keeps its end
      */
-    const root = async(api, options, port, given, lending, source, frameLatency)=>{
+    const root = async(api, options, port, given, lending, source, frameLatency, ends)=>{
         // The guest's memory, taken again when it grows (a `memory` message).
         let memory = given;
         const { device, backend: shared } = await /** @type {Promise<any>} */ (opened);
@@ -628,6 +640,33 @@ export function serveGraphics(scope, deps){
         // capture's roots are made again in its order when it is played.
         const captured = capture?.root({ api, options, source, lending: lending !== null,
             memory: memory?.length ?? 0 }) ?? 0;
+        let ended = false;
+        /** The root goes: by its own `close`, or with its client's process. */
+        const end = ()=>{
+            if (ended)
+            {
+                return;
+            }
+            ended = true;
+            ends?.delete(end);
+            capture?.close(captured);
+            port.onmessage = null;
+            port.close();
+            const left = (rootsOf.get(/** @type {number} */ (source)) ?? 1) - 1;
+            if (source !== undefined && left === 0)
+            {
+                rootsOf.delete(source);
+                // A frame of it being sent was copied out of the slot by
+                // work already submitted, which a destroy lets finish.
+                newest.get(source)?.texture.destroy();
+                newest.delete(source);
+            }
+            else if (source !== undefined)
+            {
+                rootsOf.set(source, left);
+            }
+        };
+        ends?.add(end);
         port.onmessage = event=>{
             // The guest's memory grew: the longer view of it, before any batch
             // that may lend from what it gained, which come after on this port.
@@ -642,22 +681,7 @@ export function serveGraphics(scope, deps){
             }
             if (event.data?.type === 'close')
             {
-                capture?.close(captured);
-                port.onmessage = null;
-                port.close();
-                const left = (rootsOf.get(/** @type {number} */ (source)) ?? 1) - 1;
-                if (source !== undefined && left === 0)
-                {
-                    rootsOf.delete(source);
-                    // A frame of it being sent was copied out of the slot by
-                    // work already submitted, which a destroy lets finish.
-                    newest.get(source)?.texture.destroy();
-                    newest.delete(source);
-                }
-                else if (source !== undefined)
-                {
-                    rootsOf.set(source, left);
-                }
+                end();
                 return;
             }
             if (capture && event.data?.type === 'calls')
@@ -678,10 +702,11 @@ export function serveGraphics(scope, deps){
         };
     };
 
-    /** @param {any} data */
-    const takeRoot = data=>root(data.api, data.options ?? {}, data.port, data.memory ?? null,
-        data.lending ?? null, typeof data.source === 'number' ? data.source : undefined,
-        typeof data.frameLatency === 'number' ? data.frameLatency : undefined).catch(e=>
+    /** @param {any} data @param {Set<() => void>} [ends] */
+    const takeRoot = (data, ends)=>root(data.api, data.options ?? {}, data.port,
+        data.memory ?? null, data.lending ?? null,
+        typeof data.source === 'number' ? data.source : undefined,
+        typeof data.frameLatency === 'number' ? data.frameLatency : undefined, ends).catch(e=>
         data.port.postMessage({ type: 'failed', message: String(e?.message ?? e) }));
 
     scope.onmessage = ({ data })=>{
@@ -839,10 +864,16 @@ export function serveGraphics(scope, deps){
                 /** @type {MessagePort} */
                 const port = data.port;
                 clients.add(port);
+                /** @type {Set<() => void>} */
+                const ends = new Set();
+                if (typeof data.client === 'number')
+                {
+                    byClient.set(data.client, { port, ends });
+                }
                 port.onmessage = event=>{
                     if (event.data?.type === 'root')
                     {
-                        takeRoot(event.data);
+                        takeRoot(event.data, ends);
                     }
                     else if (event.data?.type === 'close')
                     {
@@ -854,6 +885,25 @@ export function serveGraphics(scope, deps){
                 if (lostWith)
                 {
                     port.postMessage(lostWith);
+                }
+                break;
+            }
+            // A process gone however it went - one that failed or was lost
+            // never closes its roots - takes them with it: each held its
+            // memory's view and its device's objects for the run.
+            case 'forget':
+            {
+                const client = byClient.get(data.client);
+                byClient.delete(data.client);
+                if (client)
+                {
+                    for (const end of [...client.ends])
+                    {
+                        end();
+                    }
+                    clients.delete(client.port);
+                    client.port.onmessage = null;
+                    client.port.close();
                 }
                 break;
             }

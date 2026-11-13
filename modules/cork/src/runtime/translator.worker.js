@@ -168,7 +168,20 @@ function connection(send){
  */
 function scopeHandler(send){
     const own = connection(send);
+    /** The ports served for a pool, each until its runtime is done with it. @type {Set<MessagePort>} */
+    const served = new Set();
     return (/** @type {any} */ data)=>{
+        // The pool's word that the process it served is gone, whose runtime
+        // never said it was done: what was served it goes.
+        if (data?.forget === true)
+        {
+            for (const port of served)
+            {
+                port.close();
+            }
+            served.clear();
+            return;
+        }
         if (data?.busy !== undefined)
         {
             busyCell = { cells: new Int32Array(data.busy.buffer), at: data.busy.index,
@@ -184,11 +197,13 @@ function scopeHandler(send){
             const onMessage = message=>{
                 if (message?.done === true)
                 {
+                    served.delete(port);
                     port.close();
                     return;
                 }
                 serve(message);
             };
+            served.add(port);
             if (typeof port.addEventListener === 'function' && !('on' in port))
             {
                 port.onmessage = event=>onMessage(event.data);

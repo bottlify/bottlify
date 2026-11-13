@@ -765,3 +765,54 @@ test('frozen on a shown frame, the worker sends what a message can carry', async
         port2.close();
     }
 });
+
+test('a client\'s process gone however it went takes every root made through it with it',
+    async()=>{
+        const gpu = createFakeDevice();
+        Object.assign(gpu.device, { queue: gpu.queue });
+        /** @type {any[]} */
+        const posted = [];
+        /** @type {any} */
+        const scope = { postMessage: (/** @type {any} */ message)=>posted.push(message),
+            onmessage: null };
+        serveGraphics(scope, {
+            gpu: { requestAdapter: async()=>({ features: new Set(), info: {},
+                requestDevice: async()=>gpu.device }) },
+            canvas: (width, height)=>Object.assign(gpu.canvas, { width, height,
+                transferToImageBitmap: ()=>({ width, height, close: ()=>{} }) }),
+        });
+        scope.onmessage({ data: { type: 'open', frames: 'bitmap' } });
+        await settle();
+        const client = new MessageChannel();
+        scope.onmessage({ data: { type: 'client', port: client.port2, client: 0x2010 } });
+        const { port1, port2 } = new MessageChannel();
+        /** @type {string[]} */
+        const gone = [];
+        /** @type {any} */ (port1).once('close', ()=>gone.push('root'));
+        /** @type {any} */ (client.port1).once('close', ()=>gone.push('client'));
+        client.port1.postMessage({ type: 'root', api: 'd3d9', options: {}, port: port2,
+            source: 0x2010 }, [port2]);
+        const sender = createSender({ post: (message, transfer)=>port1.postMessage(message,
+            transfer), framesAhead: 100 });
+        port1.onmessage = event=>sender.receive(event.data);
+        /** @type {{ device?: any }} */
+        const out = {};
+        recordedDirect3D(createDirect3D9, {}, sender).CreateDevice({
+            swapEffect: D3DSWAPEFFECT.DISCARD, backBufferCount: 1, backBufferWidth: 8,
+            backBufferHeight: 8, backBufferFormat: D3DFMT.X8R8G8B8 }, out);
+        out.device.BeginScene();
+        out.device.Clear(0, null, D3DCLEAR.TARGET, 0xff000000, 1, 0);
+        out.device.EndScene();
+        await out.device.Present();
+        await out.device.idle();
+        await settle();
+        assert.equal(posted.filter(message=>message.type === 'frame').length, 1);
+        // Its worker failed: no root of it said `close`.
+        scope.onmessage({ data: { type: 'forget', client: 0x2010 } });
+        await settle();
+        assert.deepEqual(gone.sort(), ['client', 'root'],
+            'its root and its way in are closed here');
+        scope.onmessage({ data: { type: 'forget', client: 0x2010 } });
+        scope.onmessage({ data: { type: 'forget', client: 0x3000 } });
+        assert.ok(true, 'and a second word, or one for a client never seen, changes nothing');
+    });

@@ -129,7 +129,9 @@ looks at its doorbell for a few microseconds before it sleeps on it, since a thr
 sleep costs far more than the answer. When a process ends, however it ends, its link is closed:
 every call still waiting on it fails (a COM call into it answers `RPC_E_SERVER_DIED`), a call made
 after fails at once, and the run detaches the windows the process answered for, so nothing asks a
-gone process again.
+gone process again. The translation workers lent to it and the graphics thread let go of what they
+kept for it (the port each served it, its Direct3D roots and their view of its memory), whether it
+said goodbye or failed.
 
 A process thread seldom asks the volume: every change to a drive moves that drive's word in shared
 memory (one word per drive letter), and the process thread keeps what it read of a drive (64 KB
