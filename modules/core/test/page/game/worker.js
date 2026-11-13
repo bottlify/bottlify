@@ -115,9 +115,10 @@ self.onmessage = ({ data })=>{
                         error: String(error instanceof Error ? error.message : error) } }));
             break;
         case 'standing':
-            (harness ? harness.standing(data.list) : Promise.resolve(null)).then(value=>{
-                self.postMessage({ type: 'answer', id: data.id, value });
-            });
+            (harness ? harness.standing(data.list, data.journal) : Promise.resolve(null))
+                .then(value=>{
+                    self.postMessage({ type: 'answer', id: data.id, value });
+                });
             break;
         case 'journalRecent':
             self.postMessage({ type: 'answer', id: data.id,

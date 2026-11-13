@@ -267,7 +267,11 @@ calls every few seconds (`app.standing()`: with concurrency, every process in ev
 a child running beside its parent there included), and with `--journal S` the last
 cross-process COM calls S seconds in. `--trace S` also prints the live journal of every
 process still standing in a worker (`app.standing({ journal })`): a helper its parent kills
-hands no ring back as it ends. `--bundle ID` runs an installed
+hands no ring back as it ends. In the browser, `/eval?js=window.__bottlify__.standing(undefined, N)`
+gives the same for a run of game.mjs: each process's threads and waits, its COM (`com`: every
+apartment's queued and running calls with their ages, the calls it sent that are not answered,
+to which endpoint and whether that process lives), its last N journal entries, and `lifetimes`,
+every process started and ended with its exit code. `--bundle ID` runs an installed
 program's launcher or entry the same way, with `--click`, `--key`, `--shots`
 and, with `--attended`, its message boxes left on the desktop to answer.
 `--copy DIR TO` writes a directory of the volume out once the run is over:

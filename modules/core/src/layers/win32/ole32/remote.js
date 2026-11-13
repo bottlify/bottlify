@@ -643,10 +643,26 @@ export function createRemoting(host){
      * @property {number} outgoing  Calls this thread is waiting on.
      * @property {(() => void) | null} waiting
      * @property {Set<(reply: any) => void>} running  Answers owed for calls under way.
+     * @property {Set<{ what: string, queuedFor: number, since: number }>} runs
+     *     The same calls, what each is, for `diagnostics`.
      */
 
     /** @type {Map<unknown, Apartment>} */
     const apartments = new Map();
+    /**
+     * Calls this process sent and has no answer to yet, for `diagnostics`: a
+     * caller stuck on another process names the process and the call here.
+     *
+     * @type {Set<{ target: number, what: string, since: number }>}
+     */
+    const inFlight = new Set();
+    /** @param {unknown} thread */
+    const threadName = thread=>String(/** @type {any} */ (thread)?.name
+        ?? /** @type {any} */ (thread)?.id ?? 'thread');
+    /** @param {any} message */
+    const callName = message=>(message?.kind === 'call' || message?.kind === 'ndr'
+        ? `${message.kind} ${message.iid ?? ''} #${message.slot ?? message.method ?? ''}`
+        : String(message?.kind ?? '?'));
     /** The multithreaded apartment's calls, which its worker runs. */
     const MTA_CALLS = Symbol('multithreaded apartment');
     /** @type {boolean | null} Null until the first call for the apartment. */
@@ -665,7 +681,7 @@ export function createRemoting(host){
         if (!found)
         {
             found = { queue: [], window: 0, making: null, outgoing: 0, waiting: null,
-                running: new Set() };
+                running: new Set(), runs: new Set() };
             apartments.set(thread, found);
         }
         return found;
@@ -702,10 +718,13 @@ export function createRemoting(host){
     const drain = async(thread, home = apartment(thread))=>{
         while (home.queue.length > 0)
         {
-            const item = /** @type {{ message: any, resolve: (reply: any) => void }} */ (
+            const item = /** @type {{ message: any, resolve: (reply: any) => void, since: number }} */ (
                 home.queue.shift());
             let reply;
             home.running.add(item.resolve);
+            const run = { what: callName(item.message), queuedFor: Date.now() - item.since,
+                since: Date.now() };
+            home.runs.add(run);
             try
             {
                 reply = await execute(item.message, thread);
@@ -715,6 +734,7 @@ export function createRemoting(host){
                 reply = { hr: RPC_E_SERVERFAULT };
             }
             home.running.delete(item.resolve);
+            home.runs.delete(run);
             item.resolve(reply);
         }
     };
@@ -1002,7 +1022,16 @@ export function createRemoting(host){
         {
             return { hr: RPC_E_DISCONNECTED, disconnected: true };
         }
-        return endpoint.deliver(message);
+        const sent = { target, what: callName(message), since: Date.now() };
+        inFlight.add(sent);
+        try
+        {
+            return await endpoint.deliver(message);
+        }
+        finally
+        {
+            inFlight.delete(sent);
+        }
     };
 
     /**
@@ -2166,6 +2195,23 @@ export function createRemoting(host){
                 queuedCalls: queued.length,
                 oldestQueuedMs: queued.length > 0
                     ? Date.now() - Math.min(...queued.map(item=>item.since)) : 0,
+                worker: workerStarted,
+                // Each apartment that ever had a call: who runs its calls and
+                // what it is doing now. A call queued where nothing will run
+                // it, or one run for minutes, is the hang read off here.
+                apartments: [...apartments.entries()].map(([key, home])=>({
+                    apartment: key === MTA_CALLS ? 'mta worker' : threadName(key),
+                    window: home.window,
+                    outgoing: home.outgoing,
+                    looking: home.waiting !== null,
+                    queued: home.queue.map(item=>({ what: callName(item.message),
+                        forMs: Date.now() - item.since })),
+                    running: [...home.runs].map(run=>({ what: run.what,
+                        queuedMs: run.queuedFor, forMs: Date.now() - run.since })),
+                })),
+                waitingOn: [...inFlight].map(sent=>({ endpoint: sent.target,
+                    alive: host.table.endpoint(sent.target)?.alive ?? false,
+                    what: sent.what, forMs: Date.now() - sent.since })),
             };
         },
     };

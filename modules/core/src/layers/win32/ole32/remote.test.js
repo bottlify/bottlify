@@ -302,3 +302,25 @@ test('a call that comes in as the apartment\'s own outgoing call is answered is 
     assert.ok(calls.length > 0 && calls.every(([, thread])=>thread === 'sta'),
         'on the apartment\'s own thread');
 });
+
+test('diagnostics name a call sent and not answered, and one an apartment runs, with how long',
+    async()=>{
+        // What a stopped install is read from: ngen waiting on a call into a
+        // worker process, and that process's thread still inside it.
+        /** @type {(value: any) => void} */
+        let answer = ()=>{};
+        const { remoting, table } = channel({ exporter: 'main' });
+        const other = table.attach({ process: {}, alive: true, rundown: async()=>{},
+            deliver: ()=>new Promise(resolve=>{
+                answer = resolve;
+            }) });
+        const released = remoting.releaseReference({ endpoint: other, object: 1 }, 'main');
+        await Promise.resolve();
+        const during = remoting.diagnostics();
+        assert.equal(during.waitingOn.length, 1);
+        assert.deepEqual({ ...during.waitingOn[0], forMs: 0 },
+            { endpoint: other, alive: true, what: 'release', forMs: 0 });
+        answer({ hr: 0 });
+        await released;
+        assert.deepEqual(remoting.diagnostics().waitingOn, [], 'answered, it is gone');
+    });

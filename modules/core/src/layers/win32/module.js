@@ -170,7 +170,7 @@ import { createAcmFunctions } from './msacm32/functions.js';
 import { createWorkstationFunctions } from './netapi32/workstation.js';
 import { createThemeFunctions } from './uxtheme/functions.js';
 import { createWininetFunctions } from './wininet/functions.js';
-import { createOleFunctions, createTaskAllocator } from './ole32/functions.js';
+import { COM_DIAGNOSTICS, createOleFunctions, createTaskAllocator } from './ole32/functions.js';
 import { createClassTable } from './ole32/remote.js';
 import { createAutomationFunctions, OLEAUT32_ORDINALS, OLEPRO32_ORDINALS }
     from './oleaut32/functions.js';
@@ -5695,6 +5695,8 @@ export function createWin32Module(){
                  * the host, and how many crossings the contended ones cost.
                  */
                 criticalSections: ()=>critical.diagnostics(),
+                /** Calls across processes this one sends, runs and has waiting. */
+                comChannel: ()=>(/** @type {any} */ (libraries['ole32.dll'])?.[COM_DIAGNOSTICS]?.() ?? null),
 
                 /**
                  * What the program's message loop is pumping, and what it is
@@ -5934,6 +5936,7 @@ export function createWin32Module(){
                     waveThread: current ? current.waveThread() : null,
                     multimediaTimers: current ? current.multimediaTimers() : null,
                     criticalSections: current ? current.criticalSections() : null,
+                    com: current ? current.comChannel() : null,
                     messages: current ? current.messages() : {},
                     // What is left of the one arena everything the guest is handed
                     // comes out of. A program sizes its own caches from this, so a

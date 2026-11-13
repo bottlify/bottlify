@@ -5199,6 +5199,17 @@ export function createOleFunctions(host){
         ...createAdviseFunctions(oleEnv),
         ...clipboard.table,
     };
+    // Not an export: keyed by a symbol, which a library's table of names never
+    // lists.
+    Object.defineProperty(functions, COM_DIAGNOSTICS,
+        { value: ()=>remoting?.diagnostics() ?? null });
 
     return functions;
 }
+
+/**
+ * The key of the table's channel diagnostics: the calls this process sends,
+ * runs and has queued across processes (`remote.js`), null before any
+ * crossed.
+ */
+export const COM_DIAGNOSTICS = Symbol('com diagnostics');

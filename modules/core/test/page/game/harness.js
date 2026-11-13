@@ -51,6 +51,7 @@ const LIMITS = {
     // the cap is what stops a long run turning into hundreds of megabytes of
     // text, not a judgement about which end matters.
     log: 400000,
+    lifetimes: 20000,
 };
 
 /**
@@ -1352,8 +1353,9 @@ export function scalars(layers){
  *
  * @param {any} app
  */
-async function standingOf(app){
-    return (await app.standing()).map((/** @type {any} */ { image, diagnostics })=>{
+async function standingOf(app, journal = 0){
+    return (await app.standing({ journal })).map((/** @type {any} */ { image, diagnostics,
+        journal: entries })=>{
         /** @param {string} layer */
         // A process in a worker of its own that ended while asked answers
         // nothing.
@@ -1376,6 +1378,8 @@ async function standingOf(app){
                     x: window.x, y: window.y, width: window.width, height: window.height })),
             cpu: { recent: (cpu.recent ?? []).slice(-4), top: (cpu.samples?.top ?? []).slice(0, 8),
                 traps: cpu.traps, trapCapacity: cpu.trapCapacity },
+            com: win32.com ?? null,
+            ...entries ? { journal: entries } : {},
         };
     });
 }
@@ -1465,7 +1469,8 @@ function filesUnder(app, directory){
  *     Where a frame's time goes, asked while the run is still going. A report
  *     at the end of a run answers what a whole run cost; this answers what one
  *     frame costs, which is the question a frame rate is.
- * @property {(list?: string) => Promise<{ processes: any[], events: string[], desktop: any,
+ * @property {(list?: string, journal?: number) => Promise<{ processes: any[], events: string[],
+ *     lifetimes: string[], desktop: any,
  *     files: { path: string, size: number }[] }>} standing
  *     Every process standing, read while the run goes on: its threads and
  *     what they wait on, its parked calls, its windows, and where its
@@ -1528,6 +1533,14 @@ export function createHarness(canvas, how = {}){
     let endRun = null;
     /** What the run in progress has said so far, for `standing`. @type {string[]} */
     let runningEvents = [];
+    /**
+     * Every process the run started and ended, with when: kept past the cap on
+     * events, since an install starts hundreds and the one that never ended is
+     * what a stopped run is read from.
+     *
+     * @type {string[]}
+     */
+    let runningLifetimes = [];
     /** The frames `snapFrame` asked for, being read back, by frame. @type {Map<number, Promise<any>>} */
     const snaps = new Map();
     /**
@@ -1977,6 +1990,24 @@ export function createHarness(canvas, how = {}){
 
         listen(app, collected);
         runningEvents = collected.events;
+        runningLifetimes = [];
+        const lifetimes = runningLifetimes;
+        const lifetimesFrom = Date.now();
+        for (const name of ['process-child', 'process-server', 'process-started',
+            'process-resumed', 'process-server-exit'])
+        {
+            app.on(name, (/** @type {any} */ told)=>{
+                if (lifetimes.length < LIMITS.lifetimes)
+                {
+                    const image = String(told?.image ?? '').split('\\').pop();
+                    const at = ((Date.now() - lifetimesFrom) / 1000).toFixed(1);
+                    const code = told?.code !== undefined ? ` code ${told.code}` : '';
+                    const command = told?.commandLine
+                        ? ` ${String(told.commandLine).slice(0, 160)}` : '';
+                    lifetimes.push(`${at} s ${name} ${image}${code}${command}`);
+                }
+            });
+        }
         scheduleKeyTimes(app, request);
         const stopPresses = schedulePresses(app, request, line=>{
             if (collected.events.length < LIMITS.events)
@@ -2403,10 +2434,12 @@ export function createHarness(canvas, how = {}){
                 return null;
             }
         },
-        standing: async list=>(running
-            ? { processes: await standingOf(running), events: runningEvents,
-                desktop: desktopOf(running), files: list ? filesUnder(running, list) : [] }
-            : { processes: [], events: runningEvents, desktop: null, files: [] }),
+        standing: async(list, journal = 0)=>(running
+            ? { processes: await standingOf(running, journal), events: runningEvents,
+                lifetimes: runningLifetimes, desktop: desktopOf(running),
+                files: list ? filesUnder(running, list) : [] }
+            : { processes: [], events: runningEvents, lifetimes: runningLifetimes, desktop: null,
+                files: [] }),
         errors,
         get presents(){
             return { count: presentState.presents, gaps: presentState.gaps.slice() };
