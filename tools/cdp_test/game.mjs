@@ -2507,19 +2507,20 @@ export async function game(options){
             }, options.dumpAt * 1000)
             : null;
         let result;
-        if (censusTimer)
-        {
-            clearInterval(censusTimer);
-            await writeCensus();
-        }
         try
         {
             result = await readResult(cdp, sessionId, options.waitMs + RESULT_GRACE_MS,
                 ()=>crashed);
+            if (censusTimer)
+            {
+                clearInterval(censusTimer);
+                await writeCensus();
+            }
             result.answeredAfterMs = Date.now() - startedAt;
             if (result.tooLarge?.length > 0)
             {
-                console.log(`  result: ${result.tooLarge.join(', ')} too large to read back, left out`);
+                console.log(`  result: ${result.tooLarge.join(', ')} left out,`
+                    + ' too large to read back');
             }
             // What the origin holds once the run is over: the block cache, the
             // translations, the session (`navigator.storage.estimate()`).
