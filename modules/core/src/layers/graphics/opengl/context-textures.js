@@ -4419,6 +4419,36 @@ export function installTextureCalls(context, kernel){
                 z0, width, height, depth, format, size, data);
         },
     });
+
+    // GL_GENERATE_MIPMAP (1.4, section 3.8.8): a texture that asks for it has
+    // its levels below the base remade whenever an image of its base level is
+    // specified or changed, by any of these calls. Without it a texture that
+    // sets a mipmap filter and loads only its top level is incomplete, and
+    // what samples it reads the placeholder: text drawn as blank boxes.
+    for (const name of /** @type {const} */ (['glTexImage2D', 'glTexSubImage2D',
+        'glCopyTexImage2D', 'glCopyTexSubImage2D']))
+    {
+        const plain = /** @type {(...args: any[]) => any} */ (context[name]);
+        context[name] = /** @type {any} */ ((/** @type {any[]} */ ...args)=>{
+            const result = plain(...args);
+            const [target, level] = args;
+            // ponytail: TEXTURE_2D bound on the active unit only: a cube face, a
+            // DSA call naming another texture, or another target keeps the levels
+            // it was given.
+            if (target === GL.TEXTURE_2D && named === null)
+            {
+                const texture = kernel.side.textureBoundAt(active, GL.TEXTURE_2D)
+                    ?? units[active].defaults.get(GL.TEXTURE_2D);
+                if (texture?.parameters.get(GL.GENERATE_MIPMAP)
+                    && level === (texture.parameters.get(GL.TEXTURE_BASE_LEVEL) ?? 0)
+                    && texture.levels.has(levelKey(level)))
+                {
+                    context.glGenerateMipmap(GL.TEXTURE_2D);
+                }
+            }
+            return result;
+        });
+    }
 }
 
 /**

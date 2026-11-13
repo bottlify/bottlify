@@ -421,7 +421,12 @@ export function isTextureComplete(texture){
         let width = base.width;
         let height = base.height;
         let level = 0;
-        while (width > 1 || height > 1)
+        // The levels sampled end at GL_TEXTURE_MAX_LEVEL (1.2, section 3.8.10):
+        // a chain a program stops short of 1x1 and says so is complete.
+        // ponytail: the base level is taken as level 0; a texture that moves
+        // GL_TEXTURE_BASE_LEVEL is judged from level 0 still.
+        const last = texture.parameters.get(GL.TEXTURE_MAX_LEVEL) ?? 1000;
+        while ((width > 1 || height > 1) && level < last)
         {
             level++;
             width = Math.max(1, width >> 1);
