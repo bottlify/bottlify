@@ -13,7 +13,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { filesystemModule } from '../../filesystem/module.js';
-import { createVolume, FETCHED_PIECE_BYTES, KEPT_READ_MIN, MISS_FETCHES } from './vfs.js';
+import { createVolume, FETCHED_PIECE_BYTES, KEPT_IDLE_MS, KEPT_READ_BYTES, KEPT_READ_MIN,
+    MISS_FETCHES } from './vfs.js';
 
 async function volume(){
     const fs = await filesystemModule.create({});
@@ -541,46 +542,103 @@ test('a name renamed to itself in other letters is respelled, its contents kept'
     assert.equal(vol.stat('C:\\dir\\f')?.exists, true, 'what was in it, still in it');
 });
 
-test('a large read of an unchanged file is kept; a write makes the next one fresh', async()=>{
-    // An engine maps its executable whole hundreds of times while it loads;
-    // each map decoded the file's blocks again. What tells a kept copy is
-    // still the file is its identity, size and last write.
+/**
+ * A volume whose filesystem reads are counted, on a clock the test moves, and
+ * a file of `size` bytes in it, written long enough ago to be trusted.
+ *
+ * @param {number} size
+ */
+async function countedVolume(size){
     const fs = await filesystemModule.create({});
-    let reads = 0;
-    const counted = Object.create(fs);
-    counted.read = (/** @type {any} */ node, /** @type {number} */ length)=>{
-        reads++;
+    const counted = { reads: 0, time: 1e9 };
+    const reading = Object.create(fs);
+    reading.read = (/** @type {any} */ node, /** @type {number} */ length)=>{
+        counted.reads++;
         return fs.read(node, length);
     };
-    const vol = /** @type {any} */ (createVolume(counted));
-    const size = KEPT_READ_MIN * 2;
+    const vol = /** @type {any} */ (createVolume(reading, null, { now: ()=>counted.time }));
     const path = 'C:\\game.exe';
     const node = vol.open(path, { read: true, write: true, create: true });
     vol.write(node, 0, new Uint8Array(size).fill(1));
-    const settled = ()=>vol.setModified(path, Date.now() - 60000);
+    const settled = ()=>vol.setModified(path, counted.time - 60000);
     settled();
+    return { vol, node, counted, settled };
+}
 
-    const first = vol.read(node, 0, size);
-    first[0] = 7;
+test('a large range read again is kept; a write makes the next one fresh', async()=>{
+    // An engine maps its executable whole hundreds of times while it loads;
+    // each map decoded the file's blocks again. What tells a kept copy is
+    // still the file is its identity, size and last write.
+    const size = KEPT_READ_MIN * 2;
+    const { vol, node, counted, settled } = await countedVolume(size);
+
+    vol.read(node, 0, size);
+    assert.deepEqual(vol.held(), { keptReads: 0 }, 'read once: nothing kept');
+    const second = vol.read(node, 0, size);
+    assert.deepEqual(vol.held(), { keptReads: size }, 'read again: kept');
+    second[0] = 7;
     assert.equal(vol.read(node, 0, size)[0], 1,
         'a caller writing into its copy changes nothing kept');
-    assert.equal(reads, 1, 'the second read was the kept one');
+    assert.equal(counted.reads, 2, 'the third read was the kept one');
     vol.read(node, 0, 100);
-    assert.equal(reads, 2, 'a small read is not kept');
-    assert.equal(vol.read(node, 0, size, true), vol.read(node, 0, size, true),
-        'a reader that only copies out gets the kept bytes themselves');
+    vol.read(node, 0, 100);
+    assert.equal(counted.reads, 4, 'a small read is not kept');
 
     vol.write(node, 0, new Uint8Array([5]));
     assert.equal(vol.read(node, 0, size)[0], 5, 'written moments ago: read fresh');
     assert.equal(vol.read(node, 0, size)[0], 5);
-    assert.equal(reads, 4, 'and not kept while its stamp is that young');
+    assert.equal(counted.reads, 6, 'and not kept while its stamp is that young');
+    counted.time += 1000;
     settled();
     vol.read(node, 0, size);
     vol.read(node, 0, size);
-    assert.equal(reads, 5, 'settled again: kept again');
-    const section = vol.section(node, 'readonly');
-    vol.read(section, 0, size);
-    assert.equal(reads, 5, 'a section\'s own hold on the file reads what is kept');
-    vol.close(section);
+    vol.read(node, 0, size);
+    assert.equal(counted.reads, 8, 'settled again: kept again from its second read');
+    vol.close(node);
+});
+
+test('a file read through once in large pieces keeps none of them', async()=>{
+    // A setup extracting a cabinet reads it a mebibyte at a time, each piece
+    // once: keeping them held a quarter of a gibibyte a process.
+    const size = KEPT_READ_MIN * 40;
+    const { vol, node, counted } = await countedVolume(size);
+    for (let at = 0; at < size; at += KEPT_READ_MIN)
+    {
+        vol.read(node, at, KEPT_READ_MIN);
+    }
+    assert.equal(counted.reads, 40);
+    assert.deepEqual(vol.held(), { keptReads: 0 });
+    vol.close(node);
+});
+
+test('kept ranges share a small pool, and one past it is kept alone', async()=>{
+    const piece = KEPT_READ_MIN * 4;
+    const pieces = KEPT_READ_BYTES / piece;
+    const { vol, node } = await countedVolume(KEPT_READ_BYTES * 2);
+    for (let at = 0; at <= pieces; at++)
+    {
+        vol.read(node, at * piece, piece);
+        vol.read(node, at * piece, piece);
+    }
+    assert.equal(vol.held().keptReads, KEPT_READ_BYTES, 'the oldest let go past the pool');
+
+    const whole = KEPT_READ_BYTES * 2;
+    vol.read(node, 0, whole);
+    vol.read(node, 0, whole);
+    assert.equal(vol.held().keptReads, whole, 'everything else let go for it');
+    vol.close(node);
+});
+
+test('a kept range not read again for a while is let go', async()=>{
+    const size = KEPT_READ_MIN * 2;
+    const { vol, node, counted } = await countedVolume(size);
+    vol.read(node, 0, size);
+    vol.read(node, 0, size);
+    counted.time += KEPT_IDLE_MS / 2;
+    vol.read(node, 0, size);
+    assert.equal(counted.reads, 2, 'read within the idle time: kept');
+    counted.time += KEPT_IDLE_MS + 1;
+    vol.read(node, 0, 100);
+    assert.deepEqual(vol.held(), { keptReads: 0 }, 'let go at the next read after it');
     vol.close(node);
 });

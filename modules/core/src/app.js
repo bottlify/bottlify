@@ -9285,12 +9285,16 @@ async function buildApp(options){
                     // mode, the page's messages read between turns, the yields
                     // to the event loop, and the sleeps on the doorbell.
                     pacing: /** @type {any} */ (pacing).counts?.() ?? null,
-                    // What the program holds of its RAM, and the bundle's pools,
-                    // where this process mounted it: a bundle the run's system
-                    // mounted is the system's to report.
+                    // What the program holds of its RAM, the bundle's pools,
+                    // where this process mounted it (a bundle the run's system
+                    // mounted is the system's to report), and its volume's
+                    // ranges kept for a read again.
                     bytesHeld: {
                         guest: guestHeld(),
-                        heaps: mountedBlocks ? blocks?.held?.() ?? {} : {},
+                        heaps: {
+                            ...mountedBlocks ? blocks?.held?.() ?? {} : {},
+                            ...core.api('win32')?.volumeHeld?.() ?? { keptReads: NOT_MEASURED },
+                        },
                     },
                 },
             },
