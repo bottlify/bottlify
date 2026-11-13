@@ -183,3 +183,38 @@ test('UPDATE takes its SET values before the clause\'s parameters', ()=>{
         ERROR_SUCCESS);
     assert.deepEqual(run(db, 'SELECT `name` FROM `phone` WHERE `id` = 2').rows, [['Bea']]);
 });
+
+test('a join tests each condition as soon as its tables are joined, not on every combination',
+    { timeout: 20000 }, ()=>{
+        // The .NET Framework 4 setup joins FeatureComponents, File and Component
+        // (thousands of rows each): every combination made before the clause
+        // ran was eleven million arrays, a heap of two gigabytes for one view.
+        // Here 400 rows a table, 64 million combinations, a row each matched.
+        const db = createEmptyDatabase();
+        for (const table of ['A', 'B', 'C'])
+        {
+            assert.equal(run(db, `CREATE TABLE \`${table}\` ( \`k\` INT, \`v\` CHAR(16) `
+                + 'PRIMARY KEY `k`)').code, ERROR_SUCCESS);
+            for (let k = 1; k <= 400; k++)
+            {
+                run(db, `INSERT INTO \`${table}\` ( \`k\`, \`v\` ) VALUES ( ?, ? )`,
+                    [k, `${table}${k}`]);
+            }
+        }
+        const { code, rows } = run(db, 'SELECT `A`.`v`, `B`.`v`, `C`.`v` FROM `A`, `B`, `C` '
+            + 'WHERE `A`.`k` = `B`.`k` AND `B`.`k` = `C`.`k` AND `C`.`k` > ? ORDER BY `A`.`k`',
+        [397]);
+        assert.equal(code, ERROR_SUCCESS);
+        assert.deepEqual(rows, [['A398', 'B398', 'C398'], ['A399', 'B399', 'C399'],
+            ['A400', 'B400', 'C400']]);
+    });
+
+test('a clause\'s OR and its parameters hold across a join as they do on one table', ()=>{
+    const db = phonebook();
+    run(db, 'CREATE TABLE `owner` ( `pid` INT, `who` CHAR(8) PRIMARY KEY `pid`)');
+    run(db, 'INSERT INTO `owner` ( `pid`, `who` ) VALUES ( 1, \'me\' )');
+    run(db, 'INSERT INTO `owner` ( `pid`, `who` ) VALUES ( 3, \'you\' )');
+    assert.deepEqual(run(db, 'SELECT `name`, `who` FROM `phone`, `owner` WHERE `who` = ? '
+        + 'AND ( `id` = `pid` OR `id` = ? )', ['you', 2]).rows,
+    [['Cindy', 'you'], ['Wack', 'you']]);
+});

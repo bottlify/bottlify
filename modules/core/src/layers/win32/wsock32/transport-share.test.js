@@ -138,3 +138,29 @@ test('a refused dial is forgotten; accepted streams and datagrams go to the list
     assert.deepEqual(await first.resolve?.('a.test'), [5]);
     assert.equal(first.localAddress?.(), 0x0a560001);
 });
+
+test('a process gone leaves the share: its ports, its streams and its inbound with it', async()=>{
+    // The share kept every view it made, and each view's inbound reaches its
+    // process's whole machine: a run that started a process after another -
+    // ngen a worker per assembly - held every machine it had ever run.
+    const { state, transport } = recorder();
+    const share = shareTransport(transport);
+    const gone = share.view();
+    const stays = share.view();
+    const one = listener();
+    const two = listener();
+    gone.attach?.(one.inbound);
+    stays.attach?.(two.inbound);
+    gone.listen?.(true, 80);
+    await gone.connect?.(3, { host: 9, port: 443 });
+    const [dialled] = state.dialled.map((/** @type {any} */ dial)=>dial.id);
+
+    gone.detach?.();
+    assert.deepEqual(state.released, [{ stream: true, port: 80 }], 'its port is let go');
+    assert.deepEqual(state.hung, [{ id: dialled, half: false }], 'its stream is closed');
+    state.inbound.lost(10050);
+    state.inbound.received(dialled, Uint8Array.of(1));
+    state.inbound.accepted(80, 0x80000002, { host: 3, port: 4 });
+    assert.deepEqual(one.seen, [], 'nothing reaches the process gone');
+    assert.deepEqual(two.seen, [['lost', 10050]], 'the one that stays still hears the network');
+});

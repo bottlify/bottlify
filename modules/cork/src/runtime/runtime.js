@@ -48,7 +48,7 @@ import { blockCounts, mechanismCounts, resetBlockCounts, topBlocks, transferTarg
 import { profileForms } from './profile-forms.js';
 import { createWeakInstances } from './weak-instances.js';
 import { sharedModulesOf } from './shared-modules.js';
-import { sharedFormsOf } from './shared-forms.js';
+import { sharedFormsOf, sharedStoreOf } from './shared-forms.js';
 import {
     CACHE_VERSION, cacheKey, moduleKey, packRegion, seedRecords, unpackRegion,
 } from './cache.js';
@@ -662,10 +662,19 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
     const instanceKeys = new WeakMap();
     /** A module compiled off the thread, by its bytes. @type {WeakMap<WebAssembly.Module, number>} */
     const compiledBytes = new WeakMap();
+    /** The store this runtime keeps formed regions and compiled modules beside for
+     * the other runtimes of its thread handed it, or null where none would take
+     * them (`sharedStoreOf`). */
+    const sharesStore = sharedStoreOf(settings.store ?? null);
+    /** The store a batch's compiled module is kept for, in this thread or another one
+     * (`share`): none for a run that keeps no store or no modules. */
+    const keepsModulesFor = leaveOut.size > 0 || settings.blockProfile === true
+        || !(settings.sharedModuleBytes > 0) ? null : settings.store ?? null;
     /** The compiled modules of every runtime sharing the store, by store key
-     * (`shared-modules.js`): none for a run that keeps no store. */
-    const sharedModules = sharedModulesOf(leaveOut.size > 0 || settings.blockProfile === true
-        ? null : settings.store ?? null, settings.sharedModuleBytes);
+     * (`shared-modules.js`): none for a run that keeps no store, nor where no
+     * other runtime of this thread would take them. */
+    const sharedModules = keepsModulesFor === null || sharesStore === null ? null
+        : sharedModulesOf(sharesStore, settings.sharedModuleBytes);
     // Past three quarters of the entry hash's slots live, a block start is kept
     // in the host's map alone (`createEntries`' own share).
     const entries = createEntries(
@@ -2950,11 +2959,13 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
     /**
      * The formed regions of the runtimes sharing the store and forming as this
      * one does (`sharedFormed`), by entry and the callees formed in. None for a
-     * run that keeps no store, and for a diagnostic range left to the
-     * interpreter, which `translatable` answers by address rather than by page.
+     * run that keeps no store, where no other runtime of this thread would take
+     * them (and a region formed to be kept is formed without what the rest of
+     * its call decoded), and for a diagnostic range left to the interpreter,
+     * which `translatable` answers by address rather than by page.
      */
     const sharedForms = settings.interpretRange || leaveOut.size > 0 || profiling ? null
-        : sharedFormsOf(settings.store ?? null, JSON.stringify(formOptions), settings.sharedFormed);
+        : sharedFormsOf(sharesStore, JSON.stringify(formOptions), settings.sharedFormed);
     /**
      * Whether a region formed earlier would be formed the same here now: every
      * page forming asked about answers as it did, and every byte it read is as
@@ -3202,14 +3213,14 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
      * @param {string} key @param {WebAssembly.Module | null} module @param {number} bytes
      */
     const share = (key, module, bytes)=>{
-        if (sharedModules !== null && module !== null)
+        if (keepsModulesFor !== null && module !== null)
         {
             compiledBytes.set(module, bytes);
-            sharedModules.set(key, module, bytes);
+            sharedModules?.set(key, module, bytes);
             // Kept alive where the store is kept too, for runtimes in other
             // threads: one compiling the same bytes is handed this code,
             // tiered up as it is, by the wasm engine's own cache.
-            settings.store?.hold?.(key, module, bytes);
+            keepsModulesFor.hold?.(key, module, bytes);
         }
     };
     /**

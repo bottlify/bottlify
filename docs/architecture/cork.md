@@ -83,10 +83,13 @@ everyone's. The page flags are `INACCESSIBLE`, `HAS_CODE`, `VOLATILE`, `CLOSED`,
   module an earlier process compiled is instantiated without compiling its bytes again, and with
   the code V8 has compiled and tiered up for it since (`sharedModuleBytes`; a process in a worker
   of its own gets that code by compiling the same bytes, the engine thread keeping the module
-  alive); and the regions they
+  alive where V8 runs); and the regions they
   formed ([`shared-forms.js`](../../modules/cork/src/runtime/shared-forms.js)): a hit whose every
   byte and page forming read answer as they did takes the region an earlier process formed rather
-  than decoding it again (`sharedFormed`). A bundle may bring
+  than decoding it again (`sharedFormed`). A process or an executor in a worker of its own is
+  handed a store made for it (`alone`), and keeps neither beside it: no other runtime of its
+  thread would take them, unless the run, with no room for another worker, starts a child beside
+  the process, from which runtime on they are kept. A bundle may bring
   translations along (`CORKSEED`); they are seeded before the first instruction.
 
 ## Execution in Bottlify

@@ -118,6 +118,8 @@ let storeAsks = 0;
  */
 function processStore(send){
     return {
+        // Made for this executor's runtime, the only one its thread has.
+        alone: true,
         get: key=>new Promise(resolve=>{
             const id = ++storeAsks;
             storeAnswers.set(id, resolve);

@@ -9433,6 +9433,12 @@ async function buildApp(options){
  */
 const REPORT_WAIT_MS = 1000;
 
+/**
+ * How many memories of gone processes a run keeps for the next ones beyond
+ * those it takes at once: each is the size of a process's whole address space.
+ */
+const SPARE_MEMORIES = 4;
+
 /** How many divergences a run's diagnostics list, in the order they were said. */
 const DIVERGENCES_KEPT = 128;
 
@@ -10471,7 +10477,8 @@ export async function createApp(options){
         options.bundle?.id ?? options.id ?? 'bundle');
     // Processes in workers of their own: the batch modules they compile are
     // kept alive here, beside the store they are stored in, for the next ones
-    // to find compiled (`withHeldModules`). Not in a process joined to a run
+    // to find compiled (`withHeldModules`), where the engine hands code by
+    // bytes (V8, not JavaScriptCore). Not in a process joined to a run
     // across a link: its store is the run's, kept alive where the run is.
     const heldModuleBytes = options.cork?.config?.sharedModuleBytes ?? SHARED_MODULE_BYTES;
     const translationStore = openedStore && !options.system && (options.concurrency ?? 1) > 1
@@ -10634,18 +10641,29 @@ export async function createApp(options){
         : createClassTable(serveHere);
 
     /**
-     * The memory of the last process to go, for the next one built: a gone
-     * process's memory waits for a garbage collection nothing prompts, and a
-     * parent that starts one short-lived child after another -- a compiler a
-     * shader at a time -- would hold one memory per child until the page ran
-     * out. Taken once.
+     * The memories of the processes gone, for the next ones built, newest
+     * last: a gone process's memory waits for a garbage collection nothing
+     * prompts, and is held past it by whatever of the process anything still
+     * reaches, so a parent that starts one short-lived child after another -- a
+     * compiler a shader at a time, ngen a worker per assembly while several run
+     * at once -- would hold one memory per child until the page ran out. A
+     * process hands its memory back as it goes and the next one takes it, so
+     * a run holds as many as it ever ran at once, and `SPARE_MEMORIES` more.
      *
-     * @type {{ memory: WebAssembly.Memory, guestEnd: number } | null}
+     * @type {{ memory: WebAssembly.Memory, guestEnd: number }[]}
      */
-    let spareMemory = null;
+    const spareMemories = [];
     /** @param {any} gone  a machine disposed */
     const keepMemory = gone=>{
-        spareMemory = gone?.spareMemory?.() ?? spareMemory;
+        const spare = gone?.spareMemory?.();
+        if (spare && !spareMemories.some(one=>one.memory === spare.memory))
+        {
+            spareMemories.push(spare);
+            if (spareMemories.length > SPARE_MEMORIES)
+            {
+                spareMemories.shift();
+            }
+        }
     };
 
     /**
@@ -10657,8 +10675,7 @@ export async function createApp(options){
         const process = {};
         /** The machine, once built: what its children are started beside. @type {any} */
         let self = null;
-        const reusedMemory = spareMemory;
-        spareMemory = null;
+        const reusedMemory = spareMemories.pop() ?? null;
         const built = await buildApp(machine({ ...extra, reusedMemory,
             com: { table: classTable, process },
             // With concurrency a child runs from CreateProcess on, beside
@@ -12330,7 +12347,7 @@ export async function createApp(options){
                 }
             })
             .finally(()=>{
-                spareMemory = null;
+                spareMemories.length = 0;
                 shownHere?.dispose();
                 presenter?.dispose?.();
                 translationPool?.dispose();
