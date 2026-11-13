@@ -9901,8 +9901,8 @@ export function liveDumpOf(worker, control){
             }
             if (event.data?.type === 'snapped')
             {
-                const { id, width, height, format, data } = event.data;
-                shots.set(id, { width, height, format, data });
+                const { id, width, height, format, data, info } = event.data;
+                shots.set(id, { width, height, format, data, info: info ?? null });
             }
         });
     };
