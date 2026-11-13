@@ -61,7 +61,9 @@ const SECTION_MEM_WRITE = 0x80000000;
  * @property {number} subsystem
  * @property {number} stackReserve     How much stack the program was linked to expect.
  * @property {number} stackCommit
- * @property {boolean} relocatable     False when the image has no relocation directory.
+ * @property {boolean} relocatable     Whether it may be placed away from its base: it carries
+ *                                     relocations, needs none (x86-64), or holds no address.
+ * @property {boolean} [dynamicBase]   Linked for ASLR (DYNAMIC_BASE).
  * @property {boolean} library         A DLL, as against a program: only a DLL's imports
  *                                     are resolved and its entry point run when one is
  *                                     loaded by LoadLibrary.
@@ -189,12 +191,40 @@ function parseHeaders(bytes, wide){
         // An x86-64 image addresses its own code and data relative to RIP and may
         // need no fixup at all: it is movable unless its relocations were stripped.
         relocatable: relocDirectory !== undefined && relocDirectory.size > 0
-            || bits === 64 && (characteristics & IMAGE_FILE_RELOCS_STRIPPED) === 0,
+            || bits === 64 && (characteristics & IMAGE_FILE_RELOCS_STRIPPED) === 0
+            || holdsNoAddress(characteristics, view.getUint32(optional + 16, true), sections,
+                directories),
         library: (characteristics & IMAGE_FILE_DLL) !== 0,
         largeAddressAware: (characteristics & IMAGE_FILE_LARGE_ADDRESS_AWARE) !== 0,
+        // IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE: linked to be placed anywhere (ASLR), which
+        // Windows does with a program as with a library.
+        dynamicBase: (view.getUint16(optional + 70, true) & 0x40) !== 0,
         sections,
         directories,
     };
+}
+
+/** The directories that hold virtual addresses rather than RVAs, or code's: import, TLS, load
+ * config, the import address table, delay import. */
+const ADDRESS_DIRECTORIES = [1, 9, 10, 12, 13];
+
+/**
+ * Whether a library holds no absolute address at all: no code (no entry point, no section that
+ * executes) and none of the directories that store addresses - a library of resources, which a
+ * program reaches by RVA. With nothing to fix up it runs at any base, so it is movable though it
+ * carries no relocation directory: placed at its preferred base, a resource library linked for
+ * 0x10000000 grew every process that loaded one - the .NET Framework 4 setup's
+ * SetupResources.dll, five pages - from 256 MiB of memory to 512, the memory being as large as
+ * the highest address it holds.
+ *
+ * @param {number} characteristics @param {number} entryPointRva
+ * @param {{ executable: boolean }[]} sections
+ * @param {{ address: number, size: number }[]} directories
+ */
+function holdsNoAddress(characteristics, entryPointRva, sections, directories){
+    return (characteristics & IMAGE_FILE_DLL) !== 0 && entryPointRva === 0
+        && !sections.some(section=>section.executable)
+        && ADDRESS_DIRECTORIES.every(index=>!directories[index] || directories[index].size === 0);
 }
 
 /**
@@ -463,7 +493,9 @@ export function applyRelocations(mapped, image, delta){
         return 0;
     }
     const directory = image.directories[DIR_BASERELOC];
-    if ((!directory || directory.size === 0) && image.bits === 64 && image.relocatable)
+    // Movable with no directory: an x86-64 image that needs no fixup, or one
+    // that holds no absolute address at all (`holdsNoAddress`).
+    if ((!directory || directory.size === 0) && image.relocatable)
     {
         return 0;
     }
