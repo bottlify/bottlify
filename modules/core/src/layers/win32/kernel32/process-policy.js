@@ -1104,13 +1104,17 @@ export function createProcessPolicyFunctions(host){
         /**
          * VOID FlushProcessWriteBuffers(void)
          *
-         * Every store an executor made is already seen by the others when
-         * the call that publishes them returns: the guest's memory is one
-         * buffer, its stores in program order.
+         * Returns once every other processor has passed a barrier: each
+         * executor running guest code when it is called has since ended a
+         * run of it, so its stores before are seen here and its loads after
+         * see the caller's (`kernel.flushProcessWrites`).
          */
         FlushProcessWriteBuffers: {
             argBytes: 0,
-            handler: ()=>0,
+            handler: ()=>{
+                const flushed = kernel.flushProcessWrites?.() ?? true;
+                return flushed === true ? 0 : flushed.then(()=>0);
+            },
         },
 
         /**

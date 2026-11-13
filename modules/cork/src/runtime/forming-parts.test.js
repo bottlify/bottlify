@@ -610,3 +610,18 @@ test('regions formed again with copies of their loops are formed a share at a ca
         await m.runtime.flush();
     }
 });
+
+test('a runtime with no translator says it emitted on its own thread, timings off as shipped',
+    async()=>{
+        // What a pool that took the translator back reads to lend one again.
+        const m = machine({ worker: false, timings: false });
+        m.write(0x2000, piece(0, 100, 3).code);
+        assert.equal(m.runtime.translatedHere?.(), 0);
+        m.runtime.noteHot(0x2000, 0, 64);
+        while (m.runtime.entryOf(0x2000) < 0)
+        {
+            await m.runtime.translatePending();
+            await turn();
+        }
+        assert.ok((m.runtime.translatedHere?.() ?? 0) > 0, 'the time it emitted here');
+    });

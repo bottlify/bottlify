@@ -14,7 +14,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { kernelModule } from './module.js';
+import { flushWrites, kernelModule } from './module.js';
 import { createMetrics } from '../log/internal/metrics.js';
 import { readTable } from '../log/internal/table.js';
 
@@ -794,3 +794,29 @@ test('a process in a worker of its own finds a process of the run by id across t
     assert.equal(found.completed, true);
     assert.equal(kernel.processes.find(0x2222), null, 'an id no process of the run has');
 });
+
+test('a flush of write buffers waits until each executor running guest code has passed a barrier',
+    async()=>{
+        // Executor 1 runs guest code (odd), 2 waits between slices (even).
+        const epochs = [7, 4];
+        const cpu = { executorEpochs: ()=>epochs.slice() };
+        /** @type {(() => void)[]} */
+        const looks = [];
+        let time = 0;
+        const flushed = flushWrites(cpu, { now: ()=>(time += 5), later: look=>looks.push(look) });
+        assert.ok(flushed instanceof Promise, 'a run still on is waited for');
+        let done = false;
+        flushed.then(()=>{ done = true; });
+        looks.shift()?.();
+        await Promise.resolve();
+        assert.equal(done, false, 'not done while executor 1 is still in that run');
+        epochs[0] = 8;
+        epochs[1] = 5;
+        looks.shift()?.();
+        await flushed;
+        assert.equal(done, true,
+            'done once it ended the run; a run begun after the call is not waited for');
+        assert.equal(flushWrites({ executorEpochs: ()=>[2, 6] }), true,
+            'no executor in guest code: done at once');
+        assert.equal(flushWrites({}), true, 'one executor: nothing to wait for');
+    });

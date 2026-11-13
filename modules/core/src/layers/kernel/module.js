@@ -23,6 +23,67 @@ import { createStackPool } from './internal/stacks.js';
 /** Host ms a turn among ready threads lasts at least (`createScheduler`'s `turnMs`). */
 const TURN_MS = 0.25;
 
+/** How long a flush looks on the engine's thread before it goes on through its event loop, ms. */
+const FLUSH_LOOK_MS = 20;
+
+/** The word a flush's own sequentially consistent operation is made on. */
+const FENCE = new Int32Array(new SharedArrayBuffer(4));
+
+/**
+ * FlushProcessWriteBuffers: done once every other executor that was running
+ * guest code has passed a sequentially consistent operation since - the end
+ * of a slice or a crossing into the host, each of which moves its count of
+ * runs of guest code (`cpu.executorEpochs`). Translated code's loads and
+ * stores are plain ones in the shared memory, ordered among threads by
+ * nothing: a store of one executor's thread could be unseen by another, or
+ * a load return what was there before a store another made, as long as
+ * neither passed such an operation - and on a host that orders memory less
+ * than x86 does, longer. The caller's own stores are released by its
+ * operation here, made before the counts are read. A runtime hands a flag
+ * between threads this way: a collector sets one, flushes, and reads whether
+ * each thread has left native code, while the thread stores that it has and
+ * then reads the collector's flag - with neither store seen by the other,
+ * both go on.
+ *
+ * @param {any} cpu
+ * @param {{ now?: () => number, later?: (look: () => void) => void }} [clock]
+ * @returns {true | Promise<true>}
+ */
+export function flushWrites(cpu, { now = ()=>performance.now(),
+    later = look=>{ setTimeout(look, 0); } } = {})
+{
+    if (typeof cpu.executorEpochs !== 'function')
+    {
+        return true;
+    }
+    Atomics.add(FENCE, 0, 1);
+    const then = cpu.executorEpochs();
+    const passed = ()=>{
+        const counts = cpu.executorEpochs();
+        return then.every((/** @type {number} */ count, /** @type {number} */ at)=>
+            (count & 1) === 0 || counts[at] !== count);
+    };
+    const from = now();
+    while (!passed())
+    {
+        if (now() - from > FLUSH_LOOK_MS)
+        {
+            return new Promise(resolve=>{
+                const look = ()=>{
+                    if (passed())
+                    {
+                        resolve(true);
+                        return;
+                    }
+                    later(look);
+                };
+                later(look);
+            });
+        }
+    }
+    return true;
+}
+
 /**
  * kernel — the execution core: threads, the scheduler, synchronisation, handles
  * and the guest's clock.
@@ -747,6 +808,37 @@ export function createKernelModule(){
                  * @returns {boolean} whether it runs nowhere now
                  */
                 settleThread: thread=>!live() || state.scheduler.settle(thread),
+
+                /**
+                 * Returns once every other executor running guest code has
+                 * passed a barrier (`flushWrites`).
+                 *
+                 * @returns {true | Promise<true>}
+                 */
+                flushProcessWrites: ()=>flushWrites(cpu),
+
+                /**
+                 * Settles once the thread runs nowhere: what a caller that
+                 * could not bring it back at once (`settleThread` false - it
+                 * is answering another executor's call, which cannot wait for
+                 * the others, or the thread's slice outlasted the wait) waits
+                 * for, its own thread parked meanwhile. Asked again at each
+                 * turn of the event loop, where nothing is being answered.
+                 *
+                 * @param {any} thread
+                 * @returns {Promise<void>}
+                 */
+                settledThread: (/** @type {any} */ thread)=>new Promise(resolve=>{
+                    const look = ()=>{
+                        if (!live() || state.scheduler.settle(thread))
+                        {
+                            resolve(undefined);
+                            return;
+                        }
+                        setTimeout(look, 0);
+                    };
+                    setTimeout(look, 0);
+                }),
 
                 /**
                  * @param {any} thread

@@ -24,9 +24,10 @@ const CURRENT_THREAD = 0xfffffffe;
  *
  * @param {{ registers?: Record<string, number>,
  *     setRegisters?: (values: Record<string, number>) => void,
- *     divergence?: (api: string, detail: string) => void }} [options]
+ *     divergence?: (api: string, detail: string) => void,
+ *     flushProcessWrites?: () => true | Promise<true> }} [options]
  */
-function machine({ registers = {}, setRegisters, divergence } = {}){
+function machine({ registers = {}, setRegisters, divergence, flushProcessWrites } = {}){
     const bytes = new Uint8Array(0x10000);
     const view = new DataView(bytes.buffer);
     /** @type {number[]} */
@@ -42,6 +43,7 @@ function machine({ registers = {}, setRegisters, divergence } = {}){
         handles,
         createEvent: (/** @type {any} */ options)=>({ kind: 'event', ...options }),
         processCpuMs: ()=>5,
+        flushProcessWrites,
     };
     const fns = /** @type {Record<string, { argBytes: number, handler: Function }>} */ (
         createProcessPolicyFunctions({
@@ -269,4 +271,22 @@ test('the handle count, debugging, power and memory notifications', ()=>{
     assert.equal(errors.at(-1), ERROR_PRIVILEGE_NOT_HELD);
     assert.equal(call('WerRegisterRuntimeExceptionModule', 0x2000, 0), 0, 'S_OK');
     assert.equal(call('FlushProcessWriteBuffers'), 0);
+});
+
+test('FlushProcessWriteBuffers returns once the other executors have passed a barrier', async()=>{
+    /** @type {(value: true) => void} */
+    let passed = ()=>{};
+    const { call } = machine({
+        flushProcessWrites: ()=>new Promise(resolve=>{ passed = resolve; }) });
+    let returned = null;
+    const answer = call('FlushProcessWriteBuffers').then((/** @type {number} */ value)=>{
+        returned = value;
+    });
+    await Promise.resolve();
+    assert.equal(returned, null, 'the caller waits while an executor is still in its run');
+    passed(true);
+    await answer;
+    assert.equal(returned, 0);
+    assert.equal(machine({ flushProcessWrites: ()=>true }).call('FlushProcessWriteBuffers'), 0,
+        'nothing running elsewhere: returned at once');
 });

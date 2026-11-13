@@ -264,3 +264,12 @@ test('the scan keeps what follows a call and drops pointers to data and to funct
     assert.match(rendered, /image\+0x00001400/);
     assert.doesNotMatch(rendered, /image\+0x00001500/, 'nothing calls to land there');
 });
+
+test('a trace carries the lines the layers last traced, each line of one indented', ()=>{
+    // An exception's account and what a last-chance filter was handed: a run
+    // with no one listening to the trace keeps them nowhere else.
+    const text = formatTrace({
+        traced: ['exception 0xc0000005 at 0x102bea', 'last chance: a\nebp=0x1'] });
+    assert.ok(text.includes(
+        'traced:\n  exception 0xc0000005 at 0x102bea\n  last chance: a\n  ebp=0x1'), text);
+});

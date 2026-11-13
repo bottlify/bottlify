@@ -92,7 +92,10 @@ flowchart LR
   with its own handlers, the executor's registers swapped into its state block for the answer
   (`executor.js`). How the executors share translations and the store is in section 5. Each
   executor also counts its runs of guest code in those words, which the graphics recorder's write
-  watch reads (section 7).
+  watch reads (section 7), and `FlushProcessWriteBuffers` waits on: it returns once every executor
+  running guest code when it was called has ended that run, an atomic operation that orders the
+  plain loads and stores of translated code on both sides. `GetThreadContext` of a thread running
+  on another executor answers once it has stopped there, its caller parked meanwhile.
 
 **Processes.** How many processes run at once is `createApp({ concurrency })`; what 1, 2 and 4
 give, and when a run falls back to `compatible`, is in

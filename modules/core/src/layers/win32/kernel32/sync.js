@@ -1294,13 +1294,23 @@ export function createSyncFunctions(host){
                     return 0;
                 }
                 const own = thread === host.currentThread();
-                if (!own)
+                const answer = ()=>{
+                    writeThreadContext(out >>> 0,
+                        own ? host.registers?.() ?? {} : savedRegisters(thread.context));
+                    return 1;
+                };
+                // Windows answers for a suspended thread once it has stopped:
+                // SuspendThread only asks, and GetThreadContext is how a caller
+                // waits for the stop. A thread still running on another executor
+                // that could not be brought back at once is waited for, the caller
+                // parked: answered from where it was last placed, the registers
+                // name a stack the thread is still writing, which a collector
+                // that walks a suspended thread's stack reads as its frames.
+                if (!own && kernel.settleThread?.(thread) === false && kernel.settledThread)
                 {
-                    kernel.settleThread?.(thread);
+                    return kernel.settledThread(thread).then(answer);
                 }
-                const registers = own ? host.registers?.() ?? {} : savedRegisters(thread.context);
-                writeThreadContext(out >>> 0, registers);
-                return 1;
+                return answer();
             },
         },
 

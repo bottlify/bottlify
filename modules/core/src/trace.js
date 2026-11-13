@@ -51,6 +51,10 @@ const hex = value=>`0x${(value >>> 0).toString(16).padStart(8, '0')}`;
  * @property {any} memory
  * @property {any} kernel
  * @property {any} bridge
+ * @property {() => string[]} [traced]
+ *           The last lines the layers traced: the exceptions a program raised
+ *           and what its last-chance filter was handed, which a run with no
+ *           one listening to its trace otherwise keeps nowhere.
  * @property {any} [fault]
  *           The frame the processor pushed, when the machine stopped on an
  *           exception. Without it a fault report describes the wrong place
@@ -341,6 +345,7 @@ export function captureTrace(sources){
         trace.hostCalls = bridge.chain();
         trace.recentCalls = bridge.recent();
         trace.startedGuest = bridge.recentlyStarted?.() ?? [];
+        trace.traced = sources.traced?.() ?? [];
     }
     catch (e){
         void e;
@@ -483,6 +488,14 @@ export function formatTrace(trace){
         {
             lines.push(`  0x${entry.entry.toString(16).padStart(8, '0')}`
                 + ` on ${entry.thread}, by ${entry.by}`);
+        }
+    }
+    if (trace.traced?.length > 0)
+    {
+        lines.push('traced:');
+        for (const text of trace.traced)
+        {
+            lines.push(...String(text).split('\n').map(line=>`  ${line}`));
         }
     }
     // Every blocked thread and what it is waiting on. This was captured all
