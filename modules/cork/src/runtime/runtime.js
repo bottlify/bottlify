@@ -1205,6 +1205,12 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
         stalls.push({ at: Math.round(since), ms: Math.round(ms), what });
     };
     let nextTable = resumable ? TIER_SLOT + 1 : 0;
+    // The milliseconds emitted on this thread, read on every build: what a
+    // host's pool takes as a want for a worker (`translatedHere`). The
+    // translator's phase timings are a diagnostic and read 0 in a shipped
+    // build, and a pool going by them never lent a process its worker again
+    // once it had given it back.
+    let emittedHereMs = 0;
     /** @type {Record<ExitKind, number>} */
     const exits = { untranslated: 0, budget: 0, trap: 0, halt: 0, fault: 0, stale: 0,
         interpreted: 0 };
@@ -4097,7 +4103,9 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
             [...copies.values()].map(bytes=>bytes.buffer));
             return true;
         }
+        const relinkedAt = performance.now();
         const batch = relinkBatch(relink, emitLayout, found, emitOptions(), emitCache);
+        emittedHereMs += performance.now() - relinkedAt;
         counts.emitMs += batch.emitMs;
         counts.encodeMs += batch.encodeMs;
         applyRelink(chunk, batch, null, store);
@@ -4863,7 +4871,9 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
             // program runs on without it.
             const jobs = unbuilt.map(one=>({ region: one.region, entryTop: one.entryTop,
                 checked: one.checked, copies: one.copies === true, ...precisionJob(one) }));
+            const emittedAt = performance.now();
             const batch = emitBatch(jobs, emitLayout, found, emitOptions(), emitCache);
+            emittedHereMs += performance.now() - emittedAt;
             counts.emitMs += batch.emitMs;
             counts.encodeMs += batch.encodeMs;
             published += publishBatch(unbuilt, batch, null, store);
@@ -5573,7 +5583,7 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
         seedRecords,
         attachTranslator,
         /** The milliseconds emitted on this thread, ever: work no worker took. */
-        translatedHere: ()=>counts.emitMs,
+        translatedHere: ()=>emittedHereMs,
         detachTranslator,
         /** Writes whatever the store keeps aside from its records, so the
          * names of this run's regions are on disk before the run ends and the
