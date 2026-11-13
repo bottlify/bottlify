@@ -114,7 +114,8 @@ and the batch modules the processes in workers compile: each is posted to the en
 which keeps it alive for the run (`withHeldModules`, as many wasm bytes as `sharedModuleBytes`),
 so a later process that compiles the same bytes from the store gets the code V8 compiled and
 tiered up for the first, since V8 keeps one compiled module for the bytes of any module still
-alive in the browser's process.
+alive in the browser's process. Where JavaScriptCore runs, which is not known to do so, no module
+is posted or kept.
 The engine thread answers a process thread across a link: two rings in shared memory, one each
 way, with a doorbell word per side ([`core/src/system/link.js`](../../modules/core/src/system/link.js), values encoded by `codec.js`). The
 process thread blocks on its doorbell for each answer and answers what it is asked meanwhile (the

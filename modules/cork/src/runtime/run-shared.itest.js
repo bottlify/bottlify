@@ -163,6 +163,7 @@ async function run(code, config){
             },
             shared: d.sharedModules ?? 0,
             formed: d.formedShared ?? 0,
+            keeps: { forms: d.sharedForms !== null, modules: d.sharedHeld !== null },
             hits: d.cacheHits ?? 0,
             misses: d.cacheMisses ?? 0,
         };
@@ -216,4 +217,28 @@ test('a process started again observes the same whether it takes the earlier one
     assert.ok(hits > PROGRAMS, `store hits (${hits})`);
     assert.ok(shared > PROGRAMS / 2, `modules taken as compiled earlier (${shared})`);
     assert.ok(formed > PROGRAMS, `regions taken as formed earlier (${formed})`);
+});
+
+test('a store made for one runtime keeps nothing beside the first runtime handed it, and is '
+    + 'shared from the second on, the modules held for other threads all along', async()=>{
+    // A process in a worker of its own is handed a proxy of the run's store
+    // made for it alone: what it kept for others there was heap and wasm no
+    // one took, unless a child ran beside it in its worker.
+    const { first, second } = program(7);
+    /** @type {string[]} */
+    const held = [];
+    const store = Object.assign(storeOf(true), { alone: true,
+        hold: (/** @type {string} */ key)=>held.push(key) });
+    const alone = await run(first, { store });
+    assert.deepEqual(alone.keeps, { forms: false, modules: false }, 'the first keeps nothing');
+    assert.ok(alone.hits + alone.misses > 0 && held.length > 0,
+        `its modules still go to the store's thread (${held.length})`);
+    const beside = await run(second, { store });
+    assert.deepEqual(beside.keeps, { forms: true, modules: true }, 'the second keeps');
+    const after = await run(second, { store });
+    assert.ok(after.formed > 0 && after.shared > 0,
+        `the third takes what the second kept (${after.formed}, ${after.shared})`);
+    const shared = await run(first, { store: storeOf(true) });
+    assert.deepEqual(shared.keeps, { forms: true, modules: true },
+        'a store not made for one keeps from the first');
 });

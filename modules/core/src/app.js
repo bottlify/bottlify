@@ -10476,7 +10476,8 @@ export async function createApp(options){
         options.bundle?.id ?? options.id ?? 'bundle');
     // Processes in workers of their own: the batch modules they compile are
     // kept alive here, beside the store they are stored in, for the next ones
-    // to find compiled (`withHeldModules`). Not in a process joined to a run
+    // to find compiled (`withHeldModules`), where the engine hands code by
+    // bytes (V8, not JavaScriptCore). Not in a process joined to a run
     // across a link: its store is the run's, kept alive where the run is.
     const heldModuleBytes = options.cork?.config?.sharedModuleBytes ?? SHARED_MODULE_BYTES;
     const translationStore = openedStore && !options.system && (options.concurrency ?? 1) > 1
