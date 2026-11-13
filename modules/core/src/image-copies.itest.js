@@ -149,10 +149,22 @@ test('a library\'s file and mapped image are let go once it is in guest memory, 
     + ' read there', { timeout: 300000 }, async()=>{
     setFlagsFromString('--expose-gc');
     const gc = runInNewContext('gc');
+    // Buffers are freed after their collection, later still on a loaded
+    // machine: collected again until two readings agree.
     const settle = async()=>{
-        gc();
-        await new Promise(done=>setTimeout(done, 20));
-        gc();
+        let last = -1;
+        for (let round = 0; round < 50; round++)
+        {
+            gc();
+            await new Promise(done=>setTimeout(done, 20));
+            gc();
+            const now = process.memoryUsage().arrayBuffers;
+            if (Math.abs(now - last) < 2 ** 16)
+            {
+                return;
+            }
+            last = now;
+        }
     };
     // Once first, for what the first process of a thread makes and keeps.
     await heldAfterRun(0, settle);
