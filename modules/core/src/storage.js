@@ -407,7 +407,7 @@ export function opfsSession(key, directory){
      * two copies of all of it each time.
      *
      * @param {any} folder @param {string} path
-     * @param {Uint8Array | { bytes: Uint8Array, parts?: () => Uint8Array[] }} file
+     * @param {Uint8Array | { bytes: Uint8Array, parts?: () => Iterable<Uint8Array> }} file
      */
     const put = async(folder, path, file)=>{
         const parts = file instanceof Uint8Array ? [file] : file.parts?.() ?? [file.bytes];
@@ -562,7 +562,15 @@ export function opfsSession(key, directory){
             writing = writing.then(async()=>drop(await folderToEdit(), await entryName(path)));
             return writing;
         },
-        async load(){
+        /**
+         * The session as it was last saved. `lazy`: each file's path and size
+         * now and its bytes when `read` is called, so a session of a gigabyte
+         * is laid on the volume a file at a time rather than held whole at once.
+         *
+         * @param {{ lazy?: boolean }} [options]
+         * @returns {Promise<Session>}  Lazily, each of `files` a `LazySessionFile`.
+         */
+        async load(options){
             await writing;
             const dir = await open();
             const folder = await dir.getDirectoryHandle(folderName).catch(()=>null);
@@ -586,6 +594,32 @@ export function opfsSession(key, directory){
             let links = null;
             for await (const file of entryFiles(folder))
             {
+                if (options?.lazy)
+                {
+                    const head = await headOf(file);
+                    if (!head)
+                    {
+                        continue;
+                    }
+                    if (head.path === REGISTRY_ENTRY || head.path === LINKS_ENTRY)
+                    {
+                        const read = JSON.parse(decoder.decode(
+                            new Uint8Array(await file.slice(head.start).arrayBuffer())));
+                        if (head.path === REGISTRY_ENTRY)
+                        {
+                            registry = read;
+                        }
+                        else
+                        {
+                            links = read;
+                        }
+                        continue;
+                    }
+                    const start = head.start;
+                    files.push(/** @type {any} */ ({ path: head.path, size: file.size - start,
+                        read: async()=>new Uint8Array(await file.slice(start).arrayBuffer()) }));
+                    continue;
+                }
                 const raw = new Uint8Array(await file.arrayBuffer());
                 const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
                 if (raw.length < 8 || view.getUint32(0, true) !== ENTRY_MAGIC)
@@ -733,6 +767,13 @@ export function opfsSession(key, directory){
 const SAVE_SHARE = 0.1;
 
 /**
+ * A file of a session loaded lazily: its path and size, its bytes read when
+ * asked for.
+ *
+ * @typedef {{ path: string, size: number, read: () => Promise<Uint8Array> }} LazySessionFile
+ */
+
+/**
  * One save for a burst of changes.
  *
  * A program saving a game writes its file in hundreds of pieces, and a
@@ -828,7 +869,13 @@ export function coalescedSaver({ snapshot, persist, settleMs = 250, schedule, cl
  *
  * @param {any} spec
  * @param {string} key  Names the session when the caller did not.
- * @returns {{ load: () => Promise<any>, save: ((session: Session, changes: any[]) => any) | null }}
+ * @returns {{ load: () => Promise<any>, save: ((session: Session, changes: any[]) => any) | null,
+ *     readsWithinSave?: boolean }}
+ *     A store that can answers `load` lazily (`LazySessionFile`): the volume is
+ *     laid a file at a time. `readsWithinSave`: the store has read every file
+ *     it was handed by the time its save settles, which a provider of the
+ *     caller's says of itself; one that does not may read them later, and
+ *     they are kept as long as it holds them.
  */
 export function resolveStorage(spec, key){
     if (!spec)
@@ -837,11 +884,13 @@ export function resolveStorage(spec, key){
     }
     if (spec === 'local')
     {
-        return localStorageSession(`bottlify:${key}`);
+        return { ...localStorageSession(`bottlify:${key}`), readsWithinSave: true };
     }
     if (spec === 'opfs')
     {
-        return opfsSession(key);
+        const session = opfsSession(key);
+        return { load: ()=>session.load({ lazy: true }), save: session.save,
+            readsWithinSave: true };
     }
     // A bare function is the common case: fetch the session from somewhere and
     // hand it over. Nothing goes back out, which is a legitimate thing to want.
@@ -852,5 +901,6 @@ export function resolveStorage(spec, key){
     return {
         load: async()=>(await spec.load?.()) ?? [],
         save: spec.save ? (files, changes)=>spec.save(files, changes) : null,
+        readsWithinSave: spec.readsWithinSave === true,
     };
 }

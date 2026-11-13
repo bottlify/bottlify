@@ -50,6 +50,7 @@ import { synthesiseProcessInit, DLL_PROCESS_ATTACH, DLL_PROCESS_DETACH }
 import { createBundleSource } from './layers/filesystem/internal/bundle/source.js';
 import { crc32 } from './layers/filesystem/internal/bundle/crc32.js';
 import { createSharingMemory, openSharedSharing } from './layers/filesystem/internal/shared-sharing.js';
+import { openPageFile } from './layers/filesystem/internal/page-file.js';
 import { resolveTranslationStore } from './layers/cpu/internal/translation-store.js';
 import { blockCacheName, createBlockCache, resolveBlockStore, storedLength }
     from './layers/filesystem/internal/bundle/cache.js';
@@ -409,6 +410,13 @@ const hashText = (hash, text)=>{
  *           `opfs`. A session is the files the program wrote and the registry
  *           it wrote; `save` is handed both, and `load` may answer with both
  *           or with a bare list of files.
+ * @property {'local' | false | { root: any }} [pageFile]
+ *           Where what the program writes goes once more of it is written
+ *           than the tab keeps in memory (`HEAP_POOLS.writableFiles`): `'local'`,
+ *           the default, a file of the run's own in the origin's private file
+ *           system, where the engine's thread has synchronous access to one (a
+ *           worker); `false` keeps every byte in memory, as a build with no
+ *           such file does; `{ root }` a directory handle of the caller's.
  * @property {string} [id]           Names the session when storage does not.
  * @property {{ path: string, bytes: Uint8Array }[]} [files]
  *           The person's own edits to the title's files, laid over the
@@ -3836,6 +3844,28 @@ export function createKernelGl(opengl, journalCall, traced, counters){
 }
 
 /**
+ * The run's page file (`page-file.js`): the disk its volume's writable layers
+ * keep what they let go of from memory, or null to keep it all in memory.
+ * A write to it that fails is said once, and the files stay in memory.
+ *
+ * @param {AppOptions} options @param {any} events
+ */
+async function openRunPageFile(options, events){
+    const spec = options.pageFile ?? 'local';
+    if (spec === false)
+    {
+        return null;
+    }
+    return openPageFile({
+        root: spec === 'local' ? undefined : spec.root,
+        residentBytes: HEAP_POOLS.writableFiles,
+        onFailure: error=>events.emit('divergence', { api: 'filesystem',
+            detail: `the page file refused a write (${error.message}); what the program `
+                + 'writes is kept in memory from here' }),
+    });
+}
+
+/**
  * The session storage holds for a run, its registry laid into `registry`
  * before the program's first instruction, and what saves it from then on.
  *
@@ -3911,7 +3941,17 @@ async function openSession(deps){
             persist: (session, changes)=>Promise.resolve(persist(session, changes)).catch(
                 (/** @type {Error} */ error)=>{
                     events.emit('error', { reason: 'session-save', error });
-                }),
+                }).finally(()=>{
+                // A store of the engine's own has read the files it was handed
+                // once its save settles; the writable layer stops keeping them
+                // apart then, and its next write into one does not copy it
+                // first. One of the caller's may read them later: they are let
+                // go of when it lets go of them.
+                for (const file of storage.readsWithinSave ? session.files : [])
+                {
+                    /** @type {any} */ (file).contents?.paged?.release();
+                }
+            }),
         });
         const pending = saver;
         /** @param {any[]} changes */
@@ -4000,7 +4040,18 @@ async function furnishVolume({ options, events, filesystem, blocks, seeded, regi
 
     // The session's files go onto the volume once the bundle is under it, so
     // that a saved file the bundle also carries is the one the program sees.
-    if (seeded.files.length > 0)
+    // A store that reads them lazily is read a file at a time: an installed
+    // program's session of a gigabyte held whole at once was the gigabyte in
+    // memory before the program's first instruction.
+    if (seeded.files.some((/** @type {any} */ file)=>typeof file.read === 'function'))
+    {
+        for (const file of seeded.files)
+        {
+            filesystem.apply([typeof file.read === 'function'
+                ? { path: file.path, bytes: await file.read() } : file]);
+        }
+    }
+    else if (seeded.files.length > 0)
     {
         filesystem.apply(seeded.files);
     }
@@ -10373,7 +10424,7 @@ export async function createApp(options){
      *     processTables?: Map<number, any>, ids: { thread: number, process: number },
      *     volume: { drives: Map<string, any>, volumes: Map<string, any>,
      *         writables: Map<string, any>, watchers: Set<Function>, revisions?: Int32Array,
-     *         sharing?: any, sharingMemory?: SharedArrayBuffer } }}
+     *         sharing?: any, sharingMemory?: SharedArrayBuffer, pageFile?: any } }}
      */
     // A process in a worker of its own is handed the run's across a link
     // (`system-link.js`), and joins it rather than making one.
@@ -10483,6 +10534,13 @@ export async function createApp(options){
     const heldModuleBytes = options.cork?.config?.sharedModuleBytes ?? SHARED_MODULE_BYTES;
     const translationStore = openedStore && !options.system && (options.concurrency ?? 1) > 1
         && heldModuleBytes > 0 ? withHeldModules(openedStore, heldModuleBytes) : openedStore;
+
+    // The disk under the run's writable layers is the run's, as its volume is:
+    // a process in a worker of its own writes through the run's.
+    if (!options.system)
+    {
+        system.volume.pageFile = await openRunPageFile(options, events);
+    }
 
     const translationPool = await openTranslationPool(options);
     /** What a machine's translator is told where the run lends it its translators. */
@@ -12339,6 +12397,11 @@ export async function createApp(options){
             .then(()=>current.dispose())
             .then(()=>{
                 system.bundle?.stop();
+                // Closed once the last save under way has read its files.
+                if (!options.system)
+                {
+                    system.volume.pageFile?.close();
+                }
                 // The run's store outlives each machine it was handed to, and
                 // goes with the last of them.
                 if (runStoreSpec === 'local')

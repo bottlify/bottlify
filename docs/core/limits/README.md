@@ -99,6 +99,10 @@ event, an error. Neither stops the program.
 ## Files
 
 - The bundle is read-only. What the program writes goes into the session, kept per `id`.
+- What the program writes is held in memory, all of it, where the engine's thread has no
+  synchronous handle on the origin's file system (a run on the page's own thread, a browser
+  without one, WebKit before 16.4): an installer that unpacks gigabytes needs them in the tab.
+  Elsewhere 64 MiB of it stays in memory and the rest goes to the run's page file.
 - A file mapping is a copy: a view reads the file when it is made and writes it back when it is
   closed, so two views of one file do not see each other's writes.
 

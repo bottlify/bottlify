@@ -25,6 +25,7 @@ import assert from 'node:assert/strict';
 import { createFilesystemModule } from '../module.js';
 import { ErrorCode } from './errors.js';
 import { createMemoryStore } from './memory-store.js';
+import { createPageFile } from './page-file.js';
 
 const DIRECTORIES = ['Windows', 'Temp', 'System32', 'Game', 'Data'];
 const FILES = ['cpuz.sys', 'Save.DAT', 'a.txt'];
@@ -98,8 +99,40 @@ const everything = fs=>{
 /** @param {string[]} components */
 const onC = components=>`C:\\${components.join('\\')}`;
 
-/** @param {number} seed */
-async function run(seed){
+/**
+ * A synchronous access handle over memory, for a page file every piece of
+ * which is written out at once.
+ */
+function memoryAccess(){
+    let bytes = new Uint8Array(0);
+    return {
+        getSize: ()=>bytes.length,
+        /** @param {Uint8Array} into @param {{ at: number }} where */
+        read: (into, { at })=>{
+            into.set(bytes.subarray(at, at + into.length));
+            return into.length;
+        },
+        /** @param {Uint8Array} from @param {{ at: number }} where */
+        write: (from, { at })=>{
+            if (at + from.length > bytes.length)
+            {
+                const grown = new Uint8Array(at + from.length);
+                grown.set(bytes);
+                bytes = grown;
+            }
+            bytes.set(from, at);
+            return from.length;
+        },
+        close: ()=>{},
+    };
+}
+
+/**
+ * @param {number} seed
+ * @param {import('./page-file.js').PageFile | null} [pageFile]  the run's writable
+ *     layers on a page file rather than in memory
+ */
+async function run(seed, pageFile = null){
     const r = random(seed);
     /** @type {Record<string, string>} */
     const source = {};
@@ -108,7 +141,7 @@ async function run(seed){
         source[r.file().join('\\')] = 'bundle';
     }
     const volume = { drives: new Map(), volumes: new Map(), writables: new Map(),
-        watchers: new Set() };
+        watchers: new Set(), pageFile };
     const layers = [createFilesystemModule(), createFilesystemModule()];
     const first = await layers[0].create({ volume });
     // The machine's own directories and files, made before the bundle is
@@ -236,3 +269,11 @@ test('the tree and its stores agree after every step, whatever a program spells 
         await run(seed);
     }
 });
+
+test('they agree as well with the writable layer on a page file that holds nothing in memory',
+    async()=>{
+        for (let seed = 1; seed <= 150; seed++)
+        {
+            await run(seed, createPageFile(memoryAccess(), { residentBytes: 0 }));
+        }
+    });

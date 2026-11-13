@@ -73,13 +73,28 @@ import { ErrorCode, fsError } from './errors.js';
  *           the other's, each copying a piece before it first changes it.
  * @property {(path: string, contents: FileContents) => void} [adoptContents]
  *           Makes a file of contents another store handed out.
+ * @property {() => number} [heldBytes]  What the store holds of the tab's
+ *           memory: the bytes of every piece it keeps, lent ones included.
  */
 
 /**
- * A file's contents in the form they are kept: whole, or in pieces.
+ * A file's contents in the form they are kept: whole, or in pieces. A store
+ * that keeps its pieces on a disk (`page-file.js`) hands them out `paged`: read
+ * a piece at a time, and let go of with `release` once whoever took them is
+ * done -- until then the store copies a piece before it changes it. Its
+ * `pieces` are read whole when asked for, a copy each.
  *
  * @typedef {{ size: number, flat: Uint8Array | null,
- *     pieces: (Uint8Array | undefined)[] }} FileContents
+ *     pieces: (Uint8Array | undefined)[], paged?: PagedContents }} FileContents
+ */
+
+/**
+ * @typedef {Object} PagedContents
+ * @property {unknown} owner  The page file the pieces are kept in.
+ * @property {(index: number) => Uint8Array | undefined} piece  A piece's bytes,
+ *           a copy, or undefined for one never written (zeroes).
+ * @property {(offset: number, length: number) => Uint8Array} read
+ * @property {() => void} release
  */
 
 /** @typedef {SourceStore & WritableStoreMethods} WritableStore */
@@ -134,6 +149,10 @@ export function bytesOf(contents){
     {
         return contents.flat;
     }
+    if (contents.paged)
+    {
+        return contents.paged.read(0, contents.size);
+    }
     const out = new Uint8Array(contents.size);
     contents.pieces.forEach((piece, index)=>{
         if (piece)
@@ -148,15 +167,28 @@ export function bytesOf(contents){
 /**
  * The bytes of contents a store handed out, in its own pieces and in order,
  * none copied: what a writer that takes them a part at a time - a session
- * saved to the origin's files - is given instead of one whole array.
+ * saved to the origin's files - is given instead of one whole array. Pieces
+ * kept on a disk (`paged`) are read one at a time as the writer reaches
+ * them, so a file of a gigabyte saved holds a piece of it, not all of it.
  *
  * @param {FileContents} contents
- * @returns {Uint8Array[]}
+ * @returns {Iterable<Uint8Array>}
  */
 export function piecesOf(contents){
     if (contents.flat)
     {
         return [contents.flat];
+    }
+    const paged = contents.paged;
+    if (paged)
+    {
+        return (function* (){
+            for (let at = 0, index = 0; at < contents.size; at += PIECE_SIZE, index++)
+            {
+                const length = Math.min(PIECE_SIZE, contents.size - at);
+                yield paged.piece(index) ?? new Uint8Array(length);
+            }
+        })();
     }
     /** @type {Uint8Array[]} */
     const out = [];
@@ -184,6 +216,13 @@ export function piecesOf(contents){
 export function createMemoryStore(seed = {}){
     /** @type {Map<string, StoredFile>} */
     const entries = new Map();
+    /** The bytes every file's pieces and whole contents hold, for `heldBytes`. */
+    let held = 0;
+
+    /** @param {StoredFile} entry @returns {number} */
+    const weigh = entry=>entry.flat
+        ? entry.flat.length
+        : entry.pieces.reduce((sum, piece)=>sum + (piece?.length ?? 0), 0);
 
     /** @param {Uint8Array | null} flat @returns {StoredFile} */
     const fileOf = flat=>({ directory: false, size: flat?.length ?? 0, pieces: [], flat,
@@ -263,8 +302,10 @@ export function createMemoryStore(seed = {}){
     };
 
     /**
-     * Makes a file's bytes its own pieces, from whole ones that are -- or may
-     * be -- someone else's: the copy on a first change.
+     * Makes a file kept whole a file kept in pieces, before its first change:
+     * each piece a view of the whole bytes, lent, so only the pieces the
+     * change reaches are copied -- a write of a few bytes into an archive of
+     * a gigabyte copied the gigabyte.
      *
      * @param {StoredFile} entry
      */
@@ -277,11 +318,11 @@ export function createMemoryStore(seed = {}){
         entry.flat = null;
         entry.shared = false;
         entry.pieces = [];
-        entry.lent = null;
         for (let at = 0; at < entry.size; at += PIECE_SIZE)
         {
-            entry.pieces.push(flat.slice(at, Math.min(at + PIECE_SIZE, entry.size)));
+            entry.pieces.push(flat.subarray(at, Math.min(at + PIECE_SIZE, entry.size)));
         }
+        entry.lent = entry.pieces.map(()=>true);
     };
 
     /**
@@ -315,6 +356,7 @@ export function createMemoryStore(seed = {}){
         {
             grown.set(piece);
         }
+        held += grown.length - (piece?.length ?? 0);
         entry.pieces[index] = grown;
         return grown;
     };
@@ -327,7 +369,9 @@ export function createMemoryStore(seed = {}){
             makeDirectory(path);
             continue;
         }
-        entries.set(path, fileOf(toBytes(content)));
+        const made = fileOf(toBytes(content));
+        held += weigh(made);
+        entries.set(path, made);
     }
 
     return {
@@ -399,7 +443,13 @@ export function createMemoryStore(seed = {}){
                 // again, so the cut piece is cleared beyond it.
                 const last = Math.floor(size / PIECE_SIZE);
                 const within = size % PIECE_SIZE;
-                entry.pieces.length = Math.min(entry.pieces.length, within === 0 ? last : last + 1);
+                const kept = Math.min(entry.pieces.length, within === 0 ? last : last + 1);
+                for (const dropped of entry.pieces.slice(kept))
+                {
+                    held -= dropped?.length ?? 0;
+                }
+                entry.pieces.length = kept;
+                entry.lent?.splice(kept);
                 const piece = entry.pieces[last];
                 if (within !== 0 && piece)
                 {
@@ -421,6 +471,7 @@ export function createMemoryStore(seed = {}){
             {
                 const flat = new Uint8Array(entry.size);
                 copyOut(entry, 0, entry.size, flat, 0);
+                held += flat.length - weigh(entry);
                 entry.flat = flat;
                 entry.pieces = [];
                 entry.lent = null;
@@ -432,6 +483,7 @@ export function createMemoryStore(seed = {}){
         /** @param {string} path @param {Uint8Array} bytes */
         adopt(path, bytes){
             const entry = file(path);
+            held += bytes.length - weigh(entry);
             entry.flat = bytes;
             entry.pieces = [];
             entry.lent = null;
@@ -454,11 +506,13 @@ export function createMemoryStore(seed = {}){
         /** @param {string} path @param {FileContents} contents */
         adoptContents(path, contents){
             const entry = file(path);
+            held -= weigh(entry);
             entry.size = contents.size;
             entry.flat = contents.flat;
             entry.shared = contents.flat !== null;
-            entry.pieces = contents.pieces.slice();
+            entry.pieces = contents.flat ? [] : contents.pieces.slice();
             entry.lent = contents.flat ? null : entry.pieces.map(()=>true);
+            held += weigh(entry);
         },
 
         /** @param {string} from @param {string} to */
@@ -479,11 +533,21 @@ export function createMemoryStore(seed = {}){
 
         /** @param {string} path */
         remove(path){
-            if (!entries.delete(path))
+            const entry = entries.get(path);
+            if (!entry)
             {
                 throw fsError(ErrorCode.NOT_FOUND, `Nothing at "${path}" to remove`);
             }
+            held -= weigh(entry);
+            entries.delete(path);
         },
+
+        /**
+         * What the store holds of the tab's memory: every piece and whole
+         * contents it keeps, lent ones and views of another's whole bytes
+         * included -- they live as long as this store keeps them.
+         */
+        heldBytes: ()=>held,
 
         /** @param {string} path */
         mkdir(path){
