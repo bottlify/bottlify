@@ -1996,9 +1996,12 @@ guest's own space, about 20 MiB an executor and 8 more: at the top of the librar
 the thread stacks, or at the heap's start where it ends short of 0x10000000. Four executors or more
 fit neither, and without a range every process committed its whole RAM at its start (2.1 GiB a
 process on eight). Past 0x10000000 and the few megabytes above it, the bases a library is most
-often linked for, the heap gives the range up as it gives a library that cannot move its span, and
-the memory starts at 512 MiB on eight executors. A library linked to load inside the range cannot
-be loaded; one that can move is moved. *2026-11-07.*
+often linked for, the heap gives the range up as it gives a library that cannot move its span. A
+library linked to load inside the range cannot be loaded; one that can move is moved. *2026-11-07.*
+Since 2026-11-13 only the other executors' pages are cut out there, the first executor's tables
+and their shared record staying at the top of the libraries' space: the memory starts as it does
+on one executor and reaches the cut range when another executor opens, where every process on
+eight executors started at 512 MiB.
 
 **A234. D3DX 10 asked for a size its file holds as a level takes that level, where the format
 has no codec here.** D3DX 10 and 11 filter the first level down to a size asked; this loader does
@@ -2104,3 +2107,15 @@ machine (registry values, copies of support files), is not run: the install says
 started is the primary play task of `goggame-<id>.info`, with its arguments; its working folder
 is not carried, the program starting in its own folder. Generation-1 builds are refused with what
 they are. *2026-11-12.*
+
+**A242. In a memory a gone process handed on, a reserved page reads that process's bytes until it
+is committed.** A process the run starts takes the memory of one gone before it (a parent starting
+child after child, ngen a worker per assembly) and zeroes at its start only what it finds in place
+before anything hands it out: the thunk table and the first thread's stack. The heap zeroes a block
+as it hands it out and the stack pool a stack as it is taken, so what a program is given reads as
+in a new memory; zeroing everything the gone process wrote made all of it resident at the start, a
+quarter of a gigabyte for the smallest program. A reservation's pages are zeroed as each is
+committed, as pages given back already were: until then a read of one finds the gone process's
+bytes where a read of an uncommitted page does not fault, where Windows faults and a new memory
+reads zero. A program reading memory it never committed or was never handed is the only one to
+see the difference. *2026-11-13.*

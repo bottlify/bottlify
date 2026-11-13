@@ -263,6 +263,11 @@ const roundUp = (value, to)=>Math.ceil(value / to) * to;
  *     out before. Guest memory begins zero and only the guest writes into it,
  *     so fresh memory reads as zeroes already; recycled memory holds whatever
  *     its previous owner left, and a caller promising zeroes has to clear it.
+ * @property {number} [recycledTo]  Where the part of it this process handed out
+ *     before ends: below, what an earlier block of its own left.
+ * @property {{ from: number, to: number }[]} [stale]  What of it a gone process
+ *     left its bytes in (`dirtyTo`), not cleaned when it was placed: a
+ *     reservation's share, cleared as it is committed rather than at once.
  */
 
 /**
@@ -466,14 +471,25 @@ export function createAddressIndex(){
  * which is what makes a heap bug reproducible.
  *
  * @param {{ base: number, size: number, alignment?: number,
- *     reach?: (end: number) => boolean }} arena  Memory nothing has
+ *     reach?: (end: number) => boolean, dirtyTo?: number,
+ *     clean?: (address: number, length: number) => boolean }} arena  Memory nothing has
  *        written yet, and where every block starts and how its size is rounded:
  *        ALIGNMENT, or ALIGNMENT_64 in a 64-bit process. The base is on it. `reach`
  *        grows the guest's memory to hold a block's end before the block is handed
  *        out, false where it cannot: the block is then refused as one nothing fits.
  *        A reservation (`reserving`) is not held, only its commits are.
+ *        `dirtyTo`: where the bytes a gone process left end, when the memory is one it
+ *        handed on (`CorkHostConfig.reused`): below it arena this process never handed
+ *        out is not zero. `clean` zeroes such a part of a block handed to the program
+ *        as it is placed, so it reads as fresh arena does -- only what the program is
+ *        handed costs a write, where zeroing the gone process's whole reach made every
+ *        page of it resident at the start -- and answers false where it cannot yet
+ *        (the memory not made): the block is then not fresh, and zeroed by whoever
+ *        promises zeroes. A reservation's part is left for its commits.
  */
-export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT, reach }){
+export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT, reach,
+    dirtyTo = base, clean })
+{
     /** @type {FreeSpan[][]} */
     const bins = Array.from({ length: BINS }, ()=>[]);
     // Three maps by address, and none of them is ever deleted from: an entry
@@ -543,6 +559,92 @@ export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT, 
      * committed page is a promise the first touch collects on.
      */
     let handedTo = base;
+    /** Below this, arena never handed out here holds a gone process's bytes (`dirtyTo`). */
+    const inheritedTo = Math.min(Math.max(dirtyTo, base), base + size);
+    /**
+     * The arena still holding a gone process's bytes, in address order: not
+     * all of it below `handedTo` was handed out here -- padding a block's
+     * alignment skipped, a reservation never committed -- and a block placed
+     * there later reads what a block of fresh arena reads, zeroes, once cleaned.
+     *
+     * @type {{ from: number, to: number }[]}
+     */
+    const uncleaned = inheritedTo > base ? [{ from: base, to: inheritedTo }] : [];
+    /**
+     * The uncleaned ranges inside [start, end), and where the first of them
+     * meeting it is in `uncleaned`.
+     *
+     * @param {number} start @param {number} end
+     */
+    const staleIn = (start, end)=>{
+        let low = 0;
+        let high = uncleaned.length;
+        while (low < high)
+        {
+            const middle = (low + high) >>> 1;
+            if (uncleaned[middle].to <= start)
+            {
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle;
+            }
+        }
+        /** @type {{ from: number, to: number }[]} */
+        const inside = [];
+        for (let at = low; at < uncleaned.length && uncleaned[at].from < end; at++)
+        {
+            inside.push({ from: Math.max(start, uncleaned[at].from),
+                to: Math.min(end, uncleaned[at].to) });
+        }
+        return { at: low, inside };
+    };
+    /**
+     * What a block placed at [start, end) holds before it is written: its own
+     * recycled part below `recycledTo`, zeroes past it but where a gone process
+     * left its bytes (`stale`) -- cleaned now for a block the program reads at
+     * once, and from then on arena as fresh as any.
+     *
+     * @param {number} start @param {number} end @param {boolean} reserving
+     */
+    const settled = (start, end, reserving)=>{
+        const recycledTo = Math.min(end, Math.max(start, handedTo));
+        if (uncleaned.length === 0)
+        {
+            return { fresh: start >= handedTo, recycledTo };
+        }
+        const { at, inside } = staleIn(start, end);
+        /** @type {{ from: number, to: number }[]} */
+        const left = [];
+        for (const range of inside)
+        {
+            if (reserving || !clean?.(range.from, range.to - range.from))
+            {
+                left.push(range);
+            }
+        }
+        if (left.length < inside.length)
+        {
+            // What was cleaned is taken out of the list, what was not kept.
+            const first = uncleaned[at];
+            const last = uncleaned[at + inside.length - 1];
+            /** @type {{ from: number, to: number }[]} */
+            const kept = [];
+            if (first.from < start)
+            {
+                kept.push({ from: first.from, to: start });
+            }
+            kept.push(...left);
+            if (last.to > end)
+            {
+                kept.push({ from: end, to: last.to });
+            }
+            uncleaned.splice(at, inside.length, ...kept);
+        }
+        return { fresh: start >= handedTo && left.length === 0, recycledTo,
+            ...left.length > 0 ? { stale: left } : {} };
+    };
     /** What the free spans hold, kept as they change: a program asks every frame. */
     let freeBytes = 0;
 
@@ -656,9 +758,9 @@ export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT, 
                 insert(end, spanEnd - end);
             }
 
-            const fresh = start >= handedTo;
+            const held = settled(start, end, reserving);
             handedTo = Math.max(handedTo, end);
-            placed({ address: start, size: bytes, capacity, owner, fresh });
+            placed({ address: start, size: bytes, capacity, owner, ...held });
             liveBlocks++;
             return start;
         },
@@ -713,12 +815,13 @@ export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT, 
             {
                 insert(end, spanEnd - end);
             }
-            const fresh = start >= handedTo;
+            // Kept from the program, it reads nothing there: nothing to clean.
+            const before = settled(start, end, reserving || held);
             if (!held)
             {
                 handedTo = Math.max(handedTo, end);
             }
-            placed({ address: start, size: bytes, capacity, owner, fresh });
+            placed({ address: start, size: bytes, capacity, owner, ...before });
             liveBlocks++;
             return true;
         },
@@ -837,6 +940,12 @@ export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT, 
          * another process trusts to know what it has to zero.
          */
         handedTo: ()=>handedTo,
+        /**
+         * Where the bytes a gone process left in the arena end (`dirtyTo`): with
+         * `handedTo`, what of the arena a process taking the memory next may find
+         * written.
+         */
+        dirtyTo: ()=>inheritedTo,
 
         /** The free spans' total, without walking them. */
         freeTotal: ()=>freeBytes,
@@ -1052,6 +1161,47 @@ export function createHeapFunctions(host){
         if (!allocator.block(address)?.fresh)
         {
             zero(address, length);
+        }
+    };
+    /**
+     * A reservation handed over: what this process left there before zeroed, as
+     * every reservation reads zero; what a gone process left (`dirtyTo`) zeroed
+     * now only where the call commits it, and otherwise noted as given back, so
+     * each page is zeroed as it is committed (`takeBack`) -- a runtime reserving
+     * hundreds of megabytes and committing a few made all of them resident.
+     *
+     * @param {number} address @param {number} span @param {boolean} committing
+     */
+    const handOverReservation = (address, span, committing)=>{
+        const block = allocator.block(address);
+        if (block?.fresh)
+        {
+            return;
+        }
+        if (committing || !block)
+        {
+            zero(address, span);
+            return;
+        }
+        const end = address + span;
+        /** @type {{ from: number, to: number }[]} */
+        const kept = block.stale ?? [];
+        const stale = kept.filter(range=>range.from < end)
+            .map(range=>({ from: range.from, to: Math.min(range.to, end) }));
+        // What this process handed out there before, but what a gone one left.
+        let from = address;
+        for (const range of [...stale, { from: end, to: end }])
+        {
+            const to = Math.min(range.from, Math.max(address, block.recycledTo ?? end));
+            if (to > from)
+            {
+                zero(from, to - from);
+            }
+            from = Math.max(from, range.to);
+        }
+        if (stale.length > 0)
+        {
+            decommitted.set(address, stale);
         }
     };
 
@@ -1589,7 +1739,7 @@ export function createHeapFunctions(host){
             {
                 watched.add(start);
             }
-            zeroHandedOver(start, span);
+            handOverReservation(start, span, (kind & MEM_COMMIT) !== 0);
             settleAccess(start, start, start + span);
             return start;
         }
@@ -1708,7 +1858,9 @@ export function createHeapFunctions(host){
         // forgiving of the two wrong answers.
         //
         // Arena that was never handed out is zero already; only what
-        // something else finished with costs a write.
+        // something else finished with costs a write, and what a gone process
+        // left there is zeroed page by page as it is committed
+        // (`handOverReservation`).
         decommitted.delete(address);
         committed.set(address, []);
         unreadable.delete(address);
@@ -1721,7 +1873,7 @@ export function createHeapFunctions(host){
         {
             watched.add(address);
         }
-        zeroHandedOver(address, span);
+        handOverReservation(address, span, (kind & MEM_COMMIT) !== 0);
         settleAccess(address, address, address + span);
         return address;
     };

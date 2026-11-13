@@ -118,6 +118,20 @@ const hashText = (hash, text)=>{
  */
 
 /**
+ * A gone process's memory, for the next process of the run to take
+ * (`CorkHostConfig.reused`): below `guestEnd` its guest may have written, its
+ * heap from `heapFrom` and its threads' stacks in [`stacks.from`, `stacks.to`);
+ * the first `executors` executors' pages may hold its engine's state, laid out
+ * as `engine` says. The process taking it zeroes at its start only what it
+ * finds in place before anything hands it out (`reusedRanges`); the heap's
+ * and the stacks' share as each block and stack is handed out.
+ *
+ * @typedef {{ memory: WebAssembly.Memory, guestEnd: number, executors?: number,
+ *     heapFrom?: number, stacks?: { from: number, to: number },
+ *     engine?: { layout: string, ranges: [number, number][] } }} SpareMemory
+ */
+
+/**
  * @typedef {Object} AppOptions
  * @property {Uint8Array} executable      The program to run.
  * @property {Object} [cork]              The translator.
@@ -368,9 +382,15 @@ const hashText = (hash, text)=>{
  * @property {Record<string, string>} [environment]
  *           The variables a process starts with: a child's are the block its
  *           parent handed CreateProcess, or the parent's own as they were then.
- * @property {{ memory: WebAssembly.Memory, guestEnd: number } | null} [reusedMemory]
+ * @property {SpareMemory | null} [reusedMemory]
  *           The memory of a process of the run that has gone, for this one to
  *           take: set by the run, not something a caller supplies.
+ * @property {SpareMemory[]} [spareMemories]
+ *           The run's memories of gone processes, where this run is a process the
+ *           run put in a worker of its own: each process built here takes one,
+ *           each gone puts its own back, and they are kept past `dispose` for the
+ *           worker to hand back to the run's thread. Set by the run, not something
+ *           a caller supplies.
  * @property {boolean} [exitNotice]
  *           Whether a run the program ended with exit code 0 says so to the
  *           player: a `message-box` of the engine's own (`exit: { code }`,
@@ -1490,6 +1510,44 @@ const HEAP_FLOOR = 0x0c000000;
 export const ENGINE_CUT_AT = 0x14000000;
 
 /**
+ * The engine's range of one executor, in MiB: its tables and what lies past
+ * them, and the record the executors keep together (`engineAreaFor`).
+ */
+const ENGINE_FIRST_MIB = 28;
+
+/**
+ * The guest ranges a process taking a gone one's memory zeroes at its start
+ * (`CorkHostConfig.reused`'s `written`): what it finds in place before anything
+ * hands it out -- the thunk table and the first thread's stack under the image,
+ * that stack where it lies at the stack pool's start -- and what the gone
+ * process's heap left below this one's, which this heap never hands out again.
+ * Images are written whole as they are mapped, the heap zeroes a block as it
+ * hands it out (`createHeapAllocator`'s `dirtyTo`), and the stack pool a stack
+ * as it is taken: zeroing all the gone process wrote made every page of it
+ * resident at the start, a quarter of a gigabyte for the smallest program.
+ *
+ * @param {{ guestEnd: number, heapFrom?: number }} spare
+ * @param {{ below: number, mainStack: [number, number] | null, heapBase: number }} here
+ *     `below`: where the thunk table and the first thread's stack under the image end
+ * @returns {[number, number][]}
+ */
+export function reusedRanges(spare, { below, mainStack, heapBase }){
+    /** @type {[number, number][]} */
+    const ranges = [[0, below]];
+    if (mainStack)
+    {
+        ranges.push(mainStack);
+    }
+    // A gone heap's start unknown: everything it may have reached below this heap.
+    const heapFrom = spare.heapFrom ?? below;
+    if (heapFrom < heapBase)
+    {
+        ranges.push([heapFrom, Math.min(spare.guestEnd, heapBase)]);
+    }
+    return ranges.filter(([from, to])=>to > from);
+}
+
+/**
  * Where a large-address-aware 32-bit process's space ends on a 64-bit Windows:
  * the last 64 KiB below 4 GiB are never the program's.
  */
@@ -1509,14 +1567,20 @@ const LARGE_ADDRESS_TOP = 0xfffe0000;
  * most often linked for; otherwise cut out of the heap past the bases libraries
  * are linked for (`ENGINE_CUT_AT`, `cut`): four executors or more fit neither
  * place, and without a range every process committed its whole RAM at its start
- * (2.1 GiB a process on an eight-core machine). None for a 64-bit process, a RAM
- * that is not a power of two, or an image of the program's own lying where the
- * range would.
+ * (2.1 GiB a process on an eight-core machine). There the first executor's
+ * tables and the record the executors share stay at the top of the libraries'
+ * space and only the other executors' pages are cut out (`others`): the memory
+ * holds the RAM up to the first range from the start, as with one executor, and
+ * reaches the others' when one opens -- a process whose threads open none (most
+ * of a run's helpers) never does, where every process started at 512 MiB. None
+ * for a 64-bit process, a RAM that is not a power of two, or an image of the
+ * program's own lying where the range would.
  *
  * @param {{ long: boolean, memorySize: number, moduleBase: number, stackPoolStart: number,
  *     heapStart: number, executors: number,
  *     image: { imageBase: number, sizeOfImage: number } }} what
- * @returns {{ at: number, span: number, inHeap: boolean, cut?: true } | undefined}
+ * @returns {{ at: number, span: number, inHeap: boolean, cut?: true,
+ *     others?: { at: number, span: number } } | undefined}
  */
 export function engineAreaFor({ long, memorySize, moduleBase, stackPoolStart, heapStart,
     executors, image })
@@ -1541,6 +1605,20 @@ export function engineAreaFor({ long, memorySize, moduleBase, stackPoolStart, he
     if (heapStart >= ENGINE_CUT_AT)
     {
         return clear(heapStart) ? { at: heapStart, span, inHeap: true } : undefined;
+    }
+    // The first executor's part where one executor's whole range goes, the
+    // others' cut out of the heap.
+    const first = ENGINE_FIRST_MIB * MIB;
+    const othersSpan = span - first;
+    const firstTop = Math.floor((stackPoolStart - first) / MIB) * MIB;
+    /** @param {number} at @param {number} bytes */
+    const free = (at, bytes)=>at + bytes < memorySize
+        && !(image.imageBase < at + bytes && image.imageBase + image.sizeOfImage > at);
+    if (othersSpan > 0 && firstTop >= moduleBase + 16 * MIB && free(firstTop, first)
+        && free(ENGINE_CUT_AT, othersSpan))
+    {
+        return { at: firstTop, span: first, inHeap: false,
+            others: { at: ENGINE_CUT_AT, span: othersSpan } };
     }
     return clear(ENGINE_CUT_AT) ? { at: ENGINE_CUT_AT, span, inHeap: false, cut: true }
         : undefined;
@@ -4885,6 +4963,13 @@ async function buildApp(options){
                 base: STACK_POOL_BASE,
                 size: threadStackSize,
                 limit: STACK_POOL_BASE + STACK_POOL_SIZE,
+                // In a gone process's memory, where its stacks' bytes end: each
+                // stack zeroed below it as it is taken. The whole pool where that
+                // process's lay elsewhere.
+                ...options.reusedMemory ? { dirtyTo: options.reusedMemory.stacks
+                    && options.reusedMemory.stacks.from === STACK_POOL_BASE
+                    ? options.reusedMemory.stacks.to
+                    : STACK_POOL_BASE + STACK_POOL_SIZE } : {},
             },
             // The run's thread and process ids, which every process numbers
             // its own from (`system`).
@@ -4899,7 +4984,15 @@ async function buildApp(options){
             memorySize: programLoaded.wide === undefined ? memorySize
                 : programLoaded.wide.window - 4096,
             ...(engineArea ? { engineArea } : {}),
-            reused: options.reusedMemory ?? undefined,
+            reused: options.reusedMemory ? { ...options.reusedMemory,
+                written: reusedRanges(options.reusedMemory, {
+                    // The thunk table, and the first thread's stack under it to
+                    // the initial stack where it lies there.
+                    below: Math.min(mainImage.imageBase, mainStack.initialStack === undefined
+                        ? DEFAULT_INITIAL_STACK : DEFAULT_THUNK_BASE + DEFAULT_THUNK_CAPACITY),
+                    mainStack: mainStack.initialStack === undefined ? null
+                        : [STACK_POOL_START, STACK_POOL_BASE],
+                    heapBase: HEAP_BASE }) } : undefined,
             initialStack: mainStack.initialStack,
             // The first 64 KiB, which Windows never maps: a store there faults,
             // as PECompact2's deliberate store through NULL needs to reach the
@@ -4923,7 +5016,11 @@ async function buildApp(options){
                 // The image's low dword span: a handler's pointer into it lands there.
                 hostAlias: { at: programLoaded.imageBase % 2 ** 32,
                     size: programLoaded.sizeOfImage } },
-            eagerExecutors: options.cpu?.eager === true,
+            // Not for a process started beside another: its executors open as its
+            // threads want them (`startedBeside`), each another executor's pages
+            // the memory reaches and a worker -- a launcher's every short child
+            // opened all of them at its start.
+            eagerExecutors: options.cpu?.eager === true && options.startedBeside !== true,
             executorTranslators: options.cpu?.executorTranslators,
             learnExecutors: options.startedBeside !== true,
             // The threads holding the guest's memory bring JavaScriptCore's
@@ -5664,7 +5761,10 @@ async function buildApp(options){
                 /** @param {number} word */
                 setMxcsr: word=>core.api('cpu').fpu.setMxcsr(word),
             },
-            arena: { base: HEAP_BASE, size: HEAP_SIZE },
+            // In a gone process's memory, where the bytes it left end: each block
+            // zeroed below it as it is handed out (`createHeapAllocator`).
+            arena: { base: HEAP_BASE, size: HEAP_SIZE,
+                ...options.reusedMemory ? { dirtyTo: options.reusedMemory.guestEnd } : {} },
             modules: {
                 /**
                  * A module the process has loaded: one synthesised but not yet
@@ -6068,11 +6168,13 @@ async function buildApp(options){
     // The engine's range where it is cut out of the heap (`engineAreaFor`'s
     // `cut`): never handed out, and the heap's region two, on either side of it,
     // as a span a library claims leaves it.
-    const cutArea = engineArea?.cut && engineArea.at > HEAP_BASE
-        && engineArea.at + engineArea.span < HEAP_BASE + HEAP_SIZE ? engineArea : null;
-    if (engineArea?.cut && !cutArea)
+    // The other executors' pages, where only they are cut out (`others`).
+    const cutRange = engineArea?.cut ? engineArea : engineArea?.others ?? null;
+    const cutArea = cutRange && cutRange.at > HEAP_BASE
+        && cutRange.at + cutRange.span < HEAP_BASE + HEAP_SIZE ? cutRange : null;
+    if (cutRange && !cutArea)
     {
-        throw new Error(`app: the engine's range at 0x${engineArea.at.toString(16)} lies`
+        throw new Error(`app: the engine's range at 0x${cutRange.at.toString(16)} lies`
             + ` outside the heap's span 0x${HEAP_BASE.toString(16)}+0x${HEAP_SIZE.toString(16)}`);
     }
     /** @type {{ name: string, base: number, end: number }[]} */
@@ -8147,7 +8249,7 @@ async function buildApp(options){
         return events.emit('error', { reason, error: thrown, trace, text }) ?? thrown;
     };
 
-    /** This process's memory, once it has gone (`spareMemory`). @type {{ memory: WebAssembly.Memory, guestEnd: number } | null} */
+    /** This process's memory, once it has gone (`spareMemory`). @type {SpareMemory | null} */
     let spare = null;
 
     return {
@@ -9488,14 +9590,22 @@ async function buildApp(options){
          * with how much of it the guest may have written; null before then
          * and under an engine that keeps none.
          *
-         * @returns {{ memory: WebAssembly.Memory, guestEnd: number } | null}
+         * @returns {SpareMemory | null}
          */
         spareMemory: ()=>spare,
         dispose(){
             // Read while the machine stands: the arena's mark is the last
             // thing that says where the guest wrote.
             const memoryLeft = cpu.wasmMemory?.() ?? null;
-            const guestEnd = win32.heap?.()?.handedTo?.();
+            const heapLeft = win32.heap?.();
+            const handedTo = heapLeft?.handedTo?.();
+            // Below it the guest may have written: everything it was given, the
+            // heap a gone process's bytes reached in it, the heap handed out.
+            const guestEnd = typeof handedTo === 'number' ? Math.max(handedTo,
+                heapLeft?.dirtyTo?.() ?? 0, cpu.ramHeld?.() ?? 0) : undefined;
+            const executorsTouched = cpu.executorsTouched?.() ?? null;
+            const engineLeft = cpu.engineLeft?.() ?? null;
+            const stacksReached = kernel.stacksReached?.();
             // What the program wrote last is saved now rather than after it
             // settles: the machine it was written on is about to go.
             saver?.flush();
@@ -9515,7 +9625,12 @@ async function buildApp(options){
                     translationStore?.close?.();
                 }
                 spare = memoryLeft && typeof guestEnd === 'number'
-                    ? { memory: memoryLeft, guestEnd } : null;
+                    ? { memory: memoryLeft, guestEnd, heapFrom: HEAP_BASE,
+                        ...executorsTouched === null ? {} : { executors: executorsTouched },
+                        ...engineLeft === null ? {} : { engine: engineLeft },
+                        ...typeof stacksReached === 'number'
+                            ? { stacks: { from: STACK_POOL_BASE, to: stacksReached } } : {} }
+                    : null;
             });
         },
     };
@@ -10751,13 +10866,15 @@ export async function createApp(options){
      * at once -- would hold one memory per child until the page ran out. A
      * process hands its memory back as it goes and the next one takes it, so
      * a run holds as many as it ever ran at once, and `SPARE_MEMORIES` more.
+     * The run's, where a process is put in a worker of its own: a worker hands
+     * its process's back as it ends (`runAcross`), and a process in a worker
+     * keeps those it was handed there (`spareMemories`).
      *
-     * @type {{ memory: WebAssembly.Memory, guestEnd: number }[]}
+     * @type {SpareMemory[]}
      */
-    const spareMemories = [];
-    /** @param {any} gone  a machine disposed */
-    const keepMemory = gone=>{
-        const spare = gone?.spareMemory?.();
+    const spareMemories = options.spareMemories ?? [];
+    /** @param {SpareMemory | null | undefined} spare */
+    const keepSpare = spare=>{
         if (spare && !spareMemories.some(one=>one.memory === spare.memory))
         {
             spareMemories.push(spare);
@@ -10767,6 +10884,8 @@ export async function createApp(options){
             }
         }
     };
+    /** @param {any} gone  a machine disposed */
+    const keepMemory = gone=>keepSpare(gone?.spareMemory?.());
 
     /**
      * A machine for a process, named to the class table.
@@ -11650,6 +11769,11 @@ export async function createApp(options){
                 worker.onMessage(data=>{
                     if (data?.type === 'exited')
                     {
+                        // The memories it ran in, for the next process the run starts.
+                        for (const spare of data.memories ?? [])
+                        {
+                            keepSpare(spare);
+                        }
                         ended = data.code;
                         if (data.journal)
                         {
@@ -11674,9 +11798,19 @@ export async function createApp(options){
                 // callback: neither crosses, and the child shows nothing itself.
                 const knobs = Object.fromEntries(Object.entries(options.graphics ?? {})
                     .filter(([key, value])=>key !== 'presenter' && typeof value !== 'function'));
+                // A gone process's memory to run in, where the run keeps one: a
+                // shared memory crosses to the worker, and comes back as it ends.
+                const shareable = spareMemories.filter(spare=>typeof SharedArrayBuffer
+                    === 'function' && spare.memory.buffer instanceof SharedArrayBuffer);
+                const handed = shareable.at(-1);
+                if (handed)
+                {
+                    spareMemories.splice(spareMemories.indexOf(handed), 1);
+                }
                 worker.post({
                     type: 'start',
                     end: memory.b,
+                    memories: handed ? [handed] : [],
                     volume: { revisions: system.volume.revisions ?? null,
                         sharing: system.volume.sharingMemory ?? null },
                     // The run's foreground window, focus and captured window,
@@ -12440,6 +12574,13 @@ export async function createApp(options){
         dispose: ()=>Promise.all([...serving].map(line=>line.current.dispose()))
             .then(()=>current.dispose())
             .then(()=>{
+                // A process in a worker of its own keeps its memories for the
+                // worker to hand back to the run's thread.
+                if (options.spareMemories)
+                {
+                    [...serving].forEach(line=>keepMemory(line.current));
+                    keepMemory(current);
+                }
                 system.bundle?.stop();
                 // Closed once the last save under way has read its files.
                 if (!options.system)
@@ -12454,7 +12595,10 @@ export async function createApp(options){
                 }
             })
             .finally(()=>{
-                spareMemories.length = 0;
+                if (!options.spareMemories)
+                {
+                    spareMemories.length = 0;
+                }
                 shownHere?.dispose();
                 presenter?.dispose?.();
                 translationPool?.dispose();

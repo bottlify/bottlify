@@ -202,22 +202,37 @@ for (const cores of [1, 8])
     });
 }
 
-test('a process run on eight executors starts with a memory of what it holds, not its whole RAM:'
-    + ' the engine\'s range cut out of the heap', { timeout: 120_000 }, async t=>{
-    const ram = 2 ** 31;
-    const made = watchMemories(t, ram);
-    const executable = buildExe({ imports, codeSize: 0x80, code: ({ iat })=>assemble([
-        ...commit(iat, 0, 32 * MIB),
-        0xc6, 0x80, ...u32(32 * MIB - 1), 1, //                  mov byte [eax + 32 MiB - 1], 1
-        0x6a, 0, 0xff, 0x15, ...u32(iat('ExitProcess')),
-        ...failing(iat),
-    ]) });
-    const app = await createApp({ executable, imagePath: 'C:\\App\\eight.exe', memorySize: ram,
-        cpu: { cores: 8 } });
-    t.after(()=>app.dispose());
-    assert.equal(await app.run({ timeoutMs: 60_000 }), 0, 'committed and written');
-    assert.equal(made.length, 1);
-    // 512 MiB, the power of two past the engine's range, and the engine's slack.
-    assert.ok(made[0].buffer.byteLength < ram / 2,
-        `under half the RAM: ${made[0].buffer.byteLength}`);
-});
+for (const eager of [false, true])
+{
+    test('a process run on eight executors starts with a memory of what it holds, not its whole'
+        + ' RAM: the other executors\' pages cut out of the heap and reached as one opens ('
+        + `${eager ? 'all of them, at its start' : 'none, a program of one thread'})`,
+    { timeout: 120_000 }, async t=>{
+        const ram = 2 ** 31;
+        const made = watchMemories(t, ram);
+        const executable = buildExe({ imports, codeSize: 0x80, code: ({ iat })=>assemble([
+            ...commit(iat, 0, 32 * MIB),
+            0xc6, 0x80, ...u32(32 * MIB - 1), 1, //              mov byte [eax + 32 MiB - 1], 1
+            0x6a, 0, 0xff, 0x15, ...u32(iat('ExitProcess')),
+            ...failing(iat),
+        ]) });
+        const app = await createApp({ executable, imagePath: 'C:\\App\\eight.exe',
+            memorySize: ram, cpu: { cores: 8, eager } });
+        t.after(()=>app.dispose());
+        assert.equal(await app.run({ timeoutMs: 60_000 }), 0, 'committed and written');
+        assert.equal(made.length, 1);
+        const bytes = made[0].buffer.byteLength;
+        if (eager)
+        {
+            // Every executor's pages, cut out at 0x14000000: under 512 MiB.
+            assert.ok(bytes < 512 * MIB, `the executors' pages and no more: ${bytes}`);
+        }
+        else
+        {
+            // What one executor's holds: the RAM up to the system's shared page
+            // past the stacks, 256 MiB, and the engine's slack -- where every
+            // process on eight executors started at 512 MiB.
+            assert.ok(bytes <= 256 * MIB + 0x20000, `as one executor's: ${bytes}`);
+        }
+    });
+}

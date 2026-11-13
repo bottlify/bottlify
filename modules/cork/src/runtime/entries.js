@@ -47,11 +47,15 @@ const REMOVED_TOP = 0xff;
 
 /**
  * @param {{ memory?: WebAssembly.Memory, hashBase?: number, shift?: number,
- *     load?: number }} [hash]  the memory and the offset of the entry hash in it, and the
- *     layout's slot shift; without them the map alone answers. `load`: the share of the
- *     slots live past which entries stay in the map alone (three quarters)
+ *     load?: number, zeroed?: boolean }} [hash]  the memory and the offset of the entry hash
+ *     in it, and the layout's slot shift; without them the map alone answers. `load`: the
+ *     share of the slots live past which entries stay in the map alone (three quarters).
+ *     `zeroed`: the hash is known to be all empty slots already, and is not cleared at the
+ *     start -- the clear wrote every page of it, where a memory just made holds none
  */
-export function createEntries({ memory, hashBase = -1, shift = 16, load: share = 0.75 } = {}){
+export function createEntries({ memory, hashBase = -1, shift = 16, load: share = 0.75,
+    zeroed = false } = {})
+{
     const hashed = memory !== undefined && hashBase >= 0;
     // As many slots as the shift leaves bits for; past `share` of them live,
     // entries stay in the map alone -- an open-addressed probe grows long as
@@ -63,7 +67,7 @@ export function createEntries({ memory, hashBase = -1, shift = 16, load: share =
         .fill(0, hashBase, hashBase + slotCount * Tables.HASH_SLOT);
     let inHash = 0;
     let removed = 0;
-    if (hashed)
+    if (hashed && !zeroed)
     {
         clear();
     }

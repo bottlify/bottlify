@@ -90,6 +90,10 @@
   run's, kept on the engine thread: a server COM starts runs in a worker of its own while the run
   has room for one, and otherwise beside the process that asked, in its worker; a call from one
   worker to another goes through the engine thread and back.
+- A process gone leaves its memory to the run, which keeps as many as ran at once and four more:
+  the next process it starts takes one rather than a memory of its own, on the engine's thread or
+  in a worker of its own (a worker's goes back to the engine's thread as it ends). What it is
+  handed there reads as in a new memory (`roadmap/decisions.md` A242).
 - With `concurrency` 2 or 4 a child of a process in a worker runs in a worker of its own while
   the run has room, and otherwise beside its parent in the parent's worker, sharing its link to
   the engine thread: each process there waits on the run's named objects, answers for its own

@@ -19,6 +19,7 @@ shipped program to change.
 | `translators` | 1 | Workers the runtime opens itself; 0 when a host's pool lends them. |
 | `arena` | none | The translation cache arena (`createArena`) every executor of a process shares; absent, the runtime makes its own. |
 | `sharedCode`, `doorbell` | none | Where the process's record of code shared between its executors lies and which executor this runtime is; the words a translation worker rings after it answers. |
+| `tablesZeroed` | `false` | The host made the tables zero itself (a memory just made, or zeroed where they lie): the entry hash is not cleared at the start, which made all of it resident. |
 | `awaited` | none | Whether another executor waits for this one's answer: forming and lookups stop at the next region while it does. |
 | `store`, `bundleId` | none, `'unknown'` | Where translations are kept between runs (the core gives one per bundle in OPFS), and their namespace. |
 | `cacheVersion` | the translator's | A version above the translator's own: every record of another version misses. |
