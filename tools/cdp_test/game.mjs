@@ -353,6 +353,9 @@ function parse(argv){
         // address space a player's does (the system's shared page inside RAM,
         // the heap as large).
         memory: number('--memory', 2048),
+        // The machine's memory in megabytes (`machineMemory`): every process of
+        // the run together; 0, unset, bounds each process by --memory alone.
+        machineMemory: number('--machine-memory', 0),
         watch: number('--watch', 0),
         // With --watch: the files under this directory of the volume, counted
         // at every look and listed whenever they change.
@@ -813,8 +816,16 @@ const RESULT_GRACE_MS = 300000;
  * @returns {Promise<any>}
  */
 async function readResult(cdp, sessionId, timeoutMs, gone){
+    // A result past what one string can hold (a run with hundreds of processes'
+    // tables) is read without the keys too large to write, named in `tooLarge`,
+    // rather than losing the whole report.
     const length = await poll(cdp, sessionId, 'window.__bottlify__.result ? String(('
-        + 'self.__bottlifyResultText = JSON.stringify(window.__bottlify__.result)).length) : null',
+        + 'self.__bottlifyResultText = (()=>{ const result = window.__bottlify__.result;'
+        + ' try { return JSON.stringify(result); } catch { const tooLarge = [];'
+        + ' const kept = Object.fromEntries(Object.entries(result).filter(([key, value])=>{'
+        + ' try { JSON.stringify(value); return true; }'
+        + ' catch { tooLarge.push(key); return false; } }));'
+        + ' return JSON.stringify({ ...kept, tooLarge }); } })()).length) : null',
     timeoutMs, gone);
     const pieces = [];
     for (let at = 0; at < length;)
@@ -2052,6 +2063,8 @@ export async function game(options){
             hooks: options.watches,
             record: options.record,
             memorySize: options.memory > 0 ? options.memory * 1024 * 1024 : undefined,
+            machineMemory: options.machineMemory > 0
+                ? options.machineMemory * 1024 * 1024 : undefined,
             watch: options.watchImports.length > 0
                 ? { libraries: Object.fromEntries(options.watchImports.map(spec=>{
                     const [dll, ordinals] = spec.toLowerCase().split('#');
@@ -2476,6 +2489,10 @@ export async function game(options){
             result = await readResult(cdp, sessionId, options.waitMs + RESULT_GRACE_MS,
                 ()=>crashed);
             result.answeredAfterMs = Date.now() - startedAt;
+            if (result.tooLarge?.length > 0)
+            {
+                say(`  result: ${result.tooLarge.join(', ')} too large to read back, left out`);
+            }
             // What the origin holds once the run is over: the block cache, the
             // translations, the session (`navigator.storage.estimate()`).
             const estimate = await cdp.send('Runtime.evaluate', {

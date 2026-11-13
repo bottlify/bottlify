@@ -1377,7 +1377,8 @@ async function standingOf(app, journal = 0){
                     className: window.className, title: String(window.title ?? '').slice(0, 60),
                     x: window.x, y: window.y, width: window.width, height: window.height })),
             cpu: { recent: (cpu.recent ?? []).slice(-4), top: (cpu.samples?.top ?? []).slice(0, 8),
-                traps: cpu.traps, trapCapacity: cpu.trapCapacity },
+                traps: cpu.traps, trapCapacity: cpu.trapCapacity,
+                machineMemory: cpu.machineMemory ?? null },
             com: win32.com ?? null,
             ...entries ? { journal: entries } : {},
         };
@@ -1587,7 +1588,8 @@ export function createHarness(canvas, how = {}){
      *           store?: string, prefetch?: boolean, bundleId?: string, fakeGpu?: boolean,
      *           fakeFeatures?: string[],
      *           watch?: { libraries: Record<string, number[] | null>,
-     *               strings: number[] }, record?: number, memorySize?: number }} request
+     *               strings: number[] }, record?: number, memorySize?: number,
+     *           machineMemory?: number }} request
      * @returns {Promise<any>}
      */
     async function run(request){
@@ -1802,6 +1804,7 @@ export function createHarness(canvas, how = {}){
             watchImport: request.watch ? watchFrom(request.watch) : undefined,
             record: request.record || 0,
             ...(request.memorySize ? { memorySize: request.memorySize } : {}),
+            ...(request.machineMemory ? { machineMemory: request.machineMemory } : {}),
             // Journal categories on from the first instruction -- a call area
             // a run wants to read back afterwards through `journalRecent`.
             // `logCapacity`/`logBytes` raise the ring above its default when
