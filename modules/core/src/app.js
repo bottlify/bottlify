@@ -11359,7 +11359,8 @@ export async function createApp(options){
      * output the run's. Its exit code is the answer.
      *
      * @param {{ readImage: (path: string) => Promise<Uint8Array | null>,
-     *     sound: () => ({ options: any, giveBack: () => void } | null) }} from
+     *     sound: () => ({ options: any, giveBack: () => void } | null),
+     *     server?: boolean }} from  `server` for one COM started, whose code is no run's
      *     its parent, as the run reaches it: where its image is read, and the
      *     sound it lends
      * @param {any} request
@@ -11711,7 +11712,13 @@ export async function createApp(options){
                 opened.settle();
             }
             const { code, diagnostics } = ended;
-            lastBesideCode = code;
+            // A server COM started - a service among them, ended with the run -
+            // is nobody's game: an installer gone while the ngen service it
+            // woke winds down ended with the installer's code, not the service's.
+            if (!from.server)
+            {
+                lastBesideCode = code;
+            }
             over?.(ended);
             if (exited)
             {
@@ -11759,7 +11766,7 @@ export async function createApp(options){
             }
             return new Promise(resolve=>{
                 startAcross({ readImage: path=>current.readImage(path),
-                    sound: ()=>lendSound(current) },
+                    sound: ()=>lendSound(current), server: true },
                 { imagePath: found.path, commandLine: request.service ? request.command.trim()
                     : `${request.command.trim()} -Embedding`,
                 ...request.service ? { service: request.service } : {},
