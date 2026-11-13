@@ -2179,7 +2179,7 @@ export async function game(options){
         const censusTimer = census ? setInterval(()=>{ writeCensus(); }, 60000) : null;
         if (census)
         {
-            say(`  census: ${censusFile}`);
+            console.log(`  census: ${censusFile}`);
         }
         const deviceWatched = await device.install({
             attach: profiler === null && census === null });
@@ -2519,7 +2519,7 @@ export async function game(options){
             result.answeredAfterMs = Date.now() - startedAt;
             if (result.tooLarge?.length > 0)
             {
-                say(`  result: ${result.tooLarge.join(', ')} too large to read back, left out`);
+                console.log(`  result: ${result.tooLarge.join(', ')} too large to read back, left out`);
             }
             // What the origin holds once the run is over: the block cache, the
             // translations, the session (`navigator.storage.estimate()`).
