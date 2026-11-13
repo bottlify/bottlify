@@ -28,7 +28,10 @@ libraries' space under the thread stacks, at the heap's start, or cut out of the
 with `cpu.grow: false` hold the whole of it from the start, cork's tables past it. Nothing in a
 memory just made is cleared: its pages are zero until touched. A process that takes the memory of
 one gone before it zeroes the first executor's tables at once and another executor's pages as that
-executor opens, and only those the gone process opened. The layout
+executor opens, and only those the gone process opened; of the program's own, the thunk table and
+the first thread's stack at its start, while the heap zeroes a block and the stack pool a stack as
+each is handed out, so what the program is given reads as in a new memory
+(`roadmap/decisions.md` A242). The layout
 (program address `a` at offset `a`, the state block with the registers, 512 bytes, in the
 program's first 64 KiB, which a Windows program never maps, on pages that fault the program's
 stores, and cork's tables with one flag byte per 4 KiB page) is in

@@ -1077,3 +1077,25 @@ test('a memory a gone process left is zeroed where its engine ran: the first exe
     third.makeRoomFor(2);
     assert.equal(marked(), 0, 'with no count every executor\'s pages are taken as written');
 });
+
+test('a memory taken with the ranges to zero named is zeroed there and in its first 64 KiB, the'
+    + ' rest left to whoever hands it out; a gone engine laid out elsewhere is zeroed whole', ()=>{
+    const MIB = 1 << 20;
+    const config = { memorySize: 256 * MIB, engineArea: { at: 64 * MIB, span: 32 * MIB } };
+    const gone = host(config);
+    const memory = gone.wasmMemory();
+    const bytes = new Uint8Array(memory.buffer);
+    bytes.fill(0x5a, 0x10000, 32 * MIB);
+    bytes.fill(0x5a, 0x5000, 0x6000);
+    const next = host({ ...config, reused: { memory, guestEnd: 32 * MIB,
+        written: [[MIB, 2 * MIB]],
+        engine: { layout: 'elsewhere', ranges: [[20 * MIB, 21 * MIB]] } } });
+    assert.equal(next.wasmMemory(), memory);
+    /** @param {number} from @param {number} to @param {number} value */
+    const all = (from, to, value)=>bytes.subarray(from, to).every(byte=>byte === value);
+    assert.ok(all(0x5000, 0x10000, 0), 'the first 64 KiB');
+    assert.ok(all(MIB, 2 * MIB, 0), 'a range named');
+    assert.ok(all(20 * MIB, 21 * MIB, 0), 'the gone engine\'s pages, laid out elsewhere');
+    assert.ok(all(2 * MIB, 20 * MIB, 0x5a) && all(21 * MIB, 32 * MIB, 0x5a),
+        'the rest as the gone process left it, for the heap to zero as it hands it out');
+});

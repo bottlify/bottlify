@@ -1286,7 +1286,19 @@ export function createWin32Module(){
                 return (memory.reach?.(want) ?? Infinity) >= want;
             };
             const guestHeap = createGuestHeap({
-                allocator: createHeapAllocator({ ...arena, alignment, reach: arenaReach }),
+                allocator: createHeapAllocator({ ...arena, alignment, reach: arenaReach,
+                    // A gone process's bytes under a block handed out, zeroed as
+                    // fresh arena is; not before the machine has its memory.
+                    clean: (/** @type {number} */ address, /** @type {number} */ length)=>{
+                        try
+                        {
+                            memory.fillBytes(address, 0, length);
+                            return true;
+                        }
+                        catch {
+                            return false;
+                        }
+                    } }),
                 arena, alignment,
                 memory: {
                     readU16: address=>memory.readU16(address),
@@ -1358,6 +1370,9 @@ export function createWin32Module(){
                 // Where the arena has never been handed out: the memory above
                 // it is still zero, for a process that takes this one's memory.
                 handedTo: ()=>allocator.handedTo(),
+                // Where the bytes a gone process left in the arena end, when this
+                // process took its memory: the next one to take it finds them too.
+                dirtyTo: ()=>allocator.dirtyTo?.() ?? arena.base,
             };
             bridge.useHeap(heap);
 

@@ -2104,3 +2104,15 @@ machine (registry values, copies of support files), is not run: the install says
 started is the primary play task of `goggame-<id>.info`, with its arguments; its working folder
 is not carried, the program starting in its own folder. Generation-1 builds are refused with what
 they are. *2026-11-12.*
+
+**A242. In a memory a gone process handed on, a reserved page reads that process's bytes until it
+is committed.** A process the run starts takes the memory of one gone before it (a parent starting
+child after child, ngen a worker per assembly) and zeroes at its start only what it finds in place
+before anything hands it out: the thunk table and the first thread's stack. The heap zeroes a block
+as it hands it out and the stack pool a stack as it is taken, so what a program is given reads as
+in a new memory; zeroing everything the gone process wrote made all of it resident at the start, a
+quarter of a gigabyte for the smallest program. A reservation's pages are zeroed as each is
+committed, as pages given back already were: until then a read of one finds the gone process's
+bytes where a read of an uncommitted page does not fault, where Windows faults and a new memory
+reads zero. A program reading memory it never committed or was never handed is the only one to
+see the difference. *2026-11-13.*

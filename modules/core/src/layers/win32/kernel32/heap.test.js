@@ -1733,3 +1733,86 @@ test('the allocator keeps its free total as blocks come and go', ()=>{
         assert.equal(allocator.freeTotal(), allocator.diagnostics().free);
     }
 });
+
+/**
+ * A host over a memory a gone process left written all through its arena
+ * (`dirtyTo`), with the allocator cleaning as `clean` lets it.
+ *
+ * @param {{ base: number, size: number }} arena @param {() => boolean} [can]
+ */
+function inheritedHost(arena, can = ()=>true){
+    const host = fakeHost(arena);
+    host.bytes.fill(0xee, arena.base);
+    /** @type {[number, number][]} */
+    const cleaned = [];
+    const allocator = createHeapAllocator({ ...arena, dirtyTo: arena.base + arena.size,
+        clean: (/** @type {number} */ address, /** @type {number} */ length)=>{
+            if (!can())
+            {
+                return false;
+            }
+            cleaned.push([address, length]);
+            host.bytes.fill(0, address, address + length);
+            return true;
+        } });
+    return { host: { ...host, allocator }, allocator, cleaned };
+}
+
+test('in a gone process\'s memory a block reads what it reads in a new one: cleaned as it is'
+    + ' placed, padding an alignment skipped too, and nothing it was not handed', ()=>{
+    const { host, allocator, cleaned } = inheritedHost(RESERVING_ARENA);
+    const first = allocator.allocate(100);
+    assert.equal(allocator.block(first)?.fresh, true, 'zero, as fresh arena is');
+    assert.deepEqual(cleaned, [[first, 104]], 'only the block itself');
+    assert.ok(host.bytes.subarray(first, first + 104).every(byte=>byte === 0));
+    assert.equal(host.bytes[first + 104], 0xee, 'what lies past it left as it was');
+    // A block aligned past the end leaves padding behind it, under the handed mark:
+    // never handed out here, it still holds the gone process's bytes.
+    const aligned = allocator.allocate(64, { alignment: 0x1000 });
+    assert.ok(aligned > first + 104);
+    const padded = allocator.allocate(64);
+    assert.ok(padded < aligned, 'placed in the padding');
+    assert.ok(host.bytes.subarray(padded, padded + 64).every(byte=>byte === 0),
+        'cleaned there too, though the arena was handed out past it');
+    assert.equal(allocator.dirtyTo(), RESERVING_ARENA.base + RESERVING_ARENA.size);
+    // Freed and placed again: its own bytes now, recycled as any block's are.
+    host.bytes.fill(0x11, first, first + 104);
+    allocator.free(first);
+    const again = allocator.allocate(100);
+    assert.equal(again, first);
+    assert.equal(allocator.block(again)?.fresh, false);
+    assert.equal(host.bytes[again], 0x11, 'not cleaned again: this process wrote it');
+});
+
+test('a block placed before the memory can be written is not fresh, and is cleaned once it'
+    + ' can be', ()=>{
+    let can = false;
+    const { allocator, cleaned } = inheritedHost(RESERVING_ARENA, ()=>can);
+    const early = allocator.allocate(100);
+    assert.equal(allocator.block(early)?.fresh, false, 'whoever promises zeroes zeroes it');
+    assert.deepEqual(cleaned, []);
+    allocator.free(early);
+    can = true;
+    const later = allocator.allocate(100);
+    assert.equal(later, early);
+    assert.deepEqual(cleaned, [[early, 104]], 'still the gone process\'s bytes: cleaned now');
+});
+
+test('in a gone process\'s memory a reservation is zeroed as it is committed, page by page,'
+    + ' and not at once', ()=>{
+    const { host } = inheritedHost(RESERVING_ARENA);
+    const fns = createHeapFunctions(host);
+    const before = host.filled();
+    const reserved = fns.VirtualAlloc.handler([0, 2 * GRANULARITY, MEM_RESERVE, 0x04]);
+    assert.notEqual(reserved, 0);
+    assert.equal(host.filled(), before, 'the reservation itself zeroes nothing');
+    const page = fns.VirtualAlloc.handler([reserved + PAGE_SIZE, PAGE_SIZE, MEM_COMMIT, 0x04]);
+    assert.equal(page, reserved + PAGE_SIZE);
+    assert.ok(host.bytes.subarray(page, page + PAGE_SIZE).every(byte=>byte === 0),
+        'the page committed reads zero');
+    assert.equal(host.bytes[reserved], 0xee, 'a page not committed is not zeroed');
+    assert.equal(host.filled() - before, PAGE_SIZE, 'one page written');
+    const whole = fns.VirtualAlloc.handler([0, GRANULARITY, MEM_COMMIT | MEM_RESERVE, 0x04]);
+    assert.ok(host.bytes.subarray(whole, whole + GRANULARITY).every(byte=>byte === 0),
+        'committed with its reservation: zero at once');
+});

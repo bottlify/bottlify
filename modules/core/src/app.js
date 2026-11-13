@@ -117,10 +117,16 @@ const hashText = (hash, text)=>{
 
 /**
  * A gone process's memory, for the next process of the run to take
- * (`CorkHostConfig.reused`): below `guestEnd` its guest may have written, and
- * the first `executors` executors' pages may hold its engine's state.
+ * (`CorkHostConfig.reused`): below `guestEnd` its guest may have written, its
+ * heap from `heapFrom` and its threads' stacks in [`stacks.from`, `stacks.to`);
+ * the first `executors` executors' pages may hold its engine's state, laid out
+ * as `engine` says. The process taking it zeroes at its start only what it
+ * finds in place before anything hands it out (`reusedRanges`); the heap's
+ * and the stacks' share as each block and stack is handed out.
  *
- * @typedef {{ memory: WebAssembly.Memory, guestEnd: number, executors?: number }} SpareMemory
+ * @typedef {{ memory: WebAssembly.Memory, guestEnd: number, executors?: number,
+ *     heapFrom?: number, stacks?: { from: number, to: number },
+ *     engine?: { layout: string, ranges: [number, number][] } }} SpareMemory
  */
 
 /**
@@ -1487,6 +1493,38 @@ const HEAP_FLOOR = 0x0c000000;
  * in roadmap/decisions.md (A233).
  */
 export const ENGINE_CUT_AT = 0x14000000;
+
+/**
+ * The guest ranges a process taking a gone one's memory zeroes at its start
+ * (`CorkHostConfig.reused`'s `written`): what it finds in place before anything
+ * hands it out -- the thunk table and the first thread's stack under the image,
+ * that stack where it lies at the stack pool's start -- and what the gone
+ * process's heap left below this one's, which this heap never hands out again.
+ * Images are written whole as they are mapped, the heap zeroes a block as it
+ * hands it out (`createHeapAllocator`'s `dirtyTo`), and the stack pool a stack
+ * as it is taken: zeroing all the gone process wrote made every page of it
+ * resident at the start, a quarter of a gigabyte for the smallest program.
+ *
+ * @param {{ guestEnd: number, heapFrom?: number }} spare
+ * @param {{ below: number, mainStack: [number, number] | null, heapBase: number }} here
+ *     `below`: where the thunk table and the first thread's stack under the image end
+ * @returns {[number, number][]}
+ */
+export function reusedRanges(spare, { below, mainStack, heapBase }){
+    /** @type {[number, number][]} */
+    const ranges = [[0, below]];
+    if (mainStack)
+    {
+        ranges.push(mainStack);
+    }
+    // A gone heap's start unknown: everything it may have reached below this heap.
+    const heapFrom = spare.heapFrom ?? below;
+    if (heapFrom < heapBase)
+    {
+        ranges.push([heapFrom, Math.min(spare.guestEnd, heapBase)]);
+    }
+    return ranges.filter(([from, to])=>to > from);
+}
 
 /**
  * Where a large-address-aware 32-bit process's space ends on a 64-bit Windows:
@@ -4807,6 +4845,13 @@ async function buildApp(options){
                 base: STACK_POOL_BASE,
                 size: threadStackSize,
                 limit: STACK_POOL_BASE + STACK_POOL_SIZE,
+                // In a gone process's memory, where its stacks' bytes end: each
+                // stack zeroed below it as it is taken. The whole pool where that
+                // process's lay elsewhere.
+                ...options.reusedMemory ? { dirtyTo: options.reusedMemory.stacks
+                    && options.reusedMemory.stacks.from === STACK_POOL_BASE
+                    ? options.reusedMemory.stacks.to
+                    : STACK_POOL_BASE + STACK_POOL_SIZE } : {},
             },
             // The run's thread and process ids, which every process numbers
             // its own from (`system`).
@@ -4821,7 +4866,15 @@ async function buildApp(options){
             memorySize: programLoaded.wide === undefined ? memorySize
                 : programLoaded.wide.window - 4096,
             ...(engineArea ? { engineArea } : {}),
-            reused: options.reusedMemory ?? undefined,
+            reused: options.reusedMemory ? { ...options.reusedMemory,
+                written: reusedRanges(options.reusedMemory, {
+                    // The thunk table, and the first thread's stack under it to
+                    // the initial stack where it lies there.
+                    below: Math.min(mainImage.imageBase, mainStack.initialStack === undefined
+                        ? DEFAULT_INITIAL_STACK : DEFAULT_THUNK_BASE + DEFAULT_THUNK_CAPACITY),
+                    mainStack: mainStack.initialStack === undefined ? null
+                        : [STACK_POOL_START, STACK_POOL_BASE],
+                    heapBase: HEAP_BASE }) } : undefined,
             initialStack: mainStack.initialStack,
             // The first 64 KiB, which Windows never maps: a store there faults,
             // as PECompact2's deliberate store through NULL needs to reach the
@@ -5586,7 +5639,10 @@ async function buildApp(options){
                 /** @param {number} word */
                 setMxcsr: word=>core.api('cpu').fpu.setMxcsr(word),
             },
-            arena: { base: HEAP_BASE, size: HEAP_SIZE },
+            // In a gone process's memory, where the bytes it left end: each block
+            // zeroed below it as it is handed out (`createHeapAllocator`).
+            arena: { base: HEAP_BASE, size: HEAP_SIZE,
+                ...options.reusedMemory ? { dirtyTo: options.reusedMemory.guestEnd } : {} },
             modules: {
                 /**
                  * A module the process has loaded: one synthesised but not yet
@@ -9407,8 +9463,15 @@ async function buildApp(options){
             // Read while the machine stands: the arena's mark is the last
             // thing that says where the guest wrote.
             const memoryLeft = cpu.wasmMemory?.() ?? null;
-            const guestEnd = win32.heap?.()?.handedTo?.();
+            const heapLeft = win32.heap?.();
+            const handedTo = heapLeft?.handedTo?.();
+            // Below it the guest may have written: everything it was given, the
+            // heap a gone process's bytes reached in it, the heap handed out.
+            const guestEnd = typeof handedTo === 'number' ? Math.max(handedTo,
+                heapLeft?.dirtyTo?.() ?? 0, cpu.ramHeld?.() ?? 0) : undefined;
             const executorsTouched = cpu.executorsTouched?.() ?? null;
+            const engineLeft = cpu.engineLeft?.() ?? null;
+            const stacksReached = kernel.stacksReached?.();
             // What the program wrote last is saved now rather than after it
             // settles: the machine it was written on is about to go.
             saver?.flush();
@@ -9428,8 +9491,11 @@ async function buildApp(options){
                     translationStore?.close?.();
                 }
                 spare = memoryLeft && typeof guestEnd === 'number'
-                    ? { memory: memoryLeft, guestEnd,
-                        ...executorsTouched === null ? {} : { executors: executorsTouched } }
+                    ? { memory: memoryLeft, guestEnd, heapFrom: HEAP_BASE,
+                        ...executorsTouched === null ? {} : { executors: executorsTouched },
+                        ...engineLeft === null ? {} : { engine: engineLeft },
+                        ...typeof stacksReached === 'number'
+                            ? { stacks: { from: STACK_POOL_BASE, to: stacksReached } } : {} }
                     : null;
             });
         },

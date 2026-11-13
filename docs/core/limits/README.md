@@ -26,6 +26,10 @@ event, an error. Neither stops the program.
   says so once. Node.js 24 and later, and the browsers, let the modules go.
 - Below `0x10000` a write or running code faults, as an access violation, as on Windows; a read
   there finds zeros where Windows would fault too (`roadmap/decisions.md` A79).
+- A process the run starts may run in the memory of one gone before it. What it is handed (a heap
+  block, a committed page, a thread's stack) reads zero as in a new memory, but a page it reserved
+  and has not committed reads the gone process's bytes until it commits it, where Windows faults
+  (`roadmap/decisions.md` A242).
 - The processor a program finds is a Nehalem (SSE4.2, POPCNT): AVX, AVX2, FMA, BMI, AES-NI and
   AVX-512 are not announced and fault as on that processor. `tools/isa-audit.mjs` tells which a
   title's code uses.

@@ -106,6 +106,9 @@ export function createKernelModule(){
                 // than by failing -- which is the hardest kind of fault to read
                 // back to its cause.
                 limit: config?.stacks?.limit ?? Infinity,
+                // In a memory a gone process handed on: where its stacks' bytes end.
+                ...(config?.stacks?.dirtyTo === undefined ? {}
+                    : { dirtyTo: config.stacks.dirtyTo }),
             });
 
             /**
@@ -462,6 +465,11 @@ export function createKernelModule(){
                     return thread;
                 },
 
+                /**
+                 * Where what any process wrote in the thread stacks' pool ends:
+                 * what a process taking this memory next has to zero there.
+                 */
+                stacksReached: ()=>stacks.reached(),
                 /**
                  * A stack from the threads' pool for something that runs on a
                  * thread without being one -- a fiber -- made known to the

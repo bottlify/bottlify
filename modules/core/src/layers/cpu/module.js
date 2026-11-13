@@ -1065,6 +1065,14 @@ export function createCpuModule(){
                  * @returns {number | null}
                  */
                 executorsTouched: ()=>state.host?.executorsTouched?.() ?? null,
+                /**
+                 * Where the engine's pages lie in this process's memory and which may
+                 * hold its state, for a process taking the memory once this one has
+                 * gone. Null before boot.
+                 *
+                 * @returns {{ layout: string, ranges: [number, number][] } | null}
+                 */
+                engineLeft: ()=>state.host?.engineLeft?.() ?? null,
                 /** @param {string} name @param {number} value */
                 writeReg32: (name, value)=>started().writeReg32(name, value),
                 /** The register width: 64 for an x86-64 process. @returns {32 | 64} */
