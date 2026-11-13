@@ -408,3 +408,24 @@ test('a listing says what an image actually carries', ()=>{
     assert.deepEqual(listed.map(one=>one.name), [101, 1, 2]);
     assert.equal(listed[0].size, 2);
 });
+
+test('a mapped image answers as its file does, every offset in it an RVA', ()=>{
+    // A module keeps no copy of its file: its directory is read where it
+    // lies mapped, where the file's offsets are no longer where anything is.
+    const { bytes, image } = buildImage(buildResources([
+        { type: 2, names: [{ name: 101, langs: [{ lang: 0x409, data: [1, 2] }] }] },
+        { type: RT_STRING,
+            names: [{ name: 1, langs: [{ lang: 0x409, data: bundle(['', 'mapped']) }] }] },
+    ]));
+    const laidOut = new Uint8Array(image.sizeOfImage);
+    laidOut.set(bytes.subarray(0, RSRC_FILE));
+    laidOut.set(bytes.subarray(RSRC_FILE), RSRC_RVA);
+    const mapped = { mapped: laidOut };
+
+    assert.deepEqual(findResource(mapped, image, 2, 101), findResource(bytes, image, 2, 101));
+    assert.deepEqual(listResources(mapped, image), listResources(bytes, image));
+    assert.equal(loadString(mapped, image, 1), 'mapped');
+    assert.equal(loadString(mapped, image, 0), null, 'an empty slot is absent there too');
+    // Read as a file, the image's own layout puts the directory elsewhere.
+    assert.equal(findResource(laidOut, image, 2, 101), null);
+});

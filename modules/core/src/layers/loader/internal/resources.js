@@ -73,6 +73,26 @@ const TYPE_NAMES = new Map([
 ]);
 
 /**
+ * An image as it lies mapped, indexed by RVA: a module's own memory, read in
+ * place, where Windows reads a module's resources from. Its file is no longer
+ * needed once it is mapped, and a packed image's directory is the one its own
+ * code left there.
+ *
+ * @typedef {{ mapped: Uint8Array }} MappedImage
+ */
+
+/**
+ * The bytes a directory is read from, and where an RVA lies in them: the raw
+ * file by its sections, or a mapped image at the RVA itself.
+ *
+ * @param {Uint8Array | MappedImage} source
+ * @param {import('./pe.js').PeImage} image
+ */
+const layoutOf = (source, image)=>(ArrayBuffer.isView(source)
+    ? { bytes: source, at: (/** @type {number} */ rva)=>rvaToFileOffset(image, rva) }
+    : { bytes: source.mapped, at: (/** @type {number} */ rva)=>rva });
+
+/**
  * One resource, found.
  *
  * @typedef {Object} FoundResource
@@ -103,7 +123,7 @@ const TYPE_NAMES = new Map([
  * named is that language alone (Wine's kernel32 resource tests,
  * test_find_resource).
  *
- * @param {Uint8Array} bytes  The raw file (not the mapped image).
+ * @param {Uint8Array | MappedImage} bytes  The raw file, or the image as mapped.
  * @param {import('./pe.js').PeImage} image
  * @param {number | string} type
  * @param {number | string} name
@@ -164,7 +184,7 @@ export function findResource(bytes, image, type, name, language = null, uiLangua
  * A slot whose length is zero holds no string. That is how a gap in a range of
  * identifiers is stored, so it is absence rather than an empty string.
  *
- * @param {Uint8Array} bytes
+ * @param {Uint8Array | MappedImage} bytes  The raw file, or the image as mapped.
  * @param {import('./pe.js').PeImage} image
  * @param {number} id
  * @param {number | string | null} [language]
@@ -178,18 +198,20 @@ export function loadString(bytes, image, id, language = null){
     {
         return null;
     }
+    const layout = layoutOf(bytes, image);
     /** @type {number} */
     let at;
     try
     {
-        at = rvaToFileOffset(image, found.rva);
+        at = layout.at(found.rva);
     }
     catch {
         // Data outside every section: a file that describes a table it does
         // not hold, as a packed image does until its own code unpacks it.
         return null;
     }
-    return stringInBundle(bytes.subarray(at, at + found.size), wanted & STRINGS_PER_BUNDLE - 1);
+    return stringInBundle(layout.bytes.subarray(at, at + found.size),
+        wanted & STRINGS_PER_BUNDLE - 1);
 }
 
 /**
@@ -235,7 +257,7 @@ export function stringInBundle(bundle, slot){
  * not load a string either has none, or has them somewhere this reader is not
  * looking, and a listing says which without guessing.
  *
- * @param {Uint8Array} bytes
+ * @param {Uint8Array | MappedImage} bytes  The raw file, or the image as mapped.
  * @param {import('./pe.js').PeImage} image
  * @returns {ListedResource[]}
  */
@@ -292,18 +314,19 @@ export function listResources(bytes, image){
  * bound once and the walk never has to remember which of its numbers are
  * relative to what.
  *
- * @param {Uint8Array} bytes
+ * @param {Uint8Array | MappedImage} source
  * @param {import('./pe.js').PeImage} image
  */
-function openTree(bytes, image){
+function openTree(source, image){
     const directory = image.directories[DIR_RESOURCE];
     if (!directory || directory.size === 0)
     {
         return null;
     }
 
+    const { bytes, at: offsetOf } = layoutOf(source, image);
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    const base = rvaToFileOffset(image, directory.address);
+    const base = offsetOf(directory.address);
     const limit = directory.size;
 
     /** A node outside the directory is a malformed image, not a resource. */

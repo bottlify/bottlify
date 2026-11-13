@@ -151,7 +151,9 @@ flowchart TD
   program code. Every image's TLS is supported, a library's loaded at run time too: a slot, a
   copy of its block in every thread (those already running when it is loaded included), and TLS
   callbacks for every reason its `DllMain` hears, before it. `FreeLibrary` gives the slot and the
-  copies back.
+  copies back. A module keeps no copy of its file for its resources or its TLS directory: both are
+  read where it lies in guest memory, as Windows reads them, and a DLL's file and mapped image are
+  let go once it is bound.
 - **DirectX's redistributables** (`d3dx9_*` and the rest) are not part of the engine: a game brings
   them, through its installer's DirectX setup, which puts them in `C:\WINDOWS\system32\`, or as DLLs
   beside its `.exe`. A copy beside the `.exe` is loaded as the real DLL; for every other the

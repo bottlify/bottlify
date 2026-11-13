@@ -33,7 +33,7 @@ import { planDependencies } from './layers/loader/internal/dependencies.js';
 import {
     findResource, listResources, loadString, RT_STRING, stringInBundle,
 } from './layers/loader/internal/resources.js';
-import { readTls } from './layers/loader/internal/tls.js';
+import { readMappedTls, readTls } from './layers/loader/internal/tls.js';
 import { jumpBytes, relocatablePrefix } from './layers/loader/internal/hooks.js';
 import { mangledCall } from './layers/loader/internal/mangling.js';
 import { mapImage } from './layers/loader/internal/image.js';
@@ -2300,16 +2300,20 @@ export async function inParallel(items, limit, work){
  * offset from the base rather than at its RVA -- so that is the `rva` a data
  * file's lookup answers, since every caller adds it to the base.
  *
- * A mapped module's strings are read where it lies in memory, as Windows
+ * A mapped module's resources are read where it lies in memory, as Windows
  * reads them: a packed image's file names its string tables at addresses
- * that hold them only once its own code has unpacked them there.
+ * that hold them only once its own code has unpacked them there. A module
+ * keeps no copy of its file for them (`viewMemory`); one handed its file
+ * (`file`) has its directory read from that.
  *
  * @param {() => any} main       The running program's module, once loaded.
  * @param {Map<number, any>} byBase  Every mapped module by its base.
  * @param {Map<number, any>} [dataFiles]  Libraries mapped as data, by handle.
  * @param {(address: number, length: number) => Uint8Array} [readMemory]
+ * @param {(address: number, length: number) => Uint8Array} [viewMemory]  Guest
+ *     memory in place, for a walk done before anything else runs.
  */
-export function resourceLookup(main, byBase, dataFiles = new Map(), readMemory){
+export function resourceLookup(main, byBase, dataFiles = new Map(), readMemory, viewMemory){
     /** @param {number} instance */
     const moduleOf = instance=>{
         if (instance === 0)
@@ -2320,13 +2324,42 @@ export function resourceLookup(main, byBase, dataFiles = new Map(), readMemory){
             ? dataFiles.get(instance >>> 0) ?? null
             : byBase.get(instance >>> 0) ?? null;
     };
+    /**
+     * Where a module's resource directory is read: its file when it kept
+     * one, else its memory -- the file's own layout for a data file mapped
+     * flat (`fileSize`), the image's for any other -- or nowhere.
+     *
+     * @param {any} module
+     * @returns {Uint8Array | { mapped: Uint8Array } | null}
+     */
+    const sourceOf = module=>{
+        if (module?.file)
+        {
+            return module.file;
+        }
+        if (!module?.image || !viewMemory)
+        {
+            return null;
+        }
+        try
+        {
+            const view = viewMemory(module.base,
+                module.flat ? module.fileSize : module.image.sizeOfImage);
+            return module.flat ? view : { mapped: view };
+        }
+        catch {
+            // Its memory gone from under it: nothing mapped there now.
+            return null;
+        }
+    };
     return {
         /** @param {number} instance @param {number} id */
         loadString: (instance, id)=>{
             const module = moduleOf(instance);
+            const source = sourceOf(module);
             if (!module?.file || module.flat || !readMemory)
             {
-                return module?.file ? loadString(module.file, module.image, id) : null;
+                return source ? loadString(source, module.image, id) : null;
             }
             const found = findResource(module.file, module.image, RT_STRING,
                 ((id >>> 0) >> 4) + 1);
@@ -2344,8 +2377,9 @@ export function resourceLookup(main, byBase, dataFiles = new Map(), readMemory){
          */
         findResource: (instance, type, name, language = null)=>{
             const module = moduleOf(instance);
-            const found = module?.file
-                ? findResource(module.file, module.image, type, name, language)
+            const source = sourceOf(module);
+            const found = source
+                ? findResource(source, module.image, type, name, language)
                 : null;
             if (!found || !module.flat)
             {
@@ -2369,7 +2403,8 @@ export function resourceLookup(main, byBase, dataFiles = new Map(), readMemory){
          */
         listResources: instance=>{
             const module = moduleOf(instance);
-            return module?.file ? listResources(module.file, module.image) : [];
+            const source = sourceOf(module);
+            return source ? listResources(source, module.image) : [];
         },
         /**
          * Where a module is mapped: the address a resource's RVA is relative
@@ -2996,14 +3031,13 @@ export async function mapShippedLibraries(options){
             /** @param {number} ordinal */
             addressOfOrdinal: ordinal=>ordinals.get(ordinal) ?? null,
             entryPoint: record.record.entryPoint,
+            // Until it is bound (`buildApp`), and let go of then: the mapped
+            // image and its file are in guest memory from there on.
             mapped: record,
-            // Kept for the same reason the program's own image is: a resource
-            // is read out of the file rather than out of the mapping, and a
-            // library a program ships carries the strings, icons, dialogs and
-            // version information that program asks for. Without these a
-            // module answers nothing for every resource call -- including the
-            // one it makes to tell a person what went wrong.
-            file,
+            // A library a program ships carries the strings, icons, dialogs
+            // and version information that program asks for; they are read
+            // where it lies mapped (`resourceLookup`), as Windows reads them.
+            fromFile: true,
             image,
             // Where it came from. A program asks a library where it lives and
             // then looks for its own data beside it, so this has to be the
@@ -4435,7 +4469,7 @@ async function buildApp(options){
         const wanted = pathKey(resolveLibraryPath(path, options.imagePath ?? 'C:\\app.exe'));
         for (const module of byBase.values())
         {
-            if (module.file && module.path && pathKey(module.path) === wanted)
+            if (module.fromFile && module.path && pathKey(module.path) === wanted)
             {
                 return module;
             }
@@ -4463,7 +4497,7 @@ async function buildApp(options){
      *
      * @param {string} name @param {any} module
      */
-    const answersPath = (name, module)=>!/[\\/]/.test(name) || !module?.file || !module.path
+    const answersPath = (name, module)=>!/[\\/]/.test(name) || !module?.fromFile || !module.path
         || pathKey(module.path)
             === pathKey(resolveLibraryPath(name, options.imagePath ?? 'C:\\app.exe'));
 
@@ -5678,7 +5712,8 @@ async function buildApp(options){
                 /** @param {any} asked */
                 resolved: asked=>events.emit('resolved', asked),
                 ...resourceLookup(()=>mainModule, byBase, dataFiles,
-                    (address, length)=>core.api('memory').readBytes(address, length)),
+                    (address, length)=>core.api('memory').readBytes(address, length),
+                    (address, length)=>core.api('memory').window(address, length)),
                 /**
                  * The version resource of a file on the volume, by path: what
                  * an installer compares before it replaces a shared component.
@@ -5721,7 +5756,7 @@ async function buildApp(options){
                  */
                 systemImage: name=>{
                     const module = byName.get(moduleKeyOf(name));
-                    return module && !module.file ? imageInMemory(/** @type {any} */ (memory), module) : null;
+                    return module && !module.fromFile ? imageInMemory(/** @type {any} */ (memory), module) : null;
                 },
             },
             commandLine: options.commandLine,
@@ -6446,7 +6481,7 @@ async function buildApp(options){
             {
                 attachOrder.splice(at, 1);
             }
-            if (held.file)
+            if (held.fromFile)
             {
                 byBase.delete(held.base);
                 forgetName(held);
@@ -6614,7 +6649,7 @@ async function buildApp(options){
         // machine then does with its time.
         const named = findModule(name);
         const loaded = answersPath(name, named) ? named : null;
-        const searched = searchesBesideProgram(isKnownDll(name), Boolean(loaded?.file));
+        const searched = searchesBesideProgram(isKnownDll(name), Boolean(loaded?.fromFile));
         // A bare name an activation context redirects is that assembly's
         // file -- or the engine's own, when the engine answers it -- and is
         // looked for nowhere else.
@@ -6728,9 +6763,8 @@ async function buildApp(options){
                         /** @param {number} ordinal */
                         addressOfOrdinal: ordinal=>ordinals.get(ordinal) ?? null,
                         entryPoint: mapped.record.entryPoint,
-                        // As above: resources come from the file, so a library
-                        // loaded at run time has to keep its own.
-                        file,
+                        // As above: its resources are read where it lies.
+                        fromFile: true,
                         image,
                         path,
                         searchFrom: (flags & LOAD_WITH_ALTERED_SEARCH_PATH) !== 0
@@ -7012,7 +7046,7 @@ async function buildApp(options){
             // the image it has holds no resources.
             if (loaded)
             {
-                return record({ name, base: loaded.base, file: null, image: null,
+                return record({ name, base: loaded.base, image: null,
                     flat: false, region: null });
             }
             events.emit('library-missing', { name, path: 'as data' });
@@ -7052,8 +7086,10 @@ async function buildApp(options){
             memory.writeBytes(place.base, bytes);
             // Read-only once filled, as a view of a data file is mapped.
             memory.protect(region, memory.Access.READ);
-            return record({ name, base: place.base, file, image, flat: layout === 1, region,
-                path: wanted });
+            // Its resources are read where it lies (`resourceLookup`): a flat
+            // view is the file's own layout, as long as the file.
+            return record({ name, base: place.base, image, flat: layout === 1,
+                fileSize: file.length, region, path: wanted });
         })();
     };
 
@@ -7283,9 +7319,9 @@ async function buildApp(options){
         addressOf: exported=>ownExports()?.byName.get(exported) ?? null,
         /** @param {number} ordinal */
         addressOfOrdinal: ordinal=>ownExports()?.byOrdinal.get(ordinal) ?? null,
-        // Kept because a program reads its own resources, and a resource
-        // directory is read out of the file rather than out of the mapping.
-        file: options.executable,
+        // A program reads its own resources where it lies mapped
+        // (`resourceLookup`), as Windows reads them: no copy of its file.
+        fromFile: true,
         image: ownImage,
         // The same answer whether a program asks by null handle or by its own
         // image base, which are the two ways of asking the same question. A
@@ -7304,6 +7340,10 @@ async function buildApp(options){
     {
         loader.bind(library.mapped, resolveImport, missingImport);
         loader.bindDelayed(library.mapped, resolveImport, missingImport);
+        // Bound and written: the guest's copy is the image from here on, and
+        // holding the file and the mapped image beside it was each library
+        // twice over in the engine's heap for the life of the process.
+        library.mapped = null;
     }
 
     // Somewhere to put what a process needs before it starts: thread-local
@@ -7509,9 +7549,9 @@ async function buildApp(options){
     // stub puts it in the first thread's array.
     let nextLocal = 0;
     const withTls = [mainModule, ...shipped].map(held=>{
-        const directory = held.file
-            ? readTls(held.file, held.image ?? parsePe(held.file, { wide: true }),
-                (rva, length)=>memory.readBytes(held.base + rva, length)) : null;
+        const directory = held.fromFile && held.image
+            ? readMappedTls((rva, length)=>memory.readBytes(held.base + rva, length),
+                held.image, held.base) : null;
         if (!directory)
         {
             return held;
