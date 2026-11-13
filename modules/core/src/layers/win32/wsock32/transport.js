@@ -91,6 +91,8 @@ import { createLoopbackAdapter } from './loopback.js';
  *      does not resolve: gethostbyname stays synchronous and answers for the
  *      names this host is, rather than suspending a thread to learn nothing.
  * @property {() => Record<string, unknown>} [diagnostics]
+ * @property {() => void} [detach]  The process using it is gone: what it held of a
+ *     transport shared by several (`shareTransport`) goes back.
  */
 
 /**
@@ -116,6 +118,7 @@ export function asTransport(supplied){
         release: supplied.release ?? (()=>{}),
         resolve: supplied.resolve ?? null,
         diagnostics: supplied.diagnostics ?? (()=>({ transport: 'offline' })),
+        detach: supplied.detach ?? (()=>{}),
     };
 }
 
@@ -293,6 +296,27 @@ export function shareTransport(supplied){
                 },
                 resolve: transport.resolve,
                 diagnostics: ()=>transport.diagnostics(),
+                // The process is gone: its ports, its streams and the view
+                // itself leave the share, which held its inbound -- and through
+                // it the whole machine -- for as long as the run lasted.
+                detach: ()=>{
+                    views.delete(view);
+                    view.inbound = null;
+                    for (const [key, listening] of [...listeners])
+                    {
+                        if (listening === view)
+                        {
+                            listeners.delete(key);
+                            const [kind, port] = key.split(':');
+                            transport.release(kind === 'tcp', Number(port));
+                        }
+                    }
+                    for (const shared of [...view.toShared.values()])
+                    {
+                        transport.disconnect(shared, false);
+                        forget(shared);
+                    }
+                },
             };
         },
     };

@@ -440,6 +440,12 @@ export function createWin32Module(){
      * as long as it lasts, a gigabyte of guest memory a process.
      */
     let leaveTable = ()=>{};
+    /**
+     * Takes this process's sockets out of the run's network when it ends: a
+     * shared network keeps a view a process, and the view's inbound reaches the
+     * whole machine, which the run held for as long as it lasted.
+     */
+    let leaveNetwork = ()=>{};
 
     return {
         name: 'win32',
@@ -1434,8 +1440,10 @@ export function createWin32Module(){
             // The transport is injected, as the GPU device and the block store are.
             // Without one this is a machine with a network card and no cable: every
             // call behaves, and nothing reaches anywhere.
+            const network = config?.network ?? createLoopbackAdapter();
+            leaveNetwork = ()=>network.detach?.();
             const sockets = createSocketRegistry({
-                adapter: config?.network ?? createLoopbackAdapter(),
+                adapter: network,
                 numbers: {
                     open: (/** @type {any} */ socket)=>kernel.handles.open('socket', socket),
                     // Unless the program closed the number itself (CloseHandle).
@@ -5923,6 +5931,8 @@ export function createWin32Module(){
             leaveWindows = ()=>{};
             leaveTable();
             leaveTable = ()=>{};
+            leaveNetwork();
+            leaveNetwork = ()=>{};
             current = null;
         },
     };
