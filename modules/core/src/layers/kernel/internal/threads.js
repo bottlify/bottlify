@@ -170,6 +170,25 @@ const ENDING_WAIT_MS = 1000;
  */
 const RECALL_MS = 0;
 
+/**
+ * How long this executor goes with nothing to run before it calls back a
+ * thread that does not hand off to its threads (`HANDOFF_MS`): one woken here
+ * by a timer or a host call's answer, not by the thread elsewhere. Called back
+ * at once, a .NET game's loader on another executor came back here at every
+ * pause of the thread drawing its loading screen, 2 861 times in a load, and
+ * the two took turns on this executor while the other idled; on a stand of
+ * that shape (`tools/executor-sweep.mjs --main-work 20000 --main-wait 1`) two
+ * executors took 1.00 s against one's 0.80, and 0.61 s waiting 20 ms.
+ */
+const IDLE_RECALL_MS = 20;
+
+/**
+ * How recently a thread elsewhere must have woken one of this executor's for
+ * the two to count as handing off, in host ms: then it is called back at once
+ * (`RECALL_MS`), as a renderer's sound thread is.
+ */
+const HANDOFF_MS = 1000;
+
 /** The base of the normal priority class, and the two relative values pinned outside it. */
 const NORMAL_BASE = 8;
 const THREAD_PRIORITY_IDLE = -15;
@@ -1849,7 +1868,9 @@ export function createScheduler(options){
         if (here === null && [...placed.values()].some(on=>allowedOn(on.thread, 0)))
         {
             idleSince = idleSince < 0 ? wall() : idleSince;
-            recall = wall() - idleSince >= RECALL_MS;
+            const handsOff = [...placed.values()].some(on=>
+                wall() - (on.thread.wokeHereAt ?? -Infinity) < HANDOFF_MS);
+            recall = wall() - idleSince >= (handsOff ? RECALL_MS : IDLE_RECALL_MS);
             if (recall)
             {
                 for (const on of placed.values())
@@ -2441,6 +2462,12 @@ export function createScheduler(options){
                 noteReady(thread);
             }
             note(thread, `woken by ${current?.name ?? '-'}${preempts ? ' at once' : ''}`);
+            // A thread elsewhere that wakes one of this executor's hands off to it
+            // (`HANDOFF_MS`).
+            if (current !== null && current !== thread && placedElsewhere(current))
+            {
+                current.wokeHereAt = wall();
+            }
             if (outranks)
             {
                 recentWakes.push(`${thread.name} by ${current.name} (${current.state})`
@@ -2563,6 +2590,19 @@ export function createScheduler(options){
          * @param {any} thread
          * @returns {boolean} whether the thread runs nowhere now
          */
+        /**
+         * The other executors' traps answered between turns, as a turn begins
+         * by answering them: for a caller that waits through its event loop
+         * between turns, which would otherwise answer them only when the next
+         * turn begins.
+         */
+        answerOthers(){
+            if (!inSlice)
+            {
+                answerExecutors();
+            }
+        },
+
         settle(thread){
             const runs = ()=>placedElsewhere(thread);
             if (!runs())

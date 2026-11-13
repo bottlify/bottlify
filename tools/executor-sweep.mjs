@@ -19,7 +19,10 @@
  *
  *   node tools/executor-sweep.mjs [--threads 1,2,3] [--executors 1,2,3,4]
  *       [--host 0,65536,4096,256] [--sync 0,256] [--work 400000000] [--reps 3]
- *       [--quantum n] [--json]
+ *       [--quantum n] [--main-work N --main-wait MS] [--json]
+ *
+ * `--main-work N --main-wait MS` makes the main thread a loading screen: N turns
+ * of its own, a wait of MS on the first thread, again until that thread ends.
  *
  * K or H of 0 leaves that out. The executors, named, open before the program
  * starts (`cpu.eager`). A run's time is
@@ -50,6 +53,13 @@ const REPS = Number(option('reps', '3'));
 /** The kernel's quantum, guest instructions a slice; the app's default where not given. */
 const QUANTUM = option('quantum', '');
 const JSON_OUT = args.includes('--json');
+/**
+ * The main thread as a loading screen draws (`--main-work N --main-wait MS`): N turns of a
+ * kernel of its own, then a wait of MS on the first thread, again until it ends - each wait
+ * leaves the process's own executor with nothing to run while a worker runs elsewhere.
+ */
+const MAIN_WORK = Number(option('main-work', '0'));
+const MAIN_WAIT = Number(option('main-wait', '1'));
 /** Every executor opened before the program starts: the steady state, not the opening. */
 
 /** @param {number} value @returns {number[]} */
@@ -86,6 +96,28 @@ function program({ threads, work, sync, host }){
                     0x68, ...u32(code(WORKER)), 0x6a, 0x00, 0x6a, 0x00, // worker, 0, 0
                     0xff, 0x15, ...u32(iat('CreateThread')),
                     0xa3, ...u32(at('handles') + 4 * index));
+            }
+            if (MAIN_WORK > 0)
+            {
+                const kernel = [
+                    0x69, 0xc0, ...u32(1103515245), //        L: imul eax, eax, a
+                    0x05, ...u32(12345), //                      add eax, c
+                    0x89, 0xc2, 0xc1, 0xea, 0x16, //             mov edx, eax; shr edx, 22
+                    0x01, 0x04, 0x96, //                         add [esi+edx*4], eax
+                ];
+                const frame = [
+                    0xb9, ...u32(MAIN_WORK), //                  F: mov ecx, N
+                    ...kernel,
+                    0x49, 0x0f, 0x85, ...u32(-(kernel.length + 1 + 6)), // dec ecx; jnz L
+                    0x68, ...u32(MAIN_WAIT), //                  push MS
+                    0xff, 0x35, ...u32(at('handles')), //        push [handles]
+                    0xff, 0x15, ...u32(iat('WaitForSingleObject')),
+                    0x3d, ...u32(0x102), //                      cmp eax, WAIT_TIMEOUT
+                ];
+                main.push(0xbe, ...u32(at('own') + 4096 * threads), // mov esi, own of main
+                    0xb8, ...u32(7), //                          mov eax, 7
+                    ...frame,
+                    0x0f, 0x84, ...u32(-(frame.length + 6))); // je F
             }
             for (let index = 0; index < threads; index++)
             {
@@ -156,7 +188,7 @@ async function run(executable, executors){
         const rows = String(scheduler.byThread ?? '').split(' | ');
         const retired = rows.reduce((sum, row)=>sum + (Number(row.split(' ')[1]) || 0), 0);
         const workersRate = Math.max(0, ...rows.filter(row=>!row.startsWith('main '))
-            .map(row=>Number(/ x([\d.]+)$/.exec(row)?.[1] ?? 0)));
+            .map(row=>Number(/ x([\d.]+)(?: |$)/.exec(row)?.[1] ?? 0)));
         const shared = JSON.parse(scheduler.sharedTime ?? '{}');
         return { seconds, code: code >>> 0, retired, crossings: shared.crossings ?? 0,
             elsewhere: retired > 0 ? (shared.elsewhereRetired ?? 0) / retired : 0, workersRate };

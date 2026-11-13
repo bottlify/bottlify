@@ -54,6 +54,7 @@ import {
     liveDumpOf,
     readWholeFile,
     WHOLE_READ_BYTES,
+    answeringWhile,
 } from './app.js';
 import { createHeapAllocator } from './layers/win32/kernel32/heap.js';
 import { HEAP_POOLS } from './memory-zones.js';
@@ -2219,4 +2220,47 @@ test('a shader that compiled is a journal line only when asked, one that failed 
     assert.deepEqual(asked[0], ['info', 'shader-compiled',
         'D3DXCompileShader vs_2_0 vsh defines=[EVA_SM_2_0=1 FOG=]']);
     assert.doesNotMatch(asked[0][2], /float4/, 'no source for one that compiled');
+});
+
+test('a yield answers the other executors each time their bell rings while it lasts', async()=>{
+    let rung = 0;
+    /** @type {(() => void)[]} */
+    let sleepers = [];
+    const bell = {
+        rung: ()=>rung,
+        waitAsync: (/** @type {number} */ seen, /** @type {number} */ ms)=>new Promise(wake=>{
+            void seen;
+            void ms;
+            sleepers.push(()=>wake(undefined));
+        }),
+    };
+    const ring = ()=>{
+        rung++;
+        const woken = sleepers;
+        sleepers = [];
+        woken.forEach(wake=>wake());
+    };
+    /** @type {() => void} */
+    let finish = ()=>{};
+    const pending = new Promise(done=>{
+        finish = ()=>done(undefined);
+    });
+    let answers = 0;
+    const waited = answeringWhile(/** @type {Promise<void>} */ (pending), bell, ()=>{
+        answers++;
+    });
+    await Promise.resolve();
+    ring();
+    await new Promise(next=>setImmediate(next));
+    ring();
+    await new Promise(next=>setImmediate(next));
+    assert.equal(answers, 2, 'each ring during the yield answered');
+    finish();
+    await waited;
+    ring();
+    await new Promise(next=>setImmediate(next));
+    assert.equal(answers, 2, 'nothing answered once the yield is over');
+    assert.equal(await answeringWhile(Promise.resolve(), null, ()=>{
+        answers++;
+    }), undefined, 'no bell: the yield alone');
 });

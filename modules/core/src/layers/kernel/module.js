@@ -810,6 +810,17 @@ export function createKernelModule(){
                 settleThread: thread=>!live() || state.scheduler.settle(thread),
 
                 /**
+                 * Answers the traps the other executors are waiting on, between
+                 * turns (`scheduler.answerOthers`).
+                 */
+                answerExecutors: ()=>{
+                    if (live())
+                    {
+                        state.scheduler.answerOthers();
+                    }
+                },
+
+                /**
                  * Returns once every other executor running guest code has
                  * passed a barrier (`flushWrites`).
                  *

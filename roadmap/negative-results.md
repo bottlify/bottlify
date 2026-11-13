@@ -2829,3 +2829,25 @@ smaller ones cost Stockfish 10 %. No size won both; 256 kept.
 - **Machine.** Linux container, 4 vCPU, 15 GB, Node 26.13.1; GPU and power plan not recorded.
 - **Decision.** Kept at 8 192: the median is 36 s (5.5%) shorter. What a short process pays is the
   next thing to take back - a region kept in fewer objects than its decoded instructions.
+
+### 2026-11-13: a .NET game's loader with its commonest kernel32 calls in the guest starts no faster (core, executors)
+
+- **Idea.** The loader thread of a .NET game crossed into the host once in about 40 000
+  instructions, at the bound past which a thread is kept on the process's own executor
+  (`HOST_BOUND`), and shared it there with the thread drawing the loading screen; with
+  MultiByteToWideChar and WideCharToMultiByte over ASCII and FlushInstructionCache in the guest
+  (cb74108de) it would run on an executor of its own.
+- **Workload.** The game's warm start in the launcher, `--concurrency` of the launcher's default,
+  multithreading on, reload to the main menu's first frame with more than 15 draws; one run per arm.
+- **Values.** The loader's crossings 110 539 -> 33 025, for 4.47 G and 4.25 G instructions; it ran
+  on executor 1 (3.75 G of its instructions) instead of mostly on the process's own. To the menu:
+  626 s, against 396, 490 and 596 s on the builds before (one of them with tests running beside).
+  On executor 1 its slices were 336 s, 84 s of them waiting for answers (31 355 traps, 37% of
+  answers over 1 ms), 44 s in its event loop's turns, and it was called back to the process's
+  executor 2 861 times.
+- **Why.** Its time is not in its crossings but in the process's thread answering them late and
+  in being called back whenever that thread idles (`RECALL_MS` 0).
+- **Machine.** Parallels ARM VM, Windows 11, Chrome with the hardware WebGPU adapter; GPU, driver
+  and power plan not recorded.
+- **Decision.** Kept: it is correct and takes two thirds of the crossings away; the start is the
+  answer latency's and the recall's to fix.

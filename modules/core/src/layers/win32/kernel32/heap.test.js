@@ -1086,7 +1086,7 @@ test('FlushInstructionCache succeeds, because a program that has written code ch
     const { fns } = setup();
     // A runtime writes a thunk, flushes, and jumps into it. Failure here is a
     // reason not to jump, and the processor already notices a written code page.
-    assert.equal(fns.FlushInstructionCache.handler(), 1);
+    assert.equal(fns.FlushInstructionCache.handler([0xffffffff, 0x401000, 16]), 1);
     assert.equal(fns.FlushInstructionCache.argBytes, 12);
 });
 

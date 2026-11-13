@@ -1244,6 +1244,49 @@ export const PAGE_YIELD_MS = 2;
 export const PENDING_YIELD_MS = 1;
 
 /**
+ * Waits for `pending`, a yield to the event loop between turns, answering the
+ * other executors each time their bell rings meanwhile. A trap of theirs is
+ * otherwise answered when the next turn begins, and a yield the browser
+ * stretched - to compose a frame, run its timers, deliver a worker's message -
+ * holds every one asked in it that long: a .NET game's loader on another
+ * executor waited over a millisecond for 37% of its answers, while the thread
+ * here spent half its time yielding between the frames of a loading screen.
+ *
+ * @param {Promise<void>} pending
+ * @param {{ rung: () => number, waitAsync: (seen: number, ms: number) => Promise<void> }
+ *     | null | undefined} bell
+ * @param {() => void} answer
+ * @returns {Promise<void>}
+ */
+export async function answeringWhile(pending, bell, answer){
+    if (!bell?.waitAsync)
+    {
+        return pending;
+    }
+    const yielded = { done: false };
+    const over = pending.then(()=>{
+        yielded.done = true;
+    });
+    while (!yielded.done)
+    {
+        const seen = bell.rung();
+        await Promise.race([over, bell.waitAsync(seen, ANSWERING_LOOK_MS)]);
+        if (!yielded.done && bell.rung() !== seen)
+        {
+            answer();
+        }
+    }
+    return over;
+}
+
+/**
+ * The longest a yield's look at the executors' bell sleeps before it looks
+ * again, ms: a look outlives the yield it was for, and one asleep on the bell
+ * has each executor's turn wake it.
+ */
+const ANSWERING_LOOK_MS = 2;
+
+/**
  * A yield by need and by time, not by turn.
  *
  * The loop leaves the microtask queue when the host may have something to
@@ -8431,7 +8474,8 @@ async function buildApp(options){
                     if (turnYield)
                     {
                         journal.begin('yield', journal.PhaseKind.HOST);
-                        await turnYield;
+                        await answeringWhile(turnYield, cpu.executorBell?.(),
+                            ()=>kernel.answerExecutors?.());
                         journal.end('yield');
                     }
 

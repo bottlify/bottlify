@@ -1485,6 +1485,8 @@ test('a thread this executor keeps calling back from the other one stays here a 
         const where = sched.processorOf(sound);
         if (where === 1)
         {
+            // The sound thread set the renderer's event from there before: the two hand off.
+            sound.wokeHereAt = clock;
             sched.block(main, 'the sound');
             assert.equal(sched.runOnce().ran, sound,
                 'left nothing to run here, it calls the sound back and runs it');
@@ -1615,6 +1617,8 @@ test('a thread called back after doing as much beside this executor as it did ke
             const where = sched.processorOf(render);
             if (where === 1)
             {
+                // The render thread signalled the frame from there before: the two hand off.
+                render.wokeHereAt = 0;
                 sched.block(main, 'the frame');
                 assert.equal(sched.runOnce().ran, render, 'called back, it finishes here');
                 sched.wake(main);
@@ -1624,4 +1628,36 @@ test('a thread called back after doing as much beside this executor as it did ke
 
         assert.deepEqual([round(), round(), round(), round(), round(), round()],
             [1, 1, 1, 1, 1, 1], 'called back round after round, it still goes there');
+    });
+
+test('a thread elsewhere that wakes none of this executor\'s is called back only once it idled',
+    ()=>{
+        // A .NET game's loader went on elsewhere while the thread drawing its
+        // loading screen waited out each frame here; called back at every wait,
+        // the two took turns here while the other executor idled.
+        const { cpu, told } = twoExecutors();
+        const [remote] = cpu.executors();
+        remote.step = ()=>{
+            if (remote.started === 0 || told.goOn !== false)
+            {
+                return null;
+            }
+            remote.started = 0;
+            told.goOn = null;
+            return { instructions: 1000, fault: null };
+        };
+        let clock = 0;
+        const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000,
+            wall: ()=>clock });
+        const main = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
+        const loader = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'loader' });
+        Object.assign(main, { crossSeen: true, crossRate: 1 / 100 });
+        cpu.runSlice = (/** @type {number} */ max)=>max;
+        assert.equal(sched.runOnce().ran, main);
+        assert.equal(sched.processorOf(loader), 1, 'the loader goes to the other executor');
+        sched.block(main, 'a frame\'s wait');
+        assert.notEqual(sched.runOnce().ran, loader, 'idle a moment, the loader stays there');
+        assert.equal(sched.processorOf(loader), 1);
+        clock += 25;
+        assert.equal(sched.runOnce().ran, loader, 'idle past 20 ms, it is called back');
     });
