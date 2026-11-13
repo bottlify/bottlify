@@ -1185,6 +1185,15 @@ export function createCpuModule(){
                 /** The word their turns ring: one wait for all of them. */
                 executorBell: ()=>state.bell,
                 /**
+                 * Each other executor's count of its runs of guest code
+                 * (`Word.EPOCH`), odd while one is on: every change of it is a
+                 * sequentially consistent operation on that executor's thread.
+                 *
+                 * @returns {number[]}
+                 */
+                executorEpochs: ()=>state.remotes.map((/** @type {any} */ remote)=>
+                    remote.epoch?.() ?? 0),
+                /**
                  * Whether the other executors' asks end this one's slice at
                  * its next back edge (`interruptProcess`) rather than waiting
                  * for its next crossing or its slice's end: a slice here may

@@ -1135,6 +1135,36 @@ test('GetThreadContext fills the groups asked for, and SetThreadContext of regis
     assert.equal(fns.GetThreadContext.handler([0x99, at]), 0, 'no such thread');
 });
 
+test('GetThreadContext of a thread still running on another executor answers once it has'
+    + ' stopped, with where it stopped', async()=>{
+    const host = /** @type {any} */ (fakeHost());
+    const fns = createSyncFunctions(host);
+    const other = host.threads.second;
+    other.context = { reg32: Int32Array.of(0, 0, 0, 0, 0x6000, 0, 0, 0), eip: 0x402000, flags: 0 };
+    host.register(0x20, 'thread', other);
+    // Not brought back at once (the caller answers another executor's call): the
+    // thread goes on running, and stops later at its slice's end.
+    /** @type {() => void} */
+    let stop = ()=>{};
+    host.kernel.settleThread = ()=>false;
+    host.kernel.settledThread = ()=>new Promise(resolve=>{
+        stop = ()=>resolve(undefined);
+    });
+    const at = 0x400;
+    const view = new DataView(host.bytes.buffer);
+    view.setUint32(at, 0x10001, true);
+    view.setUint32(at + 0xc4, 0xcccccccc, true);
+    const answer = fns.GetThreadContext.handler([0x20, at]);
+    assert.ok(answer instanceof Promise, 'the caller waits for the stop');
+    assert.equal(view.getUint32(at + 0xc4, true), 0xcccccccc, 'nothing written while it runs');
+    // Where it stopped, not where it was last placed.
+    other.context = { reg32: Int32Array.of(0, 0, 0, 0, 0x5f00, 0, 0, 0), eip: 0x403000, flags: 0 };
+    stop();
+    assert.equal(await answer, 1);
+    assert.deepEqual([view.getUint32(at + 0xb8, true), view.getUint32(at + 0xc4, true)],
+        [0x403000, 0x5f00]);
+});
+
 test('SetThreadContext of the debug registers alone, breakpoints off, is the state already', ()=>{
     // A program clearing hardware breakpoints from its threads: none is ever
     // set here, so it is answered; one enabling a breakpoint is not honoured.
