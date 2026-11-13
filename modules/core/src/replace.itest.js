@@ -322,14 +322,16 @@ test('the reader keeps its level, its cursor and its sink across a child it star
 const MUTEX_NAME = 'BottlifyReplacementInstanceMutex';
 
 /**
- * Creates a named mutex and hands over to `C:\App\Child.exe`, without ever
- * closing the mutex handle -- exactly what a process that is about to be
- * replaced does, since nothing here models an orderly shutdown.
+ * Creates a named mutex, starts `C:\App\Child.exe` and waits for it, without
+ * ever closing the mutex handle. It waits because its exit closes the handle,
+ * as Windows closes every handle of a process that ends: a parent gone before
+ * its child named the mutex would leave the name free.
  */
 function buildMutexParentExe(){
     return buildExe({
         imports: {
-            'KERNEL32.dll': ['CreateMutexA', 'CreateProcessA', 'ExitProcess'],
+            'KERNEL32.dll': ['CreateMutexA', 'CreateProcessA', 'WaitForSingleObject',
+                'ExitProcess'],
         },
         codeSize: 0x100,
         data: {
@@ -355,6 +357,10 @@ function buildMutexParentExe(){
             0x6a, 0x00, //                       lpCommandLine
             0x68, ...u32(at('child')), //        lpApplicationName
             0xff, 0x15, ...u32(iat('CreateProcessA')),
+
+            0x6a, 0xff, //                       INFINITE
+            0xff, 0x35, ...u32(at('information')), // hProcess
+            0xff, 0x15, ...u32(iat('WaitForSingleObject')),
 
             0x6a, 0x00,
             0xff, 0x15, ...u32(iat('ExitProcess')),
@@ -422,7 +428,7 @@ test('a mutex the parent named is ERROR_ALREADY_EXISTS when the child names it t
     assert.equal(code, 0, 'the child exited cleanly');
     const ERROR_ALREADY_EXISTS = 183;
     assert.equal(output.join('').charCodeAt(0), ERROR_ALREADY_EXISTS,
-        'the child found the name the parent registered, never closed across the handover');
+        'the child found the name the parent registered and still holds');
 });
 
 for (const concurrency of /** @type {(1 | 2)[]} */ ([1, 2]))
