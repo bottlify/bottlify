@@ -637,7 +637,7 @@ export function createRemoting(host){
 
     /**
      * @typedef {Object} Apartment
-     * @property {{ message: any, resolve: (reply: any) => void }[]} queue
+     * @property {{ message: any, resolve: (reply: any) => void, since: number }[]} queue
      * @property {number} window
      * @property {Promise<number> | null} making
      * @property {number} outgoing  Calls this thread is waiting on.
@@ -762,12 +762,27 @@ export function createRemoting(host){
     const enqueue = (thread, message)=>new Promise(resolve=>{
         const shared = servedByWorker(thread) && startWorker();
         const home = apartment(shared ? MTA_CALLS : thread);
-        home.queue.push({ message, resolve });
+        home.queue.push({ message, resolve, since: Date.now() });
         if (shared)
         {
             home.waiting?.();
         }
-        else if (home.waiting)
+        else
+        {
+            wake(home);
+        }
+    });
+
+    /**
+     * Has an apartment's own thread run what is queued for it: woken where
+     * it waits in COM's modal loop, sent its window's message where it is
+     * idle; while it waits on a call of its own and is between looks, its
+     * modal loop finds the queue at the next one (`awaitServing`).
+     *
+     * @param {Apartment} home
+     */
+    const wake = home=>{
+        if (home.waiting)
         {
             home.waiting();
         }
@@ -778,10 +793,12 @@ export function createRemoting(host){
         else if (home.outgoing === 0)
         {
             report('a call arrived for an apartment with no window to deliver it through');
-            home.queue.pop();
-            resolve({ hr: RPC_E_DISCONNECTED });
+            for (const item of home.queue.splice(0))
+            {
+                item.resolve({ hr: RPC_E_DISCONNECTED });
+            }
         }
-    });
+    };
 
     /**
      * A BSTR's text, read where it lies, and the BSTR given back.
@@ -946,6 +963,14 @@ export function createRemoting(host){
         finally
         {
             home.outgoing--;
+            // A call that came in as the answer did was queued for this loop,
+            // which has ended without running it: it is the idle apartment's
+            // now. Left in the queue it was never run, and its caller waited
+            // for good (ngen's BindToRuntimeWorker into mscorsvw.exe).
+            if (home.queue.length > 0)
+            {
+                wake(home);
+            }
         }
     };
 
@@ -2130,10 +2155,18 @@ export function createRemoting(host){
             return S_OK;
         },
 
-        diagnostics: ()=>({
-            exported: exported.size,
-            proxies: proxies.size,
-            registered: registered.size,
-        }),
+        diagnostics: ()=>{
+            const queued = [...apartments.values()].flatMap(home=>home.queue);
+            return {
+                exported: exported.size,
+                proxies: proxies.size,
+                registered: registered.size,
+                // Calls from other processes not yet run here: one waiting long is
+                // a caller stuck on this process.
+                queuedCalls: queued.length,
+                oldestQueuedMs: queued.length > 0
+                    ? Date.now() - Math.min(...queued.map(item=>item.since)) : 0,
+            };
+        },
     };
 }

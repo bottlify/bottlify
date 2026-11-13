@@ -112,9 +112,11 @@ test('an RPC endpoint is one process\'s: a second to claim it is refused, and it
  * One process's channel over a memory of its own, whose one object answers
  * IUnknown's three and records the thread each call ran on.
  *
- * @param {{ exporter: string, worker?: boolean }} options
+ * @param {{ exporter: string, worker?: boolean, window?: boolean,
+ *     modalPump?: (thread: unknown) => Promise<number> }} options
+ *     `window`: each apartment's hidden window, its message handled at the next turn
  */
-function channel({ exporter, worker = true }){
+function channel({ exporter, worker = true, window = false, modalPump }){
     const bytes = new Uint8Array(0x10000);
     const view = new DataView(bytes.buffer);
     const OBJECT = 0x1000;
@@ -153,6 +155,20 @@ function channel({ exporter, worker = true }){
         bstr: { allocate: ()=>0, free: ()=>true },
         catalog: /** @type {any} */ ({}),
         divergence: (_api, detail)=>reported.push(detail),
+        ...(window ? { apartmentWindow: (()=>{
+            /** @type {(message: number) => unknown} */
+            let handle = ()=>0;
+            return {
+                create: (/** @type {(message: number) => unknown} */ handler)=>{
+                    handle = handler;
+                    return 7;
+                },
+                post: (/** @type {number} */ _window, /** @type {number} */ message)=>{
+                    setTimeout(()=>handle(message), 0);
+                },
+            };
+        })() } : {}),
+        ...(modalPump ? { modalPump } : {}),
         ...(worker ? { worker: (/** @type {(thread: unknown) => Promise<void>} */ body)=>{
             workers++;
             void body('rpc thread');
@@ -247,4 +263,42 @@ test('the manager starts a service once: a second start finds it running, a clas
     assert.equal(table.serviceRunning('Svc'), false, 'its process is gone');
     assert.equal(createClassTable().startService({ command: 'C:\\svc.exe', service: 'Svc' }, null),
         null, 'nothing here starts a process');
+});
+
+test('a call that comes in as the apartment\'s own outgoing call is answered is still run: the'
+    + ' modal loop ends, and the idle apartment takes it', async()=>{
+    // ngen.exe waited for good on BindToRuntimeWorker into mscorsvw.exe: the
+    // call was queued while mscorsvw's thread waited on a call of its own,
+    // that answer won the modal loop's race, and nothing ran the queue after.
+    /** @type {(value: any) => void} */
+    let answer = ()=>{};
+    /** @type {Promise<any> | null} */
+    let incoming = null;
+    /** @type {any} */
+    let endpoint = null;
+    /** @type {any} */
+    let reference = null;
+    const { remoting, table, calls, OBJECT } = channel({ exporter: 'sta', worker: false,
+        window: true, modalPump: async()=>{
+            if (incoming === null)
+            {
+                // Between the loop's looks: the call is queued, then the answer comes.
+                incoming = endpoint.deliver({ kind: 'release', object: reference.object,
+                    count: 1 });
+                answer({ hr: 0 });
+            }
+            return 0;
+        } });
+    reference = await remoting.exportReference(OBJECT, IID_IUNKNOWN, 'sta');
+    endpoint = table.endpoint(reference.endpoint);
+    const other = table.attach({ process: {}, alive: true, rundown: async()=>{},
+        deliver: ()=>new Promise(resolve=>{
+            answer = resolve;
+        }) });
+    calls.length = 0;
+    await remoting.releaseReference({ endpoint: other, object: 1 }, 'sta');
+    // Lost, it is never answered: the test's own timeout is the bound.
+    assert.deepEqual(await incoming, { hr: 0 }, 'the queued call ran once the loop had ended');
+    assert.ok(calls.length > 0 && calls.every(([, thread])=>thread === 'sta'),
+        'on the apartment\'s own thread');
 });
