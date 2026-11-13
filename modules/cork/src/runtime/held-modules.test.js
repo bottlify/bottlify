@@ -254,3 +254,35 @@ for (const [seed, mode] of CEILING_RUNS)
         assert.ok(held.cacheHits >= held.broughtBack, 'from the store, not translated again');
     });
 }
+
+test('a program run under a host\'s bound (`charge`) a few modules high runs as it does without'
+    + ' one, never holds past it, and gives back all it took', async()=>{
+    const free = await ceilingRun(61, { cacheBytes: 0 });
+    const bound = Math.ceil(3 * free.heldBytes / free.heldModules);
+    let taken = 0;
+    let most = 0;
+    let refused = 0;
+    const charge = {
+        /** @param {number} bytes */
+        take(bytes){
+            if (taken + bytes > bound)
+            {
+                refused++;
+                return false;
+            }
+            taken += bytes;
+            most = Math.max(most, taken);
+            return true;
+        },
+        /** @param {number} bytes */
+        give(bytes){
+            taken -= bytes;
+        },
+    };
+    const bounded = await ceilingRun(61, { cacheBytes: 0, charge });
+    assert.deepEqual(bounded.state, free.state, 'the same registers and memory');
+    assert.ok(most <= bound, `took ${most} of ${bound}`);
+    assert.ok(refused > 10 && bounded.evictions > 10,
+        `${refused} refused, ${bounded.evictions} let go`);
+    assert.equal(taken, bounded.heldBytes, 'what is held is what was taken, nothing given twice');
+});

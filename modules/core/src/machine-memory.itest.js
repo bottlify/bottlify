@@ -11,7 +11,8 @@
  * 100 MiB, which grows its memory to 512 MiB: four at once are 2 GiB past the
  * parent's, and a machine of 1.25 GiB has room for two. The run ends, every
  * child either has its block or is told there is none (as on a machine out of
- * memory), and the most the run held is within the machine's memory; the same
+ * memory, at its block or at its start), and the most the run held is within
+ * the machine's memory; the same
  * run without one holds past it.
  */
 
@@ -27,6 +28,10 @@ const u32 = value=>[value & 255, value >>> 8 & 255, value >>> 16 & 255, value >>
 const ascii = text=>[...text].map(character=>character.charCodeAt(0)).concat(0);
 
 const MiB = 1 << 20;
+/** What a process the machine had no room to start ends with (STATUS_NO_MEMORY). */
+const NO_MEMORY = 0xc0000017;
+/** A child that had its block, was refused it, or found no room to start. */
+const told = (/** @type {number} */ code)=>code === 0 || code === 1 || code === NO_MEMORY;
 const BLOCK = 100 * MiB;
 const MEMORY_SIZE = 512 * MiB;
 
@@ -108,14 +113,16 @@ function countMemories(t){
  * Runs the parent, and answers each child's exit code.
  *
  * @param {{ budget?: SharedArrayBuffer | ArrayBuffer, machineMemory?: number,
- *     cores?: number, concurrency?: 1 | 2 }} how
+ *     cores?: number, concurrency?: 1 | 2, guestCharge?: 'length' | 'given' }} how
  */
-async function runParent({ budget, machineMemory, cores = 1, concurrency = 1 }){
+async function runParent({ budget, machineMemory, cores = 1, concurrency = 1, guestCharge }){
     const app = await createApp({
         executable: parentOf(4, 2),
         imagePath: 'C:\\App\\parent.exe',
         memorySize: MEMORY_SIZE,
-        cpu: { cores },
+        // A child the machine has no room for fails to start after this, not ten minutes.
+        machineWaitMs: 5000,
+        cpu: { cores, ...guestCharge ? { guestCharge } : {} },
         concurrency,
         ...budget ? { memoryBudget: budget } : {},
         ...machineMemory ? { machineMemory } : {},
@@ -143,29 +150,42 @@ test('without a machine\'s memory, four children at once hold past what a machin
         assert.ok(made() > 1280 * MiB, `${made() / MiB} MiB made and grown`);
     });
 
-for (const [cores, concurrency] of /** @type {[number, 1 | 2][]} */ ([[1, 1], [3, 1], [1, 2]]))
+/** How guests are counted, each run both ways. @type {('length' | 'given')[]} */
+const CHARGES = ['length', 'given'];
+const CASES = CHARGES.flatMap(guestCharge=>/** @type {[number, 1 | 2][]} */ (
+    [[1, 1], [3, 1], [1, 2]]).map(([cores, concurrency])=>({ guestCharge, cores, concurrency })));
+for (const { guestCharge, cores, concurrency } of CASES)
 {
     const executors = `${cores} executor${cores > 1 ? 's' : ''}`;
-    test(`a run never holds more than the machine's memory (${executors}`
-        + `${concurrency > 1 ? ', each child in a worker of its own' : ''})`,
+    test(`a run never holds more than the machine's memory, guests counted by ${guestCharge}`
+        + ` (${executors}${concurrency > 1 ? ', each child in a worker of its own' : ''})`,
     { timeout: 600_000 }, async()=>{
         const budget = createMemoryBudget(1280 * MiB);
-        const { codes } = await runParent({ budget, cores, concurrency });
+        const { codes } = await runParent({ budget, cores, concurrency, guestCharge });
         const report = openMemoryBudget(budget).report();
         assert.equal(codes.length, 8, 'every child ran');
-        assert.ok(codes.every(code=>code === 0 || code === 1), `codes ${codes}`);
+        assert.ok(codes.every(told), `codes ${codes}`);
         assert.ok(codes.includes(0), 'a child had its block');
         assert.ok(report.peak <= report.limit, `peak ${report.peak / MiB} MiB of ${report.limit / MiB}`);
-        assert.ok(report.peak > 512 * MiB, 'the budget counted the memories');
+        assert.ok(report.peak > (guestCharge === 'length' ? 512 : 400) * MiB,
+            `the budget counted the guests: ${report.peak / MiB} MiB`);
+        assert.equal(report.used, 0,
+            `the run gave back all it held: ${JSON.stringify(report.byKind)}`);
     });
 }
 
-test('a run made with machineMemory reports it, and a block past it is refused, not a fault',
+for (const guestCharge of CHARGES)
+{
+    test(`a run made with machineMemory reports it, and a block past it is refused, not a fault`
+    + ` (guests counted by ${guestCharge})`,
     { timeout: 300_000 }, async()=>{
-        const { codes, diagnostics } = await runParent({ machineMemory: 640 * MiB });
-        assert.ok(codes.includes(1), 'a child was told there is no memory');
+        const { codes, diagnostics } = await runParent({ machineMemory: 640 * MiB,
+            guestCharge });
+        assert.ok(codes.some(code=>code === 1 || code === NO_MEMORY),
+            `a child was told there is no memory: ${codes}`);
         const cpu = diagnostics.find((/** @type {any} */ table)=>table.name === 'cpu');
         const machine = cpu?.metrics?.machineMemory;
         assert.ok(machine && machine.limit === 640 * MiB, JSON.stringify(machine));
         assert.ok(machine.peak <= machine.limit);
     });
+}

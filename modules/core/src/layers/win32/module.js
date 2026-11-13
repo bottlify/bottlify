@@ -1284,6 +1284,8 @@ export function createWin32Module(){
             // every host path is handed is the arena's allocator with those
             // found, sized and freed where they are.
             const alignment = pointerSize === 8 ? ALIGNMENT_64 : undefined;
+            /** The highest the heap has handed out, from its arena's start. */
+            let arenaReached = arena.base;
             /**
              * The guest's memory grown to hold what is handed out up to `end`, where
              * it grows as the guest is given more (the memory layer's `reach`), and
@@ -1296,7 +1298,22 @@ export function createWin32Module(){
                 // Past 0x7FFE0000 the RAM held is past 2 GiB, and the page with it
                 // at its own address, which the heap keeps out of its hands.
                 const want = end <= 0x7ffe0000 ? end + SHARED_PAGE_GUARD : end;
-                return (memory.reach?.(want) ?? Infinity) >= want;
+                if ((memory.reach?.(want) ?? Infinity) < want)
+                {
+                    return false;
+                }
+                // What the guest is given past the highest it was before -- a block,
+                // a commit -- taken from the machine's memory: below it, pages it was
+                // given once are the tab's already, whatever it freed.
+                if (end > arenaReached)
+                {
+                    if (memory.charge?.(end - arenaReached) === false)
+                    {
+                        return false;
+                    }
+                    arenaReached = end;
+                }
+                return true;
             };
             const guestHeap = createGuestHeap({
                 allocator: createHeapAllocator({ ...arena, alignment, reach: arenaReach,

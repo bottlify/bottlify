@@ -63,7 +63,8 @@ import { canShareMemory, withRunMode } from './mode.js';
 import { createLinkMemory, openLink } from './system/link.js';
 import { systemHandlers } from './system-link.js';
 import { SHARED_MODULE_BYTES, storeHandlers, withHeldModules } from './layers/cpu/internal/store-link.js';
-import { createMemoryBudget, openMemoryBudget } from './layers/cpu/internal/memory-budget.js';
+import { createMemoryBudget, guestByLength, openMemoryBudget, RUN_HOLDER }
+    from './layers/cpu/internal/memory-budget.js';
 import { eventFrom } from './system/events-across.js';
 import { defaultModules } from './layers/index.js';
 import { createRunRegistry } from './layers/win32/module.js';
@@ -163,9 +164,15 @@ const hashText = (hash, text)=>{
  *           measure); a grow past it is the guest's allocation refused, a process
  *           asked for while it is full waits for others to end. Unset, each process
  *           is bounded by `memorySize` alone.
+ * @property {number} [machineWaitMs]  How long a process asked for while the
+ *           machine's memory is full waits for another to end before it fails to
+ *           start (STATUS_NO_MEMORY): ten minutes unless said.
  * @property {SharedArrayBuffer | ArrayBuffer} [memoryBudget]
  *           The run's machine's memory (`memory-budget.js`), made from
  *           `machineMemory` and carried to every process: set by the run.
+ * @property {number} [memoryHolder]
+ *           The holder of the machine's memory a process in a worker of its
+ *           own holds what it takes on, claimed by its parent: set by the run.
  * @property {{ left: number }} [memoryCredit]
  *           What the run took of the machine's memory for this process's start,
  *           which its memory and grows draw on first: set by the run.
@@ -315,7 +322,8 @@ const hashText = (hash, text)=>{
  * @property {{ cores?: number, eager?: boolean, placement?: 'spread' | 'concentrate',
  *           gcNudge?: boolean | { everyMs?: number, bytes?: number }, grow?: boolean,
  *           executorTranslators?: { add: (index: number, reach: any) => void,
- *               remove: (index: number) => void }, hostMemory?: number }} [cpu]
+ *               remove: (index: number) => void }, hostMemory?: number,
+ *               guestCharge?: 'length' | 'given' }} [cpu]
  *           The machine's processor. `cores`: how many
  *           processors the program is told it has -- by every road Windows has to say
  *           it -- and the executors that run its threads at once, each a worker past
@@ -5005,7 +5013,9 @@ async function buildApp(options){
                 : programLoaded.wide.window - 4096,
             ...(engineArea ? { engineArea } : {}),
             ...(options.memoryBudget ? { memoryBudget: options.memoryBudget,
-                memoryCredit: options.memoryCredit } : {}),
+                memoryCredit: options.memoryCredit, memoryHolder: options.memoryHolder,
+                ...options.cpu?.guestCharge ? { guestCharge: options.cpu.guestCharge } : {} }
+                : {}),
             reused: options.reusedMemory ? { ...options.reusedMemory,
                 written: reusedRanges(options.reusedMemory, {
                     // The thunk table, and the first thread's stack under it to
@@ -6344,12 +6354,13 @@ async function buildApp(options){
                 } : {
                     // Guest code placed at bind time runs in a 64-bit process
                     // too where it says it places its x86-64 there (`guestLong`).
-                    target: fn.guest && (!long || fn.guestLong)
+                    // One the machine's memory had no room for is its host handler.
+                    target: (fn.guest && (!long || fn.guestLong)
                         ? fn.guest({
                             /** @param {string} label @param {any} trap */
                             register: (label, trap)=>bridge.register(label, trap),
-                        })
-                        : bridge.register(`${name}!${exported}`, fn),
+                        }) : 0)
+                        || bridge.register(`${name}!${exported}`, fn),
                 },
         }));
 
@@ -9692,8 +9703,38 @@ const START_BYTES = 256 << 20;
 /** Past `START_BYTES`, the engine's pages of the process's first executor. */
 const START_SLACK_BYTES = 32 << 20;
 
+/**
+ * What a process costs the tab past its guest's memory and its translations,
+ * while it stands: its layers' state on the JavaScript heap, its translator's
+ * arena, its buffers (`roadmap/decisions.md` A245).
+ */
+const PROCESS_ENGINE_BYTES = 32 << 20;
+
+/**
+ * Where guests count by what they were given, the translator's tables of a
+ * process's first executor, past its RAM, which its start takes (`areaBytes`).
+ */
+const PROCESS_TABLES_BYTES = 64 << 20;
+
+/** What a process Windows found no memory for ends with (STATUS_NO_MEMORY). */
+const STATUS_NO_MEMORY = 0xc0000017;
+
+/**
+ * What the tab holds before any program runs, on a machine of the run's
+ * (`roadmap/decisions.md` A245): Chrome's renderer with the engine idle is
+ * 357 MiB with one executor.
+ */
+const RUN_ENGINE_BYTES = 384 << 20;
+
+/** What a formed region kept for every runtime costs on the heap, its decoded blocks. */
+const FORMED_REGION_BYTES = 64 << 10;
+
+/** Whether the run is in a browser's page or worker, where the machine is a tab. */
+const inBrowser = ()=>typeof (/** @type {any} */ (globalThis).WorkerGlobalScope) === 'function'
+    || typeof (/** @type {any} */ (globalThis).document) === 'object';
+
 /** How long a process asked for while the machine's memory is full waits for room. */
-const MACHINE_WAIT_MS = 60_000;
+const MACHINE_WAIT_MS = 600_000;
 
 /** How many divergences a run's diagnostics list, in the order they were said. */
 const DIVERGENCES_KEPT = 128;
@@ -9716,7 +9757,7 @@ const EXIT_NOTICE_TYPE = 0x40;
 const SYSTEM_OPTIONS = new Set(['system', 'relay', 'pacing', 'device', 'bundle', 'storage',
     'discs', 'files', 'seed', 'events', 'spawned', 'logSinks', 'win32', 'watchImport', 'hooks',
     'executable', 'standardFiles', 'startup', 'fallback', 'graphics', 'audio', 'cork', 'log',
-    'com', 'memoryCredit']);
+    'com', 'memoryCredit', 'memoryHolder']);
 
 /**
  * A value as it crosses to another thread's start: data -- numbers, strings,
@@ -10591,9 +10632,30 @@ export async function createApp(options){
     options = { ...options, processId: options.processId ?? runProcessId() };
     // The machine's memory, made once by the run and carried to every process
     // it starts, here or in a worker of its own (`memory-budget.js`).
-    if (options.memoryBudget === undefined && options.machineMemory !== undefined)
+    // Named, not yet the RAM asked for by default: a run of several processes
+    // (an installer, its services, a compiler's workers) finds no room at two
+    // gigabytes until the engine's own parts give back under pressure.
+    const tabMemory = options.machineMemory;
+    if (options.memoryBudget === undefined && tabMemory !== undefined && tabMemory > 0)
     {
-        options = { ...options, memoryBudget: createMemoryBudget(options.machineMemory) };
+        const memoryBudget = createMemoryBudget(tabMemory);
+        const run = openMemoryBudget(memoryBudget);
+        // The translations every process shares (compiled modules, formed
+        // regions), sized to the machine and held for the run.
+        const shared = Math.min(SHARED_MODULE_BYTES, Math.floor(tabMemory / 32));
+        run.take(shared * 2, 'translation');
+        // In a tab, the tab's own: the page, the engine's thread, the graphics
+        // and translators' workers, the browser's code mapped in.
+        if (inBrowser())
+        {
+            run.take(RUN_ENGINE_BYTES, 'engine');
+        }
+        const config = options.cork?.config;
+        options = { ...options, memoryBudget,
+            cork: { ...options.cork, config: { ...config,
+                sharedModuleBytes: config?.sharedModuleBytes ?? shared,
+                sharedFormed: config?.sharedFormed
+                    ?? Math.max(64, Math.floor(shared / FORMED_REGION_BYTES)) } } };
     }
     graphicsChoice(options.graphicsApi);
     // Both outlive every process: subscriptions a caller made before the first
@@ -10936,20 +10998,90 @@ export async function createApp(options){
      * @type {SpareMemory[]}
      */
     const spareMemories = options.spareMemories ?? [];
-    /** The machine's memory, where the run has one: a spare memory let go is given back. */
+    /**
+     * The machine's memory, where the run has one, as the run itself holds it
+     * (`RUN_HOLDER`): the memories kept for the next process. Each process
+     * holds its own part on a holder of its own (`holderOf`), given back whole
+     * when it is gone however it ended.
+     */
     const machineMemory = options.memoryBudget === undefined ? null
         : openMemoryBudget(options.memoryBudget);
+    /** @param {number} holder */
+    const holderView = holder=>openMemoryBudget(/** @type {any} */ (options.memoryBudget), holder);
+    /**
+     * Each process's holder, and whether the run claimed it (a process started
+     * in a worker holds what its parent claimed for it).
+     *
+     * @type {Map<any, { holder: number, own: boolean }>}
+     */
+    const holderOf = new Map();
+    /** Whether a guest's memory counts by its length (`guestByLength`). */
+    const byLength = guestByLength(options.cpu?.guestCharge);
+    /**
+     * What a gone process's memory holds of the machine's: its length, or
+     * what its process was given in it, whose pages the tab keeps.
+     *
+     * @param {SpareMemory} spare
+     */
+    const spareCharge = spare=>(byLength ? spare.memory.buffer.byteLength
+        : /** @type {any} */ (spare).charged ?? 0);
     /** @param {SpareMemory | undefined} spare */
     const dropSpare = spare=>{
-        if (spare && machineMemory !== null)
+        if (spare && machineMemory !== null && /** @type {any} */ (spare).onRun !== false)
         {
-            machineMemory.give(spare.memory.buffer.byteLength);
+            machineMemory.give(spareCharge(spare));
             machineMemory.dropped();
         }
     };
-    /** @param {SpareMemory | null | undefined} spare */
+    /**
+     * A gone process's memory handed to the run: what its process was given in
+     * it (or its length) moved from the process's holder to the run's, once.
+     *
+     * @param {SpareMemory | null | undefined} spare
+     * @param {number} holder
+     */
+    const spareToRun = (spare, holder)=>{
+        if (!spare || machineMemory === null || /** @type {any} */ (spare).onRun === true)
+        {
+            return;
+        }
+        const view = holderView(holder);
+        /** @type {any} */ (spare).charged = byLength ? spare.memory.buffer.byteLength
+            : view.heldBy('guest');
+        view.move(spareCharge(spare), 'guest', RUN_HOLDER);
+        /** @type {any} */ (spare).onRun = true;
+    };
+    /**
+     * A kept memory taken by a process: its charge moved to the process's holder.
+     *
+     * @param {SpareMemory | null} spare
+     * @param {number} holder
+     */
+    const spareToProcess = (spare, holder)=>{
+        if (!spare || machineMemory === null || /** @type {any} */ (spare).onRun === false)
+        {
+            return;
+        }
+        machineMemory.move(spareCharge(spare), 'guest', holder);
+        /** @type {any} */ (spare).onRun = false;
+    };
+    /**
+     * A gone process's memory kept for the next, held by the run from now on.
+     *
+     * @param {SpareMemory | null | undefined} spare
+     */
     const keepSpare = spare=>{
-        if (spare && !spareMemories.some(one=>one.memory === spare.memory))
+        // A memory kept already, handed back again: one memory, one charge, the
+        // larger of the two (each counts what a process was given in it).
+        const kept = spare && spareMemories.find(one=>one.memory === spare.memory);
+        if (spare && kept && machineMemory !== null && !byLength)
+        {
+            const had = spareCharge(kept);
+            const more = spareCharge(spare);
+            /** @type {any} */ (kept).charged = Math.max(had, more);
+            machineMemory.give(had + more - Math.max(had, more));
+        }
+        if (spare && !kept)
         {
             spareMemories.push(spare);
             if (spareMemories.length > SPARE_MEMORIES)
@@ -10970,6 +11102,23 @@ export async function createApp(options){
         }
     };
     /**
+     * Everything a gone process held of the machine's memory given back, its
+     * memories handed to the run first where they are kept for the next.
+     *
+     * @param {number} holder
+     * @param {(SpareMemory | null | undefined)[]} kept  its memories the run keeps
+     */
+    const releaseHolder = (holder, kept)=>{
+        if (machineMemory === null)
+        {
+            kept.forEach(keepSpare);
+            return;
+        }
+        kept.forEach(spare=>spareToRun(spare, holder));
+        machineMemory.release(holder);
+        kept.forEach(keepSpare);
+    };
+    /**
      * What a process's start takes of the machine's memory, taken before it is
      * built: its memory and the grows of its start (its first heap block, the
      * engine's own tables and routines) draw on it, so a start never finds the
@@ -10979,38 +11128,73 @@ export async function createApp(options){
      * machine has, and a start that cannot finish is the child failing.
      *
      * @param {SpareMemory | null} reused  the gone process's memory it is built in, if any
+     * @param {number} holder  the process's holder
      * @returns {Promise<{ left: number } | undefined>}
      */
-    const roomForProcess = async reused=>{
+    const roomForProcess = async(reused, holder)=>{
         if (machineMemory === null)
         {
             return undefined;
         }
-        // In a memory of its own, the floor grown to cover the heap's first
-        // block; in a gone one, the room to grow that far.
-        const wanted = Math.max(0, START_BYTES - (reused?.memory.buffer.byteLength ?? 0))
-            + START_SLACK_BYTES;
-        const until = Date.now() + MACHINE_WAIT_MS;
-        while (!machineMemory.take(wanted))
+        const view = holderView(holder);
+        // Counted by length: in a memory of its own, the floor grown to cover
+        // the heap's first block; in a gone one, the room to grow that far. By
+        // what it is given: its images, its first stack and heap. And the
+        // engine's own part of a process (`PROCESS_ENGINE_BYTES`), held as long
+        // as it stands.
+        const wanted = (byLength
+            ? Math.max(0, START_BYTES - (reused?.memory.buffer.byteLength ?? 0))
+            : PROCESS_TABLES_BYTES) + START_SLACK_BYTES;
+        const waitMs = options.machineWaitMs ?? MACHINE_WAIT_MS;
+        const until = Date.now() + waitMs;
+        while (!(view.fits(wanted + PROCESS_ENGINE_BYTES)
+            && view.take(PROCESS_ENGINE_BYTES, 'engine')))
         {
             if (Date.now() >= until)
             {
-                return { left: 0 };
+                throw Object.assign(new Error('the machine\'s memory had no room for the'
+                    + ` process for ${waitMs / 1000} s`), { code: 'MACHINE_MEMORY' });
             }
             await new Promise(resolve=>setTimeout(resolve, 50));
         }
+        if (!view.take(wanted))
+        {
+            view.give(PROCESS_ENGINE_BYTES, 'engine');
+            throw Object.assign(new Error('the machine\'s memory had no room for the process'),
+                { code: 'MACHINE_MEMORY' });
+        }
         return { left: wanted };
     };
-    /** What a built process left of its start's credit, given back. @param {{ left: number } | undefined} credit */
-    const releaseCredit = credit=>{
+    /**
+     * What a built process left of its start's credit, given back.
+     *
+     * @param {{ left: number } | undefined} credit
+     * @param {number} holder
+     */
+    const releaseCredit = (credit, holder)=>{
         if (credit && credit.left > 0 && machineMemory !== null)
         {
-            machineMemory.give(credit.left);
+            holderView(holder).give(credit.left);
             credit.left = 0;
         }
     };
     /** @param {any} gone  a machine disposed */
-    const keepMemory = gone=>keepSpare(gone?.spareMemory?.());
+    const keepMemory = gone=>{
+        const spare = gone?.spareMemory?.();
+        const held = holderOf.get(gone);
+        holderOf.delete(gone);
+        if (held === undefined || !held.own)
+        {
+            // Its parent, in another thread, gives back the rest of what it held.
+            if (held !== undefined)
+            {
+                spareToRun(spare, held.holder);
+            }
+            keepSpare(spare);
+            return;
+        }
+        releaseHolder(held.holder, [spare]);
+    };
 
     /**
      * A machine for a process, named to the class table.
@@ -11022,8 +11206,27 @@ export async function createApp(options){
         /** The machine, once built: what its children are started beside. @type {any} */
         let self = null;
         const reusedMemory = spareMemories.pop() ?? null;
-        const memoryCredit = await roomForProcess(reusedMemory);
+        // Its own holder of the machine's memory; the first process of a
+        // worker holds the one its parent claimed for it.
+        const given = extra === undefined ? options.memoryHolder : undefined;
+        const holder = machineMemory === null ? RUN_HOLDER
+            : given ?? machineMemory.claim();
+        spareToProcess(reusedMemory, holder);
+        const memoryCredit = await roomForProcess(reusedMemory, holder).catch(e=>{
+            // No room: the memory it was to run in goes back to the run.
+            if (given === undefined)
+            {
+                releaseHolder(holder, [reusedMemory]);
+            }
+            else if (reusedMemory)
+            {
+                spareToRun(reusedMemory, holder);
+                keepSpare(reusedMemory);
+            }
+            throw e;
+        });
         const built = await buildApp(machine({ ...extra, reusedMemory, memoryCredit,
+            ...machineMemory === null ? {} : { memoryHolder: holder },
             com: { table: classTable, process },
             // With concurrency a child runs from CreateProcess on, beside
             // its parent, as on Windows; otherwise it waits for the parent to
@@ -11043,7 +11246,15 @@ export async function createApp(options){
             othersRunning: ()=>Boolean(options.system) || starting > 0 || across > 0
                 || besides.size > 0
                 || [...standing].some(other=>other !== self) }))
-            .finally(()=>releaseCredit(memoryCredit));
+            .catch(e=>{
+                if (given === undefined)
+                {
+                    machineMemory?.release(holder);
+                }
+                throw e;
+            })
+            .finally(()=>releaseCredit(memoryCredit, holder));
+        holderOf.set(built, { holder, own: given === undefined });
         self = built;
         standing.add(built);
         processes.set(process, built);
@@ -11837,7 +12048,7 @@ export async function createApp(options){
          *
          * @type {{ worker: import('./host/process-worker.js').ProcessWorker | null,
          *     sound: { giveBack: () => void } | null, shown: { dispose: () => void } | null,
-         *     display: MessageChannel | null, asked: any }}
+         *     display: MessageChannel | null, asked: any, holder?: number }}
          */
         const held = { worker: null, sound: null, shown: null, display: null, asked: null };
         /** The code it exited with, once it has. @type {number | null} */
@@ -11897,10 +12108,16 @@ export async function createApp(options){
                 worker.onMessage(data=>{
                     if (data?.type === 'exited')
                     {
-                        // The memories it ran in, for the next process the run starts.
-                        for (const spare of data.memories ?? [])
+                        // The memories it ran in, for the next process the run starts,
+                        // and everything else it held given back.
+                        if (held.holder === undefined)
                         {
-                            keepSpare(spare);
+                            (data.memories ?? []).forEach(keepSpare);
+                        }
+                        else
+                        {
+                            releaseHolder(held.holder, data.memories ?? []);
+                            held.holder = undefined;
                         }
                         ended = data.code;
                         if (data.journal)
@@ -11935,6 +12152,13 @@ export async function createApp(options){
                 {
                     spareMemories.splice(spareMemories.indexOf(handed), 1);
                 }
+                // Its holder of the machine's memory, claimed here and given back
+                // here once the worker is gone, whatever ended it: the memory it
+                // was handed is its own from now on.
+                if (machineMemory !== null)
+                {
+                    held.holder = machineMemory.claim();
+                }
                 worker.post({
                     type: 'start',
                     end: memory.b,
@@ -11948,6 +12172,7 @@ export async function createApp(options){
                     display: display?.port2 ?? null,
                     options: {
                         ...portableOptions(options),
+                        ...held.holder === undefined ? {} : { memoryHolder: held.holder },
                         // The run's machine, whatever this process's own width.
                         machine: runMachine,
                         executable: image,
@@ -11993,6 +12218,14 @@ export async function createApp(options){
             // The worker goes first.
             await teardown([
                 ()=>held.worker?.terminate(),
+                // A worker ended without saying so: what it held goes with it.
+                ()=>{
+                    if (held.holder !== undefined)
+                    {
+                        machineMemory?.release(held.holder);
+                        held.holder = undefined;
+                    }
+                },
                 ()=>{
                     if (listed)
                     {
@@ -12359,6 +12592,8 @@ export async function createApp(options){
         const running = (async()=>{
             /** @type {any} */
             let child = null;
+            /** The code a child that never started ends with. */
+            let failed = 2;
             // Where the run's output has nothing to lend -- the engine's own
             // mixer, in `compatible` mode -- a table of the child's own would
             // reach no speaker: it mixes onto its parent's output instead.
@@ -12397,7 +12632,18 @@ export async function createApp(options){
                 }
             }
             catch (e){
-                events.emit('error', { reason: 'process', error: e });
+                // A machine with no room for it: the child fails as a process
+                // Windows had no memory for does, which its parent hears.
+                if (/** @type {any} */ (e)?.code === 'MACHINE_MEMORY')
+                {
+                    failed = STATUS_NO_MEMORY;
+                    events.emit('divergence', { api: 'process',
+                        detail: `${request.imagePath}: ${/** @type {Error} */ (e).message}` });
+                }
+                else
+                {
+                    events.emit('error', { reason: 'process', error: e });
+                }
             }
             finally
             {
@@ -12408,8 +12654,9 @@ export async function createApp(options){
                 reachable.delete(request.id);
                 built.settle();
                 sound.giveBack();
-                parent.childExited(request, 2);
-                return 2;
+                parent.childExited(request, failed);
+                events.emit('process-resumed', { image: request.imagePath, code: failed });
+                return failed;
             }
             replayLogLevels();
             stand(child);
@@ -12714,6 +12961,20 @@ export async function createApp(options){
                 {
                     [...serving].forEach(line=>keepMemory(line.current));
                     keepMemory(current);
+                }
+                else
+                {
+                    // The run is over: what its last processes held goes with them.
+                    for (const gone of [...serving.values()].map(line=>line.current)
+                        .concat(current))
+                    {
+                        const held = holderOf.get(gone);
+                        holderOf.delete(gone);
+                        if (held?.own)
+                        {
+                            machineMemory?.release(held.holder);
+                        }
+                    }
                 }
                 system.bundle?.stop();
                 // Closed once the last save under way has read its files.

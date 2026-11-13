@@ -325,6 +325,9 @@ export function engineContractProblem(engineModule, url){
  *     when asked for (0: no ceiling). Default 256 MiB; the cpu layer gives each executor's
  *     runtime its part of what the translation zone (`TRANSLATION_ZONE_BYTES`) leaves after
  *     the engine's tables (`cacheShare`). Its diagnostics say what it holds (`heldBytes`).
+ * @property {{ take(bytes: number): boolean, give(bytes: number): void } | null} [charge]
+ *     Where the host bounds what its runtimes hold together (the tab's memory): each
+ *     module held is taken by its wasm bytes and given back as it is let go.
  * @property {number} [sharedModuleBytes]  Wasm bytes of compiled batch modules kept for every
  *     runtime handed the same `store`: a process the run starts again instantiates the modules
  *     an earlier one compiled, without compiling them (0: none kept). Default 256 MiB.

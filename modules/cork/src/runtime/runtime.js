@@ -251,6 +251,12 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
         // the store, and are brought back from it as any miss is
         // (`EVICT_HOLD`).
         cacheBytes: 256 << 20,
+        // Where a host bounds what its runtimes hold together: each module held
+        // is taken from it by its wasm bytes and given back as it is let go, and
+        // a module it has no room for lets those gone longest without running go
+        // until there is (`take` answers false where there is none).
+        charge: /** @type {{ take(bytes: number): boolean, give(bytes: number): void } | null} */
+            (null),
         // The wasm bytes of compiled batch modules kept for every runtime
         // sharing this one's store (`shared-modules.js`): a process started again
         // instantiates what an earlier one compiled (0: none kept).
@@ -651,10 +657,11 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
      * bytes, those regions, the translated instructions (`corkRetired`) when
      * one of them last ran -- an entry from the host, a crossing out of the
      * module or into it -- and until when one brought back after an eviction
-     * is kept whatever that says.
+     * is kept whatever that says; `charged`, its bytes taken from the host's
+     * bound (`charge`).
      *
      * @typedef {{ instance: WebAssembly.Instance, bytes: number,
-     *     records: Set<RegionRecord>, ran: number, keepUntil: number }} Held
+     *     records: Set<RegionRecord>, ran: number, keepUntil: number, charged: number }} Held
      */
     /** @type {Map<WebAssembly.Instance, Held>} */
     const heldModules = new Map();
@@ -1177,6 +1184,7 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
         // Modules let go past `cacheBytes`, their regions, and the regions of
         // them published again; the crossings counted by modules no longer placed.
         evictions: 0, evictedRegions: 0, broughtBack: 0, crossingsGone: 0,
+        chargeRefused: 0, unchargedBytes: 0,
         formingMs: 0, lookupMs: 0, emitMs: 0, encodeMs: 0, storeMs: 0, instantiateMs: 0,
         publishMs: 0,
         // Emitting and encoding the worker did: reported apart from
@@ -2396,7 +2404,9 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
             {
                 const bytes = instanceBytes.get(instance) ?? 0;
                 makeRoom(bytes);
-                held = { instance, bytes, records: new Set(), ran: corkRetired, keepUntil: 0 };
+                const charged = chargeFor(bytes);
+                held = { instance, bytes, records: new Set(), ran: corkRetired, keepUntil: 0,
+                    charged };
                 heldModules.set(instance, held);
                 heldBytes += bytes;
             }
@@ -2422,7 +2432,45 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
         {
             heldModules.delete(held.instance);
             heldBytes -= held.bytes;
+            if (held.charged > 0)
+            {
+                settings.charge?.give(held.charged);
+            }
         }
+    };
+    /**
+     * A module's bytes taken from the host's bound (`charge`): where it has no
+     * room, the modules gone longest without running are let go until it has.
+     * Where none is left to let go and still none fits, the module is held
+     * uncharged and counted (`unchargedBytes`): one module past the bound, said,
+     * rather than code the program needs refused.
+     *
+     * @param {number} bytes
+     * @returns {number} the bytes taken
+     */
+    const chargeFor = bytes=>{
+        const charge = settings.charge;
+        if (!charge || bytes <= 0)
+        {
+            return 0;
+        }
+        if (charge.take(bytes))
+        {
+            return bytes;
+        }
+        counts.chargeRefused++;
+        const order = [...heldModules.values()].sort((a, b)=>
+            Number(a.keepUntil > corkRetired) - Number(b.keepUntil > corkRetired) || a.ran - b.ran);
+        for (const held of order)
+        {
+            evict(held);
+            if (charge.take(bytes))
+            {
+                return bytes;
+            }
+        }
+        counts.unchargedBytes += bytes;
+        return 0;
     };
     /**
      * Lets modules go until `bytes` more fit under `cacheBytes`: those gone
@@ -5892,6 +5940,11 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
                 cacheBytes: settings.cacheBytes,
                 evictions: counts.evictions,
                 evictedRegions: counts.evictedRegions,
+                // Where the host bounds the modules (`charge`): the times it had no
+                // room for one, and the bytes held past it where nothing was left
+                // to let go.
+                chargeRefused: counts.chargeRefused,
+                unchargedBytes: counts.unchargedBytes,
                 broughtBack: counts.broughtBack,
                 // The function table's length: what the regions' indices span.
                 tableSize: table ? table.length : 0,
