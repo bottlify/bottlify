@@ -229,3 +229,24 @@ test('retable moves an entry to another function-table index, in the map and in 
         assert.equal(view.getUint32(at + 4, true), 512, 'the slot names the new index');
         assert.equal(view.getUint16(at + 8, true), 3);
     });
+
+test('the hash is cleared at the start unless it is known zero, and then left untouched', ()=>{
+    // The clear wrote every page of the hash's 12 MiB, which a memory just made
+    // holds none of: a host that made the memory, or zeroed it, says so.
+    const shift = 22;
+    const bytes = 2 ** (32 - shift) * Tables.HASH_SLOT;
+    for (const zeroed of [false, true])
+    {
+        const memory = new WebAssembly.Memory({ initial: Math.ceil((bytes + 64) / 65536) });
+        const view = new Uint8Array(memory.buffer);
+        view.fill(0x5a, 64, 64 + bytes);
+        const entries = createEntries({ memory, hashBase: 64, shift, zeroed });
+        assert.equal(view.subarray(64, 64 + bytes).every(byte=>byte === (zeroed ? 0x5a : 0)),
+            true, zeroed ? 'left as it was' : 'cleared');
+        if (!zeroed)
+        {
+            entries.add(0x401000, fn, 3, 8, 17);
+            assert.equal(entries.hashed(), 1);
+        }
+    }
+});

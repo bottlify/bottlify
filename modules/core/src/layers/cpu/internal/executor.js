@@ -140,6 +140,8 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
     workerUrl = new URL('./executor.worker.js', import.meta.url), bell = createBell(),
     unbroken = undefined, store = null })
 {
+    // Its pages zeroed first where a gone process left its engine's state there.
+    host.makeRoomFor?.(index);
     const memory = host.wasmMemory();
     if (typeof SharedArrayBuffer !== 'function' || !(memory.buffer instanceof SharedArrayBuffer))
     {

@@ -25,7 +25,10 @@ start on one to three executors, 512 MiB on more); cork's tables and the other e
 then lie in a range of the program's own space the process keeps from it (at the top of the
 libraries' space under the thread stacks, at the heap's start, or cut out of the heap at
 0x14000000 for four executors or more). A 64-bit process, a run without shared memory and one
-with `cpu.grow: false` hold the whole of it from the start, cork's tables past it. The layout
+with `cpu.grow: false` hold the whole of it from the start, cork's tables past it. Nothing in a
+memory just made is cleared: its pages are zero until touched. A process that takes the memory of
+one gone before it zeroes the first executor's tables at once and another executor's pages as that
+executor opens, and only those the gone process opened. The layout
 (program address `a` at offset `a`, the state block with the registers, 512 bytes, in the
 program's first 64 KiB, which a Windows program never maps, on pages that fault the program's
 stores, and cork's tables with one flag byte per 4 KiB page) is in

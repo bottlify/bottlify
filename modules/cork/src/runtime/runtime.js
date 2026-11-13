@@ -367,6 +367,10 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
         // runtime is (`shared-code.js`), when other executors share its page flags;
         // null for a process on one.
         sharedCode: /** @type {{ at: number, index: number } | null} */ (null),
+        // Whether the host made the tables zero itself -- a memory just made, or one
+        // it zeroed where they lie: the entry hash is then left as it is at the start,
+        // where clearing it made its 12 MiB resident in a memory nothing had touched.
+        tablesZeroed: false,
         // A store through esp alone tests no page while no translated code lies
         // on a thread's stack (`noteStack`), which the runtime then switches off
         // for good: a stack holds no code unless a program runs code there.
@@ -669,8 +673,8 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
     // Past three quarters of the entry hash's slots live, a block start is kept
     // in the host's map alone (`createEntries`' own share).
     const entries = createEntries(
-        table ? { memory, hashBase: layout.tables + Tables.HASH, shift: layout.hashShift ?? 16 }
-            : {});
+        table ? { memory, hashBase: layout.tables + Tables.HASH, shift: layout.hashShift ?? 16,
+            zeroed: settings.tablesZeroed === true } : {});
     /** The queue, miss and barren key: one address at one x87 top. Every
      * "has an entry" question is for a top, so a region compiled for another
      * top is no answer. @param {number} eip @param {number} top */

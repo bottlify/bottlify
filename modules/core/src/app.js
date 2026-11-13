@@ -116,6 +116,14 @@ const hashText = (hash, text)=>{
  */
 
 /**
+ * A gone process's memory, for the next process of the run to take
+ * (`CorkHostConfig.reused`): below `guestEnd` its guest may have written, and
+ * the first `executors` executors' pages may hold its engine's state.
+ *
+ * @typedef {{ memory: WebAssembly.Memory, guestEnd: number, executors?: number }} SpareMemory
+ */
+
+/**
  * @typedef {Object} AppOptions
  * @property {Uint8Array} executable      The program to run.
  * @property {Object} [cork]              The translator.
@@ -366,7 +374,7 @@ const hashText = (hash, text)=>{
  * @property {Record<string, string>} [environment]
  *           The variables a process starts with: a child's are the block its
  *           parent handed CreateProcess, or the parent's own as they were then.
- * @property {{ memory: WebAssembly.Memory, guestEnd: number } | null} [reusedMemory]
+ * @property {SpareMemory | null} [reusedMemory]
  *           The memory of a process of the run that has gone, for this one to
  *           take: set by the run, not something a caller supplies.
  * @property {boolean} [exitNotice]
@@ -8055,7 +8063,7 @@ async function buildApp(options){
         return events.emit('error', { reason, error: thrown, trace, text }) ?? thrown;
     };
 
-    /** This process's memory, once it has gone (`spareMemory`). @type {{ memory: WebAssembly.Memory, guestEnd: number } | null} */
+    /** This process's memory, once it has gone (`spareMemory`). @type {SpareMemory | null} */
     let spare = null;
 
     return {
@@ -9392,7 +9400,7 @@ async function buildApp(options){
          * with how much of it the guest may have written; null before then
          * and under an engine that keeps none.
          *
-         * @returns {{ memory: WebAssembly.Memory, guestEnd: number } | null}
+         * @returns {SpareMemory | null}
          */
         spareMemory: ()=>spare,
         dispose(){
@@ -9400,6 +9408,7 @@ async function buildApp(options){
             // thing that says where the guest wrote.
             const memoryLeft = cpu.wasmMemory?.() ?? null;
             const guestEnd = win32.heap?.()?.handedTo?.();
+            const executorsTouched = cpu.executorsTouched?.() ?? null;
             // What the program wrote last is saved now rather than after it
             // settles: the machine it was written on is about to go.
             saver?.flush();
@@ -9419,7 +9428,9 @@ async function buildApp(options){
                     translationStore?.close?.();
                 }
                 spare = memoryLeft && typeof guestEnd === 'number'
-                    ? { memory: memoryLeft, guestEnd } : null;
+                    ? { memory: memoryLeft, guestEnd,
+                        ...executorsTouched === null ? {} : { executors: executorsTouched } }
+                    : null;
             });
         },
     };
@@ -10648,7 +10659,7 @@ export async function createApp(options){
      * process hands its memory back as it goes and the next one takes it, so
      * a run holds as many as it ever ran at once, and `SPARE_MEMORIES` more.
      *
-     * @type {{ memory: WebAssembly.Memory, guestEnd: number }[]}
+     * @type {SpareMemory[]}
      */
     const spareMemories = [];
     /** @param {any} gone  a machine disposed */

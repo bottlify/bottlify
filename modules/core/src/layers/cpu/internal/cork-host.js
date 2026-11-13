@@ -159,12 +159,14 @@ const hex = (value, width = 8)=>(value >>> 0).toString(16).padStart(width, '0');
  *     block is at the start of the memory.
  * @property {WebAssembly.Memory} [memory]  The memory, made by the host of another executor of
  *     the process (`wasmMemory`) -- shared, sized for `executors` -- rather than one of its own.
- * @property {{ memory: WebAssembly.Memory, guestEnd: number }} [reused]  The memory of a
- *     process that has gone, taken instead of a new one where it is the size this host would
- *     make: a finished process's memory is freed only by a garbage collection nothing prompts,
- *     and a parent starting one short-lived child after another would otherwise hold one
- *     memory per child. Below `guestEnd` the guest may have written, and that is zeroed with
- *     the engine's own pages; above it the guest's memory is as it was made.
+ * @property {{ memory: WebAssembly.Memory, guestEnd: number, executors?: number }} [reused]
+ *     The memory of a process that has gone, taken instead of a new one where it is the size
+ *     this host would make: a finished process's memory is freed only by a garbage collection
+ *     nothing prompts, and a parent starting one short-lived child after another would
+ *     otherwise hold one memory per child. Below `guestEnd` the guest may have written, and
+ *     that is zeroed with the first executor's tables; above it the guest's memory is as it
+ *     was made. `executors`: how many executors' pages, from the first, may hold the gone
+ *     process's state (its `executorsTouched`), each zeroed as it opens; all when absent.
  * @property {SharedArrayBuffer} [tsc]  The time-stamp counter every executor of the process
  *     shares (`TscWord`): the guest's clock as the process last published it, and the last
  *     count any of them read.
@@ -398,19 +400,47 @@ export function createCorkHost(config){
         ?? (translationZone === undefined ? undefined
             : corkConfig?.crossTailCalls !== false ? 0
                 : cacheShare(translationZone - engineBytes, executors, executor));
+    /**
+     * The engine's bytes executor `index` keeps, [from, to): the first's tables
+     * and what lies past them (its state page is in the guest's first 64 KiB),
+     * another's state page, tables and past.
+     *
+     * @param {number} index
+     */
+    const executorRange = index=>(index === 0
+        ? { from: own.tables, to: firstPages * 65536 }
+        : { from: executorBase(index), to: executorBase(index) + executorPages * 65536 });
+    /** The record the executors keep together, empty for a process on one. */
+    const sharedRange = sharedAt < 0 ? { from: 0, to: 0 }
+        : { from: sharedAt, to: sharedAt + sharedPages * 65536 };
+    /**
+     * The executors, from the first, whose pages a gone process may have left
+     * its engine's state in: zeroed as each opens (`makeRoomFor`), not all at
+     * the start -- a process that never opens one leaves its pages untouched,
+     * where zeroing them made every executor's 19 MiB resident.
+     */
+    const dirtyExecutors = taken === undefined ? 0
+        : Math.min(executors, Math.max(1, reused?.executors ?? executors));
+    /** The executors this process made room for, the first among them. */
+    const readied = new Set([0]);
     if (taken !== undefined)
     {
         // A new memory is zero; this one is made so where it was used: its
         // state block and the guest's RAM up to where the guest was given
-        // memory, and everything past the RAM -- the engine's tables, the
-        // other executors' pages and the record they kept together.
+        // memory, past the RAM, and the first executor's tables and the record
+        // the executors keep together. Another executor's are zeroed when it
+        // opens.
         const bytes = new Uint8Array(memory.buffer);
         const guestEnd = Math.min(Math.max(reused?.guestEnd ?? memorySize, 0), memorySize);
         bytes.fill(0, 0, own.ramBase + guestEnd);
-        bytes.fill(0, own.ramBase + memorySize);
-        // A growing memory's tables lie inside the guest's space, wherever the
-        // guest's end was.
-        bytes.fill(0, engineArea.from, engineArea.to);
+        if (!growing)
+        {
+            bytes.fill(0, own.ramBase + memorySize, executorRange(0).to);
+        }
+        for (const range of [executorRange(0), sharedRange])
+        {
+            bytes.fill(0, range.from, range.to);
+        }
     }
 
     // A fixed memory (initial === maximum) never detaches its buffer, and a
@@ -865,6 +895,9 @@ export function createCorkHost(config){
                 && (enginePages.to <= enginePages.from || enginePages.from >= 0x1000)
                 ? { zeroPage: true } : {}),
             ...corkConfig,
+            // The tables are zero as the runtime starts: a memory just made, or
+            // one zeroed where they lie (`reused`, `makeRoomFor`).
+            tablesZeroed: true,
             ...(cacheBytes === undefined ? {} : { cacheBytes }),
             ...(sharedAt < 0 ? {} : { sharedCode: { at: sharedAt, index: executor } }) },
         read: (/** @type {number} */ address)=>ram[address],
@@ -1992,6 +2025,31 @@ export function createCorkHost(config){
         },
         /** Cork's own memory. */
         wasmMemory: ()=>memory,
+        /**
+         * Readies executor `index`'s pages before its worker takes the memory:
+         * zeroed where a gone process may have left its engine's state there.
+         * Only the process's own executor makes room.
+         *
+         * @param {number} index
+         */
+        makeRoomFor: index=>{
+            if (executor !== 0 || !(index >= 1 && index < executors))
+            {
+                return;
+            }
+            if (index < dirtyExecutors && !readied.has(index))
+            {
+                const range = executorRange(index);
+                new Uint8Array(memory.buffer).fill(0, range.from, range.to);
+            }
+            readied.add(index);
+        },
+        /**
+         * How many executors, from the first, may hold a gone process's state in
+         * this memory once this process has gone: what the next process to take it
+         * zeroes as each opens (`CorkHostConfig.reused`).
+         */
+        executorsTouched: ()=>Math.max(dirtyExecutors, ...[...readied].map(index=>index + 1)),
         /** The eager flags word. */
         getEflags: eflagsWord,
         /** The x87 stack's top, for the runtime's entry lookup. */

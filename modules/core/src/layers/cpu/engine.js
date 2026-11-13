@@ -171,6 +171,9 @@ export function engineContractProblem(engineModule, url){
  *     protected PAGE_NOACCESS -- faults with its address, as on Windows, and those pages are
  *     closed (`pageAccess`). Default false: a translated read is wrapped into RAM, and every
  *     page reads.
+ * @property {boolean} [tablesZeroed]    The host made the tables zero itself: a memory just
+ *     made, or one it zeroed where they lie. The entry hash is then not cleared at the start,
+ *     which wrote every page of it. The cpu layer sets it. Default false.
  * @property {boolean} [zeroPage]        The guest's first page is the RAM's zeros, which nothing
  *     writes and a store to faults (`zeroReadsBelow` over it): a tested read inside it reads
  *     them in translated code rather than leaving to the host. The cpu layer sets it where

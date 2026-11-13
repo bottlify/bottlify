@@ -1057,6 +1057,14 @@ export function createCpuModule(){
                  * @returns {WebAssembly.Memory | null}
                  */
                 wasmMemory: ()=>state.host?.wasmMemory?.() ?? null,
+                /**
+                 * How many executors' pages, from the first, may hold this process's
+                 * engine state in its memory: the part of it a process taking the
+                 * memory zeroes as each opens. Null before boot.
+                 *
+                 * @returns {number | null}
+                 */
+                executorsTouched: ()=>state.host?.executorsTouched?.() ?? null,
                 /** @param {string} name @param {number} value */
                 writeReg32: (name, value)=>started().writeReg32(name, value),
                 /** The register width: 64 for an x86-64 process. @returns {32 | 64} */

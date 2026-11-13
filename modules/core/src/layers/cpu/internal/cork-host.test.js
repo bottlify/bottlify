@@ -1041,3 +1041,39 @@ test('a memory with an engine range holds its floor, and grows as the host gives
         assert.equal(fixed.growing(), false, 'no range: the whole RAM, as before');
         assert.ok(fixed.wasmMemory().buffer.byteLength > 256 * MIB);
     });
+
+test('a memory a gone process left is zeroed where its engine ran: the first executor\'s tables'
+    + ' at once, another executor\'s pages as it opens, and only those the gone one opened', ()=>{
+    const MIB = 1 << 20;
+    const config = { memorySize: 256 * MIB, executors: 3,
+        engineArea: { at: 32 * MIB, span: 68 * MIB } };
+    const gone = host(config);
+    // Executor 1 opened, executor 2 never did.
+    gone.makeRoomFor(1);
+    assert.equal(gone.executorsTouched(), 2);
+    const memory = gone.wasmMemory();
+    const range = gone.engineRange();
+    const bytes = new Uint8Array(memory.buffer);
+    bytes.fill(0x5a, range.from, range.to);
+    /** The bytes of the engine's range the gone process's mark is left on. */
+    const marked = ()=>bytes.subarray(range.from, range.to).reduce((sum, byte)=>sum
+        + (byte === 0x5a ? 1 : 0), 0);
+    const whole = range.to - range.from;
+    const next = host({ ...config, reused: { memory, guestEnd: 0,
+        executors: gone.executorsTouched() } });
+    assert.equal(next.wasmMemory(), memory, 'taken');
+    const atStart = marked();
+    assert.ok(atStart < whole, 'the first executor\'s tables and the shared record zeroed');
+    assert.ok(atStart > 0, 'the other executors\' pages not yet');
+    next.makeRoomFor(1);
+    const afterOne = marked();
+    assert.ok(afterOne < atStart, 'executor 1 zeroed as it opens: the gone one ran there');
+    next.makeRoomFor(2);
+    assert.equal(marked(), afterOne,
+        'executor 2 left as it was: the gone process never opened it, so it is as made');
+    assert.equal(next.executorsTouched(), 3);
+    const third = host({ ...config, reused: { memory, guestEnd: 0 } });
+    assert.equal(third.wasmMemory(), memory);
+    third.makeRoomFor(2);
+    assert.equal(marked(), 0, 'with no count every executor\'s pages are taken as written');
+});
