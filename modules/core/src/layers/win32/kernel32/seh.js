@@ -752,6 +752,9 @@ export function createSeh(host){
 
         const teb = tebOf(asked);
         let reached = everything;
+        host.trace?.(`unwind on ${asked?.name ?? 'the thread'} to ${everything ? 'the end'
+            : hex(target)}: ${frames.slice(0, frames.findIndex(({ frame })=>frame === target)
+            >>> 0).map(({ frame, handler })=>`${hex(frame)}>${hex(handler)}`).join(' ')}`);
         for (let index = 0; index < frames.length; index++)
         {
             const { frame, handler } = frames[index];
