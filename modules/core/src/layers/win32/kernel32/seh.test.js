@@ -731,3 +731,30 @@ test('an exception a handler raises reaches the program with its code and '
     assert.equal(m.get(record + RECORD.INFORMATION), 7);
     assert.equal(answer, 0, 'continued, the call answers zero');
 });
+
+test('what a program hands its last-chance filter is traced: registers, chain and words', async()=>{
+    // A fail-fast calls the filter and ends: the trace is all that is left.
+    const m = machine({ answer: ()=>1 });
+    /** @type {string[]} */
+    const said = [];
+    const seh = createSeh({ ...m.host, trace: (/** @type {string} */ line)=>said.push(line) });
+    m.registerFrames([0x51000]);
+    const record = 0x30000;
+    const context = 0x31000;
+    m.put(record, 0xc0000409);
+    m.put(record + 0x0c, 0x401234);
+    m.put(context + 0xb4, 0x40100);
+    m.put(context + 0xc4, 0x40000);
+    m.put(0x40100 - 64, 0xfeedface);
+    m.put(0x2000, record);
+    m.put(0x2004, context);
+    seh.table.SetUnhandledExceptionFilter.handler([0x61000]);
+
+    await seh.table.UnhandledExceptionFilter.handler([0x2000]);
+
+    const text = said.join('\n');
+    assert.ok(text.includes('last chance: code 0xc0000409 at 0x401234'), text);
+    assert.ok(text.includes('ebp=0x40100') && text.includes('esp=0x40000'), text);
+    assert.ok(text.includes('[ebp-64] 0xfeedface'), text);
+    assert.ok(text.includes('0x20000>0x51000'), 'the handler chain');
+});

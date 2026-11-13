@@ -387,6 +387,50 @@ export function createSeh(host){
     };
 
     /**
+     * What a program handed its last-chance filter, in the trace: the
+     * exception, the registers its context holds, the thread's handler chain,
+     * and the words around every register that points at mapped memory - the
+     * frame a failed check was reading, the stack it stood on. A program that
+     * fails fast (a security cookie found overwritten) calls the filter and
+     * ends, and this is all that is left of the state it found broken.
+     *
+     * @param {number} pointers  EXCEPTION_POINTERS
+     */
+    const traceLastChance = pointers=>{
+        if (!host.trace || !host.isMapped(pointers))
+        {
+            return;
+        }
+        const record = readU32(pointers);
+        const context = readU32(pointers + 4);
+        const words = (/** @type {number} */ from, /** @type {number} */ count)=>
+            Array.from({ length: count }, (_, at)=>(host.isMapped(from + at * 4)
+                ? hex(readU32(from + at * 4)) : '-')).join(' ');
+        const lines = [`last chance: code ${host.isMapped(record) ? hex(readU32(record)) : '?'}`
+            + ` at ${host.isMapped(record) ? hex(readU32(record + RECORD.ADDRESS)) : '?'}`];
+        if (host.isMapped(context))
+        {
+            const names = /** @type {const} */ (['EAX', 'EBX', 'ECX', 'EDX', 'ESI', 'EDI',
+                'EBP', 'ESP', 'EIP']);
+            const values = names.map(name=>readU32(context + CONTEXT[name]));
+            lines.push(names.map((name, at)=>`${name.toLowerCase()}=${hex(values[at])}`)
+                .join(' '));
+            for (const [at, value] of values.entries())
+            {
+                if (host.isMapped(value - 64) && host.isMapped(value + 63))
+                {
+                    lines.push(`  [${names[at].toLowerCase()}-64] ${words(value - 64, 32)}`);
+                }
+            }
+        }
+        const thread = host.currentThread?.();
+        const { frames, damaged } = chain(thread);
+        lines.push(`  chain of ${thread?.name ?? 'the thread'}: ${frames.map(({ frame, handler })=>
+            `${hex(frame)}>${hex(handler)}`).join(' ')}${damaged ? ' (damaged)' : ''}`);
+        host.trace(lines.join('\n'));
+    };
+
+    /**
      * The vectored handlers AddVectoredExceptionHandler and
      * AddVectoredContinueHandler registered, the whole process's, each under
      * the handle its registration answered.
@@ -985,6 +1029,7 @@ export function createSeh(host){
                 argBytes: 4,
                 /** @param {number[]} args */
                 handler: ([pointers])=>{
+                    traceLastChance(pointers >>> 0);
                     if (topLevelFilter === 0)
                     {
                         return EXCEPTION_EXECUTE_HANDLER;

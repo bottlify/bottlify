@@ -4144,6 +4144,10 @@ export function journalEvents(events, into, { shaders = false } = {}){
     });
 }
 
+/** How many of the layers' last trace lines a report keeps: an exception's account and the
+ * last-chance filter's are a few lines each. */
+const TRACED_KEPT = 32;
+
 /**
  * One machine, running one image.
  *
@@ -4186,6 +4190,8 @@ async function buildApp(options){
     // process they were made against: the program has changed, the machine it
     // is running in has not.
     const events = options.events ?? createEvents();
+    /** The last lines the layers traced, for a report (`TRACED_KEPT`). @type {string[]} */
+    const layerTraces = [];
     // The presenter the run made. A machine is a process; the canvas, the
     // texture the primary is copied into and the pacer are not. This machine
     // hands the run's presenter to the graphics layer and draws through it, so
@@ -5535,7 +5541,14 @@ async function buildApp(options){
             /** @param {number} handle @param {string} text */
             onOutput: (handle, text)=>events.emit('output', { handle, text }),
             /** @param {string} text */
-            onTrace: text=>events.emit('debug', { text }),
+            onTrace: text=>{
+                layerTraces.push(text);
+                if (layerTraces.length > TRACED_KEPT)
+                {
+                    layerTraces.shift();
+                }
+                events.emit('debug', { text });
+            },
             registers: {
                 /** @param {string} name */
                 read: name=>core.api('cpu').readReg32(name),
@@ -5744,7 +5757,8 @@ async function buildApp(options){
                     imagePath: request.imagePath,
                     commandLine: request.commandLine,
                     suspended: request.suspended,
-                    trace: formatTrace(captureTrace({ cpu, memory, kernel, bridge })),
+                    trace: formatTrace(captureTrace({ cpu, memory, kernel, bridge,
+                        traced: ()=>layerTraces.slice() })),
                 });
                 // Started at CreateProcess, beside this process, as on Windows:
                 // a parent reaches into it before its next turn, and one made
@@ -8049,7 +8063,8 @@ async function buildApp(options){
         // the ROM stub the processor is standing in rather than the instruction
         // that faulted, and every register it prints is read from a machine
         // that has already left the scene.
-        const trace = captureTrace({ cpu, memory, kernel, bridge, fault: cpu.fault?.() ?? null });
+        const trace = captureTrace({ cpu, memory, kernel, bridge,
+            traced: ()=>layerTraces.slice(), fault: cpu.fault?.() ?? null });
         const text = formatTrace(trace);
         const thrown = error instanceof Error ? error : new Error(String(error));
         Object.assign(thrown, { reason, trace, traceText: text });
@@ -9309,7 +9324,8 @@ async function buildApp(options){
          *
          * @returns {string}
          */
-        trace: ()=>formatTrace(captureTrace({ cpu, memory, kernel, bridge })),
+        trace: ()=>formatTrace(captureTrace({ cpu, memory, kernel, bridge,
+            traced: ()=>layerTraces.slice() })),
 
         /**
          * Everything the engine can say about the run in one answer, for a
