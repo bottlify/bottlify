@@ -147,7 +147,10 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
     unbroken = undefined, store = null })
 {
     // Its pages zeroed first where a gone process left its engine's state there.
-    host.makeRoomFor?.(index);
+    if (host.makeRoomFor?.(index) === false)
+    {
+        throw new Error(`executor ${index}: the machine's memory has no room for its pages`);
+    }
     const memory = host.wasmMemory();
     if (typeof SharedArrayBuffer !== 'function' || !(memory.buffer instanceof SharedArrayBuffer))
     {

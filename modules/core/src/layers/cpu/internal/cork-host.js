@@ -27,6 +27,7 @@
  * and page arithmetic) is handed in by `module.js`, which loaded it by URL.
  */
 
+import { openMemoryBudget } from './memory-budget.js';
 import { exceptionName, hostFault } from './faults.js';
 import { captureBlockContext, restoreBlockContext } from './context.js';
 import { createPorts } from './ports.js';
@@ -172,6 +173,13 @@ const hex = (value, width = 8)=>(value >>> 0).toString(16).padStart(width, '0');
  *     `executorsTouched`), each zeroed as it opens; all when absent. `engine`: where the gone
  *     process's engine pages lay (its `engineLeft`): laid out elsewhere, they are zeroed at
  *     the start and every executor's as it opens.
+ * @property {SharedArrayBuffer | ArrayBuffer} [memoryBudget]  The machine's memory
+ *     (`memory-budget.js`): a memory made here, and every page it grows by, is taken from it,
+ *     and a grow it cannot cover is refused as one past the ceiling is. Absent, nothing bounds
+ *     the memory but its own ceiling.
+ * @property {{ left: number }} [memoryCredit]  What the run took of the machine's memory for
+ *     this process's start (`roomForProcess`): its memory and its grows draw on it first, so a
+ *     start never finds the machine full half way.
  * @property {SharedArrayBuffer} [tsc]  The time-stamp counter every executor of the process
  *     shares (`TscWord`): the guest's clock as the process last published it, and the last
  *     count any of them read.
@@ -248,7 +256,27 @@ export function createCorkHost(config){
     const { engine, memorySize, trapPort, entryVector, initialStack, cork: corkConfig,
         closedBelow = 0, zeroReadsBelow = 0, readThrough = [], noExecuteBelow = 0, executors = 1,
         executor = 0, memory: given, reused, tsc, features, translationZone, bits = 32,
-        window: wideWindow, codeBase = 0, hostAlias } = config;
+        window: wideWindow, codeBase = 0, hostAlias, memoryBudget, memoryCredit } = config;
+    /** The machine's memory this process's grows are taken from, where the run has one. */
+    const machine = memoryBudget === undefined ? null : openMemoryBudget(memoryBudget);
+    /**
+     * The machine's memory as this process takes it: what the run took for its
+     * start first, then the machine's own.
+     */
+    const machineBudget = machine === null ? null : {
+        ...machine,
+        /** @param {number} bytes */
+        take(bytes){
+            const credit = memoryCredit ?? { left: 0 };
+            const drawn = Math.min(credit.left, bytes);
+            if (bytes - drawn > 0 && !machine.take(bytes - drawn))
+            {
+                return false;
+            }
+            credit.left -= drawn;
+            return true;
+        },
+    };
     // A wide window's image as the host is handed it: a pointer's low dword (a handler
     // reads `args[i] >>> 0`). The image's span below 4 GiB is kept free (`app.js`), so a
     // host access there is the image's, in the block from `codeBase`.
@@ -405,6 +433,19 @@ export function createCorkHost(config){
         && (typeof SharedArrayBuffer === 'function'
             && reused.memory.buffer instanceof SharedArrayBuffer) === shared
         ? reused.memory : undefined;
+    // A memory made here is the machine's to give: refused past it, as a
+    // process Windows cannot find the memory for fails to start. A taken one
+    // is held already, by the process that left it.
+    if (given === undefined && taken === undefined && machineBudget !== null)
+    {
+        if (!machineBudget.take(pages * 65536))
+        {
+            throw Object.assign(new Error(`cpu: the machine's memory has no room for a process`
+                + ` (${pages * 65536} bytes wanted, ${machineBudget.report().used} of`
+                + ` ${machineBudget.report().limit} held)`), { code: 'MACHINE_MEMORY' });
+        }
+        machineBudget.made();
+    }
     const memory = given ?? taken
         ?? new WebAssembly.Memory({ initial: pages, maximum: maximumPages, shared });
     /** A wide window's RAM, a memory64 memory of the window's size made whole; none otherwise. */
@@ -996,6 +1037,8 @@ export function createCorkHost(config){
      * @type {Uint8Array | null}
      */
     let closedPastHeld = null;
+    /** Grows the machine's memory refused this process (`memoryBudget`). */
+    let refusedGrows = 0;
     /**
      * Grows a growing memory to hold `end` bytes of RAM, in a power of two up to
      * the ceiling: its pages added, the views taken again, the new pages opened
@@ -1020,6 +1063,14 @@ export function createCorkHost(config){
         want = Math.min(want, memorySize);
         const wantPages = Math.min(65536, (want + engine.WRAP_SLACK) / 65536);
         const havePages = memory.buffer.byteLength / 65536;
+        // The machine's memory first: a grow it cannot cover is the guest's
+        // allocation refused, as a full machine refuses it.
+        const grown = Math.max(0, wantPages - havePages) * 65536;
+        if (machineBudget !== null && !machineBudget.take(grown))
+        {
+            refusedGrows++;
+            return held;
+        }
         try
         {
             if (wantPages > havePages)
@@ -1028,6 +1079,7 @@ export function createCorkHost(config){
             }
         }
         catch {
+            machineBudget?.give(grown);
             return held;
         }
         const from = held;
@@ -2102,6 +2154,13 @@ export function createCorkHost(config){
             const have = memory.buffer.byteLength / 65536;
             if (want > have)
             {
+                // An executor the machine has no memory for does not open: its
+                // threads run on the executors the process has.
+                if (machineBudget !== null && !machineBudget.take((want - have) * 65536))
+                {
+                    refusedGrows++;
+                    return false;
+                }
                 memory.grow(want - have);
             }
             if (index < dirtyExecutors && !readied.has(index))
@@ -2116,6 +2175,12 @@ export function createCorkHost(config){
          * zeroes as each opens (`CorkHostConfig.reused`).
          */
         executorsTouched: ()=>Math.max(dirtyExecutors, ...[...readied].map(index=>index + 1)),
+        /**
+         * The machine's memory as the run holds it now (bytes) and the grows it
+         * refused this process; null where the run has none.
+         */
+        machineMemory: ()=>(machineBudget === null ? null
+            : { ...machineBudget.report(), refusedGrows }),
         /**
          * What a process taking this memory next is told of the engine's pages
          * (`CorkHostConfig.reused`'s `engine`): where they lie, and the ranges of

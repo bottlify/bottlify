@@ -408,6 +408,10 @@ export function createCpuModule(){
                 // A gone process's memory, taken in place of a new one where it
                 // fits (`CorkHostConfig.reused`).
                 reused: config?.reused,
+                // The machine's memory every process of the run takes its
+                // memory from (`memory-budget.js`); none bounds only each.
+                memoryBudget: config?.memoryBudget,
+                memoryCredit: config?.memoryCredit,
                 // The translator's module, imported at boot for `cork`.
                 engineUrl: config?.engineUrl ?? null,
                 /** @type {import('./engine.js').EngineConfig} */
@@ -688,7 +692,9 @@ export function createCpuModule(){
                             : {}),
                     };
                     state.host = createCorkHost({ ...hostConfig, engine: engineModule,
-                        reused: settings.reused });
+                        reused: settings.reused,
+                        ...settings.memoryBudget ? { memoryBudget: settings.memoryBudget,
+                            memoryCredit: settings.memoryCredit } : {} });
                     for (const listener of growListeners)
                     {
                         state.host.onGrow?.(listener);
@@ -1681,6 +1687,10 @@ export function createCpuModule(){
                     gcNudges: instance.nudge?.made() ?? null,
                     // Those the browser would not make, near its limit.
                     gcNudgesRefused: instance.nudge?.refused() ?? null,
+                    // The machine's memory every process takes its memory from, as
+                    // the run holds it now, and the grows refused this process; null
+                    // where the run has none (`machineMemory`).
+                    machineMemory: instance.host?.machineMemory?.() ?? null,
                     running: instance.running,
                     instructions: retiredEverywhere(instance),
                     traps: instance.thunks ? instance.thunks.size : 0,

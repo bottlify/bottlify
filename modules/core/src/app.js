@@ -63,6 +63,7 @@ import { canShareMemory, withRunMode } from './mode.js';
 import { createLinkMemory, openLink } from './system/link.js';
 import { systemHandlers } from './system-link.js';
 import { SHARED_MODULE_BYTES, storeHandlers, withHeldModules } from './layers/cpu/internal/store-link.js';
+import { createMemoryBudget, openMemoryBudget } from './layers/cpu/internal/memory-budget.js';
 import { eventFrom } from './system/events-across.js';
 import { defaultModules } from './layers/index.js';
 import { createRunRegistry } from './layers/win32/module.js';
@@ -155,6 +156,19 @@ const hashText = (hash, text)=>{
  *           than instantiate the binary again. Set by `createApp` on a rebuilt
  *           machine and not something a caller supplies.
  * @property {number} [memorySize]   Guest RAM in bytes; a power of two.
+ * @property {number} [machineMemory]
+ *           The machine's memory in bytes: every process of the run together, as
+ *           Windows' processes share its RAM. A process's memory is made and grown
+ *           only within it (each memory counted at its whole length, the browser's
+ *           measure); a grow past it is the guest's allocation refused, a process
+ *           asked for while it is full waits for others to end. Unset, each process
+ *           is bounded by `memorySize` alone.
+ * @property {SharedArrayBuffer | ArrayBuffer} [memoryBudget]
+ *           The run's machine's memory (`memory-budget.js`), made from
+ *           `machineMemory` and carried to every process: set by the run.
+ * @property {{ left: number }} [memoryCredit]
+ *           What the run took of the machine's memory for this process's start,
+ *           which its memory and grows draw on first: set by the run.
  * @property {number} [heapSize]     Bytes the guest's heap may allocate out of.
  *           Defaults to everything above the libraries up to the end of RAM.
  * @property {boolean} [traceStrings]  Keep the text an argument pointed at, for a trace.
@@ -4984,6 +4998,8 @@ async function buildApp(options){
             memorySize: programLoaded.wide === undefined ? memorySize
                 : programLoaded.wide.window - 4096,
             ...(engineArea ? { engineArea } : {}),
+            ...(options.memoryBudget ? { memoryBudget: options.memoryBudget,
+                memoryCredit: options.memoryCredit } : {}),
             reused: options.reusedMemory ? { ...options.reusedMemory,
                 written: reusedRanges(options.reusedMemory, {
                     // The thunk table, and the first thread's stack under it to
@@ -9649,6 +9665,19 @@ const REPORT_WAIT_MS = 1000;
  */
 const SPARE_MEMORIES = 4;
 
+/**
+ * What a process's start takes of the machine's memory where the run has one
+ * (`roomForProcess`): its RAM grown to cover the heap's first block, which lies
+ * at 192 MiB (`HEAP_FLOOR`).
+ */
+const START_BYTES = 256 << 20;
+
+/** Past `START_BYTES`, the engine's pages of the process's first executor. */
+const START_SLACK_BYTES = 32 << 20;
+
+/** How long a process asked for while the machine's memory is full waits for room. */
+const MACHINE_WAIT_MS = 60_000;
+
 /** How many divergences a run's diagnostics list, in the order they were said. */
 const DIVERGENCES_KEPT = 128;
 
@@ -9670,7 +9699,7 @@ const EXIT_NOTICE_TYPE = 0x40;
 const SYSTEM_OPTIONS = new Set(['system', 'relay', 'pacing', 'device', 'bundle', 'storage',
     'discs', 'files', 'seed', 'events', 'spawned', 'logSinks', 'win32', 'watchImport', 'hooks',
     'executable', 'standardFiles', 'startup', 'fallback', 'graphics', 'audio', 'cork', 'log',
-    'com']);
+    'com', 'memoryCredit']);
 
 /**
  * A value as it crosses to another thread's start: data -- numbers, strings,
@@ -10532,6 +10561,12 @@ export async function createApp(options){
     // Settled once, here, so every process the run makes is built in it.
     options = withRunMode(withCpuSetup(withoutFaultingTailCalls(withKnownRoutines(options))));
     options = { ...options, processId: options.processId ?? runProcessId() };
+    // The machine's memory, made once by the run and carried to every process
+    // it starts, here or in a worker of its own (`memory-budget.js`).
+    if (options.memoryBudget === undefined && options.machineMemory !== undefined)
+    {
+        options = { ...options, memoryBudget: createMemoryBudget(options.machineMemory) };
+    }
     graphicsChoice(options.graphicsApi);
     // Both outlive every process: subscriptions a caller made before the first
     // child existed still have to fire for the last one, and the record of what
@@ -10873,6 +10908,17 @@ export async function createApp(options){
      * @type {SpareMemory[]}
      */
     const spareMemories = options.spareMemories ?? [];
+    /** The machine's memory, where the run has one: a spare memory let go is given back. */
+    const machineMemory = options.memoryBudget === undefined ? null
+        : openMemoryBudget(options.memoryBudget);
+    /** @param {SpareMemory | undefined} spare */
+    const dropSpare = spare=>{
+        if (spare && machineMemory !== null)
+        {
+            machineMemory.give(spare.memory.buffer.byteLength);
+            machineMemory.dropped();
+        }
+    };
     /** @param {SpareMemory | null | undefined} spare */
     const keepSpare = spare=>{
         if (spare && !spareMemories.some(one=>one.memory === spare.memory))
@@ -10880,8 +10926,59 @@ export async function createApp(options){
             spareMemories.push(spare);
             if (spareMemories.length > SPARE_MEMORIES)
             {
-                spareMemories.shift();
+                dropSpare(spareMemories.shift());
             }
+            // A spare holds its whole length of the machine's memory: past three
+            // quarters of it, the oldest go, so a process that needs a memory of
+            // its own still finds room (one made anew starts at its floor).
+            if (machineMemory !== null)
+            {
+                const { limit } = machineMemory.report();
+                while (spareMemories.length > 0 && machineMemory.report().used > limit * 3 / 4)
+                {
+                    dropSpare(spareMemories.shift());
+                }
+            }
+        }
+    };
+    /**
+     * What a process's start takes of the machine's memory, taken before it is
+     * built: its memory and the grows of its start (its first heap block, the
+     * engine's own tables and routines) draw on it, so a start never finds the
+     * machine full half way, and what is left is given back once it is built
+     * (`releaseCredit`). A process asked for while the machine is full waits for
+     * others to end, up to `MACHINE_WAIT_MS`; past that it is built on what the
+     * machine has, and a start that cannot finish is the child failing.
+     *
+     * @param {SpareMemory | null} reused  the gone process's memory it is built in, if any
+     * @returns {Promise<{ left: number } | undefined>}
+     */
+    const roomForProcess = async reused=>{
+        if (machineMemory === null)
+        {
+            return undefined;
+        }
+        // In a memory of its own, the floor grown to cover the heap's first
+        // block; in a gone one, the room to grow that far.
+        const wanted = Math.max(0, START_BYTES - (reused?.memory.buffer.byteLength ?? 0))
+            + START_SLACK_BYTES;
+        const until = Date.now() + MACHINE_WAIT_MS;
+        while (!machineMemory.take(wanted))
+        {
+            if (Date.now() >= until)
+            {
+                return { left: 0 };
+            }
+            await new Promise(resolve=>setTimeout(resolve, 50));
+        }
+        return { left: wanted };
+    };
+    /** What a built process left of its start's credit, given back. @param {{ left: number } | undefined} credit */
+    const releaseCredit = credit=>{
+        if (credit && credit.left > 0 && machineMemory !== null)
+        {
+            machineMemory.give(credit.left);
+            credit.left = 0;
         }
     };
     /** @param {any} gone  a machine disposed */
@@ -10897,7 +10994,8 @@ export async function createApp(options){
         /** The machine, once built: what its children are started beside. @type {any} */
         let self = null;
         const reusedMemory = spareMemories.pop() ?? null;
-        const built = await buildApp(machine({ ...extra, reusedMemory,
+        const memoryCredit = await roomForProcess(reusedMemory);
+        const built = await buildApp(machine({ ...extra, reusedMemory, memoryCredit,
             com: { table: classTable, process },
             // With concurrency a child runs from CreateProcess on, beside
             // its parent, as on Windows; otherwise it waits for the parent to
@@ -10916,7 +11014,8 @@ export async function createApp(options){
             // whose every thread waits on it would find nothing to wake it.
             othersRunning: ()=>Boolean(options.system) || starting > 0 || across > 0
                 || besides.size > 0
-                || [...standing].some(other=>other !== self) }));
+                || [...standing].some(other=>other !== self) }))
+            .finally(()=>releaseCredit(memoryCredit));
         self = built;
         standing.add(built);
         processes.set(process, built);
@@ -12604,7 +12703,7 @@ export async function createApp(options){
             .finally(()=>{
                 if (!options.spareMemories)
                 {
-                    spareMemories.length = 0;
+                    spareMemories.splice(0).forEach(dropSpare);
                 }
                 shownHere?.dispose();
                 presenter?.dispose?.();

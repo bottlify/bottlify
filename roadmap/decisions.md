@@ -2119,3 +2119,17 @@ committed, as pages given back already were: until then a read of one finds the 
 bytes where a read of an uncommitted page does not fault, where Windows faults and a new memory
 reads zero. A program reading memory it never committed or was never handed is the only one to
 see the difference. *2026-11-13.*
+
+**A243. A machine's memory is counted in whole wasm memories, and a process waits for room before
+it starts.** Windows' processes share the machine's RAM page by page; here each process is its own
+WebAssembly.Memory, whose whole length the browser holds once touched and never gives back. So the
+machine's memory (`machineMemory`) counts each memory at its length, made, grown or kept for the
+next process, not the pages a program committed: a 512 MiB memory holding one 100 MiB block counts
+512 MiB. A grow past the machine's memory refuses the allocation that asked for it, as an
+out-of-memory machine's allocation fails, rather than paging. A process asked for while the machine
+is full waits up to a minute for another to end, where Windows would start it and page; past that it
+is built with what is left, and a start that cannot finish is the child failing, which its parent
+hears as an exit. What a process's start needs (its memory up to the heap's first block plus the
+first executor's engine pages) is taken before it is built, so siblings growing at once cannot
+leave a start half done. The engine's own memory (tables above the RAM, translated code, the
+graphics worker's buffers) is not counted. *2026-11-13.*
