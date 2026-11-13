@@ -11008,7 +11008,9 @@ export async function createApp(options){
         const listed = { id: ids.processId, image: found.path, beside: /** @type {true} */ (true),
             diagnostics: ()=>line.current.diagnostics(),
             read: (/** @type {number} */ address, /** @type {number} */ length)=>
-                line.current.debug.read(address, length) };
+                line.current.debug.read(address, length),
+            hook: (/** @type {number} */ address, /** @type {any} */ how)=>
+                line.current.debug.hook(address, how) };
         standingBeside.add(listed);
         noteMachines();
         events.emit('process-server', { image: found.path, clsid: request.clsid });
@@ -11073,7 +11075,8 @@ export async function createApp(options){
      *
      * @type {Set<{ image: string, id: number, beside: true,
      *     diagnostics: () => Promise<any>,
-     *     read: (address: number, length: number) => Uint8Array }>}
+     *     read: (address: number, length: number) => Uint8Array,
+     *     hook: (address: number, how: any) => any }>}
      */
     const standingBeside = new Set();
 
@@ -11283,6 +11286,25 @@ export async function createApp(options){
                         throw new Error(`no process ${id} stands beside`);
                     }
                     return child.read(address, length);
+                },
+                /**
+                 * A watch in front of a routine of a process by its id (`hook`):
+                 * the first's, or one running beside it, where a compiler or a
+                 * setup's helper does the work.
+                 *
+                 * @param {number} id @param {number} address @param {any} how
+                 */
+                hookOf: (id, address, how)=>{
+                    if (id === (options.processId ?? FIRST_PROCESS_ID))
+                    {
+                        return speaking.debug.hook(address, how);
+                    }
+                    const child = [...standingBeside].find(each=>each.id === id);
+                    if (!child)
+                    {
+                        throw new Error(`no process ${id} stands beside`);
+                    }
+                    return child.hook(address, how);
                 } };
         }
     };
@@ -11971,7 +11993,9 @@ export async function createApp(options){
             const listed = { id: request.id, image: request.imagePath, beside: /** @type {true} */ (true),
                 diagnostics: ()=>line.current.diagnostics(),
                 read: (/** @type {number} */ address, /** @type {number} */ length)=>
-                    line.current.debug.read(address, length) };
+                    line.current.debug.read(address, length),
+                hook: (/** @type {number} */ address, /** @type {any} */ how)=>
+                    line.current.debug.hook(address, how) };
             standingBeside.add(listed);
             let code = -1;
             try
