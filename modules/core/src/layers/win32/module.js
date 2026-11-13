@@ -5628,6 +5628,8 @@ export function createWin32Module(){
                 setLastError: code=>setError(code),
                 /** Views of files: how many were mapped, waited for their bytes, or failed. */
                 mappings: ()=>mappings,
+                /** What the volume holds of the tab's heaps (`memory-zones.js`), by pool. */
+                volumeHeld: ()=>volume.held(),
                 /**
                  * The last files CreateFile and NtCreateFile would not open, each
                  * with the error and what was asked: a program that goes silent or

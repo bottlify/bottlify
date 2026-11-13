@@ -40,14 +40,31 @@ export const FETCHED_PIECE_BYTES = 8 << 20;
 /** How many times a read or write fetches the blocks it misses before it fails (`fetchedAgain`). */
 export const MISS_FETCHES = 4;
 /**
- * Large reads kept whole, by the file's identity, size and last write: an
- * engine maps its own executable, reads its tables and unmaps it hundreds of
- * times while it loads, and each map decoded every bundle block of it again
- * (a second a time for 111 MB).
+ * Large reads kept whole, by the file's identity, size and last write, once
+ * the same range is read a second time: an engine maps its own executable,
+ * reads its tables and unmaps it hundreds of times while it loads, and each
+ * map decoded every bundle block of it again (a second a time for 111 MB).
+ * Only a second read keeps: a setup extracting a cabinet reads it once, a
+ * mebibyte a batch, and keeping each batch held a quarter of a gibibyte a
+ * process of bytes nothing read again. Ranges read again share this pool,
+ * the least recently read let go first.
  */
-export const KEPT_READ_BYTES = 256 << 20;
+export const KEPT_READ_BYTES = 32 << 20;
+/**
+ * One range read again larger than the pool is kept alone, everything else let
+ * go for it, up to this: the executable mapped whole again and again.
+ */
+export const KEPT_READ_LARGEST = 128 << 20;
 /** A read smaller than this costs less than keeping it. */
 export const KEPT_READ_MIN = 1 << 20;
+/**
+ * A kept range not read again for this long is let go at the next read: what
+ * was read twice at a start and never after holds nothing for the rest of
+ * the run.
+ */
+export const KEPT_IDLE_MS = 30000;
+/** How many large ranges read once are remembered, by key alone, to tell a second read. */
+const SEEN_READS = 256;
 /**
  * A last write younger than this is not trusted to tell versions apart: two
  * writes in one millisecond carry the same stamp.
@@ -83,8 +100,10 @@ export const FILE_ACTION_RENAMED_NEW_NAME = 5;
  * @param {((blocks: any[]) => Promise<void>) | null} [fetchBlocks]
  *        Brings absent bundle blocks in. Absent itself when nothing is mounted
  *        from a bundle, in which case a miss is a fault rather than a wait.
+ * @param {{ now?: () => number }} [options]  `now`: the clock reads are kept
+ *        by and a last write is aged against, in milliseconds (`Date.now`).
  */
-export function createVolume(fs, fetchBlocks = null){
+export function createVolume(fs, fetchBlocks = null, { now = Date.now } = {}){
     const { ErrorCode, Disposition, SeekFrom } = fs;
 
     /**
@@ -343,9 +362,14 @@ export function createVolume(fs, fetchBlocks = null){
 
     /** The path each node was opened by, for its version. @type {WeakMap<any, string>} */
     const pathOf = new WeakMap();
-    /** Kept reads, oldest first. @type {Map<string, Uint8Array>} */
+    /**
+     * Kept reads, the least recently read first, each with when it was read
+     * last. @type {Map<string, { bytes: Uint8Array, at: number }>}
+     */
     const kept = new Map();
     let keptBytes = 0;
+    /** Large ranges read once, by key: a second read of one keeps it. @type {Set<string>} */
+    const seen = new Set();
     /**
      * The key a read of a node is kept under, or null when it is not to be:
      * a small read, an unknown file, or one written moments ago.
@@ -355,31 +379,58 @@ export function createVolume(fs, fetchBlocks = null){
     const keptKey = (node, offset, length)=>{
         const path = length >= KEPT_READ_MIN ? pathOf.get(node) : undefined;
         const entry = path === undefined ? null : attempt(()=>fs.stat(path), null);
-        return entry && !entry.directory && Date.now() - (entry.modified ?? 0) > SETTLED_MS
+        return entry && !entry.directory && now() - (entry.modified ?? 0) > SETTLED_MS
             ? `${entry.identity ?? entry.path}|${entry.size}|${entry.modified}|${offset}|${length}`
             : null;
     };
+    /** @param {string} key */
+    const letGo = key=>{
+        keptBytes -= /** @type {{ bytes: Uint8Array }} */ (kept.get(key)).bytes.length;
+        kept.delete(key);
+    };
+    /** Lets go of what was not read again for `KEPT_IDLE_MS`. @param {number} time */
+    const expire = time=>{
+        for (const [key, held] of kept)
+        {
+            if (time - held.at <= KEPT_IDLE_MS)
+            {
+                break;
+            }
+            letGo(key);
+        }
+    };
     /**
-     * Keeps a read, and answers whether it did: what is kept is handed out
-     * only as a copy.
+     * Keeps a read when its range was read before, and answers whether it
+     * did: what is kept is handed out only as a copy, or as it is to a
+     * caller that only copies out of it.
      *
      * @param {string | null} key @param {Uint8Array} bytes
      */
     const keep = (key, bytes)=>{
-        if (key === null || bytes.length > KEPT_READ_BYTES)
+        if (key === null || bytes.length > KEPT_READ_LARGEST)
         {
             return false;
         }
-        kept.set(key, bytes);
-        keptBytes += bytes.length;
-        for (const [oldest, held] of kept)
+        if (!seen.delete(key))
         {
-            if (keptBytes <= KEPT_READ_BYTES)
+            seen.add(key);
+            if (seen.size > SEEN_READS)
+            {
+                seen.delete(/** @type {string} */ (seen.values().next().value));
+            }
+            return false;
+        }
+        kept.set(key, { bytes, at: now() });
+        keptBytes += bytes.length;
+        // A range past the pool is kept alone.
+        const limit = Math.max(KEPT_READ_BYTES, bytes.length);
+        for (const oldest of kept.keys())
+        {
+            if (keptBytes <= limit || oldest === key)
             {
                 break;
             }
-            kept.delete(oldest);
-            keptBytes -= held.length;
+            letGo(oldest);
         }
         return true;
     };
@@ -574,6 +625,14 @@ export function createVolume(fs, fetchBlocks = null){
         openRefusal: ()=>refusedOpen,
 
         /**
+         * What the volume holds of the tab's heaps (`memory-zones.js`): the
+         * ranges kept for a read again.
+         *
+         * @returns {{ keptReads: number }}
+         */
+        held: ()=>({ keptReads: keptBytes }),
+
+        /**
          * @param {string} path
          * @param {any} mode
          * @returns {any} an open file, or null
@@ -641,13 +700,19 @@ export function createVolume(fs, fetchBlocks = null){
          * @returns {Uint8Array | Promise<Uint8Array>}
          */
         read(node, offset, length, onlyCopied = false){
+            const time = now();
+            if (kept.size > 0)
+            {
+                expire(time);
+            }
             const key = keptKey(node, offset, length);
             const held = key === null ? undefined : kept.get(key);
             if (held)
             {
                 kept.delete(/** @type {string} */ (key));
+                held.at = time;
                 kept.set(/** @type {string} */ (key), held);
-                return onlyCopied ? held : held.slice();
+                return onlyCopied ? held.bytes : held.bytes.slice();
             }
             const bytes = this.readFresh(node, offset, length);
             // Copied out when kept: whoever reads may write into what it got.
