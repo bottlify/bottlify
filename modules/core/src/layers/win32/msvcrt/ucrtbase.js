@@ -25,6 +25,7 @@
  *   `_execute_onexit_table`).
  */
 
+import { addSecondNames, UCRTBASE_SECOND_NAMES } from './second-names.js';
 import { scanDecimal } from './convert.js';
 import { SYSTEM_ERRORS } from './errors.js';
 import { setSingle } from './float.js';
@@ -62,12 +63,6 @@ const LEGACY_THREE_DIGIT_EXPONENTS = 0x10;
 const STANDARD_ROUNDING = 0x20;
 /** The bit of `__stdio_common_vsscanf` and its kin that makes `%s` and `%c` take a size after each pointer. */
 const SECURE_SCANF = 0x1;
-/**
- * The functions ucrtbase also exports with an `_o_` before the name, those a
- * program has been seen to import that way.
- */
-const O_PREFIXED = ['_execute_onexit_table', '_initialize_onexit_table',
-    '_register_onexit_function', 'malloc', 'tolower', 'toupper'];
 /** DLL_PROCESS_DETACH: what a thread-local exit callback is told at exit. */
 const PROCESS_DETACH = 0;
 
@@ -1002,15 +997,7 @@ export function createUcrtbaseFunctions(crt, host){
         .../** @type {any} */ (crt)[UNIVERSAL_CXX] ?? {},
     };
 
-    // The `_o_` exports are the same functions under a second name, which the
-    // runtime's own import library binds some of the headers' calls to: one
-    // entry, so a program reaching either name reaches the same state.
-    for (const name of O_PREFIXED)
-    {
-        if (exports[name])
-        {
-            exports[`_o_${name}`] = exports[name];
-        }
-    }
-    return exports;
+    // The `_o_`, `_l`, `_nolock` and long double names are the same entries
+    // under a second name: a program reaching either reaches the same state.
+    return addSecondNames(exports, UCRTBASE_SECOND_NAMES);
 }
