@@ -373,6 +373,7 @@ export function baseState({ memory, ram, layout, sharedLayout = undefined, confi
  *     & ReturnType<typeof import('./store.js').createStore>
  *     & ReturnType<typeof import('./publish.js').createPublish>
  *     & ReturnType<typeof import('./relink.js').createRelink>
+ *     & ReturnType<typeof import('./forming.js').createForming>
  *     & Late} State
  */
 
