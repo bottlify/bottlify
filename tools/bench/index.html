@@ -172,7 +172,7 @@ const oneRun = (options, onProgress)=>new Promise((resolve, reject)=>{
         {
             rows.push(data.row);
         }
-        onProgress(data.row ?? null, rows.length, total);
+        onProgress(data.row ?? null, rows.length, total, data.progress);
         if (data.done !== undefined)
         {
             worker.terminate();
@@ -305,9 +305,12 @@ async function start(timed){
     {
         for (let run = 0; run < runs; run++)
         {
-            const rows = await oneRun({ ...options, work: run === 0 }, (row, count, total)=>{
+            let step = '';
+            const rows = await oneRun({ ...options, work: run === 0 }, (row, count, total, at)=>{
+                step = at ?? (row ? '' : step);
                 $('status').textContent = `run ${run + 1} of ${runs} · ${count} of ${total} workloads`
-                    + ` · ${((performance.now() - startedAt) / 1000).toFixed(0)} s`;
+                    + ` · ${((performance.now() - startedAt) / 1000).toFixed(0)} s`
+                    + (step ? ` · ${step}` : '');
                 if (row && run === 0)
                 {
                     workRows = [...workRows, row];
@@ -326,8 +329,8 @@ async function start(timed){
             seconds,
             work: workRows.map(({ name, bits, work, same, expected })=>({ name, bits, work, same,
                 expected })),
-            runs: done.map(rows=>rows.map(({ name, mips, ratio, noise, rounds })=>({ name, mips, ratio,
-                noise, rounds }))) };
+            runs: done.map(rows=>rows.map(({ name, mips, ratio, noise, rounds, settling })=>({ name,
+                mips, ratio, noise, rounds, settling }))) };
         window.standReport = report;
     }
     catch (e)

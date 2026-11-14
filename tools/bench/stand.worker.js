@@ -87,9 +87,19 @@ self.onmessage = async(/** @type {MessageEvent} */ event)=>{
             }
         }
         self.postMessage({ total: workloads.length });
+        let saidAt = 0;
         const rows = await runStand(arms, workloads, {
             warm: record.warm, rounds, windowMs, timed, work, now: ()=>performance.now(),
             expected: recordFor(record, cork), onRow: row=>self.postMessage({ row }),
+            // Where a run is, a few times a second: a phone takes minutes on one
+            // workload (calls4096's 4100 regions are as many modules to compile).
+            onProgress: (name, step)=>{
+                if (performance.now() - saidAt > 250)
+                {
+                    saidAt = performance.now();
+                    self.postMessage({ progress: `${name}: ${step}` });
+                }
+            },
         });
         self.postMessage({ done: rows.length });
     }

@@ -30,6 +30,10 @@ const IMAGE_BASE = 0x401000;
 const ENTRY_VECTOR = 0x7000;
 /** Guest instructions in one virtual millisecond (`VIRTUAL_INSTRUCTIONS_PER_MS`). */
 const PER_MS = 1e6;
+/** The most windows a build runs, warmed, for its speed to hold before the rounds. */
+const SETTLE_WINDOWS = 40;
+/** A build's letter on the page, A for the first. @param {number} at */
+const letter = at=>String.fromCharCode(65 + at);
 
 /**
  * An arm: a build's cork host and translator, the settings the browser needs of
@@ -88,13 +92,15 @@ function hostOf(arm, workload, profile){
  * What `warm` iterations do, to the unit.
  *
  * @param {Arm} arm @param {Workload} workload @param {number} warm
+ * @param {(step: string) => void} [progress]  told after each iteration
  * @returns {Promise<Work>}
  */
-export async function workOf(arm, workload, warm){
+export async function workOf(arm, workload, warm, progress = undefined){
     const run = hostOf(arm, workload, true);
     for (let i = 0; i < warm; i++)
     {
         await run.iteration();
+        progress?.(`work ${i + 1}/${warm}`);
     }
     const d = run.host.cork().diagnostics();
     const mechanisms = Object.fromEntries(Object.entries(d.mechanisms ?? {})
@@ -139,16 +145,31 @@ export const sameWork = (a, b)=>JSON.stringify(a) === JSON.stringify(b);
  *
  * @param {Arm[]} arms @param {Workload} workload
  * @param {{ warm: number, warmMs: number, rounds: number, windowMs: number,
- *     now: () => number }} options
+ *     now: () => number, progress?: (step: string) => void }} options
  */
-export async function timeOf(arms, workload, { warm, warmMs, rounds, windowMs, now }){
+export async function timeOf(arms, workload, { warm, warmMs, rounds, windowMs, now,
+    progress = undefined })
+{
     const runs = arms.map(arm=>hostOf(arm, workload, false));
-    for (const run of runs)
+    /** The machine's milliseconds a virtual one over one window. @param {typeof runs[0]} run */
+    const window = async run=>{
+        const from = run.retired();
+        const startedAt = now();
+        while (run.retired() - from < windowMs * PER_MS)
+        {
+            await run.iteration();
+        }
+        return (now() - startedAt) / ((run.retired() - from) / PER_MS);
+    };
+    /** @type {number[]} windows each arm ran past `warmMs` before its speed held */
+    const settling = [];
+    for (const [at, run] of runs.entries())
     {
         for (let i = 0, last = ''; i < warm || i < 8 * warm && run.formed() !== last; i++)
         {
             last = run.formed();
             await run.iteration();
+            progress?.(`${letter(at)} warm ${i + 1}`);
         }
         // Then `warmMs` of guest work more: the engine still optimises the
         // regions' functions after the translator is done (calls512-order's
@@ -158,6 +179,22 @@ export async function timeOf(arms, workload, { warm, warmMs, rounds, windowMs, n
         {
             await run.iteration();
         }
+        // And on until three windows in a row agree within a tenth: in
+        // Chrome 156 a build's vm ran at 3000 or 6000 MIPS through a whole
+        // run, and calls4096's rounds fell from 9 to 3.4 ms a virtual ms as the
+        // engine finished optimising its 4100 regions, after 200 ms of warming.
+        const recent = [];
+        for (let i = 0; i < SETTLE_WINDOWS; i++)
+        {
+            recent.push(await window(run));
+            progress?.(`${letter(at)} settling ${i + 1}`);
+            const last = recent.slice(-3);
+            if (last.length === 3 && Math.max(...last) <= 1.1 * Math.min(...last))
+            {
+                break;
+            }
+        }
+        settling.push(recent.length);
     }
     /** @type {number[][]} */
     const perVirtualMs = runs.map(()=>[]);
@@ -166,15 +203,9 @@ export async function timeOf(arms, workload, { warm, warmMs, rounds, windowMs, n
         const order = runs.map((_, at)=>at);
         for (const at of round % 2 ? order.reverse() : order)
         {
-            const run = runs[at];
-            const from = run.retired();
-            const startedAt = now();
-            while (run.retired() - from < windowMs * PER_MS)
-            {
-                await run.iteration();
-            }
-            perVirtualMs[at].push((now() - startedAt) / ((run.retired() - from) / PER_MS));
+            perVirtualMs[at].push(await window(runs[at]));
         }
+        progress?.(`round ${round + 1}/${rounds}`);
     }
     const medians = perVirtualMs.map(values=>quantile(values, 0.5));
     const paired = perVirtualMs.map(values=>values
@@ -189,6 +220,7 @@ export async function timeOf(arms, workload, { warm, warmMs, rounds, windowMs, n
         // over the median: a ratio inside it is no change this machine shows.
         noise: (quantile(perVirtualMs[0], 0.75) - quantile(perVirtualMs[0], 0.25)) / 2 / medians[0],
         rounds: perVirtualMs,
+        settling,
     };
 }
 
@@ -201,19 +233,21 @@ export async function timeOf(arms, workload, { warm, warmMs, rounds, windowMs, n
  * @param {{ warm?: number, warmMs?: number, rounds?: number, windowMs?: number,
  *     now: () => number,
  *     expected?: Record<string, { work: Work }>, timed?: boolean, work?: boolean,
- *     onRow?: (row: any) => void }} options
+ *     onRow?: (row: any) => void, onProgress?: (name: string, step: string) => void }} options
  */
 export async function runStand(arms, workloads, options){
     const { warm = 20, warmMs = 200, rounds = 7, windowMs = 30, now, expected, timed = true,
-        work: counted = true, onRow } = options;
+        work: counted = true, onRow, onProgress } = options;
     const rows = [];
     for (const workload of workloads)
     {
         /** @type {Work[]} */
         const work = [];
+        /** @param {string} step */
+        const progress = step=>onProgress?.(workload.name, step);
         for (const arm of counted ? arms : [])
         {
-            work.push(await workOf(arm, workload, warm));
+            work.push(await workOf(arm, workload, warm, progress));
         }
         const reference = expected?.[workload.name]?.work;
         const row = {
@@ -223,7 +257,8 @@ export async function runStand(arms, workloads, options){
             same: counted ? work.every(one=>sameWork(one, work[0])) : null,
             expected: !counted || reference === undefined ? null
                 : sameWork(work[work.length - 1], reference),
-            ...timed ? await timeOf(arms, workload, { warm, warmMs, rounds, windowMs, now }) : {},
+            ...timed ? await timeOf(arms, workload, { warm, warmMs, rounds, windowMs, now,
+                progress }) : {},
         };
         rows.push(row);
         onRow?.(row);
