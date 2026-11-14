@@ -14,6 +14,10 @@ import { CallStack } from '../emit/region.js';
 import { features as probeFeatures } from '../wasm/features.js';
 import { threadCpuMs } from '../../../../tools/fixtures/cpu-time.mjs';
 
+/** Why a test of the entry hash cannot run here. */
+const NO_TAIL_CALLS = 'this host\'s wasm has no tail calls: every region leaves for the host'
+    + ' and there is no entry hash';
+
 const CODE = 0x1000;
 
 /** A little-endian dword's bytes. @param {number} value */
@@ -1403,9 +1407,10 @@ test('an entry that moved to another precision control is taken from the store a
     });
 
 test('a region formed as its record says, its callees formed in, and refused for its precision is'
-    + ' translated with those callees and published', async()=>{
+    + ' translated with those callees and published', async t=>{
     if (!probeFeatures().tailCalls)
     {
+        t.skip(NO_TAIL_CALLS);
         return;
     }
     const settle = ()=>new Promise(resolve=>setTimeout(resolve, 0));
@@ -2428,7 +2433,7 @@ test('the untranslated exits are told apart by what left, and a target only ever
 });
 
 test('a transfer carries the registers and the count to a callee that names none of them,'
-    + ' and its exit to the host writes them all', async()=>{
+    + ' and its exit to the host writes them all', async t=>{
     const m = machine({ leafCalls: false });
     // mov ebx, 7; call F; hlt; F: inc edx; hlt -- F neither reads nor writes ebx, and the
     // caller never reaches its own exit, so the value is only ever in the transfer.
@@ -2441,7 +2446,8 @@ test('a transfer carries the registers and the count to a callee that names none
     const exit = m.runtime.run(m.runtime.entryOf(CODE), 1000);
     if (m.runtime.diagnostics().exits.untranslated > 0)
     {
-        return; // no tail calls: every region leaves for the host
+        t.skip(NO_TAIL_CALLS);
+        return;
     }
     assert.equal(exit.kind, 'halt');
     assert.equal(m.eip(), CODE + 13);
@@ -2703,10 +2709,11 @@ const callLoop = n=>[
 ];
 
 test('a transfer to a region of its own module is not a crossing; one into another module'
-    + ' is, and is counted', async()=>{
+    + ' is, and is counted', async t=>{
     if (!probeFeatures().tailCalls)
     {
-        return; // no hash: every transfer is the host's
+        t.skip(NO_TAIL_CALLS);
+        return;
     }
     // The loop and its callee in one batch: one module.
     const one = machine({ leafCalls: false, dispatch: true, callReturn: false });
@@ -2731,9 +2738,10 @@ test('a transfer to a region of its own module is not a crossing; one into anoth
 });
 
 test('without tail calls into another instance, a transfer out of the module is entered by the'
-    + ' loop and one inside it stays a tail call, with the same answers', async()=>{
+    + ' loop and one inside it stays a tail call, with the same answers', async t=>{
     if (!probeFeatures().tailCalls)
     {
+        t.skip(NO_TAIL_CALLS);
         return;
     }
     /** @param {Record<string, unknown>} config @param {boolean} split */
@@ -2775,9 +2783,10 @@ test('without tail calls into another instance, a transfer out of the module is 
     assert.equal(inside.left, (await run({}, false)).left, 'no transfer left the module');
 });
 
-test('a placed module whose regions have all gone gives its range of the table back', async()=>{
+test('a placed module whose regions have all gone gives its range of the table back', async t=>{
     if (!probeFeatures().tailCalls)
     {
+        t.skip(NO_TAIL_CALLS);
         return;
     }
     // The callee and the loop in modules of their own, dropped and made again
@@ -2804,9 +2813,10 @@ test('a placed module whose regions have all gone gives its range of the table b
 });
 
 test('two modules that keep transferring into each other are gathered into one, on the'
-    + ' worker', async()=>{
+    + ' worker', async t=>{
     if (!probeFeatures().tailCalls)
     {
+        t.skip(NO_TAIL_CALLS);
         return;
     }
     const m = machine({ leafCalls: false, mergeAfter: 1000, worker: true, dispatch: true,
@@ -2844,9 +2854,10 @@ test('two modules that keep transferring into each other are gathered into one, 
 });
 
 test('after a merge, the next waits for translated instructions in proportion to the regions'
-    + ' it built', async()=>{
+    + ' it built', async t=>{
     if (!probeFeatures().tailCalls)
     {
+        t.skip(NO_TAIL_CALLS);
         return;
     }
     const m = machine({ leafCalls: false, mergeAfter: 4000, worker: true, dispatch: true,
@@ -2942,9 +2953,10 @@ function mergeMachine(config){
     return { m, until, loop, translate };
 }
 
-test('a merge waits for crossings in proportion to the regions it would build', async()=>{
+test('a merge waits for crossings in proportion to the regions it would build', async t=>{
     if (!probeFeatures().tailCalls)
     {
+        t.skip(NO_TAIL_CALLS);
         return;
     }
     // A loop whose batch has sixty-four more regions calling a callee in a
@@ -2990,9 +3002,10 @@ const loopCalling = (at, n)=>{
         0x49, 0x75, 0xf8, 0xf4];
 };
 
-test('a region is built again by two merges at most', async()=>{
+test('a region is built again by two merges at most', async t=>{
     if (!probeFeatures().tailCalls)
     {
+        t.skip(NO_TAIL_CALLS);
         return;
     }
     // Three loops calling one function, each translated after the one before
@@ -3058,10 +3071,11 @@ const dispatchLoop = n=>{
 };
 
 test('an indirect call sampled going to a few small callees has them formed into its region,'
-    + ' and a call to another still leaves', async()=>{
+    + ' and a call to another still leaves', async t=>{
     if (!probeFeatures().tailCalls)
     {
-        return; // no hash, no transfers to count
+        t.skip(NO_TAIL_CALLS);
+        return;
     }
     const m = machine({ countTransfers: true, callTargets: true, callReturn: false });
     const { code, table, slots, f, g, h } = dispatchLoop(1600);
@@ -3096,9 +3110,10 @@ test('an indirect call sampled going to a few small callees has them formed into
 });
 
 test('a call its prediction takes is not sampled: the calls that still leave are, and their'
-    + ' callee is formed in next', async()=>{
+    + ' callee is formed in next', async t=>{
     if (!probeFeatures().tailCalls)
     {
+        t.skip(NO_TAIL_CALLS);
         return;
     }
     const m = machine({ countTransfers: true, callTargets: true, callReturn: false });
@@ -3195,9 +3210,10 @@ const profiledLoop = async(config, { code, table, slots }, sum)=>{
 };
 
 test('an indirect call whose callees are spread is sampled until it comes due, then formed'
-    + ' again without the profile', async()=>{
+    + ' again without the profile', async t=>{
     if (!probeFeatures().tailCalls)
     {
+        t.skip(NO_TAIL_CALLS);
         return;
     }
     // Each of the sixty-four a sixty-fourth of the calls, under the eighth a callee needs.
@@ -3221,9 +3237,10 @@ test('an indirect call whose callees are spread is sampled until it comes due, t
 });
 
 test('an indirect call whose callees cannot be formed in is quiet once it comes due again',
-    async()=>{
+    async t=>{
         if (!probeFeatures().tailCalls)
         {
+            t.skip(NO_TAIL_CALLS);
             return;
         }
         // F and G take most calls, but no callee of more than a byte is formed in.
@@ -3242,9 +3259,10 @@ test('an indirect call whose callees cannot be formed in is quiet once it comes 
     });
 
 test('a region formed after its call was predicted elsewhere is formed again with the callee'
-    + ' too', async()=>{
+    + ' too', async t=>{
     if (!probeFeatures().tailCalls)
     {
+        t.skip(NO_TAIL_CALLS);
         return;
     }
     // A: mov ebx, G; mov ecx, 1600; L: call F; dec ecx; jnz L; hlt -- and B the same
@@ -3293,9 +3311,10 @@ test('a region formed after its call was predicted elsewhere is formed again wit
 });
 
 test('a hot indirect call is sampled though another one is always the last before a reading',
-    async()=>{
+    async t=>{
         if (!probeFeatures().tailCalls)
         {
+            t.skip(NO_TAIL_CALLS);
             return;
         }
         // mov ecx, 1600; L: mov eax, ecx; and eax, 15; call [TABLE + eax*4]; dec ecx;
@@ -3345,10 +3364,11 @@ test('a hot indirect call is sampled though another one is always the last befor
         assert.ok(run() < 1600, 'the loop\'s calls to F and G formed in');
     });
 
-test('callTargets is on and dispatch off unless a run says otherwise', async()=>{
+test('callTargets is on and dispatch off unless a run says otherwise', async t=>{
     if (!probeFeatures().tailCalls)
     {
-        return; // no hash: no transfers, no placing
+        t.skip(NO_TAIL_CALLS);
+        return;
     }
     // Each default was chosen by measuring games (see the settings); a default
     // that flips unnoticed is what this holds.
@@ -3386,9 +3406,10 @@ test('callTargets is on and dispatch off unless a run says otherwise', async()=>
 });
 
 test('an indirect call sampled only now and then is not formed again; one sampled now is',
-    async()=>{
+    async t=>{
         if (!probeFeatures().tailCalls)
         {
+            t.skip(NO_TAIL_CALLS);
             return;
         }
         // A window of 64 readings, against the 140 the call is left cold for.
@@ -3433,9 +3454,10 @@ test('an indirect call sampled only now and then is not formed again; one sample
     });
 
 test('the regions of every indirect call sampled enough are formed again in one batch',
-    async()=>{
+    async t=>{
         if (!probeFeatures().tailCalls)
         {
+            t.skip(NO_TAIL_CALLS);
             return;
         }
         const m = machine({ callTargets: true });
