@@ -946,8 +946,12 @@ test('the function of a region\'s copies, planned from the region\'s own plannin
         };
         const shared = functionOf(context=>emitRegion(context, region,
             { entryTop: 0, checked: false }).copiesIndex);
+        // The copies go back to their loops through the region's function, whose index the
+        // region hands out before them: the one the fresh copies' module hands out next.
         const fresh = functionOf(context=>new RegionEmitter(context, region,
-            { entryTop: 0, checked: false, copyFunction: true }).emit().functionIndex);
+            { entryTop: 0, checked: false, copyFunction: true,
+                rejoin: context.m.importedFunctions + context.m.functions.length })
+            .emit().functionIndex);
         assert.ok(fresh.body.length > 0);
         assert.deepEqual(shared, fresh, `the copies of ${program.length} bytes of code`);
     }

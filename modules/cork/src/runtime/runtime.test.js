@@ -3130,9 +3130,10 @@ test('an indirect call sampled going to a few small callees has them formed into
         await m.runtime.translatePending();
     }
     assert.equal(m.runtime.diagnostics().reforms, 1);
-    // Only H leaves: its call, its return into the copy of the block after the call, which
-    // is inside the loop (`emitCopies`), and the copy's way on to the loop's head.
-    assert.equal(run(), 300, 'only H leaves, and its return comes back');
+    // Only H leaves: its call, and its return into the copy of the block after the call,
+    // which is inside the loop (`emitCopies`); the copy goes on to the loop's head by a call
+    // of the region's function (`rejoinAt`), not through the hash.
+    assert.equal(run(), 200, 'only H leaves, and its return comes back');
 });
 
 test('a call its prediction takes is not sampled: the calls that still leave are, and their'
@@ -3165,7 +3166,7 @@ test('a call its prediction takes is not sampled: the calls that still leave are
         run();
         await m.runtime.translatePending();
     }
-    assert.equal(run(), 300, 'F and G formed in, H leaves');
+    assert.equal(run(), 200, 'F and G formed in, H leaves: its call and its return');
     // H is a sixteenth of the calls, under the share a callee needs among all of
     // them; among the calls that leave it is every one.
     for (let i = 0; i < 400 && m.runtime.diagnostics().reforms === 1; i++)
@@ -3782,7 +3783,8 @@ test('with callReturn a call out of a region returns into it as a wasm call: the
 });
 
 test('with callReturn a loop that calls out is a loop: a return come back from outside, its callee'
-    + ' having returned elsewhere, enters it by its copy', async()=>{
+    + ' having returned elsewhere, enters it by its copy, which goes back to the loop by a call',
+async()=>{
     // mov ecx, 1000; L: call F; inc edx; call G; inc edi; dec ecx; jnz L; hlt
     // F: inc ebx; test cl, 1; jz r; add dword [esp], 6; r: ret -- on odd ecx it returns
     //    to G's return address, a block inside the loop, from outside the region
@@ -3802,7 +3804,8 @@ test('with callReturn a loop that calls out is a loop: a return come back from o
         const d = /** @type {any} */ (m.runtime.diagnostics());
         runs.push({ retired, regs: [0, 1, 2, 3, 4, 5, 6, 7].map(r=>m.reg(r)),
             loop: d.mechanisms.JUMP_LOOP, dispatch: d.mechanisms.JUMP_DISPATCH,
-            out: d.mechanisms.JUMP_OUT });
+            out: d.mechanisms.JUMP_OUT, transfers: d.mechanisms.TRANSFER,
+            through: d.mechanisms.RET_LEFT + d.mechanisms.CALL_REL - d.mechanisms.CALL_LINKED });
     }
     const [plain, called] = runs;
     assert.deepEqual(called.regs, plain.regs);
@@ -3813,6 +3816,9 @@ test('with callReturn a loop that calls out is a loop: a return come back from o
     assert.equal(called.dispatch, 0, 'no jump back through the dispatch');
     assert.ok(called.loop > 0, `the loop's jumps back are a wasm loop's: ${called.loop}`);
     assert.ok(called.out > 0, `the copy entered from outside goes back to the loop: ${called.out}`);
+    // Each transfer is a ret that left (F's elsewhere) or a direct call its callee's slot did
+    // not link: the copy goes back to the loop's head by a call of the region's function.
+    assert.equal(called.transfers, called.through, 'none from the copy\'s way back');
 });
 
 test('with callReturn a call stores what some way to it wrote since the state block last held it:'

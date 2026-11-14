@@ -2,27 +2,27 @@
  "workloads": {
   "32/crc-x87": {
    "counts": {
-    "TRANSFER": 2,
+    "TRANSFER": 4,
     "RET_LEFT": 4,
     "CALL_LEFT": 0,
-    "CALL_LINKED": 1,
+    "CALL_LINKED": 4,
     "CALL_FORMED": 0,
     "RET_FORMED": 0,
     "RET_TO_CALL": 0,
     "JUMP_DISPATCH": 0,
     "APART_FULL": 0,
     "APART_NESTED": 0,
-    "APART_BLOCKS": 1,
+    "APART_BLOCKS": 4,
     "APART_UNPREDICTED": 0
    },
    "factor": 2
   },
   "32/fmath-pc24": {
    "counts": {
-    "TRANSFER": 2,
+    "TRANSFER": 4,
     "RET_LEFT": 4,
     "CALL_LEFT": 0,
-    "CALL_LINKED": 1,
+    "CALL_LINKED": 4,
     "CALL_FORMED": 0,
     "RET_FORMED": 0,
     "RET_TO_CALL": 0,
@@ -36,10 +36,10 @@
   },
   "32/fmath-sse": {
    "counts": {
-    "TRANSFER": 2,
+    "TRANSFER": 4,
     "RET_LEFT": 4,
     "CALL_LEFT": 0,
-    "CALL_LINKED": 1,
+    "CALL_LINKED": 4,
     "CALL_FORMED": 0,
     "RET_FORMED": 0,
     "RET_TO_CALL": 0,
@@ -53,10 +53,10 @@
   },
   "32/fmath-x87": {
    "counts": {
-    "TRANSFER": 2,
+    "TRANSFER": 4,
     "RET_LEFT": 4,
     "CALL_LEFT": 0,
-    "CALL_LINKED": 1,
+    "CALL_LINKED": 4,
     "CALL_FORMED": 0,
     "RET_FORMED": 0,
     "RET_TO_CALL": 0,
@@ -70,152 +70,152 @@
   },
   "32/game-pc24": {
    "counts": {
-    "TRANSFER": 2,
+    "TRANSFER": 4,
     "RET_LEFT": 4,
     "CALL_LEFT": 0,
-    "CALL_LINKED": 6919,
+    "CALL_LINKED": 4504,
     "CALL_FORMED": 0,
-    "RET_FORMED": 0,
-    "RET_TO_CALL": 6918,
-    "JUMP_DISPATCH": 7196,
+    "RET_FORMED": 2700,
+    "RET_TO_CALL": 4500,
+    "JUMP_DISPATCH": 0,
     "APART_FULL": 0,
     "APART_NESTED": 0,
     "APART_BLOCKS": 0,
-    "APART_UNPREDICTED": 7200
+    "APART_UNPREDICTED": 4500
    },
    "factor": 2
   },
   "32/game-sse": {
    "counts": {
-    "TRANSFER": 2,
+    "TRANSFER": 4,
     "RET_LEFT": 4,
     "CALL_LEFT": 0,
-    "CALL_LINKED": 6919,
+    "CALL_LINKED": 4804,
     "CALL_FORMED": 0,
-    "RET_FORMED": 0,
-    "RET_TO_CALL": 6918,
-    "JUMP_DISPATCH": 7195,
+    "RET_FORMED": 2400,
+    "RET_TO_CALL": 4800,
+    "JUMP_DISPATCH": 0,
     "APART_FULL": 0,
     "APART_NESTED": 0,
     "APART_BLOCKS": 0,
-    "APART_UNPREDICTED": 7200
+    "APART_UNPREDICTED": 4800
    },
-   "factor": 2
+   "factor": 2.28
   },
   "32/game-x87": {
    "counts": {
-    "TRANSFER": 2,
+    "TRANSFER": 4,
     "RET_LEFT": 4,
     "CALL_LEFT": 0,
-    "CALL_LINKED": 6919,
+    "CALL_LINKED": 4504,
     "CALL_FORMED": 0,
-    "RET_FORMED": 0,
-    "RET_TO_CALL": 6918,
-    "JUMP_DISPATCH": 7196,
+    "RET_FORMED": 2700,
+    "RET_TO_CALL": 4500,
+    "JUMP_DISPATCH": 0,
     "APART_FULL": 0,
     "APART_NESTED": 0,
     "APART_BLOCKS": 0,
-    "APART_UNPREDICTED": 7200
+    "APART_UNPREDICTED": 4500
    },
    "factor": 2
   },
   "32/load-x87": {
    "counts": {
-    "TRANSFER": 95,
-    "RET_LEFT": 113,
-    "CALL_LEFT": 5,
-    "CALL_LINKED": 20657,
-    "CALL_FORMED": 48,
-    "RET_FORMED": 48,
-    "RET_TO_CALL": 20630,
-    "JUMP_DISPATCH": 11791,
-    "APART_FULL": 20666,
+    "TRANSFER": 160,
+    "RET_LEFT": 76,
+    "CALL_LEFT": 15,
+    "CALL_LINKED": 20918,
+    "CALL_FORMED": 63,
+    "RET_FORMED": 46,
+    "RET_TO_CALL": 20882,
+    "JUMP_DISPATCH": 0,
+    "APART_FULL": 20932,
     "APART_NESTED": 0,
-    "APART_BLOCKS": 1,
+    "APART_BLOCKS": 4,
     "APART_UNPREDICTED": 0
    },
    "factor": 2
   },
   "32/lua-x87": {
    "counts": {
-    "TRANSFER": 65770,
-    "RET_LEFT": 21488,
-    "CALL_LEFT": 205,
-    "CALL_LINKED": 295141,
-    "CALL_FORMED": 189238,
-    "RET_FORMED": 170025,
-    "RET_TO_CALL": 294266,
-    "JUMP_DISPATCH": 228372,
-    "APART_FULL": 29340,
-    "APART_NESTED": 33362,
-    "APART_BLOCKS": 211853,
-    "APART_UNPREDICTED": 21233
+    "TRANSFER": 60649,
+    "RET_LEFT": 14330,
+    "CALL_LEFT": 135,
+    "CALL_LINKED": 271666,
+    "CALL_FORMED": 156567,
+    "RET_FORMED": 143401,
+    "RET_TO_CALL": 271188,
+    "JUMP_DISPATCH": 8634,
+    "APART_FULL": 19421,
+    "APART_NESTED": 34345,
+    "APART_BLOCKS": 202665,
+    "APART_UNPREDICTED": 15792
    },
    "factor": 2
   },
   "32/sort-x87": {
    "counts": {
-    "TRANSFER": 6,
+    "TRANSFER": 8,
     "RET_LEFT": 8,
     "CALL_LEFT": 0,
-    "CALL_LINKED": 5,
+    "CALL_LINKED": 8,
     "CALL_FORMED": 44944,
     "RET_FORMED": 44944,
     "RET_TO_CALL": 0,
     "JUMP_DISPATCH": 0,
     "APART_FULL": 0,
     "APART_NESTED": 0,
-    "APART_BLOCKS": 5,
+    "APART_BLOCKS": 8,
     "APART_UNPREDICTED": 0
    },
    "factor": 2
   },
   "32/str-x87": {
    "counts": {
-    "TRANSFER": 2,
+    "TRANSFER": 1057,
     "RET_LEFT": 4,
     "CALL_LEFT": 0,
-    "CALL_LINKED": 1,
-    "CALL_FORMED": 37082,
-    "RET_FORMED": 37119,
+    "CALL_LINKED": 4,
+    "CALL_FORMED": 37108,
+    "RET_FORMED": 37136,
     "RET_TO_CALL": 0,
     "JUMP_DISPATCH": 0,
     "APART_FULL": 0,
     "APART_NESTED": 0,
-    "APART_BLOCKS": 1,
+    "APART_BLOCKS": 4,
     "APART_UNPREDICTED": 0
    },
    "factor": 2
   },
   "32/switch-x87": {
    "counts": {
-    "TRANSFER": 2,
+    "TRANSFER": 4,
     "RET_LEFT": 4,
     "CALL_LEFT": 0,
-    "CALL_LINKED": 1,
+    "CALL_LINKED": 4,
     "CALL_FORMED": 0,
     "RET_FORMED": 0,
     "RET_TO_CALL": 0,
     "JUMP_DISPATCH": 0,
     "APART_FULL": 0,
     "APART_NESTED": 0,
-    "APART_BLOCKS": 1,
+    "APART_BLOCKS": 4,
     "APART_UNPREDICTED": 0
    },
    "factor": 2
   },
   "32/tree-x87": {
    "counts": {
-    "TRANSFER": 10046,
-    "RET_LEFT": 4826,
+    "TRANSFER": 7528,
+    "RET_LEFT": 3568,
     "CALL_LEFT": 0,
-    "CALL_LINKED": 516,
-    "CALL_FORMED": 82215,
-    "RET_FORMED": 77469,
-    "RET_TO_CALL": 511,
-    "JUMP_DISPATCH": 42818,
+    "CALL_LINKED": 2052,
+    "CALL_FORMED": 81008,
+    "RET_FORMED": 77448,
+    "RET_TO_CALL": 2044,
+    "JUMP_DISPATCH": 46336,
     "APART_FULL": 0,
-    "APART_NESTED": 512,
+    "APART_NESTED": 2048,
     "APART_BLOCKS": 4,
     "APART_UNPREDICTED": 0
    },
@@ -223,11 +223,11 @@
   },
   "32/vm-x87": {
    "counts": {
-    "TRANSFER": 2,
+    "TRANSFER": 4,
     "RET_LEFT": 4,
     "CALL_LEFT": 0,
     "CALL_LINKED": 0,
-    "CALL_FORMED": 1,
+    "CALL_FORMED": 4,
     "RET_FORMED": 0,
     "RET_TO_CALL": 0,
     "JUMP_DISPATCH": 0,
@@ -240,27 +240,27 @@
   },
   "64/crc-x64": {
    "counts": {
-    "TRANSFER": 2,
+    "TRANSFER": 4,
     "RET_LEFT": 4,
     "CALL_LEFT": 0,
-    "CALL_LINKED": 1,
+    "CALL_LINKED": 4,
     "CALL_FORMED": 0,
     "RET_FORMED": 0,
     "RET_TO_CALL": 0,
     "JUMP_DISPATCH": 0,
     "APART_FULL": 0,
     "APART_NESTED": 0,
-    "APART_BLOCKS": 1,
+    "APART_BLOCKS": 4,
     "APART_UNPREDICTED": 0
    },
    "factor": 2
   },
   "64/fmath-x64": {
    "counts": {
-    "TRANSFER": 2,
+    "TRANSFER": 4,
     "RET_LEFT": 4,
     "CALL_LEFT": 0,
-    "CALL_LINKED": 1,
+    "CALL_LINKED": 4,
     "CALL_FORMED": 0,
     "RET_FORMED": 0,
     "RET_TO_CALL": 0,
@@ -274,61 +274,61 @@
   },
   "64/game-x64": {
    "counts": {
-    "TRANSFER": 2,
+    "TRANSFER": 4,
     "RET_LEFT": 4,
     "CALL_LEFT": 0,
-    "CALL_LINKED": 6875,
+    "CALL_LINKED": 4984,
     "CALL_FORMED": 0,
-    "RET_FORMED": 0,
-    "RET_TO_CALL": 6874,
-    "JUMP_DISPATCH": 7193,
+    "RET_FORMED": 2220,
+    "RET_TO_CALL": 4980,
+    "JUMP_DISPATCH": 0,
     "APART_FULL": 0,
     "APART_NESTED": 0,
     "APART_BLOCKS": 0,
-    "APART_UNPREDICTED": 7200
+    "APART_UNPREDICTED": 4980
    },
-   "factor": 2
+   "factor": 2.4
   },
   "64/load-x64": {
    "counts": {
-    "TRANSFER": 106,
-    "RET_LEFT": 118,
-    "CALL_LEFT": 11,
-    "CALL_LINKED": 20665,
-    "CALL_FORMED": 51,
-    "RET_FORMED": 31,
-    "RET_TO_CALL": 20635,
-    "JUMP_DISPATCH": 11790,
-    "APART_FULL": 20676,
+    "TRANSFER": 155,
+    "RET_LEFT": 69,
+    "CALL_LEFT": 22,
+    "CALL_LINKED": 20925,
+    "CALL_FORMED": 48,
+    "RET_FORMED": 44,
+    "RET_TO_CALL": 20885,
+    "JUMP_DISPATCH": 0,
+    "APART_FULL": 20945,
     "APART_NESTED": 0,
-    "APART_BLOCKS": 1,
+    "APART_BLOCKS": 4,
     "APART_UNPREDICTED": 0
    },
    "factor": 2
   },
   "64/lua-x64": {
    "counts": {
-    "TRANSFER": 64509,
-    "RET_LEFT": 17504,
-    "CALL_LEFT": 204,
-    "CALL_LINKED": 296085,
-    "CALL_FORMED": 183944,
-    "RET_FORMED": 168682,
-    "RET_TO_CALL": 294878,
-    "JUMP_DISPATCH": 227742,
-    "APART_FULL": 29992,
-    "APART_NESTED": 37171,
-    "APART_BLOCKS": 208057,
-    "APART_UNPREDICTED": 21257
+    "TRANSFER": 54949,
+    "RET_LEFT": 8313,
+    "CALL_LEFT": 168,
+    "CALL_LINKED": 271369,
+    "CALL_FORMED": 155460,
+    "RET_FORMED": 148371,
+    "RET_TO_CALL": 270713,
+    "JUMP_DISPATCH": 6147,
+    "APART_FULL": 19760,
+    "APART_NESTED": 33771,
+    "APART_BLOCKS": 202300,
+    "APART_UNPREDICTED": 15792
    },
    "factor": 2
   },
   "64/sort-x64": {
    "counts": {
-    "TRANSFER": 6,
+    "TRANSFER": 8,
     "RET_LEFT": 8,
     "CALL_LEFT": 0,
-    "CALL_LINKED": 5,
+    "CALL_LINKED": 8,
     "CALL_FORMED": 44944,
     "RET_FORMED": 44944,
     "RET_TO_CALL": 0,
@@ -342,50 +342,50 @@
   },
   "64/str-x64": {
    "counts": {
-    "TRANSFER": 2,
+    "TRANSFER": 1067,
     "RET_LEFT": 4,
     "CALL_LEFT": 0,
-    "CALL_LINKED": 1,
-    "CALL_FORMED": 37082,
-    "RET_FORMED": 37119,
+    "CALL_LINKED": 4,
+    "CALL_FORMED": 37108,
+    "RET_FORMED": 37136,
     "RET_TO_CALL": 0,
     "JUMP_DISPATCH": 0,
     "APART_FULL": 0,
     "APART_NESTED": 0,
-    "APART_BLOCKS": 1,
+    "APART_BLOCKS": 4,
     "APART_UNPREDICTED": 0
    },
    "factor": 2
   },
   "64/switch-x64": {
    "counts": {
-    "TRANSFER": 2,
+    "TRANSFER": 4,
     "RET_LEFT": 4,
     "CALL_LEFT": 0,
-    "CALL_LINKED": 1,
+    "CALL_LINKED": 4,
     "CALL_FORMED": 0,
     "RET_FORMED": 0,
     "RET_TO_CALL": 0,
     "JUMP_DISPATCH": 0,
     "APART_FULL": 0,
     "APART_NESTED": 0,
-    "APART_BLOCKS": 1,
+    "APART_BLOCKS": 4,
     "APART_UNPREDICTED": 0
    },
    "factor": 2
   },
   "64/tree-x64": {
    "counts": {
-    "TRANSFER": 9970,
-    "RET_LEFT": 4791,
+    "TRANSFER": 7204,
+    "RET_LEFT": 3408,
     "CALL_LEFT": 0,
-    "CALL_LINKED": 565,
-    "CALL_FORMED": 82166,
-    "RET_FORMED": 77453,
-    "RET_TO_CALL": 562,
-    "JUMP_DISPATCH": 43048,
+    "CALL_LINKED": 2248,
+    "CALL_FORMED": 80812,
+    "RET_FORMED": 77408,
+    "RET_TO_CALL": 2244,
+    "JUMP_DISPATCH": 46868,
     "APART_FULL": 0,
-    "APART_NESTED": 561,
+    "APART_NESTED": 2244,
     "APART_BLOCKS": 0,
     "APART_UNPREDICTED": 0
    },
@@ -393,11 +393,11 @@
   },
   "64/vm-x64": {
    "counts": {
-    "TRANSFER": 2,
+    "TRANSFER": 4,
     "RET_LEFT": 4,
     "CALL_LEFT": 0,
     "CALL_LINKED": 0,
-    "CALL_FORMED": 1,
+    "CALL_FORMED": 4,
     "RET_FORMED": 0,
     "RET_TO_CALL": 0,
     "JUMP_DISPATCH": 0,
@@ -410,21 +410,21 @@
   }
  },
  "unstable": {
-  "32/vcall-x87": "which callees an indirect call is predicted to depends on when its samples fall due (a region formed again at most three times; board card c3)",
-  "64/vcall-x64": "as vcall-x87 (board card c3)",
-  "32/calls8-scatter-x87": "as calls8-order-x87 (board card c3)",
-  "64/calls8-scatter-x64": "as calls8-order-x87 (board card c3)",
-  "32/patch-x87": "when a write to its own code drops the region and it is formed again is a matter of the slice the write lands in",
-  "64/patch-x64": "as patch-x87",
-  "32/calls512-order-x87": "how many of its calls through the table find their callee linked in the hash depends on when each callee was published: its transfers part 2x between orders of runs",
-  "32/calls512-scatter-x87": "as calls512-order-x87",
   "32/calls4096-order-x87": "as calls512-order-x87",
   "32/calls4096-scatter-x87": "as calls512-order-x87",
-  "64/calls512-order-x64": "as calls512-order-x87",
-  "64/calls512-scatter-x64": "as calls512-order-x87",
+  "32/calls512-order-x87": "how many of its calls through the table find their callee linked in the hash depends on when each callee was published: its transfers part 2x between orders of runs",
+  "32/calls512-scatter-x87": "as calls512-order-x87",
+  "32/calls8-order-x87": "the indirect calls' prediction falls due by timing (board card c3)",
+  "32/calls8-scatter-x87": "as calls8-order-x87 (board card c3)",
+  "32/patch-x87": "when a write to its own code drops the region and it is formed again is a matter of the slice the write lands in",
+  "32/vcall-x87": "which callees an indirect call is predicted to depends on when its samples fall due (a region formed again at most three times; board card c3)",
   "64/calls4096-order-x64": "as calls512-order-x87",
   "64/calls4096-scatter-x64": "as calls512-order-x87",
-  "32/calls8-order-x87": "the indirect calls' prediction falls due by timing (board card c3)",
-  "64/calls8-order-x64": "as calls8-order-x87 (board card c3)"
+  "64/calls512-order-x64": "as calls512-order-x87",
+  "64/calls512-scatter-x64": "as calls512-order-x87",
+  "64/calls8-order-x64": "as calls8-order-x87 (board card c3)",
+  "64/calls8-scatter-x64": "as calls8-order-x87 (board card c3)",
+  "64/patch-x64": "as patch-x87",
+  "64/vcall-x64": "as vcall-x87 (board card c3)"
  }
 }

@@ -938,15 +938,38 @@ export class ModuleBuilder {
     }
 
     /**
+     * A function's index handed out before its body is written, for a function
+     * written first that calls it: `function` with `at` writes it there. Until
+     * then it is a function of that type that traps, so a module whose writer
+     * failed between the two is still whole.
+     *
+     * @param {number} typeIndex
+     * @returns {number} the function index
+     */
+    reserveFunction(typeIndex){
+        const index = this.importedFunctions + this.functions.length;
+        this.functions.push({ typeIndex, locals: [], body: Uint8Array.of(0x00, 0x0b), hints: [] });
+        return index;
+    }
+
+    /**
      * @param {number} typeIndex
      * @param {number[]} locals  value types, one entry per local
      * @param {Uint8Array} body  from `Body.toBytes()`
-     * @param {{ exportAs?: string, hints?: number[] }} [options]  hints: the body's `hints`
+     * @param {{ exportAs?: string, hints?: number[], at?: number }} [options]  hints: the
+     *     body's `hints`; at: an index `reserveFunction` handed out, written here
      * @returns {number} the function index
      */
-    function(typeIndex, locals, body, { exportAs, hints = [] } = {}){
-        const index = this.importedFunctions + this.functions.length;
-        this.functions.push({ typeIndex, locals, body, hints });
+    function(typeIndex, locals, body, { exportAs, hints = [], at = undefined } = {}){
+        const index = at ?? this.importedFunctions + this.functions.length;
+        if (at === undefined)
+        {
+            this.functions.push({ typeIndex, locals, body, hints });
+        }
+        else
+        {
+            this.functions[at - this.importedFunctions] = { typeIndex, locals, body, hints };
+        }
         if (exportAs !== undefined)
         {
             this.exports.push([...name(exportAs), 0x00, ...leb128u(index)]);
@@ -1129,8 +1152,10 @@ export class ModuleBuilder {
         {
             // The custom `name` section, last: its function-names subsection (1)
             // maps indices to names.
+            // In the order of the indices, as the section has them: a function
+            // written into a reserved index is named after the ones above it.
             const map = leb128u(this.functionNames.length);
-            for (const [index, functionName] of this.functionNames)
+            for (const [index, functionName] of [...this.functionNames].sort((a, b)=>a[0] - b[0]))
             {
                 append(append(map, leb128u(index)), name(functionName));
             }

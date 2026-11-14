@@ -13,7 +13,10 @@
  * (2dfa4a83a). These counts are what such a change moves.
  *
  * Each workload of the 32-bit images and of their x86-64 twins runs a few
- * iterations on the cork host, the translator's work awaited between slices.
+ * iterations on the cork host, the translator's work awaited between slices,
+ * and is counted over as many more: the shape once warm. The first iterations
+ * are when translations land, which the run's timing decides -- a call to a
+ * callee not yet translated comes back from outside, into its loop's copy.
  * The counts still move a little from run to run (what a batch of forming
  * takes in before its time is up), so each key is compared as a smoothed ratio
  * within the workload's own factor, measured when the counts were recorded.
@@ -80,7 +83,8 @@ const imagesOf = bits=>new URL(bits === 64 ? '../bench/micro/images64/' : '../be
     import.meta.url);
 
 /**
- * One workload's counts after ITERATIONS calls of its main.
+ * One workload's counts over ITERATIONS calls of its main, after as many
+ * that warmed it.
  *
  * @param {32 | 64} bits @param {string} name
  * @returns {Promise<Record<string, number>>}
@@ -94,8 +98,18 @@ async function countsOf(bits, name){
     const vector = new Uint8Array(4);
     new DataView(vector.buffer).setUint32(0, IMAGE_BASE, true);
     host.writePhysical(ENTRY_VECTOR, vector);
-    for (let i = 0; i < ITERATIONS; i++)
+    const counted = ()=>{
+        const { mechanisms } = host.cork().diagnostics();
+        return Object.fromEntries(KEYS.map(key=>[key, Number(mechanisms[key] ?? 0)]));
+    };
+    /** @type {Record<string, number>} */
+    let warm = {};
+    for (let i = 0; i < 2 * ITERATIONS; i++)
     {
+        if (i === ITERATIONS)
+        {
+            warm = counted();
+        }
         host.runSlice(100_000);
         while (!host.halted())
         {
@@ -103,8 +117,8 @@ async function countsOf(bits, name){
             host.runSlice(100_000);
         }
     }
-    const { mechanisms } = host.cork().diagnostics();
-    return Object.fromEntries(KEYS.map(key=>[key, Number(mechanisms[key] ?? 0)]));
+    const all = counted();
+    return Object.fromEntries(KEYS.map(key=>[key, all[key] - warm[key]]));
 }
 
 /** @param {number} a @param {number} b */
