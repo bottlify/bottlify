@@ -1670,6 +1670,12 @@ objects and the engine's own routines are ordered either way. A program that han
 another thread through plain stores alone (a flag after its payload) can see the flag first on
 such a host without the variant; `ordered: true` is the switch for it. *2026-10-23.*
 
+*Removed 2026-11-14:* the ordered variant is gone (no `cork.config.ordered`, no emitter path, no
+cache-key letter, no `ordered` metric): off by default, it was kept for a cause that was not
+the order, at a price nothing measured paid back. Plain integer accesses are plain on every host;
+a program that hands data between threads through plain stores alone may see them out of order
+on arm64, as `docs/core/limits/processes.md` says.
+
 **At a fault, the status flags may be those from before a write the code after the fault overwrites.**
 Both translators drop a flag record that nothing reads before the next write of the same flags
 (`deadFlagPass` over the region, `liveFlagsOut` across its blocks), and the analysis follows the

@@ -23,10 +23,9 @@
  * split lock, which hardware too makes the slow exception) is a plain
  * read-modify-write, not indivisible against another executor.
  *
- * Plain loads and stores stay plain here. On an x86 host the engine's
- * ordinary loads and stores are the processor's, in its order; on one that
- * reorders them the ordered variant makes an integer operand's access an
- * atomic too (`readOp` in `integer.js`).
+ * Plain loads and stores stay plain: they keep the order the host's own
+ * plain accesses keep, which is x86's on an x86 host and weaker on arm64
+ * (`docs/core/limits/processes.md`).
  */
 
 import { registerLocal } from './width.js';

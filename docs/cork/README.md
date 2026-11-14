@@ -33,9 +33,8 @@ and in Node.
   100 ms) is left to the interpreter for a while.
 - Several threads over one memory. With the `atomic` setting, which Bottlify turns on when a
   process runs on several executors, `lock`-prefixed instructions and `xchg` with memory run as
-  WebAssembly atomics, so threads do not lose each other's writes. With `ordered` as well (off
-  unless a page asks for it), an integer operand's load and store not through esp are atomics
-  too, so the threads see each other's plain stores in their order on an arm64 host, as on x86.
+  WebAssembly atomics, so threads do not lose each other's writes. Plain loads and stores stay
+  plain, in the order the host keeps ([limits](../core/limits/processes.md)).
 - Exact faults. A division by zero, an unknown instruction or a write to a closed page stops right
   at that instruction, with the registers a real processor would have.
 
