@@ -31,6 +31,7 @@ import { setSingle } from './float.js';
 import { VARIADIC_SLOTS } from './scan.js';
 import { PRINT_STYLE } from './format.js';
 import { fileLayout } from './stdio.js';
+import { STANDARD_TIME_FORMATS } from './time.js';
 import { guestEntry } from './guest-code.js';
 import * as inGuestPrint from './inguest-print.js';
 import { COMPILED as PRINT_CODE } from './inguest-print.x86.js';
@@ -327,6 +328,9 @@ export function createUcrtbaseFunctions(crt, host){
             return wide;
         },
     });
+
+    /** The 2005 runtime's strftime family as the universal runtime has it. */
+    const standardTime = /** @type {any} */ (crt)[STANDARD_TIME_FORMATS];
 
     /** @type {Record<string, any>} */
     const exports = {
@@ -987,8 +991,11 @@ export function createUcrtbaseFunctions(crt, host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([buffer, size, format, time])=>
-                crt.wcsftime.handler([buffer, size, format, time]),
+                (standardTime?.wcsftime ?? crt.wcsftime).handler([buffer, size, format, time]),
         },
+
+        // strftime and its kin with C99's conversions, which msvcrt's refuse.
+        ...standardTime ?? {},
     };
 
     // The `_o_` exports are the same functions under a second name, which the

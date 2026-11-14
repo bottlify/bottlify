@@ -418,3 +418,31 @@ test('_Gettnames copies __lc_time_data whole, and _Strftime formats with what it
     assert.equal(table._Strftime.handler([buffer, 64, memory.put('%p'), block, 0]), 2);
     assert.equal(memory.text(buffer), 'PM', 'no names: the current locale\'s');
 });
+
+test('the universal runtime\'s strftime knows C99\'s conversions msvcrt refuses', ()=>{
+    const epoch = tmOf([0, 0, 0, 1, 0, 70, 4, 0, 0]);
+    /** @param {string} format @param {any} [tm] */
+    const standard = (format, tm = epoch)=>strftime(format, tm, C_TIME_NAMES, true);
+    assert.equal(standard('%C %D %e %F'), '19 01/01/70  1 1970-01-01');
+    assert.equal(standard('%#D %#e %#F %#R %#T'), '1/1/70 1 1970-1-1 0:0 0:0:0');
+    assert.equal(standard('%h|%n|%t|%u|%R|%T'), 'Jan|\n|\t|4|00:00|00:00:00');
+    assert.equal(standard('%r', tmOf([0, 0, 14, 1, 0, 70, 4, 0, 0])), '02:00:00 PM');
+    assert.equal(standard('%Oy %Ey'), '70 70', 'E and O change nothing in the C locale');
+    assert.equal(standard('%z')?.length, 5);
+    assert.equal(strftime('%e', epoch), null, 'msvcrt\'s still refuses');
+});
+
+test('%V and %G are ISO 8601\'s week and its year, across the turn of a year', ()=>{
+    /** @param {number} year @param {number} wday @param {number} yday */
+    const day = (year, wday, yday)=>tmOf([0, 0, 0, 1, 0, year - 1900, wday, yday, 0]);
+    /** @param {any} tm */
+    const iso = tm=>strftime('%G %V %g', tm, C_TIME_NAMES, true);
+    // 1 January 1999, a Friday: still the 53rd week of 1998.
+    assert.equal(iso(day(1999, 5, 0)), '1998 53 98');
+    // 4 January 1999, a Monday: week one.
+    assert.equal(iso(day(1999, 1, 3)), '1999 01 99');
+    // 31 December 2002, a Tuesday: week one of 2003.
+    assert.equal(iso(day(2002, 2, 364)), '2003 01 03');
+    // 1 January 1970, a Thursday: week one of its own year.
+    assert.equal(iso(day(1970, 4, 0)), '1970 01 70');
+});
