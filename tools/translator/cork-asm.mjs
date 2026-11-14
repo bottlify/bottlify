@@ -43,6 +43,16 @@
  *   --exact-nan       with an arm64 runner, the float arithmetic fixing up the host's
  *                     positive default NaN to x86's negative one (the runtime's `exactNaN`)
  *   --count REGEX     a column of the machine instructions the pattern matches
+ *   --inline          with --hash, let V8 inline the module's functions into a region as it
+ *                     does with no call counts: the transfer at every call site. Off by
+ *                     default there: an engine tiering up from Liftoff inlines only the calls
+ *                     its counts call hot, and a region calls the transfer only on a miss - on
+ *                     a run of calls512 with real tiering not one of 519 such calls was
+ *                     inlined, where the compile here inlined all of them (a two-call region
+ *                     687 machine instructions instead of 276, a lone `ret` 258 instead of 67).
+ *                     V8 offers no way to keep one function out, so with --hash the small
+ *                     helpers stay out too (crc-x87: 2.90 machine instructions an executed
+ *                     guest one without them, 2.69 with)
  *   --blocks FILE     a game's block profile (`game-<stamp>-blocks.json`): each block's
  *                     code found by the mark a diagnostic build stores at its start
  *                     (`markBlocks`), and its machine instructions weighted by how often
@@ -182,7 +192,8 @@ function machineCode(wasm, index){
         const runner = value('--runner');
         const [command, ...prefix] = runner ? runner.split(/\s+/) : [process.execPath];
         const out = execFileSync(command, [...prefix, '--print-wasm-code', '--no-liftoff',
-            '--no-wasm-lazy-compilation', '--input-type=commonjs', '-e', script,
+            '--no-wasm-lazy-compilation', ...hash && !args.includes('--inline')
+                ? ['--no-wasm-inlining'] : [], '--input-type=commonjs', '-e', script,
             join(dir, 'm.wasm')],
         { encoding: 'utf8', maxBuffer: 1 << 30 });
         const parts = out.split('--- WebAssembly code ---');
