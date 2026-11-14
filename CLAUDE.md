@@ -42,6 +42,15 @@ There is no single technical priority; these hold for every change:
 4. **A product we are not ashamed of**, good enough to be sold: it runs what it says it runs, says
    plainly what it does not, and is fast enough that a program plays as it did.
 
+**The task now: less memory, more speed - for every program, none excepted.** No title is
+hacked into running; a program that needs something is a contract we answer for all.
+
+A protected title (an anti-tamper or copy protection) may be watched while it runs - a trace, a
+hook, a counter, on only for a run under observation and changing nothing the program observes -
+because what it checks (`CPUID`, timing, code hashes, self-modifying code) is the hardest work
+for the translator. Where it trips over our inaccuracy, the inaccuracy is fixed for everyone, so
+it runs as on Windows. The protection itself is never patched, bypassed or answered falsely.
+
 ## Where things are
 
 - `docs/` — the documentation, one short page per question; `docs/README.md` lists every page
