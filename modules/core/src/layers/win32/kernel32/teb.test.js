@@ -62,6 +62,8 @@ test('a thread block points at itself, because FS cannot be read as a pointer', 
     assert.equal(memory.view.getUint32(teb + TEB.PROCESS_ID, true), 0x1234);
     assert.equal(memory.view.getUint32(teb + TEB.STACK_BASE, true), 0x300000);
     assert.equal(memory.view.getUint32(teb + TEB.STACK_LIMIT, true), 0x2f0000);
+    assert.equal(memory.view.getUint32(teb + TEB.DEALLOCATION_STACK, true), 0x2f0000,
+        'the stack is committed whole: its reservation begins at its limit');
 });
 
 test('the thread-local array is somewhere real, not at offset zero', ()=>{
@@ -533,6 +535,7 @@ test('a 64-bit thread block is laid out as GS reaches it, its pointers quadwords
     assert.equal(quad(memory, teb + TEB64.EXCEPTION_LIST), 0, 'no chain: handlers are in tables');
     assert.equal(quad(memory, teb + TEB64.STACK_BASE), 0x300000);
     assert.equal(quad(memory, teb + TEB64.STACK_LIMIT), 0x2f0000);
+    assert.equal(quad(memory, teb + TEB64.DEALLOCATION_STACK), 0x2f0000);
     assert.equal(quad(memory, teb + TEB64.SELF), teb);
     assert.equal(quad(memory, teb + TEB64.PROCESS_ID), 0x1234);
     assert.equal(quad(memory, teb + TEB64.THREAD_ID), 7);

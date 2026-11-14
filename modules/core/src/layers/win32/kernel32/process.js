@@ -1278,6 +1278,31 @@ export function createProcessFunctions(host){
             guest: builder=>placed(builder).getCurrentThreadId,
         },
 
+        /**
+         * VOID GetCurrentThreadStackLimits(PULONG_PTR LowLimit, PULONG_PTR HighLimit)
+         *
+         * The running stack's whole span, from the thread block: the bottom
+         * of its reservation and its base - a fiber's while one runs.
+         */
+        GetCurrentThreadStackLimits: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([low, high])=>{
+                const teb = host.currentThread().tebAddress >>> 0;
+                const long = host.pointerSize === 8;
+                /** @param {number} at */
+                const read = at=>(long
+                    ? new DataView(host.readMemory(at, 8).slice().buffer).getBigUint64(0, true)
+                    : BigInt(memory.readU32(at)));
+                /** @param {number} at @param {bigint} value */
+                const write = (at, value)=>(long ? writeU64(at, value)
+                    : memory.writeU32(at, Number(value)));
+                write(low >>> 0, read(teb + blocks.teb.DEALLOCATION_STACK));
+                write(high >>> 0, read(teb + blocks.teb.STACK_BASE));
+                return 0;
+            },
+        },
+
         /** DWORD GetCurrentProcessId(VOID) */
         GetCurrentProcessId: {
             argBytes: 0,
