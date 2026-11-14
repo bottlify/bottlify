@@ -29,7 +29,8 @@ const DOS_DEVICES = '\\??\\';
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readWideString
- * @property {Record<string, { handler: Function }>} kernel32  Needs GetFullPathNameW.
+ * @property {Record<string, { handler: Function }>} kernel32  Needs GetFullPathNameW; with
+ *           GetCurrentDirectoryW and SetCurrentDirectoryW, the current directory too.
  * @property {(bytes: number) => number} allocate  The process heap, so that
  *           RtlFreeUnicodeString gives the name back where it came from.
  * @property {(address: number) => boolean} free
@@ -45,6 +46,113 @@ const wide = text=>{
     }
     return bytes;
 };
+
+/** @param {string} c */
+const isSeparator = c=>c === '\\' || c === '/';
+
+/**
+ * RtlDetermineDosPathNameType_U's answer for a path: 1 a UNC name (`\\server`),
+ * 2 a drive and its root (`C:\`), 3 a drive and a relative name (`C:x`), 4 rooted
+ * on the current drive (`\x`), 5 relative, 6 a local device (`\\.\x`, `\\?\x`),
+ * 7 the root of the local devices (`\\.`, `\\?`). Either separator counts.
+ *
+ * @param {string} path
+ * @returns {number}
+ */
+export function dosPathType(path){
+    if (isSeparator(path[0]))
+    {
+        if (!isSeparator(path[1]))
+        {
+            return 4;
+        }
+        if (path[2] !== '.' && path[2] !== '?')
+        {
+            return 1;
+        }
+        if (path.length === 3)
+        {
+            return 7;
+        }
+        return isSeparator(path[3]) ? 6 : 1;
+    }
+    if (path.length >= 2 && path[1] === ':')
+    {
+        return isSeparator(path[2]) ? 2 : 3;
+    }
+    return 5;
+}
+
+/** The names that are devices in every folder, as Windows 10 and later know them. */
+const DOS_DEVICE = /^(con|prn|aux|nul|com[1-9]|lpt[1-9]|conin\$|conout\$)$/i;
+
+/**
+ * Where a path names a DOS device, as RtlIsDosDeviceName_U finds it: the
+ * device's offset and length in bytes, or null. The last component is the
+ * device's name once the spaces, dots and colons after it are dropped; a path
+ * ending in a separator, a UNC name and a device path name no device this way.
+ *
+ * @param {string} path
+ * @returns {{ offset: number, length: number } | null}
+ */
+export function dosDeviceName(path){
+    const type = dosPathType(path);
+    if (type === 1 || type === 6 || type === 7 || path.startsWith('\\??\\'))
+    {
+        return null;
+    }
+    if (path === '' || isSeparator(path[path.length - 1]))
+    {
+        return null;
+    }
+    let start = 0;
+    for (let at = path.length - 1; at >= 0; at--)
+    {
+        if (isSeparator(path[at]))
+        {
+            start = at + 1;
+            break;
+        }
+    }
+    if (start === 0 && type === 3)
+    {
+        start = 2;
+    }
+    const name = path.slice(start).replace(/[ .:]+$/, '');
+    return DOS_DEVICE.test(name) ? { offset: start * 2, length: name.length * 2 } : null;
+}
+
+/** Characters a short name cannot hold. */
+const NOT_IN_SHORT_NAME = /["*+,/:;<=>?[\\\]|]/;
+/** @param {string} name */
+const hasControl = name=>[...name].some(c=>c.charCodeAt(0) < 0x20);
+
+/**
+ * Whether a name is a legal 8.3 name as RtlIsNameLegalDOS8Dot3 judges one, and
+ * whether it has spaces: `.` and `..`, or one to eight characters, then at most
+ * a dot and one to three more, no space first or last in either part (the
+ * extension may begin with spaces), and none of the characters a short name
+ * cannot hold.
+ *
+ * @param {string} name
+ * @returns {{ legal: boolean, spaces: boolean }}
+ */
+export function shortNameLegality(name){
+    if (name === '.' || name === '..')
+    {
+        return { legal: true, spaces: false };
+    }
+    const parts = name.split('.');
+    const [base, extension] = parts;
+    const legal = parts.length <= 2
+        && base.length >= 1 && base.length <= 8
+        && base[0] !== ' ' && base[base.length - 1] !== ' '
+        && (extension === undefined
+            || (extension.length >= 1 && extension.length <= 3
+                && extension[extension.length - 1] !== ' '))
+        && !NOT_IN_SHORT_NAME.test(name) && !hasControl(name);
+    return { legal, spaces: legal && name.includes(' ') };
+}
 
 /**
  * @param {PathHost} host
@@ -163,5 +271,158 @@ export function createPathFunctions(host){
             argBytes: 16,
             handler: convert,
         },
+
+        /** ULONG RtlDetermineDosPathNameType_U(PCWSTR Path) */
+        RtlDetermineDosPathNameType_U: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([path])=>(path === 0 ? 0
+                : dosPathType(host.readWideString(path >>> 0, 0x10000))),
+        },
+
+        /**
+         * ULONG RtlIsDosDeviceName_U(PCWSTR Path)
+         *
+         * The device's offset in the high word and its length in the low,
+         * both in bytes; zero when the path names none.
+         */
+        RtlIsDosDeviceName_U: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([path])=>{
+                const found = path === 0 ? null
+                    : dosDeviceName(host.readWideString(path >>> 0, 0x10000));
+                return found === null ? 0 : (found.offset << 16 | found.length) >>> 0;
+            },
+        },
+
+        /**
+         * BOOLEAN RtlIsNameLegalDOS8Dot3(PCUNICODE_STRING Name, POEM_STRING OemName,
+         *     PBOOLEAN NameContainsSpaces)
+         *
+         * The name upper-cased goes to OemName whatever the answer, where it
+         * fits; whether it holds spaces is said only of a legal one.
+         */
+        RtlIsNameLegalDOS8Dot3: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([name, oem, spaces])=>{
+                const text = countedText(name);
+                if (text.length > 12)
+                {
+                    return 0;
+                }
+                const upper = text.toUpperCase();
+                if (oem !== 0)
+                {
+                    const head = new DataView(
+                        host.readMemory(oem >>> 0, COUNTED_STRING.SIZE).buffer);
+                    if (head.getUint16(COUNTED_STRING.MAXIMUM_LENGTH, true) < upper.length)
+                    {
+                        return 0;
+                    }
+                    const bytes = Uint8Array.from(upper, c=>c.charCodeAt(0) & 0xff);
+                    host.writeMemory(head.getUint32(COUNTED_STRING.BUFFER, true), bytes);
+                    host.writeMemory((oem + COUNTED_STRING.LENGTH) >>> 0,
+                        Uint8Array.of(bytes.length & 0xff, bytes.length >> 8));
+                }
+                const { legal, spaces: hasSpaces } = shortNameLegality(text);
+                if (legal && spaces !== 0)
+                {
+                    host.writeMemory(spaces >>> 0, Uint8Array.of(hasSpaces ? 1 : 0));
+                }
+                return legal ? 1 : 0;
+            },
+        },
+
+        /**
+         * ULONG RtlGetFullPathName_U(PCWSTR Name, ULONG Size, PWSTR Buffer, PWSTR *FilePart)
+         *
+         * GetFullPathNameW counted in bytes: the path's length when it fits,
+         * and the room it needs with its terminator when it does not. No name
+         * at all leaves the buffer as it was.
+         */
+        RtlGetFullPathName_U: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([name, size, buffer, filePart])=>{
+                if (name === 0 || host.readWideString(name >>> 0, 2 * 2) === '')
+                {
+                    return 0;
+                }
+                const chars = host.kernel32.GetFullPathNameW.handler(
+                    [name, (size >>> 0) >>> 1, buffer, filePart]) >>> 0;
+                return chars * 2;
+            },
+        },
+
+        ...(host.kernel32.GetCurrentDirectoryW && host.kernel32.SetCurrentDirectoryW
+            ? {
+                /**
+                 * ULONG RtlGetCurrentDirectory_U(ULONG Size, PWSTR Buffer)
+                 *
+                 * GetCurrentDirectoryW counted in bytes, as RtlGetFullPathName_U.
+                 */
+                RtlGetCurrentDirectory_U: {
+                    argBytes: 8,
+                    /** @param {number[]} args */
+                    handler: ([size, buffer])=>(host.kernel32.GetCurrentDirectoryW.handler(
+                        [(size >>> 0) >>> 1, buffer]) >>> 0) * 2,
+                },
+
+                /** NTSTATUS RtlSetCurrentDirectory_U(PCUNICODE_STRING Path) */
+                RtlSetCurrentDirectory_U: {
+                    argBytes: 4,
+                    /** @param {number[]} args */
+                    handler: ([path])=>{
+                        const text = countedText(path);
+                        const scratch = host.allocate((text.length + 1) * 2);
+                        if (scratch === 0)
+                        {
+                            return STATUS.NO_MEMORY;
+                        }
+                        host.writeMemory(scratch, wide(text));
+                        const done = host.kernel32.SetCurrentDirectoryW.handler([scratch]) !== 0;
+                        host.free(scratch);
+                        if (done)
+                        {
+                            return STATUS.SUCCESS;
+                        }
+                        const error = host.kernel32.GetLastError?.handler([]) >>> 0;
+                        return SET_DIRECTORY_STATUS.get(error) ?? STATUS.OBJECT_NAME_INVALID;
+                    },
+                },
+            }
+            : {}),
     };
+
+    /**
+     * The characters of a UNICODE_STRING.
+     *
+     * @param {number} at
+     */
+    function countedText(at){
+        if (at === 0)
+        {
+            return '';
+        }
+        const head = new DataView(host.readMemory(at >>> 0, COUNTED_STRING.SIZE).buffer);
+        const length = head.getUint16(COUNTED_STRING.LENGTH, true) & ~1;
+        const bytes = host.readMemory(head.getUint32(COUNTED_STRING.BUFFER, true), length);
+        let text = '';
+        for (let index = 0; index + 1 < bytes.length; index += 2)
+        {
+            text += String.fromCharCode(bytes[index] | bytes[index + 1] << 8);
+        }
+        return text;
+    }
 }
+
+/** The status SetCurrentDirectory's error stands for. */
+const SET_DIRECTORY_STATUS = new Map([
+    [2, STATUS.OBJECT_NAME_NOT_FOUND],
+    [3, STATUS.OBJECT_PATH_NOT_FOUND],
+    [5, STATUS.ACCESS_DENIED],
+    [123, STATUS.OBJECT_NAME_INVALID],
+    [267, STATUS.NOT_A_DIRECTORY],
+]);
