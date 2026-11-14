@@ -360,7 +360,11 @@ const entryHeader = path=>{
  * which a session written whole, packed and compressed on the thread the
  * program runs on made it do every time. Each entry is replaced whole when
  * its writer closes, so an entry is the old one or the new one. The first
- * save of a run writes everything, as does a change that names no path;
+ * save of a run writes what changed, the registry, and the files the folder
+ * has no entry for when the run read its session from the folder; otherwise
+ * it writes everything, as does a change that names no path: a run that read
+ * 2 GB of a .NET setup's files back wrote all of them again before its first
+ * real save, five minutes, and paced its next save nine times that later;
  * a session left in the earlier one-file form is read, and gone after the
  * first save. Saves are serialised, and one asked for while another is in
  * flight waits for it and then writes the latest.
@@ -396,6 +400,12 @@ export function opfsSession(key, directory){
     let writing = Promise.resolve();
     /** Whether the folder holds this run's whole session, so a change is all a save needs. */
     let whole = false;
+    /**
+     * Whether this run's session was read from the folder (`load`): the folder
+     * then holds every file the volume was given from it, and the first save
+     * needs only what changed since and what the folder lacks.
+     */
+    let loadedWhole = false;
     /** The links entry as the folder holds it since this run's first save; null for none. */
     /** @type {string | null} */
     let linksSaved = null;
@@ -607,6 +617,7 @@ export function opfsSession(key, directory){
                     files.push({ path, bytes: raw.slice(start) });
                 }
             }
+            loadedWhole = true;
             return withLinks({ files, registry }, links);
         },
         /**
@@ -621,7 +632,7 @@ export function opfsSession(key, directory){
             writing = writing.then(async()=>{
                 const dir = await open();
                 const folder = await dir.getDirectoryHandle(folderName, { create: true });
-                const full = !whole || !changes
+                const full = !(whole || loadedWhole) || !changes
                     || changes.some(change=>change.kind !== 'registry'
                         && typeof change.path !== 'string');
                 if (full)
@@ -661,6 +672,30 @@ export function opfsSession(key, directory){
                     return;
                 }
                 const byPath = new Map(files.map(file=>[file.path, file]));
+                if (!whole)
+                {
+                    // The first save of a run that read the folder: the files
+                    // laid over the session at the start (`files`) that it has no
+                    // entry for, and the hive the bundle's registry was laid into.
+                    const held = new Set();
+                    for await (const [name] of folder.entries())
+                    {
+                        held.add(name);
+                    }
+                    for (const file of files)
+                    {
+                        if (!held.has(await entryName(file.path)))
+                        {
+                            await put(folder, file.path, file);
+                        }
+                    }
+                    if (registry)
+                    {
+                        await put(folder, REGISTRY_ENTRY, registryBytes({ registry }));
+                    }
+                    await drop(dir, legacy);
+                    whole = true;
+                }
                 for (const change of /** @type {SessionChange[]} */ (changes))
                 {
                     if (change.kind === 'registry')

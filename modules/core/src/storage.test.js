@@ -253,6 +253,28 @@ test('a save after the first writes only what changed, and drops what was remove
     assert.deepEqual(back.registry, { a: 2 });
 });
 
+test('a run that read its session back saves only what changed at its first save', async()=>{
+    const disk = fakeDirectory();
+    const big = { path: 'C:\\big.save', bytes: bytes(1 << 20, 3) };
+    const config = { path: 'C:\\config.cfg', bytes: new Uint8Array([1]) };
+    await opfsSession('game', async()=>disk.root)
+        .save({ files: [big, config], registry: { a: 1 } });
+    const before = disk.writes();
+
+    const next = opfsSession('game', async()=>disk.root);
+    await next.load();
+    const config2 = { path: config.path, bytes: new Uint8Array([2]) };
+    const edit = { path: 'C:\\laid-over.ini', bytes: new Uint8Array([7]) };
+    await next.save({ files: [big, config2, edit], registry: { a: 1 } },
+        [{ kind: 'written', path: config.path }]);
+    assert.equal(disk.writes() - before, 3,
+        'the file changed, the file the folder had no entry for, and the registry');
+    const back = await opfsSession('game', async()=>disk.root).load();
+    assert.deepEqual(back.files.map(file=>[file.path, file.bytes.length]).sort(),
+        [[big.path, 1 << 20], [config.path, 1], [edit.path, 1]]);
+    assert.equal(back.files.find(file=>file.path === config.path)?.bytes[0], 2);
+});
+
 test('a session left as one packed file is read, and gone after the first save', async()=>{
     const disk = fakeDirectory();
     const old = await packSession({ files: [{ path: 'C:\\old.sav', bytes: new Uint8Array([9]) }],
