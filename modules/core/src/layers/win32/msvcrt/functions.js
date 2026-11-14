@@ -18,7 +18,8 @@
  * undefined, the choice made here is written down at the function.
  */
 
-import { formatToString, guestAccess, sequentialArguments, varargsSlots } from './format.js';
+import { MSVCRT_STYLE, PRINT_STYLE, formatToString, guestAccess, sequentialArguments,
+    varargsSlots } from './format.js';
 import { createStringFunctions } from './strings.js';
 import { createSecureFunctions } from './secure.js';
 import { createErrorFunctions, messageOf } from './errors.js';
@@ -316,8 +317,22 @@ export function createMsvcrtFunctions(host){
     /** What `_set_output_format` was given: `_TWO_DIGIT_EXPONENT` or nothing. */
     let outputFormat = 0;
 
-    /** The least digits of %e's exponent. */
-    const exponentDigits = ()=>((outputFormat & TWO_DIGIT_EXPONENT) !== 0 ? 2 : 3);
+    /**
+     * The style a universal runtime's call asked for, while that call runs
+     * (`PRINT_STYLE`); null between such calls.
+     *
+     * @type {import('./format.js').PrintStyle | null}
+     */
+    let callStyle = null;
+
+    /**
+     * How the printers write a float: the call's style, or msvcrt's with %e's
+     * exponent as `_set_output_format` left it.
+     *
+     * @returns {import('./format.js').PrintStyle}
+     */
+    const printStyle = ()=>callStyle ?? { ...MSVCRT_STYLE,
+        exponentDigits: (outputFormat & TWO_DIGIT_EXPONENT) !== 0 ? 2 : 3 };
 
     /**
      * What a narrow printer writes: %S and %ls read wide strings, and the
@@ -328,7 +343,7 @@ export function createMsvcrtFunctions(host){
      */
     const narrowText = (format, values)=>formatToString(readString(format), values, readString,
         { readWideString: readWide, cLocale: true, decodeBytes: decodeAnsi,
-            exponentDigits: exponentDigits(), ...memoryAccess });
+            style: printStyle(), ...memoryAccess });
 
     /** @param {number[]} args @param {number} fixed */
     const render = (args, fixed)=>narrowText(args[fixed - 1], args.slice(fixed));
@@ -365,7 +380,7 @@ export function createMsvcrtFunctions(host){
      * @param {number} format @param {number[]} values
      */
     const wideText = (format, values)=>formatToString(readWide(format), values, readString,
-        { readWideString: readWide, wide: true, exponentDigits: exponentDigits(),
+        { readWideString: readWide, wide: true, style: printStyle(),
             ...memoryAccess });
 
     /**
@@ -378,10 +393,10 @@ export function createMsvcrtFunctions(host){
         const text = wide ? readWide(format) : readString(format);
         const reordered = sequentialArguments(text, values);
         return formatToString(reordered?.format ?? text, reordered?.slots ?? values, readString,
-            wide ? { readWideString: readWide, wide: true, exponentDigits: exponentDigits(),
+            wide ? { readWideString: readWide, wide: true, style: printStyle(),
                 ...memoryAccess }
                 : { readWideString: readWide, cLocale: true, decodeBytes: decodeAnsi,
-                    exponentDigits: exponentDigits(), ...memoryAccess });
+                    style: printStyle(), ...memoryAccess });
     };
 
     /**
@@ -1140,7 +1155,7 @@ export function createMsvcrtFunctions(host){
             iob: host.iob,
             errno,
             errnoValue: ()=>globals.get(errnoName()),
-            exponentDigits,
+            printStyle,
             descriptors: descriptors ?? undefined,
             varargs: varargsAt,
             setRegisters: host.setRegisters,
@@ -1192,6 +1207,25 @@ export function createMsvcrtFunctions(host){
     });
 
     return {
+        [PRINT_STYLE]: {
+            /**
+             * @template T
+             * @param {import('./format.js').PrintStyle} style @param {() => T} run
+             * @returns {T}
+             */
+            during: (style, run)=>{
+                const before = callStyle;
+                callStyle = style;
+                try
+                {
+                    return run();
+                }
+                finally
+                {
+                    callStyle = before;
+                }
+            },
+        },
         ...narrow,
         // Bound to the byte functions above, so the two families cannot drift.
         ...createMultiByteFunctions(narrow, {

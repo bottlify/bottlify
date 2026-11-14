@@ -342,3 +342,12 @@ test('isleadbyte: the "C" locale has no lead bytes', ()=>{
     }
     assert.equal(table.isleadbyte.argBytes, 4);
 });
+
+test('_tolower and _toupper move the case without asking whether it is a letter', ()=>{
+    const { table } = build();
+    assert.equal(table._tolower.handler(['A'.charCodeAt(0)]), 'a'.charCodeAt(0));
+    assert.equal(table._toupper.handler(['a'.charCodeAt(0)]), 'A'.charCodeAt(0));
+    // Not a letter, moved all the same: the caller was meant to have checked.
+    assert.equal(table._tolower.handler([0]), 0x20);
+    assert.equal(table._toupper.handler([0]), -0x20);
+});

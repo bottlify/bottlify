@@ -367,6 +367,20 @@ export function createStringFunctions(host){
             'ispunct', 'isxdigit', 'isprint', 'isgraph', 'iscntrl'].map(name=>[name, guestEntry(
             /** @type {Function} */ (inGuest[/** @type {'isalpha'} */ (name)]),
             COMPILED[/** @type {'isalpha'} */ (name)], host)])),
+
+        /**
+         * int _tolower(int c) / int _toupper(int c)
+         *
+         * The case moved by the distance from 'A' to 'a' whatever `c` is:
+         * unlike tolower they do not ask whether it is a letter - the caller
+         * is meant to know - so `_tolower(0)` is 0x20.
+         */
+        _tolower: { convention: 'cdecl', argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([code])=>((code | 0) + 0x20) | 0 },
+        _toupper: { convention: 'cdecl', argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([code])=>((code | 0) - 0x20) | 0 },
     };
 
     // The table `_pctype` points at and `_isctype` reads: one mask per byte,

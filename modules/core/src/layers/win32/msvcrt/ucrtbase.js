@@ -29,6 +29,7 @@ import { scanDecimal } from './convert.js';
 import { SYSTEM_ERRORS } from './errors.js';
 import { setSingle } from './float.js';
 import { VARIADIC_SLOTS } from './scan.js';
+import { PRINT_STYLE } from './format.js';
 import { fileLayout } from './stdio.js';
 import { guestEntry } from './guest-code.js';
 import * as inGuestPrint from './inguest-print.js';
@@ -48,8 +49,23 @@ const TRUNCATE = 0xffffffff;
 const STANDARD_SNPRINTF_BEHAVIOR = 0x2;
 /** The legacy behaviour's other bit: a cut text is terminated after all. */
 const LEGACY_VSPRINTF_NULL_TERMINATION = 0x1;
+/**
+ * The options bits that keep the printers writing as msvcrt did: its
+ * infinities and NaNs ("1.#INF00") and %e's exponent at three digits. Without
+ * them the universal runtime writes C99's "inf" and "nan" and two digits.
+ */
+const LEGACY_MSVCRT_COMPATIBILITY = 0x8;
+const LEGACY_THREE_DIGIT_EXPONENTS = 0x10;
+/** The options bit that rounds a digit exactly halfway to even, as C does. */
+const STANDARD_ROUNDING = 0x20;
 /** The bit of `__stdio_common_vsscanf` and its kin that makes `%s` and `%c` take a size after each pointer. */
 const SECURE_SCANF = 0x1;
+/**
+ * The functions ucrtbase also exports with an `_o_` before the name, those a
+ * program has been seen to import that way.
+ */
+const O_PREFIXED = ['_execute_onexit_table', '_initialize_onexit_table',
+    '_register_onexit_function', 'malloc', 'tolower', 'toupper'];
 /** DLL_PROCESS_DETACH: what a thread-local exit callback is told at exit. */
 const PROCESS_DETACH = 0;
 
@@ -100,6 +116,27 @@ export function createUcrtbaseFunctions(crt, host){
         writeU32(crt._errno.handler([]), code);
         return code;
     };
+    /**
+     * `run` with the 2005 runtime's printers writing as a common entry's
+     * options word asks: %a and %F known, every digit of the binary value,
+     * C99's infinities and two-digit exponents unless the legacy bits keep
+     * msvcrt's, and ties to even under STANDARD_ROUNDING.
+     *
+     * @template T
+     * @param {number} options @param {() => T} run
+     * @returns {T}
+     */
+    const styled = (options, run)=>{
+        const style = /** @type {any} */ (crt)[PRINT_STYLE];
+        return style ? style.during({
+            exponentDigits: (options & LEGACY_THREE_DIGIT_EXPONENTS) !== 0 ? 3 : 2,
+            standardSpecials: (options & LEGACY_MSVCRT_COMPATIBILITY) === 0,
+            c99Conversions: true,
+            exactDigits: true,
+            evenTies: (options & STANDARD_ROUNDING) !== 0,
+        }, run) : run();
+    };
+
     /** @param {number} handler @param {number[]} args */
     const call = (handler, args)=>host.callGuest(handler >>> 0, args, host.currentThread?.());
 
@@ -291,7 +328,8 @@ export function createUcrtbaseFunctions(crt, host){
         },
     });
 
-    return {
+    /** @type {Record<string, any>} */
+    const exports = {
         ...crt,
         ...host.fpu ? createUcrtMathFunctions({ fpu: host.fpu, errno: code=>{
             fail(code);
@@ -317,7 +355,8 @@ export function createUcrtbaseFunctions(crt, host){
             argBytes: 24,
             quadwords: [0],
             /** @param {number[]} args */
-            handler: ([, , stream, format, , list])=>crt.vfprintf.handler([stream, format, list]),
+            handler: ([options, , stream, format, , list])=>styled(options,
+                ()=>crt.vfprintf.handler([stream, format, list])),
         },
 
         /** The same with a wide format, to a stream. */
@@ -326,7 +365,8 @@ export function createUcrtbaseFunctions(crt, host){
             argBytes: 24,
             quadwords: [0],
             /** @param {number[]} args */
-            handler: ([, , stream, format, , list])=>crt.vfwprintf.handler([stream, format, list]),
+            handler: ([options, , stream, format, , list])=>styled(options,
+                ()=>crt.vfwprintf.handler([stream, format, list])),
         },
 
         /**
@@ -342,7 +382,8 @@ export function createUcrtbaseFunctions(crt, host){
                 /** @param {number[]} args */
                 handler: args=>{
                     const [options, , buffer, count, format, , list] = optionsFirst(args);
-                    return narrowCounted(options, buffer, count, format, list);
+                    return styled(options,
+                        ()=>narrowCounted(options, buffer, count, format, list));
                 },
             }),
 
@@ -353,7 +394,7 @@ export function createUcrtbaseFunctions(crt, host){
                 /** @param {number[]} args */
                 handler: args=>{
                     const [options, , buffer, count, format, , list] = optionsFirst(args);
-                    return wideCounted(options, buffer, count, format, list);
+                    return styled(options, ()=>wideCounted(options, buffer, count, format, list));
                 },
             }),
 
@@ -367,8 +408,9 @@ export function createUcrtbaseFunctions(crt, host){
                 argBytes: 28,
                 /** @param {number[]} args */
                 handler: args=>{
-                    const [, , buffer, size, format, , list] = optionsFirst(args);
-                    return crt.vsprintf_s.handler([buffer, size, format, list]);
+                    const [options, , buffer, size, format, , list] = optionsFirst(args);
+                    return styled(options,
+                        ()=>crt.vsprintf_s.handler([buffer, size, format, list]));
                 },
             }),
 
@@ -382,8 +424,8 @@ export function createUcrtbaseFunctions(crt, host){
             argBytes: 32,
             quadwords: [0],
             /** @param {number[]} args */
-            handler: ([, , buffer, size, count, format, , list])=>
-                crt._vsnprintf_s.handler([buffer, size, count, format, list]),
+            handler: ([options, , buffer, size, count, format, , list])=>styled(options,
+                ()=>crt._vsnprintf_s.handler([buffer, size, count, format, list])),
         },
 
         /**
@@ -823,13 +865,13 @@ export function createUcrtbaseFunctions(crt, host){
             argBytes: 24,
             quadwords: [0],
             /** @param {number[]} args */
-            handler: ([, , stream, format, , list])=>{
+            handler: ([options, , stream, format, , list])=>{
                 if ((format >>> 0) === 0)
                 {
                     fail(EINVAL);
                     return -1;
                 }
-                return crt.vfprintf.handler([stream, format, list]);
+                return styled(options, ()=>crt.vfprintf.handler([stream, format, list]));
             },
         },
 
@@ -842,8 +884,9 @@ export function createUcrtbaseFunctions(crt, host){
                 argBytes: 28,
                 /** @param {number[]} args */
                 handler: args=>{
-                    const [, , buffer, size, format, , list] = optionsFirst(args);
-                    return crt.vswprintf_s.handler([buffer, size, format, list]);
+                    const [options, , buffer, size, format, , list] = optionsFirst(args);
+                    return styled(options,
+                        ()=>crt.vswprintf_s.handler([buffer, size, format, list]));
                 },
             }),
 
@@ -858,8 +901,8 @@ export function createUcrtbaseFunctions(crt, host){
             argBytes: 32,
             quadwords: [0],
             /** @param {number[]} args */
-            handler: ([, , buffer, size, count, format, , list])=>
-                crt._vsnwprintf_s.handler([buffer, size, count, format, list]),
+            handler: ([options, , buffer, size, count, format, , list])=>styled(options,
+                ()=>crt._vsnwprintf_s.handler([buffer, size, count, format, list])),
         },
 
         /**
@@ -947,4 +990,16 @@ export function createUcrtbaseFunctions(crt, host){
                 crt.wcsftime.handler([buffer, size, format, time]),
         },
     };
+
+    // The `_o_` exports are the same functions under a second name, which the
+    // runtime's own import library binds some of the headers' calls to: one
+    // entry, so a program reaching either name reaches the same state.
+    for (const name of O_PREFIXED)
+    {
+        if (exports[name])
+        {
+            exports[`_o_${name}`] = exports[name];
+        }
+    }
+    return exports;
 }
