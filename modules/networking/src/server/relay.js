@@ -59,7 +59,7 @@ import { lookup } from 'node:dns/promises';
 import {
     BROADCAST, FLAG_HALF, FLAG_REJECT, FLAG_STREAM, Op, PROTOCOL_VERSION, Wsa,
     decodeControl, decodeFrame, encodeControl, encodeFrame, formatIp, packAddresses,
-    packError, parseIp, unpackError, wsaErrorFor,
+    packError, parseIp, streamPieces, unpackError, wsaErrorFor,
 } from '../protocol.js';
 
 /** The private network a room's peers are put on: 10.86.0.0/16. */
@@ -381,7 +381,10 @@ export function createRelay(options = {}){
             });
         });
         socket.on('data', (/** @type {Buffer} */ chunk)=>{
-            send(peer, { op: Op.STREAM, tag: frame.tag, payload: new Uint8Array(chunk) });
+            for (const payload of streamPieces(new Uint8Array(chunk)))
+            {
+                send(peer, { op: Op.STREAM, tag: frame.tag, payload });
+            }
             // Read no faster than the page takes it: a client that stops
             // reading would otherwise have the server hold everything the far
             // end sends. Paused, the far end is slowed by TCP itself.

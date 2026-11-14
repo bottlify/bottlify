@@ -96,7 +96,6 @@ event, an error. Neither stops the program.
 - No raw TCP or UDP. Sockets go through the relay over WebSocket; without `network` only the
   loopback adapter exists.
 - The relay links tabs in one room and reaches outside hosts only from its server's allow list.
-- A single TCP `send` over 64 KiB fails: the relay's frames carry at most 64 KiB and are not split.
 - crypt32 builds a certificate chain from the certificates it was given and the ROOT store
   (`win32.trustedRoots`); it fetches nothing, so a missing intermediate is a partial chain and
   revocation, when asked, is unknown and offline (`CRYPT_E_REVOCATION_OFFLINE` under the SSL

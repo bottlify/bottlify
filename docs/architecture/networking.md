@@ -39,9 +39,9 @@ flowchart TB
   itself and remembers them, so the policy judges the name, not just the address. With an empty
   list, DNS answers nothing at all.
 - **Frames.** Joining a room is JSON: `hello`, answered by `welcome` with the address and the list of
-  peers. Data travels in binary frames: a 20-byte header and up to 64 KiB of payload. One `send()` is
-  one frame, so UDP datagram boundaries are kept. A TCP `send()` over 64 KiB, however, is not yet split
-  into frames and fails.
+  peers. Data travels in binary frames: a 20-byte header and up to 64 KiB of payload. A UDP `send()`
+  is one frame, so datagram boundaries are kept; a TCP `send()`, and what the relay reads from a
+  stream, goes as as many frames as its bytes take, in order.
 
 | Offset | Type | Field |
 | --- | --- | --- |

@@ -88,6 +88,20 @@ export const HEADER_SIZE = 20;
  */
 export const MAX_PAYLOAD = 64 * 1024;
 
+/**
+ * A stream's bytes as the payloads of the frames that carry them, in order,
+ * none over `MAX_PAYLOAD`: a stream has no boundaries to keep, so a TCP send
+ * of any size is as many frames as it takes.
+ *
+ * @param {Uint8Array} bytes
+ */
+export function* streamPieces(bytes){
+    for (let at = 0; at < bytes.length; at += MAX_PAYLOAD)
+    {
+        yield bytes.subarray(at, at + MAX_PAYLOAD);
+    }
+}
+
 /** The address a guest sends to when it means "everyone on this LAN". */
 export const BROADCAST = 0xffffffff;
 

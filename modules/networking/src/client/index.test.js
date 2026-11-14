@@ -300,6 +300,20 @@ test('an accepted connection is announced with the port it arrived on', async()=
     assert.deepEqual(accepted.remote, { host: parseIp('10.86.0.5'), port: 40000 });
 });
 
+test('a stream send over a frame\'s payload goes as several frames, its bytes in order',
+    async()=>{
+        const { transport, socket } = await joined();
+        const bytes = Uint8Array.from({ length: 150 * 1024 }, (_, at)=>at * 7);
+
+        transport.send(9, bytes);
+
+        const frames = socket.frames().filter(frame=>frame?.op === Op.STREAM);
+        assert.deepEqual(frames.map(frame=>frame?.payload.length), [65536, 65536, 22528]);
+        assert.ok(frames.every(frame=>frame?.tag === 9));
+        assert.deepEqual(Buffer.concat(frames.map(frame=>/** @type {Uint8Array} */ (
+            frame?.payload))), Buffer.from(bytes));
+    });
+
 test('a half close travels as a half close', async()=>{
     const { transport, socket } = await joined();
 
