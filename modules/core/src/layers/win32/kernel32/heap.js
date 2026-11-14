@@ -20,6 +20,7 @@
  */
 
 import { pointerArg } from '../common/pointers.js';
+import { IMAGE_ALLOCATION_PROTECT, imageLayout } from './image-protection.js';
 import { askChild } from './cross-process.js';
 import { guestEntry } from '../msvcrt/guest-code.js';
 import * as inGuest from './inguest.js';
@@ -129,6 +130,18 @@ const PAGE_BASES = [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80];
 const PAGE_WRITECOPIES = [0x08, 0x80];
 /** The modifiers a base protection may carry: PAGE_GUARD, PAGE_NOCACHE, PAGE_WRITECOMBINE. */
 const PAGE_MODIFIERS = 0x100 | 0x200 | 0x400;
+
+/**
+ * Whether a protection is one Windows takes for an image's pages: one base
+ * protection, copy-on-write included, with at most the modifiers.
+ *
+ * @param {number} protection
+ */
+const imageProtection = protection=>{
+    const base = protection & 0xff;
+    return (protection & ~(0xff | PAGE_MODIFIERS)) === 0 && PAGE_BASES.includes(base)
+        && (base !== PAGE_NOACCESS || (protection & PAGE_MODIFIERS) === 0);
+};
 
 /**
  * Whether a protection is one Windows takes for private memory: one base
@@ -1283,6 +1296,81 @@ export function createHeapFunctions(host){
     const protections = new Map();
 
     /**
+     * The protections VirtualProtect gave a loaded image's pages, by the
+     * image's base, with the header fields that tell that image from one
+     * mapped at the same base after it is gone.
+     *
+     * @type {Map<number, { stamp: string, pages: Map<number, number> }>}
+     */
+    const imageProtections = new Map();
+
+    /**
+     * The image `page` is in - an arena block the loader took for one, or a
+     * region mapped as one - with its layout read from its headers; null
+     * elsewhere, or where the headers are no image's.
+     *
+     * @param {number} page
+     * @returns {{ base: number, layout: NonNullable<ReturnType<typeof imageLayout>>,
+     *     changed: Map<number, number> | null } | null}
+     */
+    const imageAt = page=>{
+        const block = allocator.blockContaining(page);
+        const region = block ? null : host.regionAt?.(page) ?? null;
+        const base = block?.owner === 'image' ? block.address
+            : region?.kind === 'image' ? region.base : null;
+        if (base === null)
+        {
+            return null;
+        }
+        const layout = imageLayout(host.readMemory, base);
+        if (!layout || page >= base + layout.size)
+        {
+            return null;
+        }
+        const kept = imageProtections.get(base);
+        return { base, layout,
+            changed: kept && kept.stamp === imageStamp(base) ? kept.pages : null };
+    };
+
+    /**
+     * TimeDateStamp, CheckSum and SizeOfImage, which a different image at the
+     * same base does not share. @param {number} base
+     */
+    const imageStamp = base=>{
+        const nt = base + readDword(base + 0x3c);
+        return `${readDword(nt + 8)}:${readDword(nt + 24 + 64)}:${readDword(nt + 24 + 56)}`;
+    };
+
+    /**
+     * An image page's protection now: what VirtualProtect last gave it, else
+     * its section's.
+     *
+     * @param {NonNullable<ReturnType<typeof imageAt>>} image @param {number} page
+     */
+    const imagePageProtection = (image, page)=>image.changed?.get(page)
+        ?? image.layout.runs.find(run=>page - image.base < run.to)?.protect ?? PAGE_NOACCESS;
+
+    /**
+     * VirtualQuery's answer inside a loaded image: MEM_IMAGE, allocated
+     * PAGE_EXECUTE_WRITECOPY from its base, the run of pages sharing this
+     * one's protection.
+     *
+     * @param {NonNullable<ReturnType<typeof imageAt>>} image @param {number} page
+     * @returns {[number, number, number, number, number, number, number]}
+     */
+    const imageAnswer = (image, page)=>{
+        const protect = imagePageProtection(image, page);
+        const end = image.base + image.layout.size;
+        let to = page + PAGE_SIZE;
+        while (to < end && imagePageProtection(image, to) === protect)
+        {
+            to += PAGE_SIZE;
+        }
+        return [page, image.base, IMAGE_ALLOCATION_PROTECT, to - page, MEM_COMMIT, protect,
+            MEM_IMAGE];
+    };
+
+    /**
      * Opens what of [from, to) of a reservation the program may touch -- its
      * committed pages not protected PAGE_NOACCESS -- and closes the rest, where
      * the processor faults a closed page (`pageAccess`).
@@ -1585,6 +1673,11 @@ export function createHeapFunctions(host){
             const protection = view.writable ? PAGE_READWRITE_VIEW : PAGE_READONLY_VIEW;
             return [page, view.base, protection, (end >>> 0) - page, MEM_COMMIT, protection,
                 MEM_MAPPED];
+        }
+        const image = imageAt(page);
+        if (image)
+        {
+            return imageAnswer(image, page);
         }
         if (inArena)
         {
@@ -2864,6 +2957,29 @@ export function createHeapFunctions(host){
                         host.setLastError(ERROR_INVALID_ADDRESS);
                         return 0;
                     }
+                }
+                const image = block?.owner === VIRTUAL ? null : imageAt(first);
+                if (image)
+                {
+                    // An image's pages keep what they are given, read back
+                    // and handed back as the old protection; the range stays
+                    // inside the image.
+                    const end = roundUp((address >>> 0) + (size >>> 0), PAGE_SIZE);
+                    if (end > image.base + image.layout.size || !imageProtection(protect >>> 0))
+                    {
+                        host.setLastError(end > image.base + image.layout.size
+                            ? ERROR_INVALID_ADDRESS : ERROR_INVALID_PARAMETER);
+                        return 0;
+                    }
+                    writeDword(oldProtect >>> 0, imagePageProtection(image, first));
+                    const changed = image.changed ?? new Map();
+                    imageProtections.set(image.base,
+                        { stamp: imageStamp(image.base), pages: changed });
+                    for (let page = first; page < end; page += PAGE_SIZE)
+                    {
+                        changed.set(page, protect >>> 0);
+                    }
+                    return 1;
                 }
                 const kept = block?.owner === VIRTUAL ? protections.get(block.address) : undefined;
                 const was = block?.owner === VIRTUAL

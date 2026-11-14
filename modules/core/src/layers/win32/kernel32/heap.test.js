@@ -4,6 +4,7 @@
  * See LICENSE for details
  */
 
+import { imageHeaders } from './image-protection.fixture.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
@@ -1154,6 +1155,43 @@ test('VirtualQuery on a mapped image answers MEM_IMAGE from the image base', ()=
     assert.equal(view.getUint32(buffer + MBI.State, true), MEM_COMMIT);
     assert.equal(view.getUint32(buffer + MBI.Type, true), 0x1000000);
 });
+
+test('a loaded image answers each section\'s protection, and keeps what VirtualProtect gives it',
+    ()=>{
+        // Wine's kernel32:loader: headers read-only, code PAGE_EXECUTE_READ,
+        // data copy-on-write, a page no section covers closed; the whole
+        // allocated PAGE_EXECUTE_WRITECOPY as MEM_IMAGE.
+        const base = 0x400000;
+        const headers = imageHeaders(0x5000, [[0x1000, 0x1000, 0x60000020],
+            [0x3000, 0x1800, 0xc0000040]]);
+        const host = regionHost([{ base, size: 0x5000, kind: 'image' }]);
+        const read = host.readMemory;
+        host.readMemory = (/** @type {number} */ at, /** @type {number} */ length)=>(
+            at >= base && at < base + 0x1000 ? headers.slice(at - base, at - base + length)
+                : read(at, length));
+        const fns = createHeapFunctions(host);
+        const buffer = host.arena.base;
+        const view = new DataView(host.bytes.buffer);
+        /** @param {number} address */
+        const query = address=>{
+            assert.equal(fns.VirtualQuery.handler([address, buffer, MBI.SIZE]), MBI.SIZE);
+            return [MBI.BaseAddress, MBI.AllocationBase, MBI.AllocationProtect, MBI.RegionSize,
+                MBI.Protect, MBI.Type].map(field=>view.getUint32(buffer + field, true));
+        };
+        assert.deepEqual(query(base + 0x10), [base, base, 0x80, 0x1000, 0x02, 0x1000000]);
+        assert.deepEqual(query(base + 0x1234), [base + 0x1000, base, 0x80, 0x1000, 0x20,
+            0x1000000]);
+        assert.deepEqual(query(base + 0x2000).slice(3, 5), [0x1000, 0x01]);
+        assert.deepEqual(query(base + 0x3000).slice(3, 5), [0x2000, 0x08]);
+
+        assert.equal(fns.VirtualProtect.handler([base + 0x1000, 0x10, 0x40, buffer + 0x40]), 1);
+        assert.equal(view.getUint32(buffer + 0x40, true), 0x20, 'the section\'s, handed back');
+        assert.deepEqual(query(base + 0x1000).slice(3, 5), [0x1000, 0x40]);
+        assert.equal(fns.VirtualProtect.handler([base + 0x1000, 0x10, 0x20, buffer + 0x40]), 1);
+        assert.equal(view.getUint32(buffer + 0x40, true), 0x40, 'what it was given');
+        assert.equal(fns.VirtualProtect.handler([base + 0x4000, 0x2000, 0x04, buffer + 0x40]),
+            0, 'past the image\'s end');
+    });
 
 test('a 64-bit VirtualQuery past 4 GiB answers whole addresses, its walk reaching the image there',
     ()=>{
