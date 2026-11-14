@@ -215,6 +215,7 @@ ones need the graphics worker.
 | `callRingSkip('A,B')` | names kept out of the bridge's call ring, the one `app.diagnostics()` reads as the bridge's `recentDetailed` (each call with its caller `from`, arguments and answer) |
 | `processes()`, `diagnosticsOf(id)`, `readOf(id, address, length)`, `hookOf(id, address, how)` | every process standing, those running beside their parent (children, COM servers, services) marked `beside`; one process's diagnostics, its pipes among them (`win32.pipes`: each handle and what holds the other end); its memory; a watch (`hook`) in front of one of its routines, its calls in the `guest-return` events |
 | `registry`, `exported(lib, name)` | the program's registry; whether a system library exports a name |
+| `start(commandLine)` | a program of the bottle started beside the running one as its `CreateProcess` would start it, e.g. `ngen.exe install "C:\App\Game.exe"`; answers the child's process id (null when the line names no image). Its writes reach the session like the program's own |
 
 One more is on `app.log` rather than `app.debug`, since it reads the profiler's frames:
 `app.log.drops(n)` (default 1000; the engine keeps the last 240, about four seconds) answers

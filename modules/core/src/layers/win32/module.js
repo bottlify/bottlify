@@ -5343,6 +5343,25 @@ export function createWin32Module(){
                 libraries: ()=>libraries,
 
                 /**
+                 * A program started as this process's CreateProcess would start
+                 * it, for a tool that runs one in the program's bottle (ngen,
+                 * regedit): the child's process id, or null when the line names
+                 * no image. Its handles are not kept: nothing here waits on it.
+                 *
+                 * @param {string} line
+                 */
+                launch: line=>{
+                    const made = spawner.launch('', line, 0);
+                    if (!made)
+                    {
+                        return null;
+                    }
+                    kernel.handles.close(made.handle);
+                    kernel.handles.close(made.threadHandle);
+                    return made.id;
+                },
+
+                /**
                  * Kernel events by handle, for a library that hands one to the
                  * program or sets one the program gave it (DXGI's swap chain
                  * frame latency object, IDXGIDevice2::EnqueueSetEvent).
