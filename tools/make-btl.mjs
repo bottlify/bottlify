@@ -20,6 +20,8 @@
  *   node tools/make-btl.mjs list <bundle-id> [pattern]
  *   node tools/make-btl.mjs translations <bundle-id> (<seed-file> | --remove) [--store]
  *   node tools/make-btl.mjs extract <bundle-id> [<file-in-bundle>] [--out=<path>]
+ *   node tools/make-btl.mjs tree <bundle-id> [depth]
+ *   node tools/make-btl.mjs prune <bundle-id> [--dry]
  *
  * `--entry` names the program to start (otherwise guessed, below); `--root` is
  * where an installer put the tree, `C:\Program Files\Vendor\Game` -- what
@@ -35,10 +37,21 @@
  * `entry` to `bundles/<id>/entry`, the address a player page fetches the
  * program's image from -- `createApp` takes the image as bytes, and a page on a
  * static host has no server to read it out of the bundle for it.
+ *
+ * `tree` is what a bottle carries by directory, to a depth (3), largest first:
+ * what an installation left that is not the program -- a setup's cache, a copy
+ * of its own package -- is seen at once. `prune` puts a bottle made earlier
+ * through the rule a bottle is collected by now (`@bottlify/installer`'s
+ * `collect`): what that rule leaves out is dropped and the bundle packed again,
+ * its manifest's `bundle` record rewritten (`--dry` lists it only). Only a
+ * bottle mounted at the drive's root is taken; one made by the older rules is
+ * left alone.
  */
 
-import { readFile, rm, writeFile } from 'node:fs/promises';
-import { basename, join } from 'node:path';
+import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { basename, dirname, join } from 'node:path';
+import { DRIVE_ROOT, collect } from '../modules/installer/src/prefix.js';
 import { attachTranslations, openBundle, verifyBundle, writeBundle, ensureDirectory,
     DEFAULT_BLOCK_SIZE }
     from './btl.mjs';
@@ -270,6 +283,84 @@ async function extract(id, file, flags){
     }
 }
 
+/** @param {string} id @param {string} [depthText] */
+async function tree(id, depthText){
+    const depth = Number(depthText ?? 3);
+    const bundle = await openBundle(join(BUNDLES, id, 'bundle.btl'));
+    /** @type {Map<string, { files: number, bytes: number }>} */
+    const groups = new Map();
+    for (const file of bundle.list())
+    {
+        const key = file.path.split('\\').slice(0, Math.max(1, depth)).join('\\');
+        const group = groups.get(key) ?? { files: 0, bytes: 0 };
+        group.files += 1;
+        group.bytes += file.size;
+        groups.set(key, group);
+    }
+    const total = bundle.list().reduce((sum, file)=>sum + file.size, 0);
+    /** @param {number} bytes @param {number} files @param {string} what */
+    const line = (bytes, files, what)=>
+        `${mib(bytes).padStart(12)} ${String(files).padStart(5)}  ${what}`;
+    for (const [key, group] of [...groups].sort((a, b)=>b[1].bytes - a[1].bytes))
+    {
+        console.log(line(group.bytes, group.files, key));
+    }
+    console.log(line(total, bundle.list().length, 'total'));
+    await bundle.close();
+}
+
+/** @param {string} id @param {Record<string, any>} flags */
+async function prune(id, flags){
+    const directory = join(BUNDLES, id);
+    const manifestPath = join(directory, 'manifest.json');
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+    if (manifest.root !== DRIVE_ROOT)
+    {
+        console.error(`${id}: rooted at ${manifest.root ?? 'nothing'}, not ${DRIVE_ROOT};`
+            + ' left alone');
+        process.exitCode = 1;
+        return;
+    }
+    const bundlePath = join(directory, manifest.bundle?.file ?? 'bundle.btl');
+    const bundle = await openBundle(bundlePath);
+    const listed = bundle.list();
+    const kept = new Set(collect({
+        files: listed.map(file=>({ path: `${DRIVE_ROOT}${file.path}`, bytes: new Uint8Array(0) })),
+    }).files.map(file=>file.path));
+    const dropped = listed.filter(file=>!kept.has(file.path));
+    for (const file of dropped)
+    {
+        console.log(`drop ${mib(file.size).padStart(12)}  ${file.path}`);
+    }
+    console.log(`${dropped.length} of ${listed.length} files, `
+        + `${mib(dropped.reduce((sum, file)=>sum + file.size, 0))}`);
+    if (flags.dry || dropped.length === 0)
+    {
+        await bundle.close();
+        return;
+    }
+    const scratch = await mkdtemp(join(tmpdir(), 'btl-prune-'));
+    try
+    {
+        for (const file of listed.filter(one=>kept.has(one.path)))
+        {
+            const target = join(scratch, ...file.path.split('\\'));
+            await mkdir(dirname(target), { recursive: true });
+            await writeFile(target, await bundle.read(file.path));
+        }
+        await bundle.close();
+        const packed = await writeBundle({ root: scratch, output: `${bundlePath}.new` });
+        await rename(`${bundlePath}.new`, bundlePath);
+        manifest.bundle = { ...manifest.bundle, ...packed };
+        await writeFile(manifestPath, `${JSON.stringify(manifest, null, 4)}\n`);
+        console.log(`packed again: ${mib(packed.bytes)}`);
+    }
+    finally
+    {
+        await rm(scratch, { recursive: true, force: true });
+    }
+}
+
 const [, , command, ...rest] = process.argv;
 const flags = parseFlags(rest);
 const positional = rest.filter(argument=>!argument.startsWith('--'));
@@ -290,6 +381,12 @@ switch (command){
     case 'extract':
         await extract(positional[0], positional[1], flags);
         break;
+    case 'tree':
+        await tree(positional[0], positional[1]);
+        break;
+    case 'prune':
+        await prune(positional[0], flags);
+        break;
     default:
         console.log('usage: node tools/make-btl.mjs pack <game-directory> <bundle-id> '
             + '[--store] [--block=N] [--entry=<path>] [--root=<install-directory>]');
@@ -299,5 +396,7 @@ switch (command){
             + '(<seed-file> | --remove) [--store]');
         console.log('       node tools/make-btl.mjs extract <bundle-id> [<file-in-bundle>] '
             + '[--out=<path>]');
+        console.log('       node tools/make-btl.mjs tree <bundle-id> [depth]');
+        console.log('       node tools/make-btl.mjs prune <bundle-id> [--dry]');
         process.exitCode = 1;
 }

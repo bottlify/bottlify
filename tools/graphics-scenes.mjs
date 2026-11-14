@@ -7,7 +7,7 @@
 /**
  * The scenes the graphics benchmarks drive a device with, frame after frame:
  * Direct3D 8 and 9 draws of a lit, textured cube and through shaders, and
- * DirectDraw sprites (see `SCENES`). `tools/draw-alloc-bench.mjs` runs them in
+ * DirectDraw sprites (see `SCENES`). `tools/graphics-node-bench.mjs` runs them in
  * node over the recording double; `tools/graphics-bench` in a browser worker
  * over a real device. The graphics layer they drive is the one under the
  * `root` parameter of this module's URL -- another checkout's for a tree
