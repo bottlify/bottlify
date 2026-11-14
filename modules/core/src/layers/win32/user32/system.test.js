@@ -1594,6 +1594,21 @@ test('CharNext walks a string a byte at a time and stops at its end', ()=>{
     assert.equal(fns.CharPrevA.handler([TEXT_BUFFER, TEXT_BUFFER + 2]), TEXT_BUFFER + 1);
     assert.equal(fns.CharPrevA.handler([TEXT_BUFFER, TEXT_BUFFER]), TEXT_BUFFER,
         'and never before the start');
+    assert.equal(fns.CharPrevA.handler([TEXT_BUFFER + 1, TEXT_BUFFER]), TEXT_BUFFER,
+        'a pointer before the start comes back as it came');
+
+    // In a double-byte page the characters are found from the start: a lead
+    // byte (0xa1 in page 936) takes the byte after it, a NUL included.
+    const DBCS = TEXT_BUFFER + 0x80;
+    memory.bytes.set([0xa1, 0x41, 0xa1, 0x42, 0xa1, 0, 0x43], DBCS);
+    /** @param {number} offset */
+    const previous = offset=>fns.CharPrevExA.handler([936, DBCS, DBCS + offset, 0]) - DBCS;
+    assert.equal(previous(1), 0, 'the trail byte of the first pair');
+    assert.equal(previous(2), 0);
+    assert.equal(previous(3), 2);
+    assert.equal(previous(6), 4, 'past a pair whose trail is NUL');
+    assert.equal(fns.CharPrevExA.handler([0, TEXT_BUFFER, TEXT_BUFFER + 2, 0]), TEXT_BUFFER + 1,
+        'one byte back in a single-byte page');
 });
 
 test('OemToCharBuff translates a counted buffer between the OEM and ANSI pages', ()=>{

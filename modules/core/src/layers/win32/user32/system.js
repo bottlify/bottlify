@@ -920,6 +920,36 @@ const DMLERR_NO_ERROR = 0;
 const NO_DDE = 'no DDE instance: DdeInitialize refuses, so none of its handles exist';
 
 /**
+ * The character before `current`, never before `start`: CharPrevA and
+ * CharPrevExA. In a single-byte page one byte back; in a double-byte page the
+ * last character starting before `current`, walked to from `start`.
+ *
+ * @param {{ readMemory: (address: number, length: number) => Uint8Array }} memory
+ * @param {number} codePage @param {number} start @param {number} current
+ */
+const characterBefore = (memory, codePage, start, current)=>{
+    if (current <= start)
+    {
+        return current;
+    }
+    if (!isLeadByte(codePage, 0x81))
+    {
+        return current - 1;
+    }
+    const bytes = memory.readMemory(start, current - start);
+    let at = 0;
+    for (;;)
+    {
+        const next = at + (isLeadByte(codePage, bytes[at]) ? 2 : 1);
+        if (next >= bytes.length)
+        {
+            return start + at;
+        }
+        at = next;
+    }
+};
+
+/**
  * Whether a byte begins a two-byte character in a double-byte code page:
  * Japanese (932), and simplified Chinese, Korean and traditional Chinese
  * (936, 949, 950), whose lead bytes are the ranges their tables give.
@@ -1222,6 +1252,10 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 host.callerThread?.(), unicode, timeout === undefined ? {} : { timeout })
             : host.send(hwnd >>> 0, message >>> 0, wParam >>> 0, lParam >>> 0,
                 host.callerThread?.(), unicode));
+
+    /** @param {number} codePage @param {number} start @param {number} current */
+    const previousCharacter = (codePage, start, current)=>
+        characterBefore(host, codePage, start, current);
 
     /**
      * The monitor a box overlaps, there being one: the screen, or for a box
@@ -4916,15 +4950,29 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         /**
          * LPSTR CharPrevA(LPCSTR lpszStart, LPCSTR lpszCurrent)
          *
-         * The previous character, never before the start: at the start the
-         * answer is the start, which is how a caller walking backwards knows
-         * to stop.
+         * The previous character in the process's page, never before the
+         * start: at or before the start the answer is the pointer as it came,
+         * which is how a caller walking backwards knows to stop.
          */
         CharPrevA: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([start, current])=>(
-                (current >>> 0) > (start >>> 0) ? (current >>> 0) - 1 : start >>> 0),
+            handler: ([start, current])=>previousCharacter(0, start >>> 0, current >>> 0),
+        },
+
+        /**
+         * LPSTR CharPrevExA(WORD CodePage, LPCSTR lpStart, LPCSTR lpCurrentChar, DWORD dwFlags)
+         *
+         * CharPrevA in a code page the caller names. In a double-byte page
+         * the characters are found from the start forwards, a lead byte
+         * taking the byte after it whatever that is, since a trail byte can
+         * look like a lead one.
+         */
+        CharPrevExA: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([codePage, start, current])=>
+                previousCharacter(codePage & 0xffff, start >>> 0, current >>> 0),
         },
 
         /**
