@@ -908,6 +908,38 @@ test('the registers of the thread on this executor\'s processor are read off it,
     assert.equal(parked.context.captured, captures);
 });
 
+test('another executor\'s thread asking for the registers of the thread on this processor gets'
+    + ' them off the processor', ()=>{
+    // The collector ran on the other executor: its GetThreadContext was
+    // answered here with `current` its own thread, and the thread parked on
+    // this processor was read from what it had saved at an older slice's end.
+    const { cpu } = twoExecutors();
+    let captures = 0;
+    const counting = { ...cpu, captureContext: ()=>({ captured: ++captures }) };
+    const sched = createScheduler({ cpu: counting, switcher: createSwitcher({ cpu: counting }),
+        quantum: 5000 });
+    const main = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
+    const worker = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'worker' });
+    counting.runSlice = ()=>{
+        main.awaitingHost = true;
+        return 65;
+    };
+    assert.equal(sched.runOnce().ran, main);
+    assert.equal(sched.processorOf(worker), 1, 'the worker runs on the other executor');
+    const [remote] = cpu.executors();
+    /** @type {boolean[]} */
+    const answers = [];
+    const saved = main.context;
+    remote.step = /** @type {any} */ ((/** @type {(reply: () => void) => void} */ around)=>{
+        around(()=>answers.push(sched.settle(main)));
+        remote.step = ()=>null;
+        return null;
+    });
+    sched.runOnce();
+    assert.deepEqual(answers, [true]);
+    assert.notEqual(main.context, saved, 'taken off this processor');
+});
+
 test('the report says how long a short-period thread went without the processor', ()=>{
     // A mixer feeding a sound device from a wait of a few milliseconds is
     // heard the moment it goes without the processor longer than it wrote

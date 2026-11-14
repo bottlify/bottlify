@@ -1055,6 +1055,12 @@ export function createScheduler(options){
     const recalls = new Map();
     /** Set while they are answered: an answer's own trap does not answer again. */
     let answering = false;
+    /**
+     * While another executor's call is answered here, `current` is its caller:
+     * the thread whose registers this executor's processor holds is kept here,
+     * and whether its slice was running.
+     */
+    let onProcessor = /** @type {{ thread: any, inSlice: boolean } | null} */ (null);
     /** Set while this executor's thread runs a long turn with the others free (`runHere`). */
     let soloShared = false;
     /** Set while a turn among ready threads runs past a quantum (`turnMs`). */
@@ -1509,6 +1515,7 @@ export function createScheduler(options){
                     {
                         sharedTime.crossingsInTurn++;
                     }
+                    onProcessor = { thread: was, inSlice: wasInSlice };
                     current = on.thread;
                     inSlice = true;
                     try
@@ -1517,6 +1524,7 @@ export function createScheduler(options){
                     }
                     finally
                     {
+                        onProcessor = null;
                         inSlice = wasInSlice;
                         current = was;
                     }
@@ -2609,14 +2617,16 @@ export function createScheduler(options){
             // - a .NET runtime's collector on another executor read a thread
             // parked here in a wait as where its last slice had ended, in a
             // method it had long returned from, and walked a stack no longer
-            // there. Running a slice now, it stops at the slice's end.
-            if (thread === current)
+            // there. Running a slice now, it stops at the slice's end. Asked
+            // by another executor's thread, `current` is that caller.
+            const here = onProcessor ?? { thread: current, inSlice };
+            if (thread === here.thread && thread !== null)
             {
-                if (inSlice)
+                if (here.inSlice)
                 {
                     return false;
                 }
-                current.context = cpu.captureContext(current.context);
+                thread.context = cpu.captureContext(thread.context);
                 return true;
             }
             const runs = ()=>placedElsewhere(thread);
