@@ -23,6 +23,8 @@ npm test -w @bottlify/cork                  # unit tests and gates, a minute or 
 npm run test:integration -w @bottlify/cork  # the suites over the corpus, and the gates
 node modules/cork/bench/run.mjs             # the benchmark (bench/README.md)
 node modules/cork/bench/micro/run.mjs       # what the benchmark does not cover, x86-64 too
+node tools/bench/stand.mjs                  # the stand: the work recorded, and the speed here
+node tools/bench/serve.mjs                  # the same stand as a page, for any browser
 ```
 
 - **Instruction corpus** ([`src/x86-corpus.json.gz`](../../modules/cork/src/x86-corpus.json.gz), in the
@@ -57,5 +59,11 @@ node modules/cork/bench/micro/run.mjs       # what the benchmark does not cover,
   translates the same code however busy the machine is, which
   [`virtual-clock.test.js`](../../modules/core/src/layers/cpu/internal/virtual-clock.test.js)
   checks against a clock that jumps.
+- **The stand** ([`tools/bench/`](../../tools/bench/)): the micro workloads on the guest's own
+  clock, so each one's work (instructions, regions, every way between regions) is the same on any
+  machine and in any browser, held to `tools/bench/expected.json`; its speed is the machine's,
+  with the noise of its rounds beside it. The page runs it in a person's own browser;
+  `npm run cdp:bench` runs the page in Chromium and holds its work to the record Node made. A
+  change that makes cork form otherwise records it again (`node tools/bench/stand.mjs --write`).
 
 Plain ES modules with JSDoc, tests on `node:test`. Licensed MPL-2.0.

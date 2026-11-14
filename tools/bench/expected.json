@@ -1,0 +1,807 @@
+{
+ "warm": 20,
+ "workloads": {
+  "calls4096-order-x87": {
+   "bits": 32,
+   "work": {
+    "retired": 8520679,
+    "eax": "e97e01b5",
+    "regions": 4100,
+    "mechanisms": {
+     "APART_UNPREDICTED": 655072,
+     "CALL_ELSEWHERE": 9424,
+     "CALL_FORMED": 17,
+     "CALL_INDIRECT": 655072,
+     "CALL_LINKED": 637994,
+     "JUMP_LOOP": 637918,
+     "RET_LEFT": 31,
+     "RET_TO_CALL": 638003,
+     "TRANSFER": 10640
+    }
+   }
+  },
+  "calls4096-scatter-x87": {
+   "bits": 32,
+   "work": {
+    "retired": 9831399,
+    "eax": "e86d40f6",
+    "regions": 4100,
+    "mechanisms": {
+     "APART_UNPREDICTED": 655093,
+     "CALL_ELSEWHERE": 8727,
+     "CALL_FORMED": 17,
+     "CALL_INDIRECT": 655093,
+     "CALL_LINKED": 638640,
+     "JUMP_LOOP": 638612,
+     "RET_LEFT": 63,
+     "RET_TO_CALL": 638650,
+     "TRANSFER": 10354
+    }
+   }
+  },
+  "calls512-order-x87": {
+   "bits": 32,
+   "work": {
+    "retired": 8525159,
+    "eax": "4a04f03",
+    "regions": 516,
+    "mechanisms": {
+     "APART_UNPREDICTED": 655074,
+     "CALL_ELSEWHERE": 2674,
+     "CALL_FORMED": 17,
+     "CALL_INDIRECT": 655074,
+     "CALL_LINKED": 649660,
+     "JUMP_LOOP": 649587,
+     "RET_LEFT": 24,
+     "RET_TO_CALL": 649686,
+     "TRANSFER": 4326
+    }
+   }
+  },
+  "calls512-scatter-x87": {
+   "bits": 32,
+   "work": {
+    "retired": 9835879,
+    "eax": "b7617bd4",
+    "regions": 516,
+    "mechanisms": {
+     "APART_UNPREDICTED": 655094,
+     "CALL_ELSEWHERE": 3141,
+     "CALL_FORMED": 17,
+     "CALL_INDIRECT": 655094,
+     "CALL_LINKED": 649929,
+     "JUMP_LOOP": 649907,
+     "RET_LEFT": 65,
+     "RET_TO_CALL": 649947,
+     "TRANSFER": 4068
+    }
+   }
+  },
+  "calls8-order-x87": {
+   "bits": 32,
+   "work": {
+    "retired": 8847719,
+    "eax": "e3dcc6dc",
+    "regions": 12,
+    "mechanisms": {
+     "APART_MISSED": 296498,
+     "APART_UNPREDICTED": 62148,
+     "CALL_FORMED": 17,
+     "CALL_INDIRECT": 62148,
+     "CALL_LEFT": 296498,
+     "CALL_LINKED": 62146,
+     "CALL_PREDICTED": 296464,
+     "JUMP_LOOP": 358532,
+     "RET_FORMED": 296464,
+     "RET_LEFT": 296522,
+     "RET_TO_CALL": 62146,
+     "TRANSFER": 593018
+    }
+   }
+  },
+  "calls8-scatter-x87": {
+   "bits": 32,
+   "work": {
+    "retired": 10158439,
+    "eax": "e3dcc6dc",
+    "regions": 12,
+    "mechanisms": {
+     "APART_MISSED": 305064,
+     "APART_UNPREDICTED": 45014,
+     "CALL_FORMED": 17,
+     "CALL_INDIRECT": 45014,
+     "CALL_LEFT": 305064,
+     "CALL_LINKED": 45011,
+     "CALL_PREDICTED": 305134,
+     "JUMP_LOOP": 350103,
+     "RET_FORMED": 305134,
+     "RET_LEFT": 305089,
+     "RET_TO_CALL": 45011,
+     "TRANSFER": 610096
+    }
+   }
+  },
+  "crc-x87": {
+   "bits": 32,
+   "work": {
+    "retired": 18035279,
+    "eax": "2d5c29c4",
+    "regions": 4,
+    "mechanisms": {
+     "APART_BLOCKS": 17,
+     "CALL_ELSEWHERE": 17,
+     "CALL_LINKED": 17,
+     "CALL_REL": 17,
+     "JUMP_LOOP": 877262,
+     "RET_LEFT": 20,
+     "TRANSFER": 18
+    }
+   }
+  },
+  "fmath-pc24": {
+   "bits": 32,
+   "work": {
+    "retired": 6944552,
+    "eax": "44b3d",
+    "regions": 5,
+    "mechanisms": {
+     "APART_BYTES": 17,
+     "CALL_ELSEWHERE": 17,
+     "CALL_LINKED": 17,
+     "CALL_REL": 17,
+     "JUMP_LOOP": 245690,
+     "RET_LEFT": 20,
+     "TRANSFER": 18
+    }
+   }
+  },
+  "fmath-sse": {
+   "bits": 32,
+   "work": {
+    "retired": 6243249,
+    "eax": "44b3d",
+    "regions": 4,
+    "mechanisms": {
+     "APART_BYTES": 17,
+     "CALL_ELSEWHERE": 17,
+     "CALL_LINKED": 17,
+     "CALL_REL": 17,
+     "JUMP_LOOP": 245694,
+     "RET_LEFT": 20,
+     "TRANSFER": 18
+    }
+   }
+  },
+  "fmath-x87": {
+   "bits": 32,
+   "work": {
+    "retired": 6944547,
+    "eax": "44b3d",
+    "regions": 5,
+    "mechanisms": {
+     "APART_BYTES": 17,
+     "CALL_ELSEWHERE": 17,
+     "CALL_LINKED": 17,
+     "CALL_REL": 17,
+     "JUMP_LOOP": 245690,
+     "RET_LEFT": 20,
+     "TRANSFER": 18
+    }
+   }
+  },
+  "game-pc24": {
+   "bits": 32,
+   "work": {
+    "retired": 3512855,
+    "eax": "5a5d3f67",
+    "regions": 8,
+    "mechanisms": {
+     "APART_BYTES": 17,
+     "APART_UNPREDICTED": 9772,
+     "CALL_ELSEWHERE": 18,
+     "CALL_INDIRECT": 9772,
+     "CALL_LINKED": 9787,
+     "CALL_PREDICTED": 26100,
+     "CALL_REL": 17,
+     "JUMP_LOOP": 73467,
+     "JUMP_OUT": 130,
+     "RET_FORMED": 26100,
+     "RET_LEFT": 21,
+     "RET_TO_CALL": 9770,
+     "TRANSFER": 21
+    }
+   }
+  },
+  "game-sse": {
+   "bits": 32,
+   "work": {
+    "retired": 2929290,
+    "eax": "5a5d3f67",
+    "regions": 8,
+    "mechanisms": {
+     "APART_BYTES": 17,
+     "APART_UNPREDICTED": 10200,
+     "CALL_ELSEWHERE": 299,
+     "CALL_INDIRECT": 10200,
+     "CALL_LINKED": 9935,
+     "CALL_PREDICTED": 25800,
+     "CALL_REL": 17,
+     "JUMP_LOOP": 73325,
+     "JUMP_OUT": 282,
+     "RET_FORMED": 25800,
+     "RET_LEFT": 20,
+     "RET_TO_CALL": 9918,
+     "TRANSFER": 18
+    }
+   }
+  },
+  "game-x87": {
+   "bits": 32,
+   "work": {
+    "retired": 3512843,
+    "eax": "f6c2e36d",
+    "regions": 8,
+    "mechanisms": {
+     "APART_BYTES": 17,
+     "APART_UNPREDICTED": 9772,
+     "CALL_ELSEWHERE": 18,
+     "CALL_INDIRECT": 9772,
+     "CALL_LINKED": 9788,
+     "CALL_PREDICTED": 26100,
+     "CALL_REL": 17,
+     "JUMP_LOOP": 73468,
+     "JUMP_OUT": 129,
+     "RET_FORMED": 26100,
+     "RET_LEFT": 20,
+     "RET_TO_CALL": 9771,
+     "TRANSFER": 19
+    }
+   }
+  },
+  "load-x87": {
+   "bits": 32,
+   "work": {
+    "retired": 21934180,
+    "eax": "e8719b10",
+    "regions": 1533,
+    "mechanisms": {
+     "APART_BLOCKS": 17,
+     "APART_FULL": 104388,
+     "CALL_ELSEWHERE": 157,
+     "CALL_FORMED": 288,
+     "CALL_LEFT": 67,
+     "CALL_LINKED": 104313,
+     "CALL_REL": 104338,
+     "JUMP_LOOP": 59730,
+     "JUMP_OUT": 170,
+     "RET_FORMED": 288,
+     "RET_LEFT": 351,
+     "RET_TO_CALL": 104156,
+     "TRANSFER": 576
+    }
+   }
+  },
+  "lua-x87": {
+   "bits": 32,
+   "work": {
+    "retired": 148911168,
+    "eax": "136cc9c",
+    "regions": 293,
+    "mechanisms": {
+     "APART_BLOCKS": 1031444,
+     "APART_FULL": 101218,
+     "APART_NESTED": 163153,
+     "APART_UNPREDICTED": 82409,
+     "CALL_ELSEWHERE": 4520,
+     "CALL_FORMED": 800239,
+     "CALL_INDIRECT": 82409,
+     "CALL_LEFT": 669,
+     "CALL_LINKED": 1376682,
+     "CALL_REL": 1295146,
+     "JUMP_DISPATCH": 53015,
+     "JUMP_LOOP": 2759261,
+     "JUMP_OUT": 90264,
+     "RET_FORMED": 732433,
+     "RET_LEFT": 74549,
+     "RET_TO_CALL": 1372581,
+     "TRANSFER": 298838
+    }
+   }
+  },
+  "patch-x87": {
+   "bits": 32,
+   "work": {
+    "retired": 4403499,
+    "eax": "3bf0ccce",
+    "regions": 4,
+    "mechanisms": {
+     "APART_SHAPE": 199649,
+     "CALL_ELSEWHERE": 15471,
+     "CALL_FORMED": 51,
+     "CALL_LINKED": 111,
+     "CALL_REL": 199649,
+     "RET_LEFT": 160,
+     "TRANSFER": 199656
+    }
+   }
+  },
+  "sort-x87": {
+   "bits": 32,
+   "work": {
+    "retired": 20535419,
+    "eax": "300e8f3",
+    "regions": 5,
+    "mechanisms": {
+     "APART_BLOCKS": 37,
+     "CALL_ELSEWHERE": 37,
+     "CALL_FORMED": 224720,
+     "CALL_LINKED": 37,
+     "CALL_REL": 37,
+     "JUMP_LOOP": 486020,
+     "RET_FORMED": 224720,
+     "RET_LEFT": 40,
+     "TRANSFER": 38
+    }
+   }
+  },
+  "str-x87": {
+   "bits": 32,
+   "work": {
+    "retired": 20050919,
+    "eax": "a6c78",
+    "regions": 5,
+    "mechanisms": {
+     "APART_BLOCKS": 17,
+     "CALL_ELSEWHERE": 17,
+     "CALL_FORMED": 185598,
+     "CALL_LINKED": 17,
+     "CALL_REL": 17,
+     "JUMP_LOOP": 555123,
+     "JUMP_OUT": 30922,
+     "RET_FORMED": 185663,
+     "RET_LEFT": 20,
+     "TRANSFER": 15447
+    }
+   }
+  },
+  "switch-x87": {
+   "bits": 32,
+   "work": {
+    "retired": 5024536,
+    "eax": "8725ca8f",
+    "regions": 4,
+    "mechanisms": {
+     "APART_BLOCKS": 17,
+     "CALL_ELSEWHERE": 17,
+     "CALL_LINKED": 17,
+     "CALL_REL": 17,
+     "JUMP_LOOP": 167752,
+     "RET_LEFT": 20,
+     "TRANSFER": 18
+    }
+   }
+  },
+  "tree-x87": {
+   "bits": 32,
+   "work": {
+    "retired": 14242339,
+    "eax": "b3512e4a",
+    "regions": 6,
+    "mechanisms": {
+     "APART_BLOCKS": 20,
+     "APART_NESTED": 8704,
+     "CALL_ELSEWHERE": 37,
+     "CALL_FORMED": 406247,
+     "CALL_LINKED": 8724,
+     "CALL_REL": 8724,
+     "JUMP_DISPATCH": 227651,
+     "JUMP_LOOP": 1294456,
+     "JUMP_OUT": 22860,
+     "RET_FORMED": 387261,
+     "RET_LEFT": 19098,
+     "RET_TO_CALL": 8687,
+     "TRANSFER": 39955
+    }
+   }
+  },
+  "vcall-x87": {
+   "bits": 32,
+   "work": {
+    "retired": 9407599,
+    "eax": "999fcee0",
+    "regions": 11,
+    "mechanisms": {
+     "APART_MISSED": 12127,
+     "APART_UNPREDICTED": 133911,
+     "CALL_ELSEWHERE": 217,
+     "CALL_FORMED": 17,
+     "CALL_INDIRECT": 133911,
+     "CALL_LEFT": 12127,
+     "CALL_LINKED": 133681,
+     "CALL_PREDICTED": 467022,
+     "JUMP_LOOP": 197516,
+     "JUMP_OUT": 12210,
+     "RET_FORMED": 467022,
+     "RET_LEFT": 12160,
+     "RET_TO_CALL": 133681,
+     "TRANSFER": 24277
+    }
+   }
+  },
+  "vm-x87": {
+   "bits": 32,
+   "work": {
+    "retired": 11522599,
+    "eax": "83ab1146",
+    "regions": 4,
+    "mechanisms": {
+     "CALL_FORMED": 17,
+     "JUMP_LOOP": 1079728,
+     "RET_LEFT": 20,
+     "TRANSFER": 18
+    }
+   }
+  },
+  "calls4096-order-x64": {
+   "bits": 64,
+   "work": {
+    "retired": 7209699,
+    "eax": "e97e01b5",
+    "regions": 4100,
+    "mechanisms": {
+     "APART_UNPREDICTED": 655042,
+     "CALL_ELSEWHERE": 9294,
+     "CALL_FORMED": 16,
+     "CALL_INDIRECT": 655042,
+     "CALL_LINKED": 636408,
+     "JUMP_LOOP": 636347,
+     "RET_LEFT": 31,
+     "RET_TO_CALL": 636419,
+     "TRANSFER": 12154
+    }
+   }
+  },
+  "calls4096-scatter-x64": {
+   "bits": 64,
+   "work": {
+    "retired": 8520419,
+    "eax": "e86d40f6",
+    "regions": 4100,
+    "mechanisms": {
+     "APART_UNPREDICTED": 655072,
+     "CALL_ELSEWHERE": 8827,
+     "CALL_FORMED": 17,
+     "CALL_INDIRECT": 655072,
+     "CALL_LINKED": 637631,
+     "JUMP_LOOP": 637551,
+     "RET_LEFT": 28,
+     "RET_TO_CALL": 637642,
+     "TRANSFER": 11029
+    }
+   }
+  },
+  "calls512-order-x64": {
+   "bits": 64,
+   "work": {
+    "retired": 7213059,
+    "eax": "4a04f03",
+    "regions": 516,
+    "mechanisms": {
+     "APART_UNPREDICTED": 655044,
+     "CALL_ELSEWHERE": 3335,
+     "CALL_FORMED": 17,
+     "CALL_INDIRECT": 655044,
+     "CALL_LINKED": 647770,
+     "JUMP_LOOP": 647729,
+     "RET_LEFT": 26,
+     "RET_TO_CALL": 647806,
+     "TRANSFER": 6064
+    }
+   }
+  },
+  "calls512-scatter-x64": {
+   "bits": 64,
+   "work": {
+    "retired": 8523779,
+    "eax": "b7617bd4",
+    "regions": 516,
+    "mechanisms": {
+     "APART_UNPREDICTED": 655073,
+     "CALL_ELSEWHERE": 3028,
+     "CALL_FORMED": 17,
+     "CALL_INDIRECT": 655073,
+     "CALL_LINKED": 647997,
+     "JUMP_LOOP": 648033,
+     "RET_LEFT": 105,
+     "RET_TO_CALL": 648033,
+     "TRANSFER": 5915
+    }
+   }
+  },
+  "calls8-order-x64": {
+   "bits": 64,
+   "work": {
+    "retired": 7454979,
+    "eax": "e3dcc6dc",
+    "regions": 12,
+    "mechanisms": {
+     "APART_MISSED": 298110,
+     "APART_UNPREDICTED": 58892,
+     "CALL_FORMED": 17,
+     "CALL_INDIRECT": 58892,
+     "CALL_LEFT": 298110,
+     "CALL_LINKED": 58889,
+     "CALL_PREDICTED": 298108,
+     "JUMP_LOOP": 356994,
+     "RET_FORMED": 298108,
+     "RET_LEFT": 298135,
+     "RET_TO_CALL": 58889,
+     "TRANSFER": 596189
+    }
+   }
+  },
+  "calls8-scatter-x64": {
+   "bits": 64,
+   "work": {
+    "retired": 8765699,
+    "eax": "e3dcc6dc",
+    "regions": 12,
+    "mechanisms": {
+     "APART_MISSED": 303816,
+     "APART_UNPREDICTED": 47472,
+     "CALL_FORMED": 17,
+     "CALL_INDIRECT": 47472,
+     "CALL_LEFT": 303816,
+     "CALL_LINKED": 47466,
+     "CALL_PREDICTED": 303822,
+     "JUMP_LOOP": 351250,
+     "RET_FORMED": 303822,
+     "RET_LEFT": 303844,
+     "RET_TO_CALL": 47466,
+     "TRANSFER": 607622
+    }
+   }
+  },
+  "crc-x64": {
+   "bits": 64,
+   "work": {
+    "retired": 17441047,
+    "eax": "2d5c29c4",
+    "regions": 4,
+    "mechanisms": {
+     "APART_BLOCKS": 17,
+     "CALL_ELSEWHERE": 17,
+     "CALL_LINKED": 17,
+     "CALL_REL": 17,
+     "JUMP_LOOP": 877119,
+     "RET_LEFT": 20,
+     "TRANSFER": 18
+    }
+   }
+  },
+  "fmath-x64": {
+   "bits": 64,
+   "work": {
+    "retired": 5914460,
+    "eax": "44b3d",
+    "regions": 4,
+    "mechanisms": {
+     "APART_BYTES": 17,
+     "CALL_ELSEWHERE": 17,
+     "CALL_LINKED": 17,
+     "CALL_REL": 17,
+     "JUMP_LOOP": 245713,
+     "RET_LEFT": 20,
+     "TRANSFER": 18
+    }
+   }
+  },
+  "game-x64": {
+   "bits": 64,
+   "work": {
+    "retired": 2527542,
+    "eax": "5a5d3f67",
+    "regions": 7,
+    "mechanisms": {
+     "APART_BYTES": 17,
+     "APART_UNPREDICTED": 10373,
+     "CALL_ELSEWHERE": 343,
+     "CALL_INDIRECT": 10373,
+     "CALL_LINKED": 10064,
+     "CALL_PREDICTED": 25627,
+     "CALL_REL": 17,
+     "JUMP_LOOP": 73271,
+     "JUMP_OUT": 326,
+     "RET_FORMED": 25627,
+     "RET_LEFT": 20,
+     "RET_TO_CALL": 10047,
+     "TRANSFER": 18
+    }
+   }
+  },
+  "load-x64": {
+   "bits": 64,
+   "work": {
+    "retired": 21524912,
+    "eax": "e8719b10",
+    "regions": 1536,
+    "mechanisms": {
+     "APART_BLOCKS": 17,
+     "APART_FULL": 104376,
+     "CALL_ELSEWHERE": 210,
+     "CALL_FORMED": 291,
+     "CALL_LEFT": 104,
+     "CALL_LINKED": 104285,
+     "CALL_REL": 104289,
+     "JUMP_LOOP": 59620,
+     "JUMP_OUT": 227,
+     "RET_FORMED": 191,
+     "RET_LEFT": 503,
+     "RET_TO_CALL": 104075,
+     "TRANSFER": 807
+    }
+   }
+  },
+  "lua-x64": {
+   "bits": 64,
+   "work": {
+    "retired": 128274781,
+    "eax": "136cc9c",
+    "regions": 269,
+    "mechanisms": {
+     "APART_BLOCKS": 1013891,
+     "APART_FULL": 101083,
+     "APART_NESTED": 176925,
+     "APART_UNPREDICTED": 82341,
+     "CALL_ELSEWHERE": 4461,
+     "CALL_FORMED": 791776,
+     "CALL_INDIRECT": 82341,
+     "CALL_LEFT": 689,
+     "CALL_LINKED": 1373036,
+     "CALL_REL": 1291210,
+     "JUMP_DISPATCH": 40132,
+     "JUMP_LOOP": 2707962,
+     "JUMP_OUT": 150089,
+     "RET_FORMED": 750950,
+     "RET_LEFT": 47269,
+     "RET_TO_CALL": 1368688,
+     "TRANSFER": 273047
+    }
+   }
+  },
+  "patch-x64": {
+   "bits": 64,
+   "work": {
+    "retired": 3803419,
+    "eax": "3bf0ccce",
+    "regions": 4,
+    "mechanisms": {
+     "APART_SHAPE": 194740,
+     "CALL_ELSEWHERE": 10212,
+     "CALL_FORMED": 35,
+     "CALL_LINKED": 228,
+     "CALL_REL": 194740,
+     "RET_LEFT": 263,
+     "TRANSFER": 194754
+    }
+   }
+  },
+  "sort-x64": {
+   "bits": 64,
+   "work": {
+    "retired": 26538179,
+    "eax": "300e8f3",
+    "regions": 5,
+    "mechanisms": {
+     "APART_BLOCKS": 20,
+     "APART_BYTES": 17,
+     "CALL_ELSEWHERE": 37,
+     "CALL_FORMED": 224720,
+     "CALL_LINKED": 37,
+     "CALL_REL": 37,
+     "JUMP_LOOP": 486000,
+     "RET_FORMED": 224720,
+     "RET_LEFT": 40,
+     "TRANSFER": 38
+    }
+   }
+  },
+  "str-x64": {
+   "bits": 64,
+   "work": {
+    "retired": 20118119,
+    "eax": "a6c78",
+    "regions": 5,
+    "mechanisms": {
+     "APART_BLOCKS": 17,
+     "CALL_ELSEWHERE": 17,
+     "CALL_FORMED": 185598,
+     "CALL_LINKED": 17,
+     "CALL_REL": 17,
+     "JUMP_LOOP": 555121,
+     "JUMP_OUT": 30966,
+     "RET_FORMED": 185663,
+     "RET_LEFT": 20,
+     "TRANSFER": 15469
+    }
+   }
+  },
+  "switch-x64": {
+   "bits": 64,
+   "work": {
+    "retired": 4868868,
+    "eax": "8725ca8f",
+    "regions": 4,
+    "mechanisms": {
+     "APART_BLOCKS": 17,
+     "CALL_ELSEWHERE": 17,
+     "CALL_LINKED": 17,
+     "CALL_REL": 17,
+     "JUMP_LOOP": 167745,
+     "RET_LEFT": 20,
+     "TRANSFER": 18
+    }
+   }
+  },
+  "tree-x64": {
+   "bits": 64,
+   "work": {
+    "retired": 13554839,
+    "eax": "b3512e4a",
+    "regions": 6,
+    "mechanisms": {
+     "APART_BYTES": 20,
+     "APART_NESTED": 9537,
+     "CALL_ELSEWHERE": 19,
+     "CALL_FORMED": 405414,
+     "CALL_LINKED": 9557,
+     "CALL_REL": 9557,
+     "JUMP_DISPATCH": 229960,
+     "JUMP_LOOP": 1293538,
+     "JUMP_OUT": 22163,
+     "RET_FORMED": 387085,
+     "RET_LEFT": 18423,
+     "RET_TO_CALL": 9538,
+     "TRANSFER": 38583
+    }
+   }
+  },
+  "vcall-x64": {
+   "bits": 64,
+   "work": {
+    "retired": 8264239,
+    "eax": "999fcee0",
+    "regions": 11,
+    "mechanisms": {
+     "APART_BYTES": 17,
+     "APART_UNPREDICTED": 131966,
+     "CALL_ELSEWHERE": 297,
+     "CALL_INDIRECT": 131966,
+     "CALL_LINKED": 131694,
+     "CALL_PREDICTED": 481094,
+     "CALL_REL": 17,
+     "JUMP_LOOP": 204606,
+     "JUMP_OUT": 103,
+     "RET_FORMED": 481094,
+     "RET_LEFT": 30,
+     "RET_TO_CALL": 131677,
+     "TRANSFER": 261
+    }
+   }
+  },
+  "vm-x64": {
+   "bits": 64,
+   "work": {
+    "retired": 11461459,
+    "eax": "83ab1146",
+    "regions": 4,
+    "mechanisms": {
+     "CALL_FORMED": 17,
+     "JUMP_LOOP": 1079728,
+     "RET_LEFT": 20,
+     "TRANSFER": 18
+    }
+   }
+  }
+ }
+}

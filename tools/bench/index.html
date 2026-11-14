@@ -1,0 +1,180 @@
+<!doctype html>
+<!--
+  Copyright © 2026 Bottlify Project
+  Licensed under the Mozilla Public License, version 2.0
+  See LICENSE for details
+-->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cork stand</title>
+<style>
+:root { --bg: #fbfbfa; --fg: #1d1d1f; --muted: #6b6b70; --line: #e3e3e0; --ok: #2f7d4a; --bad: #b3261e;
+    --accent: #2f6f8f; color-scheme: light dark; }
+@media (prefers-color-scheme: dark) {
+    :root { --bg: #161618; --fg: #ececee; --muted: #9a9aa0; --line: #2c2c30; --ok: #6cc28a; --bad: #f2867e;
+        --accent: #7fb6d3; }
+}
+body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.45 system-ui, sans-serif; }
+main { max-width: 860px; margin: 0 auto; padding: 24px 16px 48px; }
+h1 { font-size: 22px; margin: 0 0 4px; }
+p { margin: 6px 0; color: var(--muted); }
+.controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 18px 0; }
+button { font: inherit; padding: 7px 14px; border-radius: 8px; border: 1px solid var(--line);
+    background: transparent; color: var(--fg); cursor: pointer; }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); }
+button:disabled { opacity: .5; cursor: default; }
+label { color: var(--muted); }
+select { font: inherit; background: var(--bg); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 6px; padding: 4px; }
+#status { margin: 8px 0 14px; min-height: 1.4em; }
+.wrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+th, td { text-align: right; padding: 5px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th:first-child, td:first-child { text-align: left; }
+th { color: var(--muted); font-weight: 500; }
+.ok { color: var(--ok); } .bad { color: var(--bad); } .muted { color: var(--muted); }
+#summary { margin-top: 16px; font-size: 17px; }
+pre { white-space: pre-wrap; word-break: break-all; color: var(--bad); }
+</style>
+<main>
+<h1>Cork stand</h1>
+<p>cork's micro workloads (32-bit and x86-64) on the guest's own clock: every device translates and
+runs the same code, so the <b>work</b> column must read as recorded everywhere, and <b>MIPS</b> is
+this device's speed. <b>Noise</b> is how far the rounds of one workload part in this run: a
+difference inside it is not one this device can show. A whole run can land elsewhere when the
+browser happens to optimise the code otherwise, so compare devices or builds over several runs.</p>
+<p id="device" class="muted"></p>
+<div class="controls">
+    <button class="primary" id="run">Run</button>
+    <label>widths <select id="bits">
+        <option value="32,64">32 and 64-bit</option><option value="32">32-bit</option><option value="64">64-bit</option>
+    </select></label>
+    <label>rounds <select id="rounds"><option>5</option><option selected>7</option><option>11</option></select></label>
+    <button id="workOnly">Work only</button>
+    <button id="copy" disabled>Copy report</button>
+</div>
+<div id="status" class="muted"></div>
+<div class="wrap"><table>
+    <thead><tr><th>workload</th><th>bits</th><th>MIPS</th><th>noise</th><th>work</th></tr></thead>
+    <tbody id="rows"></tbody>
+</table></div>
+<div id="summary"></div>
+<pre id="error"></pre>
+</main>
+<script type="module">
+import { geomean } from './stand.js';
+import { CACHE_VERSION } from '../../modules/cork/src/runtime/cache.js';
+
+const $ = id=>document.getElementById(id);
+const device = {
+    userAgent: navigator.userAgent,
+    cores: navigator.hardwareConcurrency ?? null,
+    memoryGiB: navigator.deviceMemory ?? null,
+    crossOriginIsolated: globalThis.crossOriginIsolated === true,
+};
+$('device').textContent = `${device.userAgent} · ${device.cores ?? '?'} logical cores`
+    + `${device.memoryGiB ? ` · ${device.memoryGiB} GiB` : ''} · cork cache version ${CACHE_VERSION}`;
+
+let report = null;
+const run = timed=>{
+    const bits = $('bits').value.split(',').map(Number);
+    const rounds = Number($('rounds').value);
+    const rows = [];
+    $('rows').replaceChildren();
+    $('summary').textContent = '';
+    $('error').textContent = '';
+    for (const button of ['run', 'workOnly', 'copy'])
+    {
+        $(button).disabled = true;
+    }
+    const startedAt = performance.now();
+    const worker = new Worker(new URL('./stand.worker.js', import.meta.url), { type: 'module' });
+    let total = 0;
+    const finish = ()=>{
+        worker.terminate();
+        $('run').disabled = false;
+        $('workOnly').disabled = false;
+        $('copy').disabled = rows.length === 0;
+    };
+    worker.onerror = event=>{
+        $('error').textContent = event.message ?? 'the stand\'s worker did not load';
+        window.standReport = { error: $('error').textContent };
+        finish();
+    };
+    worker.onmessage = ({ data })=>{
+        if (data.error)
+        {
+            $('error').textContent = data.error;
+            window.standReport = { error: data.error };
+            finish();
+            return;
+        }
+        if (data.total !== undefined)
+        {
+            total = data.total;
+        }
+        if (data.row)
+        {
+            const row = data.row;
+            rows.push(row);
+            const tr = document.createElement('tr');
+            const work = row.expected === null ? ['not recorded', 'muted']
+                : row.expected ? ['as recorded', 'ok'] : ['differs', 'bad'];
+            for (const [text, cls] of [[row.name], [row.bits],
+                [row.mips ? row.mips[0].toFixed(0) : '-'],
+                [row.noise !== undefined ? `±${(row.noise * 100).toFixed(1)} %` : '-'], work])
+            {
+                const td = document.createElement('td');
+                td.textContent = String(text);
+                if (cls)
+                {
+                    td.className = cls;
+                }
+                tr.append(td);
+            }
+            $('rows').append(tr);
+        }
+        $('status').textContent = `${rows.length} of ${total} workloads`
+            + ` · ${((performance.now() - startedAt) / 1000).toFixed(0)} s`;
+        if (data.done !== undefined)
+        {
+            const differ = rows.filter(row=>row.expected === false).length;
+            const means = [32, 64].map(width=>[width, geomean(rows.filter(row=>row.bits === width))])
+                .filter(([, mean])=>mean !== null);
+            $('summary').innerHTML = '';
+            const line = document.createElement('div');
+            line.textContent = `${means.map(([width, mean])=>`${width}-bit ${mean[0].toFixed(0)} MIPS`)
+                .join(' · ')}${means.length ? ' (geometric mean) · ' : ''}`
+                + (differ === 0 ? 'work as recorded everywhere' : `work differs in ${differ}`);
+            line.className = differ === 0 ? '' : 'bad';
+            $('summary').append(line);
+            report = { at: new Date().toISOString(), device, cacheVersion: CACHE_VERSION,
+                options: { bits, rounds, timed }, seconds: (performance.now() - startedAt) / 1000,
+                geomean: Object.fromEntries(means.map(([width, mean])=>[width, mean[0]])), rows };
+            // What `serve.mjs --check` reads back.
+            window.standReport = report;
+            finish();
+        }
+    };
+    worker.postMessage({ bits, rounds, timed });
+};
+$('run').onclick = ()=>run(true);
+
+$('workOnly').onclick = ()=>run(false);
+$('copy').onclick = async()=>{
+    const text = JSON.stringify(report);
+    try
+    {
+        await navigator.clipboard.writeText(text);
+        $('status').textContent = 'the report is on the clipboard';
+    }
+    catch
+    {
+        const blob = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+        const a = Object.assign(document.createElement('a'), { href: blob, download: 'cork-stand.json' });
+        a.click();
+    }
+};
+// What `serve.mjs --check` waits for before it presses a button.
+window.standReady = true;
+</script>
