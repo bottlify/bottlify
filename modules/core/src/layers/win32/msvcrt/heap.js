@@ -28,6 +28,9 @@ import {
     bindLong, callocLongCode, freeLongCode, mallocLongCode, msizeLongCode, reallocLongCode,
 } from '../kernel32/guest-heap-long.js';
 
+
+/** The key the heap's later functions are carried under in msvcrt's table. */
+export const LATER_HEAP = Symbol('later heap functions');
 /**
  * @typedef {Object} HeapHost
  * @property {(bytes: number) => number} allocate
@@ -144,6 +147,40 @@ export function createHeapFunctions(host){
             host.writeMemory(moved, host.readMemory(block, kept).slice());
         }
         host.free(base);
+        return moved;
+    };
+
+    /**
+     * The bytes an aligned block was asked for: its malloc block less the
+     * step and the slot `alignedAllocate` added, whatever the block's offset.
+     *
+     * @param {number} block @param {number} alignment
+     */
+    const alignedSize = (block, alignment)=>
+        Math.max(0, (host.block(alignedBase(block))?.size ?? 0) - Math.max(alignment, POINTER)
+            - POINTER);
+
+    /**
+     * _aligned_offset_recalloc's body: a resize to count times size, the
+     * bytes past what the block held before zeroed. A product past the
+     * address space is NULL and ENOMEM, the block kept.
+     *
+     * @param {number} block @param {number} count @param {number} size
+     * @param {number} alignment @param {number} offset
+     */
+    const alignedRecalloc = (block, count, size, alignment, offset)=>{
+        const bytes = count * size;
+        if (bytes > 0xffffffff)
+        {
+            host.errno?.(ENOMEM);
+            return 0;
+        }
+        const before = block === 0 ? 0 : alignedSize(block, alignment);
+        const moved = alignedResize(block, bytes, alignment, offset);
+        if (moved !== 0 && bytes > before)
+        {
+            host.fillMemory(moved + before, 0, bytes - before);
+        }
         return moved;
     };
 
@@ -475,6 +512,80 @@ export function createHeapFunctions(host){
             /** @param {number[]} args */
             handler: ([block, size, alignment, offset])=>
                 alignedResize(block >>> 0, size >>> 0, alignment >>> 0, offset >>> 0),
+        },
+
+        // What the 2005 runtime added to the heap's functions: msvcrt.dll has
+        // none of them, and that runtime and the universal one take them here.
+        [LATER_HEAP]: {
+            /**
+             * void *_aligned_recalloc(void *block, size_t count, size_t size, size_t alignment)
+             * void *_aligned_offset_recalloc(void *block, size_t count, size_t size,
+             *                                size_t alignment, size_t offset)
+             *
+             * _aligned_realloc to count times size, what the block did not hold
+             * before zeroed.
+             */
+            _aligned_recalloc: {
+                convention: 'cdecl',
+                argBytes: 16,
+                /** @param {number[]} args */
+                handler: ([block, count, size, alignment])=>
+                    alignedRecalloc(block >>> 0, count >>> 0, size >>> 0, alignment >>> 0, 0),
+            },
+            _aligned_offset_recalloc: {
+                convention: 'cdecl',
+                argBytes: 20,
+                /** @param {number[]} args */
+                handler: ([block, count, size, alignment, offset])=>alignedRecalloc(block >>> 0,
+                    count >>> 0, size >>> 0, alignment >>> 0, offset >>> 0),
+            },
+
+            /**
+             * size_t _aligned_msize(void *block, size_t alignment, size_t offset)
+             *
+             * The bytes the aligned block was made with; no block is EINVAL and
+             * the size's -1.
+             */
+            _aligned_msize: {
+                convention: 'cdecl',
+                argBytes: 12,
+                /** @param {number[]} args */
+                handler: ([block, alignment])=>{
+                    if ((block >>> 0) === 0)
+                    {
+                        host.errno?.(EINVAL);
+                        return 0xffffffff;
+                    }
+                    return alignedSize(block >>> 0, alignment >>> 0);
+                },
+            },
+
+            /**
+             * void *_recalloc(void *block, size_t count, size_t size)
+             *
+             * realloc to count times size, the bytes past what the block held
+             * zeroed; a product past the address space is NULL and ENOMEM.
+             */
+            _recalloc: {
+                convention: 'cdecl',
+                argBytes: 12,
+                /** @param {number[]} args */
+                handler: ([block, count, size])=>{
+                    const bytes = (count >>> 0) * (size >>> 0);
+                    if (bytes > 0xffffffff)
+                    {
+                        host.errno?.(ENOMEM);
+                        return 0;
+                    }
+                    const before = (block >>> 0) === 0 ? 0 : host.block(block >>> 0)?.size ?? 0;
+                    const moved = table.realloc.handler([block, bytes]);
+                    if (moved !== 0 && bytes > before)
+                    {
+                        host.fillMemory(moved + before, 0, bytes - before);
+                    }
+                    return moved;
+                },
+            },
         },
 
         /** void _aligned_free(void *block) -- NULL does nothing. */
