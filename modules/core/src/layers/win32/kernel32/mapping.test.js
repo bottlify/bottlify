@@ -65,6 +65,7 @@ function setup(names = {}){
             return true;
         },
         release: ()=>{},
+        zero: (address, length)=>void bytes.fill(0, address, address + length),
         handles: {
             open: (type, object)=>{
                 const handle = nextHandle;
@@ -554,6 +555,20 @@ test('an image without fixups whose base is out of reach is not mapped', ()=>{
     assert.equal(fns.CreateFileMappingW.natives.NtMapViewOfSection.handler(
         [mapping, CURRENT_PROCESS, 0x200, 0, 0, 0, 0x210, 1, 0, PAGE_READONLY]),
     STATUS_CONFLICTING_ADDRESSES);
+});
+
+test('a fresh page-file view reads zeroes, whatever the memory it is given held before', ()=>{
+    // Memory an unmapped view gave back is handed out again as it was left; the
+    // CLR's shared code-page table read an unmapped image's bytes and took them
+    // for a table already filled.
+    const { fns, bytes } = setup();
+    bytes.fill(0xcc, 0x1000);
+    const mapping = fns.CreateFileMappingA.handler(
+        [INVALID_HANDLE_VALUE, 0, PAGE_READWRITE, 0, 0x2004, 0]);
+    const view = fns.MapViewOfFile.handler([mapping, FILE_MAP_WRITE, 0, 0, 0]);
+    assert.notEqual(view, 0);
+    assert.ok(bytes.subarray(view, view + 0x3000).every(byte=>byte === 0),
+        'zero, to its last page');
 });
 
 test('a read-write mapping that names its commit is still written back to its file', ()=>{

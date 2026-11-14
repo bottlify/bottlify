@@ -2197,11 +2197,17 @@ setup there installs its own `mscoree.dll` (an XP bottle with 4.0 runs on that f
 engine leaves alone; a shim of the engine's there would also stand in front of a CLR 2-only install's
 file, which mscoreei cannot serve. *2026-11-14.*
 
-**A247 revisited: XP gets no shim of the engine's even where the volume has no `mscoree.dll`.** A
-.NET Framework 4.8 layer built on Windows 7 brings no `system32\mscoree.dll` and no `InstallRoot`
-(both are 7's own), so an XP bottle on it has no shim. Standing the engine's shim in on XP only
-where no file is there was considered and not done: an XP .NET 2.0 or 3.5 setup decides whether to
-lay down its `mscoree.dll` by the version of the one it finds, and the engine's stand-in answers
-XP's 5.1.2600, newer than 2.0.50727, so the setup would keep it, and the bottle's CLR 2 programs
-would reach a shim that serves only CLR 4. An XP bottle on a 4.8 layer wants the layer to carry
-the shim's file and InstallRoot, as an XP machine's 4.x setup leaves them. *2026-11-14.*
+**A247 revisited: on XP the engine's shim stands in for a Framework 4 that came without its own
+`mscoree.dll`.** A .NET Framework 4.8 layer built on Windows 7 brings no `system32\mscoree.dll`
+and no `InstallRoot` (both are 7's own), so an XP bottle on it had no shim: the loader bound the
+managed program's `_CorExeMain` to nothing and it faulted at its first instruction. Where the volume
+holds `<InstallRoot>v4.0.30319\mscoreei.dll` (InstallRoot as the registry names it, else
+`C:\WINDOWS\Microsoft.NET\Framework\`) and no `system32\mscoree.dll`, the engine's shim stands
+in on XP too, and the machine furnishes `InstallRoot` where nothing set it; it is decided once the
+bottle's files and registry are down, before the first library is placed. The earlier objection -
+an XP 2.0 or 3.5 setup would keep the stand-in, newer than its own, and CLR 2 programs would reach a
+shim serving only CLR 4 - does not hold where mscoreei is there: mscoreei is the shim's whole
+implementation for every runtime it finds, the one 8 and later start CLR 2 programs through, and an
+XP machine that got 4.x first keeps 4.x's `mscoree.dll` the same way. Without a Framework 4 on the
+volume, XP has no shim of the engine's, and a Framework's own `mscoree.dll` is never stood in front
+of. *2026-11-14.*
