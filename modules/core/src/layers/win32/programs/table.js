@@ -80,7 +80,7 @@ export const SYSTEM_PROGRAMS = new Map([
  *
  * The .NET Framework 4's setup, any of 4.0 to 4.8 and offline or web: the
  * Framework is a layer the embedder mounts, and the setup asks for it and
- * succeeds (`netfx.js`, A248).
+ * succeeds (`netfx.js`, A249).
  *
  * Each is known by `is`, asked a field of the version block (`CompanyName`).
  *

@@ -35,7 +35,7 @@ event, an error. Neither stops the program.
 - The engine has no .NET runtime of its own: the runtime and its assembly cache (`fusion.dll`)
   are the .NET Framework's, which a bottle has as a layer mounted under it (`bundle.layers`): a
   managed program on a volume without it, or a Framework 4 setup a program starts, asks the
-  embedder for that layer (`layer-needed`), and the setup itself succeeds in its place (A248).
+  embedder for that layer (`layer-needed`), and the setup itself succeeds in its place (A249).
   A bottle whose own installation put a Framework in keeps it. On Windows 7 and 10 the shim,
   `mscoree.dll`, is the system's, as there: the engine's, which hands every call to the
   Framework 4's `mscoreei.dll` (`roadmap/decisions.md` A247); without the Framework a managed

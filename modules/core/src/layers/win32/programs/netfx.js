@@ -14,7 +14,7 @@
  * a bottle carries it only as the layer mounted under it. So the setup asks the
  * embedder for that layer where the machine has no Framework 4 (`layer-needed`)
  * and answers as a setup that found the Framework installed: it succeeds, shows
- * nothing and asks for no restart (A248). A program the installation goes on
+ * nothing and asks for no restart (A249). A program the installation goes on
  * to start finds the Framework from the bottle's next start on.
  *
  * Everything goes through this process's own exports, like any other

@@ -1,6 +1,6 @@
 # .NET Framework as a shared layer
 
-Status: steps 1 (need, A248) and 2 (mount) done 2026-11-15 and 2026-11-14. The build's two runs
+Status: steps 1 (need, A249) and 2 (mount) done 2026-11-15 and 2026-11-14. The build's two runs
 work by hand in Node, no launcher yet: 4.8's setup on a Windows 7 machine, then `ngen
 executeQueuedItems` to an empty queue (140 native images, a 797 MB layer); a console program prints
 and exits on that layer under 7 and XP alike (2026-11-14). A WinForms program stops at its first
@@ -34,7 +34,7 @@ it can serve every bottle there.
 
 | step | where | what |
 |---|---|---|
-| 1. Need | core | Done, 2026-11-15 (A248). A program needs the Framework when its image is a CLR one (a COM descriptor directory) and the volume has no Framework that runs it (`mscoree/need.js`): a Framework 4's `mscoreei.dll`, or a CLR 2 runtime for a CLR 2 program; or a setup the program starts is the Framework 4's (known by its version block, as `DXSETUP` is: `PROGRAMS_IN_PLACE`). Either asks the embedder for the layer (`layer-needed`), and the setup stands in as run and exited 0. |
+| 1. Need | core | Done, 2026-11-15 (A249). A program needs the Framework when its image is a CLR one (a COM descriptor directory) and the volume has no Framework that runs it (`mscoree/need.js`): a Framework 4's `mscoreei.dll`, or a CLR 2 runtime for a CLR 2 program; or a setup the program starts is the Framework 4's (known by its version block, as `DXSETUP` is: `PROGRAMS_IN_PLACE`). Either asks the embedder for the layer (`layer-needed`), and the setup stands in as run and exited 0. |
 | 2. Mount | core, filesystem | Done, 2026-11-14: `bundle.layers` (`docs/core/api.md`). A volume's source can be several bundles: a union source reads a path from the first that has it - the bottle's bundle over the layer. The layer's registry is laid under the bottle's at the start, as an installation's is (`fillFromJSON`). Gate: `bundle-layers.itest.js`. |
 | 3. Installer | site, dist | The offline installer (`ndp48-x86-x64-allos-enu.exe`, unmodified - what the licence allows to redistribute) is fetched at build time from Microsoft with its SHA-256 pinned, and served from the launcher's own origin (Microsoft's download host sends no CORS headers). Not in git. |
 | 4. Build | launcher | The first time a layer is asked for and is not in this browser: a run with no picture - a modal with a progress bar - starts the installer with `/q /norestart` on an empty Windows 7 machine of the layer's width, then `ngen executeQueuedItems` until the queue is empty (WPF's assemblies included), and packs what the run wrote (files and registry, the setup's extraction folders and temp left out) into the layer bundle. *(not measured: about 15-20 minutes on this machine.)* |
