@@ -370,6 +370,12 @@ const TOKEN_ALL_ACCESS = 0x000f01ff;
  */
 const NVAPI_INTERFACES = new Map([[0x0150e828, 'NvAPI_Initialize'], [0xd22bdd7e, 'NvAPI_Unload']]);
 
+/**
+ * The kinds of handle a child started with bInheritHandles takes besides pipe
+ * ends: the objects a process on the same thread can hold as they are.
+ */
+const INHERITED_KINDS = new Set(['event', 'mutex', 'semaphore', 'timer', 'process', 'thread']);
+
 const KNOWN_DLLS = new Set([
     'advapi32.dll', 'clbcatq.dll', 'combase.dll', 'comdlg32.dll', 'coml2.dll',
     'difxapi.dll', 'gdi32.dll', 'gdiplus.dll', 'imagehlp.dll', 'imm32.dll',
@@ -613,7 +619,8 @@ export function createWin32Module(){
             };
             // This process's views of sections, by address: mapping.js keeps
             // them, VirtualQuery answers them as the regions they are.
-            /** @type {Map<number, { length: number, writable: boolean }>} */
+            /** @type {Map<number, { length: number, writable: boolean,
+             *     sections?: { start: number, end: number, protect: number }[] }>} */
             const viewRegions = new Map();
             /** @param {number} at */
             const viewAt = at=>{
@@ -892,6 +899,7 @@ export function createWin32Module(){
                 typeOf: handle=>kernel.handles.typeOf(handle),
                 /** @param {any} object */
                 holds: object=>kernel.handles.holds(object),
+                list: ()=>kernel.handles.list(),
             };
 
             const threadState = createThreadState(()=>kernel.currentThread(),
@@ -1200,6 +1208,26 @@ export function createWin32Module(){
 
             // Named pipes, in the run's namespace: their own calls, and ReadFile,
             // WriteFile, CreateFile, CloseHandle and CancelIo hand theirs on.
+            // HANDLE_FLAG_* by handle (threading.js's GetHandleInformation),
+            // read here for what a child started with bInheritHandles takes.
+            /** @type {Map<number, number>} */
+            const handleFlags = new Map();
+            /**
+             * This process's inheritable synchronisation objects, processes and
+             * threads, or of those the ones a handle list names: a child on this
+             * thread holds the same objects under the same numbers, as Windows'
+             * child holds them (an NGen worker signals the event its parent
+             * named on its command line). The pipe ends are the pipes' own.
+             *
+             * @param {number[] | null} only
+             * @returns {{ handle: number, type: string, object: any }[]}
+             */
+            const inheritedObjects = only=>[...handleFlags].flatMap(([handle, flags])=>{
+                const type = (flags & 1) !== 0 && (only === null || only.includes(handle))
+                    ? kernel.handles.typeOf(handle) : null;
+                return type !== null && INHERITED_KINDS.has(type)
+                    ? [{ handle, type, object: kernel.handles.resolve(handle) }] : [];
+            });
             const pipes = createNamedPipes({
                 pointerSize,
                 kernel,
@@ -1235,6 +1263,12 @@ export function createWin32Module(){
                     && kernel.handles.adopt(inherited.handle, inherited.type, inherited.object))
                 {
                     pipes.adopted(inherited.handle, inherited.object);
+                }
+                // An object inherited is inheritable again, as the parent's was.
+                else if (INHERITED_KINDS.has(inherited.type)
+                    && kernel.handles.adopt(inherited.handle, inherited.type, inherited.object))
+                {
+                    handleFlags.set(inherited.handle, 1);
                 }
             }
 
@@ -2629,6 +2663,7 @@ export function createWin32Module(){
                         pointerSize,
                         kernel,
                         pipes,
+                        handleFlags,
                         // A thread made in a child, and one waited on there.
                         askChild,
                         setLastErrorFor: setErrorOn,
@@ -3092,7 +3127,9 @@ export function createWin32Module(){
                     ...createSpawnFunctions({
                         // A child started with bInheritHandles takes this
                         // process's inheritable pipe ends, by their numbers.
-                        inheritedHandles: only=>pipes.inherited(only),
+                        inheritedHandles: only=>[...pipes.inherited(only),
+                            ...inheritedObjects(only)],
+                        inheritable: handle=>void handleFlags.set(handle, 1),
                         kernel,
                         processId,
                         readMemory,
@@ -5210,6 +5247,14 @@ export function createWin32Module(){
                 readWideString,
                 readMemory,
             });
+
+            // The Windows Runtime's library came with Windows 8: on 7 and XP
+            // a program that looks for it finds none, as there. The .NET
+            // Framework 4.8 loads it where it is and then requires all of it.
+            if (windows.major < 10)
+            {
+                delete libraries['combase.dll'];
+            }
 
             // The .NET shim is part of the system from Windows 7 on, and the
             // .NET Framework 4's setup there installs only its implementation,

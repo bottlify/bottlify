@@ -1147,6 +1147,12 @@ export function createFilesystemModule(){
                     if (leaving.tree === arriving.tree
                         && leaving.tree.moveFile(leaving.components, arriving.components))
                     {
+                        // A file renamed while open stays the file its
+                        // handles have: an NGen worker renames the native
+                        // image it wrote and goes on asking its size.
+                        state.files.moved({ tree: leaving.tree, from: leaving.key,
+                            to: arriving.key, components: arriving.components,
+                            path: leaving.tree.stat(arriving.components)?.path ?? to });
                         return;
                     }
 
