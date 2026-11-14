@@ -26,7 +26,7 @@
  */
 
 import { addSecondNames, UCRTBASE_SECOND_NAMES } from './second-names.js';
-import { scanDecimal } from './convert.js';
+import { scanStandardDecimal, STANDARD_NUMBERS } from './convert.js';
 import { SYSTEM_ERRORS } from './errors.js';
 import { setSingle } from './float.js';
 import { VARIADIC_SLOTS } from './scan.js';
@@ -747,14 +747,17 @@ export function createUcrtbaseFunctions(crt, host){
                 /** @param {number[]} args */
                 handler: ([text, end])=>{
                     const scanned = (text >>> 0) === 0 ? null
-                        : scanDecimal(/** @type {NonNullable<typeof host.readCString>} */ (
+                        : scanStandardDecimal(/** @type {NonNullable<typeof host.readCString>} */ (
                             host.readCString)(text >>> 0, 1024));
                     if ((end >>> 0) !== 0)
                     {
                         writePointer(end, scanned ? text + scanned.end : text);
                     }
                     const value = Math.fround(scanned?.value ?? 0);
-                    if (scanned && (scanned.range || !Number.isFinite(value)
+                    // Past a float's range from a finite double; an infinity or
+                    // a NaN read as such is none.
+                    if (scanned && (scanned.range
+                        || Number.isFinite(scanned.value) && !Number.isFinite(value)
                         || value === 0 && scanned.value !== 0))
                     {
                         fail(ERANGE);
@@ -993,6 +996,10 @@ export function createUcrtbaseFunctions(crt, host){
 
         // strftime and its kin with C99's conversions, which msvcrt's refuse.
         ...standardTime ?? {},
+
+        // strtod, atof and their kin reading C99's infinities, NaNs and
+        // hexadecimal numbers, which msvcrt's read as nothing.
+        .../** @type {any} */ (crt)[STANDARD_NUMBERS] ?? {},
 
         // std::exception's message and typeid's names, which msvcrt lacks.
         .../** @type {any} */ (crt)[UNIVERSAL_CXX] ?? {},
