@@ -6,6 +6,8 @@
 
 import { TAKEN } from './named-objects.js';
 import { STATUS, toDosError } from '../ntdll/status.js';
+import { mapImage } from '../../loader/internal/image.js';
+import { relocateImage } from '../../loader/internal/pe.js';
 
 /**
  * How far a name a program hands these is read: whole, as Windows reads it, up to
@@ -89,55 +91,56 @@ const FILE_MAP_ALL_ACCESS = 0xf001f;
  * view of it can be written back, its size, and its SEC_* attributes.
  *
  * @typedef {{ node: any, writable: boolean, size: number, attributes: number,
- *     writesFile?: boolean, image?: Uint8Array }} Section
+ *     writesFile?: boolean,
+ *     image?: { bytes: Uint8Array, image: import('../../loader/internal/pe.js').PeImage } }}
+ *     Section
  *     `writesFile`: its views' writes reach the file, as a copy-on-write one's do not.
- *     `image`: a SEC_IMAGE section's file laid out as its image, what every view shows.
+ *     `image`: a SEC_IMAGE section's file laid out as its image at its own base, and its
+ *     headers: what every view shows, moved to where the view is.
  */
 
 /**
- * A PE file laid out as the image it describes: its headers, then each
- * section's raw data at its virtual address, the rest zeros. Null when the
- * headers do not describe an image the file holds.
+ * A view of an image section: the image laid out at its own base, moved to
+ * `address` - its fixups applied and its header's ImageBase made `address` -
+ * as Windows' loader moves an image it cannot place at its base (one
+ * mechanism with the loader's own images, `relocateImage`). Null when the
+ * image has to be at its base and is not: it carries no relocations.
  *
- * @param {Uint8Array} file
+ * @param {{ bytes: Uint8Array, image: import('../../loader/internal/pe.js').PeImage }} laid
+ * @param {number} address
  * @returns {Uint8Array | null}
  */
-export function layOutImage(file){
-    const view = new DataView(file.buffer, file.byteOffset, file.byteLength);
-    const pe = file.length >= 0x40 ? view.getUint32(0x3c, true) : 0;
-    if (pe === 0 || pe + 24 > file.length || view.getUint32(pe, true) !== 0x4550)
+export function imageViewAt(laid, address){
+    if (address === laid.image.imageBase)
+    {
+        return laid.bytes.slice();
+    }
+    if (!laid.image.relocatable)
     {
         return null;
     }
-    const sections = view.getUint16(pe + 6, true);
-    const optional = pe + 24;
-    const table = optional + view.getUint16(pe + 20, true);
-    if (optional + 64 > file.length || table + sections * 40 > file.length)
-    {
-        return null;
-    }
-    // SizeOfImage and SizeOfHeaders stand at the same place in PE32 and PE32+.
-    const size = view.getUint32(optional + 56, true);
-    const headers = Math.min(view.getUint32(optional + 60, true), file.length, size);
-    if (size === 0 || size > 0x40000000)
-    {
-        return null;
-    }
-    const image = new Uint8Array(size);
-    image.set(file.subarray(0, headers));
-    for (let at = table; at < table + sections * 40; at += 40)
-    {
-        const address = view.getUint32(at + 12, true);
-        const raw = view.getUint32(at + 16, true);
-        const from = view.getUint32(at + 20, true);
-        const length = Math.min(raw, view.getUint32(at + 8, true) || raw, file.length - from,
-            size - address);
-        if (from < file.length && address < size && length > 0)
-        {
-            image.set(file.subarray(from, from + length), address);
-        }
-    }
-    return image;
+    const bytes = laid.bytes.slice();
+    relocateImage(bytes, laid.image, address);
+    return bytes;
+}
+
+/**
+ * An image's sections as a view of it holds them, each with the protection
+ * Windows maps it with: code read and executed, data written as the
+ * process's own copy, the rest read-only.
+ *
+ * @param {import('../../loader/internal/pe.js').PeImage} image
+ * @returns {{ start: number, end: number, protect: number }[]}
+ */
+export function imageSections(image){
+    const alignment = image.sectionAlignment || PAGE_SIZE;
+    return image.sections.map(section=>({
+        start: section.virtualAddress,
+        end: section.virtualAddress + Math.ceil((section.virtualSize || section.rawSize)
+            / alignment) * alignment,
+        protect: section.executable ? section.writable ? 0x80 : 0x20
+            : section.writable ? 0x08 : section.readable ? 0x02 : 0x01,
+    }));
 }
 
 /**
@@ -177,7 +180,8 @@ const pageRound = bytes=>Math.ceil(bytes / PAGE_SIZE) * PAGE_SIZE;
  *     process: number }} [sharedViews]
  *           The run's agreement between views of one page-file section, and
  *           this process's name in it (`shared-views.js`).
- * @property {Map<number, { length: number, writable: boolean }>} [viewRegions]
+ * @property {Map<number, { length: number, writable: boolean,
+ *     sections?: { start: number, end: number, protect: number }[] }>} [viewRegions]
  *           Every view of this process by its address, for VirtualQuery.
  * @property {{ views: number, waited: number, failed: number }} [metrics]
  *           Counted in place: views mapped, views that waited for their
@@ -329,19 +333,19 @@ export function createMappingFunctions(host){
                 {
                     return { status: STATUS.INVALID_IMAGE_NOT_MZ };
                 }
-                // Laid out as the loader lays it, which is where a program
-                // reads an image's metadata by RVA (fusion reads a managed
-                // library's manifest so). A view elsewhere than the image's
-                // base is not relocated.
-                const image = layOutImage(file);
-                if (!image)
+                // Laid out by the loader, at the image's own base: each view
+                // is moved to where it lands (`imageViewAt`).
+                /** @type {{ bytes: Uint8Array, image: any }} */
+                let laid;
+                try
                 {
+                    laid = mapImage(file, undefined, { wide: true });
+                }
+                catch {
                     return { status: STATUS.INVALID_IMAGE_FORMAT };
                 }
-                host.divergence?.('NtCreateSection',
-                    'a SEC_IMAGE view is laid out as its image but not relocated');
-                return { node, writable: false, size: image.length,
-                    attributes: SEC_FILE | SEC_IMAGE, image };
+                return { node, writable: false, size: laid.bytes.length,
+                    attributes: SEC_FILE | SEC_IMAGE, image: laid };
             });
         }
         if (asked === 0 && length === 0)
@@ -733,11 +737,13 @@ export function createMappingFunctions(host){
                     address=>{
                         if (address === 0)
                         {
-                            return STATUS.NO_MEMORY;
+                            return section.image && !section.image.image.relocatable
+                                ? STATUS.CONFLICTING_ADDRESSES : STATUS.NO_MEMORY;
                         }
                         writeDword(base >>> 0, address);
                         writeDword(sizeAt >>> 0, pageRound(length));
-                        return STATUS.SUCCESS;
+                        return section.image && address !== section.image.image.imageBase
+                            ? STATUS.IMAGE_NOT_AT_BASE : STATUS.SUCCESS;
                     });
             },
         },
@@ -807,9 +813,16 @@ export function createMappingFunctions(host){
                 // a file unmaps at the granule it computed from the view's address
                 // (a video encoder reading its input through views stopped after
                 // two frames when its view began mid-granule).
-                const address = placed === 0
-                    ? host.allocate(wanted, { alignment: ALLOCATION_GRANULARITY })
-                    : host.allocateAt?.(placed, wanted) ? placed : 0;
+                // An image's view goes to the image's own base when that is
+                // free, as Windows places one - but for an image linked for
+                // ASLR (DYNAMIC_BASE), which Windows moves wherever it likes:
+                // the CLR maps an assembly so, then reserves the same base
+                // for the native image it compiles of it.
+                const preferred = placed === 0 && offset === 0 && !mapping.image?.image.dynamicBase
+                    ? mapping.image?.image.imageBase ?? 0 : 0;
+                const address = preferred !== 0 && host.allocateAt?.(preferred, wanted) ? preferred
+                    : placed === 0 ? host.allocate(wanted, { alignment: ALLOCATION_GRANULARITY })
+                        : host.allocateAt?.(placed, wanted) ? placed : 0;
                 if (address === 0)
                 {
                     return fail(placed === 0 ? ERROR_NOT_ENOUGH_MEMORY : ERROR_INVALID_ADDRESS);
@@ -849,7 +862,9 @@ export function createMappingFunctions(host){
                             host.every?.(ms, tick) ?? (()=>{}),
                     }) ?? null;
                     views.set(address, view);
-                    host.viewRegions?.set(address, { length: wanted, writable });
+                    host.viewRegions?.set(address, { length: wanted, writable,
+                        ...mapping.image && offset === 0
+                            ? { sections: imageSections(mapping.image.image) } : {} });
                     if (metrics)
                     {
                         metrics.views++;
@@ -868,8 +883,16 @@ export function createMappingFunctions(host){
                 if (mapping.image)
                 {
                     // Held as a view of the file is, and given back at its unmap.
+                    // The image moved to where its view starts, or refused
+                    // there when it carries no fixups to move it with.
+                    const image = imageViewAt(mapping.image, address - offset);
+                    if (!image)
+                    {
+                        host.release(address);
+                        return fail(ERROR_INVALID_ADDRESS);
+                    }
                     host.files.retain(mapping.node);
-                    return deliver(mapping.image.slice(offset, offset + wanted));
+                    return deliver(image.subarray(offset, offset + wanted));
                 }
                 // The view holds the file from here to its unmap, so closing the
                 // mapping and the file handle first leaves it a file to be

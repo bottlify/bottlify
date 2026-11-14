@@ -367,6 +367,29 @@ test('a rename moves a file the program wrote, and copies one the source holds',
     await filesystemModule.dispose();
 });
 
+test('a file renamed while open is still the file its handles have', async()=>{
+    // An NGen worker writes a native image, renames it into the cache while
+    // its handle is open and asks that handle the image's size: Windows
+    // answers the file's, under its new name.
+    const fs = await filesystemModule.create({ drives: { C: {
+        source: createMemoryStore({}), writable: createMemoryStore() } } });
+    fs.createDirectory('C:\\Temp');
+    fs.createDirectory('C:\\Cache');
+    const handle = fs.open('C:\\Temp\\image.tmp', { read: true, write: true,
+        shareDelete: true, disposition: fs.Disposition.CREATE_NEW });
+    fs.write(handle, new Uint8Array(100).fill(9));
+    fs.rename('C:\\Temp\\image.tmp', 'C:\\Cache\\image.dll');
+    assert.equal(fs.size(handle), 100, 'the size of the file it names');
+    fs.write(handle, Uint8Array.of(1, 2));
+    assert.equal(fs.stat('C:\\Cache\\image.dll')?.size, 102, 'a write reaches it there');
+    assert.equal(fs.stat('C:\\Temp\\image.tmp'), null, 'and nothing comes back at the old name');
+    assert.throws(()=>fs.open('C:\\Cache\\image.dll', { write: true }), /incompatible/,
+        'its open still settles who else may open it');
+    fs.close(handle);
+    assert.doesNotThrow(()=>fs.close(fs.open('C:\\Cache\\image.dll', { write: true })));
+    await filesystemModule.dispose();
+});
+
 test('what one volume exports another takes as the same pieces, bytes made when read', async()=>{
     const first = await filesystemModule.create({ drives: { C: {} } });
     first.createDirectory('C:\\Steam');

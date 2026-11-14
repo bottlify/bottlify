@@ -520,6 +520,8 @@ export function createSpawner(host){
  * @property {(only: number[] | null) => { handle: number, type: string, object: any }[]}
  *     [inheritedHandles]  The handles a child started with bInheritHandles takes:
  *     every inheritable one, or of those the ones a handle list names.
+ * @property {(handle: number) => void} [inheritable]  Marks a handle inheritable, as
+ *     OpenProcess's bInheritHandle asks.
  * @property {() => Record<string, string>} [environment]
  *           This process's variables as they are now, which a child given no
  *           block inherits.
@@ -957,8 +959,16 @@ export function createSpawnFunctions(host){
         OpenProcess: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([, , id])=>{
+            handler: ([, inherit, id])=>{
                 const wanted = id >>> 0;
+                /** The handle, inheritable where bInheritHandle asked. @param {number} handle */
+                const kept = handle=>{
+                    if (inherit !== 0)
+                    {
+                        host.inheritable?.(handle);
+                    }
+                    return handle;
+                };
                 // The same default GetCurrentProcessId falls back to.
                 if (wanted === ((host.processId ?? 0x1000) >>> 0))
                 {
@@ -970,7 +980,7 @@ export function createSpawnFunctions(host){
                     // the pseudo-handle's object.
                     const self = kernel.processes.find?.(wanted)
                         ?? { kind: 'process', current: true, imagePath: host.imagePath?.() ?? '' };
-                    return kernel.handles.open('process', self);
+                    return kept(kernel.handles.open('process', self));
                 }
                 // A child, or any process of the run on this thread: a crash
                 // reporter opens the client that asked it for a dump.
@@ -981,7 +991,7 @@ export function createSpawnFunctions(host){
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                return kernel.handles.open('process', child);
+                return kept(kernel.handles.open('process', child));
             },
         },
 

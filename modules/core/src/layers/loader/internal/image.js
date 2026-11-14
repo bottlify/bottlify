@@ -4,7 +4,7 @@
  * See LICENSE for details
  */
 
-import { applyRelocations, parsePe, readImports, rvaToFileOffset } from './pe.js';
+import { parsePe, readImports, relocateImage, rvaToFileOffset } from './pe.js';
 
 /**
  * Turning a parsed PE into a laid-out image.
@@ -107,7 +107,7 @@ export function mapImage(file, base, { wide = false, bits } = {}){
         bytes.set(source.subarray(0, span), section.virtualAddress);
     }
 
-    applyRelocations(bytes, image, loadBase - image.imageBase);
+    relocateImage(bytes, image, loadBase);
 
     return {
         base: loadBase,

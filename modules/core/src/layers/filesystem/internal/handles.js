@@ -108,6 +108,23 @@ const SECTION_TERMS = Object.freeze({
  *     processes opening at once cannot both get in.
  * @property {(token: number) => void} release
  * @property {(key: string) => boolean} isOpen
+ * @property {(move: FileMove) => void} [moved]
+ *     A file was renamed: its opens are kept under the new name, and every
+ *     table following the volume's renames (`follow`) is told.
+ * @property {(table: (move: FileMove) => void) => () => void} [follow]
+ *     Tells a table of open files of every rename; answers how to stop.
+ */
+
+/**
+ * A file given a new name, which the handles open on it follow: an open file
+ * is the file, under whatever name it has now, as on Windows.
+ *
+ * @typedef {Object} FileMove
+ * @property {any} tree          The overlay the file lives in.
+ * @property {string} from       Its key before, drive plus folded path.
+ * @property {string} to         Its key now.
+ * @property {string[]} components  Its path in the tree now.
+ * @property {string} path       As its new name is spelled.
  */
 
 /**
@@ -139,6 +156,9 @@ export const removal = (key, path)=>({ key, path, access: { read: false, write: 
 export function createSharing(){
     /** @type {Map<number, OpenTerms>} */
     const opens = new Map();
+    /** Every table of open files on the volume, told of its renames. */
+    /** @type {Set<(move: FileMove) => void>} */
+    const tables = new Set();
     let next = 1;
     return {
         admit(terms){
@@ -173,6 +193,24 @@ export function createSharing(){
             opens.delete(token);
         },
         isOpen: key=>[...opens.values()].some(terms=>terms.key === key),
+        moved(move){
+            for (const terms of opens.values())
+            {
+                if (terms.key === move.from)
+                {
+                    terms.key = move.to;
+                    terms.path = move.path;
+                }
+            }
+            for (const table of tables)
+            {
+                table(move);
+            }
+        },
+        follow(table){
+            tables.add(table);
+            return ()=>void tables.delete(table);
+        },
     };
 }
 
@@ -216,6 +254,20 @@ export function createFileTable({ sharing = createSharing() } = {}){
         }
         return fresh;
     };
+
+    /** This process's opens of a file renamed, under its new name. @param {FileMove} move */
+    const follow = move=>{
+        for (const handle of open)
+        {
+            if (handle.tree === move.tree && handle.key === move.from)
+            {
+                handle.key = move.to;
+                handle.components = move.components;
+                handle.path = move.path;
+            }
+        }
+    };
+    const unfollow = sharing.follow?.(follow) ?? (()=>{});
 
     /** @param {FileHandle} handle */
     const live = handle=>{
@@ -445,6 +497,24 @@ export function createFileTable({ sharing = createSharing() } = {}){
                 closed++;
             }
             open.clear();
+            unfollow();
+        },
+
+        /**
+         * A file renamed: every open of it, in this process and every other
+         * the volume's sharing reaches, follows it to its new name.
+         *
+         * @param {FileMove} move
+         */
+        moved(move){
+            if (sharing.moved)
+            {
+                sharing.moved(move);
+            }
+            else
+            {
+                follow(move);
+            }
         },
 
         /**

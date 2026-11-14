@@ -2196,3 +2196,12 @@ ask for. A 64-bit process gets none of these exports yet: Framework64's shim is 
 setup there installs its own `mscoree.dll` (an XP bottle with 4.0 runs on that file), which the
 engine leaves alone; a shim of the engine's there would also stand in front of a CLR 2-only install's
 file, which mscoreei cannot serve. *2026-11-14.*
+
+**A247 revisited: XP gets no shim of the engine's even where the volume has no `mscoree.dll`.** A
+.NET Framework 4.8 layer built on Windows 7 brings no `system32\mscoree.dll` and no `InstallRoot`
+(both are 7's own), so an XP bottle on it has no shim. Standing the engine's shim in on XP only
+where no file is there was considered and not done: an XP .NET 2.0 or 3.5 setup decides whether to
+lay down its `mscoree.dll` by the version of the one it finds, and the engine's stand-in answers
+XP's 5.1.2600, newer than 2.0.50727, so the setup would keep it, and the bottle's CLR 2 programs
+would reach a shim that serves only CLR 4. An XP bottle on a 4.8 layer wants the layer to carry
+the shim's file and InstallRoot, as an XP machine's 4.x setup leaves them. *2026-11-14.*
