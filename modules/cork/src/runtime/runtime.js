@@ -1162,6 +1162,9 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
         predictDue: 0, predictNoShare: 0, predictReformsOut: 0, predictNotFormed: 0,
         predictNoRegion: 0, predictHeld: 0, predictQuiet: 0,
         queueDrops: 0, queueEvictions: 0, emitFailures: 0,
+        // Regions the worker formed otherwise from bytes nobody wrote, emitted here instead
+        // (`publishBatch`): a forming the worker does not repeat, which is a bug to find.
+        formedApart: 0,
         // A changed record by why (`accepted`): formed as it says with other
         // bytes, formed again by it with other bytes, or other modes (x87
         // precision, floats, the stack shape's tests).
@@ -3392,10 +3395,23 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
      */
     const publishBatch = (metas, batch, compiled, store, later = false, covers = [])=>{
         const built = batch.results.filter(result=>result.ok);
+        /** @type {any[]} */
+        const apart = [];
         for (let i = 0; i < metas.length; i++)
         {
             const result = batch.results[i];
-            if (!result.ok)
+            if (!result.ok && result.message === 'changed'
+                && metas[i].stamp === stamp(metas[i].region.pages))
+            {
+                // The worker formed it otherwise though nobody wrote its bytes: the
+                // region formed here is the one that runs, emitted here. Barren, it
+                // would never be translated, its bytes never written (CLR's
+                // hottest functions, `relinkBatch`).
+                refused[`formed apart at ${metas[i].region.entry.toString(16)}`] = 1;
+                counts.formedApart++;
+                apart.push(metas[i]);
+            }
+            else if (!result.ok)
             {
                 refused[`emit at ${metas[i].region.entry.toString(16)}: ${result.message}`] = 1;
                 // Done with, as a region the emitter took is: left in flight,
@@ -3407,10 +3423,14 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
                 counts.emitFailures++;
             }
         }
+        const here = apart.length === 0 ? 0 : publishBatch(apart, emitBatch(apart.map(one=>({
+            region: one.region, entryTop: one.entryTop, checked: one.checked,
+            copies: one.copies === true, ...precisionJob(one) })), emitLayout, found, emitOptions(),
+        emitCache), null, store);
         if (built.length === 0)
         {
             uncoverKeys(covers);
-            return 0;
+            return here;
         }
         counts.moduleBytes += batch.module.length;
         /** @type {string | undefined} */
@@ -3465,7 +3485,7 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
         {
             uncoverKeys(covers);
         }
-        return published;
+        return published + here;
     };
 
     /**
@@ -4227,9 +4247,9 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
             jobs: chunk.map(record=>({ entry: record.entry, entryTop: record.entryTop,
                 hash: record.hash, checked: record.checked === true, copies: record.copies === true,
                 ...precisionJob(record),
-                ...(record.targets === undefined ? {} : { targets: record.targets }) })),
+                ...(record.targets === undefined ? {} : { targets: record.targets }),
+                formable: [...record.formable ?? record.pages] })),
             pages: [...copies],
-            formable: chunk.flatMap(record=>[...record.formable ?? record.pages]),
             form: formOptions,
         };
         const translator = freeTranslator();
@@ -5002,9 +5022,9 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
                     jobs: unbuilt.map(one=>({ entry: one.region.entry, entryTop: one.entryTop,
                         hash: one.region.hash, checked: one.checked, copies: one.copies === true,
                         ...precisionJob(one),
-                        ...(one.targets === undefined ? {} : { targets: one.targets }) })),
+                        ...(one.targets === undefined ? {} : { targets: one.targets }),
+                        formable: [...one.region.formable ?? one.region.pages] })),
                     pages: [...copies],
-                    formable: unbuilt.flatMap(one=>[...one.region.formable ?? one.region.pages]),
                     form: formOptions,
                 },
                 layout: emitLayout, features: found, options: emitOptions(),
@@ -6149,6 +6169,7 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
                 barren: barren.size,
                 queueDrops: counts.queueDrops,
                 emitFailures: counts.emitFailures,
+                formedApart: counts.formedApart,
                 queueEvictions: counts.queueEvictions,
                 // Times a page was left to the other executor, and the pages left now.
                 volatilePages: counts.volatilePages,

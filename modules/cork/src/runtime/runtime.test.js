@@ -4214,3 +4214,51 @@ test('an address that formed nothing is asked for again once its code is written
     await m.runtime.translatePending();
     assert.ok(m.runtime.entryOf(CODE, 0) >= 0, 'translated once its code is written');
 });
+
+test('a region the worker forms otherwise from bytes nobody wrote is emitted here, not left'
+    + ' barren', async()=>{
+    // A translator that answers every region of a batch `changed`, as a worker forming
+    // over other pages than the runtime did answered CLR's hottest functions: barren
+    // until their page was written, which never came.
+    const m = machine({ worker: false });
+    /** @type {((data: any) => void) | undefined} */
+    let answer;
+    /** @type {any[]} */
+    const asked = [];
+    m.runtime.attachTranslator({
+        post: (/** @type {any} */ data)=>{
+            if (data.ready === true)
+            {
+                queueMicrotask(()=>answer?.({ ready: true }));
+                return;
+            }
+            asked.push(data);
+            queueMicrotask(()=>answer?.({ id: data.id, batch: { module: new Uint8Array(0),
+                results: data.relink.jobs.map(()=>({ ok: false, message: 'changed' })),
+                emitMs: 0, encodeMs: 0 } }));
+        },
+        onMessage: (/** @type {(data: any) => void} */ on)=>{
+            answer = on;
+        },
+        onLost: ()=>{},
+        terminate: ()=>{},
+    });
+    m.write(CODE, COUNTDOWN);
+    m.setReg(4, 0x80000);
+    await new Promise(resolve=>setTimeout(resolve, 0));
+    m.runtime.noteHot(CODE, 0, 2);
+    for (let turn = 0; turn < 50 && m.runtime.entryOf(CODE) < 0; turn++)
+    {
+        await m.runtime.translatePending();
+        await new Promise(resolve=>setTimeout(resolve, 0));
+    }
+    assert.ok(asked.length > 0, 'the batch went to the translator');
+    assert.ok(m.runtime.entryOf(CODE) >= 0, 'published, emitted here');
+    const d = m.runtime.diagnostics();
+    assert.equal(d.formedApart, 1);
+    assert.equal(d.emitFailures, 0);
+    assert.equal(d.barren, 0);
+    const exit = m.runtime.run(m.runtime.entryOf(CODE), 1_000_000);
+    assert.equal(exit.kind, 'halt');
+    assert.equal(m.reg(1), 0);
+});
