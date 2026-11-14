@@ -141,8 +141,8 @@ Performance is part of correctness: a slow implementation does not reproduce how
 Bugs and costs are found by measurement — the harness, ring buffers, phase profiler and guest CPU
 attribution are first-class.
 
-- **Look in the tools before debugging or searching.** `tools/cdp_test/README.md` lists every
-  instrument and live switch (the live ones attach to a running game without pausing it); read it
+- **Look in the tools before debugging or searching.** `tools/cdp_test/README.md` opens with every
+  tool by the question it answers, then the live switches (they attach to a running game); read it
   first and use what is there; `tools/cdp_test/DIAGNOSING.md` is the order to look in when a run is
   slow, flickers or stops. An instrument made for a hunt that a later one could use goes into
   `tools/` and onto that list in the same change, not into a scratch folder.
