@@ -898,7 +898,15 @@ export function createSyncFunctions(host){
             handler: sectionTraps.tryEnter,
         },
 
-        /** VOID DeleteCriticalSection(LPCRITICAL_SECTION lpCriticalSection) */
+        /**
+         * VOID DeleteCriticalSection(LPCRITICAL_SECTION lpCriticalSection)
+         *
+         * The section is left free, as Wine's RtlDeleteCriticalSection leaves
+         * it (LockCount -1, no owner, no debug record): a program that enters
+         * a section after deleting it, as Crysis's renderer does on its way
+         * out, takes it on Windows. Zeroed whole, its count read as held by
+         * nobody, and that entry waited for good.
+         */
         DeleteCriticalSection: {
             argBytes: 4,
             /** @param {number[]} args */
@@ -906,6 +914,7 @@ export function createSyncFunctions(host){
                 const address = pointer >>> 0;
                 host.critical.forget(address);
                 host.writeMemory(address, new Uint8Array(cs.SIZE));
+                writeI32(address + cs.LOCK_COUNT, CS_UNLOCKED);
                 return 0;
             },
         },

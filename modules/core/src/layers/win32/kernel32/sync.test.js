@@ -299,6 +299,11 @@ test('a critical section is initialised in the guest structure, not beside it', 
     assert.equal(host.readI32(section), -1);
     fns.DeleteCriticalSection.handler([section]);
     assert.equal(host.readI32(section), 0);
+    // Left free, as Wine leaves it: a program that enters it after deleting it
+    // takes it rather than waiting for an owner that is not there.
+    assert.equal(host.readI32(section + CS_LOCK_COUNT), CS_UNLOCKED);
+    assert.equal(host.readI32(section + CS_RECURSION_COUNT), 0);
+    assert.equal(host.readI32(section + CS_OWNING_THREAD), 0);
     fns.InitializeCriticalSectionAndSpinCount.handler([section, 4000]);
     assert.equal(host.readI32(section), -1);
 });
