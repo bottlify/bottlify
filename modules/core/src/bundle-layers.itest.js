@@ -26,7 +26,7 @@ import { randomBytes } from 'node:crypto';
 import { BOTTLE_DRIVE_PATH, BOTTLE_REGISTRY_PATH, BOTTLE_SYSTEM_PATH, createApp } from './app.js';
 import { writeBundle } from './bundle-node.js';
 import { createHive, HKEY_LOCAL_MACHINE, REG_DWORD, REG_SZ } from './layers/win32/advapi32/registry.js';
-import { buildExe } from '../../../tools/make-pe.mjs';
+import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
 
 /** Small blocks, so the layer's larger file spans several and a read of it misses. */
 const BLOCK_SIZE = 64 * 1024;
