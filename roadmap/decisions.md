@@ -2196,3 +2196,17 @@ ask for. A 64-bit process gets none of these exports yet: Framework64's shim is 
 setup there installs its own `mscoree.dll` (an XP bottle with 4.0 runs on that file), which the
 engine leaves alone; a shim of the engine's there would also stand in front of a CLR 2-only install's
 file, which mscoreei cannot serve. *2026-11-14.*
+
+**A248. A page reads back the protection it was given; only PAGE_NOACCESS is enforced.**
+`VirtualQuery` answers each page of a `VirtualAlloc` reservation with the protection its last
+commit or `VirtualProtect` gave it, its run split where that changes, and `AllocationProtect` the
+reservation's own; `VirtualProtect` hands back the page's real old protection, and refuses a range
+that reaches an uncommitted page (`ERROR_INVALID_ADDRESS`), a protection that is no single base
+one with at most `PAGE_GUARD`/`PAGE_NOCACHE`/`PAGE_WRITECOMBINE`, and copy-on-write, which private
+memory cannot have (`ERROR_INVALID_PARAMETER`), as Windows does (Wine's kernel32:virtual). What a
+program can tell apart only by faulting is not reproduced: a closed page faults where the processor
+can close it, but a write to `PAGE_READONLY` memory, a jump into `PAGE_READWRITE` memory or a
+touch of a `PAGE_GUARD` page goes on, since the translator keeps no per-page write or execute
+permission and a check on every store would cost every program its speed. A program that relies on
+one of those faults is the case that reopens this.
+*2026-11-14.*

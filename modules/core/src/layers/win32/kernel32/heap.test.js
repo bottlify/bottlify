@@ -1282,7 +1282,7 @@ function arenaQuery(){
             protect: view.getUint32(buffer + MBI.Protect, true),
         };
     };
-    return { fns, query };
+    return { fns, query, memory: { view } };
 }
 
 test('VirtualQuery inside a reservation answers the reservation, page by page as committed',
@@ -1299,7 +1299,8 @@ test('VirtualQuery inside a reservation answers the reservation, page by page as
         assert.deepEqual(query(reserved), { base: reserved, allocationBase: reserved,
             size: 0x1000, state: MEM_RESERVE, protect: 0 });
         assert.deepEqual(query(reserved + 0x1234), { base: reserved + 0x1000,
-            allocationBase: reserved, size: 0x1000, state: MEM_COMMIT, protect: 0x40 });
+            allocationBase: reserved, size: 0x1000, state: MEM_COMMIT, protect: 4 },
+        'the protection it was committed with');
         assert.deepEqual(query(reserved + 0x8000), { base: reserved + 0x8000,
             allocationBase: reserved, size: 2 * GRANULARITY - 0x8000, state: MEM_RESERVE,
             protect: 0 });
@@ -1309,8 +1310,47 @@ test('VirtualQuery inside a reservation answers the reservation, page by page as
 
         const committed = fns.VirtualAlloc.handler([0, 0x1000, MEM_COMMIT, 4]);
         assert.deepEqual(query(committed), { base: committed, allocationBase: committed,
-            size: 0x1000, state: MEM_COMMIT, protect: 0x40 });
+            size: 0x1000, state: MEM_COMMIT, protect: 4 });
     });
+
+test('a reservation\'s pages read back the protection they were last given', ()=>{
+    // Wine's kernel32:virtual: VirtualQuery answers each page's protection,
+    // a run split where it changes, and VirtualProtect hands back the old
+    // one; a protection that is no base one, or copy-on-write for private
+    // memory, is refused.
+    const { fns, query, memory } = arenaQuery();
+    const base = fns.VirtualAlloc.handler([0, 0x3000, MEM_COMMIT, 2]);
+    assert.notEqual(base, 0);
+    assert.equal(query(base).protect, 2);
+    assert.equal(query(base).size, 0x3000);
+    assert.equal(fns.VirtualProtect.handler([base + 0x1000, 0x1000, 0x20, 0x40]), 1);
+    assert.equal(memory.view.getUint32(0x40, true), 2, 'the old protection');
+    assert.deepEqual([query(base).size, query(base + 0x1000).protect,
+        query(base + 0x1000).size, query(base + 0x2000).protect], [0x1000, 0x20, 0x1000, 2]);
+    assert.equal(fns.VirtualProtect.handler([base, 0x1000, 0x40, 0x40]), 1);
+    assert.equal(memory.view.getUint32(0x40, true), 2);
+    for (const refused of [0, 0x03, 0x08, 0x80, 0x101, 0x800])
+    {
+        assert.equal(fns.VirtualAlloc.handler([0, 0x1000, MEM_COMMIT, refused]), 0,
+            `0x${refused.toString(16)}`);
+        assert.equal(fns.VirtualProtect.handler([base, 0x1000, refused, 0x40]), 0,
+            `0x${refused.toString(16)}, protected`);
+    }
+    assert.notEqual(fns.VirtualAlloc.handler([0, 0x1000, MEM_COMMIT, 0x104]), 0,
+        'a guard page is a base one with a modifier');
+
+    // A reserved page has no protection to change: the range is refused
+    // whole, and committing it later starts from what the commit gives.
+    const reserved = fns.VirtualAlloc.handler([0, 0x2000, MEM_RESERVE, 1]);
+    assert.equal(query(reserved).state, MEM_RESERVE);
+    assert.equal(query(reserved).protect, 0);
+    assert.equal(fns.VirtualProtect.handler([reserved, 0x1000, 2, 0x40]), 0);
+    assert.equal(fns.VirtualAlloc.handler([reserved, 0x1000, MEM_COMMIT, 1]), reserved);
+    assert.equal(fns.VirtualProtect.handler([reserved, 0x2000, 2, 0x40]), 0,
+        'half of it still reserved');
+    assert.equal(fns.VirtualProtect.handler([reserved, 0x1000, 2, 0x40]), 1);
+    assert.equal(memory.view.getUint32(0x40, true), 1, 'PAGE_NOACCESS, as committed');
+});
 
 test('VirtualQuery says free only where VirtualAlloc can reserve', ()=>{
     // "Free pages ... available to be allocated": an address the arena does
