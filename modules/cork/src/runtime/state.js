@@ -283,6 +283,7 @@ export function baseState({ memory, ram, layout, sharedLayout = undefined, confi
  * @typedef {Record<string, any>} Late
  * @typedef {ReturnType<typeof baseState>
  *     & ReturnType<typeof import('./diagnostics.js').createDiagnostics>
+ *     & ReturnType<typeof import('./variants.js').createVariants>
  *     & Late} State
  */
 

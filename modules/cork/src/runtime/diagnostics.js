@@ -18,7 +18,7 @@ import { formRegion } from '../region.js';
 import { decode } from '../decode/decoder.js';
 import { emitBatch } from './emit-built.js';
 import { openArena } from './arena.js';
-import { ANY_TOP } from './entries.js';
+import { ANY_TOP, keyOf } from './entries.js';
 import { PageFlag } from './pages.js';
 import { Tables } from './layout.js';
 import { blockCounts, mechanismCounts, topBlocks, transferTargets } from './block-profile.js';
@@ -663,10 +663,10 @@ export function createDiagnostics(state){
                     {
                         tops |= entries.entryOf(address, top) >= 0 ? 1 << top : 0;
                     }
-                    let pending = rt.coveredOut.get(rt.keyOf(address, ANY_TOP)) ?? 0;
+                    let pending = rt.coveredOut.get(keyOf(address, ANY_TOP)) ?? 0;
                     for (let top = 0; top < 8; top++)
                     {
-                        pending += rt.coveredOut.get(rt.keyOf(address, top)) ?? 0;
+                        pending += rt.coveredOut.get(keyOf(address, top)) ?? 0;
                     }
                     return { address, ...one, tops, coveredOut: pending,
                         closed: rt.closedIn.has(address), why: missReason(address) };

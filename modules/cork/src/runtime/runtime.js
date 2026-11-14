@@ -28,13 +28,13 @@
 
 import { codeSpans, emptyCode, formRegion, formShared, hashRegion } from '../region.js';
 import { CallStack, TIER_SLOT, enterRegion, mathImports } from '../emit/region.js';
-import { RANGE, SHAPE, isX87, trackRegion } from '../emit/x87.js';
+import { RANGE, SHAPE, trackRegion } from '../emit/x87.js';
 import { HELD, PRECISION } from '../emit/memory.js';
 import { arenaEmitCache, createEmitCache, emitBatch, relinkBatch } from './emit-built.js';
 import { createArena } from './arena.js';
 import { buildHelpersModule } from '../emit/helpers.js';
 import { openTranslationWorker } from './translator.js';
-import { ANY_TOP } from './entries.js';
+import { ANY_TOP, keyOf } from './entries.js';
 import { PageFlag } from './pages.js';
 import { SharedSwitch } from './shared-code.js';
 import { Tables } from './layout.js';
@@ -45,6 +45,7 @@ import { sharedFormsOf, sharedStoreOf } from './shared-forms.js';
 import { baseState, join } from './state.js';
 import { cacheKey, moduleKey, packRegion, seedRecords, unpackRegion } from './cache.js';
 import { createDiagnostics } from './diagnostics.js';
+import { createVariants, usesX87 } from './variants.js';
 
 /** @typedef {import('../../../core/src/layers/cpu/engine.js').Runtime} Runtime */
 /** @typedef {import('../../../core/src/layers/cpu/engine.js').ExitKind} ExitKind */
@@ -58,9 +59,6 @@ import { createDiagnostics } from './diagnostics.js';
  * runtime adds before it puts the map again: one part in this many.
  */
 const MAP_SHARE = 64;
-
-/** @param {import('../region.js').Region} region */
-const usesX87 = region=>region.blocks.some(block=>block.instructions.some(isX87));
 
 /** Exit codes by number, as the region functions answer them. */
 const KINDS = /** @type {ExitKind[]} */ (
@@ -91,7 +89,7 @@ export function translatorWorkerUrl(){
  * @returns {Runtime & { pages: import('./pages.js').PageTable }}
  */
 export function createCorkRuntime(env){
-    const rt = baseState(env);
+    const rt = /** @type {import('./state.js').State} */ (baseState(env));
     const { memory, ram, layout, imports, nowMs, ramOf, codeBase, read, readBytes, settings,
         cacheVersion, clock, formOptions, formHere, leaveOut, found, emitLayout, baseGlobals,
         sharedMemory, codeShared, pages, codePages, table, resumable, entries, view, guestBytes,
@@ -99,95 +97,9 @@ export function createCorkRuntime(env){
     const { logOf, CALL_SITES_CAP, counts, noteStall, exits, untranslatedBy, refused, refusedWhy,
         relaxedFlagReads, storeTrace, trace, interpretedAt, forcedStep, counters, diagnostics
     } = join(rt, createDiagnostics(rt));
-    /**
-     * The precision control each x87 region is compiled for, by its entry
-     * (`X87Precision`): the one the machine has when the entry is first formed
-     * -- single, as Direct3D leaves it, or a wide one -- then, once a region
-     * there left because it ran under the other, that one, and after a second
-     * such leave a test at every rounding instruction (`mixed`). A program
-     * that runs one part of its code under single and another under double --
-     * a renderer and a physics library -- keeps each part compiled for its
-     * own, where one switch for the whole program put every x87 region of it
-     * under the test once both were seen.
-     * @type {Map<number, { precision: X87Precision, misses: number }>}
-     */
-    const precisionAt = new Map();
-    /**
-     * The precision control a formed region's x87 is compiled for (`precisionAt`),
-     * the machine's for an entry not yet seen; `mixed` without `wideFirst`, and for a
-     * region with no x87 in it, which tests nothing.
-     *
-     * @param {import('../region.js').Region} region
-     * @returns {X87Precision}
-     */
-    const precisionOf = region=>{
-        if (settings.wideFirst !== true || !usesX87(region))
-        {
-            return 'mixed';
-        }
-        let known = precisionAt.get(region.entry);
-        if (known === undefined)
-        {
-            const single = (view().getUint16(layout.x87Control, true) & 0x300) === 0;
-            known = { precision: /** @type {X87Precision} */ (single ? 'narrow' : 'wide'),
-                misses: 0 };
-            precisionAt.set(region.entry, known);
-        }
-        return known.precision;
-    };
-    /** The x87 entries by the precision control they are compiled for. */
-    const precisionCounts = ()=>{
-        const counted = { wide: 0, narrow: 0, mixed: 0 };
-        for (const { precision } of precisionAt.values())
-        {
-            counted[precision]++;
-        }
-        return counted;
-    };
-    /**
-     * The entries, by `keyOf`, whose single-precision results kept leaving a float's range
-     * (`RANGE`): compiled for single, they round every result from a double.
-     * @type {Set<number>}
-     */
-    const roundedKeys = new Set();
-    /**
-     * A formed region's precision as a job and a record carry it, and whether its
-     * single-precision arithmetic runs on floats (`floatSingles`).
-     *
-     * @param {import('../region.js').Region} region @param {number} entryTop
-     */
-    const precisionFlags = (region, entryTop)=>{
-        const precision = precisionOf(region);
-        return { wide: precision === 'wide', narrow: precision === 'narrow',
-            floats: precision === 'narrow' && settings.floatSingles !== false
-                && !roundedKeys.has(keyOf(region.entry, entryTop)) };
-    };
-    /**
-     * What a job's emitter is told of its precision: nothing for `mixed`, the
-     * emitter's default.
-     *
-     * @param {{ wide?: boolean, narrow?: boolean, floats?: boolean }} one
-     */
-    const precisionJob = one=>(one.wide === true ? { precision: /** @type {const} */ ('wide') }
-        : one.narrow === true ? { precision: /** @type {const} */ ('narrow'),
-            ...(one.floats === true ? { floats: true } : {}) } : {});
-    /**
-     * Whether regions test the pages they read (`checkReads`): from the
-     * start when asked, or from the program's first fault on a page it cannot
-     * reach.
-     */
-    let readsChecked = settings.checkReads === true;
-    /** Whether regions are made loose (`looseStacks`): until code is translated on a stack. */
-    let loose = settings.looseStacks !== false && settings.precise !== true;
-    /** The pages of the threads' stacks the host named (`noteStack`). @type {Set<number>} */
-    const stackPages = new Set();
-    /**
-     * Whether a write to the page marks it (`takeWrites`): not on a thread's
-     * stack while stores through esp test no page.
-     * @param {number} page
-     */
-    const watchable = page=>!(loose
-        && (stackPages.has(page) || codeShared?.onStack(page) === true));
+    const { precisionAt, precisionOf, roundedKeys, precisionFlags, precisionJob,
+        stackPages, watchable, throughStack, stackCodeSeen, readsFaulted, precisionMissed,
+        floatMissed, shapeMissed, checkedAt } = join(rt, createVariants(rt));
     // The five helper functions every region imports, defined once here and
     // instantiated over this memory when the first region is published.
     /** @type {any} */
@@ -240,10 +152,6 @@ export function createCorkRuntime(env){
      * other runtime of this thread would take them. */
     const sharedModules = keepsModulesFor === null || sharesStore === null ? null
         : sharedModulesOf(sharesStore, settings.sharedModuleBytes);
-    /** The queue, miss and barren key: one address at one x87 top. Every
-     * "has an entry" question is for a top, so a region compiled for another
-     * top is no answer. @param {number} eip @param {number} top */
-    const keyOf = (eip, top)=>eip * 16 + top;
     /** @type {Map<number, number>} candidates not yet formed: key(eip, top) → eip */
     const queue = new Map();
     /** The candidates by heat: bucket b holds the ones whose heat (the
@@ -497,8 +405,6 @@ export function createCorkRuntime(env){
         entries.noteStart(one.eip);
         counts.heldEntries++;
     };
-    /** key(entry, top) of the x87 regions whose shape test kept failing: formed checked. */
-    const checkedKeys = new Set();
     /** By the start of a block inside a structured region's loop that has no entry, the
      * regions holding it so. @type {Map<number, Set<RegionRecord>>} */
     const closedIn = new Map();
@@ -1017,151 +923,6 @@ export function createCorkRuntime(env){
         }
     };
 
-    /**
-     * Whether a region's code reaches memory through esp alone (a push, a call,
-     * an operand off esp with no index): the accesses a loose region leaves
-     * untested.
-     *
-     * @param {import('../region.js').Region} region
-     */
-    const throughStack = region=>region.blocks.some(block=>block.instructions.some(
-        ({ op, operands })=>op.startsWith('push') || op === 'call' || op === 'enter'
-            || operands.some(operand=>operand.kind === 'mem' && operand.base === 4
-                && (operand.index ?? -1) < 0)));
-
-    /**
-     * Code is translated on a page of a thread's stack: the regions that store
-     * through esp untested go, and every region from now on tests them -- a
-     * store through esp could write the code itself.
-     */
-    const stackCodeSeen = ()=>{
-        if (!loose)
-        {
-            return;
-        }
-        loose = false;
-        counts.stackCode++;
-        codeShared?.raise(SharedSwitch.STACKS_TESTED);
-        const on = new Set([...regions].filter(record=>record.loose)
-            .flatMap(record=>[...record.pages]));
-        for (const page of on)
-        {
-            invalidatePage(page);
-        }
-    };
-
-    /**
-     * The program touched a page it cannot reach, and the tier that tested
-     * the access faulted it: reads are tested from now on, and the regions
-     * that wrapped theirs into RAM go -- the same instruction would read zeros
-     * there where the interpreter faults. A program reaches one only on
-     * purpose (a reservation it commits in its own handler), and a run
-     * switches at most once.
-     */
-    const readsFaulted = ()=>{
-        if (readsChecked || settings.checkReads === false)
-        {
-            return;
-        }
-        readsChecked = true;
-        counts.readSwitches++;
-        codeShared?.raise(SharedSwitch.READS_CHECKED);
-        const on = new Set([...regions].filter(record=>record.wrapped)
-            .flatMap(record=>[...record.pages]));
-        for (const page of on)
-        {
-            invalidatePage(page);
-        }
-    };
-
-    /**
-     * A region left before a rounding instruction because the machine has
-     * another precision control than it was compiled for (PRECISION): the
-     * regions holding that instruction compiled for the other go, and their
-     * entries are compiled from now on for the one found -- or, an entry whose
-     * regions left this way once already, for a test at every rounding
-     * instruction (`precisionAt`). Every other region stays as it is.
-     *
-     * @param {number} eip  the instruction it left before
-     */
-    const precisionMissed = eip=>{
-        const single = (view().getUint16(layout.x87Control, true) & 0x300) === 0;
-        const under = single ? 'narrow' : 'wide';
-        const going = [...byPage.get(eip >>> 12) ?? []].filter(record=>
-            (single ? record.wide : record.narrow) === true
-            && record.spans.some(([from, to])=>eip >= from && eip < to));
-        for (const record of going)
-        {
-            const known = precisionAt.get(record.entry);
-            // A region compiled before its entry moved on goes without moving it again.
-            if (known !== undefined && known.precision === (record.wide ? 'wide' : 'narrow'))
-            {
-                known.precision = known.misses === 0 ? under : 'mixed';
-                known.misses++;
-                counts.precisionSwitches++;
-            }
-        }
-        if (going.length > 0)
-        {
-            unpublish(going);
-        }
-    };
-
-    /**
-     * A region computing single precision on floats left before an operation whose
-     * float result is not the processor's (`RANGE`): the host ran it. One that keeps
-     * leaving -- data at a float's edge, a result past it -- goes, its entry
-     * translated again rounding every result from a double (`roundedKeys`).
-     *
-     * @param {number} eip  the operation it left before
-     */
-    const floatMissed = eip=>{
-        counts.floatMisses++;
-        const going = [...byPage.get(eip >>> 12) ?? []].filter(record=>record.floats === true
-            && record.spans.some(([from, to])=>eip >= from && eip < to)
-            && (record.floatMisses = (record.floatMisses ?? 0) + 1) >= settings.checkedAfter);
-        for (const record of going)
-        {
-            roundedKeys.add(keyOf(record.entry, record.entryTop));
-            counts.floatsRounded++;
-        }
-        if (going.length > 0)
-        {
-            unpublish(going);
-        }
-    };
-    /**
-     * An entry found the machine's x87 stack in another shape than its block
-     * was compiled for, and the host's interpreter runs the block. A region
-     * that keeps finding it -- code that faults on purpose, or a function
-     * entered with the stack in more than one shape -- is dropped, to be
-     * formed again checked; answers it then.
-     *
-     * @param {number} eip @param {number} top
-     * @returns {RegionRecord | null}
-     */
-    const shapeMissed = (eip, top)=>{
-        counts.shapeMisses++;
-        const record = recordOf.get(entries.entryOf(eip, top));
-        if (record === undefined || record.checked)
-        {
-            return null;
-        }
-        record.shapeMisses = (record.shapeMisses ?? 0) + 1;
-        if (record.shapeMisses < settings.checkedAfter)
-        {
-            return null;
-        }
-        checkedKeys.add(keyOf(record.entry, record.entryTop));
-        counts.shapeChecked++;
-        unpublish([record]);
-        return record;
-    };
-    /** Whether a formed x87 region is to be translated checked.
-     * @param {import('../region.js').Region} region @param {number} entryTop */
-    const checkedAt = (region, entryTop)=>usesX87(region)
-        && (!settings.x87Shapes || checkedKeys.has(keyOf(region.entry, entryTop)));
-
     /** @param {number} address */
     const translatable = address=>(codePages.get(address >>> 12)
         & (PageFlag.VOLATILE | PageFlag.INACCESSIBLE | PageFlag.NO_EXECUTE)) === 0
@@ -1458,11 +1219,11 @@ export function createCorkRuntime(env){
         resume: resumable,
         structure: settings.structure,
         precise: settings.precise === true,
-        checkReads: readsChecked,
+        checkReads: rt.readsChecked,
         zeroPage: settings.zeroPage === true,
         atomic: settings.atomic === true,
         ordered: settings.atomic === true && settings.ordered === true,
-        looseStacks: loose,
+        looseStacks: rt.loose,
         leaveOut,
         timings: import.meta.BOTTLIFY_DIAGNOSTICS !== false && settings.timings === true,
         ...(settings.trapPort === undefined ? {} : { trapPort: settings.trapPort }),
@@ -1886,8 +1647,8 @@ export function createCorkRuntime(env){
             || ((one.wide === true || one.narrow === true)
                 && precisionOf(region) !== (one.wide === true ? 'wide' : 'narrow'))
             || (one.floats === true && roundedKeys.has(keyOf(region.entry, one.entryTop)))
-            || (one.loose && !loose)
-            || (one.wrapped && readsChecked)
+            || (one.loose && !rt.loose)
+            || (one.wrapped && rt.readsChecked)
             || (one.checked !== true && checkedAt(region, one.entryTop)))
         {
             // A page of it was written while the batch was built.
@@ -2079,7 +1840,7 @@ export function createCorkRuntime(env){
         {
             codePages.markCode(start, end - start);
         }
-        if (loose && (stackPages.size > 0 || codeShared !== null)
+        if (rt.loose && (stackPages.size > 0 || codeShared !== null)
             && [...region.pages].some(page=>stackPages.has(page)
                 || codeShared?.onStack(page) === true))
         {
@@ -2108,7 +1869,7 @@ export function createCorkRuntime(env){
                 }
             }
         }
-        if (record.loose && !loose && throughStack(region))
+        if (record.loose && !rt.loose && throughStack(region))
         {
             // Its own code lies on a stack (`stackCodeSeen` above, which ran before
             // it was among the regions): its stores through esp, untested, could
@@ -3306,8 +3067,8 @@ export function createCorkRuntime(env){
             }
             counts.predictQuiet += quiet.size;
             formed.push({ region, entryTop: record.entryTop, stamp: stamp(region.pages),
-                cached: null, ...precisionFlags(region, record.entryTop), loose,
-                wrapped: !readsChecked,
+                cached: null, ...precisionFlags(region, record.entryTop), loose: rt.loose,
+                wrapped: !rt.readsChecked,
                 checked: record.checked === true, copies: record.copies === true,
                 replaces: record, targets: [...targets], sites: [...added.keys(), ...quiet] });
         }
@@ -3355,8 +3116,8 @@ export function createCorkRuntime(env){
             const region = formRegion(read, record.entry, { ...formHere,
                 translatable: formableFrom(record.entry), ...called });
             formed.push({ region, entryTop: record.entryTop, stamp: stamp(region.pages),
-                cached: null, ...precisionFlags(region, record.entryTop), loose,
-                wrapped: !readsChecked,
+                cached: null, ...precisionFlags(region, record.entryTop), loose: rt.loose,
+                wrapped: !rt.readsChecked,
                 checked: record.checked === true, copies: true, copying: true, replaces: record,
                 ...(record.targets === undefined ? {} : { targets: record.targets }) });
             if (formed.length >= settings.batchRegions)
@@ -3679,7 +3440,7 @@ export function createCorkRuntime(env){
     /** A candidate's store key at the top it is entered at, or at any top.
      * @param {number} eip @param {number} entryTop @param {boolean} anyTop */
     const candidateKey = (eip, entryTop, anyTop)=>regionKey({ region: { entry: eip }, entryTop,
-        loose, wrapped: !readsChecked, anyTop });
+        loose: rt.loose, wrapped: !rt.readsChecked, anyTop });
     /**
      * The batch's candidates' records asked of a store across a link before
      * they are formed, in one wait, at both keys each (`recordBefore`).
@@ -4135,8 +3896,8 @@ export function createCorkRuntime(env){
         for (const one of unbuilt)
         {
             Object.assign(one, precisionFlags(one.region, one.entryTop));
-            one.loose = loose;
-            one.wrapped = !readsChecked;
+            one.loose = rt.loose;
+            one.wrapped = !rt.readsChecked;
             one.checked = checkedAt(one.region, one.entryTop);
         }
         const translator = unbuilt.length > 0 ? freeTranslator() : null;
@@ -4480,8 +4241,8 @@ export function createCorkRuntime(env){
                 continue;
             }
             formed.push({ region, entryTop, stamp: stamp(region.pages), cached: null,
-                ...precisionFlags(region, entryTop), loose,
-                wrapped: !readsChecked,
+                ...precisionFlags(region, entryTop), loose: rt.loose,
+                wrapped: !rt.readsChecked,
                 checked: checkedAt(region, entryTop),
                 // Formed with the record's callees, and translated with them should
                 // the record be refused: the translator forms the region again from
@@ -4640,14 +4401,10 @@ export function createCorkRuntime(env){
     };
     // Late: what the modules read of runtime.js.
     join(rt, {
-        precisionCounts,
-        precisionJob,
-        get loose(){ return loose; },
         placedLive,
         heldModules,
         get heldBytes(){ return heldBytes; },
         sharedModules,
-        keyOf,
         queue,
         barren,
         barrenAt,
@@ -4658,10 +4415,13 @@ export function createCorkRuntime(env){
         crtFormed,
         recordOf,
         closedIn,
+        byPage,
         dropped,
         STUB_WRITES,
         volatileUntil,
         get corkRetired(){ return corkRetired; },
+        unpublish,
+        invalidatePage,
         pageBytes,
         translatable,
         formableFrom,
@@ -4892,7 +4652,7 @@ export function createCorkRuntime(env){
          */
         readsFaulted,
         /** Whether translated reads test their pages now. */
-        readsChecked: ()=>readsChecked,
+        readsChecked: ()=>rt.readsChecked,
         noteHot(eip, top = 0, hotness = 0){
             if (!settings.translate)
             {
