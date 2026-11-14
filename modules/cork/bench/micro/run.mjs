@@ -19,11 +19,16 @@
  * Each rep makes a fresh host and times its first iteration (`coldMs`: the
  * interpreter, the translator and the tier-up), runs `--warm` iterations and
  * times `--iters` more (`usPerIter`, the best rep: translated code in its
- * steady state). `eax` is the program's own checksum and must not change with
- * the engine. `--cork` is the translator's configuration; `--blocks DIR` writes
- * the first rep's block counts to `DIR/<name>.blocks.json`, which
- * `tools/translator/cork-asm.mjs --bin <image> --at 0x401000 --blocks` weighs, with the
- * run's count of each way between regions (`mechanisms`).
+ * steady state). The defaults let V8 tier the regions up: at 20 warm and 40
+ * timed iterations calls512-scatter-x87 had 6 of its 1066 region functions
+ * optimised, the rest in the baseline tier, at 400 and 400 it had 518 (Node
+ * 26, --print-wasm-code), so a shorter run times the baseline compiler's code;
+ * ask for fewer only to look at the start. `eax` is the program's own checksum
+ * and must not change with the engine. `--cork` is the translator's
+ * configuration; `--blocks DIR` writes the first rep's block counts to
+ * `DIR/<name>.blocks.json`, which
+ * `tools/translator/cork-asm.mjs --bin <image> --at 0x401000 --blocks` weighs,
+ * with the run's count of each way between regions (`mechanisms`).
  */
 
 import '../../../../tools/lib/chromium-v8.mjs';
@@ -34,9 +39,9 @@ import * as engine from '../../src/index.js';
 import { median, option } from '../../../../tools/lib/common.mjs';
 
 const args = process.argv.slice(2);
-const warm = Number(option(args, '--warm', '20'));
-const iters = Number(option(args, '--iters', '40'));
-const reps = Number(option(args, '--reps', '5'));
+const warm = Number(option(args, '--warm', '400'));
+const iters = Number(option(args, '--iters', '200'));
+const reps = Number(option(args, '--reps', '3'));
 const cork = JSON.parse(option(args, '--cork', '{}') ?? '{}');
 const bits = Number(option(args, '--bits', '32'));
 const blocksDir = option(args, '--blocks', '') ?? '';

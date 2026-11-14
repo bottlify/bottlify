@@ -27,19 +27,21 @@ const ONLY = new RegExp(process.env.CORPUS_ONLY ?? '', 'i');
  * One part of the corpus: the cases whose index is `part` modulo `of`.
  *
  * @param {number} part @param {number} of
- * @param {{ executor?: number, shared?: boolean, growing?: boolean }} [where]  the
- *     executor of a shared memory the machine is: its state and tables past the first's, as
- *     for every executor of a process but the first; shared: the code translated for the
- *     process's shared layout, run with this executor's bases; growing: a memory that grows
- *     (`ownLayout`'s `ramFloor`), its tables inside the RAM past the cases' pages, holding
- *     the RAM up to them
+ * @param {{ executor?: number, shared?: boolean, growing?: boolean, atomic?: boolean }} [where]
+ *     the executor of a shared memory the machine is: its state and tables past the
+ *     first's, as for every executor of a process but the first; shared: the code
+ *     translated for the process's shared layout, run with this executor's bases; growing:
+ *     a memory that grows (`ownLayout`'s `ramFloor`), its tables inside the RAM past the
+ *     cases' pages, holding the RAM up to them; atomic: the regions in the atomic variant,
+ *     as every executor of a process with more than one runs them
  */
 export function testTranslatedCorpus(part, of,
-    { executor = 0, shared = false, growing = false } = {})
+    { executor = 0, shared = false, growing = false, atomic = false } = {})
 {
     test(`translated code leaves what the processor left, on every case it translates in full`
         + ` (part ${part + 1} of ${of}${executor > 0 ? `, executor ${executor}` : ''}`
-        + `${shared ? ', the shared layout' : ''}${growing ? ', a growing memory' : ''})`,
+        + `${shared ? ', the shared layout' : ''}${growing ? ', a growing memory' : ''}`
+        + `${atomic ? ', atomic' : ''})`,
     ()=>{
         const cases = loadX86Corpus()
             .filter((one, index)=>index % of === part && ONLY.test(one.name));
@@ -47,7 +49,7 @@ export function testTranslatedCorpus(part, of,
         const result = judgeAll(cases, 'translated', one=>{
             // Judged against the hardware, so exact where the fast default is not.
             const m = createTestMachine({ ramSize: growing ? 64 << 20 : 2 << 20, precise: true,
-                executor, shared, processors: shared ? Math.max(2, executor + 1) : 1,
+                executor, shared, atomic, processors: shared ? Math.max(2, executor + 1) : 1,
                 ...growing ? { hashSlots: 1 << 12, growing: { tablesAt: 2 << 20, floor: 8 << 20 } }
                     : {} });
             const view = new DataView(m.memory.buffer);
