@@ -66,8 +66,8 @@ it runs as on Windows. The protection itself is never patched, bypassed or answe
 - `roadmap/README.md` — the index of the plans, `decisions.md` (behaviour chosen rather than
   derived from a specification) and `negative-results.md` (what was measured and did not pay).
 - `roadmap/00-*` — local working notes, not in git (`.gitignore` excludes exactly these):
-  per-area notes and **pitfalls** (read the area's pitfalls before touching the kernel,
-  bridge, graphics or audio layers), plans and reports. Open work is tracked on the owner's task
+  **pitfalls** in `00-pitfalls.md` (read its section before touching the kernel, bridge,
+  graphics, audio or cork), plans and reports. Open work is tracked on the owner's task
   board, outside the repository; a gap noticed on the way (a path no test covers, a benchmark that
   misses x64, a gate that runs nowhere) goes into its open questions when it is found. Everything else in `roadmap/` ships with the repo and is written
   for a reader who is not you.

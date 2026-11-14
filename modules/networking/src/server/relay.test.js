@@ -748,7 +748,10 @@ test('a link that still looks open is replaced, and its late close changes nothi
 });
 
 test('the heartbeat acknowledges, and a link silent for three beats is dropped but kept', async()=>{
-    const relay = createRelay({ heartbeatMs: 10 });
+    // Beats wide enough that a busy machine's late timer is not three of
+    // them: at 10 ms a first beat 30 ms late found the link already silent and
+    // dropped it before any ack was sent.
+    const relay = createRelay({ heartbeatMs: 250 });
     const client = join(relay, 'room', { resumable: true });
 
     await waitFor(()=>client.control.some(message=>message?.t === 'ack'));

@@ -317,9 +317,8 @@ const word = (bytes, at)=>new DataView(bytes.buffer, bytes.byteOffset).getUint32
 const latin = bytes=>String.fromCharCode(...bytes);
 
 /**
- * A listing's records the program was given, by name: the order is the
- * volume's (each layer's entries in the order it lists them, as a session's
- * come after the bundle's), which neither arm is asked to share.
+ * A listing's records the program was given, in the order it was given them:
+ * NTFS's, whichever layer each name came from (`inIndexOrder`).
  *
  * @param {Uint8Array} observed @param {{ at: number, records: number }} listing
  */
@@ -327,8 +326,8 @@ const recordsOf = (observed, listing)=>Array.from({ length: listing.records }, (
     observed.subarray(listing.at + record * FIND_RECORD + 4,
         listing.at + (record + 1) * FIND_RECORD))
     .filter(record=>record[44] !== 0)
-    .map(record=>({ name: latin(record.subarray(44, record.indexOf(0, 44))), record: [...record] }))
-    .sort((left, right)=>(left.name < right.name ? -1 : 1));
+    .map(record=>({ name: latin(record.subarray(44, record.indexOf(0, 44))),
+        record: [...record] }));
 
 test('a layer\'s files and keys are what a program finds, as if the bottle carried them',
     { timeout: 120_000 }, async t=>{
@@ -423,6 +422,38 @@ test('a layer is cached once, by its own name, whatever bottle stands on it',
             'one cache of the layer, named by it');
         assert.ok(tables.some(path=>path.startsWith('bottle-a-'))
             && tables.some(path=>path.startsWith('bottle-b-')), 'and one of each bottle');
+    });
+
+test('a layer that fails to mount fails the run, and the bottle mounted beside it lets go',
+    { timeout: 120_000 }, async t=>{
+        const bottle = await pack(BOTTLE_FILES, BOTTLE_HIVE);
+        const layer = await pack(LAYER_FILES, LAYER_HIVE);
+        t.after(()=>Promise.all([bottle, layer].map(one=>one.cleanup())));
+        let closed = 0;
+        const store = { ...memoryStore(), close(){
+            closed++;
+        } };
+        // The layer's index and registry arrive; its preload's blocks do not.
+        let preloading = false;
+        await assert.rejects(createApp({
+            executable: probeProgram(),
+            bundle: { id: 'bottle', store, fetch: bottle.fetch,
+                layers: [{ id: 'netfx48', store: memoryStore(), preload: true,
+                    retry: { attempts: 1 },
+                    progress: ()=>{
+                        preloading = true;
+                    },
+                    fetch: (/** @type {number} */ offset, /** @type {number} */ length)=>{
+                        if (preloading)
+                        {
+                            throw new Error('the layer is out of reach');
+                        }
+                        return layer.fetch(offset, length);
+                    } }] },
+            storage: { load: async()=>({ files: [], registry: SESSION_HIVE }) },
+        }), /the layer is out of reach/);
+        await new Promise(done=>setTimeout(done, 50));
+        assert.equal(closed, 1, 'the bottle\'s cache gave its store\'s files back');
     });
 
 /** Somewhere to keep blocks, over ordinary buffers: Node has no OPFS. */

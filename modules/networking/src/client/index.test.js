@@ -300,6 +300,20 @@ test('an accepted connection is announced with the port it arrived on', async()=
     assert.deepEqual(accepted.remote, { host: parseIp('10.86.0.5'), port: 40000 });
 });
 
+test('a stream send over a frame\'s payload goes as several frames, its bytes in order',
+    async()=>{
+        const { transport, socket } = await joined();
+        const bytes = Uint8Array.from({ length: 150 * 1024 }, (_, at)=>at * 7);
+
+        transport.send(9, bytes);
+
+        const frames = socket.frames().filter(frame=>frame?.op === Op.STREAM);
+        assert.deepEqual(frames.map(frame=>frame?.payload.length), [65536, 65536, 22528]);
+        assert.ok(frames.every(frame=>frame?.tag === 9));
+        assert.deepEqual(Buffer.concat(frames.map(frame=>/** @type {Uint8Array} */ (
+            frame?.payload))), Buffer.from(bytes));
+    });
+
 test('a half close travels as a half close', async()=>{
     const { transport, socket } = await joined();
 
@@ -604,7 +618,9 @@ test('a session not back within its window is lost', async()=>{
 });
 
 test('the heartbeat acknowledges, and a link that hears nothing is taken for dead', async()=>{
-    const { transport, sockets } = await resumable({ heartbeat: 10 });
+    // Beats wide enough that a busy machine's late timer is not three of
+    // them, which would take the link for dead before its first ack.
+    const { transport, sockets } = await resumable({ heartbeat: 250 });
 
     await waitFor(()=>sockets[0].control().some(message=>message?.t === 'ack'));
     await waitFor(()=>sockets.length === 2);

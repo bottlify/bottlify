@@ -41,6 +41,28 @@ import { foldName, matchName } from './paths.js';
 import { PIECE_SIZE, bytesOf } from './memory-store.js';
 
 /**
+ * A directory's entries in the order NTFS keeps its index and FindNextFile
+ * reads it: by name upper-cased a character at a time, compared as UTF-16 code
+ * units - not in the order the names were created, nor the bundle's before the
+ * session's. A character whose capital is longer (ß) keeps itself, as NTFS's
+ * upcase table has it.
+ *
+ * @template {{ name: string }} T
+ * @param {T[]} entries
+ * @returns {T[]}
+ */
+export function inIndexOrder(entries){
+    /** @param {string} name */
+    const key = name=>Array.from(name, one=>{
+        const upper = one.toUpperCase();
+        return upper.length === one.length ? upper : one;
+    }).join('');
+    return entries.map(entry=>({ entry, key: key(entry.name) }))
+        .sort((left, right)=>(left.key < right.key ? -1 : left.key > right.key ? 1 : 0))
+        .map(one=>one.entry);
+}
+
+/**
  * @typedef {Object} Node
  * @property {string} name        As created; enumeration reports this.
  * @property {string} path        Its key in the writable store: where it is there,
@@ -679,7 +701,7 @@ export function createOverlay({
                     junction: child.junction ? child.junction.join('\\') : null,
                 });
             }
-            return entries;
+            return inIndexOrder(entries);
         },
 
         /** @param {string[]} components @returns {number} */

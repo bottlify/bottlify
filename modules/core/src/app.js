@@ -3312,9 +3312,14 @@ async function mountBundle({ options, events, translationStore }){
     const held = [];
     /** @type {() => void} */
     let allNamed = ()=>{};
-    const named = new Promise(resolve=>{
+    /** @type {(reason: any) => void} */
+    let noneNamed = ()=>{};
+    const named = new Promise((resolve, reject)=>{
         allNamed = ()=>resolve(undefined);
+        noneNamed = reject;
     });
+    // Nobody may be waiting on it when one bundle fails.
+    named.catch(()=>{});
     /** @param {string} name */
     const opened = name=>{
         held.push(name);
@@ -3333,11 +3338,31 @@ async function mountBundle({ options, events, translationStore }){
         }
         return named;
     };
-    const mounted = await Promise.all(specs.map(one=>mountOneBundle({ ...one, held, opened,
+    // One bundle that fails fails the run: the others stop waiting for its
+    // cache's name, and those already mounted stop fetching and close theirs.
+    const outcomes = await Promise.allSettled(specs.map(one=>mountOneBundle({ ...one, held,
+        opened,
         // A layer's events say whose they are.
         events: one.layer ? { emit: (/** @type {string} */ name, /** @type {any} */ payload)=>
             events.emit(name, { ...payload, layer: one.id }) } : events,
-        translationStore: one.layer ? undefined : translationStore })));
+        translationStore: one.layer ? undefined : translationStore })
+        .catch(e=>{
+            noneNamed(e);
+            throw e;
+        })));
+    const failed = outcomes.find(one=>one.status === 'rejected');
+    if (failed)
+    {
+        for (const one of outcomes)
+        {
+            if (one.status === 'fulfilled')
+            {
+                one.value.stop();
+            }
+        }
+        throw failed.reason;
+    }
+    const mounted = outcomes.map(one=>/** @type {PromiseFulfilledResult<MountedBundle>} */ (one).value);
     if (mounted.length === 1)
     {
         return mounted[0];
@@ -9294,30 +9319,6 @@ async function buildApp(options){
              * @param {string} [names]
              */
             callRingSkip: (names = '')=>bridge.skipInRing?.(String(names).split(',')) ?? [],
-            /**
-             * Where each export of a library this build synthesises runs in
-             * this process: `guest` (code of its own, or placed when bound),
-             * `host` (a trap into its handler), `data` (a variable), or
-             * `absent` (left out of a 64-bit process's module). For a tool
-             * that counts what is guest code and what is still a crossing.
-             *
-             * @param {string} dll
-             * @returns {Record<string, 'guest' | 'host' | 'data' | 'absent'> | null}
-             */
-            exportPlaces: dll=>{
-                const table = /** @type {Record<string, any> | undefined} */ (
-                    Object.entries(builtLibraries ?? {})
-                        .find(([key])=>moduleKeyOf(key) === moduleKeyOf(dll))?.[1]);
-                if (!table)
-                {
-                    return null;
-                }
-                return Object.fromEntries(Object.entries(table).map(([exported, fn])=>[exported,
-                    long ? (fn.long || fn.guest && fn.guestLong ? 'guest'
-                        : fn.data ? 'data' : fn.handler ? 'host' : 'absent')
-                        : fn.code || fn.guest ? 'guest'
-                            : fn.data ? 'data' : 'host']));
-            },
             /**
              * Whether a system library this build makes exports a name, or a
              * number when there is no name: what an import table is checked
