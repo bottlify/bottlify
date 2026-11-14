@@ -1187,6 +1187,8 @@ export function createKernelModule(){
                      * @param {any} object
                      */
                     holds: object=>live() ? state.handles.holds(object) : false,
+                    /** Every handle open, with its kind and object. */
+                    list: ()=>(live() ? state.handles.list() : []),
                 },
 
                 /**

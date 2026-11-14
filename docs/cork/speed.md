@@ -11,15 +11,15 @@ is the processor:
 
 | Workload | What it does | Node, x87 | Node, SSE | Chromium, x87 | Chromium, SSE |
 | --- | --- | ---: | ---: | ---: | ---: |
-| `vm` | bytecode interpreter, one big `switch` | 40% | 32% | 44% | 38% |
-| `entities` | 4096 objects, virtual calls | 25% | 23% | 25% | 23% |
-| `math` | skinning, transforms, lights | 48% | 39% | 36% | 29% |
-| `path` | A* on a 128x128 grid | 51% | 57% | 53% | 48% |
-| `lz` | LZ77, CRC, Huffman | 40% | 35% | 35% | 36% |
-| `containers` | hash table, sorts, binary search | 45% | 51% | 40% | 49% |
-| `spread` | 512 functions calling each other | 19% | 17% | 22% | 21% |
-| `api` | Windows API calls between short bits of work | 34% | 34% | 35% | 32% |
-| **all eight** (geometric mean) | | **36%** | **34%** | **35%** | **33%** |
+| `vm` | bytecode interpreter, one big `switch` | 50% | 42% | 38% | 30% |
+| `entities` | 4096 objects, virtual calls | 24% | 23% | 25% | 22% |
+| `math` | skinning, transforms, lights | 45% | 31% | 31% | 31% |
+| `path` | A* on a 128x128 grid | 49% | 40% | 46% | 44% |
+| `lz` | LZ77, CRC, Huffman | 40% | 39% | 38% | 40% |
+| `containers` | hash table, sorts, binary search | 46% | 56% | 37% | 45% |
+| `spread` | 512 functions calling each other | 15% | 15% | 14% | 14% |
+| `api` | Windows API calls between short bits of work | 56% | 58% | 38% | 47% |
+| **all eight** (geometric mean) | | **38%** | **35%** | **32%** | **32%** |
 
 ```mermaid
 %%{init: {"theme": "base", "themeVariables": {"fontFamily": "Inter, Segoe UI, Helvetica, Arial, sans-serif", "xyChart": {"plotColorPalette": "#2F6F8F, #C8742E"}}}}%%
@@ -27,18 +27,20 @@ xychart-beta
   title "Share of the processor's speed, x87 build, %"
   x-axis [vm, entities, math, path, lz, containers, spread, api]
   y-axis "%" 0 --> 100
-  bar [44, 25, 36, 53, 35, 40, 22, 35]
-  line [40, 25, 48, 51, 40, 45, 19, 34]
+  bar [38, 25, 31, 46, 38, 37, 14, 38]
+  line [50, 24, 45, 49, 40, 46, 15, 56]
 ```
 
-Bars: Chromium 141. Line: Node 22.
+Bars: Chromium 153. Line: Node 22.
 
 `spread` and `entities` are the slowest. Both make many calls through function pointers whose
 targets keep changing. When a call goes mostly to a few functions cork guesses them, but `spread`
-has hundreds, and each such call looks its target up in a table. Tight loops over data (`path`,
-`containers`) get closest to the processor: about half of its speed.
+has hundreds, and each such call looks its target up in a table. Tight loops and dispatch over
+data (`vm`, `path`, `containers`) get closest to the processor: about half of its speed in Node, a
+little less in Chromium.
 
-What translation buys, x87 build in Node:
+What translation buys, x87 build in Node (measured with the v86 comparison below, on the tree and
+the machine of that date):
 
 | | Share of the processor's speed (geometric mean) |
 | --- | ---: |
@@ -55,7 +57,8 @@ a second pays for its translation many times over.
 translates hot code to WebAssembly. We ran the same `bench-x87.exe` and `bench-sse.exe` in it: v86
 boots Linux from its own test image, and inside it the benchmark runs through the same `peload` that
 runs it on the processor. Every checksum matched. Chromium 141, ten times the workloads' length,
-share of the processor's speed:
+share of the processor's speed; both sides measured on 2026-10-14, so the cork column is that
+day's cork, not the table above:
 
 | Workload | v86, x87 | cork, x87 | cork is faster | v86, SSE | cork, SSE | cork is faster |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -91,26 +94,29 @@ return v86 boots whole operating systems, where cork only runs a program's code.
 <details>
 <summary>How it was measured</summary>
 
-- 2026-10-14, cork at `00bc4680`; the interpreter row at `a24f5d9a` (what changed between them does
-  not touch the interpreter). Node 22.22.0 (V8 12.4); Chromium 141.0.7390.37 headless (V8 14.1),
-  each run in a fresh tab and a dedicated worker of a minified build.
-- A 4-core x86-64 Linux VM, Intel Xeon @ 2.10 GHz. Power plan: not recorded.
-- Node: `node modules/cork/bench/run.mjs --variant <x87|sse> --only <workload> --iterations
-  <10 x own> --reps 3`, each started together with the same run of `a24f5d9a`, so the machine's
-  drift (up to a quarter within an hour) falls on both; the processor alone, the best of three runs
-  of `bench/bin/peload`. Chromium: `node modules/cork/bench/browser/suite.mjs
-  '{"before":{},"after":{}}' --scale 10 --reps 3` over bundles of the two trees, the `after` side in
-  the tables. The interpreter row: `run.mjs --native --variant x87 --cork '{"translate":false}'` at
-  `a24f5d9a`; the row of the workload's own length: `run.mjs --variant x87` against a tenth of the
-  processor's time for ten times the length; one run each.
-- The processor ran the workloads at 1.6 to 13.0 billion instructions a second, cork in Chromium at
-  0.3 to 4.7 billion. In Chromium the three runs of one workload were up to a fifth apart (`math` on
-  x87), most within a tenth.
+- The first table: 2026-11-14, cork at `42c066d5` (Node) and `606e7377` (Chromium; the change
+  between them is documentation). Node 22.22.0 (V8 12.4); Chromium 153.0.8010.12 headless (V8
+  15.3), each run in a fresh tab and a dedicated worker of a minified build.
+- A 4-core x86-64 Linux VM, Intel Xeon @ 2.10 GHz, no other load. Power plan: not recorded.
+- Node: `node modules/cork/bench/run.mjs --native --variant <x87|sse> --only <workload>
+  --iterations <10 x own> --reps 3`, the best of three. Chromium: `node
+  modules/cork/bench/browser/build.mjs '{"head":"."}'`, then `node
+  modules/cork/bench/browser/suite.mjs '{"head":{}}' --scale 10 --reps 3`, the best of three. The
+  processor: the best of three runs of `bench/bin/peload` for each workload, the same figures for
+  both columns.
+- The processor ran the workloads at 1.8 to 14.8 billion instructions a second, cork in Chromium
+  at 0.26 to 5.7 billion. In Chromium the three runs of one workload were up to two fifths apart
+  (`entities` on SSE), most within a ninth.
+- The v86 comparison and the table of what translation buys: 2026-10-14, cork at `00bc4680`, the
+  interpreter row at `a24f5d9a`; Node 22.22.0, Chromium 141.0.7390.37 headless (V8 14.1), the
+  same kind of VM. The interpreter row: `run.mjs --native --variant x87 --cork
+  '{"translate":false}'`; the row of the workload's own length: `run.mjs --variant x87` against a
+  tenth of the processor's time for ten times the length; one run each.
 - v86 0.5.471 from npm, with the BIOS images from its repository and `linux4.iso` from its test
   images; 512 MiB of guest memory; the files handed in over its 9p filesystem. Each workload ran as
   `peload bench-<build>.exe <workload> <10 x own>` in the guest, timed by `peload` itself (the host's
   clock around the command agreed within a few per cent). In Node, three boots and the best run; in
-  Chromium (a page, not a worker), one boot. v86's percentages are taken against the same processor
-  figures as cork's in Chromium.
+  Chromium (a page, not a worker), one boot. v86's percentages are taken against that day's
+  processor figures, as cork's in that table are.
 
 </details>

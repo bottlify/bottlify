@@ -5,7 +5,7 @@
 | Part | Files | What it does |
 | --- | --- | --- |
 | Decoder | [`src/decode/`](../../modules/cork/src/decode/) | Turns bytes into instructions. The opcode tables are written by hand: for each instruction the decoder knows its operands, its length, which flags it reads and writes, and how it can fault. An unknown opcode stops it, named. |
-| Region former | [`src/region.js`](../../modules/cork/src/region.js), [`src/helpers.js`](../../modules/cork/src/helpers.js), [`src/crt-dictionary.js`](../../modules/cork/src/crt-dictionary.js) | Forms a region from an entry. Recognises compiler helpers such as MSVC's `_ftol2`, and the C runtime's `memcpy`, `memmove`, `memset`, `strlen` and `sqrt` a program links in, by their bytes and puts what they do in place of the call (`emit/crt.js`), and forms a direct call to an import thunk (`jmp [slot]`) as the call through its slot. |
+| Region former | [`src/region.js`](../../modules/cork/src/region.js), [`src/helpers.js`](../../modules/cork/src/helpers.js), [`src/crt-dictionary.js`](../../modules/cork/src/crt-dictionary.js) | Forms a region from an entry, its small callees formed in whole or not at all. Recognises the compiler's helpers and the C runtime's functions a program links in by their bytes and puts what they do in place of the call (`emit/crt.js`; the list is in [How cork works](how-it-works.md#functions-cork-knows-by-their-bytes)), and forms a direct call to an import thunk (`jmp [slot]`) as the call through its slot. |
 | Emitter | [`src/emit/`](../../modules/cork/src/emit/) | Turns a region into one WebAssembly function: integer instructions, flags, memory, the x87, MMX and SSE (`simd.js`), `lock`-prefixed instructions as atomics (`locked.js`), each in a file of its own. It works straight from the decoded instructions, with no intermediate language. |
 | Encoder | [`src/wasm/`](../../modules/cork/src/wasm/) | Writes the WebAssembly bytes, and finds out what the engine supports (SIMD, tail calls). |
 | Runtime | [`src/runtime/`](../../modules/cork/src/runtime/) | Everything around translation: the candidate queue, batches, translation workers (`translator.worker.js`), the shared memory finished code is kept in (`arena.js`), publishing, the entry hash, page flags (`pages.js`), dropping rewritten code, indirect call prediction, gathering small modules into big ones, the records kept in the translation store (`cache.js`), the compiled modules and formed regions the processes sharing a store share (`shared-modules.js`, `shared-forms.js`), and what the executors of one process share about code (`shared-code.js`). |
@@ -20,8 +20,9 @@ of one process) is in [cork in the engine](../architecture/cork.md).
 
 ```sh
 npm test -w @bottlify/cork                  # unit tests and gates, a minute or two
-npm run test:integration -w @bottlify/cork  # the suites over the corpus
+npm run test:integration -w @bottlify/cork  # the suites over the corpus, and the gates
 node modules/cork/bench/run.mjs             # the benchmark (bench/README.md)
+node modules/cork/bench/micro/run.mjs       # what the benchmark does not cover, x86-64 too
 ```
 
 - **Instruction corpus** ([`src/x86-corpus.json.gz`](../../modules/cork/src/x86-corpus.json.gz), in the
@@ -44,5 +45,17 @@ node modules/cork/bench/run.mjs             # the benchmark (bench/README.md)
   `lock`-prefixed instructions against the model (`emit/locked.test.js`), the corpus translated
   for a process's shared layout and run on its third executor against the hardware
   (`emit/corpus-shared.itest.js`).
+- **Region shapes** ([`src/region-shapes.itest.js`](../../modules/cork/src/region-shapes.itest.js)):
+  what a worse region does to a program is only slower, never wrong, so the corpus gates cannot
+  see it. This gate counts how each micro workload, 32-bit and x86-64, moves between its regions
+  once warm (transfers, calls and returns that leave, jumps through the dispatch) and holds the
+  counts to the ones recorded in `src/testing/region-shapes.json`, within each workload's own
+  spread. A workload whose counts its run's timing decides is listed there with the cause and
+  skipped. A change that moves shapes on purpose records them again
+  (`CORK_SHAPES_WRITE=5 node --test modules/cork/src/region-shapes.itest.js`).
+- **The guest's own clock** (`clock: 'virtual'`, [settings](settings.md)): a run on it
+  translates the same code however busy the machine is, which
+  [`virtual-clock.test.js`](../../modules/core/src/layers/cpu/internal/virtual-clock.test.js)
+  checks against a clock that jumps.
 
 Plain ES modules with JSDoc, tests on `node:test`. Licensed MPL-2.0.

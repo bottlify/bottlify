@@ -116,6 +116,8 @@ test('every status translated here answers what Wine\'s ntdll error tests expect
         [STATUS.CANNOT_DELETE, 5],
         [STATUS.REVISION_MISMATCH, 1306],
         [STATUS.NOT_MAPPED_VIEW, 487],
+        [STATUS.IMAGE_NOT_AT_BASE, 700],
+        [STATUS.CONFLICTING_ADDRESSES, 487],
         [STATUS.INVALID_VIEW_SIZE, 5],
         [STATUS.INVALID_FILE_FOR_SECTION, 193],
         [STATUS.OBJECT_TYPE_MISMATCH, 6],

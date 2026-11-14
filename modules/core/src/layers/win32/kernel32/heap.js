@@ -172,6 +172,8 @@ const MEM_IMAGE = 0x1000000;
 const MEM_MAPPED = 0x40000;
 const PAGE_READONLY_VIEW = 0x02;
 const PAGE_READWRITE_VIEW = 0x04;
+/** What an image's view is mapped with: its pages are copies once written. */
+const PAGE_EXECUTE_WRITECOPY = 0x80;
 
 /**
  * `lpMaximumApplicationAddress`: where 32-bit user address space ends. A free
@@ -1056,9 +1058,11 @@ export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT, 
  * @property {() => any} [currentThread]
  * @property {(thread: any, code: number) => void} [setLastErrorFor]
  * @property {(address: number) => { base: number, size: number, kind?: string } | null} [regionAt]
- * @property {(address: number) => { base: number, length: number, writable: boolean } | null}
+ * @property {(address: number) => { base: number, length: number, writable: boolean,
+ *     sections?: { start: number, end: number, protect: number }[] } | null}
  *     [viewAt]  The view of a section an address is in (mapping.js): VirtualQuery answers
- *     its pages as Windows does, MEM_MAPPED and as long as the view.
+ *     its pages as Windows does, MEM_MAPPED and as long as the view; an image's view
+ *     MEM_IMAGE, each of its sections (RVAs, end exclusive) with its own protection.
  *           The memory layer's region map, when the assembling caller wired one.
  *           A region of kind `image` is answered as MEM_IMAGE.
  *           Without it VirtualQuery knows only the arena.
@@ -1667,6 +1671,16 @@ export function createHeapFunctions(host){
         // length: a program that opens a section another made learns the
         // section's size from its view's RegionSize.
         const view = host.viewAt?.(at) ?? null;
+        if (view?.sections)
+        {
+            // An image's view: each section a region of its own protection,
+            // as Windows maps an image, the headers read-only.
+            const rva = page - view.base;
+            const part = view.sections.find(each=>rva >= each.start && rva < each.end)
+                ?? { start: 0, end: PAGE_SIZE, protect: PAGE_READONLY_VIEW };
+            return [page, view.base, PAGE_EXECUTE_WRITECOPY, view.base + part.end - page,
+                MEM_COMMIT, part.protect, MEM_IMAGE];
+        }
         if (view)
         {
             const end = (view.base + view.length + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);

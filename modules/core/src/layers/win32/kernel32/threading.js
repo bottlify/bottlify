@@ -150,6 +150,8 @@ const DUPLICATE_CLOSE_SOURCE = 0x00000001;
  *     close: (handle: number) => any } | null)} [processTable]
  *     The handle table of another process of the run on this thread, by its
  *     id: where DuplicateHandle puts a duplicate for it, or takes one from it.
+ * @property {Map<number, number>} [handleFlags]  The process's handles' HANDLE_FLAG_*
+ *     flags, kept by whoever starts its children; absent, its own.
  * @property {(handle: number) => boolean} [isSocket]
  *           Whether winsock holds a socket by this number, which the handle
  *           flags are kept for as for a kernel object's.
@@ -475,13 +477,32 @@ export function createThreadingFunctions(host){
 
     /**
      * HANDLE_FLAG_INHERIT and HANDLE_FLAG_PROTECT_FROM_CLOSE, by handle: what
-     * a duplicate was made inheritable with and SetHandleInformation set.
-     * Handles are not reissued while the table has fresh ones, so an entry
-     * outliving its handle names nothing.
+     * a handle was made or opened inheritable with, a duplicate was made
+     * with and SetHandleInformation set; the process's own, which a child it
+     * starts with bInheritHandles takes (`inheritedObjects`). Handles are not
+     * reissued while the table has fresh ones, so an entry outliving its
+     * handle names nothing.
      *
      * @type {Map<number, number>}
      */
-    const handleFlags = new Map();
+    const handleFlags = host.handleFlags ?? new Map();
+
+    /**
+     * A handle made inheritable, as SECURITY_ATTRIBUTES' bInheritHandle (its
+     * third dword) or an open's bInheritHandle asks. Answers the handle.
+     *
+     * @param {number} handle @param {boolean} inherit
+     */
+    const inheritIf = (handle, inherit)=>{
+        if (inherit && handle !== 0)
+        {
+            handleFlags.set(handle, HANDLE_FLAG_INHERIT);
+        }
+        return handle;
+    };
+    /** @param {number} attributes  SECURITY_ATTRIBUTES, or 0 */
+    const inherits = attributes=>(attributes >>> 0) !== 0
+        && readU32(host.readMemory((attributes >>> 0) + 8, 4), 0) !== 0;
 
     /**
      * Whether a handle is one GetHandleInformation and SetHandleInformation
@@ -625,8 +646,8 @@ export function createThreadingFunctions(host){
         return false;
     };
 
-    const openMutex = bothNamedForms(12, ([access, , namePointer], wide)=>
-        namedOpen('mutex', nameOf(namePointer, wide), access));
+    const openMutex = bothNamedForms(12, ([access, inherit, namePointer], wide)=>
+        inheritIf(namedOpen('mutex', nameOf(namePointer, wide), access), inherit !== 0));
 
     /**
      * Unlike the mutex form this can succeed, and routinely does: one process
@@ -634,14 +655,14 @@ export function createThreadingFunctions(host){
      * how two parts of the same program that do not know about each other
      * agree on a signal.
      */
-    const openEvent = bothNamedForms(12, ([access, , namePointer], wide)=>
-        namedOpen('event', nameOf(namePointer, wide), access));
+    const openEvent = bothNamedForms(12, ([access, inherit, namePointer], wide)=>
+        inheritIf(namedOpen('event', nameOf(namePointer, wide), access), inherit !== 0));
 
-    const openSemaphore = bothNamedForms(12, ([access, , namePointer], wide)=>
-        namedOpen('semaphore', nameOf(namePointer, wide), access));
+    const openSemaphore = bothNamedForms(12, ([access, inherit, namePointer], wide)=>
+        inheritIf(namedOpen('semaphore', nameOf(namePointer, wide), access), inherit !== 0));
 
-    const openWaitableTimer = bothNamedForms(12, ([access, , namePointer], wide)=>
-        namedOpen('timer', nameOf(namePointer, wide), access));
+    const openWaitableTimer = bothNamedForms(12, ([access, inherit, namePointer], wide)=>
+        inheritIf(namedOpen('timer', nameOf(namePointer, wide), access), inherit !== 0));
 
     /**
      * The security descriptor a SECURITY_ATTRIBUTES points at, or 0: its
@@ -680,7 +701,7 @@ export function createThreadingFunctions(host){
         }
         keepSecurity(security, mutex, found);
         remember(name, 'mutex', mutex, found !== null);
-        const handle = kernel.handles.open('mutex', mutex);
+        const handle = inheritIf(kernel.handles.open('mutex', mutex), inherits(security));
         if (name === null)
         {
             mutex.name = `#${handle.toString(16)}`;
@@ -703,7 +724,7 @@ export function createThreadingFunctions(host){
         });
         keepSecurity(security, event, found);
         remember(name, 'event', event, found !== null);
-        const handle = kernel.handles.open('event', event);
+        const handle = inheritIf(kernel.handles.open('event', event), inherits(security));
         // An unnamed object is most of them, and "event" tells a reader
         // nothing when three threads are blocked on three of them. The handle
         // is what the trace shows at every other call, so it is what ties a
@@ -746,7 +767,8 @@ export function createThreadingFunctions(host){
         });
         keepSecurity(security, semaphore, found);
         remember(name, 'semaphore', semaphore, found !== null);
-        const handle = kernel.handles.open('semaphore', semaphore);
+        const handle = inheritIf(kernel.handles.open('semaphore', semaphore),
+            inherits(security));
         if (name === null)
         {
             semaphore.name = `#${handle.toString(16)}`;
@@ -767,7 +789,7 @@ export function createThreadingFunctions(host){
         (wide ? createSemaphore.wide : createSemaphore.ansi).handler(
             [security, initial, maximum, namePointer]));
 
-    const createWaitableTimer = bothNamedForms(12, ([, manualReset, namePointer], wide)=>{
+    const createWaitableTimer = bothNamedForms(12, ([security, manualReset, namePointer], wide)=>{
         const name = nameOf(namePointer, wide);
         const found = existing(name, 'timer');
         if (found === TAKEN)
@@ -780,7 +802,7 @@ export function createThreadingFunctions(host){
             name: name ?? 'timer',
         });
         remember(name, 'timer', timer, found !== null);
-        const handle = kernel.handles.open('timer', timer);
+        const handle = inheritIf(kernel.handles.open('timer', timer), inherits(security));
         if (name === null)
         {
             timer.name = `#${handle.toString(16)}`;
@@ -1843,13 +1865,13 @@ export function createThreadingFunctions(host){
         OpenThread: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([, , id])=>{
+            handler: ([, inherit, id])=>{
                 const wanted = id >>> 0;
                 const own = (kernel.threads?.() ?? []).find((/** @type {any} */ thread)=>
                     (thread.id >>> 0) === wanted && thread.state !== 'terminated');
                 if (own)
                 {
-                    return kernel.handles.open('thread', own);
+                    return inheritIf(kernel.handles.open('thread', own), inherit !== 0);
                 }
                 const child = (kernel.processes?.all() ?? []).find((/** @type {any} */ made)=>
                     (made.threadId >>> 0) === wanted || made.threads?.has(wanted));

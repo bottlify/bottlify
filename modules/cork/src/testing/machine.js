@@ -36,7 +36,7 @@ const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
  *     leaveOut?: string[], precise?: boolean, structure?: boolean,
  *     resume?: boolean, looseStacks?: boolean, executor?: number, hashSlots?: number,
  *     processors?: number, shared?: boolean, growing?: { floor: number, tablesAt: number },
- *     features?: Partial<import('../wasm/features.js').Features> }} [given]
+ *     atomic?: boolean, features?: Partial<import('../wasm/features.js').Features> }} [given]
  *     trapPort: `out dx, eax` to it calls
  *     `trap` from inside the region (answering 1 when it moved EIP), as under a host with
  *     a call channel; without `trap`, one that answers 0; precise: nothing relaxed -- on
@@ -53,11 +53,14 @@ const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
  *     another host's engine in place of this one's (`features`), the regions translated as
  *     that host's translator makes them -- an arm64 one's default NaN is positive; growing:
  *     a memory that grows (`ownLayout`'s `ramFloor`), its RAM at 0 with the tables inside it
- *     at `tablesAt`, holding `floor` bytes of it and every page past them closed
+ *     at `tablesAt`, holding `floor` bytes of it and every page past them closed; atomic:
+ *     the regions in the atomic variant (`prepareModule`), as a process whose threads run on
+ *     more than one executor translates them
  */
 export function createTestMachine(given = {}){
     const { ramSize = 1 << 20, trapPort, trap, rdtsc, leaveOut = [],
-        precise = true, resume = false, looseStacks = false, executor = 0, shared = false } = given;
+        precise = true, resume = false, looseStacks = false, executor = 0, shared = false,
+        atomic = false } = given;
     const forced = globalThis.process?.env?.CORK_STRUCTURE;
     const structure = given.structure
         ?? (forced === '1' ? true : forced === '0' ? false : undefined);
@@ -187,6 +190,7 @@ export function createTestMachine(given = {}){
             const m = new ModuleBuilder();
             const context = prepareModule(m, emitLayout, found, {}, {
                 undoLog, hash: table !== null && hash, wide, narrow, precise, resume, looseStacks,
+                atomic,
                 ...(structure === undefined ? {} : { structure }),
                 ...(trapPort === undefined ? {} : { trapPort }), leaveOut: new Set(leaveOut),
             });

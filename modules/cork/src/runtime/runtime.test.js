@@ -14,6 +14,10 @@ import { CallStack } from '../emit/region.js';
 import { features as probeFeatures } from '../wasm/features.js';
 import { threadCpuMs } from '../../../../tools/fixtures/cpu-time.mjs';
 
+/** Why a test of the entry hash cannot run here. */
+const NO_TAIL_CALLS = 'this host\'s wasm has no tail calls: every region leaves for the host'
+    + ' and there is no entry hash';
+
 const CODE = 0x1000;
 
 /** A little-endian dword's bytes. @param {number} value */
@@ -754,6 +758,32 @@ test('code translated on a thread\'s stack drops the regions that store through 
     assert.equal(machine({ precise: true }).runtime.diagnostics().looseStacks, false);
 });
 
+test('a page whose writes keep dropping the regions that ran into it is a page of stubs:'
+    + ' regions from elsewhere stop at it', async()=>{
+    // CODE: call STUB; hlt. STUB, on the next page, a leaf (`inc edx; ret`) the
+    // caller forms in, as a runtime's precode a program patches one stub at a time.
+    // Each write there drops the caller with it, and before the rule every one did.
+    const STUB = CODE + 0x1000;
+    const m = machine({ volatileAfter: 64 });
+    m.write(CODE, [0xe8, ...le32(STUB - (CODE + 5)), 0xf4]);
+    m.write(STUB, [0x42, 0xc3]);
+    const translate = async()=>{
+        m.runtime.noteHot(CODE);
+        await m.runtime.translatePending();
+        assert.ok(m.runtime.entryOf(CODE) >= 0, 'the caller translated');
+    };
+    for (let i = 0; i < 2; i++)
+    {
+        await translate();
+        m.runtime.invalidatePage(STUB >>> 12);
+        assert.equal(m.runtime.entryOf(CODE), -1, `write ${i}: the caller held the stub`);
+    }
+    await translate();
+    m.runtime.invalidatePage(STUB >>> 12);
+    assert.ok(m.runtime.entryOf(CODE) >= 0, 'formed apart from the stub, a write there leaves it');
+    assert.equal(m.runtime.diagnostics().volatilePages, 0, 'and the page was never volatile');
+});
+
 test('a page invalidated too often becomes volatile and is not translated again', async()=>{
     const m = machine({ volatileAfter: 3 });
     m.write(CODE, COUNTDOWN);
@@ -1403,9 +1433,10 @@ test('an entry that moved to another precision control is taken from the store a
     });
 
 test('a region formed as its record says, its callees formed in, and refused for its precision is'
-    + ' translated with those callees and published', async()=>{
+    + ' translated with those callees and published', async t=>{
     if (!probeFeatures().tailCalls)
     {
+        t.skip(NO_TAIL_CALLS);
         return;
     }
     const settle = ()=>new Promise(resolve=>setTimeout(resolve, 0));
@@ -2428,7 +2459,7 @@ test('the untranslated exits are told apart by what left, and a target only ever
 });
 
 test('a transfer carries the registers and the count to a callee that names none of them,'
-    + ' and its exit to the host writes them all', async()=>{
+    + ' and its exit to the host writes them all', async t=>{
     const m = machine({ leafCalls: false });
     // mov ebx, 7; call F; hlt; F: inc edx; hlt -- F neither reads nor writes ebx, and the
     // caller never reaches its own exit, so the value is only ever in the transfer.
@@ -2441,7 +2472,8 @@ test('a transfer carries the registers and the count to a callee that names none
     const exit = m.runtime.run(m.runtime.entryOf(CODE), 1000);
     if (m.runtime.diagnostics().exits.untranslated > 0)
     {
-        return; // no tail calls: every region leaves for the host
+        t.skip(NO_TAIL_CALLS);
+        return;
     }
     assert.equal(exit.kind, 'halt');
     assert.equal(m.eip(), CODE + 13);
@@ -2703,10 +2735,11 @@ const callLoop = n=>[
 ];
 
 test('a transfer to a region of its own module is not a crossing; one into another module'
-    + ' is, and is counted', async()=>{
+    + ' is, and is counted', async t=>{
     if (!probeFeatures().tailCalls)
     {
-        return; // no hash: every transfer is the host's
+        t.skip(NO_TAIL_CALLS);
+        return;
     }
     // The loop and its callee in one batch: one module.
     const one = machine({ leafCalls: false, dispatch: true, callReturn: false });
@@ -2731,9 +2764,10 @@ test('a transfer to a region of its own module is not a crossing; one into anoth
 });
 
 test('without tail calls into another instance, a transfer out of the module is entered by the'
-    + ' loop and one inside it stays a tail call, with the same answers', async()=>{
+    + ' loop and one inside it stays a tail call, with the same answers', async t=>{
     if (!probeFeatures().tailCalls)
     {
+        t.skip(NO_TAIL_CALLS);
         return;
     }
     /** @param {Record<string, unknown>} config @param {boolean} split */
@@ -2775,9 +2809,10 @@ test('without tail calls into another instance, a transfer out of the module is 
     assert.equal(inside.left, (await run({}, false)).left, 'no transfer left the module');
 });
 
-test('a placed module whose regions have all gone gives its range of the table back', async()=>{
+test('a placed module whose regions have all gone gives its range of the table back', async t=>{
     if (!probeFeatures().tailCalls)
     {
+        t.skip(NO_TAIL_CALLS);
         return;
     }
     // The callee and the loop in modules of their own, dropped and made again
@@ -2804,9 +2839,10 @@ test('a placed module whose regions have all gone gives its range of the table b
 });
 
 test('two modules that keep transferring into each other are gathered into one, on the'
-    + ' worker', async()=>{
+    + ' worker', async t=>{
     if (!probeFeatures().tailCalls)
     {
+        t.skip(NO_TAIL_CALLS);
         return;
     }
     const m = machine({ leafCalls: false, mergeAfter: 1000, worker: true, dispatch: true,
@@ -2844,9 +2880,10 @@ test('two modules that keep transferring into each other are gathered into one, 
 });
 
 test('after a merge, the next waits for translated instructions in proportion to the regions'
-    + ' it built', async()=>{
+    + ' it built', async t=>{
     if (!probeFeatures().tailCalls)
     {
+        t.skip(NO_TAIL_CALLS);
         return;
     }
     const m = machine({ leafCalls: false, mergeAfter: 4000, worker: true, dispatch: true,
@@ -2942,9 +2979,10 @@ function mergeMachine(config){
     return { m, until, loop, translate };
 }
 
-test('a merge waits for crossings in proportion to the regions it would build', async()=>{
+test('a merge waits for crossings in proportion to the regions it would build', async t=>{
     if (!probeFeatures().tailCalls)
     {
+        t.skip(NO_TAIL_CALLS);
         return;
     }
     // A loop whose batch has sixty-four more regions calling a callee in a
@@ -2990,9 +3028,10 @@ const loopCalling = (at, n)=>{
         0x49, 0x75, 0xf8, 0xf4];
 };
 
-test('a region is built again by two merges at most', async()=>{
+test('a region is built again by two merges at most', async t=>{
     if (!probeFeatures().tailCalls)
     {
+        t.skip(NO_TAIL_CALLS);
         return;
     }
     // Three loops calling one function, each translated after the one before
@@ -3058,10 +3097,11 @@ const dispatchLoop = n=>{
 };
 
 test('an indirect call sampled going to a few small callees has them formed into its region,'
-    + ' and a call to another still leaves', async()=>{
+    + ' and a call to another still leaves', async t=>{
     if (!probeFeatures().tailCalls)
     {
-        return; // no hash, no transfers to count
+        t.skip(NO_TAIL_CALLS);
+        return;
     }
     const m = machine({ countTransfers: true, callTargets: true, callReturn: false });
     const { code, table, slots, f, g, h } = dispatchLoop(1600);
@@ -3090,15 +3130,17 @@ test('an indirect call sampled going to a few small callees has them formed into
         await m.runtime.translatePending();
     }
     assert.equal(m.runtime.diagnostics().reforms, 1);
-    // Only H leaves: its call, its return into the copy of the block after the call, which
-    // is inside the loop (`emitCopies`), and the copy's way on to the loop's head.
-    assert.equal(run(), 300, 'only H leaves, and its return comes back');
+    // Only H leaves: its call, and its return into the copy of the block after the call,
+    // which is inside the loop (`emitCopies`); the copy goes on to the loop's head by a call
+    // of the region's function (`rejoinAt`), not through the hash.
+    assert.equal(run(), 200, 'only H leaves, and its return comes back');
 });
 
 test('a call its prediction takes is not sampled: the calls that still leave are, and their'
-    + ' callee is formed in next', async()=>{
+    + ' callee is formed in next', async t=>{
     if (!probeFeatures().tailCalls)
     {
+        t.skip(NO_TAIL_CALLS);
         return;
     }
     const m = machine({ countTransfers: true, callTargets: true, callReturn: false });
@@ -3124,7 +3166,7 @@ test('a call its prediction takes is not sampled: the calls that still leave are
         run();
         await m.runtime.translatePending();
     }
-    assert.equal(run(), 300, 'F and G formed in, H leaves');
+    assert.equal(run(), 200, 'F and G formed in, H leaves: its call and its return');
     // H is a sixteenth of the calls, under the share a callee needs among all of
     // them; among the calls that leave it is every one.
     for (let i = 0; i < 400 && m.runtime.diagnostics().reforms === 1; i++)
@@ -3195,9 +3237,10 @@ const profiledLoop = async(config, { code, table, slots }, sum)=>{
 };
 
 test('an indirect call whose callees are spread is sampled until it comes due, then formed'
-    + ' again without the profile', async()=>{
+    + ' again without the profile', async t=>{
     if (!probeFeatures().tailCalls)
     {
+        t.skip(NO_TAIL_CALLS);
         return;
     }
     // Each of the sixty-four a sixty-fourth of the calls, under the eighth a callee needs.
@@ -3221,9 +3264,10 @@ test('an indirect call whose callees are spread is sampled until it comes due, t
 });
 
 test('an indirect call whose callees cannot be formed in is quiet once it comes due again',
-    async()=>{
+    async t=>{
         if (!probeFeatures().tailCalls)
         {
+            t.skip(NO_TAIL_CALLS);
             return;
         }
         // F and G take most calls, but no callee of more than a byte is formed in.
@@ -3241,10 +3285,177 @@ test('an indirect call whose callees cannot be formed in is quiet once it comes 
         assert.equal(await counted(), 0);
     });
 
-test('a region formed after its call was predicted elsewhere is formed again with the callee'
-    + ' too', async()=>{
+test('a call site keeps its own budget of forming again: other sites of its region spending'
+    + ' theirs leave it free to take a callee seen late', async()=>{
     if (!probeFeatures().tailCalls)
     {
+        return;
+    }
+    // CODE: call ebx; call esi; call edi; hlt: three sites of one region, and
+    // callees `inc edx; ret` four bytes apart past it. The samples are written
+    // into the profile by hand, a reading at a time, so the order sites come due
+    // in is the test's and no clock decides it: A first with only its first
+    // callee (a phase of the program), then B and C, then A's second callee.
+    const m = machine({ callTargets: true, predictAfter: 16, callReturn: false });
+    const callee = (/** @type {number} */ k)=>CODE + 0x100 + 4 * k;
+    m.write(CODE, [0xff, 0xd3, 0xff, 0xd6, 0xff, 0xd7, 0xf4]);
+    for (let k = 0; k < 6; k++)
+    {
+        m.write(callee(k), [0x42, 0xc3]);
+    }
+    m.runtime.noteHot(CODE);
+    for (let i = 0; i < 8 && m.runtime.entryOf(CODE) < 0; i++)
+    {
+        await m.runtime.translatePending();
+    }
+    assert.ok(m.runtime.entryOf(CODE) >= 0, 'the region translated');
+    const at = /** @type {number} */ (m.layout.callProfile);
+    const words = ()=>new DataView(m.memory.buffer);
+    /** A reading of sixteen samples, all at `site` going to `target`. */
+    const reading = async(/** @type {number} */ site, /** @type {number} */ target)=>{
+        if (words().getUint32(at, true) === 0)
+        {
+            await m.runtime.translatePending();
+        }
+        for (let i = 0; i < 16; i++)
+        {
+            words().setUint32(at + 8 + i * 8, site, true);
+            words().setUint32(at + 12 + i * 8, target, true);
+        }
+        await m.runtime.translatePending();
+        // The batch the due site asked for, formed and published.
+        for (let i = 0; i < 4; i++)
+        {
+            await m.runtime.translatePending();
+        }
+    };
+    const [a, b, c] = [CODE, CODE + 2, CODE + 4];
+    await reading(a, callee(0));
+    await reading(b, callee(2));
+    await reading(c, callee(4));
+    await reading(a, callee(1));
+    const d = m.runtime.diagnostics();
+    assert.equal(d.prediction?.reformsOut, 0, 'no site found its region out of reforms');
+    assert.equal(d.reforms, 4, 'formed again once for each due');
+    const siteA = /** @type {{ site: number, last?: string }[] | undefined} */ (d.prediction
+        ?.sites)?.find(one=>one.site === a);
+    assert.equal(siteA?.last, 'fresh', 'A took its second callee');
+});
+
+test('a callee\'s far branch left as cold, then sampled taken at every call, is followed: the'
+    + ' callee formed in with it, or made a wasm call when too large for that', async t=>{
+    if (!probeFeatures().tailCalls)
+    {
+        t.skip(NO_TAIL_CALLS);
+        return;
+    }
+    // mov eax, 1; call F; hlt. F: test eax, eax; jnz HOOK; ret. HOOK, past the cold
+    // reach: inc edx; ret, after `pad` nops. F is formed into the region without HOOK, so
+    // every call leaves at the branch, and HOOK's return comes back through the entry
+    // hash. The samples the emitter notes at such a way out are written by hand.
+    const runs = 200;
+    /** @param {number} pad @returns {Promise<[number, number]>} transfers before, after */
+    const scene = async pad=>{
+        const m = machine({ countTransfers: true, callTargets: true, predictAfter: 16 });
+        const [f, hook] = [CODE + 0x40, CODE + 0x3000];
+        const branch = f + 2;
+        m.write(CODE, [0xb8, 1, 0, 0, 0, 0xe8, ...le32(f - (CODE + 10)), 0xf4]);
+        m.write(f, [0x85, 0xc0, 0x0f, 0x85, ...le32(hook - (branch + 6)), 0xc3]);
+        m.write(hook, [...new Array(pad).fill(0x90), 0x42, 0xc3]);
+        const run = ()=>{
+            m.setReg(2, 0);
+            const before = m.runtime.diagnostics().transfers ?? 0;
+            for (let i = 0; i < runs; i++)
+            {
+                m.setReg(4, 0x80000);
+                assert.equal(m.runtime.run(m.runtime.entryOf(CODE), 1_000_000).kind, 'halt');
+            }
+            assert.equal(m.reg(2), runs);
+            return (m.runtime.diagnostics().transfers ?? 0) - before;
+        };
+        m.runtime.noteHot(CODE);
+        m.runtime.noteHot(hook);
+        for (let i = 0; i < 8 && [CODE, hook].some(one=>m.runtime.entryOf(one) < 0); i++)
+        {
+            await m.runtime.translatePending();
+        }
+        const cold = run();
+        const at = /** @type {number} */ (m.layout.callProfile);
+        const words = ()=>new DataView(m.memory.buffer);
+        if (words().getUint32(at, true) === 0)
+        {
+            await m.runtime.translatePending();
+        }
+        for (let i = 0; i < 16; i++)
+        {
+            words().setUint32(at + 8 + i * 8, branch, true);
+            words().setUint32(at + 12 + i * 8, hook, true);
+        }
+        for (let i = 0; i < 6; i++)
+        {
+            await m.runtime.translatePending();
+        }
+        assert.equal(m.runtime.diagnostics().reforms, 1, `the region formed again (pad ${pad})`);
+        // A call to F made apart enters F's own region, which the interpreter would ask for.
+        m.runtime.noteHot(f);
+        for (let i = 0; i < (pad > 0 ? 8 : 0) && m.runtime.entryOf(f) < 0; i++)
+        {
+            await m.runtime.translatePending();
+        }
+        return [cold, run()];
+    };
+    assert.deepEqual(await scene(0), [2 * runs, 0],
+        'every call left at the branch and came back by the hash; then HOOK formed in');
+    const [cold, apart] = await scene(600);
+    assert.equal(cold, 2 * runs);
+    assert.ok(apart < cold, `F too large with HOOK: a wasm call, no way out (${apart})`);
+});
+
+test('a callee\'s far branch left as cold notes where it went as it leaves there: taken at every'
+    + ' call, the region is formed again with it followed', async t=>{
+    if (!probeFeatures().tailCalls)
+    {
+        t.skip(NO_TAIL_CALLS);
+        return;
+    }
+    // mov eax, 1; call F; hlt. F: test eax, eax; jnz HOOK; ret. HOOK, past the cold
+    // reach: inc edx; ret. The samples are the emitted code's own, at the way out.
+    const m = machine({ countTransfers: true, callTargets: true, predictAfter: 16 });
+    const [f, hook] = [CODE + 0x40, CODE + 0x3000];
+    m.write(CODE, [0xb8, 1, 0, 0, 0, 0xe8, ...le32(f - (CODE + 10)), 0xf4]);
+    m.write(f, [0x85, 0xc0, 0x0f, 0x85, ...le32(hook - (f + 8)), 0xc3]);
+    m.write(hook, [0x42, 0xc3]);
+    m.runtime.noteHot(CODE);
+    m.runtime.noteHot(hook);
+    for (let i = 0; i < 8 && [CODE, hook].some(one=>m.runtime.entryOf(one) < 0); i++)
+    {
+        await m.runtime.translatePending();
+    }
+    /** @param {number} runs @returns {number} the transfers they made */
+    const run = runs=>{
+        const before = m.runtime.diagnostics().transfers ?? 0;
+        for (let i = 0; i < runs; i++)
+        {
+            m.setReg(4, 0x80000);
+            assert.equal(m.runtime.run(m.runtime.entryOf(CODE), 1_000_000).kind, 'halt');
+        }
+        return (m.runtime.diagnostics().transfers ?? 0) - before;
+    };
+    assert.equal(run(100), 200, 'every call left at the branch and came back by the hash');
+    for (let round = 0; round < 200 && m.runtime.diagnostics().reforms === 0; round++)
+    {
+        run(100);
+        await m.runtime.translatePending();
+    }
+    assert.equal(m.runtime.diagnostics().reforms, 1, 'the region formed again on its samples');
+    assert.equal(run(100), 0, 'HOOK formed in: no way out');
+});
+
+test('a region formed after its call was predicted elsewhere is formed again with the callee'
+    + ' too', async t=>{
+    if (!probeFeatures().tailCalls)
+    {
+        t.skip(NO_TAIL_CALLS);
         return;
     }
     // A: mov ebx, G; mov ecx, 1600; L: call F; dec ecx; jnz L; hlt -- and B the same
@@ -3293,9 +3504,10 @@ test('a region formed after its call was predicted elsewhere is formed again wit
 });
 
 test('a hot indirect call is sampled though another one is always the last before a reading',
-    async()=>{
+    async t=>{
         if (!probeFeatures().tailCalls)
         {
+            t.skip(NO_TAIL_CALLS);
             return;
         }
         // mov ecx, 1600; L: mov eax, ecx; and eax, 15; call [TABLE + eax*4]; dec ecx;
@@ -3345,10 +3557,11 @@ test('a hot indirect call is sampled though another one is always the last befor
         assert.ok(run() < 1600, 'the loop\'s calls to F and G formed in');
     });
 
-test('callTargets is on and dispatch off unless a run says otherwise', async()=>{
+test('callTargets is on and dispatch off unless a run says otherwise', async t=>{
     if (!probeFeatures().tailCalls)
     {
-        return; // no hash: no transfers, no placing
+        t.skip(NO_TAIL_CALLS);
+        return;
     }
     // Each default was chosen by measuring games (see the settings); a default
     // that flips unnoticed is what this holds.
@@ -3386,9 +3599,10 @@ test('callTargets is on and dispatch off unless a run says otherwise', async()=>
 });
 
 test('an indirect call sampled only now and then is not formed again; one sampled now is',
-    async()=>{
+    async t=>{
         if (!probeFeatures().tailCalls)
         {
+            t.skip(NO_TAIL_CALLS);
             return;
         }
         // A window of 64 readings, against the 140 the call is left cold for.
@@ -3433,9 +3647,10 @@ test('an indirect call sampled only now and then is not formed again; one sample
     });
 
 test('the regions of every indirect call sampled enough are formed again in one batch',
-    async()=>{
+    async t=>{
         if (!probeFeatures().tailCalls)
         {
+            t.skip(NO_TAIL_CALLS);
             return;
         }
         const m = machine({ callTargets: true });
@@ -3565,6 +3780,45 @@ test('with callReturn a call out of a region returns into it as a wasm call: the
         assert.ok(called.transfers <= plain.transfers / 2 + 2,
             `returns do not go through the hash: ${called.transfers} of ${plain.transfers}`);
     }
+});
+
+test('with callReturn a loop that calls out is a loop: a return come back from outside, its callee'
+    + ' having returned elsewhere, enters it by its copy, which goes back to the loop by a call',
+async()=>{
+    // mov ecx, 1000; L: call F; inc edx; call G; inc edi; dec ecx; jnz L; hlt
+    // F: inc ebx; test cl, 1; jz r; add dword [esp], 6; r: ret -- on odd ecx it returns
+    //    to G's return address, a block inside the loop, from outside the region
+    // G: inc esi; ret
+    const program = [0xb9, ...le32(1000), 0xe8, 0x0b, 0, 0, 0, 0x42, 0xe8, 0x10, 0, 0, 0, 0x47,
+        0x49, 0x75, 0xf1, 0xf4, 0x43, 0xf6, 0xc1, 0x01, 0x74, 0x04, 0x83, 0x04, 0x24, 0x06, 0xc3,
+        0x46, 0xc3];
+    /** @type {any[]} */
+    const runs = [];
+    for (const callReturn of [false, true])
+    {
+        const m = machine({ leafCalls: false, callReturn, blockProfile: true });
+        m.write(CODE, program);
+        m.setReg(4, 0x80000);
+        new DataView(m.memory.buffer).setUint32(m.layout.eip, CODE, true);
+        const retired = await runToHalt(m);
+        const d = /** @type {any} */ (m.runtime.diagnostics());
+        runs.push({ retired, regs: [0, 1, 2, 3, 4, 5, 6, 7].map(r=>m.reg(r)),
+            loop: d.mechanisms.JUMP_LOOP, dispatch: d.mechanisms.JUMP_DISPATCH,
+            out: d.mechanisms.JUMP_OUT, transfers: d.mechanisms.TRANSFER,
+            through: d.mechanisms.RET_LEFT + d.mechanisms.CALL_REL - d.mechanisms.CALL_LINKED });
+    }
+    const [plain, called] = runs;
+    assert.deepEqual(called.regs, plain.regs);
+    assert.equal(called.retired, plain.retired);
+    // ebx: F ran 1000 times; edx and esi (G): its 500 returns in place.
+    assert.deepEqual([called.regs[1], called.regs[2], called.regs[3], called.regs[4],
+        called.regs[6], called.regs[7]], [0, 500, 1000, 0x80000, 500, 1000]);
+    assert.equal(called.dispatch, 0, 'no jump back through the dispatch');
+    assert.ok(called.loop > 0, `the loop's jumps back are a wasm loop's: ${called.loop}`);
+    assert.ok(called.out > 0, `the copy entered from outside goes back to the loop: ${called.out}`);
+    // Each transfer is a ret that left (F's elsewhere) or a direct call its callee's slot did
+    // not link: the copy goes back to the loop's head by a call of the region's function.
+    assert.equal(called.transfers, called.through, 'none from the copy\'s way back');
 });
 
 test('with callReturn a call stores what some way to it wrote since the state block last held it:'

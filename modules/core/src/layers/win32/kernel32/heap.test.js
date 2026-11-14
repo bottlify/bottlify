@@ -1244,6 +1244,30 @@ test('VirtualQuery on a view of a section answers MEM_MAPPED, as long as the vie
     assert.equal(view.getUint32(buffer + MBI.Type, true), 0x40000, 'MEM_MAPPED');
 });
 
+test('VirtualQuery on an image\'s view answers MEM_IMAGE, each section with its protection', ()=>{
+    // The CLR maps an assembly with SEC_IMAGE and asks after its pages so.
+    const host = { ...fakeHost(),
+        viewAt: (/** @type {number} */ at)=>(at >= 0x7f0000 && at < 0x7f4000
+            ? { base: 0x7f0000, length: 0x4000, writable: false,
+                sections: [{ start: 0x1000, end: 0x3000, protect: 0x20 },
+                    { start: 0x3000, end: 0x4000, protect: 0x08 }] } : null) };
+    const fns = createHeapFunctions(host);
+    const buffer = host.arena.base;
+    const view = new DataView(host.bytes.buffer);
+    /** @param {number} at */
+    const ask = at=>{
+        fns.VirtualQuery.handler([at, buffer, MBI.SIZE]);
+        return ['BaseAddress', 'AllocationBase', 'AllocationProtect', 'RegionSize', 'Protect',
+            'Type'].map(field=>view.getUint32(buffer + /** @type {any} */ (MBI)[field], true));
+    };
+    assert.deepEqual(ask(0x7f0010), [0x7f0000, 0x7f0000, 0x80, 0x1000, 0x02, 0x1000000],
+        'the headers, read-only');
+    assert.deepEqual(ask(0x7f2010), [0x7f2000, 0x7f0000, 0x80, 0x1000, 0x20, 0x1000000],
+        'the code, to its end');
+    assert.deepEqual(ask(0x7f3000), [0x7f3000, 0x7f0000, 0x80, 0x1000, 0x08, 0x1000000],
+        'the data, written as a copy');
+});
+
 test('VirtualQuery above the last region answers up to the top of user address space', ()=>{
     const host = regionHost([{ base: 0x10000, size: 0x1000 }]);
     const fns = createHeapFunctions(host);

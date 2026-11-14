@@ -883,6 +883,12 @@ test('a movable library takes the first free base at or after the next one', ()=
     assert.ok('refused' in placeLibrary(
         { relocatable: false, imageBase: 0x00400000, sizeOfImage: 0x5000 }, space),
     'below the floor is the program\'s and the engine\'s');
+    // Where the library before it ended mid-granule: Windows maps every image
+    // on a 64 KiB granule, and the CLR refuses a native image that is not.
+    assert.deepEqual(placeLibrary(
+        { relocatable: true, imageBase: 0x10000000, sizeOfImage: 0x5000 },
+        { ...space, next: 0x02034000 }),
+    { base: 0x02040000 });
 });
 
 test('a library that imports from the program is not given a second copy of the program',

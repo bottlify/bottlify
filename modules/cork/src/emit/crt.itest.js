@@ -251,8 +251,10 @@ function caseOf(name, seed){
     /** @type {[number, number, number][]} */
     const flags = [];
     const shape = int(10);
-    // Most spans within the data; some up to RAM's end, some empty, some long.
-    const length = shape === 0 ? 0 : shape === 1 ? 0x1000 + int(0x1000) : int(600);
+    // Most spans within the data; some up to RAM's end, some empty, some long,
+    // some empty at a pointer past RAM and past the memory, which no byte of
+    // the function reads or writes.
+    const length = shape === 0 || shape === 5 ? 0 : shape === 1 ? 0x1000 + int(0x1000) : int(600);
     const place = ()=>DATA + int(DATA_BYTES - length);
     let dst = place();
     let src = place();
@@ -264,7 +266,13 @@ function caseOf(name, seed){
     {
         dst = RAM - length;                   // up to RAM's end
     }
-    const flagged = int(8);
+    const far = shape === 5 && ['memmove', 'memcpy', 'memset', 'memcmp', 'memchr'].includes(name);
+    if (far)
+    {
+        dst = (0xf0000000 + int(0x1000000)) >>> 0;
+        src = (0xe0000000 + int(0x1000000)) >>> 0;
+    }
+    const flagged = far ? -1 : int(8);
     if (flagged === 0)
     {
         flags.push([dst + int(length + 1), 1, PageFlag.WATCH]);

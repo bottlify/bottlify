@@ -371,6 +371,12 @@ const TOKEN_ALL_ACCESS = 0x000f01ff;
  */
 const NVAPI_INTERFACES = new Map([[0x0150e828, 'NvAPI_Initialize'], [0xd22bdd7e, 'NvAPI_Unload']]);
 
+/**
+ * The kinds of handle a child started with bInheritHandles takes besides pipe
+ * ends: the objects a process on the same thread can hold as they are.
+ */
+const INHERITED_KINDS = new Set(['event', 'mutex', 'semaphore', 'timer', 'process', 'thread']);
+
 const KNOWN_DLLS = new Set([
     'advapi32.dll', 'clbcatq.dll', 'combase.dll', 'comdlg32.dll', 'coml2.dll',
     'difxapi.dll', 'gdi32.dll', 'gdiplus.dll', 'imagehlp.dll', 'imm32.dll',
@@ -622,7 +628,8 @@ export function createWin32Module(){
             };
             // This process's views of sections, by address: mapping.js keeps
             // them, VirtualQuery answers them as the regions they are.
-            /** @type {Map<number, { length: number, writable: boolean }>} */
+            /** @type {Map<number, { length: number, writable: boolean,
+             *     sections?: { start: number, end: number, protect: number }[] }>} */
             const viewRegions = new Map();
             /** @param {number} at */
             const viewAt = at=>{
@@ -901,6 +908,7 @@ export function createWin32Module(){
                 typeOf: handle=>kernel.handles.typeOf(handle),
                 /** @param {any} object */
                 holds: object=>kernel.handles.holds(object),
+                list: ()=>kernel.handles.list(),
             };
 
             const threadState = createThreadState(()=>kernel.currentThread(),
@@ -934,8 +942,10 @@ export function createWin32Module(){
                 .filter(name=>name !== PROGRAMS_LIBRARY && /\.(dll|drv|ocx)$/i.test(name));
             // Every file call's volume, with the engine's libraries standing in
             // their folders as files of their images (A41).
+            // The volume as its files have it, no library of the engine's in it.
+            const filesOnly = createVolume(filesystem, config?.fetchBlocks ?? null);
             const volume = withSystemLibraries(
-                createVolume(filesystem, config?.fetchBlocks ?? null),
+                filesOnly,
                 ()=>systemLibraryNames(),
                 { homeOf: libraryHome, programs: SYSTEM_PROGRAM_FILES,
                     imageOf: name=>(libraryHome(name) !== null
@@ -1209,6 +1219,26 @@ export function createWin32Module(){
 
             // Named pipes, in the run's namespace: their own calls, and ReadFile,
             // WriteFile, CreateFile, CloseHandle and CancelIo hand theirs on.
+            // HANDLE_FLAG_* by handle (threading.js's GetHandleInformation),
+            // read here for what a child started with bInheritHandles takes.
+            /** @type {Map<number, number>} */
+            const handleFlags = new Map();
+            /**
+             * This process's inheritable synchronisation objects, processes and
+             * threads, or of those the ones a handle list names: a child on this
+             * thread holds the same objects under the same numbers, as Windows'
+             * child holds them (an NGen worker signals the event its parent
+             * named on its command line). The pipe ends are the pipes' own.
+             *
+             * @param {number[] | null} only
+             * @returns {{ handle: number, type: string, object: any }[]}
+             */
+            const inheritedObjects = only=>[...handleFlags].flatMap(([handle, flags])=>{
+                const type = (flags & 1) !== 0 && (only === null || only.includes(handle))
+                    ? kernel.handles.typeOf(handle) : null;
+                return type !== null && INHERITED_KINDS.has(type)
+                    ? [{ handle, type, object: kernel.handles.resolve(handle) }] : [];
+            });
             const pipes = createNamedPipes({
                 pointerSize,
                 kernel,
@@ -1244,6 +1274,12 @@ export function createWin32Module(){
                     && kernel.handles.adopt(inherited.handle, inherited.type, inherited.object))
                 {
                     pipes.adopted(inherited.handle, inherited.object);
+                }
+                // An object inherited is inheritable again, as the parent's was.
+                else if (INHERITED_KINDS.has(inherited.type)
+                    && kernel.handles.adopt(inherited.handle, inherited.type, inherited.object))
+                {
+                    handleFlags.set(inherited.handle, 1);
                 }
             }
 
@@ -2636,6 +2672,7 @@ export function createWin32Module(){
                         pointerSize,
                         kernel,
                         pipes,
+                        handleFlags,
                         // A thread made in a child, and one waited on there.
                         askChild,
                         setLastErrorFor: setErrorOn,
@@ -2956,6 +2993,18 @@ export function createWin32Module(){
                         allocate: (bytes, options)=>allocator.allocate(bytes, options),
                         /** @param {number} address @param {number} bytes */
                         allocateAt: (address, bytes)=>allocator.allocateAt(address, bytes),
+                        /**
+                         * Zeroes a view's span, but for a block of arena never
+                         * handed out, which reads zero already.
+                         *
+                         * @param {number} address @param {number} bytes
+                         */
+                        zero: (address, bytes)=>{
+                            if (!allocator.block(address)?.fresh)
+                            {
+                                fillMemory(address, 0, bytes);
+                            }
+                        },
                         /** @param {number} address */
                         release: address=>allocator.free(address),
                         handles,
@@ -3100,7 +3149,9 @@ export function createWin32Module(){
                     ...createSpawnFunctions({
                         // A child started with bInheritHandles takes this
                         // process's inheritable pipe ends, by their numbers.
-                        inheritedHandles: only=>pipes.inherited(only),
+                        inheritedHandles: only=>[...pipes.inherited(only),
+                            ...inheritedObjects(only)],
+                        inheritable: handle=>void handleFlags.set(handle, 1),
                         kernel,
                         processId,
                         readMemory,
@@ -5217,12 +5268,56 @@ export function createWin32Module(){
                 readMemory,
             });
 
+            // The Windows Runtime's library came with Windows 8: on 7 and XP
+            // a program that looks for it finds none, as there. The .NET
+            // Framework 4.8 loads it where it is and then requires all of it.
+            if (windows.major < 10)
+            {
+                delete libraries['combase.dll'];
+            }
+
             // The .NET shim is part of the system from Windows 7 on, and the
             // .NET Framework 4's setup there installs only its implementation,
             // mscoreei.dll, which it forwards to (A247). XP has none of its
-            // own: a Framework's setup brings the file.
-            if (windows.major >= 6)
-            {
+            // own: a Framework's setup brings the file - and where the volume
+            // holds a Framework 4 without it (one installed on 7, mounted in
+            // an XP bottle), the engine's stands in, with the install root 7
+            // keeps for it.
+            const netFramework = 'SOFTWARE\\Microsoft\\.NETFramework';
+            const installRoot = ()=>{
+                const key = hive.open(/** @type {any} */ (hive.root(HKEY_LOCAL_MACHINE)),
+                    netFramework);
+                const value = key ? hive.getValue(key, 'InstallRoot') : null;
+                const end = value ? value.data.indexOf(0) : -1;
+                return value ? decodeAnsi(value.data.subarray(0,
+                    end < 0 ? value.data.length : end)) || null : null;
+            };
+            const frameworkRoot = 'C:\\WINDOWS\\Microsoft.NET\\Framework\\';
+            // Decided when the table is first asked for, not here: the
+            // bottle's files and registry are laid down after the layers are
+            // made, and before any library is.
+            let shimDecided = false;
+            const standShim = ()=>{
+                if (shimDecided)
+                {
+                    return;
+                }
+                shimDecided = true;
+                if (windows.major < 6
+                    && (filesOnly.stat('C:\\WINDOWS\\system32\\mscoree.dll')?.exists === true
+                        || filesOnly.stat(`${(installRoot() ?? frameworkRoot).replace(/\\?$/, '\\')}`
+                            + 'v4.0.30319\\mscoreei.dll')?.exists !== true))
+                {
+                    return;
+                }
+                if (installRoot() === null)
+                {
+                    // Furnished, as the machine's own: an installation's
+                    // registry that names another replaces it.
+                    Object.assign(hive.setValue(hive.create(/** @type {any} */ (
+                        hive.root(HKEY_LOCAL_MACHINE)), netFramework).key, 'InstallRoot',
+                    REG_SZ, encodeAnsi(`${frameworkRoot}\0`)), { furnished: true });
+                }
                 const kernel32 = libraries['KERNEL32.dll'];
                 /** @param {string} text @param {(at: number) => any} use */
                 const withAnsi = async(text, use)=>{
@@ -5241,14 +5336,7 @@ export function createWin32Module(){
                     allocate: bytes=>heap.allocate(bytes),
                     allocateCode: bytes=>heap.allocateCode(bytes),
                     writeMemory,
-                    installRoot: ()=>{
-                        const key = hive.open(/** @type {any} */ (hive.root(HKEY_LOCAL_MACHINE)),
-                            'SOFTWARE\\Microsoft\\.NETFramework');
-                        const value = key ? hive.getValue(key, 'InstallRoot') : null;
-                        const end = value ? value.data.indexOf(0) : -1;
-                        return value ? decodeAnsi(value.data.subarray(0,
-                            end < 0 ? value.data.length : end)) || null : null;
-                    },
+                    installRoot,
                     windowsDirectory: ()=>'C:\\WINDOWS',
                     exists: path=>volume.stat(path)?.exists === true,
                     loadLibrary: path=>withAnsi(path, at=>kernel32.LoadLibraryA.handler([at])),
@@ -5260,8 +5348,7 @@ export function createWin32Module(){
                 }),
                 // Its export 142, which has no name, is kernel32's.
                 GetVersionExW: kernel32.GetVersionExW };
-            }
-
+            };
             libraries['SHFOLDER.dll'] = {
                 SHGetFolderPathA: libraries['SHELL32.dll'].SHGetFolderPathA,
                 SHGetFolderPathW: libraries['SHELL32.dll'].SHGetFolderPathW,
@@ -5441,7 +5528,10 @@ export function createWin32Module(){
 
             const api = {
                 /** @returns {Record<string, Record<string, any>>} library name -> its exports */
-                libraries: ()=>libraries,
+                libraries: ()=>{
+                    standShim();
+                    return libraries;
+                },
 
                 /**
                  * A program started as this process's CreateProcess would start

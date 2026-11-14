@@ -19,6 +19,10 @@ import { features as probeFeatures } from '../wasm/features.js';
 import { machine, observe, piece, translateUntil, untilTranslatorsLoaded }
     from '../testing/seeded-pieces.js';
 
+/** Why a test of the entry hash cannot run here. */
+const NO_TAIL_CALLS = 'this host\'s wasm has no tail calls: every region leaves for the host'
+    + ' and there is no entry hash';
+
 /** A share no region fits in: every call forms one candidate and leaves the rest. */
 const ONE_A_CALL = { holdMs: 1e-6 };
 
@@ -513,10 +517,11 @@ const callingLoop = at=>{
     return { code, table, slots, f, g };
 };
 
-test('regions formed again with their calls\' callees are formed a share at a call', async()=>{
+test('regions formed again with their calls\' callees are formed a share at a call', async t=>{
     if (!probeFeatures().tailCalls)
     {
-        return; // no transfers, no calls sampled
+        t.skip(NO_TAIL_CALLS);
+        return;
     }
     // A call is due at its first sample, so both are due in one reading.
     const m = machine({ worker: true, translators: 1, callTargets: true, callReturn: false,

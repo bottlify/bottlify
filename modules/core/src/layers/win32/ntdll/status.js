@@ -60,6 +60,10 @@ export const STATUS = Object.freeze({
     /** RtlVerifyVersionInfo's answer when the system does not meet the request. */
     REVISION_MISMATCH: 0xc0000059,
     /** What a section is refused with or answers. */
+    /** A success: an image's view is mapped, away from its base and moved there. */
+    IMAGE_NOT_AT_BASE: 0x40000003,
+    /** An image with no fixups whose base is taken. */
+    CONFLICTING_ADDRESSES: 0xc0000018,
     NOT_MAPPED_VIEW: 0xc0000019,
     INVALID_VIEW_SIZE: 0xc000001f,
     INVALID_FILE_FOR_SECTION: 0xc0000020,
@@ -118,6 +122,7 @@ const ERROR = Object.freeze({
     BAD_EXE_FORMAT: 193,
     MR_MID_NOT_FOUND: 317,
     INVALID_ADDRESS: 487,
+    IMAGE_NOT_AT_BASE: 700,
     RESOURCE_DATA_NOT_FOUND: 1812,
     RESOURCE_TYPE_NOT_FOUND: 1813,
     RESOURCE_NAME_NOT_FOUND: 1814,
@@ -176,6 +181,8 @@ const TO_DOS_ERROR = new Map([
     [STATUS.CANNOT_DELETE, ERROR.ACCESS_DENIED],
     [STATUS.REVISION_MISMATCH, ERROR.REVISION_MISMATCH],
     [STATUS.NOT_MAPPED_VIEW, ERROR.INVALID_ADDRESS],
+    [STATUS.IMAGE_NOT_AT_BASE, ERROR.IMAGE_NOT_AT_BASE],
+    [STATUS.CONFLICTING_ADDRESSES, ERROR.INVALID_ADDRESS],
     // A view that does not fit is refused as access is: MapViewOfFile's
     // answer for a length past the end.
     [STATUS.INVALID_VIEW_SIZE, ERROR.ACCESS_DENIED],

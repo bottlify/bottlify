@@ -1,6 +1,10 @@
 # .NET Framework as a shared layer
 
-Status: plan; step 2 (mount) done 2026-11-14, the rest no code. Numbers marked *(not measured)* are estimates.
+Status: plan; step 2 (mount) done 2026-11-14. The build's two runs work by hand in Node, no
+launcher yet: 4.8's setup on a Windows 7 machine, then `ngen executeQueuedItems` to an empty queue
+(140 native images, a 797 MB layer); a console program prints and exits on that layer under 7 and
+XP alike (2026-11-14). A WinForms program stops at its first font: the engine's GDI+ has no
+`GdipCreateFontFromLogfontW`, nor any font or drawing. Step 1 on The Swapper's bottle and the rest: no code. Numbers marked *(not measured)* are estimates.
 
 ## Why
 
