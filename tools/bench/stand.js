@@ -59,7 +59,10 @@ function hostOf(arm, workload, profile){
         initialStack: 0x800000, ...workload.bits === 64 ? { bits: 64 } : {},
         // The wasm interpreter from the first instruction: its start is the
         // process's, which a page or a second host would otherwise move.
-        cork: { ...arm.cork, clock: 'virtual', wasmInterpreterAfter: 0,
+        // Translation on this thread: the virtual clock means it, and a build
+        // from before that clock would otherwise look for its translation
+        // worker beside a page that has none, and interpret everything.
+        cork: { ...arm.cork, clock: 'virtual', worker: false, wasmInterpreterAfter: 0,
             ...profile ? { blockProfile: true } : {} },
     });
     host.writePhysical(IMAGE_BASE, workload.image);
