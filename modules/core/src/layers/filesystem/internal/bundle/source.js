@@ -94,18 +94,21 @@ const SEPARATOR = String.fromCharCode(92);
  *        The most both tiers hold together, in bytes: a pool of the tab's
  *        heaps (`memory-zones.js`), which a bundle of large blocks would
  *        otherwise fill by count alone. The scan tier gives way first.
- * @param {string} [options.prefix]
+ * @param {string | null} [options.prefix]
  *        A directory the whole bundle appears under, without separators at
  *        either end. A game belongs in a directory of its own rather than at
  *        the root of the volume: a program works out where its data lives from
  *        where it is itself, and a bundle mounted at the root makes every
- *        answer to that question -- right or wrong -- happen to work.
+ *        answer to that question -- right or wrong -- happen to work. `null`:
+ *        nowhere, only what `relocate` places appears (a layer, which has no
+ *        program directory), and `unplaced` counts the files left out.
  * @param {Record<string, string>} [options.relocate]
  *        Directories of the bundle that appear somewhere other than under
  *        `prefix`, by their path in the bundle: what a bottle carries for
  *        `C:\WINDOWS\system32` lies in the bundle beside its registry, and is
  *        found where Windows keeps it. No separators at either end of either.
- * @returns {import('../memory-store.js').SourceStore & { heldBytes: () => number }}
+ * @returns {import('../memory-store.js').SourceStore & { heldBytes: () => number,
+ *     unplaced: number }}
  */
 export function createBundleSource({
     bundle, readBlock, decode, cacheBlocks = DEFAULT_CACHE_BLOCKS,
@@ -117,9 +120,9 @@ export function createBundleSource({
     /** @type {Map<string, import('./format.js').BundleFile>} */
     const byPath = new Map();
 
-    const under = prefix === '' ? '' : prefix + SEPARATOR;
+    const under = prefix === '' || prefix === null ? '' : prefix + SEPARATOR;
     const moved = Object.entries(relocate).map(([from, to])=>({ from: foldName(from), to }));
-    /** @param {string} path */
+    /** @param {string} path @returns {string | null} */
     const outward = path=>{
         const folded = foldName(path);
         for (const { from, to } of moved)
@@ -134,26 +137,37 @@ export function createBundleSource({
                 return to === '' ? path.slice(from.length + 1) : `${to}${path.slice(from.length)}`;
             }
         }
-        return `${under}${path}`;
+        return prefix === null ? null : `${under}${path}`;
     };
 
+    let unplaced = 0;
     for (const file of bundle.files)
     {
-        byPath.set(foldName(outward(file.path)), file);
-        entries.push({ path: outward(file.path), directory: false, size: file.size });
+        const path = outward(file.path);
+        if (path === null)
+        {
+            unplaced++;
+            continue;
+        }
+        byPath.set(foldName(path), file);
+        entries.push({ path, directory: false, size: file.size });
     }
     // A directory only appears here when it is empty: every other one is implied
     // by the paths under it, and the overlay puts those back on its own.
     /** @type {Set<string>} */
-    const directories = new Set(bundle.directories.map(path=>foldName(outward(path))));
-    for (const path of bundle.directories)
+    const directories = new Set();
+    for (const path of bundle.directories.map(outward))
     {
-        entries.push({ path: outward(path), directory: true, size: 0 });
+        if (path !== null)
+        {
+            directories.add(foldName(path));
+            entries.push({ path, directory: true, size: 0 });
+        }
     }
     // The prefix's own components are directories nothing else declares: they
     // hold the bundle rather than coming from it. So are a relocated
     // directory's.
-    for (const holder of [prefix, ...moved.map(({ to })=>to)])
+    for (const holder of [prefix ?? '', ...moved.map(({ to })=>to)])
     {
         const parts = holder.split(SEPARATOR).filter(Boolean);
         for (const part of parts.map((_, at)=>parts.slice(0, at + 1).join(SEPARATOR)))
@@ -239,6 +253,7 @@ export function createBundleSource({
     return {
         /** Bytes of the decoded blocks kept, for the tab's heaps (`memory-zones.js`). */
         heldBytes: ()=>heldBytes,
+        unplaced,
 
         list: ()=>entries.map(entry=>({ ...entry })),
 

@@ -1,6 +1,6 @@
 # .NET Framework as a shared layer
 
-Status: plan, no code. 2026-11-14. Numbers marked *(not measured)* are estimates.
+Status: plan; step 2 (mount) done 2026-11-14, the rest no code. Numbers marked *(not measured)* are estimates.
 
 ## Why
 
@@ -30,7 +30,7 @@ it can serve every bottle there.
 | step | where | what |
 |---|---|---|
 | 1. Need | core | A program needs the Framework when its image is a CLR one (a COM descriptor directory, `_CorExeMain` from mscoree) and the volume has no `mscoree.dll` of its line; or a setup the program starts is the Framework's (known by its version block, as `DXSETUP` is: `PROGRAMS_IN_PLACE`). Either asks the embedder for the layer (an event), and a Framework setup stands in as run and exited 0 once the layer is there. |
-| 2. Mount | core, filesystem | A volume's source can be several bundles: a union source reads a path from the first that has it - the bottle's bundle over the layer. The layer's registry is laid under the bottle's at the start, as an installation's is (`fillFromJSON`). |
+| 2. Mount | core, filesystem | Done, 2026-11-14: `bundle.layers` (`docs/core/api.md`). A volume's source can be several bundles: a union source reads a path from the first that has it - the bottle's bundle over the layer. The layer's registry is laid under the bottle's at the start, as an installation's is (`fillFromJSON`). Gate: `bundle-layers.itest.js`. |
 | 3. Installer | site, dist | The offline installer (`ndp48-x86-x64-allos-enu.exe`, unmodified - what the licence allows to redistribute) is fetched at build time from Microsoft with its SHA-256 pinned, and served from the launcher's own origin (Microsoft's download host sends no CORS headers). Not in git. |
 | 4. Build | launcher | The first time a layer is asked for and is not in this browser: a run with no picture - a modal with a progress bar - starts the installer with `/q /norestart` on an empty Windows 7 machine of the layer's width, then `ngen executeQueuedItems` until the queue is empty (WPF's assemblies included), and packs what the run wrote (files and registry, the setup's extraction folders and temp left out) into the layer bundle. *(not measured: about 15-20 minutes on this machine.)* |
 | 5. Resume | launcher | The build keeps its own session, saved as it goes (the first-save fix, d79ced0bf). A page closed during the extraction or the MSI starts that stage again; one closed during ngen goes on with what is left in ngen's queue, which lives in the build's registry. A process cannot be resumed mid-run: that would need its memory and the host's state saved. |

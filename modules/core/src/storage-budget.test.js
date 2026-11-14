@@ -102,6 +102,16 @@ test('past its budget the oldest caches go first, never the run\'s own or a sess
         'a session is never a cache');
 });
 
+test('a run over layers keeps every cache it reads, its layers\' as its own', async()=>{
+    const root = origin();
+    const result = await keepStorageWithin({ root, estimate: { usage: 3600, quota: 4000 },
+        keep: { blocks: ['game-cccc', 'old-aaaa'], translations: 'game' } });
+    assert.ok(result.measured);
+    assert.deepEqual(result.evicted.map(one=>one.name), ['game-0000'],
+        'the oldest, old-aaaa, is a layer the run reads and stays');
+    assert.ok(root.children.has('old-aaaa.blocks') && root.children.has('game-cccc.blocks'));
+});
+
 test('a translations\' directory goes whole, by its newest file\'s age', async()=>{
     const root = origin();
     const result = await keepStorageWithin({ root, estimate: { usage: 4000, quota: 4000 },

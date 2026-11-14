@@ -47,7 +47,8 @@ import { GRAPHICS_CHOICES, graphicsChoice } from './layers/graphics/choice.js';
 import { searchesBesideProgram } from './layers/win32/kernel32/modules.js';
 import { synthesiseProcessInit, DLL_PROCESS_ATTACH, DLL_PROCESS_DETACH }
     from './layers/loader/internal/init.js';
-import { createBundleSource } from './layers/filesystem/internal/bundle/source.js';
+import { BLOCK_MISS, createBundleSource } from './layers/filesystem/internal/bundle/source.js';
+import { createUnionSource } from './layers/filesystem/internal/union-source.js';
 import { crc32 } from './layers/filesystem/internal/bundle/crc32.js';
 import { createSharingMemory, openSharedSharing } from './layers/filesystem/internal/shared-sharing.js';
 import { openPageFile } from './layers/filesystem/internal/page-file.js';
@@ -131,6 +132,20 @@ const hashText = (hash, text)=>{
  * @typedef {{ memory: WebAssembly.Memory, guestEnd: number, executors?: number,
  *     heapFrom?: number, stacks?: { from: number, to: number },
  *     engine?: { layout: string, ranges: [number, number][] } }} SpareMemory
+ */
+
+/**
+ * A bundle a bottle stands on (`bundle.layers`), read as `bundle` is: the
+ * same fields, but no `prefix` or `revision` (a layer has no program directory,
+ * and its hive is always under the bottle's). `id` is required and is the
+ * layer's own, not the bottle's: it names the layer's block cache, which
+ * every bottle standing on the layer shares.
+ *
+ * @typedef {{ id: string, fetch: (offset: number, length: number) => Promise<Uint8Array>,
+ *     store?: any, evictOthers?: boolean, prefetch?: boolean, preload?: boolean,
+ *     progress?: (state: { bytes: number, total: number } | { unbacked: string }) => void,
+ *     indexSha256?: string,
+ *     retry?: { attempts?: number, baseDelayMs?: number, maxDelayMs?: number } }} BundleLayer
  */
 
 /**
@@ -507,6 +522,12 @@ const hashText = (hash, text)=>{
  * @property {number} [bundle.retry.attempts]     Including the first. Default 6.
  * @property {number} [bundle.retry.baseDelayMs]  Doubled each attempt. Default 250.
  * @property {number} [bundle.retry.maxDelayMs]   Ceiling for that. Default 10000.
+ * @property {BundleLayer[]} [bundle.layers]  Bundles the bottle stands on - a
+ *           runtime built once and shared by bottles - under it on C:, the
+ *           first over the next. A layer is a bottle's system files alone:
+ *           `.bottlify\drive_c` mounted at C:\, `.bottlify\system32` in
+ *           system32, `.bottlify\registry.json` laid under the bottle's hive;
+ *           anything else in it is not mounted (`layer-files-unmounted`).
  * @property {Object} [sidecarHooks]
  *           A bundle's sidecar, next to `manifest.json` and never inside the
  *           bundle itself: replaces one or more guest functions, or one loop
@@ -3245,7 +3266,156 @@ function expectIndex(expected){
 }
 
 /**
- * Mounts a bundle as the read-only half of the volume.
+ * @typedef {{ source: any, fetch: (needed: any[]) => Promise<void>,
+ *     stop: () => void, ahead: () => number,
+ *     refetched: () => { blocks: number, bytes: number },
+ *     ranges: () => { requests: number, bytes: number },
+ *     decoded: () => { blocks: number, bytes: number, ms: number },
+ *     held: () => Record<string, number | string>,
+ *     registry: Promise<any>, layerRegistries?: Promise<any[]> }} MountedBundle
+ *     `layerRegistries`: the hives the layers carry, the first layer's first.
+ */
+
+/**
+ * Mounts the run's bundle and the layers it stands on (`bundle.layers`) as the
+ * read-only half of the volume: one source, the bundle's file over a layer's
+ * of the same path (`union-source.js`), each bundle with a block cache of its
+ * own, named by its own id - a layer shared by bottles is cached once.
+ *
+ * A miss names the blocks of one bundle, a layer's tagged with its number
+ * (`layer`, from 1), and the run's `fetch` hands each to its bundle.
+ *
+ * @param {any} deps
+ * @returns {Promise<MountedBundle | null>}
+ */
+async function mountBundle({ options, events, translationStore }){
+    if (!options.bundle?.fetch)
+    {
+        return null;
+    }
+    const id = options.bundle.id ?? options.id ?? 'bundle';
+    /** @type {any[]} */
+    const layers = options.bundle.layers ?? [];
+    for (const layer of layers)
+    {
+        if (typeof layer?.id !== 'string' || typeof layer.fetch !== 'function')
+        {
+            throw new TypeError('bundle.layers: each layer needs an id and a fetch');
+        }
+    }
+    const specs = [{ spec: options.bundle, id, layer: false },
+        ...layers.map(layer=>({ spec: layer, id: layer.id, layer: true }))];
+
+    // Every cache of the run named before any opens: the origin is kept under
+    // its budget with all of them kept, and a full store lets none of them go.
+    /** @type {string[]} */
+    const held = [];
+    /** @type {() => void} */
+    let allNamed = ()=>{};
+    const named = new Promise(resolve=>{
+        allNamed = ()=>resolve(undefined);
+    });
+    /** @param {string} name */
+    const opened = name=>{
+        held.push(name);
+        if (held.length === specs.length)
+        {
+            // Absent means local; `store: null` is no cache, so not `??`.
+            if ([undefined, 'local'].includes(options.bundle.store)
+                && options.bundle.evictOthers !== false)
+            {
+                // The origin's caches kept under its budget, the oldest let
+                // go: in the background, as nothing of this run's own is touched.
+                keepOriginStorageWithin({ blocks: [...held], translations: id })
+                    .then(result=>events.emit('storage-budget', result), ()=>{});
+            }
+            allNamed();
+        }
+        return named;
+    };
+    const mounted = await Promise.all(specs.map(one=>mountOneBundle({ ...one, held, opened,
+        // A layer's events say whose they are.
+        events: one.layer ? { emit: (/** @type {string} */ name, /** @type {any} */ payload)=>
+            events.emit(name, { ...payload, layer: one.id }) } : events,
+        translationStore: one.layer ? undefined : translationStore })));
+    if (mounted.length === 1)
+    {
+        return mounted[0];
+    }
+
+    /** @param {(one: MountedBundle) => Record<string, number | string>} get */
+    const added = get=>{
+        /** @type {Record<string, number | string>} */
+        const out = {};
+        for (const one of mounted)
+        {
+            for (const [key, value] of Object.entries(get(one)))
+            {
+                const before = out[key] ?? 0;
+                out[key] = typeof value === 'number' && typeof before === 'number'
+                    ? before + value : NOT_MEASURED;
+            }
+        }
+        return out;
+    };
+    const [bottle, ...under] = mounted;
+    return {
+        source: createUnionSource([bottle.source,
+            ...under.map((one, at)=>missesNamed(one.source, at + 1))]),
+        fetch: needed=>Promise.all(mounted.map((one, at)=>{
+            const own = needed.filter(block=>(block.layer ?? 0) === at);
+            return own.length === 0 ? null : one.fetch(own);
+        })).then(()=>{}),
+        registry: bottle.registry,
+        layerRegistries: Promise.all(under.map(one=>one.registry)),
+        ahead: ()=>mounted.reduce((sum, one)=>sum + one.ahead(), 0),
+        refetched: ()=>/** @type {any} */ (added(one=>one.refetched())),
+        decoded: ()=>/** @type {any} */ (added(one=>one.decoded())),
+        ranges: ()=>/** @type {any} */ (added(one=>one.ranges())),
+        held: ()=>added(one=>one.held()),
+        stop(){
+            for (const one of mounted)
+            {
+                one.stop();
+            }
+        },
+    };
+}
+
+/**
+ * A layer's source whose misses say whose blocks they want: each block tagged
+ * with the layer's number, which crosses a link to another thread with it.
+ *
+ * @param {any} source @param {number} layer
+ */
+function missesNamed(source, layer){
+    return {
+        list: ()=>source.list(),
+        /** @param {string} path */
+        stat: path=>source.stat(path),
+        /** @param {string} path @param {number} offset @param {number} length */
+        read(path, offset, length){
+            try
+            {
+                return source.read(path, offset, length);
+            }
+            catch (e){
+                const miss = /** @type {any} */ (e);
+                if (miss?.code === BLOCK_MISS)
+                {
+                    for (const block of miss.blocks)
+                    {
+                        block.layer = layer;
+                    }
+                }
+                throw miss;
+            }
+        },
+    };
+}
+
+/**
+ * Mounts one bundle as (part of) the read-only half of the volume.
  *
  * The blocks that have been brought in are held here rather than inside the
  * source, because what fetches them is the caller's business -- a file, a range
@@ -3260,26 +3430,23 @@ function expectIndex(expected){
  * of sooner. The source keeps its own bounded cache of decoded blocks in front
  * of this, which is what a repeated read actually hits.
  *
- * @param {any} deps
- * @returns {Promise<{ source: any, fetch: (needed: any[]) => Promise<void>,
- *                     stop: () => void, ahead: () => number,
- *                     refetched: () => { blocks: number, bytes: number },
- *                     ranges: () => { requests: number, bytes: number },
- *                     decoded: () => { blocks: number, bytes: number, ms: number },
- *                     held: () => Record<string, number | string>,
- *                     registry: Promise<any> } | null>}
+ * A layer (`bundle.layers`) is mounted the same way, and only its system files
+ * are: `prefix` is null for it, and nothing seeds the translator from it.
+ *
+ * @param {{ spec: any, id: string, layer: boolean, events: any, translationStore?: any,
+ *     held: string[], opened: (name: string) => Promise<void> }} deps
+ *     `spec`: the bundle's options. `held`: the names of every block cache the
+ *     run reads, this one's among them. `opened`: told this bundle's cache's
+ *     name once its index is read, and waited on before the cache is opened.
+ * @returns {Promise<MountedBundle>}
  */
-async function mountBundle({ options, events, translationStore }){
-    if (!options.bundle?.fetch)
-    {
-        return null;
-    }
+async function mountOneBundle({ spec, id, layer, events, translationStore, held, opened }){
     // Everything below fetches through this, the index included: the first
     // range of the run is as exposed to a dropped connection as the last.
     const retrying = retryingFetch({
-        fetch: options.bundle.fetch,
+        fetch: spec.fetch,
         events,
-        retry: options.bundle.retry,
+        retry: spec.retry,
     });
     /**
      * How long the bundle's last requests took. The shortest of them is the
@@ -3338,36 +3505,28 @@ async function mountBundle({ options, events, translationStore }){
     const bundle = await openBundle(
         fetchRange,
         (codec, bytes)=>codec === 1 ? inflateRaw(bytes) : decode(codec, bytes, null),
-        { verifyIndex: expectIndex(options.bundle.indexSha256) });
+        { verifyIndex: expectIndex(spec.indexSha256) });
 
-    const blockStore = options.bundle.store === undefined ? 'local' : options.bundle.store;
-    const evictOthers = options.bundle.evictOthers !== false;
-    if (blockStore === 'local' && evictOthers)
-    {
-        // The origin's caches kept under its budget, the oldest let go: in the
-        // background, as nothing of this run's own is touched.
-        keepOriginStorageWithin({
-            blocks: blockCacheName(options.bundle.id ?? options.id ?? 'bundle', bundle.fingerprint),
-            translations: options.bundle.id ?? options.id ?? 'bundle',
-        }).then(result=>events.emit('storage-budget', result), ()=>{});
-    }
+    const blockStore = spec.store === undefined ? 'local' : spec.store;
+    const evictOthers = spec.evictOthers !== false;
+    await opened(blockCacheName(id, bundle.fingerprint));
     const cache = await createBlockCache({
         // Absent means local, and only an explicit falsy value turns it off --
         // so `??` will not do here: `store: null` has to mean no cache.
         store: await resolveBlockStore(blockStore),
         // A cache of this bundle as it was packed before stays on the store
         // until the origin's budget lets it go (`storage-budget.js`).
-        name: blockCacheName(options.bundle.id ?? options.id ?? 'bundle', bundle.fingerprint),
+        name: blockCacheName(id, bundle.fingerprint),
         blockSize: bundle.blockSize,
         blockCount: bundle.blockCount,
         // Where the blocks have no store but the heap, the heaps' pool for them:
         // a read in flight keeps its blocks past it, and nothing else does.
         maxHeapBytes: HEAP_POOLS.blockCache,
         evictOthers,
+        held,
         // Nothing left to let go: the run goes on with what it fetches in the
         // heap, and the person is told there is no room, once.
-        onFull: reason=>events.emit('storage-full', {
-            bundle: options.bundle.id ?? options.id ?? 'bundle', reason }),
+        onFull: reason=>events.emit('storage-full', { bundle: id, reason }),
     });
 
     const source = createBundleSource({
@@ -3380,7 +3539,8 @@ async function mountBundle({ options, events, translationStore }){
         // At the root of the volume a program's own directory and the system
         // root are the same place, so every answer to "where do I live" happens
         // to work and a wrong one is invisible until it is not.
-        prefix: options.bundle.prefix ?? BUNDLE_DIRECTORY,
+        // A layer has no program directory: its system files are all of it.
+        prefix: layer ? null : spec.prefix ?? BUNDLE_DIRECTORY,
         // What the installation left in system32 is found there again, read
         // from the bundle a block at a time like any of its files.
         // So is what it wrote anywhere else on C:, at the drive's root.
@@ -3455,6 +3615,13 @@ async function mountBundle({ options, events, translationStore }){
             events.emit('bundle-registry-unreadable', { reason: e?.message ?? String(e) });
             return null;
         });
+
+    // What a layer holds outside its system files is not on the volume.
+    const stray = layer ? source.unplaced - (registryFile === null ? 0 : 1) : 0;
+    if (stray > 0)
+    {
+        events.emit('layer-files-unmounted', { files: stray });
+    }
 
     events.emit('bundle', {
         files: bundle.files.length,
@@ -3720,7 +3887,7 @@ async function mountBundle({ options, events, translationStore }){
      * it twice.
      */
     const fill = async()=>{
-        if (!cache.backed || options.bundle.prefetch === false)
+        if (!cache.backed || spec.prefetch === false)
         {
             return;
         }
@@ -3749,7 +3916,7 @@ async function mountBundle({ options, events, translationStore }){
      * stopped. Not the translation seed, which the translator's store reads.
      */
     const preload = async()=>{
-        const progress = options.bundle.progress ?? (()=>{});
+        const progress = spec.progress ?? (()=>{});
         if (!cache.backed)
         {
             progress({ unbacked: cache.reason ?? 'nowhere to keep the blocks' });
@@ -3780,7 +3947,7 @@ async function mountBundle({ options, events, translationStore }){
             progress({ unbacked: full });
         }
     };
-    if (options.bundle.preload === true)
+    if (spec.preload === true)
     {
         await preload();
     }
@@ -4210,6 +4377,15 @@ async function furnishVolume({ options, events, filesystem, blocks, seeded, regi
     {
         registry.fillFromJSON(installedRegistry,
             (seeded.registry?.revision ?? 0) < (options.bundle?.revision ?? 0));
+    }
+    // The layers' hives under both, the first layer's over the next: what a
+    // bottle or its session set of the same key stays as they set it.
+    for (const layer of await blocks?.layerRegistries ?? [])
+    {
+        if (layer && registry)
+        {
+            registry.fillFromJSON(layer);
+        }
     }
     // A disc is a drive of its own, and takes D: or the first letter nothing
     // holds once the machine's own disk is mounted.
@@ -4856,7 +5032,7 @@ async function buildApp(options){
      * fetching. One is a bound to raise; the other is nothing to do with us.
      */
     const bundleReads = { requests: 0, blocks: 0, bytes: 0, again: 0, againBytes: 0 };
-    /** @type {Set<number>} */
+    /** By bundle and block: a layer's blocks are numbered from 0 as the bundle's are. @type {Set<string>} */
     const blocksSeen = new Set();
 
     // A call that is waiting -- a message loop with an empty queue -- is let go
@@ -6064,14 +6240,15 @@ async function buildApp(options){
                 {
                     bundleReads.blocks++;
                     bundleReads.bytes += block.packed;
-                    if (blocksSeen.has(block.index))
+                    const seen = `${block.layer ?? 0}:${block.index}`;
+                    if (blocksSeen.has(seen))
                     {
                         bundleReads.again++;
                         bundleReads.againBytes += block.packed;
                     }
                     else
                     {
-                        blocksSeen.add(block.index);
+                        blocksSeen.add(seen);
                     }
                 }
                 fetching++;

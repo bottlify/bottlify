@@ -440,6 +440,22 @@ test('a directory relocated to the root lands there, with no leading separator',
         'every path relative to the root');
 });
 
+test('with no prefix only what is relocated appears, and the rest is counted', async()=>{
+    // A layer has no program directory: its system files are all it gives.
+    const bundle = await open();
+    const source = createBundleSource({
+        bundle, readBlock: blockReader().readBlock, decode: decodeBlock, prefix: null,
+        relocate: { 'game\\DATA': 'WINDOWS\\system32' },
+    });
+    const notes = CONTENT['Game\\Data\\Notes.txt'];
+    same(source.read('WINDOWS\\system32\\Notes.txt', 0, notes.length), notes);
+    assert.deepEqual(source.list().map(entry=>entry.path).sort(),
+        ['WINDOWS', 'WINDOWS\\system32', 'WINDOWS\\system32\\Notes.txt']);
+    assert.equal(source.stat('Game\\Ramp.dat'), null);
+    assert.throws(()=>source.read('Game\\Ramp.dat', 0, 1), { code: 'NOT_FOUND' });
+    assert.equal(source.unplaced, 2, 'the two files outside it');
+});
+
 test('a bundle packed again under the same name has another fingerprint', async()=>{
     // A block cache named by the bundle alone answered a repacked bundle's
     // reads with the old one's blocks, and the guest read garbage.

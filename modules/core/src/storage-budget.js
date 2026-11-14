@@ -181,7 +181,7 @@ async function scanStorage(root){
  * block cache and translations but the ones named in `keep` or in `busy`.
  *
  * @param {any} root
- * @param {{ blocks?: string, translations?: string }} keep
+ * @param {{ blocks: string[], translations?: string }} keep
  * @param {string[]} busy  the bundles (by safe name) a run holds now
  * @returns {Promise<Stored[]>}
  */
@@ -190,7 +190,7 @@ async function evictables(root, keep, busy){
     const held = name=>busy.some(bundle=>name === bundle || name.startsWith(`${bundle}-`)
         || name.startsWith(`${bundle}.v`));
     return (await scanStorage(root)).filter(one=>!held(one.name)
-        && (one.kind === 'blocks' ? one.name !== keep.blocks
+        && (one.kind === 'blocks' ? !keep.blocks.includes(one.name)
             : one.kind === 'translations' && !(keep.translations !== undefined
                 && one.name.startsWith(`${keep.translations}.v`))));
 }
@@ -202,9 +202,10 @@ async function evictables(root, keep, busy){
  * @param {any} options.root  the origin's file system (`navigator.storage.getDirectory()`)
  * @param {{ usage?: number, quota?: number }} options.estimate  the browser's
  *     (`navigator.storage.estimate()`)
- * @param {{ blocks?: string, translations?: string }} [options.keep]  the asking run's
- *     own: its block cache's name (`blockCacheName`) and its bundle's, as its
- *     translations are named
+ * @param {{ blocks?: string | string[], translations?: string }} [options.keep]  the
+ *     asking run's own: its block caches' names (`blockCacheName`) - its bottle's
+ *     and those of the layers under it - and its bundle's, as its translations
+ *     are named
  * @param {string[]} [options.busy]  the names of the locks held now
  *     (`navigator.locks.query()`): a bundle whose translations a run holds keeps
  *     its caches
@@ -230,7 +231,7 @@ export async function keepStorageWithin({ root, estimate, keep = {}, busy = [],
         && typeof root.removeEntry === 'function')
     {
         const kept = {
-            blocks: keep.blocks === undefined ? undefined : storageName(keep.blocks),
+            blocks: [keep.blocks ?? []].flat().map(storageName),
             translations: keep.translations === undefined ? undefined
                 : storageName(keep.translations),
         };
@@ -266,7 +267,7 @@ export async function keepStorageWithin({ root, estimate, keep = {}, busy = [],
  * The same, on the origin's own storage, asked of the browser: nothing where
  * the page has no file system of its own.
  *
- * @param {{ blocks?: string, translations?: string }} keep
+ * @param {{ blocks?: string | string[], translations?: string }} keep
  */
 export async function keepOriginStorageWithin(keep){
     const nav = /** @type {any} */ (globalThis).navigator;

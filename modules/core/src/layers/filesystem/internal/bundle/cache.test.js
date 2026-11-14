@@ -691,3 +691,25 @@ test('other bottles\' blocks stay when the person said so, and the store says it
         assert.deepEqual(told, ['quota']);
         assert.deepEqual(war.read(3, 16), new Uint8Array(16).fill(3), 'held in the heap');
     });
+
+test('a full store never lets go of a cache the run reads beside its own', async()=>{
+    // A bottle over a layer: two caches of one run on one store. The bottle's
+    // filling up must not take the blocks the layer's reads stand on.
+    const store = fakeStore();
+    const layer = await createBlockCache({ store, ...OPTIONS, name: 'layer', segmentBytes: SPAN });
+    const other = await createBlockCache({ store, ...OPTIONS, name: 'other', segmentBytes: SPAN });
+    for (let index = 0; index < 3; index++)
+    {
+        await layer.put(index, new Uint8Array(16).fill(index));
+        await other.put(index, new Uint8Array(16).fill(index));
+    }
+    const war = await createBlockCache({ store: roomFor(store, 3 * OPTIONS.blockCount * 8
+        + 3 * SPAN), ...OPTIONS, segmentBytes: SPAN, held: ['layer'] });
+    for (let index = 0; index < 4; index++)
+    {
+        await war.put(index, new Uint8Array(16).fill(index));
+    }
+    assert.equal(store.files.has('layer.pack.0'), true, 'the layer\'s blocks stay');
+    assert.equal(store.files.has('other.pack.0'), false, 'another bottle\'s went in its place');
+    assert.deepEqual(layer.read(2, 16), new Uint8Array(16).fill(2));
+});
