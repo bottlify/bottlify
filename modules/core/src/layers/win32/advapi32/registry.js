@@ -628,6 +628,13 @@ const machineKeys = (windows, directx, processors)=>{
         ...[...BUILT_IN_SERVICES, ...windows.major >= 6 ? VISTA_SERVICES : []]
             .map(({ name, values })=>({ root: HKEY_LOCAL_MACHINE,
                 path: `SYSTEM\\CurrentControlSet\\Services\\${name}`, values })),
+        // Where the .NET Framework's runtimes are, which Windows 7 and later
+        // write with the shim they carry (mscoree, A247): the shim and its
+        // implementation look under it, and the Framework 4's setup there
+        // leaves it as it found it.
+        ...windows.major >= 6 ? [{ root: HKEY_LOCAL_MACHINE,
+            path: 'SOFTWARE\\Microsoft\\.NETFramework',
+            values: { InstallRoot: `${folders.Windows}\\Microsoft.NET\\Framework\\` } }] : [],
         ...CRYPTO_PROVIDERS.map(([name, type, image])=>({ root: HKEY_LOCAL_MACHINE,
             path: `SOFTWARE\\Microsoft\\Cryptography\\Defaults\\Provider\\${name}`,
             values: { Type: type, 'Image Path': image } })),

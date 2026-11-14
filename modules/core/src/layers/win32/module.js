@@ -124,6 +124,7 @@ import { createCrypt32Functions } from './crypt32/functions.js';
 import { createAdvpackFunctions } from './advpack/functions.js';
 import { SFC_ORDINALS, createSfcFunctions } from './sfc/functions.js';
 import { createFaultrepFunctions } from './faultrep/functions.js';
+import { MSCOREE_ORDINALS, createMscoreeFunctions } from './mscoree/functions.js';
 import { createHttpapiFunctions } from './httpapi/functions.js';
 import { createLoadperfFunctions } from './loadperf/functions.js';
 import { createUrlmonFunctions } from './urlmon/functions.js';
@@ -5210,6 +5211,51 @@ export function createWin32Module(){
                 readMemory,
             });
 
+            // The .NET shim is part of the system from Windows 7 on, and the
+            // .NET Framework 4's setup there installs only its implementation,
+            // mscoreei.dll, which it forwards to (A247). XP has none of its
+            // own: a Framework's setup brings the file.
+            if (windows.major >= 6)
+            {
+                const kernel32 = libraries['KERNEL32.dll'];
+                /** @param {string} text @param {(at: number) => any} use */
+                const withAnsi = async(text, use)=>{
+                    const at = heap.allocate(text.length + 1);
+                    writeMemory(at, encodeAnsi(`${text}\0`));
+                    try
+                    {
+                        return await use(at);
+                    }
+                    finally
+                    {
+                        heap.free(at);
+                    }
+                };
+                libraries['mscoree.dll'] = { ...createMscoreeFunctions({
+                    allocate: bytes=>heap.allocate(bytes),
+                    allocateCode: bytes=>heap.allocateCode(bytes),
+                    writeMemory,
+                    installRoot: ()=>{
+                        const key = hive.open(/** @type {any} */ (hive.root(HKEY_LOCAL_MACHINE)),
+                            'SOFTWARE\\Microsoft\\.NETFramework');
+                        const value = key ? hive.getValue(key, 'InstallRoot') : null;
+                        const end = value ? value.data.indexOf(0) : -1;
+                        return value ? decodeAnsi(value.data.subarray(0,
+                            end < 0 ? value.data.length : end)) || null : null;
+                    },
+                    windowsDirectory: ()=>'C:\\WINDOWS',
+                    exists: path=>volume.stat(path)?.exists === true,
+                    loadLibrary: path=>withAnsi(path, at=>kernel32.LoadLibraryA.handler([at])),
+                    procAddress: (module, name)=>(typeof name === 'number'
+                        ? kernel32.GetProcAddress.handler([module, name])
+                        : withAnsi(name, at=>kernel32.GetProcAddress.handler([module, at]))),
+                    exitProcess: code=>kernel32.ExitProcess.handler([code]),
+                    divergence: config?.divergence,
+                }),
+                // Its export 142, which has no name, is kernel32's.
+                GetVersionExW: kernel32.GetVersionExW };
+            }
+
             libraries['SHFOLDER.dll'] = {
                 SHGetFolderPathA: libraries['SHELL32.dll'].SHGetFolderPathA,
                 SHGetFolderPathW: libraries['SHELL32.dll'].SHGetFolderPathW,
@@ -5591,6 +5637,8 @@ export function createWin32Module(){
                     'SHELL32.dll': SHELL32_ORDINALS,
                     'DPLAYX.dll': DPLAYX_ORDINALS,
                     'dwmapi.dll': DWMAPI_ORDINALS,
+                    // The CLR asks mscoree for GetVersionExW by number alone.
+                    'mscoree.dll': MSCOREE_ORDINALS,
                 }),
 
                 /**

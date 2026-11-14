@@ -664,3 +664,16 @@ test('an installation\'s registry replaces a machine default, never what a progr
     untouched.fillFromJSON(installed);
     assert.equal(pathOf(untouched)?.split(';')[0], 'C:\\Vendor\\Common');
 });
+
+test('Windows 7 and 10 name the .NET install root with the shim they carry; XP does not', ()=>{
+    /** @param {import('../kernel32/versions.js').WindowsName} name */
+    const root = name=>{
+        const hive = createHive({ windows: WINDOWS_VERSIONS[name] });
+        const key = hive.open(/** @type {any} */ (hive.root(HKEY_LOCAL_MACHINE)),
+            'SOFTWARE\\Microsoft\\.NETFramework');
+        return key ? hive.getValue(key, 'InstallRoot')?.data ?? null : null;
+    };
+    assert.deepEqual(root('win7'), latin1('C:\\WINDOWS\\Microsoft.NET\\Framework\\\0'));
+    assert.deepEqual(root('win10'), root('win7'));
+    assert.equal(root('winxp'), null);
+});
