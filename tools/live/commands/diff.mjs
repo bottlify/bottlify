@@ -15,7 +15,7 @@
  * state written into a shader builds a pipeline every time it changes. A window
  * of a scene measured, rather than a whole run with its loading in it.
  *
- *   node tools/cdp_test/live/report-diff.mjs [<before.json>] <after.json> [--top 30]
+ *   node tools/live/live.mjs diff [<before.json>] <after.json> [--top 30]
  */
 import { readFileSync } from 'node:fs';
 

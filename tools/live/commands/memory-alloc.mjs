@@ -13,12 +13,12 @@
  * `includeObjectsCollectedBy*GC` also those already collected, which is the
  * garbage itself.
  *
- *   node tools/cdp_test/live/worker-allocations.mjs [seconds=8] [top=25]
+ *   node tools/live/live.mjs memory alloc [seconds=8] [top=25]
  *
  * The raw profile is written to dbg/worker.heapprofile for DevTools.
  */
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { connect } from './connect.mjs';
+import { connect } from '../connect.mjs';
 
 const seconds = Number(process.argv[2] ?? 8);
 const top = Number(process.argv[3] ?? 25);

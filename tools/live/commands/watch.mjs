@@ -9,8 +9,8 @@
  * "there" the seconds before are already written down -- rather than a
  * capture started after the moment has passed. Nothing is paused or driven.
  *
- *   node tools/cdp_test/live/watch.mjs [file=dbg/watch.jsonl]      record until stopped
- *   node tools/cdp_test/live/watch.mjs --last SECONDS [file]        read the last seconds back
+ *   node tools/live/live.mjs watch [file=dbg/watch.jsonl]      record until stopped
+ *   node tools/live/live.mjs watch --last SECONDS [file]        read the last seconds back
  *
  * Every second a line with the frames presented since the last (their
  * milliseconds and host/guest split); every two, for each process of the run,
@@ -20,7 +20,7 @@
  * hottest guest addresses, and the slowest frames with what ran before them.
  */
 import { appendFileSync, readFileSync } from 'node:fs';
-import { connect } from './connect.mjs';
+import { connect } from '../connect.mjs';
 
 const args = process.argv.slice(2);
 const lastAt = args.indexOf('--last');

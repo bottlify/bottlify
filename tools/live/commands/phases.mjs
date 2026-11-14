@@ -12,12 +12,12 @@
  * readings. A run's totals mix its menus and loads into the scene being
  * measured; a window of the scene is what a slow frame is made of.
  *
- *   node tools/cdp_test/live/phases.mjs [seconds=10] [windows=1] [top=8]
+ *   node tools/live/live.mjs phases [seconds=10] [windows=1] [top=8]
  *
  * The first process of the run answers (`diagnostics`); a child's are asked
  * through `app.debug.diagnosticsOf(id)`.
  */
-import { connect } from './connect.mjs';
+import { connect } from '../connect.mjs';
 
 const seconds = Number(process.argv[2] ?? 10);
 const windows = Number(process.argv[3] ?? 1);

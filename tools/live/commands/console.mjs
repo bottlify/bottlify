@@ -10,9 +10,9 @@
  * -- read from the start of a session, not after the fact. What the console
  * already held is printed first.
  *
- *   node tools/cdp_test/live/console.mjs [> dbg/console.log]
+ *   node tools/live/live.mjs console [> dbg/console.log]
  */
-import { connect } from './connect.mjs';
+import { connect } from '../connect.mjs';
 
 const page = await connect();
 /** @param {number} time @param {string} level @param {string} text */

@@ -10,10 +10,10 @@
  * the renderer holds beyond the heaps is ArrayBuffers and wasm memories --
  * `big-buffers.mjs` says whose.
  *
- *   node tools/cdp_test/live/memory-watch.mjs > dbg/memory-watch.log
+ *   node tools/live/live.mjs memory watch > dbg/memory-watch.log
  */
 import { execFileSync } from 'node:child_process';
-import { connect } from './connect.mjs';
+import { connect } from '../connect.mjs';
 
 const { cdp, workers } = await connect();
 const all = await workers();

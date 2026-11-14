@@ -13,7 +13,7 @@
  * temporary directory the rule still lets through is seen while it can be
  * added to it.
  *
- *   node tools/cdp_test/live/bottle-contents.mjs [depth] [port]
+ *   node tools/live/live.mjs bottle [depth] [port]
  */
 
 import { DRIVE_ROOT, collect } from '../../../modules/installer/src/prefix.js';

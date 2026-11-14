@@ -24,32 +24,15 @@ the reference (flags, switches, what a report holds). Paths are from the reposit
 
 ### A game a person is playing (attach, never restart)
 
-- Open the shared headed browser - [`live/browser.mjs`](live/browser.mjs) `[url] [chrome flags]`
-- Walk a title's screens by screenshots and orders - [`live/drive.mjs`](live/drive.mjs) `[card regex]` (HTTP on 9401; `CDP_PORT=driver` points the other live scripts at its browser)
-- What is this expression in the launcher tab? - [`live/eval.mjs`](live/eval.mjs) `"<expression>"`
-- What did the console say, WebGPU's errors included? - [`live/console.mjs`](live/console.mjs) `> dbg/console.log`
-- What happened in the seconds before "there"? - [`live/watch.mjs`](live/watch.mjs), then `--last 30`
-- What did the engine's thread do over the next N seconds? - [`live/phases.mjs`](live/phases.mjs) `[seconds]`
-- What changed between two reports (host calls, frames, GPU time by pass, pipelines built)? - [`live/report-diff.mjs`](live/report-diff.mjs) `[before.json] after.json [--top N]`
-- Which thread works and which waits, and on what? - [`live/worker-profile.mjs`](live/worker-profile.mjs) `[seconds] [minMs] [worker]`
-- Who allocates, garbage included? - [`live/worker-allocations.mjs`](live/worker-allocations.mjs) `[seconds] [top]`
-- Which collections ran, and why? - [`live/gc-trace.mjs`](live/gc-trace.mjs) `[seconds]`
-- Is memory climbing? - [`live/memory-watch.mjs`](live/memory-watch.mjs)
-- Who holds the big buffers? - [`live/big-buffers.mjs`](live/big-buffers.mjs) `[minMB] [worker]` (a heap snapshot: not while a person plays)
-- Does it flicker? - [`live/cast.mjs`](live/cast.mjs) `[seconds] [dir]`
-- What does a texture hold on the GPU? - [`live/snapshot.mjs`](live/snapshot.mjs) `t4414 t5`
-- What did a shader become? - [`live/shader.mjs`](live/shader.mjs) `ps585`
-- What was that crackle? - [`live/audio-watch.mjs`](live/audio-watch.mjs); the sound itself: [`live/record-output.mjs`](live/record-output.mjs) `arm`, then `save`
-- What would Save put in the bottle? - [`live/bottle-contents.mjs`](live/bottle-contents.mjs) `[depth]`
+- Everything that looks at a running game - [`live/live.mjs`](../live/live.mjs) `<command>`, `help` lists them: browser, drive, eval, console, watch, phases, diff, profile, memory (watch, holders, alloc, gc), snapshot, shader, cast, audio (watch, arm, save), bottle
 - The engine's own switches (`dumpFrames`, `pick`, `freeze`, `processes`, ...) - [Switches on the running engine](#switches-on-the-running-engine)
 
 ### What a run left behind
 
 - How long did a span of frames take? - [`frame-span.mjs`](../frame-span.mjs) `<game-*-presents.json>...`
 - Which drops repeat across runs? - [`cdp_test/drop-repeat.mjs`](drop-repeat.mjs) `<frames.json> <frames.json>...`
-- What did the dropped frames do? - [`drop-profile.mjs`](../drop-profile.mjs) `<report base>` (a `--worker --cpu-profile` run)
 - Which thread and executor held the frame? - `game.mjs --series N` prints it ([`cdp_test/thread-window.mjs`](thread-window.mjs))
-- Who calls this hot function? - [`cdp_test/cpuprofile-callers.mjs`](cpuprofile-callers.mjs) `<file.cpuprofile> <regex>`
+- Who calls this hot function, and what did the dropped frames do? - `live.mjs profile --file F.cpuprofile --callers RE | --drops F-frames.json`
 - Where did a person's DevTools trace go? - [`cdp_test/trace-summary.mjs`](trace-summary.mjs) `<Trace-*.json.gz>`
 - What do a title's real frames cost the graphics worker? - [`graphics-replay.mjs`](../graphics-replay.mjs) `<capture>` (a `--graphics-capture` run)
 - Does our HLSL compiler agree with Microsoft's? - [`shader-diff.mjs`](../shader-diff.mjs) `<game-*-shaders dir>` (with `shader-diff-fxc.ps1`)
@@ -120,7 +103,7 @@ the reference (flags, switches, what a report holds). Paths are from the reposit
 - [`common.mjs`](../common.mjs) - `isMain`, options, `median`, where bundles lie (`BOTTLIFY_BUNDLES`)
 - [`btl.mjs`](../btl.mjs), [`pe-files.mjs`](../pe-files.mjs), [`relay-option.mjs`](../relay-option.mjs), [`disk-directory.mjs`](../disk-directory.mjs), [`wizard-buttons.mjs`](../wizard-buttons.mjs), [`chromium-v8.mjs`](../chromium-v8.mjs) - what the tools above share
 - [`make-pe.mjs`](../make-pe.mjs), [`d3d9-program.mjs`](../d3d9-program.mjs), [`gl-program.mjs`](../gl-program.mjs), [`gl-glsl-program.mjs`](../gl-glsl-program.mjs), [`spawn-program.mjs`](../spawn-program.mjs), [`fake-graphics-worker.mjs`](../fake-graphics-worker.mjs), [`cpu-time.mjs`](../cpu-time.mjs) - the packages' tests' programs and helpers
-- [`browser.mjs`](browser.mjs), [`cdp.mjs`](cdp.mjs), [`server.mjs`](server.mjs), [`profile.mjs`](profile.mjs), [`device-lag.mjs`](device-lag.mjs), [`frame-window.mjs`](frame-window.mjs), [`timeout-report.mjs`](timeout-report.mjs), [`shader-cases.mjs`](shader-cases.mjs), [`job-limit.ps1`](job-limit.ps1), [`live/connect.mjs`](live/connect.mjs) - the harness's own
+- [`browser.mjs`](browser.mjs), [`cdp.mjs`](cdp.mjs), [`server.mjs`](server.mjs), [`profile.mjs`](profile.mjs), [`device-lag.mjs`](device-lag.mjs), [`frame-window.mjs`](frame-window.mjs), [`timeout-report.mjs`](timeout-report.mjs), [`shader-cases.mjs`](shader-cases.mjs), [`job-limit.ps1`](job-limit.ps1), [`connect.mjs`](../live/connect.mjs) - the harness's own
 
 The tools' own tests (`*.test.js` here and in `tools/`) run with `npm test` (`npm run test:tools`).
 Reports land in `tools/cdp_test/reports/` (gitignored).
@@ -257,7 +240,7 @@ too).
 The run is headless unless `--headed`, on a fresh profile unless `--user-data-dir` names one.
 The browser flags it needs are in [`browser.mjs`](browser.mjs) (below).
 
-## [`live/`](live/): watching a title a person is playing
+## [`live.mjs`](../live/live.mjs): watching a title a person is playing
 
 A person plays in the shared headed browser; these scripts attach to it over
 CDP (port 9333, `CDP_PORT` to change) and read the launcher tab and its

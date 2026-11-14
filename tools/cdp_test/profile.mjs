@@ -256,7 +256,7 @@ export async function profileWorkers(cdp, pageSessionId, options = {}){
                 {
                     // A mark both clocks see: the worker's performance.now() as a
                     // function of this name begins, and its samples in the profile.
-                    // tools/drop-profile.mjs lays the frames over the profile by it.
+                    // `live.mjs profile --drops` lays the frames over the profile by it.
                     const anchor = await cdp.send('Runtime.evaluate', { returnByValue: true,
                         expression: ANCHOR }, worker).catch(()=>null);
                     const { profile } = await cdp.send('Profiler.stop', {}, worker);

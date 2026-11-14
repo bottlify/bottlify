@@ -13,7 +13,7 @@
  * (`bound=[0:t5!]`). Paused, the frame on the screen is played again
  * (`freeze`) and read: the picture a person stopped on, not the next one.
  *
- *   node tools/cdp_test/live/snapshot.mjs t4414 t5 [--out DIR] [--opaque]
+ *   node tools/live/live.mjs snapshot t4414 t5 [--out DIR] [--opaque]
  *
  * A colour format keeps its alpha (a font or a cut-out is its alpha), unless
  * `--opaque`; one or two channels (r8unorm, rg8unorm: GL_ALPHA, LUMINANCE,
@@ -24,7 +24,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { deflateSync } from 'node:zlib';
-import { connect } from './connect.mjs';
+import { connect } from '../connect.mjs';
 
 const argv = process.argv.slice(2);
 const outAt = argv.indexOf('--out');

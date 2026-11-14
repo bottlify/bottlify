@@ -12,14 +12,14 @@
  * person saw. Frames of two sizes taking turns - a picture and an empty
  * screen - are a flicker, and the index says how often.
  *
- *   node tools/cdp_test/live/cast.mjs [seconds=10] [dir=dbg/cast]
+ *   node tools/live/live.mjs cast [seconds=10] [dir=dbg/cast]
  *
  * Writes <dir>/f0000.jpg ... and <dir>/index.txt (frame, seconds, bytes),
  * and prints how many frames came and how many of them are near the
  * smallest size (an empty or black screen).
  */
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { connect } from './connect.mjs';
+import { connect } from '../connect.mjs';
 
 const seconds = Number(process.argv[2] ?? 10);
 const dir = process.argv[3] ?? 'dbg/cast';

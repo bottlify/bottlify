@@ -14,13 +14,13 @@
  * memory. A thread whose global sum sits at its limit collects whole at every
  * few megabytes, whatever allocates them.
  *
- *   node tools/cdp_test/live/gc-trace.mjs [seconds=6]
+ *   node tools/live/live.mjs memory gc [seconds=6]
  *
  * One full collection of the engine worker is asked for first, so that it
  * reports even when it would not have collected in the window.
  */
-import { CdpEndpoint } from '../cdp.mjs';
-import { PORT, connect } from './connect.mjs';
+import { CdpEndpoint } from '../../cdp_test/cdp.mjs';
+import { PORT, connect } from '../connect.mjs';
 
 const seconds = Number(process.argv[2] ?? 6);
 const version = await (await fetch(`http://127.0.0.1:${PORT}/json/version`)).json();

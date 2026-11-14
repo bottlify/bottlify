@@ -17,7 +17,7 @@
  * dbg/chrome-profile by default).
  */
 import { readFileSync } from 'node:fs';
-import { CdpEndpoint } from '../cdp.mjs';
+import { CdpEndpoint } from '../cdp_test/cdp.mjs';
 
 const driverProfile = process.env.DRIVE_PROFILE ?? 'dbg/chrome-profile';
 export const PORT = Number(process.env.CDP_PORT === 'driver'

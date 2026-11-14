@@ -9,15 +9,15 @@
  * profile kept between starts so the bundle cache in OPFS survives. Nothing
  * here drives the page: a person does, and the other scripts watch.
  *
- *   node tools/cdp_test/live/browser.mjs [url]
+ *   node tools/live/live.mjs browser [url]
  *
  * The default address is the launcher over TLS on the VM's address, the origin
  * the person's saves live under (see the launcher's own README).
  */
 import { spawn } from 'node:child_process';
 import { resolve } from 'node:path';
-import { BACKGROUND_OFF, findBrowser } from '../browser.mjs';
-import { PORT } from './connect.mjs';
+import { BACKGROUND_OFF, findBrowser } from '../../cdp_test/browser.mjs';
+import { PORT } from '../connect.mjs';
 
 const url = process.argv[2] ?? 'https://192.168.100.22:5180/library';
 // Throwaway by nature and large (OPFS holds whole bundles): under dbg/, never

@@ -16,16 +16,16 @@ unmeasured cause is a second bug.
   profile (`BOTTLIFY_READABLE=1 BOTTLIFY_DIAGNOSTICS=1 npm run build`). `npm run
   test:integration` rebuilds the dist as production, so rebuild readable after it.
 - **A window, not a total.** A run's totals mix its menus and loads into the scene. Read the
-  difference of two readings over the scene itself (`live/phases.mjs`, `live/report-diff.mjs`),
+  difference of two readings over the scene itself (`live.mjs phases`, `live.mjs diff`),
   and compare scenes that are the same scene.
 
 ## 2. Who works and who waits
 
-Profile every thread, not only the one you suspect: `live/worker-profile.mjs <seconds> <minMs>
+Profile every thread, not only the one you suspect: `live.mjs profile <seconds>
 <worker>` with the worker `graphics`, `executor`, `translator`, or none for the engine. A slow
 frame is one thread working and the others waiting for it; find which.
 
-The engine's phases (`live/phases.mjs`) say what that thread did:
+The engine's phases (`live.mjs phases`) say what that thread did:
 
 | phase | means | usually the cure |
 | --- | --- | --- |
@@ -56,19 +56,19 @@ worker of its own, so a run with processes that never exit holds gigabytes no he
 A collector pause is paid by whatever allocates; it is a symptom of allocation, not a cause by
 itself. Two readings:
 
-- `live/worker-allocations.mjs`: who allocates, garbage included, with callers. Allocation per
+- `live.mjs memory alloc`: who allocates, garbage included, with callers. Allocation per
   call in a hot path (a spread, a closure, an array per call) is the thing to remove.
-- `live/gc-trace.mjs`: which collections ran and why, per thread, and the "global" sum V8
+- `live.mjs memory gc`: which collections ran and why, per thread, and the "global" sum V8
   schedules full collections by against its limit. A thread whose global sum sits at its limit
   collects whole every few megabytes: then the question is what holds that memory, not who
-  allocates (`live/big-buffers.mjs`, `live/memory-watch.mjs`).
+  allocates (`live.mjs memory holders`, `live.mjs memory watch`).
 
 Raising the heap limit or hiding memory pressure is not a fix; it was measured and moved nothing.
 
 ## 5. What the person sees
 
 - A page screenshot in a cross-origin-isolated tab can show the WebGPU canvas black while the
-  screen shows a picture. `live/cast.mjs` records what the compositor sent, every frame; two
+  screen shows a picture. `live.mjs cast` records what the compositor sent, every frame; two
   frame sizes taking turns is a flicker, and the index says how often.
 - The headed browser's `devicePixelRatio` is not 1: a click in CSS pixels is the screenshot's
   pixel divided by it.

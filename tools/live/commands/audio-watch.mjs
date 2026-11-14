@@ -11,9 +11,9 @@
  * empty (starved), jumps the writer made ahead (skipped). A person says when
  * they heard the crackle; the line at that time says which of the four it was.
  *
- *   node tools/cdp_test/live/audio-watch.mjs > dbg/audio-watch.log
+ *   node tools/live/live.mjs audio watch > dbg/audio-watch.log
  */
-import { connect } from './connect.mjs';
+import { connect } from '../connect.mjs';
 
 const { evaluate } = await connect();
 const started = Date.now();

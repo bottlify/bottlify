@@ -8,10 +8,10 @@
  * Records what the person hears: the launcher's sound output, sample for
  * sample, uncompressed, taken off the output node itself.
  *
- *   node tools/cdp_test/live/record-output.mjs arm
+ *   node tools/live/live.mjs audio arm
  *       installs the tap in the open tab; the next title started there is
  *       recorded (the launcher makes its output node anew for every start)
- *   node tools/cdp_test/live/record-output.mjs save [seconds=20] [file=dbg/output.wav]
+ *   node tools/live/live.mjs audio save [seconds=20] [file=dbg/output.wav]
  *       writes the last seconds heard as 16-bit stereo WAV
  *
  * The tap wraps AudioWorkletNode so every node made after the load also feeds
@@ -20,7 +20,7 @@
  */
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { connect } from './connect.mjs';
+import { connect } from '../connect.mjs';
 
 const [command = 'save', ...rest] = process.argv.slice(2);
 const { cdp, sessionId, evaluate } = await connect();

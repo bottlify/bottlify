@@ -10,11 +10,11 @@
  * more -- guest memories, file contents, textures -- with a path of what holds
  * it, so memory kept past the process that made it names its holder.
  *
- *   node tools/cdp_test/live/big-buffers.mjs [minMB=8] [worker]
+ *   node tools/live/live.mjs memory holders [minMB=8] [worker]
  *
  * The snapshot is parsed in memory and not kept: it runs to hundreds of MB.
  */
-import { connect } from './connect.mjs';
+import { connect } from '../connect.mjs';
 
 const minBytes = Number(process.argv[2] ?? 8) * 1048576;
 const wanted = process.argv[3];

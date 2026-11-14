@@ -12,7 +12,7 @@
  * The run is never restarted to get past a screen, and the engine is there to
  * be asked at any moment (`globalThis.app` in the launcher tab).
  *
- *   node tools/cdp_test/live/drive.mjs [card] [query]
+ *   node tools/live/live.mjs drive [card] [query]
  *
  * opens https://127.0.0.1:5180/library (DRIVE_ORIGIN names another; the launcher over TLS, as the
  * person's own browser has it), starts the bottle whose card matches the
@@ -49,9 +49,9 @@
 import { createServer } from 'node:http';
 import { writeFile, mkdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { launchWithGpu, shutdown } from '../browser.mjs';
-import { CdpEndpoint, openPage } from '../cdp.mjs';
-import { pausedStack } from '../timeout-report.mjs';
+import { launchWithGpu, shutdown } from '../../cdp_test/browser.mjs';
+import { CdpEndpoint, openPage } from '../../cdp_test/cdp.mjs';
+import { pausedStack } from '../../cdp_test/timeout-report.mjs';
 
 // Another session's walk may hold the defaults: DRIVE_PORT and DRIVE_PROFILE
 // give this one its own, since two browsers cannot share a profile.
