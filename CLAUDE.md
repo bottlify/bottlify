@@ -27,17 +27,20 @@ outward-facing action) or for a wait a rule imposes, and say what waits on what.
 
 ## Priorities
 
-1. **x86-64 and the multi-worker process runner** (`roadmap/x64.md`). Work on the workers — the
-   engine, graphics, translation and audio threads and what crosses between them — pays off for the
-   whole application, not one title. cork's emitter and runtime serve both widths, so a translator
-   change is judged on a 32-bit and a 64-bit workload alike.
-2. **Correctness, speed, reuse.** Optimisation and standardisation are part of the job, not
-   extras: one shared mechanism over three similar ones, a contract written once and enforced by a
-   test.
-3. **No per-title hacks.** Never branch on a program's name, executable or hash, never hardcode an
-   offset for one title. A title that misbehaves is a signal about a generic contract we got wrong
-   (an FPU context switch, a `GetProcAddress` epoch, a DLU→px conversion, an mmap write-back gap);
-   fix it there, once, for every title on that path.
+There is no single technical priority; these hold for every change:
+
+1. **Clean, beautiful code.** One shared mechanism over three similar ones, a contract written
+   once and enforced by a test. No per-title hacks: never branch on a program's name, executable
+   or hash, never hardcode an offset for one title. A title that misbehaves is a signal about a
+   generic contract we got wrong (an FPU context switch, a `GetProcAddress` epoch, a DLU→px
+   conversion, an mmap write-back gap); fix it there, once, for every title on that path.
+2. **Strict testing, nothing hollow.** A test that cannot fail, a gate that does not run, a check
+   that passes on nothing is worse than none: it says something is covered that is not.
+3. **We understand our own code and our runtime.** Every mechanism and every tool can be
+   explained from the tree by the next one who reads it; what nobody can explain is redone or
+   removed.
+4. **A product we are not ashamed of**, good enough to be sold: it runs what it says it runs, says
+   plainly what it does not, and is fast enough that a program plays as it did.
 
 ## Where things are
 
@@ -170,6 +173,8 @@ attribution are first-class.
 - **Judge on more than one scenario** (play, menu, load).
 - **The first lever is the translator** — caching, larger blocks and regions — because it speeds
   up every title at once. Small generic gains count.
+- **A translator change is judged on a 32-bit and a 64-bit workload alike**: cork's emitter and
+  runtime serve both widths.
 - **A measurement carries its conditions**: the workload and the bundle's hash, both arms, every
   raw value and how many runs, the median and the spread, the noise floor, the browser, GPU, driver
   and power plan. A field not recorded is written `not recorded`, never reconstructed. A number is
