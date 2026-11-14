@@ -244,8 +244,10 @@ for (const [seed, mode] of CEILING_RUNS)
         }
         const free = await ceilingRun(seed, { ...mode, cacheBytes: 0 });
         assert.equal(free.evictions, 0);
-        // Room for three modules of the size they are on average.
-        const cacheBytes = Math.ceil(3 * free.heldBytes / free.heldModules);
+        // Room for five modules of the size they are on average: the driver's loop of calls,
+        // each return address copied for a return come back from outside, is two to four of
+        // them, and one module larger than the ceiling is held alone (`makeRoom`).
+        const cacheBytes = Math.ceil(5 * free.heldBytes / free.heldModules);
         const held = await ceilingRun(seed, { ...mode, cacheBytes });
         assert.deepEqual(held.state, free.state, 'the same registers and memory');
         assert.ok(held.most <= cacheBytes, `held ${held.most} of ${cacheBytes}`);
@@ -258,7 +260,7 @@ for (const [seed, mode] of CEILING_RUNS)
 test('a program run under a host\'s bound (`charge`) a few modules high runs as it does without'
     + ' one, never holds past it, and gives back all it took', async()=>{
     const free = await ceilingRun(61, { cacheBytes: 0 });
-    const bound = Math.ceil(3 * free.heldBytes / free.heldModules);
+    const bound = Math.ceil(5 * free.heldBytes / free.heldModules);
     let taken = 0;
     let most = 0;
     let refused = 0;

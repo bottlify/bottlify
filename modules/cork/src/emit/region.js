@@ -5382,7 +5382,10 @@ export function liveFlagsOut(blocks, labels, precise = true){
  * entered in its middle every turn -- through a copy of its blocks and the
  * entry hash back to its head (`emitCopies`), dearer than the flat dispatch's
  * one branch -- so it is no natural loop and its jumps back go through the
- * function's dispatch. The blocks are then emitted in a
+ * function's dispatch. Under `callReturn` a call that leaves is a wasm call
+ * whose return comes back in place: its return address is no way in but a
+ * block the runtime enters when the call went otherwise (`reentered`), and a
+ * loop around it stays a loop. The blocks are then emitted in a
  * topological order of the jumps that close no loop, a loop's blocks together
  * after its head, so that every other jump is a branch forward; ties go to
  * the block the last one falls through to, then to the lowest address.
@@ -5396,7 +5399,8 @@ export function liveFlagsOut(blocks, labels, precise = true){
  *     inside another: elsewhere the block's own loop onto itself, `selfLoop`, is all it
  *     needs); reentered: by index in `region.blocks`, blocks the runtime enters that may be
  *     inside a loop: the return addresses of the predicted indirect calls, which a call to
- *     another target comes back to from outside
+ *     another target comes back to from outside, and under `callReturn` of the calls that
+ *     leave (`comesBackAt`)
  */
 export function planStructure(region, returns, callReturn = false){
     const { blocks } = region;
@@ -5417,20 +5421,15 @@ export function planStructure(region, returns, callReturn = false){
                 out.push(at);
             }
         }
-        const back = comesBackTo(block, index);
+        const back = comesBackTo(block, index, callReturn);
         if (back !== undefined && !roots.includes(back))
         {
             roots.push(back);
         }
-        const { kind, next, predicted } = block.exit;
-        const last = block.instructions[block.instructions.length - 1];
-        if (kind === 'indirect' && last?.op === 'call' && predicted === true)
+        const again = comesBackAt(block, index, callReturn);
+        if (again !== undefined)
         {
-            const after = index.get(next);
-            if (after !== undefined)
-            {
-                reentered.push(after);
-            }
+            reentered.push(again);
         }
         return out;
     });
@@ -5855,18 +5854,43 @@ function reaching(starts, edges, barrier){
  * formed a callee of in -- and the address after a port write, where the host
  * resumes a program whose handler it did not run from inside the region. A
  * predicted call's return comes back from outside only when the call went
- * elsewhere, which its copy takes (`emitCopies`).
+ * elsewhere, which its copy takes (`emitCopies`), and so does a call that
+ * leaves under `callReturn` (`comesBackAt`).
  *
  * @param {import('../region.js').Block} block @param {Map<number, number>} index
+ * @param {boolean} callReturn
  * @returns {number | undefined}  the block's index
  */
-function comesBackTo(block, index){
+function comesBackTo(block, index, callReturn){
     const { kind, targets, next, predicted } = block.exit;
     const last = block.instructions[block.instructions.length - 1];
-    const leaves = kind === 'call' ? !index.has(targets[0])
+    const leaves = !(callReturn && callsOut(block, index)) && (kind === 'call'
+        ? !index.has(targets[0])
         : kind === 'trap' || kind === 'indirect' && last?.op === 'call'
-            && !(predicted === true && targets.some(target=>index.has(target)));
+            && !(predicted === true && targets.some(target=>index.has(target))));
     return leaves ? index.get(next) : undefined;
+}
+
+/**
+ * The block a call's return comes back to from outside the region only when
+ * the call went otherwise than its code assumed, if any: a predicted indirect
+ * call that went elsewhere, and under `callReturn` a call that leaves
+ * (`callsOut`) -- a wasm call whose return comes back in place unless a slice
+ * ended inside its callee, the callee was let go or returned elsewhere, or
+ * the call went plain, the call stack full. A slice ends inside a hot loop's
+ * callees as often as the loop runs them, so such a block inside a loop has
+ * its copy from the start (`emitCopies`): closed, it was missed until the
+ * region was formed again with copies all the same.
+ *
+ * @param {import('../region.js').Block} block @param {Map<number, number>} index
+ * @param {boolean} callReturn
+ * @returns {number | undefined}  the block's index
+ */
+function comesBackAt(block, index, callReturn){
+    const { kind, next, predicted } = block.exit;
+    const last = block.instructions[block.instructions.length - 1];
+    return kind === 'indirect' && last?.op === 'call' && predicted === true
+        || callReturn && callsOut(block, index) ? index.get(next) : undefined;
 }
 
 /**

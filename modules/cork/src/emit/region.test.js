@@ -767,11 +767,16 @@ test('a loop entered at its test at the bottom has the test for its head', ()=>{
     assert.deepEqual([...loops], [[1, 2]]);
 });
 
-test('a loop a call leaves from is entered in its middle by the return, and is no wasm loop', ()=>{
+test('a loop a call leaves from is entered in its middle by the return, and is no wasm loop'
+    + ' unless the call comes back in place', ()=>{
     // 0: jcc 2 else 1; 1: call out, back at 2; 2: jcc 0 else 3; 3: hlt
     const blocks = [shaped(0, 'jcc', [2, 1], 1), shaped(1, 'call', [0x9000], 2),
         shaped(2, 'jcc', [0, 3], 3), shaped(3, 'hlt', [], 4)];
     assert.deepEqual([...planStructure(regionOf(blocks), new Map()).loops], []);
+    // Under callReturn the call is a wasm call that comes back in place: the loop is a
+    // loop, its return a block entered by its copy when the call went otherwise.
+    const called = planStructure(regionOf(blocks), new Map(), true);
+    assert.deepEqual([[...called.loops], called.reentered], [[[0, 2]], [2]]);
     // Formed in, the callee's return is a jump: the loop is the head's.
     blocks[1] = shaped(1, 'call', [4], 2);
     blocks.push(shaped(4, 'ret', [], 5));

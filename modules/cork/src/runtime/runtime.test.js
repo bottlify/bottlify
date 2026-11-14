@@ -3567,6 +3567,40 @@ test('with callReturn a call out of a region returns into it as a wasm call: the
     }
 });
 
+test('with callReturn a loop that calls out is a loop: a return come back from outside, its callee'
+    + ' having returned elsewhere, enters it by its copy', async()=>{
+    // mov ecx, 1000; L: call F; inc edx; call G; inc edi; dec ecx; jnz L; hlt
+    // F: inc ebx; test cl, 1; jz r; add dword [esp], 6; r: ret -- on odd ecx it returns
+    //    to G's return address, a block inside the loop, from outside the region
+    // G: inc esi; ret
+    const program = [0xb9, ...le32(1000), 0xe8, 0x0b, 0, 0, 0, 0x42, 0xe8, 0x10, 0, 0, 0, 0x47,
+        0x49, 0x75, 0xf1, 0xf4, 0x43, 0xf6, 0xc1, 0x01, 0x74, 0x04, 0x83, 0x04, 0x24, 0x06, 0xc3,
+        0x46, 0xc3];
+    /** @type {any[]} */
+    const runs = [];
+    for (const callReturn of [false, true])
+    {
+        const m = machine({ leafCalls: false, callReturn, blockProfile: true });
+        m.write(CODE, program);
+        m.setReg(4, 0x80000);
+        new DataView(m.memory.buffer).setUint32(m.layout.eip, CODE, true);
+        const retired = await runToHalt(m);
+        const d = /** @type {any} */ (m.runtime.diagnostics());
+        runs.push({ retired, regs: [0, 1, 2, 3, 4, 5, 6, 7].map(r=>m.reg(r)),
+            loop: d.mechanisms.JUMP_LOOP, dispatch: d.mechanisms.JUMP_DISPATCH,
+            out: d.mechanisms.JUMP_OUT });
+    }
+    const [plain, called] = runs;
+    assert.deepEqual(called.regs, plain.regs);
+    assert.equal(called.retired, plain.retired);
+    // ebx: F ran 1000 times; edx and esi (G): its 500 returns in place.
+    assert.deepEqual([called.regs[1], called.regs[2], called.regs[3], called.regs[4],
+        called.regs[6], called.regs[7]], [0, 500, 1000, 0x80000, 500, 1000]);
+    assert.equal(called.dispatch, 0, 'no jump back through the dispatch');
+    assert.ok(called.loop > 0, `the loop's jumps back are a wasm loop's: ${called.loop}`);
+    assert.ok(called.out > 0, `the copy entered from outside goes back to the loop: ${called.out}`);
+});
+
 test('with callReturn a call stores what some way to it wrote since the state block last held it:'
     + ' a register written on one path, across the back edge, before a call to an empty function',
 async()=>{
