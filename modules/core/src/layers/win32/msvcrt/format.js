@@ -62,9 +62,10 @@ const INTEGERS = 'diouxX';
  * @param {string} format
  * @param {number} start   Index of the character after the '%'.
  * @param {() => number} take  For a width or precision written as '*'.
+ * @param {boolean} [c99]  %F a conversion of its own (`PrintStyle`).
  * @returns {Spec}
  */
-function parseSpec(format, start, take){
+function parseSpec(format, start, take, c99 = false){
     let i = start;
     let leftAlign = false;
     let zeroPad = false;
@@ -190,9 +191,12 @@ function parseSpec(format, start, take){
         {
             sixtyFour = true;
         }
-        else if (modifier === 'F' || modifier === 'N')
+        else if (modifier === 'N' || modifier === 'F'
+            && (!c99 || /[A-Za-z]/.test(format[i + 1] ?? '')))
         {
-            // Far and near: nothing to a flat address.
+            // Far and near: nothing to a flat address. Where %F is C99's
+            // conversion, an F is still far before the letter it modifies
+            // ("%Fd").
         }
         else if (modifier === 'I' && format[i + 1] === '6' && format[i + 2] === '4')
         {
@@ -339,19 +343,43 @@ function specialDigits({ value, high, low }){
 }
 
 /**
+ * A finite, nonzero double's every decimal digit, from the first that is not
+ * zero to the last that is not, and where the point falls among them: a
+ * binary fraction always ends in decimal, its mantissa times a power of five.
+ *
+ * @param {DoubleArgument} argument
+ * @returns {{ text: string, point: number }}
+ */
+function exactDecimal({ high, low }){
+    const biased = (high >>> 20) & 0x7ff;
+    const fraction = (BigInt(high & 0xfffff) << 32n) | BigInt(low >>> 0);
+    const mantissa = biased === 0 ? fraction : fraction | (1n << 52n);
+    const exponent = (biased === 0 ? 1 : biased) - 1075;
+    const whole = exponent >= 0 ? mantissa << BigInt(exponent)
+        : mantissa * 5n ** BigInt(-exponent);
+    const expansion = whole.toString();
+    const text = expansion.replace(/0+$/, '');
+    return { text, point: expansion.length + Math.min(exponent, 0) };
+}
+
+/**
  * Rounds a digit string at `count` characters, half up on the character
  * after the last kept: an increment is the next character code, so a '9'
- * carries and a '#' becomes '$'. Past its end the string is zeros.
+ * carries and a '#' becomes '$'. Past its end the string is zeros. With
+ * `evenTies`, a 5 that ends the string - exactly half - rounds up only an
+ * odd digit before it.
  *
- * @param {string} text @param {number} count
+ * @param {string} text @param {number} count @param {boolean} [evenTies]
  * @returns {{ text: string, carry: boolean }}
  */
-function roundDigits(text, count){
+function roundDigits(text, count, evenTies = false){
     if (count >= text.length)
     {
         return { text: text.padEnd(count, '0'), carry: false };
     }
-    if (count < 0 || text[count] < '5')
+    const tie = evenTies && text[count] === '5' && /^0*$/.test(text.slice(count + 1));
+    const evenBefore = count === 0 || (text.charCodeAt(count - 1) & 1) === 0;
+    if (count < 0 || text[count] < '5' || tie && evenBefore)
     {
         return { text: text.slice(0, Math.max(count, 0)), carry: false };
     }
@@ -380,7 +408,7 @@ function roundDigits(text, count){
  * @param {DoubleArgument} argument @param {number} count @param {boolean} fixed
  * @returns {{ digits: string, point: number, negative: boolean }}
  */
-export function cvtDigits(argument, count, fixed){
+export function cvtDigits(argument, count, fixed, style = MSVCRT_STYLE){
     const negative = argument.high >>> 31 === 1;
     const special = specialDigits(argument);
     if (special === null && argument.value === 0)
@@ -389,7 +417,11 @@ export function cvtDigits(argument, count, fixed){
     }
     let text = special ?? '';
     let point = 1;
-    if (special === null)
+    if (special === null && style.exactDigits)
+    {
+        ({ text, point } = exactDecimal(argument));
+    }
+    else if (special === null)
     {
         const [mantissa, exponent] = Math.abs(argument.value).toExponential(SIGNIFICANT - 1)
             .split('e');
@@ -397,7 +429,7 @@ export function cvtDigits(argument, count, fixed){
         point = Number(exponent) + 1;
     }
     const wanted = fixed ? point + count : count;
-    const rounded = roundDigits(text, wanted);
+    const rounded = roundDigits(text, wanted, style.evenTies);
     if (!rounded.carry)
     {
         return { digits: rounded.text, point, negative };
@@ -412,9 +444,10 @@ export function cvtDigits(argument, count, fixed){
  * %f's text from its digits: the whole part, or 0, and `precision` places.
  *
  * @param {DoubleArgument} argument @param {number} precision @param {boolean} alt
+ * @param {PrintStyle} style
  */
-function fixedText(argument, precision, alt){
-    const { digits: text, point } = cvtDigits(argument, precision, true);
+function fixedText(argument, precision, alt, style){
+    const { digits: text, point } = cvtDigits(argument, precision, true, style);
     const whole = point > 0 ? text.slice(0, point) : '0';
     const fraction = point > 0 ? text.slice(point)
         : '0'.repeat(Math.min(precision, -point)) + text;
@@ -428,10 +461,11 @@ function fixedText(argument, precision, alt){
  *
  * @param {DoubleArgument} argument @param {number} precision @param {boolean} alt
  * @param {string} e  The exponent's letter, in the conversion's case.
- * @param {number} least  The exponent's least digits.
+ * @param {PrintStyle} style  Its least digits among the rest.
  */
-function exponentText(argument, precision, alt, e, least){
-    const { digits: text, point } = cvtDigits(argument, precision + 1, false);
+function exponentText(argument, precision, alt, e, style){
+    const least = style.exponentDigits;
+    const { digits: text, point } = cvtDigits(argument, precision + 1, false, style);
     const exponent = argument.value === 0 ? 0 : point - 1;
     const mantissa = precision > 0 || alt ? `${text[0]}.${text.slice(1)}` : text[0];
     return `${mantissa}${e}${exponent < 0 ? '-' : '+'}${String(Math.abs(exponent))
@@ -439,31 +473,155 @@ function exponentText(argument, precision, alt, e, least){
 }
 
 /**
+ * How a printer writes its floating-point conversions: msvcrt's way, or the
+ * universal runtime's, which its common entries choose a call at a time from
+ * their options word.
+ *
+ * @typedef {Object} PrintStyle
+ * @property {number} exponentDigits  The least digits of %e's exponent: three
+ *     in msvcrt (two after `_TWO_DIGIT_EXPONENT`), two in the universal
+ *     runtime unless its options ask for three.
+ * @property {boolean} standardSpecials  C99's infinity and NaN, "inf",
+ *     "nan", "-nan(ind)", rather than msvcrt's digits that are not digits
+ *     ("1.#INF00"): the universal runtime's unless its options ask for
+ *     msvcrt's compatibility.
+ * @property {boolean} c99Conversions  %a and %F known, which msvcrt writes
+ *     as their own letters: the universal runtime's, compatible or not.
+ * @property {boolean} exactDigits  Every digit the double's binary value has
+ *     ("%.30f" of 1/3 is 0.333333333333333314829616256247), where msvcrt
+ *     converts to seventeen significant digits and writes zeros past them:
+ *     the universal runtime's.
+ * @property {boolean} evenTies  A digit exactly halfway rounded to the even
+ *     neighbour (C's rounding), where the runtimes otherwise round it up:
+ *     the universal runtime's options ask for it with STANDARD_ROUNDING.
+ */
+
+/**
+ * The key under which a runtime's table carries `during(style, run)`: `run`
+ * called with the printers writing in `style`, the runtime's own style back
+ * once it returns. A symbol, so it is never an export a program could name;
+ * the universal runtime reaches the 2005 runtime's printers through it with
+ * the style its options word asks for.
+ */
+export const PRINT_STYLE = Symbol('print style');
+
+/** msvcrt's style, with %e's exponent at three digits. @type {PrintStyle} */
+export const MSVCRT_STYLE = Object.freeze({ exponentDigits: 3, standardSpecials: false,
+    c99Conversions: false, exactDigits: false, evenTies: false });
+
+/**
+ * C99's spelling of a value that is no number: "inf", or "nan" - with
+ * "(ind)" for the x87's default NaN (the sign, the quiet bit and no
+ * payload) and "(snan)" for a signalling one. Null for a finite value.
+ *
+ * @param {DoubleArgument} argument
+ * @returns {string | null}
+ */
+function standardSpecial({ value, high, low }){
+    if (Number.isFinite(value))
+    {
+        return null;
+    }
+    const fraction = (high & 0xfffff) >>> 0;
+    if (fraction === 0 && low === 0)
+    {
+        return 'inf';
+    }
+    if ((fraction & 0x80000) === 0)
+    {
+        return 'nan(snan)';
+    }
+    return high >>> 31 === 1 && fraction === 0x80000 && low === 0 ? 'nan(ind)' : 'nan';
+}
+
+/** The hexadecimal digits of a double's fraction: thirteen, 52 bits. */
+const HEX_FRACTION_DIGITS = 13;
+
+/**
+ * %a's text: "0x", the leading digit - 1, or 0 for a zero and a subnormal -
+ * the fraction in `precision` hexadecimal digits (all thirteen when none is
+ * given), rounded half up on the digit after the last kept, and the binary
+ * exponent in decimal. A carry out of the leading digit makes it 2, as the
+ * runtime writes "%.0a" of 1.5: "0x2p+0".
+ *
+ * @param {DoubleArgument} argument @param {number} precision @param {boolean} alt
+ * @param {PrintStyle} style  msvcrt's NaN digits in the fraction without
+ *     its standard specials; a tie rounded to even with `evenTies`.
+ */
+function hexText(argument, precision, alt, style){
+    const places = precision < 0 ? HEX_FRACTION_DIGITS : precision;
+    if (!Number.isFinite(argument.value) && !style.standardSpecials)
+    {
+        // msvcrt's digits that are not digits, where the fraction's go.
+        const { text } = roundDigits(/** @type {string} */ (specialDigits(argument)), places + 1);
+        return `0x${text[0]}.${text.slice(1)}p+0`;
+    }
+    const biased = (argument.high >>> 20) & 0x7ff;
+    let fraction = (BigInt(argument.high & 0xfffff) << 32n) | BigInt(argument.low >>> 0);
+    let lead = biased === 0 ? 0n : 1n;
+    const exponent = biased === 0 ? (fraction === 0n ? 0 : -1022) : biased - 1023;
+    if (places < HEX_FRACTION_DIGITS)
+    {
+        const dropped = BigInt((HEX_FRACTION_DIGITS - places) * 4);
+        const half = 1n << (dropped - 1n);
+        const kept = fraction >> dropped;
+        const rest = fraction & ((1n << dropped) - 1n);
+        const roundsUp = rest > half || rest === half && (!style.evenTies || (kept & 1n) === 1n);
+        fraction = roundsUp ? kept + 1n : kept;
+        if (fraction >> BigInt(places * 4) !== 0n)
+        {
+            fraction -= 1n << BigInt(places * 4);
+            lead += 1n;
+        }
+    }
+    const hexDigits = places === 0 ? ''
+        : fraction.toString(16).padStart(Math.min(places, HEX_FRACTION_DIGITS), '0')
+            .padEnd(places, '0');
+    const point = places > 0 || alt ? '.' : '';
+    return `0x${lead}${point}${hexDigits}p${exponent < 0 ? '-' : '+'}${Math.abs(exponent)}`;
+}
+
+/**
  * @param {DoubleArgument} argument
  * @param {Spec} spec
- * @param {number} least  The exponent's least digits.
+ * @param {PrintStyle} style
  * @returns {Rendered}
  */
-function convertFloat(argument, spec, least){
+function convertFloat(argument, spec, style){
     const negative = argument.high >>> 31 === 1;
     const upper = spec.conversion !== spec.conversion.toLowerCase();
     const e = upper ? 'E' : 'e';
+    const special = style.standardSpecials ? standardSpecial(argument) : null;
+    if (special !== null)
+    {
+        // No precision and no zeros for a value with no digits: the field is
+        // filled with blanks however the format asked.
+        const body = upper ? special.toUpperCase() : special;
+        return { prefix: signOf(negative, spec), body, zeroable: false };
+    }
     let body;
     switch (spec.conversion.toLowerCase()){
+        case 'a': {
+            // "0x" goes with the sign, so a '0' flag pads between it and the digits.
+            const text = hexText(argument, spec.precision, spec.alt, style);
+            const cased = upper ? text.toUpperCase() : text;
+            return { prefix: signOf(negative, spec) + cased.slice(0, 2), body: cased.slice(2),
+                zeroable: true };
+        }
         case 'e':
             body = exponentText(argument, spec.precision < 0 ? 6 : spec.precision, spec.alt, e,
-                least);
+                style);
             break;
         case 'g': {
             // The precision counts significant digits, zero of them one; the
             // exponent the value has at that count chooses the form, and the
             // zeros that end the fraction go unless '#' keeps them.
             const count = spec.precision < 0 ? 6 : Math.max(spec.precision, 1);
-            const { point } = cvtDigits(argument, count, false);
+            const { point } = cvtDigits(argument, count, false, style);
             const exponent = argument.value === 0 ? 0 : point - 1;
             body = exponent < -4 || exponent >= count
-                ? exponentText(argument, count - 1, spec.alt, e, least)
-                : fixedText(argument, count - 1 - exponent, spec.alt);
+                ? exponentText(argument, count - 1, spec.alt, e, style)
+                : fixedText(argument, count - 1 - exponent, spec.alt, style);
             if (!spec.alt)
             {
                 body = body.replace(/\.([^e]*?)0+(?=$|[eE])/, '.$1').replace(/\.(?=$|[eE])/, '');
@@ -471,7 +629,7 @@ function convertFloat(argument, spec, least){
             break;
         }
         default:
-            body = fixedText(argument, spec.precision < 0 ? 6 : spec.precision, spec.alt);
+            body = fixedText(argument, spec.precision < 0 ? 6 : spec.precision, spec.alt, style);
     }
     return { prefix: signOf(negative, spec), body, zeroable: true };
 }
@@ -486,7 +644,7 @@ function convertFloat(argument, spec, least){
  * @param {(pointer: number, wide: boolean) => string | null} source.readCounted
  *        An ANSI_STRING's or UNICODE_STRING's text; null for none.
  * @param {(code: number, wide: boolean) => string} source.character  A %c's text.
- * @param {number} source.exponentDigits  The least digits of %e's exponent.
+ * @param {PrintStyle} source.style  How the floating-point conversions are written.
  * @param {number} [source.slotWords]  Two when the arguments are a 64-bit
  *     caller's eight-byte slots.
  * @param {number} produced                Characters written so far, for %n.
@@ -579,7 +737,13 @@ function convert(spec, source, produced, writeCount){
         case 'f':
         case 'g':
         case 'G':
-            return convertFloat(takeDouble(), spec, source.exponentDigits);
+            return convertFloat(takeDouble(), spec, source.style);
+        case 'a':
+        case 'A':
+        case 'F':
+            // C99's, which msvcrt writes as their own letters.
+            return source.style.c99Conversions
+                ? convertFloat(takeDouble(), spec, source.style) : null;
         case 'n': {
             // The only conversion that writes rather than reads. It produces no
             // output, which is why it returns an empty body rather than null.
@@ -705,9 +869,8 @@ export function guestAccess(readMemory, writeMemory){
  * @param {(pointer: number, value: number) => void} [options.writeCount]
  *        Where %n stores the count. Absent means %n produces nothing and
  *        writes nothing, which is what a runtime with %n disabled does.
- * @param {number} [options.exponentDigits]
- *        The least digits of %e's exponent: msvcrt's three, or two after
- *        `_set_output_format(_TWO_DIGIT_EXPONENT)`.
+ * @param {PrintStyle} [options.style]
+ *        How the floating-point conversions are written; msvcrt's, absent.
  * @param {boolean} [options.wide]
  *        True for the wprintf family, where %s means a wide string by default.
  * @param {boolean} [options.cLocale]
@@ -820,7 +983,7 @@ export function formatToString(format, varargs, readString, options = {}){
     };
 
     const source = { take, takeWide, takeDouble, readText, readCounted, character,
-        exponentDigits: options.exponentDigits ?? 3, slotWords: words };
+        style: options.style ?? MSVCRT_STYLE, slotWords: words };
     const writeCount = options.writeCount ?? (()=>{});
 
     for (let i = 0; i < format.length; i++)
@@ -831,7 +994,7 @@ export function formatToString(format, varargs, readString, options = {}){
             continue;
         }
 
-        const spec = parseSpec(format, i + 1, take);
+        const spec = parseSpec(format, i + 1, take, source.style.c99Conversions);
         spec.familyWide = options.wide === true;
         if (spec.conversion === '')
         {

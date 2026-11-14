@@ -290,6 +290,8 @@ export function createFiberFunctions(host){
                 host.writeU32(teb + TEB.EXCEPTION_LIST, host.readU32(to + FIBER.EXCEPTION_LIST));
                 host.writeU32(teb + TEB.STACK_BASE, host.readU32(to + FIBER.STACK_BASE));
                 host.writeU32(teb + TEB.STACK_LIMIT, host.readU32(to + FIBER.STACK_LIMIT));
+                // A fiber's stack is committed whole, its reservation from its limit.
+                host.writeU32(teb + TEB.DEALLOCATION_STACK, host.readU32(to + FIBER.STACK_LIMIT));
                 host.writeU32(teb + TEB.FIBER_DATA, to);
                 const kept = bounds.get(to);
                 if (thread && kept)

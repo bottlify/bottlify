@@ -54,6 +54,9 @@ const digitByte = (/** @type {number} */ d)=>(d < 10 ? (48 + d) | 0 : (87 + d) |
 /** Whether a byte is a digit. */
 const isDigit = (/** @type {number} */ c)=>(c >= 48 && c <= 57 ? 1 : 0);
 
+/** Whether a byte is an ASCII letter. */
+const isLetter = (/** @type {number} */ c)=>((c | 32) >= 97 && (c | 32) <= 122 ? 1 : 0);
+
 /** Whether a byte is one of the integer conversions, "diouxX", which alone take `I`, `z`, `t`. */
 const isInteger = (/** @type {number} */ c)=>(c === 100 || c === 105 || c === 111
     || c === 117 || c === 120 || c === 88 ? 1 : 0);
@@ -140,9 +143,10 @@ export function formatInGuest({ u8, pointerBytes }, format){
             {
                 wide64 = 1;
             }
-            else if (m === 70 || m === 78)
+            else if (m === 78 || m === 70 && isLetter(u8(at + 1)) !== 0)
             {
-                // Far and near: nothing to a flat address.
+                // Far and near: nothing to a flat address. An F before no
+                // letter is the universal runtime's %F, the host's.
             }
             else if (m === 73 && u8(at + 1) === 54 && u8(at + 2) === 52)
             {
@@ -193,8 +197,12 @@ export function formatInGuest({ u8, pointerBytes }, format){
         {
             return 0;
         }
+        // A double, and %a's and %F's too: the universal runtime writes them
+        // as numbers where msvcrt writes the letter, which the host's
+        // printer knows by the call's style.
         if (conversion === 90 || conversion === 101 || conversion === 69 || conversion === 102
-            || conversion === 103 || conversion === 71)
+            || conversion === 103 || conversion === 71 || conversion === 97 || conversion === 65
+            || conversion === 70)
         {
             return 0;
         }
@@ -959,9 +967,10 @@ export function formatInGuestWide({ u16, pointerBytes }, format){
             {
                 wide64 = 1;
             }
-            else if (m === 70 || m === 78)
+            else if (m === 78 || m === 70 && isLetter(u16(at + 2)) !== 0)
             {
-                // Far and near: nothing to a flat address.
+                // Far and near: nothing to a flat address. An F before no
+                // letter is the universal runtime's %F, the host's.
             }
             else if (m === 73 && u16(at + 2) === 54 && u16(at + 4) === 52)
             {
@@ -1013,8 +1022,12 @@ export function formatInGuestWide({ u16, pointerBytes }, format){
         {
             return 0;
         }
+        // A double, and %a's and %F's too: the universal runtime writes them
+        // as numbers where msvcrt writes the letter, which the host's
+        // printer knows by the call's style.
         if (conversion === 90 || conversion === 101 || conversion === 69 || conversion === 102
-            || conversion === 103 || conversion === 71)
+            || conversion === 103 || conversion === 71 || conversion === 97 || conversion === 65
+            || conversion === 70)
         {
             return 0;
         }

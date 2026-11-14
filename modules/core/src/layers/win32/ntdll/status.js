@@ -13,10 +13,14 @@
  * that calls an Nt entry point and then reports through GetLastError crosses
  * between them, and this table is the whole of that crossing.
  *
- * A status that is not here becomes ERROR_MR_MID_NOT_FOUND, which is what
+ * The statuses the engine makes are named here; the rest of Windows' table,
+ * for a status a program got elsewhere and hands over, is status-windows.js.
+ * A status in neither becomes ERROR_MR_MID_NOT_FOUND, which is what
  * Windows answers for a status it has no message for. That is a real code a
  * caller can recognise, unlike a guess at what the failure meant.
  */
+
+import { WINDOWS_STATUS_ERRORS } from './status-windows.js';
 
 /** The statuses this library produces or translates. */
 export const STATUS = Object.freeze({
@@ -142,6 +146,7 @@ const ERROR = Object.freeze({
  */
 /** @type {Map<number, number>} */
 const TO_DOS_ERROR = new Map([
+    ...WINDOWS_STATUS_ERRORS,
     [STATUS.SUCCESS, ERROR.SUCCESS],
     [STATUS.TIMEOUT, ERROR.WAIT_TIMEOUT],
     [STATUS.PENDING, ERROR.IO_PENDING],

@@ -2212,7 +2212,27 @@ XP machine that got 4.x first keeps 4.x's `mscoree.dll` the same way. Without a 
 volume, XP has no shim of the engine's, and a Framework's own `mscoree.dll` is never stood in front
 of. *2026-11-14.*
 
-**A248. The .NET Framework 4's setup a program starts is the engine's own, and succeeds whether
+**A248. A page reads back the protection it was given; only PAGE_NOACCESS is enforced.**
+`VirtualQuery` answers each page of a `VirtualAlloc` reservation with the protection its last
+commit or `VirtualProtect` gave it, its run split where that changes, and `AllocationProtect` the
+reservation's own; `VirtualProtect` hands back the page's real old protection, and refuses a range
+that reaches an uncommitted page (`ERROR_INVALID_ADDRESS`), a protection that is no single base
+one with at most `PAGE_GUARD`/`PAGE_NOCACHE`/`PAGE_WRITECOMBINE`, and copy-on-write, which private
+memory cannot have (`ERROR_INVALID_PARAMETER`), as Windows does (Wine's kernel32:virtual). A
+loaded image answers as Windows maps one: `MEM_IMAGE` from its base, allocated
+`PAGE_EXECUTE_WRITECOPY`, its headers `PAGE_READONLY`, each section by its characteristics (a
+writable one copy-on-write unless shared), a page no section covers `PAGE_NOACCESS`, read from the
+image's own headers; `VirtualProtect` of its pages is kept and handed back. A copy-on-write page
+still reads `PAGE_WRITECOPY` after it is written, where Windows turns it `PAGE_READWRITE`: no write
+is seen page by page. What a
+program can tell apart only by faulting is not reproduced: a closed page faults where the processor
+can close it, but a write to `PAGE_READONLY` memory, a jump into `PAGE_READWRITE` memory or a
+touch of a `PAGE_GUARD` page goes on, since the translator keeps no per-page write or execute
+permission and a check on every store would cost every program its speed. A program that relies on
+one of those faults is the case that reopens this.
+*2026-11-14.*
+
+**A249. The .NET Framework 4's setup a program starts is the engine's own, and succeeds whether
 or not the Framework's layer is there.** A bottle carries the .NET Framework only as a layer under
 it, built once per machine width and shared by every bottle (`roadmap/dotnet-layer.md`), never as a
 copy each installation makes. A setup of 4.0 to 4.8, offline or web - known by its version block,

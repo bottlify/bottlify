@@ -35,6 +35,13 @@ const MAX_STRING = 1 << 20;
 /** msvcrt's clock ticks once per millisecond, unlike most Unix runtimes. */
 export const CLOCKS_PER_SEC = 1000;
 
+/**
+ * The key under which the time functions' table carries strftime, wcsftime
+ * and _Strftime as the universal runtime has them, with C99's conversions;
+ * a symbol, so it is no export a program could name.
+ */
+export const STANDARD_TIME_FORMATS = Symbol('standard time formats');
+
 /** `struct tm`: nine ints, in this order, and the order is the layout. */
 export const TM = Object.freeze({
     SEC: 0, MIN: 4, HOUR: 8, MDAY: 12, MON: 16, YEAR: 20, WDAY: 24, YDAY: 28, ISDST: 32,
@@ -228,6 +235,40 @@ const dayName = (tm, list)=>(inRange(tm.wday, 0, 6) ? list[tm.wday] : null);
 /** @param {BrokenDown} tm @param {string[]} list */
 const monthName = (tm, list)=>(inRange(tm.mon, 0, 11) ? list[tm.mon] : null);
 
+/**
+ * ISO 8601's week of a struct tm and the year it belongs to, from its year,
+ * day of the year and weekday as they are: weeks start on Monday, and the
+ * first is the one with the year's first Thursday, so the first days of
+ * January can be the last week of the year before, and the last of
+ * December the first of the next. Null for a field out of its range.
+ *
+ * @param {BrokenDown} tm
+ * @returns {{ year: number, week: number } | null}
+ */
+function isoWeek(tm){
+    if (!inRange(tm.wday, 0, 6) || !inRange(tm.yday, 0, 365) || !inRange(tm.year, -1900, 8099))
+    {
+        return null;
+    }
+    const year = tm.year + 1900;
+    const monday = (tm.wday + 6) % 7;
+    /** Weeks in a year whose first of January falls on `first`, Monday 0. */
+    const weeksIn = (/** @type {number} */ y, /** @type {number} */ first)=>
+        (first === 3 || first === 2 && isLeap(y) ? 53 : 52);
+    const first = ((monday - tm.yday) % 7 + 7) % 7;
+    const week = Math.floor((tm.yday - monday + 10) / 7);
+    if (week < 1)
+    {
+        const before = ((first - (isLeap(year - 1) ? 366 : 365)) % 7 + 7) % 7;
+        return { year: year - 1, week: weeksIn(year - 1, before) };
+    }
+    if (week > weeksIn(year, first))
+    {
+        return { year: year + 1, week: 1 };
+    }
+    return { year, week };
+}
+
 /** @param {number} year */
 const isLeap = year=>(year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
 
@@ -311,12 +352,17 @@ export function asctime(tm){
  * or no struct at all when a conversion needs one; a format of plain text
  * reads no struct.
  *
+ * `standard` is the universal runtime's strftime, which knows C99's too:
+ * `%C %D %e %F %g %G %h %n %r %R %t %T %u %V %z`, and the `E` and `O`
+ * modifiers, which the C locale has no other form for and so ignores.
+ *
  * @param {string} format
  * @param {BrokenDown | null} tm
  * @param {TimeNames} [names]
+ * @param {boolean} [standard]
  * @returns {string | null}
  */
-export function strftime(format, tm, names = C_TIME_NAMES){
+export function strftime(format, tm, names = C_TIME_NAMES, standard = false){
     let alternate = false;
     /** @param {number} value @param {number} low @param {number} high @param {number} [width] */
     const number = (value, low, high, width = 2)=>(inRange(value, low, high)
@@ -355,6 +401,58 @@ export function strftime(format, tm, names = C_TIME_NAMES){
         Y: t=>(inRange(t.year, -1900, 8099) ? String(t.year + 1900) : null),
         Z: ()=>'UTC',
     };
+    /**
+     * Each C99 field from the ones above, so `#` reaches what they read:
+     * `%#D` is "1/1/70".
+     *
+     * @param {string} picture
+     * @returns {(tm: BrokenDown) => string | null}
+     */
+    const composed = picture=>t=>{
+        let out = '';
+        for (const part of picture.split(/(%[a-zA-Z])/))
+        {
+            const value = part.startsWith('%') ? fields[part[1]](t) : part;
+            if (value === null)
+            {
+                return null;
+            }
+            out += value;
+        }
+        return out;
+    };
+    if (standard)
+    {
+        Object.assign(fields, {
+            C: (/** @type {BrokenDown} */ t)=>(inRange(t.year, -1900, 8099)
+                ? number(Math.floor((t.year + 1900) / 100), 0, 99) : null),
+            D: composed('%m/%d/%y'),
+            e: (/** @type {BrokenDown} */ t)=>(!inRange(t.mday, 1, 31) ? null
+                : alternate ? String(t.mday) : String(t.mday).padStart(2, ' ')),
+            F: composed('%Y-%m-%d'),
+            g: (/** @type {BrokenDown} */ t)=>{
+                const iso = isoWeek(t);
+                return iso === null ? null : number(iso.year % 100, 0, 99);
+            },
+            G: (/** @type {BrokenDown} */ t)=>{
+                const iso = isoWeek(t);
+                return iso === null ? null : String(iso.year);
+            },
+            h: fields.b,
+            n: ()=>'\n',
+            r: composed('%I:%M:%S %p'),
+            R: composed('%H:%M'),
+            t: ()=>'\t',
+            T: composed('%H:%M:%S'),
+            u: (/** @type {BrokenDown} */ t)=>(inRange(t.wday, 0, 6) ? String(t.wday || 7) : null),
+            V: (/** @type {BrokenDown} */ t)=>{
+                const iso = isoWeek(t);
+                return iso === null ? null : number(iso.week, 1, 53);
+            },
+            // The engine's clock is UTC.
+            z: ()=>'+0000',
+        });
+    }
 
     let text = '';
     for (let at = 0; at < format.length; at++)
@@ -366,6 +464,10 @@ export function strftime(format, tm, names = C_TIME_NAMES){
         }
         alternate = format[at + 1] === '#';
         if (alternate)
+        {
+            at++;
+        }
+        if (standard && (format[at + 1] === 'E' || format[at + 1] === 'O'))
         {
             at++;
         }
@@ -586,6 +688,46 @@ export function createTimeFunctions(host){
             return pointer === 0 ? '' : host.readCString(pointer, 256);
         }));
     };
+
+    /** strftime, msvcrt's or with C99's conversions. @param {boolean} standard */
+    const strftimeEntry = standard=>({
+        convention: 'cdecl',
+        argBytes: 16,
+        /** @param {number[]} args */
+        handler: ([destination, max, format, block])=>{
+            const text = (format >>> 0) === 0 ? null
+                : strftime(host.readCString(format, MAX_STRING), tmAt(block), C_TIME_NAMES,
+                    standard);
+            return finishFormat(destination, max, text, writeString);
+        },
+    });
+
+    /** wcsftime, likewise. @param {boolean} standard */
+    const wcsftimeEntry = standard=>({
+        convention: 'cdecl',
+        argBytes: 16,
+        /** @param {number[]} args */
+        handler: ([destination, max, format, block])=>{
+            const text = (format >>> 0) === 0 ? null
+                : strftime(wideStringAt(host.readMemory, format), tmAt(block), C_TIME_NAMES,
+                    standard);
+            return finishFormat(destination, max, text, writeWide);
+        },
+    });
+
+    /** _Strftime, likewise. @param {boolean} standard */
+    const namedStrftimeEntry = standard=>({
+        convention: 'cdecl',
+        argBytes: 20,
+        /** @param {number[]} args */
+        handler: ([destination, max, format, block, timeNames])=>{
+            const text = (format >>> 0) === 0 ? null
+                : strftime(host.readCString(format, MAX_STRING), tmAt(block),
+                    (timeNames >>> 0) === 0 ? C_TIME_NAMES : readTimeNames(timeNames >>> 0),
+                    standard);
+            return finishFormat(destination, max, text, writeString);
+        },
+    });
 
     /**
      * Text on the heap for the caller to free, in the ANSI page; null when
@@ -1201,16 +1343,7 @@ export function createTimeFunctions(host){
          * cannot tell an overflow from an empty format, which is a defect in
          * the interface rather than here.
          */
-        strftime: {
-            convention: 'cdecl',
-            argBytes: 16,
-            /** @param {number[]} args */
-            handler: ([destination, max, format, block])=>{
-                const text = (format >>> 0) === 0 ? null
-                    : strftime(host.readCString(format, MAX_STRING), tmAt(block));
-                return finishFormat(destination, max, text, writeString);
-            },
-        },
+        strftime: strftimeEntry(false),
 
         /**
          * size_t wcsftime(wchar_t *dest, size_t max, const wchar_t *format,
@@ -1219,16 +1352,7 @@ export function createTimeFunctions(host){
          * strftime's text in UTF-16, `max` in characters, and an empty string
          * when it does not fit.
          */
-        wcsftime: {
-            convention: 'cdecl',
-            argBytes: 16,
-            /** @param {number[]} args */
-            handler: ([destination, max, format, block])=>{
-                const text = (format >>> 0) === 0 ? null
-                    : strftime(wideStringAt(host.readMemory, format), tmAt(block));
-                return finishFormat(destination, max, text, writeWide);
-            },
-        },
+        wcsftime: wcsftimeEntry(false),
 
         /**
          * size_t _Strftime(char *dest, size_t max, const char *format,
@@ -1238,16 +1362,13 @@ export function createTimeFunctions(host){
          * made, say -- in place of the current locale's; null is the current
          * locale's.
          */
-        _Strftime: {
-            convention: 'cdecl',
-            argBytes: 20,
-            /** @param {number[]} args */
-            handler: ([destination, max, format, block, timeNames])=>{
-                const text = (format >>> 0) === 0 ? null
-                    : strftime(host.readCString(format, MAX_STRING), tmAt(block),
-                        (timeNames >>> 0) === 0 ? C_TIME_NAMES : readTimeNames(timeNames >>> 0));
-                return finishFormat(destination, max, text, writeString);
-            },
+        _Strftime: namedStrftimeEntry(false),
+
+        // The universal runtime's, which knows C99's conversions too.
+        [STANDARD_TIME_FORMATS]: {
+            strftime: strftimeEntry(true),
+            wcsftime: wcsftimeEntry(true),
+            _Strftime: namedStrftimeEntry(true),
         },
 
         /**

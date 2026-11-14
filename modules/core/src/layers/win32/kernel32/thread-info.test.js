@@ -157,14 +157,14 @@ test('ThreadAffinityMask takes every bit as every processor, and refuses one pas
 });
 
 test('group affinity reads and sets the thread\'s mask, 0 handing it back to the process', ()=>{
-    // Wine's kernel32 test_thread_processor.
+    // Wine's kernel32 test_thread_processor. GetThreadGroupAffinity is
+    // sync.js's, at either width; the native query is this one's.
     const { fns, natives, view, self, other, errors, processors } = setup();
+    const query = natives.NtQueryInformationThread.handler;
 
-    assert.equal(fns.GetThreadGroupAffinity.handler([CURRENT_THREAD, 0x1000]), 1);
+    assert.equal(query([CURRENT_THREAD, THREAD_INFO.GROUP, 0x1000, 12, 0]), STATUS_SUCCESS);
     assert.equal(view.getUint32(0x1000, true), 0xf);
     assert.equal(view.getUint16(0x1004, true), 0, 'group 0');
-    assert.equal(fns.GetThreadGroupAffinity.handler([CURRENT_THREAD, 0]), 0);
-    assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER);
 
     view.setUint32(0x1100, 0x6, true);
     assert.equal(fns.SetThreadGroupAffinity.handler([CURRENT_THREAD, 0x1100, 0x1200]), 1);
@@ -181,7 +181,7 @@ test('group affinity reads and sets the thread\'s mask, 0 handing it back to the
     view.setUint32(0x1100, 0, true);
     assert.equal(fns.SetThreadGroupAffinity.handler([CURRENT_THREAD, 0x1100, 0x1200]), 1);
     processors.setProcessMask(0xf);
-    assert.equal(fns.GetThreadGroupAffinity.handler([CURRENT_THREAD, 0x1000]), 1);
+    assert.equal(query([CURRENT_THREAD, THREAD_INFO.GROUP, 0x1000, 12, 0]), STATUS_SUCCESS);
     assert.equal(view.getUint32(0x1000, true), 0xf, 'the process\'s mask, whatever it is now');
 
     view.setUint32(0x1100, 0xffffffff, true);

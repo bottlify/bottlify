@@ -87,6 +87,9 @@ test('a run is classed by how it ended before by what it printed', ()=>{
         '1000:t: unhandled exception c0000005 at 00401000')), 'guest-exception');
     assert.equal(classify(result(), parseOutput(
         '1000:t: 3 tests executed (0 marked as todo, 0 as flaky, 1 failure), 0 skipped.')), 'fail');
+    // Every check skipped, or none compiled in: the program held nothing to Windows.
+    const nothing = '1000:t: 0 tests executed (0 marked as todo, 0 failures), 1 skipped.';
+    assert.equal(classify(result(), parseOutput(nothing)), 'empty');
 });
 
 test('a run that did not finish counts the failed checks it printed', ()=>{
@@ -128,6 +131,7 @@ test('the gate finds a test that ended worse and a check failing that held, numb
         run('same', `a.c:5: Test failed: got 0x1234, n=1\n${summary(1)}`),
         run('fixed', `a.c:7: Test failed: x\n${summary(1)}`),
         run('broke', summary(0)),
+        run('emptied', summary(0)),
         run('newcheck', `a.c:1: Test failed: old\n${summary(1)}`),
     ] };
     const report = { tests: [
@@ -135,11 +139,14 @@ test('the gate finds a test that ended worse and a check failing that held, numb
         run('same', `a.c:6: Test failed: got 0x9999, n=2\n${summary(1)}`),
         run('fixed', summary(0)),
         run('broke', '', { error: { reason: 'runaway', message: 'program did not finish' } }),
+        // The library it checked went missing: every check skipped.
+        run('emptied', '1000:t: 0 tests executed (0 marked as todo, 0 failures), 1 skipped.'),
         run('newcheck', `a.c:1: Test failed: old\na.c:3: Test failed: new one\n${summary(2)}`),
         run('unseen', `a.c:2: Test failed: y\n${summary(1)}`),
     ] };
     assert.deepEqual(regressions(report, baseline), [
         'lib:broke: pass -> timeout',
+        'lib:emptied: pass -> empty',
         'lib:newcheck: 1 failed check(s) the baseline did not have, first a.c:3: new one',
     ]);
     assert.deepEqual(regressions(baseline, baseline), [], 'a run against itself');

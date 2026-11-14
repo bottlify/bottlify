@@ -65,9 +65,14 @@ const CREATE_UNICODE_ENVIRONMENT = 0x400;
 /** STARTUPINFOW's size, the one field a caller must fill. */
 const STARTUPINFO_SIZE = 68;
 
-/** The kernel32 failures CreateProcess and FindResource leave, and the statuses they are. */
+/**
+ * The kernel32 failures CreateProcess, FindResource and the thread calls
+ * leave, and the statuses they are made from.
+ */
 const ERROR_TO_STATUS = new Map([
     [2, STATUS.OBJECT_NAME_NOT_FOUND],
+    [5, STATUS.ACCESS_DENIED],
+    [6, STATUS.INVALID_HANDLE],
     [3, STATUS.OBJECT_PATH_NOT_FOUND],
     [193, STATUS.INVALID_IMAGE_NOT_MZ],
     [1812, STATUS.RESOURCE_DATA_NOT_FOUND],
@@ -128,6 +133,21 @@ export function createProcessFunctions(host){
         const error = kernel32.GetLastError?.handler([]) ?? 0;
         kernel32.SetLastError?.handler([before]);
         return { result, error };
+    };
+
+    /**
+     * Get- or SetThreadContext answered as the status its failure is made
+     * from: the handle that is no thread, the registers refused, the thread
+     * that has ended (ERROR_GEN_FAILURE, which STATUS_UNSUCCESSFUL becomes).
+     *
+     * @param {string} name @param {number} handle @param {number} context
+     */
+    const threadContextStatus = (name, handle, context)=>{
+        const { result, error } = quietly(name, [handle, context]);
+        /** @param {number} done */
+        const settle = done=>(done !== 0 ? STATUS.SUCCESS
+            : ERROR_TO_STATUS.get(error) ?? STATUS.UNSUCCESSFUL);
+        return result instanceof Promise ? result.then(settle) : settle(result);
     };
 
     /**
@@ -206,6 +226,56 @@ export function createProcessFunctions(host){
                 };
                 return result instanceof Promise ? result.then(settle) : settle(result);
             },
+        },
+
+        /**
+         * NTSTATUS NtSuspendThread(HANDLE ThreadHandle, PULONG PreviousSuspendCount)
+         *
+         * SuspendThread, as NtResumeThread is ResumeThread: the count before,
+         * through the pointer when there is one.
+         */
+        NtSuspendThread: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, count])=>{
+                const { result } = quietly('SuspendThread', [handle]);
+                const settle = (/** @type {number} */ previous)=>{
+                    if ((previous >>> 0) === 0xffffffff)
+                    {
+                        return STATUS.INVALID_HANDLE;
+                    }
+                    if ((count >>> 0) !== 0)
+                    {
+                        writeU32(count, previous);
+                    }
+                    return STATUS.SUCCESS;
+                };
+                return result instanceof Promise ? result.then(settle) : settle(result);
+            },
+        },
+
+        /**
+         * NTSTATUS NtGetContextThread(HANDLE ThreadHandle, PCONTEXT Context)
+         *
+         * GetThreadContext as a status, the groups the context's flags ask
+         * for filled in place.
+         */
+        NtGetContextThread: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, context])=>threadContextStatus('GetThreadContext', handle, context),
+        },
+
+        /**
+         * NTSTATUS NtSetContextThread(HANDLE ThreadHandle, PCONTEXT Context)
+         *
+         * SetThreadContext as a status: what it refuses is refused here the
+         * same way, as the status its last error is made from.
+         */
+        NtSetContextThread: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, context])=>threadContextStatus('SetThreadContext', handle, context),
         },
 
         /**

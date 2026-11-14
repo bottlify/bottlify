@@ -638,6 +638,27 @@ test('a thread with a block keeps its last error in the block', ()=>{
     assert.equal(fns.GetLastError.handler(), 0, 'a thread without a block keeps its own');
 });
 
+test('GetCurrentThreadStackLimits answers the reservation\'s bottom and the stack\'s base', ()=>{
+    // Low is DeallocationStack, not the committed StackLimit, at either width.
+    const host = fakeHost();
+    host.threads.first.tebAddress = 0x100;
+    host.view.setUint32(0x100 + TEB.STACK_BASE, 0x00300000, true);
+    host.view.setUint32(0x100 + TEB.STACK_LIMIT, 0x002ff000, true);
+    host.view.setUint32(0x100 + TEB.DEALLOCATION_STACK, 0x00200000, true);
+    const fns = createProcessFunctions(host);
+    assert.equal(fns.GetCurrentThreadStackLimits.handler([0x40, 0x44]), 0);
+    assert.equal(host.view.getUint32(0x40, true), 0x00200000);
+    assert.equal(host.view.getUint32(0x44, true), 0x00300000);
+    assert.equal(fns.GetCurrentThreadStackLimits.argBytes, 8);
+
+    const long = createProcessFunctions({ ...host, pointerSize: 8 });
+    host.view.setBigUint64(0x100 + TEB64.STACK_BASE, 0x7ff00300000n, true);
+    host.view.setBigUint64(0x100 + TEB64.DEALLOCATION_STACK, 0x7ff00200000n, true);
+    long.GetCurrentThreadStackLimits.handler([0x40, 0x48]);
+    assert.equal(host.view.getBigUint64(0x40, true), 0x7ff00200000n);
+    assert.equal(host.view.getBigUint64(0x48, true), 0x7ff00300000n);
+});
+
 test('freeing a slot zeroes it in the block of every thread', ()=>{
     // The guest-side TlsGetValue reads the block and has no generation to
     // compare against, so a freed slot has to read as zero everywhere at once.

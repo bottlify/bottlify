@@ -412,6 +412,10 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write', 'p
  *           not resident yet -- see WriteFile.
  * @property {(node: any, size: number) => void} truncate
  * @property {(node: any) => void} close
+ * @property {(node: any) => void} [retain]  one more hold, which a close gives back
+ * @property {(node: any, kind: any) => any} [section]  a node of its own for a section
+ * @property {(node: any) => Uint8Array | null} [standInImage]
+ *           The image an engine's library stands in with, for its node.
  * @property {(path: string) => boolean} remove
  * @property {(path: string, modified: number) => boolean} [setModified]
  * @property {(path: string) => boolean} mkdir
@@ -579,7 +583,7 @@ const SYSTEM_LIBRARY_SIZE = 0x10000;
  * @template {FileSystem} T
  * @param {T} real @param {(() => string[]) | undefined} libraries
  * @param {LibraryFiles} [where]
- * @returns {T}
+ * @returns {T & { standInImage?: (node: any) => Uint8Array | null }}
  */
 export function withSystemLibraries(real, libraries, where = {}){
     if (!libraries)
@@ -617,7 +621,13 @@ export function withSystemLibraries(real, libraries, where = {}){
     const entryOf = (name, path)=>({ exists: true, isDirectory: false,
         size: imageAt(name, path)?.length ?? SYSTEM_LIBRARY_SIZE,
         modified: SYSTEM_LIBRARY_TIME });
-    /** The open stand-ins, each its library's image. @type {WeakMap<object, Uint8Array>} */
+    /**
+     * The open stand-ins, each its library's image and the holds beyond its
+     * open: a mapping of the file, and each view of it, keeps the image as a
+     * file's node is kept, until the last of them closes.
+     *
+     * @type {WeakMap<object, { image: Uint8Array, holds: number }>}
+     */
     const opened = new WeakMap();
     return Object.assign(Object.create(real), {
         /** @param {string} path */
@@ -644,18 +654,39 @@ export function withSystemLibraries(real, libraries, where = {}){
                 return null;
             }
             const standIn = {};
-            opened.set(standIn, image);
+            opened.set(standIn, { image, holds: 0 });
             return standIn;
         },
+        /**
+         * The image a stand-in opened, or null for a file of the volume: its
+         * length is the file's size, which the volume's own nodes are asked.
+         *
+         * @param {any} node
+         */
+        standInImage: node=>opened.get(node)?.image ?? null,
         /**
          * @param {any} node @param {number} offset @param {number} length
          * @param {boolean} [onlyCopied]
          */
         read: (node, offset, length, onlyCopied)=>{
-            const image = opened.get(node);
+            const image = opened.get(node)?.image;
             return image ? image.slice(offset, offset + length)
                 : real.read(node, offset, length, onlyCopied);
         },
+        /** @param {any} node */
+        retain: node=>{
+            const standIn = opened.get(node);
+            if (standIn)
+            {
+                standIn.holds++;
+            }
+            else
+            {
+                real.retain?.(node);
+            }
+        },
+        /** A stand-in has no section of its own: a mapping holds it. @param {any} node @param {any} kind */
+        section: (node, kind)=>(opened.has(node) ? null : real.section?.(node, kind) ?? null),
         /** @param {any} node @param {number} offset @param {Uint8Array} bytes */
         write: (node, offset, bytes)=>(opened.has(node) ? 0 : real.write(node, offset, bytes)),
         /** @param {any} node @param {number} size */
@@ -667,9 +698,18 @@ export function withSystemLibraries(real, libraries, where = {}){
         },
         /** @param {any} node */
         close: node=>{
-            if (!opened.delete(node))
+            const standIn = opened.get(node);
+            if (!standIn)
             {
                 real.close(node);
+            }
+            else if (standIn.holds > 0)
+            {
+                standIn.holds--;
+            }
+            else
+            {
+                opened.delete(node);
             }
         },
         /** @param {string} path @param {string} pattern */

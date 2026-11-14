@@ -9,7 +9,9 @@ import assert from 'node:assert/strict';
 import { createProcessFunctions } from './process.js';
 
 const STATUS_SUCCESS = 0;
+const STATUS_UNSUCCESSFUL = 0xc0000001;
 const STATUS_ACCESS_VIOLATION = 0xc0000005;
+const STATUS_ACCESS_DENIED = 0xc0000022;
 const STATUS_INVALID_HANDLE = 0xc0000008;
 const STATUS_INVALID_CID = 0xc000000b;
 const STATUS_INVALID_PARAMETER_MIX = 0xc0000030;
@@ -57,6 +59,28 @@ function setup(){
             }
             lastError = 6;
             return 0xffffffff;
+        } },
+        SuspendThread: { handler: (/** @type {number[]} */ [handle])=>{
+            if (handle === 0x10)
+            {
+                return 1;
+            }
+            lastError = 6;
+            return 0xffffffff;
+        } },
+        // A thread 0x10 whose context reads; 0x20 has ended; the registers are
+        // never replaced.
+        GetThreadContext: { handler: (/** @type {number[]} */ [handle])=>{
+            if (handle === 0x10)
+            {
+                return 1;
+            }
+            lastError = handle === 0x20 ? 31 : 6;
+            return 0;
+        } },
+        SetThreadContext: { handler: (/** @type {number[]} */ [handle])=>{
+            lastError = handle === 0x10 ? 5 : 6;
+            return 0;
         } },
         OpenProcess: { handler: (/** @type {number[]} */ [, , id])=>{
             if (id === 0x1000)
@@ -139,6 +163,29 @@ test('NtResumeThread is ResumeThread as a status, the last error left alone', ()
     assert.equal(fns.NtResumeThread.handler([0x99, OUT]), STATUS_INVALID_HANDLE);
     assert.equal(lastError(), 0x77, 'a native call leaves no last error');
     assert.equal(fns.NtResumeThread.argBytes, 8);
+});
+
+test('NtSuspendThread is SuspendThread as a status', ()=>{
+    const { view, fns, lastError } = setup();
+    assert.equal(fns.NtSuspendThread.handler([0x10, OUT]), STATUS_SUCCESS);
+    assert.equal(view.getUint32(OUT, true), 1, 'the count before');
+    assert.equal(fns.NtSuspendThread.handler([0x99, OUT]), STATUS_INVALID_HANDLE);
+    assert.equal(lastError(), 0x77, 'a native call leaves no last error');
+    assert.equal(fns.NtSuspendThread.argBytes, 8);
+});
+
+test('Nt[GS]etContextThread answer the status the thread call\'s failure is made from', ()=>{
+    const { fns, lastError } = setup();
+    assert.equal(fns.NtGetContextThread.handler([0x10, OUT]), STATUS_SUCCESS);
+    assert.equal(fns.NtGetContextThread.handler([0x99, OUT]), STATUS_INVALID_HANDLE);
+    assert.equal(fns.NtGetContextThread.handler([0x20, OUT]), STATUS_UNSUCCESSFUL,
+        'a thread that has ended: ERROR_GEN_FAILURE is STATUS_UNSUCCESSFUL');
+    assert.equal(fns.NtSetContextThread.handler([0x10, OUT]), STATUS_ACCESS_DENIED,
+        'the registers refused as SetThreadContext refuses them');
+    assert.equal(fns.NtSetContextThread.handler([0x99, OUT]), STATUS_INVALID_HANDLE);
+    assert.equal(lastError(), 0x77, 'a native call leaves no last error');
+    assert.equal(fns.NtGetContextThread.argBytes, 8);
+    assert.equal(fns.NtSetContextThread.argBytes, 8);
 });
 
 test('NtOpenProcess opens by the client id, and refuses what names nothing', ()=>{

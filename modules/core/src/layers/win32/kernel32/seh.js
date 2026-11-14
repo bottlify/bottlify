@@ -174,7 +174,13 @@ const VECTOR_TO_STATUS = Object.freeze({
     16: STATUS.FLOAT_DIVIDE_BY_ZERO,
     17: STATUS.DATATYPE_MISALIGNMENT,
     19: STATUS.FLOAT_MULTIPLE_TRAPS,
+    0x2d: STATUS.BREAKPOINT,
 });
+
+/** `int 0x2d`, the kernel debugger's service call: eax the service, ecx and edx its arguments. */
+const DEBUG_SERVICE = 0x2d;
+/** BREAKPOINT_PRINT, BREAKPOINT_LOAD_SYMBOLS, BREAKPOINT_UNLOAD_SYMBOLS: nothing to raise without a debugger. */
+const SILENT_SERVICES = new Set([1, 3, 4]);
 
 /**
  * How much stack a dispatch reserves below the fault.
@@ -943,6 +949,17 @@ export function createSeh(host){
             const privileged = (fault.vector === 6 || fault.vector === 13)
                 && host.isMapped(registers.eip >>> 0)
                 && privilegedAt(host.readMemory, registers.eip >>> 0);
+            // The debug service with no debugger to serve it: the services
+            // that only tell a debugger something (a string, a module's
+            // symbols) go on one byte past the instruction - the system's
+            // return from the service skips it, which is why compilers put a
+            // breakpoint byte after `int 0x2d`; the rest are a breakpoint
+            // reported just after it, the service and its two arguments as
+            // parameters.
+            if (fault.vector === DEBUG_SERVICE && SILENT_SERVICES.has(registers.eax >>> 0))
+            {
+                return { handled: true, registers: { ...registers, eip: registers.eip + 1 >>> 0 } };
+            }
             const code = privileged ? STATUS.PRIVILEGED_INSTRUCTION
                 : VECTOR_TO_STATUS[/** @type {keyof typeof VECTOR_TO_STATUS} */ (fault.vector)];
             if (code === undefined)
@@ -956,7 +973,8 @@ export function createSeh(host){
             const parameters = code === STATUS.ACCESS_VIOLATION
                 ? [(fault.errorCode ?? 0) & 2 ? 1 : 0,
                     fault.vector === 13 ? 0xffffffff : (fault.address ?? 0) >>> 0]
-                : [];
+                : fault.vector === DEBUG_SERVICE
+                    ? [registers.eax >>> 0, registers.ecx >>> 0, registers.edx >>> 0] : [];
             const result = await dispatch({ code, address: registers.eip, parameters }, registers);
             if (result.handled)
             {

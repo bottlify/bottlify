@@ -403,6 +403,36 @@ test('a fault\'s context holds the registers the faulting code had', async()=>{
     assert.equal(result.registers?.eax, 0xa1, 'continuing resumes with them');
 });
 
+test('the debug service with no debugger is a breakpoint after it, or nothing at all', async()=>{
+    // `int 0x2d`: eax the service, ecx and edx its arguments. A breakpoint or
+    // prompt is raised as EXCEPTION_BREAKPOINT just past the instruction with
+    // the three as parameters; a print or a symbol load goes on one byte past
+    // it, raising nothing - the byte a protection's check hides there.
+    const m = machine({ answer: ()=>Disposition.CONTINUE_EXECUTION });
+    m.registerFrames([0x51000]);
+    const at = { ...m.registers(), eip: 0x401502, eax: 0, ecx: 0x1111, edx: 0x2222 };
+
+    const raised = await m.seh.onFault({ vector: 0x2d, eip: 0x401502, errorCode: null }, at);
+
+    const [{ args: [record, , context] }] = m.called;
+    assert.equal(m.get(record + RECORD.CODE), STATUS.BREAKPOINT);
+    assert.equal(m.get(record + RECORD.ADDRESS), 0x401502);
+    assert.equal(m.get(record + RECORD.PARAMETER_COUNT), 3);
+    assert.deepEqual([0, 4, 8].map(offset=>m.get(record + RECORD.INFORMATION + offset)),
+        [0, 0x1111, 0x2222]);
+    assert.equal(m.get(context + CONTEXT.EIP), 0x401502);
+    assert.equal(raised.registers?.eip, 0x401502);
+
+    for (const service of [1, 3, 4])
+    {
+        const quiet = await m.seh.onFault({ vector: 0x2d, eip: 0x401502, errorCode: null },
+            { ...at, eax: service });
+        assert.equal(quiet.handled, true);
+        assert.equal(quiet.registers?.eip, 0x401503, `service ${service} skips a byte`);
+    }
+    assert.equal(m.called.length, 1, 'and offers no handler anything');
+});
+
 test('a protection fault is an access violation with no address to give', async()=>{
     const m = machine({ answer: ()=>Disposition.CONTINUE_EXECUTION });
     m.registerFrames([0x51000]);
