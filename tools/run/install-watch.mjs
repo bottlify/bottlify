@@ -308,7 +308,12 @@ const importWatches = argv.flatMap((flag, index)=>{
             .map(one=>(/^\d+$/.test(one) ? Number(one) : one)) }];
 });
 
-const app = await createApp({
+/** `--then 'C:\path\program.exe args'`: programs of the volume run after the first, each on what
+ * the run before it left (its files and registry), as a person runs them one after another on the
+ * same machine; the outputs (`--list`, `--copy`, `--registry`, `--cat`) are taken after the
+ * last. */
+const thenLines = argv.flatMap((arg, at)=>(argv[at - 1] === '--then' ? [arg] : []));
+const runOptions = {
     ...importWatches.length > 0 ? {
         watchImport: (/** @type {string} */ dll, /** @type {string | null} */ name)=>{
             const asked = importWatches.find(one=>one.library === dll.toLowerCase()
@@ -383,18 +388,25 @@ const app = await createApp({
             'call.hook': 'trace',
         },
     } } : {},
-});
-for (const name of ['process-create', 'process-child', 'process-started', 'process-resumed',
-    'process-server', 'process-server-exit', 'error', 'exit', 'divergence', 'message-box',
-    'unimplemented',
-    // `--debug-strings`: what the programs say through OutputDebugString --
-    // a client's own log and its assertions, which name where it gave up.
-    ...argv.includes('--debug-strings') ? ['debug'] : []])
-{
-    app.on(name, (/** @type {any} */ event)=>console.log(seconds(), name,
-        JSON.stringify(event, (key, value)=>(key === 'error' && value
-            ? String(value.stack ?? value).slice(0, 800) : value))?.slice(0, 900)));
-}
+    // What the run wrote, handed to the next program `--then` names.
+    ...thenLines.length > 0 ? { collectOnExit: true } : {},
+};
+let app = await createApp(runOptions);
+/** @param {any} running */
+const watchEvents = running=>{
+    for (const name of ['process-create', 'process-child', 'process-started', 'process-resumed',
+        'process-server', 'process-server-exit', 'error', 'exit', 'divergence', 'message-box',
+        'unimplemented',
+        // `--debug-strings`: what the programs say through OutputDebugString --
+        // a client's own log and its assertions, which name where it gave up.
+        ...argv.includes('--debug-strings') ? ['debug'] : []])
+    {
+        running.on(name, (/** @type {any} */ event)=>console.log(seconds(), name,
+            JSON.stringify(event, (key, value)=>(key === 'error' && value
+                ? String(value.stack ?? value).slice(0, 800) : value))?.slice(0, 900)));
+    }
+};
+watchEvents(app);
 
 // What the programs write to their consoles, a line at a time: a console
 // program's own account of what it did.
@@ -943,6 +955,35 @@ try
 }
 catch (e){
     console.log('stopped:', e instanceof Error ? e.stack?.slice(0, 1500) : e);
+}
+for (const line of thenLines)
+{
+    // The files the run wrote (its names and links) and its hive, as a saved session holds them.
+    const session = { files: await app.session.export(), registry: app.registry().toJSON() };
+    const [, quoted, bare] = /^\s*(?:"([^"]+)"|(\S+))/.exec(line) ?? [];
+    const imagePath = quoted ?? bare;
+    const image = session.files.find((/** @type {any} */ one)=>
+        one.path.toLowerCase() === imagePath?.toLowerCase());
+    if (!image)
+    {
+        console.log(`then: ${imagePath} is not among the files the run left`);
+        break;
+    }
+    await app.dispose?.();
+    const rest = line.slice(line.indexOf(imagePath) + imagePath.length).replace(/^"/, '');
+    app = await createApp({ ...runOptions, executable: image.bytes, imagePath,
+        commandLine: `"${imagePath}"${rest}`,
+        storage: async()=>session, files: undefined, bundle: undefined });
+    watchEvents(app);
+    console.log(seconds(), 'then', line);
+    try
+    {
+        console.log('then ->', await app.run({ maxTurns: Number.MAX_SAFE_INTEGER,
+            timeoutMs: number('--minutes', 20) * 60000 }));
+    }
+    catch (e){
+        console.log('stopped:', e instanceof Error ? e.stack?.slice(0, 1500) : e);
+    }
 }
 printJournal();
 if (listAt)
