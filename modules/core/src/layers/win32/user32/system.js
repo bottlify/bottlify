@@ -1224,6 +1224,20 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 host.callerThread?.(), unicode));
 
     /**
+     * The monitor a box overlaps, there being one: the screen, or for a box
+     * off it (or none) the one the flags ask for - none under
+     * MONITOR_DEFAULTTONULL, the one monitor as both primary and nearest.
+     *
+     * @param {{ left: number, top: number, right: number, bottom: number } | null} box
+     * @param {number} flags
+     */
+    const monitorFromBox = (box, flags)=>{
+        const overlaps = box !== null && box.left < screen.width && box.right > 0
+            && box.top < screen.height && box.bottom > 0;
+        return overlaps || (flags >>> 0) !== MONITOR_DEFAULTTONULL ? PRIMARY_MONITOR : 0;
+    };
+
+    /**
      * GetMonitorInfo, both spellings. cbSize is the caller saying which
      * structure it allocated; a size that is neither of the two it may be is a
      * caller bug, and answering FALSE is how it finds out rather than by
@@ -3724,11 +3738,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         MonitorFromPoint: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([x, y, flags])=>{
-                const inside = (x | 0) >= 0 && (y | 0) >= 0 && (x | 0) < screen.width
-                    && (y | 0) < screen.height;
-                return inside || (flags >>> 0) !== MONITOR_DEFAULTTONULL ? PRIMARY_MONITOR : 0;
-            },
+            handler: ([x, y, flags])=>monitorFromBox({ left: x | 0, top: y | 0,
+                right: (x | 0) + 1, bottom: (y | 0) + 1 }, flags),
         },
 
         /**
@@ -3772,16 +3783,44 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             },
         },
 
-        /** HMONITOR MonitorFromRect(LPCRECT lprc, DWORD dwFlags) */
+        /**
+         * HMONITOR MonitorFromRect(LPCRECT lprc, DWORD dwFlags)
+         *
+         * The monitor the rectangle overlaps; an empty one is its top-left
+         * corner, a point (so (0, 0, -1, -1) is on the screen and
+         * (-1, 0, 2, -1) is not).
+         */
         MonitorFromRect: {
             argBytes: 8,
-            handler: ()=>PRIMARY_MONITOR,
+            /** @param {number[]} args */
+            handler: ([rect, flags])=>{
+                const box = readRect(host, rect >>> 0);
+                const empty = box.right <= box.left || box.bottom <= box.top;
+                return monitorFromBox(empty ? { left: box.left, top: box.top,
+                    right: box.left + 1, bottom: box.top + 1 } : box, flags);
+            },
         },
 
-        /** HMONITOR MonitorFromWindow(HWND hwnd, DWORD dwFlags) */
+        /**
+         * HMONITOR MonitorFromWindow(HWND hwnd, DWORD dwFlags)
+         *
+         * The monitor the window's rectangle overlaps; no window is no
+         * rectangle, which the flags answer as for one off every monitor.
+         */
         MonitorFromWindow: {
             argBytes: 8,
-            handler: ()=>PRIMARY_MONITOR,
+            /** @param {number[]} args */
+            handler: ([hwnd, flags])=>{
+                const record = live(hwnd);
+                if (!record)
+                {
+                    return monitorFromBox(null, flags);
+                }
+                const box = host.geometry.windowRect(record);
+                const empty = box.right <= box.left || box.bottom <= box.top;
+                return monitorFromBox(empty ? { left: box.left, top: box.top,
+                    right: box.left + 1, bottom: box.top + 1 } : box, flags);
+            },
         },
 
         /** BOOL GetMonitorInfoA(HMONITOR hMonitor, LPMONITORINFO lpmi) */

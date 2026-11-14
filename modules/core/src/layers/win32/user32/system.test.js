@@ -916,13 +916,31 @@ test('GetWindowRgnBox answers the rectangle of the region SetWindowRgn gave, and
 test('MonitorFromPoint finds the monitor for a point on the screen, and none off it only when '
     + 'asked for none', ()=>{
     const { fns } = setup();
-    const monitor = fns.MonitorFromWindow.handler([0, 0]);
+    const monitor = fns.MonitorFromWindow.handler([0, 1]);
     assert.equal(fns.MonitorFromPoint.argBytes, 12, 'the point by value');
     assert.equal(fns.MonitorFromPoint.handler([10, 10, 0]), monitor);
     assert.equal(fns.MonitorFromPoint.handler([-5, 10, 0]), 0, 'MONITOR_DEFAULTTONULL');
     assert.equal(fns.MonitorFromPoint.handler([-5, 10, 1]), monitor, 'MONITOR_DEFAULTTOPRIMARY');
     assert.equal(fns.MonitorFromPoint.handler([5000, 10, 2]), monitor, 'MONITOR_DEFAULTTONEAREST');
 });
+
+test('MonitorFromRect takes the overlap, and an empty rectangle as its corner; no window is none',
+    ()=>{
+        const { fns, memory } = setup();
+        const monitor = fns.MonitorFromWindow.handler([0, 1]);
+        assert.equal(fns.MonitorFromWindow.handler([0, 0]), 0, 'no window, MONITOR_DEFAULTTONULL');
+        assert.equal(fns.MonitorFromWindow.handler([0x9999, 2]), monitor, 'and the nearest');
+        /** @param {number[]} rect @param {number} flags */
+        const fromRect = (rect, flags)=>{
+            memory.putU32s(RECT_BUFFER, rect.map(value=>value >>> 0));
+            return fns.MonitorFromRect.handler([RECT_BUFFER, flags]);
+        };
+        assert.equal(fromRect([0, 0, -1, -1], 0), monitor, 'empty at the origin: on the screen');
+        assert.equal(fromRect([-1, 0, 2, -1], 0), 0, 'empty: its corner is off it, however wide');
+        assert.equal(fromRect([-1, 0, 2, 1], 0), monitor, 'overlapping it');
+        assert.equal(fromRect([-1, -2, 2, 0], 0), 0, 'just above it');
+        assert.equal(fromRect([-1, -2, 2, 0], 2), monitor, 'just above it, the nearest asked for');
+    });
 
 test('EnumDisplayMonitors hands the one monitor to the callback, cut by the clip', async()=>{
     /** @type {number[][]} */
@@ -941,7 +959,7 @@ test('EnumDisplayMonitors hands the one monitor to the callback, cut by the clip
             return 0;
         },
     });
-    const monitor = fns.MonitorFromWindow.handler([0, 0]);
+    const monitor = fns.MonitorFromWindow.handler([0, 1]);
     assert.equal(fns.EnumDisplayMonitors.argBytes, 16);
     assert.equal(await fns.EnumDisplayMonitors.handler([0, 0, 0x9000, 0x55]), 1,
         'the callback answering FALSE is not the call failing');
@@ -4427,7 +4445,7 @@ test('GetMonitorInfo names the adapter in a MONITORINFOEX, and the work area fol
     // sysparams.c test_enum_display_settings takes the name to
     // EnumDisplaySettings; test_SPI_SETWORKAREA reads back what it set.
     const { memory, fns, screen } = setup();
-    const MONITOR = fns.MonitorFromWindow.handler([0, 0]);
+    const MONITOR = fns.MonitorFromWindow.handler([0, 1]);
     memory.putU32s(OUT_BUFFER, [72]);
     assert.equal(fns.GetMonitorInfoA.handler([MONITOR, OUT_BUFFER]), 1);
     assert.equal(memory.readCString(OUT_BUFFER + 40, 32), '\\\\.\\DISPLAY1');
