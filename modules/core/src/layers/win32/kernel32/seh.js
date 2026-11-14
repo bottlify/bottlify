@@ -186,6 +186,9 @@ const VECTOR_TO_STATUS = Object.freeze({
  */
 const SCRATCH = RECORD.SIZE + CONTEXT.SIZE + 0x20;
 
+/** How much of the stack above esp the last-chance trace shows, in bytes. */
+const STACK_TRACED = 0x1000;
+
 /** @param {number} value */
 const hex = value=>`0x${(value >>> 0).toString(16)}`;
 
@@ -432,6 +435,18 @@ export function createSeh(host){
                 {
                     lines.push(`  [${names[at].toLowerCase()}-64] ${Array.from({ length: 32 },
                         (_, index)=>shown(word(value - 64 + index * 4))).join(' ')}`);
+                }
+            }
+            // The stack above esp whole: a fail-fast's reason - a stack walker's state, the
+            // frame it judged - sits in the frames of the calls that gave up.
+            const esp = values[names.indexOf('ESP')];
+            if (esp !== null)
+            {
+                for (let row = 0; row < STACK_TRACED / 64; row++)
+                {
+                    const at = (esp + row * 64) >>> 0;
+                    lines.push(`  ${hex(at)}: ${Array.from({ length: 16 },
+                        (_, index)=>shown(word(at + index * 4))).join(' ')}`);
                 }
             }
         }
