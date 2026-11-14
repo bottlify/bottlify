@@ -55,6 +55,8 @@ import {
     formatAttribute, PIXEL_FORMATS, PIXELFORMATDESCRIPTOR,
 } from './pixelformat.js';
 import { createWgl } from './wgl.js';
+import { createPresentQueue, createRaster, PRESENT_INTERVAL_IMMEDIATE } from '../seam/raster.js';
+import { refreshOf } from '../../win32/user32/display.js';
 import { createOpenglRoot } from './root.js';
 import { debugEntryPoints } from './exports-debug.js';
 import { compressedDigest, imageDigests, imageTimes, keptImages } from './context-textures.js';
@@ -498,6 +500,11 @@ const LIST_TYPES = new Map([
  *           The device has `texture-compression-bc`: an S3TC texture whose
  *           every level kept its blocks uploads them as blocks instead of
  *           the four-to-eight-times-larger texels the context decoded.
+ * @property {() => number} [now]
+ *           The clock the display's blanks run on: the guest's.
+ * @property {(deadline: number, result: any) => any} [waitUntil]
+ *           Stops the calling thread until `deadline` on that clock and answers
+ *           `result` then; without it a swap answers at once.
  * @property {boolean} [raster]
  *           `false` leaves primitives drawn on the processor unrasterised, so a
  *           run without a device measures everything but the rasteriser.
@@ -506,6 +513,9 @@ const LIST_TYPES = new Map([
  *           Makes the root elsewhere: its contexts keep their state here and
  *           draw in the graphics worker, whose frames come back to be shown.
  */
+
+/** The D3DPRESENT_INTERVAL_ value (`createPresentQueue`) of a swap interval of one to four blanks. */
+const SWAP_TO_PRESENT_INTERVAL = [0, 1, 2, 4, 8];
 
 /** A context handle that names none. */
 const ERROR_INVALID_HANDLE = 6;
@@ -637,6 +647,34 @@ export function createOpengl(services){
      * @type {Map<string, number>}
      */
     const swapIntervals = new Map();
+    /** The display's blanks on the guest's clock, which a swap interval counts. */
+    const clock = services.now ?? (()=>performance.now());
+    const raster = createRaster({ now: clock, refresh: ()=>refreshOf(/** @type {{ refresh?: number }} */ (screen())),
+        height: ()=>screen().height });
+    const presents = createPresentQueue(raster);
+    /**
+     * A swap's answer once its frame has room among those waiting for their
+     * blanks (`createPresentQueue`): an interval of n shows it n blanks after
+     * the frame before (WGL_EXT_swap_control; one unless set), so a program
+     * drawing faster than the display is held to its rate rather than drawing
+     * frames nobody sees - a loading screen drawn as fast as it could be took
+     * the process's own executor from the thread loading behind it. Zero shows
+     * it at once. A swap the device already holds has waited.
+     *
+     * @param {number} hdc @param {any} answer
+     */
+    const paced = (hdc, answer)=>{
+        if (!services.waitUntil || answer instanceof Promise || !answer)
+        {
+            return answer;
+        }
+        const key = describeDrawable(hdc >>> 0)?.key;
+        const interval = key === undefined ? 1 : swapIntervals.get(key) ?? 1;
+        const at = clock();
+        const wait = presents.present(at, interval <= 0 ? PRESENT_INTERVAL_IMMEDIATE
+            : SWAP_TO_PRESENT_INTERVAL[Math.min(interval, 4)]);
+        return wait > 0 ? services.waitUntil(at + wait, answer) : answer;
+    };
     /** @returns {string | null} the current DC's drawable's key */
     const currentDrawableKey = ()=>{
         const hdc = wgl.wglGetCurrentDC();
@@ -2438,7 +2476,7 @@ export function createOpengl(services){
                 return 0;
             }
             const held = presentCurrentFrame(hdc);
-            return held ? held.then(()=>1) : 1;
+            return held ? held.then(()=>1) : paced(hdc, 1);
         },
 
         /** The layer form, where layer bit 0 is the main plane. */
@@ -2448,7 +2486,7 @@ export function createOpengl(services){
                 return 0;
             }
             const held = presentCurrentFrame(hdc);
-            return held ? held.then(()=>1) : 1;
+            return held ? held.then(()=>1) : paced(hdc, 1);
         },
     };
 
@@ -2616,7 +2654,7 @@ export function createOpengl(services){
                 return false;
             }
             const held = presentCurrentFrame(hdc);
-            return held ? held.then(()=>true) : true;
+            return held ? held.then(()=>true) : paced(hdc, true);
         },
 
         /**

@@ -70,7 +70,8 @@ function machine(){
  *
  * @param {{ present?: boolean, raster?: boolean,
  *     describeDrawable?: (hdc: number) => any,
- *     callGuest?: (call: { entry: number, args: number[] }) => Promise<number> }} [options]
+ *     callGuest?: (call: { entry: number, args: number[] }) => Promise<number>,
+ *     now?: () => number, waitUntil?: (deadline: number, result: any) => any }} [options]
  */
 function library(options = {}){
     const box = machine();
@@ -91,6 +92,8 @@ function library(options = {}){
         raster: options.raster,
         describeDrawable: options.describeDrawable,
         callGuest: options.callGuest,
+        now: options.now,
+        waitUntil: options.waitUntil,
     });
     return { box, opengl, presented, presentedFor, table: /** @type {Table} */ (opengl.table) };
 }
@@ -620,6 +623,39 @@ test('the swap interval is the window\'s: every context on it reads it, no other
         assert.equal(table.wglMakeCurrent.handler([0x900e, first]), 1);
         assert.equal(table.wglGetSwapIntervalEXT.handler([]), 1, 'another window');
         assert.equal(table.wglSwapIntervalEXT.handler([-1]), 0);
+    });
+
+test('a swap waits for the blank its interval names once three frames wait, and zero never waits',
+    ()=>{
+        // A program drawing faster than the display is held to its rate, as
+        // a Present is: the frames ahead fill and the next swap stops its thread.
+        let clock = 0;
+        /** @type {number[]} */
+        const waits = [];
+        const { table } = library({ now: ()=>clock,
+            waitUntil: (/** @type {number} */ deadline, /** @type {any} */ result)=>{
+                waits.push(deadline - clock);
+                return result;
+            },
+            describeDrawable: (/** @type {number} */ hdc)=>({
+                key: `window:${hdc}`, width: 4, height: 4, window: hdc }) });
+        assert.equal(table.wglSetPixelFormat.handler([0x900d, 1, 0]), 1);
+        const context = table.wglCreateContext.handler([0x900d]);
+        assert.equal(table.wglMakeCurrent.handler([0x900d, context]), 1);
+        for (let frame = 0; frame < 6; frame++)
+        {
+            assert.equal(table.wglSwapBuffers.handler([0x900d]), 1);
+        }
+        assert.equal(waits.length, 3, 'the fourth swap on stops while three wait to be shown');
+        assert.ok(waits.every(ms=>ms > 0 && ms < 100), String(waits));
+        clock = 1000;
+        waits.length = 0;
+        assert.equal(table.wglSwapIntervalEXT.handler([0]), 1);
+        for (let frame = 0; frame < 6; frame++)
+        {
+            assert.equal(table.wglSwapBuffers.handler([0x900d]), 1);
+        }
+        assert.deepEqual(waits, [], 'interval zero shows each frame at once');
     });
 
 test('a vector argument is decoded from the window over guest memory, not from a copy', ()=>{

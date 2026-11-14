@@ -107,7 +107,8 @@ flowchart TB
   `IMMEDIATE` (windowed Direct3D 8 only under `COPY_VSYNC`) the calling thread stops until the next
   blank of the guest's raster, or as many blanks on as the interval says, at the rate of the mode
   the device asked for when the display lists it and 60 Hz otherwise; how often the page shows a
-  frame does not pace the program. Only the calls whose result only the renderer knows wait for
+  frame does not pace the program. OpenGL's `SwapBuffers` waits the same way, as many blanks on as
+  `wglSwapIntervalEXT` set (one unless set, none for zero), once three frames wait to be shown. Only the calls whose result only the renderer knows wait for
   an answer. For Direct3D 8/9 those are `GetData` on a query other than an event or occlusion
   query, `GetRenderTargetData`, `GetFrontBuffer(Data)`, plus `LockRect` and `GetDC` on a render
   target, and `CopyRects` out of one something has drawn into since it was last read back. And

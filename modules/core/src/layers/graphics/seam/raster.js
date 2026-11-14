@@ -117,7 +117,7 @@ export function rasterStatus(raster){
 }
 
 /** D3DPRESENT_INTERVAL_IMMEDIATE: present at once, never at a blank. */
-const PRESENT_INTERVAL_IMMEDIATE = 0x80000000;
+export const PRESENT_INTERVAL_IMMEDIATE = 0x80000000;
 
 /**
  * How many frames presented and not yet shown a Present lets wait for their
