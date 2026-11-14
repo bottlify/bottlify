@@ -933,8 +933,10 @@ export function createWin32Module(){
                 .filter(name=>name !== PROGRAMS_LIBRARY && /\.(dll|drv|ocx)$/i.test(name));
             // Every file call's volume, with the engine's libraries standing in
             // their folders as files of their images (A41).
+            // The volume as its files have it, no library of the engine's in it.
+            const filesOnly = createVolume(filesystem, config?.fetchBlocks ?? null);
             const volume = withSystemLibraries(
-                createVolume(filesystem, config?.fetchBlocks ?? null),
+                filesOnly,
                 ()=>systemLibraryNames(),
                 { homeOf: libraryHome, programs: SYSTEM_PROGRAM_FILES,
                     imageOf: name=>(libraryHome(name) !== null
@@ -2984,6 +2986,18 @@ export function createWin32Module(){
                         allocate: (bytes, options)=>allocator.allocate(bytes, options),
                         /** @param {number} address @param {number} bytes */
                         allocateAt: (address, bytes)=>allocator.allocateAt(address, bytes),
+                        /**
+                         * Zeroes a view's span, but for a block of arena never
+                         * handed out, which reads zero already.
+                         *
+                         * @param {number} address @param {number} bytes
+                         */
+                        zero: (address, bytes)=>{
+                            if (!allocator.block(address)?.fresh)
+                            {
+                                fillMemory(address, 0, bytes);
+                            }
+                        },
                         /** @param {number} address */
                         release: address=>allocator.free(address),
                         handles,
@@ -5259,9 +5273,45 @@ export function createWin32Module(){
             // The .NET shim is part of the system from Windows 7 on, and the
             // .NET Framework 4's setup there installs only its implementation,
             // mscoreei.dll, which it forwards to (A247). XP has none of its
-            // own: a Framework's setup brings the file.
-            if (windows.major >= 6)
-            {
+            // own: a Framework's setup brings the file - and where the volume
+            // holds a Framework 4 without it (one installed on 7, mounted in
+            // an XP bottle), the engine's stands in, with the install root 7
+            // keeps for it.
+            const netFramework = 'SOFTWARE\\Microsoft\\.NETFramework';
+            const installRoot = ()=>{
+                const key = hive.open(/** @type {any} */ (hive.root(HKEY_LOCAL_MACHINE)),
+                    netFramework);
+                const value = key ? hive.getValue(key, 'InstallRoot') : null;
+                const end = value ? value.data.indexOf(0) : -1;
+                return value ? decodeAnsi(value.data.subarray(0,
+                    end < 0 ? value.data.length : end)) || null : null;
+            };
+            const frameworkRoot = 'C:\\WINDOWS\\Microsoft.NET\\Framework\\';
+            // Decided when the table is first asked for, not here: the
+            // bottle's files and registry are laid down after the layers are
+            // made, and before any library is.
+            let shimDecided = false;
+            const standShim = ()=>{
+                if (shimDecided)
+                {
+                    return;
+                }
+                shimDecided = true;
+                if (windows.major < 6
+                    && (filesOnly.stat('C:\\WINDOWS\\system32\\mscoree.dll')?.exists === true
+                        || filesOnly.stat(`${(installRoot() ?? frameworkRoot).replace(/\\?$/, '\\')}`
+                            + 'v4.0.30319\\mscoreei.dll')?.exists !== true))
+                {
+                    return;
+                }
+                if (installRoot() === null)
+                {
+                    // Furnished, as the machine's own: an installation's
+                    // registry that names another replaces it.
+                    Object.assign(hive.setValue(hive.create(/** @type {any} */ (
+                        hive.root(HKEY_LOCAL_MACHINE)), netFramework).key, 'InstallRoot',
+                    REG_SZ, encodeAnsi(`${frameworkRoot}\0`)), { furnished: true });
+                }
                 const kernel32 = libraries['KERNEL32.dll'];
                 /** @param {string} text @param {(at: number) => any} use */
                 const withAnsi = async(text, use)=>{
@@ -5280,14 +5330,7 @@ export function createWin32Module(){
                     allocate: bytes=>heap.allocate(bytes),
                     allocateCode: bytes=>heap.allocateCode(bytes),
                     writeMemory,
-                    installRoot: ()=>{
-                        const key = hive.open(/** @type {any} */ (hive.root(HKEY_LOCAL_MACHINE)),
-                            'SOFTWARE\\Microsoft\\.NETFramework');
-                        const value = key ? hive.getValue(key, 'InstallRoot') : null;
-                        const end = value ? value.data.indexOf(0) : -1;
-                        return value ? decodeAnsi(value.data.subarray(0,
-                            end < 0 ? value.data.length : end)) || null : null;
-                    },
+                    installRoot,
                     windowsDirectory: ()=>'C:\\WINDOWS',
                     exists: path=>volume.stat(path)?.exists === true,
                     loadLibrary: path=>withAnsi(path, at=>kernel32.LoadLibraryA.handler([at])),
@@ -5299,8 +5342,7 @@ export function createWin32Module(){
                 }),
                 // Its export 142, which has no name, is kernel32's.
                 GetVersionExW: kernel32.GetVersionExW };
-            }
-
+            };
             libraries['SHFOLDER.dll'] = {
                 SHGetFolderPathA: libraries['SHELL32.dll'].SHGetFolderPathA,
                 SHGetFolderPathW: libraries['SHELL32.dll'].SHGetFolderPathW,
@@ -5476,7 +5518,10 @@ export function createWin32Module(){
 
             const api = {
                 /** @returns {Record<string, Record<string, any>>} library name -> its exports */
-                libraries: ()=>libraries,
+                libraries: ()=>{
+                    standShim();
+                    return libraries;
+                },
 
                 /**
                  * A program started as this process's CreateProcess would start
