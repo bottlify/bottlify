@@ -37,9 +37,10 @@ event, an error. Neither stops the program.
   `_CommonRedist\DotNet` installer, run as any program is). On Windows 7 and 10 the shim,
   `mscoree.dll`, is the system's, as there: the engine's, which hands every call to the
   Framework 4's `mscoreei.dll` (`roadmap/decisions.md` A247); without the Framework a managed
-  program ends at its start, and the loss is said. On XP the shim is the Framework's own file,
-  and a managed program in a bottle without it does not start: `mscoree.dll` is not found, as on
-  an XP without .NET. A 64-bit managed program has no shim of the engine's yet.
+  program ends at its start, and the loss is said. On XP the shim is the Framework's own file;
+  where a Framework 4 is there without it (one installed on 7), the engine's stands in. A managed
+  program in an XP bottle with neither does not start: `mscoree.dll` is not found, as on an XP
+  without .NET. A 64-bit managed program has no shim of the engine's yet.
 - With less RAM than 2 GiB the system's shared page (`0x7FFE0000`) is there all the same, kept in
   RAM's last 128 KiB, and the heap ends below it.
 - The WebBrowser control (ieframe, shdocvw) is there without an HTML engine

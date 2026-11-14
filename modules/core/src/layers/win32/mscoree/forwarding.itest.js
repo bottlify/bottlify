@@ -10,8 +10,9 @@
  * the .NET Framework 4 puts it, both calls reach that library's export with
  * the program's arguments and stack as they came, and only the first crosses
  * into the host; without one, both answer CLR_E_SHIM_RUNTIMELOAD, and
- * _CorExeMain ends the process, said as a loss. On XP there is no mscoree of
- * the engine's, and its file version on 7 is past what the .NET Framework
+ * _CorExeMain ends the process, said as a loss. On XP the engine's mscoree
+ * stands in only for a Framework 4 that came without its own file, and its
+ * file version on 7 is past what the .NET Framework
  * 4.8's setup asks for. Its export 142, by number alone, is GetVersionExW.
  */
 
@@ -160,6 +161,30 @@ test('Windows XP has no mscoree of the engine\'s; 7\'s is new enough for .NET 4.
         assert.equal((await run(probe, { windows: 'winxp' })).code, 0, 'XP: not found');
         const seven = (await run(probe)).code;
         assert.ok(seven >= 0x00040000, `7: version ${seven.toString(16)} is at least 4.0`);
+    });
+
+test('on XP the engine\'s mscoree stands in only for a Framework 4 that came without its own',
+    { timeout: 120_000 }, async()=>{
+        // A Framework 4 installed on 7 and mounted on XP: mscoreei, no mscoree.dll.
+        const alone = await run(twice, { windows: 'winxp', files: [{ path: SHIM, bytes: shim }] });
+        assert.equal(alone.code, 2 * (0x20 + 0x100), 'forwarded to mscoreei');
+        // An XP setup's own mscoree.dll beside it is the one the program reaches.
+        const own = buildExe({
+            dll: true,
+            imageBase: 0x10000000,
+            imports: { 'KERNEL32.dll': ['GetCurrentThreadId'] },
+            exports: [{ name: 'GetCORVersion', offset: 0x10 }],
+            codeSize: 0x20,
+            code: ()=>[
+                0xb8, ...u32(1), 0xc2, 0x0c, 0x00, //  DllMain: mov eax, TRUE; ret 12
+                ...new Array(0x10 - 8).fill(0xcc),
+                0xb8, ...u32(0x7), //                  mov eax, 7
+                0xc2, 0x0c, 0x00, //                   ret 12
+            ],
+        });
+        const both = await run(twice, { windows: 'winxp', files: [{ path: SHIM, bytes: shim },
+            { path: 'C:\\WINDOWS\\system32\\mscoree.dll', bytes: own }] });
+        assert.equal(both.code, 2 * 7, 'the file\'s own');
     });
 
 test('mscoree\'s export 142, which has no name, is GetVersionExW', { timeout: 120_000 },
