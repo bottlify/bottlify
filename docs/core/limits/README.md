@@ -66,6 +66,10 @@ event, an error. Neither stops the program.
 - DirectSound 3D keeps every parameter but does not position the sound: a 3D buffer plays as with
   3D processing off.
 - No capture: recording answers `DSERR_NODRIVER`.
+- No playing straight to an endpoint (WASAPI): MMDevAPI's enumerator lists the speakers, and an
+  endpoint activates no `IAudioClient` (E_NOINTERFACE). The enumerator is there from Vista on;
+  on XP it is not registered, so a program that would play to an endpoint plays through
+  DirectSound, as on XP.
 - Media Foundation describes media and decodes none (`roadmap/decisions.md` A238): `mfplat`'s
   attributes, media types, memory buffers, samples and events are there, and `propsys`'s
   PROPVARIANT conversions, but no source, decoder, transform or work queue. A source reader

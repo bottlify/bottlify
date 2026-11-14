@@ -2232,7 +2232,7 @@ export function createWin32Module(){
             // The audio endpoints a program walks to find the device it plays to.
             registerMmDevApiClasses({
                 registry: com, vtables: comVtables, heap, readMemory, writeMemory, readWideString,
-                pointerSize, divergence: config?.divergence,
+                pointerSize, windows, divergence: config?.divergence,
             });
 
             // DirectPlay's session and lobby objects, which a program makes
