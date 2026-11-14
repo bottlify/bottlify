@@ -1386,9 +1386,9 @@ test('the Ex forms act on the running process, and refuse any other', ()=>{
     assert.equal(fns.VirtualQueryEx.argBytes, 16);
 });
 
-test('GetWriteWatch tells every committed page of a watched reservation as written', ()=>{
-    // Writes are not tracked, so the answer errs on the side a collector can
-    // live with: it rescans more than it must, never less.
+test('GetWriteWatch tells every committed page written where the engine cannot tell writes', ()=>{
+    // No watchWrites: the answer errs on the side a collector can live with:
+    // it rescans more than it must, never less.
     const MEM_WRITE_WATCH = 0x200000;
     const ERROR_NOACCESS = 998;
     const FAILED = 0xffffffff;
@@ -1425,6 +1425,55 @@ test('GetWriteWatch tells every committed page of a watched reservation as writt
     assert.equal(fns.ResetWriteWatch.handler([plain, PAGE_SIZE]), FAILED);
     fns.VirtualFree.handler([base, 0, MEM_RELEASE]);
     assert.equal(watch(base, PAGE_SIZE, 64), FAILED, 'a released reservation is watched no more');
+});
+
+test('GetWriteWatch tells the pages written since the reset, and RESET starts them over', ()=>{
+    // The engine's watch stands in for cork's page marks: a page is written
+    // when the test says so, and take answers each page once.
+    const MEM_WRITE_WATCH = 0x200000;
+    const WRITE_WATCH_FLAG_RESET = 1;
+    /** @type {Set<number>} */
+    const marks = new Set();
+    /** @type {number[][]} */
+    const asked = [];
+    const host = { ...fakeHost(RESERVING_ARENA), setLastError: ()=>{},
+        /** @param {number} from @param {number} length */
+        watchWrites: (from, length)=>{
+            asked.push([from, length]);
+            return { take: (/** @type {number} */ address, /** @type {number} */ bytes)=>{
+                const pages = [...marks].filter(page=>page >= address >>> 12
+                    && page < Math.ceil((address + bytes) / PAGE_SIZE));
+                pages.forEach(page=>marks.delete(page));
+                return pages;
+            } };
+        } };
+    const fns = createHeapFunctions(host);
+    const view = new DataView(host.bytes.buffer);
+    const base = fns.VirtualAlloc.handler([0, 4 * PAGE_SIZE,
+        MEM_RESERVE | MEM_COMMIT | MEM_WRITE_WATCH, 0x04]);
+    /** @param {number} flags @returns {number[]} */
+    const told = flags=>{
+        view.setUint32(0x100, 64, true);
+        assert.equal(fns.GetWriteWatch.handler([flags, base, 4 * PAGE_SIZE, 0x200, 0x100, 0x104]),
+            0);
+        return Array.from({ length: view.getUint32(0x100, true) },
+            (_, at)=>(view.getUint32(0x200 + 4 * at, true) - base) / PAGE_SIZE);
+    };
+    assert.equal(fns.ResetWriteWatch.handler([base, 4 * PAGE_SIZE]), 0);
+    assert.deepEqual(asked, [[base, GRANULARITY]], 'one watch over the whole reservation');
+    assert.deepEqual(told(0), [], 'nothing written since the reset');
+
+    marks.add((base >>> 12) + 1).add((base >>> 12) + 3);
+    assert.deepEqual(told(0), [1, 3]);
+    assert.deepEqual(told(0), [1, 3], 'without RESET a page stays written');
+    assert.deepEqual(told(WRITE_WATCH_FLAG_RESET), [1, 3]);
+    assert.deepEqual(told(0), [], 'RESET took them');
+
+    marks.add((base >>> 12) + 2);
+    assert.equal(fns.ResetWriteWatch.handler([base + 2 * PAGE_SIZE, PAGE_SIZE]), 0);
+    marks.add(base >>> 12);
+    assert.deepEqual(told(0), [0], 'ResetWriteWatch takes its range alone');
+    assert.equal(asked.length, 1);
 });
 
 test('kernel32\'s Rtl memory routines move, zero and fill, overlap either way', ()=>{

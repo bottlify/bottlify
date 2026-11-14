@@ -944,6 +944,10 @@ export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT, 
  *           a reservation's pages not committed, and those protected
  *           PAGE_NOACCESS, fault on any access, as on Windows. False where the
  *           processor does not fault a read, and then every page reads.
+ * @property {(address: number, length: number) => ({ take: (address: number,
+ *     length: number) => number[] } | null)} [watchWrites]  The engine's watch over a
+ *     range's writes (the memory layer's `watchWrites`): `take` answers the pages, by
+ *     number, written since it last looked; null where the engine cannot tell.
  */
 
 /**
@@ -1160,8 +1164,42 @@ export function createHeapFunctions(host){
         }
     };
 
-    /** The reservations made with MEM_WRITE_WATCH, by base. */
-    const watched = new Set();
+    /**
+     * The reservations made with MEM_WRITE_WATCH, by base: the engine's watch
+     * over its pages (`watchWrites`), made at the first GetWriteWatch or
+     * ResetWriteWatch, and the pages it found written that no reset has taken
+     * since. Until that first look every page counts as written; null where
+     * the engine cannot tell writes, and then every committed page is told.
+     *
+     * @type {Map<number, { watch: { take: (address: number, length: number) => number[] }
+     *     | null | undefined, written: Set<number> }>}
+     */
+    const watched = new Map();
+
+    /**
+     * The written pages of a watched reservation's range brought up to date,
+     * or null where writes are not tracked.
+     *
+     * @param {{ address: number, capacity: number }} block
+     * @param {number} address @param {number} end
+     */
+    const writesIn = (block, address, end)=>{
+        const state = /** @type {NonNullable<ReturnType<typeof watched.get>>} */ (
+            watched.get(block.address));
+        if (state.watch === undefined)
+        {
+            state.watch = host.watchWrites?.(block.address, block.capacity) ?? null;
+        }
+        if (state.watch === null)
+        {
+            return null;
+        }
+        for (const page of state.watch.take(address, end - address))
+        {
+            state.written.add(page);
+        }
+        return state.written;
+    };
 
     /**
      * The watched reservation a range lies wholly inside, or null.
@@ -1595,7 +1633,7 @@ export function createHeapFunctions(host){
             }
             if ((kind & MEM_WRITE_WATCH) !== 0)
             {
-                watched.add(start);
+                watched.set(start, { watch: undefined, written: new Set() });
             }
             zeroHandedOver(start, span);
             settleAccess(start, start, start + span);
@@ -1727,7 +1765,7 @@ export function createHeapFunctions(host){
         }
         if ((kind & MEM_WRITE_WATCH) !== 0)
         {
-            watched.add(address);
+            watched.set(address, { watch: undefined, written: new Set() });
         }
         zeroHandedOver(address, span);
         settleAccess(address, address, address + span);
@@ -2145,11 +2183,13 @@ export function createHeapFunctions(host){
          * UINT GetWriteWatch(DWORD dwFlags, PVOID lpBaseAddress, SIZE_T dwRegionSize,
          *   PVOID *lpAddresses, ULONG_PTR *lpdwCount, LPDWORD lpdwGranularity)
          *
-         * The pages of a MEM_WRITE_WATCH reservation written since the watch
-         * began. Writes are not tracked, so every committed page of the range
-         * is told as written: what a collector rescans is more than it must,
-         * never less. A range outside a watched reservation, or no room for
-         * an answer, fails with (UINT)-1.
+         * The committed pages of a MEM_WRITE_WATCH reservation written since
+         * the watch began or was last reset, the program's stores on any
+         * executor and the engine's own (`watchWrites`); with
+         * WRITE_WATCH_FLAG_RESET the pages told start over. Where the engine
+         * cannot tell writes every committed page is told: what a collector
+         * rescans is more than it must, never less. A range outside a watched
+         * reservation, or no room for an answer, fails with (UINT)-1.
          */
         GetWriteWatch: {
             argBytes: 24,
@@ -2173,9 +2213,13 @@ export function createHeapFunctions(host){
                     host.setLastError(ERROR_NOACCESS);
                     return 0xffffffff;
                 }
-                host.divergence?.('GetWriteWatch',
-                    'writes are not tracked; every committed page is told as written');
                 const end = address + (bytes >>> 0);
+                const tracked = writesIn(block, address, end);
+                if (tracked === null)
+                {
+                    host.divergence?.('GetWriteWatch',
+                        'writes are not tracked; every committed page is told as written');
+                }
                 /** @type {number[]} */
                 const written = [];
                 for (const range of committed.get(block.address) ?? [])
@@ -2184,7 +2228,17 @@ export function createHeapFunctions(host){
                     for (; page < Math.min(range.to, end) && written.length < room;
                         page += PAGE_SIZE)
                     {
-                        written.push(page >>> 0);
+                        if (tracked === null || tracked.has(page >>> 12))
+                        {
+                            written.push(page >>> 0);
+                        }
+                    }
+                }
+                if (tracked !== null && (flags & WRITE_WATCH_FLAG_RESET) !== 0)
+                {
+                    for (const page of written)
+                    {
+                        tracked.delete(page >>> 12);
                     }
                 }
                 written.forEach((page, at)=>writeDword((addresses >>> 0) + at * 4, page));
@@ -2197,17 +2251,25 @@ export function createHeapFunctions(host){
         /**
          * UINT ResetWriteWatch(LPVOID lpBaseAddress, SIZE_T dwRegionSize)
          *
-         * Starts a watch over; with no writes tracked there is nothing to
-         * clear, and only the range is checked.
+         * Starts the watch over the range: its pages count as not written.
          */
         ResetWriteWatch: {
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([base, bytes])=>{
-                if (!watchedRegion(base >>> 0, bytes >>> 0))
+                const address = base >>> 0;
+                const block = watchedRegion(address, bytes >>> 0);
+                if (!block)
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0xffffffff;
+                }
+                const end = address + (bytes >>> 0);
+                const tracked = writesIn(block, address, end);
+                const last = Math.ceil(end / PAGE_SIZE);
+                for (let page = address >>> 12; page < last; page++)
+                {
+                    tracked?.delete(page);
                 }
                 return 0;
             },

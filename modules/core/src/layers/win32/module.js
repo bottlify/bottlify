@@ -2702,6 +2702,9 @@ export function createWin32Module(){
                         /** @param {number} address @param {number} length @param {boolean} open */
                         pageAccess: (address, length, open)=>
                             memory.pageAccess?.(address, length, open) === true,
+                        /** @param {number} address @param {number} length */
+                        watchWrites: (address, length)=>
+                            memory.watchWrites?.(address, length) ?? null,
                         systemCounts: ()=>({
                             processes: Math.max(1, (kernel.processes?.all() ?? []).length),
                             threads: Math.max(1, kernel.threads().length),
