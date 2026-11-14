@@ -18,7 +18,7 @@ plus at most five lines below its table of conditions the line cannot carry.
 | 2026-10-12 | callees formed two and three levels deep (`formDepth`) | geomean 1.00x, cork-bench Chromium, noise 13 % | holds | callees stop being copied per caller |
 | 2026-10-12 | predicted virtual calls (`callTargets`) on cork-bench | geomean 1.01x, noise 7.6 % | stale: on by default since b73438e6 | - |
 | 2026-10-12 | transfers inside a placed module as direct tail calls (`dispatch`) on cork-bench | geomean 0.99x, noise 5.3 % | stale: the iOS path runs it | on/off under the iOS settings |
-| 2026-10-13 | every register in wasm parameters across guest calls (calling convention, x64) | params / state-direct 1.085 node, 0.959 Chromium | disputed: arm64 never run | the M4; long mode's 16 registers |
+| 2026-10-13 | every register in wasm parameters across guest calls (calling convention, x64) | params / state-direct 1.085 node, 0.959 Chromium | disputed: arm64 never run; x64 run again 2026-11-14 | the M4; long mode's 16 registers |
 | 2026-10-13 | loading only what is live after a call (step 2a/2b), its ceiling | 0.95-0.98 of a call, node, 15 pairs | stale: built as `planPaths` d4643f20b | - |
 | 2026-10-13 | `callTargets` in Far Cry and its knobs, while the sampling took the last calls | on / off 0.971, node, 1 run | disputed: knobs ran on broken sampling | leaf limits with the sampling fixed |
 | 2026-10-13 | `callTargets` in Far Cry at a 44 % share of its calls | 0.958 cold, 0.983 warm, node, 1 pair | stale: Chromium run turned it on | - |
@@ -86,6 +86,9 @@ plus at most five lines below its table of conditions the line cannot carry.
 | 2026-11-06 | a block held at its own start in a caller's region gets a region of its own | 102.2 vs 108.3 fps median, 5 runs, spread 84-112 | holds (kept, no fps claim) | - |
 | 2026-11-06 | heavy frames inside 3DMark03's tests are not cold code waiting for translation | the wait at most 1/10 of a stall, 8 runs | holds | the stalls are open |
 | 2026-11-12 | cork's interpreter and volatile-page levers do not speed up ngen's compile | 50.9 / 53.8 vs 52.9-55.5 s, 1 run | disputed: inside two-run noise | interpreted addresses known |
+| 2026-11-14 | every register in wasm parameters (calls bench), x64 run again | farcry params / state-direct 0.826 Node 22.23.4, 0.889 Chromium 153; TurboFan, depth 8, 9 runs | between the rule's branches: not built; arm64 still not run | the M4 |
+| 2026-11-14 | a region takes three registers in parameters on an x86-64 host, where V8 passes five (2a464ac) | machine instructions -1 to -6 %; PE vm x87 1.060 ms in Node, 8 of 9 pairs slower; Chromium geomean 0.995 | holds | vm's loss explained; paired Chromium runs |
+| 2026-11-14 | a `ret` answers its wasm call the address it took and the call compares it; no stack of return addresses | calls512-scatter machine instructions 32-bit -5.3 %, 64-bit +7.6 %; formed callees' returns 100 of 100 through the transfer | holds | a frame's count of formed calls; long mode's window test folded |
 
 ## Executors and scheduler
 

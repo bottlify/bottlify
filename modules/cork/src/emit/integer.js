@@ -30,7 +30,7 @@ import { AF, CF, DF, OF, PF, SF, ZF } from '../decode/table.js';
 import { SYSTEM_TABLES, cpuidLeaves, topologyOf } from '../cpuid.js';
 import { EMPTY, ValType } from '../wasm/encoder.js';
 import { I32, I64, Kind, MASKS, SIGN_BITS, widthCode } from './flags.js';
-import { CallStack, Exit, Local, keepsFlags } from './region.js';
+import { CallStack, Exit, Local, STATE_PARAMS, keepsFlags } from './region.js';
 import {
     checkAccess, emitStaleExit, looseStackStore, noteStore, operandValues, readsOnly, stackAccess,
     windowAddress,
@@ -342,7 +342,7 @@ function callAndReturn(e, next, target, mechanism){
     else
     {
         b.localGet(Local.eip);
-        for (let local = Local.budget; local < e.width.params; local++)
+        for (let local = Local.budget; local < STATE_PARAMS; local++)
         {
             b.localGet(local);
         }
@@ -453,7 +453,7 @@ function linkedCall(e, target){
     {
         countLinked(e);
         b.localGet(Local.t2).load('i32_16u', { offset: 8 });
-        for (let local = Local.budget; local < e.width.params; local++)
+        for (let local = Local.budget; local < STATE_PARAMS; local++)
         {
             b.localGet(local);
         }
@@ -493,7 +493,7 @@ function linkedCall(e, target){
     b.br(e.depthOf('linked'));
     e.close();
     b.localGet(Local.eip);
-    for (let local = Local.budget; local < e.width.params; local++)
+    for (let local = Local.budget; local < STATE_PARAMS; local++)
     {
         b.localGet(local);
     }
@@ -512,7 +512,7 @@ function linkedCallOf(e){
     countLinked(e);
     // Masked as a quadword: V8 takes the shift and the mask as one `ubfx`.
     b.localGet(Local.t64).i64const(32n).op(I64.shrU).i64const(0xffffn).op(I64.and).op(I64.wrap);
-    for (let local = Local.budget; local < e.width.params; local++)
+    for (let local = Local.budget; local < STATE_PARAMS; local++)
     {
         b.localGet(local);
     }

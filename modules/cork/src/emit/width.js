@@ -28,8 +28,6 @@ import { ValType } from '../wasm/encoder.js';
  * @property {number} regs        general registers
  * @property {4 | 8} slot         a register's bytes in the state block, a push's and a pop's
  * @property {number} regType     a register local's wasm type
- * @property {number} params      the region function's parameters: the label, the budget and the
- *     registers it carries (`carriedOn`)
  * @property {readonly number[]} carried  the guest registers the parameters carry, in order
  * @property {readonly number[]} regLocal by guest register, its local
  * @property {readonly number[]} locals   the region function's locals past its parameters,
@@ -55,7 +53,7 @@ const LOCALS_32 = Object.freeze([
 
 /** @type {Width} */
 export const WIDTH_32 = Object.freeze({
-    bits: 32, regs: 8, slot: 4, regType: ValType.i32, params: 6,
+    bits: 32, regs: 8, slot: 4, regType: ValType.i32,
     carried: Object.freeze([0, 1, 2, 3]),
     regLocal: Object.freeze([2, 3, 4, 5, 6, 7, 8, 9]),
     locals: LOCALS_32,
@@ -69,7 +67,7 @@ export const WIDTH_32 = Object.freeze({
  * @type {Width}
  */
 export const WIDTH_64 = Object.freeze({
-    bits: 64, regs: 16, slot: 8, regType: ValType.i64, params: 6,
+    bits: 64, regs: 16, slot: 8, regType: ValType.i64,
     carried: Object.freeze([1, 2, 8, 9]),
     regLocal: Object.freeze([6, 2, 3, 7, 8, 9, 40, 41, 4, 5, 42, 43, 44, 45, 46, 47]),
     locals: Object.freeze([
@@ -96,53 +94,10 @@ export const LONG_SCRATCH = 48;
 export const LONG_WIDE = 49;
 
 /**
- * How many registers a region function takes in parameters on the host it is
- * emitted for: as many as V8 passes a wasm call's parameters in machine
- * registers there, past the instance, less the label and the budget. An x86-64
- * host passes five, an arm64 one six: on x86-64 a sixth was pushed at every
- * call and transfer, read back from the stack by the callee and popped by its
- * return (calls512-scatter: 4 % of its machine instructions at 32 bits, 3 % at
- * 64). The x86-64 host is the one whose default NaN is x86's and that emits for
- * no other (`armHost`), as the runtime tells them apart.
- *
- * @param {{ defaultNaNNegative?: boolean, armHost?: boolean }} features
- */
-export const carriedOn = features=>(features.defaultNaNNegative === true
-    && features.armHost !== true ? 3 : 4);
-
-/**
- * A width whose parameters carry only its first `count` carried registers: the
- * others are locals of the function, first among them, as the state block
- * holds them between regions.
- *
- * @param {Width} width @param {number} count
- * @returns {Width}
- */
-const carrying = (width, count)=>Object.freeze({
-    ...width, params: 2 + count, carried: Object.freeze(width.carried.slice(0, count)),
-    locals: Object.freeze([...width.carried.slice(count).map(()=>width.regType),
-        ...width.locals]),
-});
-
-const WIDTH_32_THREE = carrying(WIDTH_32, 3);
-const WIDTH_64_THREE = carrying(WIDTH_64, 3);
-
-/**
- * The registers' width a layout has, its parameters as the host passes them
- * (`carriedOn`); without the host, as many as an arm64 one takes.
- *
  * @param {{ bits?: 32 | 64 }} layout
- * @param {{ defaultNaNNegative?: boolean, armHost?: boolean }} [features]
  * @returns {Width}
  */
-export const widthOf = (layout, features = {})=>{
-    const three = carriedOn(features) === 3;
-    if (layout.bits === 64)
-    {
-        return three ? WIDTH_64_THREE : WIDTH_64;
-    }
-    return three ? WIDTH_32_THREE : WIDTH_32;
-};
+export const widthOf = layout=>(layout.bits === 64 ? WIDTH_64 : WIDTH_32);
 
 /**
  * The local a guest register lives in, in the region being emitted.
