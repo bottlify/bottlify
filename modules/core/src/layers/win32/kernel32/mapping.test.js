@@ -454,13 +454,15 @@ test('the SEC_* combinations Windows refuses are refused, each with its own erro
 
 /**
  * A library linked for `base`, whose data's first dword is the address of
- * its code, with a fixup for it when `relocatable`; its code is 9 8 7 6.
+ * its code, with a fixup for it when `relocatable`, for ASLR when
+ * `dynamicBase`; its code is 9 8 7 6.
  *
- * @param {number} base @param {boolean} [relocatable]
+ * @param {number} base @param {boolean} [relocatable] @param {boolean} [dynamicBase]
  */
-const imageAt = (base, relocatable = true)=>buildExe({
+const imageAt = (base, relocatable = true, dynamicBase = false)=>buildExe({
     dll: true,
     imageBase: base,
+    dynamicBase,
     imports: {},
     data: { pointer: [0, 0x10, 0, 0].map((byte, index)=>(index === 3 ? base >>> 24
         : index === 2 ? base >>> 16 & 0xff : byte)) },
@@ -523,6 +525,20 @@ test('an image view away from its base is moved there, each view for its own add
         assert.equal(imageBaseOf(bytes, view), view, 'the header names where it is');
         assert.deepEqual([...bytes.subarray(view + 0x1000, view + 0x1004)], [9, 8, 7, 6]);
     }
+});
+
+test('an image linked for ASLR is moved even where its base is free, as Windows moves it', ()=>{
+    // The CLR maps an assembly so and then reserves the assembly's base for
+    // the native image it compiles of it.
+    const at = setup();
+    const { fns, bytes, file, fileHandle } = at;
+    file.data = imageAt(0x40000, true, true);
+    const mapping = fns.CreateFileMappingA.handler(
+        [fileHandle, 0, PAGE_READONLY | SEC_IMAGE, 0, 0, 0]);
+    const view = fns.MapViewOfFile.handler([mapping, FILE_MAP_READ, 0, 0, 0]);
+    assert.notEqual(view, 0x40000);
+    assert.equal(dword(bytes, pointerAt(view)), view + 0x1000, 'moved there');
+    assert.equal(imageBaseOf(bytes, view), view);
 });
 
 test('an image without fixups whose base is out of reach is not mapped', ()=>{

@@ -814,8 +814,11 @@ export function createMappingFunctions(host){
                 // (a video encoder reading its input through views stopped after
                 // two frames when its view began mid-granule).
                 // An image's view goes to the image's own base when that is
-                // free, as Windows places one.
-                const preferred = placed === 0 && offset === 0
+                // free, as Windows places one - but for an image linked for
+                // ASLR (DYNAMIC_BASE), which Windows moves wherever it likes:
+                // the CLR maps an assembly so, then reserves the same base
+                // for the native image it compiles of it.
+                const preferred = placed === 0 && offset === 0 && !mapping.image?.image.dynamicBase
                     ? mapping.image?.image.imageBase ?? 0 : 0;
                 const address = preferred !== 0 && host.allocateAt?.(preferred, wanted) ? preferred
                     : placed === 0 ? host.allocate(wanted, { alignment: ALLOCATION_GRANULARITY })
