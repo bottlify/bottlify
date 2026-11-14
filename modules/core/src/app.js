@@ -2985,7 +2985,9 @@ export function placeLibrary(image, { next, floor, limit, holder, claim }){
         }
         return { refused: `no relocations, and 0x${base.toString(16)} is not free` };
     }
-    let base = next;
+    // On a 64 KiB granule, as Windows maps every image: the CLR refuses a
+    // native image that lies elsewhere.
+    let base = Math.ceil(next / LIBRARY_ALIGN) * LIBRARY_ALIGN;
     // Past the limit there is nothing more to search, and a holder that spans
     // to the end of the space answers there for ever.
     for (let held = holder(base, image.sizeOfImage); held && base + image.sizeOfImage <= limit;
