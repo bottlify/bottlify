@@ -55,15 +55,19 @@ const CRT_EXPORTS = [
     'strcat', 'strchr', 'strcmp', 'strcpy', 'strcspn', 'strlen', 'strncat',
     'strncmp', 'strncpy', 'strpbrk', 'strrchr', 'strspn', 'strstr',
     '_stricmp', '_strnicmp', '_strlwr', '_strupr',
-    'atoi', 'atol', 'strtol', 'strtoul',
+    '_snprintf_s', '_snwprintf_s',
+    'atoi', 'atol', '_atoi64', 'strtol', 'strtoul',
+    '_wtoi', '_wtol', '_wtoi64', 'wcstol', 'wcstoul',
     '_itoa', '_ltoa', '_ultoa', '_i64toa', '_ui64toa',
-    'tolower', 'toupper',
-    'isalnum', 'isalpha', 'iscntrl', 'isdigit', 'islower',
+    '_itow', '_ltow', '_ultow', '_i64tow', '_ui64tow',
+    'tolower', 'toupper', 'towlower', 'towupper',
+    'isalnum', 'isalpha', 'iscntrl', 'isdigit', 'isgraph', 'islower',
     'isprint', 'ispunct', 'isspace', 'isupper', 'isxdigit',
+    'iswalpha', 'iswctype', 'iswdigit', 'iswlower', 'iswspace', 'iswxdigit',
     'abs', 'labs',
     'mbstowcs', 'wcstombs',
     'wcscat', 'wcschr', 'wcscmp', 'wcscpy', 'wcslen', 'wcsncat', 'wcsncmp',
-    'wcsncpy', 'wcsrchr', 'wcsstr', '_wcsicmp',
+    'wcsncpy', 'wcsrchr', 'wcsstr', '_wcsicmp', '_wcsnicmp', '_wcslwr', '_wcsupr',
 ];
 
 /**
