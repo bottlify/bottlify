@@ -8,7 +8,7 @@
  * The dynamic instruction mix of a cork run, and what each part of it costs.
  *
  *   node tools/cork-mix.mjs <game-...-blocks.json> [--bundle id] [--top 30]
- *       [--image gamex86.dll@0x5500000]...
+ *       [--image gamex86.dll@0x5500000]... [--file path/on/disk.dll@0x2dea000]...
  *
  * The blocks file is what `tools/cdp_test/game.mjs` writes beside its report
  * for a run with `--cork-config '{"blockProfile":true}'`: every executed block
@@ -54,9 +54,9 @@ const extra = args.flatMap((one, at)=>(one === '--image' ? [args[at + 1]] : []))
 const opened = await openBundle(join(directory, manifest.bundle?.file ?? 'bundle.btl'));
 /** @type {{ va: number, size: number, raw: number, bytes: Buffer }[]} */
 const sections = [];
-/** @param {string} path @param {number | null} base */
-const place = async(path, base)=>{
-    const bytes = await opened.read(path);
+/** @param {string} path @param {number | null} base @param {boolean} [onDisk] */
+const place = async(path, base, onDisk = false)=>{
+    const bytes = onDisk ? readFileSync(path) : await opened.read(path);
     const pe = bytes.readUInt32LE(0x3c);
     const imageBase = base ?? bytes.readUInt32LE(pe + 52);
     const optional = bytes.readUInt16LE(pe + 20);
@@ -71,6 +71,13 @@ for (const one of extra)
 {
     const [path, base] = one.split('@');
     await place(path, Number(base));
+}
+// An image from disk rather than the bundle, `--file path/clr.dll@0x2dea000`: a runtime a
+// setup installed into the bottle is not in the bundle.
+for (const one of args.flatMap((arg, at)=>(arg === '--file' ? [args[at + 1]] : [])))
+{
+    const [path, base] = one.split('@');
+    await place(path, Number(base), true);
 }
 await opened.close();
 /** @param {number} address */
