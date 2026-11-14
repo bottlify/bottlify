@@ -463,7 +463,11 @@ export function createVersionFunctions(host){
             return resource;
         }
         const exists = host.files ? (host.files.stat(path)?.exists ?? false) : true;
-        const library = exists ? null : systemName(path);
+        // A library the engine answers for stands in its folder as a file of its
+        // image (A41), which carries no version block: it is told the system's
+        // version as one that is not on the volume is. The .NET Framework 4.8's
+        // setup read D3DCompiler_47.dll as missing and tried to install it.
+        const library = systemName(path);
         if (library !== null)
         {
             return systemVersionResource(library, host.windows, host.directx);

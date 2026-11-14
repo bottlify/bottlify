@@ -196,6 +196,16 @@ test('GetFileVersionInfoSizeA tells a missing file from one with no version reso
     assert.deepEqual(errors, [1812],
         'ERROR_RESOURCE_DATA_NOT_FOUND: present, but carries no version resource');
 
+    // A library the engine answers for stands in the system folder as a file of an image
+    // with no version block (A41): it is told the system's version all the same.
+    errors.length = 0;
+    files.nodes.set('C:\\WINDOWS\\system32\\d3dcompiler_47.dll', Uint8Array.from([1]));
+    const standing = /** @type {any} */ (createVersionFunctions({ ...host,
+        systemLibrary: (/** @type {string} */ name)=>name.toLowerCase() === 'd3dcompiler_47.dll' }));
+    put(0x10, 'C:\\WINDOWS\\system32\\d3dcompiler_47.dll');
+    assert.ok(standing.GetFileVersionInfoSizeA.handler([0x10, 0]) > 0, 'a version block');
+    assert.deepEqual(errors, [], 'and no error');
+
     // Wine's info test: NULL and "" name no file, and the handle is still zeroed.
     errors.length = 0;
     memory.set([0x55, 0x55, 0x55, 0x55], 0x40);
