@@ -311,7 +311,6 @@ export function createCpuModule(){
              *          awaited: (() => boolean) | null,
              *          trapTimed: ((ms: number) => void) | null,
              *          remoteFigures: Map<number, any>, executorsRefused: string | null,
-             *          ordered: boolean | null,
              *          writes: { host: any, clock: ReturnType<typeof createWriteClock> } | null,
              *          learned: { store: any, opened: number } | null,
              *          nudge: ReturnType<typeof startGcNudge> | null, store: any }}
@@ -342,9 +341,6 @@ export function createCpuModule(){
                 remoteFigures: new Map(),
                 // Why fewer executors run than were asked, if they do.
                 executorsRefused: null,
-                // Whether several executors' translations keep the program's plain
-                // accesses in order (cork's `ordered`); null on one executor.
-                ordered: null,
                 // The store the executors this bundle's threads opened are kept in,
                 // and the most it holds, once read: none in a run that opens them all.
                 learned: null,
@@ -676,12 +672,6 @@ export function createCpuModule(){
                         throw new Error(problem);
                     }
                     const several = settings.executors > 1;
-                    // Only when the run asks: the ordered variant makes every
-                    // integer access an atomic one, a price a program pays for
-                    // nothing unless it hands data to another thread through
-                    // plain stores alone on a host that reorders them (arm64).
-                    const ordered = several && settings.cork?.ordered === true;
-                    state.ordered = several ? ordered : null;
                     // Where the tab's memory is bounded, every engine is nudged: what
                     // the heap keeps of its garbage counts against the tab too.
                     const nudging = gcNudgeOf(config?.gcNudge
@@ -706,7 +696,7 @@ export function createCpuModule(){
                         // emitted, every other takes rather than emitting again.
                         // The translator stops forming while another executor
                         // waits for this one's answer (`awaitedBy`).
-                        cork: several ? { ...settings.cork, atomic: true, ordered,
+                        cork: several ? { ...settings.cork, atomic: true,
                             awaited: ()=>state.awaited?.() === true,
                             ...(typeof engineModule.createArena === 'function'
                                 && typeof SharedArrayBuffer === 'function'
@@ -1746,9 +1736,6 @@ export function createCpuModule(){
                     // machine, so one asked for at a run's start may still be
                     // opening when a short run ends.
                     executorsOpening: [...instance.opening.keys()],
-                    // Whether the executors keep the program's plain accesses in
-                    // order (cork's `ordered`, as the run asked); null on one executor.
-                    ordered: instance.ordered,
                     // The buffers made to bring JavaScriptCore's collections forward
                     // on this thread (`gcNudge`); null where none are made.
                     gcNudges: instance.nudge?.made() ?? null,

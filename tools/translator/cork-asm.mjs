@@ -28,8 +28,6 @@
  *   --hash            entry hash and calls as wasm calls, as a game runs (on with --pe
  *                     and --image)
  *   --atomic          the variant several executors run
- *   --ordered         with --atomic, the variant several executors run on a host that
- *                     reorders plain accesses (an arm64 one)
  *   --ram MB          the guest RAM the layout is made for (default 2048, the launcher's)
  *   --form-depth N    how many levels of callees a region forms in (the runtime's
  *                     `formDepth`, default 1)
@@ -534,7 +532,7 @@ if (args.includes('--wat'))
     for (const entry of entries)
     {
         const made = regionModule({ code, at, entry, hash, callReturn: hash, ramSize, ramBase,
-            atomic: args.includes('--atomic'), ordered: args.includes('--ordered'),
+            atomic: args.includes('--atomic'),
             checked: false, wide: true, looseStacks: true, hostFeatures, processors,
             precise: args.includes('--precise'),
             form: formDepth === null ? {} : { formDepth }, bits });
@@ -581,7 +579,7 @@ const heavy = [];
 for (const entry of entries)
 {
     const made = regionModule({ code, at, entry, hash, callReturn: hash, ramSize, ramBase,
-        atomic: args.includes('--atomic'), ordered: args.includes('--ordered'), checked: false,
+        atomic: args.includes('--atomic'), checked: false,
         wide: true, looseStacks: true, hostFeatures,
         processors, markBlocks: profile !== null,
         form: formDepth === null ? {} : { formDepth }, bits });
