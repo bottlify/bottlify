@@ -7,7 +7,7 @@
 /**
  * The built-in functions' prototypes as the GLSL 4.60 specification declares them
  * (chapter 8, KhronosGroup/GLSL `chapters/builtinfunctions.adoc`), written by
- * tools/glsl-functions.mjs: do not edit. A row is the section, the name, the return
+ * tools/generators/glsl-functions.mjs: do not edit. A row is the section, the name, the return
  * type, the parameter types, the out (2n) and inout (2n + 1) parameters, and 1 for
  * the form an optional `bias` parameter makes.
  */

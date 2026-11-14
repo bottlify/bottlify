@@ -361,7 +361,7 @@ const recordFieldsOf = layout=>{
  * @property {ExpansionNote} [expansion] told each instruction's wasm bytes as it is
  *     emitted, the checks of its memory plan with it (a diagnostic run)
  * @property {boolean} [markBlocks] each block's code opens with a store of `blockMark`, which
- *     finds it in the machine code a compiler makes (`tools/cork-asm.mjs`; a diagnostic
+ *     finds it in the machine code a compiler makes (`tools/translator/cork-asm.mjs`; a diagnostic
  *     build that is never run)
  * @property {boolean} [profileCalls] an indirect call notes its address and target in the
  *     layout's call profile while the host has it on
@@ -434,7 +434,7 @@ const recordFieldsOf = layout=>{
  *     expansion?: ExpansionNote | null, markBlocks?: boolean, crossTailCalls?: boolean,
  *     callDepth?: number }}
  *     [options]  expansion: told every instruction's wasm bytes as it is emitted
- *     (`tools/cork-asm.mjs --expansion`), in a diagnostic build only; markBlocks: each block
+ *     (`tools/translator/cork-asm.mjs --expansion`), in a diagnostic build only; markBlocks: each block
  *     marked for the machine code (`blockMark`), likewise; checkReads: an
  *     instruction that only reads tests its pages too, so a page the program cannot read
  *     faults (a reservation not committed, PAGE_NOACCESS) rather than reading RAM;
@@ -4518,7 +4518,7 @@ export class RegionEmitter {
         if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && this.context.markBlocks)
         {
             // By the block's place in the region as formed, which its reader
-            // (`tools/cork-asm.mjs`) knows: a structured region emits them in
+            // (`tools/translator/cork-asm.mjs`) knows: a structured region emits them in
             // another order.
             this.markBlock(this.formedIndex?.get(block.start) ?? index);
         }

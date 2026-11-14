@@ -2075,7 +2075,7 @@ export function withCpuSetup(options, host = coresHost()){
  *
  * Whether the page is an iPhone's WebKit: on an iPhone (iOS Safari 27.0.1,
  * 2026-10-25) the page's process died as cork's regions began to run, and
- * `tools/webkit-probe/tail-calls.html` found every tail call into another
+ * `tools/run/webkit-probe/tail-calls.html` found every tail call into another
  * instance fatal and every one inside an instance sound; Safari on an M4 Mac
  * runs them all. Every browser on iOS is WebKit. An iPad, not measured, keeps them.
  * The defect came with iOS 27: Safari's "Version/" is the system's (its "iPhone OS"
@@ -9144,7 +9144,7 @@ async function buildApp(options){
             /**
              * Whether a system library this build makes exports a name, or a
              * number when there is no name: what an import table is checked
-             * against without running the program (tools/import-audit.mjs).
+             * against without running the program (tools/bundles/import-audit.mjs).
              * Null for a library this build does not make.
              *
              * @param {string} dll @param {string | null} name @param {number | null} [ordinal]
@@ -10306,7 +10306,7 @@ export function liveDumpOf(worker, control){
         /**
          * The graphics worker's capture of what it is sent (a worker opened
          * with `capture`, `remote/capture.js`) keeps `frames` more presents
-         * from now and ends: the frames `tools/graphics-replay.mjs` measures.
+         * from now and ends: the frames `tools/read/graphics-replay.mjs` measures.
          *
          * @param {number} [frames]
          */

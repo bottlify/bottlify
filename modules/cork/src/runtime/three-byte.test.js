@@ -10,7 +10,7 @@
  * hundred turns. The runtime runs it translated whole -- no way out to the
  * interpreter, where an untranslated form cost an exit a run -- and it leaves
  * what the interpreter leaves. What each form computes is the hardware
- * corpus's to say (`x86-corpus.json.gz`, the cases of `tools/x86-corpus.mjs`'s
+ * corpus's to say (`x86-corpus.json.gz`, the cases of `tools/generators/x86-corpus.mjs`'s
  * sse4 family).
  */
 

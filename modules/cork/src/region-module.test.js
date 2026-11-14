@@ -10,7 +10,7 @@ import { regionModule } from './region-module.js';
 
 test('a region told instruction by instruction what each took in wasm', ()=>{
     // call +0x10; mov eax, ebx; ret -- as a game's region is emitted, entry hash and
-    // wasm calls on, so `tools/cork-asm.mjs --expansion` measures what a game runs.
+    // wasm calls on, so `tools/translator/cork-asm.mjs --expansion` measures what a game runs.
     /** @type {{ eip: number, op: string, bytes: number, lowered: boolean }[]} */
     const told = [];
     const { wasm } = regionModule({

@@ -20,7 +20,7 @@
  * hottest guest addresses, and the slowest frames with what ran before them.
  */
 import { appendFileSync, readFileSync } from 'node:fs';
-import { connect } from '../connect.mjs';
+import { connect } from '../../lib/connect.mjs';
 
 const args = process.argv.slice(2);
 const lastAt = args.indexOf('--last');

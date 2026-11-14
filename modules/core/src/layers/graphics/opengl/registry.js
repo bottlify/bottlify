@@ -6,7 +6,7 @@
 
 /**
  * OpenGL's commands as Khronos' gl.xml declares them (Apache-2.0,
- * THIRD-PARTY-NOTICES.md), written by tools/gl-registry.mjs from revision
+ * THIRD-PARTY-NOTICES.md), written by tools/generators/gl-registry.mjs from revision
  * 6af574a14089ccfee87efe230ebcdd8742859813: do not edit.
  *
  * A command is `return:arguments`, a letter each: `i` 32 bits, `f` GLfloat, `d`

@@ -8,7 +8,7 @@
  * Linking GLSL programs and writing them as WGSL: what a program's active
  * attributes and uniforms are and where they live, what a link refuses, and
  * the WGSL each construct WGSL lacks is spelled out in. Whether a device
- * draws what GLSL says is `tools/cdp_test/triangle.mjs --glsl`'s question;
+ * draws what GLSL says is `tools/gates/triangle.mjs --glsl`'s question;
  * this is the text's.
  */
 

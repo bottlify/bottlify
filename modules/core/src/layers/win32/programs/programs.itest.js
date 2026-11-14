@@ -15,8 +15,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createApp } from '../../../app.js';
-import { buildExe } from '../../../../../../tools/make-pe.mjs';
-import { waitingParent } from '../../../../../../tools/spawn-program.mjs';
+import { buildExe } from '../../../../../../tools/fixtures/make-pe.mjs';
+import { waitingParent } from '../../../../../../tools/fixtures/spawn-program.mjs';
 import { HKEY_CURRENT_USER } from '../advapi32/registry.js';
 import { databaseBytes } from '../msi/database-writer.js';
 import { EXECUTE_SEQUENCE, packageDatabase, registryText } from '../msi/install.fixture.js';

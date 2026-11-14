@@ -8,7 +8,7 @@
  * The register width a region is emitted for: what of the emitter depends on
  * whether the guest runs 32-bit code or long mode's, decided once per module
  * from its layout. The 32-bit width is the emitter as it always was -- its
- * modules come out byte for byte the same (`tools/emit-digest.mjs`) -- and
+ * modules come out byte for byte the same (`tools/checks/emit-digest.mjs`) -- and
  * long mode's keeps every one of its techniques, its registers sixteen i64
  * locals:
  *

@@ -11,7 +11,7 @@ name: ci
 # Tests); this is the same set on a clean machine.
 #
 # One job a package, run when the push touched that package or a file of
-# another that it uses (tools/ci-layers.mjs): cork's are core's; core's are the
+# another that it uses (tools/ci/ci-layers.mjs): cork's are core's; core's are the
 # installer's only where the installer imports them; networking stands alone. A
 # change to what every package shares (the root's files, tools/, the lockfile
 # beyond its packages' versions, these workflows) runs them all, as a run by
@@ -55,8 +55,8 @@ jobs:
             changed=$(echo "$changed" | grep -vx package-lock.json)
           fi
           echo "$changed"
-          # The packages these files are in and those that use them (tools/ci-layers.mjs).
-          echo "$changed" | node tools/ci-layers.mjs | tee -a "$GITHUB_OUTPUT"
+          # The packages these files are in and those that use them (tools/ci/ci-layers.mjs).
+          echo "$changed" | node tools/ci/ci-layers.mjs | tee -a "$GITHUB_OUTPUT"
 
   cork:
     name: cork (typecheck, lint, tests, corpus)

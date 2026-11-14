@@ -7,7 +7,8 @@
 /**
  * Fails when the documentation has a link that leads nowhere or a page nobody
  * can reach. Checked: every relative link of docs/, of the READMEs and of the
- * tools' index (tools/cdp_test/README.md, DIAGNOSING.md) leads to
+ * tools' pages (tools/README.md, tools/run/README.md, tools/live/README.md and
+ * DIAGNOSING.md) leads to
  * a file, and an anchor in it to a heading of that page; a link to this
  * repository's main branch on GitHub leads to a file that exists; every page
  * under docs/ is in docs/README.md, which is the site's navigation.
@@ -32,7 +33,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, posix } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { headings, links } from './markdown.mjs';
-import { isMain } from '../common.mjs';
+import { isMain } from '../lib/common.mjs';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const REPO = 'https://github.com/bottlify/bottlify/blob/main/';
@@ -78,7 +79,8 @@ export function check(root){
         : [];
     const top = existsSync(join(root, 'README.md')) ? ['README.md'] : [];
     // The instruments' index and the order to look in, which CLAUDE.md sends every session to.
-    const tools = ['tools/cdp_test/README.md', 'tools/cdp_test/DIAGNOSING.md']
+    const tools = ['tools/README.md', 'tools/run/README.md', 'tools/live/README.md',
+        'tools/live/DIAGNOSING.md']
         .filter(file=>existsSync(join(root, file)));
     const files = [...docs, ...modules, ...top, ...tools];
     /** @type {Map<string, Set<string>>} */

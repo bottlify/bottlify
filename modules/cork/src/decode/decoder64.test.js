@@ -7,7 +7,7 @@
 /**
  * The decoder in long mode, judged by LLVM's disassembler on code a compiler
  * and an assembler made (`x64-objdump.txt.gz`, built by
- * `tools/x64-decode-fixture.mjs`): for every instruction shape, the length,
+ * `tools/generators/x64-decode-fixture.mjs`): for every instruction shape, the length,
  * the mnemonic and each operand -- registers by name, memory by base, index,
  * scale and displacement (RIP-relative by its absolute target), immediates
  * by value at the operand's width.

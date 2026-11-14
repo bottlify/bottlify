@@ -22,7 +22,7 @@ import { openBundle, writeBundle } from './bundle-node.js';
 import {
     createDirectoryTranslationStore, createMemoryDirectory, unpackSeed,
 } from './layers/cpu/internal/translation-store.js';
-import { buildExe } from '../../../tools/make-pe.mjs';
+import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
 
 /**
  * A layer's report from the app's own graph: every graph has module objects of

@@ -10,7 +10,7 @@
  *
  *   node tools/live/live.mjs eval "document.body.innerText.slice(-2000)"
  */
-import { connect } from '../connect.mjs';
+import { connect } from '../../lib/connect.mjs';
 
 const { evaluate } = await connect();
 const value = await evaluate(process.argv[2] ?? 'location.href');

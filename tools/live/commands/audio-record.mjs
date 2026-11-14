@@ -20,7 +20,7 @@
  */
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { connect } from '../connect.mjs';
+import { connect } from '../../lib/connect.mjs';
 
 const [command = 'save', ...rest] = process.argv.slice(2);
 const { cdp, sessionId, evaluate } = await connect();

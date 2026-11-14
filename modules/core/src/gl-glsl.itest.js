@@ -22,8 +22,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createApp } from './app.js';
 import { createFakeDevice } from './layers/graphics/webgpu/internal/fake-device.js';
-import { bytesOfHex } from '../../../tools/gl-program.mjs';
-import { OUT, glslProgram } from '../../../tools/gl-glsl-program.mjs';
+import { bytesOfHex } from '../../../tools/fixtures/gl-program.mjs';
+import { OUT, glslProgram } from '../../../tools/fixtures/gl-glsl-program.mjs';
 
 test('a program draws with GLSL into a framebuffer object and samples it in the window',
     { timeout: 120000 }, async t=>{

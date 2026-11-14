@@ -33,7 +33,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { frameDrops } from '../../../modules/core/src/frame-drops.js';
-import { option } from '../../common.mjs';
+import { option } from '../../lib/common.mjs';
 
 /** A frame as the views name it. @param {any} frame */
 const nameOf = frame=>`${frame.functionName || '(anonymous)'} `
@@ -280,7 +280,7 @@ export function dropsView(profile, frames, options = {}){
  * @param {number} seconds @param {string} [which]
  */
 async function sample(seconds, which){
-    const { connect } = await import('../connect.mjs');
+    const { connect } = await import('../../lib/connect.mjs');
     const { cdp, engineWorker, workers } = await connect();
     const [wanted, nth] = (which ?? '').split('#');
     const matching = wanted ? (await workers()).filter(one=>one.url.includes(wanted)) : [];

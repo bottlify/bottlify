@@ -49,9 +49,9 @@
 import { createServer } from 'node:http';
 import { writeFile, mkdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { launchWithGpu, shutdown } from '../../cdp_test/browser.mjs';
-import { CdpEndpoint, openPage } from '../../cdp_test/cdp.mjs';
-import { pausedStack } from '../../cdp_test/timeout-report.mjs';
+import { launchWithGpu, shutdown } from '../../lib/browser.mjs';
+import { CdpEndpoint, openPage } from '../../lib/cdp.mjs';
+import { pausedStack } from '../../lib/timeout-report.mjs';
 
 // Another session's walk may hold the defaults: DRIVE_PORT and DRIVE_PROFILE
 // give this one its own, since two browsers cannot share a profile.

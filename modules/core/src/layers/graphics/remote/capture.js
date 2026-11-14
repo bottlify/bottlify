@@ -6,7 +6,7 @@
 
 /**
  * What the graphics worker was sent, written down to be played again in node
- * (`tools/graphics-replay.mjs`): every root as it was made and every batch of
+ * (`tools/read/graphics-replay.mjs`): every root as it was made and every batch of
  * calls in the order it came. What a frame costs the played side is its calls
  * and how many bytes of guest memory they move, not what those bytes hold --
  * the renderer finds what a program wrote by the pages it was sent, and a

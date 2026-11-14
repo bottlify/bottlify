@@ -14,7 +14,7 @@ modules/cork/LICENSE
 modules/installer/LICENSE
 modules/networking/LICENSE
 modules/core/THIRD-PARTY-NOTICES.md
-tools/cdp_test/reports/
+tools/*/reports/
 *.log
 # No trailing slash: a symlink at this path (a worktree pointing at the main
 # checkout's artifacts) is ignored too, not committed.

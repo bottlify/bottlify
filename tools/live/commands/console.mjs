@@ -12,7 +12,7 @@
  *
  *   node tools/live/live.mjs console [> dbg/console.log]
  */
-import { connect } from '../connect.mjs';
+import { connect } from '../../lib/connect.mjs';
 
 const page = await connect();
 /** @param {number} time @param {string} level @param {string} text */

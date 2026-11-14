@@ -1,0 +1,899 @@
+{
+ "about": "Every tool under tools/: its category (the folder it lives in), the question it answers, how it is run and its tests. An instrument carries a real output sample from this machine and how to read it; tools/README.md is written from this file by tools/checks/check-catalog.mjs --write, and check:boundaries holds the two to each other and to the tree.",
+ "tools": [
+  {
+   "path": "tools/run/game.mjs",
+   "category": "run",
+   "browser": true,
+   "question": "Does a title run in a browser, and what did the run do?",
+   "command": "npm run cdp:game -- <bundle-id> [flags]  (flags: tools/run/README.md)",
+   "tests": [],
+   "parts": [
+    "tools/run/README.md"
+   ],
+   "sample": "The Swapper undefined -- TheSwapper.exe\n  ran for 13ms, 4 guest instructions\nstopped: exited with 3221225477\nerrors -- what the engine did not do:\n  mscoree.dll!_CorExeMain: not implemented, answered with nothing\n1 imports nothing claimed:\n  mscoree.dll  (1)",
+   "source": "tools/cdp_test/reports/game-2026-11-14T03-28-29-645Z.txt (a run of steam-231160 without its .NET runtime; it printed \"undefined\" for the missing version, which the title line now leaves out)",
+   "read": "The first lines are how the run ended (exit 0xC0000005 here); \"errors\" and \"imports nothing claimed\" are what the engine lacked, the first thing to implement. The rest of a report is the address space, the last host calls and, with flags, profiles and frames.",
+   "kind": "instrument"
+  },
+  {
+   "path": "tools/run/frames.mjs",
+   "category": "run",
+   "browser": true,
+   "question": "What does a frame cost once a title is up, and where does the time go?",
+   "command": "npm run cdp:frames -- <bundle-id> [--seconds 60] [--settle 20]",
+   "tests": [],
+   "kind": "instrument"
+  },
+  {
+   "path": "tools/run/smoke.mjs",
+   "category": "run",
+   "browser": true,
+   "question": "Did a title get worse: does it still reach its game, and do its frames come as evenly as before?",
+   "command": "node tools/run/smoke.mjs <bundle-id> [--runs 3] [--against FILE]; on runs already made: smoke.mjs span <presents.json> | drops <frames.json>...",
+   "tests": [
+    "tools/run/drop-repeat.test.js"
+   ],
+   "parts": [
+    "tools/run/frame-span.mjs",
+    "tools/run/drop-repeat.mjs"
+   ],
+   "kind": "instrument"
+  },
+  {
+   "path": "tools/run/launcher.mjs",
+   "category": "run",
+   "browser": true,
+   "question": "What does the launcher's own page cost while a title runs?",
+   "command": "node tools/run/launcher.mjs <bundle-id> (launcher running: npm run ui)",
+   "tests": [],
+   "kind": "instrument"
+  },
+  {
+   "path": "tools/run/ui-layout.mjs",
+   "category": "run",
+   "browser": true,
+   "question": "Does the launcher lay out on a phone, a tablet and a desktop?",
+   "command": "node tools/run/ui-layout.mjs [card regex] (launcher running)",
+   "tests": [],
+   "kind": "instrument"
+  },
+  {
+   "path": "tools/run/install-watch.mjs",
+   "category": "run",
+   "browser": false,
+   "question": "Where does an installer, or an installed program, stop in Node, and what is each process waiting on?",
+   "command": "node tools/run/install-watch.mjs <setup.exe | disc.iso | archive.zip> | --bundle ID [--which PATH] [--args ARGS]",
+   "tests": [
+    "tools/run/wizard-buttons.test.js"
+   ],
+   "parts": [
+    "tools/run/wizard-buttons.mjs"
+   ],
+   "sample": "0.8 OUT stateblock.c:416: Running initial read state tests\n0.8 divergence {\"api\":\"Direct3D 8\",\"detail\":\"GetLightEnable(0x0, 0x81ff948) answered D3DERR_INVALIDCALL\"}\n0.8 divergence {\"api\":\"Direct3D 8\",\"detail\":\"GetLight(0x0, 0x81ff8e0) answered D3DERR_INVALIDCALL\"}\n1.0 OUT stateblock.c:1155: Test failed: Chain stage 0, render state 0x9b: expected 0, got 0x3f800000.\n1.6 OUT 16b0:stateblock: 9283 tests executed (0 marked as todo, 0 as flaky, 1 failure), 0 skipped.\n1.6 exit {\"code\":1}\nrun -> 1",
+   "source": "node tools/run/install-watch.mjs --bundle wine-d3d8 --args stateblock --every 5 --minutes 1",
+   "read": "Each line is seconds since the start and what happened: OUT is what the program printed, divergence a call answered otherwise than Windows would, then how each process ended. Here Wine's stateblock test ran 9283 checks and one failed (render state 0x9b read back 1.0, expected 0).",
+   "kind": "instrument"
+  },
+  {
+   "path": "tools/run/play.mjs",
+   "category": "run",
+   "browser": true,
+   "question": "Play a bottle from this checkout, with nothing else set up",
+   "command": "node tools/run/play.mjs <bundle-id> (then open the page it prints)",
+   "tests": [
+    "tools/run/play.test.js"
+   ],
+   "parts": [
+    "tools/run/play/"
+   ],
+   "kind": "instrument"
+  },
+  {
+   "path": "tools/run/wine-tests.mjs",
+   "category": "run",
+   "browser": false,
+   "question": "Do Wine's conformance tests pass in the engine?",
+   "command": "npm run wine-tests -- <dll>[:<test>]... [--browser] [--baseline FILE]",
+   "tests": [
+    "tools/run/wine-tests.test.js"
+   ],
+   "sample": "winetest build 4e819f054dd2d9ee855ee3f1e30d8c1bb8f80fcf, 2 at a time, 120 s each\n  kernel32:sync                pass            executed 355430 failures     0   11.7 s",
+   "source": "node tools/run/wine-tests.mjs kernel32:sync",
+   "read": "One row a test: how it ended, the checks it executed and those that failed, and its time; report.md beside it groups the failing lines and, with --baseline, says what got worse.",
+   "kind": "instrument"
+  },
+  {
+   "path": "tools/run/vcredist-matrix.mjs",
+   "category": "run",
+   "browser": false,
+   "question": "Where do the Visual C++ runtimes' own load checks let a program run, against Windows?",
+   "command": "node tools/run/vcredist-matrix.mjs [--fetch] [--out DIR]",
+   "tests": [
+    "tools/run/vcredist-matrix.test.js"
+   ],
+   "sample": "ok   vc80-crt: external program.manifest; the runtime and its manifest beside the program -- Windows runs, engine runs\nok   vc80-crt: LoadLibrary, embedded manifest; the runtime and its manifest beside it -- Windows runs, engine runs\nok   vc80-crt: the runtime installed: only in system32, the store presents it -- Windows runs (as with the redistribut\nok   vc80-crt: no manifest at all; the runtime beside the program -- Windows R6034, engine runs\nok   vc80-crt: LoadLibrary, no manifest at all; the runtime beside the program -- Windows R6034, engine runs",
+   "source": "node tools/run/vcredist-matrix.mjs --fetch (21 rows, 0 DIFF)",
+   "read": "A row a runtime and a deployment layout: what Windows does and what the engine did; DIFF marks a row where they part, \"by decision\" one the engine answers itself on purpose.",
+   "kind": "instrument"
+  },
+  {
+   "path": "tools/run/webkit-probe/tail-calls.html",
+   "category": "run",
+   "browser": true,
+   "question": "What does a phone's browser keep, and which wasm tail call takes its page down?",
+   "command": "open tools/run/webkit-probe/tail-calls.html or storage.html from the launcher on the phone",
+   "tests": [],
+   "parts": [
+    "tools/run/webkit-probe/"
+   ],
+   "kind": "instrument"
+  },
+  {
+   "path": "tools/live/live.mjs",
+   "category": "live",
+   "browser": true,
+   "question": "What is a game a person plays doing right now: console, phases, profile, memory, picture, sound?",
+   "command": "node tools/live/live.mjs help | <command> [args]",
+   "tests": [
+    "tools/live/live.test.js"
+   ],
+   "parts": [
+    "tools/live/commands/",
+    "tools/live/README.md",
+    "tools/live/DIAGNOSING.md"
+   ],
+   "sample": "21757 ms sampled: idle   6.1%, garbage collection   2.9%\nself:\n   35.0%  sleep engine.worker.js:12892\n   13.6%  waitWhile engine.worker.js:12882\n    8.1%  showNow engine.worker.js:450658\ninclusive:\n  100.0%  (root) :0\n   67.8%  run engine.worker.js:837745\n^showNow : 2004 of 21757 ms (9.2%)\n    9.2%  show engine.worker.js:450858  <  presentTo engine.worker.js:835602  <  present engine.worker.js:82812",
+   "source": "live.mjs profile --file dbg/leak/start-profile/w10-engine.cpuprofile, then --callers \"^showNow \"",
+   "read": "Attached commands need the shared browser; profile --file and diff read files. Self time is the function itself, inclusive with what it called; a stretch is time outside translated code (led by sleep or waitWhile it is the thread parked, not working). --callers says who reached a function, by the time under it: showNow is 9.2 % of this engine worker, all through present.",
+   "kind": "instrument"
+  },
+  {
+   "path": "tools/read/trace-summary.mjs",
+   "category": "read",
+   "browser": true,
+   "question": "Where did a person's DevTools trace go, by thread and function?",
+   "command": "node tools/read/trace-summary.mjs <Trace-*.json.gz> (a trace the person saved)",
+   "tests": [],
+   "kind": "instrument"
+  },
+  {
+   "path": "tools/read/graphics-replay.mjs",
+   "category": "read",
+   "browser": true,
+   "question": "What do a title's real frames cost the graphics worker, played again in Node?",
+   "command": "node tools/read/graphics-replay.mjs <capture> (from game.mjs --graphics-capture FILE)",
+   "tests": [],
+   "kind": "instrument"
+  },
+  {
+   "path": "tools/read/shader-diff.mjs",
+   "category": "read",
+   "browser": true,
+   "question": "Does our HLSL compiler agree with Microsoft's on a title's own shaders?",
+   "command": "node tools/read/shader-diff.mjs <game-*-shaders dir> (from a game.mjs run; Windows for D3DCompiler)",
+   "tests": [],
+   "parts": [
+    "tools/read/shader-diff-fxc.ps1"
+   ],
+   "kind": "instrument"
+  },
+  {
+   "path": "tools/read/wav-scan.mjs",
+   "category": "read",
+   "browser": true,
+   "question": "Where are the gaps, clicks and repeats in what the person heard?",
+   "command": "node tools/read/wav-scan.mjs <file.wav> (from live.mjs audio save)",
+   "tests": [],
+   "kind": "instrument"
+  },
+  {
+   "path": "tools/translator/launch-probe.mjs",
+   "category": "translator",
+   "browser": false,
+   "question": "What does a run in Node cost the translator, and where did the program stop?",
+   "command": "node tools/translator/launch-probe.mjs <bundle-id> [--turns N] [--series S] [--translation-store DIR] [--cork-out FILE]",
+   "tests": [],
+   "sample": "mode: default, 1 executor(s), cork {}; node 26.13.1, V8 14.6.202.34-node.40, branch hints read\nWine d3d8 tests -- d3d8_test.exe\n  entry image: 745472 bytes\nevery import bound.\n  [guest 2] 1008:visual: 141799 tests executed (0 marked as todo, 0 as flaky, 3168 failures), 15 skipped.\nstopped: exited with 255",
+   "source": "node tools/translator/launch-probe.mjs wine-d3d8 --turns 20000",
+   "read": "The head is the mode and what was bound; then what the program printed, and \"stopped:\" how the run ended, followed by the calls it made last and, with --series or --cork-out, the translator's figures. Here Wine's d3d8 visual test ran in Node, where nothing is drawn, so its read-backs fail by design.",
+   "kind": "instrument"
+  },
+  {
+   "path": "tools/translator/cork-mix.mjs",
+   "category": "translator",
+   "browser": false,
+   "question": "Which guest instructions does a run execute most, what does each kind cost, and how do its calls go?",
+   "command": "node tools/translator/cork-mix.mjs <blocks.json> [--file DLL@BASE]... [--calls]",
+   "tests": [],
+   "parts": [
+    "tools/translator/cork-calls.mjs"
+   ],
+   "sample": "114795 blocks, 5435328071 instructions in TheSwapper.exe, clr.dll@0x2dea000, 1082654156 block executions outside them\nshare  ops-share  ops/insn  form\n  9.6%      14.1%        48  push r32\n  3.3%       9.7%        95  mov m32,r32\n  4.0%       7.2%        59  call rel\n  4.8%       7.0%        48  jne rel",
+   "source": "cork-mix.mjs dbg/leak/swapper-ngen-load-blocks.json --file clr.dll@0x2dea000",
+   "read": "share is of the executed instructions, ops-share of the wasm operations they cost, ops/insn what one form costs: a form whose ops-share is far above its share (push stack32, 147 ops) is where the translator spends. --calls prints the calls' shape as JSON (direct, indirect, import; registers live around them).",
+   "kind": "instrument"
+  },
+  {
+   "path": "tools/translator/cork-asm.mjs",
+   "category": "translator",
+   "browser": false,
+   "question": "What machine code, wasm text or wasm bytes does a region become, weighed by how often it ran?",
+   "command": "node tools/translator/cork-asm.mjs --image DLL@BASE | --bin FILE --at A --entry A [--blocks FILE] [--classes|--wat|--expansion]",
+   "tests": [],
+   "sample": "     entry  blocks  x86  wasm B  machine  bytes  per x86  ran x86  weighted\n0x00401160      43  229   11492     3297  15122    14.40       9M      2.94\nran: 0.01 G guest instructions in these blocks, 2.940 machine instructions an executed one\nby kind, an executed guest instruction: other 0.935 (31.8%), branch 0.606 (20.6%), memory 0.444 (15.1%), compare 0.395",
+   "source": "cork-asm.mjs --bin modules/cork/bench/micro/images/crc-x87.bin --at 0x401000 --entry 0x401160 --blocks crc-x87.blocks.json --classes",
+   "read": "\"per x86\" is machine instructions a guest instruction becomes in the code as compiled; \"weighted\" the same over what ran. The kinds line says where the instructions go besides the guest's own work (branch, memory, frame spills). The host here is arm64 (this VM).",
+   "kind": "instrument"
+  },
+  {
+   "path": "tools/translator/pdb-hot.mjs",
+   "category": "translator",
+   "browser": false,
+   "question": "Which function of a system or runtime DLL is hot?",
+   "command": "node tools/translator/pdb-hot.mjs <blocks.json> <image.dll> <image.pdb> <base-hex> [top]",
+   "tests": [],
+   "sample": "48991 public symbols; the image 55.6% of 2436222218 block executions\n  2.11%  ?mark_object_simple1@gc_heap@WKS@@KGXPAE@Z\n  1.68%  ?relocate_address@gc_heap@WKS@@KGXPAPAE@Z\n  1.43%  ?relocate_survivors_in_plug@gc_heap@WKS@@KGXPAE0PAUrelocate_args@12@@Z\n  1.41%  ?FillEntryDataForAncestor@MethodDataObject@MethodTable@@IAEXPAV2@@Z",
+   "source": "pdb-hot.mjs dbg/leak/swapper-ngen-load-blocks.json clr.dll dbg/sym/clr.pdb 2dea000",
+   "read": "The image's share of the run's block executions, then its public functions by share: here the CLR's garbage collector (mark, relocate) leads The Swapper's ngen load.",
+   "kind": "instrument"
+  },
+  {
+   "path": "tools/translator/disasm.mjs",
+   "category": "translator",
+   "browser": false,
+   "question": "What is the code at module+offset, as a profile names it?",
+   "command": "node tools/translator/disasm.mjs <bundle-id | bundle.btl> <module> <offset[:count]> (Python with capstone)",
+   "tests": [],
+   "sample": "== clr.dll+0xb5a08\n  000b5a08  8d65f4               lea      esp, [ebp - 0xc]\n  000b5a0b  5f                   pop      edi\n  000b5a0c  5e                   pop      esi\n  000b5a0d  8b4dfc               mov      ecx, dword ptr [ebp - 4]\n  000b5a10  33cd                 xor      ecx, ebp",
+   "source": "disasm.mjs steam-231160-net clr.dll b5a08:8",
+   "read": "Offset in the module, bytes, instruction: the hottest clr.dll address of the ngen load is a function's epilogue (its security cookie check, then ret 4).",
+   "kind": "instrument"
+  },
+  {
+   "path": "tools/translator/host-call-bench.mjs",
+   "category": "translator",
+   "browser": false,
+   "question": "What does one call into the host, or one maths operation, cost?",
+   "command": "node tools/translator/host-call-bench.mjs [N] --call SPEC... | --math [--rows RE]",
+   "tests": [],
+   "sample": "N 2000000, 3 rounds; ns a call is the median over the rounds; node 26.13.1, V8 14.6.202.34-node.40, branch hints read\n                                this ns/call      min..max  host calls\nKERNEL32.dll!lstrlenA(s:a)                24         2..27           1\nKERNEL32.dll!GetACP()                    204      190..214     2000001",
+   "source": "host-call-bench.mjs 2000000 --rounds 3 --call 'KERNEL32.dll!lstrlenA(s:a)' --call 'KERNEL32.dll!GetACP()'",
+   "read": "ns a call over the loop without it, the spread of the rounds, and the host calls the bridge counted: lstrlenA is guest code (1 host call, the exit), GetACP crosses every time, about 200 ns. A spread wider than the median is noise: raise N.",
+   "kind": "instrument"
+  },
+  {
+   "path": "tools/translator/executor-sweep.mjs",
+   "category": "translator",
+   "browser": false,
+   "question": "Where do several executors beat one?",
+   "command": "node tools/translator/executor-sweep.mjs [--threads 1,2,3] [--executors 1,2,3,4] [--reps 3]",
+   "tests": [],
+   "sample": "T=2 K=- H=- E=1  best3 1.55s [1.26 1.83 1.56]  x1.00 vs E=1  1807 MIPS (2.80 G)  elsewhere 0% 0 calls\nT=2 K=- H=- E=2  best3 1.01s [0.96 1.32 0.77]  x1.53 vs E=1  2762 MIPS (2.80 G)  elsewhere 53% 2 calls\nbest of several executors: T=2 K=- H=- E=2  x1.53",
+   "source": "executor-sweep.mjs --threads 2 --executors 1,2 --host 0 --sync 0 --reps 3",
+   "read": "A row a point: the mean of its three fastest runs [each run], the ratio to one executor, MIPS, and the share run elsewhere. Here two threads ran 1.53 times as fast on two executors. Runs of one point that differ threefold (an earlier run of this sweep on the loaded machine gave 7.23 against 0.78 s) are the machine, not the engine: rerun on a quiet one.",
+   "kind": "instrument"
+  },
+  {
+   "path": "tools/bundles/import-audit.mjs",
+   "category": "bundles",
+   "browser": false,
+   "question": "What does a title import, or look up by name, that this build does not export?",
+   "command": "node tools/bundles/import-audit.mjs <file|dir|bundle.btl|disc.iso>... [--dynamic --specs DIR]",
+   "tests": [],
+   "parts": [
+    "tools/bundles/pe-files.mjs"
+   ],
+   "sample": "15 images read\nPACKED? bundle.btl:Futuremark\\3DMark03\\fmod.dll: its imports are looked up at run time\nNAMED, NO LIBRARY mscoree.dll  <- EasyFMSI.exe, FMSI.dll, FMSIX.dll, atimgpud.dll, cpuidsdk.dll, SI3.dll, msvcr71.dll,\nNAMED, NO LIBRARY atiadlxy.dll  <- FMSI.dll\nMISSING BY NAME kernel32.dll (20)\n  __C_specific_handler  <- cpuidsdk.dll\n  OpenProcessToken  <- mfc70.dll",
+   "source": "import-audit.mjs bundles/3dmark03/bundle.btl --dynamic --specs dbg/wine-specs",
+   "read": "PACKED is an image whose imports are found at run time (run it to know); NAMED, NO LIBRARY a DLL its strings name that nothing provides; MISSING BY NAME a function a program may GetProcAddress that this build does not export, with who names it.",
+   "kind": "instrument"
+  },
+  {
+   "path": "tools/bundles/make-btl.mjs",
+   "category": "bundles",
+   "browser": false,
+   "question": "Pack, verify, list, size, prune or extract a bottle, or unpack a zip of any size",
+   "command": "node tools/bundles/make-btl.mjs pack|verify|list|translations|extract|tree|prune|zip ...",
+   "tests": [],
+   "parts": [
+    "tools/bundles/zip-extract.mjs"
+   ],
+   "sample": "   463.5 MiB   284  Futuremark\\3DMark03\n     2.2 MiB     7  Common Files\\Futuremark Shared\n     0.0 MiB     1  .bottlify\\registry.json\n   465.7 MiB   292  total\n   0.01 GiB       1 files  3dmark11-setup.exe\n   0.20 GiB       1 files  cab1.cab",
+   "source": "make-btl.mjs tree 3dmark03 2; make-btl.mjs zip list to_install/3dmark11/3dmark11.zip --depth=1",
+   "read": "tree: bytes and files under each folder to a depth, largest first, so a setup's leftovers stand out; zip list the same for an archive before unpacking it.",
+   "kind": "instrument"
+  },
+  {
+   "path": "tools/checks/arg-bytes-audit.mjs",
+   "category": "checks",
+   "browser": false,
+   "question": "Do our stdcall entries pop the bytes Windows' do?",
+   "command": "node tools/checks/arg-bytes-audit.mjs <Wine spec directory> [--all]",
+   "tests": [],
+   "sample": "2641 stdcall entries checked, 0 pop a different number of bytes",
+   "source": "arg-bytes-audit.mjs dbg/wine-specs",
+   "read": "Every stdcall entry of the win32 layer against its Wine spec; a line per entry that pops another number of bytes, each one a caller's stack moved a call at a time. Run by hand: the specs are fetched once (import-audit --fetch-specs) and not kept in the repository.",
+   "kind": "instrument"
+  },
+  {
+   "path": "tools/gates/probe.mjs",
+   "category": "gates",
+   "kind": "gate",
+   "browser": true,
+   "question": "Does a browser, a page and a worker answer? (CI)",
+   "command": "npm run cdp:probe",
+   "tests": []
+  },
+  {
+   "path": "tools/gates/triangle.mjs",
+   "category": "gates",
+   "kind": "gate",
+   "browser": true,
+   "question": "Does a guest program's draw reach the screen, four pixels exact?",
+   "command": "node tools/gates/triangle.mjs [--glsl]",
+   "tests": []
+  },
+  {
+   "path": "tools/gates/shader-gate.mjs",
+   "category": "gates",
+   "kind": "gate",
+   "browser": true,
+   "question": "Do Direct3D 9 shaders translate as the reference machine computes them? (CI)",
+   "command": "npm run cdp:shaders",
+   "tests": [],
+   "parts": [
+    "tools/gates/shader-gate.html",
+    "tools/gates/shader-cases.mjs"
+   ]
+  },
+  {
+   "path": "tools/gates/shader-clip.mjs",
+   "category": "gates",
+   "kind": "gate",
+   "browser": true,
+   "question": "Do the two paths of user clip planes agree?",
+   "command": "npm run cdp:clip",
+   "tests": []
+  },
+  {
+   "path": "tools/gates/tess-gate.mjs",
+   "category": "gates",
+   "kind": "gate",
+   "browser": true,
+   "question": "Does the WGSL tessellator agree with the reference one? (CI)",
+   "command": "npm run cdp:tess",
+   "tests": [],
+   "parts": [
+    "tools/gates/tess-draw.mjs"
+   ]
+  },
+  {
+   "path": "tools/gates/gs-gate.mjs",
+   "category": "gates",
+   "kind": "gate",
+   "browser": true,
+   "question": "Do geometry shaders and stream output write what Direct3D writes? (CI)",
+   "command": "npm run cdp:gs",
+   "tests": []
+  },
+  {
+   "path": "tools/gates/vertex-pull-gate.mjs",
+   "category": "gates",
+   "kind": "gate",
+   "browser": true,
+   "question": "Do vertex streams a stage pulls itself match WebGPU's own fetch? (CI)",
+   "command": "npm run cdp:pull",
+   "tests": []
+  },
+  {
+   "path": "tools/gates/gl-lighting-gate.mjs",
+   "category": "gates",
+   "kind": "gate",
+   "browser": true,
+   "question": "Does the GPU light a fixed-function OpenGL vertex as the CPU does?",
+   "command": "npm run cdp:lighting",
+   "tests": []
+  },
+  {
+   "path": "tools/gates/spirv-gate.mjs",
+   "category": "gates",
+   "kind": "gate",
+   "browser": true,
+   "question": "Does OpenGL's SPIR-V path compute what its GLSL source does?",
+   "command": "npm run cdp:spirv",
+   "tests": [],
+   "parts": [
+    "tools/gates/spirv-gate-fixtures.mjs"
+   ]
+  },
+  {
+   "path": "tools/checks/check-budget-writes.mjs",
+   "category": "checks",
+   "kind": "check",
+   "browser": false,
+   "question": "The emitter writes a region's budget only as a count",
+   "command": "npm run check:boundaries",
+   "tests": []
+  },
+  {
+   "path": "tools/checks/check-emit-options.mjs",
+   "category": "checks",
+   "kind": "check",
+   "browser": false,
+   "question": "Every emit option reaches the cache key",
+   "command": "npm run check:boundaries",
+   "tests": []
+  },
+  {
+   "path": "tools/checks/check-guest-pointers.mjs",
+   "category": "checks",
+   "kind": "check",
+   "browser": false,
+   "question": "A handler faults on a bad guest pointer only as Windows does",
+   "command": "npm run check:boundaries",
+   "tests": [
+    "tools/checks/check-guest-pointers.test.js"
+   ]
+  },
+  {
+   "path": "tools/checks/check-is-main.mjs",
+   "category": "checks",
+   "kind": "check",
+   "browser": false,
+   "question": "No script decides it was started by comparing paths itself",
+   "command": "npm run check:boundaries",
+   "tests": []
+  },
+  {
+   "path": "tools/checks/check-link-slots.mjs",
+   "category": "checks",
+   "kind": "check",
+   "browser": false,
+   "question": "One machine a slot of a process's link",
+   "command": "npm run check:boundaries",
+   "tests": [
+    "tools/checks/check-link-slots.test.js"
+   ]
+  },
+  {
+   "path": "tools/checks/check-lock-release.mjs",
+   "category": "checks",
+   "kind": "check",
+   "browser": false,
+   "question": "A locked word is not released by a plain store",
+   "command": "npm run check:boundaries",
+   "tests": []
+  },
+  {
+   "path": "tools/checks/check-overlapped-layout.mjs",
+   "category": "checks",
+   "kind": "check",
+   "browser": false,
+   "question": "OVERLAPPED's offsets are written in one file",
+   "command": "npm run check:boundaries",
+   "tests": []
+  },
+  {
+   "path": "tools/checks/check-package-files.mjs",
+   "category": "checks",
+   "kind": "check",
+   "browser": false,
+   "question": "Core's package ships what its files import",
+   "command": "npm run check:boundaries",
+   "tests": []
+  },
+  {
+   "path": "tools/checks/check-scan-windows.mjs",
+   "category": "checks",
+   "kind": "check",
+   "browser": false,
+   "question": "A scan of guest memory stays in its region",
+   "command": "npm run check:boundaries",
+   "tests": []
+  },
+  {
+   "path": "tools/checks/check-store-protocol.mjs",
+   "category": "checks",
+   "kind": "check",
+   "browser": false,
+   "question": "A store's protocol is spoken only in GameHub",
+   "command": "npm run check:boundaries",
+   "tests": [
+    "tools/checks/check-store-protocol.test.js"
+   ]
+  },
+  {
+   "path": "tools/checks/check-volume-spread.mjs",
+   "category": "checks",
+   "kind": "check",
+   "browser": false,
+   "question": "No volume is copied by object spread",
+   "command": "npm run check:boundaries",
+   "tests": []
+  },
+  {
+   "path": "tools/checks/check-wall-bounds.mjs",
+   "category": "checks",
+   "kind": "check",
+   "browser": false,
+   "question": "No test bounds a wall-clock time",
+   "command": "npm run check:boundaries",
+   "tests": [
+    "tools/checks/check-wall-bounds.test.js"
+   ]
+  },
+  {
+   "path": "tools/checks/check-wide-limits.mjs",
+   "category": "checks",
+   "kind": "check",
+   "browser": false,
+   "question": "A UTF-16 read's limit is in bytes",
+   "command": "npm run check:boundaries",
+   "tests": [
+    "tools/checks/check-wide-limits.test.js"
+   ]
+  },
+  {
+   "path": "tools/checks/emit-digest.mjs",
+   "category": "checks",
+   "kind": "check",
+   "browser": false,
+   "question": "The 32-bit translation is unchanged (--check against emit-digest.json)",
+   "command": "npm run check:boundaries",
+   "tests": [],
+   "parts": [
+    "tools/checks/emit-digest.json"
+   ]
+  },
+  {
+   "path": "tools/checks/check-catalog.mjs",
+   "category": "checks",
+   "kind": "check",
+   "browser": false,
+   "question": "Every file under tools/ is in this catalog, in its category, and every instrument has a real sample",
+   "command": "npm run check:boundaries",
+   "tests": [
+    "tools/checks/check-catalog.test.js"
+   ]
+  },
+  {
+   "path": "tools/generators/x86-corpus.mjs",
+   "category": "generators",
+   "kind": "generator",
+   "browser": false,
+   "question": "Rewrite the 32-bit instruction corpus a real processor answered (gcc -m32)",
+   "command": "node tools/generators/x86-corpus.mjs",
+   "tests": [],
+   "parts": [
+    "tools/generators/x86-corpus/"
+   ]
+  },
+  {
+   "path": "tools/generators/x64-corpus.mjs",
+   "category": "generators",
+   "kind": "generator",
+   "browser": false,
+   "question": "Rewrite the 64-bit instruction corpus (clang)",
+   "command": "node tools/generators/x64-corpus.mjs",
+   "tests": [],
+   "parts": [
+    "tools/generators/x64-corpus/"
+   ]
+  },
+  {
+   "path": "tools/generators/x64-decode-fixture.mjs",
+   "category": "generators",
+   "kind": "generator",
+   "browser": false,
+   "question": "Rewrite the 64-bit decoder's reference from compiled code",
+   "command": "node tools/generators/x64-decode-fixture.mjs",
+   "tests": [],
+   "parts": [
+    "tools/generators/x64-edges.s"
+   ]
+  },
+  {
+   "path": "tools/generators/bc-corpus.mjs",
+   "category": "generators",
+   "kind": "generator",
+   "browser": false,
+   "question": "Rewrite the BC6H/BC7 decoder corpus",
+   "command": "node tools/generators/bc-corpus.mjs",
+   "tests": []
+  },
+  {
+   "path": "tools/generators/tess-corpus.mjs",
+   "category": "generators",
+   "kind": "generator",
+   "browser": false,
+   "question": "Rewrite the tessellator's corpus from Microsoft's reference tessellator",
+   "command": "node tools/generators/tess-corpus.mjs",
+   "tests": []
+  },
+  {
+   "path": "tools/generators/gl-registry.mjs",
+   "category": "generators",
+   "kind": "generator",
+   "browser": false,
+   "question": "Rewrite OpenGL's command sizes from Khronos' gl.xml",
+   "command": "node tools/generators/gl-registry.mjs",
+   "tests": []
+  },
+  {
+   "path": "tools/generators/glsl-functions.mjs",
+   "category": "generators",
+   "kind": "generator",
+   "browser": false,
+   "question": "Rewrite GLSL's built-in functions from the GLSL specification",
+   "command": "node tools/generators/glsl-functions.mjs",
+   "tests": []
+  },
+  {
+   "path": "tools/generators/steam-interfaces.mjs",
+   "category": "generators",
+   "kind": "generator",
+   "browser": false,
+   "question": "Rewrite the Steamworks interfaces' vtables from the SDK headers",
+   "command": "node tools/generators/steam-interfaces.mjs",
+   "tests": []
+  },
+  {
+   "path": "tools/generators/uia-ids.mjs",
+   "category": "generators",
+   "kind": "generator",
+   "browser": false,
+   "question": "Rewrite UI Automation's identifiers from the SDK headers",
+   "command": "node tools/generators/uia-ids.mjs",
+   "tests": []
+  },
+  {
+   "path": "tools/generators/crt-dictionary.mjs",
+   "category": "generators",
+   "kind": "generator",
+   "browser": false,
+   "question": "Rewrite cork's dictionary of C runtime signatures",
+   "command": "node tools/generators/crt-dictionary.mjs",
+   "tests": []
+  },
+  {
+   "path": "tools/ci/ci-layers.mjs",
+   "category": "ci",
+   "kind": "ci",
+   "browser": false,
+   "question": "Which packages does a push make CI check?",
+   "command": "run by .github/workflows/ci.yml",
+   "tests": [
+    "tools/ci/ci-layers.test.js"
+   ]
+  },
+  {
+   "path": "tools/ci/readme-links.mjs",
+   "category": "ci",
+   "kind": "ci",
+   "browser": false,
+   "question": "A package's README links point at the commit published",
+   "command": "run by .github/workflows/publish.yml",
+   "tests": [
+    "tools/ci/readme-links.test.js"
+   ]
+  },
+  {
+   "path": "tools/lib/common.mjs",
+   "category": "lib",
+   "kind": "library",
+   "browser": false,
+   "question": "isMain, options, a median, where bundles lie (BOTTLIFY_BUNDLES)",
+   "command": "",
+   "tests": []
+  },
+  {
+   "path": "tools/lib/btl.mjs",
+   "category": "lib",
+   "kind": "library",
+   "browser": false,
+   "question": "The tools' path to core's bundle reader and writer",
+   "command": "",
+   "tests": []
+  },
+  {
+   "path": "tools/lib/relay-option.mjs",
+   "category": "lib",
+   "kind": "library",
+   "browser": false,
+   "question": "--network and --roots for the runners",
+   "command": "",
+   "tests": []
+  },
+  {
+   "path": "tools/lib/disk-directory.mjs",
+   "category": "lib",
+   "kind": "library",
+   "browser": false,
+   "question": "A folder of this disk shaped as OPFS, for the translation store in Node",
+   "command": "",
+   "tests": [
+    "tools/lib/disk-directory.test.js"
+   ]
+  },
+  {
+   "path": "tools/lib/chromium-v8.mjs",
+   "category": "lib",
+   "kind": "library",
+   "browser": false,
+   "question": "Node's V8 set as Chromium's, for a tool that measures cork",
+   "command": "",
+   "tests": []
+  },
+  {
+   "path": "tools/lib/cdp.mjs",
+   "category": "lib",
+   "kind": "library",
+   "browser": false,
+   "question": "A Chrome DevTools Protocol client",
+   "command": "",
+   "tests": []
+  },
+  {
+   "path": "tools/lib/browser.mjs",
+   "category": "lib",
+   "kind": "library",
+   "browser": false,
+   "question": "Find and launch a Chromium with a GPU and a CDP endpoint",
+   "command": "",
+   "tests": [],
+   "parts": [
+    "tools/lib/job-limit.ps1"
+   ]
+  },
+  {
+   "path": "tools/lib/server.mjs",
+   "category": "lib",
+   "kind": "library",
+   "browser": false,
+   "question": "A static server for the pages, the sources and a bundle",
+   "command": "",
+   "tests": []
+  },
+  {
+   "path": "tools/lib/connect.mjs",
+   "category": "lib",
+   "kind": "library",
+   "browser": false,
+   "question": "Attach to the shared browser and the launcher tab, for live.mjs",
+   "command": "",
+   "tests": []
+  },
+  {
+   "path": "tools/lib/profile.mjs",
+   "category": "lib",
+   "kind": "library",
+   "browser": false,
+   "question": "Sample the engine's workers and fold a CPU profile, for game.mjs and frames.mjs",
+   "command": "",
+   "tests": []
+  },
+  {
+   "path": "tools/lib/device-lag.mjs",
+   "category": "lib",
+   "kind": "library",
+   "browser": false,
+   "question": "How far the device is behind the engine, for game.mjs",
+   "command": "",
+   "tests": [
+    "tools/lib/device-lag.test.js"
+   ]
+  },
+  {
+   "path": "tools/lib/frame-window.mjs",
+   "category": "lib",
+   "kind": "library",
+   "browser": false,
+   "question": "The frames a watched window holds, for frames.mjs",
+   "command": "",
+   "tests": [
+    "tools/lib/frame-window.test.js"
+   ]
+  },
+  {
+   "path": "tools/lib/timeout-report.mjs",
+   "category": "lib",
+   "kind": "library",
+   "browser": false,
+   "question": "What a run that did not answer leaves, for game.mjs and drive",
+   "command": "",
+   "tests": [
+    "tools/lib/timeout-report.test.js"
+   ]
+  },
+  {
+   "path": "tools/lib/thread-window.mjs",
+   "category": "lib",
+   "kind": "library",
+   "browser": false,
+   "question": "A --series window by thread and executor, for game.mjs",
+   "command": "",
+   "tests": []
+  },
+  {
+   "path": "tools/fixtures/make-pe.mjs",
+   "category": "fixtures",
+   "kind": "fixture",
+   "browser": false,
+   "question": "Build PE programs for the packages' tests",
+   "command": "",
+   "tests": []
+  },
+  {
+   "path": "tools/fixtures/d3d9-program.mjs",
+   "category": "fixtures",
+   "kind": "fixture",
+   "browser": false,
+   "question": "A Direct3D 9 test program",
+   "command": "",
+   "tests": []
+  },
+  {
+   "path": "tools/fixtures/gl-program.mjs",
+   "category": "fixtures",
+   "kind": "fixture",
+   "browser": false,
+   "question": "The pieces of an OpenGL test program",
+   "command": "",
+   "tests": []
+  },
+  {
+   "path": "tools/fixtures/gl-glsl-program.mjs",
+   "category": "fixtures",
+   "kind": "fixture",
+   "browser": false,
+   "question": "An OpenGL 2.0 GLSL test program (also triangle.mjs --glsl)",
+   "command": "",
+   "tests": []
+  },
+  {
+   "path": "tools/fixtures/spawn-program.mjs",
+   "category": "fixtures",
+   "kind": "fixture",
+   "browser": false,
+   "question": "A parent-process test program",
+   "command": "",
+   "tests": []
+  },
+  {
+   "path": "tools/fixtures/fake-graphics-worker.mjs",
+   "category": "fixtures",
+   "kind": "fixture",
+   "browser": false,
+   "question": "A graphics worker over the fake GPU, for tests",
+   "command": "",
+   "tests": []
+  },
+  {
+   "path": "tools/fixtures/cpu-time.mjs",
+   "category": "fixtures",
+   "kind": "fixture",
+   "browser": false,
+   "question": "A thread's processor time, for tests that bound a cost",
+   "command": "",
+   "tests": []
+  },
+  {
+   "path": "tools/docs/site.mjs",
+   "category": "docs",
+   "kind": "docs",
+   "browser": false,
+   "question": "Build the documentation site from docs/ (npm run docs); check.mjs fails a link that leads nowhere",
+   "command": "npm run docs",
+   "tests": [
+    "tools/docs/site.test.js",
+    "tools/docs/check.test.js"
+   ],
+   "parts": [
+    "tools/docs/check.mjs",
+    "tools/docs/markdown.mjs",
+    "tools/docs/assets/"
+   ]
+  }
+ ]
+}

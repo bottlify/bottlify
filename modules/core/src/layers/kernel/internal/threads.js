@@ -93,7 +93,7 @@ const BLOCKED_BOUNDS = [0.02, 0.05, 0.1, 0.2, 0.5, 1, 5, 20];
  * executor is also the one waiting on the graphics worker and the event loop.
  * Threads that compute and call the host once in 2 300 instructions ran 0.58 to
  * 0.74 times as fast on two and four executors as on one, once in 9 200 0.91 to
- * 1.18 times, once in 37 000 1.04 to 1.28 times (`tools/executor-sweep.mjs`).
+ * 1.18 times, once in 37 000 1.04 to 1.28 times (`tools/translator/executor-sweep.mjs`).
  */
 const HOST_BOUND = 1 / 30_000;
 
@@ -177,7 +177,7 @@ const RECALL_MS = 0;
  * at once, a .NET game's loader on another executor came back here at every
  * pause of the thread drawing its loading screen, 2 861 times in a load, and
  * the two took turns on this executor while the other idled; on a stand of
- * that shape (`tools/executor-sweep.mjs --main-work 20000 --main-wait 1`) two
+ * that shape (`tools/translator/executor-sweep.mjs --main-work 20000 --main-wait 1`) two
  * executors took 1.00 s against one's 0.80, and 0.61 s waiting 20 ms.
  */
 const IDLE_RECALL_MS = 20;

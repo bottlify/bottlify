@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { Access, RegionKind, createRegionMap } from './regions.js';
 import { createAccessors } from './accessors.js';
 import { GUEST_ACCESS, UNTERMINATED } from './faults.js';
-import { threadCpuMs } from '../../../../../../tools/cpu-time.mjs';
+import { threadCpuMs } from '../../../../../../tools/fixtures/cpu-time.mjs';
 
 function setup(){
     const bytes = new Uint8Array(0x4000);

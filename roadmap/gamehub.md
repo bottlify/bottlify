@@ -103,7 +103,7 @@ injected into the page or an XSS on the page getting it, or the password.
 
 GameHub's build lays files out by their path under `modules/`, so its modules import core's formats
 from one source; only the stores' pages are web-accessible, no module.
-`tools/check-store-protocol.mjs` fails a change that puts store-protocol code into core, the
+`tools/checks/check-store-protocol.mjs` fails a change that puts store-protocol code into core, the
 launcher or GameHub's content script.
 
 ## Tests
@@ -125,7 +125,7 @@ launcher or GameHub's content script.
   with the worker stopped and its document out of the page's reach, the session sealed, Steam
   switched off.
 - **The gates**: the install differential (`modules/core/src/steam/install-directory.test.js`), the bundle build test,
-  `check:boundaries` with `tools/check-store-protocol.mjs`.
+  `check:boundaries` with `tools/checks/check-store-protocol.mjs`.
 
 Not tested against Steam itself: a scanned QR code, a password sign-in and each Steam Guard code
 -- they need a person's account.

@@ -193,7 +193,7 @@ test('a capture played again asks of the GPU what the run asked, with the progra
         assert.equal(records.reduce((sum, record)=>sum + (record.presents ?? 0), 0), 2,
             'two presents kept: the one before the mark and the one after, not the third');
 
-        // The capture played on a worker of its own, as tools/graphics-replay.mjs plays it.
+        // The capture played on a worker of its own, as tools/read/graphics-replay.mjs plays it.
         const again = await worker(false);
         /** @type {Map<number, MessagePort>} */
         const ports = new Map();

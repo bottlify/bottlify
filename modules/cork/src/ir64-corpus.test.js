@@ -6,7 +6,7 @@
 
 /**
  * The 64-bit model judged by the processor: every case of the hardware corpus
- * (`x64-corpus.json.gz`, made by `tools/x64-corpus.mjs`) decoded in long mode
+ * (`x64-corpus.json.gz`, made by `tools/generators/x64-corpus.mjs`) decoded in long mode
  * and run on `evaluate64` from the same registers, flags and memory, then
  * compared with what the processor did -- the sixteen registers, the status
  * flags and DF, the sixteen XMM registers, every byte of memory that changed,

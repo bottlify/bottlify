@@ -10,7 +10,7 @@ import { readFileSync } from 'node:fs';
 import { gunzipSync } from 'node:zlib';
 import { decodeBc67, decodeBc6hBlock, decodeBc7Block } from './bc67.js';
 
-/** Blocks of every mode and an independent decoder's answer (tools/bc-corpus.mjs). */
+/** Blocks of every mode and an independent decoder's answer (tools/generators/bc-corpus.mjs). */
 const corpus = JSON.parse(gunzipSync(readFileSync(new URL('./bc67-corpus.json.gz',
     import.meta.url))).toString());
 

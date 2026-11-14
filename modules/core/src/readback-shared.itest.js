@@ -22,7 +22,7 @@ import { createApp } from './app.js';
 import { createFakeDevice } from './layers/graphics/webgpu/internal/fake-device.js';
 import { IDIRECT3DDEVICE9_SLOTS, IDIRECT3DSURFACE9_SLOTS } from './layers/graphics/d3d9/interfaces.js';
 import { IDIRECT3D9_SLOTS } from './layers/graphics/seam/vtables.js';
-import { buildExe } from '../../../tools/make-pe.mjs';
+import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
 
 const COLOUR = 0x00336699;
 
@@ -102,7 +102,7 @@ async function run(shared){
     const gpuDevice = /** @type {any} */ (gpu.device);
     gpuDevice.features = new Set();
     gpuDevice.createSampler = (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor });
-    const thread = new Worker(new URL('../../../tools/fake-graphics-worker.mjs', import.meta.url));
+    const thread = new Worker(new URL('../../../tools/fixtures/fake-graphics-worker.mjs', import.meta.url));
     thread.postMessage({ type: 'open', frames: 'none' });
     /** @type {Map<Function, (data: any) => void>} */
     const listeners = new Map();

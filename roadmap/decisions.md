@@ -1738,7 +1738,7 @@ code.** A call to `_CIsin`, `_CIcos`, `_CItan`, `_CIatan`, `_CIasin`, `_CIacos`,
 function for it (JavaScript's `Math.sin` and the rest), its result put on the x87 stack in the
 argument's place, where the runtime takes its SSE2 routines, as it does on every processor with SSE2
 and so on the one cork reports. Against the runtime's own code (`msvcr71.dll`, `msvcr80.dll`
-8.0.50727.42 and `msvcr100.dll`, `tools/crt-dictionary.mjs --verify`, 400 seeded arguments from
+8.0.50727.42 and `msvcr100.dll`, `tools/generators/crt-dictionary.mjs --verify`, 400 seeded arguments from
 2^-70 to 2^70 a function, its SSE2 path at full and at single precision) the results lie at most a
 unit in the last place apart, and agree in everything else the caller sees. The x87's own
 instructions were not taken: they round to the precision control, which the SSE2 code ignores, and
@@ -1840,7 +1840,7 @@ its dependencies found as Windows finds them (A57), and the loader takes a DLL a
 from where the context puts it. The runtimes' check was read from Microsoft's binaries rather
 than guessed: msvcr80.dll and vcomp.dll (8.0.50727.6195) look themselves up as a DLL redirection
 of the active context, refuse a load from the system directory, and accept one from WinSxS or
-beside their assembly's manifest; msvcr90.dll makes the same check. `tools/vcredist-matrix.mjs`
+beside their assembly's manifest; msvcr90.dll makes the same check. `tools/run/vcredist-matrix.mjs`
 runs Microsoft's own vcomp.dll and msvcr90.dll in the engine through seven layouts each --
 the runtime and its manifest beside the program, in its assembly's folder, named by an embedded
 or an external manifest, loaded with LoadLibrary, installed (only in system32, presented by the

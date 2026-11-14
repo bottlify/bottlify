@@ -17,7 +17,7 @@ the product is measured on, depending on whether V8 uses them for wasm parameter
 ## The workloads
 
 Not synthetic: [`profiles.json`](profiles.json) holds the shape of the calls of three block
-profiles, measured by [`tools/cork-calls.mjs`](../../../../tools/cork-calls.mjs): guest
+profiles, measured by [`tools/translator/cork-calls.mjs`](../../../../tools/translator/cork-calls.mjs): guest
 instructions between calls, the share of indirect calls, the registers the code after a return
 reads first, how many functions the calls go through:
 

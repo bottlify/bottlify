@@ -25,7 +25,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createApp } from './app.js';
 import { parsePe, rvaToFileOffset } from './layers/loader/internal/pe.js';
-import { buildExe } from '../../../tools/make-pe.mjs';
+import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
 
 /** Where the fixture builder puts every image it makes. */
 const IMAGE_BASE = 0x400000;

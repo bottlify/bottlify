@@ -13,7 +13,7 @@
  *
  *   node tools/live/live.mjs audio watch > dbg/audio-watch.log
  */
-import { connect } from '../connect.mjs';
+import { connect } from '../../lib/connect.mjs';
 
 const { evaluate } = await connect();
 const started = Date.now();

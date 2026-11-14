@@ -10,7 +10,7 @@
  * Visual C++ 7.1 to 14, by their signatures (`helpers.js`), and the operation
  * a call to each is formed as (`emit/crt.js`).
  *
- * Each signature is the library's own function as `tools/crt-dictionary.mjs`
+ * Each signature is the library's own function as `tools/generators/crt-dictionary.mjs`
  * reads it out of the runtime's DLL -- its code's spans from its entry, the
  * bytes that differ where it is linked masked -- and each was run against its
  * operation by `--verify` on seeded arguments, through every way the

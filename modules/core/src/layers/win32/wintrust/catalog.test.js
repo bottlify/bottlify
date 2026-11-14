@@ -14,7 +14,7 @@ import assert from 'node:assert/strict';
 import { catalogHash, createCatalogFunctions } from './catalog.js';
 import { createSha1 } from '../crypto/digest.js';
 import { OID } from '../crypto/signature.js';
-import { buildExe } from '../../../../../../tools/make-pe.mjs';
+import { buildExe } from '../../../../../../tools/fixtures/make-pe.mjs';
 
 const ERROR_INSUFFICIENT_BUFFER = 122;
 const ERROR_NOT_FOUND = 1168;

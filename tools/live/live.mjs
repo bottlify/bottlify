@@ -20,7 +20,7 @@
  */
 
 import { fileURLToPath } from 'node:url';
-import { isMain } from '../common.mjs';
+import { isMain } from '../lib/common.mjs';
 
 /**
  * The commands, in the order a hunt usually takes them: what the line says it

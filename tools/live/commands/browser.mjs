@@ -16,8 +16,8 @@
  */
 import { spawn } from 'node:child_process';
 import { resolve } from 'node:path';
-import { BACKGROUND_OFF, findBrowser } from '../../cdp_test/browser.mjs';
-import { PORT } from '../connect.mjs';
+import { BACKGROUND_OFF, findBrowser } from '../../lib/browser.mjs';
+import { PORT } from '../../lib/connect.mjs';
 
 const url = process.argv[2] ?? 'https://192.168.100.22:5180/library';
 // Throwaway by nature and large (OPFS holds whole bundles): under dbg/, never

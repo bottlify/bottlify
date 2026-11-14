@@ -19,8 +19,8 @@
  * One full collection of the engine worker is asked for first, so that it
  * reports even when it would not have collected in the window.
  */
-import { CdpEndpoint } from '../../cdp_test/cdp.mjs';
-import { PORT, connect } from '../connect.mjs';
+import { CdpEndpoint } from '../../lib/cdp.mjs';
+import { PORT, connect } from '../../lib/connect.mjs';
 
 const seconds = Number(process.argv[2] ?? 6);
 const version = await (await fetch(`http://127.0.0.1:${PORT}/json/version`)).json();

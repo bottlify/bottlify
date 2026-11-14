@@ -18,7 +18,7 @@
  * The raw profile is written to dbg/worker.heapprofile for DevTools.
  */
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { connect } from '../connect.mjs';
+import { connect } from '../../lib/connect.mjs';
 
 const seconds = Number(process.argv[2] ?? 8);
 const top = Number(process.argv[3] ?? 25);

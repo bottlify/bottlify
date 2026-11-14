@@ -424,7 +424,7 @@ test('a call to a function that is not the dictionary\'s, by a byte, is made as 
 /**
  * The compiler's quadword helpers and `__chkstk`, judged by what they compute
  * (their own bytes are judged against the operations by
- * `tools/crt-dictionary.mjs --verify`): a call to a function the dictionary
+ * `tools/generators/crt-dictionary.mjs --verify`): a call to a function the dictionary
  * names one of them -- its bytes this test's own, never run -- answers as the
  * helper does, and where the helper would fault (a divide by zero, the least
  * quadword by -1, a stack closed below) leaves before the call, nothing

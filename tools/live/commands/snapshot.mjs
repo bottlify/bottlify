@@ -24,7 +24,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { deflateSync } from 'node:zlib';
-import { connect } from '../connect.mjs';
+import { connect } from '../../lib/connect.mjs';
 
 const argv = process.argv.slice(2);
 const outAt = argv.indexOf('--out');

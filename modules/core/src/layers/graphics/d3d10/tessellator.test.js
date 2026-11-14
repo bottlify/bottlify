@@ -12,7 +12,7 @@ import { OUTPUT, PARTITIONING, tessellate } from './tessellator.js';
 
 /**
  * Patches drawn from a seed and what Microsoft's reference tessellator made
- * of each (`tools/tess-corpus.mjs`): every point's u and v as float bits,
+ * of each (`tools/generators/tess-corpus.mjs`): every point's u and v as float bits,
  * every index.
  *
  * @type {{ cases: { domain: 'isoline' | 'tri' | 'quad', partitioning: number, output: number,

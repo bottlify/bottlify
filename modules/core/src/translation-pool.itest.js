@@ -67,7 +67,7 @@ const u32 = value=>[
 
 /** Two threads that each loop on their own, the program waiting for both. */
 async function twoLoops(){
-    const { assemble, buildExe } = await import('../../../tools/make-pe.mjs');
+    const { assemble, buildExe } = await import('../../../tools/fixtures/make-pe.mjs');
     const WORKER_AT = 0x100;
     return buildExe({
         imports: { 'KERNEL32.dll': ['CreateThread', 'WaitForSingleObject', 'ExitProcess'] },
@@ -124,7 +124,7 @@ const ascii = text=>[...text].map(character=>character.charCodeAt(0)).concat(0);
  * @param {string} command
  */
 async function starter(command){
-    const { buildExe } = await import('../../../tools/make-pe.mjs');
+    const { buildExe } = await import('../../../tools/fixtures/make-pe.mjs');
     return buildExe({
         imports: { 'KERNEL32.dll': ['CreateProcessA', 'WaitForSingleObject',
             'GetExitCodeProcess', 'ExitProcess'] },
@@ -158,7 +158,7 @@ async t=>{
     // The program and its child take the run's two workers; the child's own
     // child (ngen's worker process, under ngen) runs beside it, and was
     // never lent one: it interpreted every instruction it ran.
-    const { assemble, buildExe } = await import('../../../tools/make-pe.mjs');
+    const { assemble, buildExe } = await import('../../../tools/fixtures/make-pe.mjs');
     const exiting = buildExe({
         imports: { 'KERNEL32.dll': ['ExitProcess'] },
         code: ({ iat })=>assemble([

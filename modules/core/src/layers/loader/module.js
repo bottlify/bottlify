@@ -488,7 +488,7 @@ export function createLoaderModule(){
                 metrics: {
                     images: loaded.length,
                     // Where each image lies, as [name, base]: what reads a block
-                    // profile back to its code (tools/cork-calls.mjs).
+                    // profile back to its code (tools/translator/cork-calls.mjs).
                     bases: loaded.map(record=>[record.name ?? '', record.base]),
                     // An import nothing implements is not fatal at load time, so the
                     // list is the only place it surfaces before the guest calls it.

@@ -11,7 +11,7 @@ program's calls into Windows on WebGPU, Web Audio, OPFS and WebSocket
 import { createApp } from '@bottlify/core';
 
 const canvas = document.querySelector('canvas');
-// The program's PE image, beside the bundle (`node tools/make-btl.mjs extract demo`).
+// The program's PE image, beside the bundle (`node tools/bundles/make-btl.mjs extract demo`).
 const executable = new Uint8Array(await (await fetch('/bundles/demo/entry')).arrayBuffer());
 
 const app = await createApp({
@@ -46,8 +46,8 @@ From a checkout of this repository, with Node 22 or later:
 
 ```sh
 npm ci && npm run build                                   # builds modules/core/dist
-node tools/make-btl.mjs pack "/path/to/My Game" mygame     # bundles/mygame/bundle.btl + manifest.json
-node tools/play.mjs mygame                                 # prints http://127.0.0.1:8080/?bottle=mygame
+node tools/bundles/make-btl.mjs pack "/path/to/My Game" mygame     # bundles/mygame/bundle.btl + manifest.json
+node tools/run/play.mjs mygame                                 # prints http://127.0.0.1:8080/?bottle=mygame
 ```
 
 Open the address in Chrome or Edge (WebGPU) and press Start.
@@ -60,7 +60,7 @@ Open the address in Chrome or Edge (WebGPU) and press Start.
 - **From an installer** rather than an installed folder:
   [`@bottlify/installer`](../installer/README.md) runs the setup inside the engine and makes the
   bottle from what it installed.
-- Other bottle commands: `node tools/make-btl.mjs verify mygame`, `list mygame [pattern]`,
+- Other bottle commands: `node tools/bundles/make-btl.mjs verify mygame`, `list mygame [pattern]`,
   `extract mygame [file]`.
 
 ## Serving a bottle
@@ -71,17 +71,17 @@ A page needs three things served from one origin:
 | --- | --- | --- |
 | `/bottlify/` | the engine: `core.js` and its `core-*.js` chunks, its workers, `worklet.js`, `cork/`, `vendor/` | `modules/core/dist` after `npm run build` |
 | `/bundles/<id>/bundle.btl`, `manifest.json` | the bottle, read a block at a time | `make-btl pack` |
-| `/bundles/<id>/entry` | the program's image, which `createApp` takes as bytes | `node tools/make-btl.mjs extract <id>` |
+| `/bundles/<id>/entry` | the program's image, which `createApp` takes as bytes | `node tools/bundles/make-btl.mjs extract <id>` |
 
 Serve `bundle.btl` with **HTTP Range** support (`206 Partial Content`): the engine never downloads
 a game whole, it reads the blocks the program asks for and keeps them in OPFS. nginx, Caddy,
 Apache, `npx http-server` and most CDNs do this; Python's `http.server` does not.
 
-The whole player page is [`tools/play/index.html`](../../tools/play/index.html): beyond the
+The whole player page is [`tools/run/play/index.html`](../../tools/run/play/index.html): beyond the
 smallest page it plays sound, which is why it starts on a click, and mounts a bottle made by the
 installer where its setup put it.
 
-`node tools/play.mjs <id> [--port 8080] [--compatible]` is a local server for exactly this layout,
+`node tools/run/play.mjs <id> [--port 8080] [--compatible]` is a local server for exactly this layout,
 with Range and the isolation headers (`--compatible` leaves them off). For a measurement the player
 page takes two more settings from its address: `&executors=3` runs the program's threads on three
 executors at once (`createApp`'s `executors`), and `&cork={"checkReads":true}` sets the

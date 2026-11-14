@@ -14,7 +14,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createApp, createMacrotask, pagePacing } from './app.js';
-import { buildExe } from '../../../tools/make-pe.mjs';
+import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
 
 /** The loop's clock: a turn's worth of milliseconds. */
 const TURN_MS = 0.1;

@@ -14,7 +14,7 @@
  *
  * The snapshot is parsed in memory and not kept: it runs to hundreds of MB.
  */
-import { connect } from '../connect.mjs';
+import { connect } from '../../lib/connect.mjs';
 
 const minBytes = Number(process.argv[2] ?? 8) * 1048576;
 const wanted = process.argv[3];

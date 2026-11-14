@@ -13,7 +13,7 @@
  *   node tools/live/live.mjs shader ps585 [vs586 ...] [> dbg/ps585.txt]
  */
 import { disassembleShader } from '../../../modules/core/src/layers/win32/d3dx9/shader-asm.js';
-import { connect } from '../connect.mjs';
+import { connect } from '../../lib/connect.mjs';
 
 const page = await connect();
 for (const id of process.argv.slice(2))

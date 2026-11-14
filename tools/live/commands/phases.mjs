@@ -17,7 +17,7 @@
  * The first process of the run answers (`diagnostics`); a child's are asked
  * through `app.debug.diagnosticsOf(id)`.
  */
-import { connect } from '../connect.mjs';
+import { connect } from '../../lib/connect.mjs';
 
 const seconds = Number(process.argv[2] ?? 10);
 const windows = Number(process.argv[3] ?? 1);

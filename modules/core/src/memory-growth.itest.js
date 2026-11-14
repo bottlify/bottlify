@@ -16,7 +16,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createApp } from './app.js';
-import { assemble, buildExe } from '../../../tools/make-pe.mjs';
+import { assemble, buildExe } from '../../../tools/fixtures/make-pe.mjs';
 
 /** @param {number} value @returns {number[]} */
 const u32 = value=>[
@@ -64,7 +64,7 @@ const commit = (iat, address, size)=>[
     0x85, 0xc0, { jump: /** @type {const} */ ('jz'), to: 'fail' },
 ];
 
-/** @param {(name: string) => number} iat @returns {import('../../../tools/make-pe.mjs').AsmPart[]} */
+/** @param {(name: string) => number} iat @returns {import('../../../tools/fixtures/make-pe.mjs').AsmPart[]} */
 const failing = iat=>[{ label: 'fail' }, 0x6a, 7, 0xff, 0x15, ...u32(iat('ExitProcess'))];
 
 test('a process\'s memory holds what the program commits, not its whole RAM',

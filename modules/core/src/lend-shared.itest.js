@@ -19,7 +19,7 @@ import assert from 'node:assert/strict';
 import { Worker } from 'node:worker_threads';
 import { createApp } from './app.js';
 import { createFakeDevice } from './layers/graphics/webgpu/internal/fake-device.js';
-import { TEXTURE, texturedFrames } from '../../../tools/d3d9-program.mjs';
+import { TEXTURE, texturedFrames } from '../../../tools/fixtures/d3d9-program.mjs';
 
 const FRAMES = 3;
 
@@ -29,7 +29,7 @@ async function run(shared, lend, mode){
     const gpuDevice = /** @type {any} */ (gpu.device);
     gpuDevice.features = new Set();
     gpuDevice.createSampler = (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor });
-    const thread = new Worker(new URL('../../../tools/fake-graphics-worker.mjs', import.meta.url));
+    const thread = new Worker(new URL('../../../tools/fixtures/fake-graphics-worker.mjs', import.meta.url));
     thread.postMessage({ type: 'open', frames: 'none' });
     /** @type {Map<Function, (data: any) => void>} */
     const listeners = new Map();

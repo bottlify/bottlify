@@ -21,9 +21,9 @@ import { randomBytes } from 'node:crypto';
 import { READ_AHEAD_BYTES, createApp } from './app.js';
 import { writeBundle } from './bundle-node.js';
 import { Worker } from 'node:worker_threads';
-import { buildExe } from '../../../tools/make-pe.mjs';
-import { texturedFrames } from '../../../tools/d3d9-program.mjs';
-import { waitingParent } from '../../../tools/spawn-program.mjs';
+import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
+import { texturedFrames } from '../../../tools/fixtures/d3d9-program.mjs';
+import { waitingParent } from '../../../tools/fixtures/spawn-program.mjs';
 import { createFakeDevice } from './layers/graphics/webgpu/internal/fake-device.js';
 
 /** @param {number} value */
@@ -203,7 +203,7 @@ test('a child in a worker of its own draws on the run\'s graphics worker, and th
         const gpu = createFakeDevice();
         Object.assign(gpu.device, { queue: gpu.queue, features: new Set(),
             createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor }) });
-        const thread = new Worker(new URL('../../../tools/fake-graphics-worker.mjs',
+        const thread = new Worker(new URL('../../../tools/fixtures/fake-graphics-worker.mjs',
             import.meta.url));
         t.after(()=>thread.terminate());
         thread.postMessage({ type: 'open', frames: 'pixels' });

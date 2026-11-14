@@ -6,7 +6,7 @@
 
 /**
  * The Steamworks interfaces' layouts by version string, as the SDK's headers
- * declare them (written by tools/steam-interfaces.mjs, not by hand): each a
+ * declare them (written by tools/generators/steam-interfaces.mjs, not by hand): each a
  * list of `name:bytes:return[:wide]`, in vtable order -- the bytes of
  * arguments after `this` on an x86 stack, how the method returns (`v` void,
  * `i` EAX, `q` EDX:EAX, `f` x87, `sN` an N-byte class through a hidden
