@@ -55,8 +55,18 @@ test('a status with no translation says so rather than guessing', ()=>{
     // Windows answers ERROR_MR_MID_NOT_FOUND for a status it has no message for.
     // Anything else here would be a Win32 error the failure never had, and a
     // caller acts on it as though it did.
-    assert.equal(toDosError(0xc0000123), ERROR_MR_MID_NOT_FOUND);
+    // A facility no status is defined in.
+    assert.equal(toDosError(0xc0fe0001), ERROR_MR_MID_NOT_FOUND);
     assert.equal(ERROR_MR_MID_NOT_FOUND, 317);
+});
+
+test('a status the engine never makes still maps as Windows maps it', ()=>{
+    // A program hands over statuses it got elsewhere - a driver's, an RPC
+    // runtime's - and reports what RtlNtStatusToDosError makes of them.
+    assert.equal(toDosError(0x80000002), 998, 'DATATYPE_MISALIGNMENT is ERROR_NOACCESS');
+    assert.equal(toDosError(0xc0030004 | 0), 6, 'RPC_NT_SS_IN_NULL_CONTEXT, ERROR_INVALID_HANDLE');
+    assert.equal(toDosError(0x40000002), 87, 'an informational status maps too');
+    assert.equal(toDosError(0xc0000123), ERROR_ACCESS_DENIED, 'FILE_DELETED');
 });
 
 test('a version that does not meet a request is a revision mismatch in both domains', ()=>{
