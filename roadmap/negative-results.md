@@ -2880,3 +2880,23 @@ smaller ones cost Stockfish 10 %. No size won both; 256 kept.
   with more than 50 draws (`in the level after`), with the instructions retired.
 - Measured that way: 447, 417 and 488 s on 2026-11-13 builds; 317 and 348 s with b59558494,
   9db0f99e7 and bf4547d36; 378 and 357 s with 1e2e2093d besides.
+
+### 2026-11-14: a .NET game's own assembly compiled to a native image (ngen) - the JIT's share unchanged
+
+- **Idea.** Over a .NET game's start clrjit.dll was 17.2% of block executions and code the JIT
+  made 10.0%; the framework's assemblies had native images from the runtime's setup, the game's
+  executable none. `ngen install` of the executable in its bottle (`debug.start`, db125b149) would
+  take the JIT's work off every later start, for any .NET program a bottle holds.
+- **Workload.** The game's warm start in the launcher, reload, Continue pressed at the menu until
+  the level draws (more than 50 draws); one timed run and one block-profiled run.
+- **Values.** ngen ran 11 minutes in the bottle and wrote a 4.8 MB image, which the start mapped.
+  To the level 367 s at 15.66 G instructions (317-450 s before). Block executions: clrjit.dll
+  21.0%, code the JIT made 9.9%, the image 0.4%; 2 436 M executions (2 005 M before).
+- **Why.** The game's engine and libraries (TrueEngine, AdvanceMath, C5 and two more) are
+  resources of the executable that an AssemblyResolve handler loads from bytes, and the runtime
+  never pairs an assembly loaded from bytes with a native image; ngen.log lists each as a
+  missing dependency. The image covers the executable's own code, 0.4% of the start.
+- **Machine.** Parallels ARM VM, Windows 11, Chrome with the hardware WebGPU adapter; GPU, driver
+  and power plan not recorded.
+- **Decision.** Not made a default. It pays only for a program whose assemblies are files; the
+  image stays in that bottle (4.8 MB).
