@@ -440,31 +440,6 @@ export function createThreadInfoFunctions(host){
         },
 
         /**
-         * BOOL GetThreadGroupAffinity(HANDLE hThread, PGROUP_AFFINITY GroupAffinity)
-         *
-         * The native ThreadGroupInformation query; no structure to fill is
-         * ERROR_INVALID_PARAMETER.
-         */
-        GetThreadGroupAffinity: {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([handle, out])=>{
-                if ((out >>> 0) === 0)
-                {
-                    host.setLastError?.(ERROR_INVALID_PARAMETER);
-                    return 0;
-                }
-                const status = query([handle, THREAD_INFO.GROUP, out, GROUP_AFFINITY_SIZE, 0]);
-                if (status !== STATUS_SUCCESS)
-                {
-                    host.setLastError?.(errorOf(status));
-                    return 0;
-                }
-                return 1;
-            },
-        },
-
-        /**
          * BOOL SetThreadGroupAffinity(HANDLE hThread, const GROUP_AFFINITY *GroupAffinity,
          *                             PGROUP_AFFINITY PreviousGroupAffinity)
          *
