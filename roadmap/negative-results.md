@@ -86,6 +86,7 @@ plus at most five lines below its table of conditions the line cannot carry.
 | 2026-11-06 | a block held at its own start in a caller's region gets a region of its own | 102.2 vs 108.3 fps median, 5 runs, spread 84-112 | holds (kept, no fps claim) | - |
 | 2026-11-06 | heavy frames inside 3DMark03's tests are not cold code waiting for translation | the wait at most 1/10 of a stall, 8 runs | holds | the stalls are open |
 | 2026-11-12 | cork's interpreter and volatile-page levers do not speed up ngen's compile | 50.9 / 53.8 vs 52.9-55.5 s, 1 run | disputed: inside two-run noise | interpreted addresses known |
+| 2026-11-14 | the transfer taken out of every region (kept from inlining) | 0 of 519 call sites inlined under real tiering, calls512, Node 26 | holds: the premise was cork-asm's compile without call counts | V8 inlines cold calls |
 
 ## Executors and scheduler
 
