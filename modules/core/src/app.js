@@ -9111,6 +9111,30 @@ async function buildApp(options){
              */
             callRingSkip: (names = '')=>bridge.skipInRing?.(String(names).split(',')) ?? [],
             /**
+             * Where each export of a library this build synthesises runs in
+             * this process: `guest` (code of its own, or placed when bound),
+             * `host` (a trap into its handler), `data` (a variable), or
+             * `absent` (left out of a 64-bit process's module). For a tool
+             * that counts what is guest code and what is still a crossing.
+             *
+             * @param {string} dll
+             * @returns {Record<string, 'guest' | 'host' | 'data' | 'absent'> | null}
+             */
+            exportPlaces: dll=>{
+                const table = /** @type {Record<string, any> | undefined} */ (
+                    Object.entries(builtLibraries ?? {})
+                        .find(([key])=>moduleKeyOf(key) === moduleKeyOf(dll))?.[1]);
+                if (!table)
+                {
+                    return null;
+                }
+                return Object.fromEntries(Object.entries(table).map(([exported, fn])=>[exported,
+                    long ? (fn.long || fn.guest && fn.guestLong ? 'guest'
+                        : fn.data ? 'data' : fn.handler ? 'host' : 'absent')
+                        : fn.code || fn.guest ? 'guest'
+                            : fn.data ? 'data' : 'host']));
+            },
+            /**
              * Whether a system library this build makes exports a name, or a
              * number when there is no name: what an import table is checked
              * against without running the program (tools/import-audit.mjs).
