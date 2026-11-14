@@ -145,9 +145,10 @@ const wide = text=>{
  * @property {() => unknown} callerThread
  * @property {(library: string, name: string, args: number[], thread?: unknown)
  *     => number | Promise<number> | null} system  another library's export
- * @property {{ create: (handler: (message: number) => number | Promise<number>)
- *     => number | Promise<number>, post: (window: number, message: number) => unknown }} [window]
- *     a hidden window on the calling thread, whose posted messages run `handler`
+ * @property {{ create: (handler: (message: number) => number | Promise<number>,
+ *     thread: unknown) => number | Promise<number>,
+ *     post: (window: number, message: number) => unknown }} [window]
+ *     a hidden window on `thread`, whose posted messages run `handler`
  * @property {(api: string, detail: string) => void} [divergence]
  */
 
@@ -367,7 +368,7 @@ export function createUrlMonikers(host){
                     await next();
                 }
                 return 0;
-            })) >>> 0;
+            }, thread)) >>> 0;
             if (hwnd === 0)
             {
                 return false;

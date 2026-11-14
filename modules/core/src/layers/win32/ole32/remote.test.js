@@ -113,10 +113,11 @@ test('an RPC endpoint is one process\'s: a second to claim it is refused, and it
  * IUnknown's three and records the thread each call ran on.
  *
  * @param {{ exporter: string, worker?: boolean, window?: boolean,
- *     modalPump?: (thread: unknown) => Promise<number> }} options
- *     `window`: each apartment's hidden window, its message handled at the next turn
+ *     modalPump?: (thread: unknown) => Promise<number>, windowsFor?: unknown[] }} options
+ *     `window`: each apartment's hidden window, its message handled at the next turn;
+ *     `windowsFor`: the thread each window was made for, as made
  */
-function channel({ exporter, worker = true, window = false, modalPump }){
+function channel({ exporter, worker = true, window = false, modalPump, windowsFor = [] }){
     const bytes = new Uint8Array(0x10000);
     const view = new DataView(bytes.buffer);
     const OBJECT = 0x1000;
@@ -159,8 +160,10 @@ function channel({ exporter, worker = true, window = false, modalPump }){
             /** @type {(message: number) => unknown} */
             let handle = ()=>0;
             return {
-                create: (/** @type {(message: number) => unknown} */ handler)=>{
+                create: (/** @type {(message: number) => unknown} */ handler,
+                    /** @type {unknown} */ thread)=>{
                     handle = handler;
+                    windowsFor.push(thread);
                     return 7;
                 },
                 post: (/** @type {number} */ _window, /** @type {number} */ message)=>{
@@ -225,6 +228,18 @@ test('a single-threaded apartment\'s object is called on its own thread, never t
         assert.equal(workers(), 0);
         assert.match(reported.join('\n'), /no window/);
     });
+
+test('an apartment\'s window is made for the apartment\'s thread, not the one the bridge has on'
+    + ' the processor', async()=>{
+    // Made past the awaits of a call being marshaled, as the processor's
+    // thread's, ngen's thread making its first export into mscorsvw sent its
+    // window's creation to a thread in no message loop, and never sent the call.
+    /** @type {unknown[]} */
+    const windowsFor = [];
+    const { remoting, OBJECT } = channel({ exporter: 'main', window: true, windowsFor });
+    await remoting.exportReference(OBJECT, IID_IUNKNOWN, 'sta');
+    assert.deepEqual(windowsFor, ['sta']);
+});
 
 test('a registered class object is held by the registration\'s count alone', async()=>{
     // ole_server.c: once its clients are gone, a server's class object has

@@ -370,10 +370,10 @@ const MAX_PROGID = 255;
  *           The run's table of class objects served out of process, and what
  *           names this process to it. Absent, this process has a table of its
  *           own and can start no server.
- * @property {{ create: (handler: (message: number) => number | Promise<number>)
- *         => number | Promise<number>,
+ * @property {{ create: (handler: (message: number) => number | Promise<number>,
+ *         thread: unknown) => number | Promise<number>,
  *     post: (window: number, message: number) => unknown }} [apartmentWindow]
- *           A hidden window on the calling thread, for the calls another
+ *           A hidden window on the apartment's thread, for the calls another
  *           process or apartment makes on this apartment's objects.
  * @property {(thread: unknown) => number | Promise<number>} [modalPump]
  *           What a thread waiting on a call into another apartment runs

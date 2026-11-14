@@ -3852,7 +3852,9 @@ export function createWin32Module(){
                                 : entry.handler(args);
                         },
                         window: {
-                            create: handler=>apartmentWindow(handler),
+                            create: (handler, thread)=>(thread
+                                ? bridge.answering(thread, ()=>apartmentWindow(handler))
+                                : apartmentWindow(handler)),
                             post: (window, message)=>libraries['USER32.dll'].PostMessageA
                                 .handler([window, message, 0, 0]),
                         },
@@ -5010,7 +5012,11 @@ export function createWin32Module(){
                     modalPump: (/** @type {unknown} */ thread)=>bridge.answering(thread,
                         ()=>windowService.modalPump?.(thread) ?? 0),
                     apartmentWindow: {
-                        create: handler=>apartmentWindow(handler),
+                        // Made as the apartment's thread's, whoever the bridge
+                        // has on the processor past the caller's awaits.
+                        create: (handler, thread)=>(thread
+                            ? bridge.answering(thread, ()=>apartmentWindow(handler))
+                            : apartmentWindow(handler)),
                         /** @param {number} window @param {number} message */
                         post: (window, message)=>
                             libraries['USER32.dll'].PostMessageA.handler([window, message, 0, 0]),
