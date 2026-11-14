@@ -160,8 +160,8 @@ function channel({ exporter, worker = true, window = false, modalPump, windowsFo
             /** @type {(message: number) => unknown} */
             let handle = ()=>0;
             return {
-                create: (/** @type {(message: number) => unknown} */ handler,
-                    /** @type {unknown} */ thread)=>{
+                /** @param {(message: number) => unknown} handler @param {unknown} thread */
+                create: (handler, thread)=>{
                     handle = handler;
                     windowsFor.push(thread);
                     return 7;
