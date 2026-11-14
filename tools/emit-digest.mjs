@@ -6,7 +6,7 @@
 
 /**
  * One digest of the wasm the 32-bit translator emits for a fixed body of x86:
- * the cork-bench images' code (regions found from each image's entry along
+ * the micro workloads' 32-bit images' code (`modules/cork/bench/micro`: regions found from each image's entry along
  * its blocks' exits and calls) and seeded sequences of the corpus's forms,
  * each emitted under the option sets a run uses. A change meant to leave the
  * 32-bit translation as it is -- the translator made width-parametric, a
@@ -49,9 +49,9 @@ if ((args.includes('--check') || args.includes('--write'))
     throw new Error('emit-digest: the kept digest is over the default regions and sequences');
 }
 
-/** Where cork-bench places an image (`tools/cork-bench/bench.mjs`). */
+/** Where the micro runner places an image (`modules/cork/bench/micro/run.mjs`). */
 const IMAGE_BASE = 0x401000;
-const IMAGES = new URL('./cork-bench/images/', import.meta.url);
+const IMAGES = new URL('../modules/cork/bench/micro/images/', import.meta.url);
 
 /**
  * The host every module is emitted for, whatever machine runs the gate: an x64

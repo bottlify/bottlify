@@ -784,7 +784,7 @@ test('with callReturn a call whose callee is formed in adds no way on: a region 
     // An edge from such a call to its return address made the callee's first block a
     // block inside a loop, with no entry: every caller from another region missed there,
     // and the region was formed again with copies of its loops.
-    const images = new URL('../../../../tools/cork-bench/images/', import.meta.url);
+    const images = new URL('../../bench/micro/images/', import.meta.url);
     const base = 0x401000;
     let compared = 0;
     for (const name of readdirSync(images).filter(file=>file.endsWith('.bin')).sort())

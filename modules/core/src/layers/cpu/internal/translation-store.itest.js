@@ -5,7 +5,7 @@
  */
 
 /**
- * A seed end to end on the cork host: a benchmark program (`tools/cork-bench`)
+ * A seed end to end on the cork host: a benchmark program (`modules/cork/bench/micro`)
  * run once with a store, the store exported, a fresh store seeded from it, and
  * the program run again -- its first iteration takes its regions from the
  * seed and emits nothing. And a seed that does not fit -- made with other
@@ -25,7 +25,7 @@ import * as engine from '../../../../../cork/src/index.js';
 import { seedRecords } from '../../../../../cork/src/runtime/cache.js';
 import { features } from '../../../../../cork/src/wasm/features.js';
 
-const IMAGES = new URL('../../../../../../tools/cork-bench/images/', import.meta.url);
+const IMAGES = new URL('../../../../../cork/bench/micro/images/', import.meta.url);
 const IMAGE_BASE = 0x401000;
 const ENTRY_VECTOR = 0x7000;
 

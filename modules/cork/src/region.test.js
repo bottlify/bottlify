@@ -525,7 +525,7 @@ test('a region\'s sources copied a span at once are the bytes read one at a time
     // Every cork-bench image, a region at its start and at each block start of that one,
     // formed with a copy of each span at once (`bytesOf`) and without: the same in every
     // field, the sources among them.
-    const images = new URL('../../../tools/cork-bench/images/', import.meta.url);
+    const images = new URL('../bench/micro/images/', import.meta.url);
     let regions = 0;
     for (const name of readdirSync(images).filter(file=>file.endsWith('.bin')))
     {

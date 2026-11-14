@@ -58,3 +58,27 @@ differed by up to two thirds.
 the translator's configuration, so a flag is A/B'd on one bundle. Both builds of every workload,
 two reps of each, take about a minute and a half. The browser is `CDP_TEST_CHROME` or the first one
 [`tools/cdp_test`](../../../tools/cdp_test) finds.
+
+## Micro workloads
+
+[`micro/`](micro/) holds what the program above does not cover, as flat images loaded at
+0x401000 and run on the cork host in Node to their `hlt`:
+
+- the x86-64 twins of the workloads (`micro/images64/`, built by `micro/build64.sh`), for the
+  long-mode translator on the same programs as the 32-bit one;
+- `calls8|512|4096-order|scatter`: calls through a table of 8, 512 or 4096 small functions, in
+  order or scattered, where only the number of distinct targets changes;
+- `patch`: a loop calling a routine that patches its own code, which crosses from translated code
+  into the interpreter and back on every call.
+
+The 32-bit images (`micro/images/`, built by `micro/build.sh`) are also the fixtures of cork's
+emitter tests and of the emit digest (`tools/emit-digest.mjs`); `lua-x87` is Lua 5.1.5 running
+one frame of 27 addons (THIRD-PARTY-NOTICES.md). The images are committed, so a run needs no
+compiler.
+
+    node modules/cork/bench/micro/run.mjs calls patch            # 32-bit
+    node modules/cork/bench/micro/run.mjs --bits 64 calls vm     # the x86-64 twins
+    node modules/cork/bench/micro/run.mjs crc --blocks dbg/blocks   # block counts for cork-asm
+
+Each rep times the first iteration (`coldMs`) and the best of `--iters` steady ones
+(`usPerIter`); `eax` is the program's checksum and must not change with the engine.

@@ -16,8 +16,9 @@
  *     node tools/cork-asm.mjs --pe Cry3DEngine.dll --base 0x444d000 --entry 0x44e1460,0x4587299
  *
  *   --hex BYTES       the code, as hex bytes, lying at --at (default 0x1000)
- *   --bin PATH        the code, a flat image's bytes, lying at --at (a cork-bench image:
- *                     `--at 0x401000`, its block profile from `bench.mjs --blocks`)
+ *   --bin PATH        the code, a flat image's bytes, lying at --at (a micro workload's image,
+ *                     modules/cork/bench/micro: `--at 0x401000`, its block profile from
+ *                     `run.mjs --blocks`)
  *   --bits 64         the code long mode's, formed and emitted as the long-mode runtime has it
  *   --pe PATH         a PE image, its sections mapped at --base (default its own image base)
  *   --image PATH@BASE an image at the base a process mapped it at; repeated, the images
