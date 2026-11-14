@@ -127,6 +127,13 @@ const gib = bytes=>`${(bytes / 2 ** 30).toFixed(2)} GiB`;
 const [command, archive, ...rest] = process.argv.slice(2);
 const flag = (/** @type {string} */ name)=>rest.find(one=>one.startsWith(`--${name}=`))
     ?.slice(name.length + 3);
+if (!['list', 'extract'].includes(command) || !archive)
+{
+    console.error('usage: node tools/zip-extract.mjs list <archive.zip> [--depth=N]\n'
+        + '       node tools/zip-extract.mjs extract <archive.zip> <out-directory>'
+        + ' [--prefix=<folder>]');
+    process.exit(2);
+}
 const file = await open(archive, 'r');
 const { size } = await file.stat();
 const entries = await directory(file, size);

@@ -31,7 +31,7 @@
 import { ENGINE } from './chromium-v8.mjs';
 import { createWriteStream, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { openBundle } from './btl.mjs';
 import { diskDirectory } from './disk-directory.mjs';
 import { createApp } from '../modules/core/src/app.js';
@@ -41,8 +41,8 @@ import { peekBytes } from '../modules/core/src/trace.js';
 import { placementOf } from '../modules/installer/src/prefix.js';
 import { modeOf } from './play/modes.js';
 import { relayFromArgv, rootsFromArgv } from './relay-option.mjs';
+import { bundleDir, hostFiles, number, option, options } from './common.mjs';
 
-const BUNDLES = new URL('../bundles/', import.meta.url);
 
 /** @param {string[]} argv */
 function parse(argv){
@@ -60,23 +60,21 @@ function parse(argv){
         // engine's Steam client runs for the manifest's app, as game.mjs's
         // `--steam` has it, for a game that needs Steam running.
         steam: argv.includes('--steam')
-            ? JSON.parse(readFileSync(argv[argv.indexOf('--steam') + 1], 'utf8')) : null,
+            ? JSON.parse(readFileSync(String(option(argv, '--steam')), 'utf8')) : null,
         // A signed-in session (or `-`, stdin) the app's ownership ticket is
         // asked for with (bottlify-ui/gamehub/tools/steam-tickets.mjs), held for this run only.
-        steamSession: argv.includes('--steam-session')
-            ? argv[argv.indexOf('--steam-session') + 1] : null,
+        steamSession: option(argv, '--steam-session') ?? null,
         // Which executable in the bundle to start. `--which launcher` takes the
         // one the manifest names as such, and any other value is a path in the
         // bundle -- a launcher is a different program from the game it starts,
         // and only running it says whether it runs.
-        which: argv.includes('--which') ? argv[argv.indexOf('--which') + 1] : null,
+        which: option(argv, '--which') ?? null,
         // Wall seconds the run may take, for a program that waits on a person.
         seconds: argv.includes('--seconds') ? Number(argv[argv.indexOf('--seconds') + 1])
             : undefined,
         // How many processes run at once: a launcher and the game it starts,
         // side by side, each child in a worker of its own.
-        concurrency: argv.includes('--concurrency')
-            ? Number(argv[argv.indexOf('--concurrency') + 1]) : undefined,
+        concurrency: argv.includes('--concurrency') ? number(argv, '--concurrency', 1) : undefined,
         // The translator's settings for the run, merged over the probe's own
         // (`feed: 'slice'`, `timings: true`, a translation worker), so two
         // settings compare on one title.
@@ -147,32 +145,17 @@ function parse(argv){
             ? argv[argv.indexOf('--command-line') + 1] : undefined,
         // Files put on the volume before the program starts, as `HOST=GUEST`,
         // repeatable: game.mjs's `--file`, what one run wrote handed to the next.
-        files: argv.flatMap((flag, index)=>{
-            if (flag !== '--file')
-            {
-                return [];
-            }
-            const at = argv[index + 1].indexOf('=');
-            if (at < 0)
-            {
-                throw new Error(`--file wants HOST=GUEST, got ${argv[index + 1]}`);
-            }
-            return [{ path: argv[index + 1].slice(at + 1),
-                bytes: new Uint8Array(readFileSync(argv[index + 1].slice(0, at))) }];
-        }),
+        files: hostFiles(argv),
         // Guest files printed when the run ends, however it ended, repeatable: what a
         // program wrote of itself, a timedemo's result in its log (install-watch's --cat).
-        cats: argv.flatMap((flag, index)=>(flag === '--cat' && index + 1 < argv.length
-            ? [argv[index + 1]] : [])),
+        cats: options(argv, '--cat'),
         // Executors of the program's process, so one title compares on one and
         // on several (`createApp`'s `cpu.cores`).
         // The whole memory from the start (`cpu.grow` false) rather than one that grows.
         fixedMemory: argv.includes('--no-grow'),
-        executors: argv.includes('--executors')
-            ? Number(argv[argv.indexOf('--executors') + 1]) : mode.cores,
+        executors: number(argv, '--executors', mode.cores),
         // Guest RAM in megabytes, as the launcher's setting gives it.
-        memory: argv.includes('--memory')
-            ? Number(argv[argv.indexOf('--memory') + 1]) : undefined,
+        memory: argv.includes('--memory') ? number(argv, '--memory', 0) : undefined,
         // A folder to keep the translator's regions in between runs, as a
         // player's origin keeps them: the first run into it is cold, every
         // later one warm. None: every run translates from nothing.
@@ -597,7 +580,7 @@ async function main(){
 
     console.log(`mode: ${mode}, ${executors ?? 1} executor(s), cork ${JSON.stringify(corkConfig)};`
         + ` ${ENGINE}`);
-    const directory = new URL(`${id}/`, BUNDLES);
+    const directory = pathToFileURL(`${bundleDir(id)}/`);
     const manifest = JSON.parse(
         await readFile(new URL('manifest.json', directory), 'utf8'));
     const path = fileURLToPath(new URL('bundle.btl', directory));

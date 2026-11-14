@@ -1,6 +1,136 @@
-# The browser harness
+# Instruments: question -> tool
 
-[DIAGNOSING.md](DIAGNOSING.md) is the order to look in when a run is slow, flickers or stops.
+Every tool in [`tools/`](..) once, by the question it answers. [DIAGNOSING.md](DIAGNOSING.md) is
+the order to look in when a run is slow, flickers or stops; the sections below this list are
+the reference (flags, switches, what a report holds). Paths are from the repository's root.
+
+### A title in a browser, and a report
+
+- Does it run, and what did it do? - [`cdp_test/game.mjs`](game.mjs), `npm run cdp:game -- <bundle-id> [flags]` (flags below)
+- What does a frame cost once it is up? - [`cdp_test/frames.mjs`](frames.mjs), `npm run cdp:frames -- <bundle-id>`
+- Does it still run as well as before? - [`cdp_test/smoke.mjs`](smoke.mjs) `<bundle-id> [--runs 3] [--against FILE] [--checkout DIR]`: exit 0 good, 1 broke, 125 not measured, so `git bisect run` takes it
+- What does the launcher's own page cost? - [`cdp_test/launcher.mjs`](launcher.mjs) `<bundle-id>` (launcher running: `npm run ui`)
+- Does the launcher lay out on a phone, a tablet, a desktop? - [`cdp_test/ui-layout.mjs`](ui-layout.mjs) `[card regex]`
+- Does a draw reach the screen at all? - [`cdp_test/triangle.mjs`](triangle.mjs) `[--glsl] [--graphics-worker pixels]`: four pixels compared
+- Does a browser, a page and a worker answer? - [`cdp_test/probe.mjs`](probe.mjs), `npm run cdp:probe` (CI)
+- Play a bottle from this checkout - [`play.mjs`](../play.mjs) `<bundle-id>` with [`play/`](../play) (its page and the run modes game.mjs shares)
+
+### A program in Node, no browser
+
+- Where does an installer, or an installed program, stop? - [`install-watch.mjs`](../install-watch.mjs) `<setup.exe | disc.iso | archive.zip> | --bundle ID`: every process's threads, waits and parked calls
+- Where does a bundle's program stop, and what is missing? - [`launch-probe.mjs`](../launch-probe.mjs) `<bundle-id> [--which launcher|PATH]`
+- Do Wine's conformance tests pass? - [`wine-tests.mjs`](../wine-tests.mjs) `<dll>[:<test>]... [--browser] [--baseline FILE]`
+- Where do the Visual C++ runtimes' own load checks let a program run? - [`vcredist-matrix.mjs`](../vcredist-matrix.mjs) `[--fetch]`
+
+### A game a person is playing (attach, never restart)
+
+- Open the shared headed browser - [`live/browser.mjs`](live/browser.mjs) `[url] [chrome flags]`
+- Walk a title's screens by screenshots and orders - [`live/drive.mjs`](live/drive.mjs) `[card regex]` (HTTP on 9401; `CDP_PORT=driver` points the other live scripts at its browser)
+- What is this expression in the launcher tab? - [`live/eval.mjs`](live/eval.mjs) `"<expression>"`
+- What did the console say, WebGPU's errors included? - [`live/console.mjs`](live/console.mjs) `> dbg/console.log`
+- What happened in the seconds before "there"? - [`live/watch.mjs`](live/watch.mjs), then `--last 30`
+- What did the engine's thread do over the next N seconds? - [`live/phases.mjs`](live/phases.mjs) `[seconds]`
+- What changed between two reports (host calls, frames, GPU time by pass, pipelines built)? - [`live/report-diff.mjs`](live/report-diff.mjs) `[before.json] after.json [--top N]`
+- Which thread works and which waits, and on what? - [`live/worker-profile.mjs`](live/worker-profile.mjs) `[seconds] [minMs] [worker]`
+- Who allocates, garbage included? - [`live/worker-allocations.mjs`](live/worker-allocations.mjs) `[seconds] [top]`
+- Which collections ran, and why? - [`live/gc-trace.mjs`](live/gc-trace.mjs) `[seconds]`
+- A whole-browser trace without a person pressing record - [`live/record-trace.mjs`](live/record-trace.mjs) `<out.json.gz> [seconds]`
+- Is memory climbing? - [`live/memory-watch.mjs`](live/memory-watch.mjs)
+- Who holds the big buffers? - [`live/big-buffers.mjs`](live/big-buffers.mjs) `[minMB] [worker]` (a heap snapshot: not while a person plays)
+- Does it flicker? - [`live/cast.mjs`](live/cast.mjs) `[seconds] [dir]`
+- What does a texture hold on the GPU? - [`live/snapshot.mjs`](live/snapshot.mjs) `t4414 t5`
+- What did a shader become? - [`live/shader.mjs`](live/shader.mjs) `ps585`
+- What was that crackle? - [`live/audio-watch.mjs`](live/audio-watch.mjs); the sound itself: [`live/record-output.mjs`](live/record-output.mjs) `arm`, then `save`
+- What would Save put in the bottle? - [`live/bottle-contents.mjs`](live/bottle-contents.mjs) `[depth]`
+- The engine's own switches (`dumpFrames`, `pick`, `freeze`, `processes`, ...) - [Switches on the running engine](#switches-on-the-running-engine)
+
+### What a run left behind
+
+- How long did a span of frames take? - [`frame-span.mjs`](../frame-span.mjs) `<game-*-presents.json>...`
+- Which drops repeat across runs? - [`cdp_test/drop-repeat.mjs`](drop-repeat.mjs) `<frames.json> <frames.json>...`
+- What did the dropped frames do? - [`drop-profile.mjs`](../drop-profile.mjs) `<report base>` (a `--worker --cpu-profile` run)
+- Which thread and executor held the frame? - [`cdp_test/thread-window.mjs`](thread-window.mjs) `<game-*-series.json>`
+- Who calls this hot function? - [`cdp_test/cpuprofile-callers.mjs`](cpuprofile-callers.mjs) `<file.cpuprofile> <regex>`
+- Where did a person's DevTools trace go? - [`cdp_test/trace-summary.mjs`](trace-summary.mjs) `<Trace-*.json.gz>`
+- What do a title's real frames cost the graphics worker? - [`graphics-replay.mjs`](../graphics-replay.mjs) `<capture>` (a `--graphics-capture` run)
+- Does our HLSL compiler agree with Microsoft's? - [`shader-diff.mjs`](../shader-diff.mjs) `<game-*-shaders dir>` (with `shader-diff-fxc.ps1`)
+- Where are the gaps, clicks and repeats in a recording? - [`wav-scan.mjs`](../wav-scan.mjs) `<file.wav>`
+
+### The translator
+
+- Which instructions run most, and what each kind costs? - [`cork-mix.mjs`](../cork-mix.mjs) `<game-*-blocks.json>`
+- What machine code, wasm text or wasm bytes does a region become? - [`cork-asm.mjs`](../cork-asm.mjs) `--image DLL@BASE --entry A --blocks FILE`, `--wat`, `--expansion`
+- How do a run's calls go? - [`cork-calls.mjs`](../cork-calls.mjs) `<game-*-blocks.json>`
+- Which function of a system DLL is hot? - [`pdb-hot.mjs`](../pdb-hot.mjs) `<blocks.json> <dll> <pdb> <base>`
+- What is the code at `hw.dll+0x35840`? - [`disasm.mjs`](../disasm.mjs) `<bundle-id> <module> <offset[:count]>` (Python with capstone)
+- Which C runtime exports still cross into the host? - [`crt-inventory.mjs`](../crt-inventory.mjs)
+- Is cork faster than before? - [`modules/cork/bench`](../../modules/cork/bench/README.md): the PE benchmark, its browser suite and the micro workloads
+
+### The engine in Node, measured
+
+- What does one call into an import cost, or one maths operation? - [`host-call-bench.mjs`](../host-call-bench.mjs) `[N] --call SPEC` or `--math`
+- Where do several executors beat one? - [`executor-sweep.mjs`](../executor-sweep.mjs)
+- What does handing jobs between threads through semaphores cost? - [`sync-handoff-bench.mjs`](../sync-handoff-bench.mjs)
+- What does a frame of a graphics scene cost each thread, and what does it allocate? - [`graphics-node-bench.mjs`](../graphics-node-bench.mjs) `[--scenes a,b]`, `--alloc`; its browser arm: [`graphics-bench/`](../graphics-bench)
+
+### Before a title's first run, and its bottle
+
+- What does it import that we do not export? - [`import-audit.mjs`](../import-audit.mjs) `<file|dir|.btl|.iso> --dynamic --specs DIR`
+- Which instruction set extensions does it use? - [`isa-audit.mjs`](../isa-audit.mjs) `<file|dir|.btl|.iso>`
+- Pack, verify, list, extract, size by folder or prune a bundle - [`make-btl.mjs`](../make-btl.mjs) `pack|verify|list|translations|extract|tree|prune`
+- Unpack a zip of tens of gigabytes - [`zip-extract.mjs`](../zip-extract.mjs) `list|extract`
+- Do our stdcall entries pop what Windows' do? - [`arg-bytes-audit.mjs`](../arg-bytes-audit.mjs) `<Wine spec directory>`
+- What does a phone's browser keep, and which tail call kills its page? - [`webkit-probe/`](../webkit-probe) `storage.html`, `tail-calls.html`
+
+### Gates on a real GPU (`npm run cdp:*`)
+
+- Direct3D 9 shaders, translated against the reference machine - [`cdp_test/shader-gate.mjs`](shader-gate.mjs) (its page [`shader-gate.html`](shader-gate.html), which the other gates load too), `cdp:shaders` (CI)
+- User clip planes, both paths - [`cdp_test/shader-clip.mjs`](shader-clip.mjs), `cdp:clip`
+- The tessellator - [`cdp_test/tess-gate.mjs`](tess-gate.mjs) (with `tess-draw.mjs`), `cdp:tess` (CI)
+- Geometry shaders and stream output - [`cdp_test/gs-gate.mjs`](gs-gate.mjs), `cdp:gs` (CI)
+- Vertex streams a stage pulls itself - [`cdp_test/vertex-pull-gate.mjs`](vertex-pull-gate.mjs), `cdp:pull` (CI)
+- OpenGL fixed-function lighting - [`cdp_test/gl-lighting-gate.mjs`](gl-lighting-gate.mjs), `cdp:lighting`
+- OpenGL SPIR-V against GLSL - [`cdp_test/spirv-gate.mjs`](spirv-gate.mjs) (with `spirv-gate-fixtures.mjs`), `cdp:spirv`
+
+### Validators (`npm run check:boundaries`) and the repository's own jobs
+
+- [`check-budget-writes.mjs`](../check-budget-writes.mjs) - the emitter writes a region's budget only as a count
+- [`check-emit-options.mjs`](../check-emit-options.mjs) - every emit option reaches the cache key
+- [`check-guest-pointers.mjs`](../check-guest-pointers.mjs) - a handler faults on a bad guest pointer only as Windows does
+- [`check-is-main.mjs`](../check-is-main.mjs) - no script decides it was started by comparing paths itself
+- [`check-link-slots.mjs`](../check-link-slots.mjs) - one machine a slot of a process's link
+- [`check-lock-release.mjs`](../check-lock-release.mjs) - a locked word is not released by a plain store
+- [`check-overlapped-layout.mjs`](../check-overlapped-layout.mjs) - OVERLAPPED's offsets are written in one file
+- [`check-package-files.mjs`](../check-package-files.mjs) - core's package ships what its files import
+- [`check-scan-windows.mjs`](../check-scan-windows.mjs) - a scan of guest memory stays in its region
+- [`check-store-protocol.mjs`](../check-store-protocol.mjs) - a store's protocol is spoken only in GameHub
+- [`check-volume-spread.mjs`](../check-volume-spread.mjs) - no volume copied by object spread
+- [`check-wall-bounds.mjs`](../check-wall-bounds.mjs) - no test bounds a wall-clock time
+- [`check-wide-limits.mjs`](../check-wide-limits.mjs) - a UTF-16 read's limit is in bytes
+- [`emit-digest.mjs`](../emit-digest.mjs) - the 32-bit translation unchanged (`--check` against `emit-digest.json`)
+- [`docs/check.mjs`](../docs/check.mjs) - every link leads somewhere; [`docs/site.mjs`](../docs/site.mjs) builds the site (`npm run docs`), both reading pages through [`docs/markdown.mjs`](../docs/markdown.mjs)
+- [`ci-layers.mjs`](../ci-layers.mjs) - which packages a push makes CI check; [`readme-links.mjs`](../readme-links.mjs) - a package's README links, at publish
+
+### Generators (each rewrites a committed file)
+
+- [`x86-corpus.mjs`](../x86-corpus.mjs) (runner in [`x86-corpus/`](../x86-corpus)) and [`x64-corpus.mjs`](../x64-corpus.mjs) (runner in [`x64-corpus/`](../x64-corpus)) - the instruction corpora a real processor answered
+- [`x64-decode-fixture.mjs`](../x64-decode-fixture.mjs) - the 64-bit decoder's reference, from [`x64-edges.s`](../x64-edges.s)
+- [`bc-corpus.mjs`](../bc-corpus.mjs), [`tess-corpus.mjs`](../tess-corpus.mjs) - the BC6H/BC7 and tessellator corpora
+- [`gl-registry.mjs`](../gl-registry.mjs), [`glsl-functions.mjs`](../glsl-functions.mjs) - OpenGL's command sizes and GLSL's built-ins, from Khronos
+- [`steam-interfaces.mjs`](../steam-interfaces.mjs), [`uia-ids.mjs`](../uia-ids.mjs) - Steamworks' vtables and UI Automation's ids, from SDK headers
+- [`crt-dictionary.mjs`](../crt-dictionary.mjs) - cork's dictionary of C runtime signatures
+
+### Libraries and test fixtures (imported, not run)
+
+- [`common.mjs`](../common.mjs) - `isMain`, options, `median`, where bundles lie (`BOTTLIFY_BUNDLES`)
+- [`btl.mjs`](../btl.mjs), [`pe-files.mjs`](../pe-files.mjs), [`isa-scan.mjs`](../isa-scan.mjs), [`relay-option.mjs`](../relay-option.mjs), [`disk-directory.mjs`](../disk-directory.mjs), [`wizard-buttons.mjs`](../wizard-buttons.mjs), [`chromium-v8.mjs`](../chromium-v8.mjs), [`graphics-scenes.mjs`](../graphics-scenes.mjs) - what the tools above share
+- [`make-pe.mjs`](../make-pe.mjs), [`d3d9-program.mjs`](../d3d9-program.mjs), [`gl-program.mjs`](../gl-program.mjs), [`gl-glsl-program.mjs`](../gl-glsl-program.mjs), [`spawn-program.mjs`](../spawn-program.mjs), [`fake-graphics-worker.mjs`](../fake-graphics-worker.mjs), [`cpu-time.mjs`](../cpu-time.mjs) - the packages' tests' programs and helpers
+- [`browser.mjs`](browser.mjs), [`cdp.mjs`](cdp.mjs), [`server.mjs`](server.mjs), [`profile.mjs`](profile.mjs), [`device-lag.mjs`](device-lag.mjs), [`frame-window.mjs`](frame-window.mjs), [`timeout-report.mjs`](timeout-report.mjs), [`shader-cases.mjs`](shader-cases.mjs), [`job-limit.ps1`](job-limit.ps1), [`live/connect.mjs`](live/connect.mjs) - the harness's own
+
+The tools' own tests (`*.test.js` here and in `tools/`) run with `npm test` (`npm run test:tools`).
+Reports land in `tools/cdp_test/reports/` (gitignored).
+
+# The browser harness
 
 Everything a title needs before it draws (its files, its threads, its
 registry) can be answered in Node. The moment it asks for a device, only a
@@ -17,38 +147,6 @@ without it a title's films do not play. The title scenarios need a bundle under
 `bundles/<id>/` (`bundle.btl` + `manifest.json`), which is not in the
 repository; without one they say so and stop. A bundle mounts at `C:\App` in
 the guest, its files directly in that directory.
-
-## The scripts
-
-| script | what it is | run it as |
-|---|---|---|
-| [`game.mjs`](game.mjs) | starts the engine on a bundle in a GPU browser, waits, writes a report | `npm run cdp:game -- <bundle-id> [flags]` |
-| [`../wine-tests.mjs`](../wine-tests.mjs) `--browser` | Wine's conformance tests, each program packed alone as the local bundle `wine-<dll>` and run through `game.mjs` in a headless browser on SwiftShader (`--gpu-adapter hardware` for the card): what a test draws is drawn and read back, so the visual tests (`d3d8:visual`, `d3d9:visual`, `ddraw:ddraw7`, `d3d10core`, `d3d11`) answer here and only here - in node every read-back is zero. The same report.json and report.md as a node run, `--baseline` to compare; one test at a time | `node tools/wine-tests.mjs --browser d3d9:visual ddraw:ddraw7 d3d11:d3d11 [--out DIR] [--baseline FILE]` |
-| [`frames.mjs`](frames.mjs) | lets a title settle, watches a window, reports what a frame costs and why | `npm run cdp:frames -- <bundle-id> [flags]` |
-| [`thread-window.mjs`](thread-window.mjs) | a window of a `--series` run by thread and by executor, a frame: instructions, ms held, ms ready waiting for an executor (contention), ms waiting for answers; each executor's slices, answers and idle time; the host's waits by what was waited on (taken at once, blocked, polls timed out) and the semaphores' releases and wakes, which says what guest code could answer | `node tools/cdp_test/thread-window.mjs <game-<stamp>-series.json> [--from S] [--to S]` |
-| [`smoke.mjs`](smoke.mjs) | whether a title still runs, in one line and a JSON report: `game.mjs` run N times with the same flags (`--worker`, `--run-seconds`, the route's `args`), and per run how far it got (the route's `smoke.milestones`, lines matched in a file the program writes, `smoke.log`), frames presented, the frame time once the load is over (median, p10, p90), instructions, turns, the report's errors and messages, the sound fed to the mixer, wall time, with the commit and the bundle's sha256. `--against` an earlier report fails a run that stops short, has an error that one did not, or whose frame time is past that one's slowest run by more than its runs differed (5 % at least); `--checkout DIR` runs another checkout's engine with this bundle. Exit 0 good, 1 broke, 125 not measured (no bundle, no harness), so `git -C DIR bisect run node $PWD/tools/cdp_test/smoke.mjs <id> --checkout DIR --against good.json` bisects another checkout with it | `node tools/cdp_test/smoke.mjs <bundle-id> [--runs 3] [--run-seconds 240] [--against FILE] [--checkout DIR] [--json FILE] [-- game.mjs flags]` |
-| [`launcher.mjs`](launcher.mjs) | starts a title in the launcher the way a person does and profiles the page thread | `node tools/cdp_test/launcher.mjs <bundle-id> [flags]` (launcher running: `npm run ui`) |
-| [`ui-layout.mjs`](ui-layout.mjs) | the launcher's layout as screenshots at a phone, a phone on its side, a tablet, a laptop and a desktop, the page as it opens and a card's details; for judging a layout change on every size at once | `node tools/cdp_test/ui-layout.mjs [card regex] [--url URL]` (launcher running: `npm run ui`; pictures in dbg/ui-layout) |
-| [`triangle.mjs`](triangle.mjs) | the graphics acceptance scenario: a fixture draws a triangle, four pixels are compared byte for byte; `--graphics-worker pixels` draws it in the graphics worker (`bitmap`, its default way of sending frames back, makes headless SwiftShader lose the read-back's `mapAsync`); `--glsl` runs the OpenGL 2.0 program instead (`tools/gl-glsl-program.mjs`: GLSL into a framebuffer object's texture, the texture into the window, four pixels saying it is neither flipped nor mirrored) | `node tools/cdp_test/triangle.mjs [--glsl] [--graphics-worker pixels] [--isolated]`; `--isolated` serves the page cross-origin isolated, so guest memory is shared |
-| [`probe.mjs`](probe.mjs) / [`cli.mjs`](cli.mjs) | the acceptance probe: browser, page, worker, ping, screenshot | `npm run cdp:probe` |
-| [`tess-gate.mjs`](tess-gate.mjs) | the tessellator gate: every patch of the reference tessellator's corpus (`d3d10/tess-corpus.json.gz`) through the WGSL tessellator on the device, its count pass and its write pass, every point's bits and every index against the reference's; a hull fixture's records tessellated on the device; the sums between the passes with the room cut short; the vertex shader as compute over every vertex format (`tess-draw.mjs`); a draw through the engine's own Direct3D 11 device, every pixel against the domain shader's picture; and what Wine's test_quad_tessellation checks of the target (culled counter-clockwise, drawn clockwise, a patch discarded by an edge factor of 0) | `npm run cdp:tess [-- --chrome-flag --use-webgpu-adapter=swiftshader]` |
-| [`gs-gate.mjs`](gs-gate.mjs) | the geometry shader and stream-output gate: the engine's own Direct3D 11 device on the page's GPU, a vertex shader's bytecode streaming points out, a triangle strip through a geometry shader written as a list, two draws appending, a buffer with room for one triangle of two; every word read back through a staging buffer and the stream-output statistics and overflow queries, against what Direct3D writes | `npm run cdp:gs [-- --chrome-flag --use-webgpu-adapter=swiftshader]` |
-| [`vertex-pull-gate.mjs`](vertex-pull-gate.mjs) | the gate of the vertex streams a vertex stage reads itself (a stride WebGPU does not align, per-instance data stepping every several instances or for all of them, indirect draws' per-instance data) beside WebGPU's own fetch: seeded cases drawn as laid out and repacked aligned, from instance zero, through the engine's Direct3D 11 device; every pixel's bits compared | `npm run cdp:pull [-- --cases N --seed S]` |
-| [`gl-lighting-gate.mjs`](gl-lighting-gate.mjs) | the GL lighting gate: seeded random lights, materials and vertices, the processor's `lightVertex` against the vertex stage's `glLit` run as a compute dispatch on the device | `npm run cdp:lighting [-- --count 60 --vertices 32 --seed 1]` |
-| [`spirv-gate.mjs`](spirv-gate.mjs) | the OpenGL SPIR-V gate: compute programs down both shader paths, from their GLSL source and from the SPIR-V glslang made of it, plain and through `spirv-opt -O` (`spirv-glsl.js` writing the module back as GLSL), dispatched by the engine's GL context and replayed on the page's device; every word written against the source path's (arithmetic, GLSL.std.450, matrices, loops, switches, shared memory and atomics, phis that read each other, specialization constants). The modules are `spirv-gate-fixtures.mjs`, made by glslang 15.1.0 and SPIRV-Tools v2025.1 | `npm run cdp:spirv [-- --chrome-flag --use-webgpu-adapter=swiftshader]` |
-| [`browser.mjs`](browser.mjs) | finds and launches a Chromium with a CDP endpoint | library |
-| [`cdp.mjs`](cdp.mjs) | a minimal CDP client over WebSocket | library |
-| [`server.mjs`](server.mjs) | a static server for the sandbox pages, the sources and a bundle | library |
-| [`../disasm.mjs`](../disasm.mjs) | a program's own code at an address a profile names hot (`hw.dll+0x35840`), disassembled out of the bottle by module and offset (capstone) | `node tools/disasm.mjs <bundle-id> hw.dll 35840:80` |
-| [`../sync-handoff-bench.mjs`](../sync-handoff-bench.mjs) | what handing a frame's jobs between threads through semaphores costs, in node: a main thread and workers releasing and waiting (blocking or polling) at a game's rates, on each executor count; ms a frame, host calls a frame, and each thread's held, ready-waiting and answer-waiting ms a frame. A change to waits or the scheduler is measured here before a title. `--win32-config '{"handleWords":false}'` is the arm with every wait in the host | `node tools/sync-handoff-bench.mjs [--frames 200] [--jobs 28] [--workers 2] [--work 4000] [--main-work 100000] [--poll] [--executors 1,3] [--reps 3]` |
-| [`../cork-asm.mjs`](../cork-asm.mjs) | the machine instructions a region of x86 becomes: formed and emitted as cork does, compiled by a node's V8 (another architecture's node under an emulator with `--runner`), and with a game's block profile (`--blocks`, a `blockProfile` run's file) each block weighed by its executions: what an executed guest instruction costs, and with `--classes` what kinds of instruction it costs (loads and stores, constants made, spills, register moves, ...), with `--calls` what its guest calls cost by part (the return stack, the registers written back and read back, the target's lookup and the call, V8's spills), with `--form-depth N` the regions formed as the runtime's `formDepth` N forms them; the layout is a Windows process's first executor's (guest RAM from the memory's start), `--ram-base 65536` cork's own default | `node tools/cork-asm.mjs --image Cry3DEngine.dll@0x30000000 --entry 0x300a1900 --blocks game-<stamp>-blocks.json` |
-| [`../pdb-hot.mjs`](../pdb-hot.mjs) | which functions of a system or runtime DLL a block profile's executions fall in, named from the DLL's PDB (Microsoft's public symbol server, by its CodeView GUID and age), placed through the PDB's OMAP for an image reordered after linking; `find=text` gives a symbol's address in the shipped image for a `debug.hook` | `node tools/pdb-hot.mjs game-<stamp>-blocks.json clr.dll clr.pdb 2dea000` |
-| [`../cork-bench/ir-hot.sh`](../cork-bench/ir-hot.sh) | where a cork-bench workload's executed machine instructions go, exactly: one run under valgrind callgrind with every instruction's count laid on the code V8 printed for each wasm function, by region function and by kind (spills and reloads, register moves, constants, memory, branches, compares); `--list N`, `--frames N` and `--range LO-HI` print the hottest function's busiest instructions, its busiest spills and reloads, or a stretch of it with counts. Shares of a run, warm-up included; `ir.sh` gives the totals | `tools/cork-bench/ir-hot.sh crc --frames 20` |
-| [`cpuprofile-callers.mjs`](cpuprofile-callers.mjs) | who calls a function in a `.cpuprofile` (`live/worker-profile.mjs` writes `dbg/worker.cpuprofile`): the callers above every matching frame, by samples | `node tools/cdp_test/cpuprofile-callers.mjs dbg/worker.cpuprofile "^now "` |
-| [`trace-summary.mjs`](trace-summary.mjs) | a Performance trace a person saved (`Trace-*.json.gz`): each thread's busy share and garbage collection, the longest tasks with what ran and was sampled inside each (a frame rate falling to nothing for a moment), and every sampled thread's functions by self time: which thread a slow scene went to, and what in it; read an event at a time, so a trace past half a gigabyte opens | `node tools/cdp_test/trace-summary.mjs <trace.json.gz>` |
-| [`device-lag.mjs`](device-lag.mjs) | counts the engine's GPU submits and those the device finished, for a run that waits on the device | library |
-
-Reports land in `tools/cdp_test/reports/` (gitignored).
 
 ## [`game.mjs`](game.mjs): a title, a run, a report
 
@@ -101,13 +199,27 @@ too).
 | `--profile-calls` | off | every host call timed as a phase of its own, so the phase table says which API a frame's host time went to rather than only that it went to the crossing |
 | `--cpu-profile-from S` | 0 | with `--cpu-profile`: the window starts S seconds into the run instead of at the start, so a scene is profiled without the load in front of it |
 | `--heap-profile [old]` | off | with `--cpu-profile`: the same workers' allocations sampled over the same window, garbage included (`old`: only what lived long enough to be promoted, the garbage a full collection is run for), as `game-<stamp>-heap-<n>.heapprofile` (the browser's Memory panel opens it) and the top allocating sites in the report; and every worker's heap read once a second for the whole run, `game-<stamp>-heap-usage.json` (`usedSize`, `totalSize`, and `backingStorageSize`, the array buffers outside the heap). A long collection pause is paid for by what was thrown away, which is what this shows |
-| `--census` | off | every worker's ArrayBuffers, SharedArrayBuffers, typed arrays and WebAssembly memories of a mebibyte or more, by the code that made them, live bytes (made and not yet collected), as `game-<stamp>-census.json` every minute and at the end (`census.mjs`): what Chrome's memory dump shows only as one `partition_alloc/array_buffer` sum, by owner |
 | `--roots FILE` | none | A PEM bundle (`/etc/ssl/certs/ca-certificates.crt`) added to the machine's trusted roots: the ROOT store a program doing its own TLS has crypt32 judge a server's chain against |
 | `--win32-config JSON` | none | createApp's `win32` for the run, e.g. `{"handleWords":false}`: events, mutexes, semaphores and their waits answered by the host instead of the guest's handle words, a run that differs from an ordinary one by that path alone |
 | `--steam FILE` | none | a signed-in Steam account, as `node bottlify-ui/gamehub/tools/steam-account.mjs --session <session> --out FILE` writes it (its Steam ID, name and owned app ids): the run has the engine's Steam client running for it, the app being the manifest's `steam.appId` -- what a game that needs Steam running (SteamAPI_Init) starts with |
 | `--cpu-config JSON` | none | createApp's `cpu` for the run, e.g. `{"gcNudge":false}` |
 | `--cork-config JSON` | `{"timings":true}` | the translator's own settings for the run, e.g. `{"countTransfers":true}` or `{"relinkAfter":0}`; the harness turns the translator's `timings` on (its milliseconds and `stalls`), which a shipped build leaves off, and `{"timings":false}` runs as it does; `{"traceStore":true}` writes every store key put and missed to `game-<stamp>-store.json` beside the report, for comparing a cold run's keys with a warm run's; `{"blockProfile":true}` counts every translated block's executions (with `"blockProfileFrom":S` only from S seconds on, so a profile holds the game and not its load) (no store is kept that run), prints the twenty hottest as `hottest blocks` and how calls, returns, transfers and `rdtsc`s went as `mechanisms` (cork's `Mechanism`) and what the hot code is made of as `forms` (each instruction form's executions and wasm bytes), and writes all of them to `game-<stamp>-blocks.json`, which `node tools/cork-mix.mjs <that file> [--top N]` turns into the dynamic instruction mix (a DLL's blocks too, placed with `--image name.dll@base`, or `--file path@base` for an image on disk, such as a runtime a setup installed into the bottle) by operation and operand form with the wasm operations cork emits for each form, ranked by weighted cost, and `node tools/cork-asm.mjs --image name.dll@base --entry A,B --blocks <that file>` into the machine instructions an executed guest instruction costs: the regions emitted again, compiled by a node's V8 (`--runner` another node, e.g. an arm64 one under qemu), each block's code found by a mark and weighed by its executions |
 | `--js-flags FLAGS` | none | V8 flags for the browser (`--no-liftoff`), for a question about the wasm tiers |
+| `--mode NAME` | none | a run mode by name, the player's own ([`../play/modes.js`](../play/modes.js)): its cores and translator settings, under any `--executors` or `--cork-config` given |
+| `--executors N` | the mode's | executors of the program's process (`createApp`'s `cpu.cores`): past one, threads ready together run at once |
+| `--placement spread\|concentrate` | the engine's | where ready threads run past one executor (`cpu.placement`, a debugging switch) |
+| `--concurrency N` | the engine's | processes at once, each child in a worker of its own |
+| `--memory MB` | 2048 | the machine's memory as the launcher's setting gives it, so a run meets a player's address space |
+| `--machine-memory MB` | 0 | every process of the run together (`machineMemory`); 0 bounds each process by `--memory` alone |
+| `--disc FILE` | none | a disc image mounted as D: for the run, as the disc a program was installed from stays in the drive |
+| `--type text,after` | off | text typed into whatever has the focus, a character a presented frame from `after`, each a key press with its character. Repeatable |
+| `--paste text,after` | off | text put on the clipboard and pasted with Control-V at `after`. Repeatable |
+| `--shots-every S` | off | a screenshot every S seconds of the run, beside the report |
+| `--dump-at S` | off | S seconds in, the next frame written down draw by draw (`dumpFrames(1)`) |
+| `--log-times` | off | each line of `--log` led by the page's clock in ms: where a run stood still is the gap between two lines |
+| `--journal-calls` | off | the call areas a person's report is taken with, traced from the first instruction |
+| `--steam-session FILE` | none | a signed-in session (`-`: stdin) the app's ownership ticket is asked for with, for this run only; needs the launcher's checkout beside this one (`bottlify-ui/gamehub/tools`) |
+| `--steam-ticket APP=FILE` | none | an ownership ticket already in a file, for a run with no session. Repeatable |
 | env `CDP_TEST_CHROME_LOG` | off | A file the browser's own log goes to (`--enable-logging=stderr`): its renderer's and GPU process's messages, the one trace a crash of the page leaves |
 | env `CDP_TEST_MEMORY_MB` | 8192 | One memory ceiling for all the browser's processes together (Windows job object, `job-limit.ps1`); past it the browser dies, not the machine. `0` turns it off |
 | `--no-video` | video on | assemble the engine without a decoder, so a run is not measured through a cinematic |
@@ -159,30 +271,7 @@ keeps a headless launcher tab of its own. A worker is reached through the
 page's auto-attach (`connect.mjs`), because a cross-origin-isolated page's
 workers answer nothing to a direct attach.
 
-| script | what it answers | run it as |
-|---|---|---|
-| [`browser.mjs`](browser.mjs) | opens the headed browser on the launcher, profile kept in `dbg/chrome-profile` | `node tools/cdp_test/live/browser.mjs [url] [chrome flags]` (`--use-webgpu-adapter=swiftshader` for the software adapter) |
-| `eval.mjs` | the value of an expression in the launcher tab (`window.__bottlify__` is the engine) | `node tools/cdp_test/live/eval.mjs "<expression>"` |
-| `audio-watch.mjs` | four times a second, with the clock: laps replayed, silence held, blocks starved, writer skips, late guest threads: what a crackle was | `node tools/cdp_test/live/audio-watch.mjs` |
-| `memory-watch.mjs` | every five seconds: the tab's private memory and each worker's JS heap | `node tools/cdp_test/live/memory-watch.mjs` |
-| `worker-profile.mjs` | a worker's time (the engine's, or `graphics`, `executor`, `translator`, the n-th of them as `executor#2`): idle, GC, top functions, and every pause outside guest code with when it began | `node tools/cdp_test/live/worker-profile.mjs [seconds] [minMs] [worker]` |
-| `phases.mjs` | what the run did over the next N seconds rather than since it began: frames presented, the engine's phases (guest, trap, idle-host, yield) and the host calls that took the most time, as differences of two readings | `node tools/cdp_test/live/phases.mjs [seconds] [windows] [top]` |
-| `record-trace.mjs` | a Performance trace of the whole browser for N seconds (every thread's tasks, JS samples on every worker, collection, wasm compilation, V8's own pool threads), gzipped for `trace-summary.mjs`: where a stretch of a run went without a person pressing record | `node tools/cdp_test/live/record-trace.mjs <out.json.gz> [seconds]` |
-| `gc-trace.mjs` | every collection of every thread over N seconds from V8's own trace: minor and full, why each ran, the pauses, and the global sum V8 schedules full collections by against its limit | `node tools/cdp_test/live/gc-trace.mjs [seconds]` |
-| `cast.mjs` | every frame the tab composed, as JPEGs with their times and sizes: a flicker a screenshot misses, and the canvas a screenshot shows black | `node tools/cdp_test/live/cast.mjs [seconds] [dir]` |
-| `worker-allocations.mjs` | what the engine worker allocates, garbage included: MiB/s and the functions that allocate most, with their callers, which is what a collector pause pays for | `node tools/cdp_test/live/worker-allocations.mjs [seconds] [top]` |
-| `allocations.mjs` | which functions of the engine worker allocate the most, garbage included | `node tools/cdp_test/live/allocations.mjs [seconds]` |
-| `big-buffers.mjs` | every backing store over a size in a worker (the engine's, or `graphics`, `executor`, `translator`), what holds it, and the whole heap summed by kind; snapshots of any size | `node tools/cdp_test/live/big-buffers.mjs [minMB] [worker]` |
-| `drive.mjs` | a headless launcher tab that stays up and takes orders on http://127.0.0.1:9401: `/shot` (the picture as a PNG), `/click?x=&y=` in the program's pixels, `/move?x=&y=` (no button), `/drag?x=&y=&to=X,Y&steps=N` (the left button held along the way, to drag a window), `/key?code=`, `/type?text=`, `/eval?js=`, `/stack` (where the tab's own code is running when it answers nothing else; the debugger interrupts it), `/upload?file=` (a file into the page's file input, the library's Add, to run an installer), `/quit`. It is for walking a title's screens a step at a time with screenshots, a person saying what to press next; the engine is `globalThis.app` in the tab, reports land in dbg/live-downloads | `node tools/cdp_test/live/drive.mjs [card regex] [query]` (launcher running over TLS on 5180) |
-| `report-diff.mjs` | what happened between two of the launcher's reports of one run: frames and rate, host calls by time (calls, seconds, a frame, a call), bytes sent to the worker a frame; a window of a scene rather than a whole run | `node tools/cdp_test/live/report-diff.mjs before.json after.json [top]` |
-| `bottle-contents.mjs` | what an installation finished in the driven tab would put in its bottle, by directory and size, after the collection rule, and what that rule leaves out; read it before Save | `node tools/cdp_test/live/bottle-contents.mjs [depth] [port]` |
-| `record-output.mjs` | what the person hears, uncompressed off the output node, the last two minutes (`arm` keeps a tap across reloads; `save` writes a WAV) | `node tools/cdp_test/live/record-output.mjs arm` then `… save [seconds] [file]` |
-| `snapshot.mjs` | textures of the running program as the GPU holds them, as PNGs, Direct3D and OpenGL: the targets, shadow maps and textures a frame dump names, alpha kept (`--opaque` drops it), a float format stretched between its smallest and largest values; for OpenGL also what GL holds of the texture (levels, filters, base and max level, generate-mipmap, complete), which is why a draw samples a placeholder (`bound=[0:t5!]`) | `node tools/cdp_test/live/snapshot.mjs t4414 t5 [--out DIR] [--opaque]` |
-| `watch.mjs` | left running in the background beside a person playing: every second the frames, every two each process's host calls, the guest code that grew and GDI's blits by path, to `dbg/watch.jsonl`; `--last N` folds the last N seconds when they say "there" | `node tools/cdp_test/live/watch.mjs` (background), then `… --last 30` |
-| `console.mjs` | the page's console as it happens, each line timed: WebGPU validation errors the page never shows, which Chrome stops printing after a few hundred per device; start it with the session | `node tools/cdp_test/live/console.mjs > dbg/console.log` |
-| `shader.mjs` | a shader of the running game read whole: the Direct3D bytecode disassembled, then every WGSL translation of it. Take the id from a dump (`dumpFrames(2)`: the second frame is whole), the draw whose picture is wrong | `node tools/cdp_test/live/shader.mjs ps585 vs586 > dbg/ps585.txt` |
-
-`tools/wav-scan.mjs <file.wav>` reads such a recording for what is wrong in it: gaps of
+The scripts are in the index above. `tools/wav-scan.mjs <file.wav>` reads a recording for what is wrong in it: gaps of
 silence inside sound, clicks (a step far beyond the signal's own), and exact repeats.
 
 ### Switches on the running engine
@@ -593,6 +682,11 @@ commit before is `git worktree add --detach ../base <commit>`). `--json` prints 
 profiler and prints the functions a crossing spends its time in (the dispatch, the reads of
 guest memory, the bookkeeping), which is what a change to the crossing is judged by. Pin it to
 one core (`taskset -c N`) on a quiet machine: the spread printed is how far to trust a median.
+
+`--math [--pc 53|24|both] [--rows REGEX]` times a program's mathematics instead: each operation
+(msvcrt's maths in its cdecl and `_CI` forms, d3dx9's matrices and vectors, MulDiv, 64-bit
+division, or the x87's own instructions inline) N times over 256 doubles against the same loop
+without it, under double and single precision control, with a digest of what it computed.
 
 ## `../graphics-replay.mjs`: what a title's frames cost the graphics worker
 

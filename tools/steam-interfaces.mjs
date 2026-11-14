@@ -32,7 +32,8 @@ import { join } from 'node:path';
 const [directory] = process.argv.slice(2);
 if (!directory)
 {
-    throw new Error('usage: node tools/steam-interfaces.mjs <directory of isteam*.h>');
+    console.error('usage: node tools/steam-interfaces.mjs <directory of isteam*.h>');
+    process.exit(2);
 }
 
 /** How each family's version strings are spelled, before the three digits. */

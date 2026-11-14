@@ -31,6 +31,7 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isMain } from './common.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const DIRS = process.argv.length > 2 ? process.argv.slice(2)
@@ -444,9 +445,7 @@ export function untimedHosts(source){
     return /\bcreateCorkHost\s*\(/.test(code) && !/\bsliceMs\b/.test(code);
 }
 
-const isMain = process.argv[1] !== undefined
-    && fileURLToPath(import.meta.url) === process.argv[1];
-if (isMain)
+if (isMain(import.meta.url))
 {
     /** @type {string[]} */
     const problems = [];

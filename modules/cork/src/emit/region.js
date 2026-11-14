@@ -434,7 +434,7 @@ const recordFieldsOf = layout=>{
  *     expansion?: ExpansionNote | null, markBlocks?: boolean, crossTailCalls?: boolean,
  *     callDepth?: number }}
  *     [options]  expansion: told every instruction's wasm bytes as it is emitted
- *     (`tools/cork-expansion.mjs`), in a diagnostic build only; markBlocks: each block
+ *     (`tools/cork-asm.mjs --expansion`), in a diagnostic build only; markBlocks: each block
  *     marked for the machine code (`blockMark`), likewise; checkReads: an
  *     instruction that only reads tests its pages too, so a page the program cannot read
  *     faults (a reservation not committed, PAGE_NOACCESS) rather than reading RAM;

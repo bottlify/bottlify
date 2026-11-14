@@ -45,7 +45,7 @@
  * in `.bottlify\registry.json`.
  *
  * The installed app is reached as an `AppTree`, so the one install runs over
- * a directory on a host (tools/redist.mjs, bottlify-ui/gamehub/tools/steam-install.mjs) and over a
+ * a directory on a host (bottlify-ui/gamehub/tools/steam-install.mjs) and over a
  * bottle a page writes in the browser (`install.js`).
  */
 

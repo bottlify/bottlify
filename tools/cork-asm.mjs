@@ -16,8 +16,9 @@
  *     node tools/cork-asm.mjs --pe Cry3DEngine.dll --base 0x444d000 --entry 0x44e1460,0x4587299
  *
  *   --hex BYTES       the code, as hex bytes, lying at --at (default 0x1000)
- *   --bin PATH        the code, a flat image's bytes, lying at --at (a cork-bench image:
- *                     `--at 0x401000`, its block profile from `bench.mjs --blocks`)
+ *   --bin PATH        the code, a flat image's bytes, lying at --at (a micro workload's image,
+ *                     modules/cork/bench/micro: `--at 0x401000`, its block profile from
+ *                     `run.mjs --blocks`)
  *   --bits 64         the code long mode's, formed and emitted as the long-mode runtime has it
  *   --pe PATH         a PE image, its sections mapped at --base (default its own image base)
  *   --image PATH@BASE an image at the base a process mapped it at; repeated, the images
@@ -54,6 +55,15 @@
  *   --classes         with --blocks, what the executed machine instructions are, by kind
  *                     (`classOf`), and the --count pattern weighed the same way: where a
  *                     translation's instructions go besides the guest's own work
+ *   --wat             print each region as wasm text (wabt's wasm2wat) instead of compiling
+ *                     it; --module the whole module, helpers included, --precise the precise
+ *                     x87 (every exception flag kept)
+ *   --expansion       how much bigger the wasm is than the x86: regions formed from every
+ *                     function start in the code (past each run of int3 or nop padding),
+ *                     each instruction counted once, the wasm bytes it took in its region's
+ *                     body set against its own length, by form; --top N rows (40), forms
+ *                     over --over X (3) marked, --json. --report REPORT.json takes the code
+ *                     a report carries (`hotCode`, the pages its hottest blocks lie in)
  *   --calls           with --blocks, the blocks that make a guest call as a wasm call
  *                     (`callReturn`) taken apart (`callPartOf`): the return stack, the
  *                     registers written into the state block, the target's lookup and the
@@ -73,6 +83,7 @@ import { join } from 'node:path';
 import { regionModule } from '../modules/cork/src/region-module.js';
 import { BLOCK_MARK_ARM, BLOCK_MARK_END, CallStack } from '../modules/cork/src/emit/region.js';
 import { ownLayout } from '../modules/cork/src/runtime/layout.js';
+import { formOf } from '../modules/cork/src/runtime/profile-forms.js';
 
 const args = process.argv.slice(2);
 /** @param {string} name */
@@ -197,11 +208,13 @@ function machineCode(wasm, index){
 const pePath = value('--pe');
 const hex = value('--hex');
 const binPath = value('--bin');
-if (pePath === null && hex === null && binPath === null && !args.includes('--image'))
+const reportPath = value('--report');
+if (pePath === null && hex === null && binPath === null && reportPath === null
+    && !args.includes('--image'))
 {
     console.error('usage: node tools/cork-asm.mjs --hex BYTES [--at ADDRESS] | --pe PATH'
         + ' [--base ADDRESS] | --image PATH@BASE... [--entry LIST] [--hash] [--atomic]'
-        + ' [--ram MB] [--listing] [--blocks FILE]');
+        + ' [--ram MB] [--listing] [--blocks FILE] [--wat] | --report FILE --expansion');
     process.exit(2);
 }
 let code;
@@ -234,6 +247,11 @@ else if (binPath !== null)
 {
     code = readFileSync(binPath);
     at = Number(value('--at') ?? 0x1000);
+}
+else if (hex === null)
+{
+    code = new Uint8Array(0);
+    at = 0;
 }
 else
 {
@@ -475,6 +493,17 @@ function callPartsOf(lines){
     return parts;
 }
 
+if (args.includes('--expansion'))
+{
+    /** @type {{ at: number, bytes: Uint8Array }[]} */
+    const pieces = reportPath === null ? [{ at, bytes: Uint8Array.from(code) }]
+        : (JSON.parse(readFileSync(reportPath, 'utf8')).hotCode ?? [])
+            .map((/** @type {any} */ page)=>({ at: page.address,
+                bytes: Buffer.from(page.base64, 'base64') }));
+    expansion(pieces);
+    process.exit(0);
+}
+
 const processors = Number(value('--processors') ?? 3);
 /**
  * The module as the runner's own host emits it: an arm64 one's default NaN is positive, which
@@ -487,6 +516,41 @@ const hostFeatures = !armRunner ? { defaultNaNNegative: true }
 console.log(`emitted for ${!armRunner ? 'an x64 host'
     : hostFeatures.armHost ? 'an arm64 host, the NaN sign left as the host makes it'
         : 'an arm64 host, the NaN sign fixed up for x86 (--exact-nan)'}`);
+if (args.includes('--wat'))
+{
+    const { default: wabt } = await import('wabt');
+    const tools = await wabt();
+    for (const entry of entries)
+    {
+        const made = regionModule({ code, at, entry, hash, callReturn: hash, ramSize, ramBase,
+            atomic: args.includes('--atomic'), ordered: args.includes('--ordered'),
+            checked: false, wide: true, looseStacks: true, hostFeatures, processors,
+            precise: args.includes('--precise'),
+            form: formDepth === null ? {} : { formDepth }, bits });
+        // What cork's modules use beyond the first release: tail calls into other
+        // regions, SIMD, shared memory and its atomics, bulk memory.
+        const module = tools.readWasm(made.wasm, { readDebugNames: true, tail_call: true,
+            simd: true, threads: true, bulk_memory: true, sign_extension: true,
+            sat_float_to_int: true, multi_value: true, mutable_globals: true });
+        module.generateNames();
+        module.applyNames();
+        const text = module.toText({ foldExprs: false, inlineExport: true });
+        module.destroy();
+        console.log(`; region at 0x${made.entry.toString(16)}: ${made.blocks.length} blocks,`
+            + ` ${made.blocks.reduce((sum, block)=>sum + block.instructions, 0)} instructions,`
+            + ` ${made.bytes} x86 bytes, module ${made.wasm.length} bytes`
+            + (Object.keys(made.refused).length > 0
+                ? `, refused ${JSON.stringify(made.refused)}` : ''));
+        // The exported region alone, from its `(func` to the next one, unless --module.
+        const lines = text.split('\n');
+        const start = args.includes('--module') ? 0
+            : lines.findIndex(line=>line.includes('(export "region")'));
+        const end = args.includes('--module') ? -1
+            : lines.findIndex((line, index)=>index > start && /^\s*\(func /.test(line));
+        console.log(lines.slice(start, end < 0 ? undefined : end).join('\n'));
+    }
+    process.exit(0);
+}
 const counted = value('--count') === null ? null : new RegExp(/** @type {string} */ (value('--count')));
 console.log(`     entry  blocks  x86  wasm B  machine  bytes  per x86${counted ? '  matched' : ''}`
     + (profile ? '  ran x86  weighted' : ''));
@@ -621,6 +685,126 @@ if (profile !== null && ranX86 > 0)
             console.log(`  ${part.padEnd(28)} ${(runs / ranMachine * 100).toFixed(1).padStart(5)}%`
                 + (part === 'blocks without a guest call' || callsRan === 0 ? ''
                     : `  ${(runs / callsRan).toFixed(1).padStart(6)} a call`));
+        }
+    }
+}
+
+/**
+ * --expansion: the wasm bytes each instruction of the pieces takes, by form.
+ *
+ * @param {{ at: number, bytes: Uint8Array }[]} pieces
+ */
+function expansion(pieces){
+    const top = Number(value('--top') ?? 40);
+    const over = Number(value('--over') ?? 3);
+    // Neighbouring pages as one piece, so a function crossing a page is whole.
+    pieces.sort((left, right)=>left.at - right.at);
+    /** @type {{ at: number, bytes: Uint8Array }[]} */
+    const joined = [];
+    for (const piece of pieces)
+    {
+        const last = joined[joined.length - 1];
+        if (last && last.at + last.bytes.length === piece.at)
+        {
+            last.bytes = Buffer.concat([last.bytes, piece.bytes]);
+        }
+        else
+        {
+            joined.push({ at: piece.at, bytes: Uint8Array.from(piece.bytes) });
+        }
+    }
+
+    /**
+     * Where functions start in a piece: past each run of two or more int3 or nop
+     * bytes, and at its own start.
+     *
+     * @param {Uint8Array} bytes
+     */
+    const startsIn = bytes=>{
+        const starts = [0];
+        let run = 0;
+        for (let offset = 0; offset < bytes.length; offset++)
+        {
+            if (bytes[offset] === 0xcc || bytes[offset] === 0x90)
+            {
+                run++;
+                continue;
+            }
+            if (run >= 2)
+            {
+                starts.push(offset);
+            }
+            run = 0;
+        }
+        return starts;
+    };
+
+    /** @type {Map<number, { form: string, x86: number, wasm: number, lowered: boolean }>} */
+    const seen = new Map();
+    let regions = 0;
+    let failed = 0;
+    for (const { at: base, bytes } of joined)
+    {
+        for (const start of startsIn(bytes))
+        {
+            try
+            {
+                regionModule({ code: bytes, at: base, entry: base + start, hash: true,
+                    callReturn: true,
+                    looseStacks: true, structure: true,
+                    expansion: (instruction, wasm, lowered)=>{
+                        if (!seen.has(instruction.eip))
+                        {
+                            seen.set(instruction.eip, { form: formOf(instruction),
+                                x86: instruction.length, wasm, lowered });
+                        }
+                    } });
+                regions++;
+            }
+            catch {
+                failed++;
+            }
+        }
+    }
+
+    /** @type {Map<string, { count: number, x86: number, wasm: number, refused: number }>} */
+    const byForm = new Map();
+    let x86 = 0;
+    let wasm = 0;
+    for (const one of seen.values())
+    {
+        const row = byForm.get(one.form) ?? { count: 0, x86: 0, wasm: 0, refused: 0 };
+        row.count++;
+        row.x86 += one.x86;
+        row.wasm += one.wasm;
+        row.refused += one.lowered ? 0 : 1;
+        byForm.set(one.form, row);
+        x86 += one.x86;
+        wasm += one.wasm;
+    }
+    const rows = [...byForm].map(([form, row])=>({ form, ...row, ratio: row.wasm / row.x86 }))
+        .sort((left, right)=>right.wasm - left.wasm);
+    if (args.includes('--json'))
+    {
+        console.log(JSON.stringify({ regions, failed, instructions: seen.size, x86, wasm,
+            ratio: wasm / x86, rows }, null, 1));
+    }
+    else
+    {
+        console.log(`regions ${regions} (${failed} not formed), instructions ${seen.size},`
+            + ` x86 ${x86} bytes, wasm ${wasm} bytes: x${(wasm / x86).toFixed(2)}`);
+        console.log(`wasm bytes an instruction: ${(wasm / seen.size).toFixed(1)}`
+            + ` (x86: ${(x86 / seen.size).toFixed(1)})`);
+        console.log('form'.padEnd(34) + 'count'.padStart(7) + 'x86 B'.padStart(8)
+            + 'wasm B'.padStart(9) + '  B/insn  ratio  share of wasm');
+        for (const row of rows.slice(0, top))
+        {
+            console.log(row.form.slice(0, 33).padEnd(34) + String(row.count).padStart(7)
+                + String(row.x86).padStart(8) + String(row.wasm).padStart(9)
+                + `  ${(row.wasm / row.count).toFixed(0).padStart(6)}`
+                + `  x${row.ratio.toFixed(1).padEnd(6)}${(100 * row.wasm / wasm).toFixed(1)}%`
+                + (row.ratio > over ? '  over' : '')
+                + (row.refused > 0 ? `  refused ${row.refused}` : ''));
         }
     }
 }

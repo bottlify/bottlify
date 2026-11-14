@@ -36,6 +36,7 @@ import { formRegion } from '../modules/cork/src/region.js';
 import { emitBuilt } from '../modules/cork/src/runtime/emit-built.js';
 import { ownLayout } from '../modules/cork/src/runtime/layout.js';
 import { features } from '../modules/cork/src/wasm/features.js';
+import { bundleDir } from './common.mjs';
 
 const args = process.argv.slice(2);
 const flag = (/** @type {string} */ name, /** @type {string} */ fallback)=>(args.includes(name) ? args[args.indexOf(name) + 1] : fallback);
@@ -45,7 +46,7 @@ const blocks = profile.blocks ?? profile.blockCounts;
 const bundleId = flag('--bundle', profile.bundle);
 const top = Number(flag('--top', '30'));
 
-const directory = join('bundles', bundleId);
+const directory = bundleDir(bundleId);
 const manifest = JSON.parse(readFileSync(join(directory, 'manifest.json'), 'utf8'));
 // The entry image at its own preferred base, and any other image named as
 // `--image gamex86.dll@0x5500000`: a DLL is placed where the run put it, which

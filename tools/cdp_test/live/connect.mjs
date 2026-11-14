@@ -11,10 +11,18 @@
  * A worker is reached through the page's auto-attach, not by attaching to the
  * worker's target directly: a cross-origin-isolated page runs its workers in a
  * process of its own, and a direct attach there answers nothing.
+ *
+ * `CDP_PORT=driver` attaches to the browser `drive.mjs` keeps up instead, found
+ * through the DevToolsActivePort file of its profile (`DRIVE_PROFILE`,
+ * dbg/chrome-profile by default).
  */
+import { readFileSync } from 'node:fs';
 import { CdpEndpoint } from '../cdp.mjs';
 
-export const PORT = Number(process.env.CDP_PORT ?? 9333);
+const driverProfile = process.env.DRIVE_PROFILE ?? 'dbg/chrome-profile';
+export const PORT = Number(process.env.CDP_PORT === 'driver'
+    ? readFileSync(`${driverProfile}/DevToolsActivePort`, 'utf8').split('\n')[0]
+    : process.env.CDP_PORT ?? 9333);
 
 /**
  * @param {string} [match]  Text the launcher tab's URL contains: the local launcher's

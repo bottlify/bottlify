@@ -27,6 +27,7 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isMain } from './common.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 
@@ -87,7 +88,7 @@ export function storeProtocolIssues(files, base){
     return issues;
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1]))
+if (isMain(import.meta.url))
 {
     const argv = process.argv.slice(2);
     /** @param {string} name @param {string} fallback */

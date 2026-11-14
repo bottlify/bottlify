@@ -33,6 +33,7 @@ import {
     colourMaterialTargets, lightVertex, normalMatrix, normalise,
 } from '../../modules/core/src/layers/graphics/opengl/lighting.js';
 import { GL } from '../../modules/core/src/layers/graphics/opengl/constants.js';
+import { isMain } from '../common.mjs';
 
 const TOOL_ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)));
 const REPORTS_DIR = join(TOOL_ROOT, 'reports');
@@ -352,7 +353,7 @@ async function main(){
     return failures.length === 0 ? 0 : 1;
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url))
+if (isMain(import.meta.url))
 {
     main().then(code=>process.exit(code), error=>{
         console.error(error);

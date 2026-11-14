@@ -36,6 +36,7 @@ import { TRIANGLE_COLOURS, TRIANGLE_REPORT } from '../make-pe.mjs';
 import { waitingParent } from '../spawn-program.mjs';
 import { GLSL_SAMPLES, OUT, glslProgram } from '../gl-glsl-program.mjs';
 import { bytesOfHex } from '../gl-program.mjs';
+import { isMain } from '../common.mjs';
 
 const GLSL = process.argv.includes('--glsl');
 
@@ -332,7 +333,7 @@ export async function runTriangleAndExit(){
     }
 }
 
-if (import.meta.url === new URL(`file://${process.argv[1].replace(/\\/g, '/')}`).href)
+if (isMain(import.meta.url))
 {
     process.exit(await runTriangleAndExit());
 }

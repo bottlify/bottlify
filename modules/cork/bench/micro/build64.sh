@@ -1,7 +1,7 @@
 #!/bin/sh
 # Builds the x86-64 twins of build.sh's workload images into images64/: the same sources compiled
 # for long mode (SysV's calling convention, SSE2 floats as an x64 compiler's), each a flat image
-# loaded at 0x401000 like the 32-bit ones, so `bench.mjs --bits 64` runs every workload the
+# loaded at 0x401000 like the 32-bit ones, so `run.mjs --bits 64` runs every workload the
 # 32-bit translator runs on the 64-bit one. The x87 builds have no twin (an x64 compiler emits
 # SSE); a float workload's twin is named after its SSE build. lua-x64 is Lua 5.1.5 as lua-x87,
 # its libc's floor, ceil, fabs and sqrt SSE2 as an x64 runtime's. Needs gcc, GNU binutils and,

@@ -124,7 +124,7 @@ launcher or GameHub's content script.
   and the frame going on, the art, a manifest and a chunk, the sign-in page's QR code polled on
   with the worker stopped and its document out of the page's reach, the session sealed, Steam
   switched off.
-- **The gates**: the install differential (`tools/steam-install.test.js`), the bundle build test,
+- **The gates**: the install differential (`modules/core/src/steam/install-directory.test.js`), the bundle build test,
   `check:boundaries` with `tools/check-store-protocol.mjs`.
 
 Not tested against Steam itself: a scanned QR code, a password sign-in and each Steam Guard code

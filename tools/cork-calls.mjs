@@ -37,6 +37,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { openBundle } from './btl.mjs';
 import { decode } from '../modules/cork/src/decode/decoder.js';
+import { bundleDir } from './common.mjs';
 
 const args = process.argv.slice(2);
 /** @param {string} name */
@@ -62,7 +63,7 @@ const place = (bytes, base)=>{
 const bundleId = flag('--bundle', profile.bundle);
 if (bundleId)
 {
-    const directory = join('bundles', bundleId);
+    const directory = bundleDir(bundleId);
     const manifest = JSON.parse(readFileSync(join(directory, 'manifest.json'), 'utf8'));
     const opened = await openBundle(join(directory, manifest.bundle?.file ?? 'bundle.btl'));
     place(await opened.read(manifest.entry), null);

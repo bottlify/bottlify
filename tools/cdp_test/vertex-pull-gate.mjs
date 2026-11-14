@@ -44,6 +44,7 @@ import { COMPONENT_TYPE, SHADER_KIND, SYSTEM_VALUE } from
 import { PULLED_VERTEX_FORMAT, VERTEX_FORMAT, VERTEX_FORMAT_BYTES } from
     '../../modules/core/src/layers/graphics/d3d10/gpuformats.js';
 import { smallFloatOf } from '../../modules/core/src/layers/graphics/d3d10/uavclear.js';
+import { isMain } from '../common.mjs';
 
 /** DXGI_FORMAT_R32G32B32A32_FLOAT, the decoded arm of a pulled-only format. */
 const RGBA32_FLOAT = 2;
@@ -431,7 +432,7 @@ async function main(){
     process.exitCode = failed === 0 ? 0 : 1;
 }
 
-if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`)
+if (isMain(import.meta.url))
 {
     await main();
 }

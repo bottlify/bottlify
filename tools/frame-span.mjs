@@ -38,6 +38,12 @@ const frames = flag('--frames', 500);
 const seconds = args.includes('--seconds')
     ? args[args.indexOf('--seconds') + 1].split('-').map(Number) : null;
 const files = args.filter((one, at)=>!one.startsWith('--') && !args[at - 1]?.startsWith('--'));
+if (files.length === 0)
+{
+    console.error('usage: node tools/frame-span.mjs <presents.json>... [--skip N] [--frames N]'
+        + ' [--seconds A-B]');
+    process.exit(2);
+}
 
 for (const file of files)
 {

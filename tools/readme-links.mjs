@@ -16,6 +16,7 @@
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join, posix, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isMain } from './common.mjs';
 
 const REPO = 'https://github.com/bottlify/bottlify';
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
@@ -42,7 +43,7 @@ export function absoluteLinks(text, dir, ref){
         .replace(/(<img[^>]*\ssrc=")([^"]+)(")/g, (_, a, url, b)=>a + fix(url) + b)).join('');
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url))
+if (isMain(import.meta.url))
 {
     const [ref, ...dirs] = process.argv.slice(2);
     if (!ref || dirs.length === 0)
