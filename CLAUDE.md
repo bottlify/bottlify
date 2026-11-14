@@ -1,6 +1,6 @@
 # Bottlify
 
-Bottlify is a set of packages for running Win32 x86 programs in the browser: **cork**, our x86 → wasm translator
+Bottlify is a set of packages for running Win32 x86 and x86-64 programs in the browser: **cork**, our x86 → wasm translator
 (`modules/cork`), in a Web Worker, under a from-scratch Win32/DirectX layer (`modules/core`) on
 WebGPU, WebAudio and OPFS. Where this file and the tree disagree, the tree is right and this file
 is the bug.
@@ -46,13 +46,13 @@ outward-facing action) or for a wait a rule imposes, and say what waits on what.
   Win32, graphics, sound, networking, storage); `docs/core/` is `@bottlify/core`'s public
   contract (API, configuration, limits), written for someone outside the project;
   `docs/cork/` is the translator. A module's own `README.md` is its npm page and stays short.
-- `roadmap/README.md` — the index of the plans: `x64.md`, `direct3d.md` (Direct3D 11 and 12),
-  `opengl.md` (OpenGL 2.0 to 4.x), and `decisions.md` (behaviour chosen rather than derived from a
-  specification).
+- `roadmap/README.md` — the index of the plans, `decisions.md` (behaviour chosen rather than
+  derived from a specification) and `negative-results.md` (what was measured and did not pay).
 - `roadmap/00-*` — local working notes, not in git (`.gitignore` excludes exactly these):
   per-area notes and **pitfalls** (read the area's pitfalls before touching the kernel,
   bridge, graphics or audio layers), plans and reports. Open work is tracked on the owner's task
-  board, outside the repository. Everything else in `roadmap/` ships with the repo and is written
+  board, outside the repository; a gap noticed on the way (a path no test covers, a benchmark that
+  misses x64, a gate that runs nowhere) goes into its open questions when it is found. Everything else in `roadmap/` ships with the repo and is written
   for a reader who is not you.
 
 ## Code
@@ -140,10 +140,10 @@ build.
 | a core layer (gdi32, d3d9, dsound, …) | that layer's unit tests by interface and its gates: `node --test "src/layers/<layer>/**/*.test.js" "src/layers/<layer>/**/*.itest.js"` in `modules/core` |
 | anything, before it goes to main | `npm run typecheck`, `npm run lint`, `npm test`, `npm run test:integration`, `npm run check:boundaries`, `npm run build` |
 
-CI (`.github/workflows/ci.yml`) runs the full set plus `npm run cdp:probe` in a real headless
-Chrome; both jobs must be green. It runs on a push to main and by hand (`gh workflow run
-ci.yml`) -- not on another branch, a pull request or a schedule: the repository's minutes are
-metered. So the full set above runs locally before anything goes to main; CI is that same set on a
+CI (`.github/workflows/ci.yml`) runs the full set, the tools' tests and the `npm run cdp:*` gates
+in a real headless Chrome; every job must be green. It runs on a push to main and by hand (`gh
+workflow run ci.yml`) - not on another branch, a pull request or a schedule: the repository's
+minutes are metered. So the full set above runs locally before anything goes to main; CI is that same set on a
 clean machine.
 
 ## Performance
