@@ -163,9 +163,11 @@ attribution are first-class.
   and power plan. A field not recorded is written `not recorded`, never reconstructed. A number is
   a share of something: say of what.
 - **What did not pay is kept.** An idea measured without a positive signal goes into
-  [`roadmap/negative-results.md`](roadmap/negative-results.md) as a dated entry with its
-  conditions, appended and never rewritten; a later measurement is a new entry. A measurement found
-  wrong is listed there as invalidated, with the reason, and is not cited again.
+  [`roadmap/negative-results.md`](roadmap/negative-results.md) as one dated line: the idea, one
+  number with its conditions, its status, and when it is worth trying again; the full write-up is
+  the commit. A no under those conditions is not a no for ever: an entry whose code or conditions
+  changed is marked stale, and one inside its own noise disputed, until measured again. A
+  measurement found wrong is marked invalidated, with the reason, and is not cited again.
 - **A plan says it is one**: its first lines give the status (plan, no code) and the date, and a
   number in it that was not measured is marked so.
 
