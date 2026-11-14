@@ -3241,6 +3241,62 @@ test('an indirect call whose callees cannot be formed in is quiet once it comes 
         assert.equal(await counted(), 0);
     });
 
+test('a call site keeps its own budget of forming again: other sites of its region spending'
+    + ' theirs leave it free to take a callee seen late', async()=>{
+    if (!probeFeatures().tailCalls)
+    {
+        return;
+    }
+    // CODE: call ebx; call esi; call edi; hlt -- three sites of one region, and
+    // callees `inc edx; ret` four bytes apart past it. The samples are written
+    // into the profile by hand, a reading at a time, so the order sites come due
+    // in is the test's and no clock decides it: A first with only its first
+    // callee (a phase of the program), then B and C, then A's second callee.
+    const m = machine({ callTargets: true, predictAfter: 16, callReturn: false });
+    const callee = (/** @type {number} */ k)=>CODE + 0x100 + 4 * k;
+    m.write(CODE, [0xff, 0xd3, 0xff, 0xd6, 0xff, 0xd7, 0xf4]);
+    for (let k = 0; k < 6; k++)
+    {
+        m.write(callee(k), [0x42, 0xc3]);
+    }
+    m.runtime.noteHot(CODE);
+    for (let i = 0; i < 8 && m.runtime.entryOf(CODE) < 0; i++)
+    {
+        await m.runtime.translatePending();
+    }
+    assert.ok(m.runtime.entryOf(CODE) >= 0, 'the region translated');
+    const at = /** @type {number} */ (m.layout.callProfile);
+    const words = ()=>new DataView(m.memory.buffer);
+    /** A reading of sixteen samples, all at `site` going to `target`. */
+    const reading = async(/** @type {number} */ site, /** @type {number} */ target)=>{
+        if (words().getUint32(at, true) === 0)
+        {
+            await m.runtime.translatePending();
+        }
+        for (let i = 0; i < 16; i++)
+        {
+            words().setUint32(at + 8 + i * 8, site, true);
+            words().setUint32(at + 12 + i * 8, target, true);
+        }
+        await m.runtime.translatePending();
+        // The batch the due site asked for, formed and published.
+        for (let i = 0; i < 4; i++)
+        {
+            await m.runtime.translatePending();
+        }
+    };
+    const [a, b, c] = [CODE, CODE + 2, CODE + 4];
+    await reading(a, callee(0));
+    await reading(b, callee(2));
+    await reading(c, callee(4));
+    await reading(a, callee(1));
+    const d = m.runtime.diagnostics();
+    assert.equal(d.prediction?.reformsOut, 0, 'no site found its region out of reforms');
+    assert.equal(d.reforms, 4, 'formed again once for each due');
+    const siteA = d.prediction?.sites.find((/** @type {any} */ one)=>one.site === a);
+    assert.equal(siteA?.last, 'fresh', 'A took its second callee');
+});
+
 test('a region formed after its call was predicted elsewhere is formed again with the callee'
     + ' too', async()=>{
     if (!probeFeatures().tailCalls)

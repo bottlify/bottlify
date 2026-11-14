@@ -955,7 +955,8 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
      * @property {[number, number[]][]} [targets]  by indirect call, the callees formed into it
      * @property {Map<number, number[]>} [unformed]  by indirect call, the callees forming it
      *     again did not take in (the region full): not asked of it again
-     * @property {number} [reforms]  times it was formed again for its indirect calls
+     * @property {Map<number, number>} [reforms]  by indirect call, times it was formed again
+     *     for that call: a site's own budget, which its region's other sites do not spend
      */
     /** @type {Set<RegionRecord>} */
     const regions = new Set();
@@ -2653,10 +2654,11 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
      *     wide?: boolean, narrow?: boolean, floats?: boolean, checked?: boolean, copies?: boolean,
      *     loose?: boolean, wrapped?: boolean, anyTop?: boolean, byHash?: boolean,
      *     replaces?: RegionRecord, targets?: [number, number[]][], copying?: boolean,
-     *     waited?: boolean }} one
+     *     sites?: number[], waited?: boolean }} one
      *     replaces: the region it is formed again from, with the callees of its indirect calls
-     *     (`targets`), or with copies of the blocks inside its loops (`copying`); waited: the
-     *     guest ran between its forming and now
+     *     (`targets`), or with copies of the blocks inside its loops (`copying`); sites: the
+     *     indirect calls it was formed again for, each spending one of its own reforms;
+     *     waited: the guest ran between its forming and now
      * @param {{ labels: [number, number][], cut: number[], closed?: number[], entryTop: number,
      *     exportName?: string, linked?: boolean }} built
      * @param {WebAssembly.Instance} instance
@@ -2774,7 +2776,11 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
             // the old region's entries give way to this one's.
             record.targets = one.targets;
             record.unformed = one.replaces.unformed;
-            record.reforms = (one.replaces.reforms ?? 0) + (one.copying === true ? 0 : 1);
+            record.reforms = new Map(one.replaces.reforms ?? []);
+            for (const site of one.copying === true ? [] : one.sites ?? [])
+            {
+                record.reforms.set(site, (record.reforms.get(site) ?? 0) + 1);
+            }
             // The same code for the merges' bounds: formed again, it would
             // otherwise start over at none.
             record.merged = one.replaces.merged;
@@ -3840,7 +3846,11 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
     // compares its target with four at most.
     const PREDICT_SHARE = 8;
     const PREDICT_CALLEES = 4;
-    // Times a region is formed again for its indirect calls.
+    // Times a region is formed again for one of its indirect calls. Counted by call, not by
+    // region: three other sites of a region coming due first had spent a region's whole
+    // budget, and a callee a site's first samples missed (a phase of the program) was never
+    // taken in - every call of it left the region (vcall: 569 k transfers in place of 74,
+    // by the order the workloads ran in).
     const REFORMS = 3;
     // Readings a call's samples are kept for unless it is due by then: a
     // region formed again is built, compiled and run on the baseline tier
@@ -4006,7 +4016,7 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
                 {
                     continue;
                 }
-                if ((record.reforms ?? 0) >= REFORMS)
+                if ((record.reforms?.get(site) ?? 0) >= REFORMS)
                 {
                     counts.predictReformsOut++;
                     out = true;
@@ -4103,7 +4113,7 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
                 cached: null, ...precisionFlags(region, record.entryTop), loose,
                 wrapped: !readsChecked,
                 checked: record.checked === true, copies: record.copies === true,
-                replaces: record, targets: [...targets] });
+                replaces: record, targets: [...targets], sites: [...added.keys(), ...quiet] });
         }
         if (formed.length === 0)
         {
