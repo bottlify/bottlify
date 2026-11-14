@@ -31,6 +31,7 @@
  */
 
 import { readU32, writeU32s } from './structs.js';
+import { frameOf } from './frame.js';
 
 const WM_CREATE = 0x0001;
 const WM_DESTROY = 0x0002;
@@ -38,6 +39,7 @@ const WM_SIZE = 0x0005;
 const WM_SETFOCUS = 0x0007;
 const WM_CLOSE = 0x0010;
 const WM_CHILDACTIVATE = 0x0022;
+const WM_GETMINMAXINFO = 0x0024;
 const WM_NCACTIVATE = 0x0086;
 const WM_KEYDOWN = 0x0100;
 const WM_SYSKEYDOWN = 0x0104;
@@ -79,6 +81,7 @@ const WS_EX_MDICHILD = 0x00000040;
 /** The client's style that hands a child the style it asked for and no more. */
 const MDIS_ALLCHILDSTYLES = 0x0001;
 const GWL_STYLE = -16;
+const GWL_EXSTYLE = -20;
 const CW_USEDEFAULT = 0x80000000;
 const SWP_NOSIZE = 0x0001;
 const SWP_NOMOVE = 0x0002;
@@ -451,7 +454,7 @@ export function createMdi(options){
      * @param {unknown} thread
      * @returns {any}
      */
-    const defChild = ([hwnd, message, wParam], thread)=>{
+    const defChild = ([hwnd, message, wParam, lParam], thread)=>{
         const child = hwnd >>> 0;
         const client = parentOf(child);
         const state = clients.get(client);
@@ -467,6 +470,22 @@ export function createMdi(options){
             case WM_SETFOCUS:
                 return state.active === child ? null
                     : then(activate(client, child, thread), ()=>null);
+            // Maximised, a child fills the client: its client area is the
+            // client's, its frame outside it (AdjustWindowRectEx's, no menu),
+            // whatever the procedure proposed before.
+            case WM_GETMINMAXINFO: {
+                if ((lParam >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const room = sizeOf(client);
+                const frame = frameOf(call('GetWindowLongA', [child, GWL_STYLE]) >>> 0,
+                    call('GetWindowLongA', [child, GWL_EXSTYLE]) >>> 0);
+                writeU32s(host, (lParam >>> 0) + 8, [room.width + 2 * frame.edge,
+                    room.height + 2 * frame.edge + frame.caption, -frame.edge,
+                    -(frame.edge + frame.caption)]);
+                return 0;
+            }
             case WM_CLOSE:
                 return then(send(client, WM_MDIDESTROY, child, 0, thread), ()=>0);
             case WM_SYSCOMMAND:

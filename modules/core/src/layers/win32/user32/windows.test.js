@@ -265,14 +265,15 @@ function paintedHost(fills, presents, clips, scrolls = []){
  * @param {4 | 8} [options.pointerSize] 8: a 64-bit process's user32.
  * @param {(args: number[], thread: number) => any} [options.waitForObjectsOrInput]
  * @param {(thread: number) => void} [options.inputArrived]
+ * @param {number} [options.memorySize] The fake memory's size, for a test that makes many windows.
  */
 function setup({
     heap = false, reply, waitForObjects, now, hookReply, threadExists, trace, paint = false,
     caller = { current: THREAD }, queueNow, regionBox, setRegion, later, scrolls = [], directory,
-    processId, pointerSize, waitForObjectsOrInput, inputArrived,
+    processId, pointerSize, waitForObjectsOrInput, inputArrived, memorySize,
 } = {})
 {
-    const memory = fakeMemory();
+    const memory = fakeMemory(memorySize);
     const handles = fakeHandles();
     const queue = createMessageQueue(queueNow ? { now: queueNow } : {});
     /** @type {any[]} */
@@ -819,7 +820,6 @@ test('CloseWindow minimises rather than closing, and a restore restores', ()=>{
 
 test('SW_SHOWMAXIMIZED covers the screen with the frame beyond it, as WM_GETMINMAXINFO '
     + 'proposes, and a restore puts the window back', ()=>{
-    const WM_GETMINMAXINFO = 0x0024;
     const SIZE_MAXIMIZED = 2;
     const SW_SHOWMAXIMIZED = 3;
     const SW_RESTORE = 9;
@@ -862,8 +862,9 @@ test('SW_SHOWMAXIMIZED covers the screen with the frame beyond it, as WM_GETMINM
     };
 
     assert.equal(fns.ShowWindow.handler([hwnd, SW_SHOWMAXIMIZED]), 0);
-    assert.deepEqual(proposals, [[646, 486, -3, -3]],
-        'the procedure is offered the screen and the sizing edges beyond it');
+    assert.deepEqual(proposals, [[646, 486, -3, -3], [646, 486, -3, -3]],
+        'the procedure is offered the screen and the sizing edges beyond it, when the window'
+            + ' is made (it has a sizing frame) and when it is maximised');
     assert.deepEqual(rectOf('GetWindowRect'), [-3, -3, 643, 483]);
     assert.deepEqual(rectOf('GetClientRect'), [0, 0, 640, 480], 'the client area is the screen');
     assert.equal(fns.IsZoomed.handler([hwnd]), 1);
@@ -874,7 +875,7 @@ test('SW_SHOWMAXIMIZED covers the screen with the frame beyond it, as WM_GETMINM
         [10, 20, 310, 220], 'the normal place is where it was');
 
     assert.equal(fns.ShowWindow.handler([hwnd, SW_SHOWMAXIMIZED]), 1);
-    assert.equal(proposals.length, 1, 'maximised already, nothing is asked');
+    assert.equal(proposals.length, 2, 'maximised already, nothing more is asked');
 
     fns.ShowWindow.handler([hwnd, SW_RESTORE]);
     assert.deepEqual(rectOf('GetWindowRect'), [10, 20, 310, 220], 'restored to where it was');
@@ -1265,13 +1266,15 @@ test('the first window shown makes the application active before the call return
     putClass(memory);
     fns.RegisterClassA.handler([CLASS_STRUCT]);
     const hidden = createWindow(fns, memory);
-    assert.deepEqual(dispatched.map(entry=>entry.message), [WM_NCCREATE, WM_NCCALCSIZE, WM_CREATE]);
+    assert.deepEqual(dispatched.map(entry=>entry.message),
+        [WM_GETMINMAXINFO, WM_NCCREATE, WM_NCCALCSIZE, WM_CREATE]);
     assert.equal(fns.GetActiveWindow.handler(), 0, 'a window made hidden is not activated');
     dispatched.length = 0;
 
     const shown = createWindow(fns, memory, { style: WS_VISIBLE });
     assert.deepEqual(dispatched.map(({ hwnd, message, wParam })=>[hwnd, message, wParam]), [
-        [shown, WM_NCCREATE, 0], [shown, WM_NCCALCSIZE, 0], [shown, WM_CREATE, 0],
+        [shown, WM_GETMINMAXINFO, 0], [shown, WM_NCCREATE, 0], [shown, WM_NCCALCSIZE, 0],
+        [shown, WM_CREATE, 0],
         [shown, WM_SIZE, 0], [shown, WM_MOVE, 0],
         [shown, WM_SHOWWINDOW, 1], [shown, WM_WINDOWPOSCHANGING, 0],
         [shown, WM_ACTIVATEAPP, 1], [hidden, WM_ACTIVATEAPP, 1],
@@ -1279,7 +1282,7 @@ test('the first window shown makes the application active before the call return
         [shown, WM_NCPAINT, 1],
     ]);
     assert.deepEqual(dispatched.filter(entry=>entry.message !== WM_WINDOWPOSCHANGING)
-        .slice(5, 10).map(entry=>entry.lParam), [0, 0, 0, 0, 0],
+        .slice(6, 11).map(entry=>entry.lParam), [0, 0, 0, 0, 0],
     'no thread of this program had the activation, and no window');
     assert.equal(queue.depth(), 0, 'nothing of it was posted');
     assert.equal(fns.GetActiveWindow.handler(), shown);
@@ -3518,6 +3521,8 @@ const CREATESTRUCT = Object.freeze({
 
 const WM_CREATE = 0x0001;
 const WM_NCCREATE = 0x0081;
+/** Sent first to an overlapped or sizable window being made (WmCreateOverlappedSeq). */
+const WM_GETMINMAXINFO = 0x0024;
 const WM_NCCALCSIZE = 0x0083;
 
 test('a new window is announced to its procedure with a CREATESTRUCT', ()=>{
@@ -3542,11 +3547,11 @@ test('a new window is announced to its procedure with a CREATESTRUCT', ()=>{
     // the active one: brought to the top (WM_WINDOWPOSCHANGING), then
     // WM_ACTIVATEAPP, WM_NCACTIVATE, WM_ACTIVATE, WM_SETFOCUS.
     assert.deepEqual(dispatched.map(entry=>entry.message),
-        [WM_NCCREATE, WM_NCCALCSIZE, WM_CREATE, WM_SIZE, WM_MOVE, WM_SHOWWINDOW, 0x0046, 0x001c,
-            WM_NCACTIVATE, 0x0006, 0x0007, WM_NCPAINT]);
-    assert.equal(dispatched[0].lParam, dispatched[2].lParam,
+        [WM_GETMINMAXINFO, WM_NCCREATE, WM_NCCALCSIZE, WM_CREATE, WM_SIZE, WM_MOVE, WM_SHOWWINDOW,
+            0x0046, 0x001c, WM_NCACTIVATE, 0x0006, 0x0007, WM_NCPAINT]);
+    assert.equal(dispatched[1].lParam, dispatched[3].lParam,
         'WM_NCCREATE carries the same structure');
-    const message = dispatched[2];
+    const message = dispatched[3];
     assert.equal(message.message, WM_CREATE);
     assert.equal(message.wndProc, WNDPROC);
     assert.equal(message.hwnd, hwnd);
@@ -3568,7 +3573,7 @@ test('a new window is announced to its procedure with a CREATESTRUCT', ()=>{
     assert.equal(memory.u32(at + CREATESTRUCT.lpszClass), CLASS_NAME);
     assert.equal(memory.u32(at + CREATESTRUCT.dwExStyle), 0x200);
 
-    const size = dispatched[3];
+    const size = dispatched[4];
     assert.equal(size.message, WM_SIZE);
     assert.equal(size.hwnd, hwnd);
     assert.equal(size.wParam, 0, 'SIZE_RESTORED');
@@ -3579,12 +3584,44 @@ test('a new window is announced to its procedure with a CREATESTRUCT', ()=>{
         - memory.u32(RECT_BUFFER + RECT.top);
     assert.equal(size.lParam >>> 16, clientHeight, 'the client height, not the frame');
     assert.equal(size.lParam & 0xffff, clientWidth, 'and the client width');
-    const place = dispatched[4];
+    const place = dispatched[5];
     assert.equal(place.hwnd, hwnd);
     assert.equal(place.lParam >>> 16, 20, 'the y it was created at');
     assert.equal(place.lParam & 0xffff, 10, 'and the x');
-    assert.deepEqual([dispatched[5].wParam, dispatched[5].lParam], [1, 0], 'shown');
+    assert.deepEqual([dispatched[6].wParam, dispatched[6].lParam], [1, 0], 'shown');
 });
+
+test('CreateWindowEx asks an overlapped or sizable window its limits first, and keeps to them',
+    ()=>{
+        // msg.c WmCreateOverlappedSeq: WM_GETMINMAXINFO before WM_NCCREATE, for
+        // a window with WS_THICKFRAME or neither WS_POPUP nor WS_CHILD; the size
+        // is held between the smallest and largest tracking sizes.
+        const WS_POPUP = 0x80000000;
+        const SM_CXMINTRACK = 34;
+        const SM_CYMINTRACK = 35;
+        const { memory, fns, dispatched } = setup({ heap: true });
+        putClass(memory);
+        fns.RegisterClassA.handler([CLASS_STRUCT]);
+        /** @param {number} hwnd */
+        const sizeOf = hwnd=>{
+            fns.GetWindowRect.handler([hwnd, RECT_BUFFER]);
+            return [memory.u32(RECT_BUFFER + 8) - memory.u32(RECT_BUFFER),
+                memory.u32(RECT_BUFFER + 12) - memory.u32(RECT_BUFFER + 4)];
+        };
+        memory.putString(TITLE, 'Tiny');
+        const overlapped = fns.CreateWindowExA.handler([0, CLASS_NAME, TITLE, 0, 0, 0, 1, 1, 0, 0,
+            HINSTANCE, 0]);
+        assert.equal(dispatched[0].message, WM_GETMINMAXINFO);
+        assert.deepEqual(sizeOf(overlapped), [fns.GetSystemMetrics.handler([SM_CXMINTRACK]),
+            fns.GetSystemMetrics.handler([SM_CYMINTRACK])], 'no smaller than the tracking size');
+
+        dispatched.length = 0;
+        const popup = fns.CreateWindowExA.handler([0, CLASS_NAME, TITLE, WS_POPUP, 0, 0, 1, 1, 0, 0,
+            HINSTANCE, 0]);
+        assert.equal(dispatched[0].message, WM_NCCREATE,
+            'a popup without a sizing frame is not asked');
+        assert.deepEqual(sizeOf(popup), [1, 1]);
+    });
 
 test('a window created hidden hears only that it is being created', ()=>{
     // A hidden window is told nothing about a size or a place it does not
@@ -3594,8 +3631,9 @@ test('a window created hidden hears only that it is being created', ()=>{
     fns.RegisterClassA.handler([CLASS_STRUCT]);
     createWindow(fns, memory);
 
-    assert.deepEqual(dispatched.map(m=>m.message), [WM_NCCREATE, WM_NCCALCSIZE, WM_CREATE],
-        'hidden: the two creates only');
+    assert.deepEqual(dispatched.map(m=>m.message),
+        [WM_GETMINMAXINFO, WM_NCCREATE, WM_NCCALCSIZE, WM_CREATE],
+        'hidden: its limits asked, then the two creates only');
 });
 
 test('CreateWindowEx tells the hook, then the procedure, in the order user32\'s message '
@@ -3648,7 +3686,7 @@ test('WM_NCCREATE answered FALSE refuses the window, which hears WM_NCDESTROY al
 
     const hwnd = createWindow(fns, memory, { style: WS_VISIBLE });
     assert.equal(hwnd, 0);
-    assert.deepEqual(dispatched.map(m=>m.message), [WM_NCCREATE, WM_NCDESTROY]);
+    assert.deepEqual(dispatched.map(m=>m.message), [WM_GETMINMAXINFO, WM_NCCREATE, WM_NCDESTROY]);
     assert.equal(fns.IsWindow.handler([dispatched[0].hwnd]), 0, 'and nothing is left behind');
 });
 
@@ -3658,9 +3696,10 @@ test('the CREATESTRUCT is freed once the procedure has seen it', ()=>{
     fns.RegisterClassA.handler([CLASS_STRUCT]);
     createWindow(fns, memory);
 
-    assert.ok(released.includes(dispatched[0].lParam), 'the CREATESTRUCT is freed');
-    assert.ok(released.includes(dispatched[1].lParam), 'and the RECT WM_NCCALCSIZE was handed');
-    assert.equal(released.length, 2, 'and nothing else was allocated');
+    assert.ok(released.includes(dispatched[1].lParam), 'the CREATESTRUCT is freed');
+    assert.ok(released.includes(dispatched[2].lParam), 'and the RECT WM_NCCALCSIZE was handed');
+    assert.ok(released.includes(dispatched[0].lParam), 'and the MINMAXINFO it was asked with');
+    assert.equal(released.length, 3, 'and nothing else was allocated');
 });
 
 test('a procedure answering -1 refuses the window', ()=>{
@@ -3919,11 +3958,12 @@ test('a CBT hook is told of a window before its procedure is, and can refuse it'
     assert.equal(thread, THREAD, 'named, because the send after it is made after an await');
     // lParam is a CBT_CREATEWND whose first word is the CREATESTRUCT the
     // procedure is then handed.
-    assert.equal(memory.u32(args[2]), dispatched[0].lParam);
-    assert.equal(memory.u32(dispatched[0].lParam + CREATESTRUCT.lpszClass), CLASS_NAME);
-    assert.deepEqual(dispatched.map(m=>m.message), [WM_NCCREATE, WM_NCCALCSIZE, WM_CREATE]);
-    assert.equal(dispatched[2].lParam, dispatched[0].lParam);
-    assert.equal(dispatched[2].thread, THREAD);
+    assert.equal(memory.u32(args[2]), dispatched[1].lParam);
+    assert.equal(memory.u32(dispatched[1].lParam + CREATESTRUCT.lpszClass), CLASS_NAME);
+    assert.deepEqual(dispatched.map(m=>m.message),
+        [WM_GETMINMAXINFO, WM_NCCREATE, WM_NCCALCSIZE, WM_CREATE]);
+    assert.equal(dispatched[3].lParam, dispatched[1].lParam);
+    assert.equal(dispatched[3].thread, THREAD);
 });
 
 test('SetWindowsHookEx refuses what Windows refuses whatever the type, each with its reason', ()=>{
@@ -4605,14 +4645,17 @@ test('a hook that sets off what it hooks is passed over past a depth, and that g
     let entered = 0;
     /** @type {number[]} */
     const made = [];
-    const built = setup({ heap: true, hookReply: (/** @type {number} */ _entry, /** @type {number[]} */ args)=>{
+    // Fifty windows made, each with its structures on a heap that never reuses.
+    /** @param {number} _entry @param {number[]} args */
+    const hookReply = (_entry, args)=>{
         if (args[0] === HCBT_CREATEWND && entered < 100)
         {
             entered++;
             made.push(createWindow(fns, memory));
         }
         return 0;
-    } });
+    };
+    const built = setup({ heap: true, memorySize: 0x20000, hookReply });
     ({ fns, memory } = built);
     putClass(memory);
     fns.RegisterClassA.handler([CLASS_STRUCT]);
@@ -4656,7 +4699,7 @@ test('a hook that answers late leaves a promise, and the creation follows it', a
     answer(0);
     assert.notEqual(await result, 0);
     assert.deepEqual(/** @type {any[]} */ (dispatched).map(m=>m.message),
-        [WM_NCCREATE, WM_NCCALCSIZE, WM_CREATE]);
+        [WM_GETMINMAXINFO, WM_NCCREATE, WM_NCCALCSIZE, WM_CREATE]);
 });
 
 test('the newest hook is called first and reaches the older through CallNextHookEx', ()=>{
@@ -6324,6 +6367,38 @@ test('under MDIS_ALLCHILDSTYLES an MDI child has the style it asks for, and one 
         'a disabled child is never activated');
 });
 
+test('DefMDIChildProc answers WM_GETMINMAXINFO with the client filled and the frame beyond it',
+    async()=>{
+        // MSDN DefMDIChildProc: WM_GETMINMAXINFO "calculates the size of a
+        // maximized MDI child window, based on the current size of the MDI
+        // client window" - its client area the client's, AdjustWindowRectEx's
+        // frame (no menu) outside it, whatever was proposed.
+        const CLIENT_CLASS = 0x10400;
+        const CLIENT_CREATE = 0x10500;
+        const MINMAX = 0x10700;
+        const { fns, memory } = setup({ heap: true });
+        putClass(memory);
+        fns.RegisterClassA.handler([CLASS_STRUCT]);
+        const frame = await createWindow(fns, memory);
+        memory.putString(CLIENT_CLASS, 'mdiclient');
+        memory.putU32s(CLIENT_CREATE, [0, 0x100]);
+        const client = await fns.CreateWindowExA.handler([0, CLIENT_CLASS, 0,
+            WS_CHILD | WS_VISIBLE, 0, 0, 200, 160, frame, 1, HINSTANCE, CLIENT_CREATE]);
+        const child = await fns.CreateMDIWindowA.handler([CLASS_NAME, TITLE, 0, 0, 0, 50, 40,
+            client, HINSTANCE, 0]);
+        fns.GetClientRect.handler([client, RECT_BUFFER]);
+        const [width, height] = [memory.u32(RECT_BUFFER + 8), memory.u32(RECT_BUFFER + 12)];
+        memory.putU32s(RECT_BUFFER, [0, 0, width, height]);
+        fns.AdjustWindowRectEx.handler([RECT_BUFFER,
+            fns.GetWindowLongA.handler([child, GWL_STYLE]), 0,
+            fns.GetWindowLongA.handler([child, -20])]);
+        const adjusted = [0, 4, 8, 12].map(at=>memory.u32(RECT_BUFFER + at) | 0);
+        memory.putU32s(MINMAX, new Array(10).fill(0));
+        await fns.DefMDIChildProcA.handler([child, 0x0024, 0, MINMAX]);
+        assert.deepEqual([2, 3, 4, 5].map(at=>memory.u32(MINMAX + at * 4) | 0),
+            [adjusted[2] - adjusted[0], adjusted[3] - adjusted[1], adjusted[0], adjusted[1]]);
+    });
+
 test('the CBT hook sees the styles asked for, the window edge following the frame, and '
     + 'WM_NCCREATE the ones the window manager settled', ()=>{
     // user32's window tests (test_window_styles): a top-level window always
@@ -7256,8 +7331,9 @@ test('WM_NCCALCSIZE places the client area where the procedure says', ()=>{
         heap: true, reply: message=>(message.message === WM_NCCALCSIZE && skinned ? 0
             : message.message === WM_NCCALCSIZE ? fns.DefWindowProcA.handler([message.hwnd,
                 message.message, message.wParam, message.lParam]) : 1) });
-    const order = dispatched.map(entry=>[entry.message, entry.wParam]).slice(0, 3);
-    assert.deepEqual(order, [[WM_NCCREATE, 0], [WM_NCCALCSIZE, 0], [WM_CREATE, 0]]);
+    const order = dispatched.map(entry=>[entry.message, entry.wParam]).slice(0, 4);
+    assert.deepEqual(order,
+        [[WM_GETMINMAXINFO, 0], [WM_NCCREATE, 0], [WM_NCCALCSIZE, 0], [WM_CREATE, 0]]);
     fns.GetClientRect.handler([hwnd, RECT_BUFFER]);
     assert.deepEqual([8, 12].map(at=>memory.u32(RECT_BUFFER + at)), [300, 200],
         'the whole window is its client area');

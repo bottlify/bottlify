@@ -34,8 +34,8 @@ import { createDirectoryListFunctions } from './dlgdir.js';
 import { createMdi } from './mdi.js';
 import { createWinEventHooks } from './hooks.js';
 import {
-    WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPSIBLINGS, WS_DISABLED, contains, createGeometry,
-    createdStyles, edgeFor, frameOf, frameRings, intersect, isEmpty,
+    WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPSIBLINGS, WS_DISABLED, WS_THICKFRAME, contains,
+    createGeometry, createdStyles, edgeFor, frameOf, frameRings, intersect, isEmpty,
 } from './frame.js';
 import {
     COLOR_3DDKSHADOW, COLOR_3DFACE, COLOR_3DHILIGHT, COLOR_3DSHADOW, COLOR_BTNTEXT,
@@ -4206,7 +4206,10 @@ export function createWindowFunctions(host){
             }
             // WM_NCCREATE before WM_CREATE, with the same structure: a
             // procedure that keeps lpCreateParams takes it from the first.
-            return andThen(tell(WM_NCCREATE), accepted=>((accepted | 0) === 0 ? refuse()
+            // A window that can be sized, or an overlapped one, is asked its
+            // limits before either, and made within them.
+            const nonClient = andThen(sizedWithin(record, thread), ()=>tell(WM_NCCREATE));
+            return andThen(nonClient, accepted=>((accepted | 0) === 0 ? refuse()
                 : andThen(placedThenCreated(), created=>((created | 0) === -1 ? refuse()
                     : andThen(made(), ()=>{
                     // A child or a popup hears its own size and its place
@@ -7004,7 +7007,19 @@ export function createWindowFunctions(host){
      *     | Promise<{ x: number, y: number, width: number, height: number }>}
      */
     const maximisedPlace = (record, thread)=>{
-        const MINMAXINFO_SIZE = 40;
+        const proposed = maximisedProposal(record);
+        return andThen(askMinMax(record, proposed, thread), info=>(info === null ? proposed
+            : { width: info.maxSize.x, height: info.maxSize.y,
+                x: info.maxPosition.x, y: info.maxPosition.y }));
+    };
+
+    /**
+     * Where the system proposes a window go maximised, before its procedure
+     * has a say (`maximisedPlace`).
+     *
+     * @param {any} record
+     */
+    const maximisedProposal = record=>{
         // A child's place is in its parent's client area, which starts at 0.
         const parent = isChild(record) ? live(record.parent) : null;
         const area = parent ? geometry.clientRect(parent)
@@ -7016,22 +7031,70 @@ export function createWindowFunctions(host){
         const proposed = { x: -edges.left, y: -edges.top,
             width: area.right - area.left + edges.left + edges.edge,
             height: area.bottom - area.top + edges.top + edges.edge };
+        return proposed;
+    };
+
+    /**
+     * CreateWindowEx's limits on a window's size: one with a sizing border,
+     * or an overlapped one, is sent WM_GETMINMAXINFO before WM_NCCREATE and
+     * made no larger than its largest tracking size and no smaller than its
+     * smallest; a popup or a child without the border is made as asked.
+     *
+     * @param {any} record @param {unknown} thread
+     * @returns {unknown}
+     */
+    const sizedWithin = (record, thread)=>{
+        if ((record.style & WS_THICKFRAME) === 0 && (record.style & (WS_POPUP | WS_CHILD)) !== 0)
+        {
+            return undefined;
+        }
+        return andThen(askMinMax(record, maximisedProposal(record), thread), info=>{
+            if (info === null)
+            {
+                return;
+            }
+            record.width = Math.max(Math.min(record.width, info.maxTrack.x), info.minTrack.x);
+            record.height = Math.max(Math.min(record.height, info.maxTrack.y), info.minTrack.y);
+        });
+    };
+
+    /**
+     * @typedef {{ maxSize: { x: number, y: number }, maxPosition: { x: number, y: number },
+     *     minTrack: { x: number, y: number }, maxTrack: { x: number, y: number } }} MinMax
+     */
+
+    /**
+     * WM_GETMINMAXINFO: the system's proposal for where the window goes
+     * maximised and how far it may be sized, handed to the procedure, which
+     * may change any of it; what it leaves is the answer. Null where there is
+     * no memory to ask in.
+     *
+     * @param {any} record
+     * @param {{ x: number, y: number, width: number, height: number }} maximised
+     * @param {unknown} thread
+     * @returns {MinMax | null | Promise<MinMax | null>}
+     */
+    const askMinMax = (record, maximised, thread)=>{
+        const MINMAXINFO_SIZE = 40;
         const at = host.allocate?.(MINMAXINFO_SIZE) ?? 0;
         if (at === 0)
         {
-            return proposed;
+            return null;
         }
         // ptReserved, ptMaxSize, ptMaxPosition, ptMinTrackSize, ptMaxTrackSize.
         const metric = (/** @type {number} */ index)=>table.GetSystemMetrics.handler([index]);
         const [SM_CXMINTRACK, SM_CYMINTRACK, SM_CXMAXTRACK, SM_CYMAXTRACK] = [34, 35, 59, 60];
-        writeU32s(host, at, [record.x, record.y, proposed.width, proposed.height,
-            proposed.x, proposed.y, metric(SM_CXMINTRACK), metric(SM_CYMINTRACK),
+        writeU32s(host, at, [record.x, record.y, maximised.width, maximised.height,
+            maximised.x, maximised.y, metric(SM_CXMINTRACK), metric(SM_CYMINTRACK),
             metric(SM_CXMAXTRACK), metric(SM_CYMAXTRACK)]);
         return andThen(send(record.hwnd, WM_GETMINMAXINFO, 0, at, thread), ()=>{
-            const view = new DataView(host.readMemory(at + 8, 16).slice().buffer);
+            const view = new DataView(host.readMemory(at + 8, 32).slice().buffer);
             host.release?.(at);
-            return { width: view.getInt32(0, true), height: view.getInt32(4, true),
-                x: view.getInt32(8, true), y: view.getInt32(12, true) };
+            /** @param {number} offset */
+            const point = offset=>({ x: view.getInt32(offset, true),
+                y: view.getInt32(offset + 4, true) });
+            return { maxSize: point(0), maxPosition: point(8), minTrack: point(16),
+                maxTrack: point(24) };
         });
     };
 
