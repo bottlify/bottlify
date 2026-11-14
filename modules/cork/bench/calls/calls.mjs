@@ -7,7 +7,7 @@
 /**
  * A benchmark of calling conventions for translated code, run in Node or a
  * page: the same guest call chains -- their shape from a real block profile
- * (`tools/cork-calls.mjs`) -- compiled under each convention, timed after
+ * (`tools/translator/cork-calls.mjs`) -- compiled under each convention, timed after
  * warming, several runs each. Self-contained (its own small wasm encoder) so a
  * page can be one file.
  *

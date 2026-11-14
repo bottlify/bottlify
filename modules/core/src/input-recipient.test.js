@@ -56,7 +56,7 @@ test('the routed input reads the cursor a locked pointer points with', async t=>
     // machine's input did not have: every such press went by the last place
     // the page named.
     const { createApp } = await import('./app.js');
-    const { buildExe } = await import('../../../tools/make-pe.mjs');
+    const { buildExe } = await import('../../../tools/fixtures/make-pe.mjs');
     const executable = buildExe({
         imports: { 'KERNEL32.dll': ['ExitProcess'] },
         codeSize: 0x10,

@@ -12,7 +12,7 @@ import { createCorkRuntime } from './runtime.js';
 import { eflagsOf } from '../emit/flags.js';
 import { CallStack } from '../emit/region.js';
 import { features as probeFeatures } from '../wasm/features.js';
-import { threadCpuMs } from '../../../../tools/cpu-time.mjs';
+import { threadCpuMs } from '../../../../tools/fixtures/cpu-time.mjs';
 
 const CODE = 0x1000;
 

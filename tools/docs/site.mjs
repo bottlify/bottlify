@@ -22,7 +22,7 @@ import { dirname, join, posix } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { covered, pages } from './check.mjs';
 import { headings, prose, render } from './markdown.mjs';
-import { isMain } from '../common.mjs';
+import { isMain } from '../lib/common.mjs';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const ASSETS = fileURLToPath(new URL('assets/', import.meta.url));

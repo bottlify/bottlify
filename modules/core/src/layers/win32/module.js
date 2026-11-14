@@ -3019,7 +3019,7 @@ export function createWin32Module(){
                     }),
                     // Activation contexts (`actctx.js`), FindActCtxSectionString
                     // with them: the Visual C++ runtimes check their own load
-                    // against it (decisions.md, tools/vcredist-matrix.mjs).
+                    // against it (decisions.md, tools/run/vcredist-matrix.mjs).
                     ...activation.functions,
                     ...createSystemFunctions({
                         processors,

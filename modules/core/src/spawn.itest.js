@@ -18,7 +18,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
-import { buildExe } from '../../../tools/make-pe.mjs';
+import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
 import {
     HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, REG_DWORD,
 } from './layers/win32/advapi32/registry.js';

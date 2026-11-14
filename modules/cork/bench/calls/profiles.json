@@ -1,5 +1,5 @@
 {
- "note": "Made by tools/cork-calls.mjs from block profiles; depth is not in a block profile and is swept.",
+ "note": "Made by tools/translator/cork-calls.mjs from block profiles; depth is not in a block profile and is swept.",
  "workloads": [
   {
    "name": "farcry",

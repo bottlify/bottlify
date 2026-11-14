@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { planDependencies } from './dependencies.js';
-import { buildExe } from '../../../../../../tools/make-pe.mjs';
+import { buildExe } from '../../../../../../tools/fixtures/make-pe.mjs';
 
 /**
  * An image that imports one function from each named library. What it does when

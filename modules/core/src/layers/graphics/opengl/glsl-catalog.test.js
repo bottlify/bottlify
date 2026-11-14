@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readCatalog } from '../../../../../../tools/glsl-functions.mjs';
+import { readCatalog } from '../../../../../../tools/generators/glsl-functions.mjs';
 import { GLSL_CATALOG } from './glsl-catalog.js';
 import { modernOverloads } from './glsl-library.js';
 import { glslName } from './glsl-types.js';

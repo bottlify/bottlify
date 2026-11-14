@@ -25,7 +25,7 @@ import assert from 'node:assert/strict';
 import { setFlagsFromString } from 'node:v8';
 import { runInNewContext } from 'node:vm';
 import { createApp } from './app.js';
-import { buildExe } from '../../../tools/make-pe.mjs';
+import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
 
 /** Bytes of file data each library is grown by. */
 const GROWN = 8 << 20;

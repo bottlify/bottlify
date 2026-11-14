@@ -69,7 +69,7 @@ import { planDependencies } from './layers/loader/internal/dependencies.js';
 import { parsePe } from './layers/loader/internal/pe.js';
 import { createAccessors } from './layers/memory/internal/accessors.js';
 import { Access, RegionKind, createRegionMap } from './layers/memory/internal/regions.js';
-import { buildExe } from '../../../tools/make-pe.mjs';
+import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
 import { findResource, RT_STRING } from './layers/loader/internal/resources.js';
 import { buildImage, buildResources } from './layers/loader/internal/resources.test.js';
 

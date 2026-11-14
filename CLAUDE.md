@@ -153,7 +153,7 @@ build.
 
 | Changed | Run |
 | --- | --- |
-| cork | `npm test -w @bottlify/cork` and `npm run test:integration -w @bottlify/cork` — the x86 corpus a real processor answered, kept in the repository (`modules/cork/src/x86-corpus.json.gz`, made by `tools/x86-corpus.mjs`) |
+| cork | `npm test -w @bottlify/cork` and `npm run test:integration -w @bottlify/cork` — the x86 corpus a real processor answered, kept in the repository (`modules/cork/src/x86-corpus.json.gz`, made by `tools/generators/x86-corpus.mjs`) |
 | a core layer (gdi32, d3d9, dsound, …) | that layer's unit tests by interface and its gates: `node --test "src/layers/<layer>/**/*.test.js" "src/layers/<layer>/**/*.itest.js"` in `modules/core` |
 | anything, before it goes to main | `npm run typecheck`, `npm run lint`, `npm test`, `npm run test:integration`, `npm run check:boundaries`, `npm run build` |
 
@@ -169,11 +169,12 @@ Performance is part of correctness: a slow implementation does not reproduce how
 Bugs and costs are found by measurement — the harness, ring buffers, phase profiler and guest CPU
 attribution are first-class.
 
-- **Look in the tools before debugging or searching.** `tools/cdp_test/README.md` opens with every
-  tool by the question it answers, then the live switches (they attach to a running game); read it
-  first and use what is there; `tools/cdp_test/DIAGNOSING.md` is the order to look in when a run is
-  slow, flickers or stops. An instrument made for a hunt that a later one could use goes into
-  `tools/` and onto that list in the same change, not into a scratch folder.
+- **Look in the tools before debugging or searching.** `tools/README.md` is every tool by the
+  question it answers, each with a real output and how to read it, written from `tools/catalog.json`;
+  read it first and use what is there; `tools/live/DIAGNOSING.md` is the order to look in when a run
+  is slow, flickers or stops. A tool goes into the folder of its category with a catalog entry (and,
+  for an instrument, a sample from real data) in the same change, not into a scratch folder:
+  `tools/checks/check-catalog.mjs` fails one that has none.
 - **One restart carries the whole hunt.** Before asking a person to restart a game, put every
   switch, counter and dump the hunt could need into that one build, and check on the running
   game that each one answers (a live switch returns data, a counter moves). A restart per readout
@@ -203,10 +204,10 @@ attribution are first-class.
 
 ## Bringing up a program
 
-Audit before the first run: `node tools/import-audit.mjs <exe|dir|.btl|.iso> --dynamic --specs
+Audit before the first run: `node tools/bundles/import-audit.mjs <exe|dir|.btl|.iso> --dynamic --specs
 <dir>` (`--fetch-specs <dir>` downloads the export lists once), and implement every missing entry
 point it lists in one pass. A setup unpacks as it runs: run it once under
-`tools/install-watch.mjs --copy` and audit what it left. Packed images and `GetProcAddress` lookups
+`tools/run/install-watch.mjs --copy` and audit what it left. Packed images and `GetProcAddress` lookups
 are found only by running.
 
 ## Delegating

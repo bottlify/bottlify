@@ -6,7 +6,7 @@
 
 /**
  * The 32-bit hardware corpus as test data (`../x86-corpus.json.gz`, made by
- * `tools/x86-corpus.mjs` on the processor itself).
+ * `tools/generators/x86-corpus.mjs` on the processor itself).
  *
  * Each case is a few instructions at CODE_AT followed by `hlt`, the state they
  * start from -- the eight registers, EFLAGS, the x87 stack with its control,

@@ -30,7 +30,7 @@
  * it: such a run measures the start. Ten times them leaves a few per cent of
  * that, and what is left is the translated code's own rate.
  *
- * The browser is CDP_TEST_CHROME or the first `tools/cdp_test/browser.mjs`
+ * The browser is CDP_TEST_CHROME or the first `tools/lib/browser.mjs`
  * finds. The configurations are interleaved and their order turned round every
  * rep, so a drift in the machine's speed falls on all of them alike.
  */
@@ -51,7 +51,7 @@ const ITERATIONS = /** @type {Record<string, number>} */ ({
 /** A job with no answer by then is run once more, and counted a failure if it fails again. */
 const JOB_LIMIT_MS = 120_000;
 
-const tool = (/** @type {string} */ name)=>import(pathToFileURL(join(REPO, 'tools/cdp_test', name)).href);
+const tool = (/** @type {string} */ name)=>import(pathToFileURL(join(REPO, 'tools/lib', name)).href);
 const { CdpEndpoint } = await tool('cdp.mjs');
 const { serveStatic } = await tool('server.mjs');
 const { launchWithGpu, shutdown } = await tool('browser.mjs');

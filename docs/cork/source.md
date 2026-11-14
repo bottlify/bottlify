@@ -26,7 +26,7 @@ node modules/cork/bench/run.mjs             # the benchmark (bench/README.md)
 
 - **Instruction corpus** ([`src/x86-corpus.json.gz`](../../modules/cork/src/x86-corpus.json.gz), in the
   repository): short random instruction sequences from templates written from the Intel SDM, run on
-  a real processor by [`tools/x86-corpus.mjs`](../../tools/x86-corpus.mjs), which makes it again
+  a real processor by [`tools/generators/x86-corpus.mjs`](../../tools/generators/x86-corpus.mjs), which makes it again
   with clang, lld and llvm-mc on an x86-64 Linux host. Each case goes through the decoder, both
   interpreters and translated code, and the result has to match the hardware; what is not compared,
   and why, is in [`src/testing/x86-corpus.js`](../../modules/cork/src/testing/x86-corpus.js), and

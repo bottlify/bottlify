@@ -94,7 +94,7 @@ const WORKER_URL = /new URL\(\s*['"](\.{1,2}\/[^'"]+\.m?js)['"]\s*,\s*import\.me
 
 /**
  * Every module of the package's source an entry reaches by its imports -- a
- * static one, an `export ... from`, a dynamic `import('./...')` -- or names as
+ * static one, an `export ... from`, a dynamic `import('...')` -- or names as
  * a URL beside itself (`new URL('./x.worker.js', import.meta.url)`, a worker it
  * starts), itself included. Not a type named in a comment
  * (`{import('./x.js').T}`), which loads nothing. What a source entry needs in

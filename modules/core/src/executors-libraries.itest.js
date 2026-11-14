@@ -21,7 +21,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createApp } from './app.js';
 import { writeBundle } from './bundle-node.js';
-import { assemble, buildExe } from '../../../tools/make-pe.mjs';
+import { assemble, buildExe } from '../../../tools/fixtures/make-pe.mjs';
 
 /** @param {number} value @returns {number[]} */
 const u32 = value=>[
@@ -35,7 +35,7 @@ const cString = text=>[...text].map(c=>c.charCodeAt(0)).concat(0);
 const WORKER_AT = 0x200;
 const CODE_SIZE = 0x400;
 
-/** @typedef {import('../../../tools/make-pe.mjs').AsmPart} Part */
+/** @typedef {import('../../../tools/fixtures/make-pe.mjs').AsmPart} Part */
 
 /**
  * A program of a main routine and a worker routine at `WORKER_AT`.

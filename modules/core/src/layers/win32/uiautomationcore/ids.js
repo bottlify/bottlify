@@ -4,7 +4,7 @@
  * See LICENSE for details
  */
 
-// Written by tools/uia-ids.mjs from the SDK headers; do not edit.
+// Written by tools/generators/uia-ids.mjs from the SDK headers; do not edit.
 
 /**
  * UI Automation's identifiers: [AutomationIdentifierType, GUID, number],

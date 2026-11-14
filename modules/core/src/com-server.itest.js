@@ -21,7 +21,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
 import { createHive, HKEY_LOCAL_MACHINE, REG_SZ } from './layers/win32/advapi32/registry.js';
-import { buildExe } from '../../../tools/make-pe.mjs';
+import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
 
 for (const concurrency of /** @type {const} */ ([1, 2, 4]))
 {

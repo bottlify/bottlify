@@ -57,7 +57,7 @@ differed by up to two thirds.
 `'{"base":"../base","new":"."}'`, and two configurations naming them. A configuration's `cork` is
 the translator's configuration, so a flag is A/B'd on one bundle. Both builds of every workload,
 two reps of each, take about a minute and a half. The browser is `CDP_TEST_CHROME` or the first one
-[`tools/cdp_test`](../../../tools/cdp_test) finds.
+[`tools/lib/browser.mjs`](../../../tools/lib/browser.mjs) finds.
 
 ## Micro workloads
 
@@ -72,7 +72,7 @@ two reps of each, take about a minute and a half. The browser is `CDP_TEST_CHROM
   into the interpreter and back on every call.
 
 The 32-bit images (`micro/images/`, built by `micro/build.sh`) are also the fixtures of cork's
-emitter tests and of the emit digest (`tools/emit-digest.mjs`); `lua-x87` is Lua 5.1.5 running
+emitter tests and of the emit digest (`tools/checks/emit-digest.mjs`); `lua-x87` is Lua 5.1.5 running
 one frame of 27 addons (THIRD-PARTY-NOTICES.md). The images are committed, so a run needs no
 compiler.
 

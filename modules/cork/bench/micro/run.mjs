@@ -11,7 +11,7 @@
  * (`images64/`, `--bits 64`), calls through a table of 8, 512 or 4096 functions
  * in order or scattered (`calls*`), and a routine that patches its own code
  * (`patch`). The 32-bit images are also the fixtures of cork's emitter tests
- * and of the emit digest (`tools/emit-digest.mjs`).
+ * and of the emit digest (`tools/checks/emit-digest.mjs`).
  *
  *   node modules/cork/bench/micro/run.mjs [name...] [--warm N] [--iters N] [--reps N]
  *       [--cork JSON] [--bits 64] [--blocks DIR] [--json]
@@ -22,15 +22,15 @@
  * steady state). `eax` is the program's own checksum and must not change with
  * the engine. `--cork` is the translator's configuration; `--blocks DIR` writes
  * the first rep's block counts to `DIR/<name>.blocks.json`, which
- * `tools/cork-asm.mjs --bin <image> --at 0x401000 --blocks` weighs.
+ * `tools/translator/cork-asm.mjs --bin <image> --at 0x401000 --blocks` weighs.
  */
 
-import '../../../../tools/chromium-v8.mjs';
+import '../../../../tools/lib/chromium-v8.mjs';
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createCorkHost } from '../../../core/src/layers/cpu/internal/cork-host.js';
 import * as engine from '../../src/index.js';
-import { median, option } from '../../../../tools/common.mjs';
+import { median, option } from '../../../../tools/lib/common.mjs';
 
 const args = process.argv.slice(2);
 const warm = Number(option(args, '--warm', '20'));

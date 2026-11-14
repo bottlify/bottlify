@@ -19,7 +19,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
 import { createFakeDevice } from './layers/graphics/webgpu/internal/fake-device.js';
-import { buildExe } from '../../../tools/make-pe.mjs';
+import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
 import {
     slotHeaderOffset, slotPcmOffset, SLOT_HEADER_INT32, SLOT_BYTES, PCM_MASK,
     STATE, STATE_OPEN, RATE, CHANNELS, BITS, GAIN, GAIN_SCALE, WRITTEN, READ,

@@ -15,7 +15,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createApp } from './app.js';
-import { buildExe } from '../../../tools/make-pe.mjs';
+import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
 import { memoryBasicInformation } from './layers/win32/kernel32/heap.js';
 
 /** @param {number} value @returns {number[]} */

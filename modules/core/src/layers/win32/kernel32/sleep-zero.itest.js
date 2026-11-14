@@ -20,7 +20,7 @@ import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import { runToHalt } from '../../cpu/internal/halt.fixture.js';
 import * as cork from '../../../../../cork/src/index.js';
 import { createApp } from '../../../app.js';
-import { assemble, buildExe } from '../../../../../../tools/make-pe.mjs';
+import { assemble, buildExe } from '../../../../../../tools/fixtures/make-pe.mjs';
 import { sleepCode } from './process.js';
 
 const PROGRAM = 0x8000;

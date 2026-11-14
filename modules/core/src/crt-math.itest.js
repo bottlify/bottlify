@@ -19,7 +19,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
-import { buildExe } from '../../../tools/make-pe.mjs';
+import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
 import { EDOM, ERANGE } from './layers/win32/msvcrt/globals.js';
 import * as sources from './layers/win32/msvcrt/inguest-math.js';
 import { loadModel } from '../scripts/guest-code/model.mjs';

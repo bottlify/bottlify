@@ -16,7 +16,7 @@
  * (culling, clamping, the picture frame's) is made on the float's bits; the
  * factors past them are finite, and every float operation left is exact (a
  * ceil, a conversion of an integer below 2^24, a product by 2^-16), so the
- * points are the reference's bit for bit. `tools/cdp_test/tess-gate.mjs`
+ * points are the reference's bit for bit. `tools/gates/tess-gate.mjs`
  * holds it to the reference's own output on a real device.
  */
 

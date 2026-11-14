@@ -17,7 +17,7 @@ import { Worker } from 'node:worker_threads';
 import {
     createJournalCursor, createJournalMemory, createJournalWriter, INLINE_TEMPLATE,
 } from './shared-journal.js';
-import { threadCpuMs } from '../../../../../../tools/cpu-time.mjs';
+import { threadCpuMs } from '../../../../../../tools/fixtures/cpu-time.mjs';
 
 const open = (/** @type {any} */ options = {})=>{
     const memory = createJournalMemory(options);

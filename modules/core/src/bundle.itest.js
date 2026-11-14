@@ -25,7 +25,7 @@ import { randomBytes } from 'node:crypto';
 import { BOTTLE_REGISTRY_PATH, BOTTLE_SYSTEM_PATH, createApp, READ_AHEAD_BYTES } from './app.js';
 import { writeBundle } from './bundle-node.js';
 import { createHive, HKEY_LOCAL_MACHINE, REG_SZ } from './layers/win32/advapi32/registry.js';
-import { assemble, buildExe } from '../../../tools/make-pe.mjs';
+import { assemble, buildExe } from '../../../tools/fixtures/make-pe.mjs';
 
 /** The fixture's blocks, small so a read of a few bytes still misses one. */
 const BLOCK_SIZE = 64 * 1024;

@@ -13,7 +13,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { createApp } from '../index.js';
-import { buildExe } from '../../../../tools/make-pe.mjs';
+import { buildExe } from '../../../../tools/fixtures/make-pe.mjs';
 
 const FIXTURE = new URL('../../test/fixtures/hello.exe', import.meta.url);
 

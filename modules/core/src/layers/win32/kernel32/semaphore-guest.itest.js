@@ -27,7 +27,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createApp } from '../../../app.js';
-import { assemble, buildExe } from '../../../../../../tools/make-pe.mjs';
+import { assemble, buildExe } from '../../../../../../tools/fixtures/make-pe.mjs';
 
 /** @param {number} value @returns {number[]} */
 const u32 = value=>[

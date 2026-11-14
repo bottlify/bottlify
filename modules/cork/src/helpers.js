@@ -50,7 +50,7 @@ import { CRT_DICTIONARY } from './crt-dictionary.js';
  * @property {readonly (readonly number[])[]} [spans]  where its code lies, `[offset,
  *     length]` from its entry: the code reachable from it, without the tables between
  * @property {readonly number[]} [masks]  the offsets read as zeroes: what differs
- *     between copies linked at two places (`tools/crt-dictionary.mjs`)
+ *     between copies linked at two places (`tools/generators/crt-dictionary.mjs`)
  * @property {string} [quick]  the fingerprint of its first `QUICK_BYTES` bytes, masked
  * @property {number} [word]   the offset in it of an absolute address the operation reads
  *     a dword at when it runs (a global the runtime set), taken as linked (`crtWord`)
@@ -176,7 +176,7 @@ export const QUICK_BYTES = 16;
  * The fingerprint of a function's code by its spans -- `[offset, length]` from
  * `address`, in order -- with the bytes at `masks` (offsets, sorted) read as
  * zeroes: what differs between two copies of one function linked at two places
- * (`tools/crt-dictionary.mjs`). The same lanes as `fingerprint`, the position
+ * (`tools/generators/crt-dictionary.mjs`). The same lanes as `fingerprint`, the position
  * a byte's offset in the spans taken together.
  *
  * @param {(address: number) => number} read

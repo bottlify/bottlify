@@ -106,7 +106,7 @@ watched page marked written as a store marks it. A process over a wide window (a
 window, past 4 GiB too.
 
 The dictionary holds Microsoft's runtimes from Visual C++ 7.1 to 14 (2015 to 2022), 32-bit and
-x86-64; Visual C++ 9's (2008) is checked against it too. `tools/crt-dictionary.mjs` reads a
+x86-64; Visual C++ 9's (2008) is checked against it too. `tools/generators/crt-dictionary.mjs` reads a
 signature out of a runtime's DLL, looks it up in other
 images (`--find`), and runs the DLL's own function against its operation on seeded arguments
 (`--verify`). An entry goes in only once `--verify` finds no difference on any of the function's

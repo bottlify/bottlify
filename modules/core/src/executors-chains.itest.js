@@ -21,7 +21,7 @@ import assert from 'node:assert/strict';
 import { createApp } from './app.js';
 import { EXECUTORS_OPENED_KEY } from './layers/cpu/module.js';
 import { EXECUTORS_WAIT_MS } from './layers/kernel/internal/threads.js';
-import { buildExe } from '../../../tools/make-pe.mjs';
+import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
 
 /** @param {number} value @returns {number[]} */
 const u32 = value=>[

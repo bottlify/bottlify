@@ -13,7 +13,7 @@
  * listening, an event raised reaches nobody, which is what Windows does with
  * one no client subscribed to, and a window answers WM_GETOBJECT with nothing
  * for UI Automation. What a provider asks of the core itself is answered: the
- * identifiers by their GUIDs (UiaLookupId, the table `tools/uia-ids.mjs`
+ * identifiers by their GUIDs (UiaLookupId, the table `tools/generators/uia-ids.mjs`
  * writes), the two reserved values, and the provider Windows hosts a window
  * with.
  */

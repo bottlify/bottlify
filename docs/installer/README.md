@@ -13,9 +13,9 @@ keys, the runtime DLLs it put in `system32`) is the bottle.
 ### From a terminal, headless
 
 ```sh
-node tools/install-watch.mjs Setup.exe --collect-to installed/mygame --shots shots
-node tools/make-btl.mjs pack installed/mygame mygame --root="C:\Program Files\Vendor\Game"
-node tools/play.mjs mygame
+node tools/run/install-watch.mjs Setup.exe --collect-to installed/mygame --shots shots
+node tools/bundles/make-btl.mjs pack installed/mygame mygame --root="C:\Program Files\Vendor\Game"
+node tools/run/play.mjs mygame
 ```
 
 `install-watch` runs the setup in Node with no browser. Every few seconds it prints what each of

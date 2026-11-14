@@ -26,7 +26,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createApp } from './app.js';
 import { writeBundle } from './bundle-node.js';
-import { buildExe } from '../../../tools/make-pe.mjs';
+import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
 
 /** @param {number} value @returns {number[]} */
 const u32 = value=>[

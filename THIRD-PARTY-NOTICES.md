@@ -165,7 +165,7 @@ Joliet specification.
 
 - Source: the npm package `wabt` 1.0.39 (https://github.com/WebAssembly/wabt), a WebAssembly
   build of the WebAssembly Binary Toolkit
-- Used by: `tools/cork-asm.mjs --wat`, which prints cork's output as text (`wasm2wat`); a development
+- Used by: `tools/translator/cork-asm.mjs --wat`, which prints cork's output as text (`wasm2wat`); a development
   dependency of the repository root, not part of any module and not distributed with the product
 - License: Apache-2.0
 
@@ -206,7 +206,7 @@ Joliet specification.
   interface version a game may ask for, as the SDK's history is kept by projects that carry it):
   each interface's methods in vtable order and their parameter and return types
 - Location in this repository: `modules/core/src/layers/win32/steamclient/interfaces.js`, written
-  by `tools/steam-interfaces.mjs` -- each method's name, its argument bytes on an x86 stack and how
+  by `tools/generators/steam-interfaces.mjs` -- each method's name, its argument bytes on an x86 stack and how
   it returns, which is the binary interface a game compiled against; no code is copied, and the
   client that answers the methods is original work under the MPL
 - License: the Steamworks SDK Access Agreement governs the SDK; the layouts are facts of the
@@ -222,7 +222,7 @@ Joliet specification.
 - Location in this repository: `modules/core/src/layers/graphics/d3d10/tessellator.js`, its
   hardware class (`CHWTessellator`) translated into JavaScript; and
   `modules/core/src/layers/graphics/d3d10/tess-corpus.json.gz`, the reference's own output for a
-  seeded set of patches (`tools/tess-corpus.mjs`), which the translation is tested against. The
+  seeded set of patches (`tools/generators/tess-corpus.mjs`), which the translation is tested against. The
   reference's sources are not in this repository.
 - License: MIT, Copyright (c) Microsoft Corporation (the repository's code license; Mesa carries
   the same files under the same notice in `src/gallium/auxiliary/tessellator/`)
@@ -255,7 +255,7 @@ Joliet specification.
 ## bcdec: an independent BC6H and BC7 decoder, the test corpus's oracle
 
 - Source: https://github.com/iOrange/bcdec (`bcdec.h`), built locally into a driver that
-  `tools/bc-corpus.mjs` asks to decode seeded blocks
+  `tools/generators/bc-corpus.mjs` asks to decode seeded blocks
 - Location in this repository: only its output, `modules/core/src/layers/graphics/d3d10/bc67-corpus.json.gz`,
   which `bc67.test.js` holds `bc67.js` to; none of its code is in the repository
 - License: MIT or the Unlicense, at the user's choice (MIT: Copyright (c) 2022 Sergii
@@ -266,7 +266,7 @@ Joliet specification.
 - Source: `xml/gl.xml` of https://github.com/KhronosGroup/OpenGL-Registry at revision
   `6af574a14089ccfee87efe230ebcdd8742859813` (Copyright 2013-2026 The Khronos Group Inc.)
 - Location in this repository: `modules/core/src/layers/graphics/opengl/registry.js`, written by
-  `tools/gl-registry.mjs` -- each command's name and the size class of its return and of each
+  `tools/generators/gl-registry.mjs` -- each command's name and the size class of its return and of each
   argument, and which commands each version and each ARB, KHR and EXT extension adds; no code is
   copied, and what answers the commands is original work under the MPL
 - License: Apache-2.0
@@ -276,7 +276,7 @@ Joliet specification.
 - Source: `chapters/builtinfunctions.adoc` of https://github.com/KhronosGroup/GLSL at revision
   `0099bf83b0288469917fc2e2972cb0a2b74d6711` (Copyright The Khronos Group Inc.)
 - Location in this repository: `modules/core/src/layers/graphics/opengl/glsl-catalog.js`, written
-  by `tools/glsl-functions.mjs` -- each built-in function's name, section, return and parameter
+  by `tools/generators/glsl-functions.mjs` -- each built-in function's name, section, return and parameter
   types and parameter directions as the specification declares them; none of the specification's
   text is copied, and the compiler that checks calls against them is original work under the MPL
 - License: CC-BY-4.0 (the specification's sources)

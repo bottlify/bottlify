@@ -18,8 +18,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
-import { buildExe } from '../../../tools/make-pe.mjs';
-import { threadCpuMs } from '../../../tools/cpu-time.mjs';
+import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
+import { threadCpuMs } from '../../../tools/fixtures/cpu-time.mjs';
 import { assemble } from './layers/win32/msvcrt/guest-code.js';
 
 /**

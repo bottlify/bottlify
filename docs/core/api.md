@@ -142,7 +142,7 @@ what every run uses.
 While a program runs, `app.debug` switches more of these from that moment on: `checkDraws(on)`
 (every Direct3D draw from a buffer compared with what the graphics worker was sent),
 `handleWords(on)`, frame dumps, draw and texture cuts, and the rest
-[`tools/cdp_test/README.md`](../../tools/cdp_test/README.md) lists.
+[`tools/README.md`](../../tools/README.md) lists.
 
 ### What the diagnostics say
 

@@ -21,7 +21,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createApp } from './app.js';
-import { buildExe } from '../../../tools/make-pe.mjs';
+import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
 
 const PSH_PROPSHEETPAGE = 0x0008;
 const PSH_USECALLBACK = 0x0100;

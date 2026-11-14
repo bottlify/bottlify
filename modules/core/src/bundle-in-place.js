@@ -64,7 +64,7 @@ export function placeFiles(files, start = HEADER_SIZE){
 const hex = bytes=>Array.from(bytes, byte=>byte.toString(16).padStart(2, '0')).join('');
 
 /**
- * Paths in the order a directory's files are packed (tools/make-btl.mjs): each
+ * Paths in the order a directory's files are packed (tools/bundles/make-btl.mjs): each
  * folder's entries by name, as code units, a folder's files where its name falls.
  *
  * @param {string} a @param {string} b

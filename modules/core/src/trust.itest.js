@@ -15,7 +15,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createApp } from './app.js';
-import { buildExe } from '../../../tools/make-pe.mjs';
+import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
 import { certificates, signedCabinet } from './layers/win32/wintrust/fixtures.test.js';
 
 const CERT_E_CHAINING = 0x800b010a;

@@ -218,7 +218,7 @@ everyone's. The page flags are `INACCESSIBLE`, `HAS_CODE`, `VOLATILE`, `CLOSED`,
   one costs about an eighth more machine code on arm64, and a program that hands data between its
   threads through locked instructions and kernel objects does not need it. The cpu layer's
   diagnostics say which way a process runs (`ordered`). The engine's own routines lock and let go
-  with locked instructions in either variant (`tools/check-lock-release.mjs`).
+  with locked instructions in either variant (`tools/checks/check-lock-release.mjs`).
 - **Exact exceptions.** A region exits right before the faulting instruction, with its EIP and
   registers. Division by zero gives #DE, an unknown instruction #UD, an access to a page the program cannot
   reach #PF with its address (translated code leaves, and the JavaScript interpreter runs the

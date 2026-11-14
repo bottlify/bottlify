@@ -28,7 +28,7 @@
  *                                    one was presented; anything else keeps them.
  *                                    Answered every time it is asked. `capture`
  *                                    true writes down everything sent from then
- *                                    on (`capture.js`), for `tools/graphics-replay.mjs`
+ *                                    on (`capture.js`), for `tools/read/graphics-replay.mjs`
  *   { type: 'root', api, options, port, memory, lending, source, frameLatency }
  *                                    `api` 'd3d7', 'd3d8', 'd3d9', 'd3d10' or 'opengl',
  *                                    `options` the plain part of what the root was

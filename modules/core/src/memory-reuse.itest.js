@@ -18,7 +18,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createApp } from './app.js';
-import { assemble, buildExe } from '../../../tools/make-pe.mjs';
+import { assemble, buildExe } from '../../../tools/fixtures/make-pe.mjs';
 
 /** @param {number} value */
 const u32 = value=>[value & 255, value >>> 8 & 255, value >>> 16 & 255, value >>> 24 & 255];
@@ -119,7 +119,7 @@ function stepsProgram(steps){
              * with its own address after it is read unless `write` is false.
              *
              * @param {string} name @param {boolean} [write]
-             * @returns {import('../../../tools/make-pe.mjs').AsmPart[]}
+             * @returns {import('../../../tools/fixtures/make-pe.mjs').AsmPart[]}
              */
             const readOver = (name, write = true)=>[
                 0x85, 0xc9, { jump: 'jz', to: `${name}-done` }, { label: name },

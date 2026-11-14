@@ -30,7 +30,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createApp } from './app.js';
-import { assemble, buildExe } from '../../../tools/make-pe.mjs';
+import { assemble, buildExe } from '../../../tools/fixtures/make-pe.mjs';
 
 /** @param {number} value @returns {number[]} */
 const u32 = value=>[
@@ -40,7 +40,7 @@ const u32 = value=>[
 /** @param {string} text */
 const cString = text=>[...text].map(c=>c.charCodeAt(0)).concat(0);
 
-/** @typedef {import('../../../tools/make-pe.mjs').AsmPart} Part */
+/** @typedef {import('../../../tools/fixtures/make-pe.mjs').AsmPart} Part */
 
 /** Who reported. */
 const TAG = Object.freeze({

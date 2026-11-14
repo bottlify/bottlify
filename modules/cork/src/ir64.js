@@ -9,7 +9,7 @@
  * 32-bit code: registers in, registers out, every flag computed eagerly by
  * the architecture's definition. It is the reference the 64-bit interpreter
  * and translator are judged against, and is itself judged against the
- * processor (`x64-corpus.json.gz`, made by `tools/x64-corpus.mjs` on real
+ * processor (`x64-corpus.json.gz`, made by `tools/generators/x64-corpus.mjs` on real
  * hardware).
  *
  * Values are BigInts throughout, so a 64-bit register, address or product is

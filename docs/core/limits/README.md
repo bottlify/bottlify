@@ -31,8 +31,7 @@ event, an error. Neither stops the program.
   and has not committed reads the gone process's bytes until it commits it, where Windows faults
   (`roadmap/decisions.md` A242).
 - The processor a program finds is a Nehalem (SSE4.2, POPCNT): AVX, AVX2, FMA, BMI, AES-NI and
-  AVX-512 are not announced and fault as on that processor. `tools/isa-audit.mjs` tells which a
-  title's code uses.
+  AVX-512 are not announced and fault as on that processor.
 - The engine has no .NET runtime of its own: `mscoree.dll`, the runtime and its assembly cache
   (`fusion.dll`) are the .NET Framework's, which the bottle has once its setup ran there (a Steam
   app's `_CommonRedist\DotNet` installer, run as any program is). A managed program in a bottle

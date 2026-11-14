@@ -1623,7 +1623,7 @@ export function createHarness(canvas, how = {}){
         // With the fake device the devices are played in a worker of their own
         // over another fake, as the player's split has them.
         // `captureGraphics` has the worker write down everything it is sent,
-        // for `tools/graphics-replay.mjs` to play again in node; the capture
+        // for `tools/read/graphics-replay.mjs` to play again in node; the capture
         // is posted to the driver's server at `captureGraphicsTo` at the end.
         const captureGraphics = request.captureGraphics === true;
         // Nudged as the player's is, by the run's own setting.

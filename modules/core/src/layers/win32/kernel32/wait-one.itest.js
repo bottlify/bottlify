@@ -432,7 +432,7 @@ const MUTEX_SLOT = 15;
 
 /**
  * @param {number} seed @param {number} count @param {boolean} guest
- * @param {typeof import('../../../../../../tools/make-pe.mjs').buildExe} buildExe
+ * @param {typeof import('../../../../../../tools/fixtures/make-pe.mjs').buildExe} buildExe
  * @param {boolean} [mutex]  a mutex taken and given back among the events' calls
  * @param {number} [rounds]  how many times the calls are made, one after the other
  */
@@ -551,7 +551,7 @@ const SET_OR_RESET = /!(Set|Reset)Event$/;
 
 test('seeded event programs answer alike with sets and resets in the guest and with every call'
     + ' in the host', async()=>{
-    const { buildExe } = await import('../../../../../../tools/make-pe.mjs');
+    const { buildExe } = await import('../../../../../../tools/fixtures/make-pe.mjs');
     for (const seed of [11, 12, 13, 14, 15, 16])
     {
         const executable = eventProgram(seed, 300, true, buildExe);
@@ -566,7 +566,7 @@ test('seeded event programs answer alike with sets and resets in the guest and w
 
 test('seeded event programs answer alike with polls in the guest and with every wait in the'
     + ' host', async()=>{
-    const { buildExe } = await import('../../../../../../tools/make-pe.mjs');
+    const { buildExe } = await import('../../../../../../tools/fixtures/make-pe.mjs');
     /** @param {Uint8Array} executable */
     const run = executable=>runEvents(executable, /WaitForSingleObject/);
     for (const seed of [1, 2, 3, 4, 5, 6])
@@ -584,7 +584,7 @@ test('seeded event and mutex programs answer alike with the guest\'s answers swi
     // `app.debug.handleWords`, switched while a program runs to see whether a
     // fault goes with the guest's own answers: a mutex the guest holds at the
     // switch keeps its owner and count in the host's hands, and back.
-    const { buildExe } = await import('../../../../../../tools/make-pe.mjs');
+    const { buildExe } = await import('../../../../../../tools/fixtures/make-pe.mjs');
     for (const seed of [21, 22, 23, 24])
     {
         const executable = eventProgram(seed, 600, true, buildExe, true, 40);
@@ -657,7 +657,7 @@ function assembler(){
  * Odd threads poll for the token, even ones wait; between, each sets, resets
  * or polls an event all of them share, whose answers go nowhere.
  *
- * @param {typeof import('../../../../../../tools/make-pe.mjs').buildExe} buildExe
+ * @param {typeof import('../../../../../../tools/fixtures/make-pe.mjs').buildExe} buildExe
  * @param {number} count @param {number} rounds
  */
 function tokenRing(buildExe, count, rounds){
@@ -750,7 +750,7 @@ function tokenRing(buildExe, count, rounds){
 test('a token passed round a ring of threads on several executors through auto-reset events is'
     + ' held by one thread at a time, and every set wakes its waiter, with the guest\'s answers'
     + ' and with every call in the host', async()=>{
-    const { buildExe } = await import('../../../../../../tools/make-pe.mjs');
+    const { buildExe } = await import('../../../../../../tools/fixtures/make-pe.mjs');
     const COUNT = 4;
     const ROUNDS = 150;
     const executable = tokenRing(buildExe, COUNT, ROUNDS);
@@ -772,7 +772,7 @@ test('an event a thread waits on together with another is set and not taken: the
     // signalled with a thread queued on it, its word the host's. The main
     // thread's poll takes A, a second times out, a reset of A set again
     // clears it: each read from the word the host writes the state into.
-    const { buildExe } = await import('../../../../../../tools/make-pe.mjs');
+    const { buildExe } = await import('../../../../../../tools/fixtures/make-pe.mjs');
     const WORKER = 0x300;
     const executable = buildExe({
         imports: { 'KERNEL32.dll': ['CreateEventA', 'SetEvent', 'ResetEvent', 'CreateThread',
