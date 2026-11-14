@@ -51,7 +51,7 @@ import {
     ARITH, CARRY_IN_WORD, I32, I64, Kind, MASKS, eagerFlagsOf, emitCondition, emitFlag, kindOf,
     recordOffsets, widthCode,
 } from './flags.js';
-import { emitInstruction } from './integer.js';
+import { emitInstruction, profileCall } from './integer.js';
 import { copyLoopOf, emitCopyAtOnce, emitIndexedCopyAtOnce, indexedCopyOf } from './copy-loop.js';
 import {
     addUndoHelper, copyPlan, emitGroupChecks, emitStaleExit, emitStreamWindow, planBlock,
@@ -1105,15 +1105,19 @@ export class RegionEmitter {
      * @param {import('../region.js').Region} region
      * @param {{ entryTop?: number, checked?: boolean, copies?: boolean,
      *     precision?: X87Precision, floats?: boolean, copyFunction?: boolean,
-     *     planned?: RegionPlanning | null }} [options]  copies, precision and floats: as
-     *     `emitRegion` takes them; copyFunction: this is the function of a structured region's
-     *     copies (`emitCopies`); planned: what the region's own function planned of it, which
-     *     the function of its copies takes rather than plan it again
+     *     planned?: RegionPlanning | null, rejoin?: number, copied?: number[] }} [options]
+     *     copies, precision and floats: as `emitRegion` takes them; copyFunction: this is the
+     *     function of a structured region's copies (`emitCopies`); planned: what the region's
+     *     own function planned of it, which the function of its copies takes rather than plan
+     *     it again; rejoin: the region's own function, which the copies call to go back to a
+     *     loop's head (`rejoinAt`) -- -1, they go back through the entry hash; copied: the
+     *     blocks the region's own function chose to copy, which the copies' function emits
      */
     constructor(context, region,
         { entryTop = 0, checked = false, copies = true, copyFunction = false,
             planned = null, precision = context.wide === true ? 'wide'
-                : context.narrow === true ? 'narrow' : 'mixed', floats = false } = {})
+                : context.narrow === true ? 'narrow' : 'mixed', floats = false,
+            rejoin = -1, copied = undefined } = {})
     {
         this.context = context;
         /** The region as formed, and the options, for the function of its copies. */
@@ -1134,6 +1138,16 @@ export class RegionEmitter {
         this.recordFields = recordFieldsOf(context.layout);
         /** What the function of the region's copies takes of this one's planning. */
         this.planned = planned;
+        /** This function's index, handed out before its copies are written (`emitCopies`). */
+        this.selfIndex = -1;
+        /** The region's own function, in the function of its copies (`rejoinAt`). */
+        this.rejoin = rejoin;
+        /** `shapeCut`, once asked. @type {Set<number> | undefined} */
+        this.shapeCutBlocks = undefined;
+        /** In the function of the copies, by address: the loop heads it goes back to, by the
+         * label the region's own function enters each with (`rejoinAt`).
+         * @type {Map<number, number>} */
+        this.rejoins = new Map();
         /** By ret block: the return addresses it jumps to rather than leaves by. */
         this.returns = planned?.returns ?? inlineReturns(region);
         /** A call out of this region is a wasm call it goes on after: no MMX state
@@ -1361,10 +1375,18 @@ export class RegionEmitter {
         // the start.
         const reentered = new Set((this.structure?.reentered ?? [])
             .map(at=>this.region.blocks.indexOf(region.blocks[at])));
-        if (!copies && !copyFunction && !this.copies.some(at=>reentered.has(at)))
+        if (copied !== undefined)
         {
-            this.closed = this.copies;
-            this.copies = [];
+            this.copies = copied;
+        }
+        else if (!copies)
+        {
+            // Copies of the blocks a way in from outside reaches before a loop's
+            // head, and only those: from a copy every other one is past a head,
+            // which the region's function is entered at. The rest have no entry.
+            const kept = this.reachedInLoops([...reentered]);
+            this.closed = this.copies.filter(at=>!kept.has(at));
+            this.copies = this.copies.filter(at=>kept.has(at));
         }
         /** Each copied block's place among the copies. @type {Map<number, number>} */
         this.copyIndex = new Map(this.copies.map((at, k)=>[at, k]));
@@ -1738,6 +1760,12 @@ export class RegionEmitter {
             liveBefore(instruction, live, this.context.precise === true), flagsOut[i]));
         if (this.copies.length > 0 && !this.copyFunction)
         {
+            // The copies go back to their loops' heads by a call of this
+            // function (`rejoinAt`), whose index they need before it is written.
+            if (this.context.hash && this.context.features.tailCalls)
+            {
+                this.selfIndex = this.context.m.reserveFunction(this.context.regionType);
+            }
             this.emitCopies(flagsOut, memoryPlan);
         }
         this.prologue();
@@ -1804,7 +1832,8 @@ export class RegionEmitter {
         }
         this.fillDeferred();
         const functionIndex = this.context.m.function(
-            this.context.regionType, this.localTypes, b.toBytes(), { hints: b.hints });
+            this.context.regionType, this.localTypes, b.toBytes(),
+            { hints: b.hints, ...this.selfIndex >= 0 ? { at: this.selfIndex } : {} });
         return {
             functionIndex, copiesIndex: this.copiesIndex,
             labels: new Map([...this.labels].map(([start, at])=>[start, this.entryLabel(at)])),
@@ -2650,6 +2679,7 @@ export class RegionEmitter {
         b.localGet(Local.t0).i32const(Exit.UNTRANSLATED).op(I32.eq)
             .localGet(Local.budget).i32const(0).op(I32.gtS).op(I32.and);
         this.openIf('transfer');
+        this.rejoinAt();
         b.localGet(Local.eip);
         b.localGet(Local.budget);
         for (let local = Local.budget + 1; local < STATE_PARAMS; local++)
@@ -2658,6 +2688,77 @@ export class RegionEmitter {
         }
         b.returnCall(/** @type {number} */ (this.context.transfer));
         this.close();
+    }
+
+    /**
+     * The blocks inside loops that a way in at `starts` reaches before it comes
+     * to a loop's head or leaves the loops, `starts` among them where inside.
+     *
+     * @param {number[]} starts  by place in the emitting order
+     * @returns {Set<number>}
+     */
+    reachedInLoops(starts){
+        const index = new Map(this.region.blocks.map((block, at)=>[block.start, at]));
+        const seen = new Set();
+        const work = starts.filter(at=>this.interior.has(at));
+        while (work.length > 0)
+        {
+            const at = /** @type {number} */ (work.pop());
+            if (seen.has(at))
+            {
+                continue;
+            }
+            seen.add(at);
+            for (const target of jumpsOf(this.region.blocks[at], this.returns, this.callReturn,
+                index))
+            {
+                const to = index.get(target);
+                if (to !== undefined && this.interior.has(to))
+                {
+                    work.push(to);
+                }
+            }
+        }
+        return seen;
+    }
+
+    /**
+     * The blocks the region's function has no entry for whatever the stack:
+     * compiled for the x87 stack in another shape than the entry's, or for none
+     * known. A copy leaving for one goes through the hash, which finds the region
+     * compiled for the stack the machine has there.
+     *
+     * @returns {Set<number>}
+     */
+    shapeCut(){
+        this.shapeCutBlocks ??= new Set([...this.x87.cut, ...this.unknownBlocks(),
+            ...this.shapedBlocks()]);
+        return this.shapeCutBlocks;
+    }
+
+    /**
+     * In the function of a region's copies, the way back to a loop's head the
+     * copy left for (`jumpTo`): a call of the region's own function, entered
+     * with the head's label as the entry hash would enter it, without the
+     * hash's look. A copy runs from a return come back from outside the
+     * region to the first jump back, and a region whose calls' returns came
+     * back so (a ret to another call than the one waiting, a callee not yet
+     * translated) went through the hash on every such turn.
+     */
+    rejoinAt(){
+        const { b, rejoin } = this;
+        for (const [address, label] of this.rejoins)
+        {
+            b.localGet(Local.eip).i32const(address).op(I32.eq);
+            this.openIf('rejoin');
+            b.i32const(label);
+            for (let local = Local.budget; local < STATE_PARAMS; local++)
+            {
+                b.localGet(local);
+            }
+            b.returnCall(rejoin);
+            this.close();
+        }
     }
 
     // --- flags ---
@@ -3518,9 +3619,11 @@ export class RegionEmitter {
      */
     emitCopies(flagsOut, memoryPlan){
         const copies = new RegionEmitter(this.context, this.formed, { ...this.options,
-            copyFunction: true, planned: { returns: this.returns, structure: this.structure,
+            copyFunction: true, copied: this.copies,
+            planned: { returns: this.returns, structure: this.structure,
                 region: this.region, x87: this.x87Plan, flagsOut,
-                memoryPlan: memoryPlan === null ? null : copyPlan(memoryPlan) } });
+                memoryPlan: memoryPlan === null ? null : copyPlan(memoryPlan) },
+            rejoin: this.selfIndex });
         const { functionIndex } = copies.emit();
         this.copiesIndex = functionIndex;
         const { b } = this;
@@ -5013,6 +5116,13 @@ export class RegionEmitter {
         const label = this.labels.get(target);
         if (label === undefined)
         {
+            // A callee's branch left as cold notes where it went, as an indirect call
+            // does: taken often, the region is formed again with it followed (`coldBranch`).
+            const block = this.region.blocks[this.blockIndex];
+            if (block.exit.cold?.includes(target) === true)
+            {
+                profileCall(this, block.instructions[block.instructions.length - 1].eip, target);
+            }
             this.exitAt(target, Exit.UNTRANSLATED);
             return;
         }
@@ -5078,6 +5188,10 @@ export class RegionEmitter {
         if (this.copyFunction ? !this.copyIndex.has(label) : this.interior.has(label))
         {
             this.countMechanism(Mechanism.JUMP_OUT);
+            if (this.copyFunction && this.rejoin >= 0 && !this.shapeCut().has(label))
+            {
+                this.rejoins.set(target, label);
+            }
             this.exitAfterEdge(target, Exit.UNTRANSLATED);
             return;
         }
@@ -5382,7 +5496,10 @@ export function liveFlagsOut(blocks, labels, precise = true){
  * entered in its middle every turn -- through a copy of its blocks and the
  * entry hash back to its head (`emitCopies`), dearer than the flat dispatch's
  * one branch -- so it is no natural loop and its jumps back go through the
- * function's dispatch. The blocks are then emitted in a
+ * function's dispatch. Under `callReturn` a call that leaves is a wasm call
+ * whose return comes back in place: its return address is no way in but a
+ * block the runtime enters when the call went otherwise (`reentered`), and a
+ * loop around it stays a loop. The blocks are then emitted in a
  * topological order of the jumps that close no loop, a loop's blocks together
  * after its head, so that every other jump is a branch forward; ties go to
  * the block the last one falls through to, then to the lowest address.
@@ -5396,7 +5513,8 @@ export function liveFlagsOut(blocks, labels, precise = true){
  *     inside another: elsewhere the block's own loop onto itself, `selfLoop`, is all it
  *     needs); reentered: by index in `region.blocks`, blocks the runtime enters that may be
  *     inside a loop: the return addresses of the predicted indirect calls, which a call to
- *     another target comes back to from outside
+ *     another target comes back to from outside, and under `callReturn` of the calls that
+ *     leave (`comesBackAt`)
  */
 export function planStructure(region, returns, callReturn = false){
     const { blocks } = region;
@@ -5417,20 +5535,15 @@ export function planStructure(region, returns, callReturn = false){
                 out.push(at);
             }
         }
-        const back = comesBackTo(block, index);
+        const back = comesBackTo(block, index, callReturn);
         if (back !== undefined && !roots.includes(back))
         {
             roots.push(back);
         }
-        const { kind, next, predicted } = block.exit;
-        const last = block.instructions[block.instructions.length - 1];
-        if (kind === 'indirect' && last?.op === 'call' && predicted === true)
+        const again = comesBackAt(block, index, callReturn);
+        if (again !== undefined)
         {
-            const after = index.get(next);
-            if (after !== undefined)
-            {
-                reentered.push(after);
-            }
+            reentered.push(again);
         }
         return out;
     });
@@ -5855,18 +5968,43 @@ function reaching(starts, edges, barrier){
  * formed a callee of in -- and the address after a port write, where the host
  * resumes a program whose handler it did not run from inside the region. A
  * predicted call's return comes back from outside only when the call went
- * elsewhere, which its copy takes (`emitCopies`).
+ * elsewhere, which its copy takes (`emitCopies`), and so does a call that
+ * leaves under `callReturn` (`comesBackAt`).
  *
  * @param {import('../region.js').Block} block @param {Map<number, number>} index
+ * @param {boolean} callReturn
  * @returns {number | undefined}  the block's index
  */
-function comesBackTo(block, index){
+function comesBackTo(block, index, callReturn){
     const { kind, targets, next, predicted } = block.exit;
     const last = block.instructions[block.instructions.length - 1];
-    const leaves = kind === 'call' ? !index.has(targets[0])
+    const leaves = !(callReturn && callsOut(block, index)) && (kind === 'call'
+        ? !index.has(targets[0])
         : kind === 'trap' || kind === 'indirect' && last?.op === 'call'
-            && !(predicted === true && targets.some(target=>index.has(target)));
+            && !(predicted === true && targets.some(target=>index.has(target))));
     return leaves ? index.get(next) : undefined;
+}
+
+/**
+ * The block a call's return comes back to from outside the region only when
+ * the call went otherwise than its code assumed, if any: a predicted indirect
+ * call that went elsewhere, and under `callReturn` a call that leaves
+ * (`callsOut`) -- a wasm call whose return comes back in place unless a slice
+ * ended inside its callee, the callee was let go or returned elsewhere, or
+ * the call went plain, the call stack full. A slice ends inside a hot loop's
+ * callees as often as the loop runs them, so such a block inside a loop has
+ * its copy from the start (`emitCopies`): closed, it was missed until the
+ * region was formed again with copies all the same.
+ *
+ * @param {import('../region.js').Block} block @param {Map<number, number>} index
+ * @param {boolean} callReturn
+ * @returns {number | undefined}  the block's index
+ */
+function comesBackAt(block, index, callReturn){
+    const { kind, next, predicted } = block.exit;
+    const last = block.instructions[block.instructions.length - 1];
+    return kind === 'indirect' && last?.op === 'call' && predicted === true
+        || callReturn && callsOut(block, index) ? index.get(next) : undefined;
 }
 
 /**

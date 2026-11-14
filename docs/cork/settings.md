@@ -96,6 +96,7 @@ default is the product's.
 | `yieldChunk` | 10000 | Instructions translated code runs at a time while a slice may end early (`createMachine`: 2^24). |
 | `sliceMs` | 8 | How long an interpreting slice may take. |
 | `wasmInterpreterAfter` | 8192 | Work the JavaScript interpreter does before the wasm tier takes over. |
+| `clock` | `host` | The clock the cork host and the translator decide by. `virtual`: the instructions the guest retired, a million a millisecond, for a slice's length, the time-stamp counter and a page's rewrites, the translation done on the engine thread. The same program then translates and runs the same code on any machine however busy it is; the time it took is the machine's alone. For stands, not the product. |
 
 A few sizes stay fixed because translated code or the prebuilt wasm interpreter are built around
 them: the state block's offsets, the page-flag table (one byte per 4 KiB page), the code-granule

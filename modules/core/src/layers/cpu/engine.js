@@ -131,8 +131,10 @@ export function engineContractProblem(engineModule, url){
  * @property {EngineImports} imports
  * @property {() => number} [now]  Cork's own: the clock, in milliseconds, a page's rewrites
  *     are timed by (`volatileWindowMs`, `volatileHoldMs`): the host's by default. A host whose
- *     program has a clock of its own (cork's machine: the instructions it retired) passes
- *     that, so what is translated follows the program and not how busy the machine is.
+ *     program has a clock of its own (cork's machine, a host on `clock: 'virtual'`: the
+ *     instructions it retired) passes that, so what is translated follows the program and not
+ *     how busy the machine is. The engine thread's own time a worker's batches may take
+ *     (`holdMs`) is the machine's whatever this is.
  * @property {{ simd: boolean, tailCalls: boolean, sharedMemory: boolean,
  *     defaultNaNNegative: boolean, armHost?: boolean }} [features]  Cork's own: the host
  *     features its translator makes code for, in place of the ones it finds here -- a test's
@@ -347,6 +349,16 @@ export function engineContractProblem(engineModule, url){
  * @property {number} [interpretChunk]  `createMachine` alone: the instructions its interpreter
  *     runs at a time. Default 2^16.
  * @property {number} [sliceMs]  How long a slice that has interpreted may take. Default 8.
+ * @property {'host' | 'virtual'} [clock]  The clock the cork host and its translator take
+ *     their decisions by: `host`, the machine's (the default); `virtual`, the instructions the
+ *     guest retired, a million a millisecond (`VIRTUAL_INSTRUCTIONS_PER_MS`) -- a slice's
+ *     length, the time-stamp counter, a page's rewrites (`now`) -- with the translation done
+ *     on the engine thread: a worker's answers come back when the event loop has them, and
+ *     the time its batches may take of the thread is the machine's. The same program then
+ *     translates and runs the same code on any machine however busy it is: a stand's counts
+ *     agree to the unit, and only the time it took is the machine's. Not what a product
+ *     runs: a program reading a clock of the layer's own (`GetTickCount`, the performance
+ *     counter) still reads the host's.
  */
 
 /**

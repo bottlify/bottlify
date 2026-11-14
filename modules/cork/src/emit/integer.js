@@ -188,11 +188,12 @@ export function classOf(instruction){
  * ratio hash, not every n-th: a loop over sixteen objects sampled every
  * sixty-fourth call would see one object only. Off, one load and a branch,
  * at every call: a `quiet` call, sampled enough to know there is nothing to
- * form in, has none. The call's target is in `count`.
+ * form in, has none. The call's target is in `count`, or given: a callee's far branch
+ * left as cold notes the same pair where it leaves (`jumpTo`, `coldBranch`).
  *
- * @param {E} e @param {number} site
+ * @param {E} e @param {number} site @param {number} [target]
  */
-function profileCall(e, site){
+export function profileCall(e, site, target = undefined){
     if (e.context.profileCalls !== true || e.region.blocks[e.blockIndex].exit.quiet === true)
     {
         return;
@@ -210,7 +211,16 @@ function profileCall(e, site){
         .i32const(3).op(I32.shl);
     intoState(context, b).localTee(Local.t1)
         .i32const(site | 0).store('i32', { offset: at + 8 });
-    b.localGet(Local.t1).localGet(Local.count).store('i32', { offset: at + 12 });
+    b.localGet(Local.t1);
+    if (target === undefined)
+    {
+        b.localGet(Local.count);
+    }
+    else
+    {
+        b.i32const(target | 0);
+    }
+    b.store('i32', { offset: at + 12 });
     e.close();
     e.close();
 }

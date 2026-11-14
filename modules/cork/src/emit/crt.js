@@ -763,8 +763,10 @@ function spans(e, operation, dst, src){
 /**
  * `[pointer, pointer + t2)`'s pages tested for `bits`, unless `Local.addr` is
  * already -1, which it is set to when one has any or the span leaves RAM. A
- * span of no bytes is plain. With `collect`, every page's flags are or'd
- * into `Local.pflags`. The pointer is i64 in a wide window (`pointers`).
+ * span of no bytes tests no page, but leaves RAM like any other: a memory's
+ * fill or copy of no bytes still traps on a pointer past its end. With
+ * `collect`, every page's flags are or'd into `Local.pflags`. The pointer is
+ * i64 in a wide window (`pointers`).
  *
  * @param {E} e @param {number} pointer @param {number} bits @param {boolean} [collect]
  */
@@ -790,10 +792,10 @@ function span(e, pointer, bits, collect = false){
             b.op(I64.wrap);
         }
     };
-    b.localGet(Local.addr).i32const(-1).op(I32.ne)
-        .localGet(Local.t2).i32const(0).op(I32.ne).op(I32.and);
+    b.localGet(Local.addr).i32const(-1).op(I32.ne);
     b.if(EMPTY);
-    // In RAM: pointer <=u ramSize and t2 <=u ramSize - pointer.
+    // In RAM: pointer <=u ramSize and t2 <=u ramSize - pointer -- an empty
+    // span too, whose pointer the memory's operation bounds as it would a byte.
     b.localGet(pointer);
     constant(e, ramSize);
     b.op(ops.gtU);
@@ -804,6 +806,8 @@ function span(e, pointer, bits, collect = false){
     b.if(EMPTY);
     b.i32const(-1).localSet(Local.addr);
     b.else();
+    b.localGet(Local.t2).i32const(0).op(I32.ne);
+    b.if(EMPTY);
     page(false);
     b.localSet(Local.addr);
     b.block(EMPTY);
@@ -824,6 +828,7 @@ function span(e, pointer, bits, collect = false){
     b.op(I32.eq).brIf(1);
     b.localGet(Local.addr).i32const(1).op(I32.add).localSet(Local.addr);
     b.br(0);
+    b.end();
     b.end();
     b.end();
     b.end();

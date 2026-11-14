@@ -72,6 +72,17 @@ const PELOAD = join(BIN, 'peload');
 const haveNative = existsSync(PELOAD);
 /** @type {Record<string, Record<string, string>>} */
 const expected = JSON.parse(readFileSync(resolve(HERE, '../expected.json'), 'utf8'));
+// A bundle not built is a worker the page cannot load, which the browser reports
+// with no message at all: say so before anything runs.
+const unbuilt = [...new Set(labels.map(label=>configs[label].bundle ?? label))]
+    .filter(bundle=>!existsSync(join(HERE, 'bundles', bundle, 'worker.js')));
+if (unbuilt.length !== 0)
+{
+    console.error(`no bundle ${unbuilt.join(', ')}: make it first, e.g.\n`
+        + `    node modules/cork/bench/browser/build.mjs '${JSON.stringify(
+            Object.fromEntries(unbuilt.map(bundle=>[bundle, '.'])))}'`);
+    process.exit(1);
+}
 if (out)
 {
     writeFileSync(out, '');

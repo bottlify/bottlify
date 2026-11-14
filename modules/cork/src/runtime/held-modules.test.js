@@ -20,6 +20,10 @@ import { memoryTranslationStore } from './cache.js';
 import { features as probeFeatures } from '../wasm/features.js';
 import { random } from '../testing/seeded-pieces.js';
 
+/** Why a test of the entry hash cannot run here. */
+const NO_TAIL_CALLS = 'this host\'s wasm has no tail calls: every region leaves for the host'
+    + ' and there is no entry hash';
+
 /** A machine of 4 MiB with cork's own layout and a runtime over it. @param {Record<string, unknown>} config */
 function machine(config){
     const layout = ownLayout({ ramSize: 4 << 20, hashSlots: 1 << 16 });
@@ -123,9 +127,10 @@ async function runToHalt(m, at, { budget = 1_000_000, held } = {}){
 }
 
 test('a relink puts the regions entered lately in one module and the rest in small ones',
-    async()=>{
+    async t=>{
         if (!probeFeatures().tailCalls)
         {
+            t.skip(NO_TAIL_CALLS);
             return;
         }
         // The loop and its callee each in a batch of its own with stubs never
@@ -237,15 +242,18 @@ for (const [seed, mode] of CEILING_RUNS)
 {
     test(`a program run under a ceiling a few modules high, its modules let go and brought back`
         + ` all the time, runs as it does without one (seed ${seed}, ${JSON.stringify(mode)})`,
-    async()=>{
+    async t=>{
         if (mode.dispatch && !probeFeatures().tailCalls)
         {
+            t.skip(NO_TAIL_CALLS);
             return;
         }
         const free = await ceilingRun(seed, { ...mode, cacheBytes: 0 });
         assert.equal(free.evictions, 0);
-        // Room for three modules of the size they are on average.
-        const cacheBytes = Math.ceil(3 * free.heldBytes / free.heldModules);
+        // Room for five modules of the size they are on average: the driver's loop of calls,
+        // each return address copied for a return come back from outside, is two to four of
+        // them, and one module larger than the ceiling is held alone (`makeRoom`).
+        const cacheBytes = Math.ceil(5 * free.heldBytes / free.heldModules);
         const held = await ceilingRun(seed, { ...mode, cacheBytes });
         assert.deepEqual(held.state, free.state, 'the same registers and memory');
         assert.ok(held.most <= cacheBytes, `held ${held.most} of ${cacheBytes}`);
@@ -258,7 +266,7 @@ for (const [seed, mode] of CEILING_RUNS)
 test('a program run under a host\'s bound (`charge`) a few modules high runs as it does without'
     + ' one, never holds past it, and gives back all it took', async()=>{
     const free = await ceilingRun(61, { cacheBytes: 0 });
-    const bound = Math.ceil(3 * free.heldBytes / free.heldModules);
+    const bound = Math.ceil(5 * free.heldBytes / free.heldModules);
     let taken = 0;
     let most = 0;
     let refused = 0;

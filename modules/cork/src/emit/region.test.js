@@ -767,11 +767,16 @@ test('a loop entered at its test at the bottom has the test for its head', ()=>{
     assert.deepEqual([...loops], [[1, 2]]);
 });
 
-test('a loop a call leaves from is entered in its middle by the return, and is no wasm loop', ()=>{
+test('a loop a call leaves from is entered in its middle by the return, and is no wasm loop'
+    + ' unless the call comes back in place', ()=>{
     // 0: jcc 2 else 1; 1: call out, back at 2; 2: jcc 0 else 3; 3: hlt
     const blocks = [shaped(0, 'jcc', [2, 1], 1), shaped(1, 'call', [0x9000], 2),
         shaped(2, 'jcc', [0, 3], 3), shaped(3, 'hlt', [], 4)];
     assert.deepEqual([...planStructure(regionOf(blocks), new Map()).loops], []);
+    // Under callReturn the call is a wasm call that comes back in place: the loop is a
+    // loop, its return a block entered by its copy when the call went otherwise.
+    const called = planStructure(regionOf(blocks), new Map(), true);
+    assert.deepEqual([[...called.loops], called.reentered], [[[0, 2]], [2]]);
     // Formed in, the callee's return is a jump: the loop is the head's.
     blocks[1] = shaped(1, 'call', [4], 2);
     blocks.push(shaped(4, 'ret', [], 5));
@@ -941,11 +946,37 @@ test('the function of a region\'s copies, planned from the region\'s own plannin
         };
         const shared = functionOf(context=>emitRegion(context, region,
             { entryTop: 0, checked: false }).copiesIndex);
+        // The copies go back to their loops through the region's function, whose index the
+        // region hands out before them: the one the fresh copies' module hands out next.
         const fresh = functionOf(context=>new RegionEmitter(context, region,
-            { entryTop: 0, checked: false, copyFunction: true }).emit().functionIndex);
+            { entryTop: 0, checked: false, copyFunction: true,
+                rejoin: context.m.importedFunctions + context.m.functions.length })
+            .emit().functionIndex);
         assert.ok(fresh.body.length > 0);
         assert.deepEqual(shared, fresh, `the copies of ${program.length} bytes of code`);
     }
+});
+
+test('only the blocks a way in from outside reaches before a loop\'s head are copied: the rest'
+    + ' of the region\'s loops have no entry', ()=>{
+    const layout = ownLayout({ ramSize: 1 << 22, hashSlots: 1 << 16 });
+    const features = { simd: true, tailCalls: true, defaultNaNNegative: false };
+    // mov ecx, 3; A: inc eax; test al, 1; jz A1; inc ebx; A1: dec ecx; jnz A;
+    // mov ecx, 3; B: inc edx; test dl, 1; jz B1; inc esi; B1: call edi; R: dec ecx; jnz B; hlt
+    // -- under callReturn the call's return R is the one block entered from outside.
+    const program = [0xb9, 3, 0, 0, 0, 0x40, 0xa8, 0x01, 0x74, 0x01, 0x43, 0x49, 0x75, 0xf7,
+        0xb9, 3, 0, 0, 0, 0x42, 0xf6, 0xc2, 0x01, 0x74, 0x01, 0x46, 0xff, 0xd7, 0x49, 0x75, 0xf4,
+        0xf4];
+    const region = formRegion(address=>program[address - CODE] ?? 0xf4, CODE);
+    const context = prepareModule(new ModuleBuilder(), layout, features, {},
+        { hash: true, callReturn: true });
+    const translation = emitRegion(context, region, { entryTop: 0, checked: false, copies: false });
+    assert.ok(translation.copiesIndex >= 0, 'R has its copy');
+    assert.ok(/** @type {number} */ (translation.labels.get(CODE + 0x1c))
+        >= 2 * region.blocks.length, 'R entered by its copy');
+    assert.deepEqual([...translation.closed].sort((a, b)=>a - b),
+        [CODE + 0x0a, CODE + 0x0b, CODE + 0x19, CODE + 0x1a],
+        'loop A\'s inside, and B\'s before the call, have no entry');
 });
 
 test('a nested loop\'s head is entered through the head of the loop around it', ()=>{
