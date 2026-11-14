@@ -4003,7 +4003,9 @@ test('BroadcastSystemMessage sends to every top-level window, and a query can be
     const BSF_SENDNOTIFYMESSAGE = 0x0100;
     told.length = 0;
     assert.equal(fns.BroadcastSystemMessageW.handler([BSF_SENDNOTIFYMESSAGE, 0, WM_APP, 0, 0]), 1);
-    assert.deepEqual(told.map(each=>each.hwnd).sort(), [first, second].sort());
+    // (told was narrowed to empty by the asserts above; it has grown since.)
+    const notified = /** @type {{ hwnd: number }[]} */ (/** @type {unknown} */ (told));
+    assert.deepEqual(notified.map(each=>each.hwnd).sort(), [first, second].sort());
 
     // Ex under BSF_RETURNHDESK names the window that denied the query.
     const BSF_RETURNHDESK = 0x0200;
