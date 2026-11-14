@@ -472,3 +472,17 @@ test('__CxxLongjmpUnwind answers to its undecorated name and the decorated one',
         'stdcall: the callee pops the buffer');
     assert.equal(table.__CxxLongjmpUnwind.argBytes, 4);
 });
+
+test('__DestructExceptionObject destroys a C++ exception\'s object and leaves another alone',
+    async()=>{
+        const m = machine();
+        const object = m.words([42]);
+        const ti = throwInfo(m, [{ type: m.type('.?AUErr@@') }], { destructor: 0x7000 });
+        await m.eh.table.__DestructExceptionObject.handler([thrown(m, object, ti)]);
+        assert.deepEqual(m.calls.map(call=>[call.entry, call.registers]),
+            [[0x7000, { ecx: object }]], 'by its destructor, thiscall');
+
+        m.put(RECORD_AT + RECORD.CODE, 0xc0000005);
+        await m.eh.table.__DestructExceptionObject.handler([RECORD_AT]);
+        assert.equal(m.calls.length, 1, 'an access violation carries no object');
+    });

@@ -68,6 +68,7 @@ import { createCrtdllFunctions } from './msvcrt/crtdll.js';
 import { createMsvcr80Functions } from './msvcrt/msvcr80.js';
 import { createMsvcp80Functions } from './msvcrt/msvcp80.js';
 import { createUcrtbaseFunctions } from './msvcrt/ucrtbase.js';
+import { UNIVERSAL_CXX } from './msvcrt/classes.js';
 import { createWindowFunctions } from './user32/windows.js';
 import { createWindowDirectory } from './user32/directory.js';
 import { createMessageQueue } from './user32/messages.js';
@@ -5343,9 +5344,13 @@ export function createWin32Module(){
             // Visual C++ 2015 on keeps the exception machinery and the memory
             // routines in vcruntime140, and a 64-bit build's compressed C++
             // tables' handler in vcruntime140_1.
-            libraries['VCRUNTIME140.dll'] = Object.fromEntries(VCRUNTIME_EXPORTS
-                .filter(name=>Object.hasOwn(libraries['msvcrt.dll'], name))
-                .map(name=>[name, libraries['msvcrt.dll'][name]]));
+            libraries['VCRUNTIME140.dll'] = {
+                ...Object.fromEntries(VCRUNTIME_EXPORTS
+                    .filter(name=>Object.hasOwn(libraries['msvcrt.dll'], name))
+                    .map(name=>[name, libraries['msvcrt.dll'][name]])),
+                // std::exception's message and typeid's names, ucrtbase's too.
+                .../** @type {any} */ (libraries['msvcrt.dll'])[UNIVERSAL_CXX] ?? {},
+            };
             if (cxx64)
             {
                 libraries['VCRUNTIME140_1.dll'] = {

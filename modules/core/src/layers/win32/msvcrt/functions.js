@@ -1439,6 +1439,7 @@ export function createMsvcrtFunctions(host){
                 allocate: host.allocate,
                 free: host.free,
                 callGuest: host.callGuest,
+                pointerSize: host.pointerSize,
                 ...host.addressOf ? { addressOf: host.addressOf } : {},
                 ...host.currentThread ? { currentThread: host.currentThread } : {},
             })
