@@ -3312,9 +3312,14 @@ async function mountBundle({ options, events, translationStore }){
     const held = [];
     /** @type {() => void} */
     let allNamed = ()=>{};
-    const named = new Promise(resolve=>{
+    /** @type {(reason: any) => void} */
+    let noneNamed = ()=>{};
+    const named = new Promise((resolve, reject)=>{
         allNamed = ()=>resolve(undefined);
+        noneNamed = reject;
     });
+    // Nobody may be waiting on it when one bundle fails.
+    named.catch(()=>{});
     /** @param {string} name */
     const opened = name=>{
         held.push(name);
@@ -3333,11 +3338,31 @@ async function mountBundle({ options, events, translationStore }){
         }
         return named;
     };
-    const mounted = await Promise.all(specs.map(one=>mountOneBundle({ ...one, held, opened,
+    // One bundle that fails fails the run: the others stop waiting for its
+    // cache's name, and those already mounted stop fetching and close theirs.
+    const outcomes = await Promise.allSettled(specs.map(one=>mountOneBundle({ ...one, held,
+        opened,
         // A layer's events say whose they are.
         events: one.layer ? { emit: (/** @type {string} */ name, /** @type {any} */ payload)=>
             events.emit(name, { ...payload, layer: one.id }) } : events,
-        translationStore: one.layer ? undefined : translationStore })));
+        translationStore: one.layer ? undefined : translationStore })
+        .catch(e=>{
+            noneNamed(e);
+            throw e;
+        })));
+    const failed = outcomes.find(one=>one.status === 'rejected');
+    if (failed)
+    {
+        for (const one of outcomes)
+        {
+            if (one.status === 'fulfilled')
+            {
+                one.value.stop();
+            }
+        }
+        throw failed.reason;
+    }
+    const mounted = outcomes.map(one=>/** @type {PromiseFulfilledResult<MountedBundle>} */ (one).value);
     if (mounted.length === 1)
     {
         return mounted[0];

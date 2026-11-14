@@ -425,6 +425,38 @@ test('a layer is cached once, by its own name, whatever bottle stands on it',
             && tables.some(path=>path.startsWith('bottle-b-')), 'and one of each bottle');
     });
 
+test('a layer that fails to mount fails the run, and the bottle mounted beside it lets go',
+    { timeout: 120_000 }, async t=>{
+        const bottle = await pack(BOTTLE_FILES, BOTTLE_HIVE);
+        const layer = await pack(LAYER_FILES, LAYER_HIVE);
+        t.after(()=>Promise.all([bottle, layer].map(one=>one.cleanup())));
+        let closed = 0;
+        const store = { ...memoryStore(), close(){
+            closed++;
+        } };
+        // The layer's index and registry arrive; its preload's blocks do not.
+        let preloading = false;
+        await assert.rejects(createApp({
+            executable: probeProgram(),
+            bundle: { id: 'bottle', store, fetch: bottle.fetch,
+                layers: [{ id: 'netfx48', store: memoryStore(), preload: true,
+                    retry: { attempts: 1 },
+                    progress: ()=>{
+                        preloading = true;
+                    },
+                    fetch: (/** @type {number} */ offset, /** @type {number} */ length)=>{
+                        if (preloading)
+                        {
+                            throw new Error('the layer is out of reach');
+                        }
+                        return layer.fetch(offset, length);
+                    } }] },
+            storage: { load: async()=>({ files: [], registry: SESSION_HIVE }) },
+        }), /the layer is out of reach/);
+        await new Promise(done=>setTimeout(done, 50));
+        assert.equal(closed, 1, 'the bottle\'s cache gave its store\'s files back');
+    });
+
 /** Somewhere to keep blocks, over ordinary buffers: Node has no OPFS. */
 function memoryStore(){
     /** @type {Map<string, Uint8Array>} */
