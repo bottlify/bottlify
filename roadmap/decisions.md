@@ -661,7 +661,7 @@ prerequisite installers among them.** Steam downloads the depots an app names fr
 (Steamworks Common Redistributables' Visual C++ and DirectX) and, on the first start, runs its
 install scripts' programs silently. The download (`bottlify-ui/gamehub/tools/steam-install.mjs`) takes those depots
 too -- an anonymous logon opens them -- and `@bottlify/core/steam`'s `redist.js` (run over a
-directory by `tools/redist.mjs`, over the bottle a page writes by an install in the browser) does
+directory by `bottlify-ui/gamehub/tools/steam-install.mjs`, over the bottle a page writes by an install in the browser) does
 what the programs would at install time instead: it unpacks each one with the engine's cabinet and installer-database
 readers and applies the packages inside by their tables -- the files of each component whose
 condition holds into the bottle's system folders, its registry rows into the bottle's registry

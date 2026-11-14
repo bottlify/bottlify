@@ -5,9 +5,9 @@
  */
 
 /**
- * tools/redist.mjs: which shared depots an install takes, what a Steam install
- * script asks for, and a redistributable's packages applied to a bottle -- a
- * real installer database and cabinets, built here, inside a program, as a
+ * redist.js over a directory: which shared depots an install takes, what a Steam
+ * install script asks for, and a redistributable's packages applied to a bottle
+ * -- a real installer database and cabinets, built here, inside a program, as a
  * bootstrapper carries them.
  */
 
@@ -17,12 +17,18 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { bootstrapper, cabinet, gameSetup } from '../modules/core/src/steam/redist.fixture.js';
+import { bootstrapper, cabinet, gameSetup } from './redist.fixture.js';
+import * as redist from './redist.js';
 import {
-    applyPackage, compareVersions, imageMachine, installRedistributables,
-    parseInstallScript, registryValue, unpackRedistributable, writeRegistry,
-} from './redist.mjs';
-import * as redist from '../modules/core/src/steam/redist.js';
+    applyPackage, compareVersions, imageMachine, parseInstallScript, registryValue,
+    unpackRedistributable, writeRegistry,
+} from './redist.js';
+import { directoryTree } from './install-directory.js';
+
+/** redist.js's install over a directory on this disk, as a host install runs it. */
+const installRedistributables = (/** @type {string} */ directory,
+    /** @type {string[]} */ scripts, /** @type {'x86' | 'amd64'} */ machine)=>
+    redist.installRedistributables(directoryTree(directory), scripts, machine);
 
 const HKLM = 0x80000002;
 const HKCU = 0x80000001;
