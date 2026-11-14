@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { collectFrom, placementOf, publish, saveBottle } from './index.js';
+import { collectFrom, placementOf, publish, saveBottle, saveLayer } from './index.js';
 
 /** A prefix with one installed file, which is the least a bottle is made of. */
 const PREFIX = {
@@ -196,4 +196,33 @@ test('a bottle saved in the browser is the bundle a server would assemble, its p
         await assert.rejects(saveBottle({ prefix: { ...prefix, entry: 'missing.exe' },
             directory: /** @type {any} */ (fakeDirectory()), id: 'b' }),
         /missing\.exe, is not among the installed files/);
+    });
+
+test('a layer saved in the browser is a bundle of its own kind, with no program to start',
+    async()=>{
+        const { openBundle } = await import(
+            '../../core/src/layers/filesystem/internal/bundle/format.js');
+        const zlib = await import('node:zlib');
+        const directory = fakeDirectory();
+        const clr = new Uint8Array(100_000).map((_, k)=>(k * 13) & 0xff);
+        const saved = await saveLayer({ directory: /** @type {any} */ (directory),
+            id: 'dotnet48-x86', manifest: { title: '.NET Framework 4.8 (x86)', version: '4.8' },
+            files: [{ path: '.bottlify\\drive_c\\WINDOWS\\clr.dll', bytes: clr },
+                { path: '.bottlify\\registry.json',
+                    bytes: new TextEncoder().encode('{"roots":[]}') }] });
+        const folder = directory.entries.get('dotnet48-x86');
+        const container = folder.entries.get('bundle.btl').bytes();
+        const bundle = await openBundle(async(/** @type {number} */ offset,
+            /** @type {number} */ length)=>container.subarray(offset, offset + length),
+        (/** @type {number} */ codec, /** @type {Uint8Array} */ stored)=>(codec === 1
+            ? new Uint8Array(zlib.inflateRawSync(stored)) : stored));
+        assert.equal(bundle.find('.bottlify\\drive_c\\WINDOWS\\clr.dll')?.size, clr.length);
+        const manifest = JSON.parse(new TextDecoder().decode(
+            folder.entries.get('manifest.json').bytes()));
+        assert.equal(manifest.kind, 'layer');
+        assert.equal(manifest.id, 'dotnet48-x86');
+        assert.equal(manifest.title, '.NET Framework 4.8 (x86)');
+        assert.equal(manifest.entry, undefined, 'a layer starts nothing');
+        assert.equal(manifest.bundle.indexSha256, saved.packed.indexSha256);
+        assert.equal(folder.entries.has('entry'), false);
     });

@@ -120,8 +120,8 @@ import { createApp } from '../../modules/core/src/app.js';
 import { createDirectoryTranslationStore, createMemoryDirectory }
     from '../../modules/core/src/layers/cpu/internal/translation-store.js';
 import { createFakeDevice } from '../../modules/core/src/layers/graphics/webgpu/internal/fake-device.js';
-import { archiveDisc, collectFrom, discOptions, placementOf, prefixOptions, readZip }
-    from '../../modules/installer/src/index.js';
+import { archiveDisc, collectFrom, collectLayer, discOptions, placementOf, prefixOptions,
+    readZip } from '../../modules/installer/src/index.js';
 import { bundleDir, hostFiles, number as numberOf, option, options } from '../lib/common.mjs';
 
 const argv = process.argv.slice(2);
@@ -1010,61 +1010,28 @@ if (listAt)
         console.log('list failed:', e instanceof Error ? e.message : e);
     }
 }
-/**
- * What a run added to a hive and changed in it: keys and values not in `before`, or not as
- * there. Removed ones are not carried - a layer only adds to the bottle's machine.
- *
- * @param {any} before @param {any} after @returns {any | null}  null when nothing differs
- */
-const hiveAdded = (before, after)=>{
-    const values = (after.values ?? []).filter((/** @type {any} */ value)=>{
-        const was = (before?.values ?? []).find((/** @type {any} */ old)=>
-            old.name.toLowerCase() === value.name.toLowerCase());
-        return !was || was.type !== value.type || was.data.join() !== value.data.join();
-    });
-    const keys = (after.keys ?? []).map((/** @type {any} */ key)=>hiveAdded(
-        (before?.keys ?? []).find((/** @type {any} */ old)=>
-            old.name.toLowerCase() === key.name.toLowerCase()) ?? null, key))
-        .filter(Boolean);
-    return values.length > 0 || keys.length > 0 || !before
-        ? { name: after.name, values, keys } : null;
-};
 // `--layer DIR`: what the runs wrote, as a layer bundle lays it out (the .NET Framework's,
-// `roadmap/dotnet-layer.md`): every file under DIR/.bottlify/drive_c by its path from C:
-// (a temp folder's left out), and DIR/.bottlify/registry.json the keys and values the runs
-// added or changed. `make-btl pack DIR <id>` makes the bundle.
+// `roadmap/dotnet-layer.md`; `collectLayer`, the launcher's own build of one too): every file
+// under DIR/.bottlify/drive_c by its path from C:, and DIR/.bottlify/registry.json the keys and
+// values the runs added or changed. `make-btl pack DIR <id>` makes the bundle.
 if (argv.includes('--layer'))
 {
     const to = argv[argv.indexOf('--layer') + 1];
     // The folder the first program was put in to be run (the setup itself) is not the layer's.
-    const runFrom = (prefix.imagePath ?? '').toLowerCase().replace(/[^\\]*$/, '');
-    let files = 0;
+    const runFrom = (prefix.imagePath ?? '').replace(/[^\\]*$/, '');
+    const layer = collectLayer({ files: await app.session.export(),
+        registry: app.registry().toJSON(), before: hiveBefore,
+        leave: runFrom === '' ? [] : [runFrom] });
     let bytes = 0;
-    for (const written of await app.session.export())
+    for (const written of layer)
     {
-        const [, drive, rest] = /^([A-Za-z]):\\(.*)$/.exec(written.path) ?? [];
-        const folder = rest?.slice(0, rest.lastIndexOf('\\') + 1) ?? '';
-        if (drive?.toUpperCase() !== 'C' || /(^|\\)temp\\/i.test(folder)
-            || (runFrom !== '' && written.path.toLowerCase().startsWith(runFrom)))
-        {
-            continue;
-        }
-        const target = join(to, '.bottlify', 'drive_c', ...rest.split('\\'));
+        const target = join(to, ...written.path.split('\\'));
         mkdirSync(dirname(target), { recursive: true });
         writeFileSync(target, written.bytes);
-        files++;
         bytes += written.bytes.length;
     }
-    const after = app.registry().toJSON();
-    const added = after.roots.map((/** @type {any} */ root)=>{
-        const key = hiveAdded(hiveBefore.roots.find((/** @type {any} */ old)=>old.id === root.id)
-            ?.key ?? null, root.key);
-        return key ? { id: root.id, key } : null;
-    }).filter(Boolean);
-    mkdirSync(join(to, '.bottlify'), { recursive: true });
-    writeFileSync(join(to, '.bottlify', 'registry.json'), JSON.stringify({ roots: added }));
-    console.log(`layer: ${files} files, ${(bytes / 1048576).toFixed(1)} MB, registry `
-        + `${JSON.stringify({ roots: added }).length} bytes, in ${to}`);
+    console.log(`layer: ${layer.length - 1} files and the registry, ${(bytes / 1048576).toFixed(1)}`
+        + ` MB, in ${to}`);
 }
 if (argv.includes('--registry'))
 {
