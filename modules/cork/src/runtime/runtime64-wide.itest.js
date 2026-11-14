@@ -21,31 +21,32 @@ import {
     CALLS, CORPUS, FAR_SWITCH, HOISTED_SWITCHES, MASKED_SWITCHES, SWITCHES, compare, nested, pool,
     program,
 } from '../testing/long-machine.js';
+import { wide } from '../testing/memory64.js';
 
 // 8 GiB: a 16 GiB window's code differs by its bits alone, and two of its memories in
 // each process beside the suite's others are more than a machine of 16 GB commits.
 for (const [window, high] of /** @type {const} */ ([[2 ** 33, 0], [2 ** 33, 2 ** 32]]))
 {
     test(`a ${window / 2 ** 30} GiB window, the data ${high / 2 ** 30} GiB past its place:`
-        + ' translated as interpreted', ()=>{
+        + ' translated as interpreted', wide(()=>{
         const { failures, exits, stats } = compare(CORPUS.cases, { budget: 7, window, high });
         assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
         assert.ok(exits > CORPUS.cases.length * 0.9, `${exits} cases ran to their exit`);
         assert.ok(stats.translated > stats.interpreted * 4, JSON.stringify(stats));
-    });
+    }));
 }
 
 /** The placement of a 64-bit image at 0x140000000: code and data in the block from 4 GiB. */
 const PAST = { window: 2 ** 33, high: 2 ** 32, codeHigh: 2 ** 32 };
 
-test('code past 4 GiB: the corpus translated as interpreted', ()=>{
+test('code past 4 GiB: the corpus translated as interpreted', wide(()=>{
     const { failures, exits, stats } = compare(CORPUS.cases, { budget: 7, ...PAST });
     assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
     assert.ok(exits > CORPUS.cases.length * 0.9, `${exits} cases ran to their exit`);
     assert.ok(stats.translated > stats.interpreted * 4, JSON.stringify(stats));
-});
+}));
 
-test('code past 4 GiB: calls, returns and switches as interpreted', ()=>{
+test('code past 4 GiB: calls, returns and switches as interpreted', wide(()=>{
     /** @param {any} one @param {number} i @param {string} name @param {string} code */
     const variant = (one, i, name, code)=>{
         const regs = [...one.regs];
@@ -62,9 +63,9 @@ test('code past 4 GiB: calls, returns and switches as interpreted', ()=>{
         assert.deepEqual(failures.slice(0, 20), [], `budget ${budget}`);
         assert.ok(stats.translated > stats.interpreted, JSON.stringify(stats));
     }
-});
+}));
 
-test('code past 4 GiB: seeded programs and loops as interpreted', ()=>{
+test('code past 4 GiB: seeded programs and loops as interpreted', wide(()=>{
     const instructions = pool();
     const straight = Array.from({ length: 200 },
         (_, i)=>program(instructions, 0x7eed + i, 20 + i % 60));
@@ -75,4 +76,4 @@ test('code past 4 GiB: seeded programs and loops as interpreted', ()=>{
         assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
         assert.ok(stats.translated > stats.interpreted, JSON.stringify(stats));
     }
-});
+}));

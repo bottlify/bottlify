@@ -29,6 +29,7 @@ export { translatesLong } from './long-ops.js';
 import { AF, CF, DF, OF, PF, SF, ZF } from '../decode/table.js';
 import { SYSTEM_TABLES, cpuidLeaves, topologyOf } from '../cpuid.js';
 import { EMPTY, ValType } from '../wasm/encoder.js';
+import { LocalSet } from '../wasm/local-set.js';
 import { I32, I64, Kind, MASKS, SIGN_BITS, widthCode } from './flags.js';
 import { CallStack, Exit, Local, STATE_PARAMS, keepsFlags } from './region.js';
 import {
@@ -328,15 +329,15 @@ function callAndReturn(e, next, target, mechanism){
     // left out (`fillDeferred`).
     /** @type {import('./region.js').CallSite | undefined} */
     const call = e.b.written === null ? undefined
-        : { block: e.blockIndex, written: new Set(e.b.written) };
+        : { block: e.blockIndex, written: e.b.written.copy() };
     if (call !== undefined)
     {
         e.callSites.set(e.blockIndex, call);
         if (e.pathStores)
         {
-            call.must = new Set(e.segment?.must ?? []);
+            call.must = e.segment?.must.copy() ?? new LocalSet();
             call.segment = e.segment;
-            call.after = new Set();
+            call.after = new LocalSet();
             e.sites.push(call);
         }
     }

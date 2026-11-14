@@ -275,6 +275,48 @@
    "kind": "instrument"
   },
   {
+   "path": "tools/bench/stand.mjs",
+   "category": "bench",
+   "browser": false,
+   "question": "Does the translator do here the work recorded, to the unit, and how fast is it on this machine -- or how fast is one checkout against another?",
+   "command": "node tools/bench/stand.mjs [--roots A,B] [--bits 32|64|both] [--only a,b] [--work] [--write]",
+   "tests": [
+    "tools/bench/stand.test.js"
+   ],
+   "parts": [
+    "tools/bench/stand.js",
+    "tools/bench/expected.json"
+   ],
+   "sample": "calls512-scatter-x87        519 MIPS  noise ±27.8 %  work as recorded\nvcall-x87                  5365 MIPS  noise ±15.4 %  work as recorded\nvm-x87                     3803 MIPS  noise ±1.6 %  work as recorded\ncalls512-scatter-x64        631 MIPS  noise ±4.8 %  work as recorded\nvcall-x64                  3979 MIPS  noise ±2.7 %  work as recorded\nvm-x64                     2477 MIPS  noise ±2.1 %  work as recorded\ngeometric mean, 32-bit: 2196 MIPS\ngeometric mean, 64-bit: 1839 MIPS",
+   "source": "node tools/bench/stand.mjs --only vm,vcall,calls512-scatter on cork 94512c08 with the stand, Node 22.22.0, a 4-core Xeon VM at 2.10 GHz, 2026-11-14",
+   "read": "Each workload runs on the guest's own clock, so its work (instructions, regions, every way between regions) is the same on any machine: \"as recorded\" is the translator doing what expected.json says; DIFFERS is the code, never the machine. MIPS is this machine's speed, the median of 7 rounds; noise is how far those rounds part (half their interquartile range): a difference inside it is not one this machine shows, and a second run can land outside it when the engine optimises otherwise (lua-x87 1290 and 2069 MIPS in two runs here). With --roots A,B a ratio column gives B against A round by round.",
+   "kind": "instrument"
+  },
+  {
+   "path": "tools/bench/index.html",
+   "category": "bench",
+   "browser": true,
+   "question": "How fast is cork on this device, in its own browser, and is one build of cork faster than another there, over several runs?",
+   "command": "node tools/bench/serve.mjs, then open the address it prints (this checkout); or node tools/bench/build.mjs --arm A=REV --arm B=. and serve or publish tools/bench/dist/ (two builds side by side)",
+   "tests": [],
+   "parts": [
+    "tools/bench/stand.worker.js",
+    "tools/bench/arm.js",
+    "tools/bench/build.mjs",
+    "tools/bench/.gitignore"
+   ],
+   "kind": "instrument"
+  },
+  {
+   "path": "tools/bench/serve.mjs",
+   "category": "bench",
+   "browser": true,
+   "question": "Does the stand's page run in Chromium and do the work recorded there, as in Node?",
+   "command": "npm run cdp:bench  (node tools/bench/serve.mjs [--dir DIR] --check [--timed] [--runs N] [--bits 32|64] [--agent STRING])",
+   "tests": [],
+   "kind": "gate"
+  },
+  {
    "path": "tools/bundles/import-audit.mjs",
    "category": "bundles",
    "browser": false,
