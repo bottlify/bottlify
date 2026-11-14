@@ -371,6 +371,7 @@ export function baseState({ memory, ram, layout, sharedLayout = undefined, confi
  *     & ReturnType<typeof import('./modules.js').createModules>
  *     & ReturnType<typeof import('./translators.js').createTranslators>
  *     & ReturnType<typeof import('./store.js').createStore>
+ *     & ReturnType<typeof import('./publish.js').createPublish>
  *     & Late} State
  */
 
