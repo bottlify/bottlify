@@ -258,6 +258,9 @@ export function parseOutput(text, test, mainProcess){
  * have shown too. A guest fault the engine stopped on is `guest-fault`: on
  * Windows the program's own filter would have printed it and ended the
  * process. `unimplemented` is a call into an import with no implementation.
+ * `empty` is a program that got to its closing count having checked nothing:
+ * every check skipped (a library or class it looks for is not there) or none
+ * compiled in. It is not a pass - nothing was held to Windows.
  *
  * @param {ChildResult} result
  * @param {ParsedOutput} parsed
@@ -302,7 +305,11 @@ export function classify(result, parsed){
     {
         return 'no-summary';
     }
-    return parsed.summary.failures > 0 ? 'fail' : 'pass';
+    if (parsed.summary.failures > 0)
+    {
+        return 'fail';
+    }
+    return parsed.summary.executed > 0 ? 'pass' : 'empty';
 }
 
 /**
@@ -359,7 +366,7 @@ export function summarise(module, test, result, mainProcess = MAIN_PROCESS){
 }
 
 /** The runs that got to the program's closing count. */
-const FINISHED = new Set(['pass', 'fail']);
+const FINISHED = new Set(['pass', 'fail', 'empty']);
 
 /**
  * What every test asks for and is meant not to find: the name a test looks up
@@ -787,8 +794,12 @@ function compared(now, before){
     return `${status}, ${before.failures} -> ${now.failures}`;
 }
 
-/** How a test ended, best first: a pass, failed checks, then a run that did not finish. */
-const STATUS_RANK = { pass: 0, fail: 1 };
+/**
+ * How a test ended, best first: a pass, failed checks, nothing checked, then a
+ * run that did not finish. A test that checked something and now checks
+ * nothing has lost what it held, and is worse.
+ */
+const STATUS_RANK = { pass: 0, fail: 1, empty: 2 };
 
 /**
  * A failed check as it is told from another across runs and Wine builds: its
@@ -812,7 +823,7 @@ export function regressions(report, baseline){
     /** @param {TestReport} t */
     const key = t=>`${t.module}:${t.test}`;
     /** @param {string} status */
-    const rank = status=>STATUS_RANK[/** @type {keyof STATUS_RANK} */ (status)] ?? 2;
+    const rank = status=>STATUS_RANK[/** @type {keyof STATUS_RANK} */ (status)] ?? 3;
     const before = new Map(baseline.tests.map(t=>[key(t), t]));
     /** @type {string[]} */
     const worse = [];
