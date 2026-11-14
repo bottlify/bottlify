@@ -23,7 +23,7 @@
 import { DF } from '../decode/table.js';
 import { EMPTY, ValType } from '../wasm/encoder.js';
 import { I32, I64 } from './flags.js';
-import { Local, STATE_PARAMS } from './region.js';
+import { Local } from './region.js';
 import { registerLocal } from './width.js';
 import { ramAt } from './memory.js';
 import { pageFlagsAt } from '../runtime/layout.js';
@@ -365,7 +365,7 @@ export function emitIndexedCopyAtOnce(e, block, loop, doneLabel, emitCompare, pr
 
 /** A new i32 local of the region's function. @param {E} e */
 function i32Local(e){
-    const made = e.localTypes.length + STATE_PARAMS;
+    const made = e.localTypes.length + e.width.params;
     e.localTypes.push(ValType.i32);
     return made;
 }

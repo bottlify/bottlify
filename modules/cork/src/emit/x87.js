@@ -59,7 +59,7 @@ import { CF, PF, ZF, AF, SF, OF } from '../decode/table.js';
 import { isX87Opcode } from '../decode/decoder.js';
 import { Body, EMPTY, ValType } from '../wasm/encoder.js';
 import { I32 } from './flags.js';
-import { Local, Exit, STATE_PARAMS } from './region.js';
+import { Local, Exit } from './region.js';
 import { prepare, readAddress, writeReg } from './integer.js';
 import { PRECISION, noteStore, ram, ramAt } from './memory.js';
 import { callsOut, inlineReturns } from '../region.js';
@@ -1287,7 +1287,7 @@ function singleOf(e, k){
     const x = e.x87;
     if (x.single[k] < 0)
     {
-        x.single[k] = e.localTypes.length + STATE_PARAMS;
+        x.single[k] = e.localTypes.length + e.width.params;
         e.localTypes.push(ValType.f32);
     }
     return x.single[k];
@@ -1302,7 +1302,7 @@ function floatTempOf(e, n){
     const x = e.x87;
     while (x.floatTemps.length <= n)
     {
-        x.floatTemps.push(e.localTypes.length + STATE_PARAMS);
+        x.floatTemps.push(e.localTypes.length + e.width.params);
         e.localTypes.push(ValType.f32);
     }
     return x.floatTemps[n];
@@ -1615,7 +1615,7 @@ export function prepareX87(e, entryTop, checked = false,
         };
     }
     const { hasMmx, tracksExact, states, ends, cut, guarded, shapes, needs } = analysis;
-    const base = e.localTypes.length + STATE_PARAMS;
+    const base = e.localTypes.length + e.width.params;
     // The eight registers, three scratch locals, and a fused compare's operands.
     for (let k = 0; k < 13; k++)
     {
@@ -1634,11 +1634,11 @@ export function prepareX87(e, entryTop, checked = false,
     const shadow = new Array(8).fill(-1);
     if (tracksExact)
     {
-        dyn = e.localTypes.length + STATE_PARAMS;
+        dyn = e.localTypes.length + e.width.params;
         e.localTypes.push(ValType.i32);
         for (let k = 0; k < 8; k++)
         {
-            shadow[k] = e.localTypes.length + STATE_PARAMS;
+            shadow[k] = e.localTypes.length + e.width.params;
             e.localTypes.push(ValType.i64);
         }
     }
@@ -2645,7 +2645,7 @@ export function emitX87(e, instruction, flagsLive){
     const shadowOf = k=>{
         if (x.shadow[k] < 0)
         {
-            x.shadow[k] = e.localTypes.length + STATE_PARAMS;
+            x.shadow[k] = e.localTypes.length + e.width.params;
             e.localTypes.push(ValType.i64);
         }
         return x.shadow[k];

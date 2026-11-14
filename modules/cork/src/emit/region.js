@@ -9,7 +9,7 @@
  *
  * The function takes the label of the block to enter, the slice's
  * instruction budget and the machine state a transfer carries
- * (`STATE_PARAMS`), and answers how it left. Its shape:
+ * (`width.params`), and answers how it left. Its shape:
  *
  *     prologue      what the parameters do not carry loaded into locals
  *     block $out
@@ -90,7 +90,8 @@ export const MATH_IMPORTS = Object.freeze([
 /**
  * Enters a region function from the host: the registers a transfer between
  * regions carries in its parameters, read from the state block, and the budget
- * written there as the one the run started with.
+ * written there as the one the run started with. The function's own count of
+ * parameters says how many it carries (`carriedOn`): three or four.
  *
  * @param {Function} fn  the region's function
  * @param {number} label @param {number} budget
@@ -112,11 +113,12 @@ export function enterRegion(fn, label, budget, view, layout){
         // Long mode's carried registers: rcx, rdx, r8, r9 (`WIDTH_64`).
         return fn(label, budget,
             view.getBigInt64(regs + 8, true), view.getBigInt64(regs + 16, true),
-            view.getBigInt64(regs + 64, true), view.getBigInt64(regs + 72, true));
+            view.getBigInt64(regs + 64, true),
+            fn.length > 5 ? view.getBigInt64(regs + 72, true) : 0n);
     }
     return fn(label, budget,
         view.getInt32(regs, true), view.getInt32(regs + 4, true),
-        view.getInt32(regs + 8, true), view.getInt32(regs + 12, true));
+        view.getInt32(regs + 8, true), fn.length > 5 ? view.getInt32(regs + 12, true) : 0);
 }
 
 /** The import object entries for `MATH_IMPORTS`. */
@@ -256,20 +258,19 @@ export const Local = Object.freeze({
     // and mm locals a region uses follow, then the x87 locals, per region.
     vec: 37,
 });
-/**
- * The function's parameters, locals 0..5: the label and the budget, then the
- * registers a transfer between regions carries rather than writing them to the
- * state block and reading them back -- eax, ecx, edx and ebx. As many as V8
- * passes in machine registers: a seventh parameter went through the stack on
- * every call and transfer, and with seventeen a direct call and its return took
- * twice what they take with six. The other four registers, the flag record and
- * the flags word stay in the state block across a transfer, a region loading
- * the registers it names and storing the ones it writes; the budget the run
- * started with is there too (`layout.origin`), the instructions retired being
- * what the run took off the budget since, added to the counter word once, when
- * it leaves for the host.
+/*
+ * The function's parameters, locals 0..5 at most (`width.params`): the label and
+ * the budget, then the registers a transfer between regions carries rather than
+ * writing them to the state block and reading them back -- eax, ecx, edx and,
+ * where the host passes six parameters in machine registers, ebx (`carriedOn`
+ * in width.js). With seventeen a direct call and its return took twice what
+ * they take with six. The other registers, the flag record and the flags word
+ * stay in the state block across a transfer, a region loading the registers it
+ * names and storing the ones it writes; the budget the run started with is
+ * there too (`layout.origin`), the instructions retired being what the run took
+ * off the budget since, added to the counter word once, when it leaves for the
+ * host.
  */
-export const STATE_PARAMS = 6;
 
 /**
  * The kinds of way out a region's epilogue stores for (`planPaths`): all it
@@ -296,8 +297,6 @@ export const BLOCK_MARK_AT = 1020;
  * @param {number} index @param {number} copy
  */
 export const blockMark = (index, copy)=>(0x6b5a0000 | (copy & 0xf) << 12 | index & 0xfff) >>> 0;
-/** The registers among the parameters: eax, ecx, edx, ebx. */
-export const CARRIED_REGS = STATE_PARAMS - 2;
 /**
  * A region's record fields as the state block keeps them between regions:
  * each local, its offset in the record (`recordOffsets`) and whether long
@@ -336,7 +335,7 @@ const recordFieldsOf = layout=>{
  * @typedef {Object} ModuleContext
  * @property {import('../wasm/encoder.js').ModuleBuilder} m
  * @property {import('./width.js').Width} width  the registers' (`width.js`)
- * @property {number} regionType       the function type (`STATE_PARAMS` × i32) → i32
+ * @property {number} regionType       the function type (`width.params` parameters) → i32
  * @property {number} materialise      the flag helper's function index
  * @property {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
  * @property {number} [stateBase]  under the process's shared layout, the global holding where
@@ -468,7 +467,7 @@ export function prepareModule(m, layout, features, memory = {},
         crossTailCalls = true,
         callDepth = CallStack.LIMIT } = {})
 {
-    const width = widthOf(layout);
+    const width = widthOf(layout, features);
     // A region keeps the record between regions and takes the registers a
     // transfer carries as parameters: a layout with no place for the record
     // has none of the state a region leaves in the block.
@@ -690,13 +689,14 @@ export function finishModule(context, functions){
         throw new Error(`emit: ${functions.length} functions for ${placed.arms} arms`);
     }
     const eip = 0; // the label's parameter, the label once the slot is found
-    const index = STATE_PARAMS; // the slot's index, then the arm
-    const slotAt = STATE_PARAMS + 1;
-    const key = STATE_PARAMS + 2;
+    const { params } = context.width;
+    const index = params; // the slot's index, then the arm
+    const slotAt = params + 1;
+    const key = params + 2;
     const hashBase = layout.tables + Tables.HASH;
     const b = new Body();
     const pass = ()=>{
-        for (let local = 0; local < STATE_PARAMS; local++)
+        for (let local = 0; local < params; local++)
         {
             b.localGet(local);
         }
@@ -915,8 +915,9 @@ function storeIp(context, b, pushEip){
  */
 function emptyReturn(context, b, slotAt, code){
     const { layout } = context;
-    const esp = STATE_PARAMS + 3;
-    const depth = STATE_PARAMS + 4;
+    const { params, carried } = context.width;
+    const esp = params + 3;
+    const depth = params + 4;
     const flags = pageFlagsAt(layout);
     b.localGet(slotAt).load('i32_8u', { offset: 11 }).localTee(code);
     b.if(EMPTY);
@@ -943,7 +944,7 @@ function emptyReturn(context, b, slotAt, code){
     // The low six bits are the dwords popped plus one: the return address's and the rest.
     atState(context, b).localGet(esp).localGet(code).i32const(63).op(I32.and).i32const(2)
         .op(I32.shl).op(I32.add).store('i32', { offset: layout.regs + 16 });
-    for (let r = 0; r < CARRIED_REGS; r++)
+    for (let r = 0; r < carried.length; r++)
     {
         atState(context, b).localGet(Local.reg + r).store('i32', { offset: layout.regs + r * 4 });
     }
@@ -1496,7 +1497,7 @@ export class RegionEmitter {
                     {
                         if (operand.kind === 'xmm' && !this.xmmLocals.has(/** @type {number} */ (operand.reg)))
                         {
-                            this.xmmLocals.set(/** @type {number} */ (operand.reg), this.localTypes.length + STATE_PARAMS);
+                            this.xmmLocals.set(/** @type {number} */ (operand.reg), this.localTypes.length + this.width.params);
                             this.localTypes.push(ValType.v128);
                         }
                     }
@@ -1506,7 +1507,7 @@ export class RegionEmitter {
             {
                 for (let p = 0; p < 8; p++)
                 {
-                    this.mmLocals.set(p, this.localTypes.length + STATE_PARAMS);
+                    this.mmLocals.set(p, this.localTypes.length + this.width.params);
                     this.localTypes.push(ValType.i64);
                 }
             }
@@ -1520,7 +1521,7 @@ export class RegionEmitter {
                         {
                             if (operand.kind === 'mm' && !this.mmLocals.has(/** @type {number} */ (operand.reg)))
                             {
-                                this.mmLocals.set(/** @type {number} */ (operand.reg), this.localTypes.length + STATE_PARAMS);
+                                this.mmLocals.set(/** @type {number} */ (operand.reg), this.localTypes.length + this.width.params);
                                 this.localTypes.push(ValType.i64);
                             }
                         }
@@ -1609,7 +1610,7 @@ export class RegionEmitter {
     stackRunLocal(){
         if (this.runLocal < 0)
         {
-            this.runLocal = this.localTypes.length + STATE_PARAMS;
+            this.runLocal = this.localTypes.length + this.width.params;
             this.localTypes.push(ValType.i32);
         }
         return this.runLocal;
@@ -1627,7 +1628,7 @@ export class RegionEmitter {
         let local = this.wideLocals.get(key);
         if (local === undefined)
         {
-            local = this.localTypes.length + STATE_PARAMS;
+            local = this.localTypes.length + this.width.params;
             this.localTypes.push(type);
             this.wideLocals.set(key, local);
         }
@@ -1638,7 +1639,7 @@ export class RegionEmitter {
     foldedSumLocal(){
         if (this.sumLocal < 0)
         {
-            this.sumLocal = this.localTypes.length + STATE_PARAMS;
+            this.sumLocal = this.localTypes.length + this.width.params;
             this.localTypes.push(ValType.i32);
         }
         return this.sumLocal;
@@ -1654,7 +1655,7 @@ export class RegionEmitter {
         let local = this.lowLocals.get(key);
         if (local === undefined)
         {
-            local = this.localTypes.length + STATE_PARAMS;
+            local = this.localTypes.length + this.width.params;
             this.localTypes.push(double ? ValType.f64 : ValType.f32);
             this.lowLocals.set(key, local);
         }
@@ -1673,7 +1674,7 @@ export class RegionEmitter {
         let local = this.compareLocals.get(key);
         if (local === undefined)
         {
-            local = this.localTypes.length + STATE_PARAMS;
+            local = this.localTypes.length + this.width.params;
             this.localTypes.push(double ? ValType.f64 : ValType.f32);
             this.compareLocals.set(key, local);
         }
@@ -1696,7 +1697,7 @@ export class RegionEmitter {
     orderedLocal(){
         if (this.orderedValue < 0)
         {
-            this.orderedValue = this.localTypes.length + STATE_PARAMS;
+            this.orderedValue = this.localTypes.length + this.width.params;
             this.localTypes.push(ValType.i32);
         }
         return this.orderedValue;
@@ -2652,7 +2653,7 @@ export class RegionEmitter {
         this.openIf('transfer');
         b.localGet(Local.eip);
         b.localGet(Local.budget);
-        for (let local = Local.budget + 1; local < STATE_PARAMS; local++)
+        for (let local = Local.budget + 1; local < this.width.params; local++)
         {
             b.localGet(local);
         }
@@ -3060,7 +3061,7 @@ export class RegionEmitter {
         }
         if (this.bitLocal < 0)
         {
-            this.bitLocal = this.localTypes.length + STATE_PARAMS;
+            this.bitLocal = this.localTypes.length + this.width.params;
             this.localTypes.push(ValType.i32);
         }
         return this.bitLocal;
@@ -3526,7 +3527,7 @@ export class RegionEmitter {
         const { b } = this;
         b.localGet(Local.label).i32const(2 * this.region.blocks.length).op(I32.geU);
         this.openGuard('copy');
-        for (let local = 0; local < STATE_PARAMS; local++)
+        for (let local = 0; local < this.width.params; local++)
         {
             b.localGet(local);
         }
@@ -3622,7 +3623,7 @@ export class RegionEmitter {
             const before = reaching(past, from, t);
             if ([...after].every(s=>keeps(s) || !before.has(s)))
             {
-                this.testedOnce.set(t, this.localTypes.length + STATE_PARAMS);
+                this.testedOnce.set(t, this.localTypes.length + this.width.params);
                 this.localTypes.push(ValType.i32);
             }
         });
@@ -4045,7 +4046,7 @@ export class RegionEmitter {
     emitHoistedLoop(block, index, live, streams){
         const { b } = this;
         const last = block.instructions[block.instructions.length - 1];
-        const turns = this.localTypes.length + STATE_PARAMS;
+        const turns = this.localTypes.length + this.width.params;
         this.localTypes.push(ValType.i32);
         const depth = this.controls.length;
         this.loops++;
@@ -4290,7 +4291,7 @@ export class RegionEmitter {
     emitReadLoop(block, index, live, streams){
         const { b } = this;
         const last = block.instructions[block.instructions.length - 1];
-        const turns = this.localTypes.length + STATE_PARAMS;
+        const turns = this.localTypes.length + this.width.params;
         this.localTypes.push(ValType.i32);
         const widest = Math.max(...streams.streams.map(stream=>Math.abs(stream.stride)));
         const reach = Math.max(...streams.streams.map(stream=>stream.hi - stream.lo));
