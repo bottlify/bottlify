@@ -165,7 +165,7 @@ Joliet specification.
 
 - Source: the npm package `wabt` 1.0.39 (https://github.com/WebAssembly/wabt), a WebAssembly
   build of the WebAssembly Binary Toolkit
-- Used by: `tools/cork-wat.mjs`, which prints cork's output as text (`wasm2wat`); a development
+- Used by: `tools/cork-asm.mjs --wat`, which prints cork's output as text (`wasm2wat`); a development
   dependency of the repository root, not part of any module and not distributed with the product
 - License: Apache-2.0
 
@@ -173,12 +173,13 @@ Joliet specification.
 
 - Source: Lua 5.1.5 by Lua.org, PUC-Rio, https://www.lua.org/ftp/lua-5.1.5.tar.gz (SHA-256
   `2640fc56a795f29d28ef15e13c34a47e223960b0240e8cb0a82d9b0738695333`), unmodified; fetched by
-  `tools/cork-bench/build.sh` at its checksum, not committed
-- Distributed artifact: `tools/cork-bench/images/lua-x87.bin`, its core and its base, string,
-  table and math libraries compiled for i386 and linked with `tools/cork-bench/src/lua` (a
-  small C library, a driver and a script: original work under the MPL); a benchmark workload,
-  not part of any module and not distributed with the product
-- License: MIT, whose full text is `tools/cork-bench/src/lua/COPYRIGHT-lua-5.1.5.txt`
+  `modules/cork/bench/micro/build.sh` and `build64.sh` at its checksum, not committed
+- Distributed artifact: `modules/cork/bench/micro/images/lua-x87.bin` and `images64/lua-x64.bin`,
+  its core and its base, string, table and math libraries compiled for i386 and x86-64 and linked
+  with `modules/cork/bench/micro/src/lua` (a small C library, a driver and a script: original work
+  under the MPL); a benchmark workload in the cork package's bench folder, which is not published
+  with the package and not distributed with the product
+- License: MIT, whose full text is `modules/cork/bench/micro/src/lua/COPYRIGHT-lua-5.1.5.txt`
 
 ## CLDR's Windows time zone mapping: which IANA zone each Windows zone is
 

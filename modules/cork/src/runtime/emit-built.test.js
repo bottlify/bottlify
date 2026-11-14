@@ -24,7 +24,7 @@ const layout = ownLayout({ ramSize: 16 << 20, hashSlots: 1 << 16 });
  * @param {string} name @param {number} count
  */
 function relinkOf(name, count){
-    const image = readFileSync(new URL(`../../../../tools/cork-bench/images/${name}.bin`,
+    const image = readFileSync(new URL(`../../bench/micro/images/${name}.bin`,
         import.meta.url));
     /** @type {Map<number, Uint8Array>} */
     const pages = new Map();

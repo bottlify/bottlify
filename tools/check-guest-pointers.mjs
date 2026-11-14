@@ -43,6 +43,7 @@
 
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { join } from 'node:path';
+import { isMain } from './common.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const LAYERS = join(ROOT, 'modules', 'core', 'src', 'layers');
@@ -376,7 +377,7 @@ async function main(){
     process.exitCode = fresh.length > 0 || stale.length > 0 ? 1 : 0;
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1])
+if (isMain(import.meta.url))
 {
     await main();
     // A call left waiting holds a timer or a promise open; the answer is in.

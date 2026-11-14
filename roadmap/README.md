@@ -3,6 +3,7 @@
 - **[`x64.md`](x64.md):** 64-bit programs.
 - **[`direct3d.md`](direct3d.md):** Direct3D 11 and 12.
 - **[`opengl.md`](opengl.md):** OpenGL 2.0 to 4.6.
+- **[`dotnet-layer.md`](dotnet-layer.md):** the .NET Framework as one shared layer per browser (a plan).
 - **[`gamehub.md`](gamehub.md):** GameHub, the extension that keeps the stores' accounts (a plan).
 - **[`decisions.md`](decisions.md):** behaviour chosen rather than derived from a specification.
 - **[`negative-results.md`](negative-results.md):** what was measured and did not pay.

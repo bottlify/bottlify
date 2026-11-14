@@ -6,7 +6,8 @@
 
 /**
  * Fails when the documentation has a link that leads nowhere or a page nobody
- * can reach. Checked: every relative link of docs/ and of the READMEs leads to
+ * can reach. Checked: every relative link of docs/, of the READMEs and of the
+ * tools' index (tools/cdp_test/README.md, DIAGNOSING.md) leads to
  * a file, and an anchor in it to a heading of that page; a link to this
  * repository's main branch on GitHub leads to a file that exists; every page
  * under docs/ is in docs/README.md, which is the site's navigation.
@@ -31,6 +32,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, posix } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { headings, links } from './markdown.mjs';
+import { isMain } from '../common.mjs';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const REPO = 'https://github.com/bottlify/bottlify/blob/main/';
@@ -75,7 +77,10 @@ export function check(root){
             .filter(file=>existsSync(join(root, file)))
         : [];
     const top = existsSync(join(root, 'README.md')) ? ['README.md'] : [];
-    const files = [...docs, ...modules, ...top];
+    // The instruments' index and the order to look in, which CLAUDE.md sends every session to.
+    const tools = ['tools/cdp_test/README.md', 'tools/cdp_test/DIAGNOSING.md']
+        .filter(file=>existsSync(join(root, file)));
+    const files = [...docs, ...modules, ...top, ...tools];
     /** @type {Map<string, Set<string>>} */
     const anchors = new Map();
     const anchorsOf = (/** @type {string} */ file)=>{
@@ -211,7 +216,7 @@ export function stale(root, changed){
     }).filter(entry=>entry.files.length);
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url) && process.argv.some(arg=>arg === '--staged'
+if (isMain(import.meta.url) && process.argv.some(arg=>arg === '--staged'
     || arg === '--hook'))
 {
     const changed = execFileSync('git', ['diff', '--cached', '--name-only'], { cwd: ROOT,
@@ -232,7 +237,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url) && process.argv.some(arg=
             : text);
     }
 }
-else if (process.argv[1] === fileURLToPath(import.meta.url))
+else if (isMain(import.meta.url))
 {
     const problems = check(ROOT);
     for (const problem of problems)

@@ -17,7 +17,7 @@
  * Without --from/--to the last window; with them, the rows whose time falls in [from, to].
  */
 import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { isMain } from '../common.mjs';
 
 /**
  * @param {any} before  the series row the window starts after
@@ -114,7 +114,7 @@ export function waitWindow(before, row, frames){
     return lines;
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1])
+if (isMain(import.meta.url))
 {
     const [file, ...rest] = process.argv.slice(2);
     if (!file)

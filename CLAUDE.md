@@ -1,9 +1,20 @@
 # Bottlify
 
-Bottlify is a set of packages for running Win32 x86 programs in the browser: **cork**, our x86 → wasm translator
+Bottlify is a set of packages for running Win32 x86 and x86-64 programs in the browser: **cork**, our x86 → wasm translator
 (`modules/cork`), in a Web Worker, under a from-scratch Win32/DirectX layer (`modules/core`) on
 WebGPU, WebAudio and OPFS. Where this file and the tree disagree, the tree is right and this file
 is the bug.
+
+## Working rule: the next one picks it up
+
+All of this code is written for ourselves. The next one to work on it - an agent first of all,
+this one in a later session, or a person - has to recover the context fast from the tree itself
+and add nothing worse than what is there. So: a change leaves its area clearer than it found it;
+a patch that works around a symptom in one place is a hack, and the cause is fixed where every
+caller goes through it; what is no longer used goes (git keeps it); a mechanism that has grown
+by patches is redone once its shape is known. Decide as the owner of the project would: an idea
+already taken, the owner's included, is followed or argued against with a reason, never kept
+only because it is there.
 
 ## Working rule: finish the step
 
@@ -16,16 +27,33 @@ outward-facing action) or for a wait a rule imposes, and say what waits on what.
 
 ## Priorities
 
-1. **x86-64 and the multi-worker process runner** (`roadmap/x64.md`). Work on the workers — the
-   engine, graphics, translation and audio threads and what crosses between them — pays off for the
-   whole application, not one title.
-2. **Correctness, speed, reuse.** Optimisation and standardisation are part of the job, not
-   extras: one shared mechanism over three similar ones, a contract written once and enforced by a
-   test.
-3. **No per-title hacks.** Never branch on a program's name, executable or hash, never hardcode an
-   offset for one title. A title that misbehaves is a signal about a generic contract we got wrong
-   (an FPU context switch, a `GetProcAddress` epoch, a DLU→px conversion, an mmap write-back gap);
-   fix it there, once, for every title on that path.
+There is no single technical priority; these hold for every change:
+
+1. **Clean, beautiful code.** One shared mechanism over three similar ones, a contract written
+   once and enforced by a test. No per-title hacks: never branch on a program's name, executable
+   or hash, never hardcode an offset for one title. A title that misbehaves is a signal about a
+   generic contract we got wrong (an FPU context switch, a `GetProcAddress` epoch, a DLU→px
+   conversion, an mmap write-back gap); fix it there, once, for every title on that path.
+   A temporary exception is allowed as a bridge while the generic answer does not exist yet: it
+   is an entry in `roadmap/decisions.md` marked temporary, naming the generic work it stands in
+   for and the condition that removes it, and it goes in the change that lands that work (a
+   managed program ran under Mono until a bottle could install .NET itself; then Mono went).
+2. **Strict testing, nothing hollow.** A test that cannot fail, a gate that does not run, a check
+   that passes on nothing is worse than none: it says something is covered that is not.
+3. **We understand our own code and our runtime.** Every mechanism and every tool can be
+   explained from the tree by the next one who reads it; what nobody can explain is redone or
+   removed.
+4. **A product we are not ashamed of**, good enough to be sold: it runs what it says it runs, says
+   plainly what it does not, and is fast enough that a program plays as it did.
+
+**The task now: less memory, more speed - for every program, none excepted.** No title is
+hacked into running; a program that needs something is a contract we answer for all.
+
+A protected title (an anti-tamper or copy protection) may be watched while it runs - a trace, a
+hook, a counter, on only for a run under observation and changing nothing the program observes -
+because what it checks (`CPUID`, timing, code hashes, self-modifying code) is the hardest work
+for the translator. Where it trips over our inaccuracy, the inaccuracy is fixed for everyone, so
+it runs as on Windows. The protection itself is never patched, bypassed or answered falsely.
 
 ## Where things are
 
@@ -35,13 +63,13 @@ outward-facing action) or for a wait a rule imposes, and say what waits on what.
   Win32, graphics, sound, networking, storage); `docs/core/` is `@bottlify/core`'s public
   contract (API, configuration, limits), written for someone outside the project;
   `docs/cork/` is the translator. A module's own `README.md` is its npm page and stays short.
-- `roadmap/README.md` — the index of the plans: `x64.md`, `direct3d.md` (Direct3D 11 and 12),
-  `opengl.md` (OpenGL 2.0 to 4.x), and `decisions.md` (behaviour chosen rather than derived from a
-  specification).
+- `roadmap/README.md` — the index of the plans, `decisions.md` (behaviour chosen rather than
+  derived from a specification) and `negative-results.md` (what was measured and did not pay).
 - `roadmap/00-*` — local working notes, not in git (`.gitignore` excludes exactly these):
   per-area notes and **pitfalls** (read the area's pitfalls before touching the kernel,
   bridge, graphics or audio layers), plans and reports. Open work is tracked on the owner's task
-  board, outside the repository. Everything else in `roadmap/` ships with the repo and is written
+  board, outside the repository; a gap noticed on the way (a path no test covers, a benchmark that
+  misses x64, a gate that runs nowhere) goes into its open questions when it is found. Everything else in `roadmap/` ships with the repo and is written
   for a reader who is not you.
 
 ## Code
@@ -129,10 +157,10 @@ build.
 | a core layer (gdi32, d3d9, dsound, …) | that layer's unit tests by interface and its gates: `node --test "src/layers/<layer>/**/*.test.js" "src/layers/<layer>/**/*.itest.js"` in `modules/core` |
 | anything, before it goes to main | `npm run typecheck`, `npm run lint`, `npm test`, `npm run test:integration`, `npm run check:boundaries`, `npm run build` |
 
-CI (`.github/workflows/ci.yml`) runs the full set plus `npm run cdp:probe` in a real headless
-Chrome; both jobs must be green. It runs on a push to main and by hand (`gh workflow run
-ci.yml`) -- not on another branch, a pull request or a schedule: the repository's minutes are
-metered. So the full set above runs locally before anything goes to main; CI is that same set on a
+CI (`.github/workflows/ci.yml`) runs the full set, the tools' tests and the `npm run cdp:*` gates
+in a real headless Chrome; every job must be green. It runs on a push to main and by hand (`gh
+workflow run ci.yml`) - not on another branch, a pull request or a schedule: the repository's
+minutes are metered. So the full set above runs locally before anything goes to main; CI is that same set on a
 clean machine.
 
 ## Performance
@@ -141,8 +169,8 @@ Performance is part of correctness: a slow implementation does not reproduce how
 Bugs and costs are found by measurement — the harness, ring buffers, phase profiler and guest CPU
 attribution are first-class.
 
-- **Look in the tools before debugging or searching.** `tools/cdp_test/README.md` lists every
-  instrument and live switch (the live ones attach to a running game without pausing it); read it
+- **Look in the tools before debugging or searching.** `tools/cdp_test/README.md` opens with every
+  tool by the question it answers, then the live switches (they attach to a running game); read it
   first and use what is there; `tools/cdp_test/DIAGNOSING.md` is the order to look in when a run is
   slow, flickers or stops. An instrument made for a hunt that a later one could use goes into
   `tools/` and onto that list in the same change, not into a scratch folder.
@@ -158,14 +186,18 @@ attribution are first-class.
 - **Judge on more than one scenario** (play, menu, load).
 - **The first lever is the translator** — caching, larger blocks and regions — because it speeds
   up every title at once. Small generic gains count.
+- **A translator change is judged on a 32-bit and a 64-bit workload alike**: cork's emitter and
+  runtime serve both widths.
 - **A measurement carries its conditions**: the workload and the bundle's hash, both arms, every
   raw value and how many runs, the median and the spread, the noise floor, the browser, GPU, driver
   and power plan. A field not recorded is written `not recorded`, never reconstructed. A number is
   a share of something: say of what.
 - **What did not pay is kept.** An idea measured without a positive signal goes into
-  [`roadmap/negative-results.md`](roadmap/negative-results.md) as a dated entry with its
-  conditions, appended and never rewritten; a later measurement is a new entry. A measurement found
-  wrong is listed there as invalidated, with the reason, and is not cited again.
+  [`roadmap/negative-results.md`](roadmap/negative-results.md) as one dated line: the idea, one
+  number with its conditions, its status, and when it is worth trying again; the full write-up is
+  the commit. A no under those conditions is not a no for ever: an entry whose code or conditions
+  changed is marked stale, and one inside its own noise disputed, until measured again. A
+  measurement found wrong is marked invalidated, with the reason, and is not cited again.
 - **A plan says it is one**: its first lines give the status (plan, no code) and the date, and a
   number in it that was not measured is marked so.
 

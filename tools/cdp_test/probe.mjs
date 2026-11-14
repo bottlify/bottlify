@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { launch, shutdown } from './browser.mjs';
 import { CdpEndpoint } from './cdp.mjs';
 import { serveStatic } from './server.mjs';
+import { isMain } from '../common.mjs';
 
 const TOOL_ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)));
 const REPO_ROOT = resolve(TOOL_ROOT, '..', '..');
@@ -165,4 +166,9 @@ export async function runProbeAndExit(){
         console.error(`probe failed: ${e.message}`);
         return 1;
     }
+}
+
+if (isMain(import.meta.url))
+{
+    process.exit(await runProbeAndExit());
 }

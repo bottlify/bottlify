@@ -2,8 +2,7 @@
 # Builds the workload images from src/: each a flat i386 image loaded at 0x401000, the x87
 # build (the era's compilers' default) of every workload, an SSE one of the float ones, and
 # the x87 float ones again under single precision control (pc24: rt-pc24.S sets it once
-# before the first main, as creating a Direct3D device does on its thread), and the long-run
-# workloads of churn.mjs into soak/, which bench.mjs and the emitter's digest do not read.
+# before the first main, as creating a Direct3D device does on its thread).
 # lua-x87 is Lua 5.1.5, fetched by its checksum and built freestanding against the small C
 # library in src/lua, running one frame of a raid's interface a call: client.c pushes the
 # frame's events through Lua's C API to 27 addons (addons.lua) and answers their checksum.
@@ -19,7 +18,6 @@ SSE="-march=pentium4 -mfpmath=sse -msse2"
 as --32 src/rt.S -o "$OUT/rt.o"
 as --32 src/rt-pc24.S -o "$OUT/rt-pc24.o"
 node src/load.mjs > "$OUT/load.c"
-node src/world.mjs > "$OUT/world.c"
 CALLS="calls8-order calls8-scatter calls512-order calls512-scatter calls4096-order calls4096-scatter"
 for w in $CALLS; do
     N=${w#calls}; node src/calls.mjs "${N%-*}" "${w#*-}" > "$OUT/$w.c"
@@ -35,8 +33,6 @@ build(){ # workload variant flags [start] [directory]
 }
 for w in vm tree vcall sort str crc switch load patch $CALLS; do build $w x87 "$X87"; done
 for w in fmath game; do build $w x87 "$X87"; build $w sse "$SSE"; build $w pc24 "$X87" rt-pc24; done
-mkdir -p soak
-build world x87 "$X87" rt soak
 
 LUA=lua-5.1.5
 curl -fsSL "https://www.lua.org/ftp/$LUA.tar.gz" -o "$OUT/lua.tgz"

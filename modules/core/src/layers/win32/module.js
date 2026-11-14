@@ -2741,6 +2741,9 @@ export function createWin32Module(){
                         /** @param {number} address @param {number} length @param {boolean} open */
                         pageAccess: (address, length, open)=>
                             memory.pageAccess?.(address, length, open) === true,
+                        /** @param {number} address @param {number} length */
+                        watchWrites: (address, length)=>
+                            memory.watchWrites?.(address, length) ?? null,
                         systemCounts: ()=>({
                             processes: Math.max(1, (kernel.processes?.all() ?? []).length),
                             threads: Math.max(1, kernel.threads().length),
@@ -5383,6 +5386,25 @@ export function createWin32Module(){
             const api = {
                 /** @returns {Record<string, Record<string, any>>} library name -> its exports */
                 libraries: ()=>libraries,
+
+                /**
+                 * A program started as this process's CreateProcess would start
+                 * it, for a tool that runs one in the program's bottle (ngen,
+                 * regedit): the child's process id, or null when the line names
+                 * no image. Its handles are not kept: nothing here waits on it.
+                 *
+                 * @param {string} line
+                 */
+                launch: line=>{
+                    const made = spawner.launch('', line, 0);
+                    if (!made)
+                    {
+                        return null;
+                    }
+                    kernel.handles.close(made.handle);
+                    kernel.handles.close(made.threadHandle);
+                    return made.id;
+                },
 
                 /**
                  * Kernel events by handle, for a library that hands one to the

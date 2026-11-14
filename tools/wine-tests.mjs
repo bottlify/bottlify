@@ -72,6 +72,7 @@ import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync } from 'nod
 import { join } from 'node:path';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { isMain } from './common.mjs';
 
 const ROOT = new URL('../', import.meta.url);
 const LOCAL = new URL('to_install/wine-tests/', ROOT);
@@ -1154,7 +1155,7 @@ async function main(){
     }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href)
+if (isMain(import.meta.url))
 {
     if (process.argv[2] === '--child')
     {

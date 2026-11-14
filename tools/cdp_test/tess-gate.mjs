@@ -36,6 +36,7 @@ import {
 } from './tess-draw.mjs';
 import { HULL_BINDING, linkHull } from '../../modules/core/src/layers/graphics/d3d10/wgsl.js';
 import { tessellate } from '../../modules/core/src/layers/graphics/d3d10/tessellator.js';
+import { isMain } from '../common.mjs';
 
 const TOOL_ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)));
 const CORPUS = new URL('../../modules/core/src/layers/graphics/d3d10/tess-corpus.json.gz',
@@ -444,7 +445,7 @@ async function main(){
     process.exitCode = failed === 0 ? 0 : 1;
 }
 
-if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`)
+if (isMain(import.meta.url))
 {
     await main();
 }

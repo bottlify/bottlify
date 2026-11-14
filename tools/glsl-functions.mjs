@@ -25,6 +25,7 @@
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { isMain } from './common.mjs';
 
 const OUT = fileURLToPath(new URL(
     '../modules/core/src/layers/graphics/opengl/glsl-catalog.js', import.meta.url));
@@ -270,7 +271,7 @@ function main(){
     console.log(`${rows.length} overloads -> ${OUT}`);
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url))
+if (isMain(import.meta.url))
 {
     main();
 }

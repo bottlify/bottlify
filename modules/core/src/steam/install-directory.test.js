@@ -19,11 +19,11 @@ import {
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { installToDirectory } from '../modules/core/src/steam/install-directory.js';
-import { openBundle, writeBundle } from './btl.mjs';
-import { installBundle } from '../modules/core/src/steam/install.js';
-import { contentServer, fakeDepot, noise } from '../modules/core/src/steam/depot.fixture.js';
-import { bootstrapper, gameSetup } from '../modules/core/src/steam/redist.fixture.js';
+import { installToDirectory } from './install-directory.js';
+import { openBundle, writeBundle } from '../bundle-node.js';
+import { installBundle } from './install.js';
+import { contentServer, fakeDepot, noise } from './depot.fixture.js';
+import { bootstrapper, gameSetup } from './redist.fixture.js';
 
 /** A program's first bytes: a PE image for x86-64. */
 function program64(){

@@ -32,6 +32,7 @@ import { serveStatic } from './server.mjs';
 import {
     passThroughVertexShader, triangleGeometryShader,
 } from '../../modules/core/src/layers/graphics/d3d10/shader-fixtures.js';
+import { isMain } from '../common.mjs';
 
 const TOOL_ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)));
 const NO_RASTERIZED_STREAM = 0xffffffff;
@@ -257,7 +258,7 @@ async function main(){
     process.exitCode = failed === 0 ? 0 : 1;
 }
 
-if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`)
+if (isMain(import.meta.url))
 {
     await main();
 }

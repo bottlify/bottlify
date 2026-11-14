@@ -17,6 +17,9 @@ test('a program is one of the system folder\'s, however its path is spelled', ()
     assert.equal(systemProgramAt('C:\\WINDOWS\\system32\\msiexec.exe'), 'msiexec');
     assert.equal(systemProgramAt('c:/windows//SYSTEM32/RunDll32.EXE'), 'rundll32');
     assert.equal(systemProgramAt(' C:\\Windows\\System32\\regsvr32.exe'), 'regsvr32');
+    // A setup's custom actions register performance counters through them (A246).
+    assert.equal(systemProgramAt('C:\\WINDOWS\\system32\\lodctr.exe'), 'lodctr');
+    assert.equal(systemProgramAt('C:\\WINDOWS\\system32\\unlodctr.exe'), 'unlodctr');
     assert.equal(systemProgramAt('C:\\App\\msiexec.exe'), null, 'only there');
     assert.equal(systemProgramAt('C:\\WINDOWS\\system32\\sub\\msiexec.exe'), null);
     assert.equal(systemProgramAt('C:\\WINDOWS\\system32\\calc.exe'), null);
@@ -117,4 +120,13 @@ test('DXSETUP\'s place, nothing beside it: succeeds, no restart, shows nothing',
                 FindFirstFileW: { handler: ()=>0xffffffff } } : {}),
     }));
     assert.equal(await functions.dxsetup.handler(), 0, 'DSETUPERR_SUCCESS: no restart');
+});
+
+test('lodctr and unlodctr answer success and register nothing (A246)', async()=>{
+    for (const name of ['lodctr.exe', 'unlodctr.exe'])
+    {
+        const program = SYSTEM_PROGRAMS.get(name);
+        assert.equal(await program?.run(/** @type {any} */ ({ commandLine: `"${name}" /M:x.man` })), 0,
+            name);
+    }
 });

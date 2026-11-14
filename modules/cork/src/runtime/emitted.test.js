@@ -142,7 +142,7 @@ const EMITTED = {
 
 /** Features fixed rather than probed, so every host emits the same bytes. */
 const FEATURES = { simd: true, tailCalls: true, defaultNaNNegative: false };
-const IMAGES = new URL('../../../../tools/cork-bench/images/', import.meta.url);
+const IMAGES = new URL('../../bench/micro/images/', import.meta.url);
 const BASE = 0x401000;
 const ENTRIES = [0x401000, 0x401010];
 

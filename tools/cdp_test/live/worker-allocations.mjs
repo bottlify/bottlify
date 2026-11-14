@@ -7,7 +7,8 @@
 /**
  * Samples what the live engine worker allocates for N seconds and prints the
  * functions that allocated the most, by bytes still sampled and with the
- * stack above each -- the garbage a collector pause is paying for. The
+ * stack above each, and then by the bytes allocated under each (inclusive) --
+ * the garbage a collector pause is paying for. The
  * sampler sees allocations alive when the profile was taken, and with
  * `includeObjectsCollectedBy*GC` also those already collected, which is the
  * garbage itself.
@@ -39,6 +40,8 @@ writeFileSync('dbg/worker.heapprofile', JSON.stringify(profile));
 
 /** @type {Map<string, { bytes: number, stack: string }>} */
 const self = new Map();
+/** @type {Map<string, number>} */
+const inclusive = new Map();
 let total = 0;
 /** @param {any} node @param {string[]} path */
 const walk = (node, path)=>{
@@ -46,6 +49,10 @@ const walk = (node, path)=>{
     const name = `${frame.functionName || '(anonymous)'} ${frame.url.split('/').pop()}`
         + `:${frame.lineNumber + 1}:${frame.columnNumber + 1}`;
     const here = [name, ...path];
+    for (const outer of new Set(here))
+    {
+        inclusive.set(outer, (inclusive.get(outer) ?? 0) + node.selfSize);
+    }
     if (node.selfSize > 0)
     {
         total += node.selfSize;
@@ -65,6 +72,11 @@ for (const [name, row] of [...self].sort((one, two)=>two[1].bytes - one[1].bytes
 {
     console.log(`${(row.bytes / 1048576).toFixed(2).padStart(8)} MiB  ${name}`);
     console.log(`            < ${row.stack}`);
+}
+console.log('inclusive:');
+for (const [name, bytes] of [...inclusive].sort((one, two)=>two[1] - one[1]).slice(0, top))
+{
+    console.log(`${(bytes / 1048576).toFixed(2).padStart(8)} MiB  ${name}`);
 }
 // The CDP connection would keep the process alive.
 process.exit(0);

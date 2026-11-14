@@ -32,6 +32,7 @@
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import { frameDrops } from '../../modules/core/src/frame-drops.js';
+import { isMain } from '../common.mjs';
 
 /**
  * @typedef {import('../../modules/core/src/frame-drops.js').FrameLike
@@ -155,8 +156,7 @@ export function freezesOf(frames, gap, freeze){
         })));
 }
 
-if (process.argv[1] && import.meta.url.endsWith(process.argv[1].replace(/\\/g, '/')
-    .split('/').pop() ?? ''))
+if (isMain(import.meta.url))
 {
     const args = process.argv.slice(2);
     /** @param {string} name @param {number} fallback */

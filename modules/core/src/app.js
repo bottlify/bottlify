@@ -9072,6 +9072,13 @@ async function buildApp(options){
             /** @param {number} address @param {number} length */
             read: (address, length)=>memory.readBytes(address >>> 0, length),
             /**
+             * A program of the volume started beside this one, as its
+             * CreateProcess would start it: the child's process id, or null.
+             *
+             * @param {string} commandLine
+             */
+            start: commandLine=>core.api('win32').launch(String(commandLine)),
+            /**
              * The calls the guest made through Direct3D's command rings, which
              * no call log shows: kept from now on for the last `count` of them,
              * 0 to stop; answers what was kept.
@@ -10091,6 +10098,8 @@ async function buildSystemHost(deps){
         debug: {
             /** @param {number} address @param {number} length */
             read: (address, length)=>ask('debug.read', [address, length]),
+            /** @param {string} commandLine */
+            start: commandLine=>ask('debug.start', [commandLine]),
             /** @param {number} [count] */
             ringTrace: count=>ask('debug.ringTrace', count === undefined ? [] : [count]),
             /** @param {boolean} on */

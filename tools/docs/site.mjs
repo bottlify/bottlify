@@ -22,6 +22,7 @@ import { dirname, join, posix } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { covered, pages } from './check.mjs';
 import { headings, prose, render } from './markdown.mjs';
+import { isMain } from '../common.mjs';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const ASSETS = fileURLToPath(new URL('assets/', import.meta.url));
@@ -765,7 +766,7 @@ export async function build(root, out){
     return written;
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url))
+if (isMain(import.meta.url))
 {
     const at = process.argv.indexOf('--out');
     const out = at > 0 ? process.argv[at + 1] : join(ROOT, 'dist', 'docs');

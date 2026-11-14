@@ -70,7 +70,9 @@ test('a directory is answered with its attribute, a file and nothing with 0', ()
             return text;
         },
         writeMemory: (address, bytes)=>memory.set(bytes, address),
-        files: { stat: path=>({ exists: path in volume, isDirectory: volume[path] === true }) },
+        files: { stat: path=>({ exists: path in volume, isDirectory: volume[path] === true }),
+            list: path=>Object.keys(volume).filter(other=>other.startsWith(`${path}\\`)
+                && !other.slice(path.length + 1).includes('\\')) },
         fullPath: path=>(/^[A-Za-z]:/.test(path) ? path : `C:\\App\\${path}`)
             .replace(/\\+$/, ''),
     });
@@ -95,6 +97,10 @@ test('a directory is answered with its attribute, a file and nothing with 0', ()
     assert.equal(fns.PathIsDirectoryA.handler([put('C:\\App\\game.exe')]), 0, 'a file');
     assert.equal(fns.PathIsDirectoryA.handler([put('C:\\Missing')]), 0, 'nothing there');
     assert.equal(fns.PathIsDirectoryA.handler([0]), 0, 'no path');
+    assert.equal(fns.PathIsDirectoryEmptyA.handler([put('C:\\App\\Data')]), 1, 'nothing in it');
+    assert.equal(fns.PathIsDirectoryEmptyA.handler([put('C:\\App')]), 0, 'a directory with files');
+    assert.equal(fns.PathIsDirectoryEmptyA.handler([put('C:\\App\\game.exe')]), 0, 'a file');
+    assert.equal(fns.PathIsDirectoryEmptyW.handler([putWide('C:\\Missing')]), 0, 'nothing there');
     assert.equal(fns.PathIsDirectoryW.handler([putWide('C:\\App\\Data\\')]), 0x10,
         'the wide spelling, a trailing separator and all');
     assert.equal(fns.PathFindExtensionW.handler([putWide('C:\\dir.d\\file.txt')]), AT + 13 * 2,

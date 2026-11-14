@@ -95,6 +95,7 @@ jobs:
       - run: npx eslint modules/core tools eslint.config.mjs eslint-rules.mjs --max-warnings 0
       - run: npm run test -w @bottlify/core
       - run: npm run check:boundaries
+      - run: npm run test:tools
       # The release test packs and installs the built package, decoder included.
       # It is a release of this repository, which is private: the plain download
       # URL answers 404, so the fetch goes through the API with the job's token.

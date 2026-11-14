@@ -661,7 +661,7 @@ prerequisite installers among them.** Steam downloads the depots an app names fr
 (Steamworks Common Redistributables' Visual C++ and DirectX) and, on the first start, runs its
 install scripts' programs silently. The download (`bottlify-ui/gamehub/tools/steam-install.mjs`) takes those depots
 too -- an anonymous logon opens them -- and `@bottlify/core/steam`'s `redist.js` (run over a
-directory by `tools/redist.mjs`, over the bottle a page writes by an install in the browser) does
+directory by `bottlify-ui/gamehub/tools/steam-install.mjs`, over the bottle a page writes by an install in the browser) does
 what the programs would at install time instead: it unpacks each one with the engine's cabinet and installer-database
 readers and applies the packages inside by their tables -- the files of each component whose
 condition holds into the bottle's system folders, its registry rows into the bottle's registry
@@ -2161,3 +2161,11 @@ engine's metadata and the translator's records beside its wasm bytes) are not me
 the .NET Framework 4 setup in Chrome with a budget of 2 GiB they held the renderer at 1.5 GB
 steady, with one sample of 2.1 GB (garbage the JavaScript heaps had not collected). The tab's own
 cost is counted only in a browser. *2026-11-13.*
+
+**A246. lodctr and unlodctr succeed and register nothing.** Windows keeps performance counters in
+Perflib, which `lodctr.exe` fills from a program's counter definitions and `unlodctr.exe` empties;
+the engine answers no Perflib data, so there is nothing to register them with. Setups call them
+from custom actions (the .NET Framework 4.8's for a dozen counter sets); a missing program failed
+each with 0x80070002, the setup ended with code 2 though all it installs was in place, and its
+self-extractor left the folder it unpacked into. Both programs are the engine's own and answer 0.
+*2026-11-14.*
