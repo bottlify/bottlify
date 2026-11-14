@@ -579,6 +579,9 @@ const ORDER_LIMIT = 4096;
  *     test to fill one with a few blocks; every reader of the cache uses the default.
  * @param {boolean} [options.evictOthers]  Whether a full store may let other
  *     bottles' blocks go when this one has none old enough. On by default.
+ * @param {string[]} [options.held]  The names of the other caches the run reads
+ *     beside this one (a bottle's and the layers under it), which a full store
+ *     never lets go of: read when the store fills, so the list may grow after.
  * @param {(reason: string) => void} [options.onFull]  Told, once a run, that the
  *     store refused a block for lack of room with nothing left it may let go.
  * @returns {Promise<any>}
@@ -769,7 +772,8 @@ export async function createBlockCache(options){
      * Removes one segment to make room: this bottle's own first, the one
      * written longest ago of those last written before `KEEP_RECENT_MS` -- what
      * it brought in lately is what it is playing now -- and only where it has
-     * none, another bottle's, the oldest first, if `evictOthers` lets it. One
+     * none, another bottle's, the oldest first, if `evictOthers` lets it -- never
+     * one of a cache the run reads beside this one (`held`). One
      * another tab holds open is passed over, and so is one that holds nothing,
      * as letting it go frees nothing. Answers whether one went.
      */
@@ -782,8 +786,9 @@ export async function createBlockCache(options){
             || segmentNumber(one.path) - segmentNumber(other.path);
         const own = segments.filter(one=>ownSegment(one.path) >= 0
             && ownSegment(one.path) < active && (one.modified ?? 0) <= settled).sort(oldest);
-        const others = evictOthers
-            ? segments.filter(one=>ownSegment(one.path) < 0).sort(oldest) : [];
+        const held = new Set((options.held ?? []).map(fileNameOf));
+        const others = evictOthers ? segments.filter(one=>ownSegment(one.path) < 0
+            && !held.has(SEGMENT_FILE.exec(one.path)?.[1] ?? '')).sort(oldest) : [];
         for (const one of [...own, ...others])
         {
             const n = ownSegment(one.path);

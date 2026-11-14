@@ -70,11 +70,12 @@ Storage has a budget too. When a run mounts a bundle on the origin's file system
 kept to 80% of the quota the browser gives it (`navigator.storage.estimate()`, which each browser
 sets by its system and disk): past that, other bundles' block caches and translations go, the
 least recently written first. A session (the files a program wrote) is never touched, nor the
-caches of the run asking or of a bundle another tab runs. The `storage-budget` event says what
+caches of the run asking (its bottle's and those of the layers under it, `bundle.layers`) or of
+a bundle another tab runs. The `storage-budget` event says what
 went. While a run plays, a block write the browser refuses for lack of room removes a 128 MiB
 segment of fetched blocks and is tried again: the running bottle's own written longest ago, of
 those not written in the last two hours, and where it has none, another bottle's, the oldest
-first. `bundle.evictOthers: false` keeps other bottles' blocks, both here and in the budget
+first, never one of a cache the run reads. `bundle.evictOthers: false` keeps other bottles' blocks, both here and in the budget
 before the run. With nothing left to remove, `storage-full` says so once, and the run goes on
 with what it fetches held in memory. Opening a bundle's translations removes every file of an older generation and any file the
 store does not know (`cpu` diagnostics, `store.opened.swept`).

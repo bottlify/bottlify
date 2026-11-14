@@ -657,6 +657,14 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
                     // A preload happens inside the start, before the page has
                     // an app to subscribe through: told as an event at once.
                     progress: (/** @type {unknown} */ state)=>emit('bundle-preload', state),
+                    // Each layer read as the bundle is, its preload told as its own.
+                    layers: bundle.layers?.map(layer=>({
+                        ...layer,
+                        fetch: layer.file ? blobFetcher(layer.file)
+                            : rangeFetcher(/** @type {string} */ (layer.url)),
+                        progress: (/** @type {object} */ state)=>emit('bundle-preload',
+                            { ...state, layer: layer.id }),
+                    })),
                 } : undefined,
                 storage: storage && typeof storage === 'object'
                     ? { load: async()=>storage.files }
