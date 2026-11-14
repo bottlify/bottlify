@@ -40,7 +40,8 @@
 import { fork } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { fileURLToPath } from 'node:url';
+import { resolve as resolvePath } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { buildExe } from './make-pe.mjs';
 import { isMain } from './common.mjs';
 
@@ -466,8 +467,9 @@ async function main(){
         await fetchAndUnpack();
     }
     const at = argv.indexOf('--out');
-    const out = at >= 0 ? new URL(`${argv[at + 1].replace(/\/?$/, '/')}`, `file://${process.cwd()}/`)
-        : new URL('matrix/', LOCAL);
+    // A path, absolute or not, as a folder's URL: one made of `file://` and the
+    // working directory is no file URL on Windows.
+    const out = at >= 0 ? pathToFileURL(`${resolvePath(argv[at + 1])}/`) : new URL('matrix/', LOCAL);
     /** @type {any[]} */
     const rows = [];
     for (const runtime of RUNTIMES)

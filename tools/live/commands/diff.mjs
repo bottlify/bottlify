@@ -34,7 +34,8 @@ const b = load(files.at(-1) ?? '');
 const a = files.length === 2 ? load(files[0]) : {};
 /** @param {any} report @param {string} name */
 const metrics = (report, name)=>{
-    const tables = report.engine?.diagnostics;
+    // A launcher's report keeps the engine's tables under `engine`, game.mjs's at its top.
+    const tables = report.engine?.diagnostics ?? report.diagnostics;
     return (Array.isArray(tables) ? tables : Object.values(tables ?? {}))
         .find((/** @type {any} */ table)=>table.name === name)?.metrics;
 };
@@ -48,6 +49,10 @@ const byFunction = report=>new Map((metrics(report, 'bridge')?.byFunction ?? [])
 const worker = (/** @type {any} */ report)=>metrics(report, 'graphics')?.worker;
 const frames = (worker(b)?.frames ?? NaN) - (files.length === 2 ? worker(a)?.frames ?? NaN : 0);
 const seconds = (Date.parse(b.at) - Date.parse(a.at)) / 1000;
+const span = files.length < 2 ? 'since the start'
+    : Number.isFinite(seconds) ? `${seconds.toFixed(0)} s` : 'time not in the reports';
+const rate = files.length === 2 && Number.isFinite(frames / seconds)
+    ? ` (${(frames / seconds).toFixed(1)} fps)` : '';
 const was = byFunction(a);
 const rows = [...byFunction(b)]
     .map(([name, now])=>({ name, calls: now.calls - (was.get(name)?.calls ?? 0),
@@ -55,8 +60,7 @@ const rows = [...byFunction(b)]
     .filter(row=>row.calls > 0)
     .sort((x, y)=>y.ms - x.ms);
 const hostMs = rows.reduce((sum, row)=>sum + row.ms, 0);
-console.log(`${files.length === 2 ? `${seconds.toFixed(0)} s` : 'since the start'},`
-    + ` ${frames} frames${files.length === 2 ? ` (${(frames / seconds).toFixed(1)} fps)` : ''},`
+console.log(`${span}, ${Number.isFinite(frames) ? frames : 'not measured:'} frames${rate},`
     + ` host calls ${(hostMs / 1000).toFixed(1)} s`);
 const sent = (/** @type {any} */ report)=>worker(report)?.sent;
 const shipped = (/** @type {any} */ report)=>worker(report)?.shipped;

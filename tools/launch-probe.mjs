@@ -601,7 +601,7 @@ async function main(){
         ? manifest.launcher ?? manifest.entry
         : which ?? manifest.entry;
 
-    console.log(`${manifest.title} ${manifest.version} — ${wanted}`);
+    console.log(`${[manifest.title, manifest.version].filter(Boolean).join(' ')} -- ${wanted}`);
 
     // The tools-side reader takes a path and does its own reading; the engine's
     // takes a range fetcher. Both are used here, over the same file: this one to
@@ -646,7 +646,11 @@ async function main(){
         // Where the bundle is mounted and the program started from: where its
         // installation put it, when the manifest says, as the launcher does.
         imagePath: placement.imagePath,
-        commandLine: commandLine ?? manifest.commandLine,
+        // The manifest's `commandLine` is the arguments, after the quoted image path,
+        // as game.mjs and the launcher take it: given whole, a program read its
+        // first argument as its own name and found none.
+        commandLine: commandLine ?? (manifest.commandLine
+            ? `"${placement.imagePath}" ${manifest.commandLine}` : undefined),
         // No frames here to feed the translator between: it takes its
         // candidates inside the slice.
         cork: { config: { feed: 'slice', timings: true,
@@ -751,8 +755,14 @@ async function main(){
     // What the program says about itself: OutputDebugString, and anything it
     // writes to a standard handle. Games say a great deal here and it is the
     // cheapest window into a run there is.
+    // A program writes a line in pieces (printf's prefix, then its message): the
+    // stream is named once a line, where the line starts.
+    let lineOpen = false;
     app.attachLog((/** @type {number} */ stream, /** @type {string} */ text)=>{
-        process.stdout.write(`  [guest ${stream}] ${text}`);
+        const lines = text.split('\n');
+        process.stdout.write(lines.map((line, at)=>(at === lines.length - 1 && line === ''
+            ? '' : `${at === 0 && lineOpen ? '' : `  [guest ${stream}] `}${line}`)).join('\n'));
+        lineOpen = !text.endsWith('\n');
     });
     // Everything a failing run says about itself. A guest fault reports where
     // the guest stood; a host one reports what threw, and the two are told

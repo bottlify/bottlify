@@ -287,7 +287,9 @@ const best = rows.filter(row=>row.executors !== EXECUTORS[0])
     .sort((a, b)=>b.speedup - a.speedup)[0];
 if (best && !JSON_OUT)
 {
-    console.log(`best: T=${best.threads} K=${best.sync || '-'} H=${best.host || '-'}`
-        + ` E=${best.executors}  x${best.speedup.toFixed(2)}`);
+    // The point several executors did best on, beside one; under x1.00 none beat one.
+    console.log(`best of several executors: T=${best.threads} K=${best.sync || '-'}`
+        + ` H=${best.host || '-'} E=${best.executors}  x${best.speedup.toFixed(2)}`
+        + `${best.speedup < 1 ? ' (slower than one)' : ''}`);
 }
 process.exit(rows.every(row=>row.sameResult) ? 0 : 1);

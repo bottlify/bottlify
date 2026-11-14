@@ -1121,7 +1121,7 @@ function describe(result, context, calls, symbols){
     /** @param {string} text */
     const say = text=>lines.push(text);
 
-    say(`${context.title} ${context.version} -- ${context.entry}`);
+    say(`${[context.title, context.version].filter(Boolean).join(' ')} -- ${context.entry}`);
     say(`  entry image: ${context.executableBytes} bytes`);
     say(`  mode: ${context.mode}`);
     const executors = result.executors;
