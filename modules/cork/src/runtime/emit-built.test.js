@@ -209,11 +209,12 @@ test('every region is formed the same on the worker from its own pages alone', (
 test('a region formed again on a worker is the region the runtime formed, wherever forming'
     + ' looked', ()=>{
     // 0x401000: call [0x403000]; ret -- the slot names a small function on a
-    // page of its own, 0x402000: ret. Forming predicts the call through the
-    // slot where that callee is code it may form, and a region already at its
-    // most blocks takes none of the callee's: its page is in no block, and
-    // none of the region's pages. A worker told only those predicts nothing,
-    // forms another region and answers the job changed.
+    // page of its own, 0x402000: ret. Forming looks at the callee where it is
+    // code it may form, and a region already at its most blocks takes none of
+    // it: the callee's page is in no block. A prediction with no callee formed
+    // in would leave the region at every call, so the call stays a wasm call
+    // as one nothing predicted is, and a worker told only the region's own
+    // pages forms the same region.
     const form = { ...FORM, maxBlocks: 1 };
     /** @type {Map<number, Uint8Array>} */
     const pages = new Map([
@@ -229,8 +230,8 @@ test('a region formed again on a worker is the region the runtime formed, wherev
     const read = (/** @type {number} */ address)=>pages.get(address >>> 12)?.[address & 0xfff] ?? 0;
     const region = formRegion(read, 0x401000, { ...form,
         translatable: address=>pages.has(address >>> 12) });
-    assert.ok(region.blocks.some(block=>block.exit.predicted), 'the call is predicted');
-    assert.ok(!region.pages.has(0x402), 'and its callee\'s page is none of the region\'s');
+    assert.ok(region.blocks.every(block=>!block.exit.predicted), 'no call is predicted');
+    assert.ok(!region.pages.has(0x402), 'and the callee\'s page is none of the region\'s');
     const relink = (/** @type {number[]} */ formable)=>relinkBatch({
         jobs: [{ entry: 0x401000, entryTop: 0, hash: region.hash }],
         pages: [...(region.reads ?? region.pages)].map(page=>[page,
@@ -239,6 +240,11 @@ test('a region formed again on a worker is the region the runtime formed, wherev
     }, layout, FEATURES, OPTIONS);
     assert.deepEqual(relink([...(region.formable ?? [])]).results.map(one=>one.ok), [true],
         'told every page forming was told it may form on');
-    assert.deepEqual(relink([...region.pages]).results.map(one=>one.ok), [false],
-        'told only the pages of its code, it forms another region');
+    assert.deepEqual(relink([...region.pages]).results.map(one=>one.ok), [true],
+        'told only the pages of its code');
+    // With room for the callee it is formed in, and its page is the region's.
+    const roomy = formRegion(read, 0x401000, { ...FORM,
+        translatable: address=>pages.has(address >>> 12) });
+    assert.ok(roomy.blocks.some(block=>block.exit.predicted), 'the call is predicted');
+    assert.ok(roomy.pages.has(0x402));
 });

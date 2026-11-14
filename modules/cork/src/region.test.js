@@ -200,6 +200,18 @@ test('a callee is formed in whole or not at all: the caps never cut one in its m
     assert.equal(region.blocks[0].exit.apart, undefined, 'apart only for the room: counted full');
 });
 
+test('the room a callee needs counts the blocks it shares with a callee taken in once', ()=>{
+    // 1000: call F; call G; ret. F = 1100: test eax, eax; jz 1106; inc eax; ret;
+    // 1106: dec eax; ret. G = 1108: test ecx, ecx; jz 1106; ret -- G's branch goes to F's
+    // last block: three blocks of the caller's, three of F's, two more of G's.
+    const code = [0xe8, 0xfb, 0x00, 0x00, 0x00, 0xe8, 0xfe, 0x00, 0x00, 0x00, 0xc3];
+    const image = [...code, ...Array.from({ length: 0x100 - code.length }, ()=>0xcc),
+        0x85, 0xc0, 0x74, 0x02, 0x40, 0xc3, 0x48, 0xc3, 0x85, 0xc9, 0x74, 0xfa, 0xc3];
+    const starts = regionOf(image, 0x1000, { maxBlocks: 8, ownRoom: { blocks: 0, bytes: 0 } })
+        .blocks.map(block=>block.start);
+    assert.deepEqual(starts, [0x1000, 0x1005, 0x100a, 0x1100, 0x1104, 0x1106, 0x1108, 0x110c]);
+});
+
 test('a page the runtime refuses is not entered, and the edge to it stays an exit', ()=>{
     // 1000: jmp 0x2000 (e9 fb 0f 00 00)
     const image = new Uint8Array(0x2000);

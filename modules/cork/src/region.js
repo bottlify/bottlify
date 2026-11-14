@@ -140,8 +140,8 @@ const coldBranch = (exit, eip, target, reach)=>reach > 0 && exit.kind === 'jcc'
  * a refusal, a page not to translate) answers no; so does a direct call in
  * it unless `calls`, when the callee's own callees leave through the hash as
  * any call does and come back to the block after their call. Answers the
- * blocks it found for yes -- what forming must have room for to take it in
- * whole -- and for no why not (`Apart`).
+ * starts of the blocks it found for yes -- what forming must have room for to
+ * take it in whole -- and for no why not (`Apart`).
  *
  * @param {(address: number) => import('./decode/decoder.js').Instruction
  *     | import('./decode/decoder.js').Refusal} decodeAt
@@ -153,7 +153,7 @@ const coldBranch = (exit, eip, target, reach)=>reach > 0 && exit.kind === 'jcc'
  * @param {boolean} [wide]  long-mode code
  * @param {number} [coldReach]  a conditional branch reaching farther is a way out
  *     (`coldBranch`), its target not part of the callee
- * @returns {Apart | number}
+ * @returns {Apart | number[]}
  */
 function isLeaf(decodeAt, target, translatable, calls = false, limits = LEAF_LIMITS,
     translates = undefined, wide = false, coldReach = 0)
@@ -226,7 +226,7 @@ function isLeaf(decodeAt, target, translatable, calls = false, limits = LEAF_LIM
             return call && seen.size < limits.blocks ? 'nested' : call ? 'blocks' : 'shape';
         }
     }
-    return seen.size;
+    return [...seen];
 }
 
 /**
@@ -616,7 +616,7 @@ function switchTable(read, block, blocks, most = SWITCH_ENTRIES){
  * functions, and each region decoded every callee again to test it.
  *
  * @typedef {{ decoded: Map<number, import('./decode/decoder.js').Instruction
- *     | import('./decode/decoder.js').Refusal>, leaves: Map<number, Apart | number> }} FormShared
+ *     | import('./decode/decoder.js').Refusal>, leaves: Map<number, Apart | number[]> }} FormShared
  */
 
 /** @returns {FormShared} */
@@ -794,9 +794,9 @@ export function formRegion(read, entry,
     const tables = [];
     /** `isLeaf` by callee and form, once a region (or once for every region
      * sharing it): a function called from many places is decoded once.
-     * @type {Map<number, Apart | number>} */
+     * @type {Map<number, Apart | number[]>} */
     const leaves = shared?.leaves ?? new Map();
-    /** @param {number} target @param {boolean} calls @returns {Apart | number} */
+    /** @param {number} target @param {boolean} calls @returns {Apart | number[]} */
     const leafOf = (target, calls)=>{
         const key = target * 2 + (calls ? 1 : 0);
         let leaf = leaves.get(key);
@@ -811,14 +811,15 @@ export function formRegion(read, entry,
     /** @param {number} target @param {boolean} calls @returns {Apart | null} */
     const leafAt = (target, calls)=>{
         const leaf = leafOf(target, calls);
-        return typeof leaf === 'number' ? null : leaf;
+        return typeof leaf === 'string' ? leaf : null;
     };
-    /** The blocks each callee to be formed in was found to have, by its entry: taken in
-     * only while the room holds all of them (`admitted`). @type {Map<number, number>} */
-    const calleeBlocks = new Map();
-    /** Blocks the callees taken in were found to have and have not decoded yet: room
-     * already promised. */
-    let promised = 0;
+    /** The starts of the blocks each callee to be formed in was found to have, by its
+     * entry: it is taken in only while the room holds all of them. @type {Map<number,
+     * number[]>} */
+    const calleeStarts = new Map();
+    /** Every start of the callees taken in: those not decoded yet are room promised.
+     * @type {Set<number>} */
+    const promised = new Set();
     let bytes = 0;
 
     /** The block starts in address order, for `containing`'s search. @type {number[]} */
@@ -929,16 +930,24 @@ export function formRegion(read, entry,
             // through the entry hash at the first block they left out, its `ret` then
             // finding no wasm call waiting -- two ways out and a region entered in the
             // middle of a function, where a wasm call to it costs one call.
-            const found = calleeBlocks.get(start);
-            if (found !== undefined)
+            const found = calleeStarts.get(start);
+            if (found !== undefined && !promised.has(start))
             {
-                if (blocks.size + promised + found > maxBlocks + room.blocks)
+                let owed = 0;
+                for (const at of promised)
+                {
+                    owed += blocks.has(at) ? 0 : 1;
+                }
+                const more = found.filter(at=>!blocks.has(at) && !promised.has(at)).length;
+                if (blocks.size + owed + more > maxBlocks + room.blocks)
                 {
                     continue;
                 }
-                promised += found;
+                for (const at of found)
+                {
+                    promised.add(at);
+                }
             }
-            promised = Math.max(0, promised - 1);
         }
         /** @type {Block} */
         const block = {
@@ -1136,20 +1145,21 @@ export function formRegion(read, entry,
                     // becomes a jump inside the region, and its return, when
                     // it comes back to this call's return address, one too.
                     const leaf = leafOf(callee, depth < formDepth);
-                    const apart = typeof leaf === 'number' ? null : leaf;
-                    if (apart === null)
+                    if (typeof leaf === 'string')
                     {
-                        calleeBlocks.set(callee, Math.max(calleeBlocks.get(callee) ?? 0,
-                            /** @type {number} */ (leaf)));
+                        exit.apart ??= leaf;
+                    }
+                    else
+                    {
+                        if ((calleeStarts.get(callee)?.length ?? 0) < leaf.length)
+                        {
+                            calleeStarts.set(callee, leaf);
+                        }
                         if (exit.predicted === true && callTargets?.has(decoded.eip))
                         {
                             predictedStarts.add(callee);
                         }
                         follow(callee, depth + 1);
-                    }
-                    else
-                    {
-                        exit.apart ??= apart;
                     }
                 }
                 if (exit.kind === 'indirect' && !exit.predicted)
@@ -1161,6 +1171,17 @@ export function formRegion(read, entry,
         }
     }
 
+    for (const { exit } of blocks.values())
+    {
+        // A predicted call none of whose callees the room took in is an indirect call as any
+        // other, a wasm call: predicted, every call of it would leave the region.
+        if (exit.kind === 'indirect' && exit.predicted === true
+            && !exit.targets.some(target=>blocks.has(target)))
+        {
+            exit.predicted = false;
+            exit.targets = [];
+        }
+    }
     const ordered = [...blocks.values()].sort((a, b)=>a.start - b.start);
     const pages = new Set();
     for (const block of ordered)
