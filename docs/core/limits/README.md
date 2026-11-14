@@ -32,10 +32,14 @@ event, an error. Neither stops the program.
   (`roadmap/decisions.md` A242).
 - The processor a program finds is a Nehalem (SSE4.2, POPCNT): AVX, AVX2, FMA, BMI, AES-NI and
   AVX-512 are not announced and fault as on that processor.
-- The engine has no .NET runtime of its own: `mscoree.dll`, the runtime and its assembly cache
-  (`fusion.dll`) are the .NET Framework's, which the bottle has once its setup ran there (a Steam
-  app's `_CommonRedist\DotNet` installer, run as any program is). A managed program in a bottle
-  without it does not start: `mscoree.dll` is not found, as on a Windows without .NET.
+- The engine has no .NET runtime of its own: the runtime and its assembly cache (`fusion.dll`)
+  are the .NET Framework's, which the bottle has once its setup ran there (a Steam app's
+  `_CommonRedist\DotNet` installer, run as any program is). On Windows 7 and 10 the shim,
+  `mscoree.dll`, is the system's, as there: the engine's, which hands every call to the
+  Framework 4's `mscoreei.dll` (`roadmap/decisions.md` A247); without the Framework a managed
+  program ends at its start, and the loss is said. On XP the shim is the Framework's own file,
+  and a managed program in a bottle without it does not start: `mscoree.dll` is not found, as on
+  an XP without .NET. A 64-bit managed program has no shim of the engine's yet.
 - With less RAM than 2 GiB the system's shared page (`0x7FFE0000`) is there all the same, kept in
   RAM's last 128 KiB, and the heap ends below it.
 - The WebBrowser control (ieframe, shdocvw) is there without an HTML engine

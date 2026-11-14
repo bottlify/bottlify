@@ -2169,3 +2169,27 @@ from custom actions (the .NET Framework 4.8's for a dozen counter sets); a missi
 each with 0x80070002, the setup ended with code 2 though all it installs was in place, and its
 self-extractor left the folder it unpacked into. Both programs are the engine's own and answer 0.
 *2026-11-14.*
+
+**A247. Windows 7 and 10 carry the engine's `mscoree.dll`, which forwards to the installed
+`mscoreei.dll`; XP carries none.** On Windows 7 and later the .NET shim is part of the system, and
+the .NET Framework 4's setup installs only the shim's implementation, `mscoreei.dll`, beside its
+runtime: the 4.8 setup found no `system32\mscoree.dll`, and its `ngen` stopped on an unanswered
+`mscoree.dll!CorGetSvc`. There the engine provides the shim, with no runtime in it: each export
+Windows' mscoree has and mscoreei has too is that export of
+`<InstallRoot>v4.0.30319\mscoreei.dll` (InstallRoot from `HKLM\SOFTWARE\Microsoft\.NETFramework`,
+which these machines now furnish as `C:\WINDOWS\Microsoft.NET\Framework\`), loaded on the first call
+that needs it and jumped to with the caller's frame as it came; after that first call none crosses
+into the host. Its file version is the system's (A31), past the 4.0.31106.0 the 4.8 setup asks for.
+Without mscoreei, each export answers what it documents for a runtime that cannot be loaded
+(`CLR_E_SHIM_RUNTIMELOAD`, `CLASS_E_CLASSNOTAVAILABLE` from `DllGetClassObject`, FALSE from the
+strong-name calls and `_CorDllMain`); `_CorExeMain` and `_CorExeMain2` end the process with
+`STATUS_DLL_NOT_FOUND` and say it as a loss, with no box, where Windows asks in one for the
+Framework to be installed. The exports with no published signature (`InitErrors`, the `ND_*`
+helpers, `CorGetSvc` and the like) cannot be answered without knowing what to take off the stack,
+so without mscoreei they end the process the same way; `GetCLRMetaHost`, the one name mscoreei
+lacks with no published signature, is left out. `_CorValidateImage` answers S_OK and changes no
+entry point, which this engine's loader does not ask for. A 64-bit process gets none of these
+exports yet: Framework64's shim is not forwarded to. XP has no shim of its own, and a Framework's
+setup there installs its own `mscoree.dll` (The Swapper's bottle runs on 4.0's), which the engine
+leaves alone; a shim of the engine's there would also stand in front of a CLR 2-only install's
+file, which mscoreei cannot serve. *2026-11-14.*
