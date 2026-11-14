@@ -336,12 +336,21 @@ export function createTranslators(state){
             dropTranslator(translator);
         }
     };
+    /** The machine goes: the workers hold nothing the store needs, and each is
+     * ended and any batch it still owes dropped. */
+    const closeTranslators = ()=>{
+        workerClosed = true;
+        for (const translator of [...translators])
+        {
+            giveUp(translator);
+            dropTranslator(translator);
+        }
+    };
     return {
         workerUrl,
         translators,
         get awaitingLend(){ return awaitingLend; },
         get workerClosed(){ return workerClosed; },
-        set workerClosed(value){ workerClosed = value; },
         freeTranslator,
         translatorReady,
         translatorLoading,
@@ -358,5 +367,6 @@ export function createTranslators(state){
         dropTranslator,
         attachTranslator,
         detachTranslator,
+        closeTranslators,
     };
 }

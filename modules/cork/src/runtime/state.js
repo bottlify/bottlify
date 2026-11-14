@@ -26,6 +26,7 @@ import { createSharedCode } from './shared-code.js';
 import { Tables, basesOf, tablesSize } from './layout.js';
 import { CACHE_VERSION } from './cache.js';
 import { runtimeSettings } from './settings.js';
+import { sharedStoreOf } from './shared-forms.js';
 
 /** @typedef {import('../../../core/src/layers/cpu/engine.js').EngineEnv} EngineEnv */
 
@@ -199,10 +200,14 @@ export function baseState({ memory, ram, layout, sharedLayout = undefined, confi
     /** Whether translated code counts its transfers through the hash (`countTransfers`). */
     const transfersCounted = import.meta.BOTTLIFY_DIAGNOSTICS !== false
         && settings.countTransfers === true;
+    /** The store this runtime keeps formed regions and compiled modules beside for
+     * the other runtimes of its thread handed it, or null where none would take
+     * them (`sharedStoreOf`). */
+    const sharesStore = sharedStoreOf(settings.store ?? null);
     return { memory, ram, layout, sharedLayout, config, imports, features, nowMs, ramOf, codeBase,
         read, readBytes, settings, cacheVersion, clock, formOptions, formHere, leaveOut, found,
         emitLayout, baseGlobals, sharedMemory, codeShared, pages, codePages, table, resumable,
-        entries, view, guestBytes, counterWord, profiling, transfersCounted };
+        entries, view, guestBytes, counterWord, profiling, transfersCounted, sharesStore };
 }
 
 /**
@@ -365,6 +370,7 @@ export function baseState({ memory, ram, layout, sharedLayout = undefined, confi
  *     & ReturnType<typeof import('./code-writes.js').createCodeWrites>
  *     & ReturnType<typeof import('./modules.js').createModules>
  *     & ReturnType<typeof import('./translators.js').createTranslators>
+ *     & ReturnType<typeof import('./store.js').createStore>
  *     & Late} State
  */
 

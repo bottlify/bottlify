@@ -21,7 +21,6 @@ import { buildHelpersModule } from '../emit/helpers.js';
 import { keyOf } from './entries.js';
 import { createWeakInstances } from './weak-instances.js';
 import { sharedModulesOf } from './shared-modules.js';
-import { sharedStoreOf } from './shared-forms.js';
 
 /** @typedef {import('./state.js').RegionRecord} RegionRecord */
 /** @typedef {import('./state.js').Placed} Placed */
@@ -34,7 +33,7 @@ import { sharedStoreOf } from './shared-forms.js';
 export function createModules(state){
     const rt = /** @type {import('./state.js').State} */ (state);
     const { baseGlobals, clock, entries, imports, layout, leaveOut, memory, ram, resumable,
-        settings, sharedMemory, table } = /** @type {import('./state.js').Base} */ (state);
+        settings, sharedMemory, sharesStore, table } = /** @type {import('./state.js').Base} */ (state);
     const { counts, refused } = rt;
     // The five helper functions every region imports, defined once here and
     // instantiated over this memory when the first region is published.
@@ -72,10 +71,6 @@ export function createModules(state){
     const instanceKeys = new WeakMap();
     /** A module compiled off the thread, by its bytes. @type {WeakMap<WebAssembly.Module, number>} */
     const compiledBytes = new WeakMap();
-    /** The store this runtime keeps formed regions and compiled modules beside for
-     * the other runtimes of its thread handed it, or null where none would take
-     * them (`sharedStoreOf`). */
-    const sharesStore = sharedStoreOf(settings.store ?? null);
     /** The store a batch's compiled module is kept for, in this thread or another one
      * (`share`): none for a run that keeps no store or no modules. */
     const keepsModulesFor = leaveOut.size > 0 || settings.blockProfile === true
@@ -433,7 +428,6 @@ export function createModules(state){
         heldModules,
         get heldBytes(){ return heldBytes; },
         compiledBytes,
-        sharesStore,
         sharedModules,
         get nextTable(){ return nextTable; },
         set nextTable(value){ nextTable = value; },
