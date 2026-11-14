@@ -36,7 +36,6 @@ import { buildHelpersModule } from '../emit/helpers.js';
 import { openTranslationWorker } from './translator.js';
 import { ANY_TOP, keyOf } from './entries.js';
 import { PageFlag } from './pages.js';
-import { SharedSwitch } from './shared-code.js';
 import { Tables } from './layout.js';
 import { resetBlockCounts } from './block-profile.js';
 import { createWeakInstances } from './weak-instances.js';
@@ -47,6 +46,8 @@ import { cacheKey, moduleKey, packRegion, seedRecords, unpackRegion } from './ca
 import { createDiagnostics } from './diagnostics.js';
 import { createVariants, usesX87 } from './variants.js';
 import { createQueue } from './queue.js';
+import { createRegions } from './regions.js';
+import { createCodeWrites } from './code-writes.js';
 
 /** @typedef {import('../../../core/src/layers/cpu/engine.js').Runtime} Runtime */
 /** @typedef {import('../../../core/src/layers/cpu/engine.js').ExitKind} ExitKind */
@@ -91,16 +92,16 @@ export function translatorWorkerUrl(){
  */
 export function createCorkRuntime(env){
     const rt = /** @type {import('./state.js').State} */ (baseState(env));
-    const { memory, ram, layout, imports, nowMs, ramOf, codeBase, read, readBytes, settings,
-        cacheVersion, clock, formOptions, formHere, leaveOut, found, emitLayout, baseGlobals,
-        sharedMemory, codeShared, pages, codePages, table, resumable, entries, view, guestBytes,
-        counterWord, profiling, transfersCounted } = rt;
+    const { memory, ram, layout, imports, ramOf, codeBase, read, readBytes, settings, cacheVersion,
+        clock, formOptions, formHere, leaveOut, found, emitLayout, baseGlobals, sharedMemory,
+        codeShared, pages, codePages, table, resumable, entries, view, counterWord, profiling,
+        transfersCounted } = rt;
     const { logOf, CALL_SITES_CAP, counts, noteStall, exits, untranslatedBy, refused, refusedWhy,
         relaxedFlagReads, storeTrace, trace, interpretedAt, forcedStep, counters, diagnostics
     } = join(rt, createDiagnostics(rt));
-    const { precisionAt, precisionOf, roundedKeys, precisionFlags, precisionJob,
-        stackPages, watchable, throughStack, stackCodeSeen, readsFaulted, precisionMissed,
-        floatMissed, shapeMissed, checkedAt } = join(rt, createVariants(rt));
+    const { precisionAt, precisionOf, roundedKeys, precisionFlags, precisionJob, stackPages,
+        throughStack, stackCodeSeen, readsFaulted, precisionMissed, floatMissed, shapeMissed,
+        checkedAt } = join(rt, createVariants(rt));
     // The five helper functions every region imports, defined once here and
     // instantiated over this memory when the first region is published.
     /** @type {any} */
@@ -153,111 +154,13 @@ export function createCorkRuntime(env){
      * other runtime of this thread would take them. */
     const sharedModules = keepsModulesFor === null || sharesStore === null ? null
         : sharedModulesOf(sharesStore, settings.sharedModuleBytes);
-    const { queue, buckets, HOT_BUCKET, heatOf, bucketOf, unqueue, enqueue, barren, pageKeys,
-        watched, WATCH_REGIONS, WATCH_KEYS, dropKey, barrenHas, barrenAdd, misses,
-        exitTargets, bornAt, noteWay, EXIT_TARGETS_CAP, variantHeat, MISSES_CAP, decayMisses,
-        inFlight, overdue } = join(rt, createQueue(rt));
+    const { queue, buckets, HOT_BUCKET, heatOf, bucketOf, unqueue, enqueue, watched, WATCH_REGIONS,
+        dropKey, barrenHas, barrenAdd, misses, exitTargets, bornAt, noteWay, EXIT_TARGETS_CAP,
+        variantHeat, MISSES_CAP, decayMisses, inFlight, overdue } = join(rt, createQueue(rt));
     let missesInserted = 0;
-    /** @type {Set<RegionRecord>} */
-    const regions = new Set();
-    /**
-     * By C runtime operation (`emit/crt.js`), the calls formed as it in the
-     * regions published, each publication of a region counted.
-     * @type {Record<string, number>}
-     */
-    const crtFormed = {};
-    /** @type {Map<number, RegionRecord>} entry index → the region that made it */
-    const recordOf = new Map();
-    /**
-     * Blocks of a region that left held at their own start, entered there with nothing
-     * run, by eip * 16 + the entry's top (`heldOnEntry`): no entry of their region's
-     * from then on, but a region of their own.
-     * @type {Set<number>}
-     */
-    const heldStarts = new Set();
-    /**
-     * A region entered at one of its inner blocks left held there, nothing run: the
-     * windows the block takes from the blocks before it are tested at its start, and a
-     * callee formed into its caller takes the caller's -- a store through a register
-     * after the call returns. Another caller entering the callee there, with that
-     * register holding something else (a loop index of 0), leaves on every call for a
-     * store it never makes, its `ret` going elsewhere. The entry goes, and the block is
-     * a start of a region of its own (`noteStart`), which tests only its own windows.
-     * One that leaves at its own region's entry is left as it is: formed again, it would
-     * test the same windows (`missAt`).
-     *
-     * @param {number} index  the entry run @param {import('./entries.js').Entry} one
-     */
-    const heldOnEntry = (index, one)=>{
-        const record = recordOf.get(index);
-        if (record === undefined || record.entry === one.eip
-            || view().getUint32(layout.eip, true) !== one.eip)
-        {
-            return;
-        }
-        heldStarts.add(one.eip * 16 + one.top);
-        entries.remove(index);
-        recordOf.delete(index);
-        record.slots = record.slots.filter(slot=>slot !== index);
-        entries.noteStart(one.eip);
-        counts.heldEntries++;
-    };
-    /** By the start of a block inside a structured region's loop that has no entry, the
-     * regions holding it so. @type {Map<number, Set<RegionRecord>>} */
-    const closedIn = new Map();
-    /** By page, the closed starts on it: those pages carry `PageFlag.CLOSED`, and the
-     * interpreter tier in wasm runs no miss of the hash there, which the host must count
-     * (`missAt`) for the copies. @type {Map<number, number>} */
-    const closedPages = new Map();
-    /** @param {number} start @param {RegionRecord} record */
-    const forgetClosed = (start, record)=>{
-        const holders = closedIn.get(start);
-        holders?.delete(record);
-        if (holders?.size === 0)
-        {
-            closedIn.delete(start);
-            const page = start >>> 12;
-            const left = (closedPages.get(page) ?? 1) - 1;
-            if (left > 0)
-            {
-                closedPages.set(page, left);
-            }
-            else
-            {
-                closedPages.delete(page);
-                codePages.clear(page, PageFlag.CLOSED);
-            }
-        }
-    };
-    /** The regions to form again with copies of those blocks. @type {Set<RegionRecord>} */
-    const copiesWanted = new Set();
-    /** @type {Map<number, Set<RegionRecord>>} page → regions on it */
-    const byPage = new Map();
-    const GRANULES = 1 << (12 - Tables.CODE_GRANULE_SHIFT);
-    /**
-     * By code page, how many regions' extents there start at each granule and
-     * end at each: the page's code range is the first start and the last end,
-     * so a region that goes takes its own out rather than the range being made
-     * again from every region left -- a page of small functions formed into
-     * their callers holds nearly every region there is, and making its range
-     * again was a pass over all of them each time one went.
-     * @type {Map<number, Uint32Array>}  granule g's starts at g, its ends at GRANULES + 1 + g
-     */
-    const pageExtents = new Map();
-    /** @param {RegionRecord} record @param {1 | -1} sign */
-    const countExtents = (record, sign)=>{
-        for (const [page, [from, to]] of record.extents)
-        {
-            let tally = pageExtents.get(page);
-            if (tally === undefined)
-            {
-                tally = new Uint32Array(2 * GRANULES + 2);
-                pageExtents.set(page, tally);
-            }
-            tally[from] += sign;
-            tally[GRANULES + 1 + to] += sign;
-        }
-    };
+    const { regions, crtFormed, recordOf, heldStarts, heldOnEntry, closedIn, closedPages,
+        forgetClosed, copiesWanted, byPage, GRANULES, countExtents, unpublish
+    } = join(rt, createRegions(rt));
     /** By the address of an indirect call in translated code, its targets sampled and how
      * often, and its samples in all. @type {Map<number, { total: number,
      *     targets: Map<number, number> }>} */
@@ -265,64 +168,9 @@ export function createCorkRuntime(env){
     /** The calls sampled `PREDICT_AFTER` times, whose callees are looked at next: what was
      * a pass over every call sampled at each `translatePending`. @type {Set<number>} */
     const callsDue = new Set();
-    /** @type {Map<number, number>} page → times invalidated, the stamp a batch checks */
-    const generation = new Map();
-    /**
-     * By page, the writes that dropped its regions: how many since `since`, the window's
-     * start, how many in all (`costs`), and how many times it was left volatile.
-     * @type {Map<number, { times: number, since: number, left: number, costs: number }>}
-     */
-    const dropped = new Map();
-    /**
-     * Writes that cost a page its regions, in all, past which it is a page of stubs: code a
-     * program patches one piece at a time (a managed runtime's precode, each stub written
-     * when its method is first called), never enough at once to be volatile, while every
-     * write dropped each region that ran into a stub there.
-     */
-    const STUB_WRITES = 2;
-    /** By volatile page, when it is translated again. @type {Map<number, number>} */
-    const volatileUntil = new Map();
-    /**
-     * By volatile page, the entries of the regions writes dropped there, with
-     * their tops: code that ran hot enough to be translated, which the
-     * interpreter's own counts -- saturated long before the page is let go --
-     * would not hand over again.
-     * @type {Map<number, Map<number, number>>}
-     */
-    const leftEntries = new Map();
-    /** The pages whose hold is over go back to the translator. */
-    const liftVolatile = ()=>{
-        if (volatileUntil.size === 0)
-        {
-            return;
-        }
-        const at = nowMs();
-        for (const [page, until] of volatileUntil)
-        {
-            if (at >= until)
-            {
-                volatileUntil.delete(page);
-                codePages.clear(page, PageFlag.VOLATILE);
-                // What was asked for there while it was left formed nothing: asked
-                // again, it is translated.
-                for (const key of pageKeys.get(page) ?? [])
-                {
-                    barren.delete(key);
-                }
-                for (const [entry, top] of leftEntries.get(page) ?? [])
-                {
-                    runtimeApi?.noteHot(entry, top, 256);
-                }
-                leftEntries.delete(page);
-                const record = dropped.get(page);
-                if (record !== undefined)
-                {
-                    record.times = 0;
-                    record.since = at;
-                }
-            }
-        }
-    };
+    const { dropped, liftVolatile, stamp, invalidatePage, sourcesChanged, storedInto, translatable,
+        stubPage, formableFrom, stored, codeWritten, takeWrites, markWritten, takeCodeWrites,
+        noteStack } = join(rt, createCodeWrites(rt));
     /** When `translateNow` last looked, for `behindMs`. */
     let lookedAt = 0;
     let nextTable = resumable ? TIER_SLOT + 1 : 0;
@@ -338,410 +186,6 @@ export function createCorkRuntime(env){
     /** @type {import('../../../core/src/layers/cpu/engine.js').ExitRecord} */
     const exit = { retired: 0, kind: 'untranslated', vector: 0 };
     let corkRetired = 0;
-
-    /** @param {Set<number>} of */
-    const stamp = of=>[...of].map(page=>generation.get(page) ?? 0).join(',');
-
-    /**
-     * Takes regions out: their entries, their function-table slots, and the
-     * code marks of their pages, which keep the range of the regions still on
-     * each.
-     *
-     * @param {RegionRecord[]} records
-     */
-    const unpublish = records=>{
-        // The pages the dropped regions spanned, taken before the records
-        // leave their sets.
-        const touched = new Set(records.flatMap(record=>[...record.pages]));
-        for (const record of records)
-        {
-            for (const slot of record.slots)
-            {
-                entries.remove(slot);
-                recordOf.delete(slot);
-            }
-            if (table && record.table >= 0)
-            {
-                // The entries are out of the hash first: nothing finds
-                // the slot before it is emptied.
-                table.set(record.table, null);
-                recordAt.delete(record.table);
-                if (record.module === undefined)
-                {
-                    freeTable.push(record.table);
-                }
-            }
-            leaveModule(record);
-            leaveHeld(record);
-            for (const p of record.pages)
-            {
-                byPage.get(p)?.delete(record);
-            }
-            countExtents(record, -1);
-            for (const start of record.closed ?? [])
-            {
-                forgetClosed(start, record);
-            }
-            copiesWanted.delete(record);
-            regions.delete(record);
-        }
-        for (const p of touched)
-        {
-            const left = byPage.get(p);
-            codePages.clearCode(p);
-            if (!left?.size)
-            {
-                watched[p] &= ~WATCH_REGIONS;
-                pageExtents.delete(p);
-                continue;
-            }
-            // The page's range from the extents of the regions still on it.
-            const tally = pageExtents.get(p);
-            if (tally === undefined)
-            {
-                continue;
-            }
-            let from = 0;
-            while (from < GRANULES && tally[from] === 0)
-            {
-                from++;
-            }
-            let to = GRANULES;
-            while (to > from && tally[GRANULES + 1 + to] === 0)
-            {
-                to--;
-            }
-            if (to > from)
-            {
-                codePages.markCode(p * 4096 + (from << Tables.CODE_GRANULE_SHIFT),
-                    (to - from) << Tables.CODE_GRANULE_SHIFT);
-            }
-        }
-    };
-
-    /**
-     * @param {number} page
-     * @param {RegionRecord[]} [only]  the regions on it that go; every one by default
-     * @returns {RegionRecord[]}  the regions that went, unless the page was left volatile
-     */
-    const invalidatePage = (page, only)=>{
-        if (watched[page] === 0)
-        {
-            return [];
-        }
-        const on = byPage.get(page);
-        const going = only ?? (on ? [...on] : []);
-        const cost = going.length;
-        if (cost > 0)
-        {
-            unpublish(going);
-            counts.invalidations += cost;
-        }
-        const notes = pageKeys.get(page);
-        if (notes)
-        {
-            counts.queueDrops += notes.size;
-            for (const key of notes)
-            {
-                unqueue(key);
-                barren.delete(key);
-            }
-            pageKeys.delete(page);
-            watched[page] &= ~WATCH_KEYS;
-        }
-        generation.set(page, (generation.get(page) ?? 0) + 1);
-        // Only a write that cost a region counts towards volatility: the
-        // loader placing an image writes a page many times before anything
-        // on it is hot, and that is not a page that mixes code with data.
-        if (cost === 0)
-        {
-            return going;
-        }
-        const at = nowMs();
-        let record = dropped.get(page);
-        if (record === undefined)
-        {
-            record = { times: 0, since: at, left: 0, costs: 0 };
-            dropped.set(page, record);
-        }
-        record.costs++;
-        if (at - record.since > settings.volatileWindowMs)
-        {
-            record.times = 0;
-            record.since = at;
-        }
-        record.times++;
-        if (record.times === settings.volatileAfter && !volatileUntil.has(page))
-        {
-            codePages.set(page, PageFlag.VOLATILE);
-            volatileUntil.set(page, at + settings.volatileHoldMs * 2 ** Math.min(record.left, 5));
-            leftEntries.set(page, new Map(going.map(one=>[one.entry, one.entryTop])));
-            record.left++;
-            counts.volatilePages++;
-            return [];
-        }
-        return going;
-    };
-
-    /**
-     * Whether a byte of `sources` in `[address, end)` reads otherwise now.
-     * @param {{ start: number, bytes: Uint8Array }[]} sources @param {number} address
-     * @param {number} end
-     */
-    const sourcesChanged = (sources, address, end)=>{
-        for (const { start, bytes } of sources)
-        {
-            const from = Math.max(start, address);
-            const to = Math.min(start + bytes.length, end);
-            const now = from < to ? guestBytes(from, to) : null;
-            if (now !== null)
-            {
-                for (let k = 0, at = from - start; k < now.length; k++, at++)
-                {
-                    if (now[k] !== bytes[at])
-                    {
-                        return true;
-                    }
-                }
-                continue;
-            }
-            for (let at = from; at < to; at++)
-            {
-                if (read(at) !== bytes[at - start])
-                {
-                    return true;
-                }
-            }
-        }
-        return false;
-    };
-
-    /**
-     * Whether `sources` hold a byte of `[address, end)`.
-     * @param {{ start: number, bytes: Uint8Array }[]} sources @param {number} address
-     * @param {number} end
-     */
-    const sourcesMet = (sources, address, end)=>sources.some(({ start, bytes })=>
-        start < end && address < start + bytes.length);
-
-    /**
-     * The bytes of each page a store into code has met, as the last store
-     * there left them: what a store into none of the page's regions is judged
-     * by. Only a choice of speed rides on it -- whether the page stays code --
-     * since every region's own bytes are judged by its copy (`sources`).
-     *
-     * @type {Map<number, Uint8Array>}
-     */
-    const pageBytes = new Map();
-
-    /**
-     * Whether the store over `[address, end)` changed a byte of `page` from
-     * what the page's copy holds, the copy taken up to date. A page met for
-     * the first time has no copy to judge by: changed.
-     *
-     * @param {number} page @param {number} address @param {number} end
-     */
-    const pageChanged = (page, address, end)=>{
-        const base = page * 4096;
-        const copy = pageBytes.get(page);
-        if (!copy)
-        {
-            const whole = guestBytes(base, base + 4096);
-            if (whole !== null)
-            {
-                pageBytes.set(page, whole.slice());
-                return true;
-            }
-            const made = new Uint8Array(4096);
-            for (let at = 0; at < 4096; at++)
-            {
-                made[at] = read(base + at);
-            }
-            pageBytes.set(page, made);
-            return true;
-        }
-        let changed = false;
-        const to = Math.min(end, base + 4096);
-        const from = Math.max(address, base);
-        const current = from < to ? guestBytes(from, to) : null;
-        if (current !== null)
-        {
-            for (let k = 0, at = from - base; k < current.length; k++, at++)
-            {
-                if (copy[at] !== current[k])
-                {
-                    copy[at] = current[k];
-                    changed = true;
-                }
-            }
-            return changed;
-        }
-        for (let at = from; at < to; at++)
-        {
-            const now = read(at);
-            if (copy[at - base] !== now)
-            {
-                copy[at - base] = now;
-                changed = true;
-            }
-        }
-        return changed;
-    };
-
-    /** @param {any} record */
-    const sourcesOf = record=>
-        /** @type {{ start: number, bytes: Uint8Array }[]} */ (record.sources);
-    /**
-     * Bytes at `[address, address + size)` were written while code stood on
-     * their pages. A region goes when a byte it was made from now differs:
-     * a program that writes its code over with the bytes already there -- a
-     * mixer setting every voice's patch on each call, most of them as they
-     * were -- keeps its translations, and one that changes a byte loses the
-     * regions made of that byte and no other on the page. A page with a region
-     * that kept no copy of its bytes goes whole, as every page did before its
-     * first such store; the regions formed on it again keep theirs.
-     *
-     * The page's generation moves either way, so a region in flight from it
-     * is checked again at its publication rather than trusted.
-     *
-     * @param {number} address @param {number} size
-     * @param {boolean} [own]  the program's own store, whose dropped code is asked for again
-     *     at once; a host's write (a file read, a loader) places bytes nothing has run yet,
-     *     which run first where cold code runs
-     */
-    const storedInto = (address, size, own = true)=>{
-        if (size <= 0)
-        {
-            return;
-        }
-        const end = address + size;
-        const last = (end - 1) >>> 12;
-        for (let page = address >>> 12; page <= last; page++)
-        {
-            // No region and no candidate on the page: nothing a store there can
-            // make wrong. Nearly every host write is an answer into a stack or
-            // a buffer, and judging it would keep a copy of every page the host
-            // ever wrote -- a game's files read, page for page -- to compare
-            // the next write against.
-            if (watched[page] === 0)
-            {
-                continue;
-            }
-            const on = byPage.get(page);
-            // With other executors beside this one a page goes whole, as before:
-            // their stores reach this one's regions only when it next looks
-            // (`takeCodeWrites`), and keeping regions across that gap is not
-            // yet judged by the executors' gate.
-            // Walked rather than copied: every host write into a watched page
-            // comes here, the arguments of every call into the guest among
-            // them, and a copy of the page's regions per write was garbage.
-            let whole = codeShared !== null || on === undefined || on.size === 0;
-            if (!whole && on !== undefined)
-            {
-                for (const record of on)
-                {
-                    if (record.sources === undefined)
-                    {
-                        whole = true;
-                        break;
-                    }
-                }
-            }
-            /** @type {any[] | undefined} */
-            let met;
-            if (!whole && on !== undefined)
-            {
-                met = [];
-                for (const record of on)
-                {
-                    if (sourcesMet(sourcesOf(record), address, end))
-                    {
-                        met.push(record);
-                    }
-                }
-            }
-            // Into none of the page's regions' bytes: no translation is wrong
-            // for it, and what is left to decide is whether the page stays
-            // code. A store that changed what was there is data beside the
-            // code -- a variable between two functions, written on every turn
-            // of a loop -- and kept as code the page would send every such
-            // store to the interpreter, ten times the loop's cost in the
-            // measured case; it goes whole, as before any store was judged by
-            // its bytes, and nothing is asked for again. One that wrote the
-            // bytes already there is a patch set again over code no region
-            // took in, and the page stays.
-            if (met !== undefined && met.length === 0 && pageChanged(page, address, end))
-            {
-                invalidatePage(page);
-                continue;
-            }
-            if (whole)
-            {
-                // The copy a later store into none of the regions is judged by.
-                pageChanged(page, address, end);
-            }
-            if (met !== undefined && met.length > 0 && pageBytes.has(page))
-            {
-                // Kept up to date for the next store into none of them.
-                pageChanged(page, address, end);
-            }
-            const changed = met?.filter(record=>sourcesChanged(sourcesOf(record), address, end));
-            if (changed === undefined || changed.length > 0)
-            {
-                // Code hot enough to have been translated runs on as it is now,
-                // on the interpreter, whose counts of it are long saturated: it
-                // is asked for again at once, so the bytes written are what is
-                // translated next.
-                for (const one of invalidatePage(page, changed))
-                {
-                    if (own && codeShared === null)
-                    {
-                        runtimeApi?.noteHot(one.entry, one.entryTop, 256);
-                    }
-                }
-                continue;
-            }
-            counts.storesKept++;
-            generation.set(page, (generation.get(page) ?? 0) + 1);
-        }
-    };
-    /**
-     * `storedInto` for a store the host tells of, at its address in the window: the
-     * translator's code is the code block's (`codeBase`), and a store outside the
-     * block reaches none of it.
-     *
-     * @param {number} address @param {number} size @param {boolean} [own]
-     */
-    const storeIntoBlock = (address, size, own = true)=>{
-        const offset = address - codeBase;
-        if (codeBase === 0 || (offset > -size && offset < 2 ** 32))
-        {
-            storedInto(offset, size, own);
-        }
-    };
-
-    /** @param {number} address */
-    const translatable = address=>(codePages.get(address >>> 12)
-        & (PageFlag.VOLATILE | PageFlag.INACCESSIBLE | PageFlag.NO_EXECUTE)) === 0
-        // A diagnostic: a range left to the interpreter, to find which code a
-        // translation goes wrong in by halving it.
-        && !(settings.interpretRange && address >= settings.interpretRange[0]
-            && address < settings.interpretRange[1]);
-    /** @param {number} page */
-    const stubPage = page=>(dropped.get(page)?.costs ?? 0) >= STUB_WRITES;
-    /**
-     * What a region formed from `entry` may form on: a page of stubs (`STUB_WRITES`) holds
-     * only regions entered there, which stay on it, so a write to a stub drops the stub's
-     * own small region and none that ran into it from elsewhere.
-     *
-     * @param {number} entry
-     * @returns {(address: number) => boolean}
-     */
-    const formableFrom = entry=>{
-        const home = entry >>> 12;
-        return stubPage(home) ? address=>address >>> 12 === home && translatable(address)
-            : address=>!stubPage(address >>> 12) && translatable(address);
-    };
 
     // The translation worker: forming and the store lookup stay on the engine
     // thread, where the memory and the store are, and the emitting and
@@ -4158,30 +3602,22 @@ export function createCorkRuntime(env){
     };
     // Late: what the modules read of runtime.js.
     join(rt, {
+        freeTable,
         placedLive,
+        recordAt,
         heldModules,
         get heldBytes(){ return heldBytes; },
         sharedModules,
-        regions,
-        crtFormed,
-        recordOf,
-        closedIn,
-        byPage,
-        dropped,
-        STUB_WRITES,
-        volatileUntil,
         get corkRetired(){ return corkRetired; },
-        unpublish,
-        invalidatePage,
-        pageBytes,
-        translatable,
-        formableFrom,
         translators,
         translatorReady,
         translatorLoading,
         coveredOut,
+        get runtimeApi(){ return runtimeApi; },
         arena,
         emitOptions,
+        leaveModule,
+        leaveHeld,
         batchInstances,
         sharedForms,
     });
@@ -4521,97 +3957,11 @@ export function createCorkRuntime(env){
             return translateNow();
         },
         invalidatePage,
-        /**
-         * `[address, address + size)` was written over code: the regions made of
-         * a byte it changed go (`storedInto`).
-         *
-         * @param {number} address @param {number} size
-         * @param {boolean} [own]  a store of the program's own, met by the host's
-         *     interpreter, rather than the host's write
-         */
-        stored(address, size, own = false){
-            pages.markWrittenRange(address, size);
-            storeIntoBlock(address, size, own);
-        },
-        /**
-         * A store this executor met reached code: its translations of the pages
-         * go, and the other executors of the process are told theirs do.
-         *
-         * @param {number} address @param {number} size
-         */
-        codeWritten(address, size){
-            if (size <= 0)
-            {
-                return;
-            }
-            pages.markWrittenRange(address, size);
-            storeIntoBlock(address, size);
-            codeShared?.publish(address, size);
-        },
-        /**
-         * The pages of `[address, address + length)` written since they were
-         * armed, or never armed, each armed from now: a store finds an armed
-         * page by the flag its page check already reads (`PageFlag.WATCH`),
-         * and only its first store after the arming does more than any store
-         * does. A page on a thread's stack is always among them while stores
-         * through esp go untested (`looseStacks`): no store there would mark
-         * it. A store another executor tested before this call and makes after
-         * it lands unmarked, and arming a page wipes its mark for every caller:
-         * the host's write watch (`write-clock.js` in the cpu layer) answers both.
-         *
-         * @param {number} address @param {number} length
-         * @returns {number[]}
-         */
-        takeWrites(address, length){
-            /** @type {number[]} */
-            const written = [];
-            const last = length > 0 ? (address + length - 1) >>> 12 : address >>> 12;
-            for (let page = address >>> 12; page <= last; page++)
-            {
-                if (!watchable(page) || pages.takeWritten(page))
-                {
-                    written.push(page);
-                }
-            }
-            return written;
-        },
-        /**
-         * Bytes another thread wrote into guest memory in place, outside every
-         * path a write takes here: the armed pages they reach are marked.
-         *
-         * @param {number} address @param {number} length
-         */
-        markWritten(address, length){
-            pages.markWrittenRange(address, length);
-        },
-        /**
-         * The stores into code the process's other executors met since this
-         * one last looked: its translations of those pages go. Asked before
-         * each slice.
-         */
-        takeCodeWrites(){
-            // A switch another executor flipped is this one's too.
-            const raised = codeShared?.switches() ?? 0;
-            if ((raised & SharedSwitch.STACKS_TESTED) !== 0)
-            {
-                stackCodeSeen();
-            }
-            if ((raised & SharedSwitch.READS_CHECKED) !== 0)
-            {
-                readsFaulted();
-            }
-            return codeShared?.take((address, size)=>{
-                if (size === 0xffffffff)
-                {
-                    for (const page of [...byPage.keys()])
-                    {
-                        invalidatePage(page);
-                    }
-                    return;
-                }
-                storedInto(address, size);
-            }) ?? 0;
-        },
+        stored,
+        codeWritten,
+        takeWrites,
+        markWritten,
+        takeCodeWrites,
         interpretWith(entry, entered){
             if (!resumable)
             {
@@ -4624,21 +3974,7 @@ export function createCorkRuntime(env){
         noteStall,
         /** @param {number} page */
         holdsPage: page=>(pages.get(page) & PageFlag.HAS_CODE) !== 0,
-        noteStack(base, size){
-            const first = base >>> 12;
-            const last = (base + Math.max(size, 1) - 1) >>> 12;
-            // The other executors are not told: they read it where every
-            // executor's stacks are kept.
-            codeShared?.noteStack(first, last);
-            for (let page = first; page <= last; page++)
-            {
-                stackPages.add(page);
-                if ((pages.get(page) & PageFlag.HAS_CODE) !== 0)
-                {
-                    stackCodeSeen();
-                }
-            }
-        },
+        noteStack,
         interpretedAt,
         forcedStep,
         counters,

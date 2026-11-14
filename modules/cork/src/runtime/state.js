@@ -285,6 +285,8 @@ export function baseState({ memory, ram, layout, sharedLayout = undefined, confi
  *     & ReturnType<typeof import('./diagnostics.js').createDiagnostics>
  *     & ReturnType<typeof import('./variants.js').createVariants>
  *     & ReturnType<typeof import('./queue.js').createQueue>
+ *     & ReturnType<typeof import('./regions.js').createRegions>
+ *     & ReturnType<typeof import('./code-writes.js').createCodeWrites>
  *     & Late} State
  */
 

@@ -196,7 +196,7 @@ export function createVariants(state){
     const precisionMissed = eip=>{
         const single = (view().getUint16(layout.x87Control, true) & 0x300) === 0;
         const under = single ? 'narrow' : 'wide';
-        const going = [...rt.byPage.get(eip >>> 12) ?? []].filter((/** @type {RegionRecord} */ record)=>
+        const going = [...rt.byPage.get(eip >>> 12) ?? []].filter(record=>
             (single ? record.wide : record.narrow) === true
             && record.spans.some(([from, to])=>eip >= from && eip < to));
         for (const record of going)
@@ -226,7 +226,7 @@ export function createVariants(state){
      */
     const floatMissed = eip=>{
         counts.floatMisses++;
-        const going = [...rt.byPage.get(eip >>> 12) ?? []].filter((/** @type {RegionRecord} */ record)=>record.floats === true
+        const going = [...rt.byPage.get(eip >>> 12) ?? []].filter(record=>record.floats === true
             && record.spans.some(([from, to])=>eip >= from && eip < to)
             && (record.floatMisses = (record.floatMisses ?? 0) + 1) >= settings.checkedAfter);
         for (const record of going)
