@@ -2579,18 +2579,6 @@ export function createScheduler(options){
         },
 
         /**
-         * Brings a thread running on another executor back, its slice ended
-         * there and its registers saved, as a processor stops a thread before
-         * its context is read: GetThreadContext of a thread SuspendThread asked
-         * to stop answers where it stopped, not where it was last placed.
-         * Answered from the process's own executor; inside the answer to
-         * another executor's call the others cannot be waited for, and the
-         * thread is left where it runs.
-         *
-         * @param {any} thread
-         * @returns {boolean} whether the thread runs nowhere now
-         */
-        /**
          * The other executors' traps answered between turns, as a turn begins
          * by answering them: for a caller that waits through its event loop
          * between turns, which would otherwise answer them only when the next
@@ -2603,7 +2591,34 @@ export function createScheduler(options){
             }
         },
 
+        /**
+         * Brings a thread running on another executor back, its slice ended
+         * there and its registers saved, as a processor stops a thread before
+         * its context is read: GetThreadContext of a thread SuspendThread asked
+         * to stop answers where it stopped, not where it was last placed.
+         * Answered from the process's own executor; inside the answer to
+         * another executor's call the others cannot be waited for, and the
+         * thread is left where it runs.
+         *
+         * @param {any} thread
+         * @returns {boolean} whether the thread runs nowhere now
+         */
         settle(thread){
+            // This executor's own thread: its registers are the processor's
+            // until it is switched away from, and what it saved last is older
+            // - a .NET runtime's collector on another executor read a thread
+            // parked here in a wait as where its last slice had ended, in a
+            // method it had long returned from, and walked a stack no longer
+            // there. Running a slice now, it stops at the slice's end.
+            if (thread === current)
+            {
+                if (inSlice)
+                {
+                    return false;
+                }
+                current.context = cpu.captureContext(current.context);
+                return true;
+            }
             const runs = ()=>placedElsewhere(thread);
             if (!runs())
             {
