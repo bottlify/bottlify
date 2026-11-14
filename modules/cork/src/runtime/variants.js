@@ -35,7 +35,7 @@ export function createVariants(state){
     const rt = /** @type {import('./state.js').State} */ (state);
     const { codeShared, entries, layout, settings, view
     } = /** @type {import('./state.js').Base} */ (state);
-    const { counts } = rt;
+    const { byPage, counts, recordOf, regions, unpublish } = rt;
     /**
      * The precision control each x87 region is compiled for, by its entry
      * (`X87Precision`): the one the machine has when the entry is first formed
@@ -153,7 +153,7 @@ export function createVariants(state){
         loose = false;
         counts.stackCode++;
         codeShared?.raise(SharedSwitch.STACKS_TESTED);
-        const on = new Set([...rt.regions].filter(record=>record.loose)
+        const on = new Set([...regions].filter(record=>record.loose)
             .flatMap(record=>[...record.pages]));
         for (const page of on)
         {
@@ -177,7 +177,7 @@ export function createVariants(state){
         readsChecked = true;
         counts.readSwitches++;
         codeShared?.raise(SharedSwitch.READS_CHECKED);
-        const on = new Set([...rt.regions].filter(record=>record.wrapped)
+        const on = new Set([...regions].filter(record=>record.wrapped)
             .flatMap(record=>[...record.pages]));
         for (const page of on)
         {
@@ -198,7 +198,7 @@ export function createVariants(state){
     const precisionMissed = eip=>{
         const single = (view().getUint16(layout.x87Control, true) & 0x300) === 0;
         const under = single ? 'narrow' : 'wide';
-        const going = [...rt.byPage.get(eip >>> 12) ?? []].filter(record=>
+        const going = [...byPage.get(eip >>> 12) ?? []].filter(record=>
             (single ? record.wide : record.narrow) === true
             && record.spans.some(([from, to])=>eip >= from && eip < to));
         for (const record of going)
@@ -214,7 +214,7 @@ export function createVariants(state){
         }
         if (going.length > 0)
         {
-            rt.unpublish(going);
+            unpublish(going);
         }
     };
 
@@ -228,7 +228,7 @@ export function createVariants(state){
      */
     const floatMissed = eip=>{
         counts.floatMisses++;
-        const going = [...rt.byPage.get(eip >>> 12) ?? []].filter(record=>record.floats === true
+        const going = [...byPage.get(eip >>> 12) ?? []].filter(record=>record.floats === true
             && record.spans.some(([from, to])=>eip >= from && eip < to)
             && (record.floatMisses = (record.floatMisses ?? 0) + 1) >= settings.checkedAfter);
         for (const record of going)
@@ -238,7 +238,7 @@ export function createVariants(state){
         }
         if (going.length > 0)
         {
-            rt.unpublish(going);
+            unpublish(going);
         }
     };
     /**
@@ -253,7 +253,7 @@ export function createVariants(state){
      */
     const shapeMissed = (eip, top)=>{
         counts.shapeMisses++;
-        const record = rt.recordOf.get(entries.entryOf(eip, top));
+        const record = recordOf.get(entries.entryOf(eip, top));
         if (record === undefined || record.checked)
         {
             return null;
@@ -265,7 +265,7 @@ export function createVariants(state){
         }
         checkedKeys.add(keyOf(record.entry, record.entryTop));
         counts.shapeChecked++;
-        rt.unpublish([record]);
+        unpublish([record]);
         return record;
     };
     /** Whether a formed x87 region is to be translated checked.

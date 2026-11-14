@@ -26,7 +26,7 @@ export function createRegions(state){
     const rt = /** @type {import('./state.js').State} */ (state);
     const { codePages, entries, layout, table, view
     } = /** @type {import('./state.js').Base} */ (state);
-    const { WATCH_REGIONS, counts, watched } = rt;
+    const { WATCH_REGIONS, counts, freeTable, leaveHeld, leaveModule, recordAt, watched } = rt;
     /** @type {Set<RegionRecord>} */
     const regions = new Set();
     /**
@@ -151,14 +151,14 @@ export function createRegions(state){
                 // The entries are out of the hash first: nothing finds
                 // the slot before it is emptied.
                 table.set(record.table, null);
-                rt.recordAt.delete(record.table);
+                recordAt.delete(record.table);
                 if (record.module === undefined)
                 {
-                    rt.freeTable.push(record.table);
+                    freeTable.push(record.table);
                 }
             }
-            rt.leaveModule(record);
-            rt.leaveHeld(record);
+            leaveModule(record);
+            leaveHeld(record);
             for (const p of record.pages)
             {
                 byPage.get(p)?.delete(record);

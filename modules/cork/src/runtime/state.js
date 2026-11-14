@@ -357,9 +357,10 @@ export function baseState({ memory, ram, layout, sharedLayout = undefined, confi
 
 /**
  * The state the runtime's parts are made over: the base and every part's
- * members. `Late` is what runtime.js itself still lends the parts.
+ * members, and what runtime.js lends the parts of its own (`Lent`): the
+ * instructions translated code retired, which its run loop counts.
  *
- * @typedef {Record<string, any>} Late
+ * @typedef {{ readonly corkRetired: number }} Lent
  * @typedef {ReturnType<typeof baseState>} Base  the base alone: what a part takes of it is
  *     typed by this, which no part's own return is in
  * @typedef {ReturnType<typeof baseState>
@@ -374,7 +375,7 @@ export function baseState({ memory, ram, layout, sharedLayout = undefined, confi
  *     & ReturnType<typeof import('./publish.js').createPublish>
  *     & ReturnType<typeof import('./relink.js').createRelink>
  *     & ReturnType<typeof import('./forming.js').createForming>
- *     & Late} State
+ *     & Lent} State
  */
 
 /**

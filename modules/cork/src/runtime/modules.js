@@ -33,8 +33,9 @@ import { sharedModulesOf } from './shared-modules.js';
 export function createModules(state){
     const rt = /** @type {import('./state.js').State} */ (state);
     const { baseGlobals, clock, entries, imports, layout, leaveOut, memory, ram, resumable,
-        settings, sharedMemory, sharesStore, table } = /** @type {import('./state.js').Base} */ (state);
-    const { counts, refused } = rt;
+        settings, sharedMemory, sharesStore, table
+    } = /** @type {import('./state.js').Base} */ (state);
+    const { MISSES_CAP, counts, refused } = rt;
     // The five helper functions every region imports, defined once here and
     // instantiated over this memory when the first region is published.
     /** @type {any} */
@@ -302,7 +303,7 @@ export function createModules(state){
         for (const record of records)
         {
             const key = keyOf(record.entry, record.entryTop);
-            if (evictedKeys.size >= rt.MISSES_CAP && !evictedKeys.has(key))
+            if (evictedKeys.size >= MISSES_CAP && !evictedKeys.has(key))
             {
                 evictedKeys.clear();
             }

@@ -78,36 +78,28 @@ export function createCorkRuntime(env){
     const rt = /** @type {import('./state.js').State} */ (baseState(env));
     const { layout, settings, codeShared, pages, codePages, table, resumable, entries, view,
         counterWord, profiling } = rt;
+    // The instructions translated code retired, counted by the run loop below with nothing
+    // between it and a region's return; the parts read it through the state.
+    let corkRetired = 0;
+    join(rt, { get corkRetired(){ return corkRetired; } });
+    // The parts, each made over what the base and the parts before it hold (a part reads
+    // what a later one makes through the state, when it runs).
     const { noteStall, exits, untranslatedBy, interpretedAt, forcedStep, counters, diagnostics
     } = join(rt, createDiagnostics(rt));
-    const { readsFaulted, precisionMissed, floatMissed, shapeMissed
-    } = join(rt, createVariants(rt));
-    join(rt, createModules(rt));
-    /** What the tier has retired in place of misses, all told, once it is installed: not
-     * the translator's own share. @type {(() => number) | null} */
-    let tierEntered = null;
     const { queue, buckets, heatOf, bucketOf, enqueue, barrenHas, misses, exitTargets, bornAt,
         EXIT_TARGETS_CAP, variantHeat, MISSES_CAP, decayMisses, inFlight, overdue
     } = join(rt, createQueue(rt));
-    let missesInserted = 0;
+    join(rt, createModules(rt));
     const { heldOnEntry, closedIn, copiesWanted } = join(rt, createRegions(rt));
+    const { readsFaulted, precisionMissed, floatMissed, shapeMissed
+    } = join(rt, createVariants(rt));
     const { liftVolatile, invalidatePage, storedInto, translatable, stored, codeWritten,
         takeWrites, markWritten, takeCodeWrites, noteStack } = join(rt, createCodeWrites(rt));
-    /** @type {Record<number, keyof typeof untranslatedBy>} */
-    const VECTOR_NAMES = { 0: 'bare', [HELD]: 'held', [PRECISION]: 'precision', [SHAPE]: 'shape',
-        [RANGE]: 'range' };
-    /** @type {import('../../../core/src/layers/cpu/engine.js').ExitRecord} */
-    const exit = { retired: 0, kind: 'untranslated', vector: 0 };
-    let corkRetired = 0;
     const { workerUrl, coveredOut, coveredIn, attachTranslator, detachTranslator, closeTranslators
     } = join(rt, createTranslators(rt));
-    let profileResetAt = import.meta.BOTTLIFY_DIAGNOSTICS !== false && profiling
-        && settings.blockProfileFrom > 0
-        ? performance.now() + settings.blockProfileFrom * 1000 : null;
     const { flushStore } = join(rt, createStore(rt));
     join(rt, createPublish(rt));
     join(rt, createRelink(rt));
-
     if (workerUrl !== null)
     {
         for (let n = 0; n < settings.translators; n++)
@@ -121,10 +113,22 @@ export function createCorkRuntime(env){
         }
     }
     const { translateNow } = join(rt, createForming(rt));
-    // Late: what the modules read of runtime.js.
-    join(rt, {
-        get corkRetired(){ return corkRetired; },
-    });
+
+    // The run loop's own: what the tier has retired in place of misses, all told, once it
+    // is installed (not the translator's share); the misses noted since the last decay;
+    // the untranslated exits' vectors by name; the one exit record every run rewrites;
+    // and when the block profile starts over.
+    /** @type {(() => number) | null} */
+    let tierEntered = null;
+    let missesInserted = 0;
+    /** @type {Record<number, keyof typeof untranslatedBy>} */
+    const VECTOR_NAMES = { 0: 'bare', [HELD]: 'held', [PRECISION]: 'precision', [SHAPE]: 'shape',
+        [RANGE]: 'range' };
+    /** @type {import('../../../core/src/layers/cpu/engine.js').ExitRecord} */
+    const exit = { retired: 0, kind: 'untranslated', vector: 0 };
+    let profileResetAt = import.meta.BOTTLIFY_DIAGNOSTICS !== false && profiling
+        && settings.blockProfileFrom > 0
+        ? performance.now() + settings.blockProfileFrom * 1000 : null;
     /** @type {Runtime & { pages: import('./pages.js').PageTable }} */
     const api = {
         pages,
