@@ -6,7 +6,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createCxxExceptions, EH_EXCEPTION_NUMBER, EH_FRAME, EH_MAGIC } from './eh.js';
+import {
+    createCxxExceptions, EH_EXCEPTION_NUMBER, EH_FRAME, EH_MAGIC, UNIVERSAL_EH,
+} from './eh.js';
 import { Disposition, EH_UNWINDING, RECORD } from '../kernel32/seh.js';
 
 /** The registration frame of the function being handled, and its body's stack. */
@@ -106,6 +108,7 @@ function machine(options = {}){
         park: ()=>'parked',
         /** @param {string} api */
         divergence: api=>diverged.push(api),
+        allocate,
     };
 
     return {
@@ -406,6 +409,39 @@ test('the translator and the uncaught query are exported under msvcrt.dll\'s own
         'the previous translator comes back');
     assert.equal(table.__uncaught_exception.handler(), 0, 'nothing is in flight');
 });
+
+test('a catch block runs with its exception the thread\'s current one, in vcruntime\'s layout',
+    async()=>{
+        const m = machine({ answer: call=>{
+            if (call.entry === 0x6000)
+            {
+                const state = /** @type {any} */ (m.eh.table)[UNIVERSAL_EH];
+                const current = state.__current_exception.handler([]);
+                seen.push(m.get(current), m.get(state.__current_exception_context.handler([])),
+                    state.__processing_throw.handler([]) - current);
+                return 0x401000;
+            }
+            return 0;
+        } });
+        /** @type {number[]} */
+        const seen = [];
+        const state = /** @type {any} */ (m.eh.table)[UNIVERSAL_EH];
+        const ours = m.type('.?AUA@@');
+        const info = funcInfo(m, { unwind: [{ toState: -1, action: 0 }],
+            tries: [{ low: 0, high: 0, catchHigh: 0,
+                handlers: [{ type: ours, address: 0x6000 }] }] });
+
+        state._set_se_translator.handler([0x401500]);
+        await handle(m, info, thrown(m, m.words([1]), throwInfo(m, [{ type: ours }])), 0);
+
+        const current = state.__current_exception.handler([]);
+        assert.deepEqual(seen, [RECORD_AT, 0x26000, 8],
+            'the record and context handled, and the count in flight two slots on');
+        assert.equal(m.get(current), 0, 'and none once the block is done');
+        assert.equal(m.get(current - 8), 0x401500,
+            'the translator two slots before, where vcruntime keeps it');
+        assert.equal(state.__current_exception.handler([]), current, 'the same cell each time');
+    });
 
 test('throw; inside a catch throws the same object again, and it is destroyed only once', async()=>{
     // The inner block rethrows, so the outer catch is the one that ends the

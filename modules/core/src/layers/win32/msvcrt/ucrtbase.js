@@ -34,6 +34,7 @@ import { PRINT_STYLE } from './format.js';
 import { fileLayout } from './stdio.js';
 import { STANDARD_TIME_FORMATS } from './time.js';
 import { UNIVERSAL_CXX } from './classes.js';
+import { UNIVERSAL_EH } from './eh.js';
 import { guestEntry } from './guest-code.js';
 import * as inGuestPrint from './inguest-print.js';
 import { COMPILED as PRINT_CODE } from './inguest-print.x86.js';
@@ -995,6 +996,8 @@ export function createUcrtbaseFunctions(crt, host){
 
         // std::exception's message and typeid's names, which msvcrt lacks.
         .../** @type {any} */ (crt)[UNIVERSAL_CXX] ?? {},
+        // The thread's exception state, vcruntime's too.
+        .../** @type {any} */ (crt)[UNIVERSAL_EH] ?? {},
     };
 
     // The `_o_`, `_l`, `_nolock` and long double names are the same entries

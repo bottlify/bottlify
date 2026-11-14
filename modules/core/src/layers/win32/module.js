@@ -50,7 +50,7 @@ import { GUEST_EXCEPTION } from './common/raise.js';
 import { createEntryPointCaller, createGuardedCaller } from './kernel32/dllentry.js';
 import { createThreadCalls, DLL_THREAD_DETACH } from './kernel32/thread-calls.js';
 import { createCrtSeh } from './msvcrt/seh.js';
-import { createCxxExceptions } from './msvcrt/eh.js';
+import { createCxxExceptions, UNIVERSAL_EH } from './msvcrt/eh.js';
 import { createCxxExceptions64 } from './msvcrt/eh64.js';
 import { createApcs } from './kernel32/apc.js';
 import { createResourceFunctions } from './kernel32/resources.js';
@@ -3457,6 +3457,7 @@ export function createWin32Module(){
                         abort: abortProcess,
                         park: ()=>bridge.park(),
                         divergence: config?.divergence,
+                        allocate: bytes=>heap.allocate(bytes),
                     }).table,
                     // The C language handler a 64-bit function names in its
                     // unwind data; the dispatcher reads its scope table rather
@@ -5446,6 +5447,7 @@ export function createWin32Module(){
                     .map(name=>[name, libraries['msvcrt.dll'][name]])),
                 // std::exception's message and typeid's names, ucrtbase's too.
                 .../** @type {any} */ (libraries['msvcrt.dll'])[UNIVERSAL_CXX] ?? {},
+                .../** @type {any} */ (libraries['msvcrt.dll'])[UNIVERSAL_EH] ?? {},
             };
             if (cxx64)
             {
