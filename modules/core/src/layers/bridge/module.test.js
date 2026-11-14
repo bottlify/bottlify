@@ -285,6 +285,22 @@ test('a thread running on a stack of its own choosing is called back there', asy
         `0x${built[0].esp.toString(16)} is on the stack the thread was running on`);
 });
 
+test('a thread is called back on the stack of a thread that has ended', async()=>{
+    // The kernel hands an ended thread's stack range to the next thread it
+    // makes; the ended thread still stands in the list while a handle holds it.
+    const machine = await bridge();
+    machine.worker.state = 'terminated';
+    machine.api.register('TEST.dll!CallsBack', {
+        argBytes: 4,
+        handler: ()=>machine.api.callGuest({ entry: 0x00402000, args: [1] }),
+    });
+    machine.trap(machine.lastTrap(), machine.main, WORKER.top - 0x100);
+    await settle();
+
+    const built = machine.resumed.filter(frame=>frame.eip === 0x00402000);
+    assert.equal(built.length, 1, 'the callback was started on the range the worker had');
+});
+
 test('a second instance in one realm does not take the first one\'s state', async()=>{
     const first = await bridge();
     /** @type {number[]} */
