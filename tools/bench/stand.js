@@ -32,7 +32,12 @@ const ENTRY_VECTOR = 0x7000;
 const PER_MS = 1e6;
 
 /**
- * @typedef {{ createCorkHost: (options: any) => any, engine: any, label?: string }} Arm
+ * An arm: a build's cork host and translator, the settings the browser needs of
+ * the translator (`withoutFaultingTailCalls`), which never change what the
+ * guest computes, and what to do after each iteration (a JavaScriptCore
+ * thread's nudge to collect).
+ * @typedef {{ createCorkHost: (options: any) => any, engine: any, label?: string,
+ *     cork?: Record<string, any>, tick?: () => void }} Arm
  * @typedef {{ name: string, bits: 32 | 64, image: Uint8Array }} Workload
  * @typedef {{ retired: number, eax: string, regions: number,
  *     mechanisms: Record<string, number> }} Work
@@ -50,7 +55,7 @@ function hostOf(arm, workload, profile){
         initialStack: 0x800000, ...workload.bits === 64 ? { bits: 64 } : {},
         // The wasm interpreter from the first instruction: its start is the
         // process's, which a page or a second host would otherwise move.
-        cork: { clock: 'virtual', wasmInterpreterAfter: 0,
+        cork: { ...arm.cork, clock: 'virtual', wasmInterpreterAfter: 0,
             ...profile ? { blockProfile: true } : {} },
     });
     host.writePhysical(IMAGE_BASE, workload.image);
@@ -68,6 +73,7 @@ function hostOf(arm, workload, profile){
                 await host.cork().translatePending();
                 retired += host.runSlice(100_000);
             }
+            arm.tick?.();
         },
         retired: ()=>retired,
         /** What the run has translated: a change means an iteration still formed. */
@@ -95,6 +101,22 @@ export async function workOf(arm, workload, warm){
         .filter(([, count])=>count !== 0).sort(([a], [b])=>(a < b ? -1 : a > b ? 1 : 0)));
     return { retired: run.retired(), eax: (run.host.readReg32('eax') >>> 0).toString(16),
         regions: d.regions ?? 0, mechanisms };
+}
+
+/**
+ * The record's work under the translator settings `cork`, by workload name:
+ * `expected.json` holds one work a workload for each settings it lists (what a
+ * browser that needs them asks of cork changes the ways between regions, never
+ * what the guest computes). Undefined where none matches.
+ *
+ * @param {{ settings: Record<string, any>[], workloads: Record<string, { bits: number,
+ *     work: Work[] }> }} record @param {Record<string, any>} cork
+ * @returns {Record<string, { work: Work }> | undefined}
+ */
+export function recordFor(record, cork){
+    const at = record.settings.findIndex(one=>JSON.stringify(one) === JSON.stringify(cork));
+    return at < 0 ? undefined : Object.fromEntries(Object.entries(record.workloads)
+        .map(([name, one])=>[name, { work: one.work[at] }]));
 }
 
 /** @param {number[]} values @param {number} at  the share, 0..1 */

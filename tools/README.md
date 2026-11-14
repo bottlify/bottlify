@@ -340,7 +340,7 @@ From `arg-bytes-audit.mjs dbg/wine-specs`. Every stdcall entry of the win32 laye
 
 ### `bench/`
 
-- [`bench/serve.mjs`](bench/serve.mjs) - Does the stand's page run in Chromium and do the work recorded there, as in Node? (`npm run cdp:bench  (node tools/bench/serve.mjs --check [--timed] [--bits 32|64])`)
+- [`bench/serve.mjs`](bench/serve.mjs) - Does the stand's page run in Chromium and do the work recorded there, as in Node? (`npm run cdp:bench  (node tools/bench/serve.mjs [--dir DIR] --check [--timed] [--runs N] [--bits 32|64] [--agent STRING])`)
 
 ### `gates/`
 

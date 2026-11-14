@@ -13,16 +13,19 @@
  *
  *     node tools/bench/serve.mjs [--dir DIR] [--port N]
  *     node tools/bench/serve.mjs [--dir DIR] --check [--timed] [--runs N] [--bits 32|64]
+ *         [--agent STRING]
  *
  * `--dir` serves what `build.mjs` made (the page with two builds of cork) instead
- * of the checkout. `--check` runs the work alone unless `--timed`. The browser
+ * of the checkout. `--check` runs the work alone unless `--timed`; `--agent` has
+ * the browser name itself so (an iPhone's: the page then asks of cork what an
+ * iPhone needs, and holds the work to that record). The browser
  * is CDP_TEST_CHROME or the first `tools/lib/browser.mjs` finds.
  */
 
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { serveStatic } from '../lib/server.mjs';
-import { launch, shutdown } from '../lib/browser.mjs';
+import { launch, launchWithGpu, shutdown } from '../lib/browser.mjs';
 import { CdpEndpoint, openPage } from '../lib/cdp.mjs';
 
 const REPO = resolve(fileURLToPath(new URL('.', import.meta.url)), '../..');
@@ -41,7 +44,10 @@ if (!args.includes('--check'))
 }
 else
 {
-    const browser = await launch();
+    // As another browser says it is: what it asks of cork follows its agent string.
+    const agent = option('agent', '');
+    const browser = agent === '' ? await launch()
+        : await launchWithGpu({ extraFlags: [`--user-agent=${agent}`] });
     const cdp = new CdpEndpoint(browser.browserWs);
     try
     {
@@ -103,6 +109,7 @@ else
                 const parted = row.same ? '' : ', arms differ';
                 console.log(`${row.name.padEnd(24)} ${time}work ${work}${parted}`);
             }
+            console.log(`settings: ${JSON.stringify(report.settings)}`);
             const named = report.device.userAgent.match(/Chrome\/[\d.]+/)?.[0]
                 ?? report.device.userAgent;
             const verdict = differ.length === 0 ? 'work as recorded everywhere'

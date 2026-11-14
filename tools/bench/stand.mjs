@@ -14,14 +14,16 @@
  *
  *   --roots   checkouts to compare (default this one); the first is the base
  *   --work    the work alone, no time: what a gate runs (exit 1 on a difference)
- *   --write   record the last arm's work (the newest checkout) as `expected.json`
+ *   --write   record the last arm's work (the newest checkout) as `expected.json`, once
+ *             for each translator settings a browser asks (none, an iPhone's)
  *   --window  virtual milliseconds of guest work a timed round runs (default 30)
  */
 
 import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { geomean, runStand } from './stand.js';
+import { geomean, recordFor, runStand } from './stand.js';
+import { withoutFaultingTailCalls } from '../../modules/core/src/tail-calls.js';
 
 const HERE = fileURLToPath(new URL('.', import.meta.url));
 const EXPECTED = join(HERE, 'expected.json');
@@ -54,50 +56,74 @@ function workloadsOf(root){
 
 const recorded = JSON.parse(readFileSync(EXPECTED, 'utf8'));
 const warm = Number(option('warm', String(recorded.warm)));
-const arms = await Promise.all(roots.map(armOf));
-const rows = await runStand(arms, workloadsOf(roots[0]), {
-    warm, rounds: Number(option('rounds', '7')), windowMs: Number(option('window', '30')),
-    now: ()=>performance.now(), timed: !workOnly,
-    expected: warm === recorded.warm ? recorded.workloads : undefined,
-    onRow: row=>{
-        if (args.includes('--json'))
-        {
-            console.log(JSON.stringify(row));
-            return;
-        }
-        const work = row.expected === null ? 'not recorded' : row.expected ? 'as recorded'
-            : 'DIFFERS from the record';
-        const time = row.mips === undefined ? ''
-            : `${row.mips.map((/** @type {number} */ m)=>m.toFixed(0).padStart(6)).join(' /')} MIPS`
-                + (row.ratio.length > 1 ? `  ratio ${row.ratio.slice(1)
-                    .map((/** @type {number} */ r)=>r.toFixed(3)).join(' ')}` : '')
-                + `  noise ±${(row.noise * 100).toFixed(1)} %`;
-        const parted = row.same ? '' : ', arms differ';
-        console.log(`${row.name.padEnd(24)} ${time}  work ${work}${parted}`);
-    },
-});
-if (!workOnly && !args.includes('--json'))
-{
-    for (const bits of widths)
+/** The translator settings a browser asks: none, and an iPhone's. */
+const SETTINGS = [{}, withoutFaultingTailCalls({ cork: { config: {} } }, true).cork.config];
+/** What this host asks (none, in Node). */
+const cork = withoutFaultingTailCalls({ cork: { config: {} } }).cork?.config ?? {};
+const arms = (await Promise.all(roots.map(armOf))).map(arm=>({ ...arm, cork }));
+const workloads = workloadsOf(roots[0]);
+
+/** @param {any} row */
+const say = row=>{
+    if (args.includes('--json'))
     {
-        const mean = geomean(rows.filter(row=>row.bits === bits));
-        if (mean !== null)
-        {
-            const each = mean.map(m=>m.toFixed(0)).join(' / ');
-            console.log(`geometric mean, ${bits}-bit: ${each} MIPS`);
-        }
+        console.log(JSON.stringify(row));
+        return;
     }
-}
+    const work = row.expected === null ? 'not recorded' : row.expected ? 'as recorded'
+        : 'DIFFERS from the record';
+    const time = row.mips === undefined ? ''
+        : `${row.mips.map((/** @type {number} */ m)=>m.toFixed(0).padStart(6)).join(' /')} MIPS`
+            + (row.ratio.length > 1 ? `  ratio ${row.ratio.slice(1)
+                .map((/** @type {number} */ r)=>r.toFixed(3)).join(' ')}` : '')
+            + `  noise ±${(row.noise * 100).toFixed(1)} %`;
+    const parted = row.same ? '' : ', arms differ';
+    console.log(`${row.name.padEnd(24)} ${time}  work ${work}${parted}`);
+};
+
 if (args.includes('--write'))
 {
-    // A run of some workloads keeps the others' record (`--only`); another
-    // `--warm` starts the record afresh.
+    // The last arm's work (the newest checkout) under every settings a browser
+    // asks; a run of some workloads keeps the others' record (`--only`), another
+    // `--warm` starts it afresh.
     const kept = warm === recorded.warm ? recorded.workloads : {};
-    writeFileSync(EXPECTED, `${JSON.stringify({ warm, workloads: { ...kept, ...Object.fromEntries(
-        rows.map(row=>[row.name, { bits: row.bits, work: row.work.at(-1) }])) } }, null, 1)}\n`);
-    console.log(`expected.json: ${rows.length} workloads at ${warm} iterations`);
+    const workloadsNow = Object.fromEntries(workloads.map(one=>[one.name,
+        { bits: one.bits, work: /** @type {any[]} */ ([]) }]));
+    for (const settings of SETTINGS)
+    {
+        const rows = await runStand(arms.map(arm=>({ ...arm, cork: settings })), workloads,
+            { warm, now: ()=>performance.now(), timed: false });
+        for (const row of rows)
+        {
+            workloadsNow[row.name].work.push(row.work.at(-1));
+        }
+    }
+    writeFileSync(EXPECTED, `${JSON.stringify({ warm, settings: SETTINGS,
+        workloads: { ...kept, ...workloadsNow } }, null, 1)}\n`);
+    console.log(`expected.json: ${workloads.length} workloads at ${warm} iterations,`
+        + ` ${SETTINGS.length} settings`);
 }
-else if (rows.some(row=>row.expected === false || !row.same))
+else
 {
-    process.exitCode = 1;
+    const rows = await runStand(arms, workloads, {
+        warm, rounds: Number(option('rounds', '7')), windowMs: Number(option('window', '30')),
+        now: ()=>performance.now(), timed: !workOnly, onRow: say,
+        expected: warm === recorded.warm ? recordFor(recorded, cork) : undefined,
+    });
+    if (!workOnly && !args.includes('--json'))
+    {
+        for (const bits of widths)
+        {
+            const mean = geomean(rows.filter(row=>row.bits === bits));
+            if (mean !== null)
+            {
+                const each = mean.map(m=>m.toFixed(0)).join(' / ');
+                console.log(`geometric mean, ${bits}-bit: ${each} MIPS`);
+            }
+        }
+    }
+    if (rows.some(row=>row.expected === false || !row.same))
+    {
+        process.exitCode = 1;
+    }
 }

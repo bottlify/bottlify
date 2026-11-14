@@ -312,7 +312,7 @@
    "category": "bench",
    "browser": true,
    "question": "Does the stand's page run in Chromium and do the work recorded there, as in Node?",
-   "command": "npm run cdp:bench  (node tools/bench/serve.mjs --check [--timed] [--bits 32|64])",
+   "command": "npm run cdp:bench  (node tools/bench/serve.mjs [--dir DIR] --check [--timed] [--runs N] [--bits 32|64] [--agent STRING])",
    "tests": [],
    "kind": "gate"
   },

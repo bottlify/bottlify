@@ -141,6 +141,9 @@ $('head').append(head);
 const median = values=>quantile(values, 0.5);
 const geomean = values=>Math.exp(values.reduce((sum, v)=>sum + Math.log(v), 0) / values.length);
 
+// What the worker asked of cork and of the collector in this browser.
+let settings = null;
+
 /** One run in a fresh worker; resolves with its rows. */
 const oneRun = (options, onProgress)=>new Promise((resolve, reject)=>{
     const worker = new Worker(new URL('./stand.worker.js', import.meta.url), { type: 'module' });
@@ -160,6 +163,10 @@ const oneRun = (options, onProgress)=>new Promise((resolve, reject)=>{
         if (data.total !== undefined)
         {
             total = data.total;
+        }
+        if (data.settings)
+        {
+            settings = data.settings;
         }
         if (data.row)
         {
@@ -315,7 +322,8 @@ async function start(timed){
         }
         const seconds = (performance.now() - startedAt) / 1000;
         $('status').textContent = `${timed ? `${runs} runs` : 'the work'} in ${seconds.toFixed(0)} s`;
-        report = { at: new Date().toISOString(), device, arms, options: { ...options, runs }, seconds,
+        report = { at: new Date().toISOString(), device, arms, settings, options: { ...options, runs },
+            seconds,
             work: workRows.map(({ name, bits, work, same, expected })=>({ name, bits, work, same,
                 expected })),
             runs: done.map(rows=>rows.map(({ name, mips, ratio, noise, rounds })=>({ name, mips, ratio,

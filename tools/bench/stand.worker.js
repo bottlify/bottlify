@@ -13,7 +13,9 @@
  * benchmark's images of the checkout. Each row is posted as it is done.
  */
 
-import { runStand } from './stand.js';
+import { recordFor, runStand } from './stand.js';
+import { withoutFaultingTailCalls } from '../../modules/core/src/tail-calls.js';
+import { gcNudgeOf, startGcNudge } from '../../modules/core/src/layers/cpu/internal/gc-nudge.js';
 
 const IMAGES = { 32: '../../modules/cork/bench/micro/images/',
     64: '../../modules/cork/bench/micro/images64/' };
@@ -57,12 +59,20 @@ self.onmessage = async(/** @type {MessageEvent} */ event)=>{
         work = true } = event.data;
     try
     {
+        // What a run of the product asks of cork in this browser, every arm alike:
+        // on an iPhone a wasm tail call into another instance kills the page.
+        const cork = withoutFaultingTailCalls({ cork: { config: {} } }).cork?.config ?? {};
+        // On JavaScriptCore the hosts each workload makes are collected late
+        // unless nudged, as the engine's thread is.
+        const nudging = gcNudgeOf(undefined, navigator.userAgent, 16 << 20);
+        const nudge = nudging === null ? null : startGcNudge(nudging);
+        self.postMessage({ settings: { cork, nudge: nudging } });
         const arms = [];
         for (const arm of named)
         {
             const module = await import(here(arm.url).href);
             arms.push({ createCorkHost: module.createCorkHost, engine: module.engine,
-                label: arm.name });
+                label: arm.name, cork, tick: nudge === null ? undefined : nudge.poke });
         }
         const record = await recordOf();
         const workloads = [];
@@ -79,7 +89,7 @@ self.onmessage = async(/** @type {MessageEvent} */ event)=>{
         self.postMessage({ total: workloads.length });
         const rows = await runStand(arms, workloads, {
             warm: record.warm, rounds, windowMs, timed, work, now: ()=>performance.now(),
-            expected: record.workloads, onRow: row=>self.postMessage({ row }),
+            expected: recordFor(record, cork), onRow: row=>self.postMessage({ row }),
         });
         self.postMessage({ done: rows.length });
     }
