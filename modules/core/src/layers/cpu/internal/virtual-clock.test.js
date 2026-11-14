@@ -34,7 +34,9 @@ const ENTRY_VECTOR = 0x7000;
 async function runOf(name, clock, iterations){
     const host = createCorkHost({
         engine, memorySize: 16 << 20, trapPort: 0xb077, entryVector: ENTRY_VECTOR,
-        initialStack: 0x800000, cork: { blockProfile: true, clock, wasmInterpreterAfter: 0 },
+        initialStack: 0x800000,
+        // The default slice, 8 ms: on the machine's clock it is what the clock decides.
+        cork: { blockProfile: true, clock, wasmInterpreterAfter: 0, sliceMs: 8 },
     });
     host.writePhysical(IMAGE_BASE, readFileSync(new URL(`${name}.bin`, IMAGES)));
     const vector = new Uint8Array(4);
@@ -56,19 +58,20 @@ async function runOf(name, clock, iterations){
 }
 
 /**
- * `run` with the machine's clock jumping as a loaded machine's does: a few
- * milliseconds, now and then hundreds, between two readings.
+ * `run` with the machine's clock made by the test, so no reading of the real one
+ * decides anything: `noisy` jumps as a loaded machine's does (3 ms between two
+ * readings, every seventh 300), a quiet one stands still.
  *
- * @template T @param {() => Promise<T>} run @returns {Promise<T>}
+ * @template T @param {boolean} noisy @param {() => Promise<T>} run @returns {Promise<T>}
  */
-async function underNoise(run){
-    const real = performance.now.bind(performance);
-    let skew = 0;
+async function underClock(noisy, run){
+    const real = performance.now;
+    let at = 0;
     let reads = 0;
     performance.now = ()=>{
         reads++;
-        skew += reads % 7 === 0 ? 300 : 3;
-        return real() + skew;
+        at += !noisy ? 0 : reads % 7 === 0 ? 300 : 3;
+        return at;
     };
     try
     {
@@ -84,15 +87,15 @@ test('on the guest\'s clock a program runs the same to the unit however the mach
     + ' goes; on the machine\'s it does not', async()=>{
     for (const name of ['vcall-x87', 'calls512-scatter-x87'])
     {
-        const quiet = await runOf(name, 'virtual', 6);
-        const noisy = await underNoise(()=>runOf(name, 'virtual', 6));
+        const quiet = await underClock(false, ()=>runOf(name, 'virtual', 6));
+        const noisy = await underClock(true, ()=>runOf(name, 'virtual', 6));
         assert.deepEqual(noisy, quiet, `${name}: the same work, the same code`);
         assert.ok(quiet.retired > 0 && quiet.mechanisms.TRANSFER >= 0);
     }
     // The machine's clock decides a slice's length and so when the translator is
     // fed: the same noise moves what the program did.
-    const quiet = await runOf('vcall-x87', 'host', 6);
-    const noisy = await underNoise(()=>runOf('vcall-x87', 'host', 6));
+    const quiet = await underClock(false, ()=>runOf('vcall-x87', 'host', 6));
+    const noisy = await underClock(true, ()=>runOf('vcall-x87', 'host', 6));
     assert.equal(noisy.eax, quiet.eax, 'the program\'s answer is its own either way');
     assert.notDeepEqual(noisy.mechanisms, quiet.mechanisms,
         'on the machine\'s clock the noise is seen in the counts');
