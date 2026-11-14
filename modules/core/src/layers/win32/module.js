@@ -2968,7 +2968,8 @@ export function createWin32Module(){
                             /** @param {any} node @param {number} offset @param {Uint8Array} bytes */
                             write: (node, offset, bytes)=>volume.write(node, offset, bytes),
                             /** @param {any} node */
-                            size: node=>filesystem.size(node),
+                            size: node=>volume.standInImage?.(node)?.length
+                                ?? filesystem.size(node),
                             /** @param {any} node */
                             retain: node=>volume.retain(node),
                             /** @param {any} node */

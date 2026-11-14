@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { volumeName } from './drives.js';
-import { createFileFunctions, WIN32_FIND_DATAA } from './files.js';
+import { createFileFunctions, withSystemLibraries, WIN32_FIND_DATAA } from './files.js';
 import { HANDLE_STDOUT } from './console.js';
 import { decodeAnsi } from './locale.js';
 import { systemProgramAt, systemProgramImage } from '../programs/table.js';
@@ -2770,6 +2770,40 @@ test('a program this build runs in the system folder stands there as a file too'
     files.put('C:\\WINDOWS\\system32\\msiexec.exe', 'a real one');
     assert.equal(files.stat('C:\\WINDOWS\\system32\\msiexec.exe')?.size, 10,
         'a file there wins');
+});
+
+test('a library standing in the system folder is held by its mapping past its handle', ()=>{
+    // Wine's kernel32:virtual maps system32\\kernel32.dll as an image: the
+    // section asks the file's size and holds it, the file handle is closed,
+    // the view reads it. A stand-in is no node of the volume's to ask either.
+    const image = Uint8Array.of(0x4d, 0x5a, 1, 2, 3);
+    /** @type {any[]} */
+    const realCalls = [];
+    const real = /** @type {any} */ ({
+        open: ()=>null,
+        stat: ()=>null,
+        read: ()=>{
+            throw new Error('a stand-in read from the volume');
+        },
+        retain: (/** @type {any} */ node)=>realCalls.push(['retain', node]),
+        close: (/** @type {any} */ node)=>realCalls.push(['close', node]),
+        section: ()=>{
+            throw new Error('a stand-in has no section of the volume');
+        },
+    });
+    const volume = withSystemLibraries(real, ()=>['KERNEL32.dll'],
+        { imageOf: ()=>image });
+    const node = volume.open('C:\\WINDOWS\\system32\\kernel32.dll', { read: true });
+    assert.deepEqual([...volume.standInImage?.(node) ?? []], [...image], 'its bytes, its size');
+    assert.equal(volume.standInImage?.({}), null, 'a node of the volume is not one');
+    assert.equal(volume.section?.(node, 'image'), null, 'the mapping holds the stand-in itself');
+    volume.retain?.(node);
+    volume.close(node);
+    assert.deepEqual([...volume.read(node, 0, 2)], [0x4d, 0x5a],
+        'the file handle closed, the mapping still reads it');
+    volume.close(node);
+    assert.equal(volume.standInImage?.(node), null, 'gone with the last hold');
+    assert.deepEqual(realCalls, [], 'none of it reached the volume');
 });
 
 test('a library standing in the system folder is replaced by a setup that writes it', ()=>{
