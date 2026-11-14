@@ -27,6 +27,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isMain } from './common.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 
@@ -65,7 +66,7 @@ export function findSlots(code){
     return found;
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1])
+if (isMain(import.meta.url))
 {
     let failed = 0;
     for (const file of FILES)

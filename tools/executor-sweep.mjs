@@ -35,6 +35,7 @@
 import './chromium-v8.mjs';
 import { createApp } from '../modules/core/src/app.js';
 import { buildExe } from './make-pe.mjs';
+import { median } from './common.mjs';
 
 const args = process.argv.slice(2);
 /** @param {string} name @param {string} fallback */
@@ -199,8 +200,6 @@ async function run(executable, executors){
     }
 }
 
-/** @param {number[]} values */
-const median = values=>[...values].sort((a, b)=>a - b)[values.length >> 1];
 /**
  * What a point is judged by: the mean of its three fastest runs, steadier than
  * the median against a machine whose other load comes and goes; the median

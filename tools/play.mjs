@@ -24,6 +24,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openBundle } from './btl.mjs';
 import { serveStatic } from './cdp_test/server.mjs';
+import { isMain } from './common.mjs';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const PAGE = join(ROOT, 'tools', 'play');
@@ -72,7 +73,7 @@ export function servePlayer({ bundles, port = 0, coi = true }){
     });
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url))
+if (isMain(import.meta.url))
 {
     const args = process.argv.slice(2);
     /** @param {string} name @param {string} fallback */

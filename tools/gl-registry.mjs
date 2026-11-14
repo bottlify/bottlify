@@ -20,6 +20,7 @@
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { isMain } from './common.mjs';
 
 /** The revision of KhronosGroup/OpenGL-Registry the table is made from. */
 const REVISION = '6af574a14089ccfee87efe230ebcdd8742859813';
@@ -182,7 +183,7 @@ async function main(){
         + ` versions, ${Object.keys(registry.extensions).length} extensions -> ${OUT}`);
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url))
+if (isMain(import.meta.url))
 {
     await main();
 }

@@ -47,6 +47,7 @@ import { createRequire } from 'node:module';
 import { cpus, platform, release } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { BUNDLES_DIR } from '../common.mjs';
 
 const TOOL_ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)));
 const REPO_ROOT = resolve(TOOL_ROOT, '..', '..');
@@ -370,7 +371,7 @@ if (!options.id)
     process.exit(2);
 }
 const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-const bundleDir = join(REPO_ROOT, 'bundles', options.id);
+const bundleDir = join(BUNDLES_DIR, options.id);
 const commit = commitOf(options.checkout);
 const game = join(options.checkout, 'tools', 'cdp_test', 'game.mjs');
 const absent = !existsSync(join(bundleDir, 'bundle.btl'))

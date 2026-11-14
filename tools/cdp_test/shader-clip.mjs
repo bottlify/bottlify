@@ -33,6 +33,7 @@ import { FVF, decodeFvf } from
 import {
     UNIFORM_AT, UNIFORM_FLOATS, clipPlanesOf,
 } from '../../modules/core/src/layers/graphics/d3d8/render.js';
+import { isMain } from '../common.mjs';
 
 const TOOL_ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)));
 /** The target's side, in pixels. */
@@ -288,7 +289,7 @@ async function main(){
     }
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url))
+if (isMain(import.meta.url))
 {
     main().then(code=>process.exit(code), error=>{
         console.error(error);

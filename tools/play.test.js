@@ -53,7 +53,9 @@ test('make-btl extract writes the entry, or a named file, out of a bottle', asyn
     try
     {
         const run = (/** @type {string[]} */ args)=>spawnSync(process.execPath,
-            [MAKE_BTL, ...args], { cwd: dir, encoding: 'utf8' });
+            [MAKE_BTL, ...args],
+            { cwd: dir, encoding: 'utf8',
+                env: { ...process.env, BOTTLIFY_BUNDLES: join(dir, 'bundles') } });
         const entry = run(['extract', 'demo']);
         assert.equal(entry.status, 0, entry.stderr);
         assert.deepEqual(new Uint8Array(readFileSync(join(bottle, 'entry'))), image);
@@ -77,7 +79,9 @@ test('make-btl pack guesses the entry, or records the one and the root it is giv
         writeFileSync(join(game, 'Setup.exe'), new Uint8Array(8192));
         writeFileSync(join(game, 'Tool.exe'), new Uint8Array(1024));
         const run = (/** @type {string[]} */ args)=>spawnSync(process.execPath,
-            [MAKE_BTL, ...args], { cwd: dir, encoding: 'utf8' });
+            [MAKE_BTL, ...args],
+            { cwd: dir, encoding: 'utf8',
+                env: { ...process.env, BOTTLIFY_BUNDLES: join(dir, 'bundles') } });
         const manifest = ()=>JSON.parse(readFileSync(join(dir, 'bundles', 'g', 'manifest.json'),
             'utf8'));
         assert.equal(run(['pack', game, 'g']).status, 0);

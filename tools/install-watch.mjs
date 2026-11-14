@@ -122,13 +122,11 @@ import { createDirectoryTranslationStore, createMemoryDirectory }
 import { createFakeDevice } from '../modules/core/src/layers/graphics/webgpu/internal/fake-device.js';
 import { archiveDisc, collectFrom, discOptions, placementOf, prefixOptions, readZip }
     from '../modules/installer/src/index.js';
+import { bundleDir, hostFiles, number as numberOf, option, options } from './common.mjs';
 
 const argv = process.argv.slice(2);
 /** @param {string} flag @param {number} fallback */
-const number = (flag, fallback)=>{
-    const at = argv.indexOf(flag);
-    return at >= 0 ? Number(argv[at + 1]) : fallback;
-};
+const number = (flag, fallback)=>numberOf(argv, flag, fallback);
 const bundleId = argv.includes('--bundle') ? argv[argv.indexOf('--bundle') + 1] : null;
 const file = bundleId
     ?? argv.find(argument=>!argument.startsWith('--') && !/^\d+$/.test(argument));
@@ -147,8 +145,7 @@ const profileOut = argv.includes('--profile-out') ? argv[argv.indexOf('--profile
  *
  * @param {string} flag
  */
-const all = flag=>argv.flatMap((argument, index)=>argument === flag && index + 1 < argv.length
-    ? [argv[index + 1]] : []);
+const all = flag=>options(argv, flag);
 const traceAt = number('--trace', 0);
 // `--dump-at S`: S seconds in, the next frame with draws written down by the
 // devices the graphics worker plays (`--worker`), every draw with its state,
@@ -182,10 +179,10 @@ const [screenWidth, screenHeight] = argv.includes('--screen')
  * @param {string} id
  */
 const mountBundle = async id=>{
-    const directory = join('bundles', id);
+    const directory = bundleDir(id);
     const manifest = JSON.parse(readFileSync(join(directory, 'manifest.json'), 'utf8'));
     const path = join(directory, 'bundle.btl');
-    const wanted = argv.includes('--which') ? argv[argv.indexOf('--which') + 1] : manifest.entry;
+    const wanted = option(argv, '--which', manifest.entry);
     const reader = await openBundle(path);
     const executable = new Uint8Array(await reader.read(wanted));
     await reader.close();
@@ -193,10 +190,7 @@ const mountBundle = async id=>{
     const placement = placementOf({ ...manifest, entry: wanted });
     // `--file HOST=GUEST`: a file of this disk put on the session's volume
     // before the program starts -- a saved game to load, a settings file.
-    const seeded = all('--file').map(pair=>{
-        const at = pair.indexOf('=');
-        return { path: pair.slice(at + 1), bytes: new Uint8Array(readFileSync(pair.slice(0, at))) };
-    });
+    const seeded = hostFiles(argv);
     return {
         executable,
         windows: manifest.windows,
@@ -295,7 +289,7 @@ const seconds = ()=>((Date.now() - started) / 1000).toFixed(1);
 // (bottlify-ui/gamehub/tools/steam-account.mjs), which the engine's Steam client answers with.
 // `--steam-app N` is the app being run, as Steam tells a game it starts.
 const steam = argv.includes('--steam')
-    ? { ...JSON.parse(readFileSync(argv[argv.indexOf('--steam') + 1], 'utf8')),
+    ? { ...JSON.parse(readFileSync(String(option(argv, '--steam')), 'utf8')),
         ...argv.includes('--steam-app')
             ? { appId: Number(argv[argv.indexOf('--steam-app') + 1]) } : {} }
     : null;
@@ -345,12 +339,10 @@ const app = await createApp({
         : {},
     // `--concurrency N`: processes at once, each child in a worker of its
     // own, as a page with concurrency runs them.
-    ...argv.includes('--concurrency')
-        ? { concurrency: Number(argv[argv.indexOf('--concurrency') + 1]) } : {},
+    ...argv.includes('--concurrency') ? { concurrency: number('--concurrency', 1) } : {},
     // `--executors N`: the program's threads on N executors at once, as the
     // player's multi modes run them.
-    ...argv.includes('--executors')
-        ? { cpu: { cores: Number(argv[argv.indexOf('--executors') + 1]) } } : {},
+    ...argv.includes('--executors') ? { cpu: { cores: number('--executors', 1) } } : {},
     // `--unshared`: guest memory not a SharedArrayBuffer, as on a page that is
     // not cross-origin isolated.
     // `--cork JSON`: cork's settings (`EngineConfig`), beside `--unshared`.

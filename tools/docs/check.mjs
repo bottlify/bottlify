@@ -31,6 +31,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, posix } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { headings, links } from './markdown.mjs';
+import { isMain } from '../common.mjs';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const REPO = 'https://github.com/bottlify/bottlify/blob/main/';
@@ -211,7 +212,7 @@ export function stale(root, changed){
     }).filter(entry=>entry.files.length);
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url) && process.argv.some(arg=>arg === '--staged'
+if (isMain(import.meta.url) && process.argv.some(arg=>arg === '--staged'
     || arg === '--hook'))
 {
     const changed = execFileSync('git', ['diff', '--cached', '--name-only'], { cwd: ROOT,
@@ -232,7 +233,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url) && process.argv.some(arg=
             : text);
     }
 }
-else if (process.argv[1] === fileURLToPath(import.meta.url))
+else if (isMain(import.meta.url))
 {
     const problems = check(ROOT);
     for (const problem of problems)

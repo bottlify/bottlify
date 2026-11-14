@@ -43,6 +43,7 @@ import { applyRelocations, parsePe, readExports }
     from '../modules/core/src/layers/loader/internal/pe.js';
 import { maskedFingerprint, QUICK_BYTES } from '../modules/cork/src/helpers.js';
 import { CRT_BODIES, CRT_DICTIONARY } from '../modules/cork/src/crt-dictionary.js';
+import { isMain } from './common.mjs';
 
 /** The operations on a double argument, returned in ST0. */
 const FLOATS = ['sqrt', 'floor', 'ceil'];
@@ -898,6 +899,13 @@ const u32x = v=>[v & 255, v >>> 8 & 255, v >>> 16 & 255, v >>> 24 & 255];
 
 async function main(){
     const args = process.argv.slice(2);
+    if (args.length < 2)
+    {
+        console.error('usage: node tools/crt-dictionary.mjs <library.dll> <name>[=<entry name>] ...'
+            + ' [--find <image>...]\n       node tools/crt-dictionary.mjs --verify <library.dll>'
+            + ' <name>=<operation>[@<entry name>] ...');
+        process.exit(2);
+    }
     if (args[0] === '--verify')
     {
         const bytes = new Uint8Array(await readFile(args[1]));
@@ -956,7 +964,7 @@ async function main(){
     }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`)
+if (isMain(import.meta.url))
 {
     await main();
 }

@@ -57,7 +57,6 @@ import { CdpEndpoint, openPage } from './cdp.mjs';
 import { pausedStack, reportTimeout } from './timeout-report.mjs';
 import { serveStatic } from './server.mjs';
 import { describeProfile, profileWorkers, summarise, summariseAllocations } from './profile.mjs';
-import { censusWorkers } from './census.mjs';
 import { describeDevice, watchDevice } from './device-lag.mjs';
 import { openBundle } from '../btl.mjs';
 import { placementOf } from '../../modules/installer/src/prefix.js';
@@ -69,6 +68,7 @@ import { modeOf } from '../play/modes.js';
 import { threadWindow } from './thread-window.mjs';
 import { rootsFromArgv } from '../relay-option.mjs';
 import { frameDrops } from '../../modules/core/src/frame-drops.js';
+import { BUNDLES_DIR } from '../common.mjs';
 
 const TOOL_ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)));
 
@@ -161,7 +161,6 @@ function serveControl(port, page){
 }
 const PACKAGE_DIR = join(REPO_ROOT, 'modules', 'core');
 // A checkout without bundles of its own (a worktree) names the folder that has them.
-const BUNDLES_DIR = process.env.BOTTLIFY_BUNDLES ?? join(REPO_ROOT, 'bundles');
 const REPORTS_DIR = join(TOOL_ROOT, 'reports');
 
 /** Lines per round trip when draining the call log. */
@@ -372,11 +371,13 @@ function parse(argv){
         // The frame this many frames after the last long stall, written beside
         // the report as game-<stamp>-snap.png: a demo's frame N in every run.
         snapFrame: number('--snap-frame', 0),
+        // A screenshot every N seconds of the run, beside the report.
         shotsEvery: number('--shots-every', 0),
         // `--control PORT`: the run takes orders over HTTP while it goes on
         // (`serveControl`), so a screen is walked by looking at it, not by
         // guessing when it comes.
         control: number('--control', 0),
+        // N seconds in, the next frame written down draw by draw (`dumpFrames(1)`).
         dumpAt: number('--dump-at', 0),
         snapFromStart: argv.includes('--snap-from-start'),
         // With it, this many frames from it, --snap-every apart, each written
@@ -393,9 +394,6 @@ function parse(argv){
         // same window, garbage included (`old`: only what lived to be
         // promoted), and their heaps read every second -- what a long
         // collection pause was paid for.
-        // Every worker's large buffers by where they were made (`census.mjs`),
-        // written beside the report every minute and at the end.
-        census: argv.includes('--census'),
         heapProfile: argv.includes('--heap-profile')
             ? argv[argv.indexOf('--heap-profile') + 1] === 'old' ? 'old' : 'all'
             : null,
@@ -2163,26 +2161,7 @@ export async function game(options){
         /** @type {Awaited<ReturnType<typeof profileWorkers>> | null} */
         const profiler = options.cpuProfile > 0 && options.worker
             ? await profileWorkers(cdp, sessionId, { heap: options.heapProfile }) : null;
-        const census = options.census && options.worker
-            ? await censusWorkers(cdp, sessionId) : null;
-        const censusFile = join(REPORTS_DIR,
-            `game-${new Date().toISOString().replace(/[:.]/g, '-')}-census.json`);
-        const censusFrom = Date.now();
-        const writeCensus = async()=>{
-            const read = await census?.read().catch(()=>null);
-            if (read)
-            {
-                writeFileSync(censusFile, JSON.stringify({ at: Date.now() - censusFrom, ...read },
-                    null, 1));
-            }
-        };
-        const censusTimer = census ? setInterval(()=>{ writeCensus(); }, 60000) : null;
-        if (census)
-        {
-            console.log(`  census: ${censusFile}`);
-        }
-        const deviceWatched = await device.install({
-            attach: profiler === null && census === null });
+        const deviceWatched = await device.install({ attach: profiler === null });
         let profilingFrom = Date.now();
         /** @type {{ url: string, profile: any, allocations: any, windowMs: number, from: number }[] | null} */
         let cpuProfiles = null;
@@ -2511,11 +2490,6 @@ export async function game(options){
         {
             result = await readResult(cdp, sessionId, options.waitMs + RESULT_GRACE_MS,
                 ()=>crashed);
-            if (censusTimer)
-            {
-                clearInterval(censusTimer);
-                await writeCensus();
-            }
             result.answeredAfterMs = Date.now() - startedAt;
             if (result.tooLarge?.length > 0)
             {

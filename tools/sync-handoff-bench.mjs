@@ -39,6 +39,7 @@ import './chromium-v8.mjs';
 import { ENGINE } from './chromium-v8.mjs';
 import { createApp } from '../modules/core/src/app.js';
 import { assemble, buildExe } from './make-pe.mjs';
+import { median } from './common.mjs';
 
 const args = process.argv.slice(2);
 /** @param {string} name @param {string} fallback */
@@ -204,8 +205,6 @@ async function run(executable, executors){
     }
 }
 
-/** @param {number[]} values */
-const median = values=>[...values].sort((a, b)=>a - b)[values.length >> 1];
 
 const executable = program();
 const expected = FRAMES * JOBS;

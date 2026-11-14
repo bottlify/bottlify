@@ -27,6 +27,7 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isMain } from './common.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const SRC = process.argv[2] ? resolve(process.argv[2]) : join(ROOT, 'modules', 'core', 'src');
@@ -199,7 +200,7 @@ function main(){
     process.exitCode = wrong.length > 0 ? 1 : 0;
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1])
+if (isMain(import.meta.url))
 {
     main();
 }

@@ -17,10 +17,11 @@
  * this was written on has; the tool says so plainly when it is missing.
  */
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openBundle } from './btl.mjs';
+import { bundleDir } from './common.mjs';
 
 const [bundleArg, moduleName, ...offsets] = process.argv.slice(2);
 if (!bundleArg || !moduleName || offsets.length === 0)
@@ -28,7 +29,7 @@ if (!bundleArg || !moduleName || offsets.length === 0)
     console.log('usage: disasm.mjs <bundle.btl | bundle id> <module> <offset[:count]>...');
     process.exit(1);
 }
-const path = bundleArg.endsWith('.btl') ? bundleArg : join('bundles', bundleArg, 'bundle.btl');
+const path = bundleArg.endsWith('.btl') ? bundleArg : join(bundleDir(bundleArg), 'bundle.btl');
 const bundle = await openBundle(path);
 const wanted = moduleName.toLowerCase();
 const file = bundle.list().find((/** @type {any} */ one)=>
@@ -39,7 +40,8 @@ if (!file)
     process.exit(1);
 }
 const bytes = Buffer.from(await bundle.read(file.path));
-const image = join(mkdtempSync(join(tmpdir(), 'disasm-')), wanted);
+const scratch = mkdtempSync(join(tmpdir(), 'disasm-'));
+const image = join(scratch, wanted);
 writeFileSync(image, bytes);
 
 // The section walk and the decoding in one small Python program: capstone is
@@ -83,4 +85,5 @@ for spec in sys.argv[2:]:
 const run = spawnSync('python', ['-P', '-c', program, image, ...offsets], { encoding: 'utf8' });
 process.stdout.write(run.stdout ?? '');
 process.stderr.write(run.stderr ?? '');
+rmSync(scratch, { recursive: true, force: true });
 process.exit(run.status ?? 1);

@@ -18,6 +18,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isMain } from './common.mjs';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 export const LAYERS = Object.freeze(['cork', 'core', 'installer', 'networking']);
@@ -110,7 +111,7 @@ const readHere = path=>{
         ? readFileSync(full, 'utf8') : null;
 };
 
-if (process.argv[1] === fileURLToPath(import.meta.url))
+if (isMain(import.meta.url))
 {
     const answer = layersFor(readFileSync(0, 'utf8').split('\n'), readHere);
     for (const name of LAYERS)

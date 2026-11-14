@@ -42,6 +42,7 @@ import { existsSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { buildExe } from './make-pe.mjs';
+import { isMain } from './common.mjs';
 
 const ROOT = new URL('../', import.meta.url);
 const LOCAL = new URL('to_install/vcredist/', ROOT);
@@ -512,7 +513,7 @@ async function main(){
     process.exitCode = rows.some(row=>row.agrees === 'NO') ? 1 : 0;
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1])
+if (isMain(import.meta.url))
 {
     await main();
 }

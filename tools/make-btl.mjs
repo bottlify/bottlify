@@ -55,8 +55,8 @@ import { DRIVE_ROOT, collect } from '../modules/installer/src/prefix.js';
 import { attachTranslations, openBundle, verifyBundle, writeBundle, ensureDirectory,
     DEFAULT_BLOCK_SIZE }
     from './btl.mjs';
+import { BUNDLES_DIR } from './common.mjs';
 
-const BUNDLES = 'bundles';
 
 /** @param {number} bytes */
 const mib = bytes=>`${(bytes / 2 ** 20).toFixed(1)} MiB`;
@@ -98,7 +98,7 @@ function guessEntry(files){
  * @param {Record<string, any>} flags
  */
 async function pack(root, id, flags){
-    const directory = join(BUNDLES, id);
+    const directory = join(BUNDLES_DIR, id);
     await ensureDirectory(directory);
     const output = join(directory, 'bundle.btl');
 
@@ -198,7 +198,7 @@ async function pack(root, id, flags){
 
 /** @param {string} id */
 async function verify(id){
-    const path = join(BUNDLES, id, 'bundle.btl');
+    const path = join(BUNDLES_DIR, id, 'bundle.btl');
     const started = Date.now();
     const { checked, bad } = await verifyBundle(path, progress=>{
         if (progress.checked % 10 === 0)
@@ -227,7 +227,7 @@ async function verify(id){
  * @param {string} id @param {string | undefined} seedPath @param {Record<string, any>} flags
  */
 async function translations(id, seedPath, flags){
-    const directory = join(BUNDLES, id);
+    const directory = join(BUNDLES_DIR, id);
     const seed = flags.remove ? null : new Uint8Array(await readFile(String(seedPath)));
     const result = await attachTranslations(join(directory, 'bundle.btl'), seed,
         { store: Boolean(flags.store) });
@@ -243,7 +243,7 @@ async function translations(id, seedPath, flags){
 
 /** @param {string} id @param {string} [pattern] */
 async function list(id, pattern){
-    const bundle = await openBundle(join(BUNDLES, id, 'bundle.btl'));
+    const bundle = await openBundle(join(BUNDLES_DIR, id, 'bundle.btl'));
     const match = pattern ? new RegExp(pattern, 'i') : null;
     for (const file of bundle.list())
     {
@@ -260,7 +260,7 @@ async function list(id, pattern){
  * @param {Record<string, any>} flags
  */
 async function extract(id, file, flags){
-    const directory = join(BUNDLES, id);
+    const directory = join(BUNDLES_DIR, id);
     const manifest = JSON.parse(await readFile(join(directory, 'manifest.json'), 'utf8'));
     const path = file ?? manifest.entry;
     if (typeof path !== 'string' || path === '')
@@ -286,7 +286,7 @@ async function extract(id, file, flags){
 /** @param {string} id @param {string} [depthText] */
 async function tree(id, depthText){
     const depth = Number(depthText ?? 3);
-    const bundle = await openBundle(join(BUNDLES, id, 'bundle.btl'));
+    const bundle = await openBundle(join(BUNDLES_DIR, id, 'bundle.btl'));
     /** @type {Map<string, { files: number, bytes: number }>} */
     const groups = new Map();
     for (const file of bundle.list())
@@ -311,7 +311,7 @@ async function tree(id, depthText){
 
 /** @param {string} id @param {Record<string, any>} flags */
 async function prune(id, flags){
-    const directory = join(BUNDLES, id);
+    const directory = join(BUNDLES_DIR, id);
     const manifestPath = join(directory, 'manifest.json');
     const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
     if (manifest.root !== DRIVE_ROOT)

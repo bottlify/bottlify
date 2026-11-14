@@ -73,6 +73,7 @@ import { Session } from 'node:inspector/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { buildExe } from './make-pe.mjs';
+import { isMain, median } from './common.mjs';
 
 const HERE = resolve(fileURLToPath(new URL('..', import.meta.url)));
 
@@ -773,13 +774,6 @@ async function engineOf(root){
     };
 }
 
-/** @param {number[]} values */
-function median(values){
-    const sorted = [...values].sort((a, b)=>a - b);
-    const middle = sorted.length >> 1;
-    return sorted.length % 2 === 1 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
-}
-
 /**
  * @typedef {Object} Result
  * @property {string} call
@@ -1029,7 +1023,7 @@ function mathTable(runs, labels){
     return lines.join('\n');
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href)
+if (isMain(import.meta.url))
 {
     const o = options(process.argv.slice(2));
     if (o.compare)

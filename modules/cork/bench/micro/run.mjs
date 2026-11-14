@@ -30,19 +30,15 @@ import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createCorkHost } from '../../../core/src/layers/cpu/internal/cork-host.js';
 import * as engine from '../../src/index.js';
+import { median, option } from '../../../../tools/common.mjs';
 
 const args = process.argv.slice(2);
-/** @param {string[]} argv @param {string} name @param {string} fallback */
-const option = (argv, name, fallback)=>(argv.includes(name)
-    ? argv[argv.indexOf(name) + 1] : fallback);
-/** @param {number[]} values */
-const median = values=>[...values].sort((a, b)=>a - b)[values.length >> 1];
 const warm = Number(option(args, '--warm', '20'));
 const iters = Number(option(args, '--iters', '40'));
 const reps = Number(option(args, '--reps', '5'));
-const cork = JSON.parse(option(args, '--cork', '{}'));
+const cork = JSON.parse(option(args, '--cork', '{}') ?? '{}');
 const bits = Number(option(args, '--bits', '32'));
-const blocksDir = option(args, '--blocks', '');
+const blocksDir = option(args, '--blocks', '') ?? '';
 const only = args.filter((one, at)=>!one.startsWith('--') && !args[at - 1]?.startsWith('--'));
 if (blocksDir !== '')
 {
