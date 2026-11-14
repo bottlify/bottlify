@@ -957,6 +957,28 @@ test('the function of a region\'s copies, planned from the region\'s own plannin
     }
 });
 
+test('only the blocks a way in from outside reaches before a loop\'s head are copied: the rest'
+    + ' of the region\'s loops have no entry', ()=>{
+    const layout = ownLayout({ ramSize: 1 << 22, hashSlots: 1 << 16 });
+    const features = { simd: true, tailCalls: true, defaultNaNNegative: false };
+    // mov ecx, 3; A: inc eax; test al, 1; jz A1; inc ebx; A1: dec ecx; jnz A;
+    // mov ecx, 3; B: inc edx; test dl, 1; jz B1; inc esi; B1: call edi; R: dec ecx; jnz B; hlt
+    // -- under callReturn the call's return R is the one block entered from outside.
+    const program = [0xb9, 3, 0, 0, 0, 0x40, 0xa8, 0x01, 0x74, 0x01, 0x43, 0x49, 0x75, 0xf7,
+        0xb9, 3, 0, 0, 0, 0x42, 0xf6, 0xc2, 0x01, 0x74, 0x01, 0x46, 0xff, 0xd7, 0x49, 0x75, 0xf4,
+        0xf4];
+    const region = formRegion(address=>program[address - CODE] ?? 0xf4, CODE);
+    const context = prepareModule(new ModuleBuilder(), layout, features, {},
+        { hash: true, callReturn: true });
+    const translation = emitRegion(context, region, { entryTop: 0, checked: false, copies: false });
+    assert.ok(translation.copiesIndex >= 0, 'R has its copy');
+    assert.ok(/** @type {number} */ (translation.labels.get(CODE + 0x1c))
+        >= 2 * region.blocks.length, 'R entered by its copy');
+    assert.deepEqual([...translation.closed].sort((a, b)=>a - b),
+        [CODE + 0x0a, CODE + 0x0b, CODE + 0x19, CODE + 0x1a],
+        'loop A\'s inside, and B\'s before the call, have no entry');
+});
+
 test('a nested loop\'s head is entered through the head of the loop around it', ()=>{
     const I = CODE + 10;
     const m = createTestMachine({ structure: true });

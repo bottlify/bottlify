@@ -1105,18 +1105,19 @@ export class RegionEmitter {
      * @param {import('../region.js').Region} region
      * @param {{ entryTop?: number, checked?: boolean, copies?: boolean,
      *     precision?: X87Precision, floats?: boolean, copyFunction?: boolean,
-     *     planned?: RegionPlanning | null, rejoin?: number }} [options]  copies, precision and
-     *     floats: as `emitRegion` takes them; copyFunction: this is the function of a
-     *     structured region's copies (`emitCopies`); planned: what the region's own function
-     *     planned of it, which the function of its copies takes rather than plan it again;
-     *     rejoin: the region's own function, which the copies call to go back to a loop's head
-     *     (`rejoinAt`) -- -1, they go back through the entry hash
+     *     planned?: RegionPlanning | null, rejoin?: number, copied?: number[] }} [options]
+     *     copies, precision and floats: as `emitRegion` takes them; copyFunction: this is the
+     *     function of a structured region's copies (`emitCopies`); planned: what the region's
+     *     own function planned of it, which the function of its copies takes rather than plan
+     *     it again; rejoin: the region's own function, which the copies call to go back to a
+     *     loop's head (`rejoinAt`) -- -1, they go back through the entry hash; copied: the
+     *     blocks the region's own function chose to copy, which the copies' function emits
      */
     constructor(context, region,
         { entryTop = 0, checked = false, copies = true, copyFunction = false,
             planned = null, precision = context.wide === true ? 'wide'
                 : context.narrow === true ? 'narrow' : 'mixed', floats = false,
-            rejoin = -1 } = {})
+            rejoin = -1, copied = undefined } = {})
     {
         this.context = context;
         /** The region as formed, and the options, for the function of its copies. */
@@ -1374,10 +1375,18 @@ export class RegionEmitter {
         // the start.
         const reentered = new Set((this.structure?.reentered ?? [])
             .map(at=>this.region.blocks.indexOf(region.blocks[at])));
-        if (!copies && !copyFunction && !this.copies.some(at=>reentered.has(at)))
+        if (copied !== undefined)
         {
-            this.closed = this.copies;
-            this.copies = [];
+            this.copies = copied;
+        }
+        else if (!copies)
+        {
+            // Copies of the blocks a way in from outside reaches before a loop's
+            // head, and only those: from a copy every other one is past a head,
+            // which the region's function is entered at. The rest have no entry.
+            const kept = this.reachedInLoops([...reentered]);
+            this.closed = this.copies.filter(at=>!kept.has(at));
+            this.copies = this.copies.filter(at=>kept.has(at));
         }
         /** Each copied block's place among the copies. @type {Map<number, number>} */
         this.copyIndex = new Map(this.copies.map((at, k)=>[at, k]));
@@ -2682,6 +2691,38 @@ export class RegionEmitter {
     }
 
     /**
+     * The blocks inside loops that a way in at `starts` reaches before it comes
+     * to a loop's head or leaves the loops, `starts` among them where inside.
+     *
+     * @param {number[]} starts  by place in the emitting order
+     * @returns {Set<number>}
+     */
+    reachedInLoops(starts){
+        const index = new Map(this.region.blocks.map((block, at)=>[block.start, at]));
+        const seen = new Set();
+        const work = starts.filter(at=>this.interior.has(at));
+        while (work.length > 0)
+        {
+            const at = /** @type {number} */ (work.pop());
+            if (seen.has(at))
+            {
+                continue;
+            }
+            seen.add(at);
+            for (const target of jumpsOf(this.region.blocks[at], this.returns, this.callReturn,
+                index))
+            {
+                const to = index.get(target);
+                if (to !== undefined && this.interior.has(to))
+                {
+                    work.push(to);
+                }
+            }
+        }
+        return seen;
+    }
+
+    /**
      * The blocks the region's function has no entry for whatever the stack:
      * compiled for the x87 stack in another shape than the entry's, or for none
      * known. A copy leaving for one goes through the hash, which finds the region
@@ -3578,7 +3619,8 @@ export class RegionEmitter {
      */
     emitCopies(flagsOut, memoryPlan){
         const copies = new RegionEmitter(this.context, this.formed, { ...this.options,
-            copyFunction: true, planned: { returns: this.returns, structure: this.structure,
+            copyFunction: true, copied: this.copies,
+            planned: { returns: this.returns, structure: this.structure,
                 region: this.region, x87: this.x87Plan, flagsOut,
                 memoryPlan: memoryPlan === null ? null : copyPlan(memoryPlan) },
             rejoin: this.selfIndex });

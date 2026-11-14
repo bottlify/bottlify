@@ -73,15 +73,15 @@
     "TRANSFER": 4,
     "RET_LEFT": 4,
     "CALL_LEFT": 0,
-    "CALL_LINKED": 4504,
+    "CALL_LINKED": 2704,
     "CALL_FORMED": 0,
-    "RET_FORMED": 2700,
-    "RET_TO_CALL": 4500,
+    "RET_FORMED": 4500,
+    "RET_TO_CALL": 2700,
     "JUMP_DISPATCH": 0,
     "APART_FULL": 0,
     "APART_NESTED": 0,
     "APART_BLOCKS": 0,
-    "APART_UNPREDICTED": 4500
+    "APART_UNPREDICTED": 2700
    },
    "factor": 2
   },
@@ -90,43 +90,43 @@
     "TRANSFER": 4,
     "RET_LEFT": 4,
     "CALL_LEFT": 0,
-    "CALL_LINKED": 4804,
+    "CALL_LINKED": 3004,
     "CALL_FORMED": 0,
-    "RET_FORMED": 2400,
-    "RET_TO_CALL": 4800,
+    "RET_FORMED": 4200,
+    "RET_TO_CALL": 3000,
     "JUMP_DISPATCH": 0,
     "APART_FULL": 0,
     "APART_NESTED": 0,
     "APART_BLOCKS": 0,
-    "APART_UNPREDICTED": 4800
+    "APART_UNPREDICTED": 3000
    },
-   "factor": 2.28
+   "factor": 2
   },
   "32/game-x87": {
    "counts": {
     "TRANSFER": 4,
     "RET_LEFT": 4,
     "CALL_LEFT": 0,
-    "CALL_LINKED": 4504,
+    "CALL_LINKED": 2704,
     "CALL_FORMED": 0,
-    "RET_FORMED": 2700,
-    "RET_TO_CALL": 4500,
+    "RET_FORMED": 4500,
+    "RET_TO_CALL": 2700,
     "JUMP_DISPATCH": 0,
     "APART_FULL": 0,
     "APART_NESTED": 0,
     "APART_BLOCKS": 0,
-    "APART_UNPREDICTED": 4500
+    "APART_UNPREDICTED": 2700
    },
    "factor": 2
   },
   "32/load-x87": {
    "counts": {
-    "TRANSFER": 160,
-    "RET_LEFT": 76,
+    "TRANSFER": 121,
+    "RET_LEFT": 62,
     "CALL_LEFT": 15,
     "CALL_LINKED": 20918,
-    "CALL_FORMED": 63,
-    "RET_FORMED": 46,
+    "CALL_FORMED": 60,
+    "RET_FORMED": 60,
     "RET_TO_CALL": 20882,
     "JUMP_DISPATCH": 0,
     "APART_FULL": 20932,
@@ -138,17 +138,17 @@
   },
   "32/lua-x87": {
    "counts": {
-    "TRANSFER": 60649,
-    "RET_LEFT": 14330,
+    "TRANSFER": 60318,
+    "RET_LEFT": 14335,
     "CALL_LEFT": 135,
-    "CALL_LINKED": 271666,
-    "CALL_FORMED": 156567,
-    "RET_FORMED": 143401,
-    "RET_TO_CALL": 271188,
-    "JUMP_DISPATCH": 8634,
+    "CALL_LINKED": 271923,
+    "CALL_FORMED": 156561,
+    "RET_FORMED": 143397,
+    "RET_TO_CALL": 271187,
+    "JUMP_DISPATCH": 8637,
     "APART_FULL": 19421,
-    "APART_NESTED": 34345,
-    "APART_BLOCKS": 202665,
+    "APART_NESTED": 32436,
+    "APART_BLOCKS": 204572,
     "APART_UNPREDICTED": 15792
    },
    "factor": 2
@@ -277,29 +277,29 @@
     "TRANSFER": 4,
     "RET_LEFT": 4,
     "CALL_LEFT": 0,
-    "CALL_LINKED": 4984,
+    "CALL_LINKED": 3177,
     "CALL_FORMED": 0,
-    "RET_FORMED": 2220,
-    "RET_TO_CALL": 4980,
+    "RET_FORMED": 4027,
+    "RET_TO_CALL": 3173,
     "JUMP_DISPATCH": 0,
     "APART_FULL": 0,
     "APART_NESTED": 0,
     "APART_BLOCKS": 0,
-    "APART_UNPREDICTED": 4980
+    "APART_UNPREDICTED": 3173
    },
-   "factor": 2.4
+   "factor": 2
   },
   "64/load-x64": {
    "counts": {
-    "TRANSFER": 155,
-    "RET_LEFT": 69,
+    "TRANSFER": 166,
+    "RET_LEFT": 89,
     "CALL_LEFT": 22,
-    "CALL_LINKED": 20925,
-    "CALL_FORMED": 48,
-    "RET_FORMED": 44,
-    "RET_TO_CALL": 20885,
+    "CALL_LINKED": 20909,
+    "CALL_FORMED": 60,
+    "RET_FORMED": 40,
+    "RET_TO_CALL": 20869,
     "JUMP_DISPATCH": 0,
-    "APART_FULL": 20945,
+    "APART_FULL": 20929,
     "APART_NESTED": 0,
     "APART_BLOCKS": 4,
     "APART_UNPREDICTED": 0
@@ -308,17 +308,17 @@
   },
   "64/lua-x64": {
    "counts": {
-    "TRANSFER": 54949,
-    "RET_LEFT": 8313,
+    "TRANSFER": 54762,
+    "RET_LEFT": 8105,
     "CALL_LEFT": 168,
-    "CALL_LINKED": 271369,
-    "CALL_FORMED": 155460,
-    "RET_FORMED": 148371,
-    "RET_TO_CALL": 270713,
-    "JUMP_DISPATCH": 6147,
-    "APART_FULL": 19760,
-    "APART_NESTED": 33771,
-    "APART_BLOCKS": 202300,
+    "CALL_LINKED": 271426,
+    "CALL_FORMED": 155626,
+    "RET_FORMED": 148545,
+    "RET_TO_CALL": 270769,
+    "JUMP_DISPATCH": 6149,
+    "APART_FULL": 19766,
+    "APART_NESTED": 35664,
+    "APART_BLOCKS": 200458,
     "APART_UNPREDICTED": 15792
    },
    "factor": 2

@@ -92,7 +92,8 @@ const imagesOf = bits=>new URL(bits === 64 ? '../bench/micro/images64/' : '../be
 async function countsOf(bits, name){
     const host = createCorkHost({
         engine, memorySize: 16 << 20, trapPort: 0xb077, entryVector: ENTRY_VECTOR,
-        initialStack: 0x800000, cork: { blockProfile: true }, ...(bits === 64 ? { bits } : {}),
+        initialStack: 0x800000, cork: { blockProfile: true, sliceMs: Infinity },
+        ...(bits === 64 ? { bits } : {}),
     });
     host.writePhysical(IMAGE_BASE, readFileSync(new URL(`${name}.bin`, imagesOf(bits))));
     const vector = new Uint8Array(4);
