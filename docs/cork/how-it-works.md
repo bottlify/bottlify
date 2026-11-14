@@ -46,8 +46,10 @@ flowchart LR
 
 5. **The next run.** Translations are kept in OPFS, so the second run of the same program loads
    what the first one translated instead of translating it again. A region is kept under its entry,
-   the x87 stack top it is entered at (any top when it has no x87 code) and the translator's modes,
-   and a block reached first in another order is taken as the stored region that holds it.
+   the x87 stack top it is entered at (any top when it has no x87 code) and the translator's modes;
+   a version of other bytes at the same entry - code the program patches as it runs - is kept beside
+   it under its bytes' hash, so each version is found. A block reached first in another order is
+   taken as the stored region that holds it.
 
 All of the program's memory is one `WebAssembly.Memory`. In Bottlify the program's address `a` is
 at offset `a` in it, and cork's own state lies in the program's first 64 KiB, which a Windows

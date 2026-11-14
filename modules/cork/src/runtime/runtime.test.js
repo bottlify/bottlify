@@ -1066,8 +1066,8 @@ test('with a store, a second runtime takes its regions from the store; a changed
         assert.equal(exit.kind, 'halt', 'the stored module runs');
         assert.equal(second.reg(1), 0);
         assert.equal(exit.retired, 1 + 2 * 1000 + 1);
-        // One byte changed: another hash, a miss; the region's record is the new one,
-        // beside another batch module.
+        // One byte changed: another hash, a miss; the new bytes' record is kept beside the
+        // old one, under their hash, naming another batch module.
         const third = machine({ store, bundleId: 'test' });
         third.write(CODE, [0xb9, 0xe9, 0x03, 0, 0, 0x49, 0x75, 0xfd, 0xf4]); // 1001 rounds
         third.setReg(4, 0x80000);
@@ -1076,7 +1076,7 @@ test('with a store, a second runtime takes its regions from the store; a changed
         await settle();
         assert.equal(third.runtime.diagnostics().cacheMisses, 1);
         assert.equal(third.runtime.diagnostics().missChanged, 1, 'a record of other bytes');
-        assert.equal(store.size(), 3);
+        assert.equal(store.size(), 4);
         // Another bundle: its own namespace.
         const fourth = machine({ store, bundleId: 'other' });
         fourth.write(CODE, COUNTDOWN);
@@ -1086,7 +1086,7 @@ test('with a store, a second runtime takes its regions from the store; a changed
         await settle();
         assert.equal(fourth.runtime.diagnostics().cacheMisses, 1);
         assert.equal(fourth.runtime.diagnostics().missNoRecord, 1);
-        assert.equal(store.size(), 5);
+        assert.equal(store.size(), 6);
     });
 
 test('a runtime sharing a store instantiates the batch modules another compiled, and runs them '
@@ -1181,6 +1181,65 @@ test('a region the store answers for at once is formed once, as its record says'
         }
     }
 });
+
+test('an entry formed before and after a store into a stub it reaches is a hit in both versions',
+    async()=>{
+        // A region that jumps to a stub a page on, which the program patches as it runs -
+        // a .NET runtime's call to its prestub, made a jump to the method once that is
+        // prepared - formed once over each version a run, over every kind of store: one
+        // that answers a turn later (`get`), at once (`getNow`), or across a link
+        // (`getManyNow`). One record at the key had the later version overwrite the
+        // earlier, and the next run missed the earlier.
+        const settle = ()=>new Promise(resolve=>setTimeout(resolve, 0));
+        const STUB = CODE + 0x1000;
+        // jmp STUB; and at STUB: mov eax, imm32; hlt
+        const jump = [0xe9, ...le32(STUB - (CODE + 5))];
+        const stub = (/** @type {number} */ value)=>[0xb8, value, 0, 0, 0, 0xf4];
+        for (const kind of ['later', 'now', 'linked'])
+        {
+            /** @type {Map<string, Uint8Array>} */
+            const records = new Map();
+            const store = {
+                get: async(/** @type {string} */ key)=>records.get(key) ?? null,
+                put: async(/** @type {string} */ key, /** @type {Uint8Array} */ bytes)=>{
+                    records.set(key, bytes);
+                },
+                ...kind === 'now' ? { getNow: (/** @type {string} */ key)=>records.get(key) ?? null }
+                    : kind === 'linked' ? { getManyNow: (/** @type {string[]} */ keys)=>
+                        keys.map(key=>records.get(key) ?? null) } : {},
+            };
+            const run = async()=>{
+                const m = machine({ store, bundleId: 'test' });
+                m.write(CODE, jump);
+                m.setReg(4, 0x80000);
+                /** @type {number[]} */
+                const eax = [];
+                for (const value of [1, 2])
+                {
+                    // The stub patched as the host writes code: the bytes, then the page.
+                    m.write(STUB, stub(value));
+                    m.runtime.invalidatePage(STUB >>> 12);
+                    m.runtime.noteHot(CODE);
+                    await m.runtime.translatePending();
+                    await settle();
+                    assert.equal(m.runtime.run(m.runtime.entryOf(CODE), 100).kind, 'halt');
+                    eax.push(m.reg(0));
+                }
+                assert.deepEqual(eax, [1, 2], `each version runs as its bytes say (${kind})`);
+                return m.runtime.diagnostics();
+            };
+            const first = await run();
+            assert.deepEqual([first.cacheHits, first.cacheMisses, first.missChanged], [0, 2, 1],
+                `the second version meets the first's record (${kind})`);
+            const stored = records.size;
+            for (const again of [await run(), await run()])
+            {
+                assert.deepEqual([again.cacheHits, again.cacheMisses], [2, 0],
+                    `both versions from the store (${kind})`);
+            }
+            assert.equal(records.size, stored, `nothing stored again (${kind})`);
+        }
+    });
 
 test('a region with no x87 in it is taken from the store at another top, one with x87 is not',
     async()=>{

@@ -936,6 +936,7 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
      * @property {boolean} [floats]  of those, one computing on floats in f32 (`floatSingles`)
      * @property {boolean} [loose]  compiled with its stores through esp untested (`looseStacks`)
      * @property {boolean} [anyTop]  no x87 in it: kept in the store at any top (`regionKey`)
+     * @property {boolean} [byHash]  kept in the store under its bytes' hash too (`storeKey`)
      * @property {boolean} [wrapped]  compiled with its reads wrapped into RAM, untested
      * @property {boolean} [checked]  an x87 region whose entries test nothing of the stack's shape
      * @property {boolean} [copies]  its blocks inside its loops are entered through copies
@@ -2650,7 +2651,7 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
      *
      * @param {{ region: import('../region.js').Region, entryTop: number, stamp: string,
      *     wide?: boolean, narrow?: boolean, floats?: boolean, checked?: boolean, copies?: boolean,
-     *     loose?: boolean, wrapped?: boolean, anyTop?: boolean,
+     *     loose?: boolean, wrapped?: boolean, anyTop?: boolean, byHash?: boolean,
      *     replaces?: RegionRecord, targets?: [number, number[]][], copying?: boolean,
      *     waited?: boolean }} one
      *     replaces: the region it is formed again from, with the callees of its indirect calls
@@ -2758,6 +2759,7 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
             checked: one.checked === true,
             copies: one.copies === true, closed, blocks: built.labels.length,
             anyTop: one.anyTop ?? !usesX87(region),
+            ...((one.byHash ?? one.replaces?.byHash) === true ? { byHash: true } : {}),
             ...(one.targets === undefined ? {} : { targets: one.targets }),
         };
         if (keepsSources)
@@ -2980,8 +2982,9 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
         + `p${(settings.trapPort ?? 0).toString(16)}`;
     /**
      * The store key of one formed region: its entry, its top, and the run's modes its
-     * code is made for -- what a run knows before it forms the region. The last region
-     * stored there stands for it; what forming made of it is in its record (`shapeOf`).
+     * code is made for -- what a run knows before it forms the region. The region stored
+     * there stands for it, and one a lookup found of other bytes than that record's goes
+     * beside it (`storeKey`); what forming made of it is in its record (`shapeOf`).
      * A region with no x87 in it is the same code at every top, and is kept at any
      * (`anyTop`, found once for the formed region): of a warm Far Cry run's 2 072 misses,
      * 362 were entries the store had at another top.
@@ -2998,6 +3001,27 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
                 + `${one.wrapped === false ? '-q' : ''}`,
         });
     };
+    /**
+     * Where a region's record is put: under its key, or beside the record there under its
+     * own bytes' hash too, where that record is of other bytes (`byHash`, which a region
+     * formed again inherits from the one it replaces). An entry whose code reaches a stub
+     * the program patches as it runs - a .NET runtime's call to its prestub, made a jump
+     * to the method once that is prepared - is formed in two versions every run, and one
+     * record under its key had the later version overwrite the earlier: the next run met
+     * the earlier first and missed, and so on every start (The Swapper: 8 400 regions,
+     * 4 128 of them in mscorlib's native image). Kept apart, each version is a hit.
+     * @param {Parameters<typeof regionKey>[0] & { region: { hash: string },
+     *     byHash?: boolean, replaces?: { byHash?: boolean } }} one */
+    const storeKey = one=>regionKey(one)
+        + ((one.byHash ?? one.replaces?.byHash) === true ? `/${one.region.hash}` : '');
+    /**
+     * The key to ask for a formed region's own version (`storeKey`) where the record under
+     * its key is of other bytes, or null.
+     * @param {{ region: { hash: string } }} one @param {string} key  its `regionKey`
+     * @param {import('./cache.js').CachedRegion | null | undefined} cached  the record there
+     */
+    const besideKey = (one, key, cached)=>(cached?.shape !== undefined
+        && cached.shape.hash !== one.region.hash ? `${key}/${one.region.hash}` : null);
     /**
      * What forming made of a region and what it is compiled as, for its record.
      * @param {{ region: { entry: number, hash: string },
@@ -3107,18 +3131,27 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
      * compiled for the control its run first met there is no such lesson, and
      * is taken only for that control -- a region compiled for another leaves
      * at its first rounding instruction. Taken, the formed region is the one
-     * the record was made of.
+     * the record was made of. A record of other bytes is passed over for the one kept
+     * beside it under the formed region's hash (`beside`, `storeKey`).
      *
      * @param {any} one @param {import('./cache.js').CachedRegion | null} cached
+     * @param {import('./cache.js').CachedRegion | null} [beside]  the record at `besideKey`
      * @returns {import('./cache.js').CachedRegion | null}
      */
-    const accepted = (one, cached)=>{
-        const shape = cached?.shape;
+    const accepted = (one, cached, beside = null)=>{
+        let shape = cached?.shape;
         if (cached === null || shape === undefined)
         {
             return null;
         }
         let region = one.region;
+        if (region.hash !== shape.hash && beside !== null && beside.shape !== undefined
+            && beside.shape.hash === region.hash)
+        {
+            cached = beside;
+            shape = beside.shape;
+            one.byHash = true;
+        }
         if (region.hash !== shape.hash && one.formedAs !== undefined
             && one.formedAs === regionKey(one))
         {
@@ -3126,6 +3159,7 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
             counts.missChanged++;
             counts.missBytes++;
             one.storedOther = true;
+            one.byHash = true;
             return null;
         }
         if (region.hash !== shape.hash)
@@ -3136,6 +3170,7 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
                 counts.missChanged++;
                 counts.missFormedOther++;
                 one.storedOther = true;
+                one.byHash = true;
                 return null;
             }
             counts.hitsFormedAgain++;
@@ -3378,7 +3413,7 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
             {
                 const storeAt = clock();
                 trace(storeTrace.put, metas[i]);
-                store.put(regionKey(metas[i]), packRegion({ ...result.region,
+                store.put(storeKey(metas[i]), packRegion({ ...result.region,
                     module: new Uint8Array(0), moduleKey: key, shape: shapeOf(metas[i]) },
                 cacheVersion),
                 key === undefined ? undefined : { needs: key }).catch(()=>{});
@@ -3514,8 +3549,8 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
                 entryTop: record.entryTop, wide: record.wide, narrow: record.narrow,
                 floats: record.floats, checked: record.checked, copies: record.copies,
                 loose: record.loose, wrapped: record.wrapped, targets: record.targets,
-                anyTop: record.anyTop };
-            store.put(regionKey(one), packRegion({ ...region,
+                anyTop: record.anyTop, byHash: record.byHash };
+            store.put(storeKey(one), packRegion({ ...region,
                 module: new Uint8Array(0), moduleKey: key, linked: true, shape: shapeOf(one) },
             cacheVersion), key === undefined ? undefined : { needs: key }).catch(()=>{});
         }
@@ -4544,7 +4579,8 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
         {
             return 'later';
         }
-        const { formed, known } = step;
+        const { formed } = step;
+        const known = step.known ??= new Map();
         /** @type {Lookup} */
         const lookup = step.lookup ?? { records: null, cached: [], wanted: null,
             modules: new Map(), done: false };
@@ -4554,29 +4590,29 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
             return 'done';
         }
         const keys = lookup.keys ??= formed.map(region=>regionKey(region));
-        // A store across a link answers the batch's names in one wait; any
-        // other is asked a name at a time. A name answered before its region
-        // was formed (`recordBefore`) is not asked again.
+        // A store across a link answers the batch's names in one wait - each
+        // region's key and its own version's beside it (`storeKey`); any other
+        // is asked a name at a time. A name answered before its region was
+        // formed (`recordBefore`) is not asked again.
         const linked = typeof store.getManyNow === 'function';
         /** @type {(key: string) => Uint8Array | null | undefined} */
         const one = linked ? key=>store.getManyNow([key])?.[0] : key=>store.getNow(key);
         /** @param {string} key */
-        const answer = key=>(known?.has(key) ? known.get(key) : one(key));
+        const answer = key=>(known.has(key) ? known.get(key) : one(key));
         try
         {
             if (linked && lookup.records === null)
             {
-                const asked = keys.filter(key=>!known?.has(key));
+                const asked = [...keys, ...keys.map((key, at)=>`${key}/${formed[at].region.hash}`)]
+                    .filter(key=>!known.has(key));
                 const answers = asked.length === 0 ? [] : store.getManyNow(asked) ?? null;
                 if (answers === null || answers.some((/** @type {any} */ bytes)=>
                     bytes === undefined))
                 {
                     return 'later';
                 }
-                /** @type {Map<string, Uint8Array | null>} */
-                const byKey = new Map(asked.map((key, at)=>[key, answers[at]]));
-                lookup.records = keys.map(key=>(known?.has(key) ? known.get(key) ?? null
-                    : byKey.get(key) ?? null));
+                asked.forEach((key, at)=>known.set(key, answers[at]));
+                lookup.records = keys.map(key=>known.get(key) ?? null);
             }
             while (lookup.cached.length < formed.length)
             {
@@ -4591,8 +4627,15 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
                 {
                     return 'later';
                 }
-                lookup.cached.push(bytes === null ? null
-                    : accepted(formed[at], unpackedOf(step, keys[at], bytes)));
+                const cached = bytes === null ? null : unpackedOf(step, keys[at], bytes);
+                const other = besideKey(formed[at], keys[at], cached);
+                const besideBytes = other === null ? null : answer(other);
+                if (besideBytes === undefined)
+                {
+                    return 'later';
+                }
+                lookup.cached.push(accepted(formed[at], cached, besideBytes === null ? null
+                    : unpackedOf(step, /** @type {string} */ (other), besideBytes)));
             }
             /** A batch module's bytes are read once for every record naming it. */
             lookup.wanted ??= [...new Set(lookup.cached.map(cached=>cached?.moduleKey)
@@ -5370,9 +5413,13 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
         Promise.all(formed.map(async one=>{
             try
             {
-                const bytes = await store.get(regionKey(one));
-                const cached = bytes === null ? null
-                    : accepted(one, unpackRegion(bytes, cacheVersion));
+                const key = regionKey(one);
+                const bytes = await store.get(key);
+                const record = bytes === null ? null : unpackRegion(bytes, cacheVersion);
+                const other = besideKey(one, key, record);
+                const besideBytes = other === null ? null : await store.get(other);
+                const cached = accepted(one, record, besideBytes === null ? null
+                    : unpackRegion(besideBytes, cacheVersion));
                 const batchKey = cached?.moduleKey;
                 // Its batch's module, unless this run instantiated it already.
                 settle(one, cached, batchKey !== undefined && !batchInstances.has(batchKey)

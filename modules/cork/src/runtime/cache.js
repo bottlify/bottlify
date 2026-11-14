@@ -15,7 +15,9 @@
  * run's modes -- what a run knows before it forms it. What forming made of
  * it is in its record (`RegionShape`): which callees it formed in depend
  * on what the run had sampled by then, and a run that formed it otherwise forms it again as
- * the record says before it compares the bytes.
+ * the record says before it compares the bytes. A version of other bytes at
+ * the same entry - code the program patches as it runs - is kept beside it,
+ * under that key and its own bytes' hash.
  *
  * A record is the module's bytes behind a small header of what the
  * runtime needs to publish it without the emitter: the block starts and
