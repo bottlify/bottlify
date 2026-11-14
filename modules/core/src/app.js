@@ -4374,8 +4374,8 @@ export function journalEvents(events, into, { shaders = false } = {}){
 }
 
 /** How many of the layers' last trace lines a report keeps: an exception's account and the
- * last-chance filter's are a few lines each. */
-const TRACED_KEPT = 32;
+ * last-chance filter's are a few lines each, and a wait's repeated warning many more. */
+const TRACED_KEPT = 200;
 
 /**
  * One machine, running one image.
