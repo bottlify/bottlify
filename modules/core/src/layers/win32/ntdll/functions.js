@@ -33,6 +33,7 @@ import { createIntegerFunctions } from './integer.js';
 import { createBitmapFunctions } from './bitmap.js';
 import { createWaitFunctions } from './waits.js';
 import { createPathFunctions } from './paths.js';
+import { createAtomTableFunctions } from './atoms.js';
 import { MEMORY_ENTRIES, createMemoryFunctions } from './memory.js';
 import { createDebugFunctions } from './debug.js';
 import { createProcessFunctions } from './process.js';
@@ -337,6 +338,9 @@ export function createNtdllFunctions(host){
         }),
 
         ...createImageFunctions({ readMemory: host.readMemory, writeMemory: host.writeMemory }),
+
+        ...createAtomTableFunctions({ readMemory: host.readMemory, writeMemory: host.writeMemory,
+            readWideString: host.readWideString, allocate, free }),
 
         ...createBitmapFunctions({ readMemory: host.readMemory, writeMemory: host.writeMemory }),
 
