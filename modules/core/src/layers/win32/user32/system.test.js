@@ -3994,6 +3994,25 @@ test('BroadcastSystemMessage sends to every top-level window, and a query can be
     assert.equal(fns.BroadcastSystemMessageA.handler([BSF_QUERY | BSF_POSTMESSAGE, 0, WM_APP,
         0, 0]), 0);
     assert.deepEqual(errors, [87]);
+    assert.equal(fns.BroadcastSystemMessageExA.handler([0x80000000, 0, WM_APP, 0, 0, 0]), 0,
+        'a flag Windows does not know');
+    assert.deepEqual(errors, [87, 87]);
+
+    // SendNotifyMessage to each: a window of this thread is answered before
+    // the call returns, unlike a post.
+    const BSF_SENDNOTIFYMESSAGE = 0x0100;
+    told.length = 0;
+    assert.equal(fns.BroadcastSystemMessageW.handler([BSF_SENDNOTIFYMESSAGE, 0, WM_APP, 0, 0]), 1);
+    assert.deepEqual(told.map(each=>each.hwnd).sort(), [first, second].sort());
+
+    // Ex under BSF_RETURNHDESK names the window that denied the query.
+    const BSF_RETURNHDESK = 0x0200;
+    const INFO = OUT_BUFFER + 0x40;
+    memory.putU32s(INFO, [20, 0, 0, 0, 0]);
+    assert.equal(fns.BroadcastSystemMessageExW.handler([BSF_QUERY | BSF_RETURNHDESK, 0, WM_APP,
+        0, 0, INFO]), 0);
+    assert.equal(memory.u32(INFO + 8), first, 'the window that denied it');
+    assert.notEqual(memory.u32(INFO + 4), 0, 'and its desktop');
 });
 
 test('ExcludeUpdateRgn keeps a context off what is still to be repainted', ()=>{

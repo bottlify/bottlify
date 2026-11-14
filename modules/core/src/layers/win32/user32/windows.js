@@ -7204,9 +7204,10 @@ export function createWindowFunctions(host){
      * is positive.
      *
      * @param {number[]} args @param {boolean} unicode
+     * @param {(hwnd: number) => void} [denied]  told the window that refused a query
      * @returns {number | Promise<number>}
      */
-    const broadcastSystem = ([flags, recipients, message, wParam, lParam], unicode)=>{
+    const broadcastSystem = ([flags, recipients, message, wParam, lParam], unicode, denied)=>{
         const BSF_QUERY = 0x0001;
         const BSF_IGNORECURRENTTASK = 0x0002;
         const BSF_POSTMESSAGE = 0x0010;
@@ -7214,10 +7215,15 @@ export function createWindowFunctions(host){
         const BSM_APPLICATIONS = 0x0008;
         const BSM_ALLDESKTOPS = 0x0010;
         const BROADCAST_QUERY_DENY = 0x424d5144;
-        if ((flags & BSF_QUERY) !== 0 && (flags & (BSF_POSTMESSAGE | BSF_SENDNOTIFYMESSAGE)) !== 0)
+        // BSF_QUERY through BSF_LUID: a flag past them is no flag Windows knows.
+        const BSF_KNOWN = 0x07ff;
+        if ((flags & ~BSF_KNOWN) !== 0
+            || ((flags & BSF_QUERY) !== 0
+                && (flags & (BSF_POSTMESSAGE | BSF_SENDNOTIFYMESSAGE)) !== 0))
         {
             // A query is answered one recipient at a time; one that is not
-            // waited for cannot answer it.
+            // waited for cannot answer it. And a flag Windows does not know is
+            // refused, not ignored.
             host.setLastError?.(ERROR_INVALID_PARAMETER);
             return 0;
         }
@@ -7237,7 +7243,7 @@ export function createWindowFunctions(host){
         }
         const ours = (flags & BSF_IGNORECURRENTTASK) !== 0;
         const targets = broadcastTargets().filter(hwnd=>!ours || !live(hwnd));
-        if ((flags & (BSF_POSTMESSAGE | BSF_SENDNOTIFYMESSAGE)) !== 0)
+        if ((flags & BSF_POSTMESSAGE) !== 0)
         {
             for (const hwnd of targets)
             {
@@ -7245,13 +7251,50 @@ export function createWindowFunctions(host){
             }
             return 1;
         }
+        if ((flags & BSF_SENDNOTIFYMESSAGE) !== 0)
+        {
+            // SendNotifyMessage to each: a window of the caller's thread is
+            // answered before the call returns, any other's is not waited for.
+            /** @param {number} at @returns {number | Promise<number>} */
+            const each = at=>(at >= targets.length ? 1
+                : andThen(notify([targets[at], message, wParam, lParam], unicode),
+                    ()=>each(at + 1)));
+            return each(0);
+        }
         const thread = host.callerThread?.();
         /** @param {number} at @returns {number | Promise<number>} */
         const next = at=>(at >= targets.length ? 1
             : andThen(sendAcross(targets[at], message, wParam, lParam, thread, unicode),
-                answer=>((flags & BSF_QUERY) !== 0 && (answer >>> 0) === BROADCAST_QUERY_DENY
-                    ? 0 : next(at + 1))));
+                answer=>{
+                    if ((flags & BSF_QUERY) !== 0 && (answer >>> 0) === BROADCAST_QUERY_DENY)
+                    {
+                        denied?.(targets[at]);
+                        return 0;
+                    }
+                    return next(at + 1);
+                }));
         return next(0);
+    };
+
+    /**
+     * BroadcastSystemMessageEx in either encoding: the broadcast, and under
+     * BSF_RETURNHDESK the window that refused a query, with its thread's
+     * desktop, in the BSMINFO.
+     *
+     * @param {number[]} args @param {boolean} unicode
+     */
+    const broadcastEx = (args, unicode)=>{
+        const BSF_RETURNHDESK = 0x0200;
+        const info = args[5] >>> 0;
+        if ((args[0] & BSF_RETURNHDESK) === 0 || info === 0)
+        {
+            return broadcastSystem(args, unicode);
+        }
+        return broadcastSystem(args, unicode, hwnd=>{
+            const thread = (/** @type {any} */ (table)).GetWindowThreadProcessId.handler([hwnd, 0]);
+            const desk = (/** @type {any} */ (table)).GetThreadDesktop.handler([thread]);
+            writeU32s(host, info + 4, [desk >>> 0, hwnd >>> 0]);
+        });
     };
 
     /**
@@ -8944,6 +8987,25 @@ export function createWindowFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: args=>broadcastSystem(args, true),
+        },
+
+        /**
+         * long BroadcastSystemMessageExA(DWORD flags, LPDWORD lpdwRecipients, UINT uiMessage,
+         *                                WPARAM wParam, LPARAM lParam, PBSMINFO pbsmInfo)
+         *
+         * BroadcastSystemMessage with a BSMINFO (cbSize, hdesk, hwnd, luid) to
+         * learn who refused a query: under BSF_RETURNHDESK the refusing
+         * window and its desktop are written there.
+         */
+        BroadcastSystemMessageExA: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: args=>broadcastEx(args, false),
+        },
+        BroadcastSystemMessageExW: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: args=>broadcastEx(args, true),
         },
 
         /**
