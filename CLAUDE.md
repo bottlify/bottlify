@@ -29,7 +29,8 @@ outward-facing action) or for a wait a rule imposes, and say what waits on what.
 
 1. **x86-64 and the multi-worker process runner** (`roadmap/x64.md`). Work on the workers — the
    engine, graphics, translation and audio threads and what crosses between them — pays off for the
-   whole application, not one title.
+   whole application, not one title. cork's emitter and runtime serve both widths, so a translator
+   change is judged on a 32-bit and a 64-bit workload alike.
 2. **Correctness, speed, reuse.** Optimisation and standardisation are part of the job, not
    extras: one shared mechanism over three similar ones, a contract written once and enforced by a
    test.
