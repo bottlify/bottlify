@@ -10,14 +10,9 @@
  * ready for one (contention), the ms its slices on another executor waited for the process's
  * answers, and the rate it ran at in the rest; then each executor's slices, answers, idle time
  * and what it retired. A frame rate bound by one thread shows as that thread's held ms near
- * the frame's; one bound by the scheduler as its ready ms.
- *
- *   node tools/cdp_test/thread-window.mjs <series.json> [--from S] [--to S]
- *
- * Without --from/--to the last window; with them, the rows whose time falls in [from, to].
+ * the frame's; one bound by the scheduler as its ready ms. game.mjs prints it below its frame
+ * series.
  */
-import { readFileSync } from 'node:fs';
-import { isMain } from '../common.mjs';
 
 /**
  * @param {any} before  the series row the window starts after
@@ -114,54 +109,3 @@ export function waitWindow(before, row, frames){
     return lines;
 }
 
-if (isMain(import.meta.url))
-{
-    const [file, ...rest] = process.argv.slice(2);
-    if (!file)
-    {
-        console.error('usage: node tools/cdp_test/thread-window.mjs <series.json>'
-            + ' [--from S] [--to S]');
-        process.exit(2);
-    }
-    /** @param {string} flag */
-    const arg = flag=>{
-        const at = rest.indexOf(flag);
-        return at < 0 ? null : Number(rest[at + 1]);
-    };
-    const series = JSON.parse(readFileSync(file, 'utf8'));
-    const rows = Array.isArray(series) ? series : series.series ?? series.rows;
-    const from = arg('--from');
-    const to = arg('--to');
-    let first = rows.length - 2;
-    let last = rows.length - 1;
-    if (from !== null || to !== null)
-    {
-        const inside = rows.map((/** @type {any} */ r, /** @type {number} */ i)=>[r, i])
-            .filter(([r])=>r.at / 1000 >= (from ?? 0) && r.at / 1000 <= (to ?? Infinity))
-            .map(([, i])=>i);
-        if (inside.length < 2)
-        {
-            console.error('not measured: fewer than two rows in that window');
-            process.exit(1);
-        }
-        first = inside[0];
-        last = inside[inside.length - 1];
-    }
-    /** @type {any[]} */
-    const window = rows.slice(first + 1, last + 1);
-    const frames = window.reduce((sum, r)=>sum + r.frames, 0);
-    const avg = (/** @type {string} */ key)=>window.reduce((sum, r)=>sum + r[key] * r.frames, 0)
-        / Math.max(1, frames);
-    const draws = (rows[last].draws - rows[first].draws) / Math.max(1, frames);
-    const calls = (rows[last].calls - rows[first].calls) / Math.max(1, frames);
-    const instructions = rows[last].instructions === null ? 'not measured'
-        : ((rows[last].instructions - rows[first].instructions) / Math.max(1, frames) / 1e6)
-            .toFixed(1);
-    console.log(`frame ${avg('frameMs').toFixed(1)} ms, host ${avg('hostMs').toFixed(1)} ms,`
-        + ` guest ${avg('guestMs').toFixed(1)} ms, draws ${draws.toFixed(0)},`
-        + ` host calls ${calls.toFixed(0)}, M instr ${instructions}`);
-    for (const line of threadWindow(rows[first], rows[last], frames))
-    {
-        console.log(line);
-    }
-}

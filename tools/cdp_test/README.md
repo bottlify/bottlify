@@ -34,7 +34,6 @@ the reference (flags, switches, what a report holds). Paths are from the reposit
 - Which thread works and which waits, and on what? - [`live/worker-profile.mjs`](live/worker-profile.mjs) `[seconds] [minMs] [worker]`
 - Who allocates, garbage included? - [`live/worker-allocations.mjs`](live/worker-allocations.mjs) `[seconds] [top]`
 - Which collections ran, and why? - [`live/gc-trace.mjs`](live/gc-trace.mjs) `[seconds]`
-- A whole-browser trace without a person pressing record - [`live/record-trace.mjs`](live/record-trace.mjs) `<out.json.gz> [seconds]`
 - Is memory climbing? - [`live/memory-watch.mjs`](live/memory-watch.mjs)
 - Who holds the big buffers? - [`live/big-buffers.mjs`](live/big-buffers.mjs) `[minMB] [worker]` (a heap snapshot: not while a person plays)
 - Does it flicker? - [`live/cast.mjs`](live/cast.mjs) `[seconds] [dir]`
@@ -49,7 +48,7 @@ the reference (flags, switches, what a report holds). Paths are from the reposit
 - How long did a span of frames take? - [`frame-span.mjs`](../frame-span.mjs) `<game-*-presents.json>...`
 - Which drops repeat across runs? - [`cdp_test/drop-repeat.mjs`](drop-repeat.mjs) `<frames.json> <frames.json>...`
 - What did the dropped frames do? - [`drop-profile.mjs`](../drop-profile.mjs) `<report base>` (a `--worker --cpu-profile` run)
-- Which thread and executor held the frame? - [`cdp_test/thread-window.mjs`](thread-window.mjs) `<game-*-series.json>`
+- Which thread and executor held the frame? - `game.mjs --series N` prints it ([`cdp_test/thread-window.mjs`](thread-window.mjs))
 - Who calls this hot function? - [`cdp_test/cpuprofile-callers.mjs`](cpuprofile-callers.mjs) `<file.cpuprofile> <regex>`
 - Where did a person's DevTools trace go? - [`cdp_test/trace-summary.mjs`](trace-summary.mjs) `<Trace-*.json.gz>`
 - What do a title's real frames cost the graphics worker? - [`graphics-replay.mjs`](../graphics-replay.mjs) `<capture>` (a `--graphics-capture` run)
@@ -63,20 +62,16 @@ the reference (flags, switches, what a report holds). Paths are from the reposit
 - How do a run's calls go? - [`cork-calls.mjs`](../cork-calls.mjs) `<game-*-blocks.json>`
 - Which function of a system DLL is hot? - [`pdb-hot.mjs`](../pdb-hot.mjs) `<blocks.json> <dll> <pdb> <base>`
 - What is the code at `hw.dll+0x35840`? - [`disasm.mjs`](../disasm.mjs) `<bundle-id> <module> <offset[:count]>` (Python with capstone)
-- Which C runtime exports still cross into the host? - [`crt-inventory.mjs`](../crt-inventory.mjs)
 - Is cork faster than before? - [`modules/cork/bench`](../../modules/cork/bench/README.md): the PE benchmark, its browser suite and the micro workloads
 
 ### The engine in Node, measured
 
 - What does one call into an import cost, or one maths operation? - [`host-call-bench.mjs`](../host-call-bench.mjs) `[N] --call SPEC` or `--math`
 - Where do several executors beat one? - [`executor-sweep.mjs`](../executor-sweep.mjs)
-- What does handing jobs between threads through semaphores cost? - [`sync-handoff-bench.mjs`](../sync-handoff-bench.mjs)
-- What does a frame of a graphics scene cost each thread, and what does it allocate? - [`graphics-node-bench.mjs`](../graphics-node-bench.mjs) `[--scenes a,b]`, `--alloc`; its browser arm: [`graphics-bench/`](../graphics-bench)
 
 ### Before a title's first run, and its bottle
 
 - What does it import that we do not export? - [`import-audit.mjs`](../import-audit.mjs) `<file|dir|.btl|.iso> --dynamic --specs DIR`
-- Which instruction set extensions does it use? - [`isa-audit.mjs`](../isa-audit.mjs) `<file|dir|.btl|.iso>`
 - Pack, verify, list, extract, size by folder or prune a bundle - [`make-btl.mjs`](../make-btl.mjs) `pack|verify|list|translations|extract|tree|prune`
 - Unpack a zip of tens of gigabytes - [`zip-extract.mjs`](../zip-extract.mjs) `list|extract`
 - Do our stdcall entries pop what Windows' do? - [`arg-bytes-audit.mjs`](../arg-bytes-audit.mjs) `<Wine spec directory>`
@@ -123,7 +118,7 @@ the reference (flags, switches, what a report holds). Paths are from the reposit
 ### Libraries and test fixtures (imported, not run)
 
 - [`common.mjs`](../common.mjs) - `isMain`, options, `median`, where bundles lie (`BOTTLIFY_BUNDLES`)
-- [`btl.mjs`](../btl.mjs), [`pe-files.mjs`](../pe-files.mjs), [`isa-scan.mjs`](../isa-scan.mjs), [`relay-option.mjs`](../relay-option.mjs), [`disk-directory.mjs`](../disk-directory.mjs), [`wizard-buttons.mjs`](../wizard-buttons.mjs), [`chromium-v8.mjs`](../chromium-v8.mjs), [`graphics-scenes.mjs`](../graphics-scenes.mjs) - what the tools above share
+- [`btl.mjs`](../btl.mjs), [`pe-files.mjs`](../pe-files.mjs), [`relay-option.mjs`](../relay-option.mjs), [`disk-directory.mjs`](../disk-directory.mjs), [`wizard-buttons.mjs`](../wizard-buttons.mjs), [`chromium-v8.mjs`](../chromium-v8.mjs) - what the tools above share
 - [`make-pe.mjs`](../make-pe.mjs), [`d3d9-program.mjs`](../d3d9-program.mjs), [`gl-program.mjs`](../gl-program.mjs), [`gl-glsl-program.mjs`](../gl-glsl-program.mjs), [`spawn-program.mjs`](../spawn-program.mjs), [`fake-graphics-worker.mjs`](../fake-graphics-worker.mjs), [`cpu-time.mjs`](../cpu-time.mjs) - the packages' tests' programs and helpers
 - [`browser.mjs`](browser.mjs), [`cdp.mjs`](cdp.mjs), [`server.mjs`](server.mjs), [`profile.mjs`](profile.mjs), [`device-lag.mjs`](device-lag.mjs), [`frame-window.mjs`](frame-window.mjs), [`timeout-report.mjs`](timeout-report.mjs), [`shader-cases.mjs`](shader-cases.mjs), [`job-limit.ps1`](job-limit.ps1), [`live/connect.mjs`](live/connect.mjs) - the harness's own
 
@@ -394,17 +389,6 @@ lists (Wine's spec files, fetched once into DIR by `--fetch-specs DIR` and not
 kept in the repository): a function a program looks up by name that this
 build does not export is a NULL it may call.
 
-`tools/isa-audit.mjs <file|directory|bundle.btl|disc.iso>...` reads the code of
-every PE image under the paths and counts the instruction set extensions it
-uses: those the engine executes (SSE3 to SSE4.2, POPCNT, MOVBE), those it
-answers #UD to as the processor it presents (AVX, AVX2, FMA, F16C, BMI1/2,
-AVX-512, AES, SHA, ADX, XSAVE), and LZCNT, which runs there as BSR. Code is
-followed along its branches from each function an x86-64 image's `.pdata`
-lists (from the entry, exports and relocated addresses of an i386 one), so data
-among a function's instructions is never counted. Its verdict tells a program
-built for an extension (in most of its functions) from one that picks a path
-by cpuid and xgetbv (in a few). Run it with the import audit, before a title's
-first run.
 
 [`tools/vcredist-matrix.mjs`](../vcredist-matrix.mjs) runs Microsoft's own Visual C++ runtimes
 in Node -- vcomp.dll (2005) and msvcr90.dll (2008), whose DllMain checks that it was loaded
