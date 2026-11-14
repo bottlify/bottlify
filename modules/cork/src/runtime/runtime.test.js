@@ -754,6 +754,32 @@ test('code translated on a thread\'s stack drops the regions that store through 
     assert.equal(machine({ precise: true }).runtime.diagnostics().looseStacks, false);
 });
 
+test('a page whose writes keep dropping the regions that ran into it is a page of stubs:'
+    + ' regions from elsewhere stop at it', async()=>{
+    // CODE: call STUB; hlt -- STUB, on the next page, a leaf (`inc edx; ret`) the
+    // caller forms in, as a runtime's precode a program patches one stub at a time.
+    // Each write there drops the caller with it, and before the rule every one did.
+    const STUB = CODE + 0x1000;
+    const m = machine({ volatileAfter: 64 });
+    m.write(CODE, [0xe8, ...le32(STUB - (CODE + 5)), 0xf4]);
+    m.write(STUB, [0x42, 0xc3]);
+    const translate = async()=>{
+        m.runtime.noteHot(CODE);
+        await m.runtime.translatePending();
+        assert.ok(m.runtime.entryOf(CODE) >= 0, 'the caller translated');
+    };
+    for (let i = 0; i < 2; i++)
+    {
+        await translate();
+        m.runtime.invalidatePage(STUB >>> 12);
+        assert.equal(m.runtime.entryOf(CODE), -1, `write ${i}: the caller held the stub`);
+    }
+    await translate();
+    m.runtime.invalidatePage(STUB >>> 12);
+    assert.ok(m.runtime.entryOf(CODE) >= 0, 'formed apart from the stub, a write there leaves it');
+    assert.equal(m.runtime.diagnostics().volatilePages, 0, 'and the page was never volatile');
+});
+
 test('a page invalidated too often becomes volatile and is not translated again', async()=>{
     const m = machine({ volatileAfter: 3 });
     m.write(CODE, COUNTDOWN);

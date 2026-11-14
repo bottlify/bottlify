@@ -1099,10 +1099,17 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
     const generation = new Map();
     /**
      * By page, the writes that dropped its regions: how many since `since`, the window's
-     * start, and how many times it was left volatile.
-     * @type {Map<number, { times: number, since: number, left: number }>}
+     * start, how many in all (`costs`), and how many times it was left volatile.
+     * @type {Map<number, { times: number, since: number, left: number, costs: number }>}
      */
     const dropped = new Map();
+    /**
+     * Writes that cost a page its regions, in all, past which it is a page of stubs: code a
+     * program patches one piece at a time (a managed runtime's precode, each stub written
+     * when its method is first called), never enough at once to be volatile, while every
+     * write dropped each region that ran into a stub there.
+     */
+    const STUB_WRITES = 2;
     /** By volatile page, when it is translated again. @type {Map<number, number>} */
     const volatileUntil = new Map();
     /**
@@ -1438,9 +1445,10 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
         let record = dropped.get(page);
         if (record === undefined)
         {
-            record = { times: 0, since: at, left: 0 };
+            record = { times: 0, since: at, left: 0, costs: 0 };
             dropped.set(page, record);
         }
+        record.costs++;
         if (at - record.since > settings.volatileWindowMs)
         {
             record.times = 0;
@@ -1848,6 +1856,21 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
         // translation goes wrong in by halving it.
         && !(settings.interpretRange && address >= settings.interpretRange[0]
             && address < settings.interpretRange[1]);
+    /** @param {number} page */
+    const stubPage = page=>(dropped.get(page)?.costs ?? 0) >= STUB_WRITES;
+    /**
+     * What a region formed from `entry` may form on: a page of stubs (`STUB_WRITES`) holds
+     * only regions entered there, which stay on it, so a write to a stub drops the stub's
+     * own small region and none that ran into it from elsewhere.
+     *
+     * @param {number} entry
+     * @returns {(address: number) => boolean}
+     */
+    const formableFrom = entry=>{
+        const home = entry >>> 12;
+        return stubPage(home) ? address=>address >>> 12 === home && translatable(address)
+            : address=>!stubPage(address >>> 12) && translatable(address);
+    };
 
     /**
      * Why the translator has no entry at an untranslated exit's target, the
@@ -2260,8 +2283,8 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
             held += count;
             const called = record.targets === undefined ? {}
                 : { callTargets: new Map(record.targets) };
-            jobs.push({ region: formRegion(read, record.entry, { ...formHere, translatable,
-                ...called }), entryTop: record.entryTop,
+            jobs.push({ region: formRegion(read, record.entry, { ...formHere,
+                translatable: formableFrom(record.entry), ...called }), entryTop: record.entryTop,
             checked: record.checked === true,
             copies: record.copies === true, ...precisionJob(record) });
         }
@@ -3062,9 +3085,10 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
      * @param {import('./shared-forms.js').Formed} formed
      */
     const formsAsBefore = ({ region, answers })=>{
+        const formable = formableFrom(region.entry);
         for (const [page, yes] of answers)
         {
-            if (translatable(page * 4096) !== yes)
+            if (formable(page * 4096) !== yes)
             {
                 return false;
             }
@@ -3096,9 +3120,14 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
      */
     const formAt = (eip, targets, shared)=>{
         const called = targets === undefined ? {} : { callTargets: new Map(targets) };
+        const formable = formableFrom(eip);
+        // What forming finds shared between the regions of a call is found under their
+        // own pages: a region entered on a page of stubs may form on less than the others.
+        const sharing = stubPage(eip >>> 12) ? undefined : shared;
         if (sharedForms === null)
         {
-            return formRegion(read, eip, { ...formHere, translatable, shared, ...called });
+            return formRegion(read, eip, { ...formHere, translatable: formable, shared: sharing,
+                ...called });
         }
         const key = `${eip}/${targets === undefined ? '' : JSON.stringify(targets)}`;
         const known = sharedForms.get(key);
@@ -3115,7 +3144,7 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
                 let yes = answers.get(page);
                 if (yes === undefined)
                 {
-                    yes = translatable(address);
+                    yes = formable(address);
                     answers.set(page, yes);
                 }
                 return yes;
@@ -4077,7 +4106,7 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
                 continue;
             }
             const region = formRegion(read, record.entry,
-                { ...formHere, translatable, callTargets: targets });
+                { ...formHere, translatable: formableFrom(record.entry), callTargets: targets });
             const starts = new Set(region.blocks.map(block=>block.start));
             // Formed without the profile at a quiet call, the region is worth
             // publishing whether or not a callee was formed in.
@@ -4156,8 +4185,8 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
             }
             const called = record.targets === undefined ? {}
                 : { callTargets: new Map(record.targets) };
-            const region = formRegion(read, record.entry, { ...formHere, translatable,
-                ...called });
+            const region = formRegion(read, record.entry, { ...formHere,
+                translatable: formableFrom(record.entry), ...called });
             formed.push({ region, entryTop: record.entryTop, stamp: stamp(region.pages),
                 cached: null, ...precisionFlags(region, record.entryTop), loose,
                 wrapped: !readsChecked,
@@ -6101,7 +6130,8 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
                 // With `checkStale`, the regions still published whose bytes no
                 // longer form as they did: translated code a write did not drop.
                 ...(settings.checkStale ? { staleRegions: [...regions]
-                    .filter(record=>formRegion(read, record.entry, { ...formHere, translatable,
+                    .filter(record=>formRegion(read, record.entry, { ...formHere,
+                        translatable: formableFrom(record.entry),
                         ...(record.targets === undefined
                             ? {} : { callTargets: new Map(record.targets) }) }).hash
                         !== record.hash)
@@ -6120,6 +6150,8 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
                 // Times a page was left to the other executor, and the pages left now.
                 volatilePages: counts.volatilePages,
                 volatileNow: volatileUntil.size,
+                // Pages of stubs: regions from elsewhere stop at them (`STUB_WRITES`).
+                stubPages: [...dropped.values()].filter(one=>one.costs >= STUB_WRITES).length,
                 storesKept: counts.storesKept,
                 // Pages whose bytes are kept to judge a store into none of their
                 // regions by: pages code was on when the store came.
