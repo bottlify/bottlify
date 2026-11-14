@@ -171,33 +171,36 @@ export async function timeOf(arms, workload, { warm, warmMs, rounds, windowMs, n
 }
 
 /**
- * The stand over `workloads`: each workload's work in every arm, compared with
- * `expected` (by workload name) where given, then its time.
+ * The stand over `workloads`: each workload's work in every arm (unless
+ * `work` is false: a repeated run needs it once), compared with `expected` (by
+ * workload name) where given, then its time (unless `timed` is false).
  *
  * @param {Arm[]} arms @param {Workload[]} workloads
  * @param {{ warm?: number, warmMs?: number, rounds?: number, windowMs?: number,
  *     now: () => number,
- *     expected?: Record<string, { work: Work }>, timed?: boolean,
+ *     expected?: Record<string, { work: Work }>, timed?: boolean, work?: boolean,
  *     onRow?: (row: any) => void }} options
  */
 export async function runStand(arms, workloads, options){
     const { warm = 20, warmMs = 200, rounds = 7, windowMs = 30, now, expected, timed = true,
-        onRow } = options;
+        work: counted = true, onRow } = options;
     const rows = [];
     for (const workload of workloads)
     {
         /** @type {Work[]} */
         const work = [];
-        for (const arm of arms)
+        for (const arm of counted ? arms : [])
         {
             work.push(await workOf(arm, workload, warm));
         }
         const reference = expected?.[workload.name]?.work;
         const row = {
-            name: workload.name, bits: workload.bits, work,
-            // Every arm's work as the first's; and the first's as recorded.
-            same: work.every(one=>sameWork(one, work[0])),
-            expected: reference === undefined ? null : sameWork(work[0], reference),
+            name: workload.name, bits: workload.bits, work: counted ? work : null,
+            // Every arm's work as the first's; and the last's as recorded (the
+            // record is made from the newest checkout, the last arm).
+            same: counted ? work.every(one=>sameWork(one, work[0])) : null,
+            expected: !counted || reference === undefined ? null
+                : sameWork(work[work.length - 1], reference),
             ...timed ? await timeOf(arms, workload, { warm, warmMs, rounds, windowMs, now }) : {},
         };
         rows.push(row);

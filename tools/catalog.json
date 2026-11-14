@@ -296,11 +296,14 @@
    "path": "tools/bench/index.html",
    "category": "bench",
    "browser": true,
-   "question": "How fast is cork on this device, in its own browser, and does it do there the work recorded?",
-   "command": "node tools/bench/serve.mjs, then open the address it prints (any static server of the checkout that sends COOP/COEP will do)",
+   "question": "How fast is cork on this device, in its own browser, and is one build of cork faster than another there, over several runs?",
+   "command": "node tools/bench/serve.mjs, then open the address it prints (this checkout); or node tools/bench/build.mjs --arm A=REV --arm B=. and serve or publish tools/bench/dist/ (two builds side by side)",
    "tests": [],
    "parts": [
-    "tools/bench/stand.worker.js"
+    "tools/bench/stand.worker.js",
+    "tools/bench/arm.js",
+    "tools/bench/build.mjs",
+    "tools/bench/.gitignore"
    ],
    "kind": "instrument"
   },

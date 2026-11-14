@@ -14,7 +14,7 @@
  *
  *   --roots   checkouts to compare (default this one); the first is the base
  *   --work    the work alone, no time: what a gate runs (exit 1 on a difference)
- *   --write   record the first arm's work as `expected.json`
+ *   --write   record the last arm's work (the newest checkout) as `expected.json`
  *   --window  virtual milliseconds of guest work a timed round runs (default 30)
  */
 
@@ -94,7 +94,7 @@ if (args.includes('--write'))
     // `--warm` starts the record afresh.
     const kept = warm === recorded.warm ? recorded.workloads : {};
     writeFileSync(EXPECTED, `${JSON.stringify({ warm, workloads: { ...kept, ...Object.fromEntries(
-        rows.map(row=>[row.name, { bits: row.bits, work: row.work[0] }])) } }, null, 1)}\n`);
+        rows.map(row=>[row.name, { bits: row.bits, work: row.work.at(-1) }])) } }, null, 1)}\n`);
     console.log(`expected.json: ${rows.length} workloads at ${warm} iterations`);
 }
 else if (rows.some(row=>row.expected === false || !row.same))

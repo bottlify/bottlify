@@ -288,12 +288,12 @@ geometric mean, 64-bit: 1839 MIPS
 
 From `node tools/bench/stand.mjs --only vm,vcall,calls512-scatter on cork 94512c08 with the stand, Node 22.22.0, a 4-core Xeon VM at 2.10 GHz, 2026-11-14`. Each workload runs on the guest's own clock, so its work (instructions, regions, every way between regions) is the same on any machine: "as recorded" is the translator doing what expected.json says; DIFFERS is the code, never the machine. MIPS is this machine's speed, the median of 7 rounds; noise is how far those rounds part (half their interquartile range): a difference inside it is not one this machine shows, and a second run can land outside it when the engine optimises otherwise (lua-x87 1290 and 2069 MIPS in two runs here). With --roots A,B a ratio column gives B against A round by round.
 
-### How fast is cork on this device, in its own browser, and does it do there the work recorded?
+### How fast is cork on this device, in its own browser, and is one build of cork faster than another there, over several runs?
 
-[`bench/index.html`](bench/index.html): `node tools/bench/serve.mjs, then open the address it prints (any static server of the checkout that sends COOP/COEP will do)`
+[`bench/index.html`](bench/index.html): `node tools/bench/serve.mjs, then open the address it prints (this checkout); or node tools/bench/build.mjs --arm A=REV --arm B=. and serve or publish tools/bench/dist/ (two builds side by side)`
 
 Needs the shared browser, a GPU or a phone: no sample yet from this
-machine's data. Run `node tools/bench/serve.mjs, then open the address it prints (any static server of the checkout that sends COOP/COEP will do)` and put what it prints here.
+machine's data. Run `node tools/bench/serve.mjs, then open the address it prints (this checkout); or node tools/bench/build.mjs --arm A=REV --arm B=. and serve or publish tools/bench/dist/ (two builds side by side)` and put what it prints here.
 
 ### What does a title import, or look up by name, that this build does not export?
 

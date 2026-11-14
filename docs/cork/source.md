@@ -63,7 +63,9 @@ node tools/bench/serve.mjs                  # the same stand as a page, for any 
   clock, so each one's work (instructions, regions, every way between regions) is the same on any
   machine and in any browser, held to `tools/bench/expected.json`; its speed is the machine's,
   with the noise of its rounds beside it. The page runs it in a person's own browser;
-  `npm run cdp:bench` runs the page in Chromium and holds its work to the record Node made. A
-  change that makes cork form otherwise records it again (`node tools/bench/stand.mjs --write`).
+  `npm run cdp:bench` runs the page in Chromium and holds its work to the record Node made.
+  `tools/bench/build.mjs --arm A=REV --arm B=.` makes the page with two builds of cork as static
+  files, run on a device several times over with B's speed against A's in each run. A change that
+  makes cork form otherwise records it again (`node tools/bench/stand.mjs --write`).
 
 Plain ES modules with JSDoc, tests on `node:test`. Licensed MPL-2.0.
