@@ -1129,17 +1129,37 @@ test('SetWindowLongA answers with the value it replaced', ()=>{
         'code that restores what it changed needs the old value back');
 });
 
-test('SetLayeredWindowAttributes records what GetLayeredWindowAttributes reads back', ()=>{
-    const { fns, memory, hwnd } = withWindow();
-    assert.equal(fns.SetLayeredWindowAttributes.handler([hwnd, 0x00ff00, 0x80, 0x2]), 1);
+test('SetLayeredWindowAttributes records what GetLayeredWindowAttributes reads back', async()=>{
+    const { fns, memory, hwnd, errors } = withWindow();
+    const GWL_EXSTYLE = -20;
+    const WS_EX_LAYERED = 0x00080000;
+    const [KEY, ALPHA, FLAGS, SIZE] = [0x5000, 0x5004, 0x5008, 0x5010];
+    assert.equal(fns.SetLayeredWindowAttributes.handler([hwnd, 0, 0, 0x2]), 0,
+        'a window not layered has none');
+    assert.equal(errors.at(-1), 87);
+    fns.SetWindowLongA.handler([hwnd, GWL_EXSTYLE, WS_EX_LAYERED]);
+    assert.equal(fns.GetLayeredWindowAttributes.handler([hwnd, KEY, ALPHA, FLAGS]), 0,
+        'layered, none set yet');
 
-    const KEY = 0x5000;
-    const ALPHA = 0x5004;
-    const FLAGS = 0x5008;
+    // UpdateLayeredWindow gives it a picture of its own: still no attributes.
+    memory.putU32s(SIZE, [10, 10]);
+    assert.equal(await fns.UpdateLayeredWindow.handler([hwnd, 0, 0, SIZE, 0, 0, 0, 0, 0x4]), 1);
+    assert.equal(fns.GetLayeredWindowAttributes.handler([hwnd, KEY, ALPHA, FLAGS]), 0);
+    assert.equal(await fns.UpdateLayeredWindow.handler([hwnd, 0, 0, SIZE, 0, 0, 0, 0, 0x4 | 0x8]),
+        0, 'ULW_EX_NORESIZE is the Indirect call\'s');
+
+    assert.equal(await fns.SetLayeredWindowAttributes.handler([hwnd, 0x00ff00, 0x80, 0x2]), 1);
+    assert.equal(await fns.UpdateLayeredWindow.handler([hwnd, 0, 0, SIZE, 0, 0, 0, 0, 0x4]), 0,
+        'drawn by its attributes, it takes no picture');
     assert.equal(fns.GetLayeredWindowAttributes.handler([hwnd, KEY, ALPHA, FLAGS]), 1);
     assert.equal(memory.u32(KEY), 0x00ff00);
     assert.equal(memory.u32(ALPHA) & 0xff, 0x80);
     assert.equal(memory.u32(FLAGS), 0x2);
+
+    fns.SetWindowLongA.handler([hwnd, GWL_EXSTYLE, 0]);
+    fns.SetWindowLongA.handler([hwnd, GWL_EXSTYLE, WS_EX_LAYERED]);
+    assert.equal(fns.GetLayeredWindowAttributes.handler([hwnd, KEY, ALPHA, FLAGS]), 0,
+        'no longer layered, then layered again: forgotten');
 
     assert.equal(fns.SetLayeredWindowAttributes.handler([0x1234, 0, 0, 0]), 0, 'not a window');
     assert.deepEqual([fns.SetLayeredWindowAttributes.argBytes,

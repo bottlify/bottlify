@@ -456,6 +456,11 @@ const WS_EX_TOOLWINDOW = 0x00000080;
 const WS_CLIPCHILDREN = 0x02000000;
 /** A layered window is one only once CreateWindowEx has shown the CBT hook the window. */
 const WS_EX_LAYERED = 0x00080000;
+/** RedrawWindow's flags for a window painted again whole, its children too. */
+const RDW_INVALIDATE = 0x0001;
+const RDW_ERASE = 0x0004;
+const RDW_ALLCHILDREN = 0x0080;
+const RDW_FRAME = 0x0400;
 /** The ShowWindow commands that leave activation where it is. */
 const SHOW_WITHOUT_ACTIVATING = new Set([SW_HIDE, 4, 6, 7, 8]);
 
@@ -3259,6 +3264,13 @@ export function createWindowFunctions(host){
                 tell(record);
                 return;
             case GWL_EXSTYLE:
+                // A window no longer layered forgets how it was: set layered
+                // again, it has neither attributes nor a picture of its own.
+                if ((value & WS_EX_LAYERED) === 0)
+                {
+                    record.layered = undefined;
+                    record.layeredBy = undefined;
+                }
                 record.exStyle = edgeFor(record.style, value);
                 tell(record);
                 return;
@@ -8638,12 +8650,19 @@ export function createWindowFunctions(host){
             /** @param {number[]} args */
             handler: ([hwnd, key, alpha, flags])=>{
                 const record = live(hwnd);
-                if (!record)
+                if (!record || (record.exStyle & WS_EX_LAYERED) === 0)
                 {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
                 record.layered = { key: key >>> 0, alpha: alpha & 0xff, flags: flags >>> 0 };
-                return 1;
+                const was = record.layeredBy;
+                record.layeredBy = 'attributes';
+                // From a picture of its own (or none) to the system drawing
+                // it: the window and its children are painted again.
+                return was === 'attributes' ? 1 : andThen(
+                    (/** @type {any} */ (table)).RedrawWindow.handler([hwnd, 0, 0,
+                        RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN]), ()=>1);
             },
         },
 
@@ -8652,8 +8671,13 @@ export function createWindowFunctions(host){
             /** @param {number[]} args */
             handler: ([hwnd, key, alpha, flags])=>{
                 const record = live(hwnd);
-                if (!record)
+                // Only a layered window drawn by its attributes has any: one
+                // not layered, not yet set, or given its picture by
+                // UpdateLayeredWindow is refused.
+                if (!record || (record.exStyle & WS_EX_LAYERED) === 0
+                    || record.layeredBy !== 'attributes')
                 {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
                 const layered = record.layered;
@@ -8696,12 +8720,18 @@ export function createWindowFunctions(host){
                 const [ULW_COLORKEY, ULW_ALPHA] = [0x1, 0x2];
                 const [SWP_NOSIZE, SWP_NOMOVE] = [0x1, 0x2];
                 const [SWP_NOZORDER, SWP_NOACTIVATE] = [0x4, 0x10];
+                const ULW_OPAQUE = 0x4;
                 const record = live(hwnd);
-                if (!record || (record.exStyle & WS_EX_LAYERED) === 0)
+                // Not layered, drawn by its attributes already, or a flag
+                // past the three (ULW_EX_NORESIZE is UpdateLayeredWindowIndirect's).
+                if (!record || (record.exStyle & WS_EX_LAYERED) === 0
+                    || record.layeredBy === 'attributes'
+                    || (flags & ~(ULW_COLORKEY | ULW_ALPHA | ULW_OPAQUE)) !== 0)
                 {
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
+                record.layeredBy = 'update';
                 if ((flags & (ULW_ALPHA | ULW_COLORKEY)) !== 0 && !layeredBlendSaid)
                 {
                     layeredBlendSaid = true;
