@@ -5572,9 +5572,14 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
                 return;
             }
             // A block closed in a live region's loop is that region's, formed
-            // again with copies should translated code keep leaving for it.
+            // again with copies should translated code keep leaving for it. A
+            // block of a region formed and not yet published has its entry
+            // once it is: queued, a batch took it, found it covered and dropped
+            // it, and the interpreter noted it again - a .NET runtime's load
+            // spent a seventh of the engine thread over a window so.
             if (entries.entryOf(eip, top & 7) >= 0 || barrenHas(eip, top & 7)
-                || !translatable(eip) || closedIn.has(eip))
+                || !translatable(eip) || closedIn.has(eip)
+                || coveredIn(coveredOut, eip, top & 7))
             {
                 return;
             }
