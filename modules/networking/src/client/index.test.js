@@ -618,7 +618,9 @@ test('a session not back within its window is lost', async()=>{
 });
 
 test('the heartbeat acknowledges, and a link that hears nothing is taken for dead', async()=>{
-    const { transport, sockets } = await resumable({ heartbeat: 10 });
+    // Beats wide enough that a busy machine's late timer is not three of
+    // them, which would take the link for dead before its first ack.
+    const { transport, sockets } = await resumable({ heartbeat: 250 });
 
     await waitFor(()=>sockets[0].control().some(message=>message?.t === 'ack'));
     await waitFor(()=>sockets.length === 2);
