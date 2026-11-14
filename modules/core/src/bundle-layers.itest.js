@@ -317,9 +317,8 @@ const word = (bytes, at)=>new DataView(bytes.buffer, bytes.byteOffset).getUint32
 const latin = bytes=>String.fromCharCode(...bytes);
 
 /**
- * A listing's records the program was given, by name: the order is the
- * volume's (each layer's entries in the order it lists them, as a session's
- * come after the bundle's), which neither arm is asked to share.
+ * A listing's records the program was given, in the order it was given them:
+ * NTFS's, whichever layer each name came from (`inIndexOrder`).
  *
  * @param {Uint8Array} observed @param {{ at: number, records: number }} listing
  */
@@ -327,8 +326,8 @@ const recordsOf = (observed, listing)=>Array.from({ length: listing.records }, (
     observed.subarray(listing.at + record * FIND_RECORD + 4,
         listing.at + (record + 1) * FIND_RECORD))
     .filter(record=>record[44] !== 0)
-    .map(record=>({ name: latin(record.subarray(44, record.indexOf(0, 44))), record: [...record] }))
-    .sort((left, right)=>(left.name < right.name ? -1 : 1));
+    .map(record=>({ name: latin(record.subarray(44, record.indexOf(0, 44))),
+        record: [...record] }));
 
 test('a layer\'s files and keys are what a program finds, as if the bottle carried them',
     { timeout: 120_000 }, async t=>{

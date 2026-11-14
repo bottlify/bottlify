@@ -51,6 +51,19 @@ test('enumeration reports the case a name was created with', ()=>{
     assert.deepEqual(tree.list([]).map(entry=>entry.name).sort(), ['Game', 'Readme.TXT']);
 });
 
+test('enumeration lists a directory in NTFS\'s order, whichever layer a name is in', ()=>{
+    const { tree } = mounted();
+    for (const name of ['b.txt', '_x', 'a_b', 'ab', 'Zeta', 'straße'])
+    {
+        tree.createFile(['Game', name]);
+    }
+
+    // Upper-cased, '.' (0x2e) before letters, letters before '_' (0x5f); the
+    // source's Data and Setup.EXE among the session's names, not before them.
+    assert.deepEqual(tree.list(['Game']).map(entry=>entry.name),
+        ['ab', 'a_b', 'b.txt', 'Data', 'Setup.EXE', 'straße', 'Zeta', '_x']);
+});
+
 test('enumeration filters by the wildcard pattern it was given', ()=>{
     const { tree } = mounted();
 
