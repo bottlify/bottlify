@@ -573,9 +573,31 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
          */
         readWideString(address, limit = 8192){
             const units = scanWideString(address, limit);
-            return new TextDecoder('utf-16le').decode(read(address, units * 2));
+            return unitsText(read(address, units * 2));
         },
 
         scanWideString,
     };
+}
+
+/**
+ * UTF-16 units as a string, unit for unit. A Windows string is a sequence of
+ * units, not of characters: half a surrogate pair is a legal unit in a file
+ * name or a message, and a decoder would replace it with U+FFFD.
+ *
+ * @param {Uint8Array} bytes  little-endian, an even count
+ * @returns {string}
+ */
+export function unitsText(bytes){
+    const units = new Uint16Array(bytes.length >> 1);
+    for (let at = 0; at < units.length; at++)
+    {
+        units[at] = bytes[at * 2] | bytes[at * 2 + 1] << 8;
+    }
+    let text = '';
+    for (let at = 0; at < units.length; at += 0x2000)
+    {
+        text += String.fromCharCode(...units.subarray(at, at + 0x2000));
+    }
+    return text;
 }
