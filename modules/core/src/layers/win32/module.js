@@ -512,6 +512,14 @@ export function createWin32Module(){
             const blocks = blockLayouts(pointerSize);
 
             const memory = host.requireApi('memory');
+            /**
+             * Whether a region holds the address: what an exception's dispatch
+             * asks before it reads a frame or calls a handler. `find` answers
+             * undefined for a gap, never null.
+             *
+             * @param {number} address
+             */
+            const isMapped = address=>memory.find(address) !== undefined;
             const kernel = host.requireApi('kernel');
             const bridge = host.requireApi('bridge');
             const filesystem = host.requireApi('filesystem');
@@ -1829,8 +1837,7 @@ export function createWin32Module(){
             const seh = createSeh({
                 readMemory,
                 writeMemory,
-                /** @param {number} address */
-                isMapped: address=>memory.find(address) !== null,
+                isMapped,
                 teb: ()=>kernel.currentThread()?.tebAddress ?? 0,
                 // With the flags: a raised exception's context carries them as a
                 // fault's does, and a handler that continues from it gets them back.
@@ -1925,8 +1932,7 @@ export function createWin32Module(){
                     readMemory,
                     writeMemory,
                     readCString,
-                    /** @param {number} address */
-                    isMapped: address=>memory.find(address) !== null,
+                    isMapped,
                     imageBaseOf: address=>modules.imageOf?.(address)?.base ?? 0,
                     raise: what=>dispatcher.raise(what),
                     dispatcherContextAt: address=>dispatcher.dispatcherContextAt(address),
@@ -3260,8 +3266,7 @@ export function createWin32Module(){
                     ...createCrtSeh({
                         readMemory,
                         writeMemory,
-                        /** @param {number} address */
-                        isMapped: address=>memory.find(address) !== null,
+                        isMapped,
                         registers: ()=>Object.fromEntries(
                             registerNames.map(name=>[name, cpuRegisters.read(name)])),
                         setRegisters,
@@ -3387,8 +3392,7 @@ export function createWin32Module(){
                         readMemory,
                         writeMemory,
                         readCString,
-                        /** @param {number} address */
-                        isMapped: address=>memory.find(address) !== null,
+                        isMapped,
                         registers: ()=>Object.fromEntries(
                             registerNames.map(name=>[name, cpuRegisters.read(name)])),
                         /** @param {any} call */
