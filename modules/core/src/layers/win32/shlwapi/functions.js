@@ -141,7 +141,8 @@ const SHLWAPI_VERSION = /** @type {[number, number, number, number]} */ ([6, 0, 
  *           Reads a UTF-16 argument. Absent in a build that cannot, and the
  *           W spellings then fail as they would for an argument they could
  *           not read.
- * @property {{ stat(path: string): { exists: boolean, isDirectory: boolean } | null }} [files]
+ * @property {{ stat(path: string): { exists: boolean, isDirectory: boolean } | null,
+ *     list?(path: string): unknown[] }} [files]
  *           The volume, for the functions that ask what a path names. Absent,
  *           every path names nothing.
  * @property {(path: string) => string} [fullPath]
@@ -503,6 +504,29 @@ export function createShlwapiFunctions(host){
         },
     });
 
+    /**
+     * PathIsDirectoryEmpty for either width: TRUE for a directory with nothing
+     * in it; FALSE for one with anything, for a file and for nothing there. A
+     * setup asks it of the folder it unpacked into before it takes the folder
+     * away.
+     *
+     * @param {(address: number) => string | null} read
+     */
+    const pathIsDirectoryEmpty = read=>({
+        argBytes: 4,
+        /** @param {number[]} args */
+        handler: ([pointer])=>{
+            const path = read(pointer);
+            const entry = statPath(host, path);
+            if (!entry?.exists || !entry.isDirectory || !host.files?.list || !host.fullPath)
+            {
+                return 0;
+            }
+            return host.files.list(host.fullPath(/** @type {string} */ (path))).length === 0
+                ? 1 : 0;
+        },
+    });
+
     /** @param {number} address @param {number} value */
     const writeWord = (address, value)=>{
         if ((address >>> 0) !== 0)
@@ -738,6 +762,13 @@ export function createShlwapiFunctions(host){
          */
         PathIsDirectoryA: pathIsDirectory(pathAt),
         PathIsDirectoryW: pathIsDirectory(widePathAt),
+
+        /**
+         * BOOL PathIsDirectoryEmptyA(LPCSTR pszPath)
+         * BOOL PathIsDirectoryEmptyW(LPCWSTR pszPath)
+         */
+        PathIsDirectoryEmptyA: pathIsDirectoryEmpty(pathAt),
+        PathIsDirectoryEmptyW: pathIsDirectoryEmpty(widePathAt),
 
         /**
          * LPSTR PathCombineA(LPSTR pszDest, LPCSTR pszDir, LPCSTR pszFile)
