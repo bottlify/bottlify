@@ -481,7 +481,8 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write', 'p
  *              resolve: (handle: number, type?: string) => any,
  *              close: (handle: number) => any,
  *              typeOf?: (handle: number) => string | undefined,
- *              holds?: (object: any) => boolean }} handles
+ *              holds?: (object: any) => boolean,
+ *              list?: () => { handle: number, type: string, object: any }[] }} handles
  *           The one handle table, shared with every other kind of object.
  * @property {() => any} [currentThread]
  *           Whose call this is, for an answer that arrives after the thread has
@@ -1382,9 +1383,36 @@ export function createFileFunctions(host){
         const moved = files.renameOrFetch ? files.renameOrFetch(source, destination)
             : files.rename(source, destination);
         /** @param {boolean} done */
-        const answer = done=>(done
-            ? 1 : fail(denied(onReadOnlyMedia(source) ? source : destination)));
+        const answer = done=>{
+            if (!done)
+            {
+                return fail(denied(onReadOnlyMedia(source) ? source : destination));
+            }
+            follow(source, destination);
+            return 1;
+        };
         return typeof moved === 'boolean' ? answer(moved) : moved.then(answer);
+    };
+
+    /**
+     * This process's open files under a name just moved, named as they are
+     * now: an open file is the file, whatever it is called since, as on
+     * Windows - an NGen worker renames the native image it wrote into the
+     * cache and goes on asking its handle the image's size.
+     *
+     * @param {string} source @param {string} destination
+     */
+    const follow = (source, destination)=>{
+        const from = source.toLowerCase();
+        for (const { type, object: open } of host.handles.list?.() ?? [])
+        {
+            const path = type === 'file' && typeof open?.path === 'string' ? open.path : null;
+            const lower = path?.toLowerCase();
+            if (path !== null && (lower === from || lower?.startsWith(`${from}\\`)))
+            {
+                open.path = `${destination}${path.slice(source.length)}`;
+            }
+        }
     };
 
     /**
