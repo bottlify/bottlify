@@ -30,6 +30,7 @@ const ERROR_PRIVILEGE_NOT_HELD = 1314;
 const ERROR_MORE_DATA = 234;
 
 const CURRENT_PROCESS = 0xffffffff;
+const E_INVALIDARG = 0x80070057;
 
 /** CONTEXT_i386 with its control, integer and segment groups: RtlCaptureContext's set. */
 const CONTEXT_FULL_SEGMENTS = 0x00010007;
@@ -376,6 +377,8 @@ export function createProcessPolicyFunctions(host){
     const mitigations = new Map();
     let depFlags = PROCESS_DEP_ENABLE;
     let depPermanent = false;
+    /** WerSetFlags's flags, which WerGetFlags answers. */
+    let werFlags = 0;
 
     /**
      * How many handles this process holds: the kernel's own count where it
@@ -1143,5 +1146,48 @@ export function createProcessPolicyFunctions(host){
             argBytes: 8,
             handler: ()=>0,
         },
+
+        /**
+         * HRESULT WerSetFlags(DWORD dwFlags) and
+         * HRESULT WerGetFlags(HANDLE hProcess, PDWORD pdwFlags)
+         *
+         * The process's error reporting flags (WER_FAULT_REPORTING_*), kept and
+         * answered back; nothing reads them, as no reporting service runs. Another
+         * process's are not this one's to read: E_INVALIDARG, as for a handle that
+         * names no process.
+         */
+        WerSetFlags: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([flags])=>{
+                werFlags = flags >>> 0;
+                return 0;
+            },
+        },
+        WerGetFlags: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([process, out])=>{
+                if (processOf(process) !== SELF || (out >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                writeDword(out >>> 0, werFlags);
+                return 0;
+            },
+        },
+
+        /**
+         * HRESULT WerRegisterFile(PCWSTR, WER_REGISTER_FILE_TYPE, DWORD),
+         * HRESULT WerUnregisterFile(PCWSTR),
+         * HRESULT WerRegisterMemoryBlock(PVOID, DWORD) and
+         * HRESULT WerUnregisterMemoryBlock(PVOID)
+         *
+         * S_OK: what a report would carry is accepted, and no report is ever made.
+         */
+        WerRegisterFile: { argBytes: 12, handler: ()=>0 },
+        WerUnregisterFile: { argBytes: 4, handler: ()=>0 },
+        WerRegisterMemoryBlock: { argBytes: 8, handler: ()=>0 },
+        WerUnregisterMemoryBlock: { argBytes: 4, handler: ()=>0 },
     };
 }

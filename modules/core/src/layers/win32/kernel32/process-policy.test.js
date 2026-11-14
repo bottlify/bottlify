@@ -270,6 +270,14 @@ test('the handle count, debugging, power and memory notifications', ()=>{
     assert.equal(call('SetSystemPowerState', 1, 0), 0);
     assert.equal(errors.at(-1), ERROR_PRIVILEGE_NOT_HELD);
     assert.equal(call('WerRegisterRuntimeExceptionModule', 0x2000, 0), 0, 'S_OK');
+    // The .NET Framework 4.8's ngen sets its flags first thing; they come back as set.
+    assert.equal(call('WerSetFlags', 0x7), 0, 'S_OK');
+    assert.equal(call('WerGetFlags', 0xffffffff, 0x2000), 0);
+    assert.equal(view.getUint32(0x2000, true), 0x7, 'the flags set');
+    assert.equal(call('WerGetFlags', childHandle, 0x2000), 0x80070057, 'not another process');
+    assert.equal(call('WerGetFlags', 0xffffffff, 0), 0x80070057, 'nowhere to answer');
+    assert.equal(call('WerRegisterFile', 0x2000, 1, 0), 0);
+    assert.equal(call('WerRegisterMemoryBlock', 0x2000, 16), 0);
     assert.equal(call('FlushProcessWriteBuffers'), 0);
 });
 
