@@ -2852,6 +2852,35 @@ smaller ones cost Stockfish 10 %. No size won both; 256 kept.
 - **Decision.** Kept: it is correct and takes two thirds of the crossings away; the start is the
   answer latency's and the recall's to fix.
 
+### 2026-11-14: a thread elsewhere is called back at once only when one it woke here waits on something it can end (core, executors) - no fewer recalls
+
+- **Idea.** A .NET game's loader on executor 1 was called back to the process's own executor
+  1 182 times in a start and its executor idled 5-20 ms before each next slice (633 gaps of 5-20
+  ms, 406 longer); the loading screen's thread, which the loader had woken, now waits 16 ms for
+  each blank (b59558494), so the process's executor idles and the hand-off rule (`HANDOFF_MS`,
+  called back at once) fired. Waits only their deadline ends (Sleep, the blank) were marked
+  `timeOnly` and left out of the hand-off test.
+- **Workload.** The game's warm start in the launcher, reload, Continue pressed at the menu until
+  the level draws; two runs.
+- **Values.** The loader's recalls 1 501 (one run; 1 182 before). To the level 367 and 368 s,
+  against 357 and 378 s on the build before.
+- **Why.** Not measured: the recalls are not the blank's; the idle-recall rule (`IDLE_RECALL_MS`)
+  or another thread's hand-off still calls it back.
+- **Machine.** Parallels ARM VM, Windows 11, Chrome with the hardware WebGPU adapter; GPU, driver
+  and power plan not recorded.
+- **Decision.** Reverted; not committed.
+
+### 2026-11-14: invalidated - "to the menu" is no measure of a .NET game's start
+
+- The game draws its menu (more than 15 draws) at either about 5.6 G instructions (88 and 148 s)
+  or about 13.2 G (258-338 s) and reaches its level at 357-378 s either way: the menu comes up
+  while loading goes on, and Continue waits for it. The "to the menu" times of the 2026-11-13
+  entry above and of commit messages 9874ad48e and 0fb0f07fd are not comparable with each other
+  or with a later run and are not cited again; a start is measured to the level's first frame
+  with more than 50 draws (`in the level after`), with the instructions retired.
+- Measured that way: 447, 417 and 488 s on 2026-11-13 builds; 317 and 348 s with b59558494,
+  9db0f99e7 and bf4547d36; 378 and 357 s with 1e2e2093d besides.
+
 ### 2026-11-14: one machine memory with page tables costs a third to two thirds of translated code (cork)
 
 - **Idea.** Every process's memory as pages of one shared buffer, mapped through a table per

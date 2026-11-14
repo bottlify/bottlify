@@ -625,3 +625,33 @@ test('a runtime with no translator says it emitted on its own thread, timings of
         }
         assert.ok((m.runtime.translatedHere?.() ?? 0) > 0, 'the time it emitted here');
     });
+
+test('a block of a region formed and not yet published is not queued when it is noted again',
+    async()=>{
+        // Noted by the interpreter while the region holding it was with the
+        // translator, a block was queued, taken into a batch, found covered and
+        // dropped, and noted again: a .NET runtime's load spent a seventh of
+        // the engine thread over a window doing so.
+        const m = machine({ worker: true, translators: 0, batchRegions: 2, maxBatchRegions: 2,
+            ...ONE_A_CALL });
+        const held = heldTranslator();
+        try
+        {
+            m.runtime.attachTranslator?.(held.adapter);
+            held.ready();
+            // test eax, eax; jz +1; nop; ret - blocks at 0x2000, 0x2004 and 0x2005.
+            m.write(0x2000, [0x85, 0xc0, 0x74, 0x01, 0x90, 0xc3]);
+            m.runtime.noteHot(0x2000, 0, 64);
+            await m.runtime.translatePending();
+            assert.equal(held.held.length, 1, 'the region is with the translator');
+            const diagnostics = ()=>/** @type {any} */ (m.runtime.diagnostics());
+            assert.equal(diagnostics().queued, 0);
+            m.runtime.noteHot(0x2005, 0, 64);
+            m.runtime.noteHot(0x2004, 0, 64);
+            assert.equal(diagnostics().queued, 0, 'its blocks wait for it, not in the queue');
+        }
+        finally
+        {
+            await m.runtime.flush();
+        }
+    });
