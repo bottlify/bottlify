@@ -32,6 +32,7 @@ import { runRegsvr32 } from './regsvr32.js';
 import { runReg } from './reg.js';
 import { runNotepad } from './notepad.js';
 import { runDxsetup } from './dxsetup.js';
+import { runFrameworkSetup } from './netfx.js';
 import { runLodctr } from './lodctr.js';
 
 /** Where the programs are: GetSystemDirectory's answer. */
@@ -77,12 +78,21 @@ export const SYSTEM_PROGRAMS = new Map([
  * beside it - D3DX, the shader compilers, XAudio2 - and succeeds with no
  * window (`dxsetup.js`).
  *
- * @type {readonly { routine: string, company: string, original: string,
+ * The .NET Framework 4's setup, any of 4.0 to 4.8 and offline or web: the
+ * Framework is a layer the embedder mounts, and the setup asks for it and
+ * succeeds (`netfx.js`, A248).
+ *
+ * Each is known by `is`, asked a field of the version block (`CompanyName`).
+ *
+ * @type {readonly { routine: string, is: (field: (name: string) => string | null) => boolean,
  *     run: (context: import('./msiexec.js').ProgramContext) => Promise<number> }[]}
  */
 export const PROGRAMS_IN_PLACE = [
-    { routine: 'dxsetup', company: 'Microsoft Corporation', original: 'dxsetup.exe',
-        run: runDxsetup },
+    { routine: 'dxsetup', is: field=>field('CompanyName') === 'Microsoft Corporation'
+        && field('OriginalFilename')?.toLowerCase() === 'dxsetup.exe', run: runDxsetup },
+    { routine: 'netfxsetup', is: field=>field('CompanyName') === 'Microsoft Corporation'
+        && /^Microsoft \.NET Framework 4(\.\d+)*( Client Profile)? Setup$/
+            .test(field('FileDescription') ?? ''), run: runFrameworkSetup },
 ];
 
 const RT_VERSION = 16;
@@ -106,10 +116,9 @@ export function programInPlaceOf(executable){
     catch {
         return null;
     }
-    const company = block && versionStringOf(block, 'CompanyName');
-    const original = block && versionStringOf(block, 'OriginalFilename')?.toLowerCase();
-    const program = PROGRAMS_IN_PLACE.find(each=>each.company === company
-        && each.original === original);
+    /** @param {string} name */
+    const field = name=>(block ? versionStringOf(block, name) : null);
+    const program = block ? PROGRAMS_IN_PLACE.find(each=>each.is(field)) : undefined;
     return program ? synthesiseProgram({ library: PROGRAMS_LIBRARY, routine: program.routine })
         .bytes : null;
 }

@@ -73,6 +73,11 @@ A page needs three things served from one origin:
 | `/bundles/<id>/bundle.btl`, `manifest.json` | the bottle, read a block at a time | `make-btl pack` |
 | `/bundles/<id>/entry` | the program's image, which `createApp` takes as bytes | `node tools/bundles/make-btl.mjs extract <id>` |
 
+A bundle whose manifest says `"kind": "layer"` is no bottle but a runtime bottles stand on (the
+.NET Framework, which `layer-needed` asks for by its id): it has no `entry`, is not listed among
+the bottles, and is mounted under one through `createApp`'s `bundle.layers`, its manifest's
+`bundle.indexSha256` checked as a bottle's is.
+
 Serve `bundle.btl` with **HTTP Range** support (`206 Partial Content`): the engine never downloads
 a game whole, it reads the blocks the program asks for and keeps them in OPFS. nginx, Caddy,
 Apache, `npx http-server` and most CDNs do this; Python's `http.server` does not.

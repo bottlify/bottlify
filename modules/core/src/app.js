@@ -69,7 +69,8 @@ import { createMemoryBudget, guestByLength, openMemoryBudget, RUN_HOLDER }
 import { eventFrom } from './system/events-across.js';
 import { defaultModules } from './layers/index.js';
 import { createRunRegistry } from './layers/win32/module.js';
-import { programInPlaceOf, systemProgramImage } from './layers/win32/programs/table.js';
+import { WINDOWS_DIRECTORY, programInPlaceOf, systemProgramImage } from './layers/win32/programs/table.js';
+import { frameworkNeeded } from './layers/win32/mscoree/need.js';
 import { createWindowDirectory } from './layers/win32/user32/directory.js';
 import { shareTransport } from './layers/win32/wsock32/transport.js';
 import { createSharedViews } from './layers/win32/kernel32/shared-views.js';
@@ -392,6 +393,10 @@ const hashText = (hash, text)=>{
  * @property {any} [system]  The run's system half -- registry, volume, windows, ids, named
  *           objects -- for a process that joins another run's rather than making one: a
  *           process in a worker of its own is handed it across a link (`system-link.js`).
+ * @property {Record<string, (payload: any) => void>} [on]
+ *           Subscribed before the start, as a worker's app takes it: what the engine
+ *           tells while it starts (`bundle-preload`, `layer-needed`) comes before the
+ *           app it answers with could be subscribed on.
  * @property {(name: string, payload: any) => void} [relay]
  *           Told every event this process emits, for a process in a worker of its own
  *           to tell the bus of the run that started it.
@@ -5983,6 +5988,10 @@ async function buildApp(options){
             // what it copied cannot leave the engine.
             /** @param {string} text */
             onClipboard: text=>events.emit('clipboard', { text }),
+            // A runtime the machine lacks, which the embedder mounts as a
+            // layer from the next start on: a Framework setup asked for it.
+            /** @param {string} layer */
+            onLayerNeeded: layer=>events.emit('layer-needed', { layer }),
             // An address the program asked the shell to open -- a setup's
             // "visit our site", a readme's link -- for the page to open, as
             // XP's browser would. Taken whether or not anyone opens it: the
@@ -7650,6 +7659,25 @@ async function buildApp(options){
         memory.register({ name: 'image (low dword)', base: aliasAt,
             size: programLoaded.sizeOfImage, kind: memory.RegionKind.RESERVED,
             access: memory.Access.READ_WRITE_EXECUTE });
+    }
+
+    // A managed program on a machine with no Framework that runs it: the
+    // embedder is asked for the layer that carries one. The program goes on,
+    // as it would on that machine, until a start with the layer under it.
+    const neededLayer = frameworkNeeded(options.executable,
+        path=>{
+            try
+            {
+                const entry = filesystem.stat(path);
+                return Boolean(entry) && !entry.directory;
+            }
+            catch {
+                return false;
+            }
+        }, WINDOWS_DIRECTORY);
+    if (neededLayer !== null)
+    {
+        events.emit('layer-needed', { layer: neededLayer, program: options.imagePath ?? null });
     }
 
     // The program's activation context, before any library is looked for:
@@ -10929,6 +10957,10 @@ export async function createApp(options){
     // child existed still have to fire for the last one, and the record of what
     // asked for a replacement is worthless if it dies with the asker.
     const events = createEvents();
+    for (const [name, handler] of Object.entries(options.on ?? {}))
+    {
+        events.on(name, handler);
+    }
     // A process in a worker of its own tells the run's bus what happens to
     // it: the page subscribes there, on the thread that started it.
     if (options.relay)
