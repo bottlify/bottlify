@@ -130,6 +130,13 @@ everyone's. The page flags are `INACCESSIBLE`, `HAS_CODE`, `VOLATILE`, `CLOSED`,
   A page that loses its translations 8 times within 100 ms is marked volatile (`VOLATILE`) and
   interpreted for 2 s, twice as long each time it is marked again, then translated again. With
   several executors a page loses all its translations on every such write.
+- **Whose clock.** A page's rewrites are timed by the runtime's `now`, a slice's length and the
+  time-stamp counter by the host's clock: the machine's in the product. On `clock: 'virtual'`
+  ([`settings.md`](../cork/settings.md)) they are the instructions the guest retired, and the
+  translation is done on the engine thread, where nothing else waits on time (the share of the
+  thread a worker's batches may take is the machine's, and there is no worker). What is
+  translated, and so every count of a run, is then the program's alone, and the time a run took
+  tells how fast the machine was.
 - **Several executors of a process.** How many a run gets, when they open, what the program is
   told of its processors and what an affinity mask means are in
   [`core/configuration.md`](../core/configuration.md#cpu) (`cpu.cores`, `cpu.eager`).

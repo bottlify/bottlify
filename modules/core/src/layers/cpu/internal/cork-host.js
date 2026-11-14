@@ -79,6 +79,11 @@ const DEFAULT_EFLAGS = 0x2;
  */
 const INTERPRET_CHUNK = 8192;
 const SLICE_MS = 8;
+/**
+ * The rate the guest's own clock runs at (`clock: 'virtual'`): a millisecond a
+ * million instructions retired, a guest of a thousand MIPS.
+ */
+export const VIRTUAL_INSTRUCTIONS_PER_MS = 1e6;
 /** The flat 32-bit code selector the segments are implicit at. */
 const FLAT_CS = 0x08;
 /** #UD, the fault an instruction the processor does not know raises. */
@@ -328,6 +333,9 @@ export function createCorkHost(config){
     // How long an interpreted slice may take: a test's own where it names one
     // (`EngineConfig`), so its slices are cut by instructions alone.
     const sliceMs = corkConfig?.sliceMs ?? SLICE_MS;
+    // The clock the host and its translator decide by (`EngineConfig.clock`): the
+    // machine's, or the guest's own, the instructions it retired (`virtualNow`).
+    const virtualClock = corkConfig?.clock === 'virtual';
 
     // The guest RAM is the whole memorySize; the tables and the state block are
     // memory of cork's own beside it, not carved out of the guest's. `own` is
@@ -864,6 +872,21 @@ export function createCorkHost(config){
     // come less than 2^32 instructions apart.
     let counted = 0;
     let lastWord = 0;
+    /** Fold the block's 32-bit counter word into the exact count. */
+    const fold = ()=>{
+        const word = blockView.getUint32(inBlock.counter, true) >>> 0;
+        counted += (word - lastWord) >>> 0;
+        lastWord = word;
+    };
+    /**
+     * The clock the host and its translator decide by, in milliseconds: the
+     * machine's, or on `clock: 'virtual'` the instructions retired so far, the
+     * counter word folded in (`fold`), a million a millisecond.
+     */
+    const now = virtualClock ? ()=>{
+        fold();
+        return counted / VIRTUAL_INSTRUCTIONS_PER_MS;
+    } : ()=>performance.now();
 
     // RIP in long mode, whose code lies in the window below 4 GiB.
     const eip = long ? ()=>Number(blockView.getBigUint64(inBlock.eip, true))
@@ -934,7 +957,7 @@ export function createCorkHost(config){
     // a slice here saw the time go back by however long the process had run
     // before this executor opened, and a game timing its frames by it slept
     // that long.
-    const tscBase = performance.now();
+    const tscBase = virtualClock ? 0 : now();
     const TICKS_PER_MS = CORK_TSC_MHZ * 1000;
     const tscWords = tsc === undefined ? null : new BigInt64Array(tsc);
     /** @type {(() => number) | null} milliseconds of guest time */
@@ -972,17 +995,17 @@ export function createCorkHost(config){
         }
     };
     const readTsc = ()=>{
-        const now = performance.now();
-        let ticks = (now - tscBase) * TICKS_PER_MS;
+        const at = now();
+        let ticks = (at - tscBase) * TICKS_PER_MS;
         const ms = guestNow();
         if (ms !== null)
         {
             if (ms !== guestMs)
             {
                 guestMs = ms;
-                guestMovedAt = now;
+                guestMovedAt = at;
             }
-            ticks = (guestMs + Math.min(now - guestMovedAt, TSC_DRIFT_MS)) * TICKS_PER_MS;
+            ticks = (guestMs + Math.min(at - guestMovedAt, TSC_DRIFT_MS)) * TICKS_PER_MS;
         }
         return later(Math.floor(ticks));
     };
@@ -1022,12 +1045,16 @@ export function createCorkHost(config){
                 && (enginePages.to <= enginePages.from || enginePages.from >= 0x1000)
                 ? { zeroPage: true } : {}),
             ...corkConfig,
+            // On the guest's clock the translation is done on this thread: a
+            // worker's answers come back when the event loop has them.
+            ...virtualClock ? { worker: false } : {},
             // The tables are zero as the runtime starts: a memory just made, or
             // one zeroed where they lie (`reused`, `makeRoomFor`).
             tablesZeroed: true,
             ...(cacheBytes === undefined ? {} : { cacheBytes }),
             ...(translationCharge === null ? {} : { charge: translationCharge }),
             ...(sharedAt < 0 ? {} : { sharedCode: { at: sharedAt, index: executor } }) },
+        ...virtualClock ? { now } : {},
         read: (/** @type {number} */ address)=>ram[address],
         // Past RAM's end `read` answers nothing, which a copy keeps as zeros.
         readBytes: (/** @type {number} */ start, /** @type {number} */ end)=>{
@@ -1260,12 +1287,6 @@ export function createCorkHost(config){
         }
     };
 
-    /** Fold the block's 32-bit counter word into the exact count. */
-    const fold = ()=>{
-        const word = blockView.getUint32(inBlock.counter, true) >>> 0;
-        counted += (word - lastWord) >>> 0;
-        lastWord = word;
-    };
 
     /**
      * The fault record built from a `fault` exit. Cork-alone has no IDT, so
@@ -1788,7 +1809,7 @@ export function createCorkHost(config){
      */
     const runSlice = maxInstructions=>{
         const sliceAt = clock();
-        const wallAt = performance.now();
+        const wallAt = now();
         if (sharedAt >= 0)
         {
             // What the process's other executors wrote over code meanwhile.
@@ -1992,7 +2013,7 @@ export function createCorkHost(config){
                     break;
                 }
             }
-            if (performance.now() - wallAt >= sliceMs)
+            if (now() - wallAt >= sliceMs)
             {
                 break;
             }
