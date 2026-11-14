@@ -756,7 +756,7 @@ test('code translated on a thread\'s stack drops the regions that store through 
 
 test('a page whose writes keep dropping the regions that ran into it is a page of stubs:'
     + ' regions from elsewhere stop at it', async()=>{
-    // CODE: call STUB; hlt -- STUB, on the next page, a leaf (`inc edx; ret`) the
+    // CODE: call STUB; hlt. STUB, on the next page, a leaf (`inc edx; ret`) the
     // caller forms in, as a runtime's precode a program patches one stub at a time.
     // Each write there drops the caller with it, and before the rule every one did.
     const STUB = CODE + 0x1000;
@@ -3273,7 +3273,7 @@ test('a call site keeps its own budget of forming again: other sites of its regi
     {
         return;
     }
-    // CODE: call ebx; call esi; call edi; hlt -- three sites of one region, and
+    // CODE: call ebx; call esi; call edi; hlt: three sites of one region, and
     // callees `inc edx; ret` four bytes apart past it. The samples are written
     // into the profile by hand, a reading at a time, so the order sites come due
     // in is the test's and no clock decides it: A first with only its first
@@ -3319,8 +3319,77 @@ test('a call site keeps its own budget of forming again: other sites of its regi
     const d = m.runtime.diagnostics();
     assert.equal(d.prediction?.reformsOut, 0, 'no site found its region out of reforms');
     assert.equal(d.reforms, 4, 'formed again once for each due');
-    const siteA = d.prediction?.sites.find((/** @type {any} */ one)=>one.site === a);
+    const siteA = /** @type {{ site: number, last?: string }[] | undefined} */ (d.prediction
+        ?.sites)?.find(one=>one.site === a);
     assert.equal(siteA?.last, 'fresh', 'A took its second callee');
+});
+
+test('a callee\'s far branch left as cold, then sampled taken at every call, is followed: the'
+    + ' callee formed in with it, or made a wasm call when too large for that', async()=>{
+    if (!probeFeatures().tailCalls)
+    {
+        return;
+    }
+    // mov eax, 1; call F; hlt. F: test eax, eax; jnz HOOK; ret. HOOK, past the cold
+    // reach: inc edx; ret, after `pad` nops. F is formed into the region without HOOK, so
+    // every call leaves at the branch, and HOOK's return comes back through the entry
+    // hash. The samples the emitter notes at such a way out are written by hand.
+    const runs = 200;
+    /** @param {number} pad @returns {Promise<[number, number]>} transfers before, after */
+    const scene = async pad=>{
+        const m = machine({ countTransfers: true, callTargets: true, predictAfter: 16 });
+        const [f, hook] = [CODE + 0x40, CODE + 0x3000];
+        const branch = f + 2;
+        m.write(CODE, [0xb8, 1, 0, 0, 0, 0xe8, ...le32(f - (CODE + 10)), 0xf4]);
+        m.write(f, [0x85, 0xc0, 0x0f, 0x85, ...le32(hook - (branch + 6)), 0xc3]);
+        m.write(hook, [...new Array(pad).fill(0x90), 0x42, 0xc3]);
+        const run = ()=>{
+            m.setReg(2, 0);
+            const before = m.runtime.diagnostics().transfers ?? 0;
+            for (let i = 0; i < runs; i++)
+            {
+                m.setReg(4, 0x80000);
+                assert.equal(m.runtime.run(m.runtime.entryOf(CODE), 1_000_000).kind, 'halt');
+            }
+            assert.equal(m.reg(2), runs);
+            return (m.runtime.diagnostics().transfers ?? 0) - before;
+        };
+        m.runtime.noteHot(CODE);
+        m.runtime.noteHot(hook);
+        for (let i = 0; i < 8 && [CODE, hook].some(one=>m.runtime.entryOf(one) < 0); i++)
+        {
+            await m.runtime.translatePending();
+        }
+        const cold = run();
+        const at = /** @type {number} */ (m.layout.callProfile);
+        const words = ()=>new DataView(m.memory.buffer);
+        if (words().getUint32(at, true) === 0)
+        {
+            await m.runtime.translatePending();
+        }
+        for (let i = 0; i < 16; i++)
+        {
+            words().setUint32(at + 8 + i * 8, branch, true);
+            words().setUint32(at + 12 + i * 8, hook, true);
+        }
+        for (let i = 0; i < 6; i++)
+        {
+            await m.runtime.translatePending();
+        }
+        assert.equal(m.runtime.diagnostics().reforms, 1, `the region formed again (pad ${pad})`);
+        // A call to F made apart enters F's own region, which the interpreter would ask for.
+        m.runtime.noteHot(f);
+        for (let i = 0; i < (pad > 0 ? 8 : 0) && m.runtime.entryOf(f) < 0; i++)
+        {
+            await m.runtime.translatePending();
+        }
+        return [cold, run()];
+    };
+    assert.deepEqual(await scene(0), [2 * runs, 0],
+        'every call left at the branch and came back by the hash; then HOOK formed in');
+    const [cold, apart] = await scene(600);
+    assert.equal(cold, 2 * runs);
+    assert.ok(apart < cold, `F too large with HOOK: a wasm call, no way out (${apart})`);
 });
 
 test('a region formed after its call was predicted elsewhere is formed again with the callee'

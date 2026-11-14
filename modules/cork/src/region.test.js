@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
-import { emptyCode, formRegion, inlineReturns } from './region.js';
+import { emptyCode, formRegion, formShared, inlineReturns } from './region.js';
 
 /** A region over bytes placed at `base`. @param {number[]} bytes @param {number} [base] */
 function regionOf(bytes, base = 0x1000, options = {}){
@@ -306,7 +306,26 @@ test('a callee whose far conditional branch goes to cold code is formed in witho
         'F formed in, its cold path left out');
     const branch = formed.blocks.find(block=>block.start === 0x1006)?.exit;
     assert.deepEqual(branch?.targets, [cold, 0x100e], 'the branch still names its cold target');
+    assert.deepEqual(branch?.cold, [cold], 'and says which of them was left out as cold');
     assert.deepEqual([...inlineReturns(formed)], [[0x100e, [0x1005]]]);
+    // A branch the run saw taken often is no cold path: followed, F is no leaf either.
+    const hot = form({ callTargets: new Map([[0x1008, [cold]]]) });
+    assert.deepEqual(hot.entries, [0x1000, 0x1005]);
+    assert.equal(hot.blocks[0].exit.apart, 'nested');
+    // Named hot for another target, or for none (its samples said cold: `quiet`), it is cold.
+    assert.deepEqual(form({ callTargets: new Map([[0x1008, [0x100e]]]) }).entries,
+        formed.entries);
+    const quiet = form({ callTargets: new Map([[0x1008, []]]) });
+    assert.deepEqual(quiet.entries, formed.entries);
+    assert.equal(quiet.blocks.find(block=>block.start === 0x1006)?.exit.quiet, true);
+    assert.notEqual(quiet.hash, formed.hash, 'a quiet branch decides code: hashed');
+    // Sharing what forming found keeps each region's own profile: the leaf found cold for
+    // one region is not the one found hot for another.
+    const shared = formShared();
+    assert.deepEqual(form({ shared }).entries, formed.entries);
+    assert.deepEqual(form({ shared, callTargets: new Map([[0x1008, [cold]]]) }).entries,
+        hot.entries);
+    assert.deepEqual(form({ shared }).entries, formed.entries);
     // Followed, the cold path's call makes F no leaf: the call stays a call out.
     const followed = form({ coldReach: 0 });
     assert.deepEqual(followed.entries, [0x1000, 0x1005]);

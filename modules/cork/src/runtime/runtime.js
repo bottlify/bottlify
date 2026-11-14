@@ -4113,6 +4113,15 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
             let taken = quiet.size > 0;
             for (const [site, callees] of added)
             {
+                // A callee's far branch the region left as cold (`coldBranch`), taken often:
+                // followed, its callee was formed in with it, or is too large for that now and
+                // stays a wasm call, the branch no longer in the region - which no longer
+                // leaves there either way. A call is in its region however its callees went.
+                if (!region.blocks.some(block=>site >= block.start && site < block.end))
+                {
+                    taken = true;
+                    continue;
+                }
                 const missed = callees.filter(target=>!starts.has(target));
                 taken ||= missed.length < callees.length;
                 if (missed.length > 0)

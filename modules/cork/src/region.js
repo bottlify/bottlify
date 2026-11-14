@@ -48,12 +48,14 @@ import { translatesLong } from './emit/long-ops.js';
  * @property {{ kind: ExitKind, targets: number[], next: number, backEdge: boolean,
  *              refusal?: import('./decode/decoder.js').Refusal,
  *              table?: SwitchTable, predicted?: boolean, apart?: Apart,
- *              quiet?: boolean }} exit
+ *              quiet?: boolean, cold?: number[] }} exit
  *   an `indirect` exit through a switch's table of addresses carries the table,
  *   and its distinct targets as `targets`; an indirect call the runtime has
  *   seen go to a few callees (`callTargets`) is `predicted`, those callees its
  *   `targets`, and one it has seen enough of to know it has none to form in is
- *   `quiet`; a call whose callee forming did not take in says why (`apart`)
+ *   `quiet`; a call whose callee forming did not take in says why (`apart`); a callee's
+ *   branch to cold code left as a way out (`coldBranch`) names those targets (`cold`),
+ *   and is `quiet` once the run has seen enough of it to know it stays cold
  */
 
 /**
@@ -124,13 +126,17 @@ const COLD_REACH = 4096;
  * bytes and calls count, and the call to it stays a wasm call. Not followed, the branch is
  * a way out of the region to its target, which returns past the call through the entry
  * hash as any callee's `ret` does. `isLeaf` and `formRegion` ask the same question of
- * the same instruction, so a callee found a leaf is formed as it was found.
+ * the same instruction, so a callee found a leaf is formed as it was found. A branch the
+ * run has seen go there often (`hot`) is not cold, however far it reaches: a runtime's
+ * hook checked on every call (a function pointer it set itself, rarely null) lies as far
+ * from the check as an error path, and as a way out it left the region at every call.
  *
  * @param {Block['exit']} exit  of the instruction @param {number} eip  the instruction's
  * @param {number} target @param {number} reach
+ * @param {(eip: number, target: number) => boolean} [hot]
  */
-const coldBranch = (exit, eip, target, reach)=>reach > 0 && exit.kind === 'jcc'
-    && Math.abs(target - eip) > reach;
+const coldBranch = (exit, eip, target, reach, hot)=>reach > 0 && exit.kind === 'jcc'
+    && Math.abs(target - eip) > reach && hot?.(eip, target) !== true;
 
 /**
  * Whether the function at `target` is small enough to form into its caller:
@@ -153,10 +159,13 @@ const coldBranch = (exit, eip, target, reach)=>reach > 0 && exit.kind === 'jcc'
  * @param {boolean} [wide]  long-mode code
  * @param {number} [coldReach]  a conditional branch reaching farther is a way out
  *     (`coldBranch`), its target not part of the callee
+ * @param {(eip: number, target: number) => boolean} [hot]  branches no reach makes cold
+ * @param {[number, number][]} [far]  given, the branches reaching past `coldReach` are put
+ *     there (with their targets), hot or not: what another `hot` could answer otherwise
  * @returns {Apart | number[]}
  */
 function isLeaf(decodeAt, target, translatable, calls = false, limits = LEAF_LIMITS,
-    translates = undefined, wide = false, coldReach = 0)
+    translates = undefined, wide = false, coldReach = 0, hot = undefined, far = undefined)
 {
     const seen = new Set();
     const work = [target];
@@ -199,8 +208,18 @@ function isLeaf(decodeAt, target, translatable, calls = false, limits = LEAF_LIM
             }
             if (exit.kind === 'jump' || exit.kind === 'jcc' || exit.kind === 'loop')
             {
-                work.push(...exit.targets.filter(to=>!coldBranch(exit, decoded.eip, to,
-                    coldReach)));
+                for (const to of exit.targets)
+                {
+                    if (coldBranch(exit, decoded.eip, to, coldReach))
+                    {
+                        far?.push([decoded.eip, to]);
+                        if (hot?.(decoded.eip, to) !== true)
+                        {
+                            continue;
+                        }
+                    }
+                    work.push(to);
+                }
                 break;
             }
             // A jump through a register or memory leaves through the entry hash
@@ -616,7 +635,8 @@ function switchTable(read, block, blocks, most = SWITCH_ENTRIES){
  * functions, and each region decoded every callee again to test it.
  *
  * @typedef {{ decoded: Map<number, import('./decode/decoder.js').Instruction
- *     | import('./decode/decoder.js').Refusal>, leaves: Map<number, Apart | number[]> }} FormShared
+ *     | import('./decode/decoder.js').Refusal>,
+ *     leaves: Map<number, { leaf: Apart | number[], far: [number, number][] }> }} FormShared
  */
 
 /** @returns {FormShared} */
@@ -648,7 +668,9 @@ export function formShared(){
  *     64-bit code are; callTargets:
  *     by the address of an indirect call, the callees it has been seen to go to, formed in
  *     as a direct call's small callee is -- the call compares its target with each; a call
- *     named with none is `quiet`, its calls no longer sampled;
+ *     named with none is `quiet`, its calls no longer sampled; by the address of a callee's
+ *     conditional branch, the far targets the run has seen it take often, which are then
+ *     not cold (`coldBranch`): the same profile, where an instruction was seen to go;
  *     predictedRoom: the blocks and bytes past `maxBlocks` and `maxBytes` those callees may
  *     take, all of them together: a region full of its own function is where a hot call
  *     was left out, and the runtime asks for its callees having seen it go there;
@@ -794,17 +816,36 @@ export function formRegion(read, entry,
     const tables = [];
     /** `isLeaf` by callee and form, once a region (or once for every region
      * sharing it): a function called from many places is decoded once.
-     * @type {Map<number, Apart | number[]>} */
+     * @type {FormShared['leaves']} */
     const leaves = shared?.leaves ?? new Map();
+    /** The far branches this region's profile names taken (`callTargets`).
+     * @param {number} eip @param {number} target */
+    const hot = (eip, target)=>callTargets?.get(eip)?.includes(target) === true;
+    /** `isLeaf` with those branches followed, for the callees that have one: not shared,
+     * as what is hot is this region's. @type {Map<number, Apart | number[]>} */
+    const heated = new Map();
     /** @param {number} target @param {boolean} calls @returns {Apart | number[]} */
     const leafOf = (target, calls)=>{
         const key = target * 2 + (calls ? 1 : 0);
-        let leaf = leaves.get(key);
+        let found = leaves.get(key);
+        if (found === undefined)
+        {
+            /** @type {[number, number][]} */
+            const far = [];
+            found = { leaf: isLeaf(decodeAt, target, translatable, calls, leafLimits, translates,
+                wide, coldReach, undefined, far), far };
+            leaves.set(key, found);
+        }
+        if (!found.far.some(([eip, to])=>hot(eip, to)))
+        {
+            return found.leaf;
+        }
+        let leaf = heated.get(key);
         if (leaf === undefined)
         {
             leaf = isLeaf(decodeAt, target, translatable, calls, leafLimits, translates, wide,
-                coldReach);
-            leaves.set(key, leaf);
+                coldReach, hot);
+            heated.set(key, leaf);
         }
         return leaf;
     };
@@ -1107,9 +1148,18 @@ export function formRegion(read, entry,
                 // callee's branch to cold code is a way out (`coldBranch`).
                 for (const target of [...exit.targets].reverse())
                 {
-                    if (depth === 0 || !coldBranch(exit, decoded.eip, target, coldReach))
+                    if (depth === 0 || !coldBranch(exit, decoded.eip, target, coldReach, hot))
                     {
                         follow(target, depth);
+                    }
+                    else
+                    {
+                        (exit.cold ??= []).push(target);
+                        if (callTargets?.get(decoded.eip)?.length === 0)
+                        {
+                            // Named with no target, its samples showed it cold: sampled no more.
+                            exit.quiet = true;
+                        }
                     }
                 }
             }
