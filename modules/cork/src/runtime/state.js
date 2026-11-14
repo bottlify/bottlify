@@ -10,8 +10,8 @@
  * and adding what it returns), in place of the closure the parts once shared.
  * This file holds its base: what the host hands the runtime and what follows
  * from it alone -- the settings, the features translated code is made for,
- * the page table, the function table and the entries. Nothing here changes
- * after the start.
+ * the page table, the function table, the entries and the views of guest
+ * memory. Nothing here changes after the start.
  */
 
 import { TIER_SLOT } from '../emit/region.js';
@@ -152,11 +152,139 @@ export function baseState({ memory, ram, layout, sharedLayout = undefined, confi
     const entries = createEntries(
         table ? { memory, hashBase: layout.tables + Tables.HASH, shift: layout.hashShift ?? 16,
             zeroed: settings.tablesZeroed === true } : {});
+    /** @type {DataView | null} */
+    let cachedView = null;
+    // One view, taken again only when the memory grew (which detaches the
+    // buffer it was on): a view per region run was a fifth of a call's cost.
+    const view = ()=>{
+        // A grown memory detaches the old buffer, whose length then reads 0:
+        // asked of the view's own buffer, not of `memory.buffer`, whose getter
+        // is a crossing into the engine on every run.
+        if (cachedView === null || cachedView.buffer.byteLength === 0)
+        {
+            cachedView = new DataView(memory.buffer);
+        }
+        return cachedView;
+    };
+    /** @type {Uint8Array | null} */
+    let cachedBytes = null;
+    /**
+     * The guest's bytes `[address, end)` where they lie in the memory, or null
+     * where a byte is past RAM and only `read` answers it: what compares a
+     * store's range with a copy byte by byte, which through `read` was a call
+     * a byte -- tens of microseconds for half a page.
+     *
+     * @param {number} address @param {number} end
+     */
+    const guestBytes = (address, end)=>{
+        if (typeof layout.ramSize !== 'number' || address < 0
+            || codeBase + end > layout.ramSize)
+        {
+            return null;
+        }
+        // A shared memory that grew keeps its old buffer whole, only shorter
+        // than the memory now is: taken again once a range reaches past it.
+        if (cachedBytes === null || cachedBytes.buffer.byteLength === 0
+            || cachedBytes.length < layout.ramBase + codeBase + end)
+        {
+            cachedBytes = new Uint8Array(ramOf.buffer);
+        }
+        return cachedBytes.length < layout.ramBase + codeBase + end ? null
+            : cachedBytes.subarray(layout.ramBase + codeBase + address,
+                layout.ramBase + codeBase + end);
+    };
+    const counterWord = ()=>view().getUint32(layout.counter, true);
+    /** Whether every block counts its executions (`blockProfile`). */
+    const profiling = import.meta.BOTTLIFY_DIAGNOSTICS !== false && settings.blockProfile === true;
+    /** Whether translated code counts its transfers through the hash (`countTransfers`). */
+    const transfersCounted = import.meta.BOTTLIFY_DIAGNOSTICS !== false
+        && settings.countTransfers === true;
     return { memory, ram, layout, sharedLayout, config, imports, features, nowMs, ramOf, codeBase,
         read, readBytes, settings, cacheVersion, clock, formOptions, formHere, leaveOut, found,
         emitLayout, baseGlobals, sharedMemory, codeShared, pages, codePages, table, resumable,
-        entries };
+        entries, view, guestBytes, counterWord, profiling, transfersCounted };
 }
+
+/**
+ * A module placed in the table (`placeModule`): its range's start and
+ * length, its counts of what left it through the table, and its running
+ * regions.
+ *
+ * @typedef {{ base: number, arms: number, crossings: WebAssembly.Global,
+ *     crossedTo: WebAssembly.Global, seen: number, records: Set<RegionRecord>,
+ *     toward: Map<Placed, number>, instance: WebAssembly.Instance,
+ *     baseGlobal: WebAssembly.Global }} Placed
+ *   seen: `crossings` when last read; toward: crossings into each other module
+ */
+
+/**
+ * A module some running region's function is in (`cacheBytes`): its wasm
+ * bytes, those regions, the translated instructions (`corkRetired`) when
+ * one of them last ran -- an entry from the host, a crossing out of the
+ * module or into it -- and until when one brought back after an eviction
+ * is kept whatever that says; `charged`, its bytes taken from the host's
+ * bound (`charge`).
+ *
+ * @typedef {{ instance: WebAssembly.Instance, bytes: number,
+ *     records: Set<RegionRecord>, ran: number, keepUntil: number, charged: number }} Held
+ */
+
+/**
+ * @typedef {Object} RegionRecord
+ * @property {number} entry
+ * @property {Set<number>} pages
+ * @property {Set<number>} [reads]   every page forming read: what a worker forms it from
+ * @property {Set<number>} [formable]   every page forming was told it may form code on
+ * @property {number[]} slots   entry indices
+ * @property {number} table     the function's index in the table, or -1
+ * @property {[number, number][]} spans   the blocks' [start, end)
+ * @property {{ start: number, bytes: Uint8Array }[]} [sources]  every byte forming read,
+ *     as it read them, kept where a store into code reached one of its pages before: a
+ *     later store there drops it only when it changes one of them (`storedInto`)
+ * @property {Map<number, [number, number]>} extents  by page, the code granules its
+ *     blocks cover there, [from, to)
+ * @property {number} entryTop  the x87 top it was formed for
+ * @property {string} hash      of its bytes, which a relink forms it from again
+ * @property {string} labels    its block starts and labels, which a relinked function
+ *     must keep for the entries to stand
+ * @property {boolean} [linked]  its function is in a relinked module already
+ * @property {boolean} [wide]  an x87 region compiled for the wide precision controls
+ * @property {boolean} [narrow]  an x87 region compiled for single precision
+ * @property {boolean} [floats]  of those, one computing on floats in f32 (`floatSingles`)
+ * @property {boolean} [loose]  compiled with its stores through esp untested (`looseStacks`)
+ * @property {boolean} [anyTop]  no x87 in it: kept in the store at any top (`regionKey`)
+ * @property {boolean} [byHash]  kept in the store under its bytes' hash too (`storeKey`)
+ * @property {boolean} [wrapped]  compiled with its reads wrapped into RAM, untested
+ * @property {boolean} [checked]  an x87 region whose entries test nothing of the stack's shape
+ * @property {boolean} [copies]  its blocks inside its loops are entered through copies
+ *     (`emitRegion`); without, they have no entry (`closed`)
+ * @property {number[]} [closed]  the starts of those blocks with no entry
+ * @property {number} [blocks]  how many blocks it has: a label from twice as many is a copy's
+ * @property {Placed} [module]  the placed module its table index is in (`placeModule`)
+ * @property {Held} [held]  the module its function is in (`cacheBytes`)
+ * @property {number} [heat]  its entries and the crossings into it, halved at each
+ *     reading (`foldHeat`)
+ * @property {number} [crossed]  crossings into it read since the last reading
+ * @property {boolean} [movedAlone]  a merge took it alone into the module calling it
+ * @property {number} [merged]  the merges that built it again (`MERGES_A_REGION`)
+ * @property {number} [floatMisses]  its float results that were not the processor's
+ * @property {number} [shapeMisses]  its entries' tests that failed
+ * @property {[number, number[]][]} [targets]  by indirect call, the callees formed into it
+ * @property {Map<number, number[]>} [unformed]  by indirect call, the callees forming it
+ *     again did not take in (the region full): not asked of it again
+ * @property {Map<number, number>} [reforms]  by indirect call, times it was formed again
+ *     for that call: a site's own budget, which its region's other sites do not spend
+ */
+
+/**
+ * The state the runtime's parts are made over: the base and every part's
+ * members. `Late` is what runtime.js itself still lends the parts.
+ *
+ * @typedef {Record<string, any>} Late
+ * @typedef {ReturnType<typeof baseState>
+ *     & ReturnType<typeof import('./diagnostics.js').createDiagnostics>
+ *     & Late} State
+ */
 
 /**
  * Adds a part's members to the state, accessors as accessors: a part's

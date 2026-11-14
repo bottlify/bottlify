@@ -28,29 +28,30 @@
 
 import { codeSpans, emptyCode, formRegion, formShared, hashRegion } from '../region.js';
 import { CallStack, TIER_SLOT, enterRegion, mathImports } from '../emit/region.js';
-import { decode } from '../decode/decoder.js';
-import { NanRecord, RANGE, SHAPE, isX87, trackRegion } from '../emit/x87.js';
+import { RANGE, SHAPE, isX87, trackRegion } from '../emit/x87.js';
 import { HELD, PRECISION } from '../emit/memory.js';
 import { arenaEmitCache, createEmitCache, emitBatch, relinkBatch } from './emit-built.js';
-import { createArena, openArena } from './arena.js';
+import { createArena } from './arena.js';
 import { buildHelpersModule } from '../emit/helpers.js';
 import { openTranslationWorker } from './translator.js';
 import { ANY_TOP } from './entries.js';
 import { PageFlag } from './pages.js';
 import { SharedSwitch } from './shared-code.js';
 import { Tables } from './layout.js';
-import { blockCounts, mechanismCounts, resetBlockCounts, topBlocks, transferTargets }
-    from './block-profile.js';
-import { profileForms } from './profile-forms.js';
+import { resetBlockCounts } from './block-profile.js';
 import { createWeakInstances } from './weak-instances.js';
 import { sharedModulesOf } from './shared-modules.js';
 import { sharedFormsOf, sharedStoreOf } from './shared-forms.js';
-import { baseState } from './state.js';
+import { baseState, join } from './state.js';
 import { cacheKey, moduleKey, packRegion, seedRecords, unpackRegion } from './cache.js';
+import { createDiagnostics } from './diagnostics.js';
 
 /** @typedef {import('../../../core/src/layers/cpu/engine.js').Runtime} Runtime */
 /** @typedef {import('../../../core/src/layers/cpu/engine.js').ExitKind} ExitKind */
 /** @typedef {import('../emit/region.js').X87Precision} X87Precision */
+/** @typedef {import('./state.js').RegionRecord} RegionRecord */
+/** @typedef {import('./state.js').Placed} Placed */
+/** @typedef {import('./state.js').Held} Held */
 
 /**
  * The least share of the store's map of blocks to regions (`storedBlocks`) a
@@ -61,72 +62,12 @@ const MAP_SHARE = 64;
 /** @param {import('../region.js').Region} region */
 const usesX87 = region=>region.blocks.some(block=>block.instructions.some(isX87));
 
-/** A profiling run's hot forms (`hotForms`): the regions emitted again for them at most, the
- * share of the counted executions they stop at, and how long an answer stands. */
-const FORMS_REGIONS = 300;
-const FORMS_SHARE = 0.95;
-const FORMS_EVERY_MS = 30_000;
-/** How many addresses forced steps are counted for (`forcedAt`): the first met, which in a
- * loop that forces are the ones that go on forcing. */
-const FORCED_KEPT = 256;
-
 /** Exit codes by number, as the region functions answer them. */
 const KINDS = /** @type {ExitKind[]} */ (
     ['untranslated', 'budget', 'trap', 'halt', 'fault', 'stale', 'interpreted',
         // `RETURNED` goes to a region's own wasm call, never to the host; were it
         // to arrive, the state block is whole and the run goes on at its EIP.
         'untranslated']);
-
-
-/**
- * Under `precise`, a NaN hunt's record (`layout.nanFirst`): the first x87 NaN
- * translated code made from numbers, from what, and how many; the first stack
- * fault; the first arithmetic with a NaN result; the first NaN read from memory
- * and the first stored there.
- *
- * @param {DataView} view
- * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
- */
-function nanFirst(view, layout){
-    const at = layout.nanFirst ?? -1;
-    if (at < 0)
-    {
-        return {};
-    }
-    const word = (/** @type {number} */ offset)=>view.getUint32(at + offset, true);
-    const hex = (/** @type {number} */ offset)=>`0x${word(offset).toString(16)}`;
-    /** @param {number} slot */
-    const first = slot=>({ eip: hex(slot), count: word(slot + 4),
-        order: word(NanRecord.orderOf[slot]) });
-    /** @type {Record<string, any>} */
-    const out = {};
-    if (word(NanRecord.MADE + 4) > 0)
-    {
-        out.nanFirst = { ...first(NanRecord.MADE), a: view.getFloat64(at + NanRecord.MADE_A, true),
-            c: view.getFloat64(at + NanRecord.MADE_C, true) };
-    }
-    if (word(NanRecord.FAULT + 4) > 0)
-    {
-        // A register read empty or a push onto a held one: the indefinite, a NaN, follows.
-        const r = NanRecord.FAULT_REGION;
-        out.stackFaultFirst = { ...first(NanRecord.FAULT), region: hex(r), entryTop: word(r + 4),
-            empty: hex(r + 8), top: word(r + 12) };
-    }
-    if (word(NanRecord.RESULT + 4) > 0)
-    {
-        // Any arithmetic whose result was a NaN, made or carried from an operand.
-        out.nanResultFirst = first(NanRecord.RESULT);
-    }
-    if (word(NanRecord.LOAD + 4) > 0)
-    {
-        out.nanLoadFirst = { ...first(NanRecord.LOAD), from: hex(NanRecord.LOAD + 8) };
-    }
-    if (word(NanRecord.STORE + 4) > 0)
-    {
-        out.nanStoreFirst = { ...first(NanRecord.STORE), to: hex(NanRecord.STORE + 8) };
-    }
-    return out;
-}
 
 /**
  * The translation worker's file, beside this one, as a host opens it for a
@@ -153,7 +94,11 @@ export function createCorkRuntime(env){
     const rt = baseState(env);
     const { memory, ram, layout, imports, nowMs, ramOf, codeBase, read, readBytes, settings,
         cacheVersion, clock, formOptions, formHere, leaveOut, found, emitLayout, baseGlobals,
-        sharedMemory, codeShared, pages, codePages, table, resumable, entries } = rt;
+        sharedMemory, codeShared, pages, codePages, table, resumable, entries, view, guestBytes,
+        counterWord, profiling, transfersCounted } = rt;
+    const { logOf, CALL_SITES_CAP, counts, noteStall, exits, untranslatedBy, refused, refusedWhy,
+        relaxedFlagReads, storeTrace, trace, interpretedAt, forcedStep, counters, diagnostics
+    } = join(rt, createDiagnostics(rt));
     /**
      * The precision control each x87 region is compiled for, by its entry
      * (`X87Precision`): the one the machine has when the entry is first formed
@@ -266,34 +211,12 @@ export function createCorkRuntime(env){
     /** The ranges of placed modules whose regions have all gone, for others to take.
      * @type {{ base: number, arms: number }[]} */
     const freeRanges = [];
-    /**
-     * A module placed in the table (`placeModule`): its range's start and
-     * length, its counts of what left it through the table, and its running
-     * regions.
-     *
-     * @typedef {{ base: number, arms: number, crossings: WebAssembly.Global,
-     *     crossedTo: WebAssembly.Global, seen: number, records: Set<RegionRecord>,
-     *     toward: Map<Placed, number>, instance: WebAssembly.Instance,
-     *     baseGlobal: WebAssembly.Global }} Placed
-     *   seen: `crossings` when last read; toward: crossings into each other module
-     */
     /** @type {WeakMap<WebAssembly.Instance, Placed>} */
     const placedOf = new WeakMap();
     /** The placed modules with running regions. @type {Set<Placed>} */
     const placedLive = new Set();
     /** The running region at each table index. @type {Map<number, RegionRecord>} */
     const recordAt = new Map();
-    /**
-     * A module some running region's function is in (`cacheBytes`): its wasm
-     * bytes, those regions, the translated instructions (`corkRetired`) when
-     * one of them last ran -- an entry from the host, a crossing out of the
-     * module or into it -- and until when one brought back after an eviction
-     * is kept whatever that says; `charged`, its bytes taken from the host's
-     * bound (`charge`).
-     *
-     * @typedef {{ instance: WebAssembly.Instance, bytes: number,
-     *     records: Set<RegionRecord>, ran: number, keepUntil: number, charged: number }} Held
-     */
     /** @type {Map<WebAssembly.Instance, Held>} */
     const heldModules = new Map();
     let heldBytes = 0;
@@ -500,14 +423,6 @@ export function createCorkRuntime(env){
     };
     const EXIT_TARGETS_CAP = 4096;
     /**
-     * With `timings`: the instructions interpreted from each address the host
-     * began interpreting at (a chunk's first), and the first and last time -
-     * which code a frame spent interpreted, and when. Bounded: past the cap a
-     * new address is not counted.
-     * @type {Map<number, { count: number, first: number, last: number }>}
-     */
-    const interpretedFrom = new Map();
-    /**
      * How often the machine stood at an address that has a region for another
      * top (or a block with no entry of its own), per key(eip, top): the heat a
      * variant is noted with, so one the machine keeps arriving at climbs the
@@ -538,52 +453,6 @@ export function createCorkRuntime(env){
             }
         }
     };
-    /**
-     * @typedef {Object} RegionRecord
-     * @property {number} entry
-     * @property {Set<number>} pages
-     * @property {Set<number>} [reads]   every page forming read: what a worker forms it from
-     * @property {Set<number>} [formable]   every page forming was told it may form code on
-     * @property {number[]} slots   entry indices
-     * @property {number} table     the function's index in the table, or -1
-     * @property {[number, number][]} spans   the blocks' [start, end)
-     * @property {{ start: number, bytes: Uint8Array }[]} [sources]  every byte forming read,
-     *     as it read them, kept where a store into code reached one of its pages before: a
-     *     later store there drops it only when it changes one of them (`storedInto`)
-     * @property {Map<number, [number, number]>} extents  by page, the code granules its
-     *     blocks cover there, [from, to)
-     * @property {number} entryTop  the x87 top it was formed for
-     * @property {string} hash      of its bytes, which a relink forms it from again
-     * @property {string} labels    its block starts and labels, which a relinked function
-     *     must keep for the entries to stand
-     * @property {boolean} [linked]  its function is in a relinked module already
-     * @property {boolean} [wide]  an x87 region compiled for the wide precision controls
-     * @property {boolean} [narrow]  an x87 region compiled for single precision
-     * @property {boolean} [floats]  of those, one computing on floats in f32 (`floatSingles`)
-     * @property {boolean} [loose]  compiled with its stores through esp untested (`looseStacks`)
-     * @property {boolean} [anyTop]  no x87 in it: kept in the store at any top (`regionKey`)
-     * @property {boolean} [byHash]  kept in the store under its bytes' hash too (`storeKey`)
-     * @property {boolean} [wrapped]  compiled with its reads wrapped into RAM, untested
-     * @property {boolean} [checked]  an x87 region whose entries test nothing of the stack's shape
-     * @property {boolean} [copies]  its blocks inside its loops are entered through copies
-     *     (`emitRegion`); without, they have no entry (`closed`)
-     * @property {number[]} [closed]  the starts of those blocks with no entry
-     * @property {number} [blocks]  how many blocks it has: a label from twice as many is a copy's
-     * @property {Placed} [module]  the placed module its table index is in (`placeModule`)
-     * @property {Held} [held]  the module its function is in (`cacheBytes`)
-     * @property {number} [heat]  its entries and the crossings into it, halved at each
-     *     reading (`foldHeat`)
-     * @property {number} [crossed]  crossings into it read since the last reading
-     * @property {boolean} [movedAlone]  a merge took it alone into the module calling it
-     * @property {number} [merged]  the merges that built it again (`MERGES_A_REGION`)
-     * @property {number} [floatMisses]  its float results that were not the processor's
-     * @property {number} [shapeMisses]  its entries' tests that failed
-     * @property {[number, number[]][]} [targets]  by indirect call, the callees formed into it
-     * @property {Map<number, number[]>} [unformed]  by indirect call, the callees forming it
-     *     again did not take in (the region full): not asked of it again
-     * @property {Map<number, number>} [reforms]  by indirect call, times it was formed again
-     *     for that call: a site's own budget, which its region's other sites do not spend
-     */
     /** @type {Set<RegionRecord>} */
     const regions = new Set();
     /**
@@ -693,34 +562,6 @@ export function createCorkRuntime(env){
     /** The calls sampled `PREDICT_AFTER` times, whose callees are looked at next: what was
      * a pass over every call sampled at each `translatePending`. @type {Set<number>} */
     const callsDue = new Set();
-    /**
-     * A diagnostic: each sampled call site's samples over the run, its dues,
-     * how its last due ended and the callees it named then -- what tells a
-     * site the sampling never reaches from one whose callees did not form in.
-     *
-     * At its last due, too, how many of the regions spanning it were formed with its
-     * callees (`held`, of `spanning`), and how often a region formed again for it did not
-     * take them in (`notFormed`) -- the last such region's entry and why (`apart`, the
-     * reason forming gave, or `full`).
-     *
-     * @type {Map<number, { samples: number, dues: number, last: string, top: number[],
-     *     share: number, held: number, spanning: number, notFormed: number,
-     *     unformedIn: number, apart: string }>}
-     */
-    const siteLog = new Map();
-    /** @param {number} site */
-    const logOf = site=>{
-        let one = siteLog.get(site);
-        if (one === undefined && siteLog.size < 16384)
-        {
-            one = { samples: 0, dues: 0, last: '', top: [], share: 0, held: 0, spanning: 0,
-                notFormed: 0, unformedIn: 0, apart: '' };
-            siteLog.set(site, one);
-        }
-        return one;
-    };
-    // Indirect call sites tried with predicted callees, kept for the diagnostics.
-    const CALL_SITES_CAP = 16384;
     /** @type {Map<number, number>} page → times invalidated, the stamp a batch checks */
     const generation = new Map();
     /**
@@ -779,87 +620,8 @@ export function createCorkRuntime(env){
             }
         }
     };
-    const counts = {
-        modules: 0, invalidations: 0, volatilePages: 0, dropped: 0, moduleBytes: 0,
-        // Stores into code that changed none of the bytes a region on the page was made from.
-        storesKept: 0,
-        // Indirect call sites whose samples came due (`callTargets`), and why
-        // each was left as it was: no callee took a share of its samples, or
-        // only ones tried already; its regions formed again as often as they
-        // may be; formed again with none of its new callees in; no region
-        // holding it to form again. And the calls a region was formed again
-        // without sampling (`quiet`).
-        predictDue: 0, predictNoShare: 0, predictReformsOut: 0, predictNotFormed: 0,
-        predictNoRegion: 0, predictHeld: 0, predictQuiet: 0,
-        queueDrops: 0, queueEvictions: 0, emitFailures: 0,
-        // A changed record by why (`accepted`): formed as it says with other
-        // bytes, formed again by it with other bytes, or other modes (x87
-        // precision, floats, the stack shape's tests).
-        cacheHits: 0, cacheMisses: 0, missNoRecord: 0, missNoModule: 0, missChanged: 0,
-        missBytes: 0, missFormedOther: 0, missModes: 0, missPrecision: 0, missFloats: 0,
-        hitsFormedAgain: 0, formedAsRecorded: 0, sharedModules: 0, formedShared: 0,
-        toStoredRegion: 0, precisionSwitches: 0,
-        readSwitches: 0,
-        stackCode: 0,
-        // Inner entries that left held at their start, nothing run (`heldOnEntry`).
-        heldEntries: 0,
-        // Batches the store answered in the call that formed them, and a turn later.
-        lookedUpNow: 0, lookedUpLater: 0, lookedUpInPart: 0,
-        // Calls that formed part of a batch and left the rest to a later one
-        // (`holdMs`), that published part of a batch's store hits, and asks
-        // the spent credit put off; the hits' modules compiled off this thread.
-        formedInPart: 0, publishedInPart: 0, heldBack: 0, compiledApart: 0, answeredFirst: 0,
-        // Calls that found a batch whole and every translator busy (`holdMs`).
-        formedWaiting: 0,
-        shapeMisses: 0, shapeChecked: 0, x87RelaxedReads: 0, floatMisses: 0, floatsRounded: 0,
-        // The milliseconds of translating, by the part of a batch they are:
-        // `translateMs` is their sum, so a frame's own figure and the split
-        // always agree.
-        relinks: 0, relinked: 0, merges: 0, merged: 0, reforms: 0, copied: 0,
-        // Modules let go past `cacheBytes`, their regions, and the regions of
-        // them published again; the crossings counted by modules no longer placed.
-        evictions: 0, evictedRegions: 0, broughtBack: 0, crossingsGone: 0,
-        chargeRefused: 0, unchargedBytes: 0,
-        formingMs: 0, lookupMs: 0, emitMs: 0, encodeMs: 0, storeMs: 0, instantiateMs: 0,
-        publishMs: 0,
-        // Emitting and encoding the worker did: reported apart from
-        // `translateMs`, which is the engine thread's own, so the two threads'
-        // costs stay legible.
-        workerMs: 0,
-        // With `timings`: all the worker was held for (forming a relink and
-        // compiling too), how long a batch was out, and how long work stood
-        // queued behind the one out -- what a second worker, or a second
-        // batch out, would have taken -- and the longest the queue grew.
-        workerBusyMs: 0, inFlightMs: 0, behindMs: 0, queueMax: 0,
-        // With `timings`: the worker's busy time by part - emitting, encoding,
-        // compiling its modules, and hashing and packing them for the store.
-        workerEmitMs: 0, workerEncodeMs: 0, workerCompileMs: 0, workerPackMs: 0,
-    };
     /** When `translateNow` last looked, for `behindMs`. */
     let lookedAt = 0;
-    /**
-     * The engine thread's long holds, host milliseconds: what a guest thread
-     * waiting on a timer (a sound mixer) sat through. The last 64 over 5 ms.
-     * @type {{ at: number, ms: number, what: string }[]}
-     */
-    const stalls = [];
-    /** @param {string} what @param {number} since @param {number} [floorMs] */
-    const noteStall = (what, since, floorMs = 5)=>{
-        if (import.meta.BOTTLIFY_DIAGNOSTICS === false || settings.timings !== true)
-        {
-            return;
-        }
-        const ms = performance.now() - since;
-        if (ms < floorMs)
-        {
-            return;
-        }
-        if (stalls.length === 64)
-        {
-            stalls.shift();
-        }
-        stalls.push({ at: Math.round(since), ms: Math.round(ms), what });
-    };
     let nextTable = resumable ? TIER_SLOT + 1 : 0;
     // The milliseconds emitted on this thread, read on every build: what a
     // host's pool takes as a want for a worker (`translatedHere`). The
@@ -867,87 +629,12 @@ export function createCorkRuntime(env){
     // build, and a pool going by them never lent a process its worker again
     // once it had given it back.
     let emittedHereMs = 0;
-    /** @type {Record<ExitKind, number>} */
-    const exits = { untranslated: 0, budget: 0, trap: 0, halt: 0, fault: 0, stale: 0,
-        interpreted: 0 };
-    // The untranslated exits by what left: a bare one (nothing at the target
-    // in the region), or one a region made to the host on purpose -- a window
-    // its accesses would fault on or a store into code (HELD), the x87
-    // precision it was not formed for (PRECISION), a stack shape it was not
-    // checked for (SHAPE). One count read alone mixes them, and the held ones
-    // land on addresses that are translated, which reads as a link not made.
-    const untranslatedBy = { bare: 0, held: 0, precision: 0, shape: 0, range: 0, other: 0 };
     /** @type {Record<number, keyof typeof untranslatedBy>} */
     const VECTOR_NAMES = { 0: 'bare', [HELD]: 'held', [PRECISION]: 'precision', [SHAPE]: 'shape',
         [RANGE]: 'range' };
     /** @type {import('../../../core/src/layers/cpu/engine.js').ExitRecord} */
     const exit = { retired: 0, kind: 'untranslated', vector: 0 };
-    /** @type {Record<string, number>} */
-    const refused = {};
-    /** @type {Record<string, number>} why an instruction was left out, with its block */
-    const refusedWhy = {};
-    /** By opcode, translated instructions that read a flag the fast default left undefined.
-     * @type {Record<string, number>} */
-    const relaxedFlagReads = {};
     let corkRetired = 0;
-    // Turns the host retired nothing in and forced one interpreted
-    // instruction through, so a slice always moves (the progress guarantee).
-    let forcedSteps = 0;
-    /** Forced steps by address, for the first `FORCED_KEPT` addresses met.
-     * @type {Map<number, { count: number, top: number, why: string, registers: string }>} */
-    const forcedAt = new Map();
-    // The counter word folded the way the layer folds it: exact as long as
-    // reads come less than 2^32 instructions apart.
-    let counted = 0;
-    let lastWord = 0;
-    /** @type {DataView | null} */
-    let cachedView = null;
-    // One view, taken again only when the memory grew (which detaches the
-    // buffer it was on): a view per region run was a fifth of a call's cost.
-    const view = ()=>{
-        // A grown memory detaches the old buffer, whose length then reads 0:
-        // asked of the view's own buffer, not of `memory.buffer`, whose getter
-        // is a crossing into the engine on every run.
-        if (cachedView === null || cachedView.buffer.byteLength === 0)
-        {
-            cachedView = new DataView(memory.buffer);
-        }
-        return cachedView;
-    };
-    /** @type {Uint8Array | null} */
-    let cachedBytes = null;
-    /**
-     * The guest's bytes `[address, end)` where they lie in the memory, or null
-     * where a byte is past RAM and only `read` answers it: what compares a
-     * store's range with a copy byte by byte, which through `read` was a call
-     * a byte -- tens of microseconds for half a page.
-     *
-     * @param {number} address @param {number} end
-     */
-    const guestBytes = (address, end)=>{
-        if (typeof layout.ramSize !== 'number' || address < 0
-            || codeBase + end > layout.ramSize)
-        {
-            return null;
-        }
-        // A shared memory that grew keeps its old buffer whole, only shorter
-        // than the memory now is: taken again once a range reaches past it.
-        if (cachedBytes === null || cachedBytes.buffer.byteLength === 0
-            || cachedBytes.length < layout.ramBase + codeBase + end)
-        {
-            cachedBytes = new Uint8Array(ramOf.buffer);
-        }
-        return cachedBytes.length < layout.ramBase + codeBase + end ? null
-            : cachedBytes.subarray(layout.ramBase + codeBase + address,
-                layout.ramBase + codeBase + end);
-    };
-    const counterWord = ()=>view().getUint32(layout.counter, true);
-    const fold = ()=>{
-        const word = counterWord();
-        counted += (word - lastWord) >>> 0;
-        lastWord = word;
-    };
-    lastWord = counterWord();
 
     /** @param {Set<number>} of */
     const stamp = of=>[...of].map(page=>generation.get(page) ?? 0).join(',');
@@ -1498,68 +1185,6 @@ export function createCorkRuntime(env){
             : address=>!stubPage(address >>> 12) && translatable(address);
     };
 
-    /**
-     * Why the translator has no entry at an untranslated exit's target, the
-     * histogram's second column: the page is volatile (or beyond RAM), the
-     * address formed nothing (`barren`), it is queued and not yet formed, an
-     * entry stands at another x87 top, or the decoder refuses its first
-     * instruction (`cpuid`, `rdtsc`, `int n`, the `fs:`-forms -- plan 4.2's
-     * list). Anything else is not known.
-     *
-     * @param {number} address
-     * @returns {string}
-     */
-    const missReason = address=>{
-        if (codePages.get(address >>> 12) & PageFlag.VOLATILE)
-        {
-            return 'volatile';
-        }
-        if (!translatable(address))
-        {
-            return 'inaccessible';
-        }
-        if (barrenAt(address))
-        {
-            return 'barren';
-        }
-        for (const eip of queue.values())
-        {
-            if (eip === address)
-            {
-                return 'queued';
-            }
-        }
-        for (let top = 0; top < 8; top++)
-        {
-            if (entries.entryOf(address, top) >= 0)
-            {
-                // Every top it was left at has its region now: those exits
-                // were the wait for the translation, not a gap still open.
-                const tops = exitTargets.get(address)?.tops ?? 0;
-                for (let t = 0; t < 8; t++)
-                {
-                    if ((tops >>> t & 1) !== 0 && entries.entryOf(address, t) < 0)
-                    {
-                        return 'other-top';
-                    }
-                }
-                return 'translated since';
-            }
-        }
-        if (typeof read === 'function' && 'refused' in decode(byte=>read(byte), address))
-        {
-            return 'refused';
-        }
-        // Closed in a region's loop: it is that region's to give an entry by
-        // forming again with copies, and no candidate of its own until then.
-        const holders = closedIn.get(address);
-        if (holders !== undefined)
-        {
-            return [...holders].every(record=>record.copies === true) ? 'closed, copied' : 'closed';
-        }
-        return 'unknown';
-    };
-
     // The translation worker: forming and the store lookup stay on the engine
     // thread, where the memory and the store are, and the emitting and
     // encoding of what the store did not hold go to a worker. The engine
@@ -1810,10 +1435,6 @@ export function createCorkRuntime(env){
     /** What emitting inline keeps for a relink to take again: the arena the translators
      * share, or a cache of this thread's own. */
     const emitCache = arena !== null ? arenaEmitCache(arena) : createEmitCache();
-
-    /** The last `hotForms` answer and when it was taken. @type {{ at: number, forms: any } | null} */
-    let formsTaken = null;
-    const profiling = import.meta.BOTTLIFY_DIAGNOSTICS !== false && settings.blockProfile === true;
     let profileResetAt = import.meta.BOTTLIFY_DIAGNOSTICS !== false && profiling
         && settings.blockProfileFrom > 0
         ? performance.now() + settings.blockProfileFrom * 1000 : null;
@@ -1823,9 +1444,6 @@ export function createCorkRuntime(env){
     {
         settings.store?.prepare?.()?.catch(()=>{});
     }
-    /** Whether translated code counts its transfers through the hash (`countTransfers`). */
-    const transfersCounted = import.meta.BOTTLIFY_DIAGNOSTICS !== false
-        && settings.countTransfers === true;
     /** The options both the inline emitter and the worker's take. */
     const emitOptions = ()=>({
         countTransfers: transfersCounted,
@@ -1850,77 +1468,6 @@ export function createCorkRuntime(env){
         ...(settings.trapPort === undefined ? {} : { trapPort: settings.trapPort }),
         ...(sharedMemory ? { memory: sharedMemory } : {}),
     });
-
-    /**
-     * The hot code's forms in a profiling run (`profileForms`): the regions its
-     * counted blocks lie in, the most executed first, until they hold
-     * `FORMS_SHARE` of the counted executions or `FORMS_REGIONS` of them --
-     * formed again as their records were and emitted with the run's options
-     * but no counts, in this thread. Emitting hundreds of regions is no cost
-     * to take on every look at the diagnostics, so the answer stands for
-     * `FORMS_EVERY_MS`.
-     *
-     * @param {[number, number, number, number][]} blocks  `blockCounts`
-     */
-    const hotForms = blocks=>{
-        const now = performance.now();
-        if (formsTaken !== null && now - formsTaken.at < FORMS_EVERY_MS)
-        {
-            return formsTaken.forms;
-        }
-        /** @type {Map<number, number>} */
-        const executions = new Map();
-        /** @type {Map<number, number>} */
-        const byEntry = new Map();
-        let total = 0;
-        for (const [address, count, , entry] of blocks)
-        {
-            executions.set(address, count);
-            total += count;
-            if (entry >= 0)
-            {
-                byEntry.set(entry, (byEntry.get(entry) ?? 0) + count);
-            }
-        }
-        /** @type {Map<number, RegionRecord>} */
-        const hottestAt = new Map();
-        for (const record of regions)
-        {
-            if (!hottestAt.has(record.entry))
-            {
-                hottestAt.set(record.entry, record);
-            }
-        }
-        /** @type {{ region: import('../region.js').Region, entryTop: number, checked: boolean,
-         *     copies: boolean }[]} */
-        const jobs = [];
-        let held = 0;
-        for (const [entry, count] of [...byEntry].sort((a, b)=>b[1] - a[1]))
-        {
-            const record = hottestAt.get(entry);
-            if (record === undefined)
-            {
-                continue;
-            }
-            if (jobs.length >= FORMS_REGIONS || held >= total * FORMS_SHARE)
-            {
-                break;
-            }
-            held += count;
-            const called = record.targets === undefined ? {}
-                : { callTargets: new Map(record.targets) };
-            jobs.push({ region: formRegion(read, record.entry, { ...formHere,
-                translatable: formableFrom(record.entry), ...called }), entryTop: record.entryTop,
-            checked: record.checked === true,
-            copies: record.copies === true, ...precisionJob(record) });
-        }
-        const forms = { ...profileForms(jobs.map(job=>job.region), executions,
-            note=>emitBatch(jobs, emitLayout, found, { ...emitOptions(), blockProfile: false,
-                countTransfers: false, timings: false, expansion: note })),
-        held: total > 0 ? held / total : 0 };
-        formsTaken = { at: now, forms };
-        return forms;
-    };
 
     /** Folds what the emitter left out into the run's refusal maps, the reads of
      * flags the fast default leaves undefined into theirs, and the x87 status-word
@@ -2600,21 +2147,6 @@ export function createCorkRuntime(env){
         }
         counts.publishMs += clock() - publishAt;
         return 1;
-    };
-
-    /** @type {{ put: string[], missed: string[] }} */
-    const storeTrace = { put: [], missed: [] };
-    /** @param {string[]} list
-     * @param {{ region: { entry: number, hash: string, blocks?: { start: number, end: number }[] },
-     *     entryTop: number }} one */
-    const trace = (list, one)=>{
-        if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && settings.traceStore)
-        {
-            const spans = one.region.blocks
-                ?.map(block=>`${block.start.toString(16)}-${block.end.toString(16)}`);
-            list.push(`${one.region.entry.toString(16)}:${one.region.hash}:${one.entryTop}`
-                + (spans ? `:${spans.join(',')}` : ''));
-        }
     };
     // The settings that change emitted code but not a region's bytes, in the
     // store's keys: structure, precise, the transfer count, the modules' placing
@@ -5106,7 +4638,42 @@ export function createCorkRuntime(env){
         counts.lookupMs += clock() - lookupAt;
         return 0;
     };
-
+    // Late: what the modules read of runtime.js.
+    join(rt, {
+        precisionCounts,
+        precisionJob,
+        get loose(){ return loose; },
+        placedLive,
+        heldModules,
+        get heldBytes(){ return heldBytes; },
+        sharedModules,
+        keyOf,
+        queue,
+        barren,
+        barrenAt,
+        exitTargets,
+        bornAt,
+        EXIT_TARGETS_CAP,
+        regions,
+        crtFormed,
+        recordOf,
+        closedIn,
+        dropped,
+        STUB_WRITES,
+        volatileUntil,
+        get corkRetired(){ return corkRetired; },
+        pageBytes,
+        translatable,
+        formableFrom,
+        translators,
+        translatorReady,
+        translatorLoading,
+        coveredOut,
+        arena,
+        emitOptions,
+        batchInstances,
+        sharedForms,
+    });
     /** @type {Runtime & { pages: import('./pages.js').PageTable }} */
     const api = {
         pages,
@@ -5561,291 +5128,10 @@ export function createCorkRuntime(env){
                 }
             }
         },
-        /** One turn the host forced an interpreted instruction through, for
-         * the progress guarantee's diagnostics: where, at what x87 top, and why,
-         * kept for the busiest addresses (`forcedAt`), with the registers the first one
-         * met there before the step, and the flags of the page each points at: with the
-         * instruction they say which window a region found closed (a `held` leave).
-         * @param {number} [at] @param {number} [top] @param {string} [why]
-         * @param {() => number[]} [registers] */
-        /** Instructions interpreted from `at` on (`interpretedFrom`), with `timings`.
-         * @param {number} at @param {number} instructions */
-        interpretedAt(at, instructions){
-            if (settings.timings !== true || instructions === 0)
-            {
-                return;
-            }
-            const now = Math.round(performance.now() - bornAt);
-            const one = interpretedFrom.get(at);
-            if (one !== undefined)
-            {
-                one.count += instructions;
-                one.last = now;
-            }
-            else if (interpretedFrom.size < EXIT_TARGETS_CAP)
-            {
-                interpretedFrom.set(at, { count: instructions, first: now, last: now });
-            }
-        },
-        forcedStep(at, top, why, registers){
-            forcedSteps++;
-            if (at !== undefined && (forcedAt.size < FORCED_KEPT || forcedAt.has(at)))
-            {
-                const values = forcedAt.has(at) ? [] : registers?.() ?? [];
-                // The region the entry is a block of, and the modes it was made in.
-                const owner = forcedAt.has(at) ? undefined
-                    : recordOf.get(entries.entryOf(at, (top ?? 0) & 7));
-                const one = forcedAt.get(at) ?? { count: 0, top: top ?? -1, why: why ?? '',
-                    registers: values.map(value=>`${(value >>> 0).toString(16)}`
-                        + `/${(pages.get(value >>> 12) ?? 0).toString(16)}`).join(' ')
-                        + (owner === undefined ? '' : ` in 0x${owner.entry.toString(16)}`
-                            + `@${owner.entryTop}${owner.loose ? ' loose' : ''}`
-                            + `${owner.wrapped ? ' wrapped' : ''}${owner.checked ? ' checked' : ''}`
-                            + ` ${owner.spans.length} blocks`) };
-                one.count++;
-                forcedAt.set(at, one);
-            }
-        },
-        // The numbers a slice's counters want, and nothing that costs more
-        // than reading them: the frame counters ask every slice, and the
-        // whole snapshot below sorts the exit targets and names each one's
-        // reason across the candidate queue -- a third of a loading phase's
-        // engine time when it was asked that often.
-        counters(){
-            fold();
-            return {
-                regions: regions.size,
-                modules: counts.modules,
-                invalidations: counts.invalidations,
-                translatedShare: counted > 0 ? corkRetired / counted : 0,
-                retired: corkRetired,
-                // Whether the milliseconds below were measured (`timings`): 0 otherwise.
-                timed: import.meta.BOTTLIFY_DIAGNOSTICS !== false && settings.timings === true,
-                translateMs: counts.formingMs + counts.lookupMs + counts.emitMs
-                    + counts.encodeMs + counts.storeMs + counts.instantiateMs + counts.publishMs,
-                exits,
-            };
-        },
-        diagnostics(){
-            fold();
-            const blocks = import.meta.BOTTLIFY_DIAGNOSTICS !== false && profiling
-                ? blockCounts(view(), layout, regions) : null;
-            return {
-                ...(import.meta.BOTTLIFY_DIAGNOSTICS !== false && blocks
-                    ? { blockCounts: blocks, topBlocks: topBlocks(blocks, regions),
-                        mechanisms: mechanismCounts(view(), layout), forms: hotForms(blocks),
-                        transferTargets: transferTargets(view(), layout) }
-                    : {}),
-                regions: regions.size,
-                crtFormed: { ...crtFormed },
-                // Counted only by a run that asked (`countTransfers`); absent otherwise,
-                // where a 0 would read as none made.
-                ...(transfersCounted
-                    ? { transfers: view().getUint32(layout.tables + Tables.TRANSFERS, true) }
-                    : {}),
-                relinks: counts.relinks,
-                relinked: counts.relinked,
-                merges: counts.merges,
-                // The regions those merges built again, of `relinked`.
-                merged: counts.merged,
-                reforms: counts.reforms,
-                copied: counts.copied,
-                // Transfers that left a placed module through the table, as it
-                // counts them (running modules only).
-                crossings: [...placedLive].reduce((sum, placed)=>sum + placed.crossings.value, 0),
-                // And all of them since the start, those of modules gone included.
-                crossingsAll: counts.crossingsGone
-                    + [...placedLive].reduce((sum, placed)=>sum + placed.crossings.value, 0),
-                // The wasm bytes of the modules some running region's function is
-                // in, and how many: what the translated code holds now, against
-                // `moduleBytes`, all made in the run. Past `cacheBytes` the modules
-                // gone longest without running were let go (`evictions`), their
-                // regions brought back from the store when asked for again.
-                heldBytes,
-                heldModules: heldModules.size,
-                cacheBytes: settings.cacheBytes,
-                evictions: counts.evictions,
-                evictedRegions: counts.evictedRegions,
-                // Where the host bounds the modules (`charge`): the times it had no
-                // room for one, and the bytes held past it where nothing was left
-                // to let go.
-                chargeRefused: counts.chargeRefused,
-                unchargedBytes: counts.unchargedBytes,
-                broughtBack: counts.broughtBack,
-                // The function table's length: what the regions' indices span.
-                tableSize: table ? table.length : 0,
-                entries: table ? entries.hashed() : entries.count(),
-                // Every entry, hashed or not: past the hash's room the rest are
-                // reached from translated code only through the host.
-                entriesAll: entries.count(),
-                translateMs: counts.formingMs + counts.lookupMs + counts.emitMs
-                    + counts.encodeMs + counts.storeMs + counts.instantiateMs + counts.publishMs,
-                formingMs: counts.formingMs,
-                lookupMs: counts.lookupMs,
-                emitMs: counts.emitMs,
-                encodeMs: counts.encodeMs,
-                storeMs: counts.storeMs,
-                instantiateMs: counts.instantiateMs,
-                publishMs: counts.publishMs,
-                workerMs: counts.workerMs,
-                workerBusyMs: counts.workerBusyMs,
-                workerEmitMs: counts.workerEmitMs,
-                workerEncodeMs: counts.workerEncodeMs,
-                workerCompileMs: counts.workerCompileMs,
-                workerPackMs: counts.workerPackMs,
-                inFlightMs: counts.inFlightMs,
-                behindMs: counts.behindMs,
-                queueMax: counts.queueMax,
-                // Every module's bytes made in the run, relinks included -- not
-                // what is held; `batchModulesHeld` is the stored batches' instances
-                // still reachable.
-                moduleBytes: counts.moduleBytes,
-                modules: counts.modules,
-                batchModulesHeld: batchInstances.live(),
-                translatedShare: counted > 0 ? corkRetired / counted : 0,
-                retired: corkRetired,
-                cacheHits: counts.cacheHits,
-                cacheMisses: counts.cacheMisses,
-                missNoRecord: counts.missNoRecord,
-                missChanged: counts.missChanged,
-                missBytes: counts.missBytes,
-                missFormedOther: counts.missFormedOther,
-                missModes: counts.missModes,
-                missPrecision: counts.missPrecision,
-                missFloats: counts.missFloats,
-                hitsFormedAgain: counts.hitsFormedAgain,
-                formedAsRecorded: counts.formedAsRecorded,
-                toStoredRegion: counts.toStoredRegion,
-                missNoModule: counts.missNoModule,
-                // Store hits whose batch module a runtime sharing the store had
-                // compiled already, and what the shared modules hold.
-                sharedModules: counts.sharedModules,
-                sharedHeld: sharedModules?.stats() ?? null,
-                // Regions taken as a runtime sharing the store formed them, and
-                // what the shared regions hold.
-                formedShared: counts.formedShared,
-                sharedForms: sharedForms?.stats() ?? null,
-                // What the store holds and what its opening kept, where it says.
-                store: settings.store?.stats?.() ?? null,
-                lookedUpNow: counts.lookedUpNow,
-                lookedUpLater: counts.lookedUpLater,
-                lookedUpInPart: counts.lookedUpInPart,
-                formedInPart: counts.formedInPart,
-                // Forming or a lookup cut short for another executor's ask (`awaited`).
-                answeredFirst: counts.answeredFirst,
-                publishedInPart: counts.publishedInPart,
-                heldBack: counts.heldBack,
-                compiledApart: counts.compiledApart,
-                formedWaiting: counts.formedWaiting,
-                // Times an x87 entry moved to the other precision control or to a
-                // test at every rounding instruction (`precisionAt`).
-                precisionSwitches: counts.precisionSwitches,
-                // Reads tested since the program's first fault on a page it
-                // cannot reach (1), or not (0).
-                readSwitches: counts.readSwitches,
-                // Whether stores through esp go untested (`looseStacks`), and how
-                // often code on a stack switched that off (once at most).
-                looseStacks: loose,
-                stackCode: counts.stackCode,
-                heldEntries: counts.heldEntries,
-                // The x87 entries by the precision control they are compiled for.
-                precision: precisionCounts(),
-                // Entries that found the x87 stack in another shape than their
-                // block's, and the regions translated checked for it.
-                shapeMisses: counts.shapeMisses,
-                shapeChecked: counts.shapeChecked,
-                // Single-precision operations on floats that left for the host because
-                // the float result was not the processor's, and the regions that kept
-                // leaving and went back to rounding from doubles (`floatSingles`).
-                floatMisses: counts.floatMisses,
-                floatsRounded: counts.floatsRounded,
-                // Translated x87 status-word reads that may see what `precise`
-                // alone keeps: where a strange result is worth a run with it.
-                x87RelaxedReads: counts.x87RelaxedReads,
-                // With `checkStale`, the regions still published whose bytes no
-                // longer form as they did: translated code a write did not drop.
-                ...(settings.checkStale ? { staleRegions: [...regions]
-                    .filter(record=>formRegion(read, record.entry, { ...formHere,
-                        translatable: formableFrom(record.entry),
-                        ...(record.targets === undefined
-                            ? {} : { callTargets: new Map(record.targets) }) }).hash
-                        !== record.hash)
-                    .map(record=>`0x${record.entry.toString(16)}`) } : {}),
-                ...nanFirst(view(), layout),
-                stalls: [...stalls],
-                ...(import.meta.BOTTLIFY_DIAGNOSTICS !== false && settings.traceStore
-                    ? { storeTrace } : {}),
-                invalidations: counts.invalidations,
-                dropped: counts.dropped,
-                queued: queue.size,
-                barren: barren.size,
-                queueDrops: counts.queueDrops,
-                emitFailures: counts.emitFailures,
-                queueEvictions: counts.queueEvictions,
-                // Times a page was left to the other executor, and the pages left now.
-                volatilePages: counts.volatilePages,
-                volatileNow: volatileUntil.size,
-                // Pages of stubs: regions from elsewhere stop at them (`STUB_WRITES`).
-                stubPages: [...dropped.values()].filter(one=>one.costs >= STUB_WRITES).length,
-                storesKept: counts.storesKept,
-                // Pages whose bytes are kept to judge a store into none of their
-                // regions by: pages code was on when the store came.
-                codePageCopies: pageBytes.size,
-                prediction: { due: counts.predictDue, noShare: counts.predictNoShare,
-                    reformsOut: counts.predictReformsOut, notFormed: counts.predictNotFormed,
-                    noRegion: counts.predictNoRegion, held: counts.predictHeld,
-                    quiet: counts.predictQuiet,
-                    sites: [...siteLog].sort((a, b)=>b[1].samples - a[1].samples).slice(0, 4096)
-                        .map(([site, one])=>({ site, ...one })),
-                    reforms: counts.reforms },
-                exits: { ...exits },
-                untranslatedBy: { ...untranslatedBy },
-                // The top untranslated-exit targets over the whole run (or the
-                // block profile's window), and why each has no entry: what a
-                // loading phase leaves behind. One only ever left on purpose
-                // (HELD) is `held` -- its address is translated and no link is
-                // missing; the reason of the rest is read now, not at the exit.
-                exitsByTarget: [...exitTargets].sort((a, b)=>b[1].count - a[1].count).slice(0, 32)
-                    .map(([address, { count, held, first, last, way }])=>({ address, count, held,
-                        first, last, way, reason: held === count ? 'held' : missReason(address) })),
-                refused: { ...refused },
-                refusedWhy: { ...refusedWhy },
-                // Where a program reads what `precise: false` leaves: a title that
-                // misbehaves only without `precise` is looked for here first.
-                relaxedFlagReads: { ...relaxedFlagReads },
-                forcedSteps,
-                // Where the interpreted instructions went, busiest first.
-                // and why no translation took each start over: the tops it has
-                // entries at (a bit each), a formed region not yet published that
-                // will cover it (`coveredOut`, the regions holding it), a loop it
-                // is closed in, and the miss's reason.
-                interpretedFrom: [...interpretedFrom].sort((a, b)=>b[1].count - a[1].count)
-                    .slice(0, 24).map(([address, one])=>{
-                        let tops = 0;
-                        for (let top = 0; top < 8; top++)
-                        {
-                            tops |= entries.entryOf(address, top) >= 0 ? 1 << top : 0;
-                        }
-                        let pending = coveredOut.get(keyOf(address, ANY_TOP)) ?? 0;
-                        for (let top = 0; top < 8; top++)
-                        {
-                            pending += coveredOut.get(keyOf(address, top)) ?? 0;
-                        }
-                        return { address, ...one, tops, coveredOut: pending,
-                            closed: closedIn.has(address), why: missReason(address) };
-                    }),
-                // The addresses most forced, busiest first, as "0x401000 x5000 top 3 why".
-                forcedAt: [...forcedAt].sort((a, b)=>b[1].count - a[1].count).slice(0, 10)
-                    .map(([at, one])=>`0x${at.toString(16)} x${one.count}`
-                        + ` top ${one.top} ${one.why}`
-                        + (one.registers ? ` [${one.registers}]` : '')),
-                worker: translatorReady() ? 'ready' : translatorLoading() ? 'loading' : 'none',
-                translators: translators.length,
-                translatorsReady: translators.filter(one=>one.ready).length,
-                ...(arena === null ? {} : { arena: openArena(arena).counts() }),
-                batchesOut: translators.filter(one=>one.pending !== null).length,
-            };
-        },
+        interpretedAt,
+        forcedStep,
+        counters,
+        diagnostics,
     };
     runtimeApi = api;
     return api;
