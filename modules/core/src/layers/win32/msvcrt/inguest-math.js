@@ -1404,3 +1404,345 @@ export function fminf({ floatBits }, x, y){
     }
     return Math.fround(x < y ? x : y);
 }
+
+/** From it on in magnitude asinh and acosh are ln 2 past ln |x|: the rest is below a double's reach. */
+const HYPERBOLIC_LARGE = 2 ** 28;
+
+/** Below it e^x - 1 is -1 to the double: e^x is under half its last place. */
+const EXPM1_FLOOR = -40;
+
+/** The float range 2^x stays normal in. */
+const FLOAT_EXP2_RANGE = 126;
+
+/**
+ * ln(1 + a) for a above -1, u being 1 + a rounded: ln u scaled by a / (u - 1),
+ * which puts back what the rounding of u lost (Goldberg's way); a itself where
+ * u rounds to 1.
+ */
+const log1pFrom = (/** @type {number} */ a, /** @type {number} */ u)=>(u === 1 ? a
+    : X87.yl2x(X87.LN2, u) * (a / (u - 1)));
+
+/** ln(1 + a) for a above -1. */
+const log1pOf = (/** @type {number} */ a)=>log1pFrom(a, 1 + a);
+
+/** What asinh takes log1p of for a below HYPERBOLIC_LARGE: a + a^2 / (1 + sqrt(1 + a^2)). */
+const asinhArgument = (/** @type {number} */ a, /** @type {number} */ root)=>a
+    + a * a / (1 + root);
+
+/** acosh of 1 + t, t not negative: ln(1 + t + sqrt(2t + t^2)). */
+const acoshNear = (/** @type {number} */ t)=>log1pOf(t + Math.sqrt(2 * t + t * t));
+
+/** acosh of x, x finite and at least 1. */
+const acoshOf = (/** @type {number} */ x)=>(x < HYPERBOLIC_LARGE ? acoshNear(x - 1)
+    : X87.yl2x(X87.LN2, x) + X87.LN2);
+
+/** What atanh takes half the log1p of, for a in [0, 1). */
+const atanhArgument = (/** @type {number} */ a)=>2 * a / (1 - a);
+
+/** e^x - 1 for x below EXP_RANGE and not a NaN. */
+const expm1Signed = (/** @type {number} */ x)=>(x < EXPM1_FLOOR ? -1
+    : Math.abs(x) < EXPM1_RANGE ? X87.f2xm1(x * X87.L2E) : expOf(x) - 1);
+
+/**
+ * double log2(double x) -- `fyl2x` of 1 and x; zero, a negative, an infinity
+ * and a NaN the handler's.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f64} x
+ * @returns {f64}
+ */
+export function log2({ host }, x){
+    if (!(x > 0 && x <= MAX))
+    {
+        return host();
+    }
+    return X87.yl2x(1, x);
+}
+
+/**
+ * float log2f(float x), as log2.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x
+ * @returns {f32}
+ */
+export function log2f({ host }, x){
+    if (!(x > 0 && x <= MAX))
+    {
+        return host();
+    }
+    return Math.fround(X87.yl2x(1, x));
+}
+
+/**
+ * double exp2(double x) -- 2^x by `f2xm1` and `fscale`, a whole x exact; past
+ * the normal doubles, an infinity and a NaN the handler's.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f64} x
+ * @returns {f64}
+ */
+export function exp2({ host }, x){
+    if (!(Math.abs(x) < POW_RANGE))
+    {
+        return host();
+    }
+    return pow2Of(x);
+}
+
+/**
+ * float exp2f(float x), as exp2 within the normal floats.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x
+ * @returns {f32}
+ */
+export function exp2f({ host }, x){
+    if (!(Math.abs(x) < FLOAT_EXP2_RANGE))
+    {
+        return host();
+    }
+    return Math.fround(pow2Of(x));
+}
+
+/**
+ * double log1p(double x) -- ln(1 + x) (`log1pOf`); -1 and below, an infinity
+ * and a NaN the handler's.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f64} x
+ * @returns {f64}
+ */
+export function log1p({ host }, x){
+    if (!(x > -1 && x <= MAX))
+    {
+        return host();
+    }
+    return log1pOf(x);
+}
+
+/**
+ * float log1pf(float x), as log1p.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x
+ * @returns {f32}
+ */
+export function log1pf({ host }, x){
+    if (!(x > -1 && x <= MAX))
+    {
+        return host();
+    }
+    return Math.fround(log1pOf(x));
+}
+
+/**
+ * double expm1(double x) -- e^x - 1: `f2xm1` near zero, e^x less one beyond,
+ * -1 far below; EXP_RANGE and above (an overflow there) and a NaN the handler's.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f64} x
+ * @returns {f64}
+ */
+export function expm1({ host }, x){
+    if (!(x < EXP_RANGE))
+    {
+        return host();
+    }
+    return expm1Signed(x);
+}
+
+/**
+ * float expm1f(float x), as expm1.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x
+ * @returns {f32}
+ */
+export function expm1f({ host }, x){
+    if (!(x < EXP_RANGE))
+    {
+        return host();
+    }
+    return Math.fround(expm1Signed(x));
+}
+
+/**
+ * double asinh(double x) -- ln(|x| + sqrt(x^2 + 1)) by log1p, the sign put
+ * back; an infinity and a NaN the handler's.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f64} x
+ * @returns {f64}
+ */
+export function asinh({ host }, x){
+    if (!(Math.abs(x) <= MAX))
+    {
+        return host();
+    }
+    if (x === 0)
+    {
+        return x;
+    }
+    const a = Math.abs(x);
+    if (!(a < HYPERBOLIC_LARGE))
+    {
+        const large = X87.yl2x(X87.LN2, a) + X87.LN2;
+        return x < 0 ? -large : large;
+    }
+    const root = Math.sqrt(1 + a * a);
+    const v = asinhArgument(a, root);
+    const s = log1pOf(v);
+    return x < 0 ? -s : s;
+}
+
+/**
+ * float asinhf(float x), as asinh.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x
+ * @returns {f32}
+ */
+export function asinhf({ host }, x){
+    if (!(Math.abs(x) <= MAX))
+    {
+        return host();
+    }
+    if (x === 0)
+    {
+        return x;
+    }
+    const a = Math.abs(x);
+    if (!(a < HYPERBOLIC_LARGE))
+    {
+        const large = X87.yl2x(X87.LN2, a) + X87.LN2;
+        return Math.fround(x < 0 ? -large : large);
+    }
+    const root = Math.sqrt(1 + a * a);
+    const v = asinhArgument(a, root);
+    const s = log1pOf(v);
+    return Math.fround(x < 0 ? -s : s);
+}
+
+/**
+ * double acosh(double x) -- ln(x + sqrt(x^2 - 1)) by log1p of x - 1; below 1
+ * (EDOM), an infinity and a NaN the handler's.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f64} x
+ * @returns {f64}
+ */
+export function acosh({ host }, x){
+    if (!(x >= 1 && x <= MAX))
+    {
+        return host();
+    }
+    return acoshOf(x);
+}
+
+/**
+ * float acoshf(float x), as acosh.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x
+ * @returns {f32}
+ */
+export function acoshf({ host }, x){
+    if (!(x >= 1 && x <= MAX))
+    {
+        return host();
+    }
+    return Math.fround(acoshOf(x));
+}
+
+/**
+ * double atanh(double x) -- ln((1 + |x|) / (1 - |x|)) / 2 by log1p, the sign
+ * put back; 1 and beyond in magnitude (ERANGE, EDOM) and a NaN the handler's.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f64} x
+ * @returns {f64}
+ */
+export function atanh({ host }, x){
+    if (!(Math.abs(x) < 1))
+    {
+        return host();
+    }
+    if (x === 0)
+    {
+        return x;
+    }
+    const v = atanhArgument(Math.abs(x));
+    const t = log1pOf(v) * 0.5;
+    return x < 0 ? -t : t;
+}
+
+/**
+ * float atanhf(float x), as atanh.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x
+ * @returns {f32}
+ */
+export function atanhf({ host }, x){
+    if (!(Math.abs(x) < 1))
+    {
+        return host();
+    }
+    if (x === 0)
+    {
+        return x;
+    }
+    const v = atanhArgument(Math.abs(x));
+    const t = log1pOf(v) * 0.5;
+    return Math.fround(x < 0 ? -t : t);
+}
+
+/**
+ * int ilogb(double x) -- the unbiased exponent, `fxtract`'s, a subnormal's as
+ * though normalised; zero, an infinity and a NaN the handler's.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f64} x
+ * @returns {i32}
+ */
+export function ilogb({ host }, x){
+    if (!(Math.abs(x) <= MAX && x !== 0))
+    {
+        return host();
+    }
+    return exponentOf(Math.abs(x)) | 0;
+}
+
+/**
+ * int ilogbf(float x), as ilogb.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x
+ * @returns {i32}
+ */
+export function ilogbf({ host }, x){
+    if (!(Math.abs(x) <= MAX && x !== 0))
+    {
+        return host();
+    }
+    return exponentOf(Math.abs(x)) | 0;
+}
+
+/**
+ * float modff(float x, float *whole) -- as modf; an infinity and a NaN the
+ * handler's.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {f32} x @param {u32} whole
+ * @returns {f32}
+ */
+export function modff({ host, setF32 }, x, whole){
+    if (!(Math.abs(x) <= MAX))
+    {
+        return host();
+    }
+    const truncated = x < 0 ? Math.ceil(x) : Math.floor(x);
+    setF32(whole, truncated);
+    return Math.fround(x - truncated);
+}
