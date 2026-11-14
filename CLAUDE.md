@@ -5,6 +5,17 @@ Bottlify is a set of packages for running Win32 x86 programs in the browser: **c
 WebGPU, WebAudio and OPFS. Where this file and the tree disagree, the tree is right and this file
 is the bug.
 
+## Working rule: the next one picks it up
+
+All of this code is written for ourselves. The next one to work on it - an agent first of all,
+this one in a later session, or a person - has to recover the context fast from the tree itself
+and add nothing worse than what is there. So: a change leaves its area clearer than it found it;
+a patch that works around a symptom in one place is a hack, and the cause is fixed where every
+caller goes through it; what is no longer used goes (git keeps it); a mechanism that has grown
+by patches is redone once its shape is known. Decide as the owner of the project would: an idea
+already taken, the owner's included, is followed or argued against with a reason, never kept
+only because it is there.
+
 ## Working rule: finish the step
 
 A step ends in one of two ways: **solved** (implemented, tested, verified on what it was for) or
