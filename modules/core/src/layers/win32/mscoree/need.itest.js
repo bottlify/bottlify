@@ -32,8 +32,9 @@ async function run(executable, options = {}){
     /** @type {any[]} */
     const asked = [];
     const app = await createApp({ executable, imagePath: 'C:\\App\\managed.exe',
-        windows: 'win7', ...options,
-        on: { 'layer-needed': (/** @type {any} */ event)=>asked.push(event) } });
+        windows: 'win7', ...options });
+    // Told while the program was loaded, and kept for its first subscriber.
+    app.on('layer-needed', (/** @type {any} */ event)=>asked.push(event));
     try
     {
         const code = (await app.run({ timeoutMs: 60_000 })) >>> 0;

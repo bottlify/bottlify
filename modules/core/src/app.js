@@ -394,10 +394,6 @@ const hashText = (hash, text)=>{
  * @property {any} [system]  The run's system half -- registry, volume, windows, ids, named
  *           objects -- for a process that joins another run's rather than making one: a
  *           process in a worker of its own is handed it across a link (`system-link.js`).
- * @property {Record<string, (payload: any) => void>} [on]
- *           Subscribed before the start, as a worker's app takes it: what the engine
- *           tells while it starts (`bundle-preload`, `layer-needed`) comes before the
- *           app it answers with could be subscribed on.
  * @property {(name: string, payload: any) => void} [relay]
  *           Told every event this process emits, for a process in a worker of its own
  *           to tell the bus of the run that started it.
@@ -10890,10 +10886,6 @@ export async function createApp(options){
     // child existed still have to fire for the last one, and the record of what
     // asked for a replacement is worthless if it dies with the asker.
     const events = createEvents();
-    for (const [name, handler] of Object.entries(options.on ?? {}))
-    {
-        events.on(name, handler);
-    }
     // A process in a worker of its own tells the run's bus what happens to
     // it: the page subscribes there, on the thread that started it.
     if (options.relay)
