@@ -221,24 +221,18 @@ export class Body {
         /**
          * Where the locals written from now on are added too, when given: the
          * region emitter's account of what each block writes.
-         * @type {Set<number> | null}
+         * @type {import('./local-set.js').LocalSet | null}
          */
         this.written = null;
-        /**
-         * Where the locals read or written from now on are added too, when
-         * given: the long-mode emitter's account of what each block touches.
-         * @type {Set<number> | null}
-         */
-        this.seen = null;
         /**
          * Where the locals read before this point's code wrote them are added
          * too, when given, and the locals it wrote at `mustDepth` -- code no
          * branch inside the block skips -- into `must`: the region emitter's
-         * account of what a block needs from before it (`planReloads`).
-         * @type {Set<number> | null}
+         * account of what a block needs from before it (`planPaths`).
+         * @type {import('./local-set.js').LocalSet | null}
          */
         this.exposed = null;
-        /** @type {Set<number> | null} */
+        /** @type {import('./local-set.js').LocalSet | null} */
         this.must = null;
         this.mustDepth = -1;
         /**
@@ -270,7 +264,6 @@ export class Body {
             this.touched = grown;
         }
         this.touched[index] |= how;
-        this.seen?.add(index);
         if (how === 3)
         {
             this.written?.add(index);
