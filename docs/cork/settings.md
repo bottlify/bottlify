@@ -12,7 +12,6 @@ shipped program to change.
 | Setting | Default | What it is |
 | --- | --- | --- |
 | `atomic` | `false` | `lock`-prefixed instructions and `xchg` with memory as wasm atomics: set by the core for a process whose threads run on several executors over one memory. |
-| `ordered` | `false` | With `atomic`, an integer operand's load and store not through esp as wasm atomics too, where aligned: the order of plain stores on a host that reorders them (arm64). Off unless the page asks. |
 | `trapPort` | none | The I/O port whose `out` is the host's call. |
 | `worker` | on where `Worker` exists, unless `feed` is `'slice'` | Emit and compile in translation workers; `false` translates on the calling thread. |
 | `workerUrl` | beside the runtime | Where `translator.worker.js` is, when a bundler moves it. |
