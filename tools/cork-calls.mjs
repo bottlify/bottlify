@@ -8,7 +8,7 @@
  * The shape of a run's calls, from its block profile: what a benchmark of
  * calling conventions has to reproduce to measure what the engine would pay.
  *
- *   node tools/cork-calls.mjs <blocks.json> [--bundle id] [--image name.dll@0x2b3b000]...
+ *   node tools/cork-mix.mjs --calls <blocks.json> [--bundle id] [--image name.dll@0x2b3b000]...
  *       [--file path.exe@0x400000]... [--exclude 0x2b50c40-0x2b50cd2]... [--out profile.json]
  *       [--top 20]
  *

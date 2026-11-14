@@ -15,6 +15,14 @@
  *
  *   node tools/cdp_test/smoke.mjs <bundle-id> [--runs 3] [--run-seconds 240] [--wait S]
  *       [--checkout DIR] [--against FILE] [--json FILE] [-- game.mjs flags...]
+ *   node tools/cdp_test/smoke.mjs span <game-*-presents.json>... [--skip N] [--frames N]
+ *   node tools/cdp_test/smoke.mjs drops <game-*-frames.json> <game-*-frames.json>...
+ *
+ * The same question asked of runs already made: `span` the frame time of a
+ * span of one run's presents, after its load (frame-span.mjs); `drops` the
+ * frame drops that fall at the same point of the workload in most of several
+ * runs, which the guest or the engine causes, against the ones that wander,
+ * which the machine does (drop-repeat.mjs).
  *
  * The title's part is data beside its bundle, never code here: the route's
  * `args` (`bundles/<id>/route.json`, as `game.mjs --route` reads it) take it
@@ -48,6 +56,18 @@ import { cpus, platform, release } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BUNDLES_DIR } from '../common.mjs';
+
+/** The readers of runs already made, by the mode that runs them. */
+const READERS = /** @type {Record<string, string>} */ ({ span: '../frame-span.mjs',
+    drops: './drop-repeat.mjs' });
+if (READERS[process.argv[2]])
+{
+    // Each reads its own command line, given to it as though it ran alone.
+    const reader = new URL(READERS[process.argv[2]], import.meta.url);
+    process.argv = [process.argv[0], fileURLToPath(reader), ...process.argv.slice(3)];
+    await import(reader.href);
+    process.exit(process.exitCode ?? 0);
+}
 
 const TOOL_ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)));
 const REPO_ROOT = resolve(TOOL_ROOT, '..', '..');

@@ -26,10 +26,16 @@
  * its branch, `fld; fmul; faddp`, a copy through a register -- rank first. A
  * profile written by `tools/launch-probe.mjs --cork-out` (`blockCounts`) reads as
  * one of game.mjs's.
+ *
+ * `--calls` reads the same profile for the shape of the run's calls instead
+ * (cork-calls.mjs, its options there): direct, indirect and import calls and
+ * the registers live around them, what a benchmark of calling conventions has
+ * to reproduce (modules/cork/bench/calls).
  */
 
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { openBundle } from './btl.mjs';
 import { decode } from '../modules/cork/src/decode/decoder.js';
 import { formRegion } from '../modules/cork/src/region.js';
@@ -37,6 +43,16 @@ import { emitBuilt } from '../modules/cork/src/runtime/emit-built.js';
 import { ownLayout } from '../modules/cork/src/runtime/layout.js';
 import { features } from '../modules/cork/src/wasm/features.js';
 import { bundleDir } from './common.mjs';
+
+if (process.argv.includes('--calls'))
+{
+    // The calls' reader takes its own command line, as though it ran alone.
+    const reader = new URL('./cork-calls.mjs', import.meta.url);
+    process.argv = [process.argv[0], fileURLToPath(reader),
+        ...process.argv.slice(2).filter(arg=>arg !== '--calls')];
+    await import(reader.href);
+    process.exit(process.exitCode ?? 0);
+}
 
 const args = process.argv.slice(2);
 const flag = (/** @type {string} */ name, /** @type {string} */ fallback)=>(args.includes(name) ? args[args.indexOf(name) + 1] : fallback);
@@ -164,9 +180,11 @@ for (const row of mix.values())
 }
 const rows = [...mix].sort((one, two)=>two[1].executions * two[1].cost
     - one[1].executions * one[1].cost);
-const images = [manifest.entry, ...extra].join(', ');
+const files = args.flatMap((one, at)=>(one === '--file'
+    ? [args[at + 1].split(/[\\/]/).pop()] : []));
+const images = [manifest.entry, ...extra, ...files].join(', ');
 console.log(`${blocks.length} blocks, ${executed} instructions in ${images}`
-    + `, ${outside} block executions outside it`);
+    + `, ${outside} block executions outside them`);
 console.log('share  ops-share  ops/insn  form');
 for (const [key, row] of rows.slice(0, top))
 {

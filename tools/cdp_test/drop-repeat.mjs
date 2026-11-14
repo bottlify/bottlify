@@ -192,7 +192,7 @@ if (isMain(import.meta.url))
     }
     if (files.length < 2)
     {
-        console.error('usage: node tools/cdp_test/drop-repeat.mjs <frames.json> <frames.json>...'
+        console.error('usage: node tools/cdp_test/smoke.mjs drops <frames.json> <frames.json>...'
             + ' [--bin S] [--share F] [--gap MS] [--json FILE]');
         process.exit(2);
     }

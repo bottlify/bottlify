@@ -40,7 +40,7 @@ const seconds = args.includes('--seconds')
 const files = args.filter((one, at)=>!one.startsWith('--') && !args[at - 1]?.startsWith('--'));
 if (files.length === 0)
 {
-    console.error('usage: node tools/frame-span.mjs <presents.json>... [--skip N] [--frames N]'
+    console.error('usage: node tools/cdp_test/smoke.mjs span <presents.json>... [--skip N] [--frames N]'
         + ' [--seconds A-B]');
     process.exit(2);
 }
