@@ -46,8 +46,10 @@ export async function assembleModules(config = {}){
             }
             return api;
         },
-        diagnostics(){
-            return plan.map(entry=>entry.module.diagnostics());
+        /** Every module's table, or the one module's named. @param {string | null} [only] */
+        diagnostics(only = null){
+            return plan.filter(entry=>only === null || entry.module.name === only)
+                .map(entry=>entry.module.diagnostics());
         },
         async dispose(){
             for (const entry of [...plan].reverse())

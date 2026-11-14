@@ -746,6 +746,7 @@ test('what a program hands its last-chance filter is traced: registers, chain an
     m.put(context + 0xb4, 0x40100);
     m.put(context + 0xc4, 0x40000);
     m.put(0x40100 - 64, 0xfeedface);
+    m.put(0x40000 + 0x2c4, 0xc0ffee);
     m.put(0x2000, record);
     m.put(0x2004, context);
     seh.table.SetUnhandledExceptionFilter.handler([0x61000]);
@@ -756,6 +757,7 @@ test('what a program hands its last-chance filter is traced: registers, chain an
     assert.ok(text.includes('last chance: code 0xc0000409 at 0x401234'), text);
     assert.ok(text.includes('ebp=0x40100') && text.includes('esp=0x40000'), text);
     assert.ok(text.includes('[ebp-64] 0xfeedface'), text);
+    assert.ok(/0x402c0: \S+ 0xc0ffee /.test(text), 'the stack above esp, row by row');
     assert.ok(text.includes('0x20000>0x51000'), 'the handler chain');
 });
 

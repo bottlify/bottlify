@@ -25,6 +25,13 @@ import { criticalLayout } from './critical.js';
  * itself have to wait.
  */
 
+/**
+ * An SRW lock's word, Windows' own layout: held; someone waits, and then every
+ * release comes to the host to hand it on and only the host changes the word;
+ * and the readers inside, counted from bit 4.
+ */
+export const SRW = Object.freeze({ HELD: 0x1, WAITING: 0x2, SHARED: 0x10 });
+
 /** InitOnceBeginInitialize's and InitOnceComplete's flags. */
 const INIT_ONCE_CHECK_ONLY = 0x1;
 const INIT_ONCE_ASYNC = 0x2;
@@ -104,6 +111,154 @@ export function sleepSrwCode(at, { sleep, timedOut, shared, exclusive }){
         0x58, //                                  pop eax
         0xc2, 0x10, 0x00, //                      ret 16
     ]);
+}
+
+/**
+ * A near jump from `at` to `target`.
+ *
+ * @param {number} at @param {number} target
+ * @returns {number[]}
+ */
+const jump = (at, target)=>[0xe9, ...dword(target - (at + 5))];
+
+/**
+ * The SRW lock's six exports as 32-bit guest code: what takes or lets go of a
+ * lock nobody waits for is the program's own `lock cmpxchg` on the word
+ * (`SRW`), and only what has to wait or wake jumps to the host's trap with the
+ * caller's stack as it came. The tries never trap. A .NET runtime loading took
+ * and let go of one some 1 300 times a second, each a crossing.
+ *
+ *   AcquireSRWLockExclusive:          ReleaseSRWLockExclusive:
+ *     mov ecx, [esp+4]                  mov ecx, [esp+4]
+ *     xor eax, eax                      mov eax, HELD
+ *     mov edx, HELD                     xor edx, edx
+ *     lock cmpxchg [ecx], edx           lock cmpxchg [ecx], edx
+ *     jnz trap                          jnz trap      ; shared, or someone waits
+ *     ret 4                             ret 4
+ *
+ *   AcquireSRWLockShared:             ReleaseSRWLockShared:
+ *     mov ecx, [esp+4]                  mov ecx, [esp+4]
+ *     mov eax, [ecx]                    mov eax, [ecx]
+ *   again:                            again:
+ *     test al, WAITING; jnz trap        test al, WAITING; jnz trap
+ *     cmp eax, HELD; je trap            xor edx, edx
+ *     lea edx, [eax+SHARED]             cmp eax, HELD|SHARED; je swap   ; the last reader
+ *     test eax, eax; jnz swap           jb trap                         ; not held shared
+ *     mov edx, HELD|SHARED              lea edx, [eax-SHARED]
+ *   swap:                             swap:
+ *     lock cmpxchg [ecx], edx           lock cmpxchg [ecx], edx
+ *     jnz again                         jnz again
+ *     ret 4                             ret 4
+ *
+ * TryAcquireSRWLockExclusive is the first with `sete al; movzx eax, al` for
+ * the jump, TryAcquireSRWLockShared the third answering 1, or 0 where it
+ * would trap.
+ *
+ * @param {number} at  Where the six are placed, one after another.
+ * @param {{ acquireExclusive: number, releaseExclusive: number,
+ *     acquireShared: number, releaseShared: number }} traps
+ * @returns {{ code: Uint8Array, entries: { acquireExclusive: number,
+ *     releaseExclusive: number, acquireShared: number, releaseShared: number,
+ *     tryExclusive: number, tryShared: number } }}
+ */
+export function srwCode(at, traps){
+    const HELD = SRW.HELD;
+    const WAITING = SRW.WAITING;
+    const ONE_READER = SRW.HELD | SRW.SHARED;
+    /** @type {number[]} */
+    const bytes = [];
+    /** @type {Record<string, number>} */
+    const entries = {};
+    /** @param {string} name @param {(start: number) => number[]} routine */
+    const add = (name, routine)=>{
+        entries[name] = at + bytes.length;
+        bytes.push(...routine(at + bytes.length));
+    };
+    add('acquireExclusive', start=>[
+        0x8b, 0x4c, 0x24, 0x04, //                mov ecx, [esp+4]
+        0x31, 0xc0, //                            xor eax, eax
+        0xba, ...dword(HELD), //                  mov edx, HELD
+        0xf0, 0x0f, 0xb1, 0x11, //                lock cmpxchg [ecx], edx
+        0x75, 0x03, //                            jnz trap (+3)
+        0xc2, 0x04, 0x00, //                      ret 4
+        ...jump(start + 20, traps.acquireExclusive),
+    ]);
+    add('tryExclusive', ()=>[
+        0x8b, 0x4c, 0x24, 0x04, //                mov ecx, [esp+4]
+        0x31, 0xc0, //                            xor eax, eax
+        0xba, ...dword(HELD), //                  mov edx, HELD
+        0xf0, 0x0f, 0xb1, 0x11, //                lock cmpxchg [ecx], edx
+        0x0f, 0x94, 0xc0, //                      sete al
+        0x0f, 0xb6, 0xc0, //                      movzx eax, al
+        0xc2, 0x04, 0x00, //                      ret 4
+    ]);
+    add('releaseExclusive', start=>[
+        0x8b, 0x4c, 0x24, 0x04, //                mov ecx, [esp+4]
+        0xb8, ...dword(HELD), //                  mov eax, HELD
+        0x31, 0xd2, //                            xor edx, edx
+        0xf0, 0x0f, 0xb1, 0x11, //                lock cmpxchg [ecx], edx
+        0x75, 0x03, //                            jnz trap (+3)
+        0xc2, 0x04, 0x00, //                      ret 4
+        ...jump(start + 20, traps.releaseExclusive),
+    ]);
+    add('acquireShared', start=>[
+        0x8b, 0x4c, 0x24, 0x04, //          00    mov ecx, [esp+4]
+        0x8b, 0x01, //                      04    mov eax, [ecx]
+        // again:
+        0xa8, WAITING, //                   06    test al, WAITING
+        0x75, 0x1a, //                      08    jnz trap (0x24)
+        0x83, 0xf8, HELD, //                0a    cmp eax, HELD
+        0x74, 0x15, //                      0d    je trap (0x24)
+        0x8d, 0x50, SRW.SHARED, //          0f    lea edx, [eax+SHARED]
+        0x85, 0xc0, //                      12    test eax, eax
+        0x75, 0x05, //                      14    jnz swap (0x1b)
+        0xba, ...dword(ONE_READER), //      16    mov edx, HELD|SHARED
+        // swap:
+        0xf0, 0x0f, 0xb1, 0x11, //          1b    lock cmpxchg [ecx], edx
+        0x75, 0xe5, //                      1f    jnz again (0x06)
+        0xc2, 0x04, 0x00, //                21    ret 4
+        ...jump(start + 0x24, traps.acquireShared),
+    ]);
+    add('tryShared', ()=>[
+        0x8b, 0x4c, 0x24, 0x04, //          00    mov ecx, [esp+4]
+        0x8b, 0x01, //                      04    mov eax, [ecx]
+        // again:
+        0xa8, WAITING, //                   06    test al, WAITING
+        0x75, 0x1f, //                      08    jnz fail (0x29)
+        0x83, 0xf8, HELD, //                0a    cmp eax, HELD
+        0x74, 0x1a, //                      0d    je fail (0x29)
+        0x8d, 0x50, SRW.SHARED, //          0f    lea edx, [eax+SHARED]
+        0x85, 0xc0, //                      12    test eax, eax
+        0x75, 0x05, //                      14    jnz swap (0x1b)
+        0xba, ...dword(ONE_READER), //      16    mov edx, HELD|SHARED
+        // swap:
+        0xf0, 0x0f, 0xb1, 0x11, //          1b    lock cmpxchg [ecx], edx
+        0x75, 0xe5, //                      1f    jnz again (0x06)
+        0xb8, ...dword(1), //               21    mov eax, 1
+        0xc2, 0x04, 0x00, //                26    ret 4
+        // fail:
+        0x31, 0xc0, //                      29    xor eax, eax
+        0xc2, 0x04, 0x00, //                2b    ret 4
+    ]);
+    add('releaseShared', start=>[
+        0x8b, 0x4c, 0x24, 0x04, //          00    mov ecx, [esp+4]
+        0x8b, 0x01, //                      04    mov eax, [ecx]
+        // again:
+        0xa8, WAITING, //                   06    test al, WAITING
+        0x75, 0x15, //                      08    jnz trap (0x1f)
+        0x31, 0xd2, //                      0a    xor edx, edx
+        0x83, 0xf8, ONE_READER, //          0c    cmp eax, HELD|SHARED
+        0x74, 0x05, //                      0f    je swap (0x16)
+        0x72, 0x0c, //                      11    jb trap (0x1f)
+        0x8d, 0x50, 0x100 - SRW.SHARED, //  13    lea edx, [eax-SHARED]
+        // swap:
+        0xf0, 0x0f, 0xb1, 0x11, //          16    lock cmpxchg [ecx], edx
+        0x75, 0xea, //                      1a    jnz again (0x06)
+        0xc2, 0x04, 0x00, //                1c    ret 4
+        ...jump(start + 0x1f, traps.releaseShared),
+    ]);
+    return { code: new Uint8Array(bytes),
+        entries: /** @type {any} */ (entries) };
 }
 
 /**
@@ -364,130 +519,172 @@ export function createSlimSync(host, enterCritical, enterSection){
     };
 
     /**
-     * @typedef {Object} SrwState
-     * @property {any} owner      The thread holding it exclusively, or null.
-     * @property {number} shared  How many hold it shared.
-     * @property {{ thread: any, exclusive: boolean }[]} waiters  In arrival order.
+     * The threads waiting for each SRW lock, in arrival order. The word itself
+     * is the lock (`SRW`): the guest's own instructions take and let go of one
+     * nobody waits for, and only what they cannot do comes here.
+     *
+     * @type {Map<number, { thread: any, exclusive: boolean }[]>}
      */
-    /** @type {Map<number, SrwState>} */
     const locks = new Map();
     /** @type {Map<number, any[]>} */
     const conditions = new Map();
 
     /** @param {number} address */
-    const lockAt = address=>{
-        let state = locks.get(address);
-        if (!state)
+    const lockWord = address=>new DataView(
+        host.readMemory(address, 4).slice().buffer).getUint32(0, true);
+    /**
+     * The word replaced by `value` if it still holds `expected`, answering
+     * what it held: a thread on another executor takes and lets go of the lock
+     * with `lock cmpxchg` meanwhile, and a plain store would undo it.
+     *
+     * @param {number} address @param {number} expected @param {number} value
+     */
+    const swapWord = (address, expected, value)=>{
+        if (host.compareExchangeU32 !== undefined)
         {
-            state = { owner: null, shared: 0, waiters: [] };
-            locks.set(address, state);
+            return host.compareExchangeU32(address, expected >>> 0, value >>> 0) >>> 0;
         }
-        return state;
-    };
-
-    /** @param {number} address @param {SrwState} state */
-    const publish = (address, state)=>{
-        const word = state.owner !== null ? 1 : state.shared > 0 ? (state.shared << 4 | 1) : 0;
-        host.writeMemory(address, wide(word));
+        const held = lockWord(address);
+        if (held === expected >>> 0)
+        {
+            host.writeMemory(address, new Uint8Array(dword(value)));
+        }
+        return held;
     };
 
     /**
-     * Takes the lock at once when it can be taken. A reader does not join
-     * readers already inside while a writer waits, or a stream of readers
-     * would keep the writer out for ever.
+     * What a word taken now becomes, or null when it cannot be taken: free
+     * for a writer; free or shared for a reader with nobody waiting, or a
+     * stream of readers would keep a waiting writer out for ever.
      *
-     * @param {SrwState} state @param {any} thread @param {boolean} exclusive
+     * @param {number} word @param {boolean} exclusive
+     * @returns {number | null}
      */
-    const take = (state, thread, exclusive)=>{
-        if (exclusive)
+    const takenAs = (word, exclusive)=>{
+        if (word === 0)
         {
-            if (state.owner !== null || state.shared > 0)
+            return exclusive ? SRW.HELD : SRW.HELD | SRW.SHARED;
+        }
+        return !exclusive && (word & SRW.WAITING) === 0 && (word & SRW.HELD) !== 0
+            && word >= SRW.SHARED ? word + SRW.SHARED : null;
+    };
+
+    /**
+     * Takes the lock at once when it can be taken, as the guest code does.
+     *
+     * @param {number} address @param {boolean} exclusive
+     */
+    const take = (address, exclusive)=>{
+        for (;;)
+        {
+            const word = lockWord(address);
+            const next = takenAs(word, exclusive);
+            if (next === null)
             {
                 return false;
             }
-            state.owner = thread;
-            return true;
+            if (swapWord(address, word, next) === word)
+            {
+                return true;
+            }
         }
-        if (state.owner !== null || state.waiters.some(waiter=>waiter.exclusive))
-        {
-            return false;
-        }
-        state.shared++;
-        return true;
     };
 
     /**
-     * Hands a free lock to whoever waits first: one writer, or every reader
-     * queued before the next writer.
+     * Hands a lock its last holder let go of to whoever waits first: one
+     * writer, or every reader queued before the next writer. The word says
+     * someone waits until the queue is empty, and while it does no guest code
+     * changes it.
      *
-     * @param {number} address @param {SrwState} state
+     * @param {number} address @param {number} word
      */
-    const handOn = (address, state)=>{
-        while (state.waiters.length > 0 && state.owner === null)
+    const handOn = (address, word)=>{
+        const waiters = locks.get(address) ?? [];
+        let next;
+        if (waiters[0]?.exclusive === true)
         {
-            const next = state.waiters[0];
-            if (next.exclusive && state.shared > 0)
-            {
-                break;
-            }
-            state.waiters.shift();
-            if (next.exclusive)
-            {
-                state.owner = next.thread;
-            }
-            else
-            {
-                state.shared++;
-            }
-            kernel.wake(next.thread, 0);
-            if (next.exclusive)
-            {
-                break;
-            }
+            kernel.wake(waiters[0].thread, 0);
+            waiters.shift();
+            next = SRW.HELD;
         }
-        publish(address, state);
+        else
+        {
+            let readers = 0;
+            while (waiters.length > 0 && !waiters[0].exclusive)
+            {
+                kernel.wake(waiters[0].thread, 0);
+                waiters.shift();
+                readers++;
+            }
+            next = readers > 0 ? SRW.HELD | readers * SRW.SHARED : 0;
+        }
+        if (waiters.length > 0)
+        {
+            next |= SRW.WAITING;
+        }
+        else
+        {
+            locks.delete(address);
+        }
+        swapWord(address, word, next);
     };
 
     /** @param {number} address @param {boolean} exclusive */
     const acquire = (address, exclusive)=>{
         const thread = host.currentThread();
-        const state = lockAt(address);
-        if (take(state, thread, exclusive))
+        for (;;)
         {
-            publish(address, state);
-            return 0;
+            const word = lockWord(address);
+            const next = takenAs(word, exclusive);
+            if (next !== null)
+            {
+                if (swapWord(address, word, next) === word)
+                {
+                    return 0;
+                }
+                continue;
+            }
+            // Marked as waited for first: from then on a release cannot be
+            // the guest's own and comes here to hand the lock on.
+            if ((word & SRW.WAITING) === 0
+                && swapWord(address, word, word | SRW.WAITING) !== word)
+            {
+                continue;
+            }
+            const waiters = locks.get(address) ?? [];
+            waiters.push({ thread, exclusive });
+            locks.set(address, waiters);
+            kernel.block(thread, `${exclusive ? 'exclusive' : 'shared'} SRW lock`
+                + ` 0x${address.toString(16)}`);
+            return host.park(thread);
         }
-        state.waiters.push({ thread, exclusive });
-        kernel.block(thread, `${exclusive ? 'exclusive' : 'shared'} SRW lock`
-            + ` 0x${address.toString(16)}`);
-        return host.park(thread);
     };
 
     /** @param {number} address @param {boolean} exclusive */
     const release = (address, exclusive)=>{
-        const state = locks.get(address);
-        if (!state)
+        for (;;)
         {
-            // A lock no acquire here ever took -- a word the program set --
-            // is released to free, as the word's own arithmetic would leave it.
-            host.writeMemory(address, new Uint8Array(WORD));
-            return;
-        }
-        if (exclusive)
-        {
-            state.owner = null;
-        }
-        else if (state.shared > 0)
-        {
-            state.shared--;
-        }
-        if (state.owner === null && state.shared === 0)
-        {
-            handOn(address, state);
-        }
-        else
-        {
-            publish(address, state);
+            const word = lockWord(address);
+            // A writer, or the last reader: free, or handed on. A word the
+            // program set by hand, no acquire ever seen, is released the same
+            // way (Wine's kernel32 sync test_srwlock_quirk).
+            const last = exclusive || word < 2 * SRW.SHARED;
+            if ((word & SRW.WAITING) !== 0)
+            {
+                if (last)
+                {
+                    handOn(address, word);
+                }
+                else
+                {
+                    swapWord(address, word, word - SRW.SHARED);
+                }
+                return;
+            }
+            if (swapWord(address, word, last ? 0 : word - SRW.SHARED) === word)
+            {
+                return;
+            }
         }
     };
 
@@ -616,6 +813,44 @@ export function createSlimSync(host, enterCritical, enterSection){
             handler: ([variable, section, milliseconds])=>sleep(variable >>> 0,
                 milliseconds, ()=>leaveSection(section >>> 0)),
         },
+    };
+
+    /** @type {ReturnType<typeof srwCode>['entries'] | null} */
+    let srwEntries = null;
+    /**
+     * The SRW lock's guest code, placed on first use; what it cannot do
+     * itself reaches these traps, each answering as the export's handler.
+     *
+     * @param {any} builder
+     */
+    const srwPlaced = builder=>{
+        if (srwEntries)
+        {
+            return srwEntries;
+        }
+        /** @param {(lock: number) => any} answer */
+        const trap = answer=>({ argBytes: 4,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [lock])=>answer(lock >>> 0) });
+        const traps = {
+            acquireExclusive: builder.register('<srw-wait-exclusive>',
+                trap(lock=>acquire(lock, true))),
+            acquireShared: builder.register('<srw-wait-shared>', trap(lock=>acquire(lock, false))),
+            releaseExclusive: builder.register('<srw-wake-exclusive>', trap(lock=>{
+                release(lock, true);
+                return 0;
+            })),
+            releaseShared: builder.register('<srw-wake-shared>', trap(lock=>{
+                release(lock, false);
+                return 0;
+            })),
+        };
+        const size = srwCode(0, traps).code.length;
+        const at = (host.allocateCode ?? host.allocate)(size);
+        const { code, entries } = srwCode(at, traps);
+        host.writeMemory(at, code);
+        srwEntries = entries;
+        return entries;
     };
 
     /** @type {{ srw: number, cs: number } | null} */
@@ -826,40 +1061,40 @@ export function createSlimSync(host, enterCritical, enterSection){
         /** VOID AcquireSRWLockExclusive(PSRWLOCK) */
         AcquireSRWLockExclusive: {
             argBytes: 4,
+            /** @param {any} builder */
+            guest: builder=>srwPlaced(builder).acquireExclusive,
             /** @param {number[]} args */
             handler: ([lock])=>acquire(lock >>> 0, true),
         },
         /** VOID AcquireSRWLockShared(PSRWLOCK) */
         AcquireSRWLockShared: {
             argBytes: 4,
+            /** @param {any} builder */
+            guest: builder=>srwPlaced(builder).acquireShared,
             /** @param {number[]} args */
             handler: ([lock])=>acquire(lock >>> 0, false),
         },
         /** BOOLEAN TryAcquireSRWLockExclusive(PSRWLOCK) */
         TryAcquireSRWLockExclusive: {
             argBytes: 4,
+            /** @param {any} builder */
+            guest: builder=>srwPlaced(builder).tryExclusive,
             /** @param {number[]} args */
-            handler: ([lock])=>{
-                const state = lockAt(lock >>> 0);
-                const taken = take(state, host.currentThread(), true);
-                publish(lock >>> 0, state);
-                return taken ? 1 : 0;
-            },
+            handler: ([lock])=>(take(lock >>> 0, true) ? 1 : 0),
         },
         /** BOOLEAN TryAcquireSRWLockShared(PSRWLOCK) */
         TryAcquireSRWLockShared: {
             argBytes: 4,
+            /** @param {any} builder */
+            guest: builder=>srwPlaced(builder).tryShared,
             /** @param {number[]} args */
-            handler: ([lock])=>{
-                const state = lockAt(lock >>> 0);
-                const taken = take(state, host.currentThread(), false);
-                publish(lock >>> 0, state);
-                return taken ? 1 : 0;
-            },
+            handler: ([lock])=>(take(lock >>> 0, false) ? 1 : 0),
         },
         /** VOID ReleaseSRWLockExclusive(PSRWLOCK) */
         ReleaseSRWLockExclusive: {
             argBytes: 4,
+            /** @param {any} builder */
+            guest: builder=>srwPlaced(builder).releaseExclusive,
             /** @param {number[]} args */
             handler: ([lock])=>{
                 release(lock >>> 0, true);
@@ -869,6 +1104,8 @@ export function createSlimSync(host, enterCritical, enterSection){
         /** VOID ReleaseSRWLockShared(PSRWLOCK) */
         ReleaseSRWLockShared: {
             argBytes: 4,
+            /** @param {any} builder */
+            guest: builder=>srwPlaced(builder).releaseShared,
             /** @param {number[]} args */
             handler: ([lock])=>{
                 release(lock >>> 0, false);

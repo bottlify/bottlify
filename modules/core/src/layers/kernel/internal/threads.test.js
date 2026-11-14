@@ -887,6 +887,27 @@ test('a suspended thread keeps its state and gets no turn until resumed as often
     assert.equal(sched.resume(a), 0, 'resuming a thread nobody suspended changes nothing');
 });
 
+test('the registers of the thread on this executor\'s processor are read off it, not off what it'
+    + ' saved last', ()=>{
+    // A .NET runtime's collector, on another executor, read a thread parked
+    // here in a wait as where its last slice had ended - in a method it had
+    // since returned from - and walked a stack that was no longer there.
+    let captures = 0;
+    const cpu = { ...fakeCpu(), captureContext: ()=>({ captured: ++captures }) };
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000 });
+    const parked = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'parked' });
+    cpu.runSlice = ()=>{
+        parked.awaitingHost = true;
+        return 65;
+    };
+    assert.equal(sched.runOnce().ran, parked);
+    assert.equal(sched.current(), parked, 'still on the processor, its state there');
+    const saved = parked.context;
+    assert.equal(sched.settle(parked), true);
+    assert.notEqual(parked.context, saved, 'taken off the processor');
+    assert.equal(parked.context.captured, captures);
+});
+
 test('the report says how long a short-period thread went without the processor', ()=>{
     // A mixer feeding a sound device from a wait of a few milliseconds is
     // heard the moment it goes without the processor longer than it wrote

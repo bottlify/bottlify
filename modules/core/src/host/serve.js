@@ -834,7 +834,7 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
          * @param {string} [layer]
          */
         diagnostics: layer=>{
-            const tables = app.diagnostics();
+            const tables = app.diagnostics(layer);
             return plain(layer === undefined
                 ? tables
                 : tables.filter((/** @type {{ name: string }} */ table)=>table.name === layer));

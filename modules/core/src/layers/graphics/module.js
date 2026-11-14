@@ -850,6 +850,10 @@ export function createGraphicsModule(){
                 /** @returns {any} */
                 opengl: (/** @type {any} */ options)=>createOpengl({
                     presented: config?.presented,
+                    // A swap waits for the blank its swap interval names, as a
+                    // Present does: on the guest's clock, the thread stopped.
+                    now: config?.guestNow,
+                    waitUntil: config?.waitUntil,
                     readMemory: services.readMemory,
                     windowMemory: services.windowMemory,
                     readF32sInto: services.readF32sInto,
