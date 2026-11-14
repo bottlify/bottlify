@@ -955,7 +955,8 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
      * @property {[number, number[]][]} [targets]  by indirect call, the callees formed into it
      * @property {Map<number, number[]>} [unformed]  by indirect call, the callees forming it
      *     again did not take in (the region full): not asked of it again
-     * @property {number} [reforms]  times it was formed again for its indirect calls
+     * @property {Map<number, number>} [reforms]  by indirect call, times it was formed again
+     *     for that call: a site's own budget, which its region's other sites do not spend
      */
     /** @type {Set<RegionRecord>} */
     const regions = new Set();
@@ -1098,10 +1099,17 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
     const generation = new Map();
     /**
      * By page, the writes that dropped its regions: how many since `since`, the window's
-     * start, and how many times it was left volatile.
-     * @type {Map<number, { times: number, since: number, left: number }>}
+     * start, how many in all (`costs`), and how many times it was left volatile.
+     * @type {Map<number, { times: number, since: number, left: number, costs: number }>}
      */
     const dropped = new Map();
+    /**
+     * Writes that cost a page its regions, in all, past which it is a page of stubs: code a
+     * program patches one piece at a time (a managed runtime's precode, each stub written
+     * when its method is first called), never enough at once to be volatile, while every
+     * write dropped each region that ran into a stub there.
+     */
+    const STUB_WRITES = 2;
     /** By volatile page, when it is translated again. @type {Map<number, number>} */
     const volatileUntil = new Map();
     /**
@@ -1437,9 +1445,10 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
         let record = dropped.get(page);
         if (record === undefined)
         {
-            record = { times: 0, since: at, left: 0 };
+            record = { times: 0, since: at, left: 0, costs: 0 };
             dropped.set(page, record);
         }
+        record.costs++;
         if (at - record.since > settings.volatileWindowMs)
         {
             record.times = 0;
@@ -1847,6 +1856,21 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
         // translation goes wrong in by halving it.
         && !(settings.interpretRange && address >= settings.interpretRange[0]
             && address < settings.interpretRange[1]);
+    /** @param {number} page */
+    const stubPage = page=>(dropped.get(page)?.costs ?? 0) >= STUB_WRITES;
+    /**
+     * What a region formed from `entry` may form on: a page of stubs (`STUB_WRITES`) holds
+     * only regions entered there, which stay on it, so a write to a stub drops the stub's
+     * own small region and none that ran into it from elsewhere.
+     *
+     * @param {number} entry
+     * @returns {(address: number) => boolean}
+     */
+    const formableFrom = entry=>{
+        const home = entry >>> 12;
+        return stubPage(home) ? address=>address >>> 12 === home && translatable(address)
+            : address=>!stubPage(address >>> 12) && translatable(address);
+    };
 
     /**
      * Why the translator has no entry at an untranslated exit's target, the
@@ -2259,8 +2283,8 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
             held += count;
             const called = record.targets === undefined ? {}
                 : { callTargets: new Map(record.targets) };
-            jobs.push({ region: formRegion(read, record.entry, { ...formHere, translatable,
-                ...called }), entryTop: record.entryTop,
+            jobs.push({ region: formRegion(read, record.entry, { ...formHere,
+                translatable: formableFrom(record.entry), ...called }), entryTop: record.entryTop,
             checked: record.checked === true,
             copies: record.copies === true, ...precisionJob(record) });
         }
@@ -2653,10 +2677,11 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
      *     wide?: boolean, narrow?: boolean, floats?: boolean, checked?: boolean, copies?: boolean,
      *     loose?: boolean, wrapped?: boolean, anyTop?: boolean, byHash?: boolean,
      *     replaces?: RegionRecord, targets?: [number, number[]][], copying?: boolean,
-     *     waited?: boolean }} one
+     *     sites?: number[], waited?: boolean }} one
      *     replaces: the region it is formed again from, with the callees of its indirect calls
-     *     (`targets`), or with copies of the blocks inside its loops (`copying`); waited: the
-     *     guest ran between its forming and now
+     *     (`targets`), or with copies of the blocks inside its loops (`copying`); sites: the
+     *     indirect calls it was formed again for, each spending one of its own reforms;
+     *     waited: the guest ran between its forming and now
      * @param {{ labels: [number, number][], cut: number[], closed?: number[], entryTop: number,
      *     exportName?: string, linked?: boolean }} built
      * @param {WebAssembly.Instance} instance
@@ -2774,7 +2799,11 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
             // the old region's entries give way to this one's.
             record.targets = one.targets;
             record.unformed = one.replaces.unformed;
-            record.reforms = (one.replaces.reforms ?? 0) + (one.copying === true ? 0 : 1);
+            record.reforms = new Map(one.replaces.reforms ?? []);
+            for (const site of one.copying === true ? [] : one.sites ?? [])
+            {
+                record.reforms.set(site, (record.reforms.get(site) ?? 0) + 1);
+            }
             // The same code for the merges' bounds: formed again, it would
             // otherwise start over at none.
             record.merged = one.replaces.merged;
@@ -3056,9 +3085,10 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
      * @param {import('./shared-forms.js').Formed} formed
      */
     const formsAsBefore = ({ region, answers })=>{
+        const formable = formableFrom(region.entry);
         for (const [page, yes] of answers)
         {
-            if (translatable(page * 4096) !== yes)
+            if (formable(page * 4096) !== yes)
             {
                 return false;
             }
@@ -3090,9 +3120,14 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
      */
     const formAt = (eip, targets, shared)=>{
         const called = targets === undefined ? {} : { callTargets: new Map(targets) };
+        const formable = formableFrom(eip);
+        // What forming finds shared between the regions of a call is found under their
+        // own pages: a region entered on a page of stubs may form on less than the others.
+        const sharing = stubPage(eip >>> 12) ? undefined : shared;
         if (sharedForms === null)
         {
-            return formRegion(read, eip, { ...formHere, translatable, shared, ...called });
+            return formRegion(read, eip, { ...formHere, translatable: formable, shared: sharing,
+                ...called });
         }
         const key = `${eip}/${targets === undefined ? '' : JSON.stringify(targets)}`;
         const known = sharedForms.get(key);
@@ -3109,7 +3144,7 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
                 let yes = answers.get(page);
                 if (yes === undefined)
                 {
-                    yes = translatable(address);
+                    yes = formable(address);
                     answers.set(page, yes);
                 }
                 return yes;
@@ -3840,7 +3875,11 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
     // compares its target with four at most.
     const PREDICT_SHARE = 8;
     const PREDICT_CALLEES = 4;
-    // Times a region is formed again for its indirect calls.
+    // Times a region is formed again for one of its indirect calls. Counted by call, not by
+    // region: three other sites of a region coming due first had spent a region's whole
+    // budget, and a callee a site's first samples missed (a phase of the program) was never
+    // taken in - every call of it left the region (vcall: 569 k transfers in place of 74,
+    // by the order the workloads ran in).
     const REFORMS = 3;
     // Readings a call's samples are kept for unless it is due by then: a
     // region formed again is built, compiled and run on the baseline tier
@@ -4006,7 +4045,7 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
                 {
                     continue;
                 }
-                if ((record.reforms ?? 0) >= REFORMS)
+                if ((record.reforms?.get(site) ?? 0) >= REFORMS)
                 {
                     counts.predictReformsOut++;
                     out = true;
@@ -4067,13 +4106,22 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
                 continue;
             }
             const region = formRegion(read, record.entry,
-                { ...formHere, translatable, callTargets: targets });
+                { ...formHere, translatable: formableFrom(record.entry), callTargets: targets });
             const starts = new Set(region.blocks.map(block=>block.start));
             // Formed without the profile at a quiet call, the region is worth
             // publishing whether or not a callee was formed in.
             let taken = quiet.size > 0;
             for (const [site, callees] of added)
             {
+                // A callee's far branch the region left as cold (`coldBranch`), taken often:
+                // followed, its callee was formed in with it, or is too large for that now and
+                // stays a wasm call, the branch no longer in the region - which no longer
+                // leaves there either way. A call is in its region however its callees went.
+                if (!region.blocks.some(block=>site >= block.start && site < block.end))
+                {
+                    taken = true;
+                    continue;
+                }
                 const missed = callees.filter(target=>!starts.has(target));
                 taken ||= missed.length < callees.length;
                 if (missed.length > 0)
@@ -4103,7 +4151,7 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
                 cached: null, ...precisionFlags(region, record.entryTop), loose,
                 wrapped: !readsChecked,
                 checked: record.checked === true, copies: record.copies === true,
-                replaces: record, targets: [...targets] });
+                replaces: record, targets: [...targets], sites: [...added.keys(), ...quiet] });
         }
         if (formed.length === 0)
         {
@@ -4146,8 +4194,8 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
             }
             const called = record.targets === undefined ? {}
                 : { callTargets: new Map(record.targets) };
-            const region = formRegion(read, record.entry, { ...formHere, translatable,
-                ...called });
+            const region = formRegion(read, record.entry, { ...formHere,
+                translatable: formableFrom(record.entry), ...called });
             formed.push({ region, entryTop: record.entryTop, stamp: stamp(region.pages),
                 cached: null, ...precisionFlags(region, record.entryTop), loose,
                 wrapped: !readsChecked,
@@ -6091,7 +6139,8 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
                 // With `checkStale`, the regions still published whose bytes no
                 // longer form as they did: translated code a write did not drop.
                 ...(settings.checkStale ? { staleRegions: [...regions]
-                    .filter(record=>formRegion(read, record.entry, { ...formHere, translatable,
+                    .filter(record=>formRegion(read, record.entry, { ...formHere,
+                        translatable: formableFrom(record.entry),
                         ...(record.targets === undefined
                             ? {} : { callTargets: new Map(record.targets) }) }).hash
                         !== record.hash)
@@ -6110,6 +6159,8 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
                 // Times a page was left to the other executor, and the pages left now.
                 volatilePages: counts.volatilePages,
                 volatileNow: volatileUntil.size,
+                // Pages of stubs: regions from elsewhere stop at them (`STUB_WRITES`).
+                stubPages: [...dropped.values()].filter(one=>one.costs >= STUB_WRITES).length,
                 storesKept: counts.storesKept,
                 // Pages whose bytes are kept to judge a store into none of their
                 // regions by: pages code was on when the store came.
