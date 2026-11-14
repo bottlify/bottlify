@@ -366,7 +366,8 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
         {
             started.shift();
         }
-        frames.push({ frameBase, extent, settle, epoch, now });
+        frames.push({ frameBase, extent, settle, epoch, now, entry: entry >>> 0, by,
+            since: Date.now() });
         // Off to run guest code, whatever it was doing before.
         awaitHost(thread, false);
         return frameBase;
@@ -824,6 +825,20 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
                     name: call.name,
                     forMs: call.at ? Date.now() - call.at : 0,
                 }))),
+            // The guest code host calls are running now, innermost last, with the
+            // thread's state and the executor it is homed on: a host call that
+            // waits on a callback its thread is never given the turn to run is a
+            // hang that names no wait (ngen's BindToRuntimeWorker).
+            callingBack: kernel.threads().filter((/** @type {any} */ thread)=>
+                callbackFrames(thread).length > 0).map((/** @type {any} */ thread)=>({
+                thread: thread.name,
+                state: thread.state ?? null,
+                home: thread.home ?? null,
+                frames: callbackFrames(thread).map((/** @type {any} */ frame)=>({
+                    entry: (frame.entry ?? 0).toString(16), by: frame.by ?? null,
+                    forMs: frame.since ? Date.now() - frame.since : 0,
+                })),
+            })),
         }),
     };
 }

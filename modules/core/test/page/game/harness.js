@@ -1389,6 +1389,7 @@ async function standingOf(app, journal = 0){
             phases: (log.topPhases ?? []).slice(0, 8),
             threads: kernel.byState, waiting: kernel.waiting, turns: kernel.turns,
             calls: bridge.calls, lastCall: bridge.lastCall, suspended: bridge.suspendedCalls,
+            callingBack: bridge.callingBack ?? null,
             messages: win32.messages,
             windows: (win32.windows ?? []).filter((/** @type {any} */ window)=>window.visible)
                 .map((/** @type {any} */ window)=>({ hwnd: window.hwnd, parent: window.parent,
