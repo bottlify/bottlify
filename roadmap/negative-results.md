@@ -17,7 +17,7 @@ plus at most five lines below its table of conditions the line cannot carry.
 | 2026-10-11 | patched code sites formed apart; store-dropped regions formed again with copies | 39.0 / 39.2 vs 38.6 s, synthetic mixer | stale: compiling moved to workers | a patched loop runs interpreted again |
 | 2026-10-12 | callees formed two and three levels deep (`formDepth`) | geomean 1.00x, cork-bench Chromium, noise 13 % | holds | callees stop being copied per caller |
 | 2026-10-12 | predicted virtual calls (`callTargets`) on cork-bench | geomean 1.01x, noise 7.6 % | stale: on by default since b73438e6 | - |
-| 2026-10-12 | transfers inside a placed module as direct tail calls (`dispatch`) on cork-bench | geomean 0.99x, noise 5.3 % | stale: the iOS path runs it | on/off under the iOS settings |
+| 2026-10-12 | transfers inside a placed module as direct tail calls (`dispatch`) on cork-bench | geomean 0.99x, noise 5.3 % | holds: measured again 2026-11-14, below | - |
 | 2026-10-13 | every register in wasm parameters across guest calls (calling convention, x64) | params / state-direct 1.085 node, 0.959 Chromium | disputed: arm64 never run | the M4; long mode's 16 registers |
 | 2026-10-13 | loading only what is live after a call (step 2a/2b), its ceiling | 0.95-0.98 of a call, node, 15 pairs | stale: built as `planPaths` d4643f20b | - |
 | 2026-10-13 | `callTargets` in Far Cry and its knobs, while the sampling took the last calls | on / off 0.971, node, 1 run | disputed: knobs ran on broken sampling | leaf limits with the sampling fixed |
@@ -86,6 +86,14 @@ plus at most five lines below its table of conditions the line cannot carry.
 | 2026-11-06 | a block held at its own start in a caller's region gets a region of its own | 102.2 vs 108.3 fps median, 5 runs, spread 84-112 | holds (kept, no fps claim) | - |
 | 2026-11-06 | heavy frames inside 3DMark03's tests are not cold code waiting for translation | the wait at most 1/10 of a stall, 8 runs | holds | the stalls are open |
 | 2026-11-12 | cork's interpreter and volatile-page levers do not speed up ngen's compile | 50.9 / 53.8 vs 52.9-55.5 s, 1 run | disputed: inside two-run noise | interpreted addresses known |
+| 2026-11-14 | regions of a module as one: `dispatch` alone on V8, its merges (`mergeAfter`) with a worker | Chromium 153 cork-bench x10 MIPS on/off 0.995 x87, 0.999 sse, median of 5, 2 runs | holds | V8 inlines a `return_call` into a placed function |
+| 2026-11-14 | `dispatch` keeping linked calls (it turns each into a transfer) | Chromium 153 cork-bench x10 MIPS 1.006 x87, 0.994 sse; micro 1.012 x86, 0.931 x64 inside ±15-25 % noise | holds | as above |
+
+The two 2026-11-14 lines, conditions: cork 3f877946, a cloud machine (Intel Xeon @ 2.10GHz, 4 cores,
+power plan not recorded), Chromium 153.0.8010.12 / V8 15.3.76.4 headless (`browser/suite.mjs --scale 10
+--reps 5`, both arms in one run, 5 reps an arm, a first run's sse spread +18 % not repeated in the
+second, 1.00); Node 22.23.4 `run.mjs` x10 with a worker, ms on/off 0.987 x87, 0.998 sse, spread 10-20 %;
+merges fired 0-1 a run, module bytes -1 to -12 % only from the linked calls `dispatch` drops.
 
 ## Executors and scheduler
 
