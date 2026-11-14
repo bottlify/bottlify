@@ -48,8 +48,9 @@ const FALSE = 0;
 const VOID = 0;
 
 /**
- * Every export Windows' mscoree.dll has that mscoreei.dll has too: [name,
- * argument bytes (stdcall), the answer without a runtime]. Argument bytes are
+ * Every export Windows' mscoree.dll has that mscoreei.dll has too: [name, or
+ * `#n` for one exported by number alone, argument bytes (stdcall), the answer
+ * without a runtime]. Argument bytes are
  * null where the signature is not published; such an export ends the process
  * when no runtime is there to take it. `GetCLRMetaHost` is the one name of
  * Windows' table mscoreei lacks with no published signature, and is left out.
@@ -64,6 +65,8 @@ export const MSCOREE_FORWARDS = Object.freeze([
     ['CloseCtrs', null, 'end'],
     ['LoadStringRC', 16, HR],
     ['ReOpenMetaDataWithMemory', null, 'end'],
+    // Exported by number alone, as mscoreei's own 24 is; the CLR asks for it.
+    ['#24', null, 'end'],
     ['CollectCtrs', null, 'end'],
     ['CorDllMainWorker', null, 'end'],
     ['EEDllGetClassObjectFromClass', null, 'end'],
@@ -179,6 +182,19 @@ export const MSCOREE_FORWARDS = Object.freeze([
     ['_CorExeMain', 0, 'end'],
 ]);
 
+/**
+ * The numbers Windows' table gives the exports, which a program may import
+ * them by: from 17 in MSCOREE_FORWARDS' order, past 68 (`GetCLRMetaHost`);
+ * then mscoree's own two, and 142, which has no name and is kernel32's
+ * GetVersionExW - the CLR asks for it by number.
+ *
+ * @type {Readonly<Record<number, string>>}
+ */
+export const MSCOREE_ORDINALS = Object.freeze(Object.fromEntries([
+    // GetCLRMetaHost's 68 is the one number the forwards skip.
+    ...MSCOREE_FORWARDS.map(([name], index)=>[17 + index + (17 + index >= 68 ? 1 : 0), name]),
+    [139, '_CorImageUnloading'], [140, '_CorValidateImage'], [142, 'GetVersionExW']]));
+
 /** The stub's length and where its two traps' displacements are. */
 const STUB_LENGTH = 25;
 const RESOLVE_AT = 10;
@@ -228,7 +244,8 @@ export function forwardingStub(at, slot, resolve, failed){
  * @property {() => string} windowsDirectory
  * @property {(path: string) => boolean} exists
  * @property {(path: string) => number | Promise<number>} loadLibrary  LoadLibrary's answer.
- * @property {(module: number, name: string) => number | Promise<number>} procAddress
+ * @property {(module: number, name: string | number) => number | Promise<number>} procAddress
+ *           GetProcAddress's answer, for a name or a number.
  * @property {(code: number) => any} exitProcess  ExitProcess, called by the program.
  * @property {(api: string, detail: string, kind?: 'loss') => void} [divergence]
  */
@@ -294,7 +311,8 @@ export function createMscoreeFunctions(host){
         {
             return 0;
         }
-        const target = (await host.procAddress(module, name)) >>> 0;
+        const target = (await host.procAddress(module,
+            name.startsWith('#') ? Number(name.slice(1)) : name)) >>> 0;
         if (target === 0)
         {
             lost(name, `${shimPath()} exports no ${name}: answered as with no runtime`);

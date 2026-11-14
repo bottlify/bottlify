@@ -12,7 +12,7 @@
  * into the host; without one, both answer CLR_E_SHIM_RUNTIMELOAD, and
  * _CorExeMain ends the process, said as a loss. On XP there is no mscoree of
  * the engine's, and its file version on 7 is past what the .NET Framework
- * 4.8's setup asks for.
+ * 4.8's setup asks for. Its export 142, by number alone, is GetVersionExW.
  */
 
 import { test } from 'node:test';
@@ -160,4 +160,26 @@ test('Windows XP has no mscoree of the engine\'s; 7\'s is new enough for .NET 4.
         assert.equal((await run(probe, { windows: 'winxp' })).code, 0, 'XP: not found');
         const seven = (await run(probe)).code;
         assert.ok(seven >= 0x00040000, `7: version ${seven.toString(16)} is at least 4.0`);
+    });
+
+test('mscoree\'s export 142, which has no name, is GetVersionExW', { timeout: 120_000 },
+    async()=>{
+        // GetProcAddress(LoadLibraryA("mscoree.dll"), 142) called with an
+        // OSVERSIONINFOW: the exit code is its major version times 100 plus its minor.
+        const probe = buildExe({
+            imports: { 'KERNEL32.dll': ['LoadLibraryA', 'GetProcAddress', 'ExitProcess'] },
+            data: { name: ansi('mscoree.dll'), info: [...u32(276), ...new Array(272).fill(0)] },
+            codeSize: 0x60,
+            code: ({ iat, at })=>assemble([
+                0x68, ...u32(at('name')), 0xff, 0x15, ...u32(iat('LoadLibraryA')),
+                0x68, ...u32(142), 0x50, 0xff, 0x15, ...u32(iat('GetProcAddress')),
+                0x85, 0xc0, { jump: 'jz', to: 'out' },
+                0x68, ...u32(at('info')), 0xff, 0xd0, //    call eax
+                0x6b, 0x05, ...u32(at('info') + 4), 100, // imul eax, [major], 100
+                0x03, 0x05, ...u32(at('info') + 8), //       add eax, [minor]
+                { label: 'out' },
+                0x50, 0xff, 0x15, ...u32(iat('ExitProcess')),
+            ]),
+        });
+        assert.equal((await run(probe)).code, 601);
     });

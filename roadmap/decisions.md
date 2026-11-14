@@ -2187,9 +2187,12 @@ strong-name calls and `_CorDllMain`); `_CorExeMain` and `_CorExeMain2` end the p
 Framework to be installed. The exports with no published signature (`InitErrors`, the `ND_*`
 helpers, `CorGetSvc` and the like) cannot be answered without knowing what to take off the stack,
 so without mscoreei they end the process the same way; `GetCLRMetaHost`, the one name mscoreei
-lacks with no published signature, is left out. `_CorValidateImage` answers S_OK and changes no
-entry point, which this engine's loader does not ask for. A 64-bit process gets none of these
-exports yet: Framework64's shim is not forwarded to. XP has no shim of its own, and a Framework's
-setup there installs its own `mscoree.dll` (The Swapper's bottle runs on 4.0's), which the engine
-leaves alone; a shim of the engine's there would also stand in front of a CLR 2-only install's
+lacks with no published signature, is left out. The exports keep Windows' numbers, and the two it
+exports by number alone are as there: 24 is mscoreei's own 24 (named `#24` here, as the engine's
+tables name every export), 142 kernel32's `GetVersionExW`; clr.dll asks for both by number and
+calls them unchecked.
+`_CorValidateImage` answers S_OK and changes no entry point, which this engine's loader does not
+ask for. A 64-bit process gets none of these exports yet: Framework64's shim is not forwarded to. XP has no shim of its own, and a Framework's
+setup there installs its own `mscoree.dll` (an XP bottle with 4.0 runs on that file), which the
+engine leaves alone; a shim of the engine's there would also stand in front of a CLR 2-only install's
 file, which mscoreei cannot serve. *2026-11-14.*

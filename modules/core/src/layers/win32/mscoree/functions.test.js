@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { CLR_E_SHIM_RUNTIMELOAD, MSCOREE_FORWARDS, STATUS_DLL_NOT_FOUND,
+import { CLR_E_SHIM_RUNTIMELOAD, MSCOREE_FORWARDS, MSCOREE_ORDINALS, STATUS_DLL_NOT_FOUND,
     createMscoreeFunctions, forwardingStub } from './functions.js';
 
 const CLASS_E_CLASSNOTAVAILABLE = 0x80040111;
@@ -16,7 +16,7 @@ const CLASS_E_CLASSNOTAVAILABLE = 0x80040111;
  * of what was loaded, ended and said.
  *
  * @param {{ files?: string[], installRoot?: string | null,
- *     exports?: Record<string, number> }} [given]
+ *     exports?: Record<string | number, number> }} [given]
  */
 function hostFor({ files = [], installRoot = null, exports = {} } = {}){
     const memory = new Map();
@@ -41,7 +41,7 @@ function hostFor({ files = [], installRoot = null, exports = {} } = {}){
             loaded.push(path);
             return 0x7000000;
         },
-        procAddress: async(/** @type {number} */ _module, /** @type {string} */ name)=>
+        procAddress: async(/** @type {number} */ _module, /** @type {string | number} */ name)=>
             exports[name] ?? 0,
         exitProcess: (/** @type {number} */ code)=>{
             ended.push(code);
@@ -93,7 +93,7 @@ test('the stub reads its slot, calls its resolver and jumps to its failure where
 test('the first call loads the shim from InstallRoot once and fills each slot', async()=>{
     const path = 'D:\\NET\\v4.0.30319\\mscoreei.dll';
     const f = hostFor({ files: [path], installRoot: 'D:\\NET',
-        exports: { GetCORVersion: 0x7001000, CLRCreateInstance: 0x7002000 } });
+        exports: { GetCORVersion: 0x7001000, CLRCreateInstance: 0x7002000, 24: 0x7003000 } });
     const version = f.place('GetCORVersion');
     const create = f.place('CLRCreateInstance');
     assert.notEqual(version.slot, create.slot);
@@ -104,6 +104,7 @@ test('the first call loads the shim from InstallRoot once and fills each slot', 
     assert.equal(f.u32(version.slot), 0x7001000);
     assert.equal(f.u32(create.slot), 0x7002000);
     assert.deepEqual(f.loaded, [path], 'loaded once, from InstallRoot');
+    assert.equal(await f.place('#24').resolve?.trap.handler([]), 0x7003000, 'by number');
 });
 
 test('a name the shim does not export answers as with no runtime, and is said', async()=>{
@@ -141,6 +142,22 @@ test('with no .NET Framework, each export answers its documented failure', async
     assert.equal(f.said.at(-1)?.api, '_CorExeMain');
     assert.equal(f.said.at(-1)?.kind, 'loss');
     assert.match(f.said.at(-1)?.detail ?? '', /no \.NET Framework is installed/);
+});
+
+test('the exports carry the numbers of Windows\' mscoree', ()=>{
+    // Read off the export table of Windows' mscoree.dll (4.0.31106 and 10.0).
+    const numbers = { 17: 'InitErrors', 23: 'ReOpenMetaDataWithMemory', 25: 'CollectCtrs',
+        38: 'CLRCreateInstance', 54: 'CorGetSvc', 67: 'GetAssemblyMDImport',
+        69: 'GetCORRequiredVersion', 72: 'GetCORVersion', 109: 'ND_WU1', 136: '_CorDllMain',
+        137: '_CorExeMain2', 138: '_CorExeMain', 139: '_CorImageUnloading',
+        140: '_CorValidateImage', 142: 'GetVersionExW' };
+    for (const [ordinal, name] of Object.entries(numbers))
+    {
+        assert.equal(MSCOREE_ORDINALS[Number(ordinal)], name, `#${ordinal}`);
+    }
+    assert.equal(MSCOREE_ORDINALS[24], '#24', 'by number alone');
+    assert.equal(MSCOREE_ORDINALS[68], undefined);
+    assert.equal(Object.keys(MSCOREE_ORDINALS).length, MSCOREE_FORWARDS.length + 3);
 });
 
 test('mscoree\'s own notifications answer without the shim', ()=>{

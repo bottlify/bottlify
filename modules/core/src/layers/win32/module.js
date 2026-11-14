@@ -124,7 +124,7 @@ import { createCrypt32Functions } from './crypt32/functions.js';
 import { createAdvpackFunctions } from './advpack/functions.js';
 import { SFC_ORDINALS, createSfcFunctions } from './sfc/functions.js';
 import { createFaultrepFunctions } from './faultrep/functions.js';
-import { createMscoreeFunctions } from './mscoree/functions.js';
+import { MSCOREE_ORDINALS, createMscoreeFunctions } from './mscoree/functions.js';
 import { createHttpapiFunctions } from './httpapi/functions.js';
 import { createLoadperfFunctions } from './loadperf/functions.js';
 import { createUrlmonFunctions } from './urlmon/functions.js';
@@ -5231,7 +5231,7 @@ export function createWin32Module(){
                         heap.free(at);
                     }
                 };
-                libraries['mscoree.dll'] = createMscoreeFunctions({
+                libraries['mscoree.dll'] = { ...createMscoreeFunctions({
                     allocate: bytes=>heap.allocate(bytes),
                     allocateCode: bytes=>heap.allocateCode(bytes),
                     writeMemory,
@@ -5246,11 +5246,14 @@ export function createWin32Module(){
                     windowsDirectory: ()=>'C:\\WINDOWS',
                     exists: path=>volume.stat(path)?.exists === true,
                     loadLibrary: path=>withAnsi(path, at=>kernel32.LoadLibraryA.handler([at])),
-                    procAddress: (module, name)=>withAnsi(name,
-                        at=>kernel32.GetProcAddress.handler([module, at])),
+                    procAddress: (module, name)=>(typeof name === 'number'
+                        ? kernel32.GetProcAddress.handler([module, name])
+                        : withAnsi(name, at=>kernel32.GetProcAddress.handler([module, at]))),
                     exitProcess: code=>kernel32.ExitProcess.handler([code]),
                     divergence: config?.divergence,
-                });
+                }),
+                // Its export 142, which has no name, is kernel32's.
+                GetVersionExW: kernel32.GetVersionExW };
             }
 
             libraries['SHFOLDER.dll'] = {
@@ -5634,6 +5637,8 @@ export function createWin32Module(){
                     'SHELL32.dll': SHELL32_ORDINALS,
                     'DPLAYX.dll': DPLAYX_ORDINALS,
                     'dwmapi.dll': DWMAPI_ORDINALS,
+                    // The CLR asks mscoree for GetVersionExW by number alone.
+                    'mscoree.dll': MSCOREE_ORDINALS,
                 }),
 
                 /**
