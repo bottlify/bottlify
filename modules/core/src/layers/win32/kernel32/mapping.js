@@ -191,6 +191,9 @@ const pageRound = bytes=>Math.ceil(bytes / PAGE_SIZE) * PAGE_SIZE;
  * @property {(ms: number, tick: () => void) => () => void} [every]
  *           Calls `tick` every `ms` of the guest's clock until the answer is
  *           called: how a service watching its section's views looks at them.
+ * @property {(address: number, bytes: number) => void} [zero]  Zeroes a span the view
+ *     was given, which recycled memory may not be: what a view holds past what its
+ *     section delivers reads zero, as a page-file section's does on Windows.
  * @property {(address: number, bytes: number) => boolean} [allocateAt]
  *           Guest memory at exactly that address, when all of it is free.
  * @property {(address: number) => void} release
@@ -835,6 +838,14 @@ export function createMappingFunctions(host){
                 const metrics = host.metrics;
                 /** @param {Uint8Array} bytes */
                 const deliver = bytes=>{
+                    // Memory freed by an earlier view or block is handed out
+                    // again as it was left: a page-file section's fresh view
+                    // read an unmapped image's bytes, and the CLR took them for
+                    // a code-page table another process had already filled.
+                    if (bytes.length < wanted)
+                    {
+                        host.zero?.(address + bytes.length, wanted - bytes.length);
+                    }
                     if (bytes.length > 0)
                     {
                         host.writeMemory(address, bytes);

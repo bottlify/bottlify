@@ -2984,6 +2984,18 @@ export function createWin32Module(){
                         allocate: (bytes, options)=>allocator.allocate(bytes, options),
                         /** @param {number} address @param {number} bytes */
                         allocateAt: (address, bytes)=>allocator.allocateAt(address, bytes),
+                        /**
+                         * Zeroes a view's span, but for a block of arena never
+                         * handed out, which reads zero already.
+                         *
+                         * @param {number} address @param {number} bytes
+                         */
+                        zero: (address, bytes)=>{
+                            if (!allocator.block(address)?.fresh)
+                            {
+                                fillMemory(address, 0, bytes);
+                            }
+                        },
                         /** @param {number} address */
                         release: address=>allocator.free(address),
                         handles,
