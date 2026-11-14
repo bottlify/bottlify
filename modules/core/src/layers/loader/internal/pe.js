@@ -552,6 +552,37 @@ export function applyRelocations(mapped, image, delta){
 }
 
 /**
+ * An image moved to `base`: its fixups applied, and the ImageBase of its
+ * mapped header made `base`, as Windows leaves a moved image - code that
+ * reads its own header's ImageBase (the CLR, to tell how far an image was
+ * moved) finds where it is.
+ *
+ * @param {Uint8Array} mapped   The mapped image, indexed by RVA.
+ * @param {PeImage} image
+ * @param {number} base
+ * @returns {number} how many fixups were applied
+ */
+export function relocateImage(mapped, image, base){
+    const applied = applyRelocations(mapped, image, base - image.imageBase);
+    if (base !== image.imageBase && mapped.length >= 0x40)
+    {
+        const view = new DataView(mapped.buffer, mapped.byteOffset, mapped.byteLength);
+        // ImageBase: a dword at 28 into PE32's optional header, a quadword at 24
+        // into PE32+'s.
+        const optional = view.getUint32(0x3c, true) + 24;
+        if (image.bits === 64 && optional + 32 <= mapped.length)
+        {
+            view.setBigUint64(optional + 24, BigInt(base), true);
+        }
+        else if (image.bits !== 64 && optional + 32 <= mapped.length)
+        {
+            view.setUint32(optional + 28, base >>> 0, true);
+        }
+    }
+    return applied;
+}
+
+/**
  * Translates an RVA to an offset in the raw file.
  *
  * @param {PeImage} image

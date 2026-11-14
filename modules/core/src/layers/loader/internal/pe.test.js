@@ -183,6 +183,20 @@ test('a library that holds no address moves though it carries no relocations, an
         'an entry point is code, and code holds addresses');
 });
 
+test('a moved image\'s header names the base it was moved to; one left in place keeps its own',
+    ()=>{
+        // Windows writes the new base into a moved image's ImageBase: the CLR
+        // reads it there to tell how far an assembly it mapped was moved.
+        const imageBaseOf = (/** @type {Uint8Array} */ bytes)=>{
+            const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+            return view.getUint32(view.getUint32(0x3c, true) + 24 + 28, true);
+        };
+        const moved = mapImage(resourceLibrary(), 0x02100000);
+        assert.equal(imageBaseOf(moved.bytes), 0x02100000);
+        const image = parsePe(resourceLibrary());
+        assert.equal(imageBaseOf(mapImage(resourceLibrary()).bytes), image.imageBase);
+    });
+
 test('building the image binds every import into the IAT', ()=>{
     /** @type {string[]} */
     const asked = [];
