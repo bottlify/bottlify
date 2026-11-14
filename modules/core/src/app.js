@@ -9279,82 +9279,91 @@ async function buildApp(options){
         readImage: path=>readProgramImage(filesystem, blocks, path),
 
         // The zones' sums last (`memory-zones.js`), over what this thread holds.
-        diagnostics: ()=>withZones([
-            ...core.diagnostics(),
-            // The run's windows, where this thread keeps them (`manager.js`).
-            ...options.system?.windows?.manager ? [{ name: 'windows', status: 'ready',
-                metrics: options.system.windows.manager.diagnostics() }] : [],
-            {
-                name: 'js',
-                version: '0.1.0',
-                status: 'ready',
-                metrics: jsSampler?.snapshot()
+        // One layer asked for builds that table alone, the zones excepted, which
+        // sum every other: a launcher reading a layer's counters every second
+        // while a program loaded built every layer's, a twenty-fifth of the
+        // thread the program ran on.
+        diagnostics: (/** @type {string | undefined} */ layer)=>{
+            const only = layer === undefined || layer === 'zones' ? null : layer;
+            const asked = (/** @type {string} */ name)=>only === null || only === name;
+            const tables = [
+                ...core.diagnostics(only),
+                // The run's windows, where this thread keeps them (`manager.js`).
+                ...options.system?.windows?.manager && asked('windows') ? [{ name: 'windows',
+                    status: 'ready', metrics: options.system.windows.manager.diagnostics() }]
+                    : [],
+                ...asked('js') ? [{
+                    name: 'js',
+                    version: '0.1.0',
+                    status: 'ready',
+                    metrics: jsSampler?.snapshot()
                     ?? { measured: false, reason: 'off: the sampleJs option' },
-            },
-            {
-                name: 'app',
-                version: '0.1.0',
-                status: 'ready',
-                metrics: {
-                    ...events.diagnostics(),
-                    bundle: {
-                        ...bundleReads, distinct: blocksSeen.size, ahead: blocks?.ahead() ?? 0,
-                        refetched: blocks?.refetched().blocks ?? 0,
-                        refetchedBytes: blocks?.refetched().bytes ?? 0,
-                        ranges: blocks?.ranges().requests ?? 0,
-                        rangeBytes: blocks?.ranges().bytes ?? 0,
-                        // zstd blocks decoded for guest reads, and the time it took:
-                        // a bundle mounted on this thread's; one a process in a
-                        // worker reads across its link decodes on the system's.
-                        decoded: blocks?.decoded?.().blocks ?? 0,
-                        decodedBytes: blocks?.decoded?.().bytes ?? 0,
-                        decodeMs: Math.round(blocks?.decoded?.().ms ?? 0),
+                }] : [],
+                ...asked('app') ? [{
+                    name: 'app',
+                    version: '0.1.0',
+                    status: 'ready',
+                    metrics: {
+                        ...events.diagnostics(),
+                        bundle: {
+                            ...bundleReads, distinct: blocksSeen.size, ahead: blocks?.ahead() ?? 0,
+                            refetched: blocks?.refetched().blocks ?? 0,
+                            refetchedBytes: blocks?.refetched().bytes ?? 0,
+                            ranges: blocks?.ranges().requests ?? 0,
+                            rangeBytes: blocks?.ranges().bytes ?? 0,
+                            // zstd blocks decoded for guest reads, and the time it took:
+                            // a bundle mounted on this thread's; one a process in a
+                            // worker reads across its link decodes on the system's.
+                            decoded: blocks?.decoded?.().blocks ?? 0,
+                            decodedBytes: blocks?.decoded?.().bytes ?? 0,
+                            decodeMs: Math.round(blocks?.decoded?.().ms ?? 0),
+                        },
+                        film: { ...film },
+                        // Which of the program's own code the machine is spent on
+                        // is not here: the kernel publishes its page counts and the
+                        // memory layer its regions, and whoever reads them sums and
+                        // sorts on their own thread. A table computed on this one
+                        // is a reader's work done by the program.
+                        unimplementedCalls: Object.fromEntries(missingCalls),
+                        // What was said as a divergence, the first of them: a
+                        // consumer that listened for none has no other record of
+                        // what this build accepted and did not do, and the journal
+                        // has long since let go of a line said once.
+                        divergences: [...reportDivergence.divergences].slice(0, DIVERGENCES_KEPT),
+                        // And every loss -- a draw, a frame, data that did not
+                        // happen -- with how many times it came: an error the
+                        // journal let go of is still here.
+                        losses: Object.fromEntries([...reportDivergence.losses]
+                            .slice(0, DIVERGENCES_KEPT)),
+                        // The system exports a 64-bit process has no x86-64 of.
+                        leftOutAt64,
+                        // The guest-to-guest calls a watch was put in front of, by label.
+                        watches: [...watches.keys()],
+                        // How many calls a site kernel issued through `frame.gl`,
+                        // read beside the bridge's own per-hook rows: these calls
+                        // never cross the bridge, so they are not in `hooks` at all.
+                        kernelGlCalls: glCounters.calls,
+                        // Whether the guest's memory is shared with other threads, and
+                        // how many processes run at once (`mode.js`).
+                        mode: options.mode ?? null,
+                        concurrency: options.concurrency ?? 1,
+                        // What was asked for and not had, when the run fell back.
+                        fallback: options.fallback ?? null,
+                        // What a pacing that counts said of the run: in the workers
+                        // mode, the page's messages read between turns, the yields
+                        // to the event loop, and the sleeps on the doorbell.
+                        pacing: /** @type {any} */ (pacing).counts?.() ?? null,
+                        // What the program holds of its RAM, and the bundle's pools,
+                        // where this process mounted it: a bundle the run's system
+                        // mounted is the system's to report.
+                        bytesHeld: {
+                            guest: guestHeld(),
+                            heaps: mountedBlocks ? blocks?.held?.() ?? {} : {},
+                        },
                     },
-                    film: { ...film },
-                    // Which of the program's own code the machine is spent on
-                    // is not here: the kernel publishes its page counts and the
-                    // memory layer its regions, and whoever reads them sums and
-                    // sorts on their own thread. A table computed on this one
-                    // is a reader's work done by the program.
-                    unimplementedCalls: Object.fromEntries(missingCalls),
-                    // What was said as a divergence, the first of them: a
-                    // consumer that listened for none has no other record of
-                    // what this build accepted and did not do, and the journal
-                    // has long since let go of a line said once.
-                    divergences: [...reportDivergence.divergences].slice(0, DIVERGENCES_KEPT),
-                    // And every loss -- a draw, a frame, data that did not
-                    // happen -- with how many times it came: an error the
-                    // journal let go of is still here.
-                    losses: Object.fromEntries([...reportDivergence.losses]
-                        .slice(0, DIVERGENCES_KEPT)),
-                    // The system exports a 64-bit process has no x86-64 of.
-                    leftOutAt64,
-                    // The guest-to-guest calls a watch was put in front of, by label.
-                    watches: [...watches.keys()],
-                    // How many calls a site kernel issued through `frame.gl`,
-                    // read beside the bridge's own per-hook rows: these calls
-                    // never cross the bridge, so they are not in `hooks` at all.
-                    kernelGlCalls: glCounters.calls,
-                    // Whether the guest's memory is shared with other threads, and
-                    // how many processes run at once (`mode.js`).
-                    mode: options.mode ?? null,
-                    concurrency: options.concurrency ?? 1,
-                    // What was asked for and not had, when the run fell back.
-                    fallback: options.fallback ?? null,
-                    // What a pacing that counts said of the run: in the workers
-                    // mode, the page's messages read between turns, the yields
-                    // to the event loop, and the sleeps on the doorbell.
-                    pacing: /** @type {any} */ (pacing).counts?.() ?? null,
-                    // What the program holds of its RAM, and the bundle's pools,
-                    // where this process mounted it: a bundle the run's system
-                    // mounted is the system's to report.
-                    bytesHeld: {
-                        guest: guestHeld(),
-                        heaps: mountedBlocks ? blocks?.held?.() ?? {} : {},
-                    },
-                },
-            },
-        ]),
+                }] : []];
+            return only === null ? withZones(tables) : tables;
+        },
 
         /**
          * Where the machine is standing, right now, asked from outside.
