@@ -226,7 +226,7 @@ test('a handler that awaited and named its thread builds on that thread\'s stack
     }
 });
 
-test('a frame that would land off its thread\'s stack is refused, whatever led there', async()=>{
+test('a frame that would land on another thread\'s stack is refused, whatever led there', async()=>{
     // The backstop under the rule above. Wherever a resting position comes from
     // -- a frame, a suspended call, a caller that worked one out -- a callback
     // frame belongs on the stack of the thread that will run it, and anything
@@ -263,7 +263,26 @@ test('a frame that would land off its thread\'s stack is refused, whatever led t
     machine.trap(wild, machine.main, MAIN.top - 0x100);
     await settle();
 
-    assert.match(String(refused), /callback frame for thread-3 .* is outside its stack/);
+    assert.match(String(refused), /callback frame for thread-3 .* is on main's stack/);
+});
+
+test('a thread running on a stack of its own choosing is called back there', async()=>{
+    // A program may switch a thread onto any memory it owns - a coroutine's
+    // stack in its heap - and Windows calls it back on that stack. Only another
+    // thread's stack is refused (above).
+    const machine = await bridge();
+    const HEAP_STACK = 0x0e3b0000;
+    machine.api.register('TEST.dll!CallsBack', {
+        argBytes: 4,
+        handler: ()=>machine.api.callGuest({ entry: 0x00402000, args: [1] }),
+    });
+    machine.trap(machine.lastTrap(), machine.main, HEAP_STACK - 0x100);
+    await settle();
+
+    const built = machine.resumed.filter(frame=>frame.eip === 0x00402000);
+    assert.equal(built.length, 1, 'the callback was started');
+    assert.ok(built[0].esp < HEAP_STACK && built[0].esp > HEAP_STACK - 0x1000,
+        `0x${built[0].esp.toString(16)} is on the stack the thread was running on`);
 });
 
 test('a second instance in one realm does not take the first one\'s state', async()=>{

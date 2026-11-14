@@ -335,22 +335,25 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
         const { frameBase, extent } = long ? longFrame(resting, args)
             : { frameBase: resting - 4 * (args.length + 2),
                 extent: resting - 4 * (args.length + 2) + 4 * (args.length + 2) };
-        // And it has to land on this thread's own stack. Three separate
-        // defects have written a callback frame onto a stack belonging to
-        // another thread -- each time because the resting position was read
-        // from something that had moved on while a handler awaited -- and
-        // every one of them was silent at the moment it happened, surfacing
-        // much later as a return into an address that holds no code. There
-        // is no legitimate reason for a frame to be anywhere else, so the
-        // fourth instance stops here and says whose stack it was about to
-        // write on instead of corrupting it.
-        if (thread.stackLimit !== undefined
-            && (frameBase < thread.stackLimit || frameBase > thread.stackTop))
+        // And it must not land on another thread's stack. Three separate
+        // defects have written a callback frame there -- each time because
+        // the resting position was read from something that had moved on
+        // while a handler awaited -- and every one of them was silent at the
+        // moment it happened, surfacing much later as a return into an
+        // address that holds no code. So the fourth instance stops here and
+        // says whose stack it was about to write on. Anywhere else is the
+        // program's to choose: Windows runs a thread on any stack it switched
+        // to (a fiber's, a coroutine's, a block of its heap), and calls it
+        // back there.
+        const other = kernel.threads().find((/** @type {any} */ one)=>one !== thread
+            && one.stackLimit !== undefined
+            && frameBase >= one.stackLimit && frameBase <= one.stackTop);
+        if (other)
         {
             throw new Error(`bridge: a callback frame for ${thread.name} at`
-                + ` 0x${(frameBase >>> 0).toString(16)} is outside its stack`
-                + ` (0x${(thread.stackLimit >>> 0).toString(16)}`
-                + `..0x${(thread.stackTop >>> 0).toString(16)})`);
+                + ` 0x${(frameBase >>> 0).toString(16)} is on ${other.name}'s stack`
+                + ` (0x${(other.stackLimit >>> 0).toString(16)}`
+                + `..0x${(other.stackTop >>> 0).toString(16)})`);
         }
         if (!long)
         {
