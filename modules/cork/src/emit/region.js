@@ -51,7 +51,7 @@ import {
     ARITH, CARRY_IN_WORD, I32, I64, Kind, MASKS, eagerFlagsOf, emitCondition, emitFlag, kindOf,
     recordOffsets, widthCode,
 } from './flags.js';
-import { emitInstruction } from './integer.js';
+import { emitInstruction, profileCall } from './integer.js';
 import { copyLoopOf, emitCopyAtOnce, emitIndexedCopyAtOnce, indexedCopyOf } from './copy-loop.js';
 import {
     addUndoHelper, copyPlan, emitGroupChecks, emitStaleExit, emitStreamWindow, planBlock,
@@ -5013,6 +5013,13 @@ export class RegionEmitter {
         const label = this.labels.get(target);
         if (label === undefined)
         {
+            // A callee's branch left as cold notes where it went, as an indirect call
+            // does: taken often, the region is formed again with it followed (`coldBranch`).
+            const block = this.region.blocks[this.blockIndex];
+            if (block.exit.cold?.includes(target) === true)
+            {
+                profileCall(this, block.instructions[block.instructions.length - 1].eip, target);
+            }
             this.exitAt(target, Exit.UNTRANSLATED);
             return;
         }

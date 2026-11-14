@@ -3342,9 +3342,10 @@ test('a call site keeps its own budget of forming again: other sites of its regi
 });
 
 test('a callee\'s far branch left as cold, then sampled taken at every call, is followed: the'
-    + ' callee formed in with it, or made a wasm call when too large for that', async()=>{
+    + ' callee formed in with it, or made a wasm call when too large for that', async t=>{
     if (!probeFeatures().tailCalls)
     {
+        t.skip(NO_TAIL_CALLS);
         return;
     }
     // mov eax, 1; call F; hlt. F: test eax, eax; jnz HOOK; ret. HOOK, past the cold
@@ -3407,6 +3408,46 @@ test('a callee\'s far branch left as cold, then sampled taken at every call, is 
     const [cold, apart] = await scene(600);
     assert.equal(cold, 2 * runs);
     assert.ok(apart < cold, `F too large with HOOK: a wasm call, no way out (${apart})`);
+});
+
+test('a callee\'s far branch left as cold notes where it went as it leaves there: taken at every'
+    + ' call, the region is formed again with it followed', async t=>{
+    if (!probeFeatures().tailCalls)
+    {
+        t.skip(NO_TAIL_CALLS);
+        return;
+    }
+    // mov eax, 1; call F; hlt. F: test eax, eax; jnz HOOK; ret. HOOK, past the cold
+    // reach: inc edx; ret. The samples are the emitted code's own, at the way out.
+    const m = machine({ countTransfers: true, callTargets: true, predictAfter: 16 });
+    const [f, hook] = [CODE + 0x40, CODE + 0x3000];
+    m.write(CODE, [0xb8, 1, 0, 0, 0, 0xe8, ...le32(f - (CODE + 10)), 0xf4]);
+    m.write(f, [0x85, 0xc0, 0x0f, 0x85, ...le32(hook - (f + 8)), 0xc3]);
+    m.write(hook, [0x42, 0xc3]);
+    m.runtime.noteHot(CODE);
+    m.runtime.noteHot(hook);
+    for (let i = 0; i < 8 && [CODE, hook].some(one=>m.runtime.entryOf(one) < 0); i++)
+    {
+        await m.runtime.translatePending();
+    }
+    /** @param {number} runs @returns {number} the transfers they made */
+    const run = runs=>{
+        const before = m.runtime.diagnostics().transfers ?? 0;
+        for (let i = 0; i < runs; i++)
+        {
+            m.setReg(4, 0x80000);
+            assert.equal(m.runtime.run(m.runtime.entryOf(CODE), 1_000_000).kind, 'halt');
+        }
+        return (m.runtime.diagnostics().transfers ?? 0) - before;
+    };
+    assert.equal(run(100), 200, 'every call left at the branch and came back by the hash');
+    for (let round = 0; round < 200 && m.runtime.diagnostics().reforms === 0; round++)
+    {
+        run(100);
+        await m.runtime.translatePending();
+    }
+    assert.equal(m.runtime.diagnostics().reforms, 1, 'the region formed again on its samples');
+    assert.equal(run(100), 0, 'HOOK formed in: no way out');
 });
 
 test('a region formed after its call was predicted elsewhere is formed again with the callee'
