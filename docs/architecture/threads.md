@@ -117,13 +117,30 @@ and the batch modules the processes in workers compile: each is posted to the en
 which keeps it alive for the run (`withHeldModules`, as many wasm bytes as `sharedModuleBytes`),
 so a later process that compiles the same bytes from the store gets the code V8 compiled and
 tiered up for the first, since V8 keeps one compiled module for the bytes of any module still
-alive in the browser's process.
+alive in the browser's process. Where JavaScriptCore runs, which is not known to do so, no module
+is posted or kept.
+Where the run has a machine's memory (`machineMemory`), a few words in shared memory count every
+process's memory against it, whichever thread holds that memory
+([`cpu/internal/memory-budget.js`](../../modules/core/src/layers/cpu/internal/memory-budget.js)):
+a memory is made or grown only by a compare-exchange that keeps the sum within it, and a process
+takes what its start needs before it is built, waiting for another to end while there is no room.
+A process that ends gives back what it held of these, as an exit closes every handle at once: its
+references to named objects go (a name no other process holds is free again), a mutex one of its
+threads held is abandoned to the next waiter, and an object another process still holds keeps its
+state and nothing of the gone process - not its memory, its scheduler or its link
+([`core/src/system-objects.js`](../../modules/core/src/system-objects.js),
+[`kernel32/named-objects.js`](../../modules/core/src/layers/win32/kernel32/named-objects.js)).
 The engine thread answers a process thread across a link: two rings in shared memory, one each
 way, with a doorbell word per side ([`core/src/system/link.js`](../../modules/core/src/system/link.js), values encoded by `codec.js`). The
 process thread blocks on its doorbell for each answer and answers what it is asked meanwhile (the
 engine asks it about its windows); a message longer than a ring holds goes in parts. Each side
 looks at its doorbell for a few microseconds before it sleeps on it, since a thread woken from
-sleep costs far more than the answer.
+sleep costs far more than the answer. When a process ends, however it ends, its link is closed:
+every call still waiting on it fails (a COM call into it answers `RPC_E_SERVER_DIED`), a call made
+after fails at once, and the run detaches the windows the process answered for, so nothing asks a
+gone process again. The translation workers lent to it and the graphics thread let go of what they
+kept for it (the port each served it, its Direct3D roots and their view of its memory), whether it
+said goodbye or failed.
 
 A process thread seldom asks the volume: every change to a drive moves that drive's word in shared
 memory (one word per drive letter), and the process thread keeps what it read of a drive (64 KB

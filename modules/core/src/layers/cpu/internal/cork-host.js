@@ -27,9 +27,18 @@
  * and page arithmetic) is handed in by `module.js`, which loaded it by URL.
  */
 
+import { guestByLength, openCharge, openMemoryBudget } from './memory-budget.js';
 import { exceptionName, hostFault } from './faults.js';
 import { captureBlockContext, restoreBlockContext } from './context.js';
 import { createPorts } from './ports.js';
+
+/**
+ * What a byte of a translated module held costs the tab, its own included:
+ * the compiled machine code, the engine's metadata for the module, and the
+ * translator's records of its regions on the JavaScript heap. Measured on a
+ * .NET Framework setup in Chrome (`roadmap/decisions.md` A245).
+ */
+export const TRANSLATION_WEIGHT = 4;
 
 /** Register names in the state block's reg32 view, in index order. */
 const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
@@ -159,12 +168,30 @@ const hex = (value, width = 8)=>(value >>> 0).toString(16).padStart(width, '0');
  *     block is at the start of the memory.
  * @property {WebAssembly.Memory} [memory]  The memory, made by the host of another executor of
  *     the process (`wasmMemory`) -- shared, sized for `executors` -- rather than one of its own.
- * @property {{ memory: WebAssembly.Memory, guestEnd: number }} [reused]  The memory of a
- *     process that has gone, taken instead of a new one where it is the size this host would
- *     make: a finished process's memory is freed only by a garbage collection nothing prompts,
- *     and a parent starting one short-lived child after another would otherwise hold one
- *     memory per child. Below `guestEnd` the guest may have written, and that is zeroed with
- *     the engine's own pages; above it the guest's memory is as it was made.
+ * @property {{ memory: WebAssembly.Memory, guestEnd: number, executors?: number,
+ *     written?: [number, number][], engine?: { layout: string, ranges: [number, number][] } }}
+ *     [reused]  The memory of a process that has gone, taken instead of a new one where it is
+ *     the size this host would make: a finished process's memory is freed only by a garbage
+ *     collection nothing prompts, and a parent starting one short-lived child after another
+ *     would otherwise hold one memory per child. Below `guestEnd` the guest may have written;
+ *     above it the guest's memory is as it was made. `written`: the guest ranges zeroed at
+ *     the start, the rest below `guestEnd` left for the host to zero as it hands it out
+ *     again; without it everything below `guestEnd` is zeroed at the start. `executors`: how
+ *     many executors' pages, from the first, may hold the gone process's state (its
+ *     `executorsTouched`), each zeroed as it opens; all when absent. `engine`: where the gone
+ *     process's engine pages lay (its `engineLeft`): laid out elsewhere, they are zeroed at
+ *     the start and every executor's as it opens.
+ * @property {SharedArrayBuffer | ArrayBuffer} [memoryBudget]  The machine's memory
+ *     (`memory-budget.js`): a memory made here, and every page it grows by, is taken from it,
+ *     and a grow it cannot cover is refused as one past the ceiling is. Absent, nothing bounds
+ *     the memory but its own ceiling.
+ * @property {'length' | 'given'} [guestCharge]  How the guest's memory is counted
+ *     against the machine's (`guestByLength`): its length, or what it was given.
+ * @property {number} [memoryHolder]  The holder of the machine's memory this process
+ *     takes on (`memory-budget.js`), given back whole as it is gone.
+ * @property {{ left: number }} [memoryCredit]  What the run took of the machine's memory for
+ *     this process's start (`roomForProcess`): its memory and its grows draw on it first, so a
+ *     start never finds the machine full half way.
  * @property {SharedArrayBuffer} [tsc]  The time-stamp counter every executor of the process
  *     shares (`TscWord`): the guest's clock as the process last published it, and the last
  *     count any of them read.
@@ -174,11 +201,14 @@ const hex = (value, width = 8)=>(value >>> 0).toString(16).padStart(width, '0');
  * @property {{ everyMs: number, bytes: number } | false} [gcNudge]  How the threads holding
  *     the guest's memory bring JavaScriptCore's collections forward (`gc-nudge.js`), as the
  *     process settled it; an executor's worker nudges by it.
- * @property {{ at: number, span: number }} [engineArea]  A range of the guest's own space the
- *     process keeps from the program, `at` a MiB boundary: the memory then grows as the guest
- *     is given more (`growTo`), the engine's tables and other executors' pages kept there,
- *     where the whole `memorySize` was committed at the start. Only over shared memory, for
- *     a 32-bit process and a `memorySize` a power of two; a fixed memory otherwise.
+ * @property {{ at: number, span: number, others?: { at: number, span: number } }} [engineArea]
+ *     A range of the guest's own space the process keeps from the program, `at` a MiB
+ *     boundary: the memory then grows as the guest is given more (`growTo`), the engine's
+ *     tables and other executors' pages kept there, where the whole `memorySize` was committed
+ *     at the start. With `others`, the other executors' pages lie there instead, apart, and the
+ *     memory reaches them as each opens (`makeRoomFor`): it starts holding the first range.
+ *     Only over shared memory, for a 32-bit process and a `memorySize` a power of two; a fixed
+ *     memory otherwise.
  * @property {32 | 64} [bits]  64 for a long-mode (x86-64) process: the engine's 64-bit state
  *     block, run on its long-mode interpreter, on one executor. Default 32.
  */
@@ -238,7 +268,31 @@ export function createCorkHost(config){
     const { engine, memorySize, trapPort, entryVector, initialStack, cork: corkConfig,
         closedBelow = 0, zeroReadsBelow = 0, readThrough = [], noExecuteBelow = 0, executors = 1,
         executor = 0, memory: given, reused, tsc, features, translationZone, bits = 32,
-        window: wideWindow, codeBase = 0, hostAlias } = config;
+        window: wideWindow, codeBase = 0, hostAlias, memoryBudget, memoryCredit,
+        memoryHolder, guestCharge } = config;
+    /** Whether the guest's memory counts by its length, not by what it was given. */
+    const byLength = guestByLength(guestCharge);
+    /** The machine's memory this process's grows are taken from, where the run has one. */
+    const machine = memoryBudget === undefined ? null
+        : openMemoryBudget(memoryBudget, memoryHolder);
+    /**
+     * The machine's memory as this process takes it: what the run took for its
+     * start first, then the machine's own.
+     */
+    const machineBudget = machine === null ? null : {
+        ...machine,
+        /** @param {number} bytes @param {import('./memory-budget.js').MemoryKind} [kind] */
+        take(bytes, kind = 'guest'){
+            const credit = memoryCredit ?? { left: 0 };
+            const drawn = Math.min(credit.left, bytes);
+            if (bytes - drawn > 0 && !machine.take(bytes - drawn, kind))
+            {
+                return false;
+            }
+            credit.left -= drawn;
+            return true;
+        },
+    };
     // A wide window's image as the host is handed it: a pointer's low dword (a handler
     // reads `args[i] >>> 0`). The image's span below 4 GiB is kept free (`app.js`), so a
     // host access there is the image's, in the block from `codeBase`.
@@ -327,13 +381,24 @@ export function createCorkHost(config){
     // growth leaves every view taken as it was; a 32-bit process; a RAM a power
     // of two; an engine that knows the layout (`WRAP_SLACK`).
     const area = config.engineArea;
-    const areaBytes = Math.ceil(past / 65536) * 65536
-        + ((executors - 1) * executorPages + sharedPages) * 65536;
+    // Where the other executors' pages lie apart from the first's (`others`), the
+    // first's range holds its tables and the record they share; otherwise all
+    // of them, the record last.
+    const apart = area?.others;
+    const othersBytes = (executors - 1) * executorPages * 65536;
+    const areaBytes = Math.ceil(past / 65536) * 65536 + sharedPages * 65536
+        + (apart ? 0 : othersBytes);
     const growing = area !== undefined && shared && !long
         && typeof engine.WRAP_SLACK === 'number' && (memorySize & memorySize - 1) === 0
         && area.at % 0x100000 === 0 && area.at >= 0x100000 && areaBytes <= area.span
-        && area.at + areaBytes <= memorySize;
-    /** The RAM a growing memory always holds: up to its engine's range, a power of two. */
+        && area.at + areaBytes <= memorySize
+        && (apart === undefined || (apart.at % 0x100000 === 0 && othersBytes <= apart.span
+            && apart.at >= area.at + areaBytes && apart.at + othersBytes <= memorySize));
+    /**
+     * The RAM a growing memory always holds: up to its engine's range, a power
+     * of two -- the first executor's range alone where the others' lie apart,
+     * which the memory reaches as each opens (`makeRoomFor`).
+     */
     const ramFloor = growing
         ? Math.max(0x100000, 2 ** Math.ceil(Math.log2(area.at + areaBytes))) : memorySize;
     if (growing)
@@ -342,9 +407,12 @@ export function createCorkHost(config){
     }
     /** The engine's range inside the guest's space, empty where it has none. */
     const engineArea = growing ? { from: area.at, to: area.at + areaBytes } : { from: 0, to: 0 };
+    /** The other executors' pages where they lie apart from the first's, empty otherwise. */
+    const othersArea = growing && apart ? { from: apart.at, to: apart.at + othersBytes }
+        : { from: 0, to: 0 };
     /** Every guest range the engine holds, in address order: closed to the program. */
-    const engineRanges = [enginePages, engineArea].filter(range=>range.to > range.from)
-        .sort((a, b)=>a.from - b.from);
+    const engineRanges = [enginePages, engineArea, othersArea]
+        .filter(range=>range.to > range.from).sort((a, b)=>a.from - b.from);
     // Every field from the start of a state block, as the block's views read
     // it: the same on every executor, whose blocks a thread's context moves
     // between (`blockLayout`).
@@ -352,13 +420,16 @@ export function createCorkHost(config){
     const firstPages = growing ? Math.ceil((own.tables + past) / 65536) : pagesFor(own, past);
     /** Where an executor's state page begins. @param {number} index */
     const executorBase = index=>(index === 0 ? own.regs
-        : (firstPages + (index - 1) * executorPages) * 65536);
+        : othersArea.to > othersArea.from ? othersArea.from + (index - 1) * executorPages * 65536
+            : (firstPages + (index - 1) * executorPages) * 65536);
     const stateBase = executorBase(executor);
     const layout = executor === 0 ? own : executorLayout(own, stateBase, executor);
     const wasmArea = layout.tables + tables + profileSize;
     // Past every executor's pages, the record they keep together of who holds
     // code where and which stores reached it (`shared-code.js`).
-    const sharedAt = executors > 1 ? (firstPages + (executors - 1) * executorPages) * 65536 : -1;
+    const sharedAt = executors < 2 ? -1
+        : othersArea.to > othersArea.from ? firstPages * 65536
+            : (firstPages + (executors - 1) * executorPages) * 65536;
     // A growing memory starts with its floor and the slack past it, and may
     // grow to its whole RAM's (wasm's 4 GiB at most).
     const pages = growing ? (ramFloor + engine.WRAP_SLACK) / 65536
@@ -378,6 +449,19 @@ export function createCorkHost(config){
         && (typeof SharedArrayBuffer === 'function'
             && reused.memory.buffer instanceof SharedArrayBuffer) === shared
         ? reused.memory : undefined;
+    // A memory made here is the machine's to give: refused past it, as a
+    // process Windows cannot find the memory for fails to start. A taken one
+    // is held already, by the process that left it.
+    if (given === undefined && taken === undefined && machineBudget !== null && byLength)
+    {
+        if (!machineBudget.take(pages * 65536))
+        {
+            throw Object.assign(new Error(`cpu: the machine's memory has no room for a process`
+                + ` (${pages * 65536} bytes wanted, ${machineBudget.report().used} of`
+                + ` ${machineBudget.report().limit} held)`), { code: 'MACHINE_MEMORY' });
+        }
+        machineBudget.made();
+    }
     const memory = given ?? taken
         ?? new WebAssembly.Memory({ initial: pages, maximum: maximumPages, shared });
     /** A wide window's RAM, a memory64 memory of the window's size made whole; none otherwise. */
@@ -388,29 +472,102 @@ export function createCorkHost(config){
     // The memory past the guest's RAM, or a growing memory's engine range: the
     // engine's tables and pages for every executor, which the translator's zone
     // holds before any module of it.
-    const engineBytes = growing ? areaBytes : ramMemory !== undefined ? memory.buffer.byteLength
-        : memory.buffer.byteLength - own.ramBase - memorySize;
+    const engineBytes = growing ? areaBytes + othersArea.to - othersArea.from
+        : ramMemory !== undefined ? memory.buffer.byteLength
+            : memory.buffer.byteLength - own.ramBase - memorySize;
+    // Where the guest counts by what it was given, the first executor's tables
+    // are the engine's, written as it translates (the others' as each opens).
+    if (machineBudget !== null && !byLength && executor === 0
+        && !machineBudget.take(growing ? areaBytes : engineBytes, 'engine'))
+    {
+        throw Object.assign(new Error('cpu: the machine\'s memory has no room for a'
+            + ' process\'s tables'), { code: 'MACHINE_MEMORY' });
+    }
     // A ceiling only where the iOS hack runs (`crossTailCalls` false): a phone's tab is
     // what it is for. Elsewhere it let a desktop's other executors, a sixteenth of the
     // zone each, let modules go and bring them back without end: CoD4 on four cores
     // fell from 58 to 42 frames a second in its menu, under one core's 61.
+    // The translator's modules taken from the machine's memory, each byte
+    // weighed for what holding it costs past itself (`TRANSLATION_WEIGHT`).
+    const translationCharge = machine === null ? null
+        : openCharge(machine, 'translation', TRANSLATION_WEIGHT);
     const cacheBytes = corkConfig?.cacheBytes
         ?? (translationZone === undefined ? undefined
             : corkConfig?.crossTailCalls !== false ? 0
                 : cacheShare(translationZone - engineBytes, executors, executor));
+    /**
+     * The engine's bytes executor `index` keeps, [from, to): the first's tables
+     * and what lies past them (its state page is in the guest's first 64 KiB),
+     * another's state page, tables and past.
+     *
+     * @param {number} index
+     */
+    const executorRange = index=>(index === 0
+        ? { from: own.tables, to: firstPages * 65536 }
+        : { from: executorBase(index), to: executorBase(index) + executorPages * 65536 });
+    /** The record the executors keep together, empty for a process on one. */
+    const sharedRange = sharedAt < 0 ? { from: 0, to: 0 }
+        : { from: sharedAt, to: sharedAt + sharedPages * 65536 };
+    /**
+     * The executors, from the first, whose pages a gone process may have left
+     * its engine's state in: zeroed as each opens (`makeRoomFor`), not all at
+     * the start -- a process that never opens one leaves its pages untouched,
+     * where zeroing them made every executor's 19 MiB resident.
+     */
+    /**
+     * Where the engine's pages lie, for whether a gone process's lay where this
+     * one's do: the executors' ranges, from the first, and the shared record.
+     */
+    const engineLayout = [executorRange(0).from, executorRange(0).to, executors,
+        executors > 1 ? executorRange(1).from : 0, executorPages, sharedRange.from].join(':');
+    /** The gone process's engine lay where this one's does: its executors' pages are known. */
+    const sameEngine = reused?.engine === undefined || reused.engine.layout === engineLayout;
+    const dirtyExecutors = taken === undefined ? 0
+        : sameEngine ? Math.min(executors, Math.max(1, reused?.executors ?? executors))
+            : executors;
+    /** The executors this process made room for, the first among them. */
+    const readied = new Set([0]);
     if (taken !== undefined)
     {
         // A new memory is zero; this one is made so where it was used: its
-        // state block and the guest's RAM up to where the guest was given
-        // memory, and everything past the RAM -- the engine's tables, the
-        // other executors' pages and the record they kept together.
+        // state block and the guest's RAM where the guest wrote, past the RAM,
+        // and the first executor's tables and the record the executors keep
+        // together. Another executor's are zeroed when it opens. Where the host
+        // names the ranges to zero now (`written`), the rest of what the guest
+        // was given is the host's to zero as it hands it out again; otherwise
+        // all of it up to `guestEnd`.
         const bytes = new Uint8Array(memory.buffer);
-        const guestEnd = Math.min(Math.max(reused?.guestEnd ?? memorySize, 0), memorySize);
-        bytes.fill(0, 0, own.ramBase + guestEnd);
-        bytes.fill(0, own.ramBase + memorySize);
-        // A growing memory's tables lie inside the guest's space, wherever the
-        // guest's end was.
-        bytes.fill(0, engineArea.from, engineArea.to);
+        /** @param {number} from @param {number} to */
+        const zero = (from, to)=>bytes.fill(0, Math.max(0, from),
+            Math.max(0, Math.min(to, bytes.length)));
+        const written = reused?.written;
+        if (written === undefined)
+        {
+            const guestEnd = Math.min(Math.max(reused?.guestEnd ?? memorySize, 0), memorySize);
+            zero(0, own.ramBase + guestEnd);
+        }
+        else
+        {
+            // The guest's first 64 KiB, the state page among them.
+            zero(0, Math.max(0x10000, own.ramBase, enginePages.to));
+            for (const [from, to] of written)
+            {
+                zero(own.ramBase + from, own.ramBase + to);
+            }
+            // A gone process's engine laid out elsewhere: its pages wherever they were.
+            for (const [from, to] of sameEngine ? [] : reused?.engine?.ranges ?? [])
+            {
+                zero(from, to);
+            }
+        }
+        if (!growing)
+        {
+            bytes.fill(0, own.ramBase + memorySize, executorRange(0).to);
+        }
+        for (const range of [executorRange(0), sharedRange])
+        {
+            bytes.fill(0, range.from, range.to);
+        }
     }
 
     // A fixed memory (initial === maximum) never detaches its buffer, and a
@@ -865,7 +1022,11 @@ export function createCorkHost(config){
                 && (enginePages.to <= enginePages.from || enginePages.from >= 0x1000)
                 ? { zeroPage: true } : {}),
             ...corkConfig,
+            // The tables are zero as the runtime starts: a memory just made, or
+            // one zeroed where they lie (`reused`, `makeRoomFor`).
+            tablesZeroed: true,
             ...(cacheBytes === undefined ? {} : { cacheBytes }),
+            ...(translationCharge === null ? {} : { charge: translationCharge }),
             ...(sharedAt < 0 ? {} : { sharedCode: { at: sharedAt, index: executor } }) },
         read: (/** @type {number} */ address)=>ram[address],
         // Past RAM's end `read` answers nothing, which a copy keeps as zeros.
@@ -905,6 +1066,8 @@ export function createCorkHost(config){
      * @type {Uint8Array | null}
      */
     let closedPastHeld = null;
+    /** Grows the machine's memory refused this process (`memoryBudget`). */
+    let refusedGrows = 0;
     /**
      * Grows a growing memory to hold `end` bytes of RAM, in a power of two up to
      * the ceiling: its pages added, the views taken again, the new pages opened
@@ -929,6 +1092,14 @@ export function createCorkHost(config){
         want = Math.min(want, memorySize);
         const wantPages = Math.min(65536, (want + engine.WRAP_SLACK) / 65536);
         const havePages = memory.buffer.byteLength / 65536;
+        // The machine's memory first: a grow it cannot cover is the guest's
+        // allocation refused, as a full machine refuses it.
+        const grown = byLength ? Math.max(0, wantPages - havePages) * 65536 : 0;
+        if (machineBudget !== null && !machineBudget.take(grown))
+        {
+            refusedGrows++;
+            return held;
+        }
         try
         {
             if (wantPages > havePages)
@@ -937,6 +1108,7 @@ export function createCorkHost(config){
             }
         }
         catch {
+            machineBudget?.give(grown);
             return held;
         }
         const from = held;
@@ -1938,6 +2110,17 @@ export function createCorkHost(config){
                 }
             }
         },
+        /**
+         * What the translator took of the machine's memory given back, as the
+         * process or the executor goes (its modules go with it, unlet).
+         */
+        release(){
+            const bytes = translationCharge?.held() ?? 0;
+            if (bytes > 0)
+            {
+                translationCharge?.give(bytes);
+            }
+        },
         stop(){
             stopped = true;
             // Where the others interrupt this one, the stop takes the same
@@ -1992,6 +2175,97 @@ export function createCorkHost(config){
         },
         /** Cork's own memory. */
         wasmMemory: ()=>memory,
+        /**
+         * Readies executor `index`'s pages before its worker takes the memory:
+         * zeroed where a gone process may have left its engine's state there.
+         * Only the process's own executor makes room.
+         *
+         * @param {number} index
+         */
+        makeRoomFor: index=>{
+            if (executor !== 0 || !(index >= 1 && index < executors))
+            {
+                return;
+            }
+            const range = executorRange(index);
+            // Its pages apart from the first's, past what the memory holds: the
+            // memory reaches them now, the RAM held and its wrap as they were.
+            const want = Math.ceil(range.to / 65536);
+            const have = memory.buffer.byteLength / 65536;
+            if (want > have)
+            {
+                // An executor the machine has no memory for does not open: its
+                // threads run on the executors the process has.
+                if (machineBudget !== null && byLength
+                    && !machineBudget.take((want - have) * 65536))
+                {
+                    refusedGrows++;
+                    return false;
+                }
+                memory.grow(want - have);
+            }
+            // Its tables, written as it translates, the engine's where the
+            // guest counts by what it was given.
+            if (machineBudget !== null && !byLength && !readied.has(index)
+                && !machineBudget.take(range.to - range.from, 'engine'))
+            {
+                refusedGrows++;
+                return false;
+            }
+            if (index < dirtyExecutors && !readied.has(index))
+            {
+                new Uint8Array(memory.buffer).fill(0, range.from, range.to);
+            }
+            readied.add(index);
+        },
+        /**
+         * Bytes the guest was given (a heap's reach, a commit, an image, a
+         * stack) taken from the machine's memory where it counts by what was
+         * given; false where it has no room, and the guest's allocation fails.
+         *
+         * @param {number} bytes
+         */
+        chargeGuest: bytes=>machineBudget === null || byLength || machineBudget.take(bytes),
+        /** Bytes the guest was given back. @param {number} bytes */
+        giveGuest: bytes=>{
+            if (machineBudget !== null && !byLength)
+            {
+                machineBudget.give(bytes);
+            }
+        },
+        /**
+         * How many executors, from the first, may hold a gone process's state in
+         * this memory once this process has gone: what the next process to take it
+         * zeroes as each opens (`CorkHostConfig.reused`).
+         */
+        executorsTouched: ()=>Math.max(dirtyExecutors, ...[...readied].map(index=>index + 1)),
+        /**
+         * The machine's memory as the run holds it now (bytes) and the grows it
+         * refused this process; null where the run has none.
+         */
+        machineMemory: ()=>(machineBudget === null ? null
+            : { ...machineBudget.report(), refusedGrows }),
+        /**
+         * What a process taking this memory next is told of the engine's pages
+         * (`CorkHostConfig.reused`'s `engine`): where they lie, and the ranges of
+         * the executors that may hold this process's state there.
+         *
+         * @returns {{ layout: string, ranges: [number, number][] }}
+         */
+        engineLeft: ()=>{
+            const touched = Math.max(dirtyExecutors, ...[...readied].map(index=>index + 1));
+            /** @type {[number, number][]} */
+            const ranges = [];
+            for (const range of [...Array.from({ length: touched }, (_, index)=>
+                executorRange(index)), sharedRange])
+            {
+                if (range.to > range.from)
+                {
+                    ranges.push([range.from, range.to]);
+                }
+            }
+            return { layout: engineLayout, ranges };
+        },
         /** The eager flags word. */
         getEflags: eflagsWord,
         /** The x87 stack's top, for the runtime's entry lookup. */

@@ -1996,9 +1996,12 @@ guest's own space, about 20 MiB an executor and 8 more: at the top of the librar
 the thread stacks, or at the heap's start where it ends short of 0x10000000. Four executors or more
 fit neither, and without a range every process committed its whole RAM at its start (2.1 GiB a
 process on eight). Past 0x10000000 and the few megabytes above it, the bases a library is most
-often linked for, the heap gives the range up as it gives a library that cannot move its span, and
-the memory starts at 512 MiB on eight executors. A library linked to load inside the range cannot
-be loaded; one that can move is moved. *2026-11-07.*
+often linked for, the heap gives the range up as it gives a library that cannot move its span. A
+library linked to load inside the range cannot be loaded; one that can move is moved. *2026-11-07.*
+Since 2026-11-13 only the other executors' pages are cut out there, the first executor's tables
+and their shared record staying at the top of the libraries' space: the memory starts as it does
+on one executor and reaches the cut range when another executor opens, where every process on
+eight executors started at 512 MiB.
 
 **A234. D3DX 10 asked for a size its file holds as a level takes that level, where the format
 has no codec here.** D3DX 10 and 11 filter the first level down to a size asked; this loader does
@@ -2105,10 +2108,56 @@ started is the primary play task of `goggame-<id>.info`, with its arguments; its
 is not carried, the program starting in its own folder. Generation-1 builds are refused with what
 they are. *2026-11-12.*
 
-**A242. GL_CLAMP clamps to the edge, as GL_CLAMP_TO_EDGE does,** said when a texture or a
+**A242. In a memory a gone process handed on, a reserved page reads that process's bytes until it
+is committed.** A process the run starts takes the memory of one gone before it (a parent starting
+child after child, ngen a worker per assembly) and zeroes at its start only what it finds in place
+before anything hands it out: the thunk table and the first thread's stack. The heap zeroes a block
+as it hands it out and the stack pool a stack as it is taken, so what a program is given reads as
+in a new memory; zeroing everything the gone process wrote made all of it resident at the start, a
+quarter of a gigabyte for the smallest program. A reservation's pages are zeroed as each is
+committed, as pages given back already were: until then a read of one finds the gone process's
+bytes where a read of an uncommitted page does not fault, where Windows faults and a new memory
+reads zero. A program reading memory it never committed or was never handed is the only one to
+see the difference. *2026-11-13.*
+
+**A243. The tab's memory is one budget, counted by kind, each process holding its part apart.**
+A browser ends a tab past a line of its own (Safari on iOS near 1.7 GB), and a person who sets a
+memory of two gigabytes expects the tab to hold no more; so in a browser the run's memory
+(`machineMemory`, by default `memorySize`) bounds everything the run holds, not each process's
+address space. Windows' processes share the machine's RAM page by page and page what does not fit;
+here nothing can be paged (a touched wasm page is the tab's for good), so the budget counts what
+can be held and refuses what would pass it. The guest's memories count as the engine holds them:
+at their whole length in JavaScriptCore, where a grow made every grown page resident; by what the
+guest was given elsewhere (its heap's reach, its commits, its images, its stacks), as Windows
+counts commit and not address space, a memory kept for the next process at what its process left
+in it. The engine's own counts as measured costs: the tab
+before any program, each process, each executor's worker, the executors' shared arena. The
+translator's modules count by their wasm bytes weighed for what holding them costs (compiled code,
+the engine's state beside them), and its shared translations at a ceiling sized to the tab. A guest
+allocation past the budget is refused, as an out-of-memory machine's is; translations past it let
+their coldest modules go, as a cache; an executor past it is not opened; a process with no room to
+start waits for another to end (`machineWaitMs`) and fails to start with STATUS_NO_MEMORY past
+that, where Windows would page. Each process holds its part on a holder of its own, given back
+whole by whoever started it once it is gone, however it ended, as Windows takes back a process's
+memory at its exit. Outside a browser there is no tab, and no budget unless one is named; the
+tab's own cost is not counted there. *2026-11-13.*
+
+**A244. GL_CLAMP clamps to the edge, as GL_CLAMP_TO_EDGE does,** said when a texture or a
 sampler is given it: GL_CLAMP clamps a coordinate to [0, 1], so a linear filter at the edge takes
 half its weight from the border (the border colour, for an image without border texels). WebGPU
 has no border to address, and the device and the processor both sample GL_CLAMP as
 GL_CLAMP_TO_EDGE, so the two paths agree; the difference from GL is the outer half texel of a
 linearly filtered texture, which keeps the edge texel here where GL fades it toward the border
 colour. Emulating it is the coordinate test in every shader that A186 would need. *2026-11-13.*
+
+**A245. What the tab's budget counts for the engine's own parts, and from what.** The costs the
+budget charges for what it cannot measure from inside (`machineMemory`, A243), and where each
+comes from. The tab before any program (`RUN_ENGINE_BYTES`, 384 MiB): Chrome 156's renderer with
+an idle program, one executor, a fake GPU, 357 MiB (8 executors: 425 MiB, so about 10 MiB an
+idle executor's worker: `EXECUTOR_BYTES`, 12 MiB). A process's own state (`PROCESS_ENGINE_BYTES`,
+32 MiB), its first executor's tables (`PROCESS_TABLES_BYTES`, 64 MiB, their size, not what is
+touched of them) and a translated module's weight (`TRANSLATION_WEIGHT`, 4: its compiled code, the
+engine's metadata and the translator's records beside its wasm bytes) are not measured apart: on
+the .NET Framework 4 setup in Chrome with a budget of 2 GiB they held the renderer at 1.5 GB
+steady, with one sample of 2.1 GB (garbage the JavaScript heaps had not collected). The tab's own
+cost is counted only in a browser. *2026-11-13.*

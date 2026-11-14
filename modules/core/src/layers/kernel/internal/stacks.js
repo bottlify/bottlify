@@ -26,11 +26,17 @@ const MEGABYTE = 0x100000;
  * @param {number} options.base
  * @param {number} options.size   The default reserve: what a thread asking for nothing gets.
  * @param {number} options.limit  Where the pool ends.
+ * @param {number} [options.dirtyTo]  Where the bytes a gone process left in the pool end,
+ *     in a memory it handed on: a stack this process takes there for the first time is
+ *     zeroed below it, as a new thread's stack reads zero on Windows -- each as it is
+ *     taken, where zeroing the gone process's whole reach at the start made it resident.
  */
-export function createStackPool({ memory, base, size, limit }){
+export function createStackPool({ memory, base, size, limit, dirtyTo = base }){
     /** @type {{ base: number, size: number, name: string, owner: any }[]} */
     const held = [];
     let issued = 0;
+    /** Where the stacks this process took end, the highest: below it they are its own. */
+    let reached = base;
 
     /**
      * The reserve a thread gets, by the rules CreateThread documents: a
@@ -89,6 +95,13 @@ export function createStackPool({ memory, base, size, limit }){
             {
                 return null;
             }
+            // A stack past the highest the pool reached is the guest's to write:
+            // taken from the machine's memory, none where it has no room.
+            const past = from + bytes - Math.max(reached, from);
+            if (past > 0 && memory.charge?.(past) === false)
+            {
+                return null;
+            }
             issued++;
             const slot = { base: from, size: bytes, name: `stack-${issued}`, owner: null };
             memory.register({
@@ -99,8 +112,21 @@ export function createStackPool({ memory, base, size, limit }){
                 access: memory.Access.READ_WRITE,
             });
             held.push(slot);
+            const stale = { from: Math.max(slot.base, reached),
+                to: Math.min(slot.base + slot.size, dirtyTo) };
+            if (stale.to > stale.from)
+            {
+                memory.fillBytes(stale.from, 0, stale.to - stale.from);
+            }
+            reached = Math.max(reached, slot.base + slot.size);
             return slot;
         },
+
+        /**
+         * Where what any process wrote in the pool ends: the stacks this one
+         * took, or the bytes a gone one left (`dirtyTo`).
+         */
+        reached: ()=>Math.max(reached, dirtyTo),
 
         diagnostics: ()=>({
             stacksHeld: held.length,

@@ -38,7 +38,7 @@
 
 import { ErrorCode, fsError } from './errors.js';
 import { foldName, matchName } from './paths.js';
-import { bytesOf } from './memory-store.js';
+import { PIECE_SIZE, bytesOf } from './memory-store.js';
 
 /**
  * @typedef {Object} Node
@@ -415,6 +415,8 @@ export function createOverlay({
     /**
      * Copy-on-write: the moment a source file is first written to, its bytes
      * move into the writable layer and every later read comes from there.
+     * A piece at a time: a game's archive of a gigabyte read whole was the
+     * gigabyte held three times over at once -- read, decoded, written.
      *
      * @param {Node} node
      */
@@ -425,8 +427,12 @@ export function createOverlay({
         }
         materialise(/** @type {Node} */ (node.parent));
         const size = source?.stat(node.sourcePath)?.size ?? 0;
-        writable.write(node.path, 0,
-            source ? source.read(node.sourcePath, 0, size) : new Uint8Array(0));
+        writable.write(node.path, 0, new Uint8Array(0));
+        for (let at = 0; at < size; at += PIECE_SIZE)
+        {
+            const part = source?.read(node.sourcePath, at, Math.min(PIECE_SIZE, size - at));
+            writable.write(node.path, at, part ?? new Uint8Array(0));
+        }
         node.inWritable = true;
     };
 

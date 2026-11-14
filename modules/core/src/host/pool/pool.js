@@ -396,6 +396,10 @@ export function createTranslatorPool({ open, perProcess, capacity, windowMs = 50
             for (const entry of [...at.workers])
             {
                 entry.process = null;
+                // Its runtime is gone and never says it is done with the
+                // port: the worker lets go of what it served it, or it kept
+                // the process's port and what it built for it until lent again.
+                entry.worker.post({ forget: true }, []);
             }
             processes.delete(id);
             // A worker it gave back goes to one that waits for it.

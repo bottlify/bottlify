@@ -176,6 +176,7 @@ const OWN = Symbol('guest heap');
  * @property {() => { base: number, size: number }[]} freeSpans
  * @property {(owner: any) => number[]} owned
  * @property {() => number} handedTo  the first arena address never inside a block
+ * @property {() => number} [dirtyTo]  where the bytes a gone process left in the arena end
  * @property {() => { blocks: number, used: number, free: number, largestFree: number }}
  *     diagnostics
  * @property {(count?: number) => { owner: any, bytes: number, blocks: number }[]} [owners]
@@ -713,6 +714,7 @@ export function createGuestHeap({ allocator, arena, memory, alignment = 8 }){
                     return own;
                 },
                 handedTo: ()=>allocator.handedTo(),
+                dirtyTo: ()=>allocator.dirtyTo?.() ?? arena.base,
                 diagnostics: ()=>allocator.diagnostics(),
                 owners: count=>allocator.owners?.(count) ?? [],
             };

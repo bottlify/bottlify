@@ -48,7 +48,7 @@ import { blockCounts, mechanismCounts, resetBlockCounts, topBlocks, transferTarg
 import { profileForms } from './profile-forms.js';
 import { createWeakInstances } from './weak-instances.js';
 import { sharedModulesOf } from './shared-modules.js';
-import { sharedFormsOf } from './shared-forms.js';
+import { sharedFormsOf, sharedStoreOf } from './shared-forms.js';
 import {
     CACHE_VERSION, cacheKey, moduleKey, packRegion, seedRecords, unpackRegion,
 } from './cache.js';
@@ -251,6 +251,12 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
         // the store, and are brought back from it as any miss is
         // (`EVICT_HOLD`).
         cacheBytes: 256 << 20,
+        // Where a host bounds what its runtimes hold together: each module held
+        // is taken from it by its wasm bytes and given back as it is let go, and
+        // a module it has no room for lets those gone longest without running go
+        // until there is (`take` answers false where there is none).
+        charge: /** @type {{ take(bytes: number): boolean, give(bytes: number): void } | null} */
+            (null),
         // The wasm bytes of compiled batch modules kept for every runtime
         // sharing this one's store (`shared-modules.js`): a process started again
         // instantiates what an earlier one compiled (0: none kept).
@@ -367,6 +373,10 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
         // runtime is (`shared-code.js`), when other executors share its page flags;
         // null for a process on one.
         sharedCode: /** @type {{ at: number, index: number } | null} */ (null),
+        // Whether the host made the tables zero itself -- a memory just made, or one
+        // it zeroed where they lie: the entry hash is then left as it is at the start,
+        // where clearing it made its 12 MiB resident in a memory nothing had touched.
+        tablesZeroed: false,
         // A store through esp alone tests no page while no translated code lies
         // on a thread's stack (`noteStack`), which the runtime then switches off
         // for good: a stack holds no code unless a program runs code there.
@@ -647,10 +657,11 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
      * bytes, those regions, the translated instructions (`corkRetired`) when
      * one of them last ran -- an entry from the host, a crossing out of the
      * module or into it -- and until when one brought back after an eviction
-     * is kept whatever that says.
+     * is kept whatever that says; `charged`, its bytes taken from the host's
+     * bound (`charge`).
      *
      * @typedef {{ instance: WebAssembly.Instance, bytes: number,
-     *     records: Set<RegionRecord>, ran: number, keepUntil: number }} Held
+     *     records: Set<RegionRecord>, ran: number, keepUntil: number, charged: number }} Held
      */
     /** @type {Map<WebAssembly.Instance, Held>} */
     const heldModules = new Map();
@@ -662,15 +673,24 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
     const instanceKeys = new WeakMap();
     /** A module compiled off the thread, by its bytes. @type {WeakMap<WebAssembly.Module, number>} */
     const compiledBytes = new WeakMap();
+    /** The store this runtime keeps formed regions and compiled modules beside for
+     * the other runtimes of its thread handed it, or null where none would take
+     * them (`sharedStoreOf`). */
+    const sharesStore = sharedStoreOf(settings.store ?? null);
+    /** The store a batch's compiled module is kept for, in this thread or another one
+     * (`share`): none for a run that keeps no store or no modules. */
+    const keepsModulesFor = leaveOut.size > 0 || settings.blockProfile === true
+        || !(settings.sharedModuleBytes > 0) ? null : settings.store ?? null;
     /** The compiled modules of every runtime sharing the store, by store key
-     * (`shared-modules.js`): none for a run that keeps no store. */
-    const sharedModules = sharedModulesOf(leaveOut.size > 0 || settings.blockProfile === true
-        ? null : settings.store ?? null, settings.sharedModuleBytes);
+     * (`shared-modules.js`): none for a run that keeps no store, nor where no
+     * other runtime of this thread would take them. */
+    const sharedModules = keepsModulesFor === null || sharesStore === null ? null
+        : sharedModulesOf(sharesStore, settings.sharedModuleBytes);
     // Past three quarters of the entry hash's slots live, a block start is kept
     // in the host's map alone (`createEntries`' own share).
     const entries = createEntries(
-        table ? { memory, hashBase: layout.tables + Tables.HASH, shift: layout.hashShift ?? 16 }
-            : {});
+        table ? { memory, hashBase: layout.tables + Tables.HASH, shift: layout.hashShift ?? 16,
+            zeroed: settings.tablesZeroed === true } : {});
     /** The queue, miss and barren key: one address at one x87 top. Every
      * "has an entry" question is for a top, so a region compiled for another
      * top is no answer. @param {number} eip @param {number} top */
@@ -1164,6 +1184,7 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
         // Modules let go past `cacheBytes`, their regions, and the regions of
         // them published again; the crossings counted by modules no longer placed.
         evictions: 0, evictedRegions: 0, broughtBack: 0, crossingsGone: 0,
+        chargeRefused: 0, unchargedBytes: 0,
         formingMs: 0, lookupMs: 0, emitMs: 0, encodeMs: 0, storeMs: 0, instantiateMs: 0,
         publishMs: 0,
         // Emitting and encoding the worker did: reported apart from
@@ -2383,7 +2404,9 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
             {
                 const bytes = instanceBytes.get(instance) ?? 0;
                 makeRoom(bytes);
-                held = { instance, bytes, records: new Set(), ran: corkRetired, keepUntil: 0 };
+                const charged = chargeFor(bytes);
+                held = { instance, bytes, records: new Set(), ran: corkRetired, keepUntil: 0,
+                    charged };
                 heldModules.set(instance, held);
                 heldBytes += bytes;
             }
@@ -2409,7 +2432,45 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
         {
             heldModules.delete(held.instance);
             heldBytes -= held.bytes;
+            if (held.charged > 0)
+            {
+                settings.charge?.give(held.charged);
+            }
         }
+    };
+    /**
+     * A module's bytes taken from the host's bound (`charge`): where it has no
+     * room, the modules gone longest without running are let go until it has.
+     * Where none is left to let go and still none fits, the module is held
+     * uncharged and counted (`unchargedBytes`): one module past the bound, said,
+     * rather than code the program needs refused.
+     *
+     * @param {number} bytes
+     * @returns {number} the bytes taken
+     */
+    const chargeFor = bytes=>{
+        const charge = settings.charge;
+        if (!charge || bytes <= 0)
+        {
+            return 0;
+        }
+        if (charge.take(bytes))
+        {
+            return bytes;
+        }
+        counts.chargeRefused++;
+        const order = [...heldModules.values()].sort((a, b)=>
+            Number(a.keepUntil > corkRetired) - Number(b.keepUntil > corkRetired) || a.ran - b.ran);
+        for (const held of order)
+        {
+            evict(held);
+            if (charge.take(bytes))
+            {
+                return bytes;
+            }
+        }
+        counts.unchargedBytes += bytes;
+        return 0;
     };
     /**
      * Lets modules go until `bytes` more fit under `cacheBytes`: those gone
@@ -2956,11 +3017,13 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
     /**
      * The formed regions of the runtimes sharing the store and forming as this
      * one does (`sharedFormed`), by entry and the callees formed in. None for a
-     * run that keeps no store, and for a diagnostic range left to the
-     * interpreter, which `translatable` answers by address rather than by page.
+     * run that keeps no store, where no other runtime of this thread would take
+     * them (and a region formed to be kept is formed without what the rest of
+     * its call decoded), and for a diagnostic range left to the interpreter,
+     * which `translatable` answers by address rather than by page.
      */
     const sharedForms = settings.interpretRange || leaveOut.size > 0 || profiling ? null
-        : sharedFormsOf(settings.store ?? null, JSON.stringify(formOptions), settings.sharedFormed);
+        : sharedFormsOf(sharesStore, JSON.stringify(formOptions), settings.sharedFormed);
     /**
      * Whether a region formed earlier would be formed the same here now: every
      * page forming asked about answers as it did, and every byte it read is as
@@ -3208,14 +3271,14 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
      * @param {string} key @param {WebAssembly.Module | null} module @param {number} bytes
      */
     const share = (key, module, bytes)=>{
-        if (sharedModules !== null && module !== null)
+        if (keepsModulesFor !== null && module !== null)
         {
             compiledBytes.set(module, bytes);
-            sharedModules.set(key, module, bytes);
+            sharedModules?.set(key, module, bytes);
             // Kept alive where the store is kept too, for runtimes in other
             // threads: one compiling the same bytes is handed this code,
             // tiered up as it is, by the wasm engine's own cache.
-            settings.store?.hold?.(key, module, bytes);
+            keepsModulesFor.hold?.(key, module, bytes);
         }
     };
     /**
@@ -5882,6 +5945,11 @@ export function createCorkRuntime({ memory, ram, layout, sharedLayout = undefine
                 cacheBytes: settings.cacheBytes,
                 evictions: counts.evictions,
                 evictedRegions: counts.evictedRegions,
+                // Where the host bounds the modules (`charge`): the times it had no
+                // room for one, and the bytes held past it where nothing was left
+                // to let go.
+                chargeRefused: counts.chargeRefused,
+                unchargedBytes: counts.unchargedBytes,
                 broughtBack: counts.broughtBack,
                 // The function table's length: what the regions' indices span.
                 tableSize: table ? table.length : 0,

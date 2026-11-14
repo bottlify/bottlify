@@ -214,6 +214,14 @@ export function createMemoryModule(){
                     {
                         return null;
                     }
+                    // An image mapped is the guest's to write: given, and counted
+                    // against the machine's memory, refused where it has no room.
+                    if (region?.kind === RegionKind.IMAGE
+                        && /** @type {any} */ (cpu).chargeGuest?.(region.size ?? 0) === false)
+                    {
+                        throw Object.assign(new Error(`memory: the machine's memory has no room`
+                            + ` for ${region.name ?? 'an image'}`), { code: 'MACHINE_MEMORY' });
+                    }
                     const made = state.regions.register(region);
                     publish();
                     return made;
@@ -257,6 +265,23 @@ export function createMemoryModule(){
                  * @returns {number}
                  */
                 reach: end=>(live() ? /** @type {any} */ (cpu).growTo?.(end) ?? Infinity : 0),
+                /**
+                 * Bytes the guest is given -- a heap's reach past its highest, a
+                 * commit, a stack -- taken from the machine's memory (the cpu
+                 * layer's `chargeGuest`); false where it has no room, and what asked
+                 * fails as an allocation Windows has no memory for.
+                 *
+                 * @param {number} bytes
+                 * @returns {boolean}
+                 */
+                charge: bytes=>!live() || /** @type {any} */ (cpu).chargeGuest?.(bytes) !== false,
+                /** Bytes the guest was given back. @param {number} bytes */
+                uncharge: bytes=>{
+                    if (live())
+                    {
+                        /** @type {any} */ (cpu).giveGuest?.(bytes);
+                    }
+                },
                 /** The RAM the guest's memory holds now. @returns {number} */
                 held: ()=>(live() ? /** @type {any} */ (cpu).ramHeld?.() ?? Infinity : 0),
                 /** Whether the guest's memory grows as the guest is given more. */

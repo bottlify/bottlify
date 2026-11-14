@@ -695,6 +695,73 @@ test('a gone process\'s record in the run\'s directory keeps its exit, not its m
     assert.equal(memoryOfGone.deref(), undefined, 'and its memory is nobody\'s');
 });
 
+test('a gone process on this thread gives its names back, and a name another process still holds'
+    + ' keeps its object\'s state, not the gone machine', async()=>{
+    const { setFlagsFromString } = await import('node:v8');
+    const { runInNewContext } = await import('node:vm');
+    setFlagsFromString('--expose-gc');
+    const gc = runInNewContext('gc');
+    const { createKernelModule } = await import('./module.js');
+    const { createNamedObjects } = await import('../win32/kernel32/named-objects.js');
+    // The run's one namespace, and the process that stays.
+    const table = new Map();
+    const ids = { thread: 1, process: 0x3000 };
+    /** @param {any} memory */
+    const machine = async memory=>{
+        const module = createKernelModule();
+        const kernel = /** @type {any} */ (await module.create(
+            { stacks: { base: STACK_BASE, size: STACK_SIZE }, ids },
+            /** @type {any} */ ({
+                /** @param {string} name */
+                requireApi: name=>(name === 'cpu' ? fakeCpu() : memory),
+                provide: ()=>{},
+            })));
+        const named = createNamedObjects({ table });
+        return { module, kernel, named,
+            ended: ()=>named.ended(object=>kernel.forsake(object)) };
+    };
+    const staying = await machine(fakeMemory());
+    const waiter = staying.kernel.createThread({ entry: 0x00402000, name: 'waiter' });
+    /** @type {WeakRef<object>} */
+    let memoryOfGone = new WeakRef({});
+    /** @type {any} */
+    let ready = null;
+    await (async()=>{
+        const memory = fakeMemory();
+        memoryOfGone = new WeakRef(memory);
+        const gone = await machine(memory);
+        const owner = gone.kernel.createThread({ entry: 0x00402000, name: 'owner' });
+        ready = gone.kernel.createEvent({ manualReset: true, name: 'Local\\Ready' });
+        gone.named.remember('Local\\Ready', 'event', ready, false, ()=>{});
+        const lock = gone.kernel.createMutex({ name: 'Local\\Lock' });
+        gone.named.remember('Local\\Lock', 'mutex', lock, false, ()=>{});
+        const alone = gone.kernel.createEvent({ name: 'Local\\Alone' });
+        gone.named.remember('Local\\Alone', 'event', alone, false, ()=>{});
+        assert.equal(gone.kernel.poll(lock, owner), 0, 'its thread holds the lock');
+        // The process that stays opens two of the names, and waits on the lock.
+        staying.named.reference(staying.named.existing('Local\\Ready', 'event'));
+        staying.named.reference(staying.named.existing('Local\\Lock', 'mutex'));
+        assert.equal(staying.kernel.wait(lock, waiter), null);
+        gone.kernel.setEvent(ready);
+        gone.ended();
+        await gone.module.dispose();
+    })();
+    assert.deepEqual([...table.keys()].sort(), ['Local\\Lock', 'Local\\Ready'],
+        'a name only the gone process held is free again');
+    assert.equal(waiter.waitResult, 0x80, 'the lock went to the waiter, abandoned');
+    for (let round = 0; round < 3; round++)
+    {
+        await new Promise(done=>setImmediate(done));
+        gc();
+    }
+    assert.equal(memoryOfGone.deref(), undefined, 'the gone machine\'s memory is nobody\'s');
+    assert.equal(staying.kernel.poll(ready, waiter), 0, 'the event it set stays set');
+    staying.kernel.resetEvent(ready);
+    assert.equal(staying.kernel.poll(ready, waiter), null, 'and works on as an object of the run');
+    staying.ended();
+    assert.equal(table.size, 0, 'the last process gone, every name is free');
+});
+
 test('a process in a worker of its own finds a process of the run by id across the link: its'
     + ' exit is a stand-in for the run\'s event, and its code is asked there', async()=>{
     const { objectHandlers } = await import('../../system-objects.js');

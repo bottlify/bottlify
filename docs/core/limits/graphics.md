@@ -61,7 +61,7 @@
 - OpenGL texturing departs from 2.1 where WebGPU or the fixed pipeline here has no way to follow,
   each said as a divergence: `GL_TEXTURE_LOD_BIAS` (a texture's or a unit's) and
   `GL_DEPTH_TEXTURE_MODE` are kept and not applied; `GL_CLAMP` and `GL_CLAMP_TO_BORDER` clamp to the
-  edge (decisions A242, A186); a combiner source naming another unit (`GL_TEXTUREn`) reads the
+  edge (decisions A244, A186); a combiner source naming another unit (`GL_TEXTUREn`) reads the
   previous unit's result; `GL_COORD_REPLACE` is not done; a 3D texture enabled on the fixed pipeline
   is not sampled (a loss); an image's border texels are sampled as part of the image; the sRGB
   luminance formats are sampled without their decode; the mipmaps generated of a compressed sized

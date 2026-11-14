@@ -167,6 +167,9 @@ export function createKernelModule(){
                 // than by failing -- which is the hardest kind of fault to read
                 // back to its cause.
                 limit: config?.stacks?.limit ?? Infinity,
+                // In a memory a gone process handed on: where its stacks' bytes end.
+                ...(config?.stacks?.dirtyTo === undefined ? {}
+                    : { dirtyTo: config.stacks.dirtyTo }),
             });
 
             /**
@@ -523,6 +526,11 @@ export function createKernelModule(){
                     return thread;
                 },
 
+                /**
+                 * Where what any process wrote in the thread stacks' pool ends:
+                 * what a process taking this memory next has to zero there.
+                 */
+                stacksReached: ()=>stacks.reached(),
                 /**
                  * A stack from the threads' pool for something that runs on a
                  * thread without being one -- a fiber -- made known to the
@@ -906,6 +914,21 @@ export function createKernelModule(){
                     }
                 },
 
+                /**
+                 * This process ends while another of the run still holds the
+                 * object (a name both opened): its threads leave the object's
+                 * queue and a mutex one of them holds is abandoned to the next
+                 * waiter, as Windows does at a process's exit.
+                 *
+                 * @param {any} object
+                 */
+                forsake: (/** @type {any} */ object)=>{
+                    if (live())
+                    {
+                        state.sync.forsake(object, ourThread(state));
+                    }
+                },
+
                 createEvent: (/** @type {any} */ options)=>
                     live() ? state.sync.createEvent(options) : null,
                 createMutex: (/** @type {any} */ options)=>
@@ -1277,6 +1300,9 @@ export function createKernelModule(){
             {
                 current.disposed = true;
                 settleRecords(current);
+                // What another process of the run still holds of this one's
+                // objects keeps their state and nothing of this machine.
+                current.sync?.settleAll(ourThread(current), current.scheduler?.all() ?? []);
                 current.unwake?.();
             }
             current = null;
@@ -1304,6 +1330,18 @@ function settleRecords(state){
                 manualReset: exited.manualReset, signalled: exited.signalled, waiters: [] };
         }
     }
+}
+
+/**
+ * Whether a thread is this process's: a thread of another process on this
+ * thread of the page carries its own scheduler (`threads.js`).
+ *
+ * @param {any} state
+ * @returns {(thread: any) => boolean}
+ */
+function ourThread(state){
+    const scheduler = state.scheduler;
+    return thread=>Boolean(thread) && thread.scheduler === scheduler;
 }
 
 /** One graph's worth, for the boundary check and for a test that builds this layer alone. */

@@ -52,10 +52,14 @@ export const MEMORY_ZONES = Object.freeze({
  * `decodedBlocks`: the bundle's blocks decoded for guest reads, kept for the
  * reads after them -- a block is a quarter of a mebibyte by default, and the
  * tiers hold two dozen.
+ * `writableFiles`: what the program wrote, held in memory where the run has a
+ * page file on the disk (`filesystem/internal/page-file.js`), the least
+ * recently used written out and let go first; an installer writes gigabytes.
  */
 export const HEAP_POOLS = Object.freeze({
     blockCache: 64 * MIB,
     decodedBlocks: 16 * MIB,
+    writableFiles: 64 * MIB,
 });
 
 /** What a pool says when nothing can measure it. */

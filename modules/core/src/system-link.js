@@ -54,8 +54,12 @@ const answering = (service, names)=>Object.fromEntries(names.map(name=>
  * @param {{ registry: any, ids: any, volume: any, windows: any, bundle?: any }} system
  * @param {(target: string, method: string, args: any[]) => any} [askBack]
  *     a blocking call to the process across the link, for its windows
+ * @param {Set<number>} [attached]  where the ids of the processes whose
+ *     windows are answered across this link are kept: a link that ends
+ *     without each saying so is detached by the run, or this thread would
+ *     ask a gone process about its windows and block on it for good
  */
-export function systemHandlers(system, askBack){
+export function systemHandlers(system, askBack, attached){
     return {
         registry: answering(system.registry, REGISTRY),
         ids: { take: (/** @type {'thread' | 'process'} */ name, /** @type {number} */ step)=>
@@ -71,9 +75,17 @@ export function systemHandlers(system, askBack){
             /** @param {number} processId */
             // Asked back with the process it is for: a child started beside
             // its parent in one worker answers for its windows on the same link.
-            attach: processId=>system.windows.attach(processId, Object.fromEntries(
-                ENDPOINT.map(name=>[name, (/** @type {any[]} */ ...args)=>
-                    (askBack ? askBack('endpoint', name, [processId, ...args]) : null)]))),
+            attach: processId=>{
+                attached?.add(processId >>> 0);
+                return system.windows.attach(processId, Object.fromEntries(
+                    ENDPOINT.map(name=>[name, (/** @type {any[]} */ ...args)=>
+                        (askBack ? askBack('endpoint', name, [processId, ...args]) : null)])));
+            },
+            /** @param {number} processId */
+            detach: processId=>{
+                attached?.delete(processId >>> 0);
+                return system.windows.detach(processId);
+            },
         },
     };
 }

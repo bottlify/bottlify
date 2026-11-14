@@ -552,7 +552,7 @@ function wrapTexel(i, size, wrap){
         }
         default:
             // GL_CLAMP is sampled as GL_CLAMP_TO_EDGE, as on the device,
-            // which has no border to blend in (`roadmap/decisions.md` A242).
+            // which has no border to blend in (`roadmap/decisions.md` A244).
             return i < 0 ? 0 : i >= size ? size - 1 : i;
     }
 }

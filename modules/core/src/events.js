@@ -40,6 +40,64 @@
  */
 export const REPLAY_LIMIT = 32;
 
+/** How deep into a layer's metrics a summary looks: a metric, and the fields of one. */
+const SUMMARY_DEPTH = 2;
+
+/**
+ * The numbers, flags and empties of a value, as deep as `depth` plain objects
+ * go: no list, no text.
+ *
+ * @param {unknown} value @param {number} depth
+ * @returns {unknown}  undefined for what is left out
+ */
+const plainOf = (value, depth)=>{
+    if (value === null || typeof value === 'number' || typeof value === 'boolean')
+    {
+        return value;
+    }
+    if (depth === 0 || typeof value !== 'object' || Array.isArray(value)
+        || Object.getPrototypeOf(value) !== Object.prototype)
+    {
+        return undefined;
+    }
+    /** @type {Record<string, unknown>} */
+    const kept = {};
+    for (const [key, field] of Object.entries(value))
+    {
+        const plain = plainOf(field, depth - 1);
+        if (plain !== undefined)
+        {
+            kept[key] = plain;
+        }
+    }
+    return kept;
+};
+
+/**
+ * What a process's diagnostics come to in an event about it: each layer's
+ * name, status and its metrics' numbers and flags (and those of a metric's
+ * fields), not its lists, tables or text. An event is kept for a subscriber
+ * yet to come (`REPLAY_LIMIT` of each name) and written into the run's journal
+ * as text, once per process gone: the whole of a process's diagnostics was
+ * kept and written each time one of a setup's helpers ended. The whole is the
+ * run's report's to read, not an event's.
+ *
+ * @param {unknown} diagnostics  a process's layers, as `diagnostics()` answers them
+ * @returns {{ name: string, status: string, metrics: Record<string, any> }[] | null}
+ */
+export function diagnosticsSummary(diagnostics){
+    if (!Array.isArray(diagnostics))
+    {
+        return null;
+    }
+    return diagnostics.map(layer=>({
+        name: String(layer?.name ?? ''),
+        status: String(layer?.status ?? ''),
+        metrics: /** @type {Record<string, any>} */ (plainOf(layer?.metrics ?? {}, SUMMARY_DEPTH)
+            ?? {}),
+    }));
+}
+
 export function createEvents(){
     /** @type {Map<string, EventHandler[]>} */
     const handlers = new Map();

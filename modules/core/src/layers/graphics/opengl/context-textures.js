@@ -314,7 +314,7 @@ export function samplingRefusal(parameter, value){
 /**
  * What a texture or sampler wrapped GL_CLAMP is told: it is sampled as
  * GL_CLAMP_TO_EDGE, on the device and the processor alike
- * (`roadmap/decisions.md` A242).
+ * (`roadmap/decisions.md` A244).
  *
  * @param {number} parameter @param {number} value
  * @returns {string | null}

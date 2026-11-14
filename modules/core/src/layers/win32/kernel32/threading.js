@@ -902,10 +902,17 @@ export function createThreadingFunctions(host){
             return null;
         }
         const words = host.allocate(EVENT_SLOTS * 4);
-        host.writeMemory(words, new Uint8Array(EVENT_SLOTS * 4));
         const mutexes = host.allocate(MUTEX_SLOTS * 4);
-        host.writeMemory(mutexes, new Uint8Array(MUTEX_SLOTS * 4));
         const events = host.allocate(EVENT_WORD_SLOTS * 4);
+        // A machine out of memory hands none out: the waits stay the host's,
+        // as where the table is switched off.
+        if (words === 0 || mutexes === 0 || events === 0)
+        {
+            handleWords = null;
+            return null;
+        }
+        host.writeMemory(words, new Uint8Array(EVENT_SLOTS * 4));
+        host.writeMemory(mutexes, new Uint8Array(MUTEX_SLOTS * 4));
         host.writeMemory(events, new Uint8Array(EVENT_WORD_SLOTS * 4));
         // The semaphores' two words each at the table's end (`wait-one.js`).
         const eventWords = EVENT_WORD_SLOTS - SEMAPHORE_SLOTS * 2;

@@ -29,9 +29,20 @@
  */
 
 const RPC_E_DISCONNECTED = 0x80010108 | 0;
+const RPC_E_SERVER_DIED = 0x80010007 | 0;
 
 /** What a call to an endpoint that is gone answers. */
 const GONE = Object.freeze({ hr: RPC_E_DISCONNECTED, disconnected: true });
+
+/**
+ * What a call answers whose server's process ended while it was delivered:
+ * its link closed, and nothing will answer it. A proxy takes it as a server
+ * gone (`disconnected`).
+ */
+const DIED = Object.freeze({ hr: RPC_E_SERVER_DIED, disconnected: true });
+
+/** @param {Promise<any>} delivered */
+const orDied = delivered=>delivered.catch(()=>DIED);
 
 /**
  * The link's handlers that answer for the run's class table, for one process
@@ -73,7 +84,7 @@ export function comHandlers(table, side){
                 const endpoint = {
                     process: key,
                     alive: true,
-                    deliver: message=>side.call('deliver', [id, message]),
+                    deliver: message=>orDied(side.call('deliver', [id, message])),
                     // What its proxies held it gave back itself, as it ended.
                     rundown: async()=>{},
                 };
@@ -159,9 +170,15 @@ export function comHandlers(table, side){
             releaseService: name=>table.releaseService(name),
             /** @param {number} number */
             exited: number=>launched.get(number) ?? null,
-            /** @param {string} clsid @param {number} number */
+            /**
+             * Number 0 names no server of the run's (one started beside the
+             * process, which waits on its end itself); any other the run does
+             * not know is one that ended already.
+             *
+             * @param {string} clsid @param {number} number
+             */
             whenRegistered: (clsid, number)=>table.whenRegistered(clsid,
-                launched.get(number) ?? new Promise(()=>{})),
+                number === 0 ? new Promise(()=>{}) : launched.get(number) ?? Promise.resolve()),
             /** @param {number[]} ids */
             ended: async ids=>{
                 for (const id of ids)
@@ -214,7 +231,8 @@ export function remoteClassTable(link, hooks = {}){
                 const number = link.ask('launch', [request]);
                 if (number)
                 {
-                    const exited = link.call('exited', [number]);
+                    // A link closed with it is this process ending: nobody waits.
+                    const exited = link.call('exited', [number]).catch(()=>null);
                     started.set(exited, number);
                     return { exited };
                 }
@@ -235,7 +253,7 @@ export function remoteClassTable(link, hooks = {}){
             const answer = link.ask('serviceProcess', [request]);
             if (answer)
             {
-                const exited = link.call('exited', [answer.number]);
+                const exited = link.call('exited', [answer.number]).catch(()=>null);
                 started.set(exited, answer.number);
                 return { exited, fresh: answer.fresh };
             }
@@ -287,7 +305,7 @@ export function remoteClassTable(link, hooks = {}){
                 get alive(){
                     return link.ask('alive', [id]) === true;
                 },
-                deliver: (/** @type {any} */ message)=>link.call('deliver', [id, message]),
+                deliver: (/** @type {any} */ message)=>orDied(link.call('deliver', [id, message])),
                 rundown: async()=>{},
             };
         },

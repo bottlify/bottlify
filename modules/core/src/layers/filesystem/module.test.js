@@ -7,7 +7,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createFilesystemModule, filesystemModule } from './module.js';
-import { createMemoryStore } from './internal/memory-store.js';
+import { PIECE_SIZE, createMemoryStore } from './internal/memory-store.js';
+import { createPageFile } from './internal/page-file.js';
 import { buildIso } from './internal/iso/build.js';
 import { openIso } from './internal/iso/iso9660.js';
 import { createIsoSource } from './internal/iso/source.js';
@@ -677,3 +678,53 @@ test('a directory is not moved into itself: refused, and left where it was', asy
     assert.equal(fs.stat('C:\\Database\\save.dat')?.size, 4,
         'a name that only begins with the directory\'s is not inside it');
 });
+
+test('the writable layer says what it holds, and on a page file holds no more than its pool',
+    async()=>{
+        const at = (/** @type {string[]} */ ...parts)=>['C:', ...parts].join(String.fromCharCode(92));
+        const inMemory = createFilesystemModule();
+        const plain = await inMemory.create({});
+        const written = plain.open(at('setup.tmp'),
+            { write: true, disposition: plain.Disposition.CREATE_NEW });
+        plain.write(written, new Uint8Array(3 * PIECE_SIZE));
+        plain.close(written);
+        assert.deepEqual(/** @type {any} */ (inMemory.diagnostics()).metrics.bytesHeld,
+            { heaps: { writable: 3 * PIECE_SIZE } });
+        await inMemory.dispose();
+
+        /** @type {Map<number, Uint8Array>} */
+        const disk = new Map();
+        const access = {
+            /** @param {Uint8Array} into @param {{ at: number }} where */
+            read: (into, { at: offset })=>{
+                into.set(/** @type {Uint8Array} */ (disk.get(offset)));
+                return into.length;
+            },
+            /** @param {Uint8Array} from @param {{ at: number }} where */
+            write: (from, { at: offset })=>{
+                disk.set(offset, from.slice());
+                return from.length;
+            },
+            getSize: ()=>0,
+            close: ()=>{},
+        };
+        const paged = createFilesystemModule();
+        const fs = await paged.create({ pageFile: createPageFile(access,
+            { residentBytes: PIECE_SIZE }) });
+        const handle = fs.open(at('setup.tmp'),
+            { write: true, disposition: fs.Disposition.CREATE_NEW });
+        for (let index = 0; index < 8; index++)
+        {
+            fs.write(handle, new Uint8Array(PIECE_SIZE).fill(index + 1));
+        }
+        fs.close(handle);
+        const report = /** @type {any} */ (paged.diagnostics()).metrics;
+        assert.deepEqual(report.bytesHeld, { heaps: { writable: PIECE_SIZE },
+            disk: { pageFile: 7 * PIECE_SIZE } });
+        assert.equal(report.pageFile.evicted, 7);
+        const reading = fs.open(at('setup.tmp'));
+        fs.seek(reading, 3 * PIECE_SIZE + 10);
+        assert.deepEqual([...fs.read(reading, 1)], [4], 'read back from the disk');
+        fs.close(reading);
+        await paged.dispose();
+    });

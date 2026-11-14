@@ -26,6 +26,10 @@ event, an error. Neither stops the program.
   says so once. Node.js 24 and later, and the browsers, let the modules go.
 - Below `0x10000` a write or running code faults, as an access violation, as on Windows; a read
   there finds zeros where Windows would fault too (`roadmap/decisions.md` A79).
+- A process the run starts may run in the memory of one gone before it. What it is handed (a heap
+  block, a committed page, a thread's stack) reads zero as in a new memory, but a page it reserved
+  and has not committed reads the gone process's bytes until it commits it, where Windows faults
+  (`roadmap/decisions.md` A242).
 - The processor a program finds is a Nehalem (SSE4.2, POPCNT): AVX, AVX2, FMA, BMI, AES-NI and
   AVX-512 are not announced and fault as on that processor. `tools/isa-audit.mjs` tells which a
   title's code uses.
@@ -99,6 +103,10 @@ event, an error. Neither stops the program.
 ## Files
 
 - The bundle is read-only. What the program writes goes into the session, kept per `id`.
+- What the program writes is held in memory, all of it, where the engine's thread has no
+  synchronous handle on the origin's file system (a run on the page's own thread, a browser
+  without one, WebKit before 16.4): an installer that unpacks gigabytes needs them in the tab.
+  Elsewhere 64 MiB of it stays in memory and the rest goes to the run's page file.
 - A file mapping is a copy: a view reads the file when it is made and writes it back when it is
   closed, so two views of one file do not see each other's writes.
 

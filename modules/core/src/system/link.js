@@ -64,6 +64,16 @@ const failureOf = e=>{
     return told;
 };
 
+/**
+ * What a call on a closed link fails with: the other side is gone, or going,
+ * and will answer nothing. `closed` tells it apart from the other side's own
+ * failure.
+ *
+ * @param {string} target @param {string} method
+ */
+export const closedError = (target, method)=>Object.assign(
+    new Error(`link: ${target}.${method}: the link is closed`), { closed: true });
+
 /** @param {any} failure */
 const errorOf = failure=>(typeof failure === 'string' ? new Error(failure)
     : Object.assign(new Error(failure?.message ?? 'link: the call failed'),
@@ -117,7 +127,12 @@ export function openLink(end, handlers){
     let nextId = 1;
     /** Answers to calls this side waits on, by id. @type {Map<number, { ok: boolean, value: any }>} */
     const arrived = new Map();
-    /** Calls this side was handed a promise for. @type {Map<number, { resolve: (value: any) => void, reject: (error: Error) => void }>} */
+    /**
+     * Calls this side was handed a promise for.
+     *
+     * @type {Map<number, { resolve: (value: any) => void, reject: (error: Error) => void,
+     *     target: string, method: string }>}
+     */
     const promised = new Map();
     /** Calls answered whose answer did not fit the ring yet. @type {Uint8Array[]} */
     const unsent = [];
@@ -321,8 +336,23 @@ export function openLink(end, handlers){
         asked.set(key, entry);
     };
 
-    /** Whether `serve` goes on: an object, so the loop reads what `close` wrote. */
-    const state = { serving: false };
+    /**
+     * Whether `serve` goes on, whether its loop runs, and whether the link is
+     * closed: an object, so the loop reads what `close` wrote.
+     */
+    const state = { serving: false, looping: false, closed: false };
+
+    /**
+     * Every call still waiting for an answer fails: nothing will answer it
+     * now, and a caller left waiting would hold whatever it holds for good.
+     */
+    const failWaiting = ()=>{
+        for (const [id, waiting] of [...promised])
+        {
+            promised.delete(id);
+            waiting.reject(closedError(waiting.target, waiting.method));
+        }
+    };
 
     return {
         bell,
@@ -336,10 +366,14 @@ export function openLink(end, handlers){
          * @returns {Promise<any>}
          */
         call(target, method, args = []){
+            if (state.closed)
+            {
+                return Promise.reject(closedError(target, method));
+            }
             note(target, method, 0);
             const id = nextId++;
             return new Promise((resolve, reject)=>{
-                promised.set(id, { resolve, reject });
+                promised.set(id, { resolve, reject, target, method });
                 send(encodeValue([CALL, id, target, method, args]));
             });
         },
@@ -354,6 +388,10 @@ export function openLink(end, handlers){
          * @returns {any}
          */
         callWaiting(target, method, args = [], timeoutMs = Infinity){
+            if (state.closed)
+            {
+                throw closedError(target, method);
+            }
             const id = nextId++;
             const started = performance.now();
             send(encodeValue([CALL, id, target, method, args]));
@@ -372,6 +410,11 @@ export function openLink(end, handlers){
                         throw errorOf(got.value);
                     }
                     return got.value;
+                }
+                // Closed while it waited, by a call it answered meanwhile.
+                if (state.closed)
+                {
+                    throw closedError(target, method);
                 }
                 const left = until - Date.now();
                 if (left <= 0)
@@ -392,7 +435,12 @@ export function openLink(end, handlers){
          * is called.
          */
         async serve(){
+            if (state.closed)
+            {
+                return;
+            }
             state.serving = true;
+            state.looping = true;
             const words = new Int32Array(bell.buffer);
             while (state.serving)
             {
@@ -417,6 +465,8 @@ export function openLink(end, handlers){
             // What the other side wrote before it was closed is still its
             // word: the last things a process tells the run as it ends.
             pump();
+            state.looping = false;
+            failWaiting();
         },
 
         /**
@@ -435,11 +485,20 @@ export function openLink(end, handlers){
             };
         },
 
-        /** Stops `serve`. */
+        /**
+         * Stops `serve`, and fails every call still waiting for an answer -
+         * once `serve` has read what the other side wrote last, where it runs.
+         * A call made after this fails at once.
+         */
         close(){
             state.serving = false;
+            state.closed = true;
             Atomics.add(new Int32Array(bell.buffer), bell.index, 1);
             Atomics.notify(new Int32Array(bell.buffer), bell.index);
+            if (!state.looping)
+            {
+                failWaiting();
+            }
         },
     };
 }

@@ -51,6 +51,7 @@ const LIMITS = {
     // the cap is what stops a long run turning into hundreds of megabytes of
     // text, not a judgement about which end matters.
     log: 400000,
+    lifetimes: 20000,
 };
 
 /**
@@ -1352,8 +1353,9 @@ export function scalars(layers){
  *
  * @param {any} app
  */
-async function standingOf(app){
-    return (await app.standing()).map((/** @type {any} */ { image, diagnostics })=>{
+async function standingOf(app, journal = 0){
+    return (await app.standing({ journal })).map((/** @type {any} */ { image, diagnostics,
+        journal: entries })=>{
         /** @param {string} layer */
         // A process in a worker of its own that ended while asked answers
         // nothing.
@@ -1364,18 +1366,40 @@ async function standingOf(app){
         const win32 = metrics('win32');
         const cpu = metrics('cpu');
         const log = metrics('log');
+        // What the process's layers say they hold, by zone (`memory-zones.js`):
+        // what the tab's memory is measured against.
+        /** @type {Record<string, number>} */
+        const held = {};
+        for (const entry of diagnostics ?? [])
+        {
+            for (const [zone, pools] of Object.entries(entry.metrics?.bytesHeld ?? {}))
+            {
+                for (const [pool, bytes] of Object.entries(pools ?? {}))
+                {
+                    if (typeof bytes === 'number')
+                    {
+                        held[`${zone}.${entry.name}.${pool}`] = bytes;
+                    }
+                }
+            }
+        }
         return {
             image,
+            held,
             phases: (log.topPhases ?? []).slice(0, 8),
             threads: kernel.byState, waiting: kernel.waiting, turns: kernel.turns,
             calls: bridge.calls, lastCall: bridge.lastCall, suspended: bridge.suspendedCalls,
+            callingBack: bridge.callingBack ?? null,
             messages: win32.messages,
             windows: (win32.windows ?? []).filter((/** @type {any} */ window)=>window.visible)
                 .map((/** @type {any} */ window)=>({ hwnd: window.hwnd, parent: window.parent,
                     className: window.className, title: String(window.title ?? '').slice(0, 60),
                     x: window.x, y: window.y, width: window.width, height: window.height })),
             cpu: { recent: (cpu.recent ?? []).slice(-4), top: (cpu.samples?.top ?? []).slice(0, 8),
-                traps: cpu.traps, trapCapacity: cpu.trapCapacity },
+                traps: cpu.traps, trapCapacity: cpu.trapCapacity,
+                machineMemory: cpu.machineMemory ?? null },
+            com: win32.com ?? null,
+            ...entries ? { journal: entries } : {},
         };
     });
 }
@@ -1465,7 +1489,8 @@ function filesUnder(app, directory){
  *     Where a frame's time goes, asked while the run is still going. A report
  *     at the end of a run answers what a whole run cost; this answers what one
  *     frame costs, which is the question a frame rate is.
- * @property {(list?: string) => Promise<{ processes: any[], events: string[], desktop: any,
+ * @property {(list?: string, journal?: number) => Promise<{ processes: any[], events: string[],
+ *     lifetimes: string[], desktop: any,
  *     files: { path: string, size: number }[] }>} standing
  *     Every process standing, read while the run goes on: its threads and
  *     what they wait on, its parked calls, its windows, and where its
@@ -1528,6 +1553,14 @@ export function createHarness(canvas, how = {}){
     let endRun = null;
     /** What the run in progress has said so far, for `standing`. @type {string[]} */
     let runningEvents = [];
+    /**
+     * Every process the run started and ended, with when: kept past the cap on
+     * events, since an install starts hundreds and the one that never ended is
+     * what a stopped run is read from.
+     *
+     * @type {string[]}
+     */
+    let runningLifetimes = [];
     /** The frames `snapFrame` asked for, being read back, by frame. @type {Map<number, Promise<any>>} */
     const snaps = new Map();
     /**
@@ -1574,7 +1607,8 @@ export function createHarness(canvas, how = {}){
      *           store?: string, prefetch?: boolean, bundleId?: string, fakeGpu?: boolean,
      *           fakeFeatures?: string[],
      *           watch?: { libraries: Record<string, number[] | null>,
-     *               strings: number[] }, record?: number, memorySize?: number }} request
+     *               strings: number[] }, record?: number, memorySize?: number,
+     *           machineMemory?: number }} request
      * @returns {Promise<any>}
      */
     async function run(request){
@@ -1789,6 +1823,7 @@ export function createHarness(canvas, how = {}){
             watchImport: request.watch ? watchFrom(request.watch) : undefined,
             record: request.record || 0,
             ...(request.memorySize ? { memorySize: request.memorySize } : {}),
+            ...(request.machineMemory ? { machineMemory: request.machineMemory } : {}),
             // Journal categories on from the first instruction -- a call area
             // a run wants to read back afterwards through `journalRecent`.
             // `logCapacity`/`logBytes` raise the ring above its default when
@@ -1977,6 +2012,24 @@ export function createHarness(canvas, how = {}){
 
         listen(app, collected);
         runningEvents = collected.events;
+        runningLifetimes = [];
+        const lifetimes = runningLifetimes;
+        const lifetimesFrom = Date.now();
+        for (const name of ['process-child', 'process-server', 'process-started',
+            'process-resumed', 'process-server-exit'])
+        {
+            app.on(name, (/** @type {any} */ told)=>{
+                if (lifetimes.length < LIMITS.lifetimes)
+                {
+                    const image = String(told?.image ?? '').split('\\').pop();
+                    const at = ((Date.now() - lifetimesFrom) / 1000).toFixed(1);
+                    const code = told?.code !== undefined ? ` code ${told.code}` : '';
+                    const command = told?.commandLine
+                        ? ` ${String(told.commandLine).slice(0, 160)}` : '';
+                    lifetimes.push(`${at} s ${name} ${image}${code}${command}`);
+                }
+            });
+        }
         scheduleKeyTimes(app, request);
         const stopPresses = schedulePresses(app, request, line=>{
             if (collected.events.length < LIMITS.events)
@@ -2403,10 +2456,12 @@ export function createHarness(canvas, how = {}){
                 return null;
             }
         },
-        standing: async list=>(running
-            ? { processes: await standingOf(running), events: runningEvents,
-                desktop: desktopOf(running), files: list ? filesUnder(running, list) : [] }
-            : { processes: [], events: runningEvents, desktop: null, files: [] }),
+        standing: async(list, journal = 0)=>(running
+            ? { processes: await standingOf(running, journal), events: runningEvents,
+                lifetimes: runningLifetimes, desktop: desktopOf(running),
+                files: list ? filesUnder(running, list) : [] }
+            : { processes: [], events: runningEvents, lifetimes: runningLifetimes, desktop: null,
+                files: [] }),
         errors,
         get presents(){
             return { count: presentState.presents, gaps: presentState.gaps.slice() };

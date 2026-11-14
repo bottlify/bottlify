@@ -531,11 +531,11 @@ export function createClassTable(hooks = {}){
  * @property {{ allocate: (bytes: Uint8Array) => number, free: (bstr: number) => unknown }} bstr
  * @property {{ create: (vt: number, bounds: { elements: number, lower: number }[]) => number,
  *     destroy: (array: number) => unknown }} [safeArray]
- * @property {{ create: (handler: (message: number) => number | Promise<number>)
- *         => number | Promise<number>,
+ * @property {{ create: (handler: (message: number) => number | Promise<number>,
+ *         thread: unknown) => number | Promise<number>,
  *     post: (window: number, message: number) => unknown }} [apartmentWindow]
- *     A hidden window on the calling thread, whose procedure is `handler`,
- *     and a way to post to it.
+ *     A hidden window on `thread`, whose procedure is `handler`, and a way to
+ *     post to it.
  * @property {(thread: unknown) => number | Promise<number>} [modalPump]
  *     What a thread waiting on a call it made runs meanwhile, besides the
  *     calls into its apartment: the messages other threads sent it and its
@@ -643,10 +643,63 @@ export function createRemoting(host){
      * @property {number} outgoing  Calls this thread is waiting on.
      * @property {(() => void) | null} waiting
      * @property {Set<(reply: any) => void>} running  Answers owed for calls under way.
+     * @property {Set<{ what: string, queuedFor: number, since: number }>} runs
+     *     The same calls, what each is, for `diagnostics`.
      */
 
     /** @type {Map<unknown, Apartment>} */
     const apartments = new Map();
+    /**
+     * Calls this process sent and has no answer to yet, for `diagnostics`: a
+     * caller stuck on another process names the process and the call here.
+     *
+     * @type {Set<{ target: number, what: string, since: number }>}
+     */
+    const inFlight = new Set();
+    /**
+     * What a thread making a call is doing before it sends it, for
+     * `diagnostics`: marshaling, and within it the step it waits on -- its
+     * apartment's window being made, or a method of the interface it exports
+     * running in the guest. A call stuck there has sent nothing and waits on
+     * nothing another process holds.
+     *
+     * @type {Map<unknown, { what: string, since: number }>}
+     */
+    const stages = new Map();
+    /**
+     * Notes `what` as the step `thread` is on until `pending` settles, then
+     * the step it was on before.
+     *
+     * @template T
+     * @param {unknown} thread @param {string} what @param {Promise<T> | T} pending
+     * @returns {Promise<T>}
+     */
+    const during = async(thread, what, pending)=>{
+        const before = stages.get(thread);
+        stages.set(thread, { what, since: Date.now() });
+        try
+        {
+            return await pending;
+        }
+        finally
+        {
+            if (before)
+            {
+                stages.set(thread, before);
+            }
+            else
+            {
+                stages.delete(thread);
+            }
+        }
+    };
+    /** @param {unknown} thread */
+    const threadName = thread=>String(/** @type {any} */ (thread)?.name
+        ?? /** @type {any} */ (thread)?.id ?? 'thread');
+    /** @param {any} message */
+    const callName = message=>(message?.kind === 'call' || message?.kind === 'ndr'
+        ? `${message.kind} ${message.iid ?? ''} #${message.slot ?? message.method ?? ''}`
+        : String(message?.kind ?? '?'));
     /** The multithreaded apartment's calls, which its worker runs. */
     const MTA_CALLS = Symbol('multithreaded apartment');
     /** @type {boolean | null} Null until the first call for the apartment. */
@@ -665,7 +718,7 @@ export function createRemoting(host){
         if (!found)
         {
             found = { queue: [], window: 0, making: null, outgoing: 0, waiting: null,
-                running: new Set() };
+                running: new Set(), runs: new Set() };
             apartments.set(thread, found);
         }
         return found;
@@ -683,13 +736,18 @@ export function createRemoting(host){
         {
             return;
         }
+        // Made as `thread`'s: this runs past the awaits of a call being
+        // marshaled, where the thread the bridge has on the processor is
+        // another's, and a window made as that one's was sent its creation's
+        // messages across threads to one waiting in no message loop (ngen's
+        // BindToRuntimeWorker, never sent).
         home.making ??= Promise.resolve(host.apartmentWindow.create(message=>{
             if (message !== WM_OLE_CALL)
             {
                 return 0;
             }
             return drain(host.callerThread()).then(()=>0);
-        }));
+        }, thread));
         home.window = (await home.making) >>> 0;
     };
 
@@ -702,10 +760,13 @@ export function createRemoting(host){
     const drain = async(thread, home = apartment(thread))=>{
         while (home.queue.length > 0)
         {
-            const item = /** @type {{ message: any, resolve: (reply: any) => void }} */ (
+            const item = /** @type {{ message: any, resolve: (reply: any) => void, since: number }} */ (
                 home.queue.shift());
             let reply;
             home.running.add(item.resolve);
+            const run = { what: callName(item.message), queuedFor: Date.now() - item.since,
+                since: Date.now() };
+            home.runs.add(run);
             try
             {
                 reply = await execute(item.message, thread);
@@ -715,6 +776,7 @@ export function createRemoting(host){
                 reply = { hr: RPC_E_SERVERFAULT };
             }
             home.running.delete(item.resolve);
+            home.runs.delete(run);
             item.resolve(reply);
         }
     };
@@ -1002,7 +1064,16 @@ export function createRemoting(host){
         {
             return { hr: RPC_E_DISCONNECTED, disconnected: true };
         }
-        return endpoint.deliver(message);
+        const sent = { target, what: callName(message), since: Date.now() };
+        inFlight.add(sent);
+        try
+        {
+            return await endpoint.deliver(message);
+        }
+        finally
+        {
+            inFlight.delete(sent);
+        }
     };
 
     /**
@@ -1050,8 +1121,9 @@ export function createRemoting(host){
             }
             return { endpoint: proxy.endpoint, object: proxy.object };
         }
-        await ensureWindow(thread);
-        const identity = await queryGuest(pointer, IID_IUNKNOWN, thread);
+        await during(thread, 'apartment window', ensureWindow(thread));
+        const identity = await during(thread, 'QueryInterface(IUnknown) in the guest',
+            queryGuest(pointer, IID_IUNKNOWN, thread));
         const unknown = identity.hr < 0 ? pointer >>> 0 : identity.pointer;
         let entry = exported.get(byIdentity.get(unknown) ?? 0);
         if (!entry)
@@ -1063,11 +1135,13 @@ export function createRemoting(host){
         }
         else if (identity.hr >= 0)
         {
-            await callSlot(unknown, SLOT_RELEASE, [], thread);
+            await during(thread, 'Release in the guest',
+                callSlot(unknown, SLOT_RELEASE, [], thread));
         }
         if (identity.hr < 0)
         {
-            await callSlot(unknown, SLOT_ADD_REF, [], thread);
+            await during(thread, 'AddRef in the guest',
+                callSlot(unknown, SLOT_ADD_REF, [], thread));
         }
         if (!entry.interfaces.has(iid))
         {
@@ -1731,7 +1805,8 @@ export function createRemoting(host){
         let request;
         try
         {
-            request = await marshalRequest(side, method, args);
+            request = await during(thread, `marshaling ${method.name}`,
+                marshalRequest(side, method, args));
         }
         catch (e){
             report(`${name}::${method.name}: ${e instanceof Error ? e.message : String(e)}`);
@@ -2166,6 +2241,27 @@ export function createRemoting(host){
                 queuedCalls: queued.length,
                 oldestQueuedMs: queued.length > 0
                     ? Date.now() - Math.min(...queued.map(item=>item.since)) : 0,
+                worker: workerStarted,
+                // Each apartment that ever had a call: who runs its calls and
+                // what it is doing now. A call queued where nothing will run
+                // it, or one run for minutes, is the hang read off here.
+                apartments: [...apartments.entries()].map(([key, home])=>({
+                    apartment: key === MTA_CALLS ? 'mta worker' : threadName(key),
+                    window: home.window,
+                    outgoing: home.outgoing,
+                    looking: home.waiting !== null,
+                    queued: home.queue.map(item=>({ what: callName(item.message),
+                        forMs: Date.now() - item.since })),
+                    running: [...home.runs].map(run=>({ what: run.what,
+                        queuedMs: run.queuedFor, forMs: Date.now() - run.since })),
+                })),
+                // Calls being made and not sent yet, by the step each is on.
+                making: [...stages.entries()].map(([thread, stage])=>({
+                    thread: threadName(thread), what: stage.what,
+                    forMs: Date.now() - stage.since })),
+                waitingOn: [...inFlight].map(sent=>({ endpoint: sent.target,
+                    alive: host.table.endpoint(sent.target)?.alive ?? false,
+                    what: sent.what, forMs: Date.now() - sent.since })),
             };
         },
     };

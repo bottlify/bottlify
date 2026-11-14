@@ -370,10 +370,10 @@ const MAX_PROGID = 255;
  *           The run's table of class objects served out of process, and what
  *           names this process to it. Absent, this process has a table of its
  *           own and can start no server.
- * @property {{ create: (handler: (message: number) => number | Promise<number>)
- *         => number | Promise<number>,
+ * @property {{ create: (handler: (message: number) => number | Promise<number>,
+ *         thread: unknown) => number | Promise<number>,
  *     post: (window: number, message: number) => unknown }} [apartmentWindow]
- *           A hidden window on the calling thread, for the calls another
+ *           A hidden window on the apartment's thread, for the calls another
  *           process or apartment makes on this apartment's objects.
  * @property {(thread: unknown) => number | Promise<number>} [modalPump]
  *           What a thread waiting on a call into another apartment runs
@@ -5199,6 +5199,17 @@ export function createOleFunctions(host){
         ...createAdviseFunctions(oleEnv),
         ...clipboard.table,
     };
+    // Not an export: keyed by a symbol, which a library's table of names never
+    // lists.
+    Object.defineProperty(functions, COM_DIAGNOSTICS,
+        { value: ()=>remoting?.diagnostics() ?? null });
 
     return functions;
 }
+
+/**
+ * The key of the table's channel diagnostics: the calls this process sends,
+ * runs and has queued across processes (`remote.js`), null before any
+ * crossed.
+ */
+export const COM_DIAGNOSTICS = Symbol('com diagnostics');

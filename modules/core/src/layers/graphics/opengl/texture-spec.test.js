@@ -241,7 +241,7 @@ test('6.1.4: glGetTexImage packs into a packed type (BGRA, UNSIGNED_INT_8_8_8_8_
     assert.deepEqual(Array.from(packed), [3, 2, 1, 4]);
 });
 
-test('GL_CLAMP is sampled as GL_CLAMP_TO_EDGE (decisions A242), and says so', ()=>{
+test('GL_CLAMP is sampled as GL_CLAMP_TO_EDGE (decisions A244), and says so', ()=>{
     // A 2x1 white texture, border colour black: GL blends half the border in
     // at s = 0; here the edge texel is read, as the device reads it.
     const image = { width: 2, height: 1, texels: new Uint8Array(8).fill(255) };

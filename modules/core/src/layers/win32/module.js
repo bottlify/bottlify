@@ -173,7 +173,7 @@ import { createAcmFunctions } from './msacm32/functions.js';
 import { createWorkstationFunctions } from './netapi32/workstation.js';
 import { createThemeFunctions } from './uxtheme/functions.js';
 import { createWininetFunctions } from './wininet/functions.js';
-import { createOleFunctions, createTaskAllocator } from './ole32/functions.js';
+import { COM_DIAGNOSTICS, createOleFunctions, createTaskAllocator } from './ole32/functions.js';
 import { createClassTable } from './ole32/remote.js';
 import { createAutomationFunctions, OLEAUT32_ORDINALS, OLEPRO32_ORDINALS }
     from './oleaut32/functions.js';
@@ -462,6 +462,12 @@ export function createWin32Module(){
      */
     let leaveTable = ()=>{};
     /**
+     * Gives back the names this process held in the run's namespace when it
+     * ends: an exit closes every handle at once, and a name an ended process
+     * kept would keep its object, and through it the machine, for the run.
+     */
+    let leaveNames = ()=>{};
+    /**
      * Takes this process's sockets out of the run's network when it ends: a
      * shared network keeps a view a process, and the view's inbound reaches the
      * whole machine, which the run held for as long as it lasted.
@@ -570,6 +576,7 @@ export function createWin32Module(){
             const runObjects = system?.objects
                 ? createRemoteNamedObjects({ objects: system.objects, kernel })
                 : createNamedObjects({ table: system?.namedObjects });
+            leaveNames = ()=>runObjects.ended(object=>kernel.forsake?.(object));
             // The objects a running Steam client offers by name (its
             // SteamStart lock and section), made when a process first opens
             // one, as the client made them before the game ran.
@@ -989,7 +996,7 @@ export function createWin32Module(){
             leaveWindows = ()=>windowDirectory.detach(processId);
             // A process's windows end with it, for every other process too,
             // and so does the table a handle is duplicated into.
-            endTasks.push(()=>leaveWindows(), ()=>leaveTable());
+            endTasks.push(()=>leaveWindows(), ()=>leaveTable(), ()=>leaveNames());
             // The guest's clock, because a timer is due against the clock the
             // program itself reads, and the input layer's key state, because a
             // hot key fires on a combination and only the layer that sees the
@@ -1298,6 +1305,8 @@ export function createWin32Module(){
             // every host path is handed is the arena's allocator with those
             // found, sized and freed where they are.
             const alignment = pointerSize === 8 ? ALIGNMENT_64 : undefined;
+            /** The highest the heap has handed out, from its arena's start. */
+            let arenaReached = arena.base;
             /**
              * The guest's memory grown to hold what is handed out up to `end`, where
              * it grows as the guest is given more (the memory layer's `reach`), and
@@ -1310,10 +1319,37 @@ export function createWin32Module(){
                 // Past 0x7FFE0000 the RAM held is past 2 GiB, and the page with it
                 // at its own address, which the heap keeps out of its hands.
                 const want = end <= 0x7ffe0000 ? end + SHARED_PAGE_GUARD : end;
-                return (memory.reach?.(want) ?? Infinity) >= want;
+                if ((memory.reach?.(want) ?? Infinity) < want)
+                {
+                    return false;
+                }
+                // What the guest is given past the highest it was before -- a block,
+                // a commit -- taken from the machine's memory: below it, pages it was
+                // given once are the tab's already, whatever it freed.
+                if (end > arenaReached)
+                {
+                    if (memory.charge?.(end - arenaReached) === false)
+                    {
+                        return false;
+                    }
+                    arenaReached = end;
+                }
+                return true;
             };
             const guestHeap = createGuestHeap({
-                allocator: createHeapAllocator({ ...arena, alignment, reach: arenaReach }),
+                allocator: createHeapAllocator({ ...arena, alignment, reach: arenaReach,
+                    // A gone process's bytes under a block handed out, zeroed as
+                    // fresh arena is; not before the machine has its memory.
+                    clean: (/** @type {number} */ address, /** @type {number} */ length)=>{
+                        try
+                        {
+                            memory.fillBytes(address, 0, length);
+                            return true;
+                        }
+                        catch {
+                            return false;
+                        }
+                    } }),
                 arena, alignment,
                 memory: {
                     readU16: address=>memory.readU16(address),
@@ -1385,6 +1421,9 @@ export function createWin32Module(){
                 // Where the arena has never been handed out: the memory above
                 // it is still zero, for a process that takes this one's memory.
                 handedTo: ()=>allocator.handedTo(),
+                // Where the bytes a gone process left in the arena end, when this
+                // process took its memory: the next one to take it finds them too.
+                dirtyTo: ()=>allocator.dirtyTo?.() ?? arena.base,
             };
             bridge.useHeap(heap);
 
@@ -3816,7 +3855,9 @@ export function createWin32Module(){
                                 : entry.handler(args);
                         },
                         window: {
-                            create: handler=>apartmentWindow(handler),
+                            create: (handler, thread)=>(thread
+                                ? bridge.answering(thread, ()=>apartmentWindow(handler))
+                                : apartmentWindow(handler)),
                             post: (window, message)=>libraries['USER32.dll'].PostMessageA
                                 .handler([window, message, 0, 0]),
                         },
@@ -4974,7 +5015,11 @@ export function createWin32Module(){
                     modalPump: (/** @type {unknown} */ thread)=>bridge.answering(thread,
                         ()=>windowService.modalPump?.(thread) ?? 0),
                     apartmentWindow: {
-                        create: handler=>apartmentWindow(handler),
+                        // Made as the apartment's thread's, whoever the bridge
+                        // has on the processor past the caller's awaits.
+                        create: (handler, thread)=>(thread
+                            ? bridge.answering(thread, ()=>apartmentWindow(handler))
+                            : apartmentWindow(handler)),
                         /** @param {number} window @param {number} message */
                         post: (window, message)=>
                             libraries['USER32.dll'].PostMessageA.handler([window, message, 0, 0]),
@@ -5671,6 +5716,8 @@ export function createWin32Module(){
                 setLastError: code=>setError(code),
                 /** Views of files: how many were mapped, waited for their bytes, or failed. */
                 mappings: ()=>mappings,
+                /** What the volume holds of the tab's heaps (`memory-zones.js`), by pool. */
+                volumeHeld: ()=>volume.held(),
                 /**
                  * The last files CreateFile and NtCreateFile would not open, each
                  * with the error and what was asked: a program that goes silent or
@@ -5714,6 +5761,8 @@ export function createWin32Module(){
                  * the host, and how many crossings the contended ones cost.
                  */
                 criticalSections: ()=>critical.diagnostics(),
+                /** Calls across processes this one sends, runs and has waiting. */
+                comChannel: ()=>(/** @type {any} */ (libraries['ole32.dll'])?.[COM_DIAGNOSTICS]?.() ?? null),
 
                 /**
                  * What the program's message loop is pumping, and what it is
@@ -5953,6 +6002,7 @@ export function createWin32Module(){
                     waveThread: current ? current.waveThread() : null,
                     multimediaTimers: current ? current.multimediaTimers() : null,
                     criticalSections: current ? current.criticalSections() : null,
+                    com: current ? current.comChannel() : null,
                     messages: current ? current.messages() : {},
                     // What is left of the one arena everything the guest is handed
                     // comes out of. A program sizes its own caches from this, so a
@@ -5974,6 +6024,8 @@ export function createWin32Module(){
             leaveWindows = ()=>{};
             leaveTable();
             leaveTable = ()=>{};
+            leaveNames();
+            leaveNames = ()=>{};
             leaveNetwork();
             leaveNetwork = ()=>{};
             current = null;

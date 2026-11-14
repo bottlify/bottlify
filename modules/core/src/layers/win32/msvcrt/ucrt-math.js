@@ -289,12 +289,27 @@ export function createUcrtMathFunctions(host){
     table.lroundf = guestEntry(inGuestMath.lroundf, MATH_CODE.lroundf, { fpu }, table.lroundf);
 
     /**
+     * C99's base-two and near-one logarithms and exponentials, the inverse
+     * hyperbolics and the exponent, in the guest (`inguest-math.js`); what one
+     * hands over -- a domain or range error, an infinity, a NaN -- is the
+     * handler's above, errno and all.
+     */
+    for (const name of /** @type {const} */ (['log2', 'log2f', 'exp2', 'exp2f', 'log1p', 'log1pf',
+        'expm1', 'expm1f', 'asinh', 'asinhf', 'acosh', 'acoshf', 'atanh', 'atanhf', 'ilogb',
+        'ilogbf']))
+    {
+        table[name] = guestEntry(inGuestMath[name], MATH_CODE[name], { fpu }, table[name]);
+    }
+
+    /**
      * short _dclass(double x), short _fdclass(float x), short _dtest(double *x),
      * short _fdtest(float *x), int _dsign(double x), int _fdsign(float x): the
      * class and the sign from the bits, in the guest (`inguest-float.js`).
      */
     const memory = { readMemory: host.readMemory, writeMemory: host.writeMemory,
         pointerSize: host.pointerSize };
+    table.modff = guestEntry(inGuestMath.modff, MATH_CODE.modff, { fpu, ...memory },
+        table.modff);
     for (const name of /** @type {const} */ (['_dclass', '_fdclass', '_dtest', '_fdtest',
         '_dsign', '_fdsign']))
     {

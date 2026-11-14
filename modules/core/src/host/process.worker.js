@@ -15,12 +15,13 @@
  * ring pacing, read from the link rather than from a page's ring.
  *
  * The same file runs under a page's `Worker` and Node's `worker_threads`. It
- * is told `{ type: 'start', end, volume, graphics, display, options, run }` --
+ * is told `{ type: 'start', end, volume, graphics, display, memories, options, run }` --
  * its side of the link, the run's volume memory (`volume-link.js`), its way in
  * to the run's graphics worker and the port its surfaces' pictures go out on
- * (or null), the process as
+ * (or null), the memories of gone processes it may run in, the process as
  * `createApp` takes it, how long it may run -- and answers
- * `{ type: 'exited', code, diagnostics }`, or `{ type: 'failed', message, diagnostics }`.
+ * `{ type: 'exited', code, diagnostics, memories }` (the memories it leaves, for the
+ * run's next process), or `{ type: 'failed', message, diagnostics }`.
  */
 
 import { createApp, createMacrotask } from '../app.js';
@@ -119,14 +120,17 @@ export const plainOf = (read, failed = ()=>null)=>{
  *     volume?: import('../layers/filesystem/internal/volume-link.js').VolumeMemory | null,
  *     graphics?: MessagePort | null,
  *     display?: MessagePort | null, options: any, run?: any,
- *     windowCells?: Int32Array | null }} start
+ *     windowCells?: Int32Array | null, memories?: any[] }} start
+ *     `memories`: the run's memories of gone processes (`SpareMemory`) the
+ *     process takes from, and puts its own back into as it goes
  * @returns {Promise<{ code: number, diagnostics: any, systemLibraries: any,
  *     journal?: { time: number, text: string }[] | null }>} its exit
  *     code, its layers' diagnostics as it ended and the system libraries it knew, as
  *     plain data, or null
  */
 export async function serveProcess(start){
-    const { end, volume, graphics, display, options, run, windowCells = null } = start;
+    const { end, volume, graphics, display, options, run, windowCells = null,
+        memories = [] } = start;
     /** @type {Record<string, Record<string, (...args: any[]) => any>>} */
     const handlers = {};
     const link = openLink(end, handlers);
@@ -247,6 +251,7 @@ export async function serveProcess(start){
     {
         app = await createApp({
             ...options,
+            spareMemories: memories,
             standardFiles: standardFilesOf(options.standardFiles, ask),
             graphics: { ...options.graphics, worker: graphics ? portEnd(graphics) : undefined,
                 display: display ? sendFrames(display) : undefined },
@@ -383,9 +388,16 @@ const bind = (listen, send)=>{
         {
             return;
         }
-        serveProcess(data).then(
+        // What the process ran in and left goes back with its exit: the run's
+        // next process takes it rather than a memory of its own.
+        const memories = Array.isArray(data.memories) ? data.memories : [];
+        serveProcess({ ...data, memories }).then(
             ({ code, diagnostics, systemLibraries, journal })=>
-                send({ type: 'exited', code, diagnostics, systemLibraries, journal }),
+                send({ type: 'exited', code, diagnostics, systemLibraries, journal,
+                    // Only a shared memory crosses to another thread.
+                    memories: memories.splice(0).filter((/** @type {any} */ spare)=>
+                        typeof SharedArrayBuffer === 'function'
+                        && spare?.memory?.buffer instanceof SharedArrayBuffer) }),
             (/** @type {any} */ e)=>send({ type: 'failed', message: String(e?.stack ?? e),
                 diagnostics: e?.diagnostics ?? null }));
     });

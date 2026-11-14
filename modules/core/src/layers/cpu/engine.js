@@ -171,6 +171,9 @@ export function engineContractProblem(engineModule, url){
  *     protected PAGE_NOACCESS -- faults with its address, as on Windows, and those pages are
  *     closed (`pageAccess`). Default false: a translated read is wrapped into RAM, and every
  *     page reads.
+ * @property {boolean} [tablesZeroed]    The host made the tables zero itself: a memory just
+ *     made, or one it zeroed where they lie. The entry hash is then not cleared at the start,
+ *     which wrote every page of it. The cpu layer sets it. Default false.
  * @property {boolean} [zeroPage]        The guest's first page is the RAM's zeros, which nothing
  *     writes and a store to faults (`zeroReadsBelow` over it): a tested read inside it reads
  *     them in translated code rather than leaving to the host. The cpu layer sets it where
@@ -322,6 +325,9 @@ export function engineContractProblem(engineModule, url){
  *     when asked for (0: no ceiling). Default 256 MiB; the cpu layer gives each executor's
  *     runtime its part of what the translation zone (`TRANSLATION_ZONE_BYTES`) leaves after
  *     the engine's tables (`cacheShare`). Its diagnostics say what it holds (`heldBytes`).
+ * @property {{ take(bytes: number): boolean, give(bytes: number): void } | null} [charge]
+ *     Where the host bounds what its runtimes hold together (the tab's memory): each
+ *     module held is taken by its wasm bytes and given back as it is let go.
  * @property {number} [sharedModuleBytes]  Wasm bytes of compiled batch modules kept for every
  *     runtime handed the same `store`: a process the run starts again instantiates the modules
  *     an earlier one compiled, without compiling them (0: none kept). Default 256 MiB.
@@ -393,6 +399,11 @@ export function engineContractProblem(engineModule, url){
  *     store is shared by threads: a runtime elsewhere compiling the same bytes is handed the code
  *     already compiled and tiered up, by the wasm engine's cache of live modules, rather than
  *     starting it over in its baseline tier. Optional.
+ * @property {boolean} [alone]  Made for one runtime (a proxy a process or an executor in a
+ *     worker made for itself): cork keeps formed regions and compiled modules beside it for
+ *     other runtimes of its thread (`sharedFormed`, `sharedModuleBytes`) only from the second
+ *     runtime handed it on, a child run beside its parent; `hold` is called all the same.
+ *     Optional.
  * @property {(key: string) => Uint8Array | null | undefined} [getNow]  The record at once,
  *     without a turn of the event loop, where the store can answer so; undefined where it
  *     cannot yet, and the translator asks `get`. Optional.

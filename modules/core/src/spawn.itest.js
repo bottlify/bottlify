@@ -311,6 +311,13 @@ test('a process in a worker finds the modules an earlier one compiled kept alive
             { path: 'C:\\App\\loop.exe', bytes: loop }] }), save: ()=>{} } });
     /** @type {any} */
     let store;
+    /** What each child's runtime kept beside its store for others in its worker. @type {any[]} */
+    const keptBeside = [];
+    app.on('process-resumed', (/** @type {any} */ event)=>{
+        const cork = event.diagnostics?.find((/** @type {any} */ layer)=>layer.name === 'cpu')
+            ?.metrics.cork;
+        keptBeside.push(cork && { forms: cork.sharedForms, modules: cork.sharedHeld });
+    });
     try
     {
         assert.equal(await app.run({ timeoutMs: 150_000 }), 0);
@@ -324,6 +331,9 @@ test('a process in a worker finds the modules an earlier one compiled kept alive
     const held = store?.heldModules;
     assert.ok(held?.added > 0, `the first kept its modules alive: ${JSON.stringify(held)}`);
     assert.ok(held?.again > 0, `the second compiled the same ones: ${JSON.stringify(held)}`);
+    // Alone in its worker, a child's regions and modules kept beside its
+    // store would be for no one: what the next one finds is the run's.
+    assert.deepEqual(keptBeside, [{ forms: null, modules: null }, { forms: null, modules: null }]);
 });
 
 test('the run\'s translation store keeps its records file open past a child, until the run goes',

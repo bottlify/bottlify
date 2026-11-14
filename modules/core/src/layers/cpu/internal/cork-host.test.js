@@ -1041,3 +1041,84 @@ test('a memory with an engine range holds its floor, and grows as the host gives
         assert.equal(fixed.growing(), false, 'no range: the whole RAM, as before');
         assert.ok(fixed.wasmMemory().buffer.byteLength > 256 * MIB);
     });
+
+test('a memory a gone process left is zeroed where its engine ran: the first executor\'s tables'
+    + ' at once, another executor\'s pages as it opens, and only those the gone one opened', ()=>{
+    const MIB = 1 << 20;
+    const config = { memorySize: 256 * MIB, executors: 3,
+        engineArea: { at: 32 * MIB, span: 68 * MIB } };
+    const gone = host(config);
+    // Executor 1 opened, executor 2 never did.
+    gone.makeRoomFor(1);
+    assert.equal(gone.executorsTouched(), 2);
+    const memory = gone.wasmMemory();
+    const range = gone.engineRange();
+    const bytes = new Uint8Array(memory.buffer);
+    bytes.fill(0x5a, range.from, range.to);
+    /** The bytes of the engine's range the gone process's mark is left on. */
+    const marked = ()=>bytes.subarray(range.from, range.to).reduce((sum, byte)=>sum
+        + (byte === 0x5a ? 1 : 0), 0);
+    const whole = range.to - range.from;
+    const next = host({ ...config, reused: { memory, guestEnd: 0,
+        executors: gone.executorsTouched() } });
+    assert.equal(next.wasmMemory(), memory, 'taken');
+    const atStart = marked();
+    assert.ok(atStart < whole, 'the first executor\'s tables and the shared record zeroed');
+    assert.ok(atStart > 0, 'the other executors\' pages not yet');
+    next.makeRoomFor(1);
+    const afterOne = marked();
+    assert.ok(afterOne < atStart, 'executor 1 zeroed as it opens: the gone one ran there');
+    next.makeRoomFor(2);
+    assert.equal(marked(), afterOne,
+        'executor 2 left as it was: the gone process never opened it, so it is as made');
+    assert.equal(next.executorsTouched(), 3);
+    const third = host({ ...config, reused: { memory, guestEnd: 0 } });
+    assert.equal(third.wasmMemory(), memory);
+    third.makeRoomFor(2);
+    assert.equal(marked(), 0, 'with no count every executor\'s pages are taken as written');
+});
+
+test('a memory taken with the ranges to zero named is zeroed there and in its first 64 KiB, the'
+    + ' rest left to whoever hands it out; a gone engine laid out elsewhere is zeroed whole', ()=>{
+    const MIB = 1 << 20;
+    const config = { memorySize: 256 * MIB, engineArea: { at: 64 * MIB, span: 32 * MIB } };
+    const gone = host(config);
+    const memory = gone.wasmMemory();
+    const bytes = new Uint8Array(memory.buffer);
+    bytes.fill(0x5a, 0x10000, 32 * MIB);
+    bytes.fill(0x5a, 0x5000, 0x6000);
+    const next = host({ ...config, reused: { memory, guestEnd: 32 * MIB,
+        written: [[MIB, 2 * MIB]],
+        engine: { layout: 'elsewhere', ranges: [[20 * MIB, 21 * MIB]] } } });
+    assert.equal(next.wasmMemory(), memory);
+    /** @param {number} from @param {number} to @param {number} value */
+    const all = (from, to, value)=>bytes.subarray(from, to).every(byte=>byte === value);
+    assert.ok(all(0x5000, 0x10000, 0), 'the first 64 KiB');
+    assert.ok(all(MIB, 2 * MIB, 0), 'a range named');
+    assert.ok(all(20 * MIB, 21 * MIB, 0), 'the gone engine\'s pages, laid out elsewhere');
+    assert.ok(all(2 * MIB, 20 * MIB, 0x5a) && all(21 * MIB, 32 * MIB, 0x5a),
+        'the rest as the gone process left it, for the heap to zero as it hands it out');
+});
+
+test('the other executors\' pages apart from the first\'s: the memory starts holding the first'
+    + ' range\'s floor, and reaches an executor\'s pages as it opens, the RAM held as it was', ()=>{
+    const MIB = 1 << 20;
+    const grown = host({ memorySize: 1024 * MIB, executors: 8,
+        engineArea: { at: 32 * MIB, span: 28 * MIB, others: { at: 320 * MIB, span: 140 * MIB } } });
+    assert.equal(grown.growing(), true);
+    assert.equal(grown.ramHeld(), 64 * MIB, 'up to the first range, a power of two');
+    assert.equal(grown.wasmMemory().buffer.byteLength, 64 * MIB + engine.WRAP_SLACK,
+        'not the other executors\' pages');
+    grown.makeRoomFor(2);
+    const reached = grown.wasmMemory().buffer.byteLength;
+    assert.ok(reached > 320 * MIB && reached <= 360 * MIB,
+        `executor 2's pages and no further: ${reached}`);
+    assert.equal(grown.ramHeld(), 64 * MIB, 'the RAM held and its wrap as they were');
+    assert.equal(grown.wrappedAddress(0x7ffe0000), 0x7ffe0000 & (64 * MIB - 1));
+    grown.makeRoomFor(1);
+    assert.equal(grown.wasmMemory().buffer.byteLength, reached, 'executor 1 lies below it');
+    const ranges = grown.engineLeft().ranges;
+    assert.equal(ranges.length, 4, 'the first executor, 1 and 2, and the shared record');
+    assert.ok(ranges.every((/** @type {[number, number]} */ [from, to])=>to <= reached
+        && from < to));
+});

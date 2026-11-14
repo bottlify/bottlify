@@ -7,7 +7,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { parsePe } from './pe.js';
-import { readTls } from './tls.js';
+import { mapImage } from './image.js';
+import { readMappedTls, readTls } from './tls.js';
 
 const IMAGE_BASE = 0x400000;
 const SECTION_RVA = 0x1000;
@@ -227,4 +228,47 @@ test('a PE32+ directory holds quadword addresses, its callbacks a quadword each'
     assert.equal(tls.zeroFillSize, 48);
     assert.equal(tls.characteristics, 0x00500000);
     assert.deepEqual(tls.callbackRvas, [SECTION_RVA + 0x400, SECTION_RVA + 0x500]);
+});
+
+test('read where the image lies mapped, the directory answers as its file does', ()=>{
+    // A process keeps no copy of an image's file once it is mapped: the
+    // directory is read out of guest memory, where its addresses were moved
+    // with the image when it had relocations and were left as the file has
+    // them when it had none.
+    const { bytes, image } = withTls({ callbacks: [0x400, 0x500] });
+    const fromFile = readTls(bytes, image);
+    /** @param {Uint8Array} laidOut */
+    const reader = laidOut=>(/** @type {number} */ rva, /** @type {number} */ length)=>
+        laidOut.slice(rva, rva + length);
+
+    const inPlace = mapImage(bytes).bytes;
+    assert.deepEqual(readMappedTls(reader(inPlace), image, IMAGE_BASE), fromFile,
+        'at its own base');
+
+    const moved = 0x10000000;
+    assert.deepEqual(readMappedTls(reader(inPlace), image, moved), fromFile,
+        'moved with no relocations: its addresses as the file has them');
+
+    // Relocated by hand, as the loader would have: every address in the
+    // directory and in its callback table moved by the same amount.
+    const relocated = inPlace.slice();
+    const view = new DataView(relocated.buffer);
+    for (const at of [0, 4, 8, 12, 0x300, 0x304].map(offset=>SECTION_RVA + offset))
+    {
+        view.setUint32(at, view.getUint32(at, true) - IMAGE_BASE + moved, true);
+    }
+    const withRelocations = { ...image,
+        directories: image.directories.map((each, index)=>(index === 5
+            ? { address: SECTION_RVA + 0x800, size: 8 } : each)) };
+    assert.deepEqual(readMappedTls(reader(relocated), withRelocations, moved), fromFile,
+        'moved with relocations: its addresses against where it lies');
+});
+
+test('a mapped directory past the end of its image declares nothing', ()=>{
+    // Read as zeroes it would name the image's first dword as the slot.
+    const { bytes, image } = withTls();
+    const outside = { ...image, directories: image.directories.map((each, index)=>(index === 9
+        ? { address: image.sizeOfImage - 8, size: 24 } : each)) };
+    assert.equal(readMappedTls(()=>new Uint8Array(0), outside, IMAGE_BASE), null);
+    assert.ok(readTls(bytes, image));
 });

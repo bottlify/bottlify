@@ -28,6 +28,21 @@ import { createSyncObjects } from './layers/kernel/internal/sync.js';
 const KINDS = new Set(['event', 'semaphore', 'mutex']);
 
 /**
+ * The scheduler of the objects made here, which never blocks anyone, since
+ * nothing waits through it. Made once, out here: an object made for a link
+ * reaches its maker's scheduler, and a scheduler made beside the link's
+ * handlers would hold them - the link, its rings, its worker - for as long as
+ * any process of the run held the object's name.
+ */
+const NOBODY = Object.freeze({
+    block(){
+        throw new Error('objects: a wait here is a stand-in\'s, never a block');
+    },
+    wake(){},
+    onTimeout(){},
+});
+
+/**
  * @param {Object} deps
  * @param {Map<string, { kind: string, object: any, refs: number }>} deps.table
  *     the run's named objects, every process's
@@ -38,15 +53,8 @@ const KINDS = new Set(['event', 'semaphore', 'mutex']);
  *     sets: what a process across the link opens another by
  */
 export function objectHandlers({ table, wake, processes }){
-    // Made only for what a process across a link names first; its scheduler
-    // never blocks anyone, since nothing waits through it.
-    const sync = createSyncObjects({ scheduler: {
-        block(){
-            throw new Error('objects: a wait here is a stand-in\'s, never a block');
-        },
-        wake(){},
-        onTimeout(){},
-    } });
+    // Made only for what a process across a link names first.
+    const sync = createSyncObjects({ scheduler: NOBODY });
     /** @type {Map<number, any>} */
     const byId = new Map();
     /** @type {WeakMap<object, number>} */
@@ -97,12 +105,35 @@ export function objectHandlers({ table, wake, processes }){
                         queued.delete(token);
                         woken.state = 'running';
                         ended.set(token, woken.waitResult);
-                        wake(token, woken.waitResult).finally(()=>ended.delete(token));
+                        // A process gone meanwhile hears nothing; its link said so.
+                        wake(token, woken.waitResult).catch(()=>{})
+                            .finally(()=>ended.delete(token));
                     },
                 } };
             standIns.set(threadId, standIn);
         }
         return standIn;
+    };
+
+    /**
+     * The references the processes across this link hold, by name: what the
+     * link's end takes back, as an exit closes every handle at once - a name
+     * a gone process kept would keep its object for the run.
+     *
+     * @type {Map<string, number>}
+     */
+    const mine = new Map();
+    /** @param {string} name @param {number} by */
+    const counted = (name, by)=>{
+        const now = (mine.get(name) ?? 0) + by;
+        if (now > 0)
+        {
+            mine.set(name, now);
+        }
+        else
+        {
+            mine.delete(name);
+        }
     };
 
     /** @param {string} name @param {string} kind */
@@ -118,27 +149,38 @@ export function objectHandlers({ table, wake, processes }){
          * abandons a dead thread's -- the next waiter takes it and is told.
          */
         dispose(){
-            for (const { standIn, object } of queued.values())
+            const gone = new Set(standIns.values());
+            /** @param {any} thread */
+            const ours = thread=>gone.has(thread);
+            for (const { object } of queued.values())
             {
-                const at = object.waiters.indexOf(standIn);
-                if (at >= 0)
-                {
-                    object.waiters.splice(at, 1);
-                }
+                sync.forsake(object, ours);
             }
             queued.clear();
             for (const object of byId.values())
             {
-                for (const standIn of standIns.values())
+                sync.forsake(object, ours);
+            }
+            // Its references go; a name another process still holds stays.
+            for (const [name, times] of mine)
+            {
+                const entry = table.get(name);
+                if (entry)
                 {
-                    if (object.kind === 'mutex' && object.owner === standIn)
+                    entry.refs -= Math.min(times, entry.refs);
+                    if (entry.refs <= 0)
                     {
-                        object.abandoned = true;
-                        object.recursion = 1;
-                        sync.releaseMutex(object, standIn);
+                        table.delete(name);
                     }
                 }
             }
+            mine.clear();
+            // What it made and another process holds keeps its state, and
+            // nothing of this link: no stand-in of its threads, no word.
+            sync.settleAll(ours, []);
+            byId.clear();
+            standIns.clear();
+            ended.clear();
         },
         objects: {
             /**
@@ -175,6 +217,7 @@ export function objectHandlers({ table, wake, processes }){
                 if (entry)
                 {
                     entry.refs++;
+                    counted(name, 1);
                     return { id: numberOf(entry.object), reused: true };
                 }
                 const object = kind === 'event'
@@ -189,17 +232,19 @@ export function objectHandlers({ table, wake, processes }){
                     sync.poll(object, standInFor(state.owner));
                 }
                 table.set(name, { kind, object, refs: 1 });
+                counted(name, 1);
                 return { id: numberOf(object), reused: false };
             },
 
             /** One more handle onto it. @param {number} id */
             reference(id){
                 const object = objectOf(id);
-                for (const entry of table.values())
+                for (const [name, entry] of table)
                 {
                     if (entry.object === object)
                     {
                         entry.refs++;
+                        counted(name, 1);
                     }
                 }
             },
@@ -209,7 +254,12 @@ export function objectHandlers({ table, wake, processes }){
                 const object = objectOf(id);
                 for (const [name, entry] of table)
                 {
-                    if (entry.object === object && --entry.refs <= 0)
+                    if (entry.object !== object)
+                    {
+                        continue;
+                    }
+                    counted(name, -1);
+                    if (--entry.refs <= 0)
                     {
                         table.delete(name);
                         byId.delete(id);

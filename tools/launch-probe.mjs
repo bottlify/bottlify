@@ -22,6 +22,7 @@
  *     node tools/launch-probe.mjs <bundle-id> [--turns 200000] [--mode NAME]
  *         [--network ws://host:port/] [--steam ACCOUNT.json] [--steam-session FILE|-]
  *         [--steam-ticket APP=FILE] [--log FILE [--log-last N]] [--file HOST=GUEST]...
+ *         [--cat GUEST_PATH]...
  *
  * `--network` puts the program on a relay's network (tools/relay-option.mjs);
  * without it the machine has the loopback adapter alone.
@@ -159,6 +160,10 @@ function parse(argv){
             return [{ path: argv[index + 1].slice(at + 1),
                 bytes: new Uint8Array(readFileSync(argv[index + 1].slice(0, at))) }];
         }),
+        // Guest files printed when the run ends, however it ended, repeatable: what a
+        // program wrote of itself, a timedemo's result in its log (install-watch's --cat).
+        cats: argv.flatMap((flag, index)=>(flag === '--cat' && index + 1 < argv.length
+            ? [argv[index + 1]] : [])),
         // Executors of the program's process, so one title compares on one and
         // on several (`createApp`'s `cpu.cores`).
         // The whole memory from the start (`cpu.grow` false) rather than one that grows.
@@ -581,7 +586,7 @@ function lastLines(path, count){
 async function main(){
     const { id, turns, map, grep, calls, heap, profile, log, logLast, watch, peek, dump, which,
         corkConfig, series, raster, draw, corkOut, concurrency, seconds, commandLine, executors,
-        memory, fixedMemory, mode, translationStore, cpuProfile, steam, steamSession, files }
+        cats, memory, fixedMemory, mode, translationStore, cpuProfile, steam, steamSession, files }
         = parse(process.argv.slice(2));
     if (!id)
     {
@@ -925,6 +930,17 @@ async function main(){
         console.log(`  cork profile written to ${corkOut}`);
     }
     await report(app, { grep, calls });
+    for (const guestPath of cats)
+    {
+        try
+        {
+            const text = new TextDecoder('latin1').decode(app.files.read(guestPath));
+            console.log(`CAT ${guestPath}\n${text}`);
+        }
+        catch (e){
+            console.log('cat failed:', guestPath, e instanceof Error ? e.message : e);
+        }
+    }
     for (const failure of failures.slice(0, 3))
     {
         // The trace, not the payload. A dump of the whole event is unreadable

@@ -875,9 +875,14 @@ export function createProcessFunctions(host){
             handler: args=>table.TlsSetValue.handler(args),
         });
         /** @param {(at: number) => Uint8Array} code */
+        // Where the machine's memory has no room, none is placed: the export
+        // stays its host handler.
         const place = code=>{
             const at = allocate(code(0).length);
-            host.writeMemory(at, code(at));
+            if (at !== 0)
+            {
+                host.writeMemory(at, code(at));
+            }
             return at;
         };
         fastPaths = {

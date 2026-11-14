@@ -157,7 +157,8 @@ if (inWorker)
     namespace.journalRecent = (/** @type {number} */ count)=>ask('journalRecent', { count });
     namespace.readFile = (/** @type {string} */ path, /** @type {number | undefined} */ tail)=>
         ask('readFile', { path, tail });
-    namespace.standing = (/** @type {string | undefined} */ list)=>ask('standing', { list });
+    namespace.standing = (/** @type {string | undefined} */ list, /** @type {number} */ journal = 0)=>
+        ask('standing', { list, journal });
     namespace.input = (/** @type {any} */ event)=>ask('input', { event });
     namespace.stop = ()=>ask('stop');
     namespace.clearLog = ()=>{

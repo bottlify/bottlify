@@ -2900,3 +2900,44 @@ smaller ones cost Stockfish 10 %. No size won both; 256 kept.
   and power plan not recorded.
 - **Decision.** Not made a default. It pays only for a program whose assemblies are files; the
   image stays in that bottle (4.8 MB).
+
+### 2026-11-14: one machine memory with page tables costs a third to two thirds of translated code (cork)
+
+- **Idea.** Every process's memory as pages of one shared buffer, mapped through a table per
+  process, so that images are shared and paged in, anonymous pages can be paged out, and one
+  buffer is the whole machine's limit: a software MMU in translated code.
+- **Workload.** cork-bench, 32-bit images (`x87`; `game` x87), one executor, 16 MiB RAM. A stand
+  patch (not committed) puts every guest access through `phys = addr + table[addr >>> 12]`, the
+  wrap of untested reads dropped, the table all zeros (identity), checked equal to the plain arm
+  in answers, retired instructions and RAM on 12 workloads, and broken by a table of garbage.
+  Arms: `paged` (the lookup alone, wrong for an access across a page), `tails` (lookup; a frame
+  keeps a copy of the next page's first 16 bytes, so only stores test their page offset),
+  `paged+cross` (lookup and a page-crossing test on every access), `floor` (one add of a base
+  held in a local: processes at offsets in one buffer, no pages).
+- **Values.** Machine instructions an iteration against the plain arm, one count each (exact;
+  repeats agree within about 0.2 %). x64: `tools/cork-bench/ir.sh`, in-wasm column, node 26.13.1,
+  CLOCK=0.001 WARM 1000 ITERS 300. arm64: qemu-aarch64 8.2.2 with an instruction-count plugin,
+  node 26.13.1 arm64, `--no-wasm-bounds-checks` (the macOS model), whole process, WARM 500
+  ITERS 200.
+
+  | workload | x64 floor | x64 paged | x64 tails | x64 paged+cross | arm64 floor | arm64 paged | arm64 tails | arm64 paged+cross |
+  | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+  | vm | -2.4% | +30.8% | +49.0% | +68.6% | +1.9% | +29.6% | +47.9% | +52.3% |
+  | crc | +4.4% | +35.3% | +36.1% | +49.4% | +2.4% | +44.2% | +45.6% | +57.7% |
+  | switch | +8.6% | +31.8% | +45.7% | +54.9% | +2.2% | +25.6% | +35.5% | +40.7% |
+  | tree | +6.5% | +48.9% | not measured | +84.1% | +4.0% | +48.8% | +59.1% | +79.1% |
+  | sort | +10.9% | not measured | not measured | not measured | +6.6% | +64.6% | +87.3% | +101.3% |
+  | game | not measured | not measured | not measured | not measured | +5.4% | +43.3% | +57.2% | +71.0% |
+  | str | not measured | not measured | not measured | not measured | +6.2% | +52.5% | +61.2% | +65.3% |
+  | fmath | not measured | not measured | not measured | not measured | +3.0% | +74.4% | +80.3% | +103.5% |
+  | geomean | +5.5% (5) | +36.5% (4) | +43.5% (3) | +63.7% (4) | +3.9% (8) | +47.1% (8) | +58.5% (8) | +70.1% (8) |
+
+  The x64 cells marked not measured were stopped when the decision was taken.
+- **Why.** A lookup is a shift, a load and an add on every access, where the plain arm has at
+  most an `and`; correctness across a page boundary adds a test and a branch. Host code (the
+  memory layer, Direct3D's buffers and rings, sound, files) would also have to translate and pin.
+- **Machine.** Linux container, 4 vCPU (Intel Xeon), 15 GB; GPU and power plan not relevant.
+- **Decision.** Not taken: it makes the translator an emulator. A process keeps its own flat
+  memory; the tab's limit is the engine side's to keep (translation caches, cork's state, copies
+  in graphics). If one buffer for the machine is ever wanted, processes at offsets in it (`floor`)
+  cost a few per cent.

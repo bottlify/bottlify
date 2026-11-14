@@ -5,6 +5,7 @@
  */
 
 import { createCorkHost, createTsc } from './internal/cork-host.js';
+import { openMemoryBudget } from './internal/memory-budget.js';
 import { gcNudgeOf, startGcNudge } from './internal/gc-nudge.js';
 import { createBell, createRemoteExecutor } from './internal/executor.js';
 import { unbrokenTable } from './internal/unbroken.js';
@@ -35,6 +36,38 @@ export const DEFAULT_MEMORY_SIZE = 1024 * 1024 * 1024;
  * modules go to stay under that.
  */
 export const TRANSLATION_ZONE_BYTES = 256 * 1024 * 1024;
+
+/**
+ * The bytes of the arena a process's executors share their emitted functions
+ * through, which fills as they translate.
+ */
+const ARENA_BYTES = 48 << 20;
+
+/**
+ * Whether the machine's memory has room for a process's arena, taken on its
+ * holder where it has: without one each executor emits for itself.
+ *
+ * @param {{ memoryBudget?: SharedArrayBuffer | ArrayBuffer, memoryHolder?: number }} settings
+ */
+const arenaRoom = settings=>settings.memoryBudget === undefined
+    || openMemoryBudget(settings.memoryBudget, settings.memoryHolder).take(ARENA_BYTES, 'engine');
+
+/**
+ * What an executor's worker costs the tab while it stands: its JavaScript
+ * engine, the translator's state in it, its compiled code (`roadmap/decisions.md` A245).
+ */
+const EXECUTOR_BYTES = 12 << 20;
+
+/**
+ * Whether the machine's memory has room for one more executor's worker, taken
+ * on the process's holder where it has: without it the process runs its
+ * threads on the executors it has.
+ *
+ * @param {{ memoryBudget?: SharedArrayBuffer | ArrayBuffer, memoryHolder?: number }} settings
+ */
+const executorRoom = settings=>settings.memoryBudget === undefined
+    || openMemoryBudget(settings.memoryBudget, settings.memoryHolder)
+        .take(EXECUTOR_BYTES, 'engine');
 
 /** The most executors a process has: an x86 affinity mask has 32 bits, a processor each. */
 export const MAX_EXECUTORS = 32;
@@ -408,6 +441,12 @@ export function createCpuModule(){
                 // A gone process's memory, taken in place of a new one where it
                 // fits (`CorkHostConfig.reused`).
                 reused: config?.reused,
+                // The machine's memory every process of the run takes its
+                // memory from (`memory-budget.js`); none bounds only each.
+                memoryBudget: config?.memoryBudget,
+                memoryCredit: config?.memoryCredit,
+                memoryHolder: config?.memoryHolder,
+                guestCharge: config?.guestCharge,
                 // The translator's module, imported at boot for `cork`.
                 engineUrl: config?.engineUrl ?? null,
                 /** @type {import('./engine.js').EngineConfig} */
@@ -643,7 +682,11 @@ export function createCpuModule(){
                     // plain stores alone on a host that reorders them (arm64).
                     const ordered = several && settings.cork?.ordered === true;
                     state.ordered = several ? ordered : null;
-                    const nudging = gcNudgeOf(config?.gcNudge, undefined, settings.memorySize);
+                    // Where the tab's memory is bounded, every engine is nudged: what
+                    // the heap keeps of its garbage counts against the tab too.
+                    const nudging = gcNudgeOf(config?.gcNudge
+                        ?? (settings.memoryBudget !== undefined ? true : undefined),
+                    undefined, settings.memorySize);
                     if (keepsTableImporters())
                     {
                         log?.warn?.('cpu', 'this host\'s WebAssembly (V8 before 13, Node.js 22)'
@@ -667,7 +710,8 @@ export function createCpuModule(){
                             awaited: ()=>state.awaited?.() === true,
                             ...(typeof engineModule.createArena === 'function'
                                 && typeof SharedArrayBuffer === 'function'
-                                ? { arena: engineModule.createArena() }
+                                && arenaRoom(settings)
+                                ? { arena: engineModule.createArena(ARENA_BYTES) }
                                 : {}) } : settings.cork,
                         closedBelow: settings.closedBelow,
                         zeroReadsBelow: settings.zeroReadsBelow,
@@ -681,6 +725,11 @@ export function createCpuModule(){
                         // each thread that holds the guest's memory is nudged.
                         gcNudge: nudging ?? /** @type {false} */ (false),
                         translationZone: TRANSLATION_ZONE_BYTES,
+                        // The machine's memory: each executor's translations held on
+                        // the process's holder, given back with it.
+                        ...settings.memoryBudget ? { memoryBudget: settings.memoryBudget,
+                            memoryHolder: settings.memoryHolder,
+                            guestCharge: settings.guestCharge } : {},
                         bits: settings.bits,
                         ...(settings.window ? { window: settings.window,
                             codeBase: settings.codeBase ?? 0,
@@ -688,7 +737,8 @@ export function createCpuModule(){
                             : {}),
                     };
                     state.host = createCorkHost({ ...hostConfig, engine: engineModule,
-                        reused: settings.reused });
+                        reused: settings.reused,
+                        ...settings.memoryBudget ? { memoryCredit: settings.memoryCredit } : {} });
                     for (const listener of growListeners)
                     {
                         state.host.onGrow?.(listener);
@@ -725,7 +775,7 @@ export function createCpuModule(){
                         const bell = createBell();
                         state.bell = bell;
                         const host = state.host;
-                        state.openExecutor = index=>createRemoteExecutor({ host, index,
+                        const openOne = (/** @type {number} */ index)=>createRemoteExecutor({ host, index,
                             engineUrl: settings.engineUrl, bell,
                             unbroken: state.unbroken.buffer,
                             store: hostConfig.cork?.store ?? null,
@@ -747,6 +797,9 @@ export function createCpuModule(){
                             };
                             return remote;
                         });
+                        state.openExecutor = index=>(executorRoom(settings) ? openOne(index)
+                            : Promise.reject(new Error('the machine\'s memory has no room'
+                                + ' for its worker')));
                         const store = hostConfig.cork?.store ?? null;
                         if (config?.eagerExecutors === true)
                         {
@@ -1034,6 +1087,17 @@ export function createCpuModule(){
                  * @returns {number}
                  */
                 growTo: end=>state.host?.growTo?.(end) ?? settings.memorySize,
+                /**
+                 * Bytes the guest was given -- a heap's reach, a commit, an image, a
+                 * stack -- taken from the machine's memory (`machineMemory`); false
+                 * where it has no room, and the allocation that asked fails.
+                 *
+                 * @param {number} bytes
+                 * @returns {boolean}
+                 */
+                chargeGuest: bytes=>state.host?.chargeGuest?.(bytes) ?? true,
+                /** Bytes the guest was given back. @param {number} bytes */
+                giveGuest: bytes=>state.host?.giveGuest?.(bytes),
                 /** The RAM the guest's memory holds now. @returns {number} */
                 ramHeld: ()=>state.host?.ramHeld?.() ?? settings.memorySize,
                 /** Whether the guest's memory grows as the guest is given more. */
@@ -1057,6 +1121,22 @@ export function createCpuModule(){
                  * @returns {WebAssembly.Memory | null}
                  */
                 wasmMemory: ()=>state.host?.wasmMemory?.() ?? null,
+                /**
+                 * How many executors' pages, from the first, may hold this process's
+                 * engine state in its memory: the part of it a process taking the
+                 * memory zeroes as each opens. Null before boot.
+                 *
+                 * @returns {number | null}
+                 */
+                executorsTouched: ()=>state.host?.executorsTouched?.() ?? null,
+                /**
+                 * Where the engine's pages lie in this process's memory and which may
+                 * hold its state, for a process taking the memory once this one has
+                 * gone. Null before boot.
+                 *
+                 * @returns {{ layout: string, ranges: [number, number][] } | null}
+                 */
+                engineLeft: ()=>state.host?.engineLeft?.() ?? null,
                 /** @param {string} name @param {number} value */
                 writeReg32: (name, value)=>started().writeReg32(name, value),
                 /** The register width: 64 for an x86-64 process. @returns {32 | 64} */
@@ -1674,6 +1754,10 @@ export function createCpuModule(){
                     gcNudges: instance.nudge?.made() ?? null,
                     // Those the browser would not make, near its limit.
                     gcNudgesRefused: instance.nudge?.refused() ?? null,
+                    // The machine's memory every process takes its memory from, as
+                    // the run holds it now, and the grows refused this process; null
+                    // where the run has none (`machineMemory`).
+                    machineMemory: instance.host?.machineMemory?.() ?? null,
                     running: instance.running,
                     instructions: retiredEverywhere(instance),
                     traps: instance.thunks ? instance.thunks.size : 0,

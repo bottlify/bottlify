@@ -21,11 +21,18 @@ kernel, and where a system call would be, a trap into the bridge fires instead (
 **Memory.** All of the program's memory is one `WebAssembly.Memory`, shared in the `isolated`
 mode: up to 1 GiB for the program by default. In a 32-bit process over shared memory it holds only
 the RAM the program has been given and grows as it is given more, by powers of two (256 MiB at the
-start on one to three executors, 512 MiB on more); cork's tables and the other executors' pages
-then lie in a range of the program's own space the process keeps from it (at the top of the
-libraries' space under the thread stacks, at the heap's start, or cut out of the heap at
-0x14000000 for four executors or more). A 64-bit process, a run without shared memory and one
-with `cpu.grow: false` hold the whole of it from the start, cork's tables past it. The layout
+start); cork's tables and the other executors' pages then lie in a range of the program's own
+space the process keeps from it (at the top of the libraries' space under the thread stacks, or at
+the heap's start). With four executors or more the first executor's tables stay there and the
+other executors' pages are cut out of the heap at 0x14000000, which the memory reaches only when
+one of them opens: a process whose threads open none holds what it would on one executor. A 64-bit process, a run without shared memory and one
+with `cpu.grow: false` hold the whole of it from the start, cork's tables past it. Nothing in a
+memory just made is cleared: its pages are zero until touched. A process that takes the memory of
+one gone before it zeroes the first executor's tables at once and another executor's pages as that
+executor opens, and only those the gone process opened; of the program's own, the thunk table and
+the first thread's stack at its start, while the heap zeroes a block and the stack pool a stack as
+each is handed out, so what the program is given reads as in a new memory
+(`roadmap/decisions.md` A242). The layout
 (program address `a` at offset `a`, the state block with the registers, 512 bytes, in the
 program's first 64 KiB, which a Windows program never maps, on pages that fault the program's
 stores, and cork's tables with one flag byte per 4 KiB page) is in
@@ -83,10 +90,13 @@ everyone's. The page flags are `INACCESSIBLE`, `HAS_CODE`, `VOLATILE`, `CLOSED`,
   module an earlier process compiled is instantiated without compiling its bytes again, and with
   the code V8 has compiled and tiered up for it since (`sharedModuleBytes`; a process in a worker
   of its own gets that code by compiling the same bytes, the engine thread keeping the module
-  alive); and the regions they
+  alive where V8 runs); and the regions they
   formed ([`shared-forms.js`](../../modules/cork/src/runtime/shared-forms.js)): a hit whose every
   byte and page forming read answer as they did takes the region an earlier process formed rather
-  than decoding it again (`sharedFormed`). A bundle may bring
+  than decoding it again (`sharedFormed`). A process or an executor in a worker of its own is
+  handed a store made for it (`alone`), and keeps neither beside it: no other runtime of its
+  thread would take them, unless the run, with no room for another worker, starts a child beside
+  the process, from which runtime on they are kept. A bundle may bring
   translations along (`CORKSEED`); they are seeded before the first instruction.
 
 ## Execution in Bottlify

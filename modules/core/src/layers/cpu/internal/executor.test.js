@@ -586,3 +586,17 @@ for (const told of [true, false])
         }
     });
 }
+
+test('an executor whose worker is lost before it is ready fails its start, and does not wait for'
+    + ' good', { timeout: 30000 }, async()=>{
+    // A worker that fails to load says nothing of its own: the process's start
+    // and its dispose waited on its `ready` for ever.
+    const process = createCorkHost({ ...CONFIG, engine, executors: 2 });
+    for (const body of ['throw new Error("broken at load")', 'process.exit(3)'])
+    {
+        await assert.rejects(createRemoteExecutor({ host: process, index: 1,
+            engineUrl: ENGINE_URL, config: { ...CONFIG, executors: 2 },
+            workerUrl: new URL(`data:text/javascript,${encodeURIComponent(body)}`) }),
+        /executor 1: .*(broken at load|exited \(3\))/);
+    }
+});

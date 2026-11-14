@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { PIECE_SIZE, piecesOf } from './layers/filesystem/internal/memory-store.js';
 import {
     coalescedSaver, inflateRaw,
     normaliseSession, opfsSession, packSession, resolveStorage, unpackSession,
@@ -147,7 +148,6 @@ function fakeDirectory(){
 
 test('a file the volume keeps in pieces is saved a piece at a time and read back whole', async()=>{
     const { filesystemModule } = await import('./layers/filesystem/module.js');
-    const { PIECE_SIZE } = await import('./layers/filesystem/internal/memory-store.js');
     const volume = /** @type {any} */ (await filesystemModule.create(undefined));
     const handle = volume.open('C:\\big.bin',
         { write: true, disposition: volume.Disposition.CREATE_NEW });
@@ -158,7 +158,7 @@ test('a file the volume keeps in pieces is saved a piece at a time and read back
     volume.close(handle);
     const files = volume.export();
     await filesystemModule.dispose();
-    assert.equal(files[0].parts().length, 3, 'handed out as the store keeps it, a piece each');
+    assert.equal([...files[0].parts()].length, 3, 'handed out as the store keeps it, a piece each');
     const disk = fakeDirectory();
     const store = opfsSession('pieces', async()=>disk.root);
     await store.save({ files, registry: null });
@@ -531,3 +531,53 @@ test('the origin\'s storage is asked to be kept once, and a refusal keeps the se
             }
         }
     });
+
+test('a file the volume keeps on its page file is saved a piece at a time, holes as zeroes',
+    async()=>{
+        const disk = fakeDirectory();
+        const store = opfsSession('game', async()=>disk.root);
+        /** @type {number[]} */
+        const asked = [];
+        const size = 2 * PIECE_SIZE + 3;
+        const paged = {
+            owner: {},
+            /** @param {number} index */
+            piece: index=>{
+                asked.push(index);
+                return index === 1 ? undefined
+                    : new Uint8Array(Math.min(PIECE_SIZE, size - index * PIECE_SIZE))
+                        .fill(index + 1);
+            },
+            read: ()=>{
+                throw new Error('read whole');
+            },
+            release: ()=>{},
+        };
+        const contents = { size, flat: null, pieces: [], paged };
+        const file = { path: 'C:\\big.pak', parts: ()=>piecesOf(contents) };
+        const madeWhole = ()=>{
+            throw new Error('made whole');
+        };
+        Object.defineProperty(file, 'bytes', { get: madeWhole });
+        assert.deepEqual(asked, [], 'nothing read before the writer reaches it');
+        const files = /** @type {any[]} */ ([file]);
+        await store.save({ files, registry: null });
+        assert.deepEqual(asked, [0, 1, 2]);
+        const back = await store.load();
+        const read = back.files[0].bytes;
+        assert.equal(read.length, size);
+        assert.deepEqual([read[0], read[PIECE_SIZE], read[2 * PIECE_SIZE + 2]], [1, 0, 3]);
+    });
+
+test('a session loaded lazily names its files and reads each when asked', async()=>{
+    const disk = fakeDirectory();
+    const store = opfsSession('game', async()=>disk.root);
+    await store.save({ files: [{ path: 'C:\\save.dat', bytes: new Uint8Array([7, 8]) }],
+        registry: { roots: [1] } });
+    const loaded = /** @type {any} */ (await store.load({ lazy: true }));
+    assert.deepEqual(loaded.registry, { roots: [1] });
+    assert.deepEqual(loaded.files.map((/** @type {any} */ file)=>[file.path, file.size]),
+        [['C:\\save.dat', 2]]);
+    assert.equal(loaded.files[0].bytes, undefined, 'nothing read up front');
+    assert.deepEqual([...await loaded.files[0].read()], [7, 8]);
+});

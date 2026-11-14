@@ -101,6 +101,7 @@ too).
 | `--profile-calls` | off | every host call timed as a phase of its own, so the phase table says which API a frame's host time went to rather than only that it went to the crossing |
 | `--cpu-profile-from S` | 0 | with `--cpu-profile`: the window starts S seconds into the run instead of at the start, so a scene is profiled without the load in front of it |
 | `--heap-profile [old]` | off | with `--cpu-profile`: the same workers' allocations sampled over the same window, garbage included (`old`: only what lived long enough to be promoted, the garbage a full collection is run for), as `game-<stamp>-heap-<n>.heapprofile` (the browser's Memory panel opens it) and the top allocating sites in the report; and every worker's heap read once a second for the whole run, `game-<stamp>-heap-usage.json` (`usedSize`, `totalSize`, and `backingStorageSize`, the array buffers outside the heap). A long collection pause is paid for by what was thrown away, which is what this shows |
+| `--census` | off | every worker's ArrayBuffers, SharedArrayBuffers, typed arrays and WebAssembly memories of a mebibyte or more, by the code that made them, live bytes (made and not yet collected), as `game-<stamp>-census.json` every minute and at the end (`census.mjs`): what Chrome's memory dump shows only as one `partition_alloc/array_buffer` sum, by owner |
 | `--roots FILE` | none | A PEM bundle (`/etc/ssl/certs/ca-certificates.crt`) added to the machine's trusted roots: the ROOT store a program doing its own TLS has crypt32 judge a server's chain against |
 | `--win32-config JSON` | none | createApp's `win32` for the run, e.g. `{"handleWords":false}`: events, mutexes, semaphores and their waits answered by the host instead of the guest's handle words, a run that differs from an ordinary one by that path alone |
 | `--steam FILE` | none | a signed-in Steam account, as `node bottlify-ui/gamehub/tools/steam-account.mjs --session <session> --out FILE` writes it (its Steam ID, name and owned app ids): the run has the engine's Steam client running for it, the app being the manifest's `steam.appId` -- what a game that needs Steam running (SteamAPI_Init) starts with |
@@ -269,7 +270,11 @@ calls every few seconds (`app.standing()`: with concurrency, every process in ev
 a child running beside its parent there included), and with `--journal S` the last
 cross-process COM calls S seconds in. `--trace S` also prints the live journal of every
 process still standing in a worker (`app.standing({ journal })`): a helper its parent kills
-hands no ring back as it ends. `--bundle ID` runs an installed
+hands no ring back as it ends. In the browser, `/eval?js=window.__bottlify__.standing(undefined, N)`
+gives the same for a run of game.mjs: each process's threads and waits, its COM (`com`: every
+apartment's queued and running calls with their ages, the calls it sent that are not answered,
+to which endpoint and whether that process lives), its last N journal entries, and `lifetimes`,
+every process started and ended with its exit code. `--bundle ID` runs an installed
 program's launcher or entry the same way, with `--click`, `--key`, `--shots`
 and, with `--attended`, its message boxes left on the desktop to answer.
 `--copy DIR TO` writes a directory of the volume out once the run is over:
