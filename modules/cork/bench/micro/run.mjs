@@ -22,7 +22,8 @@
  * steady state). `eax` is the program's own checksum and must not change with
  * the engine. `--cork` is the translator's configuration; `--blocks DIR` writes
  * the first rep's block counts to `DIR/<name>.blocks.json`, which
- * `tools/translator/cork-asm.mjs --bin <image> --at 0x401000 --blocks` weighs.
+ * `tools/translator/cork-asm.mjs --bin <image> --at 0x401000 --blocks` weighs, with the
+ * run's count of each way between regions (`mechanisms`).
  */
 
 import '../../../../tools/lib/chromium-v8.mjs';
@@ -111,8 +112,9 @@ for (const name of names)
         if (blocksDir !== '' && rep === 0)
         {
             mkdirSync(blocksDir, { recursive: true });
+            const { blockCounts, mechanisms } = host.cork().diagnostics();
             writeFileSync(join(blocksDir, `${name}.blocks.json`),
-                JSON.stringify({ blocks: host.cork().diagnostics().blockCounts }));
+                JSON.stringify({ blocks: blockCounts, mechanisms }));
         }
         const after = host.cork().counters();
         summary = {
