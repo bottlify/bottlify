@@ -34,6 +34,10 @@ There is no single technical priority; these hold for every change:
    or hash, never hardcode an offset for one title. A title that misbehaves is a signal about a
    generic contract we got wrong (an FPU context switch, a `GetProcAddress` epoch, a DLU→px
    conversion, an mmap write-back gap); fix it there, once, for every title on that path.
+   A temporary exception is allowed as a bridge while the generic answer does not exist yet: it
+   is an entry in `roadmap/decisions.md` marked temporary, naming the generic work it stands in
+   for and the condition that removes it, and it goes in the change that lands that work (a
+   managed program ran under Mono until a bottle could install .NET itself; then Mono went).
 2. **Strict testing, nothing hollow.** A test that cannot fail, a gate that does not run, a check
    that passes on nothing is worse than none: it says something is covered that is not.
 3. **We understand our own code and our runtime.** Every mechanism and every tool can be
