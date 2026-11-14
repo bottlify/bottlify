@@ -948,6 +948,19 @@ test('GetFullPathNameA resolves textually and points at the last component', ()=
     assert.equal(memory.string(memory.dword(OUT_PART)), 'SAVE.DAT');
 });
 
+test('a name cannot end in a dot or a space; a folder before a separator drops one dot', ()=>{
+    const { memory, fns, at } = setup();
+    /** @param {string} name */
+    const full = name=>{
+        fns.GetFullPathNameA.handler([at(NAME, name), 0x40, OUT_TEXT, OUT_PART]);
+        return memory.string(OUT_TEXT);
+    };
+    assert.equal(full('C:/test  ....   ..   '), 'C:\\test');
+    assert.equal(full('C:/test./file'), 'C:\\test\\file');
+    assert.equal(full('C:/test.. /file'), 'C:\\test.. \\file', 'only a single dot goes');
+    assert.equal(full('C:\\dir\\*.'), 'C:\\dir\\*.', 'a pattern keeps its dots');
+});
+
 test('SearchPathA walks the documented order, adds an extension, and reports the file part', ()=>{
     const { memory, fns, files, at } = setup();
     files.put('C:\\WINDOWS\\system32\\cabinet.dll', 'x');
