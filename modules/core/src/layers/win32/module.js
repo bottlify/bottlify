@@ -613,7 +613,8 @@ export function createWin32Module(){
             };
             // This process's views of sections, by address: mapping.js keeps
             // them, VirtualQuery answers them as the regions they are.
-            /** @type {Map<number, { length: number, writable: boolean }>} */
+            /** @type {Map<number, { length: number, writable: boolean,
+             *     sections?: { start: number, end: number, protect: number }[] }>} */
             const viewRegions = new Map();
             /** @param {number} at */
             const viewAt = at=>{
@@ -5210,6 +5211,14 @@ export function createWin32Module(){
                 readWideString,
                 readMemory,
             });
+
+            // The Windows Runtime's library came with Windows 8: on 7 and XP
+            // a program that looks for it finds none, as there. The .NET
+            // Framework 4.8 loads it where it is and then requires all of it.
+            if (windows.major < 10)
+            {
+                delete libraries['combase.dll'];
+            }
 
             // The .NET shim is part of the system from Windows 7 on, and the
             // .NET Framework 4's setup there installs only its implementation,
