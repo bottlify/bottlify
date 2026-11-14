@@ -27,9 +27,10 @@ import { SharedSwitch } from './shared-code.js';
  */
 export function createCodeWrites(state){
     const rt = /** @type {import('./state.js').State} */ (state);
-    const { WATCH_KEYS, barren, byPage, codeBase, codePages, codeShared, counts, guestBytes, nowMs,
-        pageKeys, pages, read, readsFaulted, settings, stackCodeSeen, stackPages, unpublish,
-        unqueue, watchable, watched } = rt;
+    const { codeBase, codePages, codeShared, guestBytes, nowMs, pages, read, settings
+    } = /** @type {import('./state.js').Base} */ (state);
+    const { WATCH_KEYS, barren, byPage, counts, pageKeys, readsFaulted, stackCodeSeen, stackPages,
+        unpublish, unqueue, watchable, watched } = rt;
     /** @type {Map<number, number>} page → times invalidated, the stamp a batch checks */
     const generation = new Map();
     /**

@@ -96,7 +96,8 @@ function nanFirst(view, layout){
 export function createDiagnostics(state){
     const rt = /** @type {import('./state.js').State} */ (state);
     const { codePages, counterWord, emitLayout, entries, formHere, found, layout, pages, profiling,
-        read, settings, table, transfersCounted, view } = rt;
+        read, settings, table, transfersCounted, view
+    } = /** @type {import('./state.js').Base} */ (state);
     /**
      * With `timings`: the instructions interpreted from each address the host
      * began interpreting at (a chunk's first), and the first and last time -

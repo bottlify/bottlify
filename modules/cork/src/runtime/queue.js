@@ -23,7 +23,8 @@ import { ANY_TOP, keyOf } from './entries.js';
  */
 export function createQueue(state){
     const rt = /** @type {import('./state.js').State} */ (state);
-    const { counts, settings } = rt;
+    const { settings } = /** @type {import('./state.js').Base} */ (state);
+    const { counts } = rt;
     /** @type {Map<number, number>} candidates not yet formed: key(eip, top) → eip */
     const queue = new Map();
     /** The candidates by heat: bucket b holds the ones whose heat (the

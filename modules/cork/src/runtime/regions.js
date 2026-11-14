@@ -24,7 +24,9 @@ import { Tables } from './layout.js';
  */
 export function createRegions(state){
     const rt = /** @type {import('./state.js').State} */ (state);
-    const { WATCH_REGIONS, codePages, counts, entries, layout, table, view, watched } = rt;
+    const { codePages, entries, layout, table, view
+    } = /** @type {import('./state.js').Base} */ (state);
+    const { WATCH_REGIONS, counts, watched } = rt;
     /** @type {Set<RegionRecord>} */
     const regions = new Set();
     /**

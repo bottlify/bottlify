@@ -281,12 +281,15 @@ export function baseState({ memory, ram, layout, sharedLayout = undefined, confi
  * members. `Late` is what runtime.js itself still lends the parts.
  *
  * @typedef {Record<string, any>} Late
+ * @typedef {ReturnType<typeof baseState>} Base  the base alone: what a part takes of it is
+ *     typed by this, which no part's own return is in
  * @typedef {ReturnType<typeof baseState>
  *     & ReturnType<typeof import('./diagnostics.js').createDiagnostics>
  *     & ReturnType<typeof import('./variants.js').createVariants>
  *     & ReturnType<typeof import('./queue.js').createQueue>
  *     & ReturnType<typeof import('./regions.js').createRegions>
  *     & ReturnType<typeof import('./code-writes.js').createCodeWrites>
+ *     & ReturnType<typeof import('./modules.js').createModules>
  *     & Late} State
  */
 

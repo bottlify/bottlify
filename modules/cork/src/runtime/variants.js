@@ -33,7 +33,9 @@ export const usesX87 = region=>region.blocks.some(block=>block.instructions.some
  */
 export function createVariants(state){
     const rt = /** @type {import('./state.js').State} */ (state);
-    const { codeShared, counts, entries, layout, settings, view } = rt;
+    const { codeShared, entries, layout, settings, view
+    } = /** @type {import('./state.js').Base} */ (state);
+    const { counts } = rt;
     /**
      * The precision control each x87 region is compiled for, by its entry
      * (`X87Precision`): the one the machine has when the entry is first formed
