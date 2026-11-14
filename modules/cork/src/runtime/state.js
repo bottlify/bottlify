@@ -277,6 +277,80 @@ export function baseState({ memory, ram, layout, sharedLayout = undefined, confi
  */
 
 /**
+ * A batch with a translator: the regions it publishes (`metas`) or the
+ * running ones it relinks, and whether nothing else may be out beside it
+ * (`alone`: a relink, a merge, regions formed again with their callees or
+ * copies -- each takes over regions that are running, and a batch
+ * publishing beside it could publish one of them).
+ * @typedef {{ id: number, metas?: any[], relink?: RegionRecord[], store: any,
+ *     at: number, alone: boolean, covers?: number[] }} Pending
+ *     covers: what its regions cover until they are published (`coveredOut`)
+ */
+
+/**
+ * A translation worker: loaded once it has answered its first message
+ * (`ready`), with at most one batch out (`pending`); one asked to go
+ * (`leaving`) takes no batch and goes when its last one is back.
+ * @typedef {{ adapter: import('./translator.js').WorkerAdapter, ready: boolean,
+ *     pending: Pending | null, leaving: boolean }} Translator
+ */
+
+/**
+ * A region a batch publishes later (`publishOn`): it, its translation, and
+ * the instance of its module -- or, for a store hit whose module this run
+ * has not instantiated, null, with the bytes to compile and what they are
+ * known by (`instanceFor`). With `relink`, `one` is a running region a
+ * relink moves to the instance, and where the store keeps the module.
+ * @typedef {{ one: any, built: any, instance: WebAssembly.Instance | null,
+ *     source?: string | object, bytes?: Uint8Array | WebAssembly.Module,
+ *     relink?: { store: any, key: string | undefined } }} Waiting
+ */
+
+/**
+ * The batches waiting to be published, in order: a translator's answer,
+ * or a batch's store hits and whether their modules are compiled. Until
+ * they are all published no new batch goes, as while a batch's lookups are
+ * out, and they are published before a batch half formed goes on. A
+ * batch's store hits wait for their modules: `compile` holds those not
+ * started yet (`compileOn`), `started` the compiles under way, `compiled`
+ * those done, and `instances` those instantiated as their first region is
+ * published.
+ * @typedef {{ waiting: Waiting[], next: number, ready: boolean,
+ *     compile: { source: string | object, bytes: Uint8Array }[],
+ *     started: Promise<void>[],
+ *     compiled: Map<string | object, WebAssembly.Module | null>,
+ *     instances: Map<string | object, WebAssembly.Instance | null>,
+ *     covers: number[] }} Publishing
+ */
+
+/**
+ * The batch being formed, from one call to the next while forming it whole
+ * would hold the engine thread past `holdMs`: its candidates, the next to
+ * form, and what is formed so far. Nothing else is formed or sent until it
+ * is whole, so it goes out as the one batch it would have been. `covered`
+ * holds where the regions it formed will have entries once published
+ * (`coverKeys`): a candidate among them is already translated by one (a
+ * loop's head and its cases were all hot at once, and each formed the
+ * whole loop again). It is noted again should its block get no entry
+ * after all. `forTranslator`: a translator was free when it was taken,
+ * or one was loading where the work here is bounded, so it goes to one --
+ * emitted here only should none be left at all.
+ * `lookup`: the store's answers so far (`lookUpOn`), null once the store
+ * cannot answer at once. `known`: what the store answered for the batch's
+ * keys before they were formed (`recordBefore`), and `unpacked` those
+ * records read.
+ * @typedef {{ records: (Uint8Array | null | undefined)[] | null,
+ *     cached: (import('./cache.js').CachedRegion | null)[], wanted: string[] | null,
+ *     modules: Map<string, Uint8Array | WebAssembly.Module | null>, done: boolean,
+ *     keys?: string[] }} Lookup
+ * @typedef {{ batch: [number, number][], next: number, formed: any[],
+ *     covered: Set<number>, ceiling: number, takenAt: number,
+ *     forTranslator: boolean, lookup?: Lookup | null,
+ *     known?: Map<string, Uint8Array | null>,
+ *     unpacked?: Map<string, import('./cache.js').CachedRegion | null> }} Forming
+ */
+
+/**
  * The state the runtime's parts are made over: the base and every part's
  * members. `Late` is what runtime.js itself still lends the parts.
  *
@@ -290,6 +364,7 @@ export function baseState({ memory, ram, layout, sharedLayout = undefined, confi
  *     & ReturnType<typeof import('./regions.js').createRegions>
  *     & ReturnType<typeof import('./code-writes.js').createCodeWrites>
  *     & ReturnType<typeof import('./modules.js').createModules>
+ *     & ReturnType<typeof import('./translators.js').createTranslators>
  *     & Late} State
  */
 

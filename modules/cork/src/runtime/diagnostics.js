@@ -680,9 +680,9 @@ export function createDiagnostics(state){
             worker: /** @type {'ready' | 'loading' | 'none'} */ (rt.translatorReady() ? 'ready'
                 : rt.translatorLoading() ? 'loading' : 'none'),
             translators: rt.translators.length,
-            translatorsReady: rt.translators.filter((/** @type {any} */ one)=>one.ready).length,
+            translatorsReady: rt.translators.filter(one=>one.ready).length,
             ...(rt.arena === null ? {} : { arena: openArena(rt.arena).counts() }),
-            batchesOut: rt.translators.filter((/** @type {any} */ one)=>one.pending !== null).length,
+            batchesOut: rt.translators.filter(one=>one.pending !== null).length,
         };
     };
     return {
