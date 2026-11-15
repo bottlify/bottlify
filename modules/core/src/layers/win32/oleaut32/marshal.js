@@ -453,6 +453,44 @@ const DISPATCH_METHODS = [
     ] },
 ];
 
+const IID_IOLEWINDOW = '{00000114-0000-0000-C000-000000000046}';
+const IID_IOLECLIENTSITE = '{00000118-0000-0000-C000-000000000046}';
+const IID_IMONIKER = '{0000000F-0000-0000-C000-000000000046}';
+const IID_IOLECONTAINER = '{0000011B-0000-0000-C000-000000000046}';
+
+/**
+ * IOleWindow's two methods, which IOleClientSite's callers and the in-place
+ * interfaces after it start with; ole32's own proxy/stub marshals both.
+ *
+ * @type {MethodDescription[]}
+ */
+const OLE_WINDOW_METHODS = [
+    { name: 'GetWindow', slot: 3, unsupported: null, parameters: [
+        { name: 'phwnd', flags: PARAMFLAG_FOUT, type: pointer(word(4)) },
+    ] },
+    { name: 'ContextSensitiveHelp', slot: 4, unsupported: null, parameters: [
+        { name: 'fEnterMode', flags: PARAMFLAG_FIN, type: word(4) },
+    ] },
+];
+
+/** @type {MethodDescription[]} */
+const OLE_CLIENT_SITE_METHODS = [
+    { name: 'SaveObject', slot: 3, unsupported: null, parameters: [] },
+    { name: 'GetMoniker', slot: 4, unsupported: null, parameters: [
+        { name: 'dwAssign', flags: PARAMFLAG_FIN, type: word(4) },
+        { name: 'dwWhichMoniker', flags: PARAMFLAG_FIN, type: word(4) },
+        { name: 'ppmk', flags: PARAMFLAG_FOUT, type: pointer(iface(IID_IMONIKER)) },
+    ] },
+    { name: 'GetContainer', slot: 5, unsupported: null, parameters: [
+        { name: 'ppContainer', flags: PARAMFLAG_FOUT, type: pointer(iface(IID_IOLECONTAINER)) },
+    ] },
+    { name: 'ShowObject', slot: 6, unsupported: null, parameters: [] },
+    { name: 'OnShowWindow', slot: 7, unsupported: null, parameters: [
+        { name: 'fShow', flags: PARAMFLAG_FIN, type: word(4) },
+    ] },
+    { name: 'RequestNewObjectLayout', slot: 8, unsupported: null, parameters: [] },
+];
+
 /** The interfaces every proxy knows without a library. */
 /** @type {Map<string, InterfaceDescription>} */
 const BUILT_IN = new Map([
@@ -471,6 +509,10 @@ const BUILT_IN = new Map([
             { name: 'fLock', flags: PARAMFLAG_FIN, type: word(4) },
         ] },
     ] }],
+    [IID_IOLEWINDOW, { iid: IID_IOLEWINDOW, name: 'IOleWindow',
+        methods: [null, null, null, ...OLE_WINDOW_METHODS] }],
+    [IID_IOLECLIENTSITE, { iid: IID_IOLECLIENTSITE, name: 'IOleClientSite',
+        methods: [null, null, null, ...OLE_CLIENT_SITE_METHODS] }],
 ]);
 
 /**
