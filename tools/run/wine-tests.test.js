@@ -6,7 +6,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { classify, markdown, parseOutput, regressions, summarise } from './wine-tests.mjs';
+import {
+    classify, markdown, parseOutput, regressions, summarise, windowsOf,
+} from './wine-tests.mjs';
 
 /** @param {Partial<import('./wine-tests.mjs').ChildResult>} [extra] */
 const result = (extra = {})=>({
@@ -81,6 +83,10 @@ test('a run is classed by how it ended before by what it printed', ()=>{
     // Windows refuses the same program: its manifest's assembly is not there.
     assert.equal(classify(result({ error: { reason: 'side-by-side',
         message: 'the side-by-side configuration is incorrect' } }), passed), 'not-loaded');
+    // A library it imports is nowhere: the system ends it before its first instruction.
+    assert.equal(classify(result({ exitCode: 0xc0000135 }), parseOutput('')), 'not-loaded');
+    assert.equal(classify(result({ exitCode: 0xc0000135 | 0 }), parseOutput('')), 'not-loaded');
+    assert.equal(classify(result({ exitCode: 1 }), parseOutput('')), 'no-summary');
 
     const empty = parseOutput('');
     assert.equal(classify(result(), empty), 'no-summary');
@@ -114,7 +120,7 @@ test('the markdown groups a failing line checked in a loop and compares with a b
     const text = markdown({ build: 'b', started: 's', tests: [now] },
         { failures: 20, baseline: { tests: [before] } });
     assert.match(text, /`a\.c:5` \(x2\): n=1/);
-    assert.match(text, /\| lib:t \| fail \| 10 \| 3 \| 0 \| 0 \| 0\.0 \| fail, 7 -> 3 \|/);
+    assert.match(text, /\| lib:t \| - \| fail \| 10 \| 3 \| 0 \| 0 \| 0\.0 \| fail, 7 -> 3 \|/);
 });
 
 test('the names a test asked for and did not get are listed, but for the Wine probe', ()=>{
@@ -135,6 +141,8 @@ test('the gate finds a test that ended worse and a check failing that held, numb
         run('fixed', `a.c:7: Test failed: x\n${summary(1)}`),
         run('broke', summary(0)),
         run('emptied', summary(0)),
+        run('unloaded', '1000:t: unhandled exception c0000005 at 00401000'),
+        run('stillunloaded', '', { exitCode: 0xc0000135 }),
         run('newcheck', `a.c:1: Test failed: old\n${summary(1)}`),
     ] };
     const report = { tests: [
@@ -144,13 +152,25 @@ test('the gate finds a test that ended worse and a check failing that held, numb
         run('broke', '', { error: { reason: 'runaway', message: 'program did not finish' } }),
         // The library it checked went missing: every check skipped.
         run('emptied', '1000:t: 0 tests executed (0 marked as todo, 0 failures), 1 skipped.'),
+        // Even from a run that stopped in the guest, one that no longer loads is worse.
+        run('unloaded', '', { exitCode: 0xc0000135 }),
+        run('stillunloaded', '', { exitCode: 0xc0000135 }),
         run('newcheck', `a.c:1: Test failed: old\na.c:3: Test failed: new one\n${summary(2)}`),
         run('unseen', `a.c:2: Test failed: y\n${summary(1)}`),
     ] };
     assert.deepEqual(regressions(report, baseline), [
         'lib:broke: pass -> timeout',
         'lib:emptied: pass -> empty',
+        'lib:unloaded: guest-exception -> not-loaded',
         'lib:newcheck: 1 failed check(s) the baseline did not have, first a.c:3: new one',
     ]);
     assert.deepEqual(regressions(baseline, baseline), [], 'a run against itself');
+});
+
+test('each library runs on the Windows its tests are written for', ()=>{
+    assert.equal(windowsOf('kernel32'), 'win7');
+    assert.equal(windowsOf('comctl32'), 'win7');
+    assert.equal(windowsOf('combase'), 'win10', 'only Windows 10 has it');
+    assert.equal(windowsOf('shcore'), 'win10');
+    assert.equal(windowsOf('windows.gaming.input'), 'win10', 'the Windows Runtime\'s');
 });

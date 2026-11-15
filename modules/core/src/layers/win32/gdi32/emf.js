@@ -84,6 +84,8 @@ export const MM_ISOTROPIC = 7;
 export const MM_ANISOTROPIC = 8;
 
 /** Logical units to the inch in each fixed mapping mode. */
+/** The fixed mode whose units are the frame's own. */
+const MM_HIMETRIC = 3;
 const UNITS_PER_INCH = new Map([[2, 254], [3, 2540], [4, 100], [5, 1000], [6, 1440]]);
 
 /** ModifyWorldTransform's ways. */
@@ -641,6 +643,42 @@ function emfComments(emf){
 }
 
 /**
+ * MulDiv: the product over the divisor, rounded half away from zero; zero
+ * for a divisor of zero.
+ *
+ * @param {number} value @param {number} times @param {number} over
+ */
+const mulDiv = (value, times, over)=>{
+    if (over === 0)
+    {
+        return 0;
+    }
+    const exact = value * times / over;
+    return Math.sign(exact) * Math.round(Math.abs(exact));
+};
+
+/**
+ * Where GetWinMetaFileBits puts the WMF's window origin, as words in WMF's
+ * order (y, x): see `emfToWmf`.
+ *
+ * @param {Rect} frame  Hundredths of a millimetre.
+ * @param {number} mapMode
+ * @param {{ device: Size, millimeters: Size }} target
+ * @returns {number[]}
+ */
+function windowOrigin(frame, mapMode, target){
+    const units = UNITS_PER_INCH.get(mapMode);
+    if (units === undefined)
+    {
+        return [mulDiv(frame.top, target.device.cy, target.millimeters.cy * 100) + 1,
+            mulDiv(frame.left, target.device.cx, target.millimeters.cx * 100)];
+    }
+    const left = mapMode === MM_HIMETRIC && frame.left < 0 ? frame.left + 1
+        : mulDiv(frame.left, units, 2540);
+    return [mulDiv(-frame.top, units, 2540) + 1, left];
+}
+
+/**
  * An EMF as a WMF: GetWinMetaFileBits. The EMF goes in whole first, in
  * comment records, and then the WMF's mapping mode, its window -- the
  * picture frame, in pixels for the modes a program scales and in the fixed
@@ -650,15 +688,25 @@ function emfComments(emf){
  * record for, or that the conversion does not know, are left out. The word
  * sum of the whole is zero, by the first comment's checksum.
  *
+ * The window is the frame as Windows writes it, on the reference device the
+ * conversion is asked for (hdcRef), not the one the EMF was recorded on: its
+ * origin a pixel lower than the frame's top in the modes a program scales,
+ * and in a fixed mode's units, y growing upwards, also a unit lower, with
+ * MM_HIMETRIC's left a unit to the right where it is negative; its extent
+ * the frame in that device's pixels whatever the mode.
+ *
  * @param {Uint8Array} emf  One `emfRefusal` took.
  * @param {number} mapMode
  * @param {(text: string) => Uint8Array} encode  Text to the ANSI page.
+ * @param {{ device: Size, millimeters: Size }} [reference]  The device the
+ *     WMF is for; the EMF's own where none is given.
  * @returns {Uint8Array}
  */
-export function emfToWmf(emf, mapMode, encode){
+export function emfToWmf(emf, mapMode, encode, reference){
     const header = readEmfHeader(emf);
     const view = viewOf(emf);
     const { device, millimeters, frame } = header;
+    const target = reference ?? { device, millimeters };
     const units = UNITS_PER_INCH.get(mapMode);
     // Hundredths of a millimetre to the WMF's logical units, and the
     // reference device's pixels likewise.
@@ -671,10 +719,10 @@ export function emfToWmf(emf, mapMode, encode){
     const records = [
         ...emfComments(emf),
         wmfRecord(META.SETMAPMODE, [mapMode]),
-        wmfRecord(META.SETWINDOWORG, [Math.round(frame.top * perHundredth[1]),
-            Math.round(frame.left * perHundredth[0])]),
-        wmfRecord(META.SETWINDOWEXT, [Math.round((frame.bottom - frame.top) * perHundredth[1]),
-            Math.round((frame.right - frame.left) * perHundredth[0])]),
+        wmfRecord(META.SETWINDOWORG, windowOrigin(frame, mapMode, target)),
+        wmfRecord(META.SETWINDOWEXT, [
+            mulDiv(frame.bottom - frame.top, target.device.cy, target.millimeters.cy * 100),
+            mulDiv(frame.right - frame.left, target.device.cx, target.millimeters.cx * 100)]),
     ];
     const page = createPage(device, millimeters);
     /** @param {{ x: number, y: number }} point */

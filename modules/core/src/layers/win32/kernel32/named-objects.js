@@ -105,6 +105,25 @@ export function createNamedObjects({ table = new Map() } = {}){
         },
 
         /**
+         * The Win32 name an object was made or opened by, or null for an
+         * object no name stands for: what NtQueryObject's
+         * ObjectNameInformation answers, put under its object directory.
+         *
+         * @param {any} object
+         * @returns {string | null}
+         */
+        nameOf(object){
+            for (const [name, held] of table)
+            {
+                if (held.object === object)
+                {
+                    return name;
+                }
+            }
+            return null;
+        },
+
+        /**
          * An Open* call found the name and is about to hand back a handle onto
          * it -- one more reference, counted the same as a create's, but with
          * no last error of its own to set: opening an existing named object is
@@ -216,8 +235,11 @@ export function createRemoteNamedObjects({ objects, kernel }){
             mine.delete(id);
         }
     };
+    /** The name each object there was reached by, by number. @type {Map<number, string>} */
+    const names = new Map();
     /** @param {string} kind @param {number} id @param {string} name */
     const standInFor = (kind, id, name)=>{
+        names.set(id, name);
         let made = standIns.get(id);
         if (!made)
         {
@@ -274,11 +296,17 @@ export function createRemoteNamedObjects({ objects, kernel }){
                     });
                     made.remote = answer.id;
                     standIns.set(answer.id, made);
+                    names.set(answer.id, name);
                     count(answer.id, 1);
                     reused = answer.reused === true;
                 }
             }
             setLastError(reused ? ERROR_ALREADY_EXISTS : ERROR_SUCCESS);
+        },
+
+        /** @param {any} object @returns {string | null} */
+        nameOf(object){
+            return object.remote ? names.get(object.remote) ?? null : own.nameOf(object);
         },
 
         /** @param {any} object */

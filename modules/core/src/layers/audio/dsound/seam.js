@@ -35,7 +35,8 @@ import { createSoundBuffer, normaliseFormat, DSBSTATUS_PLAYING } from './buffers
 import {
     createSpatial, IDIRECTSOUND3DLISTENER_SLOTS, IDIRECTSOUND3DBUFFER_SLOTS,
 } from './spatial.js';
-import { SOUND_ADAPTER_NAME } from '../../win32/devices.js';
+import { SOUND_ADAPTER_NAME, SOUND_DEVICE_GUID } from '../../win32/devices.js';
+import { parseGuid } from '../../win32/ole32/guid.js';
 
 export const DS_OK = 0;
 const DS_UNCERTIFIED = 1;
@@ -278,10 +279,7 @@ export const DSOUND_ORDINALS = Object.freeze({
  * and GetDeviceID answers. Every GUID opens the same output here, so its value
  * only has to be stable and not null.
  */
-const DEVICE_GUID = Object.freeze([
-    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-]);
+const DEVICE_GUID = Object.freeze([.../** @type {Uint8Array} */ (parseGuid(SOUND_DEVICE_GUID))]);
 
 /**
  * dsound.h's DSDEVID_Default* aliases, {DEF0000n-9C6D-47ED-AAF1-4DDA8F2B5C03},

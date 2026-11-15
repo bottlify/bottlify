@@ -28,8 +28,8 @@ import { guestEntry } from './msvcrt/guest-code.js';
 import * as kernel32InGuest from './kernel32/inguest.js';
 import { COMPILED as KERNEL32_COMPILED } from './kernel32/inguest.x86.js';
 import {
-    ENVIRONMENT_NOW, createEnvironmentFunctions, createUserenvFunctions, defaultEnvironment,
-    machineArchitecture, sessionEnvironment,
+    ENVIRONMENT_NOW, EXPAND_ENVIRONMENT, createEnvironmentFunctions, createUserenvFunctions,
+    defaultEnvironment, machineArchitecture, sessionEnvironment,
 } from './kernel32/environment.js';
 import { createThreadPool } from './kernel32/pool.js';
 import { serveCall } from './kernel32/cross-process.js';
@@ -1557,6 +1557,7 @@ export function createWin32Module(){
                             libraries['MSVFW32.dll'].ICDecompress
                                 .handler([hic, flags, format, data, output, bits]),
                     },
+                    acm: { call: (name, args)=>libraries['MSACM32.dll'][name].handler(args) },
                     readWideString: (address, maxLength)=>readWideString(address, maxLength),
                     allocate: bytes=>heap.allocate(bytes),
                     free: address=>heap.free(address),
@@ -1811,6 +1812,9 @@ export function createWin32Module(){
                 call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
                 callerThread: ()=>bridge.callerThread(),
                 setLastError: setError,
+                // A font file the program adds: read where its path leads.
+                readFile: path=>readVolumeFile(path),
+                fullPath: path=>filesystem.resolve(path).path || path,
             });
 
             // The transport is injected, as the GPU device and the block store are.
@@ -5357,6 +5361,11 @@ export function createWin32Module(){
                         /** @param {string} library @param {string} name @param {number[]} args */
                         system: (library, name, args)=>libraries[library]?.[name]?.handler(args),
                         computerName: COMPUTER_NAME,
+                        // RegGetValue answers a REG_EXPAND_SZ expanded, against
+                        // the process's environment as it is when asked.
+                        /** @param {string} text */
+                        expandEnvironment: text=>/** @type {any} */ (libraries['KERNEL32.dll'])
+                            ?.[EXPAND_ENVIRONMENT]?.(text) ?? text,
                         // Where RegSaveKey writes a hive and RegLoadKey reads one.
                         files: volume,
                         // The run's file-security store, and how a path is made
@@ -5970,7 +5979,10 @@ export function createWin32Module(){
                     files: volume }),
             };
             libraries['MSVCR80.dll'] = createMsvcr80Functions(libraries['msvcrt.dll'],
-                { readMemory, writeMemory, pointerSize });
+                { readMemory, writeMemory, pointerSize,
+                    // What calls the program's invalid-parameter handler.
+                    callGuest: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
+                    currentThread: ()=>kernel.currentThread() });
             // And its C++ library, over that runtime's operator new and delete.
             libraries['MSVCP80.dll'] = createMsvcp80Functions(libraries['MSVCR80.dll'],
                 { readMemory, writeMemory, fillMemory });
@@ -6039,6 +6051,9 @@ export function createWin32Module(){
                 setRegisters,
                 windows,
                 handleType: (/** @type {number} */ handle)=>kernel.handles.typeOf(handle),
+                // The name the run's namespace keeps for the object a handle opens.
+                namedObjectName: (/** @type {number} */ handle)=>
+                    runObjects.nameOf(kernel.handles.resolve(handle)),
                 processOf: (/** @type {number} */ handle)=>
                     (kernel.handles.typeOf(handle) === 'process'
                         ? kernel.handles.resolve(handle, 'process') : null),

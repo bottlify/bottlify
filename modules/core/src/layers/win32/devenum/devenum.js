@@ -29,6 +29,8 @@ import { describe } from '../quartz/describe.js';
 export const CLSID_SYSTEM_DEVICE_ENUM = '{62BE5D10-60EB-11D0-BD3B-00A0C911CE86}';
 export const CLSID_DEVICE_MONIKER = '{4315D437-5B8C-11D0-BD3B-00A0C911CE86}';
 export const CLSID_LEGACY_AM_FILTER_CATEGORY = '{083863F1-70DE-11D0-BD40-00A0C911CE86}';
+/** CLSID_ActiveMovieCategories: the category whose entries are the categories. */
+export const CLSID_ACTIVE_MOVIE_CATEGORIES = '{DA4E3DA0-D07D-11D0-BD50-00A0C911CE86}';
 export const IID_ICREATE_DEV_ENUM = '{29840822-5B84-11D0-BD3B-00A0C911CE86}';
 export const IID_IENUM_MONIKER = '{00000102-0000-0000-C000-000000000046}';
 export const IID_IMONIKER = '{0000000F-0000-0000-C000-000000000046}';
@@ -100,6 +102,8 @@ const IPARSE_DISPLAY_NAME_SLOTS = [['ParseDisplayName', 4]];
  * @property {boolean} zero
  * @property {boolean} many
  * @property {[string, string][]} types  Major and minor type; GUID_NULL matches anything.
+ * @property {number} [instances]  REGFILTERPINS2's cInstances; 0 where the registration
+ *           had none to give (REGFILTERPINS, quartz's own).
  */
 
 /**
@@ -174,6 +178,66 @@ export function createFilterStore(){
  *           mapper enumerates them beside the filters.
  */
 
+/** REGFILTERPINS2's flags, as FilterData carries them. */
+const REG_PINFLAG = { ZERO: 0x1, RENDERER: 0x2, MANY: 0x4, OUTPUT: 0x8 };
+
+/**
+ * A registration as the registry's binary FilterData value, version 2: a
+ * header (version, merit, pin count, a reserved word), then per pin its
+ * signature ("0pi3", its first byte the pin's index), flags, instances, type
+ * and medium counts and its category's offset, each type after it as "0ty3",
+ * a reserved word and the offsets of its major and minor type; the GUIDs come
+ * at the end, where the offsets point. What IFilterMapper2 writes for a
+ * filter, IAMFilterData::CreateFilterData makes and ParseFilterData reads.
+ *
+ * @param {{ merit: number, pins: RegisteredPin[] }} registration
+ * @returns {Uint8Array}
+ */
+export function encodeFilterData({ merit, pins }){
+    // Each GUID is written once, the types naming it by the same offset.
+    /** @type {string[]} */
+    const guids = [];
+    for (const [major, minor] of pins.flatMap(pin=>pin.types))
+    {
+        for (const guid of [major.toUpperCase(), minor.toUpperCase()])
+        {
+            if (!guids.includes(guid))
+            {
+                guids.push(guid);
+            }
+        }
+    }
+    const typeTotal = pins.reduce((sum, pin)=>sum + pin.types.length, 0);
+    const guidsAt = 16 + pins.length * 24 + typeTotal * 16;
+    const block = new Uint8Array(guidsAt + guids.length * 16);
+    const view = new DataView(block.buffer);
+    view.setUint32(0, 2, true);
+    view.setUint32(4, merit >>> 0, true);
+    view.setUint32(8, pins.length, true);
+    guids.forEach((guid, index)=>block.set(/** @type {Uint8Array} */ (parseGuid(guid)),
+        guidsAt + index * 16));
+    /** @param {string} guid */
+    const offsetOf = guid=>guidsAt + guids.indexOf(guid.toUpperCase()) * 16;
+    let at = 16;
+    pins.forEach((pin, index)=>{
+        view.setUint32(at, 0x33697030 + index, true);
+        view.setUint32(at + 4, (pin.zero ? REG_PINFLAG.ZERO : 0)
+            | (pin.renderer ? REG_PINFLAG.RENDERER : 0) | (pin.many ? REG_PINFLAG.MANY : 0)
+            | (pin.output ? REG_PINFLAG.OUTPUT : 0), true);
+        view.setUint32(at + 8, pin.instances ?? 0, true);
+        view.setUint32(at + 12, pin.types.length, true);
+        at += 24;
+        for (const [major, minor] of pin.types)
+        {
+            view.setUint32(at, 0x33797430, true);
+            view.setUint32(at + 8, offsetOf(major), true);
+            view.setUint32(at + 12, offsetOf(minor), true);
+            at += 16;
+        }
+    });
+    return block;
+}
+
 /** @param {number} value */
 const dword = value=>{
     const bytes = new Uint8Array(4);
@@ -215,6 +279,26 @@ export function createDeviceEnumeration(host, store){
     /** @param {string} text */
     const guidBytes = text=>/** @type {Uint8Array} */ (parseGuid(text));
 
+    /**
+     * The values a registration's key holds beside its name and class: a
+     * filter's FilterData, a category's Merit, as the registry keeps them. A
+     * device a program wrote itself has only what it wrote.
+     *
+     * @param {RegisteredFilter} filter @param {string} name
+     * @returns {number | Uint8Array | undefined}
+     */
+    const registryValue = (filter, name)=>{
+        if (filter.clsid === '' || filter.display !== undefined)
+        {
+            return undefined;
+        }
+        if (filter.category.toUpperCase() === CLSID_ACTIVE_MOVIE_CATEGORIES)
+        {
+            return name === 'Merit' ? filter.merit : undefined;
+        }
+        return name === 'FilterData' ? encodeFilterData(filter) : undefined;
+    };
+
     /** @type {Record<string, (filter: RegisteredFilter, args: number[]) => number | Promise<number>>} */
     const propertyBag = {
         /** HRESULT Read(LPCOLESTR pszPropName, VARIANT *pVar, IErrorLog *pErrorLog) */
@@ -226,7 +310,7 @@ export function createDeviceEnumeration(host, store){
             const wanted = host.readWideString(name >>> 0, NAME_BYTES);
             const value = wanted === 'FriendlyName' ? filter.name || undefined
                 : wanted === 'CLSID' ? filter.clsid || undefined
-                    : filter.properties.get(wanted);
+                    : filter.properties.get(wanted) ?? registryValue(filter, wanted);
             if (value === undefined)
             {
                 return PROPERTY_NOT_FOUND;
@@ -483,7 +567,11 @@ export function createDeviceEnumeration(host, store){
             {
                 return E_POINTER;
             }
-            const filters = store.list(readGuid(category >>> 0));
+            // A DMO category lists the DMOs registered in it (msdmo), as
+            // Windows' devenum lists them beside the filters.
+            const asked = readGuid(category >>> 0).toUpperCase();
+            const filters = [...store.list(asked),
+                ...(host.dmos?.() ?? []).filter(dmo=>dmo.category.toUpperCase() === asked)];
             if (filters.length === 0)
             {
                 // An empty category hands out no enumerator, as the documentation says.

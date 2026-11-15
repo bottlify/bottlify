@@ -19,6 +19,8 @@
 import { guestEntry } from './guest-code.js';
 import { LATER_HEAP } from './heap.js';
 import { settle } from './io.js';
+import { INVALID_CRUNTIME_PARAMETER, INVALID_PARAMETERS, createInvalidParameterRuntime,
+    watchedExports } from './invalid-parameter.js';
 import * as inGuest from './inguest.js';
 import { COMPILED } from './inguest.x86.js';
 import * as inGuestPrint from './inguest-print.js';
@@ -34,6 +36,9 @@ const TRUNCATE = 0xffffffff;
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {number} [pointerSize]  8 in a 64-bit process; absent, 4.
+ * @property {(entry: number, args: number[], thread?: unknown) => any} [callGuest]
+ *           What calls the program's invalid-parameter handler.
+ * @property {() => unknown} [currentThread]
  */
 
 /**
@@ -56,9 +61,21 @@ export function createMsvcr80Functions(crt, host){
         host.writeMemory(address >>> 0, bytes);
     };
 
+    const seam = /** @type {any} */ (crt)[INVALID_PARAMETERS];
+    // This runtime's own handler, apart from the universal runtime's: each
+    // DLL keeps the one its own `_set_invalid_parameter_handler` was given.
+    const invalid = createInvalidParameterRuntime({
+        library: 'MSVCR80.dll',
+        callGuest: host.callGuest,
+        currentThread: host.currentThread,
+        exitProcess: seam?.exitProcess,
+        report: seam?.report,
+    });
+
     /** The calling thread's errno, set. @param {number} code */
     const fail = code=>{
         setU32(crt._errno.handler([]), code);
+        seam?.watch.note(code);
         return code;
     };
 
@@ -158,13 +175,10 @@ export function createMsvcr80Functions(crt, host){
         },
     });
 
-    /**
-     * The secure library's end for a parameter it cannot live with, and a
-     * failed assertion's: the process ends as abort ends it.
-     */
-    const invalidParameter = ()=>crt.abort.handler([]);
+    /** A failed assertion's end: the process ends as abort ends it. */
+    const assertFailed = ()=>crt.abort.handler([]);
 
-    return {
+    const table = {
         ...crt,
         // The heap functions this runtime added: _recalloc, the aligned ones'.
         .../** @type {any} */ (crt)[LATER_HEAP] ?? {},
@@ -300,31 +314,74 @@ export function createMsvcr80Functions(crt, host){
         _wassert: {
             convention: 'cdecl',
             argBytes: 12,
-            handler: ()=>invalidParameter(),
+            handler: ()=>assertFailed(),
+        },
+
+        /**
+         * _invalid_parameter_handler _set_invalid_parameter_handler(
+         *     _invalid_parameter_handler handler)
+         *
+         * The one installed before. This runtime calls it for every argument
+         * one of its functions refuses, and the function then answers its
+         * documented failure (decisions.md A255).
+         */
+        _set_invalid_parameter_handler: {
+            convention: 'cdecl',
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handler])=>invalid.set(handler),
+        },
+
+        /** _invalid_parameter_handler _get_invalid_parameter_handler(void) */
+        _get_invalid_parameter_handler: {
+            convention: 'cdecl',
+            argBytes: 0,
+            handler: ()=>invalid.get(),
         },
 
         /**
          * void _invalid_parameter_noinfo(void)
          *
          * A secure function's argument it cannot live with, in a release
-         * build: no handler is installed, so the process ends.
+         * build: the handler with nothing known, and the caller goes on; with
+         * none installed, the process ends as `_invoke_watson` ends it.
          */
         _invalid_parameter_noinfo: {
             convention: 'cdecl',
             argBytes: 0,
-            handler: ()=>invalidParameter(),
+            handler: ()=>invalid.raise('_invalid_parameter_noinfo', [], 0),
+        },
+
+        /**
+         * void _invalid_parameter(const wchar_t *expression, const wchar_t *function,
+         *     const wchar_t *file, unsigned int line, uintptr_t reserved)
+         *
+         * A debug build's report: the handler hears the details it was given.
+         */
+        _invalid_parameter: {
+            convention: 'cdecl',
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: args=>invalid.raise('_invalid_parameter', args, 0, args.slice(0, 5)),
         },
 
         /**
          * void _invoke_watson(const wchar_t *expression, const wchar_t *function,
          *     const wchar_t *file, unsigned int line, uintptr_t reserved)
          *
-         * The secure library's end: the process goes, as abort takes it.
+         * The secure library's end: the process goes with
+         * STATUS_INVALID_CRUNTIME_PARAMETER, whatever handler is installed.
          */
         _invoke_watson: {
             convention: 'cdecl',
             argBytes: 20,
-            handler: ()=>invalidParameter(),
+            /** @param {number[]} args */
+            handler: args=>{
+                seam?.report?.('MSVCR80.dll', `_invoke_watson(${args.map(value=>
+                    `0x${(value >>> 0).toString(16)}`).join(', ')}): the process ends (0xC0000417)`,
+                'loss');
+                return seam?.exitProcess?.(INVALID_CRUNTIME_PARAMETER) ?? 0;
+            },
         },
 
         /** void _crt_debugger_hook(int reserved): a debugger's breakpoint; none is attached. */
@@ -422,4 +479,7 @@ export function createMsvcr80Functions(crt, host){
         '??4exception@std@@QAEAAV01@ABV01@@Z': crt['??4exception@@QAEAAV0@ABV0@@Z'],
         '?what@exception@std@@UBEPBDXZ': crt['?what@exception@@UBEPBDXZ'],
     };
+    // Every export a call of this runtime: what its functions refuse reaches
+    // its handler, where msvcrt.dll's same function answers EINVAL alone.
+    return seam ? watchedExports(table, seam.watch, invalid) : table;
 }

@@ -24,8 +24,10 @@ import { createGdiObjects } from './objects.js';
 import { DEFAULT_PALETTE_COLORS, createDrawingFunctions } from './drawing.js';
 import { copyPath, pathMoved } from './paths.js';
 import { createMetafileFunctions } from './metafiles.js';
+import { createFontResources } from './font-resources.js';
 import {
-    FACES, FF_MODERN, FF_ROMAN, FIXED_PITCH, faceNamed, fontFamilies, windowsMetrics,
+    FACES, FF_MODERN, FF_ROMAN, FF_SWISS, FIXED_PITCH, VARIABLE_PITCH, faceNamed, fontFamilies,
+    outlineCell, rasterFace, rasterRealization, windowsMetrics,
 } from './faces.js';
 import { ANSI_PAGE, OEM_PAGE, decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { DISPLAY_DEVICE_NAME } from '../devices.js';
@@ -71,6 +73,11 @@ const HS_API_MAX = 12;
 const WHITE_PEN = 6;
 const BLACK_PEN = 7;
 const NULL_PEN = 8;
+const OEM_FIXED_FONT = 10;
+const ANSI_FIXED_FONT = 11;
+const ANSI_VAR_FONT = 12;
+/** The OEM code page's character set, the one a console's font is in. */
+const OEM_CHARSET = 255;
 const SYSTEM_FONT = 13;
 const DEVICE_DEFAULT_FONT = 14;
 const DEFAULT_PALETTE = 15;
@@ -247,6 +254,20 @@ const BITSPIXEL = 12;
 const PLANES = 14;
 const NUMCOLORS = 24;
 const RASTERCAPS = 38;
+/** TECHNOLOGY of a Windows metafile's DC. */
+const DT_METAFILE = 5;
+/** The shapes GDI draws on any device itself, whatever the driver does. */
+const CURVECAPS = 28;
+const LINECAPS = 30;
+const POLYGONALCAPS = 32;
+/**
+ * Every curve, line and polygon capability there is (CC_*, LC_* but
+ * LC_NONE's zero, PC_* but PC_NONE's): GDI draws them all, on the display and
+ * into a metafile alike, which is what Windows answers for both.
+ */
+const ALL_CURVE_CAPS = 0x1ff;
+const ALL_LINE_CAPS = 0xfe;
+const ALL_POLYGONAL_CAPS = 0xff;
 const LOGPIXELSX = 88;
 const LOGPIXELSY = 90;
 const SIZEPALETTE = 104;
@@ -504,6 +525,9 @@ const LAST_CHAR = 0xff;
 const DEFAULT_CHAR = 0x1f;
 const BREAK_CHAR = 0x20;
 
+/** How far a file name is read: Windows' MAX_PATH, in characters. */
+const MAX_PATH_CHARS = 260;
+
 /** Nothing bounds a face name but the field it came out of. */
 const MAX_FACE_NAME = 64;
 
@@ -525,6 +549,8 @@ const NEWTEXTMETRICEXW_SIZE = 100;
  * only, and of the tables GetFontData answers only 'cmap'.
  */
 const ENUMERATED_FONTTYPE = 0x0004;
+/** A bitmap face's FontType: one enumerated once for each size it has. */
+const RASTER_FONTTYPE = 0x0001;
 
 /**
  * @typedef {Object} GdiHost
@@ -560,6 +586,10 @@ const ENUMERATED_FONTTYPE = 0x0004;
  * @property {(hdc: number) => void} [windowContextCurrent]
  *           Brings a window's context up to where its window now is and what
  *           of it shows, before it draws: the window manager's to say.
+ * @property {(path: string) => Promise<Uint8Array | null>} [readFile]
+ *           A file's bytes from the volume, for a font file a program adds.
+ * @property {(path: string) => string} [fullPath]
+ *           A path as the program's current directory makes it absolute.
  * @property {(address: number, length: number) => boolean} [canWrite]
  *           Whether the program's buffer can take that many bytes. A gdi32
  *           call probes its out buffer and fails with ERROR_NOACCESS; writing
@@ -699,9 +729,24 @@ export function createGdiFunctions(host){
             case SYSTEM_FIXED_FONT:
                 return { type: 'font',
                     attributes: logFont({ height: 16, pitchAndFamily: 1, faceName: 'Fixedsys' }) };
+            // The ANSI code page's bitmap faces at 12, which realise at their
+            // 13-pixel sizes, and the OEM one a console draws in.
+            case ANSI_FIXED_FONT:
+                return { type: 'font', attributes: logFont({ height: 12, width: 9,
+                    weight: FW_NORMAL, pitchAndFamily: FF_MODERN | FIXED_PITCH,
+                    faceName: 'Courier' }) };
+            case ANSI_VAR_FONT:
+                return { type: 'font', attributes: logFont({ height: 12, width: 9,
+                    weight: FW_NORMAL, pitchAndFamily: FF_SWISS | VARIABLE_PITCH,
+                    faceName: 'MS Sans Serif' }) };
+            case OEM_FIXED_FONT:
+                return { type: 'font', attributes: logFont({ height: 12, width: 8,
+                    weight: FW_NORMAL, charSet: OEM_CHARSET,
+                    pitchAndFamily: FF_MODERN | FIXED_PITCH, faceName: 'Terminal' }) };
             case DEFAULT_GUI_FONT:
                 return { type: 'font',
-                    attributes: logFont({ height: -11, faceName: 'MS Shell Dlg' }) };
+                    attributes: logFont({ height: -11, weight: FW_NORMAL,
+                        faceName: 'MS Shell Dlg' }) };
             case DEFAULT_PALETTE:
                 // PALETTEENTRYs, red in the low byte.
                 return { type: 'palette', attributes: { version: 0x300,
@@ -1709,7 +1754,31 @@ export function createGdiFunctions(host){
             charSet: font.charSet === DEFAULT_CHARSET ? ANSI_CHARSET : font.charSet,
             ...measured,
             ...windowsFields(font),
+            ...rasterFields(font),
         };
+    };
+
+    /**
+     * What a bitmap face's size measures, over everything else: the strike
+     * it is realised at is Windows' own, drawn in the ANSI character set it
+     * is installed in, and neither scaled (no TMPF_VECTOR) nor TrueType.
+     *
+     * @param {import('./structs.js').LogFontFields} font
+     */
+    const rasterFields = font=>{
+        const raster = font.raster ?? rasterRealization(font);
+        const face = faceNamed(font.faceName);
+        if (!raster || !face)
+        {
+            return {};
+        }
+        const { strike, scaleX, scaleY } = raster;
+        return { height: strike.height * scaleY, ascent: strike.ascent * scaleY,
+            descent: strike.descent * scaleY, internalLeading: strike.internalLeading * scaleY,
+            externalLeading: strike.externalLeading * scaleY,
+            aveCharWidth: strike.aveCharWidth * scaleX, maxCharWidth: strike.maxCharWidth * scaleX,
+            weight: raster.face.weight, defaultChar: raster.face.defaultChar, charSet: ANSI_CHARSET,
+            pitchAndFamily: face.family | (face.pitch === FIXED_PITCH ? 0 : TMPF_FIXED_PITCH) };
     };
 
     /**
@@ -1722,14 +1791,35 @@ export function createGdiFunctions(host){
         const known = windowsMetrics(font);
         if (!known)
         {
-            return {};
+            // An outline face whose cell is known measures as Windows scales it.
+            return outlineCell(font, fontResources.cellOf) ?? {};
         }
         const { height, ascent, descent, internalLeading, aveCharWidth } = known;
         return { height, ascent, descent, internalLeading, aveCharWidth };
     };
 
     /** @param {any} dc @returns {import('./structs.js').LogFontFields} */
-    const currentFont = dc=>objects.get(dc.font)?.attributes ?? logFont({});
+    const currentFont = dc=>asDrawn(objects.get(dc.font)?.attributes ?? logFont({}));
+    /**
+     * A font as it is drawn: a bitmap face at the size it is realised at, so
+     * what is drawn and measured is that size whatever height was asked.
+     *
+     * @param {import('./structs.js').LogFontFields} font
+     */
+    const asDrawn = font=>{
+        const raster = rasterRealization(font);
+        if (!raster)
+        {
+            return font;
+        }
+        const { strike, scaleX, scaleY } = raster;
+        // A height that already names the size it is realised at stays as
+        // asked; any other becomes that size's cell.
+        const exact = scaleY === 1 && (font.height === strike.height
+            || font.height === strike.internalLeading - strike.height);
+        return { ...font, raster, height: exact ? font.height : strike.height * scaleY,
+            width: scaleX === scaleY ? 0 : strike.aveCharWidth * scaleX };
+    };
     /** The instance id of the font a DC draws with: its handle, which is never zero. */
     const realizationOf = (/** @type {number} */ handle)=>{
         const dc = dcOf(handle);
@@ -1743,6 +1833,59 @@ export function createGdiFunctions(host){
 
     /** @param {any} dc @returns {import('./structs.js').TextMetricFields} */
     const currentMetrics = dc=>metricsOf(currentFont(dc));
+
+    /** The font files the program added, drawn and enumerated with the system's faces. */
+    const fontResources = createFontResources({
+        readFile: host.readFile, fullPath: host.fullPath,
+        addFont: host.graphics?.addFont
+            && ((family, bytes)=>host.graphics?.addFont?.(family, bytes) ?? false),
+    });
+    /**
+     * A face by name: the system's, or a family a font file added.
+     *
+     * @param {string} name
+     * @returns {import('./faces.js').Face | null}
+     */
+    const knownFace = name=>{
+        const system = faceNamed(name);
+        if (system || name === '')
+        {
+            return system;
+        }
+        const wanted = name.toLowerCase();
+        const family = fontResources.enumerable().find(added=>added.toLowerCase() === wanted);
+        return family ? { name: family, family: 0, pitch: VARIABLE_PITCH } : null;
+    };
+    /**
+     * A file name a font resource call is given, in its own width.
+     *
+     * @param {number} address @param {boolean} wide
+     */
+    const nameAt = (address, wide)=>{
+        if ((address >>> 0) === 0)
+        {
+            return '';
+        }
+        if (!wide)
+        {
+            const text = host.readCString(address >>> 0, MAX_PATH_CHARS);
+            return decodeAnsi(Uint8Array.from(text, character=>character.charCodeAt(0)));
+        }
+        // A unit at a time: a name ends wherever its NUL is, maybe at the
+        // end of its page.
+        let text = '';
+        for (let at = 0; at < MAX_PATH_CHARS; at++)
+        {
+            const bytes = host.readMemory((address >>> 0) + at * 2, 2);
+            const unit = bytes[0] | bytes[1] << 8;
+            if (unit === 0)
+            {
+                break;
+            }
+            text += String.fromCharCode(unit);
+        }
+        return text;
+    };
 
     /** The handles AddFontMemResourceEx gave out and RemoveFontMemResourceEx has not taken back. */
     const memoryFonts = new Set();
@@ -1776,6 +1919,11 @@ export function createGdiFunctions(host){
     const glyphOutline = ([handle, char, format, metrics, size, buffer, matrix], api)=>{
         const dc = dcOf(handle);
         if (!dc || (matrix >>> 0) === 0 || (metrics >>> 0) === 0)
+        {
+            return GDI_ERROR;
+        }
+        // A bitmap face has no outline to measure or draw a glyph from.
+        if (rasterFace(currentFont(dc).faceName))
         {
             return GDI_ERROR;
         }
@@ -1875,7 +2023,7 @@ export function createGdiFunctions(host){
      */
     const currentFace = dc=>{
         const font = currentFont(dc);
-        const named = font.faceName === '' ? null : faceNamed(font.faceName);
+        const named = font.faceName === '' ? null : knownFace(font.faceName);
         if (named)
         {
             return named.name;
@@ -1902,6 +2050,18 @@ export function createGdiFunctions(host){
         if (engine !== undefined && engine !== null)
         {
             return engine;
+        }
+        // Without an engine a bitmap face's size measures with its own
+        // advances, as wide again as it is scaled across.
+        const raster = font.raster;
+        const advances = raster?.advances;
+        if (raster && advances)
+        {
+            return Array.from(text, character=>{
+                const code = character.charCodeAt(0);
+                return (code >= 0x20 && code <= 0xff ? advances[code - 0x20]
+                    : raster.strike.aveCharWidth) * raster.scaleX;
+            }).reduce((sum, advance)=>sum + advance, 0);
         }
         const pitch = metricsOf(font).aveCharWidth;
         const windows = windowsMetrics(font)?.advances;
@@ -1970,6 +2130,12 @@ export function createGdiFunctions(host){
      * @returns {number}
      */
     const deviceCaps = (dc, index)=>{
+        // A Windows metafile's DC (CreateMetaFile) has no device behind it:
+        // it is a metafile and nothing else (Wine's dc.c test_device_caps).
+        if (dc.metafile === 'metafile')
+        {
+            return (index | 0) === TECHNOLOGY ? DT_METAFILE : 0;
+        }
         // A memory context answers for the device it is compatible with, the
         // display, whatever bitmap is selected into it (Wine's dc.c
         // test_CreateCompatibleDC compares one over a 1-bit 10x10 bitmap with
@@ -1999,6 +2165,12 @@ export function createGdiFunctions(host){
                 return depth > PALETTE_DEPTH ? -1 : 1 << depth;
             case RASTERCAPS:
                 return DISPLAY_RASTER_CAPS;
+            case CURVECAPS:
+                return ALL_CURVE_CAPS;
+            case LINECAPS:
+                return ALL_LINE_CAPS;
+            case POLYGONALCAPS:
+                return ALL_POLYGONAL_CAPS;
             case LOGPIXELSX:
             case LOGPIXELSY:
                 return LOGICAL_DPI;
@@ -2336,10 +2508,13 @@ export function createGdiFunctions(host){
         const request = asked !== undefined ? asked : (logfont >>> 0) === 0 ? null
             : (wide ? readLogFontW : readLogFont)(host, logfont >>> 0);
         const charSet = request ? request.charSet : DEFAULT_CHARSET;
-        const named = request && request.faceName !== '' ? faceNamed(request.faceName) : null;
+        const named = request && request.faceName !== '' ? knownFace(request.faceName) : null;
         const faces = charSet !== DEFAULT_CHARSET && charSet !== ANSI_CHARSET ? []
             : request && request.faceName !== '' ? (named ? [named] : [])
-                : FACES.filter(face=>!face.substitute);
+                : [...FACES.filter(face=>!face.substitute), ...fontResources.enumerable()
+                    .filter(family=>!faceNamed(family))
+                    .map(family=>/** @type {import('./faces.js').Face} */ (
+                        { name: family, family: 0, pitch: VARIABLE_PITCH }))];
         const call = host.call;
         if (!call || (proc >>> 0) === 0 || faces.length === 0)
         {
@@ -2357,10 +2532,14 @@ export function createGdiFunctions(host){
             let answer = 1;
             try
             {
-                for (const face of faces)
+                // A bitmap face is told of once for each size it has.
+                const sizes = faces.flatMap(face=>(rasterFace(face.name)?.strikes ?? [null])
+                    .map(strike=>({ face, strike })));
+                for (const { face, strike } of sizes)
                 {
                     const font = logFont({ faceName: face.name, charSet: ANSI_CHARSET,
-                        pitchAndFamily: face.family | face.pitch });
+                        pitchAndFamily: face.family | face.pitch,
+                        ...strike ? { height: strike.height } : {} });
                     const metrics = metricsOf(font);
                     const bytes = new Uint8Array(enumSize);
                     bytes.set(logFontBytes({ ...font, height: metrics.height,
@@ -2373,7 +2552,8 @@ export function createGdiFunctions(host){
                     host.writeMemory(block + enumSize, new Uint8Array(metricSize));
                     (wide ? writeTextMetricsW : writeTextMetrics)(host, block + enumSize, metrics);
                     answer = (await call(proc >>> 0,
-                        [block, block + enumSize, ENUMERATED_FONTTYPE, lParam >>> 0], thread)) | 0;
+                        [block, block + enumSize, strike ? RASTER_FONTTYPE : ENUMERATED_FONTTYPE,
+                            lParam >>> 0], thread)) | 0;
                     if (answer === 0)
                     {
                         break;
@@ -4302,12 +4482,11 @@ export function createGdiFunctions(host){
         },
 
         /**
-         * The font table here is fixed: a font file cannot be added to it,
-         * and a scalable font resource cannot be written for one. Zero is the
-         * documented failure of each, which an installer notes and moves on
-         * from -- the file itself was already copied. Every spelling answers
-         * the same way, the private ones included, and nothing can be removed
-         * that was never added. A font in memory is the exception, below.
+         * A font file the program adds is read and drawn, counted, and
+         * enumerated unless it says FR_NOT_ENUM (`font-resources.js`); the
+         * spellings without Ex add and remove with no flags. A scalable font
+         * resource cannot be written: zero, the documented failure, which an
+         * installer notes and moves on from.
          *
          * int AddFontResourceA(LPCSTR lpszFilename)
          * int AddFontResourceW(LPCWSTR lpszFilename)
@@ -4320,10 +4499,16 @@ export function createGdiFunctions(host){
          * BOOL CreateScalableFontResourceA(DWORD fdwHidden, LPCSTR lpszFontRes,
          *                                  LPCSTR lpszFontFile, LPCSTR lpszCurrentPath)
          */
-        AddFontResourceA: { argBytes: 4, handler: ()=>0 },
-        AddFontResourceW: { argBytes: 4, handler: ()=>0 },
-        AddFontResourceExA: { argBytes: 12, handler: ()=>0 },
-        AddFontResourceExW: { argBytes: 12, handler: ()=>0 },
+        AddFontResourceA: { argBytes: 4,
+            handler: (/** @type {number[]} */ [name])=>fontResources.add(nameAt(name, false), 0) },
+        AddFontResourceW: { argBytes: 4,
+            handler: (/** @type {number[]} */ [name])=>fontResources.add(nameAt(name, true), 0) },
+        AddFontResourceExA: { argBytes: 12,
+            handler: (/** @type {number[]} */ [name, flags])=>
+                fontResources.add(nameAt(name, false), flags) },
+        AddFontResourceExW: { argBytes: 12,
+            handler: (/** @type {number[]} */ [name, flags])=>
+                fontResources.add(nameAt(name, true), flags) },
         /**
          * HANDLE AddFontMemResourceEx(PVOID pFileView, DWORD cjSize, PVOID pvResrved,
          *                             DWORD *pNumFonts)
@@ -4364,10 +4549,16 @@ export function createGdiFunctions(host){
                     });
             },
         },
-        RemoveFontResourceA: { argBytes: 4, handler: ()=>0 },
-        RemoveFontResourceW: { argBytes: 4, handler: ()=>0 },
-        RemoveFontResourceExA: { argBytes: 12, handler: ()=>0 },
-        RemoveFontResourceExW: { argBytes: 12, handler: ()=>0 },
+        RemoveFontResourceA: { argBytes: 4,
+            handler: (/** @type {number[]} */ [name])=>fontResources.remove(nameAt(name, false), 0) },
+        RemoveFontResourceW: { argBytes: 4,
+            handler: (/** @type {number[]} */ [name])=>fontResources.remove(nameAt(name, true), 0) },
+        RemoveFontResourceExA: { argBytes: 12,
+            handler: (/** @type {number[]} */ [name, flags])=>
+                fontResources.remove(nameAt(name, false), flags) },
+        RemoveFontResourceExW: { argBytes: 12,
+            handler: (/** @type {number[]} */ [name, flags])=>
+                fontResources.remove(nameAt(name, true), flags) },
         // The face stays drawable: a run keeps the fonts it was given.
         RemoveFontMemResourceEx: {
             argBytes: 4,
@@ -4808,7 +4999,6 @@ export function createGdiFunctions(host){
             handler: ([handle])=>{
                 const dc = dcOf(handle);
                 const charSet = dc ? currentMetrics(dc).charSet : DEFAULT_CHARSET;
-                const OEM_CHARSET = 255;
                 const MAC_CHARSET = 77;
                 if (charSet === OEM_CHARSET)
                 {
@@ -5029,6 +5219,8 @@ export function createGdiFunctions(host){
          * BOOL GetCharWidthFloatA/W(HDC, UINT iFirst, UINT iLast, PFLOAT)
          *
          * The same widths as floats; a null DC or buffer is refused.
+         * GetCharWidthFloat answers a sixteenth of the width, as Windows does
+         * whatever its documentation says (decisions.md A253).
          */
         GetCharABCWidthsFloatA: {
             argBytes: 16,
@@ -5046,13 +5238,13 @@ export function createGdiFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([handle, first, last, out])=>writeWidths(handle, first >>> 0, last >>> 0,
-                out, 4, width=>[floatBits(width)], 0xff),
+                out, 4, width=>[floatBits(width / 16)], 0xff),
         },
         GetCharWidthFloatW: {
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([handle, first, last, out])=>writeWidths(handle, first >>> 0, last >>> 0,
-                out, 4, width=>[floatBits(width)], 0xffff),
+                out, 4, width=>[floatBits(width / 16)], 0xffff),
         },
 
         /** BOOL GetCharABCWidthsW(HDC hdc, UINT wFirst, UINT wLast, LPABC lpABC) */

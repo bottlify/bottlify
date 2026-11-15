@@ -210,6 +210,10 @@ test('GetWinMetaFileBits carries the EMF whole, and SetWinMetaFileBits gives it 
     });
     assert.deepEqual(records.slice(chunks, chunks + 3).map(record=>record.func),
         [META.SETMAPMODE, META.SETWINDOWORG, META.SETWINDOWEXT]);
+    const origin = records[chunks + 1];
+    assert.deepEqual([wmfView.getInt16(origin.offset + 6, true),
+        wmfView.getInt16(origin.offset + 8, true)], [1, 0],
+    'the frame\'s top left, a pixel lower, as Windows writes it');
     const ext = records[chunks + 2];
     // 1000 by 2000 hundredths of a millimetre, on a display of 640 by 480 pixels and
     // 169 by 127 millimetres.

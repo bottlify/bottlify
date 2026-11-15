@@ -41,6 +41,13 @@ const STARTUPINFO_SIZE64 = 104;
  */
 export const ENVIRONMENT_NOW = Symbol('environmentNow');
 
+/**
+ * The key under which the table expands `%NAME%` in a string as
+ * ExpandEnvironmentStrings does, for a library that answers a REG_EXPAND_SZ
+ * expanded (advapi32's RegGetValue, shlwapi's SHRegGetValue).
+ */
+export const EXPAND_ENVIRONMENT = Symbol('expandEnvironment');
+
 /** Where Windows lives, as a program of this era expects to find it. */
 const WINDOWS_DIRECTORY = 'C:\\WINDOWS';
 const SYSTEM_DIRECTORY = 'C:\\WINDOWS\\system32';
@@ -376,6 +383,8 @@ export function createEnvironmentFunctions(host){
     return {
         /** @returns {Record<string, string>} */
         [ENVIRONMENT_NOW]: ()=>Object.fromEntries(variables.entries()),
+        /** @param {string} text */
+        [EXPAND_ENVIRONMENT]: text=>expand(text),
 
         /** LPSTR GetCommandLineA(VOID) */
         GetCommandLineA: {

@@ -37,6 +37,7 @@ import { SYSTEM_DIRECTORY, systemProgramAt } from '../programs/table.js';
 import { decodeAnsi, encodeAnsi } from './locale.js';
 import { STARTUPINFO, readStartupInfo } from './startup-info.js';
 import { askChild, childThread } from './cross-process.js';
+import { INTERACTIVE_SESSION } from './teb.js';
 
 /** Codes this surface reports. */
 const ERROR_SUCCESS = 0;
@@ -129,8 +130,6 @@ const ATTRIBUTE_SIZES = new Map([
 /** dwCreationFlags, the one bit that changes what a create does here. */
 const CREATE_SUSPENDED = 0x00000004;
 const DEBUG_PROCESS = 0x00000001;
-/** The session an interactive user's processes run in. */
-const INTERACTIVE_SESSION = 1;
 const DEBUG_ONLY_THIS_PROCESS = 0x00000002;
 
 /** STARTUPINFO's dwFlags bit that says its three handles are the child's own. */

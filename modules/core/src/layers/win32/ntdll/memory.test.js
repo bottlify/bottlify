@@ -49,6 +49,9 @@ function setup(answers = {}, lastError = 0, more = {}){
             VirtualQueryEx: recorder('VirtualQueryEx', 28),
             ReadProcessMemory: recorder('ReadProcessMemory', 1),
             WriteProcessMemory: recorder('WriteProcessMemory', 1),
+            FlushInstructionCache: recorder('FlushInstructionCache', 1),
+            GetWriteWatch: recorder('GetWriteWatch', 0),
+            ResetWriteWatch: recorder('ResetWriteWatch', 0),
             GetLastError: { argBytes: 0, handler: ()=>lastError },
         },
         ...more,
@@ -133,6 +136,23 @@ test('NtReadVirtualMemory and NtWriteVirtualMemory are kernel32\'s, answered as 
     const partial = setup({ ReadProcessMemory: 0 }, 299);
     assert.equal(partial.fns.NtReadVirtualMemory.handler([0x44, 0x10000, 0x300, 16, 0]),
         STATUS_PARTIAL_COPY);
+});
+
+test('the instruction cache and write watches are kernel32\'s, answered as statuses', ()=>{
+    const { fns, calls } = setup();
+    const { NtFlushInstructionCache, NtGetWriteWatch, NtResetWriteWatch } =
+        /** @type {Record<string, { handler: Function }>} */ (fns);
+    assert.equal(NtFlushInstructionCache.handler([SELF, 0x10000, 0x100]), 0);
+    assert.deepEqual(calls.at(-1), { name: 'FlushInstructionCache', args: [SELF, 0x10000, 0x100] });
+    assert.equal(NtGetWriteWatch.handler([SELF, 1, 0x10000, 0x2000, 0x300, 0x304, 0x308]), 0);
+    assert.deepEqual(calls.at(-1), { name: 'GetWriteWatch',
+        args: [1, 0x10000, 0x2000, 0x300, 0x304, 0x308] }, 'the process handle off');
+    assert.equal(NtResetWriteWatch.handler([SELF, 0x10000, 0x2000]), 0);
+    assert.equal(NtGetWriteWatch.handler([0x44, 0, 0x10000, 0x2000, 0x300, 0x304, 0x308]),
+        0xc0000008, 'another process\'s watches are not kept');
+    const refused = setup({ GetWriteWatch: 0xffffffff }, 87);
+    assert.equal(/** @type {any} */ (refused.fns).NtGetWriteWatch.handler([SELF, 0, 0x1, 0x10, 0x300, 0x304, 0x308]),
+        0xc000000d, 'STATUS_INVALID_PARAMETER');
 });
 
 test('a call answered later by another process answers its status then, from its caller\'s error',

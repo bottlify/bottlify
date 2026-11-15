@@ -194,6 +194,8 @@ export { USER_NAME };
  *           Another library's export, called as the program would call it:
  *           the performance-data block reads kernel32's clocks through it.
  * @property {string} [computerName]  This machine's name, in the perf block.
+ * @property {(text: string) => string} [expandEnvironment]  `%NAME%` expanded
+ *     against the process's environment, as ExpandEnvironmentStrings does.
  */
 
 /** @param {number[]} numbers */
@@ -1461,8 +1463,8 @@ export function createRegistryFunctions(host){
      * data zeroed for RRF_ZEROONFAILURE), and a binary value asked for as a
      * DWORD or a QWORD is ERROR_DATATYPE_MISMATCH unless it is that long. A
      * string is answered terminated whether it was stored so or not. A
-     * REG_EXPAND_SZ without RRF_NOEXPAND is answered as REG_SZ, as Windows
-     * answers it, but unexpanded: this library has no environment to read.
+     * REG_EXPAND_SZ without RRF_NOEXPAND is answered as REG_SZ, expanded
+     * against the process's environment, as Windows answers it.
      *
      * @param {TextForm} text
      */
@@ -1483,11 +1485,15 @@ export function createRegistryFunctions(host){
                 return ERROR_FILE_NOT_FOUND;
             }
             let type = value.type;
+            let answered = value;
             if (type === REG_EXPAND_SZ && (flags & RRF_NOEXPAND) === 0)
             {
                 type = REG_SZ;
+                const stored = decodeAnsi(value.data).replace(/\0.*$/s, '');
+                const expanded = host.expandEnvironment?.(stored) ?? stored;
+                answered = { ...value, data: encodeAnsi(`${expanded}\0`) };
             }
-            let bytes = text.answer(value);
+            let bytes = text.answer(answered);
             if (STRING_TYPES.has(value.type))
             {
                 const last = bytes.length < text.unit

@@ -62,7 +62,29 @@ function fakeMemory(){
     };
 }
 
-/** @param {number} [esp] */
+/**
+ * Whether what `ref` points at is let go of: collected after the tasks a
+ * disposed machine had already queued have run. A timer or a turn queued
+ * before `dispose` may hold it for a moment and lets go when it runs; under
+ * a loaded machine that moment outlasts a few turns of the event loop. Held
+ * still after a second of timers and collections is held for good - a leak.
+ *
+ * @param {WeakRef<object>} ref @param {() => void} gc
+ */
+async function letGo(ref, gc){
+    for (const until = Date.now() + 1000; Date.now() < until;)
+    {
+        await new Promise(done=>setTimeout(done, 10));
+        gc();
+        if (ref.deref() === undefined)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+/** @param {number} [esp]  What the stack pointer reads while a call is in flight. */
 async function makeKernel(esp){
     const memory = fakeMemory();
     const kernel = await kernelModule.create(
@@ -692,7 +714,7 @@ test('a gone process\'s record in the run\'s directory keeps its exit, not its m
     const record = directory.get(0x3004);
     assert.equal(record.exited.signalled, true, 'a wait on its exit still returns at once');
     assert.equal(record.exited.manualReset, true);
-    assert.equal(memoryOfGone.deref(), undefined, 'and its memory is nobody\'s');
+    assert.ok(await letGo(memoryOfGone, gc), 'and its memory is nobody\'s');
 });
 
 test('a gone process on this thread gives its names back, and a name another process still holds'
@@ -749,12 +771,7 @@ test('a gone process on this thread gives its names back, and a name another pro
     assert.deepEqual([...table.keys()].sort(), ['Local\\Lock', 'Local\\Ready'],
         'a name only the gone process held is free again');
     assert.equal(waiter.waitResult, 0x80, 'the lock went to the waiter, abandoned');
-    for (let round = 0; round < 3; round++)
-    {
-        await new Promise(done=>setImmediate(done));
-        gc();
-    }
-    assert.equal(memoryOfGone.deref(), undefined, 'the gone machine\'s memory is nobody\'s');
+    assert.ok(await letGo(memoryOfGone, gc), 'the gone machine\'s memory is nobody\'s');
     assert.equal(staying.kernel.poll(ready, waiter), 0, 'the event it set stays set');
     staying.kernel.resetEvent(ready);
     assert.equal(staying.kernel.poll(ready, waiter), null, 'and works on as an object of the run');

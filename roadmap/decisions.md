@@ -2289,5 +2289,38 @@ binds through its class, as on Windows, but a registration made by one run is no
 A program registers its filters from DllRegisterServer, which an installer calls once, so a filter it
 expects to find later through the mapper is not found; nothing builds a graph from registered filters
 yet (`quartz/graph.js` renders through the media layer), so nothing the engine does depends on it.
-This stands until the registry's FilterData is written and read, which is also what the system's own
-filters being enumerated in their categories needs. *2026-11-15.*
+The system's own filters and the devices devenum lists itself (the audio renderers, each installed
+video compressor as an `@device:cm:` moniker) are written into the same store when quartz starts, so
+they are enumerated in their categories and their monikers' property bags answer FilterData; a
+program that opens `CLSID\{category}\Instance` in the registry itself finds nothing there. This stands
+until the registry's FilterData is written and read. *2026-11-15.*
+
+**A253. GetCharWidthFloat answers a sixteenth of a character's width.** Its documentation says
+the widths are in logical units, as GetCharWidth32's and GetCharABCWidthsFloat's are; Windows
+answers GetCharWidth32's width divided by sixteen, and Wine's gdi32 font test holds every face to
+that (`get_char_width_proc`: `i / 16.0f == f`). A program that ran on Windows read the sixteenth,
+so the engine answers it; GetCharABCWidthsFloat keeps the whole width, as Windows' does.
+*2026-11-15.*
+
+**A254. A face's VDMX is read only from a record for the Windows ANSI set.** The OpenType
+specification gives a VDMX ratio record's bCharSet as 0 for every glyph and 1 for the Windows ANSI
+subset, and says nothing of one being preferred. Windows measures a TrueType face by the record
+for the ANSI set and passes over one for every glyph, in both versions of the table: Wine's gdi32
+font test (`test_height_selection_vdmx`) runs one face with each, and only the ANSI record changes
+the heights Windows answers. A face added with only an every-glyph record measures by its em
+square and OS/2 cell, as one with no VDMX does.
+*2026-11-15.*
+
+**A255. A function of the 2005 or the universal runtime that refuses an argument calls the
+invalid-parameter handler, and with none set ends the process; msvcrt.dll answers EINVAL alone.**
+As Windows' runtimes do: the handler a program set (`_set_invalid_parameter_handler`, and in the
+universal runtime the thread's own from `_set_thread_local_invalid_parameter_handler`, asked first)
+is called with the zeros a release runtime passes, and the function then answers its documented
+failure - an empty handler is how games live with the check. With no handler the process ends as
+`_invoke_watson` ends it, STATUS_INVALID_CRUNTIME_PARAMETER (0xC0000417). msvcrt.dll keeps no
+handler, so its same functions answer EINVAL and go on. The refusal is found where every function
+of the runtimes says it, the errno set to EINVAL during a call that came through MSVCR80's or
+ucrtbase's export (`msvcrt/invalid-parameter.js`); a call one function of a runtime makes into
+another belongs to the call the program made. The ending is loud on purpose: an error in the
+journal names the function and its arguments, because a parameter Windows lets through and ours
+refuses is a defect of our check, not something to stay quiet about. *2026-11-15.*

@@ -342,6 +342,8 @@ export function readLogBrush(memory, address){
  * @property {number} quality
  * @property {number} pitchAndFamily
  * @property {string} faceName
+ * @property {import('./faces.js').RasterRealization} [raster]  How a bitmap face is
+ *           realised, carried by a font as a DC draws with it.
  */
 
 /**

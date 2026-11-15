@@ -22,6 +22,7 @@ import { MSVCRT_STYLE, PRINT_STYLE, formatToString, guestAccess, sequentialArgum
     varargsSlots } from './format.js';
 import { createStringFunctions } from './strings.js';
 import { createSecureFunctions } from './secure.js';
+import { INVALID_PARAMETERS, createInvalidParameterWatch } from './invalid-parameter.js';
 import { createErrorFunctions, messageOf } from './errors.js';
 import { createConversionFunctions } from './convert.js';
 import { createScanFunctions, VARIADIC_SLOTS } from './scan.js';
@@ -268,7 +269,7 @@ const seededCode = (made, long, argBytes, handler)=>({
  * @property {(named: string, line: string, flags: number) => any} [launch]
  *           Starts an image as CreateProcess does, for _spawn (process.js).
  * @property {(handle: number) => void} [closeHandle]
- * @property {(api: string, detail: string) => void} [divergence]
+ * @property {(api: string, detail: string, kind?: 'loss') => void} [divergence]
  *           Where a call answers plausibly but not the way real Windows does
  *           -- a locale we do not carry data for is the case here. Absent,
  *           the difference goes unreported rather than the call refused.
@@ -1101,8 +1102,14 @@ export function createMsvcrtFunctions(host){
         }
         return name;
     };
+    // Where a runtime with an invalid-parameter handler hears what its
+    // functions refuse: every refusal sets errno through here.
+    const invalidParameters = createInvalidParameterWatch();
     /** @param {number} code */
-    const errno = code=>globals.set(errnoName(), code);
+    const errno = code=>{
+        globals.set(errnoName(), code);
+        invalidParameters.note(code);
+    };
 
     // The runtime's copy of the environment, taken from the process's as it
     // starts: what getenv reads, _putenv changes and main is handed.
@@ -1207,6 +1214,14 @@ export function createMsvcrtFunctions(host){
     });
 
     return {
+        // The runtimes over this table wrap their exports in it, and end a
+        // process the way exit ends it; their refusals are reported through
+        // the same channel as this table's divergences.
+        [INVALID_PARAMETERS]: {
+            watch: invalidParameters,
+            exitProcess: host.exitProcess,
+            report: host.divergence,
+        },
         [PRINT_STYLE]: {
             /**
              * @template T
