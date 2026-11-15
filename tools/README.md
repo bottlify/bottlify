@@ -217,6 +217,29 @@ by kind, an executed guest instruction: other 0.935 (31.8%), branch 0.606 (20.6%
 
 From `cork-asm.mjs --bin modules/cork/bench/micro/images/crc-x87.bin --at 0x401000 --entry 0x401160 --blocks crc-x87.blocks.json --classes`. "per x86" is machine instructions a guest instruction becomes in the code as compiled; "weighted" the same over what ran. The kinds line says where the instructions go besides the guest's own work (branch, memory, frame spills). The host here is arm64 (this VM).
 
+### What does translating cost, to the instruction, and did a change to the emitter make it cheaper?
+
+[`translator/emit-count.mjs`](translator/emit-count.mjs): `node tools/translator/emit-count.mjs --qemu DIR [--root DIR]... [--regions N] [--warm W] [--reps R]`
+
+```
+4dae6081^: 903.3 M instructions a pass of work (js 781.7, gc 5.9, other 115.8), passes 892.3..928.9; 8363946 a region; compiles 70.8 a pass; 108 regions, 912195 wasm bytes
+4dae6081: 774.4 M instructions a pass of work (js 671.1, gc 5.6, other 97.8), passes 756.4..805.0; 7170805 a region; compiles 71.5 a pass; 108 regions, 912195 wasm bytes; 0.8573 of the first
+```
+
+From `emit-count.mjs --qemu <qemu 8.2.2 built with plugins> --root <4dae6081^> --root <4dae6081>, node 22.22.0, default 40 passes of warm-up and 8 counted: the commit that made the emitter's sets of locals bit sets`. "work" is what a pass of 108 regions costs without V8's optimising compiles, whose moments jump from pass to pass; it is the same in every run of a tree, and arms are compared by it ("of the first"). "passes" is the spread of the counted passes, the size of a difference that says nothing; the wasm bytes say whether the emitted code changed too.
+
+### How much resident memory does a translated module cost past its bytes, compiled lazily, by the baseline compiler or by the optimising one?
+
+[`translator/module-memory.mjs`](translator/module-memory.mjs): `node --expose-gc [--no-wasm-lazy-compilation --no-wasm-tier-up | --no-wasm-lazy-compilation --no-liftoff] tools/translator/module-memory.mjs [--regions N]`
+
+```
+node v26.13.1 (defaults): 837 modules, 9.6 MiB of wasm; resident +15.5 MiB, 1.62 times their bytes
+node v26.13.1 --no-wasm-lazy-compilation --no-wasm-tier-up: 837 modules, 9.6 MiB of wasm; resident +35.9 MiB, 3.75 times their bytes
+node v26.13.1 --no-wasm-lazy-compilation --no-liftoff: 837 modules, 9.6 MiB of wasm; resident +58.3 MiB, 6.09 times their bytes
+```
+
+From `module-memory.mjs under node 26.13.1 (V8 14.6) with each set of flags, the micro benchmark's first 40 regions of each image`. The multiple is what holding a module costs over its wasm bytes: lazily compiled, nothing has run; the other two lines are every function compiled by Liftoff or TurboFan. A program pays the first for every module and between the other two for what ran. Resident memory moves by a few per cent run to run.
+
 ### Which function of a system or runtime DLL is hot?
 
 [`translator/pdb-hot.mjs`](translator/pdb-hot.mjs): `node tools/translator/pdb-hot.mjs <blocks.json> <image.dll> <image.pdb> <base-hex> [top]`
