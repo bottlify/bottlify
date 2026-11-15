@@ -207,7 +207,22 @@ const HAS_ALPHA = new Set([GL.RGBA, GL.ALPHA, GL.LUMINANCE_ALPHA, GL.INTENSITY])
  * @property {any | null} depth  the depth-stencil view, or none
  * @property {string} depthFormat  '' where there is none
  * @property {Set<object>} attached  the textures it draws into
+ * @property {object | null} depthTexture  the texture its depth-stencil attachment is
+ *           a level of, or none
  */
+
+/**
+ * Whether a draw writes its depth-stencil attachment, as WebGPU judges a
+ * pipeline in a pass that holds the attachment read-only: the depth through
+ * its mask (off with the test, `drawStateOf`), the stencil through a write
+ * mask and an operation other than GL_KEEP on either face.
+ *
+ * @param {import('./wgsl.js').DrawState} state
+ */
+const writesDepthStencil = state=>state.depth.write || (!!state.stencil
+    && state.stencil.writeMask !== 0
+    && [state.stencil, state.stencilBack ?? state.stencil].some(face=>
+        face.fail !== GL.KEEP || face.zfail !== GL.KEEP || face.zpass !== GL.KEEP));
 
 /**
  * The S3TC format a program uploaded → the block-compressed format a device
@@ -3130,6 +3145,8 @@ export function createGpuRenderer(services){
             diverge('a program wrote gl_CullDistance, and no primitive was culled by it:'
                 + ' WebGPU clips by distances, and culls by none');
         }
+        /** Whether the draw samples its depth-stencil attachment, which it then holds read-only. */
+        let readsDepth = false;
         /** @param {BindPlan['textures'][number]} entry */
         const sampledTexture = entry=>{
             let texture = entry.sampler !== undefined && executable
@@ -3142,8 +3159,15 @@ export function createGpuRenderer(services){
                     + ' components unswizzled');
             }
             // Sampled while it is drawn into: GL leaves it undefined, and
-            // WebGPU refuses the pass.
-            if (target.attached.has(texture))
+            // WebGPU refuses the pass. The depth-stencil attachment of a draw
+            // writing neither aspect is only read, which WebGPU allows as a
+            // read-only attachment: a deferred light reads the scene's depth
+            // while testing against it.
+            if (texture === target.depthTexture && !writesDepthStencil(state))
+            {
+                readsDepth = true;
+            }
+            else if (target.attached.has(texture))
             {
                 diverge('a draw sampled a texture its framebuffer draws into, and sampled'
                     + ' black instead');
@@ -3585,6 +3609,7 @@ export function createGpuRenderer(services){
             ...rects,
             stencilReference: scene.stencil ? scene.stencil.reference : 0,
             target,
+            readsDepth,
             blendConstant: blendConstantOf(scene.blend, scene.blendColor ?? [0, 0, 0, 0]),
             probe,
             probeDraw: recording.counts.draws - 1,
@@ -4002,6 +4027,7 @@ export function createGpuRenderer(services){
                 return HAS_ALPHA.has(base) ? 0xf : 0x7;
             }),
             depth, depthFormat: depth ? depth.format ?? DEPTH_FORMAT : '', attached,
+            depthTexture: depthAttachment?.kind === 'texture' ? depthAttachment.texture : null,
         };
         layers.set(layer, { version: fbo.version, records, target });
         return target;
@@ -4637,7 +4663,7 @@ export function createGpuRenderer(services){
         surfaces.target = {
             key: 'window', width, height, flipped: false, colours: [surfaces.colour],
             formats: [COLOUR_FORMAT], masks: [0xf], depth: surfaces.depth,
-            depthFormat: DEPTH_FORMAT, attached: new Set(),
+            depthFormat: DEPTH_FORMAT, attached: new Set(), depthTexture: null,
         };
         if (drawable.key !== undefined)
         {
@@ -5038,6 +5064,8 @@ export function createGpuRenderer(services){
             let pass = null;
             /** @type {DrawTarget | null} */
             let passTarget = null;
+            /** Whether the open pass holds its depth-stencil attachment read-only. */
+            let passReadsDepth = false;
             /** @type {any} */
             let viewport = null;
             /** @type {any} */
@@ -5045,27 +5073,36 @@ export function createGpuRenderer(services){
             let stencilReference = -1;
             /** @type {any} */
             let blendConstant = null;
-            /** @param {DrawTarget} drawn */
-            const drawing = drawn=>{
-                if (pass && passTarget === drawn)
+            /**
+             * The pass a draw goes into: the open one while the target and
+             * how it holds its depth stay, else a new one. A read-only
+             * attachment takes no load or store and keeps what the pass
+             * before stored, for the pass after to load.
+             *
+             * @param {DrawTarget} drawn @param {boolean} readsDepth
+             */
+            const drawing = (drawn, readsDepth)=>{
+                if (pass && passTarget === drawn && passReadsDepth === readsDepth)
                 {
                     return pass;
                 }
                 passTarget = drawn;
+                passReadsDepth = readsDepth;
                 pass = frame.beginPass({
                     targets: drawn.colours,
                     clear: false,
                     occlusion: counting,
                     depthTarget: drawn.depth ?? undefined,
-                    depthStencilAttachment: drawn.depth
-                        ? {
-                            view: drawn.depth.view,
-                            depthLoadOp: 'load',
-                            depthStoreOp: 'store',
-                            stencilLoadOp: 'load',
-                            stencilStoreOp: 'store',
-                        }
-                        : undefined,
+                    depthStencilAttachment: !drawn.depth ? undefined
+                        : readsDepth ? { view: drawn.depth.view, depthReadOnly: true,
+                            stencilReadOnly: true }
+                            : {
+                                view: drawn.depth.view,
+                                depthLoadOp: 'load',
+                                depthStoreOp: 'store',
+                                stencilLoadOp: 'load',
+                                stencilStoreOp: 'store',
+                            },
                 });
                 viewport = null;
                 scissor = null;
@@ -5177,7 +5214,7 @@ export function createGpuRenderer(services){
                         before: frame.snapshot(target.colour), after: null });
                     pass = null;
                 }
-                drawing(command.target);
+                drawing(command.target, command.readsDepth === true);
                 pass.setPipeline(pipeline.gpu);
                 if (command.blendConstant && !sameBlendConstant(blendConstant,
                     command.blendConstant))

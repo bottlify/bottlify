@@ -301,6 +301,128 @@ test('a framebuffer draws into a half float colour texture and a depth texture',
     assert.deepEqual(r.gpu.errors ?? [], []);
 });
 
+/**
+ * A framebuffer of a colour texture and a DEPTH24_STENCIL8 one, its depth
+ * written by a first draw; then the depth texture bound on unit 0, linearly
+ * filtered, for the draws a test makes, as a deferred light reads the scene's
+ * depth while testing against it.
+ *
+ * @param {ReturnType<typeof rig>} r
+ */
+function depthReadRig(r){
+    const { context } = r;
+    const [colour, depth] = context.glGenTextures(2);
+    context.glBindTexture(GL.TEXTURE_2D, colour);
+    context.glTexImage2D(GL.TEXTURE_2D, 0, GL.RGBA, 16, 16, 0, GL.RGBA, GL.UNSIGNED_BYTE, null);
+    context.glBindTexture(GL.TEXTURE_2D, depth);
+    context.glTexImage2D(GL.TEXTURE_2D, 0, TEX.DEPTH24_STENCIL8, 16, 16, 0, GL.DEPTH_STENCIL,
+        GL.UNSIGNED_INT_24_8, null);
+    context.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR);
+    context.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MAG_FILTER, GL.LINEAR);
+    context.glBindTexture(GL.TEXTURE_2D, 0);
+    const [fbo] = context.glGenFramebuffers(1);
+    context.bindFramebuffer(GL.FRAMEBUFFER, fbo, false);
+    context.framebufferTexture(GL.FRAMEBUFFER, GL.COLOR_ATTACHMENT0, GL.TEXTURE_2D, colour, 0);
+    context.framebufferTexture(GL.FRAMEBUFFER, GL.DEPTH_STENCIL_ATTACHMENT, GL.TEXTURE_2D, depth,
+        0);
+    assert.equal(context.glCheckFramebufferStatus(GL.FRAMEBUFFER), GL.FRAMEBUFFER_COMPLETE);
+    context.glEnable(GL.DEPTH_TEST);
+    context.glClear(GL.COLOR_BUFFER_BIT | GL.DEPTH_BUFFER_BIT | GL.STENCIL_BUFFER_BIT);
+    r.draw();
+    context.glBindTexture(GL.TEXTURE_2D, depth);
+    context.glEnable(GL.TEXTURE_2D);
+    context.glDepthFunc(GL.GREATER);
+    context.glEnable(GL.STENCIL_TEST);
+    context.glStencilFunc(GL.EQUAL, 1, 0xff);
+    context.glStencilOp(GL.KEEP, GL.KEEP, GL.KEEP);
+    context.glEnable(GL.BLEND);
+    context.glBlendFunc(GL.ONE, GL.ONE);
+    return { depth };
+}
+
+/**
+ * The passes into the depth texture in order, each with the depth views its
+ * draws sampled.
+ *
+ * @param {ReturnType<typeof rig>} r @param {number} depth
+ */
+function depthPasses(r, depth){
+    const surface = surfaceOf(r, depth).texture;
+    return r.gpu.of('beginRenderPass').filter((/** @type {any} */ p)=>
+        p.descriptor.depthStencilAttachment?.view?.texture === surface).map((/** @type {any} */ p)=>({
+        attachment: p.descriptor.depthStencilAttachment,
+        draws: r.gpu.of('draw').concat(r.gpu.of('drawIndexed'))
+            .filter((/** @type {any} */ d)=>d.pass === p.pass).length,
+        sampled: r.gpu.of('setBindGroup').filter((/** @type {any} */ c)=>c.pass === p.pass)
+            .flatMap((/** @type {any} */ c)=>c.group?.entries ?? [])
+            .filter((/** @type {any} */ e)=>e.resource?.texture === surface)
+            .map((/** @type {any} */ e)=>e.resource.viewDescriptor?.aspect),
+    }));
+}
+
+test('a draw writing neither depth nor stencil samples its depth attachment, held read-only',
+    async()=>{
+        const r = rig();
+        const { context } = r;
+        const { depth } = depthReadRig(r);
+        context.glDepthMask(false);
+        r.draw();
+        r.draw();
+        // Depth written again after the lights: a pass of its own again.
+        context.glDisable(GL.TEXTURE_2D);
+        context.glDepthMask(true);
+        context.glDepthFunc(GL.LESS);
+        context.glDisable(GL.STENCIL_TEST);
+        r.draw();
+        await r.swap();
+        assert.deepEqual(r.gpu.errors, []);
+        assert.ok(!r.said.some(d=>/framebuffer draws into/.test(d)), r.said.join('\n'));
+        assert.ok(r.said.some(d=>/read nearest/.test(d)), 'the linear filter is said dropped');
+        const passes = depthPasses(r, depth).filter(p=>p.draws > 0);
+        const at = passes.findIndex(p=>p.attachment.depthReadOnly);
+        assert.ok(at > 0, 'a pass that writes depth comes before the read-only one');
+        const [before, reading, after] = passes.slice(at - 1, at + 2);
+        assert.deepEqual(reading.attachment, { view: reading.attachment.view,
+            depthReadOnly: true, stencilReadOnly: true }, 'read-only, no load or store');
+        assert.equal(reading.draws, 2, 'both lights in the one read-only pass');
+        assert.deepEqual(reading.sampled, ['depth-only'], 'bound once, through its depth');
+        // What the first draw wrote is kept across the break and loaded after.
+        assert.equal(before.attachment.depthStoreOp, 'store');
+        assert.equal(before.attachment.stencilStoreOp, 'store');
+        assert.ok(after, 'the draw writing depth again is a pass of its own');
+        assert.equal(after.attachment.depthReadOnly, undefined);
+        assert.equal(after.attachment.depthLoadOp, 'load');
+        assert.equal(after.attachment.stencilLoadOp, 'load');
+        assert.deepEqual(after.sampled, []);
+    });
+
+test('a draw writing its depth or stencil while sampling the depth attachment samples black',
+    async()=>{
+        for (const writes of ['depth', 'stencil'])
+        {
+            const r = rig();
+            const { context } = r;
+            const { depth } = depthReadRig(r);
+            if (writes === 'depth')
+            {
+                context.glDepthMask(true);
+            }
+            else
+            {
+                context.glDepthMask(false);
+                context.glStencilOp(GL.KEEP, GL.KEEP, GL.REPLACE);
+            }
+            r.draw();
+            await r.swap();
+            assert.deepEqual(r.gpu.errors, [], writes);
+            assert.ok(r.said.some(d=>/sampled a texture its framebuffer draws into/.test(d)),
+                writes);
+            const passes = depthPasses(r, depth);
+            assert.ok(passes.every(p=>!p.attachment.depthReadOnly), writes);
+            assert.ok(passes.every(p=>p.sampled.length === 0), `${writes}: the placeholder`);
+        }
+    });
+
 test('an attachment of a sized format answers its sizes, component type and encoding', ()=>{
     const { context } = rig();
     const [colour, depth] = context.glGenTextures(2);
