@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { synthesiseProcessInit, DLL_PROCESS_ATTACH } from './init.js';
+import { synthesiseProcessInit, synthesiseStartRefused, DLL_PROCESS_ATTACH } from './init.js';
 
 /** Reads a little-endian dword out of the emitted code. */
 const u32At = (/** @type {Uint8Array} */ bytes, /** @type {number} */ at)=>
@@ -100,4 +100,27 @@ test('the loader lock is held from before the first DllMain to the jump into the
     assert.equal(u32At(bytes, tail + 1), lock.address);
     assert.equal(u32At(bytes, tail + 6), lock.leave);
     assert.equal(u32At(bytes, bytes.length - 6), 0x00401000);
+});
+
+test('a refused start calls ExitProcess with the status and nothing else', ()=>{
+    const bytes = synthesiseStartRefused({ exitProcess: 0x7b801234, status: 0xc0000135 });
+    // push status / mov eax, ExitProcess / call eax / jmp $.
+    assert.equal(bytes[0], 0x68);
+    assert.equal(u32At(bytes, 1) >>> 0, 0xc0000135);
+    assert.equal(bytes[5], 0xb8);
+    assert.equal(u32At(bytes, 6) >>> 0, 0x7b801234);
+    assert.deepEqual([...bytes.subarray(10)], [0xff, 0xd0, 0xeb, 0xfe]);
+});
+
+test('a refused x86-64 start passes the status in ecx, with the shadow space, aligned', ()=>{
+    const exitProcess = 0x7ff8_1234_5678;
+    const bytes = synthesiseStartRefused({ exitProcess, status: 0xc0000135, long: true });
+    assert.deepEqual([...bytes.subarray(0, 4)], [0x48, 0x83, 0xec, 0x28],
+        'sub rsp, 40: entered with rsp 8 off 16, the call finds it aligned');
+    assert.equal(bytes[4], 0xb9);
+    assert.equal(u32At(bytes, 5) >>> 0, 0xc0000135);
+    assert.deepEqual([...bytes.subarray(9, 11)], [0x48, 0xb8]);
+    assert.equal(u32At(bytes, 11) >>> 0, exitProcess % 2 ** 32);
+    assert.equal(u32At(bytes, 15) >>> 0, Math.floor(exitProcess / 2 ** 32));
+    assert.deepEqual([...bytes.subarray(19)], [0xff, 0xd0, 0xeb, 0xfe]);
 });

@@ -243,3 +243,33 @@ function longProcessInit({ libraries, entryPoint, loaderLock }){
     );
     return { bytes: new Uint8Array(code), attached, tlsImages };
 }
+
+/**
+ * The start of a process the loader refuses: one of its static imports is a
+ * library found nowhere. Windows' loader ends such a process in its first
+ * thread, before any DllMain or TLS callback, with STATUS_DLL_NOT_FOUND as its
+ * exit code; this is that thread's only work.
+ *
+ * @param {Object} options
+ * @param {number} options.exitProcess  The guest address of ExitProcess: nothing
+ *        is attached yet, so it detaches nothing and ends with the code given.
+ * @param {number} options.status       The exit code.
+ * @param {boolean} [options.long]      An x86-64 process: the x64 convention.
+ * @returns {Uint8Array}
+ */
+export function synthesiseStartRefused({ exitProcess, status, long = false }){
+    return new Uint8Array(long
+        ? [
+            0x48, 0x83, 0xec, 0x28, //              sub rsp, 40: the shadow space, aligned
+            0xb9, ...u32(status), //                mov ecx, status
+            0x48, 0xb8, ...u64(exitProcess), //     mov rax, ExitProcess
+            0xff, 0xd0, //                          call rax
+            0xeb, 0xfe, //                          jmp $: ExitProcess does not return
+        ]
+        : [
+            0x68, ...u32(status), //                push status
+            0xb8, ...u32(exitProcess), //           mov eax, ExitProcess
+            0xff, 0xd0, //                          call eax
+            0xeb, 0xfe, //                          jmp $
+        ]);
+}

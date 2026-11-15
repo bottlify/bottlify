@@ -59,7 +59,9 @@ The order matters in three places.
   them with `DLL_THREAD_ATTACH` before its start routine, and with `DLL_THREAD_DETACH` when it
   ends, under the same loader lock (`kernel32/thread-calls.js`). The process's end and the last
   `FreeLibrary` tell each image's TLS callbacks `DLL_PROCESS_DETACH` before its `DllMain`
-  (`kernel32/dllentry.js`).
+  (`kernel32/dllentry.js`). A static import of a library found nowhere and carried by no Windows
+  puts the loader's refusal in that stub's place: ExitProcess with STATUS_DLL_NOT_FOUND, nothing
+  attached and nothing of the program run (`roadmap/decisions.md` A256).
 
 With processes at once (`concurrency` 2 or 4), the engine thread builds the run's system instead:
 it mounts the bundle, lays the session and the page's files on the volume, makes the registry and
