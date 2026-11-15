@@ -2474,7 +2474,7 @@ export function createWin32Module(){
                     try
                     {
                         const length = await kernel32Call('GetTempPathW', [260, buffer]);
-                        return readWideString(buffer, length >>> 0);
+                        return readWideString(buffer, (length >>> 0) * 2);
                     }
                     finally
                     {
