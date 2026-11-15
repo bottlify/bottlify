@@ -17,14 +17,12 @@
  * Windows' would not.
  */
 
-import { CLSID_LEGACY_AM_FILTER_CATEGORY } from '../devenum/devenum.js';
+import { CLSID_ACTIVE_MOVIE_CATEGORIES, CLSID_LEGACY_AM_FILTER_CATEGORY } from '../devenum/devenum.js';
 import { GUID_NULL, MEDIATYPE_AUDIO, MEDIATYPE_STREAM, MEDIATYPE_VIDEO } from './filter.js';
 import { CLSID_ASYNC_READER } from './interfaces.js';
 
 /** CLSID_AudioRendererCategory: where a program finds the machine's audio outputs. */
 export const CLSID_AUDIO_RENDERER_CATEGORY = '{E0F158E1-CB04-11D0-BD4E-00A0C911CE86}';
-/** CLSID_ActiveMovieCategories: the category whose entries are the categories. */
-export const CLSID_ACTIVE_MOVIE_CATEGORIES = '{DA4E3DA0-D07D-11D0-BD50-00A0C911CE86}';
 
 /** The merits the SDK names. */
 export const MERIT = {
@@ -36,6 +34,12 @@ const MEDIASUBTYPE_WAVE = '{E436EB8B-524F-11CE-9F53-0020AF0BA770}';
 const MEDIASUBTYPE_AU = '{E436EB8C-524F-11CE-9F53-0020AF0BA770}';
 const MEDIASUBTYPE_AIFF = '{E436EB8D-524F-11CE-9F53-0020AF0BA770}';
 const MEDIASUBTYPE_PCM = '{00000001-0000-0010-8000-00AA00389B71}';
+/** The RGB kinds the Color Space Converter registers for both its pins. */
+const RGB_TYPES = /** @type {[string, string][]} */ ([
+    '{E436EB7A-524F-11CE-9F53-0020AF0BA770}', '{E436EB7C-524F-11CE-9F53-0020AF0BA770}',
+    '{E436EB7B-524F-11CE-9F53-0020AF0BA770}', '{E436EB7D-524F-11CE-9F53-0020AF0BA770}',
+    '{E436EB7E-524F-11CE-9F53-0020AF0BA770}', '{773C9AC0-3274-11D0-B724-00AA006C1A01}',
+].map(sub=>[MEDIATYPE_VIDEO, sub]));
 
 /**
  * @param {string} name @param {boolean} output @param {[string, string][]} types
@@ -104,6 +108,14 @@ export const WINDOWS_REGISTRATIONS = [
         pins: [
             pin('XForm In', false, [[MEDIATYPE_VIDEO, GUID_NULL]]),
             pin('XForm Out', true, [[MEDIATYPE_VIDEO, GUID_NULL]]),
+        ],
+    },
+    {
+        clsid: '{1643E180-90F5-11CE-97D5-00AA0055595A}', name: 'Color Space Converter',
+        merit: MERIT.UNLIKELY + 1,
+        pins: [
+            pin('Input', false, RGB_TYPES),
+            pin('XForm Out', true, RGB_TYPES),
         ],
     },
     {

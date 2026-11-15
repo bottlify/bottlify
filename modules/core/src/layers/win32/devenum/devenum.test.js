@@ -9,12 +9,13 @@ import assert from 'node:assert/strict';
 import { createComObject } from '../ole32/objects.js';
 import { parseGuid } from '../ole32/guid.js';
 import {
-    CLSID_LEGACY_AM_FILTER_CATEGORY, CLSID_SYSTEM_DEVICE_ENUM, IID_ICREATE_DEV_ENUM,
+    CLSID_ACTIVE_MOVIE_CATEGORIES, CLSID_LEGACY_AM_FILTER_CATEGORY, CLSID_SYSTEM_DEVICE_ENUM,
+    IID_ICREATE_DEV_ENUM,
     CLSID_DEVICE_MONIKER, IID_IENUM_MONIKER, IID_IMONIKER, IID_IPARSE_DISPLAY_NAME,
     IID_IPROPERTY_BAG,
-    createDeviceEnumeration, createFilterStore,
+    createDeviceEnumeration, createFilterStore, encodeFilterData,
 } from './devenum.js';
-import { CLSID_ACTIVE_MOVIE_CATEGORIES, registerWindowsFilters } from '../quartz/registrations.js';
+import { registerWindowsFilters } from '../quartz/registrations.js';
 
 const S_OK = 0;
 const S_FALSE = 1;
@@ -225,3 +226,62 @@ test('Windows\' registrations are written for the classes made here, and every c
     assert.equal(filters[0].merit, 0x600000);
     assert.ok(store.list(CLSID_ACTIVE_MOVIE_CATEGORIES).some(c=>c.name === 'DirectShow Filters'));
 });
+
+test('FilterData writes each GUID once and the registration\'s cInstances', ()=>{
+    const VIDEO = '{73646976-0000-0010-8000-00AA00389B71}';
+    const RGB24 = '{E436EB7D-524F-11CE-9F53-0020AF0BA770}';
+    const RGB32 = '{E436EB7E-524F-11CE-9F53-0020AF0BA770}';
+    const data = encodeFilterData({ merit: 0x400001, pins: [
+        { name: 'Input', output: false, renderer: false, zero: false, many: false,
+            types: [[VIDEO, RGB24], [VIDEO, RGB32]] },
+        { name: 'XForm Out', output: true, renderer: false, zero: false, many: false,
+            instances: 2, types: [[VIDEO, RGB24]] },
+    ] });
+    const view = new DataView(data.buffer);
+    // A header, two pins, three types, then three GUIDs: video, RGB24, RGB32.
+    assert.equal(data.length, 16 + 2 * 24 + 3 * 16 + 3 * 16);
+    assert.deepEqual([view.getUint32(0, true), view.getUint32(4, true), view.getUint32(8, true)],
+        [2, 0x400001, 2]);
+    assert.equal(view.getUint32(16 + 8, true), 0, 'no cInstances from the registration is 0');
+    const second = 16 + 24 + 2 * 16;
+    assert.equal(view.getUint32(second + 4, true), 8, 'REG_PINFLAG_B_OUTPUT');
+    assert.equal(view.getUint32(second + 8, true), 2, 'the one it gave');
+    const firstType = 16 + 24;
+    const lastType = second + 24;
+    assert.equal(view.getUint32(firstType + 8, true), view.getUint32(lastType + 8, true),
+        'the same major type, the same offset');
+    assert.equal(view.getUint32(firstType + 12, true), view.getUint32(lastType + 12, true),
+        'and RGB24 named twice is written once');
+});
+
+test('a filter\'s key answers FilterData, a category\'s Merit, as the registry holds them',
+    async()=>{
+        const m = machine();
+        const filter = { category: CLSID_LEGACY_AM_FILTER_CATEGORY, instance: FILTER, clsid: FILTER,
+            name: 'A filter', merit: 0x600000, pins: [], properties: new Map() };
+        const category = { category: CLSID_ACTIVE_MOVIE_CATEGORIES,
+            instance: CLSID_LEGACY_AM_FILTER_CATEGORY, clsid: CLSID_LEGACY_AM_FILTER_CATEGORY,
+            name: 'DirectShow Filters', merit: 0x200000, pins: [], properties: new Map() };
+        m.store.register(filter);
+        m.store.register(category);
+        m.host.writeMemory(0x100, /** @type {Uint8Array} */ (parseGuid(IID_IPROPERTY_BAG)));
+        /** @param {any} entry @param {string} name */
+        const read = async(entry, name)=>{
+            const moniker = m.objects.get(m.devices.monikerFor(entry));
+            m.call(moniker, IID_IMONIKER, 'BindToStorage', [0, 0, 0x100, 0x200]);
+            const bag = m.objects.get(m.memory.getUint32(0x200, true));
+            m.putWide(name, 0x300);
+            m.memory.setUint16(0x400, 0, true);
+            return await m.call(bag, IID_IPROPERTY_BAG, 'Read', [0x300, 0x400, 0]) >>> 0;
+        };
+        assert.equal(await read(filter, 'FilterData'), S_OK);
+        assert.equal(m.memory.getUint16(0x400, true), 0x2011, 'VT_ARRAY | VT_UI1');
+        const array = m.memory.getUint32(0x408, true);
+        const bytes = m.host.readMemory(m.memory.getUint32(array + 12, true), 16);
+        assert.equal(new DataView(bytes.buffer).getUint32(4, true), 0x600000, 'its merit inside');
+        assert.equal(await read(filter, 'Merit'), NOT_FOUND,
+            'a filter keeps its merit in FilterData');
+        assert.equal(await read(category, 'Merit'), S_OK);
+        assert.equal(m.memory.getUint32(0x408, true), 0x200000);
+        assert.equal(await read(category, 'FilterData'), NOT_FOUND);
+    });

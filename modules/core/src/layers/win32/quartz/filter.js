@@ -109,7 +109,7 @@ const ALLOCATOR = { Commit: 5, Decommit: 6, GetBuffer: 7 };
 /** IMediaSample's. */
 const SAMPLE = {
     GetPointer: 3, GetSize: 4, SetTime: 6, SetSyncPoint: 8, SetPreroll: 10,
-    SetActualDataLength: 12, SetDiscontinuity: 16,
+    SetActualDataLength: 12, SetDiscontinuity: 16, SetMediaTime: 18,
 };
 /** IMemInputPin::Receive's, and IPin's that travel downstream. */
 const RECEIVE = 6;
@@ -125,6 +125,8 @@ const PIN_STREAM = { EndOfStream: 14, BeginFlush: 15, EndFlush: 16, NewSegment: 
  * @property {boolean} [sync]   A sync point: a key frame, or any sample of uncompressed data.
  * @property {boolean} [discontinuity]
  * @property {boolean} [preroll]
+ * @property {{ start: number, stop: number }} [media]  Its media times (a frame
+ *           number, a byte offset), as the sample it was made from carried them.
  */
 
 /**
@@ -402,6 +404,19 @@ export function createFilterBase(host){
             host.writeMemory(scratch + 8, times);
             await invoke(media, SAMPLE.SetTime,
                 [scratch + 8, sample.stop === undefined ? 0 : scratch + 16]);
+        }
+        if (sample.media)
+        {
+            const times = new Uint8Array(16);
+            const view = new DataView(times.buffer);
+            const [startLow, startHigh] = quad(sample.media.start);
+            const [stopLow, stopHigh] = quad(sample.media.stop);
+            view.setUint32(0, startLow, true);
+            view.setUint32(4, startHigh, true);
+            view.setUint32(8, stopLow, true);
+            view.setUint32(12, stopHigh, true);
+            host.writeMemory(scratch + 8, times);
+            await invoke(media, SAMPLE.SetMediaTime, [scratch + 8, scratch + 16]);
         }
         await invoke(media, SAMPLE.SetSyncPoint, [sample.sync ? 1 : 0]);
         await invoke(media, SAMPLE.SetDiscontinuity, [sample.discontinuity ? 1 : 0]);

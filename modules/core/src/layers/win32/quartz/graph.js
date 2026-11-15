@@ -68,6 +68,7 @@ import { createFileSource } from './filesource.js';
 import { createRenderers } from './renderers.js';
 import { createParsers } from './splitters.js';
 import { createTransforms } from './transforms.js';
+import { createColorSpaceConverter } from './colorspace.js';
 
 /**
  * How far a name a program hands these is read: whole, as Windows reads it, up to
@@ -2180,6 +2181,7 @@ export function registerQuartzClasses(registry, host){
         registry.registerClass(CLSID_SEEKING_PASS_THRU, passThru.seekingPassThru);
         for (const [clsid, define] of [...createRenderers(base, host.filters, passThru),
             ...createParsers(base, host.filters),
+            ...createColorSpaceConverter(base, host.filters, passThru),
             ...host.filters.icm
                 ? createTransforms(base, host.filters, host.filters.icm, passThru) : []])
         {
