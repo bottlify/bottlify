@@ -3640,14 +3640,20 @@ export class RegionEmitter {
      * @param {import('./memory.js').RegionPlan} plan
      */
     planTestedOnce(plan){
+        // Most regions have no block whose entry tests anything: nothing to plan.
+        if (plan.entry.every(windows=>windows.length === 0))
+        {
+            return;
+        }
         const blocks = this.region.blocks;
         const word = this.width.bits === 64 ? 8 : 4;
         // By block, the registers it changes, all of them where it may reach
-        // the host and go on.
-        const changed = blocks.map(block=>(block.instructions.some(ins=>HOST_OPS.has(ins.op))
-            ? -1 : registersChanged(block.instructions, word)));
-        /** @type {Map<number, number>} */
-        const index = new Map(blocks.map((block, t)=>[block.start, t]));
+        // the host and go on: worked out for the blocks asked about.
+        /** @type {(number | undefined)[]} */
+        const changedOf = [];
+        const changed = (/** @type {number} */ s)=>changedOf[s] ??= blocks[s].instructions
+            .some(ins=>HOST_OPS.has(ins.op)) ? -1 : registersChanged(blocks[s].instructions, word);
+        const index = this.labels;
         /** @type {number[][]} by block, the blocks its ways out reach, calls and returns too */
         const ways = blocks.map(block=>[...jumpsOf(block, this.returns, this.callReturn,
             this.labels), ...block.exit.targets, block.exit.next]
@@ -3665,7 +3671,10 @@ export class RegionEmitter {
             {
                 regs |= (base >= 0 ? 1 << base : 0) | (by >= 0 ? 1 << by : 0);
             }
-            const keeps = (/** @type {number} */ s)=>changed[s] !== -1 && (changed[s] & regs) === 0;
+            const keeps = (/** @type {number} */ s)=>{
+                const mask = changed(s);
+                return mask !== -1 && (mask & regs) === 0;
+            };
             const past = [...new Set(from[t])].filter(s=>s !== plan.inherit[t] && s !== t);
             if (!past.some(s=>keeps(s) && blocks[s].start >= blocks[t].start))
             {
@@ -3710,8 +3719,7 @@ export class RegionEmitter {
      */
     planCarries(){
         const blocks = this.region.blocks;
-        /** @type {Map<number, number>} */
-        const index = new Map(blocks.map((block, t)=>[block.start, t]));
+        const index = this.labels;
         /** @type {number[][]} by block, the blocks whose ways reach it, once a way */
         const from = blocks.map(()=>[]);
         blocks.forEach((block, s)=>{
