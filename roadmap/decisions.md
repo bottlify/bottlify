@@ -2286,3 +2286,10 @@ video compressor as an `@device:cm:` moniker) are written into the same store wh
 they are enumerated in their categories and their monikers' property bags answer FilterData; a
 program that opens `CLSID\{category}\Instance` in the registry itself finds nothing there. This stands
 until the registry's FilterData is written and read. *2026-11-15.*
+
+**A253. GetCharWidthFloat answers a sixteenth of a character's width.** Its documentation says
+the widths are in logical units, as GetCharWidth32's and GetCharABCWidthsFloat's are; Windows
+answers GetCharWidth32's width divided by sixteen, and Wine's gdi32 font test holds every face to
+that (`get_char_width_proc`: `i / 16.0f == f`). A program that ran on Windows read the sixteenth,
+so the engine answers it; GetCharABCWidthsFloat keeps the whole width, as Windows' does.
+*2026-11-15.*

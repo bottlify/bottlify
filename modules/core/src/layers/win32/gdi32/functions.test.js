@@ -1521,7 +1521,7 @@ function withEngine(/** @type {Record<string, any>} */ more = {}){
 
 test('with a font engine the metrics are its measurements of the selected font', ()=>{
     const { fns, memory, hdc, asked } = withEngine();
-    putLogFont(memory, { height: -12, faceName: 'Tahoma', weight: 700 });
+    putLogFont(memory, { height: -12, faceName: 'Arial', weight: 700 });
     fns.SelectObject.handler([hdc, fns.CreateFontIndirectA.handler([STRUCT])]);
 
     assert.equal(fns.GetTextMetricsA.handler([hdc, OUT]), 1);
@@ -1532,7 +1532,7 @@ test('with a font engine the metrics are its measurements of the selected font',
     assert.equal(memory.i32(OUT + TEXTMETRICA.tmMaxCharWidth), 9);
     assert.equal(memory.i32(OUT + TEXTMETRICA.tmWeight), 700, 'the rest is still the LOGFONT\'s');
     const font = asked.at(-1);
-    assert.equal(font?.faceName, 'Tahoma');
+    assert.equal(font?.faceName, 'Arial');
     assert.equal(font?.height, -12);
 });
 
@@ -2754,7 +2754,8 @@ test('the glyph-index width calls read a glyph as the character GetGlyphIndices 
 
     const view = new DataView(memory.bytes.buffer);
     assert.equal(fns.GetCharWidthFloatA.handler([hdc, 65, 65, WIDTHS]), 1);
-    assert.equal(view.getFloat32(WIDTHS, true), a, 'the same width, as a float');
+    assert.equal(view.getFloat32(WIDTHS, true), a / 16,
+        'a sixteenth of the width, as Windows answers it (A253)');
     assert.equal(fns.GetCharABCWidthsFloatW.handler([hdc, 66, 66, WIDTHS]), 1);
     assert.equal(view.getFloat32(WIDTHS + 4, true), b);
     assert.equal(fns.GetCharABCWidthsFloatW.handler([0, 66, 66, WIDTHS]), 0);

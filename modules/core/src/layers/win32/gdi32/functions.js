@@ -25,8 +25,8 @@ import { DEFAULT_PALETTE_COLORS, createDrawingFunctions } from './drawing.js';
 import { copyPath, pathMoved } from './paths.js';
 import { createMetafileFunctions } from './metafiles.js';
 import {
-    FACES, FF_MODERN, FF_ROMAN, FIXED_PITCH, faceNamed, fontFamilies, rasterFace, rasterRealization,
-    windowsMetrics,
+    FACES, FF_MODERN, FF_ROMAN, FIXED_PITCH, faceNamed, fontFamilies, outlineCell, rasterFace,
+    rasterRealization, windowsMetrics,
 } from './faces.js';
 import { ANSI_PAGE, OEM_PAGE, decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { DISPLAY_DEVICE_NAME } from '../devices.js';
@@ -1749,7 +1749,8 @@ export function createGdiFunctions(host){
         const known = windowsMetrics(font);
         if (!known)
         {
-            return {};
+            // An outline face whose cell is known measures as Windows scales it.
+            return outlineCell(font) ?? {};
         }
         const { height, ascent, descent, internalLeading, aveCharWidth } = known;
         return { height, ascent, descent, internalLeading, aveCharWidth };
@@ -5098,6 +5099,8 @@ export function createGdiFunctions(host){
          * BOOL GetCharWidthFloatA/W(HDC, UINT iFirst, UINT iLast, PFLOAT)
          *
          * The same widths as floats; a null DC or buffer is refused.
+         * GetCharWidthFloat answers a sixteenth of the width, as Windows does
+         * whatever its documentation says (decisions.md A253).
          */
         GetCharABCWidthsFloatA: {
             argBytes: 16,
@@ -5115,13 +5118,13 @@ export function createGdiFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([handle, first, last, out])=>writeWidths(handle, first >>> 0, last >>> 0,
-                out, 4, width=>[floatBits(width)], 0xff),
+                out, 4, width=>[floatBits(width / 16)], 0xff),
         },
         GetCharWidthFloatW: {
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([handle, first, last, out])=>writeWidths(handle, first >>> 0, last >>> 0,
-                out, 4, width=>[floatBits(width)], 0xffff),
+                out, 4, width=>[floatBits(width / 16)], 0xffff),
         },
 
         /** BOOL GetCharABCWidthsW(HDC hdc, UINT wFirst, UINT wLast, LPABC lpABC) */

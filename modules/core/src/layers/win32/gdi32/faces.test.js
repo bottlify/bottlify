@@ -6,7 +6,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { fontFamilies, rasterFace, rasterRealization, windowsMetrics } from './faces.js';
+import {
+    fontFamilies, outlineCell, rasterFace, rasterRealization, windowsMetrics,
+} from './faces.js';
 
 /**
  * The smallest font a name can be read from: an sfnt directory with one
@@ -101,4 +103,22 @@ test('a bitmap face is realised at one of its sizes, a whole number of times ove
     assert.deepEqual(realise('System', 43), [16, 2, 2], 'five short is too far');
     assert.deepEqual(realise('System', 32, 21), [16, 3, 2], 'a width scales across alone');
     assert.deepEqual(realise('System', 0, 4), [16, 1, 1]);
+});
+
+test('an outline face whose cell is known measures as Windows scales it', ()=>{
+    // Wine's test_height_selection: Tahoma at every height it asks for.
+    /** @param {number} height */
+    const cell = height=>{
+        const known = outlineCell({ faceName: 'Tahoma', height });
+        assert.ok(known);
+        return [known.height, known.ascent, known.descent, known.internalLeading];
+    };
+    assert.deepEqual(cell(-12), [14, 12, 2, 2]);
+    assert.deepEqual(cell(-24), [29, 24, 5, 5]);
+    assert.deepEqual(cell(-192), [232, 192, 40, 40]);
+    assert.deepEqual(cell(12), [12, 10, 2, 2]);
+    assert.deepEqual(cell(192), [192, 159, 33, 33]);
+    assert.deepEqual(cell(-11), [13, 11, 2, 2], 'the 8-point dialog cell');
+    assert.equal(outlineCell({ faceName: 'Tahoma', height: 0 }), null);
+    assert.equal(outlineCell({ faceName: 'Arial', height: -12 }), null, 'a cell not known');
 });

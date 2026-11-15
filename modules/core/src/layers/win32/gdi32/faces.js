@@ -166,6 +166,51 @@ export function windowsMetrics(font){
 }
 
 /**
+ * An outline face's vertical extent, from its own tables: the em square
+ * ('head' unitsPerEm) and the cell Windows measures it by, OS/2's
+ * usWinAscent and usWinDescent. Only faces whose numbers Windows' answers
+ * confirm are here: Tahoma's give every height of Wine's
+ * test_height_selection and the 8-point dialog cell.
+ *
+ * @type {ReadonlyMap<string, { unitsPerEm: number, ascent: number, descent: number }>}
+ */
+const OUTLINE_CELLS = new Map([
+    ['tahoma', Object.freeze({ unitsPerEm: 2048, ascent: 2049, descent: 423 })],
+]);
+
+/**
+ * What GetTextMetrics measures vertically for an outline face whose cell is
+ * known, as Windows scales a TrueType face: a negative height is the em, the
+ * ascent and descent each its share of it rounded; a positive one is the
+ * cell, split by the same shares, the em what is left of it. Null for a face
+ * not known, or a height of zero.
+ *
+ * @param {{ faceName: string, height: number }} font
+ * @returns {{ height: number, ascent: number, descent: number, internalLeading: number } | null}
+ */
+export function outlineCell(font){
+    const named = faceNamed(font.faceName ?? '');
+    const cell = OUTLINE_CELLS.get((named?.substitute ?? named?.name ?? '').toLowerCase());
+    const requested = font.height | 0;
+    if (!cell || requested === 0)
+    {
+        return null;
+    }
+    const tall = cell.ascent + cell.descent;
+    if (requested < 0)
+    {
+        const em = -requested;
+        const ascent = Math.round(cell.ascent * em / cell.unitsPerEm);
+        const descent = Math.round(cell.descent * em / cell.unitsPerEm);
+        return { height: ascent + descent, ascent, descent,
+            internalLeading: ascent + descent - em };
+    }
+    const ascent = Math.round(cell.ascent * requested / tall);
+    return { height: requested, ascent, descent: requested - ascent,
+        internalLeading: requested - Math.round(cell.unitsPerEm * requested / tall) };
+}
+
+/**
  * One size of a bitmap face, as its .fon holds it at 96 DPI: the cell, its
  * split, the leadings and the widths GetTextMetrics answers.
  *
