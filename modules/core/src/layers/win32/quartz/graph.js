@@ -58,6 +58,7 @@ import { createSystemClock } from './clock.js';
 import { createMemoryAllocator } from './allocator.js';
 import { IAM_FILTER_DATA_SLOTS, IID_IAM_FILTER_DATA, createFilterMapper } from './mapper.js';
 import { registerWindowsFilters } from './registrations.js';
+import { CLSID_SEEKING_PASS_THRU, createPassThru } from './passthru.js';
 import {
     CLSID_SYSTEM_DEVICE_ENUM, CLSID_DEVICE_MONIKER, createDeviceEnumeration,
 } from '../devenum/devenum.js';
@@ -615,15 +616,17 @@ export function createQuartz(host){
             graph.source.startedAt = null;
             playing.add(graph);
         }
-        return (result | 0) < 0 ? result : S_OK;
+        return (result | 0) < 0 || result === S_FALSE ? result : S_OK;
     };
 
     /** @param {FilterGraphState} graph @param {number} slot @param {number} state */
     const moveFilters = async(graph, slot, state)=>{
         playing.delete(graph);
-        await /** @type {NonNullable<typeof streaming>} */ (streaming).each(graph.filters, slot);
+        const result = await /** @type {NonNullable<typeof streaming>} */ (streaming)
+            .each(graph.filters, slot);
         graph.state = state;
-        return S_OK;
+        // S_FALSE is a filter still on its way, a renderer with nothing to show yet.
+        return (result | 0) < 0 || result === S_FALSE ? result : S_OK;
     };
 
     /** @param {FilterGraphState} graph @param {number} result */
@@ -1193,8 +1196,21 @@ export function createQuartz(host){
         /** HRESULT StopWhenReady(void) */
         StopWhenReady: graph=>stopGraph(graph),
 
-        /** HRESULT GetState(LONG msTimeout, OAFilterState *pfs) */
-        GetState: (graph, [, out])=>writeLong(out, graph.state),
+        /**
+         * HRESULT GetState(LONG msTimeout, OAFilterState *pfs)
+         *
+         * The program's filters are asked too: one still on its way (a
+         * renderer paused with no sample yet) makes the answer
+         * VFW_S_STATE_INTERMEDIATE, as the graph's own filters would.
+         */
+        GetState: (graph, [timeout, out])=>{
+            const answer = writeLong(out, graph.state);
+            if ((answer | 0) < 0 || !streaming || graph.filters.length === 0)
+            {
+                return answer;
+            }
+            return streaming.states(graph.filters, timeout);
+        },
 
         /** HRESULT RenderFile(BSTR strFilename) — a BSTR is wide, like the other one. */
         RenderFile: (graph, [path])=>render(graph, path),
@@ -2158,9 +2174,11 @@ export function registerQuartzClasses(registry, host){
     if (host.filters)
     {
         const base = createFilterBase(host.filters);
+        const passThru = createPassThru(base, host.filters);
         registry.registerClass(CLSID_ASYNC_READER, createFileSource(base, host.filters,
             host.filters.files));
-        for (const [clsid, define] of [...createRenderers(base, host.filters),
+        registry.registerClass(CLSID_SEEKING_PASS_THRU, passThru.seekingPassThru);
+        for (const [clsid, define] of [...createRenderers(base, host.filters, passThru),
             ...createParsers(base, host.filters),
             ...host.filters.icm ? createTransforms(base, host.filters, host.filters.icm) : []])
         {

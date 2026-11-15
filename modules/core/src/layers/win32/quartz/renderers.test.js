@@ -13,6 +13,13 @@ import { createComObject } from '../ole32/objects.js';
 import { parseGuid } from '../ole32/guid.js';
 import { createComRegistry } from '../ole32/objects.js';
 import { registerQuartzClasses } from './graph.js';
+import { createPassThru } from './passthru.js';
+
+/** The renderers over one base, its seeking passed through over the same. @param {any} host */
+const renderersOver = host=>{
+    const base = createFilterBase(host);
+    return createRenderers(base, host, createPassThru(base, host));
+};
 import { CLSID_FILTER_GRAPH, IID_IFILTER_GRAPH } from './interfaces.js';
 
 const IID_IBASE_FILTER = '{56A86895-0AD4-11CE-B03A-0020AF0BA770}';
@@ -89,7 +96,7 @@ function machine(){
 test('a renderer takes its media type, refuses samples while stopped, and ends with EC_COMPLETE',
     async()=>{
         const m = machine();
-        const renderers = createRenderers(createFilterBase(m.host), m.host);
+        const renderers = renderersOver(m.host);
         const filter = createComObject(CLSID_DSOUND_RENDER,
             /** @type {any} */ (renderers.get(CLSID_DSOUND_RENDER))());
         const out = m.allocate(8);
@@ -114,8 +121,22 @@ test('a renderer takes its media type, refuses samples while stopped, and ends w
         const sample = m.guestObject({});
         assert.equal(await m.invoke(pin, IID_IMEM_INPUT_PIN, 'Receive', [sample]),
             0x80040227 | 0, 'VFW_E_WRONG_STATE: stopped');
-        assert.equal(await m.invoke(filter, IID_IBASE_FILTER, 'Pause'), 0);
-        assert.equal(await m.invoke(pin, IID_IMEM_INPUT_PIN, 'Receive', [sample]), 0);
+        // Connected and paused with no sample yet: still on its way.
+        assert.equal(await m.invoke(filter, IID_IBASE_FILTER, 'Pause'), 1, 'S_FALSE');
+        assert.equal(await m.invoke(filter, IID_IBASE_FILTER, 'GetState', [0, 0x7000]),
+            0x00040237, 'VFW_S_STATE_INTERMEDIATE');
+        let returned = false;
+        const held = Promise.resolve(m.invoke(pin, IID_IMEM_INPUT_PIN, 'Receive', [sample]))
+            .then(answer=>{
+                returned = true;
+                return answer;
+            });
+        await new Promise(done=>setImmediate(done));
+        assert.equal(returned, false, 'a paused renderer holds its sample');
+        assert.equal(await m.invoke(filter, IID_IBASE_FILTER, 'GetState', [0, 0x7000]), 0,
+            'and has reached paused');
+        assert.equal(await m.invoke(filter, IID_IBASE_FILTER, 'Run', [0, 0]), 0);
+        assert.equal(await held, 0, 'running lets it go');
 
         /** @type {number[][]} */
         const notified = [];
@@ -129,12 +150,12 @@ test('a renderer takes its media type, refuses samples while stopped, and ends w
         } });
         await m.invoke(filter, IID_IBASE_FILTER, 'JoinFilterGraph', [graph, 0]);
         assert.equal(await m.invoke(pin, IID_IPIN, 'EndOfStream'), 0);
-        assert.deepEqual(notified, [[1, 0]], 'EC_COMPLETE, S_OK');
+        assert.deepEqual(notified, [[1, 0]], 'EC_COMPLETE, S_OK, at once while running');
     });
 
 test('the Null Renderer takes any type', async()=>{
     const m = machine();
-    const renderers = createRenderers(createFilterBase(m.host), m.host);
+    const renderers = renderersOver(m.host);
     const filter = createComObject(CLSID_NULL_RENDERER,
         /** @type {any} */ (renderers.get(CLSID_NULL_RENDERER))());
     const out = m.allocate(8);

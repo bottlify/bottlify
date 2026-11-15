@@ -44,6 +44,10 @@ import {
 
 const S_OK = 0x00000000;
 const S_FALSE = 0x00000001;
+/** A filter still on its way to the state it was told, as GetState answers. */
+const VFW_S_STATE_INTERMEDIATE = 0x00040237;
+/** IMediaFilter::GetState, IUnknown's three and IPersist's one before it. */
+const FILTER_GET_STATE = 7;
 const E_POINTER = 0x80004003;
 const E_UNEXPECTED = 0x8000ffff;
 const VFW_E_NOT_FOUND = 0x80040216;
@@ -606,8 +610,32 @@ export function createStreaming(host){
         for (const filter of filters)
         {
             const answer = await call(thread, filter, slot, args);
-            result = failed(result) ? result : answer;
+            // A filter still on its way (a renderer pausing with no sample yet
+            // answers S_FALSE) makes the graph's answer S_FALSE too.
+            result = failed(result) ? result
+                : failed(answer) || answer === S_FALSE ? answer : result;
         }
+        return result;
+    };
+
+    /**
+     * IMediaFilter::GetState of each of the program's filters, the graph's
+     * answer made of theirs: a failure first, then VFW_S_STATE_INTERMEDIATE
+     * where any is still on its way to the state it was told.
+     *
+     * @param {number[]} filters @param {number} timeout
+     */
+    const states = async(filters, timeout)=>{
+        const thread = host.currentThread();
+        const slot = host.allocate(4);
+        let result = S_OK;
+        for (const filter of filters)
+        {
+            const answer = await call(thread, filter, FILTER_GET_STATE, [timeout >>> 0, slot]);
+            result = failed(result) ? result
+                : failed(answer) || answer === VFW_S_STATE_INTERMEDIATE ? answer : result;
+        }
+        host.free(slot);
         return result;
     };
 
@@ -741,5 +769,6 @@ export function createStreaming(host){
         }
     };
 
-    return { createSource, connect, feed, restart, close, each, join, leave, remove, teardown };
+    return { createSource, connect, feed, restart, close, each, states, join, leave, remove,
+        teardown };
 }

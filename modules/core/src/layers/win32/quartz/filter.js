@@ -242,6 +242,10 @@ const PIN_STREAM = { EndOfStream: 14, BeginFlush: 15, EndFlush: 16, NewSegment: 
  * @property {(filter: Filter, from: number, to: number) => number | Promise<number>} [changed]
  *           Told of a state change before it is answered.
  * @property {(filter: Filter) => any} [state]
+ * @property {(filter: Filter, timeoutMs: number) => number | Promise<number>} [stateAnswer]
+ *           GetState's answer: S_OK where the filter is in its state,
+ *           VFW_S_STATE_INTERMEDIATE where it is still on its way after waiting
+ *           up to the time given.
  * @property {(filter: Filter) => void} [destroy]
  * @property {boolean} [aggregatable]
  */
@@ -1060,14 +1064,21 @@ export function createFilterBase(host){
             filter.start = (high | 0) * 0x1_0000_0000 + (low >>> 0);
             return changeState(filter, STATE_RUNNING);
         },
-        /** HRESULT GetState(DWORD dwMilliSecsTimeout, FILTER_STATE *State) */
-        GetState: (filter, [, out])=>{
+        /**
+         * HRESULT GetState(DWORD dwMilliSecsTimeout, FILTER_STATE *State)
+         *
+         * The class answers whether it has reached the state (a renderer
+         * paused with no sample has not: VFW_S_STATE_INTERMEDIATE).
+         */
+        GetState: async(filter, [timeout, out])=>{
             if ((out >>> 0) === 0)
             {
                 return E_POINTER;
             }
+            const answer = await filterClass.get(filter.clsid)?.stateAnswer?.(filter, timeout >>> 0)
+                ?? S_OK;
             host.writeMemory(out >>> 0, dword(filter.state));
-            return S_OK;
+            return answer;
         },
         /** HRESULT SetSyncSource(IReferenceClock *pClock) */
         SetSyncSource: async(filter, [clock])=>{
