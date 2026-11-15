@@ -131,6 +131,23 @@ test('a library that is neither ours nor present is recorded, not thrown', async
     assert.deepEqual(missing, ['absent.dll']);
 });
 
+test('a statically imported library found nowhere and carried by no Windows ends the start',
+    async()=>{
+        // msvcr100.dll with no msvcr100.dll beside the program: Windows does not
+        // start it (STATUS_DLL_NOT_FOUND). One Windows carries and the engine
+        // does not is the engine's gap: the program starts and fails where it
+        // calls in, as before.
+        const { missing, absent } = await planDependencies({
+            entry: importing(['msvcr100.dll', 'dbghelp.dll', 'KERNEL32.dll']),
+            isSystem: systemOnly(['kernel32.dll']),
+            isKnownDll: systemOnly(['kernel32.dll']),
+            isWindowsLibrary: systemOnly(['dbghelp.dll']),
+            readLibrary: async()=>null,
+        });
+        assert.deepEqual(missing, ['msvcr100.dll', 'dbghelp.dll']);
+        assert.deepEqual(absent, ['msvcr100.dll']);
+    });
+
 test('a library reached by two paths is loaded once', async()=>{
     /** @type {Record<string, Uint8Array>} */
     const library = {

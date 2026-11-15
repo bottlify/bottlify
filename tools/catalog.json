@@ -703,6 +703,15 @@
    "tests": []
   },
   {
+   "path": "tools/generators/windows-libraries.mjs",
+   "category": "generators",
+   "kind": "generator",
+   "browser": false,
+   "question": "Rewrite the loader's list of the libraries Windows itself carries, from Wine's configure.ac",
+   "command": "node tools/generators/windows-libraries.mjs <configure.ac>",
+   "tests": ["tools/generators/windows-libraries.test.js"]
+  },
+  {
    "path": "tools/generators/uia-ids.mjs",
    "category": "generators",
    "kind": "generator",

@@ -384,6 +384,7 @@ From `arg-bytes-audit.mjs dbg/wine-specs`. Every stdcall entry of the win32 laye
 - [`generators/gl-registry.mjs`](generators/gl-registry.mjs) - Rewrite OpenGL's command sizes from Khronos' gl.xml (`node tools/generators/gl-registry.mjs`)
 - [`generators/glsl-functions.mjs`](generators/glsl-functions.mjs) - Rewrite GLSL's built-in functions from the GLSL specification (`node tools/generators/glsl-functions.mjs`)
 - [`generators/steam-interfaces.mjs`](generators/steam-interfaces.mjs) - Rewrite the Steamworks interfaces' vtables from the SDK headers (`node tools/generators/steam-interfaces.mjs`)
+- [`generators/windows-libraries.mjs`](generators/windows-libraries.mjs) - Rewrite the loader's list of the libraries Windows itself carries, from Wine's configure.ac (`node tools/generators/windows-libraries.mjs <configure.ac>`)
 - [`generators/uia-ids.mjs`](generators/uia-ids.mjs) - Rewrite UI Automation's identifiers from the SDK headers (`node tools/generators/uia-ids.mjs`)
 - [`generators/crt-dictionary.mjs`](generators/crt-dictionary.mjs) - Rewrite cork's dictionary of C runtime signatures (`node tools/generators/crt-dictionary.mjs`)
 

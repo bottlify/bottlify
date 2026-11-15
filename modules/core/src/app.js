@@ -30,6 +30,8 @@ import { DIR_EXCEPTION, DIR_EXPORT, parseExportDirectory, parsePe, readExports, 
     rvaToFileOffset }
     from './layers/loader/internal/pe.js';
 import { planDependencies } from './layers/loader/internal/dependencies.js';
+import { WINDOWS_LIBRARIES } from './layers/loader/internal/windows-libraries.js';
+import { STATUS } from './layers/win32/ntdll/status.js';
 import {
     findResource, listResources, loadString, RT_STRING, stringInBundle,
 } from './layers/loader/internal/resources.js';
@@ -45,7 +47,7 @@ import { supportedOsOf, windowsVersion } from './layers/win32/kernel32/versions.
 import { KNOWN_ROUTINES } from './layers/win32/msvcrt/known-routines.js';
 import { GRAPHICS_CHOICES, graphicsChoice } from './layers/graphics/choice.js';
 import { searchesBesideProgram } from './layers/win32/kernel32/modules.js';
-import { synthesiseProcessInit, DLL_PROCESS_ATTACH, DLL_PROCESS_DETACH }
+import { synthesiseProcessInit, synthesiseStartRefused, DLL_PROCESS_ATTACH, DLL_PROCESS_DETACH }
     from './layers/loader/internal/init.js';
 import { BLOCK_MISS, createBundleSource } from './layers/filesystem/internal/bundle/source.js';
 import { createUnionSource } from './layers/filesystem/internal/union-source.js';
@@ -3008,6 +3010,19 @@ export function placeLibrary(image, { next, floor, limit, holder, claim }){
 }
 
 /**
+ * Whether Windows itself carries a library: one in system32
+ * (`WINDOWS_LIBRARIES`), or an API set, which the system's schema resolves by
+ * name and no program brings.
+ *
+ * @param {string} name
+ */
+export function isWindowsLibrary(name){
+    const lower = name.toLowerCase();
+    return WINDOWS_LIBRARIES.has(lower.includes('.') ? lower : `${lower}.dll`)
+        || /^(api|ext)-ms-win-/.test(lower);
+}
+
+/**
  * Maps every library the program brought with it, in dependency order.
  *
  * Nothing is bound here. A set of libraries that import each other has to be
@@ -3066,12 +3081,13 @@ export async function mapShippedLibraries(options){
     const shipped = shippedLibraryReader(filesystem, blocks, imagePath,
         (name, wanted)=>isSystem(name) && (options.covers?.(name, wanted) ?? true),
         { currentDirectory: options.currentDirectory, path: options.path });
-    const { order, missing } = await planDependencies({
+    const { order, missing, absent } = await planDependencies({
         entry: executable,
         entryName: imagePath.slice(
             Math.max(imagePath.lastIndexOf('\\'), imagePath.lastIndexOf('/')) + 1),
         isSystem,
         isKnownDll,
+        isWindowsLibrary,
         // A file the program brought is read from beside it; a file it did not
         // bring is looked for in the system directories the engine fills, which
         // is where the runtime a title links against actually lives. Only when
@@ -3095,6 +3111,13 @@ export async function mapShippedLibraries(options){
         // that does fails where it called, which says far more than a refusal
         // here would.
         events.emit('libraries-missing', { names: missing });
+    }
+    if (absent.length > 0)
+    {
+        // A library the program was meant to bring, found nowhere: Windows does
+        // not start it, and the start is refused (`options.onAbsent`).
+        events.emit('libraries-not-found', { names: absent, program: imagePath });
+        options.onAbsent?.(absent);
     }
 
     let next = options.base;
@@ -4503,6 +4526,8 @@ const SEVERITY = /** @type {Record<string, string>} */ ({
     'bundle-unavailable': 'error',
     'library-missing': 'warn',
     'libraries-missing': 'warn',
+    // A static import found nowhere: the process is not started.
+    'libraries-not-found': 'error',
     divergence: 'warn',
     // Something the program made did not happen: a draw, a frame, data.
     loss: 'error',
@@ -7687,7 +7712,16 @@ async function buildApp(options){
     // binding the first needs the second's exports, which need the second's
     // base. And they are bound after the program is mapped and known by name,
     // because a library may import from the program that loads it.
+    /**
+     * The static imports found nowhere: the process is created and ends in its
+     * first thread with STATUS_DLL_NOT_FOUND, before anything of it runs.
+     * @type {string[]}
+     */
+    let refusedLibraries = [];
     const shipped = await mapShippedLibraries({
+        onAbsent: (/** @type {string[]} */ names)=>{
+            refusedLibraries = names;
+        },
         executable: options.executable,
         bits: processBits,
         imagePath: options.imagePath ?? 'C:\\app.exe',
@@ -8080,17 +8114,27 @@ async function buildApp(options){
     // Inside the same span the blocks came from, rather than beside it: it is
     // written once, before anything runs, and giving it a region of its own
     // only creates a boundary two allocations can land on either side of.
-    const start = startup.attached.length === 0 && startup.tlsImages === 0
-        ? image.entryPoint
-        : (()=>{
-            const at = allocateFromHeap(startup.bytes.length);
-            memory.writeBytes(at, startup.bytes);
-            events.emit('libraries-attached', {
-                names: startup.attached,
-                tlsImages: startup.tlsImages,
-            });
-            return at;
-        })();
+    const exitProcess = kernel32?.addressOf('ExitProcess') ?? 0;
+    let start = image.entryPoint;
+    if (refusedLibraries.length > 0 && exitProcess !== 0)
+    {
+        // Nothing of the program runs, no library is attached: the first
+        // thread's one act is the loader's refusal, as on Windows (A256).
+        const refusal = synthesiseStartRefused({ exitProcess, status: STATUS.DLL_NOT_FOUND,
+            long });
+        start = allocateFromHeap(refusal.length);
+        memory.writeBytes(start, refusal);
+        attachOrder.length = 0;
+    }
+    else if (startup.attached.length > 0 || startup.tlsImages > 0)
+    {
+        start = allocateFromHeap(startup.bytes.length);
+        memory.writeBytes(start, startup.bytes);
+        events.emit('libraries-attached', {
+            names: startup.attached,
+            tlsImages: startup.tlsImages,
+        });
+    }
 
     // A quadword in long mode: a wide window's image starts past 4 GiB.
     if (long)

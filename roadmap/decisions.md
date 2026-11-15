@@ -2316,3 +2316,15 @@ ucrtbase's export (`msvcrt/invalid-parameter.js`); a call one function of a runt
 another belongs to the call the program made. The ending is loud on purpose: an error in the
 journal names the function and its arguments, because a parameter Windows lets through and ours
 refuses is a defect of our check, not something to stay quiet about. *2026-11-15.*
+
+**A256. A static import of a library found nowhere and carried by no Windows ends the process at
+its start with STATUS_DLL_NOT_FOUND; one Windows carries and the engine does not recreate lets it
+start.** Windows creates the process and its loader ends it in the first thread, before any
+DllMain or TLS callback, with 0xC0000135 as its exit code: CreateProcess succeeds and the parent
+reads that code. A library Windows itself puts in system32 is never absent on Windows, so its
+absence here is the engine's gap, not the program's: the program starts as before and fails
+where it calls in. Which libraries Windows carries is knowledge, not code: Wine's list of the
+libraries it recreates, less what is Wine's alone and the redistributable runtimes a program
+brings itself (`tools/generators/windows-libraries.mjs`), with every `api-ms-win-` and
+`ext-ms-win-` set. A delay-loaded library fails on its first call on Windows and is not refused
+at the start. The refusal is said as `libraries-not-found`, an error. *2026-11-15.*
