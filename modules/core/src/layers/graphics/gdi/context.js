@@ -123,39 +123,13 @@ export function createGdiDrawing(options = {}){
     const contextOf = hdc=>contexts.get(hdc >>> 0) ?? null;
 
     /**
-     * What a line drawn with a geometric pen adds to the DC's bounds: not the
-     * pixels it wrote but the segment's own rectangle grown by the pen, as
-     * Windows grows it - by the width plus two, five times that under a mitre
-     * join, and by part of that for the end caps (Wine's dc.c test_boundsrect,
-     * "the wide pen heuristics"), within the surface.
+     * Widens a DC's accumulated bounds by a rectangle in device units, as
+     * much of it as lies on the surface.
      *
-     * @param {any} context @param {any} pen
-     * @param {number} x0 @param {number} y0 @param {number} x1 @param {number} y1
+     * @param {any} context @param {import("./contract.js").Rect} rect
      */
-    const widenForGeometricPen = (context, pen, x0, y0, x1, y1)=>{
-        const style = pen.extended;
-        if (context.state.boundsState !== DCB_ENABLE || style === undefined
-            || ((style >>> 0) & PS_TYPE_MASK) !== PS_GEOMETRIC || pen.style === PS_NULL)
-        {
-            return;
-        }
-        const join = (style >>> 0) & PS_JOIN_MASK;
-        const square = ((style >>> 0) & PS_ENDCAP_MASK) === PS_ENDCAP_SQUARE;
-        let inflate = Math.max(1, pen.width | 0) + 2;
-        let by;
-        if (join === PS_JOIN_MITER)
-        {
-            inflate *= 5;
-            by = square ? Math.floor((inflate * 3 + 1) / 2) : inflate;
-        }
-        else
-        {
-            by = square ? inflate - Math.floor(inflate / 4) : Math.floor((inflate + 1) / 2);
-        }
-        const grown = intersectRect(surfaceBounds(context.surface), {
-            left: Math.min(x0, x1) - by, top: Math.min(y0, y1) - by,
-            right: Math.max(x0, x1) + 1 + by, bottom: Math.max(y0, y1) + 1 + by,
-        });
+    const widenBounds = (context, rect)=>{
+        const grown = intersectRect(surfaceBounds(context.surface), rect);
         if (isEmptyRect(grown))
         {
             return;
@@ -166,6 +140,57 @@ export function createGdiDrawing(options = {}){
             right: Math.max(was.right, grown.right), bottom: Math.max(was.bottom, grown.bottom),
         } : grown;
     };
+
+    /**
+     * The rectangle a line counts in a DC's bounds: its two ends, the last
+     * pixel included though a line does not paint it (Wine's dib.c "diagonal
+     * solid lines"), grown for a geometric pen as Windows grows it - by the
+     * width plus two, five times that under a mitre join, and by part of that
+     * for the end caps (dc.c test_boundsrect, "the wide pen heuristics").
+     *
+     * @param {any} pen
+     * @param {number} x0 @param {number} y0 @param {number} x1 @param {number} y1
+     * @returns {import("./contract.js").Rect}
+     */
+    const lineShape = (pen, x0, y0, x1, y1)=>{
+        // CreatePen's pen wider than a pixel is geometric, its join and caps
+        // round (Wine's dib.c "wide pen": a seven-pixel pen grows by five).
+        const style = pen.extended === undefined
+            ? ((pen.width | 0) > 1 ? PS_GEOMETRIC : 0) : pen.extended >>> 0;
+        let by = 0;
+        if ((style & PS_TYPE_MASK) === PS_GEOMETRIC)
+        {
+            const join = style & PS_JOIN_MASK;
+            const square = (style & PS_ENDCAP_MASK) === PS_ENDCAP_SQUARE;
+            let inflate = Math.max(1, pen.width | 0) + 2;
+            if (join === PS_JOIN_MITER)
+            {
+                inflate *= 5;
+                by = square ? Math.floor((inflate * 3 + 1) / 2) : inflate;
+            }
+            else
+            {
+                by = square ? inflate - Math.floor(inflate / 4) : Math.floor((inflate + 1) / 2);
+            }
+        }
+        return {
+            left: Math.min(x0, x1) - by, top: Math.min(y0, y1) - by,
+            right: Math.max(x0, x1) + 1 + by, bottom: Math.max(y0, y1) + 1 + by,
+        };
+    };
+
+    /**
+     * A rectangle a call names by two corners in either order, as Rectangle
+     * and Ellipse take one: {250, 100, 350, 10} is drawn as {250, 10, 350, 100}
+     * (Wine's dib.c "rectangles").
+     *
+     * @param {number} left @param {number} top @param {number} right @param {number} bottom
+     * @returns {import("./contract.js").Rect}
+     */
+    const cornersInOrder = (left, top, right, bottom)=>({
+        left: Math.min(left, right), top: Math.min(top, bottom),
+        right: Math.max(left, right), bottom: Math.max(top, bottom),
+    });
 
     /** @param {any} context @returns {import("./shapes.js").Painter} */
     const painterOf = context=>createPainter(context.surface, context.clip, context.state.rop2);
@@ -182,11 +207,23 @@ export function createGdiDrawing(options = {}){
      * @param {any} context
      * @param {() => T} draw
      * @param {{ x: number, y: number }} [moving]  How far a blit moves its source.
+     * @param {import("./contract.js").Rect} [shape]  The draw's own rectangle in
+     *     device units, for one whose bounds Windows takes from its shape.
      * @returns {T}
      */
-    const clipped = (context, draw, moving)=>{
+    const clipped = (context, draw, moving, shape)=>{
         if (context.state.boundsState !== DCB_ENABLE)
         {
+            return clippedPieces(context, draw, moving);
+        }
+        if (shape)
+        {
+            // Bounds from the shape, within the rectangle that holds the
+            // clip and not the clip itself: a line the clip hides altogether
+            // still widens them if it crosses that rectangle (Wine's dib.c
+            // "clipped solid hlines").
+            widenBounds(context,
+                intersectRect(shape, context.clip ?? surfaceBounds(context.surface)));
             return clippedPieces(context, draw, moving);
         }
         // SetBoundsRect's DCB_ENABLE: every pixel a draw changes widens the
@@ -960,7 +997,10 @@ export function createGdiDrawing(options = {}){
                 x, y, width, height,
                 rop,
                 pattern: patternOf(context),
-            }));
+            }), undefined, {
+                left: Math.min(x, x + width), top: Math.min(y, y + height),
+                right: Math.max(x, x + width), bottom: Math.max(y, y + height),
+            });
         },
 
         /**
@@ -1058,8 +1098,8 @@ export function createGdiDrawing(options = {}){
             }
             const pen = penOf(context);
             const pattern = patternOf(context);
-            clipped(context, ()=>rectangle(painterOf(context), { left, top, right, bottom },
-                pen, pattern));
+            const box = cornersInOrder(left, top, right, bottom);
+            clipped(context, ()=>rectangle(painterOf(context), box, pen, pattern), undefined, box);
             return true;
         },
 
@@ -1081,8 +1121,8 @@ export function createGdiDrawing(options = {}){
             }
             const pen = penOf(context);
             const pattern = patternOf(context);
-            clipped(context, ()=>ellipse(painterOf(context), { left, top, right, bottom },
-                pen, pattern));
+            const box = cornersInOrder(left, top, right, bottom);
+            clipped(context, ()=>ellipse(painterOf(context), box, pen, pattern), undefined, box);
             return true;
         },
 
@@ -1169,8 +1209,9 @@ export function createGdiDrawing(options = {}){
             }
             const from = context.state.position;
             const pen = penOf(context);
-            clipped(context, ()=>line(painterOf(context), from.x, from.y, x | 0, y | 0, pen));
-            widenForGeometricPen(context, pen, from.x, from.y, x | 0, y | 0);
+            clipped(context, ()=>line(painterOf(context), from.x, from.y, x | 0, y | 0, pen),
+                undefined, pen.style === PS_NULL ? undefined
+                    : lineShape(pen, from.x, from.y, x | 0, y | 0));
             context.state.position = { x: x | 0, y: y | 0 };
             return true;
         },

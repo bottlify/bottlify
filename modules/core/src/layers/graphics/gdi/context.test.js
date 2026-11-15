@@ -189,7 +189,7 @@ test('a blit inside one surface under a region reads its source before writing o
     assert.equal(surface.read(5, 7), 7, 'the hole kept its row');
 });
 
-test('a line drawn with a geometric pen widens the bounds by the pen, not by its pixels', ()=>{
+test('a line widens the bounds by its ends, grown by a geometric pen, not by its pixels', ()=>{
     // Wine's dc.c test_boundsrect: a one-pixel geometric pen with round join
     // and cap grows the segment's rectangle by (1 + 2 + 1) / 2 on each side; a
     // mitre join by five times the width plus two.
@@ -210,8 +210,34 @@ test('a line drawn with a geometric pen widens the bounds by the pen, not by its
     context.state.pen = objects.create('pen', { style: PS_SOLID, width: 1, color: RED_COLOR });
     drawing.moveToEx(HDC, 100, 100);
     drawing.lineTo(HDC, 160, 100);
-    assert.deepEqual(context.state.boundingRect, { left: 100, top: 100, right: 160, bottom: 101 },
-        'a cosmetic pen is counted by its pixels');
+    assert.deepEqual(context.state.boundingRect, { left: 100, top: 100, right: 161, bottom: 101 },
+        'a cosmetic pen counts its two ends, the last one too though it is not painted');
+});
+
+test('bounds come from the shape within the clip\'s rectangle, and a rectangle takes its corners'
+    + ' in either order', ()=>{
+    // Wine's dib.c: a line the clip hides still counts where it crosses the
+    // rectangle holding the clip; {250, 100, 350, 10} is drawn and counted;
+    // CreatePen's seven-pixel pen grows a line by five.
+    const { objects, drawing, context, surface } = fixture({ width: 400, height: 300 });
+    context.state.boundsState = 4;
+    drawing.setClipRegion(HDC, [{ left: 10, top: 10, right: 200, bottom: 20 },
+        { left: 100, top: 100, right: 200, bottom: 200 }]);
+    drawing.moveToEx(HDC, 10, 50);
+    drawing.lineTo(HDC, 150, 50);
+    assert.deepEqual(context.state.boundingRect, { left: 10, top: 50, right: 151, bottom: 51 });
+    assert.equal(surface.read(50, 50), BACKGROUND, 'nothing drawn there');
+    drawing.setClipRect(HDC, { left: 0, top: 0, right: 400, bottom: 300 });
+    context.state.boundingRect = null;
+    context.state.pen = objects.create('pen', { style: PS_SOLID, width: 1, color: RED_COLOR });
+    drawing.rectangle(HDC, 250, 100, 350, 10);
+    assert.deepEqual(context.state.boundingRect, { left: 250, top: 10, right: 350, bottom: 100 });
+    assert.equal(surface.read(250, 10), RED_PIXEL, 'the corner is the outline');
+    context.state.boundingRect = null;
+    context.state.pen = objects.create('pen', { style: PS_SOLID, width: 7, color: RED_COLOR });
+    drawing.moveToEx(HDC, 10, 10);
+    drawing.lineTo(HDC, 200, 10);
+    assert.deepEqual(context.state.boundingRect, { left: 5, top: 5, right: 206, bottom: 16 });
 });
 
 test('the selected pen and brush come from the shared object table', ()=>{
