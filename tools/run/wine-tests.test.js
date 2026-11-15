@@ -6,7 +6,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { classify, markdown, parseOutput, regressions, summarise } from './wine-tests.mjs';
+import {
+    classify, markdown, parseOutput, regressions, summarise, windowsOf,
+} from './wine-tests.mjs';
 
 /** @param {Partial<import('./wine-tests.mjs').ChildResult>} [extra] */
 const result = (extra = {})=>({
@@ -118,7 +120,7 @@ test('the markdown groups a failing line checked in a loop and compares with a b
     const text = markdown({ build: 'b', started: 's', tests: [now] },
         { failures: 20, baseline: { tests: [before] } });
     assert.match(text, /`a\.c:5` \(x2\): n=1/);
-    assert.match(text, /\| lib:t \| fail \| 10 \| 3 \| 0 \| 0 \| 0\.0 \| fail, 7 -> 3 \|/);
+    assert.match(text, /\| lib:t \| - \| fail \| 10 \| 3 \| 0 \| 0 \| 0\.0 \| fail, 7 -> 3 \|/);
 });
 
 test('the names a test asked for and did not get are listed, but for the Wine probe', ()=>{
@@ -163,4 +165,12 @@ test('the gate finds a test that ended worse and a check failing that held, numb
         'lib:newcheck: 1 failed check(s) the baseline did not have, first a.c:3: new one',
     ]);
     assert.deepEqual(regressions(baseline, baseline), [], 'a run against itself');
+});
+
+test('each library runs on the Windows its tests are written for', ()=>{
+    assert.equal(windowsOf('kernel32'), 'win7');
+    assert.equal(windowsOf('comctl32'), 'win7');
+    assert.equal(windowsOf('combase'), 'win10', 'only Windows 10 has it');
+    assert.equal(windowsOf('shcore'), 'win10');
+    assert.equal(windowsOf('windows.gaming.input'), 'win10', 'the Windows Runtime\'s');
 });

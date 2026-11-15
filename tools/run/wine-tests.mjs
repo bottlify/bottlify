@@ -52,9 +52,9 @@
  *                         a runtime the tests need that is not part of the engine
  *                         (the .NET Framework, for the tests of its libraries)
  *     --cork-config <json>  the translator's settings, over the ones used here
- *     --windows <name>    the Windows the machine is (win2000, winxp, win7,
- *                         win10; winxp by default): a library that came with a
- *                         later Windows - combase, shcore - is there only on one
+ *     --windows <name>    the Windows the machine is for every test (win2000,
+ *                         winxp, win7, win10), over WINDOWS_OF: by default each
+ *                         library runs on the Windows its tests are written for
  *     --browser           run each test in a headless browser on WebGPU, through
  *                         tools/run/game.mjs: what a test draws is drawn and
  *                         read back, where in node every read-back is zero, so the
@@ -125,6 +125,24 @@ export const PRESETS = {
         ['comdlg32', ['filedlg']],
     ],
 };
+
+/**
+ * The Windows each library's tests run on when --windows does not say: Wine's
+ * tests are written for Windows 7 and later, and that is where most games ran;
+ * a library that came with Windows 10 - combase, shcore, the Windows Runtime's -
+ * is there only on 10. The gate's baseline is taken this way, so it does not
+ * depend on a flag; what a game sees differently on XP is held by the engine's
+ * own tests by version.
+ */
+export const WINDOWS_10_LIBRARIES = new Set(['combase', 'shcore']);
+
+/**
+ * @param {string} module
+ * @returns {'win7' | 'win10'}
+ */
+export function windowsOf(module){
+    return WINDOWS_10_LIBRARIES.has(module) || module.startsWith('windows.') ? 'win10' : 'win7';
+}
 
 /**
  * @typedef {Object} FailedCheck
@@ -343,6 +361,7 @@ export function classify(result, parsed){
  * @property {string[]} divergences
  * @property {string[]} missing
  * @property {string} tail       the last lines the program printed
+ * @property {string} [windows]  the Windows the machine was
  */
 
 /**
@@ -906,12 +925,13 @@ export function markdown(report, { failures, baseline }){
     }
 
     lines.push('', '## By test', '');
-    lines.push(`| test | status | executed | failures | todo | skipped | seconds |${
+    lines.push(`| test | windows | status | executed | failures | todo | skipped | seconds |${
         baseline ? ' before -> after |' : ''}`);
-    lines.push(`|---|---|---|---|---|---|---|${baseline ? '---|' : ''}`);
+    lines.push(`|---|---|---|---|---|---|---|---|${baseline ? '---|' : ''}`);
     for (const test of report.tests)
     {
-        lines.push(`| ${key(test)} | ${test.status} | ${test.executed ?? '-'} | ${test.failures}`
+        lines.push(`| ${key(test)} | ${test.windows ?? '-'} | ${test.status}`
+            + ` | ${test.executed ?? '-'} | ${test.failures}`
             + ` | ${test.todo ?? '-'} | ${test.skipped} | ${(test.wallMs / 1000).toFixed(1)} |${
                 baseline ? ` ${compared(test, earlier.get(key(test)))} |` : ''}`);
     }
@@ -1098,7 +1118,7 @@ async function main(){
         + ` ${options.timeout} s each`
         + (options.browser ? `, in a browser on ${options.adapter}` : ''));
 
-    /** @type {{ module: string, test: string, exePath: string }[]} */
+    /** @type {{ module: string, test: string, exePath: string, machine: typeof settings }[]} */
     const plan = [];
     /** @type {TestReport[]} */
     const unavailable = [];
@@ -1116,11 +1136,12 @@ async function main(){
         {
             bundles.set(module, packTest(module, exePath));
         }
+        const machine = { ...settings, windows: options.windows ?? windowsOf(module) };
         let names = tests;
         if (!names)
         {
             // The program is the only record of which tests it holds.
-            const listed = await runInChild(exePath, '--list', settings);
+            const listed = await runInChild(exePath, '--list', machine);
             names = parseOutput(listed.output).names;
             if (names.length === 0)
             {
@@ -1132,18 +1153,18 @@ async function main(){
         }
         for (const test of names)
         {
-            plan.push({ module, test, exePath });
+            plan.push({ module, test, exePath, machine });
         }
     }
 
     const started = new Date();
-    const results = await pool(plan.map(({ module, test, exePath })=>async()=>{
+    const results = await pool(plan.map(({ module, test, exePath, machine })=>async()=>{
         const result = options.browser
             ? await runInBrowser(/** @type {string} */ (bundles.get(module)), module, test,
-                settings)
-            : await runInChild(exePath, test, settings);
-        const report = summarise(module, test, result,
-            options.browser ? null : MAIN_PROCESS);
+                machine)
+            : await runInChild(exePath, test, machine);
+        const report = { ...summarise(module, test, result,
+            options.browser ? null : MAIN_PROCESS), windows: machine.windows };
         console.log(`  ${`${module}:${test}`.padEnd(28)} ${report.status.padEnd(15)}`
             + ` executed ${String(report.executed ?? '-').padStart(6)}`
             + ` failures ${String(report.failures).padStart(5)}`
