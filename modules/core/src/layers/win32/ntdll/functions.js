@@ -42,6 +42,7 @@ import { createStringOperations } from './string-ops.js';
 import { createNtdllCrt } from './crt.js';
 import { createRandomFunctions } from './random.js';
 import { createChecksumFunctions } from './checksum.js';
+import { createIpStringFunctions } from './ip-strings.js';
 import { createHandleTableFunctions } from './handle-table.js';
 import { createSecurityFunctions } from './security.js';
 import { MEMORY_ENTRIES, createMemoryFunctions } from './memory.js';
@@ -496,6 +497,7 @@ export function createNtdllFunctions(host){
 
         ...createRandomFunctions({ readMemory: host.readMemory, writeMemory: host.writeMemory }),
         ...createChecksumFunctions({ readMemory: host.readMemory }),
+        ...createIpStringFunctions({ readMemory: host.readMemory, writeMemory: host.writeMemory }),
         ...createHandleTableFunctions({ readMemory: host.readMemory,
             writeMemory: host.writeMemory, allocate, free }),
 
