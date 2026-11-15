@@ -376,6 +376,8 @@ export function createProcessPolicyFunctions(host){
     /** The mitigation policies this process set, by policy. @type {Map<number, number>} */
     const mitigations = new Map();
     let depFlags = PROCESS_DEP_ENABLE;
+    /** DEP_SYSTEM_POLICY_TYPE's OptOut. */
+    const DEP_POLICY_OPT_OUT = 3;
     let depPermanent = false;
     /** WerSetFlags's flags, which WerGetFlags answers. */
     let werFlags = 0;
@@ -770,6 +772,17 @@ export function createProcessPolicyFunctions(host){
                 depPermanent ||= (asked & PROCESS_DEP_ENABLE) !== 0;
                 return 1;
             },
+        },
+
+        /**
+         * DEP_SYSTEM_POLICY_TYPE GetSystemDEPPolicy(void)
+         *
+         * OptOut: every process starts with DEP on (its flags above) and may
+         * turn it off for itself, which is what SetProcessDEPPolicy allows.
+         */
+        GetSystemDEPPolicy: {
+            argBytes: 0,
+            handler: ()=>DEP_POLICY_OPT_OUT,
         },
 
         /** BOOL GetProcessDEPPolicy(HANDLE hProcess, LPDWORD lpFlags, PBOOL lpPermanent) */

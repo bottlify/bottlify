@@ -34,6 +34,7 @@ import { createBitmapFunctions } from './bitmap.js';
 import { createWaitFunctions } from './waits.js';
 import { createPathFunctions } from './paths.js';
 import { createAtomTableFunctions } from './atoms.js';
+import { createTimeFunctions } from './time.js';
 import { createStringOperations } from './string-ops.js';
 import { MEMORY_ENTRIES, createMemoryFunctions } from './memory.js';
 import { createDebugFunctions } from './debug.js';
@@ -78,6 +79,29 @@ const CRT_EXPORTS = [
  */
 /** 'MZ' and 'PE' with two zero bytes, as an image's two headers begin. */
 const IMAGE_DOS_SIGNATURE = 0x5a4d;
+/** NtQuerySystemInformation's classes answered here, past query.js's own. */
+const SYSTEM_KERNEL_DEBUGGER_INFORMATION = 35;
+const SYSTEM_RANGE_START_INFORMATION = 50;
+const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX = 107;
+const SYSTEM_CPU_INFORMATION = 1;
+/** The emulated view of it, the same structure in a process of the machine's width. */
+const SYSTEM_EMULATION_PROCESSOR_INFORMATION = 63;
+const SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION = 8;
+/**
+ * SYSTEM_CPU_INFORMATION's ProcessorFeatureBits (the kernel's KF_ flags) for
+ * the IsProcessorFeaturePresent features that have one.
+ *
+ * @type {[number, number][]}
+ */
+const KERNEL_FEATURES = [
+    [8, 0x2],           // PF_RDTSC_INSTRUCTION_AVAILABLE -> KF_RDTSC
+    [2, 0x80],          // PF_COMPARE_EXCHANGE_DOUBLE -> KF_CMPXCHG8B
+    [3, 0x100],         // PF_MMX_INSTRUCTIONS_AVAILABLE -> KF_MMX
+    [6, 0x2000],        // PF_XMMI_INSTRUCTIONS_AVAILABLE -> KF_XMMI
+    [7, 0x4000],        // PF_3DNOW_INSTRUCTIONS_AVAILABLE -> KF_3DNOW
+    [10, 0x10000],      // PF_XMMI64_INSTRUCTIONS_AVAILABLE -> KF_XMMI64
+    [12, 0x20000000],   // PF_NX_ENABLED -> KF_NOEXECUTE
+];
 const IMAGE_NT_SIGNATURE = 0x00004550;
 
 const KERNEL32_ALIASES = Object.freeze({
@@ -112,6 +136,8 @@ const KERNEL32_ALIASES = Object.freeze({
     // kernel32's is forwarded to the Rtl one; the Nt one is the system call
     // under it, with the same answer.
     RtlGetCurrentProcessorNumber: 'GetCurrentProcessorNumber',
+    // kernel32's is ntdll's (kernel32.spec forwards it).
+    RtlIsProcessorFeaturePresent: 'IsProcessorFeaturePresent',
     NtGetCurrentProcessorNumber: 'GetCurrentProcessorNumber',
     // kernel32's is ntdll's under the same name (kernel32.spec forwards it).
     RtlCaptureStackBackTrace: 'RtlCaptureStackBackTrace',
@@ -288,6 +314,41 @@ function createUserInfoFunctions(kernel32, writeMemory){
     };
 }
 
+/** @param {unknown} error */
+const unreachable = error=>/** @type {{ code?: string }} */ (error)?.code === 'GUEST_ACCESS';
+
+/**
+ * A native call's handler, a guest pointer it could not reach answered as the
+ * kernel answers it: STATUS_ACCESS_VIOLATION, the call returning.
+ *
+ * @param {Function} handler
+ * @returns {Function}
+ */
+function probed(handler){
+    return (/** @type {any[]} */ ...args)=>{
+        try
+        {
+            const answer = handler(...args);
+            return typeof answer?.then === 'function'
+                ? answer.catch((/** @type {unknown} */ error)=>{
+                    if (unreachable(error))
+                    {
+                        return STATUS.ACCESS_VIOLATION;
+                    }
+                    throw error;
+                })
+                : answer;
+        }
+        catch (e){
+            if (unreachable(e))
+            {
+                return STATUS.ACCESS_VIOLATION;
+            }
+            throw e;
+        }
+    };
+}
+
 /**
  * Builds the function table: name -> { argBytes, handler }.
  *
@@ -320,6 +381,76 @@ export function createNtdllFunctions(host){
     // The registry's native calls ride on advapi32's table, whose keys and
     // handles they are, and a key handle closes there.
     const registry = host.advapi32?.[REGISTRY_NATIVES] ?? null;
+
+    /**
+     * SystemCpuInformation, from what GetSystemInfo and IsProcessorFeaturePresent
+     * say of the processor, and SystemProcessorPerformanceInformation, one
+     * record a processor of GetSystemTimes' times shared out evenly.
+     *
+     * @returns {Record<number, import('./query.js').SystemClass>}
+     */
+    const processorClasses = ()=>{
+        /** @type {Record<number, import('./query.js').SystemClass>} */
+        const classes = {};
+        const scratch = (/** @type {number} */ size, /** @type {(at: number) => void} */ fill)=>{
+            const at = allocate(size);
+            try
+            {
+                fill(at);
+                return host.readMemory(at, size).slice();
+            }
+            finally
+            {
+                free(at);
+            }
+        };
+        if (kernel32.GetSystemInfo && kernel32.IsProcessorFeaturePresent)
+        {
+            classes[SYSTEM_CPU_INFORMATION] = classes[SYSTEM_EMULATION_PROCESSOR_INFORMATION] = {
+                exact: true, read: ()=>{
+                    const info = new DataView(scratch(36,
+                        at=>kernel32.GetSystemInfo.handler([at])).buffer);
+                    let features = 0;
+                    for (const [feature, bit] of KERNEL_FEATURES)
+                    {
+                        if (kernel32.IsProcessorFeaturePresent.handler([feature]) !== 0)
+                        {
+                            features |= bit;
+                        }
+                    }
+                    const out = new DataView(new ArrayBuffer(12));
+                    out.setUint16(0, info.getUint16(0, true), true);
+                    out.setUint16(2, info.getUint16(32, true), true);
+                    out.setUint16(4, info.getUint16(34, true), true);
+                    out.setUint16(6, 0, true);
+                    out.setUint32(8, features >>> 0, true);
+                    return new Uint8Array(out.buffer);
+                } };
+        }
+        if (kernel32.GetSystemTimes)
+        {
+            const count = host.processors?.count() ?? 1;
+            classes[SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION] = { read: ()=>{
+                const times = new DataView(scratch(24, at=>
+                    kernel32.GetSystemTimes.handler([at, at + 8, at + 16])).buffer);
+                const out = new DataView(new ArrayBuffer(48 * count));
+                for (let one = 0; one < count; one++)
+                {
+                    // IdleTime, KernelTime, UserTime: each processor its share.
+                    for (const field of [0, 1, 2])
+                    {
+                        out.setBigUint64(one * 48 + field * 8,
+                            times.getBigUint64(field * 8, true) / BigInt(count), true);
+                    }
+                }
+                return new Uint8Array(out.buffer);
+            } };
+        }
+        return classes;
+    };
+
+    const time = createTimeFunctions({ readMemory: host.readMemory,
+        writeMemory: host.writeMemory, kernel32, allocate, free });
 
     const table = {
         ...alias(kernel32, KERNEL32_ALIASES),
@@ -355,6 +486,8 @@ export function createNtdllFunctions(host){
 
         ...createBitmapFunctions({ readMemory: host.readMemory, writeMemory: host.writeMemory }),
 
+        ...time.table,
+
         ...createQueryFunctions({
             readMemory: host.readMemory,
             writeMemory: host.writeMemory,
@@ -367,6 +500,19 @@ export function createNtdllFunctions(host){
             divergence: host.divergence,
             processes: host.processes,
             processors: host.processors,
+            systemClasses: {
+                ...time.systemClasses,
+                // SYSTEM_KERNEL_DEBUGGER_INFORMATION: no kernel debugger, none
+                // present - the machine is not being debugged.
+                [SYSTEM_KERNEL_DEBUGGER_INFORMATION]: { read: ()=>Uint8Array.of(0, 1) },
+                ...processorClasses(),
+                // SYSTEM_RANGE_START_INFORMATION: where the system's half of
+                // the address space begins, a pointer wide.
+                [SYSTEM_RANGE_START_INFORMATION]: { exact: true,
+                    read: ()=>(host.pointerSize === 8
+                        ? Uint8Array.of(0, 0, 0, 0, 0, 0x80, 0xff, 0xff)
+                        : Uint8Array.of(0, 0, 0, 0x80)) },
+            },
             pointerSize: host.pointerSize,
         }),
 
@@ -797,6 +943,78 @@ export function createNtdllFunctions(host){
             },
         },
     };
+    const query = /** @type {any} */ (table).NtQuerySystemInformation;
+    if (query && kernel32.GetLogicalProcessorInformationEx)
+    {
+        /**
+         * NTSTATUS NtQuerySystemInformationEx(SYSTEM_INFORMATION_CLASS, PVOID InputBuffer,
+         *     ULONG InputLength, PVOID SystemInformation, ULONG Length, PULONG ReturnLength)
+         *
+         * The classes that take an input: the logical processors of one
+         * relationship (kernel32's records, which GetLogicalProcessorInformationEx
+         * is built on). Any other class takes none and is not asked this way.
+         */
+        /** @type {any} */ (table).NtQuerySystemInformationEx = {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([infoClass, input, inputLength, buffer, length, returnLength])=>{
+                if ((infoClass >>> 0) !== SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)
+                {
+                    return STATUS.INVALID_INFO_CLASS;
+                }
+                if ((inputLength >>> 0) < 4 || (input >>> 0) === 0)
+                {
+                    return STATUS.INVALID_PARAMETER;
+                }
+                const relation = readU32(host.readMemory(input >>> 0, 4));
+                const size = allocate(4);
+                try
+                {
+                    host.writeMemory(size, Uint8Array.of(length & 0xff, length >>> 8 & 0xff,
+                        length >>> 16 & 0xff, length >>> 24 & 0xff));
+                    const ok = kernel32.GetLogicalProcessorInformationEx.handler(
+                        [relation, buffer >>> 0, size]) !== 0;
+                    const needed = readU32(host.readMemory(size, 4));
+                    if ((returnLength >>> 0) !== 0)
+                    {
+                        host.writeMemory(returnLength >>> 0, host.readMemory(size, 4));
+                    }
+                    if (ok)
+                    {
+                        return STATUS.SUCCESS;
+                    }
+                    return needed > (length >>> 0) ? STATUS.INFO_LENGTH_MISMATCH
+                        : STATUS.INVALID_PARAMETER;
+                }
+                finally
+                {
+                    free(size);
+                }
+            },
+        };
+    }
+    // A native call is a system call: the kernel probes the pointers it is
+    // handed and answers one it cannot reach with STATUS_ACCESS_VIOLATION,
+    // where the same pointer handed to a user-mode Rtl function faults.
+    // An entry another library's table owns (kernel32's APC calls, advapi32's
+    // registry and token calls) is that table's own and stays the same entry.
+    const foreign = new Set([...Object.values(kernel32), ...Object.values(natives),
+        ...Object.values(registry?.entries ?? {}),
+        ...Object.values(host.advapi32?.[TOKEN_NATIVES] ?? {})]);
+    for (const [name, entry] of Object.entries(table))
+    {
+        if (name.startsWith('Nt') && typeof entry?.handler === 'function' && !foreign.has(entry))
+        {
+            /** @type {any} */ (table)[name] = { ...entry, handler: probed(entry.handler) };
+        }
+    }
+    if (/** @type {any} */ (table).NtQuerySystemInformation)
+    {
+        // The native view and the process's are one where the process is the
+        // machine's own width, as every process here is: the same system call.
+        /** @type {any} */ (table).RtlGetNativeSystemInformation =
+            /** @type {any} */ (table).NtQuerySystemInformation;
+    }
     // A native call answers to both its names: user mode reaches the same
     // entry through Zw as through Nt, and a program asks GetProcAddress for
     // either.

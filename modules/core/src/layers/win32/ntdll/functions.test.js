@@ -125,6 +125,39 @@ test('the aliases carry the argument sizes the guest compiled against', ()=>{
     assert.equal(fns.RtlUnwind.argBytes, 16);
 });
 
+test('a native call answers a pointer it cannot reach with STATUS_ACCESS_VIOLATION', ()=>{
+    // The kernel probes what a system call is handed; the same pointer handed
+    // to a user-mode Rtl function faults there.
+    const host = fakeHost();
+    const unreachable = Object.assign(new Error('no page'), { code: 'GUEST_ACCESS' });
+    const fns = createNtdllFunctions({ ...host, writeMemory: (address, data)=>{
+        if (address >= 0x1000)
+        {
+            throw unreachable;
+        }
+        host.writeMemory(address, data);
+    } });
+    assert.equal(fns.NtQuerySystemInformation.handler([35, 0x2000, 2, 0]),
+        STATUS.ACCESS_VIOLATION);
+    assert.equal(fns.ZwQuerySystemInformation.handler([35, 0x2000, 2, 0]),
+        STATUS.ACCESS_VIOLATION, 'under its Zw name too');
+    assert.throws(()=>fns.RtlFillMemoryUlong.handler([0x2000, 4, 1]), /no page/,
+        'a user-mode Rtl function faults');
+});
+
+test('the kernel debugger is absent and the system range starts at 2 GiB', ()=>{
+    const host = fakeHost();
+    const fns = createNtdllFunctions(host);
+    assert.equal(fns.NtQuerySystemInformation.handler([35, 0x100, 2, 0x110]), STATUS.SUCCESS);
+    assert.deepEqual([...host.bytes.subarray(0x100, 0x102)], [0, 1]);
+    assert.equal(fns.NtQuerySystemInformation.handler([50, 0x100, 8, 0x110]),
+        STATUS.INFO_LENGTH_MISMATCH, 'a pointer wide, exactly');
+    assert.equal(fns.NtQuerySystemInformation.handler([50, 0x100, 4, 0x110]), STATUS.SUCCESS);
+    assert.equal(new DataView(host.bytes.buffer).getUint32(0x100, true), 0x80000000);
+    assert.equal(fns.NtQuerySystemInformation.handler([50, 0, 4, 0x110]),
+        STATUS.ACCESS_VIOLATION, 'nowhere to put it');
+});
+
 test('unwinding is the walk kernel32 already drives', ()=>{
     // There is one handler chain per thread and it lives in the thread block. A
     // second dispatcher walking it would call handlers the first had already
