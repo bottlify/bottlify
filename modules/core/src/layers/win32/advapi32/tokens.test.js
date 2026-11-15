@@ -236,7 +236,8 @@ test('the native token calls open and adjust the same tokens, with statuses', ()
     assert.deepEqual(Object.fromEntries(Object.entries(natives)
         .map(([name, entry])=>[name, entry.argBytes])),
     { RtlAreAllAccessesGranted: 8, RtlAreAnyAccessesGranted: 8, RtlMapGenericMask: 8,
-        NtOpenProcessToken: 12, NtOpenProcessTokenEx: 16, NtAdjustPrivilegesToken: 24,
+        NtOpenProcessToken: 12, NtOpenProcessTokenEx: 16, NtOpenThreadToken: 16,
+        NtOpenThreadTokenEx: 20, NtAdjustPrivilegesToken: 24,
         NtSetSecurityObject: 12, NtQuerySecurityObject: 20, NtAccessCheck: 32,
         NtDuplicateToken: 24 });
 });
@@ -1098,6 +1099,17 @@ test('SetThreadToken gives a thread the impersonation token OpenThreadToken then
     assert.equal(fns.SetThreadToken.handler([BUFFER, 0]), 1, 'NULL reverts');
     assert.equal(fns.OpenThreadToken.handler([CURRENT_THREAD, TOKEN_QUERY, 0, OUT]), 0);
     assert.equal(errors.at(-1), ERROR_NO_TOKEN);
+
+    // The native forms answer the same with a status, the last error left alone.
+    const natives = fns[TOKEN_NATIVES];
+    const before = errors.length;
+    assert.equal(natives.NtOpenThreadToken.handler([CURRENT_THREAD, TOKEN_QUERY, 0, OUT]),
+        0xc000007c, 'STATUS_NO_TOKEN');
+    assert.equal(fns.SetThreadToken.handler([0, impersonation]), 1);
+    assert.equal(natives.NtOpenThreadTokenEx.handler([CURRENT_THREAD, TOKEN_QUERY, 0, 0, OUT]), 0);
+    assert.equal(table.get(dword(OUT))?.object, table.get(impersonation)?.object);
+    assert.equal(natives.NtOpenThreadToken.handler([0x7777, TOKEN_QUERY, 0, OUT]), 0xc0000008);
+    assert.equal(errors.length, before, 'no last error from a native call');
 });
 
 test('ImpersonateSelf gives the calling thread a token, RevertToSelf takes it away', ()=>{

@@ -55,6 +55,14 @@ export const TEB = Object.freeze({
     SIZE: 0x1000,
 });
 
+/**
+ * The session every process here runs in: the interactive user's, the one
+ * WTSGetActiveConsoleSessionId names. Its number is in the process block, in
+ * ProcessIdToSessionId's answer and in the object namespace's
+ * \Sessions\1\BaseNamedObjects, one value for all three.
+ */
+export const INTERACTIVE_SESSION = 1;
+
 /** Field offsets in the process block. */
 export const PEB = Object.freeze({
     INHERITED_ADDRESS_SPACE: 0x00,
@@ -70,6 +78,7 @@ export const PEB = Object.freeze({
     OS_BUILD_NUMBER: 0xac,
     OS_CSD_VERSION: 0xae,
     OS_PLATFORM_ID: 0xb0,
+    SESSION_ID: 0x1d4,
     CSD_VERSION: 0x1f0,
     SIZE: 0x230,
 });
@@ -203,6 +212,7 @@ export const PEB64 = Object.freeze({
     OS_BUILD_NUMBER: 0x120,
     OS_CSD_VERSION: 0x122,
     OS_PLATFORM_ID: 0x124,
+    SESSION_ID: 0x2c0,
     CSD_VERSION: 0x2e8,
     SIZE: 0x380,
 });
@@ -377,6 +387,8 @@ export function createProcessBlocks(options){
     write(peb + pebFields.OS_PLATFORM_ID, 2); // VER_PLATFORM_WIN32_NT
     // Read directly by a runtime sizing its thread pool, without a call.
     write(peb + pebFields.NUMBER_OF_PROCESSORS, options.processors ?? 1);
+    // Read straight from the block by code naming its session's objects.
+    write(peb + pebFields.SESSION_ID, INTERACTIVE_SESSION);
 
     // Strings are laid out after the parameter block, in the same allocation.
     let strings = params + paramsFields.SIZE;

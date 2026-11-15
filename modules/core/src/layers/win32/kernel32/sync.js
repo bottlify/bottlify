@@ -624,6 +624,7 @@ export function createSyncFunctions(host){
             processId: host.processId,
             threadOf,
             objectOf: object,
+            processors,
         }),
         ...createThreadInfoFunctions({
             kernel,

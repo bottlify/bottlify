@@ -48,9 +48,12 @@ import { createCompressionFunctions } from './lznt1.js';
 import { createHandleTableFunctions } from './handle-table.js';
 import { createSecurityFunctions } from './security.js';
 import { MEMORY_ENTRIES, createMemoryFunctions } from './memory.js';
+import { HANDLE_ENTRIES, createHandleNatives } from './handles.js';
 import { createDebugFunctions } from './debug.js';
 import { createProcessFunctions } from './process.js';
 import { STATUS, toDosError } from './status.js';
+import { nativeNameOf } from '../kernel32/object-attributes.js';
+import { INTERACTIVE_SESSION } from '../kernel32/teb.js';
 import { REGISTRY_NATIVES, UNLOAD_KEY } from '../advapi32/functions.js';
 import { TOKEN_NATIVES, USER_SID_TEXT } from '../advapi32/tokens.js';
 
@@ -173,6 +176,9 @@ const KERNEL32_ALIASES = Object.freeze({
  *     own table keeps.
  */
 
+/** The handle types a Win32 name can stand for, whose names the named table keeps. */
+const NAMED_KINDS = new Set(['event', 'mutex', 'semaphore', 'timer', 'mapping']);
+
 /**
  * @typedef {Object} NtdllHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
@@ -195,6 +201,8 @@ const KERNEL32_ALIASES = Object.freeze({
  * @property {() => import('./query.js').SystemProcess[]} [processes]
  *           What SystemProcessInformation lists.
  * @property {(handle: number) => string | null} [handleType]
+ * @property {(handle: number) => string | null} [namedObjectName]  The Win32 name
+ *     a kernel object was made or opened by, null for one made with none.
  * @property {import('./query.js').QueryHost['processOf']} [processOf]
  * @property {import('./query.js').QueryHost['askChild']} [askChild]
  * @property {(api: string, detail: string) => void} [divergence]
@@ -573,6 +581,14 @@ export function createNtdllFunctions(host){
             // as GetFinalPathNameByHandle's VOLUME_NAME_NT spells it.
             objectName: handle=>{
                 const type = host.handleType?.(handle);
+                // A kernel object's name is the Win32 name it was made or
+                // opened by, under the object directory that name lives in;
+                // one made with no name has none, an empty string.
+                if (typeof type === 'string' && NAMED_KINDS.has(type) && host.namedObjectName)
+                {
+                    const name = host.namedObjectName(handle);
+                    return name === null ? '' : nativeNameOf(name, INTERACTIVE_SESSION);
+                }
                 if ((type !== 'file' && type !== 'directory')
                     || !kernel32.GetFinalPathNameByHandleW)
                 {
@@ -631,6 +647,8 @@ export function createNtdllFunctions(host){
                 writeMemory: host.writeMemory, readWideString: host.readWideString,
                 kernel32, allocate, free })
             : {}),
+
+        ...(HANDLE_ENTRIES.every(name=>kernel32[name]) ? createHandleNatives({ kernel32 }) : {}),
 
         ...(MEMORY_ENTRIES.every(name=>kernel32[name])
             ? createMemoryFunctions({ readMemory: host.readMemory,

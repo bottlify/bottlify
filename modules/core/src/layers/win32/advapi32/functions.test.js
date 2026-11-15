@@ -18,6 +18,7 @@ import {
     HKEY_LOCAL_MACHINE,
     REG_BINARY,
     REG_DWORD,
+    REG_EXPAND_SZ,
     REG_MULTI_SZ,
     REG_SZ,
 } from './registry.js';
@@ -98,7 +99,8 @@ function fakeMemory(size = 0x11000){
     };
 }
 
-function setup(){
+/** @param {Partial<import('./functions.js').RegistryHost>} [extra] */
+function setup(extra = {}){
     const memory = fakeMemory();
     const hive = createRegistryService(createHive());
     const fns = createRegistryFunctions({
@@ -106,6 +108,7 @@ function setup(){
         writeMemory: memory.writeMemory,
         readCString: (address, maxLength)=>memory.readCString(address, maxLength),
         hive,
+        ...extra,
     });
 
     /**
@@ -1225,6 +1228,33 @@ test('RegGetValue holds the value to the types it is asked for', ()=>{
     assert.equal(fns.RegGetValueA.handler(
         [key, 0, NAME + 0x20, RRF_RT_QWORD, OUT_TYPE, OUT_DATA, OUT_SIZE]), ERROR_SUCCESS);
     assert.equal(fns.RegGetValueA.argBytes, 28);
+});
+
+test('RegGetValue answers a REG_EXPAND_SZ as REG_SZ expanded, unless told not to', ()=>{
+    // MSDN RegGetValue: without RRF_NOEXPAND a REG_EXPAND_SZ is expanded and
+    // reported as REG_SZ; shlwapi's SHRegGetValue stands on it.
+    const { memory, fns, create } = setup({
+        expandEnvironment: text=>text.replace('%WINDIR%', 'C:\\WINDOWS'),
+    });
+    const key = create('Software\\Expand');
+    memory.putString(NAME, 'Path');
+    memory.putString(INPUT, '%WINDIR%\\system32');
+    fns.RegSetValueExA.handler([key, NAME, 0, REG_EXPAND_SZ, INPUT, 18]);
+    const RRF_RT_REG_SZ = 0x02;
+    const RRF_RT_REG_EXPAND_SZ = 0x04;
+    const RRF_NOEXPAND = 0x10000000;
+
+    memory.putDword(OUT_SIZE, 0x40);
+    assert.equal(fns.RegGetValueA.handler(
+        [key, 0, NAME, RRF_RT_REG_SZ, OUT_TYPE, OUT_DATA, OUT_SIZE]), ERROR_SUCCESS);
+    assert.equal(memory.dword(OUT_TYPE), REG_SZ);
+    assert.equal(memory.string(OUT_DATA), 'C:\\WINDOWS\\system32');
+    assert.equal(memory.dword(OUT_SIZE), 20, 'the expanded length, terminator included');
+    memory.putDword(OUT_SIZE, 0x40);
+    assert.equal(fns.RegGetValueA.handler([key, 0, NAME, RRF_RT_REG_EXPAND_SZ | RRF_NOEXPAND,
+        OUT_TYPE, OUT_DATA, OUT_SIZE]), ERROR_SUCCESS);
+    assert.equal(memory.dword(OUT_TYPE), REG_EXPAND_SZ);
+    assert.equal(memory.string(OUT_DATA), '%WINDIR%\\system32', 'kept as stored');
 });
 
 test('a tree is copied whole and deleted whole, and data below 64 KiB is refused', ()=>{

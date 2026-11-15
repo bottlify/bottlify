@@ -50,6 +50,7 @@ export const RECORD_OBJECT_SECURITY = Symbol('recordObjectSecurity');
 const STATUS_SUCCESS = 0;
 const STATUS_ACCESS_VIOLATION = 0xc0000005;
 const STATUS_INVALID_HANDLE = 0xc0000008;
+const STATUS_NO_TOKEN = 0xc000007c;
 const STATUS_BUFFER_TOO_SMALL = 0xc0000023;
 const STATUS_ACCESS_DENIED = 0xc0000022;
 
@@ -1894,9 +1895,35 @@ export function createTokenFunctions(host){
         return codec.selfRelative(asked);
     };
 
+    /**
+     * The token a thread impersonates with, opened into `out`: the win32
+     * error OpenThreadToken sets, or ERROR_SUCCESS. Both forms stand on it.
+     *
+     * @param {number} thread @param {number} out
+     */
+    const openThreadToken = (thread, out)=>{
+        const named = threadNamed(thread);
+        if (named === null)
+        {
+            return ERROR_INVALID_HANDLE;
+        }
+        const token = impersonating.get(named);
+        if (!token)
+        {
+            return ERROR_NO_TOKEN;
+        }
+        if ((out >>> 0) === 0)
+        {
+            return ERROR_INVALID_PARAMETER;
+        }
+        writeDword(out >>> 0, host.handles.open('token', token));
+        return ERROR_SUCCESS;
+    };
+
     /** @param {number} code @returns {number} the status a native call answers it with */
     const statusOf = code=>(code === ERROR_SUCCESS ? STATUS_SUCCESS
-        : code === ERROR_INVALID_HANDLE ? STATUS_INVALID_HANDLE : STATUS_ACCESS_VIOLATION);
+        : code === ERROR_INVALID_HANDLE ? STATUS_INVALID_HANDLE
+            : code === ERROR_NO_TOKEN ? STATUS_NO_TOKEN : STATUS_ACCESS_VIOLATION);
 
     /**
      * The access an object's DACL grants a token, as both AccessCheck (a
@@ -2089,6 +2116,21 @@ export function createTokenFunctions(host){
                 argBytes: 16,
                 /** @param {number[]} args */
                 handler: ([process, , , out])=>statusOf(openProcessToken(process, out)),
+            },
+            /**
+             * NTSTATUS NtOpenThreadToken(HANDLE Thread, ACCESS_MASK, BOOLEAN OpenAsSelf,
+             *   PHANDLE TokenHandle), and the Ex form with HandleAttributes: a
+             *   thread not impersonating is STATUS_NO_TOKEN.
+             */
+            NtOpenThreadToken: {
+                argBytes: 16,
+                /** @param {number[]} args */
+                handler: ([thread, , , out])=>statusOf(openThreadToken(thread, out)),
+            },
+            NtOpenThreadTokenEx: {
+                argBytes: 20,
+                /** @param {number[]} args */
+                handler: ([thread, , , , out])=>statusOf(openThreadToken(thread, out)),
             },
             NtAdjustPrivilegesToken: {
                 argBytes: 24,
@@ -2766,22 +2808,8 @@ export function createTokenFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([thread, , , out])=>{
-                const named = threadNamed(thread);
-                if (named === null)
-                {
-                    return fail(ERROR_INVALID_HANDLE);
-                }
-                const token = impersonating.get(named);
-                if (!token)
-                {
-                    return fail(ERROR_NO_TOKEN);
-                }
-                if ((out >>> 0) === 0)
-                {
-                    return fail(ERROR_INVALID_PARAMETER);
-                }
-                writeDword(out >>> 0, host.handles.open('token', token));
-                return 1;
+                const code = openThreadToken(thread, out);
+                return code === ERROR_SUCCESS ? 1 : fail(code);
             },
         },
 

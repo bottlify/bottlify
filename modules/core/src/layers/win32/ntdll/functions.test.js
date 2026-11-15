@@ -95,6 +95,25 @@ function fakeHost({ registers = true } = {}){
     };
 }
 
+test('NtQueryObject names a kernel object under its session\'s object directory', ()=>{
+    // om.c: an event made as "wine_test" is \Sessions\1\BaseNamedObjects\wine_test,
+    // one made with no name has an empty name, not a refusal.
+    const host = fakeHost();
+    const fns = createNtdllFunctions({ ...host,
+        handleType: handle=>(handle === 0x44 || handle === 0x48 ? 'event' : null),
+        namedObjectName: handle=>(handle === 0x44 ? 'wine_test' : null),
+    });
+    const BUFFER = 0x800;
+    const expected = '\\Sessions\\1\\BaseNamedObjects\\wine_test';
+    assert.equal(fns.NtQueryObject.handler([0x44, 1, BUFFER, 0x200, 0]), 0);
+    const view = new DataView(host.bytes.buffer);
+    assert.equal(view.getUint16(BUFFER, true), expected.length * 2);
+    assert.equal(String.fromCharCode(...Array.from({ length: expected.length },
+        (_, at)=>view.getUint16(BUFFER + 8 + at * 2, true))), expected);
+    assert.equal(fns.NtQueryObject.handler([0x48, 1, BUFFER, 0x200, 0]), 0);
+    assert.equal(view.getUint16(BUFFER, true), 0, 'no name: an empty string');
+});
+
 test('the heap family is the very entry kernel32 exports, not a copy of it', ()=>{
     // A program allocates through RtlAllocateHeap and frees through HeapFree in
     // the same breath. Two allocators would each refuse the other's pointers, and

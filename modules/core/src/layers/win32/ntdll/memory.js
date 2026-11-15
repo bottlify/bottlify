@@ -21,6 +21,9 @@ import { memoryBasicInformation } from '../kernel32/heap.js';
 /** A page; the native calls report what they did in whole ones. */
 const PAGE = 0x1000;
 
+/** GetCurrentProcess()'s pseudo-handle, the one process whose write watches are kept. */
+const CURRENT_PROCESS = 0xffffffff;
+
 /** VirtualQuery's MEMORY_BASIC_INFORMATION, the one information class kept. */
 const MEMORY_BASIC_INFORMATION = 0;
 
@@ -309,5 +312,55 @@ export function createMemoryFunctions(host){
             handler: args=>settled(kernel32.WriteProcessMemory.handler(args),
                 (wrote, error)=>(wrote ? STATUS.SUCCESS : failure(error))),
         },
+
+        /**
+         * NTSTATUS NtFlushInstructionCache(HANDLE ProcessHandle, PVOID BaseAddress,
+         *     SIZE_T Length): FlushInstructionCache's work - code written over is
+         *     translated again - answered as a status. A JIT or a patcher calls
+         *     either name.
+         */
+        ...(kernel32.FlushInstructionCache ? { NtFlushInstructionCache: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: args=>settled(kernel32.FlushInstructionCache.handler(args),
+                (flushed, error)=>(flushed ? STATUS.SUCCESS : failure(error))),
+        } } : {}),
+
+        /**
+         * NTSTATUS NtGetWriteWatch(HANDLE ProcessHandle, ULONG Flags, PVOID BaseAddress,
+         *     SIZE_T RegionSize, PVOID *UserAddressArray, PULONG_PTR EntriesInUserAddressArray,
+         *     PULONG Granularity): GetWriteWatch for this process, a status
+         *     rather than its (UINT)-1.
+         */
+        ...(kernel32.GetWriteWatch ? { NtGetWriteWatch: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: ([process, flags, base, size, addresses, count, granularity])=>{
+                if ((process >>> 0) !== CURRENT_PROCESS)
+                {
+                    return STATUS.INVALID_HANDLE;
+                }
+                return settled(kernel32.GetWriteWatch.handler(
+                    [flags, base, size, addresses, count, granularity]),
+                (answer, error)=>((answer >>> 0) === 0 ? STATUS.SUCCESS : failure(error)));
+            },
+        } } : {}),
+
+        /**
+         * NTSTATUS NtResetWriteWatch(HANDLE ProcessHandle, PVOID BaseAddress,
+         *     SIZE_T RegionSize)
+         */
+        ...(kernel32.ResetWriteWatch ? { NtResetWriteWatch: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([process, base, size])=>{
+                if ((process >>> 0) !== CURRENT_PROCESS)
+                {
+                    return STATUS.INVALID_HANDLE;
+                }
+                return settled(kernel32.ResetWriteWatch.handler([base, size]),
+                    (answer, error)=>((answer >>> 0) === 0 ? STATUS.SUCCESS : failure(error)));
+            },
+        } } : {}),
     };
 }
