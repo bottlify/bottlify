@@ -142,11 +142,13 @@ export const PARAMS = Object.freeze({
 });
 
 /**
- * The parameter block holds pointers into itself rather than elsewhere, and
- * says so with this flag. A runtime that finds it clear treats every pointer in
- * the block as an offset instead, and reads from near address zero.
+ * The parameter block holds pointers rather than offsets from its start, and
+ * says so with RTL_USER_PROC_PARAMS_NORMALIZED. A runtime that finds it clear
+ * treats every pointer in the block as an offset and adds the block's address
+ * to it: RtlCreateProcessParameters copying this process's directory read far
+ * past the block.
  */
-const PARAMS_NORMALIZED = 0x80000000;
+const PARAMS_NORMALIZED = 0x1;
 
 /** Where the parameter block sits inside the process block's own allocation. */
 const PARAMS_OFFSET = 0x300;

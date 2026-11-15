@@ -263,7 +263,8 @@ test('the process block points at its parameters, and they say they are normalis
     const { peb, params } = build(memory);
 
     assert.equal(memory.view.getUint32(peb + PEB.PROCESS_PARAMETERS, true), params);
-    assert.notEqual(memory.view.getUint32(params + PARAMS.FLAGS, true) & 0x80000000, 0);
+    assert.notEqual(memory.view.getUint32(params + PARAMS.FLAGS, true) & 0x1, 0,
+        'RTL_USER_PROC_PARAMS_NORMALIZED: pointers, not offsets');
     assert.equal(memory.view.getUint32(peb + PEB.IMAGE_BASE_ADDRESS, true), 0x00400000);
 });
 
