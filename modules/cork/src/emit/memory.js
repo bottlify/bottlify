@@ -1508,8 +1508,16 @@ function entryTests({ blocks, children, joined, placesOf, next, word }, s, reach
 function freshValues(next, regs = 8){
     const n = next.n;
     next.n += regs;
-    return { sym: Array.from({ length: regs }, (_, r)=>n + r), delta: new Array(regs).fill(0),
-        next };
+    // A loop, not `Array.from` with a mapping function: that is V8's generic path,
+    // a twelfth as fast, and every block's plan starts from these.
+    const sym = new Array(regs);
+    const delta = new Array(regs);
+    for (let r = 0; r < regs; r++)
+    {
+        sym[r] = n + r;
+        delta[r] = 0;
+    }
+    return { sym, delta, next };
 }
 
 /** @param {Values} values @returns {Values} */

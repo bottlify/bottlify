@@ -192,6 +192,11 @@ const SIMD_SCALAR = new Map([
     [91, { kind: 'i64', store: true, lane: 29 }],
 ]);
 
+/** A body's touched locals before it touches one: shared, never written. */
+const UNTOUCHED = new Uint8Array(0);
+/** Up to how many bytes `insertAll` copies a piece by hand. */
+const SMALL_COPY = 32;
+
 /**
  * An instruction stream, with the block nesting checked as it is written.
  *
@@ -214,8 +219,10 @@ export class Body {
         /** Bytes written. */
         this.length = 0;
         this.depth = 0;
-        /** By local index: 1 when the body reads or writes it, 2 when it writes it. */
-        this.touched = new Uint8Array(64);
+        /** By local index: 1 when the body reads or writes it, 2 when it writes it; made at
+         * the first local touched, as a region makes a body for every way out and most
+         * touch none. */
+        this.touched = UNTOUCHED;
         /** Where the branches marked unlikely start, in bytes. @type {number[]} */
         this.hints = [];
         /**
@@ -259,7 +266,7 @@ export class Body {
     touch(index, how){
         if (index >= this.touched.length)
         {
-            const grown = new Uint8Array(Math.max(index + 1, this.touched.length * 2));
+            const grown = new Uint8Array(Math.max(index + 1, 64, this.touched.length * 2));
             grown.set(this.touched);
             this.touched = grown;
         }
@@ -403,7 +410,20 @@ export class Body {
             }
             written += at - from;
             from = at;
-            out.set(body.buffer.subarray(0, body.length), written);
+            const { buffer, length } = body;
+            if (length <= SMALL_COPY)
+            {
+                // Most pieces are a few loads or stores: copied by hand, not through a view
+                // made of each.
+                for (let k = 0; k < length; k++)
+                {
+                    out[written + k] = buffer[k];
+                }
+            }
+            else
+            {
+                out.set(buffer.subarray(0, length), written);
+            }
             for (const one of body.hints)
             {
                 hints.push(one + written);
