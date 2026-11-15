@@ -76,7 +76,10 @@ const READ_MAX = 1 << 20;
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {{ allocate: (bytes: number) => number, free: (address: number) => unknown,
  *              block: (address: number) => { size: number } | null }} heap
- *           Task memory and, being the same heap, HGLOBALs.
+ *           Task memory and, being the same heap, a fixed HGLOBAL.
+ * @property {() => import('../kernel32/moveable.js').GlobalMemory | undefined} [globalMemory]
+ *           kernel32's global family, through which a moveable HGLOBAL's
+ *           bytes are found.
  * @property {(object: number, slot: number, args: number[], thread?: unknown)
  *     => Promise<number>} callMethod
  * @property {(object: number, iid: string, thread: unknown) => Promise<number>} queryPointer
@@ -439,21 +442,40 @@ export function createOleUtil(env){
     };
 
     /**
+     * Where an HGLOBAL's bytes are and how many: a moveable handle's block
+     * through kernel32's global family, a fixed one itself; null for a handle
+     * that is neither.
+     *
+     * @param {number} handle
+     * @returns {{ at: number, size: number } | null}
+     */
+    const globalBytes = handle=>{
+        const memory = env.globalMemory?.();
+        const at = memory?.isHandle(handle >>> 0) ? memory.pointer(handle >>> 0) : handle >>> 0;
+        if (at === 0)
+        {
+            return memory?.has(handle >>> 0) ? { at: 0, size: 0 } : null;
+        }
+        const block = env.heap.block(at);
+        return block ? { at, size: block.size } : null;
+    };
+
+    /**
      * A copy of an HGLOBAL's bytes in a block of its own; 0 for a handle
      * that is no block, or no memory.
      *
      * @param {number} handle
      */
     const copyGlobal = handle=>{
-        const block = env.heap.block(handle >>> 0);
-        if (!block)
+        const bytes = globalBytes(handle);
+        if (!bytes)
         {
             return 0;
         }
-        const copy = env.heap.allocate(Math.max(block.size, 1)) >>> 0;
-        if (copy !== 0)
+        const copy = env.heap.allocate(Math.max(bytes.size, 1)) >>> 0;
+        if (copy !== 0 && bytes.size !== 0)
         {
-            env.writeMemory(copy, env.readMemory(handle >>> 0, block.size).slice());
+            env.writeMemory(copy, env.readMemory(bytes.at, bytes.size).slice());
         }
         return copy;
     };
@@ -487,13 +509,13 @@ export function createOleUtil(env){
             }
             case TYMED.MFPICT:
             {
-                const picture = env.heap.block(handle >>> 0);
+                const picture = globalBytes(handle);
                 if (!picture || picture.size < METAFILEPICT_SIZE)
                 {
                     return 0;
                 }
                 const metafile = await system('GDI32.dll', 'CopyMetaFileW',
-                    [readU32(handle + METAFILEPICT_HANDLE), 0], thread);
+                    [readU32(picture.at + METAFILEPICT_HANDLE), 0], thread);
                 if (!metafile)
                 {
                     if (metafile === null)
@@ -516,7 +538,7 @@ export function createOleUtil(env){
 
     return {
         readU32, readU16, writeU32, writeU16, writeWords, wideBytes, readWide, lend, lendWide,
-        lendGuid, system, sayOnce, registerFormat, formatName, withScratch, release,
+        lendGuid, system, sayOnce, registerFormat, formatName, withScratch, release, globalBytes,
         storageClass, openStream, readStream, writeStream, readFormat, writeFormat, formatsOf,
         tymedOf, copyGlobal, duplicate,
     };

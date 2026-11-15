@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { formatGuid, parseGuid } from './guid.js';
 import { createComRegistry } from './objects.js';
+import { createGlobalMemory } from '../kernel32/moveable.js';
 import { parseCompoundFile, serializeCompoundFile, createRoot } from './cfb.js';
 import {
     IID_IENUMSTATSTG, IID_ISEQUENTIALSTREAM, IID_ISTORAGE, IID_ISTREAM, STGM,
@@ -1159,3 +1160,55 @@ test('a docfile opened direct single-writer is read beside it, and its writer ho
             ?.interfaceFor('{0E6D4D92-6738-11CF-9608-00AA00680DB4}'));
         host.release(host.u32(OUT));
     });
+
+test('a memory stream over a moveable handle grows its block under the same handle', ()=>{
+    // CreateStreamOnHGlobal of GlobalAlloc(GMEM_MOVEABLE): the handle is an
+    // entry of kernel32's table, its block found and grown through it.
+    const { host, fns, call } = setup();
+    const memory = createGlobalMemory({
+        allocate: bytes=>host.heap.allocate(bytes),
+        free: address=>host.heap.free(address),
+        block: address=>{
+            const found = host.heap.block(address);
+            return found ? { address, size: found.size } : null;
+        },
+        reallocate: (block, wanted)=>{
+            const moved = host.heap.allocate(wanted);
+            const kept = Math.min(block.size, wanted);
+            host.bytes.copyWithin(moved, block.address, block.address + kept);
+            host.heap.free(block.address);
+            return moved;
+        },
+        zero: (address, length)=>host.bytes.fill(0, address, address + length),
+        writeMemory: (address, data)=>host.bytes.set(data, address),
+        setLastError: ()=>{},
+        userInfo: new Map(),
+    });
+    /** @type {any} */ (host).globalMemory = ()=>memory;
+
+    const handle = memory.global.allocate(0x2, 3);
+    assert.equal(handle % 8, 4, 'a moveable handle');
+    host.bytes.set(Uint8Array.of(7, 8, 9), memory.pointer(handle));
+    assert.equal(fns.CreateStreamOnHGlobal.handler([handle, 0, OUT]), S_OK);
+    const stream = host.u32(OUT);
+    assert.equal(call(stream, 'Read', [BUFFER, 10, COUNT]), S_OK);
+    assert.equal(host.u32(COUNT), 3, 'the handle\'s block is the stream');
+    assert.deepEqual(host.bytes.slice(BUFFER, BUFFER + 3), Uint8Array.of(7, 8, 9));
+
+    const data = new Uint8Array(500).map((_, index)=>index & 0xff);
+    host.bytes.set(data, BUFFER);
+    assert.equal(call(stream, 'Write', [BUFFER, data.length, COUNT]), S_OK);
+    assert.equal(fns.GetHGlobalFromStream.handler([stream, OUT2]), S_OK);
+    assert.equal(host.u32(OUT2), handle, 'the same handle after it grew');
+    const at = memory.pointer(handle);
+    assert.deepEqual(host.bytes.slice(at + 3, at + 503), data, 'its block holds the bytes');
+    host.release(stream);
+    assert.ok(memory.has(handle), 'kept, as asked');
+
+    assert.equal(fns.CreateStreamOnHGlobal.handler([0, 1, OUT]), S_OK);
+    const made = host.u32(OUT);
+    assert.equal(fns.GetHGlobalFromStream.handler([made, OUT2]), S_OK);
+    assert.equal(host.u32(OUT2) % 8, 4, 'one it makes is moveable, as Windows makes it');
+    assert.equal(call(made, 'Write', [BUFFER, 0, COUNT]), S_OK, 'nothing written into nothing');
+    host.release(made);
+});

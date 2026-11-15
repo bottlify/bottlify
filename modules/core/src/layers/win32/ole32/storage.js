@@ -1536,7 +1536,10 @@ export function createStorageFunctions(host){
             entry: null,
             handle: ()=>handle,
             size: ()=>(alive() ? size : 0),
-            read: (offset, length)=>host.readMemory(at() + offset, length).slice(),
+            // Nothing is read or written for no bytes: a moveable handle's
+            // block is NULL while it is empty.
+            read: (offset, length)=>(length === 0 ? new Uint8Array(0)
+                : host.readMemory(at() + offset, length).slice()),
             write: (offset, bytes)=>{
                 if (!alive() || !grow(offset + bytes.length))
                 {
@@ -1546,7 +1549,10 @@ export function createStorageFunctions(host){
                 {
                     host.fillMemory(at() + size, 0, offset - size);
                 }
-                host.writeMemory(at() + offset, bytes);
+                if (bytes.length !== 0)
+                {
+                    host.writeMemory(at() + offset, bytes);
+                }
                 size = Math.max(size, offset + bytes.length);
                 return true;
             },

@@ -374,13 +374,16 @@ export function createClipboardFunctions(env){
                             {
                                 return handle;
                             }
-                            const from = env.heap.block(handle)?.size ?? 0;
-                            const room = env.heap.block(target)?.size ?? 0;
-                            if (from > room)
+                            const from = util.globalBytes(handle);
+                            const to = util.globalBytes(target);
+                            if ((from?.size ?? 0) > (to?.size ?? 0))
                             {
                                 return STG_E_MEDIUMFULL;
                             }
-                            env.writeMemory(target, env.readMemory(handle, from).slice());
+                            if (from && to && from.size !== 0)
+                            {
+                                env.writeMemory(to.at, env.readMemory(from.at, from.size).slice());
+                            }
                             return S_OK;
                         },
                     },
