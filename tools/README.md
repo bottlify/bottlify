@@ -217,16 +217,18 @@ by kind, an executed guest instruction: other 0.935 (31.8%), branch 0.606 (20.6%
 
 From `cork-asm.mjs --bin modules/cork/bench/micro/images/crc-x87.bin --at 0x401000 --entry 0x401160 --blocks crc-x87.blocks.json --classes`. "per x86" is machine instructions a guest instruction becomes in the code as compiled; "weighted" the same over what ran. The kinds line says where the instructions go besides the guest's own work (branch, memory, frame spills). The host here is arm64 (this VM).
 
-### What does translating cost, to the instruction, and did a change to the emitter make it cheaper?
+### What does translating cost, to the instruction: a pass, its forming and emitting, and the price of a region, a block, a call and any other instruction?
 
 [`translator/emit-count.mjs`](translator/emit-count.mjs): `node tools/translator/emit-count.mjs --qemu DIR [--root DIR]... [--regions N] [--warm W] [--reps R]`
 
 ```
-4dae6081^: 903.3 M instructions a pass of work (js 781.7, gc 5.9, other 115.8), passes 892.3..928.9; 8363946 a region; compiles 70.8 a pass; 108 regions, 912195 wasm bytes
-4dae6081: 774.4 M instructions a pass of work (js 671.1, gc 5.6, other 97.8), passes 756.4..805.0; 7170805 a region; compiles 71.5 a pass; 108 regions, 912195 wasm bytes; 0.8573 of the first
+<base>: 2042.4 M instructions a pass of work (forming 474.1, emitting 1568.3), passes 2018.9..2086.7; compiles 104.3 a pass; 306 regions, 2657564 wasm bytes
+  forming  price list (R^2 0.901, a region's error 25.9% at the median): region -59.8k (-4%), block -5.9k (-10%), call 116.5k (57%), ret 163.1k (14%), jmp 32.5k (7%), other 7.0k (36%)
+  emitting price list (R^2 0.978, a region's error 10.8% at the median): region 313.1k (6%), block 15.1k (8%), call 152.2k (23%), ret 222.2k (6%), jmp -0.5k (-0%), other 36.6k (57%)
+<helper lookup by looks>: 1915.8 M instructions a pass of work (forming 341.3, emitting 1574.5), passes 1891.4..1964.1; compiles 104.3 a pass; 306 regions, 2657564 wasm bytes; 0.9380 of the first
 ```
 
-From `emit-count.mjs --qemu <qemu 8.2.2 built with plugins> --root <4dae6081^> --root <4dae6081>, node 22.22.0, default 40 passes of warm-up and 8 counted: the commit that made the emitter's sets of locals bit sets`. "work" is what a pass of 108 regions costs without V8's optimising compiles, whose moments jump from pass to pass; it is the same in every run of a tree, and arms are compared by it ("of the first"). "passes" is the spread of the counted passes, the size of a difference that says nothing; the wasm bytes say whether the emitted code changed too.
+From `emit-count.mjs --qemu <qemu 8.2.2 built with plugins> --root <1851609d> --root <its helperAt keyed by looks> --regions 10 --warm 15 --reps 3, node 22.22.0`. "work" is what a pass costs without V8's optimising compiles, whose moments jump from pass to pass; it is the same in every run of a tree, and arms are compared by it ("of the first"); "passes" is the spread of the counted passes. The price lists are least squares over every region's own count: what one more region, block (with the jump that ends it), call, return, jump or other instruction costs in machine instructions, and its share of the part. Forming's fit is loose (its cost hangs on what the shared decoding already found); emitting's is close: the cost is the sum of those prices, nothing growing with a region's size. A negative price is a term the others absorb.
 
 ### How much resident memory does a translated module cost past its bytes, compiled lazily, by the baseline compiler or by the optimising one?
 
