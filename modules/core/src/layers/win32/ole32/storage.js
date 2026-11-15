@@ -220,6 +220,10 @@ const MAX_PATH = 260;
  * @property {(thread: unknown) => Promise<number>} [push]
  *           Writes the tree out to an ILockBytes the program implemented,
  *           through its methods; `lockBytes` is then the copy written into.
+ * @property {(thread: unknown) => Promise<unknown>} [release]
+ *           Lets go of that ILockBytes, once the last object has gone and the
+ *           tree was written: waited on inside the last Release, so the
+ *           program's count is down before its own Release returns.
  */
 
 /**
@@ -1274,14 +1278,22 @@ export function createStorageFunctions(host){
             state,
             // The last object over a docfile in a program's ILockBytes
             // writes it there inside the Release, which the program waits on.
-            lastRelease: state.document.push ? async()=>{
+            lastRelease: state.document.push || state.document.release ? async()=>{
                 const document = state.document;
-                if (document.objects === 1 && document.push && !document.deleteOnRelease)
+                if (document.objects !== 1)
+                {
+                    return;
+                }
+                const caller = host.callerThread?.();
+                if (document.push && !document.deleteOnRelease)
                 {
                     flush(document);
-                    await document.push(host.callerThread?.());
+                    await document.push(caller);
                     document.push = undefined;
                 }
+                const release = document.release;
+                document.release = undefined;
+                await release?.(caller);
             } : undefined,
             interfaces: [{ id: IID_ISTORAGE, methods: storageMethods() },
                 ...(host.propertySetMethods
@@ -1778,8 +1790,13 @@ export function createStorageFunctions(host){
                         written ||= hr >= 0;
                         return hr;
                     }),
+                release: caller=>callGuest(pointer, SLOT_LOCKBYTES.RELEASE, [], caller),
+                // The last object was a stream, which has no Release of its
+                // own to wait in: let go of the ILockBytes all the same.
                 done: ()=>{
-                    void callGuest(pointer, SLOT_LOCKBYTES.RELEASE, [], host.callerThread?.());
+                    const release = document.release;
+                    document.release = undefined;
+                    void release?.(host.callerThread?.());
                 },
             };
             flush(document);

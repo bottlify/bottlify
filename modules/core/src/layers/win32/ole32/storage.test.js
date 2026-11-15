@@ -756,6 +756,60 @@ test('a docfile in a program\'s ILockBytes is read from it and written back thro
             [lockBytes, STGM.CREATE | RW, 0, OUT]), STG_E_INVALIDFUNCTION);
     });
 
+test('the last Release of a docfile in a program\'s ILockBytes lets go of it before it returns',
+    async()=>{
+        // storage32.c test lock bytes: the program counts its references the
+        // moment the storage's last Release comes back, so its own Release
+        // is waited on there, as the write-back before it is.
+        const { host, fns } = setup();
+        let contents = new Uint8Array(0);
+        let released = 0;
+        const lockBytes = host.guestObject([
+            ()=>0, ()=>2,
+            ()=>{
+                released++;
+                return 1;
+            },
+            ([, offset, , buffer, length, count])=>{
+                const data = contents.subarray(offset, offset + length);
+                host.bytes.set(data, buffer);
+                host.putU32(count, data.length);
+                return 0;
+            },
+            ([, offset, , buffer, length, count])=>{
+                const grown = new Uint8Array(Math.max(contents.length, offset + length));
+                grown.set(contents);
+                grown.set(host.bytes.subarray(buffer, buffer + length), offset);
+                contents = grown;
+                host.putU32(count, length);
+                return 0;
+            },
+            ()=>0,
+            ([, size])=>{
+                const resized = new Uint8Array(size);
+                resized.set(contents.subarray(0, size));
+                contents = resized;
+                return 0;
+            },
+            ()=>0, ()=>0,
+            ([, stat])=>{
+                host.putU32(stat + 8, contents.length);
+                return 0;
+            },
+        ]);
+        assert.equal(await fns.StgCreateDocfileOnILockBytes.handler(
+            [lockBytes, STGM.CREATE | RW, 0, OUT]), S_OK);
+        const storage = host.objectAt(host.u32(OUT));
+        assert.equal(released, 0, 'held while the storage is open');
+        // What the vtable's Release does with a last reference: wait on
+        // lastRelease, then drop the count.
+        assert.equal(storage.refCount, 1);
+        await storage.lastRelease?.();
+        assert.equal(released, 1, 'let go of inside the Release the program waits on');
+        storage.release();
+        assert.equal(released, 1, 'and only once');
+    });
+
 test('a memory stream lives in a global block the program can lock', ()=>{
     const { host, fns, call } = setup();
     assert.equal(fns.CreateStreamOnHGlobal.handler([0, 1, OUT]), S_OK);
