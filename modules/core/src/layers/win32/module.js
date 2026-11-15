@@ -4614,15 +4614,16 @@ export function createWin32Module(){
                             journal.write('trace', 'input.activate', '{0}', text);
                         }
                     },
-                    dispatch: (wndProc, message, thread)=>bridge.callGuest({
-                        entry: wndProc,
+                    dispatch: (wndProc, message, thread, guarded)=>{
                         // The four arguments a window procedure declares, in
                         // order: at 64 bits a WPARAM widens as the UINT it is
                         // kept as, an LPARAM as the LONG (`callback.js`).
-                        args: [message.hwnd >>> 0, message.message >>> 0,
-                            message.wParam >>> 0, message.lParam | 0],
-                        thread,
-                    }),
+                        const args = [message.hwnd >>> 0, message.message >>> 0,
+                            message.wParam >>> 0, message.lParam | 0];
+                        return guarded
+                            ? callGuarded({ entry: wndProc, args, thread, failed: 0 })
+                            : bridge.callGuest({ entry: wndProc, args, thread });
+                    },
                     call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
                     callerThread: ()=>bridge.callerThread(),
                     answering: (thread, fn)=>bridge.answering(thread, fn),

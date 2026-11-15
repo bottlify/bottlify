@@ -737,18 +737,27 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
          */
         transfer(thread, registers, below){
             const target = (below ?? registers.esp) >>> 0;
-            const suspended = hostCalls(thread);
-            while (suspended.length > 0
-                && (suspended[suspended.length - 1].restingStack >>> 0) <= target)
-            {
-                suspended.pop();
-                pending--;
-            }
             const frames = callbackFrames(thread);
             while (frames.length > 0
                 && (frames[frames.length - 1].frameBase >>> 0) < target)
             {
                 frames.pop();
+            }
+            // A host call goes with the stack it rests on, and so does one
+            // resting inside the frame of the innermost callback left
+            // standing: only that callback's routine can have made it, and the
+            // thread leaves it. It lies above the target when the routine
+            // ended in a jump to an import (`jmp RaiseException`), handing it
+            // its own return and arguments; the call that built the frame
+            // rests at its extent or above.
+            const within = (frames.at(-1)?.extent ?? 0) >>> 0;
+            const suspended = hostCalls(thread);
+            while (suspended.length > 0
+                && ((suspended[suspended.length - 1].restingStack >>> 0) <= target
+                    || (suspended[suspended.length - 1].restingStack >>> 0) < within))
+            {
+                suspended.pop();
+                pending--;
             }
             awaitHost(thread, false);
             if (answered)

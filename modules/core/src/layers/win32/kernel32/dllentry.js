@@ -95,8 +95,15 @@ export function createGuardedCaller(host){
                     (host.readU32(record + 12) >>> 0).toString(16));
                 return host.unwind(frame >>> 0, call.resume,
                     { record: record >>> 0, thread: call.thread })
-                    .then(()=>host.continueAt({ eip: call.resume, esp: call.frameBase },
-                        { below: call.frameBase }));
+                    .then(()=>{
+                        // The routine's own return, as the call was built: one
+                        // that ended in a jump to an import (`jmp
+                        // RaiseException`) gave that call its return slot, and
+                        // a host call that waits has the park written there.
+                        host.writeU32(call.frameBase, call.returnTo);
+                        return host.continueAt({ eip: call.resume, esp: call.frameBase },
+                            { below: call.frameBase });
+                    });
             },
         });
     };
@@ -128,7 +135,10 @@ export function createGuardedCaller(host){
             guarded.delete(record);
             host.writeU32(teb, previous);
         };
-        return host.callGuest({ entry, args, thread, stackAtRest: record })
+        const called = host.callGuest({ entry, args, thread, stackAtRest: record });
+        // Built by now: the bridge writes the frame before the call is sent.
+        /** @type {any} */ (guarded.get(record)).returnTo = host.readU32(frameBase) >>> 0;
+        return called
             .then(answer=>{
                 done();
                 return answer;

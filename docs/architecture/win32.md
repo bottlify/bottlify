@@ -88,7 +88,11 @@ sequenceDiagram
   stack.
 - **Callbacks:** a window procedure, a COM callback, `DllMain`. The bridge stops the thread, builds a
   frame on the program's stack and runs the program's code until it returns into a sentinel trap.
-  A host call that calls the program back many times in a row (a D3DX effect's pass setting each
+  Where Windows calls the program inside an `__except` of its own (`DllMain` in the loader, a COM
+  method a stub runs for another process, a `TIMERPROC` in `DispatchMessage`), the host puts a
+  frame of its own on the chain just above the callback (`kernel32/dllentry.js`): an exception the
+  routine leaves unwinds to it and ends the call with a fixed answer instead of reaching the
+  caller's handlers. A host call that calls the program back many times in a row (a D3DX effect's pass setting each
   state through the program's own state manager) is written as steps (`bridge.drive`): a generator
   that yields each guest call. The bridge sends the thread into each routine in the slice the call
   came in and takes its answer at the sentinel there, with no park and no turn of the run loop
