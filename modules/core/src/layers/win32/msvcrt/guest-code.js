@@ -217,7 +217,8 @@ function x87Words(fpu){
 /**
  * @typedef {Object} GuestHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {(address: number, bytes: Uint8Array) => void} writeMemory  The bytes copied before it
+ *     returns: the helpers write every scalar from one buffer.
  * @property {(address: number, value: number, length: number) => void} [fillMemory]
  *     A range set to one byte in place, with no buffer of the length made.
  * @property {(fn: number, args: number[]) => number} [call]
@@ -246,16 +247,28 @@ export function guestMemory(host){
         const bytes = host.readMemory(address >>> 0, length);
         return new DataView(bytes.buffer, bytes.byteOffset, length);
     };
-    /** @param {number} address @param {number} length @param {(v: DataView) => void} fill */
+    // A scalar written goes through one buffer, its bytes copied out by the
+    // write: a handler answering a call that stores a character at a time
+    // (MultiByteToWideChar, a sort's swaps) made two objects a store, and in a
+    // 64-bit process, where these handlers answer every such call, that was
+    // most of what the call cost.
+    const scratch = new Uint8Array(8);
+    const scratchView = new DataView(scratch.buffer);
+    /** By length, the buffer's first bytes. @type {Record<number, Uint8Array>} */
+    const pieces = { 1: scratch.subarray(0, 1), 2: scratch.subarray(0, 2),
+        4: scratch.subarray(0, 4), 8: scratch };
+    /** @param {number} address @param {1 | 2 | 4 | 8} length @param {(v: DataView) => void} fill */
     const write = (address, length, fill)=>{
-        const bytes = new Uint8Array(length);
-        fill(new DataView(bytes.buffer));
-        host.writeMemory(address >>> 0, bytes);
+        fill(scratchView);
+        host.writeMemory(address >>> 0, pieces[length]);
     };
     /** @param {number} address */
     const u8 = address=>host.readMemory(address >>> 0, 1)[0];
     /** @param {number} address @param {number} value */
-    const setU8 = (address, value)=>host.writeMemory(address >>> 0, Uint8Array.of(value));
+    const setU8 = (address, value)=>{
+        scratch[0] = value;
+        host.writeMemory(address >>> 0, pieces[1]);
+    };
     return {
         u8,
         i8: address=>view(address, 1).getInt8(0),
