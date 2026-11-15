@@ -98,6 +98,9 @@ const MEDIA_TYPE = {
     MAJOR: 0x00, SUB: 0x10, FIXED: 0x20, TEMPORAL: 0x24, SAMPLE_SIZE: 0x28,
     FORMAT_TYPE: 0x2c, UNKNOWN: 0x3c, FORMAT_BYTES: 0x40, FORMAT: 0x44, BYTES: 0x48,
 };
+/** IPin's slots this calls on a peer, IUnknown's three counted. */
+const PIN = { QueryDirection: 9, EnumMediaTypes: 12 };
+
 /** ALLOCATOR_PROPERTIES: four LONGs. */
 const PROPERTIES_BYTES = 16;
 
@@ -521,7 +524,7 @@ export function createFilterBase(host){
         host.writeMemory(slot, dword(0));
         /** @type {MediaType[]} */
         const types = [];
-        if (!failed(await call(peer, 12, [slot])) && host.readU32(slot) !== 0)
+        if (!failed(await call(peer, PIN.EnumMediaTypes, [slot])) && host.readU32(slot) !== 0)
         {
             const enumTypes = host.readU32(slot);
             while (await call(enumTypes, 3, [1, slot + 4, 0]) === S_OK)
@@ -617,7 +620,7 @@ export function createFilterBase(host){
                 return VFW_E_TYPE_NOT_ACCEPTED;
             }
             const slot = host.allocate(4);
-            await call(peer >>> 0, 7, [slot]);
+            await call(peer >>> 0, PIN.QueryDirection, [slot]);
             const direction = host.readU32(slot);
             host.free(slot);
             if (direction !== PINDIR_OUTPUT)
