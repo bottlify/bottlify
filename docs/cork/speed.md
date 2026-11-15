@@ -53,13 +53,14 @@ Translated code is over twenty times faster than the interpreter, and even a run
 a second pays for its translation many times over.
 
 What translating itself costs is counted, not timed:
-[`tools/translator/emit-count.mjs`](../../tools/translator/emit-count.mjs) forms and emits a fixed
-set of 108 regions from the micro benchmark's 32-bit and x86-64 images, pass after pass under QEMU,
-and counts the machine instructions of a pass, without V8's own optimising compiles. A tree gives
-the same count in every run, so an emitter change of a per cent shows where a timed run on this
-machine varies by a tenth. Under Node 22.22.0, on 2026-11-15 at cork `39d13fe5`: 771 million
-instructions a pass, 7.1 million a region; the change that made the emitter's sets of locals bit
-sets took a pass from 903 to 774 million.
+[`tools/translator/emit-count.mjs`](../../tools/translator/emit-count.mjs) forms and emits regions
+of the micro benchmark's 32-bit and x86-64 images, as the runtime and its translation worker do,
+pass after pass under QEMU, and counts the machine instructions of each region's forming and
+emitting, without V8's own optimising compiles. A tree gives the same count in every run. The cost
+is a sum of prices, nothing in it growing with a region's size: emitting a region costs about
+310 thousand machine instructions, a call 150 thousand more, any other instruction 37 thousand;
+forming adds 7 to 9 thousand an instruction and most of its cost at calls. Under Node 22.22.0 on
+2026-11-15, 306 regions: 1.92 billion instructions a pass, forming 0.34, emitting 1.57.
 
 ## Against v86
 
