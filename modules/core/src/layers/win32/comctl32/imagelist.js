@@ -1410,6 +1410,16 @@ export function createImageLists(host){
         functions,
         drawEmbossed,
         /**
+         * An image list's image size, or null for a handle that is no list:
+         * what a version 6 button lays its content out by.
+         *
+         * @param {number} handle
+         */
+        sizeOf: handle=>{
+            const list = listOf(handle);
+            return list ? { cx: list.cx, cy: list.cy } : null;
+        },
+        /**
          * One image as an icon is made of: its colour bits as a 32-bit
          * device-dependent bitmap's, rows top first, and its mask's, each row
          * padded to a WORD -- black where the mask is set, as an icon's XOR

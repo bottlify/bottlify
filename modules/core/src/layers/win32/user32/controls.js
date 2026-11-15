@@ -33,6 +33,7 @@ import { CHECK_MARK, RADIO_DOT, RADIO_RING_DARK, RADIO_RING_LIGHT, layoutText } 
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { createTabWalk } from './tabwalk.js';
 import { directoryItems } from './dlgdir.js';
+import { createButtonV6 } from './button-v6.js';
 
 /** Messages the controls answer. */
 export const WM_CREATE = 0x0001;
@@ -158,6 +159,8 @@ const BM_GETSTATE = 0x00f2;
 const BM_SETSTATE = 0x00f3;
 const BM_SETSTYLE = 0x00f4;
 const BM_CLICK = 0x00f5;
+const BM_GETIMAGE = 0x00f6;
+const BM_SETIMAGE = 0x00f7;
 const BST_UNCHECKED = 0;
 const BST_CHECKED = 1;
 const BST_INDETERMINATE = 2;
@@ -694,6 +697,11 @@ export const imagePlace = (record, rect, shape)=>{
  *           The thread's caret, which an edit takes while it has the focus.
  *           Absent, an edit draws its own bar where typing goes.
  * @property {import('../kernel32/files.js').FileSystem} [files]
+ * @property {4 | 8} [pointerSize]  8 in a 64-bit process: a handle's width in a structure.
+ * @property {(code: number) => void} [setLastError]
+ * @property {(himl: number) => ({ cx: number, cy: number } | null)} [imageListSize]
+ *           An image list's image size (comctl32's), for a version 6 button's
+ *           ideal size. Absent, a button's list has no size.
  *           The volume LB_DIR and CB_DIR list. Absent, they list nothing.
  */
 
@@ -1350,11 +1358,58 @@ export function createControlProcedures(host){
     };
 
     /**
+     * The text of a button in its font, for its ideal size: through a
+     * context on the window, the only place its font can be asked.
+     *
+     * @param {any} record @param {string} text @param {number} [wrapAt]
+     */
+    const buttonTextExtent = (record, text, wrapAt)=>{
+        const draw = host.draw;
+        if (!draw)
+        {
+            return { width: text.length * 8, height: 16 };
+        }
+        const { hdc } = host.contextOn(record);
+        try
+        {
+            const metrics = draw.measure(hdc, 'M');
+            const lines = layoutText(text, { left: 0, top: 0, right: wrapAt ?? 0x7fff,
+                bottom: 0x7fff }, wrapAt === undefined ? 0 : DT_WORDBREAK, {
+                cellWidth: metrics.width, cellHeight: metrics.height,
+                width: (/** @type {string} */ piece)=>draw.measure(hdc, piece).width,
+            });
+            const widest = lines.reduce((most, line)=>
+                Math.max(most, draw.measure(hdc, line.text).width), 0);
+            return {
+                width: widest,
+                height: Math.max(lines.length, 1) * metrics.height,
+            };
+        }
+        finally
+        {
+            host.endPaint(record, hdc);
+        }
+    };
+    const buttonV6 = createButtonV6({
+        read: host.readMemory, write: host.writeMemory, pointerSize: host.pointerSize ?? 4,
+        imageListSize: himl=>host.imageListSize?.(himl) ?? null,
+        imageSize: image=>imageSize(image),
+        textExtent: buttonTextExtent,
+        clientSize: record=>host.clientSize(record),
+        setLastError: code=>host.setLastError?.(code),
+    });
+
+    /**
      * @param {any} record @param {ControlMessage} message @param {unknown} [thread]
      */
     const buttonProc = (record, message, thread)=>{
         const state = stateOf(record);
         const kind = buttonKind(record);
+        const six = buttonV6.answer(record, state, message);
+        if (six !== undefined)
+        {
+            return six;
+        }
         switch (message.message){
             case WM_PAINT:
                 if (kind === BS_OWNERDRAW)
@@ -1483,6 +1538,22 @@ export function createControlProcedures(host){
                 return 0;
             case BM_CLICK:
                 return clickButton(record, thread);
+            // The image a button holds, whatever its style says it shows:
+            // the one before is handed back, and a type that is neither a
+            // bitmap nor an icon is no image.
+            case BM_SETIMAGE: {
+                if (message.wParam !== IMAGE_BITMAP && message.wParam !== IMAGE_ICON)
+                {
+                    return 0;
+                }
+                const before = state.image?.handle ?? 0;
+                state.image = message.lParam === 0 ? null
+                    : { type: message.wParam, handle: message.lParam >>> 0 };
+                host.invalidate(record);
+                return before;
+            }
+            case BM_GETIMAGE:
+                return state.image && state.image.type === message.wParam ? state.image.handle : 0;
             default:
                 return common(record, message, thread);
         }

@@ -5302,6 +5302,8 @@ export function createWin32Module(){
                     // program with Common Controls 6 in its manifest makes
                     // version 6's Button (`actctx.js`).
                     windowClass: name=>activation.loaderApi.windowClass(name),
+                    // A version 6 button's image list, by comctl32's measure.
+                    imageListSize: himl=>imageLists.sizeOf(himl),
                     // The common controls are built-in classes of the window
                     // manager, built from the same host and drawing helpers its
                     // own system classes use: comctl32 owns their behaviour, not

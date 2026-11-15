@@ -620,6 +620,17 @@ test('under a context holding Common Controls 6 a class name makes version 6\'s 
     assert.equal(make('SysLink'), 0);
 });
 
+test('a program\'s class registered by a versioned name is found by it', ()=>{
+    // Wine's user32 class test (test_actctx_classes): a manifest's own
+    // window class, registered by its versioned name outside the context.
+    const { memory, fns } = setup();
+    putClass(memory, { name: '1.2.3.4!wndClass' });
+    assert.notEqual(fns.RegisterClassA.handler([CLASS_STRUCT]), 0);
+    assert.equal(fns.GetClassInfoA.handler([HINSTANCE, CLASS_NAME, TEXT_BUFFER]), 1);
+    assert.equal(memory.u32(TEXT_BUFFER + 4), WNDPROC);
+    assert.notEqual(createWindow(fns, memory, { className: CLASS_NAME }), 0);
+});
+
 test('GetClassInfoA on a class nobody registered writes nothing', ()=>{
     const { memory, fns } = setup();
     memory.putString(CLASS_NAME, 'Absent');
