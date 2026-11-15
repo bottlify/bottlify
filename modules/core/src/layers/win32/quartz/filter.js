@@ -156,6 +156,21 @@ const PIN_STREAM = { EndOfStream: 14, BeginFlush: 15, EndFlush: 16, NewSegment: 
  *           The graph's streaming thread: a sample pushed downstream, an end of
  *           stream, is a call made from it, in order, never from the thread
  *           of the call that started the streaming.
+ * @property {IcmHost} [icm]  The installable compressors, for the AVI Decompressor.
+ */
+
+/**
+ * The installable compressors as the host lends them: msvfw32's own entries,
+ * over guest memory.
+ *
+ * @typedef {Object} IcmHost
+ * @property {(type: number, handler: number, input: number, output: number, mode: number)
+ *     => number | Promise<number>} locate
+ * @property {(hic: number, message: number, first: number, second: number)
+ *     => number | Promise<number>} send
+ * @property {(hic: number) => number | Promise<number>} close
+ * @property {(hic: number, flags: number, format: number, data: number, output: number,
+ *     bits: number) => number | Promise<number>} decompress
  */
 
 /**
@@ -166,8 +181,9 @@ const PIN_STREAM = { EndOfStream: 14, BeginFlush: 15, EndFlush: 16, NewSegment: 
  * @property {string} [id]         QueryId's answer; the name where absent.
  * @property {'input' | 'output'} direction
  * @property {(pin: Pin) => MediaType[]} [types]  What the pin offers, in its order.
- * @property {(pin: Pin, type: MediaType) => boolean} [accepts]
- *           Whether a connection of this type would be taken; every type where absent.
+ * @property {(pin: Pin, type: MediaType) => boolean | Promise<boolean>} [accepts]
+ *           Whether a connection of this type would be taken; every type where
+ *           absent. A filter that asks something else (a codec) answers later.
  * @property {(pin: Pin, type: MediaType, peer: number) => number | Promise<number>} [connected]
  *           Told once a connection is made, before Connect or ReceiveConnection
  *           returns; an error undoes it.
@@ -175,6 +191,10 @@ const PIN_STREAM = { EndOfStream: 14, BeginFlush: 15, EndFlush: 16, NewSegment: 
  * @property {(pin: Pin, sample: number) => number | Promise<number>} [receive]
  *           An input pin's sample, the program's IMediaSample, one reference lent.
  * @property {(pin: Pin) => number | Promise<number>} [endOfStream]
+ * @property {(pin: Pin, begin: boolean) => number | Promise<number>} [flush]
+ *           An input pin's BeginFlush or EndFlush, after the pin's own state is set.
+ * @property {(pin: Pin, start: number, stop: number, rate: number) => number | Promise<number>}
+ *     [newSegment]  An input pin's NewSegment.
  * @property {{ buffers: number, size: number, align: number, prefix: number }
  *     | ((pin: Pin) => { buffers: number, size: number, align: number, prefix: number })}
  *     [allocator]  An output pin's buffers, asked of the allocator it connects with;
@@ -320,6 +340,18 @@ export function createFilterBase(host){
     };
 
     /**
+     * How a delivery is called: from the streaming thread, for a filter that
+     * streams on its own (a parser); on the calling thread, for one that
+     * passes on what it is given inside its own Receive (a transform), whose
+     * caller is the streaming thread already.
+     *
+     * @param {Pin} pin @param {boolean} direct
+     * @returns {(self: number, slot: number, args?: number[]) => Promise<number>}
+     */
+    const caller = (pin, direct)=>(direct ? call
+        : (self, slot, args = [])=>callStreaming(self, slot, args, pin.filter));
+
+    /**
      * Pushes one sample out of an output pin, as the base classes' output pin
      * delivers one: a buffer from the connection's allocator, the bytes and
      * what is said of them written into it, IMemInputPin::Receive on the peer,
@@ -327,32 +359,32 @@ export function createFilterBase(host){
      * failure tells the filter to stop pushing.
      *
      * @param {Pin} pin @param {Outgoing} sample
+     * @param {boolean} [direct]  On the calling thread rather than the streaming thread.
      * @returns {Promise<number>}
      */
-    const deliver = async(pin, sample)=>{
+    const deliver = async(pin, sample, direct = false)=>{
         if (pin.peer === 0 || pin.memInput === 0 || pin.allocator === 0)
         {
             return VFW_E_NOT_CONNECTED;
         }
-        const tag = pin.filter;
+        const invoke = caller(pin, direct);
         const scratch = host.allocate(24);
         host.writeMemory(scratch, dword(0));
-        const got = await callStreaming(pin.allocator, ALLOCATOR.GetBuffer, [scratch, 0, 0, 0],
-            tag);
+        const got = await invoke(pin.allocator, ALLOCATOR.GetBuffer, [scratch, 0, 0, 0]);
         const media = host.readU32(scratch);
         if (failed(got) || media === 0)
         {
             host.free(scratch);
             return failed(got) ? got : E_UNEXPECTED;
         }
-        await callStreaming(media, SAMPLE.GetPointer, [scratch + 4], tag);
+        await invoke(media, SAMPLE.GetPointer, [scratch + 4]);
         // GetSize answers the buffer's size itself, not an HRESULT; what does
         // not fit is not written, as a buffer's end is the allocator's.
-        const capacity = await callStreaming(media, SAMPLE.GetSize, [], tag) | 0;
+        const capacity = await invoke(media, SAMPLE.GetSize, []) | 0;
         const buffer = host.readU32(scratch + 4);
         const size = buffer === 0 ? 0 : Math.max(0, Math.min(sample.data.length, capacity));
         host.writeMemory(buffer, sample.data.subarray(0, size));
-        await callStreaming(media, SAMPLE.SetActualDataLength, [size], tag);
+        await invoke(media, SAMPLE.SetActualDataLength, [size]);
         if (sample.start !== undefined)
         {
             const times = new Uint8Array(16);
@@ -364,17 +396,17 @@ export function createFilterBase(host){
             view.setUint32(8, stopLow, true);
             view.setUint32(12, stopHigh, true);
             host.writeMemory(scratch + 8, times);
-            await callStreaming(media, SAMPLE.SetTime,
-                [scratch + 8, sample.stop === undefined ? 0 : scratch + 16], tag);
+            await invoke(media, SAMPLE.SetTime,
+                [scratch + 8, sample.stop === undefined ? 0 : scratch + 16]);
         }
-        await callStreaming(media, SAMPLE.SetSyncPoint, [sample.sync ? 1 : 0], tag);
-        await callStreaming(media, SAMPLE.SetDiscontinuity, [sample.discontinuity ? 1 : 0], tag);
+        await invoke(media, SAMPLE.SetSyncPoint, [sample.sync ? 1 : 0]);
+        await invoke(media, SAMPLE.SetDiscontinuity, [sample.discontinuity ? 1 : 0]);
         if (sample.preroll)
         {
-            await callStreaming(media, SAMPLE.SetPreroll, [1], tag);
+            await invoke(media, SAMPLE.SetPreroll, [1]);
         }
-        const answer = await callStreaming(pin.memInput, RECEIVE, [media], tag);
-        await callStreaming(media, VTABLE.Release, [], tag);
+        const answer = await invoke(pin.memInput, RECEIVE, [media]);
+        await invoke(media, VTABLE.Release, []);
         host.free(scratch);
         return answer;
     };
@@ -383,36 +415,36 @@ export function createFilterBase(host){
      * The end of an output pin's stream, told to its peer from the streaming
      * thread after every sample before it.
      *
-     * @param {Pin} pin
+     * @param {Pin} pin @param {boolean} [direct]
      */
-    const deliverEndOfStream = pin=>(pin.peer === 0 ? Promise.resolve(S_OK)
-        : callStreaming(pin.peer, PIN_STREAM.EndOfStream, [], pin.filter));
+    const deliverEndOfStream = (pin, direct = false)=>(pin.peer === 0 ? Promise.resolve(S_OK)
+        : caller(pin, direct)(pin.peer, PIN_STREAM.EndOfStream));
 
     /**
      * A new segment told downstream: the stream times that follow start at
      * `start` of the media and run to `stop`, at `rate`.
      *
      * @param {Pin} pin @param {number} start @param {number} stop @param {number} [rate]
+     * @param {boolean} [direct]
      */
-    const deliverNewSegment = (pin, start, stop, rate = 1)=>{
+    const deliverNewSegment = (pin, start, stop, rate = 1, direct = false)=>{
         if (pin.peer === 0)
         {
             return Promise.resolve(S_OK);
         }
         const double = new DataView(new ArrayBuffer(8));
         double.setFloat64(0, rate, true);
-        return callStreaming(pin.peer, PIN_STREAM.NewSegment, [...quad(start), ...quad(stop),
-            double.getUint32(0, true), double.getUint32(4, true)], pin.filter);
+        return caller(pin, direct)(pin.peer, PIN_STREAM.NewSegment, [...quad(start),
+            ...quad(stop), double.getUint32(0, true), double.getUint32(4, true)]);
     };
 
     /**
      * A flush told downstream, around the work a seek does while nothing flows.
      *
-     * @param {Pin} pin @param {boolean} begin
+     * @param {Pin} pin @param {boolean} begin @param {boolean} [direct]
      */
-    const deliverFlush = (pin, begin)=>(pin.peer === 0 ? Promise.resolve(S_OK)
-        : callStreaming(pin.peer, begin ? PIN_STREAM.BeginFlush : PIN_STREAM.EndFlush, [],
-            pin.filter));
+    const deliverFlush = (pin, begin, direct = false)=>(pin.peer === 0 ? Promise.resolve(S_OK)
+        : caller(pin, direct)(pin.peer, begin ? PIN_STREAM.BeginFlush : PIN_STREAM.EndFlush));
 
     /** @param {number} address @returns {MediaType} */
     const readMediaType = address=>{
@@ -658,7 +690,7 @@ export function createFilterBase(host){
      * @returns {Promise<boolean>}
      */
     const tryType = async(pin, peer, type)=>{
-        if (!pinAccepts(pin, type))
+        if (!await pinAccepts(pin, type))
         {
             return false;
         }
@@ -765,7 +797,7 @@ export function createFilterBase(host){
                 return VFW_E_NOT_STOPPED;
             }
             const type = readMediaType(given >>> 0);
-            if (!pinAccepts(pin, type))
+            if (!await pinAccepts(pin, type))
             {
                 return VFW_E_TYPE_NOT_ACCEPTED;
             }
@@ -869,12 +901,12 @@ export function createFilterBase(host){
             return S_OK;
         },
         /** HRESULT QueryAccept(const AM_MEDIA_TYPE *pmt) */
-        QueryAccept: (pin, [given])=>{
+        QueryAccept: async(pin, [given])=>{
             if ((given >>> 0) === 0)
             {
                 return E_POINTER;
             }
-            return pinAccepts(pin, readMediaType(given >>> 0)) ? S_OK : S_FALSE;
+            return await pinAccepts(pin, readMediaType(given >>> 0)) ? S_OK : S_FALSE;
         },
         /** HRESULT EnumMediaTypes(IEnumMediaTypes **ppEnum) */
         EnumMediaTypes: (pin, [out])=>{
@@ -905,7 +937,7 @@ export function createFilterBase(host){
                 return E_UNEXPECTED;
             }
             pin.flushing = true;
-            return S_OK;
+            return pin.spec.flush?.(pin, true) ?? S_OK;
         },
         EndFlush: pin=>{
             if (pin.spec.direction !== 'input')
@@ -914,9 +946,23 @@ export function createFilterBase(host){
             }
             pin.flushing = false;
             pin.ended = false;
-            return S_OK;
+            return pin.spec.flush?.(pin, false) ?? S_OK;
         },
-        NewSegment: pin=>(pin.spec.direction === 'input' ? S_OK : E_UNEXPECTED),
+        /**
+         * HRESULT NewSegment(REFERENCE_TIME tStart, REFERENCE_TIME tStop, double dRate)
+         */
+        NewSegment: (pin, [startLow, startHigh, stopLow, stopHigh, rateLow, rateHigh])=>{
+            if (pin.spec.direction !== 'input')
+            {
+                return E_UNEXPECTED;
+            }
+            const rate = new DataView(new ArrayBuffer(8));
+            rate.setUint32(0, rateLow >>> 0, true);
+            rate.setUint32(4, rateHigh >>> 0, true);
+            return pin.spec.newSegment?.(pin,
+                (startLow >>> 0) + (startHigh | 0) * 0x1_0000_0000,
+                (stopLow >>> 0) + (stopHigh | 0) * 0x1_0000_0000, rate.getFloat64(0, true)) ?? S_OK;
+        },
     };
 
     /** @type {Record<string, (pin: Pin, args: number[]) => number | Promise<number>>} */

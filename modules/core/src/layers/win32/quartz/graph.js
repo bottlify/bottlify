@@ -65,6 +65,7 @@ import { createFilterBase } from './filter.js';
 import { createFileSource } from './filesource.js';
 import { createRenderers } from './renderers.js';
 import { createParsers } from './splitters.js';
+import { createTransforms } from './transforms.js';
 
 /**
  * How far a name a program hands these is read: whole, as Windows reads it, up to
@@ -2154,7 +2155,8 @@ export function registerQuartzClasses(registry, host){
         registry.registerClass(CLSID_ASYNC_READER, createFileSource(base, host.filters,
             host.filters.files));
         for (const [clsid, define] of [...createRenderers(base, host.filters),
-            ...createParsers(base, host.filters)])
+            ...createParsers(base, host.filters),
+            ...host.filters.icm ? createTransforms(base, host.filters, host.filters.icm) : []])
         {
             registry.registerClass(clsid, define);
         }

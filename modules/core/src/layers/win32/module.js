@@ -1533,6 +1533,18 @@ export function createWin32Module(){
                         deliver: (entry, args, done, tag)=>
                             streamNotices.deliver(entry, args, done, tag),
                     },
+                    // The AVI Decompressor's codecs are msvfw32's installable
+                    // compressors, through the same entries a program calls.
+                    icm: {
+                        locate: (type, handler, input, output, mode)=>libraries['MSVFW32.dll']
+                            .ICLocate.handler([type, handler, input, output, mode]),
+                        send: (hic, message, first, second)=>libraries['MSVFW32.dll']
+                            .ICSendMessage.handler([hic, message, first, second]),
+                        close: hic=>libraries['MSVFW32.dll'].ICClose.handler([hic]),
+                        decompress: (hic, flags, format, data, output, bits)=>
+                            libraries['MSVFW32.dll'].ICDecompress
+                                .handler([hic, flags, format, data, output, bits]),
+                    },
                     readWideString: (address, maxLength)=>readWideString(address, maxLength),
                     allocate: bytes=>heap.allocate(bytes),
                     free: address=>heap.free(address),
