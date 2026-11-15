@@ -3066,3 +3066,36 @@ test('a bitmap made of bits this layer holds reads back those bits', ()=>{
         'nine pixels a line, padded to a WORD');
     assert.deepEqual([...memory.readMemory(OUT, 4)], [...bits]);
 });
+
+test('a path keeps an arc as curves, one a quarter of the ellipse', ()=>{
+    // Wine's path test_arcto and test_anglearc, within the two pixels they allow.
+    const { fns, memory, hdc } = withDC();
+    const AD_CLOCKWISE = 2;
+    const PT_LINETO = 2;
+    const PT_BEZIERTO = 4;
+    fns.BeginPath.handler([hdc]);
+    fns.SetArcDirection.handler([hdc, AD_CLOCKWISE]);
+    assert.equal(fns.ArcTo.handler([hdc, 200, 200, 400, 300, 200, 200, 400, 300]), 1);
+    fns.EndPath.handler([hdc]);
+    const count = fns.GetPath.handler([hdc, OUT, STRUCT, 64]);
+    assert.equal(count, 11, 'the line to the start and three curves of three points');
+    const types = [...memory.readMemory(STRUCT, count)];
+    assert.deepEqual(types.slice(1, 3), [PT_LINETO, PT_BEZIERTO]);
+    /** @param {number} at */
+    const point = at=>[memory.i32(OUT + at * 8), memory.i32(OUT + at * 8 + 4)];
+    const expected = [[229, 215], [248, 205], [273, 200], [300, 200], [355, 200], [399, 222],
+        [399, 250], [399, 263], [389, 275], [370, 285]];
+    expected.forEach(([x, y], index)=>{
+        const [gotX, gotY] = point(index + 1);
+        assert.ok(Math.abs(gotX - x) <= 2 && Math.abs(gotY - y) <= 2,
+            `point ${index + 1}: (${gotX},${gotY}) for (${x},${y})`);
+    });
+
+    // An arc ending on a quarter's edge ends in a curve of no length.
+    fns.BeginPath.handler([hdc]);
+    const float = (/** @type {number} */ value)=>new Uint32Array(Float32Array.of(value).buffer)[0];
+    assert.equal(fns.AngleArc.handler([hdc, 300, 300, 100, float(45), float(135)]), 1);
+    fns.EndPath.handler([hdc]);
+    assert.equal(fns.GetPath.handler([hdc, OUT, STRUCT, 64]), 11);
+    assert.deepEqual([point(8), point(9), point(10)], [[200, 300], [200, 300], [200, 300]]);
+});
