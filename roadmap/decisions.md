@@ -2271,3 +2271,15 @@ window on the fly, which no program can see but through how much one send takes.
 every byte let a loop of non-blocking sends - Wine's ws2_32:afd, a game feeding a slow peer - grow
 the process by hundreds of megabytes a second until the kernel ended it. A stream to the relay is
 not held here: its frames go to the transport as they are sent. *2026-11-15.*
+
+**A252. A filter registration lives as long as the process.** Windows keeps what
+IFilterMapper2::RegisterFilter and IFilterMapper::RegisterFilter register in the registry: the
+filter's FilterData under its category's Instance key, and the first mapper's under HKCR\Filter and
+the class's key. Here one store per process (`devenum/devenum.js`) holds them: both mappers and the
+system device enumerator read it, so a filter registered either way is enumerated either way and
+binds through its class, as on Windows, but a registration made by one run is not seen by the next.
+A program registers its filters from DllRegisterServer, which an installer calls once, so a filter it
+expects to find later through the mapper is not found; nothing builds a graph from registered filters
+yet (`quartz/graph.js` renders through the media layer), so nothing the engine does depends on it.
+This stands until the registry's FilterData is written and read, which is also what the system's own
+filters being enumerated in their categories needs. *2026-11-15.*

@@ -74,6 +74,24 @@ export const IID_IUNKNOWN = '{00000000-0000-0000-C000-000000000046}';
  *     A word of guest memory to keep the count in, for an object the program
  *     counts thousands of times a frame: the guest's AddRef and Release take
  *     every reference but the first and the last there, with no host call.
+ * @property {boolean} [aggregatable]
+ *     The class may be made inside another object (CoCreateInstance with a
+ *     controlling unknown), as COM's aggregation rules have it: see `Aggregation`.
+ */
+
+/**
+ * An object made inside another, as COM aggregation makes one. Its IUnknown is
+ * its own -- the non-delegating unknown the outer object keeps, counting the
+ * inner object alone -- and every other interface it hands out belongs to the
+ * outer object's identity: QueryInterface, AddRef and Release through them are
+ * the outer object's, and a QueryInterface through the inner IUnknown for one
+ * of them takes the reference through it, so on the outer object too.
+ *
+ * @typedef {Object} Aggregation
+ * @property {number} outer  The controlling unknown.
+ * @property {(slot: number, args: number[]) => Promise<number>} call
+ *     Calls the controlling unknown's method in `slot` (0 QueryInterface,
+ *     1 AddRef, 2 Release) with `this` and `args`.
  */
 
 /**
@@ -92,8 +110,11 @@ export const IID_IUNKNOWN = '{00000000-0000-0000-C000-000000000046}';
  * @property {boolean} destroyed
  * @property {(id: string) => ComInterface | null} interfaceFor
  * @property {(id: string) => ComInterface | null} queryInterface
- * @property {() => number} addRef
+ * @property {(id?: string) => number | Promise<number>} addRef
+ *     A promise only for an aggregated object's reference on an interface
+ *     other than its own IUnknown, which is the controlling unknown's.
  * @property {() => number} release
+ * @property {Aggregation | null} [aggregation]
  * @property {(id: string) => boolean} [reachable]
  *     For an object something else owns: its pointers stay good at a count
  *     of zero, as the bridge asks of an object that can be called again.
@@ -168,11 +189,44 @@ function methodsOf(descriptor){
 }
 
 /**
+ * The same methods for an aggregated object: IUnknown's three are the
+ * controlling unknown's, called through it, rather than this object's own.
+ *
+ * @type {WeakMap<object, readonly any[]>}
+ */
+const delegatingMethods = new WeakMap();
+
+/** IUnknown's three as an aggregated object's interfaces have them. */
+const DELEGATING_UNKNOWN = Object.freeze([
+    Object.freeze({ name: 'QueryInterface', argBytes: 12,
+        invoke: (/** @type {ComObject} */ object, /** @type {number[]} */ args)=>
+            /** @type {Aggregation} */ (object.aggregation).call(0, args) }),
+    Object.freeze({ name: 'AddRef', argBytes: 4,
+        invoke: (/** @type {ComObject} */ object)=>
+            /** @type {Aggregation} */ (object.aggregation).call(1, []) }),
+    Object.freeze({ name: 'Release', argBytes: 4,
+        invoke: (/** @type {ComObject} */ object)=>
+            /** @type {Aggregation} */ (object.aggregation).call(2, []) }),
+]);
+
+/** @param {ComInterfaceDescriptor} descriptor @returns {readonly any[]} */
+function delegatingMethodsOf(descriptor){
+    let methods = delegatingMethods.get(descriptor);
+    if (!methods)
+    {
+        methods = Object.freeze([...DELEGATING_UNKNOWN, ...descriptor.methods]);
+        delegatingMethods.set(descriptor, methods);
+    }
+    return methods;
+}
+
+/**
  * @param {string} clsid
  * @param {ComClassDefinition} definition
+ * @param {Aggregation | null} [aggregation]  Made inside a controlling unknown.
  * @returns {ComObject}
  */
-export function createComObject(clsid, definition){
+export function createComObject(clsid, definition, aggregation = null){
     const declared = new Map(definition.interfaces.map(checkDescriptor));
     /** @type {Map<string, ComInterface>} */
     const published = new Map();
@@ -201,6 +255,7 @@ export function createComObject(clsid, definition){
     /** @type {ComObject} */
     const object = {
         clsid,
+        aggregation,
         state: definition.state ?? null,
         get refCount(){
             return count();
@@ -237,7 +292,8 @@ export function createComObject(clsid, definition){
             const record = Object.freeze({
                 object,
                 id: key,
-                methods: methodsOf(descriptor),
+                methods: aggregation && key !== IID_IUNKNOWN
+                    ? delegatingMethodsOf(descriptor) : methodsOf(descriptor),
             });
             // Memoised, so the record -- and therefore the pointer published for
             // it -- is the same one every time this object is asked for this
@@ -256,7 +312,14 @@ export function createComObject(clsid, definition){
             return record;
         },
 
-        addRef(){
+        /** @param {string} [id] */
+        addRef(id){
+            // A reference on an aggregated object's other faces is the
+            // controlling unknown's: its own count is its IUnknown's alone.
+            if (aggregation && id !== undefined && canonicalGuid(id) !== IID_IUNKNOWN)
+            {
+                return aggregation.call(1, []);
+            }
             if (destroyed)
             {
                 // Nothing legitimate resurrects an object: the reference that
@@ -305,6 +368,9 @@ export function createComObject(clsid, definition){
  * @property {(clsid: string, factory: () => ComClassDefinition | null) => void} registerClass
  * @property {(clsid: string) => boolean} isRegistered
  * @property {(clsid: string) => ComObject | null} create
+ * @property {(clsid: string, aggregation: Aggregation) =>
+ *     ComObject | null | false} createAggregated
+ *           Made inside a controlling unknown; false where the class may not be.
  * @property {{ enter: () => void, leave: () => void, readonly users: number }} mtaUsage
  *           Holds the multithreaded apartment open with no thread in it, as
  *           CoIncrementMTAUsage does -- and as a system object with worker
@@ -369,6 +435,28 @@ export function createComRegistry(){
             }
             const definition = factory();
             return definition ? createComObject(/** @type {string} */ (key), definition) : null;
+        },
+
+        /**
+         * @param {string} clsid
+         * @param {Aggregation} aggregation  The controlling unknown it is made inside.
+         * @returns {ComObject | null | false} an object with one reference, null
+         *     where there is none, false where the class may not be aggregated
+         */
+        createAggregated(clsid, aggregation){
+            const key = canonicalGuid(clsid);
+            const factory = key === null ? undefined : classes.get(key);
+            const definition = factory?.();
+            if (!definition)
+            {
+                return null;
+            }
+            if (!definition.aggregatable)
+            {
+                definition.destroy?.();
+                return false;
+            }
+            return createComObject(/** @type {string} */ (key), definition, aggregation);
         },
     };
 }

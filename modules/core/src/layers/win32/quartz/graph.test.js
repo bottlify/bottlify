@@ -949,3 +949,42 @@ test('IFilterMapper takes a filter DLL\'s registration, and an instance gets a G
             [1, 2, 3, 4, 0x2000, 0]), E_POINTER);
         assert.equal(call(object, IID_IFILTER_MAPPER, 'UnregisterFilter', [1, 2, 3, 4]), S_OK);
     });
+
+test('IBasicVideo places the source inside the frame and the destination anywhere', ()=>{
+    const { object, host } = createObject();
+    const video = (/** @type {string} */ name, /** @type {number[]} */ args = [])=>
+        call(object, IID_IBASIC_VIDEO, name, args);
+    const rect = ()=>[0, 4, 8, 12].map(at=>host.i32(OUT + at));
+
+    assert.equal(video('GetSourcePosition', [OUT, OUT + 4, OUT + 8, 0]), E_POINTER);
+    assert.equal(video('GetSourcePosition', [OUT, OUT + 4, OUT + 8, OUT + 12]), S_OK);
+    assert.deepEqual(rect(), [0, 0, 640, 480], 'the whole frame by default');
+    assert.equal(video('IsUsingDefaultSource'), S_OK);
+    assert.equal(video('SetSourcePosition', [640, 0, 640, 480]), E_INVALIDARG, 'past the frame');
+    assert.equal(video('put_SourceLeft', [-1]), E_INVALIDARG);
+    assert.equal(video('SetSourcePosition', [320, 240, 214, 161]), S_OK);
+    assert.equal(video('put_SourceLeft', [213]), S_OK);
+    video('GetSourcePosition', [OUT, OUT + 4, OUT + 8, OUT + 12]);
+    assert.deepEqual(rect(), [213, 240, 214, 161], 'a side put keeps the other three');
+    assert.equal(video('IsUsingDefaultSource'), S_FALSE);
+    assert.equal(video('SetDefaultSourcePosition'), S_OK);
+    assert.equal(video('IsUsingDefaultSource'), S_OK);
+
+    assert.equal(video('SetDestinationPosition', [-10, -10, 2000, 2000]), S_OK,
+        'a destination may reach past the window');
+    assert.equal(video('put_DestinationWidth', [0]), E_INVALIDARG, 'but has a size');
+    video('GetDestinationPosition', [OUT, OUT + 4, OUT + 8, OUT + 12]);
+    assert.deepEqual(rect(), [-10, -10, 2000, 2000]);
+    assert.equal(video('IsUsingDefaultDestination'), S_FALSE);
+});
+
+test('a graph seeks in REFERENCE_TIME alone, and converts a time to itself in it', ()=>{
+    const { object, host } = createObject();
+    const seeking = (/** @type {string} */ name, /** @type {number[]} */ args = [])=>
+        call(object, IID_IMEDIA_SEEKING, name, args);
+    assert.equal(seeking('QueryPreferredFormat', [OUT]), S_OK);
+    assert.equal(host.i32(OUT) >>> 0, 0x7b785574, 'TIME_FORMAT_MEDIA_TIME');
+    assert.equal(seeking('ConvertTimeFormat', [OUT, 0, 0x3456789a, 0x12, 0]), S_OK);
+    assert.equal(host.i64(OUT), 0x123456789an);
+    assert.equal(seeking('ConvertTimeFormat', [0, 0, 1, 0, 0]), E_POINTER);
+});

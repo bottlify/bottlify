@@ -52,8 +52,15 @@ import {
     IID_IOBJECT_WITH_SITE, IOBJECT_WITH_SITE_SLOTS, IID_IVIDEO_FRAME_STEP, IVIDEO_FRAME_STEP_SLOTS,
 } from './interfaces.js';
 import { describe } from './describe.js';
-import { parseGuid } from '../ole32/guid.js';
+import { formatGuid, parseGuid } from '../ole32/guid.js';
 import { createStreaming } from './stream.js';
+import { createSystemClock } from './clock.js';
+import { createMemoryAllocator } from './allocator.js';
+import { IAM_FILTER_DATA_SLOTS, IID_IAM_FILTER_DATA, createFilterMapper } from './mapper.js';
+import {
+    CLSID_SYSTEM_DEVICE_ENUM, createDeviceEnumeration,
+} from '../devenum/devenum.js';
+import { CLSID_MEMORY_ALLOCATOR, CLSID_SYSTEM_CLOCK } from './interfaces.js';
 
 /**
  * How far a name a program hands these is read: whole, as Windows reads it, up to
@@ -186,6 +193,9 @@ const AUDIO_PROPERTIES = ['Volume', 'Balance'];
  * @property {Record<string, number>} window
  * @property {Record<string, number>} audio
  * @property {{ width: number, height: number }} video
+ * @property {{ source: [number, number, number, number] | null,
+ *     destination: [number, number, number, number] | null }} placement
+ *           IBasicVideo's rectangles, left, top, width, height; null for the default.
  * @property {VideoClip | null} clip   What RenderFile opened, when it opened one.
  * @property {number} film             Which clip this is, so that whoever plays
  *                                     the sound can tell one from the next.
@@ -306,6 +316,7 @@ function newGraphState(){
         },
         audio: Object.fromEntries(AUDIO_PROPERTIES.map(name=>[name, 0])),
         video: { width: DEFAULT_VIDEO_WIDTH, height: DEFAULT_VIDEO_HEIGHT },
+        placement: { source: null, destination: null },
         clip: null,
         film: 0,
         shown: 0,
@@ -344,6 +355,14 @@ function newGraphState(){
  *           Kernel events by handle: the one IMediaEvent::GetEventHandle hands
  *           out, manual-reset and signalled while the queue holds an event.
  *           Absent, GetEventHandle refuses as before.
+ * @property {(import('../devenum/devenum.js').DevEnumHost
+ *     & { store: import('../devenum/devenum.js').FilterStore }) | undefined} [devices]
+ *           What the filter mappers and the device enumerator keep their
+ *           registrations in and hand them out through. Absent, a registration
+ *           is accepted and forgotten, and nothing is enumerated.
+ * @property {import('./clock.js').ClockHost | undefined} [clock]
+ *           The machine's clock and its timers, which CLSID_SystemClock is built
+ *           on. Absent, the class is not registered, as on a machine without it.
  * @property {import('./stream.js').StreamHost | undefined} [stream]
  *           What joining a program's own filters to a graph needs: calling into
  *           its objects, handing out ours, and a thread to call it from. Absent,
@@ -357,6 +376,11 @@ function newGraphState(){
  * @param {QuartzHost} host
  */
 export function createQuartz(host){
+    // The mappers' registrations and the device enumerator over them (`mapper.js`).
+    const devices = host.devices
+        ? createDeviceEnumeration(host.devices, host.devices.store) : null;
+    const mapping = host.devices && devices
+        ? createFilterMapper(host.devices, host.devices.store, devices) : null;
     /** @param {number} address @param {number} value @returns {number} an HRESULT */
     const writeLong = (address, value)=>{
         if ((address >>> 0) === 0)
@@ -1325,22 +1349,125 @@ export function createQuartz(host){
         IsCursorHidden: (graph, [out])=>writeLong(out, 0),
     };
 
+    /**
+     * The rectangles IBasicVideo places: the part of the frame shown (the
+     * source, which must lie inside the frame) and where in the window it is
+     * shown (the destination, which only needs a size). Unset, each is its
+     * default - the whole frame, and the window's client area, which a video
+     * window keeps at the frame's size.
+     *
+     * @param {FilterGraphState} graph @param {'source' | 'destination'} which
+     * @returns {[number, number, number, number]} left, top, width, height
+     */
+    const placed = (graph, which)=>graph.placement[which]
+        ?? [0, 0, graph.video.width, graph.video.height];
+
+    /**
+     * Places a rectangle, as the documentation bounds it.
+     *
+     * @param {FilterGraphState} graph @param {'source' | 'destination'} which
+     * @param {[number, number, number, number]} rect
+     */
+    const placeRect = (graph, which, [left, top, width, height])=>{
+        if (width <= 0 || height <= 0)
+        {
+            return E_INVALIDARG;
+        }
+        if (which === 'source' && (left < 0 || top < 0 || left + width > graph.video.width
+            || top + height > graph.video.height))
+        {
+            return E_INVALIDARG;
+        }
+        graph.placement[which] = [left, top, width, height];
+        return S_OK;
+    };
+
+    /**
+     * get_ and put_ for one side of a rectangle: a put keeps the other three.
+     *
+     * @param {'source' | 'destination'} which @param {string} prefix @returns {Record<string,
+     *     (graph: FilterGraphState, args: number[]) => number>}
+     */
+    const sides = (which, prefix)=>{
+        /** @param {number} index @param {FilterGraphState} graph @param {number} value */
+        const put = (index, graph, value)=>{
+            const rect = /** @type {[number, number, number, number]} */ (
+                [...placed(graph, which)]);
+            rect[index] = value | 0;
+            return placeRect(graph, which, rect);
+        };
+        return Object.fromEntries(['Left', 'Top', 'Width', 'Height'].flatMap((side, index)=>[
+            [`get_${prefix}${side}`, (/** @type {FilterGraphState} */ graph,
+                /** @type {number[]} */ [out])=>writeLong(out, placed(graph, which)[index])],
+            [`put_${prefix}${side}`, (/** @type {FilterGraphState} */ graph,
+                /** @type {number[]} */ [value])=>put(index, graph, value)],
+        ]));
+    };
+
+    /**
+     * SetSourcePosition and the like: four longs in, or four addresses out.
+     *
+     * @param {'source' | 'destination'} which
+     */
+    const position4 = which=>({
+        /** @param {FilterGraphState} graph @param {number[]} args */
+        set: (graph, args)=>placeRect(graph, which,
+            /** @type {[number, number, number, number]} */ (args.map(value=>value | 0))),
+        /** @param {FilterGraphState} graph @param {number[]} args */
+        get: (graph, args)=>{
+            if (args.some(out=>(out >>> 0) === 0))
+            {
+                return E_POINTER;
+            }
+            const rect = placed(graph, which);
+            args.forEach((out, index)=>writeLong(out, rect[index]));
+            return S_OK;
+        },
+    });
+
+    /** @param {FilterGraphState} graph @param {'source' | 'destination'} which */
+    const isDefault = (graph, which)=>{
+        const rect = placed(graph, which);
+        return rect[0] === 0 && rect[1] === 0 && rect[2] === graph.video.width
+            && rect[3] === graph.video.height ? S_OK : S_FALSE;
+    };
+
     /** @type {Record<string, (graph: FilterGraphState, args: number[]) => number | Promise<number>>} */
     const basicVideo = {
+        /** HRESULT get_AvgTimePerFrame(REFTIME *pAvgTimePerFrame) */
+        get_AvgTimePerFrame: (graph, [out])=>writeDouble(out,
+            graph.clip ? 1 / graph.clip.fps : 0),
+
         /** HRESULT get_VideoWidth(long *pVideoWidth) */
         get_VideoWidth: (graph, [out])=>writeLong(out, graph.video.width),
 
         /** HRESULT get_VideoHeight(long *pVideoHeight) */
         get_VideoHeight: (graph, [out])=>writeLong(out, graph.video.height),
 
+        ...sides('source', 'Source'),
+        ...sides('destination', 'Destination'),
+
+        SetSourcePosition: position4('source').set,
+        GetSourcePosition: position4('source').get,
+        SetDefaultSourcePosition: graph=>{
+            graph.placement.source = null;
+            return S_OK;
+        },
+        SetDestinationPosition: position4('destination').set,
+        GetDestinationPosition: position4('destination').get,
+        SetDefaultDestinationPosition: graph=>{
+            graph.placement.destination = null;
+            return S_OK;
+        },
+
         /** HRESULT GetVideoSize(long *pWidth, long *pHeight) */
         GetVideoSize: (graph, args)=>videoSize(graph, args),
 
         /** HRESULT IsUsingDefaultSource(void) */
-        IsUsingDefaultSource: ()=>S_OK,
+        IsUsingDefaultSource: graph=>isDefault(graph, 'source'),
 
         /** HRESULT IsUsingDefaultDestination(void) */
-        IsUsingDefaultDestination: ()=>S_OK,
+        IsUsingDefaultDestination: graph=>isDefault(graph, 'destination'),
     };
 
     /** @type {Record<string, (graph: FilterGraphState, args: number[]) => number | Promise<number>>} */
@@ -1418,8 +1545,72 @@ export function createQuartz(host){
         CanSeekBackward: (graph, [out])=>writeLong(out, 0),
     };
 
+    /** The one time format a graph answers in: REFERENCE_TIME, a hundred nanoseconds. */
+    const TIME_FORMAT_MEDIA_TIME = '{7B785574-8C82-11CF-BC0C-00AA00AC74F6}';
+    /**
+     * A time format a program names, GUID_NULL - the format in use - for none.
+     *
+     * @param {number} address @returns {string}
+     */
+    const formatAt = address=>{
+        const read = host.stream?.readU32;
+        if ((address >>> 0) === 0 || !read)
+        {
+            return TIME_FORMAT_MEDIA_TIME;
+        }
+        const bytes = new Uint8Array(16);
+        const view = new DataView(bytes.buffer);
+        for (let i = 0; i < 16; i += 4)
+        {
+            view.setUint32(i, read((address >>> 0) + i), true);
+        }
+        const format = formatGuid(bytes);
+        return format === '{00000000-0000-0000-0000-000000000000}'
+            ? TIME_FORMAT_MEDIA_TIME : format;
+    };
+    /** @param {number} out */
+    const writeFormat = out=>{
+        if ((out >>> 0) === 0)
+        {
+            return E_POINTER;
+        }
+        host.writeMemory(out >>> 0, /** @type {Uint8Array} */ (parseGuid(TIME_FORMAT_MEDIA_TIME)));
+        return S_OK;
+    };
+
     /** @type {Record<string, (graph: FilterGraphState, args: number[]) => number | Promise<number>>} */
     const mediaSeeking = {
+        /** HRESULT IsFormatSupported(const GUID *pFormat) */
+        IsFormatSupported: (graph, [format])=>((format >>> 0) === 0 ? E_POINTER
+            : formatAt(format) === TIME_FORMAT_MEDIA_TIME ? S_OK : S_FALSE),
+        /** HRESULT QueryPreferredFormat(GUID *pFormat) */
+        QueryPreferredFormat: (graph, [out])=>writeFormat(out),
+        /** HRESULT GetTimeFormat(GUID *pFormat) */
+        GetTimeFormat: (graph, [out])=>writeFormat(out),
+        /** HRESULT IsUsingTimeFormat(const GUID *pFormat) */
+        IsUsingTimeFormat: (graph, [format])=>((format >>> 0) === 0 ? E_POINTER
+            : formatAt(format) === TIME_FORMAT_MEDIA_TIME ? S_OK : S_FALSE),
+        /** HRESULT SetTimeFormat(const GUID *pFormat) */
+        SetTimeFormat: (graph, [format])=>((format >>> 0) === 0 ? E_POINTER
+            : formatAt(format) === TIME_FORMAT_MEDIA_TIME ? S_OK : E_INVALIDARG),
+        /**
+         * HRESULT ConvertTimeFormat(LONGLONG *pTarget, const GUID *pTargetFormat,
+         *                           LONGLONG Source, const GUID *pSourceFormat)
+         *
+         * Between the one format and itself, a time is itself.
+         */
+        ConvertTimeFormat: (graph, [target, targetFormat, low, high, sourceFormat])=>{
+            if ((target >>> 0) === 0)
+            {
+                return E_POINTER;
+            }
+            if (formatAt(targetFormat) !== TIME_FORMAT_MEDIA_TIME
+                || formatAt(sourceFormat) !== TIME_FORMAT_MEDIA_TIME)
+            {
+                return E_INVALIDARG;
+            }
+            return writeLongLong(target, (high | 0) * 0x1_0000_0000 + (low >>> 0));
+        },
         /**
          * HRESULT GetCapabilities(DWORD *pCapabilities)
          *
@@ -1733,10 +1924,21 @@ export function createQuartz(host){
         };
     };
 
-    /** @returns {import('../ole32/objects.js').ComClassDefinition} */
+    /**
+     * The filter mapper's class: both mappers, the third's device enumerator,
+     * and IAMFilterData, as quartz's mapper answers for them.
+     *
+     * @returns {import('../ole32/objects.js').ComClassDefinition}
+     */
     const filterMapper2 = ()=>({
         state: null,
-        interfaces: [describe(IID_IFILTER_MAPPER2, IFILTER_MAPPER2_SLOTS, filterMapper)],
+        aggregatable: true,
+        interfaces: [
+            describe(IID_IFILTER_MAPPER2, IFILTER_MAPPER2_SLOTS, filterMapper),
+            describe(IID_IFILTER_MAPPER3, IFILTER_MAPPER3_SLOTS, filterMapper),
+            describe(IID_IFILTER_MAPPER, IFILTER_MAPPER_SLOTS, firstMapper),
+            describe(IID_IAM_FILTER_DATA, IAM_FILTER_DATA_SLOTS, mapping?.filterData ?? {}),
+        ],
     });
 
     /**
@@ -1770,10 +1972,16 @@ export function createQuartz(host){
         UnregisterFilterInstance: ()=>S_OK,
         UnregisterPin: ()=>S_OK,
     };
+    if (mapping)
+    {
+        Object.assign(filterMapper, mapping.mapper2);
+        Object.assign(firstMapper, mapping.mapper1);
+    }
 
     /** @returns {import('../ole32/objects.js').ComClassDefinition} */
     const filterMapper1 = ()=>({
         state: null,
+        aggregatable: true,
         interfaces: [describe(IID_IFILTER_MAPPER, IFILTER_MAPPER_SLOTS, firstMapper)],
     });
 
@@ -1860,7 +2068,8 @@ export function createQuartz(host){
         };
     };
 
-    return { filterGraph, filterMapper1, filterMapper2, tick, film };
+    return { filterGraph, filterMapper1, filterMapper2, systemDeviceEnum: devices?.systemDeviceEnum,
+        tick, film };
 }
 
 /**
@@ -1888,5 +2097,17 @@ export function registerQuartzClasses(registry, host){
     registry.registerClass(CLSID_FILTER_GRAPH_NO_THREAD, quartz.filterGraph);
     registry.registerClass(CLSID_FILTER_MAPPER2, quartz.filterMapper2);
     registry.registerClass(CLSID_FILTER_MAPPER, quartz.filterMapper1);
+    if (host.clock)
+    {
+        registry.registerClass(CLSID_SYSTEM_CLOCK, createSystemClock(host.clock));
+    }
+    if (quartz.systemDeviceEnum)
+    {
+        registry.registerClass(CLSID_SYSTEM_DEVICE_ENUM, quartz.systemDeviceEnum);
+    }
+    if (host.stream)
+    {
+        registry.registerClass(CLSID_MEMORY_ALLOCATOR, createMemoryAllocator(host.stream));
+    }
     return { tick: quartz.tick, film: quartz.film };
 }
