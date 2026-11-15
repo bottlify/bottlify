@@ -143,6 +143,17 @@ function fakeKernel(){
             }
             return true;
         },
+        // A port is the kernel's manual-reset event, signalled while a packet waits.
+        /** @param {{ manualReset: boolean, signalled: boolean, name: string }} options */
+        createEvent: options=>({ ...options }),
+        /** @param {any} event */
+        setEvent(event){
+            event.signalled = true;
+        },
+        /** @param {any} event */
+        resetEvent(event){
+            event.signalled = false;
+        },
         handles: {
             /** @param {string} type @param {any} object */
             open(type, object){
@@ -576,4 +587,49 @@ test('a read on a handle bound to no port still reads', ()=>{
     const { files, memory, file } = fileSetup();
     assert.equal(files.ReadFile.handler([file, BUFFER, 3, OUT_COUNT, 0]), 1);
     assert.equal(memory.dword(OUT_COUNT), 3);
+});
+
+test('a packet one front door queues the other takes: native and Win32 over one port', ()=>{
+    // NtSetIoCompletion's packet carries its caller's status, which the native
+    // dequeue hands back in the IO_STATUS_BLOCK; a Win32 dequeue of a failing
+    // one answers FALSE.
+    const { fns, memory } = setup();
+    const natives = /** @type {any} */ (fns.CreateIoCompletionPort).natives;
+    const port = makePort(fns);
+    const STATUS_ACCESS_DENIED = 0xc0000022;
+
+    assert.equal(natives.NtSetIoCompletion.handler([port, 0xabc, 0xdef, 0, 42]), 0);
+    assert.equal(natives.NtSetIoCompletion.handler([port, 1, 2, STATUS_ACCESS_DENIED, 3]), 0);
+    assert.equal(natives.NtQueryIoCompletion.handler([port, 0, 0x500, 4, 0]), 0);
+    assert.equal(memory.dword(0x500), 2, 'two packets queued');
+    assert.equal(fns.GetQueuedCompletionStatus.handler(
+        [port, OUT_BYTES, OUT_KEY, OUT_OVERLAPPED, 0]), 1);
+    assert.deepEqual([memory.dword(OUT_BYTES), memory.dword(OUT_KEY)], [42, 0xabc]);
+    assert.equal(fns.GetQueuedCompletionStatus.handler(
+        [port, OUT_BYTES, OUT_KEY, OUT_OVERLAPPED, 0]), 0, 'a failed status answers FALSE');
+
+    fns.PostQueuedCompletionStatus.handler([port, 7, 0x11, 0x22]);
+    assert.equal(natives.NtRemoveIoCompletion.handler([port, 0x510, 0x514, 0x518, 0]), 0);
+    assert.deepEqual([memory.dword(0x510), memory.dword(0x514), memory.dword(0x518),
+        memory.dword(0x51c)], [0x11, 0x22, 0, 7], 'key, overlapped, status, bytes');
+});
+
+test('a port is signalled while a packet waits, and the last thread to wait is woken first', ()=>{
+    const { fns, kernel, main, run } = setup();
+    const port = makePort(fns);
+    const object = kernel.handles.resolve(port, 'iocp');
+    assert.equal(object.signalled, false);
+    fns.PostQueuedCompletionStatus.handler([port, 0, 1, 0]);
+    assert.equal(object.signalled, true, 'a wait on the handle is satisfied');
+    fns.GetQueuedCompletionStatus.handler([port, OUT_BYTES, OUT_KEY, OUT_OVERLAPPED, 0]);
+    assert.equal(object.signalled, false, 'and empty again');
+
+    const second = kernel.thread('second');
+    fns.GetQueuedCompletionStatus.handler([port, OUT_BYTES, OUT_KEY, OUT_OVERLAPPED, INFINITE]);
+    run(second);
+    fns.GetQueuedCompletionStatus.handler([port, 0x530, 0x534, 0x538, INFINITE]);
+    run(main);
+    fns.PostQueuedCompletionStatus.handler([port, 0, 2, 0]);
+    assert.equal(second.blocked, false, 'the latest waiter, as Windows wakes them');
+    assert.equal(main.blocked, true);
 });

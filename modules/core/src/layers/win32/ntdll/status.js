@@ -91,6 +91,11 @@ export const STATUS = Object.freeze({
     PIPE_LISTENING: 0xc00000b3,
     PIPE_CLOSING: 0xc00000b1,
     CANCELLED: 0xc0000120,
+    /** A success: a create with OBJ_OPENIF opened an object its name held already. */
+    OBJECT_NAME_EXISTS: 0x40000000,
+    /** A mutant released by a thread that does not own it; a semaphore past its maximum. */
+    MUTANT_NOT_OWNED: 0xc0000046,
+    SEMAPHORE_LIMIT_EXCEEDED: 0xc0000047,
 });
 
 /** The Win32 errors this table produces. */
@@ -170,6 +175,7 @@ const TO_DOS_ERROR = new Map([
     [STATUS.OBJECT_NAME_INVALID, ERROR.INVALID_NAME],
     [STATUS.OBJECT_NAME_NOT_FOUND, ERROR.FILE_NOT_FOUND],
     [STATUS.OBJECT_NAME_COLLISION, ERROR.ALREADY_EXISTS],
+    [STATUS.OBJECT_NAME_EXISTS, ERROR.ALREADY_EXISTS],
     [STATUS.OBJECT_PATH_NOT_FOUND, ERROR.PATH_NOT_FOUND],
     [STATUS.SHARING_VIOLATION, ERROR.SHARING_VIOLATION],
     [STATUS.DISK_FULL, ERROR.DISK_FULL],

@@ -5,6 +5,7 @@
  */
 
 import { TAKEN } from './named-objects.js';
+import { readObjectAttributes, win32NameOf } from './object-attributes.js';
 import { STATUS, toDosError } from '../ntdll/status.js';
 import { mapImage } from '../../loader/internal/image.js';
 import { relocateImage } from '../../loader/internal/pe.js';
@@ -516,29 +517,6 @@ export function createMappingFunctions(host){
     };
 
     /**
-     * The object name an OBJECT_ATTRIBUTES gives, its UNICODE_STRING read;
-     * null for none.
-     *
-     * @param {number} attributes
-     * @returns {string | null}
-     */
-    const objectName = attributes=>{
-        const string = (attributes >>> 0) === 0 ? 0 : readDword((attributes >>> 0) + 8);
-        if (string === 0)
-        {
-            return null;
-        }
-        const head = host.readMemory(string, 2);
-        const units = host.readMemory(readDword(string + 4), head[0] | head[1] << 8);
-        let name = '';
-        for (let at = 0; at + 1 < units.length; at += 2)
-        {
-            name += String.fromCharCode(units[at] | units[at + 1] << 8);
-        }
-        return name;
-    };
-
-    /**
      * @param {number} handle
      * @returns {Section | number} the section, or the status a handle that
      *          names none is answered with
@@ -611,18 +589,16 @@ export function createMappingFunctions(host){
                 {
                     return STATUS.ACCESS_VIOLATION;
                 }
-                const path = objectName(attributes);
-                if (path === null || path === '')
+                const given = readObjectAttributes(host.readMemory, attributes);
+                if (given === null || given.name === null || given.name === '')
                 {
                     return STATUS.OBJECT_NAME_INVALID;
                 }
-                if (/^\\device\\physicalmemory$/i.test(path))
+                if (/^\\device\\physicalmemory$/i.test(given.name))
                 {
                     return STATUS.ACCESS_DENIED;
                 }
-                const relative = readDword((attributes >>> 0) + 4) !== 0;
-                const name = relative ? path
-                    : /^\\(?:sessions\\\d+\\)?basenamedobjects\\(.+)$/i.exec(path)?.[1];
+                const name = win32NameOf(given);
                 if (name === undefined)
                 {
                     return STATUS.OBJECT_PATH_NOT_FOUND;

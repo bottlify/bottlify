@@ -1221,6 +1221,7 @@ export function createWin32Module(){
             const ports = createIoCompletionPorts({
                 pointerSize,
                 kernel,
+                divergence: config?.divergence,
                 readMemory,
                 writeMemory,
                 setLastError: setError,
@@ -2746,6 +2747,8 @@ export function createWin32Module(){
                         writeMemory,
                         setLastError: setError,
                         namedObjects,
+                        /** @param {number} handle @param {any} object */
+                        closed: (handle, object)=>ports.closed(handle, object),
                         currentThread: ()=>kernel.currentThread(),
                         park: (/** @type {any} */ thread)=>bridge.park(thread),
                         // Where a start routine returns to. Registered once, the
