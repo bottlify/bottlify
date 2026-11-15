@@ -2293,3 +2293,12 @@ answers GetCharWidth32's width divided by sixteen, and Wine's gdi32 font test ho
 that (`get_char_width_proc`: `i / 16.0f == f`). A program that ran on Windows read the sixteenth,
 so the engine answers it; GetCharABCWidthsFloat keeps the whole width, as Windows' does.
 *2026-11-15.*
+
+**A254. A face's VDMX is read only from a record for the Windows ANSI set.** The OpenType
+specification gives a VDMX ratio record's bCharSet as 0 for every glyph and 1 for the Windows ANSI
+subset, and says nothing of one being preferred. Windows measures a TrueType face by the record
+for the ANSI set and passes over one for every glyph, in both versions of the table: Wine's gdi32
+font test (`test_height_selection_vdmx`) runs one face with each, and only the ANSI record changes
+the heights Windows answers. A face added with only an every-glyph record measures by its em
+square and OS/2 cell, as one with no VDMX does.
+*2026-11-15.*

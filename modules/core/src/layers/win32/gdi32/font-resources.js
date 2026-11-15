@@ -15,11 +15,12 @@
  * counts the adds of one file: as many removes as adds take it out again,
  * and a remove whose flags (FR_PRIVATE, FR_NOT_ENUM) are not the add's
  * fails. A face added without FR_NOT_ENUM is enumerated with the system's.
+ * A face added measures by its own em square and cell ('head', 'OS/2').
  * A .fot, the scalable font resource CreateScalableFontResource writes for
  * a TrueType file, is not read: it names no family of its own.
  */
 
-import { fontFamilies } from './faces.js';
+import { fontFaces } from './faces.js';
 
 /** AddFontResourceEx's flags: private to the process, and kept out of enumeration. */
 export const FR_PRIVATE = 0x10;
@@ -44,6 +45,7 @@ const FONTS_FOLDER = 'C:\\WINDOWS\\Fonts\\';
  * @property {number} flags  FR_PRIVATE and FR_NOT_ENUM as added.
  * @property {number} count  The adds not yet removed.
  * @property {string[]} families
+ * @property {Map<string, import('./faces.js').OutlineCell>} cells  By lowercase family.
  */
 
 /** @param {FontResourceHost} host */
@@ -100,18 +102,20 @@ export function createFontResources(host){
         {
             bytes = await host.readFile?.(FONTS_FOLDER + name) ?? null;
         }
-        const families = bytes ? fontFamilies(bytes) : [];
-        if (!bytes || families.length === 0)
+        const faces = bytes ? fontFaces(bytes) : [];
+        if (!bytes || faces.length === 0)
         {
             return 0;
         }
-        const unique = [...new Set(families)];
+        const unique = [...new Set(faces.map(face=>face.family))];
+        const cells = new Map(faces.flatMap(face=>(face.cell
+            ? [[face.family.toLowerCase(), face.cell]] : [])));
         if (host.addFont)
         {
             await Promise.all(unique.map(family=>host.addFont?.(family, bytes)));
         }
-        added.set(key, { path, flags: flagsOf(flags), count: 1, families: unique });
-        return families.length;
+        added.set(key, { path, flags: flagsOf(flags), count: 1, families: unique, cells });
+        return faces.length;
     };
 
     /**
@@ -140,5 +144,23 @@ export function createFontResources(host){
         .filter(entry=>(entry.flags & FR_NOT_ENUM) === 0)
         .flatMap(entry=>entry.families))];
 
-    return { add, remove, enumerable };
+    /**
+     * The cell of a family added and not yet removed, enumerable or not.
+     *
+     * @param {string} family
+     */
+    const cellOf = family=>{
+        const wanted = family.toLowerCase();
+        for (const entry of added.values())
+        {
+            const cell = entry.cells.get(wanted);
+            if (cell)
+            {
+                return cell;
+            }
+        }
+        return undefined;
+    };
+
+    return { add, remove, enumerable, cellOf };
 }

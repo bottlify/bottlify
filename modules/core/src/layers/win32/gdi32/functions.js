@@ -1792,7 +1792,7 @@ export function createGdiFunctions(host){
         if (!known)
         {
             // An outline face whose cell is known measures as Windows scales it.
-            return outlineCell(font) ?? {};
+            return outlineCell(font, fontResources.cellOf) ?? {};
         }
         const { height, ascent, descent, internalLeading, aveCharWidth } = known;
         return { height, ascent, descent, internalLeading, aveCharWidth };

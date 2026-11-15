@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    fontFamilies, outlineCell, rasterFace, rasterRealization, windowsMetrics,
+    fontFaces, fontFamilies, outlineCell, rasterFace, rasterRealization, windowsMetrics,
 } from './faces.js';
 
 /**
@@ -52,6 +52,100 @@ test('a font file names its family from its name table, Windows English first', 
     assert.deepEqual(fontFamilies(Uint8Array.from([1, 2, 3, 4, 5, 6])), [], 'not a font');
     const cut = fontWithNames([[3, 0x409, 'Cut']]).subarray(0, 30);
     assert.deepEqual(fontFamilies(cut), [], 'a directory past the end');
+});
+
+/**
+ * A font with a family and a cell: `fontWithNames`' name table beside a
+ * 'head' and an 'OS/2' holding the em square and the Windows ascent and descent.
+ *
+ * With `vdmx`, a 'VDMX' of one ratio record naming no ratio, for that
+ * character set, over one group of [ppem, yMax, yMin] entries.
+ *
+ * @param {string} family @param {number} unitsPerEm @param {number} ascent
+ * @param {number} descent
+ * @param {{ charSet: number, entries: [number, number, number][] }} [vdmx]
+ */
+function fontWithCell(family, unitsPerEm, ascent, descent, vdmx){
+    const named = fontWithNames([[3, 0x409, family]]);
+    const name = named.subarray(12 + 16);
+    const vdmxSize = vdmx ? 6 + 4 + 2 + 4 + vdmx.entries.length * 6 : 0;
+    const tables = [['head', 54], ['OS/2', 78], ['name', name.length],
+        ...(vdmx ? [['VDMX', vdmxSize]] : [])];
+    const directory = 12 + tables.length * 16;
+    const size = directory + tables.reduce((sum, [, length])=>sum + Number(length), 0);
+    const bytes = new Uint8Array(size);
+    const view = new DataView(bytes.buffer);
+    view.setUint32(0, 0x00010000);
+    view.setUint16(4, tables.length);
+    let at = directory;
+    /** @type {Record<string, number>} */
+    const where = {};
+    tables.forEach(([tag, length], index)=>{
+        const record = 12 + index * 16;
+        bytes.set([...String(tag)].map(ch=>ch.charCodeAt(0)), record);
+        view.setUint32(record + 8, at);
+        view.setUint32(record + 12, Number(length));
+        where[tag] = at;
+        at += Number(length);
+    });
+    view.setUint16(where.head + 18, unitsPerEm);
+    view.setUint16(where['OS/2'] + 74, ascent);
+    view.setUint16(where['OS/2'] + 76, descent);
+    bytes.set(name, where.name);
+    if (vdmx)
+    {
+        const table = where.VDMX;
+        view.setUint16(table + 2, 1);
+        view.setUint16(table + 4, 1);
+        bytes[table + 6] = vdmx.charSet;
+        view.setUint16(table + 10, 12);
+        const group = table + 12;
+        view.setUint16(group, vdmx.entries.length);
+        vdmx.entries.forEach(([ppem, yMax, yMin], index)=>{
+            view.setUint16(group + 4 + index * 6, ppem);
+            view.setInt16(group + 6 + index * 6, yMax);
+            view.setInt16(group + 8 + index * 6, yMin);
+        });
+    }
+    return bytes;
+}
+
+test('a font file brings its own cell, and a face added measures by it', ()=>{
+    const [face] = fontFaces(fontWithCell('Shipped Face', 1000, 900, 200));
+    assert.deepEqual(face, { family: 'Shipped Face',
+        cell: { unitsPerEm: 1000, ascent: 900, descent: 200 } });
+    assert.equal(fontFaces(fontWithNames([[3, 0x409, 'No Cell']]))[0].cell, null,
+        'no head or OS/2, no cell');
+    /** @param {string} family */
+    const added = family=>(family === 'Shipped Face' ? face.cell ?? undefined : undefined);
+    /** @param {number} height */
+    const measure = height=>{
+        const known = outlineCell({ faceName: 'Shipped Face', height }, added);
+        assert.ok(known);
+        return [known.height, known.ascent, known.descent, known.internalLeading];
+    };
+    assert.deepEqual(measure(12), [12, 10, 2, 1], 'the cell split by the shares');
+    assert.deepEqual(measure(-10), [11, 9, 2, 1], 'the em, each share rounded');
+    assert.equal(outlineCell({ faceName: 'Other', height: 12 }, added), null);
+});
+
+test('a face whose VDMX holds the ANSI set measures by its hinted extents', ()=>{
+    const entries = /** @type {[number, number, number][]} */ ([[10, 9, -3], [11, 10, -3],
+        [12, 10, -3], [13, 11, -4]]);
+    const [face] = fontFaces(fontWithCell('Hinted', 1000, 900, 200, { charSet: 1, entries }));
+    /** @param {number} height */
+    const measure = height=>{
+        const known = outlineCell({ faceName: 'Hinted', height }, ()=>face.cell ?? undefined);
+        assert.ok(known);
+        return [known.height, known.ascent, known.descent, known.internalLeading];
+    };
+    assert.deepEqual(measure(-12), [13, 10, 3, 1], 'an em the table holds');
+    assert.deepEqual(measure(14), [13, 10, 3, 1], 'the largest em whose extent fits the cell');
+    assert.deepEqual(measure(15), [15, 11, 4, 2]);
+    assert.deepEqual(measure(-20), [22, 18, 4, 2], 'an em past the table: the shares');
+    assert.deepEqual(measure(30), [30, 25, 5, 3], 'a cell past the table: the shares');
+    const [every] = fontFaces(fontWithCell('Every', 1000, 900, 200, { charSet: 0, entries }));
+    assert.equal(every.cell?.pixels, undefined, 'a record for every glyph is passed over (A254)');
 });
 
 test('the dialog faces advance as Windows draws them, so a line breaks where Windows broke it',
