@@ -9,8 +9,10 @@
  * the program finds the version's functions with wglGetProcAddress, as
  * OPENGL32.dll exports 1.1 alone; compiles and links a GLSL program, sets its
  * uniforms (through the command ring's routines); draws a quad into a
- * texture attached to a framebuffer object with a depth renderbuffer; then
- * draws the window sampling that texture, and swaps. What it was answered is
+ * texture attached to a framebuffer object with a depth-stencil texture;
+ * draws the framebuffer again sampling that depth, its own attachment, with
+ * no depth or stencil written; then draws the window sampling the colour
+ * texture, and swaps. What it was answered is
  * dumped to the console; what reached the device is read off it.
  *
  * Every call is stdcall, so a word count one out anywhere is a stack the
@@ -62,8 +64,18 @@ test('a program draws with GLSL into a framebuffer object and samples it in the 
         const pipelines = gpu.of('createRenderPipeline').map((/** @type {any} */ p)=>p.descriptor)
             .filter((/** @type {any} */ d)=>d.vertex.module.descriptor.code.includes('fn vmain'));
         assert.deepEqual(pipelines.map((/** @type {any} */ d)=>d.fragment.targets[0].format)
-            .sort(), ['bgra8unorm', 'rgba8unorm'],
-        'the program draws into the texture and into the window');
+            .sort(), ['bgra8unorm', 'rgba8unorm', 'rgba8unorm'],
+        'the program draws into the texture twice and into the window');
+        const reading = gpu.of('beginRenderPass').filter((/** @type {any} */ p)=>
+            p.descriptor.depthStencilAttachment?.depthReadOnly);
+        assert.equal(reading.length, 1, 'the draw reading the depth holds it read-only');
+        assert.equal(reading[0].descriptor.depthStencilAttachment.stencilReadOnly, true);
+        assert.ok(gpu.of('setBindGroup').some((/** @type {any} */ c)=>c.pass === reading[0].pass
+            && (c.group?.entries ?? []).some((/** @type {any} */ e)=>
+                e.resource?.texture === reading[0].descriptor.depthStencilAttachment.view.texture
+                && e.resource.viewDescriptor?.aspect === 'depth-only')),
+        'and samples it through its depth');
+        assert.deepEqual(gpu.errors, []);
         assert.ok(gpu.of('beginRenderPass').some((/** @type {any} */ p)=>/gl-texture/.test(
             p.descriptor.colorAttachments[0]?.view?.viewDescriptor?.label ?? '')),
         'a pass draws into the texture\'s level');

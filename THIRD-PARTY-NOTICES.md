@@ -118,6 +118,12 @@ shader token streams there and the semantics Windows answers for them are the ca
 `modules/core/src/layers/win32/d3dx9/semantics.test.js` -- test data only; the walk itself is
 written from the documented token format.
 
+Wine's `configure.ac` (LGPL-2.1-or-later) is used the same way for the names of the libraries
+Windows carries in its system directory: `tools/generators/windows-libraries.mjs` reads the
+libraries Wine recreates from it and writes their names, less Wine's own and the redistributable
+runtimes, into `modules/core/src/layers/loader/internal/windows-libraries.js` -- names only, which
+Windows' own files establish; the list is Wine's work of finding them.
+
 What is not taken: no code, no test structure, no helper, no assertion text, no ordering. Every
 test in this repository is written independently, against this project's own conventions.
 

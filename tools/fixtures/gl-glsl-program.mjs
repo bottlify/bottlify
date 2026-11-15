@@ -9,10 +9,14 @@
  * functions with wglGetProcAddress, as OPENGL32.dll exports 1.1 alone;
  * compiles and links a GLSL program, sets its uniforms (through the command
  * ring's routines); draws a red quad into the lower left quarter of a
- * texture attached to a framebuffer object with a depth renderbuffer; then
- * draws the whole window sampling that texture, swaps, and dumps what it was
- * answered (`OUT`) to the console as hex. Run by `gl-glsl.itest.js` on the
- * recording device and by `tools/gates/triangle.mjs --glsl` on a real one.
+ * texture attached to a framebuffer object with a depth-stencil texture, at
+ * depth 0.6; then the whole framebuffer again, its depth tested and not
+ * written, sampling that depth-stencil texture - its own attachment, which a
+ * draw writing neither depth nor stencil may read, as a deferred light reads
+ * the scene's depth; then the whole window sampling the colour texture,
+ * swaps, and dumps what it was answered (`OUT`) to the console as hex. Run
+ * by `gl-glsl.itest.js` on the recording device and by
+ * `tools/gates/triangle.mjs --glsl` on a real one.
  *
  * Dev tooling: never imported by a package.
  */
@@ -25,8 +29,9 @@ import {
 const GL = {
     TEXTURE_2D: 0x0de1, TEXTURE_MIN_FILTER: 0x2801, LINEAR: 0x2601, RGBA: 0x1908,
     UNSIGNED_BYTE: 0x1401, FLOAT: 0x1406, VERTEX_SHADER: 0x8b31, FRAGMENT_SHADER: 0x8b30,
-    COMPILE_STATUS: 0x8b81, LINK_STATUS: 0x8b82, FRAMEBUFFER: 0x8d40, RENDERBUFFER: 0x8d41,
+    COMPILE_STATUS: 0x8b81, LINK_STATUS: 0x8b82, FRAMEBUFFER: 0x8d40,
     COLOR_ATTACHMENT0: 0x8ce0, DEPTH_STENCIL_ATTACHMENT: 0x821a, DEPTH24_STENCIL8: 0x88f0,
+    DEPTH_STENCIL: 0x84f9, UNSIGNED_INT_24_8: 0x84fa, DEPTH_TEST: 0x0b71, LEQUAL: 0x0203,
     COLOR_BUFFER_BIT: 0x4000, DEPTH_BUFFER_BIT: 0x100, TRIANGLE_FAN: 6,
 };
 
@@ -65,9 +70,7 @@ const PROCS = ['glCreateShader', 'glShaderSource', 'glCompileShader', 'glGetShad
     'glCreateProgram', 'glAttachShader', 'glBindAttribLocation', 'glLinkProgram',
     'glGetProgramiv', 'glUseProgram', 'glGetUniformLocation', 'glUniform1i',
     'glUniformMatrix4fv', 'glGenFramebuffers', 'glBindFramebuffer', 'glFramebufferTexture2D',
-    'glGenRenderbuffers', 'glBindRenderbuffer', 'glRenderbufferStorage',
-    'glFramebufferRenderbuffer', 'glCheckFramebufferStatus', 'glVertexAttribPointer',
-    'glEnableVertexAttribArray'];
+    'glCheckFramebufferStatus', 'glVertexAttribPointer', 'glEnableVertexAttribArray'];
 
 /** Where each answer is in the dumped blob. */
 export const OUT = { vs: 0, fs: 4, link: 8, framebuffer: 12, error: 16, projection: 20,
@@ -82,14 +85,15 @@ export function glslProgram(){
     /** @type {Record<string, number[]>} */
     const slots = Object.fromEntries(PROCS.map(name=>[`p_${name}`, [0, 0, 0, 0]]));
     const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+    // At z 0.2: depth 0.6, which a byte holds exactly (153).
     const quad = [[-1, -1, 0, 0], [1, -1, 1, 0], [1, 1, 1, 1], [-1, 1, 0, 1]].flatMap(
-        ([x, y, s, t])=>[...u32(floatBits(x)), ...u32(floatBits(y)), ...u32(0),
+        ([x, y, s, t])=>[...u32(floatBits(x)), ...u32(floatBits(y)), ...u32(floatBits(0.2)),
             0xff, 0x00, 0x00, 0xff, ...u32(floatBits(s)), ...u32(floatBits(t))]);
     return buildExe({
         imports: importsWith({
             'OPENGL32.dll': ['wglGetProcAddress', 'glGenTextures', 'glBindTexture',
                 'glTexParameteri', 'glTexImage2D', 'glViewport', 'glClear', 'glDrawArrays',
-                'glGetError'],
+                'glGetError', 'glEnable', 'glDisable', 'glDepthMask', 'glDepthFunc'],
         }),
         codeSize: 0x1000,
         data: {
@@ -108,7 +112,7 @@ export function glslProgram(){
             matrix: identity.flatMap(value=>u32(floatBits(value))),
             quad,
             vs: [0, 0, 0, 0], fs: [0, 0, 0, 0], prog: [0, 0, 0, 0], tex: [0, 0, 0, 0],
-            fbo: [0, 0, 0, 0], rb: [0, 0, 0, 0], loc: [0, 0, 0, 0],
+            fbo: [0, 0, 0, 0], depth: [0, 0, 0, 0], loc: [0, 0, 0, 0],
         },
         code: ({ iat, at })=>{
             /** @param {number | { mem: number }} value */
@@ -164,22 +168,24 @@ export function glslProgram(){
                 ...proc('glGetUniformLocation', [mem('prog'), uniformName(2)]),
                 ...storeEax(out(OUT.useTexture)), ...storeEax(at('loc')),
                 ...proc('glUniform1i', [mem('loc'), 0]),
-                // The texture, the framebuffer and its depth.
+                // The textures, the framebuffer and its depth.
                 ...gl('glGenTextures', [1, at('tex')]),
                 ...gl('glBindTexture', [GL.TEXTURE_2D, mem('tex')]),
                 ...gl('glTexParameteri', [GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR]),
                 ...gl('glTexImage2D', [GL.TEXTURE_2D, 0, GL.RGBA, 32, 16, 0, GL.RGBA,
                     GL.UNSIGNED_BYTE, 0]),
+                ...gl('glGenTextures', [1, at('depth')]),
+                ...gl('glBindTexture', [GL.TEXTURE_2D, mem('depth')]),
+                ...gl('glTexParameteri', [GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR]),
+                ...gl('glTexImage2D', [GL.TEXTURE_2D, 0, GL.DEPTH24_STENCIL8, 32, 16, 0,
+                    GL.DEPTH_STENCIL, GL.UNSIGNED_INT_24_8, 0]),
                 ...gl('glBindTexture', [GL.TEXTURE_2D, 0]),
                 ...proc('glGenFramebuffers', [1, at('fbo')]),
                 ...proc('glBindFramebuffer', [GL.FRAMEBUFFER, mem('fbo')]),
                 ...proc('glFramebufferTexture2D', [GL.FRAMEBUFFER, GL.COLOR_ATTACHMENT0,
                     GL.TEXTURE_2D, mem('tex'), 0]),
-                ...proc('glGenRenderbuffers', [1, at('rb')]),
-                ...proc('glBindRenderbuffer', [GL.RENDERBUFFER, mem('rb')]),
-                ...proc('glRenderbufferStorage', [GL.RENDERBUFFER, GL.DEPTH24_STENCIL8, 32, 16]),
-                ...proc('glFramebufferRenderbuffer', [GL.FRAMEBUFFER, GL.DEPTH_STENCIL_ATTACHMENT,
-                    GL.RENDERBUFFER, mem('rb')]),
+                ...proc('glFramebufferTexture2D', [GL.FRAMEBUFFER, GL.DEPTH_STENCIL_ATTACHMENT,
+                    GL.TEXTURE_2D, mem('depth'), 0]),
                 ...proc('glCheckFramebufferStatus', [GL.FRAMEBUFFER]),
                 ...storeEax(out(OUT.framebuffer)),
                 // The quad's arrays.
@@ -189,15 +195,24 @@ export function glslProgram(){
                 ...[0, 1, 2].flatMap(k=>proc('glEnableVertexAttribArray', [k])),
                 // Into the texture, then the window sampling it.
                 // The quad covers the lower left quarter of the texture alone,
-                // the rest cleared black: the window shows the quarter where
-                // GL puts it only when the texture is neither flipped nor
-                // mirrored on its way.
+                // at depth 0.6, the rest cleared to depth 1: the window shows
+                // the quarter where GL puts it only when the texture is
+                // neither flipped nor mirrored on its way.
                 ...gl('glViewport', [0, 0, 16, 8]),
                 ...gl('glClear', [GL.COLOR_BUFFER_BIT | GL.DEPTH_BUFFER_BIT]),
+                ...gl('glEnable', [GL.DEPTH_TEST]),
                 ...gl('glDrawArrays', [GL.TRIANGLE_FAN, 0, 4]),
+                // The whole texture again, red times the depth it samples of
+                // its own attachment: tested, not written.
+                ...gl('glViewport', [0, 0, 32, 16]),
+                ...gl('glDepthMask', [0]),
+                ...gl('glDepthFunc', [GL.LEQUAL]),
+                ...proc('glUniform1i', [mem('loc'), 1]),
+                ...gl('glBindTexture', [GL.TEXTURE_2D, mem('depth')]),
+                ...gl('glDrawArrays', [GL.TRIANGLE_FAN, 0, 4]),
+                ...gl('glDisable', [GL.DEPTH_TEST]),
                 ...proc('glBindFramebuffer', [GL.FRAMEBUFFER, 0]),
                 ...gl('glViewport', [0, 0, 320, 240]),
-                ...proc('glUniform1i', [mem('loc'), 1]),
                 ...gl('glBindTexture', [GL.TEXTURE_2D, mem('tex')]),
                 ...gl('glDrawArrays', [GL.TRIANGLE_FAN, 0, 4]),
                 ...push([mem('hdc')]), 0xff, 0x15, ...u32(iat('SwapBuffers')),
@@ -209,13 +224,14 @@ export function glslProgram(){
 }
 
 /**
- * The window's pixels, 320x240 from its top: red in its lower left quarter,
- * where the quad was drawn in the texture, black elsewhere; each away from
- * the edges a linear filter blends.
+ * The window's pixels, 320x240 from its top: red times the depth read back,
+ * 0.6 in its lower left quarter, where the quad was drawn in the texture,
+ * and 1 elsewhere; each away from the edges a linear filter blends. A depth
+ * sampled as black leaves all four black.
  */
 export const GLSL_SAMPLES = Object.freeze([
-    { name: 'drawn-lower-left', x: 80, y: 180, colour: 0xffff0000 },
-    { name: 'cleared-upper-left', x: 80, y: 60, colour: 0xff000000 },
-    { name: 'cleared-lower-right', x: 240, y: 180, colour: 0xff000000 },
-    { name: 'cleared-upper-right', x: 240, y: 60, colour: 0xff000000 },
+    { name: 'drawn-lower-left', x: 80, y: 180, colour: 0xff990000 },
+    { name: 'cleared-upper-left', x: 80, y: 60, colour: 0xffff0000 },
+    { name: 'cleared-lower-right', x: 240, y: 180, colour: 0xffff0000 },
+    { name: 'cleared-upper-right', x: 240, y: 60, colour: 0xffff0000 },
 ]);

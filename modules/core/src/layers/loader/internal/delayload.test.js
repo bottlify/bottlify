@@ -378,6 +378,20 @@ test('a library the program delay-loads and brought is planned, as an import is'
     assert.deepEqual(missing, ['nowhere.dll']);
 });
 
+test('a delay-loaded library found nowhere does not end the start', async()=>{
+    // Windows fails it on the first call into it (0xC06D007E), not at the start.
+    const { bytes } = withDelayLoads({ rvaBased: true, dlls: [{ dll: 'nowhere.dll' }] });
+    const { missing, absent } = await planDependencies({
+        entry: bytes,
+        isSystem: ()=>false,
+        isKnownDll: ()=>false,
+        isWindowsLibrary: ()=>false,
+        readLibrary: async()=>null,
+    });
+    assert.deepEqual(missing, ['nowhere.dll']);
+    assert.deepEqual(absent, []);
+});
+
 test('a PE32+ descriptor\'s thunks are quadwords, bound eight bytes wide', ()=>{
     // Read four bytes at a time, the high half of each name thunk reads as the
     // end of the table after the first import, and an ordinal's flag -- bit 63

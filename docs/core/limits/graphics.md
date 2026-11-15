@@ -65,7 +65,9 @@
   previous unit's result; `GL_COORD_REPLACE` is not done; a 3D texture enabled on the fixed pipeline
   is not sampled (a loss); an image's border texels are sampled as part of the image; the sRGB
   luminance formats are sampled without their decode; the mipmaps generated of a compressed sized
-  format are not made on the device.
+  format are not made on the device; a texture sampled by a draw into a framebuffer it is attached
+  to samples black, except the depth-stencil attachment of a draw that writes neither depth nor
+  stencil, which is read (nearest, as every depth texture sampled without comparison).
 - OpenGL SPIR-V shaders (`glShaderBinary` with `GL_SHADER_BINARY_FORMAT_SPIR_V`,
   `glSpecializeShader`) are written back as GLSL and compiled as a source shader is, so they take
   what GLSL takes here and no more. Refused at specialization, with the reason in the shader's log:

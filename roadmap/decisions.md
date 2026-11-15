@@ -2302,3 +2302,29 @@ font test (`test_height_selection_vdmx`) runs one face with each, and only the A
 the heights Windows answers. A face added with only an every-glyph record measures by its em
 square and OS/2 cell, as one with no VDMX does.
 *2026-11-15.*
+
+**A255. A function of the 2005 or the universal runtime that refuses an argument calls the
+invalid-parameter handler, and with none set ends the process; msvcrt.dll answers EINVAL alone.**
+As Windows' runtimes do: the handler a program set (`_set_invalid_parameter_handler`, and in the
+universal runtime the thread's own from `_set_thread_local_invalid_parameter_handler`, asked first)
+is called with the zeros a release runtime passes, and the function then answers its documented
+failure - an empty handler is how games live with the check. With no handler the process ends as
+`_invoke_watson` ends it, STATUS_INVALID_CRUNTIME_PARAMETER (0xC0000417). msvcrt.dll keeps no
+handler, so its same functions answer EINVAL and go on. The refusal is found where every function
+of the runtimes says it, the errno set to EINVAL during a call that came through MSVCR80's or
+ucrtbase's export (`msvcrt/invalid-parameter.js`); a call one function of a runtime makes into
+another belongs to the call the program made. The ending is loud on purpose: an error in the
+journal names the function and its arguments, because a parameter Windows lets through and ours
+refuses is a defect of our check, not something to stay quiet about. *2026-11-15.*
+
+**A256. A static import of a library found nowhere and carried by no Windows ends the process at
+its start with STATUS_DLL_NOT_FOUND; one Windows carries and the engine does not recreate lets it
+start.** Windows creates the process and its loader ends it in the first thread, before any
+DllMain or TLS callback, with 0xC0000135 as its exit code: CreateProcess succeeds and the parent
+reads that code. A library Windows itself puts in system32 is never absent on Windows, so its
+absence here is the engine's gap, not the program's: the program starts as before and fails
+where it calls in. Which libraries Windows carries is knowledge, not code: Wine's list of the
+libraries it recreates, less what is Wine's alone and the redistributable runtimes a program
+brings itself (`tools/generators/windows-libraries.mjs`), with every `api-ms-win-` and
+`ext-ms-win-` set. A delay-loaded library fails on its first call on Windows and is not refused
+at the start. The refusal is said as `libraries-not-found`, an error. *2026-11-15.*

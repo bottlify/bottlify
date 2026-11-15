@@ -49,6 +49,11 @@ event, an error. Neither stops the program.
   (`roadmap/decisions.md` A240): a program embeds it, navigates and hears its events, but the
   page is not drawn and has no document; each address not drawn is said once as a loss. The
   InternetExplorer application object is not there.
+- A library Windows carries in its system directory and the engine does not recreate (in Wine's
+  list of them, `loader/internal/windows-libraries.js`) is missing, not absent: a program that
+  imports one still starts, and fails where it calls in. A static import of a library in no list
+  and on no volume ends the process at its start with STATUS_DLL_NOT_FOUND (0xC0000135), as on
+  Windows (`roadmap/decisions.md` A256).
 - An import nothing implements returns 0 when its argument size is known (a decorated name, a cdecl
   library, a library the program brought). Otherwise the program stops with `unimplemented import`
   and the function's name.
