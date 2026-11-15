@@ -2546,38 +2546,33 @@ function comparison(e, dst, src, double, flagsLive){
     }
     const a = double ? Local.d0 : Local.f0;
     const c = double ? Local.d1 : Local.f1;
-    const [feq, flt, fne] = double ? [0x61, 0x63, 0x62] : [F32.eq, F32.lt, F32.ne];
-    // Read by the block's branch alone: the branch compares the operands. A
-    // compiler schedules other work between the two (an x64 gcc a store, a
-    // multiply); what stands there leaves the flags be, and a way out of it
-    // makes them (`payFloatCompare`). Its scalar forms use f0 and f1, so the
-    // operands wait in locals of their own.
+    // The block's branch compares the operands itself. A compiler schedules
+    // other work between the two (an x64 gcc a store, a multiply); what
+    // stands there leaves the flags be. Read by that branch alone, the flags
+    // are never made, and a way out between the two makes them
+    // (`payFloatCompare`); read past it, or by no such branch, they wait in
+    // the record as the operands' bits (`recordFloatCompare`). The scalar
+    // forms use f0 and f1, so the operands wait in locals of their own.
     const instructions = e.region.blocks[e.blockIndex].instructions;
     const at = instructions.indexOf(e.current);
-    if (e.fusesCompare(at, keepsFlags))
+    const branch = e.branchReads(at, keepsFlags);
+    const alone = branch && e.fusesCompare(at, keepsFlags);
+    if (!alone)
     {
-        if (at + 2 < instructions.length)
-        {
-            const [ka, kc] = [e.compareLocal(0, double), e.compareLocal(1, double)];
-            b.localGet(a).localSet(ka).localGet(c).localSet(kc);
-            e.fcmp = { a: ka, c: kc, double };
-            return;
-        }
-        e.fcmp = { a, c, double };
+        e.recordFloatCompare(a, c, double);
+    }
+    if (!branch)
+    {
         return;
     }
-    e.eagerWrite(CF | PF | AF | ZF | SF | OF);
-    // unordered: ZF = PF = CF = 1
-    b.localGet(a).localGet(a).op(fne);
-    b.localGet(c).localGet(c).op(fne);
-    b.op(I32.or);
-    b.localSet(Local.t1);
-    b.localGet(Local.t1);
-    e.orFlag(PF);
-    b.localGet(Local.t1).localGet(a).localGet(c).op(feq).op(I32.or);
-    e.orFlag(ZF);
-    b.localGet(Local.t1).localGet(a).localGet(c).op(flt).op(I32.or);
-    e.orFlag(CF);
+    if (at + 2 < instructions.length)
+    {
+        const [ka, kc] = [e.compareLocal(0, double), e.compareLocal(1, double)];
+        b.localGet(a).localSet(ka).localGet(c).localSet(kc);
+        e.fcmp = { a: ka, c: kc, double, recorded: !alone };
+        return;
+    }
+    e.fcmp = { a, c, double, recorded: !alone };
 }
 
 /**

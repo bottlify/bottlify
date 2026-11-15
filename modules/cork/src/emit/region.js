@@ -73,6 +73,9 @@ const I64_EXTEND_U = 0xad;
 const I64_LT_U = 0x54;
 const I64_EQ = 0x51;
 const I64_NE = 0x52;
+const I64_SHR_U = 0x88;
+const I32_REINTERPRET_F32 = 0xbc;
+const I64_REINTERPRET_F64 = 0xbd;
 import { callsOut, inlineReturns } from '../region.js';
 import {
     analyseX87, floatCondition, isX87, prepareX87, sameState, x87BlockEnd, x87BlockStart,
@@ -2771,54 +2774,31 @@ export class RegionEmitter {
      * (a `dec ecx` after an `add` or `xor` in a loop called the helper each
      * turn for five flags the `dec` overwrites); an unknown one is folded
      * only when its kind does not leave CF in the word already -- a counting
-     * loop's head meets its own `dec`'s record there. The record stays as it
-     * was otherwise, its word agreeing with it.
+     * loop's head meets its own `dec`'s record there -- and first tried as
+     * the record the block is expected to be entered with (`blockHint`), whose
+     * carry is one compare: a `dec` after the `test` or the `cmp` of the
+     * block before. The record stays as it was otherwise, its word agreeing
+     * with it.
      */
     carryIntoWord(){
         const { b } = this;
         const pending = this.pending;
         if (pending === null)
         {
-            // The unfolded kind in t2; CF of a kind that does not keep it in
-            // the word, without the helper: the operands are masked to their
-            // width, so an unsigned compare is the carry at every width.
-            const k = Local.t2;
-            b.localGet(Local.kind).i32const(2).op(I32.shrU).localSet(k);
-            b.i32const(CARRY_IN_WORD).localGet(k).op(I32.shrU).i32const(1).op(I32.and).op(I32.eqz);
-            this.openIf('carry', EMPTY);
-            b.localGet(Local.flags).i32const(~CF).op(I32.and);
-            // SUB/SBB: op1 < op2, or equal with a borrow in (SBB).
-            // Long mode's record is i64, its operands zero-extended: the same compares.
-            const wide = this.width.bits === 64;
-            const ltU = wide ? I64_LT_U : I32.ltU;
-            const eq = wide ? I64_EQ : I32.eq;
-            b.localGet(k).i32const(Kind.SUB).op(I32.sub).i32const(2).op(I32.ltU);
-            b.localGet(Local.op1).localGet(Local.op2).op(ltU);
-            b.localGet(Local.op1).localGet(Local.op2).op(eq).localGet(Local.cin).op(I32.and)
-                .localGet(k).i32const(Kind.SBB).op(I32.eq).op(I32.and);
-            b.op(I32.or).op(I32.and);
-            // ADD/ADC: the sum wrapped below op1, or equal with a carry in (ADC).
-            b.localGet(k).i32const(Kind.ADD).op(I32.sub).i32const(2).op(I32.ltU);
-            b.localGet(Local.res).localGet(Local.op1).op(ltU);
-            b.localGet(Local.res).localGet(Local.op1).op(eq).localGet(Local.cin).op(I32.and)
-                .localGet(k).i32const(Kind.ADC).op(I32.eq).op(I32.and);
-            b.op(I32.or).op(I32.and);
-            b.op(I32.or);
-            // NEG: op2 was not zero. LOGIC: none of the three, 0.
-            b.localGet(k).i32const(Kind.NEG).op(I32.eq);
-            b.localGet(Local.op2);
-            if (wide)
+            const hint = this.blockHint();
+            if (hint !== null && (eagerFlagsOf(hint.kind) & CF) === 0)
             {
-                b.i64const(0n).op(I64_NE);
+                b.localGet(Local.kind).i32const(hint.kind * 4 + hint.width).op(I32.eq);
+                this.openIf('carryHint', EMPTY);
+                b.localGet(Local.flags).i32const(~CF).op(I32.and);
+                emitFlag(b, this.flagLocals, hint.kind, hint.width, CF);
+                b.op(I32.or).localSet(Local.flags);
+                b.else();
+                this.unknownCarryIntoWord();
+                this.close();
+                return;
             }
-            else
-            {
-                b.i32const(0).op(I32.ne);
-            }
-            b.op(I32.and);
-            b.op(I32.or);
-            b.op(I32.or).localSet(Local.flags);
-            this.close();
+            this.unknownCarryIntoWord();
             return;
         }
         if ((eagerFlagsOf(pending.kind) & CF) !== 0)
@@ -2828,6 +2808,67 @@ export class RegionEmitter {
         b.localGet(Local.flags).i32const(~CF).op(I32.and);
         emitFlag(b, this.flagLocals, pending.kind, pending.width, CF);
         b.op(I32.or).localSet(Local.flags);
+    }
+
+    /**
+     * `carryIntoWord` of a record whose kind is not known here: the word left
+     * as it is where the kind keeps CF there, and CF computed into it
+     * otherwise -- from the operands, or by the helper for a float compare's.
+     */
+    unknownCarryIntoWord(){
+        const { b } = this;
+        // The unfolded kind in t2; CF of a kind that does not keep it in
+        // the word, without the helper: the operands are masked to their
+        // width, so an unsigned compare is the carry at every width.
+        const k = Local.t2;
+        b.localGet(Local.kind).i32const(2).op(I32.shrU).localSet(k);
+        b.i32const(CARRY_IN_WORD).localGet(k).op(I32.shrU).i32const(1).op(I32.and).op(I32.eqz);
+        this.openIf('carry', EMPTY);
+        // A float compare's carry is a compare of floats: the helper makes
+        // it with the rest of the word, and the record is then the word's.
+        b.localGet(k).i32const(Kind.FCMP).op(I32.eq);
+        this.openIf('floatCarry', EMPTY);
+        b.localGet(Local.kind).localGet(Local.res).localGet(Local.op1).localGet(Local.op2)
+            .localGet(Local.cin).localGet(Local.flags);
+        b.call(this.context.materialise);
+        this.folds++;
+        b.localSet(Local.flags);
+        b.i32const(0).localSet(Local.kind);
+        b.else();
+        b.localGet(Local.flags).i32const(~CF).op(I32.and);
+        // SUB/SBB: op1 < op2, or equal with a borrow in (SBB).
+        // Long mode's record is i64, its operands zero-extended: the same compares.
+        const wide = this.width.bits === 64;
+        const ltU = wide ? I64_LT_U : I32.ltU;
+        const eq = wide ? I64_EQ : I32.eq;
+        b.localGet(k).i32const(Kind.SUB).op(I32.sub).i32const(2).op(I32.ltU);
+        b.localGet(Local.op1).localGet(Local.op2).op(ltU);
+        b.localGet(Local.op1).localGet(Local.op2).op(eq).localGet(Local.cin).op(I32.and)
+            .localGet(k).i32const(Kind.SBB).op(I32.eq).op(I32.and);
+        b.op(I32.or).op(I32.and);
+        // ADD/ADC: the sum wrapped below op1, or equal with a carry in (ADC).
+        b.localGet(k).i32const(Kind.ADD).op(I32.sub).i32const(2).op(I32.ltU);
+        b.localGet(Local.res).localGet(Local.op1).op(ltU);
+        b.localGet(Local.res).localGet(Local.op1).op(eq).localGet(Local.cin).op(I32.and)
+            .localGet(k).i32const(Kind.ADC).op(I32.eq).op(I32.and);
+        b.op(I32.or).op(I32.and);
+        b.op(I32.or);
+        // NEG: op2 was not zero. LOGIC: none of the three, 0.
+        b.localGet(k).i32const(Kind.NEG).op(I32.eq);
+        b.localGet(Local.op2);
+        if (wide)
+        {
+            b.i64const(0n).op(I64_NE);
+        }
+        else
+        {
+            b.i32const(0).op(I32.ne);
+        }
+        b.op(I32.and);
+        b.op(I32.or);
+        b.op(I32.or).localSet(Local.flags);
+        this.close();
+        this.close();
     }
 
     /**
@@ -2941,6 +2982,21 @@ export class RegionEmitter {
      * @param {(instruction: import('../decode/decoder.js').Instruction) => boolean} between
      */
     fusesCompare(at, between){
+        return this.branchReads(at, between)
+            && (this.flagsOut[this.blockIndex] & ARITH_FLAGS) === 0;
+    }
+
+    /**
+     * Whether the block's final conditional branch reads the flags of the
+     * instruction at `at` as that instruction left them: nothing between the
+     * two touches the flags or can leave (`between` names what may stand
+     * there). The branch of such a float compare compares its operands
+     * itself, whoever else reads the flags after it.
+     *
+     * @param {number} at
+     * @param {(instruction: import('../decode/decoder.js').Instruction) => boolean} between
+     */
+    branchReads(at, between){
         const block = this.region.blocks[this.blockIndex];
         const last = block.instructions.length - 1;
         if (block.exit.kind !== 'jcc' || at < 0 || at >= last)
@@ -2954,7 +3010,7 @@ export class RegionEmitter {
                 return false;
             }
         }
-        return (this.flagsOut[this.blockIndex] & ARITH_FLAGS) === 0;
+        return true;
     }
 
     /**
@@ -3013,6 +3069,46 @@ export class RegionEmitter {
         }
         this.b.i32const(kindOf(kind, size)).localSet(Local.kind);
         this.pending = { kind, width: widthCode(size) };
+    }
+
+    /**
+     * Records a float compare (`Kind.FCMP`): its two operands' bits, from the
+     * f32 or f64 locals they are in, for whoever reads a flag later to compare
+     * again. All six flags are the compare's, so nothing of the record before
+     * it survives. A double's bits take the 32-bit record's four fields.
+     *
+     * @param {number} a  the first operand's local @param {number} c  the second's
+     * @param {boolean} double
+     */
+    recordFloatCompare(a, c, double){
+        const { b } = this;
+        const wide = this.width.bits === 64;
+        /** @type {(from: number, low: number, high: number) => void} */
+        const bits = (from, low, high)=>{
+            if (!double)
+            {
+                b.localGet(from).op(I32_REINTERPRET_F32);
+                if (wide)
+                {
+                    b.op(I64_EXTEND_U);
+                }
+                b.localSet(low);
+            }
+            else if (wide)
+            {
+                b.localGet(from).op(I64_REINTERPRET_F64).localSet(low);
+            }
+            else
+            {
+                b.localGet(from).op(I64_REINTERPRET_F64).op(I64.wrap).localSet(low);
+                b.localGet(from).op(I64_REINTERPRET_F64).i64const(32n).op(I64_SHR_U).op(I64.wrap)
+                    .localSet(high);
+            }
+        };
+        bits(a, Local.op1, Local.res);
+        bits(c, Local.op2, Local.cin);
+        b.i32const(kindOf(Kind.FCMP, double ? 8 : 4)).localSet(Local.kind);
+        this.pending = { kind: Kind.FCMP, width: double ? 3 : 2 };
     }
 
     /**
@@ -5321,7 +5417,7 @@ export class RegionEmitter {
         if (!emptied)
         {
             this.payResult();
-            if (this.fcmp !== null)
+            if (this.fcmp !== null && this.fcmp.recorded !== true)
             {
                 this.payFloatCompare();
             }
