@@ -173,11 +173,21 @@ test('in a 64-bit process the pointers are quadwords, a BLOB\'s pointer on its b
     assert.notEqual(s.view.getUint32(VARIANT + 16, true), 0, 'pBlobData at 16');
 });
 
-test('an endpoint activates nothing to play to: E_NOINTERFACE, said once', ()=>{
+test('an endpoint activates an audio client; another interface is E_NOINTERFACE, said once', ()=>{
     const s = setup();
     s.enumerator('GetDefaultAudioEndpoint', [0, 0, OUT]);
     const device = s.view.getUint32(OUT, true);
-    assert.equal(s.call(device, 'Activate', [0, 0x17, 0, OUT]), E_NOINTERFACE);
-    assert.equal(s.call(device, 'Activate', [0, 0x17, 0, OUT]), E_NOINTERFACE);
+    // IID_IAudioClient, {1CB9AD4C-DBFA-4C32-B178-C2F568A703B2}.
+    s.view.setUint32(KEY, 0x1cb9ad4c, true);
+    s.view.setUint16(KEY + 4, 0xdbfa, true);
+    s.view.setUint16(KEY + 6, 0x4c32, true);
+    [0xb1, 0x78, 0xc2, 0xf5, 0x68, 0xa7, 0x03, 0xb2].forEach((byte, index)=>{
+        s.view.setUint8(KEY + 8 + index, byte);
+    });
+    assert.equal(s.call(device, 'Activate', [KEY, 0x17, 0, OUT]), S_OK);
+    assert.notEqual(s.view.getUint32(OUT, true), 0);
+    s.view.setUint32(KEY, 0x12345678, true);
+    assert.equal(s.call(device, 'Activate', [KEY, 0x17, 0, OUT]), E_NOINTERFACE);
+    assert.equal(s.call(device, 'Activate', [KEY, 0x17, 0, OUT]), E_NOINTERFACE);
     assert.equal(s.reported.length, 1);
 });
