@@ -5,30 +5,23 @@
  */
 
 /**
- * The settings cork takes and the table of docs/cork/settings.md are the same
- * set, both ways. A setting the code reads and no table names is one
- * nobody can find; a row whose setting nothing reads silently does nothing
- * (`long` stayed a row a week after the code that read it was gone). The
- * default a table gives is the runtime's: `callWindow` and `callSitesKept`
- * had moved on and their rows had not. And every runtime setting a host may
- * pass is in the core's `EngineConfig` typedef.
+ * The settings cork's code reads and the keys of its settings table (`SETTINGS`) are
+ * the same set, both ways. A setting the code reads and the table lacks is one nobody
+ * can find; a key nothing reads silently does nothing (`long` stayed a row a week
+ * after the code that read it was gone, `interpretChunk` a typedef key long after
+ * `createMachine` took a constant). That the docs and the core's `EngineConfig` are
+ * the table's is tools/checks/check-cork-settings.mjs's to hold.
  */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
-import { runtimeSettings } from './runtime/settings.js';
+import { SETTINGS } from './runtime/settings.js';
 
 const read = (/** @type {string} */ path)=>readFileSync(new URL(path, import.meta.url), 'utf8');
 
 /** A setting's name: a word that may hold digits past its first letter (`x87Shapes`). */
 const NAME = '[a-zA-Z][a-zA-Z0-9]*';
-
-/**
- * The runtime's settings, its defaults (`runtimeSettings`): each key with its value.
- * @returns {Map<string, unknown>}
- */
-const runtimeDefaults = ()=>new Map(Object.entries(runtimeSettings({})));
 
 /**
  * The names a source reads off a config by one of the spellings given (`settings.`,
@@ -38,18 +31,16 @@ const runtimeDefaults = ()=>new Map(Object.entries(runtimeSettings({})));
 const namesRead = (source, spellings)=>new Set(spellings.flatMap(spelling=>[
     ...source.matchAll(new RegExp(`${spelling}(${NAME})\\b`, 'g'))].map(match=>match[1])));
 
-/** The runtime's own sources: its parts, not their tests, nor their imports (a
- * `'./settings.js'` is no setting). */
+/** The runtime's own sources: its parts, not their tests, nor their imports or comments (a
+ * `'./settings.js'` or a `settings.md` they name is no setting). */
 const runtimeSources = ()=>readdirSync(new URL('./runtime/', import.meta.url))
     .filter(name=>name.endsWith('.js') && !/\.i?test\.js$/.test(name))
-    .map(name=>read(`./runtime/${name}`).replace(/^import [^;]*;$/gm, '')).join('\n');
+    .map(name=>read(`./runtime/${name}`).replace(/^import [^;]*;$/gm, '')
+        .replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')).join('\n');
 
-/** What the runtime reads: its defaults' keys, and the keys it reads past them. */
-function runtimeReads(){
-    const source = runtimeSources();
-    return new Set([...runtimeDefaults().keys(),
-        ...namesRead(source, ['\\bsettings\\.', '\\bsettings\\?\\.', '\\bconfig\\.'])]);
-}
+/** What the runtime reads off its settings or its config. */
+const runtimeReads = ()=>namesRead(runtimeSources(),
+    ['\\bsettings\\.', '\\bsettings\\?\\.', '\\bconfig\\.']);
 
 /** What the core's host of cork reads of cork's config, and what `createMachine` does. */
 function hostReads(){
@@ -64,96 +55,23 @@ function hostReads(){
     ]);
 }
 
-/**
- * A default as a table gives it, as a value: a number
- * (`1 << 20`, `48 << 20`, `10_000`; `2^20`, `48 MiB`), a boolean; anything
- * else -- `unset`, `none`, a sentence -- is undefined, compared with nothing.
- * @param {string} text
- */
-function valueOf(text){
-    const plain = text.replace(/`/g, '').replace(/_/g, '').trim();
-    const shift = /^(\d+) << (\d+)$/.exec(plain);
-    const power = /^2\^(\d+)$/.exec(plain);
-    const mebi = /^(\d+) (?:MiB|МиБ)$/.exec(plain);
-    return plain === 'true' || plain === 'false' ? plain === 'true'
-        : shift ? Number(shift[1]) * 2 ** Number(shift[2])
-            : power ? 2 ** Number(power[1])
-                : mebi ? Number(mebi[1]) * 2 ** 20
-                    : /^\d+(\.\d+)?$/.test(plain) ? Number(plain) : undefined;
-}
-
-/**
- * The settings a settings table names, with their defaults: a row's names and its
- * defaults in the same order, or one default for all of them.
- * @param {string} doc
- * @returns {Map<string, string>}
- */
-function documentedDefaults(doc){
-    /** @type {Map<string, string>} */
-    const found = new Map();
-    for (const line of doc.split('\n').filter(row=>row.startsWith('| `')))
-    {
-        const [names, defaults] = line.slice(2).split(' | ');
-        const keys = [...names.matchAll(new RegExp(`\`(${NAME})\``, 'g'))].map(match=>match[1]);
-        const values = keys.length > 1 && defaults.includes(', ') ? defaults.split(', ')
-            : keys.map(()=>defaults);
-        keys.forEach((key, k)=>found.set(key, values[k] ?? ''));
-    }
-    return found;
-}
-
-const DOCS = ['../../../docs/cork/settings.md'];
-
-/** Settings a host wires that EngineConfig does not carry: not a person's to pass. */
-const WIRING = new Set(['sharedCode']);
+const KEYS = new Set(Object.keys(SETTINGS));
 
 test('the name pattern sees a setting with digits in it', ()=>{
-    assert.ok(runtimeDefaults().has('x87Shapes'), 'x87Shapes among the runtime\'s defaults');
-    assert.ok(documentedDefaults(read(DOCS[0])).has('x87Shapes'), 'and among the documented');
+    assert.ok(runtimeReads().has('x87Shapes'), 'x87Shapes among what the runtime reads');
 });
 
-test('every setting the runtime reads is in the table, and in EngineConfig but the wiring',
+test('every setting the runtime, the core\'s host or createMachine reads is in the table',
     ()=>{
-        const typedef = read('../../core/src/layers/cpu/engine.js');
-        const names = [...runtimeReads()];
-        assert.ok(names.length > 40, `${names.length} settings found`);
-        for (const doc of DOCS)
-        {
-            const documented = documentedDefaults(read(doc));
-            assert.deepEqual(names.filter(name=>!documented.has(name)), [], `${doc}: undocumented`);
-        }
-        assert.deepEqual(names.filter(name=>!WIRING.has(name) && !typedef.includes(`[${name}]`)),
-            [], 'not in EngineConfig');
+        const runtime = [...runtimeReads()];
+        const host = [...hostReads()];
+        assert.ok(runtime.length > 40, `${runtime.length} settings the runtime reads`);
+        assert.ok(host.length > 8, `${host.length} settings the host reads`);
+        assert.deepEqual(runtime.filter(name=>!KEYS.has(name)), [], 'the runtime\'s');
+        assert.deepEqual(host.filter(name=>!KEYS.has(name)), [], 'the host\'s');
     });
-
-test('every config the core\'s host or createMachine reads is in the table', ()=>{
-    const names = [...hostReads()];
-    assert.ok(names.length > 8, `${names.length} host settings found`);
-    for (const doc of DOCS)
-    {
-        const documented = documentedDefaults(read(doc));
-        assert.deepEqual(names.filter(name=>!documented.has(name)), [], `${doc}: undocumented`);
-    }
-});
 
 test('every setting the table names is one something reads', ()=>{
     const reads = new Set([...runtimeReads(), ...hostReads()]);
-    const english = [...documentedDefaults(read(DOCS[0])).keys()];
-    assert.ok(english.length > 40, `${english.length} settings documented`);
-    assert.deepEqual(english.filter(name=>!reads.has(name)), [], 'documented, read by nothing');
+    assert.deepEqual([...KEYS].filter(name=>!reads.has(name)), [], 'in the table, read by nothing');
 });
-
-test('every default docs/cork/settings.md gives for a runtime setting is the runtime\'s',
-    ()=>{
-        const runtime = runtimeDefaults();
-        for (const doc of DOCS)
-        {
-            const documented = documentedDefaults(read(doc));
-            const compared = [...documented].filter(([name, text])=>runtime.has(name)
-                && valueOf(text) !== undefined);
-            assert.ok(compared.length > 30, `${doc}: ${compared.length} defaults compared`);
-            const wrong = compared.filter(([name, text])=>valueOf(text) !== runtime.get(name))
-                .map(([name, text])=>`${name}: ${text}, the runtime's ${runtime.get(name)}`);
-            assert.deepEqual(wrong, [], doc);
-        }
-    });
