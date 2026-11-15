@@ -8,27 +8,25 @@
  * What translating costs, in machine instructions rather than milliseconds:
  * cork forms and emits a fixed body of regions (the micro benchmark's 32-bit
  * and x86-64 images, the first REGIONS each reaches breadth first) pass after
- * pass under QEMU, and a plugin (`emit-count/count.c`) counts the
+ * pass under QEMU, and a plugin (`tools/lib/qemu-count.c`) counts the
  * instructions of each pass. Time on this machine varies by a tenth between
  * runs, which hides every small gain in the emitter; this count of a tree is
  * the same in every run, to the instruction.
  *
  * What a pass costs falls for a long time: V8 keeps optimising the
- * emitter's rarer functions for ninety passes, and each compile lands in the
- * pass that crossed its threshold, a few hundred million instructions in one
- * pass and none in the next. So the count is split by where the code lies:
- * the emitter's own work (the code V8 made of it, V8's builtins, the
- * collector and the rest of the runtime) is steady within a per cent from
- * the fortieth pass, and is what an arm is judged by; the compiles are said
- * beside it. The collector is part of the work, kept steady by a young
- * generation of 64 MiB and an old one past what a run reaches: node's
- * predictable collection schedule makes the old generation's marks fall
- * where a pass's garbage happens to cross a fixed step instead.
+ * emitter's rarer functions for ninety passes, each compile landing in the
+ * pass that crossed its threshold, so an arm is judged by the work without
+ * them (`tools/lib/qemu-count.mjs`), steady within a per cent from the
+ * fortieth pass.
  *
- * The count is regionModule's: one region formed and emitted as a module of
- * its own, as the translator's worker emits each of a batch's, for an x64
- * host's engine. Several roots are arms, run at once (the count does not
- * depend on the machine's load), each with its ratio to the first.
+ * Each region is formed with the runtime's inputs (a span's bytes at once,
+ * callees' far branches cold, decoding shared between a pass's regions of
+ * one image) and emitted by `emitBatch` as the translation worker emits one,
+ * for an x64 host's engine, three marks around it: the price list fitted to
+ * every region's count says what a region, a block, a call, a return, a
+ * jump and any other instruction cost in each part. Several roots are arms,
+ * run at once (the count does not depend on the machine's load), each with
+ * its ratio to the first.
  *
  * Needs a qemu-x86_64 built with plugins (`./configure
  * --target-list=x86_64-linux-user --enable-plugins`; a distribution's
@@ -43,14 +41,11 @@
  * runs this runs the passes: a newer one measures a newer V8.
  */
 
-import { existsSync, fdatasyncSync, readFileSync, readdirSync, statSync } from 'node:fs';
-import { execFileSync, spawn } from 'node:child_process';
+import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { between, mark, runCounted, work } from '../lib/qemu-count.mjs';
 
 const IMAGE_BASE = 0x401000;
-const NODE_FLAGS = ['--single-threaded', '--predictable', '--no-flush-bytecode',
-    '--min-semi-space-size=64', '--max-semi-space-size=64', '--initial-old-space-size=4096'];
-const KINDS = /** @type {const} */ (['js', 'compile', 'gc', 'other']);
 
 /** @param {string[]} argv */
 const optionsOf = argv=>{
@@ -85,21 +80,6 @@ const optionsOf = argv=>{
         options.roots.push(fileURLToPath(new URL('../../', import.meta.url)));
     }
     return options;
-};
-
-/**
- * A mark in the count: the plugin prints its totals at every fdatasync,
- * which nothing else in node calls (on a pipe it fails, and is made all the
- * same).
- */
-const mark = ()=>{
-    try
-    {
-        fdatasyncSync(1);
-    }
-    catch {
-        // EINVAL on a pipe: the call was made, which is all a mark is.
-    }
 };
 
 /**
@@ -145,8 +125,17 @@ const inner = async({ roots: [root], regions, warm, reps })=>{
                 const offset = address - IMAGE_BASE;
                 return offset >= 0 && offset < image.length ? image[offset] : 0xf4;
             };
-            const bytesOf = (/** @type {number} */ start, /** @type {number} */ end)=>
-                Uint8Array.from({ length: end - start }, (_, at)=>read(start + at));
+            // A span's bytes at once, as the host copies them out of guest memory.
+            const bytesOf = (/** @type {number} */ start, /** @type {number} */ end)=>{
+                const bytes = new Uint8Array(end - start).fill(0xf4);
+                const from = Math.max(start, IMAGE_BASE);
+                const to = Math.min(end, IMAGE_BASE + image.length);
+                if (from < to)
+                {
+                    bytes.set(image.subarray(from - IMAGE_BASE, to - IMAGE_BASE), from - start);
+                }
+                return bytes;
+            };
             const form = { coldReach: COLD_REACH, bytesOf,
                 ...bits === 64 ? { mode: MODE_64 } : {} };
             const queue = [IMAGE_BASE];
@@ -229,30 +218,7 @@ const shapeOf = (region, name)=>{
     return shape;
 };
 
-/**
- * The plugin, built beside the qemu binary the first time, or again when
- * its source is newer.
- *
- * @param {string} dir
- */
-const pluginIn = dir=>{
-    const source = fileURLToPath(new URL('emit-count/count.c', import.meta.url));
-    const built = `${dir}/emit-count.so`;
-    if (!existsSync(`${dir}/qemu-x86_64`) || !existsSync(`${dir}/qemu-plugin.h`))
-    {
-        throw new Error(`emit-count: not measured: --qemu ${dir || '(none)'} holds no qemu-x86_64 `
-            + 'and qemu-plugin.h (a qemu built with --enable-plugins)');
-    }
-    if (!existsSync(built) || statSync(built).mtimeMs < statSync(source).mtimeMs)
-    {
-        const glib = execFileSync('pkg-config', ['--cflags', 'glib-2.0'], { encoding: 'utf8' })
-            .trim().split(/\s+/);
-        execFileSync('gcc', ['-shared', '-fPIC', '-O2', ...glib, `-I${dir}`, source, '-o', built]);
-    }
-    return built;
-};
-
-/** @typedef {{ js: number, compile: number, gc: number, other: number }} Kinds */
+/** @typedef {import('../lib/qemu-count.mjs').Kinds} Kinds */
 
 /**
  * The least-squares prices of a linear cost: x with X x nearest y, by the
@@ -324,52 +290,35 @@ const priceList = (shapes, costs)=>{
 
 
 /**
- * One root's passes counted: the plugin's totals at every mark, two a pass.
+ * One root's passes counted: three marks a region, before its forming,
+ * between and after its emitting.
  *
  * @param {string} root
  * @param {{ regions: number, warm: number, reps: number, qemu: string }} options
- * @param {string} plugin
  * @returns {Promise<{ passes: { form: Kinds, emit: Kinds }[][], regions: number, bytes: number,
  *     shapes: Shape[] }>}
  */
-const counted = (root, { regions, warm, reps, qemu }, plugin)=>new Promise((resolve, reject)=>{
-    const run = spawn(`${qemu}/qemu-x86_64`, ['-plugin', plugin, process.execPath, ...NODE_FLAGS,
-        fileURLToPath(import.meta.url), '--inner', '--root', root, '--regions', String(regions),
-        '--warm', String(warm), '--reps', String(reps)], { stdio: ['ignore', 'pipe', 'pipe'] });
-    let out = '';
-    let err = '';
-    run.stdout.on('data', chunk=>{
-        out += chunk;
-    });
-    run.stderr.on('data', chunk=>{
-        err += chunk;
-    });
-    run.on('error', reject);
-    run.on('close', status=>{
-        const marks = [...err.matchAll(/^Mark : \d+ js (\d+) compile (\d+) gc (\d+) other (\d+)$/gm)]
-            .map(([, ...counts])=>counts.map(Number));
-        const said = /^\{.*\}$/m.exec(out);
-        const { regions: count = 0 } = said ? JSON.parse(said[0]) : {};
-        if (status !== 0 || !said || marks.length !== 3 * count * (warm + reps))
-        {
-            reject(new Error(`emit-count: the run of ${root} gave no count (status ${status}, `
-                + `${marks.length} marks): ${err.slice(-2000)}`));
-            return;
-        }
-        const between = (/** @type {number} */ from, /** @type {number} */ to)=>/** @type {Kinds} */ (
-            Object.fromEntries(KINDS.map((kind, k)=>[kind, marks[to][k] - marks[from][k]])));
-        /** @type {{ form: Kinds, emit: Kinds }[][]} */
-        const passes = [];
-        for (let pass = 0; pass < warm + reps; pass++)
-        {
-            passes.push(Array.from({ length: count }, (_, r)=>{
-                const at = 3 * (pass * count + r);
-                return { form: between(at, at + 1), emit: between(at + 1, at + 2) };
-            }));
-        }
-        resolve({ passes, ...JSON.parse(said[0]) });
-    });
-});
+const counted = async(root, { regions, warm, reps, qemu })=>{
+    const { marks, out } = await runCounted(qemu, [fileURLToPath(import.meta.url), '--inner',
+        '--root', root, '--regions', String(regions), '--warm', String(warm),
+        '--reps', String(reps)]);
+    const said = /^\{.*\}$/m.exec(out);
+    const { regions: count = 0 } = said ? JSON.parse(said[0]) : {};
+    if (!said || marks.length !== 3 * count * (warm + reps))
+    {
+        throw new Error(`emit-count: the run of ${root} gave no count (${marks.length} marks)`);
+    }
+    /** @type {{ form: Kinds, emit: Kinds }[][]} */
+    const passes = [];
+    for (let pass = 0; pass < warm + reps; pass++)
+    {
+        passes.push(Array.from({ length: count }, (_, r)=>{
+            const at = 3 * (pass * count + r);
+            return { form: between(marks, at, at + 1), emit: between(marks, at + 1, at + 2) };
+        }));
+    }
+    return { passes, ...JSON.parse(said[0]) };
+};
 
 const options = optionsOf(process.argv.slice(2));
 if (options.inner)
@@ -378,9 +327,7 @@ if (options.inner)
 }
 else
 {
-    const plugin = pluginIn(options.qemu);
-    const arms = await Promise.all(options.roots.map(root=>counted(root, options, plugin)));
-    const work = (/** @type {Kinds} */ kinds)=>kinds.js + kinds.gc + kinds.other;
+    const arms = await Promise.all(options.roots.map(root=>counted(root, options)));
     /** @type {number | undefined} */
     let first;
     const m = (/** @type {number} */ n)=>(n / 1e6).toFixed(1);

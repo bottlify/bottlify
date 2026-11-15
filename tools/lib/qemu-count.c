@@ -5,7 +5,7 @@
  */
 
 /*
- * A QEMU TCG plugin for emit-count.mjs: counts the instructions every guest
+ * A QEMU TCG plugin for the counting stands (qemu-count.mjs): counts the instructions every guest
  * thread executes, by what the code is - "js" (code V8 made at run time,
  * which has no symbol, and V8's builtins, `Builtins_*`), "compile" (V8's
  * optimising compilers, the deoptimiser and their zones), "gc" (the
