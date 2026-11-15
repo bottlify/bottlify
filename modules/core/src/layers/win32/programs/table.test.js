@@ -28,9 +28,10 @@ test('a program is one of the system folder\'s, however its path is spelled', ()
 
 test('every program\'s image calls its own routine, and every routine is in the library', ()=>{
     const routines = Object.keys(createProgramFunctions(/** @type {any} */ ({})));
-    for (const [name, { routine }] of SYSTEM_PROGRAMS)
+    for (const [name, { routine, directories }] of SYSTEM_PROGRAMS)
     {
-        const bytes = systemProgramImage(`C:\\WINDOWS\\system32\\${name}`);
+        const directory = (directories ?? ['C:\\WINDOWS\\system32'])[0];
+        const bytes = systemProgramImage(`${directory}\\${name}`);
         assert.ok(bytes, name);
         const imports = readImports(bytes, parsePe(bytes));
         assert.deepEqual(imports[0], { dll: PROGRAMS_LIBRARY,

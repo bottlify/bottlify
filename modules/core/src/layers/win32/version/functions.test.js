@@ -528,9 +528,11 @@ test('VerFindFileA recommends the program directory, and reports a copy that liv
     memory.set(new Uint8Array([0x04, 1, 0, 0]), CURLEN);
     memory.set(new Uint8Array([0x04, 1, 0, 0]), DESTLEN);
 
-    // A fresh install: no copy anywhere, so the current directory is empty.
+    // A fresh install: no copy anywhere, so the current directory is empty -
+    // and that it is not the destination is VFF_CURNEDEST, as Windows answers
+    // Wine's install test for a file that does not exist.
     assert.equal(
-        version.VerFindFileA.handler([0, 0x10, 0x30, 0x50, CUR, CURLEN, DEST, DESTLEN]), 0);
+        version.VerFindFileA.handler([0, 0x10, 0x30, 0x50, CUR, CURLEN, DEST, DESTLEN]), 1);
     assert.equal(readAt(DEST), 'C:\\Games\\Doom');
     assert.equal(readAt(CUR), '');
     assert.equal(memory[CURLEN], 1, 'the terminator alone');
@@ -548,18 +550,38 @@ test('VerFindFileA recommends the program directory, and reports a copy that liv
     assert.equal(readAt(DEST), 'C:\\WINDOWS\\system32');
     assert.equal(readAt(CUR), 'C:\\WINDOWS');
 
-    // A buffer too short is told the length it needed, and given what fits.
+    // A buffer too short is told the length it needed, and given what fits;
+    // a file not shared is found in the Windows directory too, in OpenFile's
+    // order, which is not its destination.
     memory.set(new Uint8Array([4, 0, 0, 0]), DESTLEN);
     assert.equal(version.VerFindFileA.handler([0, 0x10, 0x30, 0x50, 0, 0, DEST, DESTLEN]),
-        4, 'VFF_BUFFTOOSMALL');
+        4 | 1, 'VFF_BUFFTOOSMALL and VFF_CURNEDEST');
     assert.equal(readAt(DEST), 'C:\\');
     assert.equal(memory[DESTLEN], 'C:\\Games\\Doom'.length + 1);
 
-    // Wine's install test: no program directory recommends none.
+    // Wine's install test: no program directory recommends none, and a file
+    // found nowhere then has its empty current directory as its destination.
+    put(0x80, 'Nothing.dll');
     memory.set(new Uint8Array([0x04, 1, 0, 0]), CURLEN);
     memory.set(new Uint8Array([0x04, 1, 0, 0]), DESTLEN);
-    assert.equal(version.VerFindFileA.handler([0, 0x10, 0, 0, CUR, CURLEN, DEST, DESTLEN]), 0);
+    assert.equal(version.VerFindFileA.handler([0, 0x80, 0, 0, CUR, CURLEN, DEST, DESTLEN]), 0);
     assert.equal(memory[DESTLEN], 1);
+
+    // The current directory is searched as OpenFile searches it, and a program
+    // the engine runs in the system folder is a copy there.
+    files.nodes.set('C:\\Temp\\Save.tmp', Uint8Array.from([1]));
+    put(0x90, 'Save.tmp');
+    memory.set(new Uint8Array([0x04, 1, 0, 0]), CURLEN);
+    memory.set(new Uint8Array([0x04, 1, 0, 0]), DESTLEN);
+    const searching = /** @type {any} */ (createVersionFunctions({ ...host,
+        currentDirectory: ()=>'C:\\Temp',
+        systemProgram: (/** @type {string} */ path)=>path === 'C:\\WINDOWS\\regedit.exe' }));
+    assert.equal(searching.VerFindFileA.handler([0, 0x90, 0, 0, CUR, CURLEN, DEST, DESTLEN]), 1);
+    assert.equal(readAt(CUR), 'C:\\Temp');
+    put(0xa0, 'regedit.exe');
+    memory.set(new Uint8Array([0x04, 1, 0, 0]), CURLEN);
+    assert.equal(searching.VerFindFileA.handler([0, 0xa0, 0, 0, CUR, CURLEN, DEST, DESTLEN]), 1);
+    assert.equal(readAt(CUR), 'C:\\WINDOWS');
     assert.equal(version.VerFindFileA.argBytes, 32);
 });
 
@@ -588,7 +610,8 @@ test('the ANSI answers are in the ANSI page: a string value, and a directory', (
     m.memory.set([0x44, 0x2e, 0x64, 0x6c, 0x6c, 0], 0x40);
     m.memory.set([0x43, 0x3a, 0x5c, 0x80, 0x99, 0], 0x50);
     m.memory.set([0x04, 1, 0, 0], 0x1f00);
-    assert.equal(m.version.VerFindFileA.handler([0, 0x40, 0x50, 0x50, 0, 0, 0x1e00, 0x1f00]), 0);
+    assert.equal(m.version.VerFindFileA.handler([0, 0x40, 0x50, 0x50, 0, 0, 0x1e00, 0x1f00]),
+        1, 'found nowhere: VFF_CURNEDEST');
     assert.deepEqual([...m.memory.subarray(0x1e00, 0x1e06)], [0x43, 0x3a, 0x5c, 0x80, 0x99, 0]);
 });
 
@@ -841,4 +864,38 @@ test('a wide path is read whole, not cut at half of MAX_PATH', ()=>{
     const version = /** @type {any} */ (createVersionFunctions(host));
     assert.equal(version.GetFileVersionInfoSizeW.handler([0x100, 0]), 0);
     assert.deepEqual(asked, [path]);
+});
+
+test('a name with no value is found: a length of zero, pointing where its value would be', ()=>{
+    const m = machine(node('VS_VERSION_INFO', {
+        value: fixedInfo(),
+        children: [node('StringFileInfo', {
+            children: [node('FFFF0000', { children: [node('FileVersion')] })],
+        })],
+    }));
+    m.putString(0x10, 'C:\\thing.exe');
+    m.version.GetFileVersionInfoA.handler([0x10, 0, 0x400, 0x400]);
+    m.putString(0x100, '\\StringFileInfo\\FFFF0000\\FileVersion');
+    m.memory.set([0xef, 0xbe, 0xad, 0xde, 0xef, 0xbe, 0xad, 0xde], 0x30);
+    assert.equal(m.version.VerQueryValueA.handler([0x400, 0x100, 0x30, 0x34]), 1);
+    assert.equal(m.get32(0x34), 0, 'no value');
+    assert.ok(m.get32(0x30) > 0x400 && m.get32(0x30) < 0x800, 'a pointer into the block');
+    m.putString(0x100, '\\StringFileInfo\\FFFF0000\\ProductVersion');
+    assert.equal(m.version.VerQueryValueA.handler([0x400, 0x100, 0x30, 0x34]), 0, 'not there');
+});
+
+test('a system program the engine runs carries the system\'s version, as an application', ()=>{
+    const m = machine(/** @type {any} */ (null));
+    const host = /** @type {any} */ ({ ...m.host, files: { stat: ()=>null },
+        systemProgram: (/** @type {string} */ path)=>
+            path.toLowerCase() === 'c:\\windows\\system32\\regsvr32.exe' });
+    const version = /** @type {any} */ (createVersionFunctions(host));
+    m.putString(0x10, 'C:\\WINDOWS\\system32\\regsvr32.exe');
+    assert.ok(version.GetFileVersionInfoSizeA.handler([0x10, 0]) > 0);
+    version.GetFileVersionInfoA.handler([0x10, 0, 0x800, 0x400]);
+    m.putString(0x20, '\\');
+    assert.equal(version.VerQueryValueA.handler([0x400, 0x20, 0x30, 0x34]), 1);
+    assert.equal(m.get32(m.get32(0x30) + 36), 1, 'VFT_APP');
+    m.putString(0x10, 'C:\\WINDOWS\\system32\\calc.exe');
+    assert.equal(version.GetFileVersionInfoSizeA.handler([0x10, 0]), 0, 'one it does not run');
 });

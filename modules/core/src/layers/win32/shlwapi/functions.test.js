@@ -791,3 +791,40 @@ test('PathStripPath leaves the name PathFindFileName finds', ()=>{
         assert.equal(m.fns[`PathStripPath${suffix}`].argBytes, 4);
     }
 });
+
+test('the copies between widths: what fits with its terminator, its characters counted', ()=>{
+    const { fns, put, read } = strings();
+    const dest = put('');
+    assert.equal(fns.SHUnicodeToAnsi.handler([put('café', true), dest, 10]), 5);
+    assert.equal(read(dest), 'café', 'in the ANSI page');
+    assert.equal(fns.SHUnicodeToAnsi.handler([put('abcdef', true), dest, 4]), 4, 'cut to fit');
+    assert.equal(read(dest), 'abc');
+    assert.equal(fns.SHAnsiToUnicode.handler([put('xyz'), dest, 10]), 4);
+    assert.equal(read(dest, true), 'xyz');
+    assert.equal(fns.SHAnsiToAnsi.handler([put('hello'), dest, 3]), 3);
+    assert.equal(read(dest), 'he');
+    assert.equal(fns.SHUnicodeToUnicode.handler([0, dest, 8]), 1, 'NULL is the empty string');
+    assert.equal(read(dest, true), '');
+    assert.equal(fns.SHAnsiToAnsi.handler([put('x'), dest, 0]), 0, 'no room at all');
+    assert.equal(fns.SHAnsiToUnicode.argBytes, 12);
+});
+
+test('SHCopyKey, SHRegGetValue and SHRegDuplicateHKey are the registry\'s own calls', async()=>{
+    const m = registryMachine();
+    const source = m.create('Software\\From\\Inner');
+    m.setValue(source, 'v');
+    m.registry.RegCloseKey.handler([source]);
+    const target = m.create('Software\\To');
+    assert.equal(await m.fns.SHCopyKeyA.handler([HKEY_CURRENT_USER, m.str('Software\\From'),
+        target, 0]), 0);
+    assert.equal(m.exists('Software\\To\\Inner'), true, 'the tree beneath, into the target');
+    const size = m.str('\x10\0\0');
+    assert.equal(await m.fns.SHRegGetValueA.handler([HKEY_CURRENT_USER,
+        m.str('Software\\To\\Inner'), m.str('v'), 0x2, 0, m.str('................'), size]), 0);
+    const copy = /** @type {number} */ (await m.fns.SHRegDuplicateHKey.handler([target]));
+    assert.ok(copy !== 0 && copy !== target, 'a handle of its own');
+    assert.equal(m.registry.RegCloseKey.handler([copy]), 0);
+    assert.equal(await m.fns.SHRegDuplicateHKey.handler([0x1234]), 0, 'no key, no handle');
+    assert.deepEqual([m.fns.SHCopyKeyA.argBytes, m.fns.SHRegGetValueA.argBytes,
+        m.fns.SHRegGetPathA.argBytes], [16, 28, 20]);
+});

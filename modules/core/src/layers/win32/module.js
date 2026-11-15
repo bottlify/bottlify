@@ -389,6 +389,32 @@ const KNOWN_DLLS = new Set([
 ]);
 
 /**
+ * What shcore.dll exports that shlwapi.dll has too (Windows 8.1 on, where
+ * shlwapi forwards them to it): its strings, registry, streams, thread
+ * references and COM helpers.
+ */
+const SHCORE_FROM_SHLWAPI = [
+    'IStream_Copy', 'IStream_Read', 'IStream_ReadStr', 'IStream_Reset', 'IStream_Size',
+    'IStream_Write', 'IStream_WriteStr', 'IUnknown_AtomicRelease', 'IUnknown_GetSite',
+    'IUnknown_QueryService', 'IUnknown_Set', 'IUnknown_SetSite', 'SHAnsiToAnsi',
+    'SHAnsiToUnicode', 'SHCopyKeyA', 'SHCopyKeyW', 'SHCreateMemStream',
+    'SHCreateStreamOnFileA', 'SHCreateStreamOnFileEx', 'SHCreateStreamOnFileW',
+    'SHCreateThread', 'SHCreateThreadRef', 'SHCreateThreadWithHandle', 'SHDeleteEmptyKeyA',
+    'SHDeleteEmptyKeyW', 'SHDeleteKeyA', 'SHDeleteKeyW', 'SHDeleteValueA', 'SHDeleteValueW',
+    'SHEnumKeyExA', 'SHEnumKeyExW', 'SHEnumValueA', 'SHEnumValueW', 'SHGetThreadRef',
+    'SHGetValueA', 'SHGetValueW', 'SHOpenRegStream2A', 'SHOpenRegStream2W', 'SHOpenRegStreamA',
+    'SHOpenRegStreamW', 'SHQueryInfoKeyA', 'SHQueryInfoKeyW', 'SHQueryValueExA',
+    'SHQueryValueExW', 'SHRegDuplicateHKey', 'SHRegGetIntW', 'SHRegGetPathA', 'SHRegGetPathW',
+    'SHRegGetValueA', 'SHRegGetValueW', 'SHRegSetPathA', 'SHRegSetPathW', 'SHReleaseThreadRef',
+    'SHSetThreadRef', 'SHSetValueA', 'SHSetValueW', 'SHStrDupA', 'SHStrDupW',
+    'SHUnicodeToAnsi', 'SHUnicodeToUnicode',
+];
+
+/** And what it exports that shell32.dll has: the process's application identity. */
+const SHCORE_FROM_SHELL32 = ['CommandLineToArgvW', 'GetCurrentProcessExplicitAppUserModelID',
+    'SetCurrentProcessExplicitAppUserModelID'];
+
+/**
  * What imagehlp.dll exports of dbghelp's (Wine's imagehlp.spec forwards them
  * there): the 32-bit symbol calls, the stack walk and the name undecorator.
  */
@@ -3635,6 +3661,10 @@ export function createWin32Module(){
                     // them, which carry a version all the same.
                     /** @param {string} name */
                     systemLibrary: name=>modules.systemLibrary?.(name) ?? false,
+                    // The system folder's programs the engine runs itself.
+                    /** @param {string} path */
+                    systemProgram: path=>systemProgramAt(path) !== null,
+                    currentDirectory: ()=>filesystem.currentDirectory(),
                     // Where VerInstallFile reads a compressed source and writes the
                     // expanded file: the same volume every other file call uses.
                     files: volume,
@@ -3763,6 +3793,8 @@ export function createWin32Module(){
                     free: address=>heap.free(address),
                     call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
                     callerThread: ()=>bridge.callerThread(),
+                    // SHCreateThreadRef's object is the engine's own.
+                    publish: (object, iid)=>bridge.publishInterface(object, iid),
                 }) },
 
                 'ADVPACK.dll': createAdvpackFunctions({
@@ -5303,6 +5335,48 @@ export function createWin32Module(){
             if (windows.major < 10)
             {
                 delete libraries['combase.dll'];
+            }
+
+            // The reference the process holds to keep its host alive is the
+            // shell core's, and shell32's Explorer reference is the same one:
+            // never shlwapi's own export.
+            const processReference = {
+                GetProcessReference: libraries['SHLWAPI.dll'].GetProcessReference,
+                SetProcessReference: libraries['SHLWAPI.dll'].SetProcessReference,
+            };
+            delete libraries['SHLWAPI.dll'].GetProcessReference;
+            delete libraries['SHLWAPI.dll'].SetProcessReference;
+            libraries['SHELL32.dll'].SHGetInstanceExplorer = processReference.GetProcessReference;
+            libraries['SHELL32.dll'].SHSetInstanceExplorer = processReference.SetProcessReference;
+            Object.assign(libraries['SHCORE.dll'], processReference);
+
+            // The shell's core came with Windows 8.1, and took over shlwapi's
+            // strings, registry, streams, thread references and COM helpers
+            // and shell32's application identity: shlwapi and shell32 forward
+            // those names to it, so each is one entry under both libraries. A
+            // Windows before it has none, and a program that looks finds none.
+            if (windows.major < 10)
+            {
+                delete libraries['SHCORE.dll'];
+            }
+            else
+            {
+                const shcore = libraries['SHCORE.dll'];
+                for (const name of SHCORE_FROM_SHLWAPI)
+                {
+                    shcore[name] ??= libraries['SHLWAPI.dll'][name];
+                }
+                for (const name of SHCORE_FROM_SHELL32)
+                {
+                    shcore[name] ??= libraries['SHELL32.dll'][name];
+                }
+                for (const name of Object.keys(shcore))
+                {
+                    if (shcore[name] === undefined)
+                    {
+                        delete shcore[name];
+                    }
+                }
             }
 
             // The .NET shim is part of the system from Windows 7 on, and the

@@ -52,6 +52,9 @@
  *                         a runtime the tests need that is not part of the engine
  *                         (the .NET Framework, for the tests of its libraries)
  *     --cork-config <json>  the translator's settings, over the ones used here
+ *     --windows <name>    the Windows the machine is (win2000, winxp, win7,
+ *                         win10; winxp by default): a library that came with a
+ *                         later Windows - combase, shcore - is there only on one
  *     --browser           run each test in a headless browser on WebGPU, through
  *                         tools/run/game.mjs: what a test draws is drawn and
  *                         read back, where in node every read-back is zero, so the
@@ -446,7 +449,7 @@ async function filesUnder(host, guest){
  * run ended from outside still reports how far it got.
  *
  * @param {string} exePath @param {string} test
- * @param {{ timeout: number, corkConfig: object, volume?: string }} settings
+ * @param {{ timeout: number, corkConfig: object, volume?: string, windows?: string }} settings
  */
 async function runChild(exePath, test, settings){
     const send = (/** @type {any} */ message)=>new Promise(resolve=>{
@@ -488,6 +491,7 @@ async function runChild(exePath, test, settings){
                     'modules/cork/src/runtime/translator.worker.js', ROOT).href,
                 ...settings.corkConfig } },
             storage: null,
+            ...settings.windows ? { windows: settings.windows } : {},
         });
         app.attachLog((/** @type {number} */ stream, /** @type {string} */ text)=>
             send({ type: 'output', stream, text }));
@@ -694,7 +698,7 @@ function parseArgs(argv){
     };
     const flags = new Set(['--winetest', '--preset', '--timeout', '--jobs', '--failures', '--out',
         '--baseline', '--cork-config', '--winetest-url', '--gpu-adapter', '--graphics-config',
-        '--volume']);
+        '--volume', '--windows']);
     /** @type {string[]} */
     const specs = [];
     for (let i = 0; i < argv.length; i++)
@@ -724,6 +728,7 @@ function parseArgs(argv){
         gate: argv.includes('--gate'),
         corkConfig: JSON.parse(value('--cork-config', '{}') ?? '{}'),
         volume: value('--volume'),
+        windows: value('--windows'),
         graphicsConfig: value('--graphics-config')
             ? JSON.parse(/** @type {string} */ (value('--graphics-config'))) : undefined,
         specs,
@@ -1078,7 +1083,7 @@ async function main(){
     const extracted = new URL('extracted/', LOCAL);
     await mkdir(extracted, { recursive: true });
     const settings = { timeout: options.timeout, corkConfig: options.corkConfig,
-        volume: options.volume,
+        volume: options.volume, windows: options.windows,
         adapter: options.adapter, graphicsConfig: options.graphicsConfig };
     /** @type {Map<string, string>} module -> its bundle, for --browser */
     const bundles = new Map();
