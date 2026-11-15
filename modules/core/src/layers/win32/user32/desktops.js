@@ -25,6 +25,7 @@ import { readText, textBytes } from './unicode.js';
 
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_NOT_ENOUGH_MEMORY = 8;
+const ERROR_NOACCESS = 998;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_INSUFFICIENT_BUFFER = 122;
 const ERROR_BUSY = 170;
@@ -76,7 +77,8 @@ const MAX_NAME = 256;
  *     setLastError?: (code: number) => void,
  *     call?: (entry: number, args: number[], thread?: unknown) => number | Promise<number>,
  *     allocate?: (bytes: number) => number,
- *     release?: (address: number) => void }} options.host
+ *     release?: (address: number) => void,
+ *     divergence?: (api: string, detail: string) => void }} options.host
  * @param {() => number[]} options.topLevel  The top-level windows, topmost first.
  * @param {(hwnd: number) => { exStyle: number } | null} [options.windowOf]
  *        A live window by its handle.
@@ -92,6 +94,8 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
     const desktops = [standard];
     /** The desktop that takes the input. */
     let input = standard;
+    /** Whether SetUserObjectSecurity has said it keeps nothing. */
+    let securitySaid = false;
 
     /**
      * What a handle of this layer names, or null for one it did not open.
@@ -295,8 +299,44 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
     };
 
     /**
-     * EnumDesktops in either encoding: the station's desktops by name, each
-     * handed to the callback until one answers FALSE.
+     * Hands each name to an enumeration's callback until one answers FALSE.
+     * The call answers what the callback last answered, as EnumDesktops and
+     * EnumWindowStations do: an lParam a callback hands back comes back.
+     *
+     * @param {UserObject[]} objects @param {number} callback @param {number} lParam
+     * @param {boolean} unicode
+     */
+    const enumNames = (objects, callback, lParam, unicode)=>{
+        const call = host.call;
+        if (!call || (callback >>> 0) === 0 || !host.allocate)
+        {
+            return fail(ERROR_INVALID_PARAMETER);
+        }
+        const thread = host.callerThread?.();
+        const names = objects.map(each=>textBytes(each.name, unicode));
+        return (async()=>{
+            let answer = 1;
+            for (const bytes of names)
+            {
+                const at = host.allocate?.(bytes.length) ?? 0;
+                if (at === 0)
+                {
+                    return fail(ERROR_NOT_ENOUGH_MEMORY);
+                }
+                host.writeMemory(at, bytes);
+                answer = await call(callback >>> 0, [at, lParam >>> 0], thread) >>> 0;
+                host.release?.(at);
+                if (answer === 0)
+                {
+                    break;
+                }
+            }
+            return answer;
+        })();
+    };
+
+    /**
+     * EnumDesktops in either encoding: the station's desktops by name.
      *
      * @param {number[]} args  hwinsta, lpEnumFunc, lParam.
      * @param {boolean} unicode
@@ -306,31 +346,65 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
         {
             return fail(ERROR_INVALID_HANDLE);
         }
-        const call = host.call;
-        if (!call || (callback >>> 0) === 0 || !host.allocate)
+        return enumNames(desktops, callback, lParam, unicode);
+    };
+
+    /**
+     * SetUserObjectInformation in either encoding: only UOI_FLAGS can be set
+     * (USEROBJECTFLAGS: fInherit, fReserved, dwFlags), and it must be whole.
+     *
+     * @param {number[]} args  hObj, nIndex, pvInfo, nLength.
+     */
+    const setUserObjectInformation = ([handle, index, from, length])=>{
+        const entry = opened.get(handle >>> 0);
+        if (!entry)
+        {
+            return fail(ERROR_INVALID_HANDLE);
+        }
+        if ((index | 0) !== UOI_FLAGS || (length >>> 0) < USEROBJECTFLAGS_SIZE
+            || (from >>> 0) === 0)
         {
             return fail(ERROR_INVALID_PARAMETER);
         }
-        const thread = host.callerThread?.();
-        const names = desktops.map(each=>textBytes(each.name, unicode));
-        return (async()=>{
-            for (const bytes of names)
-            {
-                const at = host.allocate?.(bytes.length) ?? 0;
-                if (at === 0)
-                {
-                    return fail(ERROR_NOT_ENOUGH_MEMORY);
-                }
-                host.writeMemory(at, bytes);
-                const going = await call(callback >>> 0, [at, lParam >>> 0], thread);
-                host.release?.(at);
-                if ((going | 0) === 0)
-                {
-                    return 0;
-                }
-            }
-            return 1;
-        })();
+        const view = new DataView(host.readMemory(from >>> 0, USEROBJECTFLAGS_SIZE).slice().buffer);
+        entry.inherit = view.getUint32(0, true) !== 0;
+        entry.object.flags = view.getUint32(8, true);
+        return 1;
+    };
+
+    /**
+     * The security descriptor GetUserObjectSecurity gives for a desktop or a
+     * station: self-relative, with a DACL that allows everyone all access
+     * when the DACL is asked for; the engine keeps no other security on them.
+     *
+     * @param {number} asked  SECURITY_INFORMATION's bits.
+     */
+    const userObjectSecurity = asked=>{
+        const DACL_SECURITY_INFORMATION = 0x4;
+        const SE_DACL_PRESENT = 0x0004;
+        const SE_SELF_RELATIVE = 0x8000;
+        const HEADER = 20;
+        const withDacl = (asked & DACL_SECURITY_INFORMATION) !== 0;
+        // ACL header (8), one ACCESS_ALLOWED_ACE (8) with S-1-1-0, Everyone (12).
+        const ACL_SIZE = 8 + 8 + 12;
+        const bytes = new Uint8Array(HEADER + (withDacl ? ACL_SIZE : 0));
+        const view = new DataView(bytes.buffer);
+        view.setUint8(0, 1);
+        view.setUint16(2, SE_SELF_RELATIVE | (withDacl ? SE_DACL_PRESENT : 0), true);
+        if (withDacl)
+        {
+            view.setUint32(16, HEADER, true);
+            view.setUint8(HEADER, 2);
+            view.setUint16(HEADER + 2, ACL_SIZE, true);
+            view.setUint16(HEADER + 4, 1, true);
+            const ace = HEADER + 8;
+            view.setUint16(ace + 2, 20, true);
+            view.setUint32(ace + 4, 0x10000000, true);
+            view.setUint8(ace + 8, 1);
+            view.setUint8(ace + 9, 1);
+            view.setUint8(ace + 15, 1);
+        }
+        return bytes;
     };
 
     /** @param {number} at */
@@ -610,6 +684,94 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
             argBytes: 12,
             /** @param {number[]} args */
             handler: args=>enumDesktops(args, true),
+        },
+
+        /**
+         * BOOL EnumWindowStationsA(WINSTAENUMPROCA lpEnumFunc, LPARAM lParam)
+         *
+         * The stations by name: WinSta0 and those CreateWindowStation made.
+         */
+        EnumWindowStationsA: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([callback, lParam])=>enumNames(stations, callback, lParam, false),
+        },
+        /** BOOL EnumWindowStationsW(WINSTAENUMPROCW lpEnumFunc, LPARAM lParam) */
+        EnumWindowStationsW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([callback, lParam])=>enumNames(stations, callback, lParam, true),
+        },
+
+        /**
+         * BOOL SetUserObjectInformationA(HANDLE hObj, int nIndex, PVOID pvInfo,
+         *     DWORD nLength), and the W form: the same, no text being set.
+         */
+        SetUserObjectInformationA: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: args=>setUserObjectInformation(args),
+        },
+        SetUserObjectInformationW: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: args=>setUserObjectInformation(args),
+        },
+
+        /**
+         * BOOL GetUserObjectSecurity(HANDLE hObj, PSECURITY_INFORMATION pSIRequested,
+         *     PSECURITY_DESCRIPTOR pSID, DWORD nLength, LPDWORD lpnLengthNeeded)
+         *
+         * The size is written whether or not it fits; a buffer too small is
+         * ERROR_INSUFFICIENT_BUFFER.
+         */
+        GetUserObjectSecurity: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([handle, requested, into, length, needed])=>{
+                if (!opened.has(handle >>> 0))
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                if ((requested >>> 0) === 0 || (needed >>> 0) === 0)
+                {
+                    return fail(ERROR_NOACCESS);
+                }
+                const bytes = userObjectSecurity(readU32(requested >>> 0));
+                host.writeMemory(needed >>> 0,
+                    new Uint8Array(new Uint32Array([bytes.length]).buffer));
+                if ((length >>> 0) < bytes.length || (into >>> 0) === 0)
+                {
+                    return fail(ERROR_INSUFFICIENT_BUFFER);
+                }
+                host.writeMemory(into >>> 0, bytes);
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL SetUserObjectSecurity(HANDLE hObj, PSECURITY_INFORMATION pSIRequested,
+         *     PSECURITY_DESCRIPTOR pSID)
+         *
+         * Accepted and not kept: the engine's desktops and stations have no
+         * security to change, and GetUserObjectSecurity answers as before.
+         */
+        SetUserObjectSecurity: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                if (!opened.has(handle >>> 0))
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                if (!securitySaid)
+                {
+                    securitySaid = true;
+                    host.divergence?.('SetUserObjectSecurity',
+                        'a desktop\'s or station\'s security is accepted and not kept');
+                }
+                return 1;
+            },
         },
 
         /** HWINSTA GetProcessWindowStation(void) */

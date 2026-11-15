@@ -34,8 +34,8 @@ import { createDirectoryListFunctions } from './dlgdir.js';
 import { createMdi } from './mdi.js';
 import { createWinEventHooks } from './hooks.js';
 import {
-    WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPSIBLINGS, WS_DISABLED, contains, createGeometry,
-    createdStyles, edgeFor, frameOf, frameRings, intersect, isEmpty,
+    WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPSIBLINGS, WS_DISABLED, WS_THICKFRAME, contains,
+    createGeometry, createdStyles, edgeFor, frameOf, frameRings, intersect, isEmpty,
 } from './frame.js';
 import {
     COLOR_3DDKSHADOW, COLOR_3DFACE, COLOR_3DHILIGHT, COLOR_3DSHADOW, COLOR_BTNTEXT,
@@ -456,6 +456,11 @@ const WS_EX_TOOLWINDOW = 0x00000080;
 const WS_CLIPCHILDREN = 0x02000000;
 /** A layered window is one only once CreateWindowEx has shown the CBT hook the window. */
 const WS_EX_LAYERED = 0x00080000;
+/** RedrawWindow's flags for a window painted again whole, its children too. */
+const RDW_INVALIDATE = 0x0001;
+const RDW_ERASE = 0x0004;
+const RDW_ALLCHILDREN = 0x0080;
+const RDW_FRAME = 0x0400;
 /** The ShowWindow commands that leave activation where it is. */
 const SHOW_WITHOUT_ACTIVATING = new Set([SW_HIDE, 4, 6, 7, 8]);
 
@@ -3259,6 +3264,13 @@ export function createWindowFunctions(host){
                 tell(record);
                 return;
             case GWL_EXSTYLE:
+                // A window no longer layered forgets how it was: set layered
+                // again, it has neither attributes nor a picture of its own.
+                if ((value & WS_EX_LAYERED) === 0)
+                {
+                    record.layered = undefined;
+                    record.layeredBy = undefined;
+                }
                 record.exStyle = edgeFor(record.style, value);
                 tell(record);
                 return;
@@ -4194,7 +4206,10 @@ export function createWindowFunctions(host){
             }
             // WM_NCCREATE before WM_CREATE, with the same structure: a
             // procedure that keeps lpCreateParams takes it from the first.
-            return andThen(tell(WM_NCCREATE), accepted=>((accepted | 0) === 0 ? refuse()
+            // A window that can be sized, or an overlapped one, is asked its
+            // limits before either, and made within them.
+            const nonClient = andThen(sizedWithin(record, thread), ()=>tell(WM_NCCREATE));
+            return andThen(nonClient, accepted=>((accepted | 0) === 0 ? refuse()
                 : andThen(placedThenCreated(), created=>((created | 0) === -1 ? refuse()
                     : andThen(made(), ()=>{
                     // A child or a popup hears its own size and its place
@@ -6992,7 +7007,19 @@ export function createWindowFunctions(host){
      *     | Promise<{ x: number, y: number, width: number, height: number }>}
      */
     const maximisedPlace = (record, thread)=>{
-        const MINMAXINFO_SIZE = 40;
+        const proposed = maximisedProposal(record);
+        return andThen(askMinMax(record, proposed, thread), info=>(info === null ? proposed
+            : { width: info.maxSize.x, height: info.maxSize.y,
+                x: info.maxPosition.x, y: info.maxPosition.y }));
+    };
+
+    /**
+     * Where the system proposes a window go maximised, before its procedure
+     * has a say (`maximisedPlace`).
+     *
+     * @param {any} record
+     */
+    const maximisedProposal = record=>{
         // A child's place is in its parent's client area, which starts at 0.
         const parent = isChild(record) ? live(record.parent) : null;
         const area = parent ? geometry.clientRect(parent)
@@ -7004,22 +7031,70 @@ export function createWindowFunctions(host){
         const proposed = { x: -edges.left, y: -edges.top,
             width: area.right - area.left + edges.left + edges.edge,
             height: area.bottom - area.top + edges.top + edges.edge };
+        return proposed;
+    };
+
+    /**
+     * CreateWindowEx's limits on a window's size: one with a sizing border,
+     * or an overlapped one, is sent WM_GETMINMAXINFO before WM_NCCREATE and
+     * made no larger than its largest tracking size and no smaller than its
+     * smallest; a popup or a child without the border is made as asked.
+     *
+     * @param {any} record @param {unknown} thread
+     * @returns {unknown}
+     */
+    const sizedWithin = (record, thread)=>{
+        if ((record.style & WS_THICKFRAME) === 0 && (record.style & (WS_POPUP | WS_CHILD)) !== 0)
+        {
+            return undefined;
+        }
+        return andThen(askMinMax(record, maximisedProposal(record), thread), info=>{
+            if (info === null)
+            {
+                return;
+            }
+            record.width = Math.max(Math.min(record.width, info.maxTrack.x), info.minTrack.x);
+            record.height = Math.max(Math.min(record.height, info.maxTrack.y), info.minTrack.y);
+        });
+    };
+
+    /**
+     * @typedef {{ maxSize: { x: number, y: number }, maxPosition: { x: number, y: number },
+     *     minTrack: { x: number, y: number }, maxTrack: { x: number, y: number } }} MinMax
+     */
+
+    /**
+     * WM_GETMINMAXINFO: the system's proposal for where the window goes
+     * maximised and how far it may be sized, handed to the procedure, which
+     * may change any of it; what it leaves is the answer. Null where there is
+     * no memory to ask in.
+     *
+     * @param {any} record
+     * @param {{ x: number, y: number, width: number, height: number }} maximised
+     * @param {unknown} thread
+     * @returns {MinMax | null | Promise<MinMax | null>}
+     */
+    const askMinMax = (record, maximised, thread)=>{
+        const MINMAXINFO_SIZE = 40;
         const at = host.allocate?.(MINMAXINFO_SIZE) ?? 0;
         if (at === 0)
         {
-            return proposed;
+            return null;
         }
         // ptReserved, ptMaxSize, ptMaxPosition, ptMinTrackSize, ptMaxTrackSize.
         const metric = (/** @type {number} */ index)=>table.GetSystemMetrics.handler([index]);
         const [SM_CXMINTRACK, SM_CYMINTRACK, SM_CXMAXTRACK, SM_CYMAXTRACK] = [34, 35, 59, 60];
-        writeU32s(host, at, [record.x, record.y, proposed.width, proposed.height,
-            proposed.x, proposed.y, metric(SM_CXMINTRACK), metric(SM_CYMINTRACK),
+        writeU32s(host, at, [record.x, record.y, maximised.width, maximised.height,
+            maximised.x, maximised.y, metric(SM_CXMINTRACK), metric(SM_CYMINTRACK),
             metric(SM_CXMAXTRACK), metric(SM_CYMAXTRACK)]);
         return andThen(send(record.hwnd, WM_GETMINMAXINFO, 0, at, thread), ()=>{
-            const view = new DataView(host.readMemory(at + 8, 16).slice().buffer);
+            const view = new DataView(host.readMemory(at + 8, 32).slice().buffer);
             host.release?.(at);
-            return { width: view.getInt32(0, true), height: view.getInt32(4, true),
-                x: view.getInt32(8, true), y: view.getInt32(12, true) };
+            /** @param {number} offset */
+            const point = offset=>({ x: view.getInt32(offset, true),
+                y: view.getInt32(offset + 4, true) });
+            return { maxSize: point(0), maxPosition: point(8), minTrack: point(16),
+                maxTrack: point(24) };
         });
     };
 
@@ -7204,9 +7279,10 @@ export function createWindowFunctions(host){
      * is positive.
      *
      * @param {number[]} args @param {boolean} unicode
+     * @param {(hwnd: number) => void} [denied]  told the window that refused a query
      * @returns {number | Promise<number>}
      */
-    const broadcastSystem = ([flags, recipients, message, wParam, lParam], unicode)=>{
+    const broadcastSystem = ([flags, recipients, message, wParam, lParam], unicode, denied)=>{
         const BSF_QUERY = 0x0001;
         const BSF_IGNORECURRENTTASK = 0x0002;
         const BSF_POSTMESSAGE = 0x0010;
@@ -7214,10 +7290,15 @@ export function createWindowFunctions(host){
         const BSM_APPLICATIONS = 0x0008;
         const BSM_ALLDESKTOPS = 0x0010;
         const BROADCAST_QUERY_DENY = 0x424d5144;
-        if ((flags & BSF_QUERY) !== 0 && (flags & (BSF_POSTMESSAGE | BSF_SENDNOTIFYMESSAGE)) !== 0)
+        // BSF_QUERY through BSF_LUID: a flag past them is no flag Windows knows.
+        const BSF_KNOWN = 0x07ff;
+        if ((flags & ~BSF_KNOWN) !== 0
+            || ((flags & BSF_QUERY) !== 0
+                && (flags & (BSF_POSTMESSAGE | BSF_SENDNOTIFYMESSAGE)) !== 0))
         {
             // A query is answered one recipient at a time; one that is not
-            // waited for cannot answer it.
+            // waited for cannot answer it. And a flag Windows does not know is
+            // refused, not ignored.
             host.setLastError?.(ERROR_INVALID_PARAMETER);
             return 0;
         }
@@ -7237,7 +7318,7 @@ export function createWindowFunctions(host){
         }
         const ours = (flags & BSF_IGNORECURRENTTASK) !== 0;
         const targets = broadcastTargets().filter(hwnd=>!ours || !live(hwnd));
-        if ((flags & (BSF_POSTMESSAGE | BSF_SENDNOTIFYMESSAGE)) !== 0)
+        if ((flags & BSF_POSTMESSAGE) !== 0)
         {
             for (const hwnd of targets)
             {
@@ -7245,13 +7326,50 @@ export function createWindowFunctions(host){
             }
             return 1;
         }
+        if ((flags & BSF_SENDNOTIFYMESSAGE) !== 0)
+        {
+            // SendNotifyMessage to each: a window of the caller's thread is
+            // answered before the call returns, any other's is not waited for.
+            /** @param {number} at @returns {number | Promise<number>} */
+            const each = at=>(at >= targets.length ? 1
+                : andThen(notify([targets[at], message, wParam, lParam], unicode),
+                    ()=>each(at + 1)));
+            return each(0);
+        }
         const thread = host.callerThread?.();
         /** @param {number} at @returns {number | Promise<number>} */
         const next = at=>(at >= targets.length ? 1
             : andThen(sendAcross(targets[at], message, wParam, lParam, thread, unicode),
-                answer=>((flags & BSF_QUERY) !== 0 && (answer >>> 0) === BROADCAST_QUERY_DENY
-                    ? 0 : next(at + 1))));
+                answer=>{
+                    if ((flags & BSF_QUERY) !== 0 && (answer >>> 0) === BROADCAST_QUERY_DENY)
+                    {
+                        denied?.(targets[at]);
+                        return 0;
+                    }
+                    return next(at + 1);
+                }));
         return next(0);
+    };
+
+    /**
+     * BroadcastSystemMessageEx in either encoding: the broadcast, and under
+     * BSF_RETURNHDESK the window that refused a query, with its thread's
+     * desktop, in the BSMINFO.
+     *
+     * @param {number[]} args @param {boolean} unicode
+     */
+    const broadcastEx = (args, unicode)=>{
+        const BSF_RETURNHDESK = 0x0200;
+        const info = args[5] >>> 0;
+        if ((args[0] & BSF_RETURNHDESK) === 0 || info === 0)
+        {
+            return broadcastSystem(args, unicode);
+        }
+        return broadcastSystem(args, unicode, hwnd=>{
+            const thread = (/** @type {any} */ (table)).GetWindowThreadProcessId.handler([hwnd, 0]);
+            const desk = (/** @type {any} */ (table)).GetThreadDesktop.handler([thread]);
+            writeU32s(host, info + 4, [desk >>> 0, hwnd >>> 0]);
+        });
     };
 
     /**
@@ -8595,12 +8713,19 @@ export function createWindowFunctions(host){
             /** @param {number[]} args */
             handler: ([hwnd, key, alpha, flags])=>{
                 const record = live(hwnd);
-                if (!record)
+                if (!record || (record.exStyle & WS_EX_LAYERED) === 0)
                 {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
                 record.layered = { key: key >>> 0, alpha: alpha & 0xff, flags: flags >>> 0 };
-                return 1;
+                const was = record.layeredBy;
+                record.layeredBy = 'attributes';
+                // From a picture of its own (or none) to the system drawing
+                // it: the window and its children are painted again.
+                return was === 'attributes' ? 1 : andThen(
+                    (/** @type {any} */ (table)).RedrawWindow.handler([hwnd, 0, 0,
+                        RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN]), ()=>1);
             },
         },
 
@@ -8609,8 +8734,13 @@ export function createWindowFunctions(host){
             /** @param {number[]} args */
             handler: ([hwnd, key, alpha, flags])=>{
                 const record = live(hwnd);
-                if (!record)
+                // Only a layered window drawn by its attributes has any: one
+                // not layered, not yet set, or given its picture by
+                // UpdateLayeredWindow is refused.
+                if (!record || (record.exStyle & WS_EX_LAYERED) === 0
+                    || record.layeredBy !== 'attributes')
                 {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
                 const layered = record.layered;
@@ -8653,12 +8783,18 @@ export function createWindowFunctions(host){
                 const [ULW_COLORKEY, ULW_ALPHA] = [0x1, 0x2];
                 const [SWP_NOSIZE, SWP_NOMOVE] = [0x1, 0x2];
                 const [SWP_NOZORDER, SWP_NOACTIVATE] = [0x4, 0x10];
+                const ULW_OPAQUE = 0x4;
                 const record = live(hwnd);
-                if (!record || (record.exStyle & WS_EX_LAYERED) === 0)
+                // Not layered, drawn by its attributes already, or a flag
+                // past the three (ULW_EX_NORESIZE is UpdateLayeredWindowIndirect's).
+                if (!record || (record.exStyle & WS_EX_LAYERED) === 0
+                    || record.layeredBy === 'attributes'
+                    || (flags & ~(ULW_COLORKEY | ULW_ALPHA | ULW_OPAQUE)) !== 0)
                 {
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
+                record.layeredBy = 'update';
                 if ((flags & (ULW_ALPHA | ULW_COLORKEY)) !== 0 && !layeredBlendSaid)
                 {
                     layeredBlendSaid = true;
@@ -8944,6 +9080,25 @@ export function createWindowFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: args=>broadcastSystem(args, true),
+        },
+
+        /**
+         * long BroadcastSystemMessageExA(DWORD flags, LPDWORD lpdwRecipients, UINT uiMessage,
+         *                                WPARAM wParam, LPARAM lParam, PBSMINFO pbsmInfo)
+         *
+         * BroadcastSystemMessage with a BSMINFO (cbSize, hdesk, hwnd, luid) to
+         * learn who refused a query: under BSF_RETURNHDESK the refusing
+         * window and its desktop are written there.
+         */
+        BroadcastSystemMessageExA: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: args=>broadcastEx(args, false),
+        },
+        BroadcastSystemMessageExW: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: args=>broadcastEx(args, true),
         },
 
         /**

@@ -365,6 +365,9 @@ test('a string read copies the string, not the region it sits in', ()=>{
     bytes.set([0x41, 0x00, 0x42, 0x00, 0x00, 0x00], 0x4000); // "AB" as UTF-16LE
     assert.equal(accessors.readWideString(0x4000, size), 'AB');
     assert.equal(accessors.scanWideString(0x4000, size), 2, 'its length in units, no text');
+    // Half a surrogate pair is a unit like any other in a Windows string.
+    bytes.set([0x41, 0x00, 0x00, 0xd8, 0x42, 0x00, 0x00, 0x00], 0x4100);
+    assert.equal(accessors.readWideString(0x4100, size), 'A\ud800B');
     assert.throws(()=>accessors.readCString(0x2000, 8), /No NUL within 8 bytes/);
 });
 

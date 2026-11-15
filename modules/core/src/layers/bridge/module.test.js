@@ -43,7 +43,10 @@ async function bridge(){
     let onTrap = null;
     let nextTrap = 1;
 
-    /** @param {string} name @param {{ top: number, limit: number }} stack */
+    /**
+     * @param {string} name @param {{ top: number, limit: number }} stack
+     * @returns {{ name: string, stackTop: number, stackLimit: number, state?: string }}
+     */
     const thread = (name, stack)=>({ name, stackTop: stack.top, stackLimit: stack.limit });
     const main = thread('main', MAIN);
     const worker = thread('thread-3', WORKER);

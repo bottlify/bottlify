@@ -9,6 +9,7 @@ import { createRefusals } from '../common/refusal.js';
 import { verLanguageName } from './languages.js';
 import { STATUS } from '../ntdll/status.js';
 import { decodeUtf7, encodeUtf7 } from './utf7.js';
+import { unitsFromUtf8, utf8FromUnits } from './utf8.js';
 import { bestFit, codePage } from './codepages.js';
 import { ALTERNATE_SORTS, LOCALES, lcidOfName, localeByLcid, localeByName } from './locales.js';
 import { renderDate, renderTime } from './datetime-format.js';
@@ -72,6 +73,8 @@ const MB_FLAGS = 0x0f;
  * WC_COMPOSITECHECK, WC_NO_BEST_FIT_CHARS: any other bit is refused.
  */
 const WC_FLAGS = 0x6f0;
+/** Half a surrogate pair fails the call instead of becoming U+FFFD. */
+const WC_ERR_INVALID_CHARS = 0x80;
 const WC_NO_BEST_FIT_CHARS = 0x400;
 const ERROR_NO_UNICODE_TRANSLATION = 1113;
 const ERROR_GEN_FAILURE = 31;
@@ -175,13 +178,41 @@ const CSTR_LESS_THAN = 1;
 const CSTR_GREATER_THAN = 3;
 
 /**
- * A UTF-16 unit in upper case, as Windows' one-to-one table has it.
+ * Where Windows' case table keeps a character that Unicode's maps: the micro
+ * sign stays (its upper case would be the Greek capital mu), and the Greek
+ * capital theta symbol keeps its own lower case.
+ */
+const KEEPS_CASE = { upper: new Set([0x00b5]), lower: new Set([0x03f4]) };
+
+/**
+ * A UTF-16 unit in upper case, as Windows' one-to-one table has it: one whose
+ * upper case is longer than one unit (\u00df) stays as it is.
  *
  * @param {number} unit
+ * @returns {number}
  */
-const upcaseUnit = unit=>{
+export const upcaseUnit = unit=>{
+    if (KEEPS_CASE.upper.has(unit))
+    {
+        return unit;
+    }
     const upper = String.fromCharCode(unit).toUpperCase();
     return upper.length === 1 ? upper.charCodeAt(0) : unit;
+};
+
+/**
+ * A UTF-16 unit in lower case, by the same table.
+ *
+ * @param {number} unit
+ * @returns {number}
+ */
+export const downcaseUnit = unit=>{
+    if (KEEPS_CASE.lower.has(unit))
+    {
+        return unit;
+    }
+    const lower = String.fromCharCode(unit).toLowerCase();
+    return lower.length === 1 ? lower.charCodeAt(0) : unit;
 };
 
 /** CompareString's flags: the NORM_, LINGUISTIC_ and SORT_ ones, and LOCALE_USE_CP_ACP. */
@@ -1044,6 +1075,12 @@ export function createLocaleFunctions(host){
      */
     const anyNegative = declared=>((declared | 0) < 0 ? -1 : declared);
 
+    /** A conversion that met a sequence it may not replace: fails, as asked. */
+    const noTranslation = ()=>{
+        host.setLastError(ERROR_NO_UNICODE_TRANSLATION);
+        return 0;
+    };
+
     /**
      * Text in a page, as WideCharToMultiByte writes it: with the caller's
      * default character when it gives one, and how much of it a short
@@ -1058,7 +1095,9 @@ export function createLocaleFunctions(host){
         const whole = (/** @type {number} */ room)=>room;
         if (page === CP_UTF8)
         {
-            return { bytes: new TextEncoder().encode(text), fit: whole, usedDefault: ()=>false };
+            const units = Array.from({ length: text.length }, (_, at)=>text.charCodeAt(at));
+            return { bytes: Uint8Array.from(utf8FromUnits(units).bytes.flat()), fit: whole,
+                usedDefault: ()=>false };
         }
         if (page === CP_UTF7)
         {
@@ -2550,10 +2589,7 @@ export function createLocaleFunctions(host){
                 RtlDowncaseUnicodeChar: {
                     argBytes: 4,
                     /** @param {number[]} args */
-                    handler: ([unit])=>{
-                        const lower = String.fromCharCode(unit & 0xffff).toLowerCase();
-                        return lower.length === 1 ? lower.charCodeAt(0) : unit & 0xffff;
-                    },
+                    handler: ([unit])=>downcaseUnit(unit & 0xffff),
                 },
             },
             /** @param {number[]} args */
@@ -2754,20 +2790,15 @@ export function createLocaleFunctions(host){
                 }
                 const raw = host.readMemory(source >>> 0, span.length);
                 let text;
+                let invalid = false;
                 if (resolved === CP_UTF8)
                 {
                     // With MB_ERR_INVALID_CHARS a malformed sequence fails the
-                    // call rather than becoming U+FFFD, measuring included.
-                    try
-                    {
-                        text = new TextDecoder('utf-8',
-                            { fatal: (flags & MB_ERR_INVALID_CHARS) !== 0 }).decode(raw);
-                    }
-                    catch (e){
-                        void e;
-                        host.setLastError(ERROR_NO_UNICODE_TRANSLATION);
-                        return 0;
-                    }
+                    // call rather than becoming U+FFFD, measuring included; the
+                    // text is written all the same, U+FFFD and all.
+                    const { units, unmapped } = unitsFromUtf8(raw);
+                    invalid = unmapped && (flags & MB_ERR_INVALID_CHARS) !== 0;
+                    text = units.flat().map(unit=>String.fromCharCode(unit)).join('');
                 }
                 else if (resolved === CP_UTF7)
                 {
@@ -2789,7 +2820,7 @@ export function createLocaleFunctions(host){
                 // Zero is the measuring call, and it must not write.
                 if ((destinationChars | 0) === 0)
                 {
-                    return text.length;
+                    return invalid ? noTranslation() : text.length;
                 }
                 // A destination too small is filled as far as it goes and then
                 // reported as too small. Both halves are the contract: a
@@ -2804,7 +2835,7 @@ export function createLocaleFunctions(host){
                     return 0;
                 }
                 writeWide(destination >>> 0, text);
-                return text.length;
+                return invalid ? noTranslation() : text.length;
             },
         },
 
@@ -2839,6 +2870,11 @@ export function createLocaleFunctions(host){
                     return 0;
                 }
                 const text = readWide(source >>> 0, span.length);
+                // Half a surrogate pair is no character: WC_ERR_INVALID_CHARS
+                // fails on it, the text written all the same with U+FFFD.
+                const invalid = resolved === CP_UTF8 && (flags & WC_ERR_INVALID_CHARS) !== 0
+                    && utf8FromUnits(Array.from({ length: text.length },
+                        (_, at)=>text.charCodeAt(at))).unmapped;
                 const encoded = encodeIn(resolved, text, flags, args[6] >>> 0);
                 const room = destinationBytes | 0;
                 const short = room !== 0 && encoded.bytes.length > room;
@@ -2853,7 +2889,7 @@ export function createLocaleFunctions(host){
                 }
                 if (room === 0)
                 {
-                    return encoded.bytes.length;
+                    return invalid ? noTranslation() : encoded.bytes.length;
                 }
                 // Filled as far as it goes, for the reason MultiByteToWideChar
                 // gives -- but never with half a character.
@@ -2864,7 +2900,7 @@ export function createLocaleFunctions(host){
                     return 0;
                 }
                 host.writeMemory(destination >>> 0, encoded.bytes);
-                return encoded.bytes.length;
+                return invalid ? noTranslation() : encoded.bytes.length;
             },
         },
 

@@ -916,13 +916,31 @@ test('GetWindowRgnBox answers the rectangle of the region SetWindowRgn gave, and
 test('MonitorFromPoint finds the monitor for a point on the screen, and none off it only when '
     + 'asked for none', ()=>{
     const { fns } = setup();
-    const monitor = fns.MonitorFromWindow.handler([0, 0]);
+    const monitor = fns.MonitorFromWindow.handler([0, 1]);
     assert.equal(fns.MonitorFromPoint.argBytes, 12, 'the point by value');
     assert.equal(fns.MonitorFromPoint.handler([10, 10, 0]), monitor);
     assert.equal(fns.MonitorFromPoint.handler([-5, 10, 0]), 0, 'MONITOR_DEFAULTTONULL');
     assert.equal(fns.MonitorFromPoint.handler([-5, 10, 1]), monitor, 'MONITOR_DEFAULTTOPRIMARY');
     assert.equal(fns.MonitorFromPoint.handler([5000, 10, 2]), monitor, 'MONITOR_DEFAULTTONEAREST');
 });
+
+test('MonitorFromRect takes the overlap, and an empty rectangle as its corner; no window is none',
+    ()=>{
+        const { fns, memory } = setup();
+        const monitor = fns.MonitorFromWindow.handler([0, 1]);
+        assert.equal(fns.MonitorFromWindow.handler([0, 0]), 0, 'no window, MONITOR_DEFAULTTONULL');
+        assert.equal(fns.MonitorFromWindow.handler([0x9999, 2]), monitor, 'and the nearest');
+        /** @param {number[]} rect @param {number} flags */
+        const fromRect = (rect, flags)=>{
+            memory.putU32s(RECT_BUFFER, rect.map(value=>value >>> 0));
+            return fns.MonitorFromRect.handler([RECT_BUFFER, flags]);
+        };
+        assert.equal(fromRect([0, 0, -1, -1], 0), monitor, 'empty at the origin: on the screen');
+        assert.equal(fromRect([-1, 0, 2, -1], 0), 0, 'empty: its corner is off it, however wide');
+        assert.equal(fromRect([-1, 0, 2, 1], 0), monitor, 'overlapping it');
+        assert.equal(fromRect([-1, -2, 2, 0], 0), 0, 'just above it');
+        assert.equal(fromRect([-1, -2, 2, 0], 2), monitor, 'just above it, the nearest asked for');
+    });
 
 test('EnumDisplayMonitors hands the one monitor to the callback, cut by the clip', async()=>{
     /** @type {number[][]} */
@@ -941,7 +959,7 @@ test('EnumDisplayMonitors hands the one monitor to the callback, cut by the clip
             return 0;
         },
     });
-    const monitor = fns.MonitorFromWindow.handler([0, 0]);
+    const monitor = fns.MonitorFromWindow.handler([0, 1]);
     assert.equal(fns.EnumDisplayMonitors.argBytes, 16);
     assert.equal(await fns.EnumDisplayMonitors.handler([0, 0, 0x9000, 0x55]), 1,
         'the callback answering FALSE is not the call failing');
@@ -1576,6 +1594,21 @@ test('CharNext walks a string a byte at a time and stops at its end', ()=>{
     assert.equal(fns.CharPrevA.handler([TEXT_BUFFER, TEXT_BUFFER + 2]), TEXT_BUFFER + 1);
     assert.equal(fns.CharPrevA.handler([TEXT_BUFFER, TEXT_BUFFER]), TEXT_BUFFER,
         'and never before the start');
+    assert.equal(fns.CharPrevA.handler([TEXT_BUFFER + 1, TEXT_BUFFER]), TEXT_BUFFER,
+        'a pointer before the start comes back as it came');
+
+    // In a double-byte page the characters are found from the start: a lead
+    // byte (0xa1 in page 936) takes the byte after it, a NUL included.
+    const DBCS = TEXT_BUFFER + 0x80;
+    memory.bytes.set([0xa1, 0x41, 0xa1, 0x42, 0xa1, 0, 0x43], DBCS);
+    /** @param {number} offset */
+    const previous = offset=>fns.CharPrevExA.handler([936, DBCS, DBCS + offset, 0]) - DBCS;
+    assert.equal(previous(1), 0, 'the trail byte of the first pair');
+    assert.equal(previous(2), 0);
+    assert.equal(previous(3), 2);
+    assert.equal(previous(6), 4, 'past a pair whose trail is NUL');
+    assert.equal(fns.CharPrevExA.handler([0, TEXT_BUFFER, TEXT_BUFFER + 2, 0]), TEXT_BUFFER + 1,
+        'one byte back in a single-byte page');
 });
 
 test('OemToCharBuff translates a counted buffer between the OEM and ANSI pages', ()=>{
@@ -3994,6 +4027,27 @@ test('BroadcastSystemMessage sends to every top-level window, and a query can be
     assert.equal(fns.BroadcastSystemMessageA.handler([BSF_QUERY | BSF_POSTMESSAGE, 0, WM_APP,
         0, 0]), 0);
     assert.deepEqual(errors, [87]);
+    assert.equal(fns.BroadcastSystemMessageExA.handler([0x80000000, 0, WM_APP, 0, 0, 0]), 0,
+        'a flag Windows does not know');
+    assert.deepEqual(errors, [87, 87]);
+
+    // SendNotifyMessage to each: a window of this thread is answered before
+    // the call returns, unlike a post.
+    const BSF_SENDNOTIFYMESSAGE = 0x0100;
+    told.length = 0;
+    assert.equal(fns.BroadcastSystemMessageW.handler([BSF_SENDNOTIFYMESSAGE, 0, WM_APP, 0, 0]), 1);
+    // (told was narrowed to empty by the asserts above; it has grown since.)
+    const notified = /** @type {{ hwnd: number }[]} */ (/** @type {unknown} */ (told));
+    assert.deepEqual(notified.map(each=>each.hwnd).sort(), [first, second].sort());
+
+    // Ex under BSF_RETURNHDESK names the window that denied the query.
+    const BSF_RETURNHDESK = 0x0200;
+    const INFO = OUT_BUFFER + 0x40;
+    memory.putU32s(INFO, [20, 0, 0, 0, 0]);
+    assert.equal(fns.BroadcastSystemMessageExW.handler([BSF_QUERY | BSF_RETURNHDESK, 0, WM_APP,
+        0, 0, INFO]), 0);
+    assert.equal(memory.u32(INFO + 8), first, 'the window that denied it');
+    assert.notEqual(memory.u32(INFO + 4), 0, 'and its desktop');
 });
 
 test('ExcludeUpdateRgn keeps a context off what is still to be repainted', ()=>{
@@ -4406,7 +4460,7 @@ test('GetMonitorInfo names the adapter in a MONITORINFOEX, and the work area fol
     // sysparams.c test_enum_display_settings takes the name to
     // EnumDisplaySettings; test_SPI_SETWORKAREA reads back what it set.
     const { memory, fns, screen } = setup();
-    const MONITOR = fns.MonitorFromWindow.handler([0, 0]);
+    const MONITOR = fns.MonitorFromWindow.handler([0, 1]);
     memory.putU32s(OUT_BUFFER, [72]);
     assert.equal(fns.GetMonitorInfoA.handler([MONITOR, OUT_BUFFER]), 1);
     assert.equal(memory.readCString(OUT_BUFFER + 40, 32), '\\\\.\\DISPLAY1');

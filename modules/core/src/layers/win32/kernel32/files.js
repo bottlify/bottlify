@@ -895,19 +895,30 @@ export function createFileFunctions(host){
         const root = rooted.startsWith('\\\\') ? '\\\\' : rooted.slice(0, 3);
         /** @type {string[]} */
         const parts = [];
-        for (const part of rooted.slice(root.length).split('\\'))
-        {
+        const pieces = rooted.slice(root.length).split('\\');
+        pieces.forEach((part, index)=>{
             if (part === '' || part === '.')
             {
-                continue;
+                return;
             }
             if (part === '..')
             {
                 parts.pop();
-                continue;
+                return;
             }
-            parts.push(part);
-        }
+            // A name cannot end in a dot or a space: the last one's are
+            // dropped (`file.txt. ` is `file.txt`, and a name of nothing else
+            // names nothing), and a folder's single dot before a separator.
+            // A pattern's dots are its own (`*.` is a name with no
+            // extension): FindFirstFile reads them, so they stay.
+            const pattern = /[*?]/.test(part);
+            const kept = pattern ? part : index === pieces.length - 1 ? part.replace(/[. ]+$/, '')
+                : /[^.]\.$/.test(part) ? part.slice(0, -1) : part;
+            if (kept !== '')
+            {
+                parts.push(kept);
+            }
+        });
         return root + parts.join('\\');
     }
 
@@ -1862,7 +1873,9 @@ export function createFileFunctions(host){
     /** @param {number[]} args @param {TextForm} text */
     const searchPathBody = ([pathList, fileName, extension, size, buffer, filePart], text)=>{
         let name = text.raw(fileName);
-        if (name === '')
+        // Blanks are no name: the path rules would drop them and find the
+        // folder searched.
+        if (/^ *$/.test(name))
         {
             return fail(ERROR_INVALID_PARAMETER);
         }

@@ -175,3 +175,65 @@ test('the message filter: accepted for the process; for a window, what was let i
     assert.equal(fns.ChangeWindowMessageFilterEx.handler([0x10010, 0x4a, 1, STRUCT]), 0,
         'a structure of another size');
 });
+
+/**
+ * The functions over a host that runs a callback: it records the name it was
+ * handed and answers the lParam it was given.
+ *
+ * @param {string[]} seen @param {Uint8Array} bytes
+ */
+function setupWithCalls(seen, bytes){
+    let free = 0x3c00;
+    return createDesktopFunctions({ topLevel: ()=>[], host: {
+        readMemory: (at, length)=>bytes.slice(at, at + length),
+        writeMemory: (at, data)=>bytes.set(data, at),
+        readCString: ()=>'',
+        handles: { open: ()=>0x80, close: ()=>{} },
+        allocate: size=>{
+            const at = free;
+            free += size + 4;
+            return at;
+        },
+        release: ()=>{},
+        call: (entry, [name, lParam])=>{
+            let end = name;
+            while (bytes[end] !== 0)
+            {
+                end++;
+            }
+            seen.push(String.fromCharCode(...bytes.subarray(name, end)));
+            return lParam;
+        },
+    } });
+}
+
+test('an enumeration answers its callback\'s last answer, and the flags and security are set',
+    async()=>{
+        const { fns, u32, errors, bytes } = setup();
+        /** @type {string[]} */
+        const seen = [];
+        const station = fns.GetProcessWindowStation.handler();
+        const withCalls = setupWithCalls(seen, bytes);
+        assert.equal(await withCalls.EnumWindowStationsA.handler([0x401000, 0x12345]), 0x12345,
+            'the lParam a callback hands back comes back');
+        assert.deepEqual(seen, ['WinSta0']);
+        assert.equal(await withCalls.EnumDesktopsA.handler([0, 0x401000, 0]), 0,
+            'a callback answering FALSE ends it, and that is the answer');
+
+        new DataView(bytes.buffer).setUint32(OUT, 1, true);
+        new DataView(bytes.buffer).setUint32(OUT + 8, 1, true);
+        assert.equal(fns.SetUserObjectInformationW.handler([station, UOI_FLAGS, OUT, 12]), 1);
+        fns.GetUserObjectInformationA.handler([station, UOI_FLAGS, OUT + 0x100, 12, NEEDED]);
+        assert.equal(u32(OUT + 0x108), 1, 'WSF_VISIBLE kept');
+        assert.equal(fns.SetUserObjectInformationA.handler([station, UOI_NAME, OUT, 12]), 0);
+        assert.equal(errors.at(-1), 87);
+
+        const ASKED = 0x3800;
+        new DataView(bytes.buffer).setUint32(ASKED, 4, true);
+        assert.equal(fns.GetUserObjectSecurity.handler([station, ASKED, 0, 0, NEEDED]), 0);
+        assert.equal(errors.at(-1), ERROR_INSUFFICIENT_BUFFER);
+        assert.equal(u32(NEEDED), 48, 'header, DACL, one ACE for everyone');
+        assert.equal(fns.GetUserObjectSecurity.handler([station, ASKED, OUT, 500, NEEDED]), 1);
+        assert.equal(bytes[OUT], 1, 'revision 1');
+        assert.equal(u32(OUT + 16), 20, 'the DACL just past the header');
+    });
