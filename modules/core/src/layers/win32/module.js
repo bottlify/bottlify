@@ -3590,6 +3590,9 @@ export function createWin32Module(){
                     // CreateMappedBitmap reads and writes a bitmap's bits
                     // through gdi32's own calls, looked up when called.
                     gdi32: name=>libraries['GDI32.dll']?.[name],
+                    // The arrays and the allocator take their memory through
+                    // kernel32's heaps, looked up when called.
+                    kernel32: name=>libraries['KERNEL32.dll']?.[name]?.handler,
                     allocate: bytes=>heap.allocate(bytes),
                     release: address=>heap.free(address),
                     call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
@@ -5416,6 +5419,13 @@ export function createWin32Module(){
             libraries['SHELL32.dll'].SHGetInstanceExplorer = processReference.GetProcessReference;
             libraries['SHELL32.dll'].SHSetInstanceExplorer = processReference.SetProcessReference;
             Object.assign(libraries['SHCORE.dll'], processReference);
+
+            // comctl32 registers a class of its own on user32's asking from
+            // Vista on; XP's library has no such entry.
+            if (windows.major < 6)
+            {
+                delete libraries['COMCTL32.dll'].RegisterClassNameW;
+            }
 
             // The shell's core came with Windows 8.1, and took over shlwapi's
             // strings, registry, streams, thread references and COM helpers
