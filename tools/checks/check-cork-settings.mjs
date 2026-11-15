@@ -208,14 +208,17 @@ export function checkTypedef(source, settings){
 
 if (isMain(import.meta.url))
 {
-    const page = readFileSync(DOCS, 'utf8');
+    // A checkout that turns line ends into CRLF (git's autocrlf on Windows)
+    // is the same page: its rows are compared without the CR.
+    const page = readFileSync(DOCS, 'utf8').replace(/\r\n/g, '\n');
     const { written, problems } = checkDocs(page, SETTINGS);
     if (process.argv.includes('--write'))
     {
         writeFileSync(DOCS, written);
         problems.length = 0;
     }
-    problems.push(...checkTypedef(readFileSync(TYPEDEF, 'utf8'), SETTINGS));
+    problems.push(...checkTypedef(readFileSync(TYPEDEF, 'utf8').replace(/\r\n/g, '\n'),
+        SETTINGS));
     if (problems.length > 0)
     {
         console.error(`check-cork-settings: ${problems.length} problem(s)\n  `
