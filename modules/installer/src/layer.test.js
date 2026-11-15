@@ -34,6 +34,14 @@ test('a layer is what the runs wrote on C:, under its drive folder, less their s
         '.bottlify\\registry.json',
     ]);
     assert.equal(files[1].pieces?.[0], pieces[0], 'a file in pieces keeps them, not copied');
+
+    // A session kept in the origin's file system hands its files out unread.
+    const read = async()=>bytes('ni');
+    const unread = /** @type {any} */ ({ path: 'C:\\WINDOWS\\a.ni.dll', size: 2, read });
+    const [lazy] = collectLayer({ files: [unread], registry: { roots: [] },
+        before: { roots: [] } });
+    assert.equal(lazy.read, read, 'one read when it is packed, not now');
+    assert.equal(lazy.path, '.bottlify\\drive_c\\WINDOWS\\a.ni.dll');
 });
 
 test('a layer\'s registry is what the runs added or changed, never what the machine had', ()=>{

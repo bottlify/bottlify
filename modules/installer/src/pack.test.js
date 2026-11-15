@@ -96,6 +96,21 @@ test('the engine\'s reader finds every file, byte for byte', async()=>{
     }
 });
 
+test('a file read only when it is packed is packed as the same file whole would be', async()=>{
+    const art = Uint8Array.from({ length: 5000 }, (u, at)=>(at * 3) & 0xff);
+    let reads = 0;
+    const file = /** @type {any} */ ({ path: 'data\\art.mpq', size: art.length,
+        read: async()=>{
+            reads++;
+            return art.slice();
+        } });
+    const lazy = await packed([file], 1024);
+    const whole = await packed([{ path: 'data\\art.mpq', bytes: art }], 1024);
+    assert.equal(reads, 1, 'read once, when its turn came');
+    assert.deepEqual(readFile(lazy.bundle, lazy.container, 'data\\art.mpq'), art);
+    assert.equal(lazy.summary.indexSha256, whole.summary.indexSha256, 'and indexed alike');
+});
+
 test('a file spanning blocks records the run, and the last block is short', async()=>{
     const bytes = Uint8Array.from({ length: 2500 }, (u, at)=>(at * 7) & 0xff);
     const { bundle } = await packed([{ path: 'big.bin', bytes }], 1024);
