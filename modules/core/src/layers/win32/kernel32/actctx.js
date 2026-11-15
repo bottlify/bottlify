@@ -501,6 +501,19 @@ const surrogateData = surrogate=>{
 const directoryOf = path=>path.slice(0, path.lastIndexOf('\\') + 1);
 
 /**
+ * The window classes Common Controls 6 registers, each under its versioned
+ * name: the user controls it carries its own of, and its own. A window made
+ * by one of these names under a context holding the assembly is of version
+ * 6's class (`loaderApi.windowClass`).
+ */
+const COMMON_CONTROLS_6_CLASSES = Object.freeze(['Button', 'ComboBox', 'ComboLBox', 'Edit',
+    'ListBox', 'Static', 'ComboBoxEx32', 'msctls_hotkey32', 'msctls_progress32',
+    'msctls_statusbar32', 'msctls_trackbar32', 'msctls_updown32', 'NativeFontCtl',
+    'ReBarWindow32', 'SysAnimate32', 'SysDateTimePick32', 'SysHeader32', 'SysIPAddress32',
+    'SysLink', 'SysListView32', 'SysMonthCal32', 'SysPager', 'SysTabControl32', 'SysTreeView32',
+    'ToolbarWindow32', 'tooltips_class32']);
+
+/**
  * The system assemblies the engine's store provides, as a Windows with the
  * Visual C++ redistributables installed holds them: Common Controls 6 is the
  * engine's comctl32, and each runtime's DLLs are the engine's own where it
@@ -515,7 +528,8 @@ const VC80 = [8, 0, 50727, 6195];
 const VC90 = [9, 0, 30729, 6161];
 const ENGINE_ASSEMBLIES = Object.freeze([
     { name: 'Microsoft.Windows.Common-Controls', version: [6, 0, 2600, 2180],
-        publicKeyToken: '6595b64144ccf1df', files: ['comctl32.dll'] },
+        publicKeyToken: '6595b64144ccf1df', files: ['comctl32.dll'],
+        windowClasses: COMMON_CONTROLS_6_CLASSES },
     { name: 'Microsoft.VC80.CRT', version: VC80, publicKeyToken: VC_TOKEN,
         files: ['msvcr80.dll', 'msvcp80.dll', 'msvcm80.dll'] },
     { name: 'Microsoft.VC80.OpenMP', version: VC80, publicKeyToken: VC_TOKEN,
@@ -751,8 +765,11 @@ export function createActivationContexts(host){
             return {
                 identity, directoryName, directory: `${STORE}${directoryName}\\`,
                 manifestPath: `${STORE}Manifests\\${directoryName}.manifest`,
-                manifest: { identity, files: provided.files.map(name=>({ name, loadFrom: null,
-                    windowClasses: [] })), dependencies: [], noInheritable: true, runLevel: null,
+                manifest: { identity, files: provided.files.map((name, index)=>({ name,
+                    loadFrom: null,
+                    windowClasses: index === 0 ? (provided.windowClasses ?? [])
+                        .map(className=>({ name: className, versioned: true })) : [] })),
+                dependencies: [], noInheritable: true, runLevel: null,
                 compatibility: { supportedOs: [], maxVersionTested: [] }, settings: new Map(),
                 redirects: [], redirectsFor: null },
             };
@@ -2241,6 +2258,40 @@ export function createActivationContexts(host){
                         const source = entry?.exists && !entry.isDirectory ? path
                             : host.answers?.(file.name) ? null : bottleCopyOf(file.name);
                         return { path, source, context: context.handle };
+                    }
+                }
+            }
+            return null;
+        },
+
+        /**
+         * The class a window class name is under the thread's active context,
+         * then the process default: its versioned name (`6.0.2600.2180!Button`)
+         * and the major version of the assembly that registers it, or null
+         * when no context redirects the name.
+         *
+         * @param {string} name
+         * @returns {{ versioned: string, major: number } | null}
+         */
+        windowClass(name){
+            const key = name.toUpperCase();
+            for (const context of [activeContext(), processDefault])
+            {
+                for (const assembly of context?.assemblies ?? [])
+                {
+                    for (const file of assembly.manifest.files)
+                    {
+                        const found = file.windowClasses
+                            .find(windowClass=>windowClass.name.toUpperCase() === key);
+                        if (found)
+                        {
+                            const version = assembly.identity.version;
+                            return {
+                                versioned: found.versioned && version
+                                    ? `${version.join('.')}!${found.name}` : found.name,
+                                major: version?.[0] ?? 0,
+                            };
+                        }
                     }
                 }
             }

@@ -266,11 +266,16 @@ function paintedHost(fills, presents, clips, scrolls = []){
  * @param {(args: number[], thread: number) => any} [options.waitForObjectsOrInput]
  * @param {(thread: number) => void} [options.inputArrived]
  * @param {number} [options.memorySize] The fake memory's size, for a test that makes many windows.
+ * @param {(name: string) => ({ versioned: string, major: number } | null)} [options.windowClass]
+ *        The activation context's class redirection.
+ * @param {(name: string, handler: any) => number} [options.registerProcedure]
+ *        Addresses for host procedures, as the bridge hands them out.
  */
 function setup({
     heap = false, reply, waitForObjects, now, hookReply, threadExists, trace, paint = false,
     caller = { current: THREAD }, queueNow, regionBox, setRegion, later, scrolls = [], directory,
-    processId, pointerSize, waitForObjectsOrInput, inputArrived, memorySize,
+    processId, pointerSize, waitForObjectsOrInput, inputArrived, memorySize, windowClass,
+    registerProcedure,
 } = {})
 {
     const memory = fakeMemory(memorySize);
@@ -378,6 +383,8 @@ function setup({
         later,
         directory,
         processId,
+        windowClass,
+        registerProcedure,
         ...pointerSize ? { pointerSize } : {},
         ...(paint ? paintedHost(fills, presents, clips, scrolls) : {}),
     });
@@ -557,6 +564,60 @@ test('a class Windows\' own libraries register is there though no control draws 
         assert.notEqual(createWindow(fns, memory, { className: CLASS_NAME }), 0,
             `${name}: a window of it is made`);
     }
+});
+
+test('under a context holding Common Controls 6 a class name makes version 6\'s class', ()=>{
+    // Wine's comctl32 tests: Button under the manifest is comctl32's own,
+    // reported as Button; SysLink is there only in version 6.
+    const context = { active: false };
+    const VERSIONED = '6.0.2600.2180!';
+    // Each host procedure at an address of its own, as the bridge hands them out.
+    let stubs = 0x7f000000;
+    /** @type {Record<string, string>} */
+    const redirected = { button: 'Button', syslink: 'SysLink' };
+    const { memory, fns } = setup({ registerProcedure: ()=>(stubs += 16),
+        windowClass: (/** @type {string} */ name)=>{
+            const own = redirected[name.toLowerCase()];
+            return context.active && own ? { versioned: `${VERSIONED}${own}`, major: 6 } : null;
+        } });
+    /** @param {string} name */
+    const procedureOf = name=>{
+        memory.putString(CLASS_NAME, name);
+        memory.fill(TEXT_BUFFER, WNDCLASSEXA.SIZE / 4);
+        assert.equal(fns.GetClassInfoExA.handler([0, CLASS_NAME, TEXT_BUFFER]), 1, name);
+        return memory.u32(TEXT_BUFFER + WNDCLASSEXA.lpfnWndProc);
+    };
+    /** @param {string} name */
+    const make = name=>{
+        memory.putString(CLASS_NAME, name);
+        return createWindow(fns, memory, { className: CLASS_NAME });
+    };
+    /** @param {number} hwnd */
+    const nameOf = hwnd=>{
+        assert.ok(fns.GetClassNameA.handler([hwnd, TEXT_BUFFER, 64]) > 0);
+        return memory.readCString(TEXT_BUFFER, 64);
+    };
+
+    const user32 = procedureOf('Button');
+    assert.equal(make('SysLink'), 0, 'no SysLink without version 6');
+
+    context.active = true;
+    const own = procedureOf('Button');
+    assert.notEqual(own, user32, 'version 6\'s Button has a procedure of its own');
+    assert.equal(procedureOf(`${VERSIONED}Button`), own,
+        'and its versioned name is the same class');
+    const button = make('Button');
+    assert.equal(nameOf(button), 'Button', 'reported by its plain name');
+    assert.equal(fns.GetWindowLongA.handler([button, GWL_WNDPROC]), own);
+    const link = make('SysLink');
+    assert.notEqual(link, 0);
+    assert.equal(nameOf(link), 'SysLink');
+
+    context.active = false;
+    assert.equal(procedureOf('Button'), user32, 'the context gone, user32\'s again');
+    assert.equal(fns.GetWindowLongA.handler([make(`${VERSIONED}Button`), GWL_WNDPROC]), own,
+        'the versioned name still makes version 6\'s');
+    assert.equal(make('SysLink'), 0);
 });
 
 test('GetClassInfoA on a class nobody registered writes nothing', ()=>{

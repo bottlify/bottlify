@@ -23,6 +23,7 @@ import { WM_CREATE, WM_PAINT, WM_ERASEBKGND, COLOR_3DFACE, COLOR_BTNTEXT, after 
     from '../user32/controls.js';
 import { notifyWindow } from './notify.js';
 import { LPSTR_TEXTCALLBACK, MAX_TEXT, readText, writeText } from './strings.js';
+import { CCM_GETVERSION, CCM_SETVERSION, answerVersion } from './version.js';
 
 /** The class name a program creates the control by. */
 export const HEADER_CLASS = 'SysHeader32';
@@ -52,8 +53,6 @@ export const HDM = Object.freeze({
 });
 const CCM_SETUNICODEFORMAT = 0x2005;
 const CCM_GETUNICODEFORMAT = 0x2006;
-const CCM_SETVERSION = 0x2007;
-const CCM_GETVERSION = 0x2008;
 
 /** HDITEM, the same shape in both spellings: only the text differs. */
 export const HDITEM = Object.freeze({ mask: 0, cxy: 4, pszText: 8, hbm: 12, cchTextMax: 16,
@@ -175,7 +174,6 @@ export function createHeaderProcedure(host, tk){
         held.bitmapMargin ??= BITMAP_MARGIN;
         held.filterTimeout ??= FILTER_TIMEOUT;
         held.focused ??= 0;
-        held.version ??= 5;
         return held;
     };
 
@@ -773,13 +771,9 @@ export function createHeaderProcedure(host, tk){
             }
             case CCM_GETUNICODEFORMAT:
                 return held.unicode ? 1 : 0;
-            case CCM_SETVERSION: {
-                const previous = held.version;
-                held.version = wParam | 0;
-                return previous;
-            }
+            case CCM_SETVERSION:
             case CCM_GETVERSION:
-                return held.version;
+                return answerVersion(record, held, message.message, wParam);
             default:
                 return tk.common(record, message, thread);
         }

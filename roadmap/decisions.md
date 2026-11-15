@@ -2328,3 +2328,17 @@ libraries it recreates, less what is Wine's alone and the redistributable runtim
 brings itself (`tools/generators/windows-libraries.mjs`), with every `api-ms-win-` and
 `ext-ms-win-` set. A delay-loaded library fails on its first call on Windows and is not refused
 at the start. The refusal is said as `libraries-not-found`, an error. *2026-11-15.*
+
+**A257. comctl32 is two libraries of one implementation: system32's 5.82, and Common Controls 6
+where a program's activation context holds that assembly.** As on Windows, the context decides at
+binding, not the call: an import, `LoadLibrary` and `GetModuleHandle` of `comctl32.dll` under a
+context that redirects the name to the engine's assembly (A57) get version 6's module, at the
+assembly's WinSxS directory, and every other gets 5.82's. They differ in what is version 6's
+alone: DllGetVersion (6.0.2600.2180 against 5.82.2900.5512), the exports Wine's misc test lists
+as version 6's (5.82 has none of them), the classes RegisterClassNameW registers (version 6 adds
+the user controls and SysLink), and CCM_GETVERSION (6, whatever is set; 5.82 keeps what is set
+from 0 and refuses past 5). The assembly registers its classes under versioned names
+(`6.0.2600.2180!Button`); user32 makes a window by the name the active context, then the process
+default, redirects, and reports the plain name. A window of version 6's class answers as version 6
+(`controlsVersion`): one control implementation, branching where the versions differ, not two
+copies. *2026-11-15.*
