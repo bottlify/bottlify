@@ -22,7 +22,7 @@
 import { createComObject } from '../ole32/objects.js';
 import { describe } from './describe.js';
 import { formatGuid } from '../ole32/guid.js';
-import { CLSID_LEGACY_AM_FILTER_CATEGORY } from '../devenum/devenum.js';
+import { CLSID_LEGACY_AM_FILTER_CATEGORY, encodeFilterData } from '../devenum/devenum.js';
 
 const S_OK = 0x00000000;
 const S_FALSE = 0x00000001;
@@ -158,6 +158,7 @@ export function createFilterMapper(host, store, devices){
                     output: (flags & REG_PINFLAG_B_OUTPUT) !== 0,
                     zero: (flags & REG_PINFLAG_B_ZERO) !== 0,
                     many: (flags & REG_PINFLAG_B_MANY) !== 0,
+                    instances: host.readU32(at + 4),
                     types: readTypes(host.readU32(at + PINS2.TYPE_ARRAY),
                         host.readU32(at + PINS2.TYPES)),
                 };
@@ -539,37 +540,7 @@ export function createFilterMapper(host, store, devices){
             {
                 return E_INVALIDARG;
             }
-            const { pins } = registration;
-            const typeTotal = pins.reduce((sum, pin)=>sum + pin.types.length, 0);
-            const guidsAt = 16 + pins.length * 24 + typeTotal * 16;
-            const block = new Uint8Array(guidsAt + typeTotal * 32);
-            const view = new DataView(block.buffer);
-            view.setUint32(0, 2, true);
-            view.setUint32(4, registration.merit, true);
-            view.setUint32(8, pins.length, true);
-            let at = 16;
-            let guid = guidsAt;
-            pins.forEach((pin, index)=>{
-                // "0pi3", its first byte the pin's index in ASCII.
-                view.setUint32(at, 0x33697030 + index, true);
-                view.setUint32(at + 4, (pin.zero ? REG_PINFLAG_B_ZERO : 0)
-                    | (pin.renderer ? REG_PINFLAG_B_RENDERER : 0)
-                    | (pin.many ? REG_PINFLAG_B_MANY : 0)
-                    | (pin.output ? REG_PINFLAG_B_OUTPUT : 0), true);
-                view.setUint32(at + 8, 1, true);
-                view.setUint32(at + 12, pin.types.length, true);
-                at += 24;
-                for (const [major, minor] of pin.types)
-                {
-                    view.setUint32(at, 0x33797430, true);
-                    view.setUint32(at + 8, guid, true);
-                    view.setUint32(at + 12, guid + 16, true);
-                    block.set(guidBytes(major), guid);
-                    block.set(guidBytes(minor), guid + 16);
-                    at += 16;
-                    guid += 32;
-                }
-            });
+            const block = encodeFilterData(registration);
             const copy = host.allocate(block.length);
             host.writeMemory(copy, block);
             host.writeMemory(out >>> 0, dword(copy));

@@ -1976,7 +1976,9 @@ export function createMetafileFunctions({ host, objects, dcOf, call, transform, 
                 {
                     return refuse(ERROR_INVALID_PARAMETER);
                 }
-                const wmf = emfToWmf(bits, mapMode | 0, encodeAnsi);
+                // The window is laid out on the reference device: the display
+                // every DC here answers for.
+                const wmf = emfToWmf(bits, mapMode | 0, encodeAnsi, reference());
                 if ((out >>> 0) !== 0 && (size >>> 0) < wmf.length)
                 {
                     return refuse(ERROR_INVALID_PARAMETER);
