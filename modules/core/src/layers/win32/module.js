@@ -83,7 +83,7 @@ import { SERVICE_BY_NAME, SERVICE_SECURITY, createServiceFunctions } from './adv
 import { createCryptoFunctions } from './advapi32/crypto.js';
 import {
     DIRECTX_RELEASES, HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE,
-    MACHINE_ENVIRONMENT, REG_EXPAND_SZ, REG_SZ, createHive, shellFolderDirectories,
+    MACHINE_ENVIRONMENT, REG_BINARY, REG_EXPAND_SZ, REG_SZ, createHive, shellFolderDirectories,
     shellFolders,
 } from './advapi32/registry.js';
 import { createGdiFunctions } from './gdi32/functions.js';
@@ -146,6 +146,7 @@ import { createDwmapiFunctions, createSessionInformationFunctions,
 import { createDwriteFunctions } from './dwrite/functions.js';
 import { createImageCertificateFunctions } from './dbghelp/image-certificates.js';
 import { createMsvfwFunctions } from './msvfw32/functions.js';
+import { createMsdmoFunctions, listDmos } from './msdmo/functions.js';
 import { createAvifilFunctions } from './avifil32/functions.js';
 import { DPLAYX_ORDINALS, createDplayFunctions, registerDplayClasses } from './dplayx/functions.js';
 import { createIostreamFunctions } from './msvcirt/functions.js';
@@ -1384,6 +1385,45 @@ export function createWin32Module(){
              */
             const dispatching = [];
 
+            // The DMOs' registry, under the classes root where Windows keeps it:
+            // msdmo writes it, and the filter mapper enumerates it beside the filters.
+            /** @type {import('./msdmo/functions.js').DmoRegistry} */
+            const dmoRegistry = (()=>{
+                const classes = ()=>/** @type {any} */ (hive.root(HKEY_CLASSES_ROOT));
+                /** @param {any} key */
+                const removeTree = key=>{
+                    for (const name of hive.subkeys(key))
+                    {
+                        removeTree(hive.open(key, name));
+                        hive.remove(key, name);
+                    }
+                };
+                return {
+                    exists: path=>hive.open(classes(), path) !== null,
+                    subkeys: path=>{
+                        const key = hive.open(classes(), path);
+                        return key ? hive.subkeys(key) : [];
+                    },
+                    get: (path, name)=>{
+                        const key = hive.open(classes(), path);
+                        return key ? hive.getValue(key, name)?.data ?? null : null;
+                    },
+                    set: (path, name, data, binary)=>{
+                        const { key } = hive.create(classes(), path);
+                        hive.setValue(key, name, binary ? REG_BINARY : REG_SZ, data);
+                    },
+                    create: path=>void hive.create(classes(), path),
+                    remove: path=>{
+                        const key = hive.open(classes(), path);
+                        if (key)
+                        {
+                            removeTree(key);
+                            hive.remove(classes(), path);
+                        }
+                    },
+                };
+            })();
+
             // Registered here rather than by the graphics layer, because a filter
             // graph is not a drawing device: a program reaches it through
             // CoCreateInstance alone, and everything it does -- events, a notify
@@ -1436,6 +1476,21 @@ export function createWin32Module(){
                     at=>libraries['OLEAUT32.dll'].SysAllocString.handler([at])),
                     createInstance: (clsid, iid, out)=>lent(/** @type {Uint8Array} */ (parseGuid(clsid)), at=>
                         libraries['ole32.dll'].CoCreateInstance.handler([at, 0, 1, iid, out])),
+                    // A DMO enumerates as the DMO wrapper filter registers it: at
+                    // MERIT_NORMAL + 0x800, its pins its registered types.
+                    dmos: ()=>listDmos(dmoRegistry).map(dmo=>({
+                        category: dmo.category, instance: dmo.clsid, clsid: dmo.clsid,
+                        name: dmo.name, merit: 0x00600800, properties: new Map(),
+                        display: `@device:dmo:${dmo.clsid}${dmo.category}`,
+                        pins: [
+                            { name: 'in0', output: false, renderer: false, zero: false,
+                                many: false, types: dmo.inputs.map(type=>/** @type {[string, string]} */ (
+                                    [type.type, type.subtype])) },
+                            { name: 'out0', output: true, renderer: false, zero: false,
+                                many: false, types: dmo.outputs.map(type=>/** @type {[string, string]} */ (
+                                    [type.type, type.subtype])) },
+                        ],
+                    })),
                 },
                 // CLSID_SystemClock: the machine's millisecond clock, and an
                 // advise as a kernel timer the scheduler honours.
@@ -1467,6 +1522,45 @@ export function createWin32Module(){
                 // A renderer the program wrote is fed from a thread of its own,
                 // as quartz feeds one from its streaming thread; made on the
                 // first sample, so a program with no such filter has none.
+                // quartz's own filters: File Source reads the volume's files.
+                filters: {
+                    readU32: address=>memory.readU32(address),
+                    readMemory,
+                    writeMemory,
+                    readWideString: (address, maxLength)=>readWideString(address, maxLength),
+                    allocate: bytes=>heap.allocate(bytes),
+                    free: address=>heap.free(address),
+                    callGuest: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
+                    currentThread: ()=>kernel.currentThread(),
+                    publish: (object, iid)=>bridge.publishInterface(object, iid),
+                    createInstance: async(clsid, iid)=>{
+                        const at = heap.allocate(36);
+                        writeMemory(at, /** @type {Uint8Array} */ (parseGuid(clsid)));
+                        writeMemory(at + 16, /** @type {Uint8Array} */ (parseGuid(iid)));
+                        writeMemory(at + 32, new Uint8Array(4));
+                        const made = await libraries['ole32.dll'].CoCreateInstance
+                            .handler([at, 0, 1, at + 16, at + 32]);
+                        const pointer = (made | 0) < 0 ? 0 : memory.readU32(at + 32);
+                        heap.free(at);
+                        return pointer;
+                    },
+                    files: {
+                        open: async path=>{
+                            const entry = volume.stat(path);
+                            const node = entry && !entry.isDirectory
+                                ? volume.open(path, { read: true }) : null;
+                            if (!entry || !node)
+                            {
+                                return null;
+                            }
+                            return {
+                                size: entry.size,
+                                read: async(offset, length)=>volume.read(node, offset, length),
+                                close: ()=>volume.close(node),
+                            };
+                        },
+                    },
+                },
                 stream: {
                     readU32: address=>memory.readU32(address),
                     writeMemory,
@@ -4301,6 +4395,16 @@ export function createWin32Module(){
 
                 // The AVIFile library with no file handlers registered.
                 'AVIFIL32.dll': createAvifilFunctions({ writeMemory }),
+
+                // The DMOs' registry, kept under the classes root where Windows
+                // keeps it, and the media type helpers in task memory.
+                'msdmo.dll': createMsdmoFunctions({
+                    readMemory, writeMemory, readWideString,
+                    allocate: bytes=>heap.allocate(bytes),
+                    free: address=>heap.free(address),
+                    publish: (object, iid)=>bridge.publishInterface(object, iid),
+                    registry: dmoRegistry,
+                }),
 
                 // DirectPlay with no service provider, and a lobby that did
                 // not launch the program.

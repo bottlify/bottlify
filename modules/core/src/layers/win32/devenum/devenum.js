@@ -102,6 +102,8 @@ const IPROPERTY_BAG_SLOTS = [['Read', 3], ['Write', 2]];
  * @property {number} merit
  * @property {RegisteredPin[]} pins
  * @property {Map<string, string>} properties  What a program wrote to its property bag.
+ * @property {string} [display]  Its moniker's display name where it is not a software
+ *     device's: a DMO is `@device:dmo:{clsid}{category}`.
  */
 
 /**
@@ -153,6 +155,8 @@ export function createFilterStore(){
  * @property {(text: string) => number | Promise<number>} allocateString  A BSTR.
  * @property {(clsid: string, iid: number, out: number) => number | Promise<number>} createInstance
  *           CoCreateInstance of a class in this process, for the interface at `iid`.
+ * @property {() => RegisteredFilter[]} [dmos]  The DMOs registered, as the filter
+ *           mapper enumerates them beside the filters.
  */
 
 /** @param {number} value */
@@ -241,7 +245,8 @@ export function createDeviceEnumeration(host, store){
     };
 
     /** @param {RegisteredFilter} filter */
-    const displayName = filter=>`@device:sw:${filter.category}\\${filter.instance}`;
+    const displayName = filter=>filter.display
+        ?? `@device:sw:${filter.category}\\${filter.instance}`;
 
     /** @type {Record<string, (filter: RegisteredFilter, args: number[], self: any) => number | Promise<number>>} */
     const moniker = {

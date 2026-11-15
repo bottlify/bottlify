@@ -60,7 +60,10 @@ import { IAM_FILTER_DATA_SLOTS, IID_IAM_FILTER_DATA, createFilterMapper } from '
 import {
     CLSID_SYSTEM_DEVICE_ENUM, createDeviceEnumeration,
 } from '../devenum/devenum.js';
-import { CLSID_MEMORY_ALLOCATOR, CLSID_SYSTEM_CLOCK } from './interfaces.js';
+import { CLSID_ASYNC_READER, CLSID_MEMORY_ALLOCATOR, CLSID_SYSTEM_CLOCK } from './interfaces.js';
+import { createFilterBase } from './filter.js';
+import { createFileSource } from './filesource.js';
+import { createRenderers } from './renderers.js';
 
 /**
  * How far a name a program hands these is read: whole, as Windows reads it, up to
@@ -363,6 +366,11 @@ function newGraphState(){
  * @property {import('./clock.js').ClockHost | undefined} [clock]
  *           The machine's clock and its timers, which CLSID_SystemClock is built
  *           on. Absent, the class is not registered, as on a machine without it.
+ * @property {(import('./filter.js').FilterHost
+ *     & { files: import('./filesource.js').FileSourceHost }) | undefined} [filters]
+ *           What quartz's own filters are built on: the program's memory and
+ *           objects, this process's classes, and the volume's files File Source
+ *           reads. Absent, the filter classes are not registered.
  * @property {import('./stream.js').StreamHost | undefined} [stream]
  *           What joining a program's own filters to a graph needs: calling into
  *           its objects, handing out ours, and a thread to call it from. Absent,
@@ -1011,19 +1019,28 @@ export function createQuartz(host){
     };
 
     /**
-     * Connect and ConnectDirect: only a connection out of this graph's own
-     * source pin can be made, because that pin is the one thing here that
-     * produces anything.
+     * Connect and ConnectDirect: the output pin's IPin::Connect with the input
+     * pin and the type, as the documentation has ConnectDirect do; the graph's
+     * own source pin connects through its streaming half.
      *
      * @param {FilterGraphState} graph @param {number} out @param {number} into
+     * @param {number} [type]  The AM_MEDIA_TYPE, 0 for any.
      */
-    const connectPins = (graph, out, into)=>{
+    const connectPins = async(graph, out, into, type = 0)=>{
         const source = graph.source;
-        if (!streaming || !source || host.stream?.objectAt(out) !== source.pin)
+        if (streaming && source && host.stream?.objectAt(out) === source.pin)
         {
-            return VFW_E_CANNOT_CONNECT;
+            return streaming.connect(source, into);
         }
-        return streaming.connect(source, into);
+        const stream = host.stream;
+        if (!stream || (out >>> 0) === 0 || (into >>> 0) === 0)
+        {
+            return (out >>> 0) === 0 || (into >>> 0) === 0 ? E_POINTER : VFW_E_CANNOT_CONNECT;
+        }
+        // IPin::Connect, the vtable's fourth slot.
+        const entry = stream.readU32((stream.readU32(out >>> 0) + 3 * 4) >>> 0);
+        return (await stream.callGuest(entry, [out >>> 0, into >>> 0, type >>> 0],
+            stream.currentThread())) | 0;
     };
 
     /**
@@ -1076,7 +1093,7 @@ export function createQuartz(host){
         },
 
         /** HRESULT ConnectDirect(IPin *ppinOut, IPin *ppinIn, const AM_MEDIA_TYPE *pmt) */
-        ConnectDirect: (graph, [out, into])=>connectPins(graph, out, into),
+        ConnectDirect: (graph, [out, into, type])=>connectPins(graph, out, into, type),
 
         /** HRESULT EnumFilters(IEnumFilters **ppEnum) */
         EnumFilters: (graph, [out])=>refuse(out, E_NOTIMPL),
@@ -1089,6 +1106,27 @@ export function createQuartz(host){
 
         /** HRESULT Connect(IPin *ppinOut, IPin *ppinIn) */
         Connect: (graph, [out, into])=>connectPins(graph, out, into),
+
+        /**
+         * HRESULT Disconnect(IPin *ppin)
+         *
+         * The pin's own IPin::Disconnect, one end at a time, as the
+         * documentation has it: a program disconnects both ends.
+         */
+        Disconnect: async(graph, [pin])=>{
+            const stream = host.stream;
+            if ((pin >>> 0) === 0)
+            {
+                return E_POINTER;
+            }
+            if (!stream)
+            {
+                return E_NOTIMPL;
+            }
+            // IPin::Disconnect, the vtable's sixth slot.
+            const entry = stream.readU32((stream.readU32(pin >>> 0) + 5 * 4) >>> 0);
+            return (await stream.callGuest(entry, [pin >>> 0], stream.currentThread())) | 0;
+        },
 
         /** HRESULT Render(IPin *ppinOut) */
         Render: (graph, [out])=>{
@@ -2108,6 +2146,16 @@ export function registerQuartzClasses(registry, host){
     if (host.stream)
     {
         registry.registerClass(CLSID_MEMORY_ALLOCATOR, createMemoryAllocator(host.stream));
+    }
+    if (host.filters)
+    {
+        const base = createFilterBase(host.filters);
+        registry.registerClass(CLSID_ASYNC_READER, createFileSource(base, host.filters,
+            host.filters.files));
+        for (const [clsid, define] of createRenderers(base, host.filters))
+        {
+            registry.registerClass(clsid, define);
+        }
     }
     return { tick: quartz.tick, film: quartz.film };
 }
