@@ -185,11 +185,13 @@ function fakeSurfaces(){
     };
 }
 
-function setup(){
+/** @param {Partial<import('./functions.js').GdiHost>} [extra] */
+function setup(extra = {}){
     const memory = fakeMemory();
     const handles = fakeHandles();
     const surfaces = fakeSurfaces();
     const gdi = createGdiFunctions({
+        ...extra,
         readMemory: (address, length)=>memory.readMemory(address, length),
         writeMemory: (address, data)=>memory.writeMemory(address, data),
         fillMemory: (address, value, length)=>memory.bytes.fill(value, address, address + length),
@@ -624,6 +626,22 @@ test('a pattern brush names its bitmap and no colour, and outlives the bitmap', 
 
     memory.putU32s(STRUCT, [3, 0, 0x9999]);
     assert.equal(fns.CreateBrushIndirect.handler([STRUCT]), 0, 'no bitmap, no pattern');
+});
+
+test('a DIB pattern brush over a moveable HGLOBAL reads the DIB where the handle locks to', ()=>{
+    // CreateDIBPatternBrush and LOGBRUSH's BS_DIBPATTERN take an HGLOBAL: a
+    // moveable one is an entry of kernel32's table, its bytes elsewhere.
+    const HANDLE = 0x1234c;
+    const DIB = STRUCT + 0x40;
+    const { fns, memory } = setup({ lockGlobal: handle=>(handle === HANDLE ? DIB : handle) });
+    memory.putU32s(DIB, [40, 32, 32, 1 | (1 << 16), 0, 0, 0, 0, 2, 0]);
+    memory.putU32s(DIB + 40, [0, 0x00ffffff]);
+    assert.ok(fns.CreateDIBPatternBrush.handler([HANDLE, 0]) > 0, 'the DIB found through it');
+    memory.putU32s(STRUCT, [5, 0, HANDLE]);
+    assert.ok(fns.CreateBrushIndirect.handler([STRUCT]) > 0);
+    memory.putU32s(STRUCT, [6, 0, HANDLE]);
+    assert.equal(fns.CreateBrushIndirect.handler([STRUCT]), 0,
+        'BS_DIBPATTERNPT is a pointer, not a handle');
 });
 
 test('a DIB pattern brush reads back as BS_DIBPATTERN naming its packed DIB', ()=>{

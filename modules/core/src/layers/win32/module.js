@@ -1758,6 +1758,9 @@ export function createWin32Module(){
                 // GetObject's BITMAP, DIBSECTION, LOGBRUSH and EXTLOGPEN at the
                 // process's width.
                 pointerSize,
+                // A packed DIB's HGLOBAL, read where kernel32's GlobalLock puts it.
+                lockGlobal: handle=>/** @type {any} */ (libraries['KERNEL32.dll'])
+                    ?.[GLOBAL_MEMORY]?.pointer(handle) || handle,
                 readMemory,
                 writeMemory,
                 fillMemory,

@@ -110,8 +110,8 @@ const BS_NULL = 1;
 const BS_HATCHED = 2;
 const BS_PATTERN = 3;
 /**
- * A packed DIB's brush: lbHatch the DIB -- an HGLOBAL, which is its address
- * here, or the address itself -- and lbColor its usage. BS_PATTERN8X8 is
+ * A packed DIB's brush: lbHatch the DIB -- an HGLOBAL, read where it locks
+ * to, or the address itself -- and lbColor its usage. BS_PATTERN8X8 is
  * BS_PATTERN under an older name.
  */
 const BS_DIBPATTERN = 5;
@@ -528,6 +528,9 @@ const ENUMERATED_FONTTYPE = 0x0004;
 
 /**
  * @typedef {Object} GdiHost
+ * @property {(handle: number) => number} [lockGlobal]
+ *     The address an HGLOBAL's bytes are at - a moveable handle's block, a
+ *     fixed one itself - as GlobalLock answers it.
  * @property {number} [pointerSize]  8 in a 64-bit process, whose structures
  *     have their pointers, handles and message parameters eight bytes wide.
  * @property {(address: number, length: number) => Uint8Array} readMemory
@@ -3077,7 +3080,12 @@ export function createGdiFunctions(host){
                 {
                     return patternBrush(fields.hatch);
                 }
-                return fields.style === BS_DIBPATTERN || fields.style === BS_DIBPATTERNPT
+                if (fields.style === BS_DIBPATTERN)
+                {
+                    return dibPatternBrush(host.lockGlobal?.(fields.hatch) ?? fields.hatch,
+                        fields.color);
+                }
+                return fields.style === BS_DIBPATTERNPT
                     ? dibPatternBrush(fields.hatch, fields.color)
                     : objects.create('brush', fields);
             },
@@ -3101,7 +3109,7 @@ export function createGdiFunctions(host){
          * HBRUSH CreateDIBPatternBrush(HGLOBAL hglbDIBPacked, UINT fuColorSpec)
          *
          * A brush over a packed DIB, which the BS_DIBPATTERNPT and BS_DIBPATTERN
-         * forms of a LOGBRUSH describe; an HGLOBAL is the address it locks to.
+         * forms of a LOGBRUSH describe; an HGLOBAL is read where it locks to.
          */
         CreateDIBPatternBrushPt: {
             argBytes: 8,
@@ -3111,7 +3119,8 @@ export function createGdiFunctions(host){
         CreateDIBPatternBrush: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([packed, usage])=>dibPatternBrush(packed >>> 0, usage >>> 0),
+            handler: ([packed, usage])=>
+                dibPatternBrush(host.lockGlobal?.(packed >>> 0) ?? packed >>> 0, usage >>> 0),
         },
 
         /**
