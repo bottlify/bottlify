@@ -2278,7 +2278,7 @@ export function readAddress(e, operand){
  * @param {E} e @param {Operand} operand
  * @returns {number}
  */
-function accessAddress(e, operand){
+export function accessAddress(e, operand){
     const disp = stackOffset(e, operand);
     if (disp === null)
     {

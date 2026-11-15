@@ -60,7 +60,7 @@ import { isX87Opcode } from '../decode/decoder.js';
 import { Body, EMPTY, ValType } from '../wasm/encoder.js';
 import { I32 } from './flags.js';
 import { Local, Exit, STATE_PARAMS } from './region.js';
-import { prepare, readAddress, writeReg } from './integer.js';
+import { accessAddress, prepare, readAddress, writeReg } from './integer.js';
 import { PRECISION, noteStore, ram, ramAt } from './memory.js';
 import { callsOut, inlineReturns } from '../region.js';
 import { exactWrites } from '../ir-x87.js';
@@ -3218,8 +3218,8 @@ export function emitX87(e, instruction, flagsLive){
                 {
                     prepare(e, dst);
                     noteStore(e, 4);
-                    b.localGet(Local.addr).localGet(x.single[from])
-                        .store('f32', ram(e));
+                    const offset = accessAddress(e, dst);
+                    b.localGet(x.single[from]).store('f32', ramAt(offset));
                 }
                 if (op === 'fstp')
                 {
@@ -4485,14 +4485,15 @@ function storeFloat(e, operand, pushValue){
             .store('f32', ram(e));
         return;
     }
-    b.localGet(Local.addr);
+    // Off esp, the displacement the store's own offset, as an integer store's.
+    const offset = accessAddress(e, operand);
     pushValue();
     if (operand.size === 4)
     {
-        b.op(F32.demoteF64).store('f32', ram(e));
+        b.op(F32.demoteF64).store('f32', ramAt(offset));
         return;
     }
-    b.store('f64', ram(e));
+    b.store('f64', ramAt(offset));
 }
 
 /**
