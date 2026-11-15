@@ -149,6 +149,8 @@ const HANDLE_PROBE = 1 << 20;
  * @property {(handle: number) => any} threadOf  A thread by handle, the pseudo-handle its own.
  * @property {(handle: number, type?: string) => any} objectOf  A kernel object by handle, or null.
  * @property {number} [processId]  This process's id, which a job's id list names.
+ * @property {{ count: () => number, systemMask: () => number }} [processors]  The
+ *     machine's processors, all of them on its one NUMA node.
  * @property {(values: Record<string, number>) => void} [setRegisters]  The running
  *           thread's registers, EIP and ESP among them: where it goes on from.
  * @property {(api: string, detail: string) => void} [divergence]
@@ -175,6 +177,10 @@ export function createProcessPolicyFunctions(host){
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
         host.writeMemory(address, bytes);
     };
+    /** The machine's processors, all on node 0: one when nothing says. */
+    const processorCount = ()=>host.processors?.count() ?? 1;
+    /** The processors node 0 holds, as an affinity mask. */
+    const nodeMask = ()=>host.processors?.systemMask() ?? 1;
     /** @param {number} address @param {bigint} value */
     const writeQword = (address, value)=>{
         const bytes = new Uint8Array(8);
@@ -1083,6 +1089,84 @@ export function createProcessPolicyFunctions(host){
                 }
                 writeDword(out >>> 0, event.signalled ? 1 : 0);
                 return 1;
+            },
+        },
+
+        /**
+         * BOOL GetNumaNodeProcessorMask(UCHAR Node, PULONGLONG ProcessorMask):
+         * node 0 holds every processor; another node is no node of this
+         * machine's, ERROR_INVALID_PARAMETER.
+         */
+        GetNumaNodeProcessorMask: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([node, out])=>{
+                if ((node & 0xff) !== 0 || (out >>> 0) === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                writeQword(out >>> 0, BigInt(nodeMask() >>> 0));
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL GetNumaNodeProcessorMaskEx(USHORT Node, PGROUP_AFFINITY ProcessorMask):
+         * the same mask in group 0, the GROUP_AFFINITY's mask a pointer wide.
+         */
+        GetNumaNodeProcessorMaskEx: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([node, out])=>{
+                if ((node & 0xffff) !== 0 || (out >>> 0) === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const record = new Uint8Array(wide ? 16 : 12);
+                new DataView(record.buffer).setUint32(0, nodeMask(), true);
+                host.writeMemory(out >>> 0, record);
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL GetNumaProcessorNode(UCHAR Processor, PUCHAR NodeNumber): node 0
+         * for a processor the machine has; for another, 0xff and
+         * ERROR_INVALID_PARAMETER.
+         */
+        GetNumaProcessorNode: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([processor, out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const known = (processor & 0xff) < processorCount();
+                host.writeMemory(out >>> 0, new Uint8Array([known ? 0 : 0xff]));
+                return known ? 1 : fail(ERROR_INVALID_PARAMETER);
+            },
+        },
+
+        /**
+         * BOOL GetNumaProcessorNodeEx(PPROCESSOR_NUMBER Processor, PUSHORT NodeNumber):
+         * as GetNumaProcessorNode for a processor named by group and number, all
+         * of them in group 0; 0xffff for one the machine does not have.
+         */
+        GetNumaProcessorNodeEx: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([processor, out])=>{
+                if ((processor >>> 0) === 0 || (out >>> 0) === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const named = host.readMemory(processor >>> 0, 4);
+                const group = named[0] | named[1] << 8;
+                const known = group === 0 && named[2] < processorCount();
+                host.writeMemory(out >>> 0, known ? new Uint8Array([0, 0])
+                    : new Uint8Array([0xff, 0xff]));
+                return known ? 1 : fail(ERROR_INVALID_PARAMETER);
             },
         },
 

@@ -48,6 +48,7 @@ import { createCompressionFunctions } from './lznt1.js';
 import { createHandleTableFunctions } from './handle-table.js';
 import { createSecurityFunctions } from './security.js';
 import { MEMORY_ENTRIES, createMemoryFunctions } from './memory.js';
+import { HANDLE_ENTRIES, createHandleNatives } from './handles.js';
 import { createDebugFunctions } from './debug.js';
 import { createProcessFunctions } from './process.js';
 import { STATUS, toDosError } from './status.js';
@@ -646,6 +647,8 @@ export function createNtdllFunctions(host){
                 writeMemory: host.writeMemory, readWideString: host.readWideString,
                 kernel32, allocate, free })
             : {}),
+
+        ...(HANDLE_ENTRIES.every(name=>kernel32[name]) ? createHandleNatives({ kernel32 }) : {}),
 
         ...(MEMORY_ENTRIES.every(name=>kernel32[name])
             ? createMemoryFunctions({ readMemory: host.readMemory,
