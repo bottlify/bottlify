@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createScanFunctions, SCAN_EOF } from './scan.js';
+import { createScanFunctions, SCAN_EOF, STANDARD_SCAN } from './scan.js';
 import { fakeMemory } from './harness.test.js';
 
 const build = ()=>{
@@ -259,4 +259,35 @@ test('sscanf_s takes each string buffer\'s size, and text too long for it ends t
         'what fit, the first character zeroed');
     assert.equal(table.sscanf_s.handler([memory.put('123'), memory.put('%3c'), word, 3]), 1);
     assert.deepEqual([...memory.bytes.subarray(word, word + 4)], [0x31, 0x32, 0x33, 0x61]);
+});
+
+test('the universal runtime\'s scan reads C99\'s numbers and widths, stops at the unknown', ()=>{
+    const fixture = build();
+    const { memory } = fixture;
+    const standard = /** @type {any} */ (fixture.table)[STANDARD_SCAN];
+    /** @param {string} input @param {string} format @param {number[]} pointers */
+    const scan = (input, format, pointers)=>
+        standard.sscanf.handler([memory.put(input), memory.put(format), ...pointers]);
+    const value = memory.allocate(8);
+    const count = memory.allocate(4);
+    // Wine's ucrtbase test_sscanf: an exponent with no digit, or infinity
+    // half spelt, is a failure, at the end of the input EOF.
+    for (const text of ['1e', '1e+', 'infi'])
+    {
+        assert.equal(scan(text, '%lf%n', [value, count]), SCAN_EOF, text);
+    }
+    assert.equal(scan('infa', '%lf%n', [value, count]), 1);
+    assert.equal(new DataView(memory.bytes.buffer).getFloat64(value, true), Infinity);
+    assert.equal(memory.i32(count), 3, 'the a after inf is left');
+    assert.equal(scan('0x1p3', '%lf', [value]), 1);
+    assert.equal(new DataView(memory.bytes.buffer).getFloat64(value, true), 8);
+    memory.setU32(value, 0xdeadbeef);
+    assert.equal(scan('12345678', '%hhd', [value]), 1);
+    assert.equal(memory.u32(value), 0xdeadbe4e, 'hh is one byte');
+    assert.equal(scan('0x87654321', '%Ix', [value]), 1);
+    assert.equal(memory.u32(value), 0x87654321);
+    assert.equal(scan('0x46F173', '%p', [value]), 1);
+    assert.equal(memory.u32(value), 0x46f173, 'a pointer may have its 0x');
+    assert.equal(scan('1234', '%P', [value]), 0, 'no %P here');
+    assert.equal(sscanf(fixture, '1e', '%lf%n', [value, count]), 1, 'msvcrt reads the 1');
 });

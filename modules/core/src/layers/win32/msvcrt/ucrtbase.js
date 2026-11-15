@@ -29,7 +29,7 @@ import { addSecondNames, UCRTBASE_SECOND_NAMES } from './second-names.js';
 import { scanStandardDecimal, STANDARD_NUMBERS } from './convert.js';
 import { SYSTEM_ERRORS } from './errors.js';
 import { setSingle } from './float.js';
-import { VARIADIC_SLOTS } from './scan.js';
+import { STANDARD_SCAN, VARIADIC_SLOTS } from './scan.js';
 import { PRINT_STYLE } from './format.js';
 import { fileLayout } from './stdio.js';
 import { STANDARD_TIME_FORMATS } from './time.js';
@@ -443,11 +443,14 @@ export function createUcrtbaseFunctions(crt, host){
             /** @param {number[]} args */
             handler: ([options, , buffer, count, format, , list])=>{
                 const pointers = pointersAt(list);
+                const scans = /** @type {any} */ (crt)[STANDARD_SCAN];
+                const secure = (options & SECURE_SCANF) !== 0;
                 if ((count >>> 0) !== TRUNCATE)
                 {
-                    return crt._snscanf.handler([buffer, count, format, ...pointers]);
+                    return (secure ? scans._snscanf_s : scans._snscanf)
+                        .handler([buffer, count, format, ...pointers]);
                 }
-                return (options & SECURE_SCANF ? crt.sscanf_s : crt.sscanf)
+                return (secure ? scans.sscanf_s : scans.sscanf)
                     .handler([buffer, format, ...pointers]);
             },
         },
