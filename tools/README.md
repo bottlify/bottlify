@@ -240,7 +240,7 @@ instructions an iteration (100 warm, 20 counted), arms: <798a130a>, <798a130a>, 
   str-32                   2932339  2932339 (1.0000)  2928703 (0.9988)  2928703 (0.9988)
 ```
 
-From `run-count.mjs --bits 32 load str under qemu 8.2.2 with tools/lib/qemu-count.c, node 22.22.0, each of two trees twice (cork 798a130a, 2026-11-14, and ae2d03ab, 2026-11-15): a tree's two runs equal to the instruction, load included`. Each cell is the instructions an iteration of the counted ones took, the whole process but V8's optimising compiles; the bracket is the arm's against the first. A tree counts the same in every run, so any ratio off 1.0000 is the change's; the geomean is over the workloads shown.
+From `run-count.mjs --bits 32 load str under qemu 8.2.2 with tools/lib/qemu-count.c, node 22.22.0, each of two trees twice in one run (cork 798a130a, 2026-11-14, and ae2d03ab, 2026-11-15). Two runs started together agree to the instruction; separate runs of a tree agree on str and differ by a few per cent on load (V8's optimising compiles land when the machine has them done)`. Each cell is the instructions an iteration of the counted ones took, the whole process but V8's optimising compiles; the bracket is the arm's against the first. A tree counts the same in every run, so a ratio off 1.0000 is the change's - except on a workload that keeps translating (load), which varies by a few per cent between separate runs: read it over several. The geomean is over the workloads shown.
 
 ### How much resident memory does a translated module cost past its bytes, compiled lazily, by the baseline compiler or by the optimising one?
 

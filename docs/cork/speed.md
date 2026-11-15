@@ -55,7 +55,9 @@ a second pays for its translation many times over.
 What the translated code costs to run is counted the same way when a change must be judged
 finer than a timed run can: [`tools/translator/run-count.mjs`](../../tools/translator/run-count.mjs)
 runs a micro image's iterations under QEMU, on a clock of its own, and gives each workload's machine
-instructions an iteration, the same in every run of a tree.
+instructions an iteration, the same in every run of a tree; a workload that keeps translating
+(`load`) varies by a few per cent between runs, as V8's optimised code comes ready when the machine
+has it.
 
 What translating itself costs is counted, not timed:
 [`tools/translator/emit-count.mjs`](../../tools/translator/emit-count.mjs) forms and emits regions
