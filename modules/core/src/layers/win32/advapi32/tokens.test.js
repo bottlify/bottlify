@@ -235,9 +235,22 @@ test('the native token calls open and adjust the same tokens, with statuses', ()
     assert.deepEqual(errors, [], 'the last error is left alone');
     assert.deepEqual(Object.fromEntries(Object.entries(natives)
         .map(([name, entry])=>[name, entry.argBytes])),
-    { NtOpenProcessToken: 12, NtOpenProcessTokenEx: 16, NtAdjustPrivilegesToken: 24,
+    { RtlAreAllAccessesGranted: 8, RtlAreAnyAccessesGranted: 8, RtlMapGenericMask: 8,
+        NtOpenProcessToken: 12, NtOpenProcessTokenEx: 16, NtAdjustPrivilegesToken: 24,
         NtSetSecurityObject: 12, NtQuerySecurityObject: 20, NtAccessCheck: 32,
         NtDuplicateToken: 24 });
+});
+
+test('whether granted rights cover all the desired ones, or any', ()=>{
+    // advapi32's and ntdll's names for the one test (Wine's ntdll:rtl).
+    const { fns } = setup();
+    const natives = fns[TOKEN_NATIVES];
+    assert.equal(fns.AreAllAccessesGranted.handler([0x7, 0x3]), 1);
+    assert.equal(fns.AreAllAccessesGranted.handler([0x1, 0x3]), 0);
+    assert.equal(fns.AreAnyAccessesGranted.handler([0x1, 0x3]), 1);
+    assert.equal(fns.AreAnyAccessesGranted.handler([0x4, 0x3]), 0);
+    assert.equal(natives.RtlAreAllAccessesGranted.handler([0x7, 0]), 1, 'nothing asked, all given');
+    assert.equal(natives.RtlMapGenericMask, fns.MapGenericMask);
 });
 
 test('NtDuplicateToken clones a token, its level from the SecurityQualityOfService', ()=>{

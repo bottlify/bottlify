@@ -2015,6 +2015,32 @@ export function createTokenFunctions(host){
         return 1;
     };
 
+    /**
+     * void MapGenericMask(PDWORD AccessMask, PGENERIC_MAPPING GenericMapping),
+     * ntdll's RtlMapGenericMask: each generic right in the mask replaced by
+     * the specific rights the mapping gives it, as AccessCheck maps the
+     * access it is asked for.
+     */
+    const mapGenericMask = {
+        argBytes: 8,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [mask, mapping])=>{
+            const map = [0, 4, 8, 12].map(offset=>readDword((mapping >>> 0) + offset));
+            writeDword(mask >>> 0, mapGeneric(readDword(mask >>> 0), map));
+            return 0;
+        },
+    };
+
+    /** @param {boolean} all  every desired right, or any */
+    const accessesGranted = all=>({
+        argBytes: 8,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [granted, desired])=>{
+            const covered = (granted & desired) >>> 0;
+            return (all ? covered === (desired >>> 0) : covered !== 0) ? 1 : 0;
+        },
+    });
+
     return {
         /**
          * The native calls over the same tokens, for ntdll to publish: a
@@ -2051,6 +2077,9 @@ export function createTokenFunctions(host){
         },
 
         [TOKEN_NATIVES]: {
+            RtlAreAllAccessesGranted: accessesGranted(true),
+            RtlAreAnyAccessesGranted: accessesGranted(false),
+            RtlMapGenericMask: mapGenericMask,
             NtOpenProcessToken: {
                 argBytes: 12,
                 /** @param {number[]} args */
@@ -2691,15 +2720,15 @@ export function createTokenFunctions(host){
          * Each generic right in the mask replaced by the specific rights the
          * mapping gives it, as AccessCheck maps the access it is asked for.
          */
-        MapGenericMask: {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([mask, mapping])=>{
-                const map = [0, 4, 8, 12].map(offset=>readDword((mapping >>> 0) + offset));
-                writeDword(mask >>> 0, mapGeneric(readDword(mask >>> 0), map));
-                return 0;
-            },
-        },
+        MapGenericMask: mapGenericMask,
+
+        /**
+         * BOOL AreAllAccessesGranted(DWORD GrantedAccess, DWORD DesiredAccess)
+         * and AreAnyAccessesGranted: whether the granted rights cover every
+         * desired one, or any of them.
+         */
+        AreAllAccessesGranted: accessesGranted(true),
+        AreAnyAccessesGranted: accessesGranted(false),
 
         /**
          * BOOL AccessCheck(PSECURITY_DESCRIPTOR, HANDLE ClientToken, DWORD DesiredAccess,

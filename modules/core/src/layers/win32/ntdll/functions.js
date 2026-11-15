@@ -40,6 +40,7 @@ import { LOADER_ENTRIES, createLoaderFunctions } from './loader.js';
 import { POOL_ENTRIES, createPoolFunctions } from './pool.js';
 import { createStringOperations } from './string-ops.js';
 import { createNtdllCrt } from './crt.js';
+import { createRandomFunctions } from './random.js';
 import { MEMORY_ENTRIES, createMemoryFunctions } from './memory.js';
 import { createDebugFunctions } from './debug.js';
 import { createProcessFunctions } from './process.js';
@@ -486,6 +487,8 @@ export function createNtdllFunctions(host){
         }),
 
         ...createImageFunctions({ readMemory: host.readMemory, writeMemory: host.writeMemory }),
+
+        ...createRandomFunctions({ readMemory: host.readMemory, writeMemory: host.writeMemory }),
 
         ...createAtomTableFunctions({ readMemory: host.readMemory, writeMemory: host.writeMemory,
             readWideString: host.readWideString, allocate, free }),
