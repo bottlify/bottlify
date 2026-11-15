@@ -814,5 +814,7 @@ test('a client\'s process gone however it went takes every root made through it 
             'its root and its way in are closed here');
         scope.onmessage({ data: { type: 'forget', client: 0x2010 } });
         scope.onmessage({ data: { type: 'forget', client: 0x3000 } });
-        assert.ok(true, 'and a second word, or one for a client never seen, changes nothing');
+        await settle();
+        assert.deepEqual(gone.sort(), ['client', 'root'],
+            'and a second word, or one for a client never seen, closes nothing more');
     });
