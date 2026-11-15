@@ -254,6 +254,20 @@ const BITSPIXEL = 12;
 const PLANES = 14;
 const NUMCOLORS = 24;
 const RASTERCAPS = 38;
+/** TECHNOLOGY of a Windows metafile's DC. */
+const DT_METAFILE = 5;
+/** The shapes GDI draws on any device itself, whatever the driver does. */
+const CURVECAPS = 28;
+const LINECAPS = 30;
+const POLYGONALCAPS = 32;
+/**
+ * Every curve, line and polygon capability there is (CC_*, LC_* but
+ * LC_NONE's zero, PC_* but PC_NONE's): GDI draws them all, on the display and
+ * into a metafile alike, which is what Windows answers for both.
+ */
+const ALL_CURVE_CAPS = 0x1ff;
+const ALL_LINE_CAPS = 0xfe;
+const ALL_POLYGONAL_CAPS = 0xff;
 const LOGPIXELSX = 88;
 const LOGPIXELSY = 90;
 const SIZEPALETTE = 104;
@@ -2116,6 +2130,12 @@ export function createGdiFunctions(host){
      * @returns {number}
      */
     const deviceCaps = (dc, index)=>{
+        // A Windows metafile's DC (CreateMetaFile) has no device behind it:
+        // it is a metafile and nothing else (Wine's dc.c test_device_caps).
+        if (dc.metafile === 'metafile')
+        {
+            return (index | 0) === TECHNOLOGY ? DT_METAFILE : 0;
+        }
         // A memory context answers for the device it is compatible with, the
         // display, whatever bitmap is selected into it (Wine's dc.c
         // test_CreateCompatibleDC compares one over a 1-bit 10x10 bitmap with
@@ -2145,6 +2165,12 @@ export function createGdiFunctions(host){
                 return depth > PALETTE_DEPTH ? -1 : 1 << depth;
             case RASTERCAPS:
                 return DISPLAY_RASTER_CAPS;
+            case CURVECAPS:
+                return ALL_CURVE_CAPS;
+            case LINECAPS:
+                return ALL_LINE_CAPS;
+            case POLYGONALCAPS:
+                return ALL_POLYGONAL_CAPS;
             case LOGPIXELSX:
             case LOGPIXELSY:
                 return LOGICAL_DPI;

@@ -1334,6 +1334,19 @@ test('GetDeviceCaps answers for what is modelled and zero for what is not', ()=>
     assert.equal(fns.GetDeviceCaps.handler([memoryDC, RASTERCAPS]), raster,
         'a memory DC answers for the display it is compatible with');
 
+    // CURVECAPS, LINECAPS, POLYGONALCAPS: every shape, GDI's own to draw, on
+    // the display and into a metafile alike (Wine's metafile getwinmetafilebits).
+    const enhanced = fns.CreateEnhMetaFileA.handler([0, 0, 0, 0]);
+    for (const context of [hdc, enhanced])
+    {
+        assert.deepEqual([28, 30, 32].map(index=>fns.GetDeviceCaps.handler([context, index])),
+            [511, 254, 255]);
+    }
+    // A Windows metafile's DC has no device: a metafile, and every
+    // capability zero (Wine's dc.c test_device_caps).
+    const windowsMetafile = fns.CreateMetaFileA.handler([0]);
+    assert.deepEqual([TECHNOLOGY, HORZRES, RASTERCAPS, 28].map(index=>
+        fns.GetDeviceCaps.handler([windowsMetafile, index])), [5, 0, 0, 0]);
     assert.equal(fns.GetDeviceCaps.handler([hdc, 118]), 0,
         'an index with no answer here reads as absent, not as garbage');
     assert.equal(fns.GetDeviceCaps.handler([0x9999, HORZRES]), 0);
