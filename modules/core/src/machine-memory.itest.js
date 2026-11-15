@@ -189,3 +189,65 @@ for (const guestCharge of CHARGES)
         assert.ok(machine.peak <= machine.limit);
     });
 }
+
+/**
+ * A library of `megabytes` mapped: a small image whose last section is that
+ * large in memory, as a big DLL's data is, and nothing on disk; relocatable,
+ * so it is placed wherever the library space has room.
+ *
+ * @param {number} megabytes
+ */
+function bigLibrary(megabytes){
+    const bytes = buildExe({ dll: true, imageBase: 0x10000000, dynamicBase: true,
+        data: { self: u32(0x10000000) }, relocations: { self: [0] },
+        imports: { 'KERNEL32.dll': ['GetCurrentThreadId'] },
+        code: ()=>[0xb8, ...u32(1), 0xc2, 0x0c, 0x00] }).slice();
+    const view = new DataView(bytes.buffer);
+    const coff = view.getUint32(0x3c, true) + 4;
+    const sections = view.getUint16(coff + 2, true);
+    const optional = coff + 20;
+    const table = optional + view.getUint16(coff + 16, true);
+    const last = table + (sections - 1) * 40;
+    const alignment = view.getUint32(optional + 32, true);
+    const size = megabytes * MiB;
+    view.setUint32(last + 8, size, true);
+    const end = view.getUint32(last + 12, true) + size;
+    view.setUint32(optional + 56, Math.ceil(end / alignment) * alignment, true);
+    return bytes;
+}
+
+test('a library the machine\'s memory has no room for fails to load, and the program goes on',
+    { timeout: 120_000 }, async()=>{
+        // A setup's custom action loaded a temporary DLL with the machine full:
+        // the refusal was thrown, and the setup ended at -1 with its work half done.
+        const program = buildExe({
+            imports: { 'KERNEL32.dll': ['LoadLibraryA', 'GetLastError', 'ExitProcess'] },
+            data: { name: ascii('C:\\App\\big.dll') },
+            codeSize: 0x40,
+            code: ({ iat, at })=>[
+                0x68, ...u32(at('name')), 0xff, 0x15, ...u32(iat('LoadLibraryA')),
+                0x85, 0xc0, 0x74, 0x08, //            jz failed
+                0x6a, 0, 0xff, 0x15, ...u32(iat('ExitProcess')), //  loaded: exit 0
+                0xff, 0x15, ...u32(iat('GetLastError')), // failed:
+                0x50, 0xff, 0x15, ...u32(iat('ExitProcess')),
+            ],
+        });
+        const app = await createApp({ executable: program, imagePath: 'C:\\App\\program.exe',
+            memorySize: 1024 * MiB, machineMemory: 192 * MiB, machineWaitMs: 3000,
+            cpu: { cores: 1 },
+            storage: { load: async()=>({ files: [{ path: 'C:\\App\\big.dll',
+                bytes: bigLibrary(120) }] }) } });
+        try
+        {
+            /** @type {any[]} */
+            const missing = [];
+            app.on('library-missing', (/** @type {any} */ event)=>missing.push(event));
+            assert.equal(await app.run({ timeoutMs: 60_000 }) >>> 0, 8,
+                'LoadLibrary answered NULL with ERROR_NOT_ENOUGH_MEMORY');
+            assert.match(String(missing.at(-1)?.reason), /no room/, 'and said why');
+        }
+        finally
+        {
+            await app.dispose();
+        }
+    });
