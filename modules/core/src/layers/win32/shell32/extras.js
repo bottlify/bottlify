@@ -689,8 +689,8 @@ export function createShellExtras(host, parts){
          * HRESULT SetCurrentProcessExplicitAppUserModelID(PCWSTR AppID)
          *
          * The name the taskbar would group the process's windows under, kept
-         * for the getter; one longer than the 128 characters an ID may have
-         * is E_INVALIDARG.
+         * for the getter; one of 128 characters or more, which leaves no room
+         * for its terminator in the 128 an ID may take, is E_INVALIDARG.
          */
         SetCurrentProcessExplicitAppUserModelID: {
             argBytes: 4,
@@ -698,7 +698,7 @@ export function createShellExtras(host, parts){
             handler: ([id])=>{
                 const APP_USER_MODEL_ID_MAX = 128;
                 const text = wide(id);
-                if (text === null || text.length > APP_USER_MODEL_ID_MAX)
+                if (text === null || text.length >= APP_USER_MODEL_ID_MAX)
                 {
                     return E_INVALIDARG;
                 }
