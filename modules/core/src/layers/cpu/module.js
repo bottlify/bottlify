@@ -128,6 +128,17 @@ export const EXECUTORS_OPENED_KEY = 'cpu/executors-opened';
 const HOT_SAMPLE_INSTRUCTIONS = 2000;
 
 /**
+ * The guest instructions the process's executor may retire without its
+ * translator being fed (`feedTranslator`) before a slice's end feeds it: about
+ * what a frame retires. A frame feeds it otherwise, and a program that
+ * presents none - a console program, a setup, a compiler - was fed only while
+ * its interpreter still met new code: once all of it was translated, the
+ * translator's own steps (the calls sampled for their callees, the copies of
+ * blocks translated code keeps leaving for, the relinks) never ran again.
+ */
+const FEED_INSTRUCTIONS = 2 ** 24;
+
+/**
  * cpu — the guest CPU and the channel the guest calls us through.
  *
  * The only layer that knows which engine is underneath. Everything above it
@@ -303,6 +314,7 @@ export function createCpuModule(){
              *          guestClock: (() => number) | null,
              *          stacks: [number, number][],
              *          lent: import('./engine.js').TranslatorPort[], remotes: any[],
+             *          sinceFeed: number,
              *          openExecutor: ((index: number) => Promise<any>) | null,
              *          opening: Map<number, Promise<void>>, unopened: Set<number>,
              *          bell: ReturnType<typeof createBell> | null,
@@ -356,11 +368,15 @@ export function createCpuModule(){
                 stacks: [],
                 // Translators a pool lent before the translator was up, taken once it is.
                 lent: [],
+                // What the process's executor retired since its translator was last fed.
+                sinceFeed: 0,
             };
             /**
-             * Once a frame: every bucket the sampler has credited past the
-             * threshold becomes a candidate for the translator, and the pending
-             * batch is instantiated -- paced by frames, never inside a slice.
+             * Once a frame, or at the end of a slice once the guest has run a
+             * frame's worth with none presented (`FEED_INSTRUCTIONS`): every
+             * bucket the sampler has credited past the threshold becomes a
+             * candidate for the translator, and the pending batch is
+             * instantiated - never inside a slice.
              */
             const feedTranslator = ()=>{
                 const cork = state.cork;
@@ -368,6 +384,7 @@ export function createCpuModule(){
                 {
                     return;
                 }
+                state.sinceFeed = 0;
                 // A hot bucket is handed over at the address its last slice
                 // ended on, every time that address is a new one: a bucket
                 // ends its slices at more than one place (a loop's head, the
@@ -1430,7 +1447,9 @@ export function createCpuModule(){
                         creditSample(state.samples, machine.eip(), instructions,
                             HOT_SAMPLE_INSTRUCTIONS);
                     }
-                    if (instructions > 0 && settings.cork.feed === 'slice')
+                    state.sinceFeed += instructions;
+                    if (instructions > 0 && (settings.cork.feed === 'slice'
+                        || state.sinceFeed >= FEED_INSTRUCTIONS))
                     {
                         feedTranslator();
                     }

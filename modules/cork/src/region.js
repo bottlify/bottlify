@@ -118,8 +118,11 @@ export const LEAF_BYTES = 512;
 export const FORM_DEPTH = 1;
 /** How large a callee formed into its caller may be, unless forming says otherwise. */
 const LEAF_LIMITS = Object.freeze({ blocks: LEAF_BLOCKS, bytes: LEAF_BYTES });
-/** Past the caps, for the callees the runtime predicted: four of the largest leaves. */
-const PREDICTED_ROOM = Object.freeze({ blocks: 4 * LEAF_BLOCKS, bytes: 4 * LEAF_BYTES });
+/** Past the caps, for the callees the runtime predicted: thirty-two of the largest leaves,
+ * as many as a call may have formed in (`PREDICT_CALLEES` in runtime/relink.js). At four,
+ * a loop whose three virtual calls each went to two dozen small methods took a third of
+ * them and left for the rest. */
+const PREDICTED_ROOM = Object.freeze({ blocks: 32 * LEAF_BLOCKS, bytes: 32 * LEAF_BYTES });
 const NO_ROOM = Object.freeze({ blocks: 0, bytes: 0 });
 /** How far a callee's conditional branch may reach and still be followed (`coldBranch`;
  * the runtime's `coldReach`). */

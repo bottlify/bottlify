@@ -30,7 +30,7 @@ page or the core's `EngineConfig` parts from it.
 | `store` | none | Where translations are kept between runs (the core gives one per bundle in OPFS). |
 | `bundleId` | `'unknown'` | The namespace of the store's records. |
 | `cacheVersion` | the translator's | A version above the translator's own: every record of another version misses. |
-| `feed` | `'frame'` | When candidates are formed: once a frame, or after every slice (`'slice'`, a program that never presents; `createMachine`'s). |
+| `feed` | `'frame'` | When candidates are formed: once a frame, and at a slice's end once the program has run a frame's worth with none presented, or after every slice (`'slice'`; `createMachine`'s). |
 | `sharedMemory` | `true` where possible | Guest memory a `SharedArrayBuffer` where the page is cross-origin isolated; `false` keeps it private and the program on one executor. |
 | `cacheBytes` | 256 MiB | The wasm bytes of the modules running regions are in, past which those gone longest without running are let go (0: no ceiling); the core sets a ceiling only on the iOS path below. |
 | `charge` | none | Where a host bounds what its runtimes hold together: `{ take(bytes), give(bytes) }`. Each module held is taken by its wasm bytes and given back as it is let go; one it has no room for lets those gone longest without running go until there is, and where none is left one module is held past it (`unchargedBytes` in the diagnostics). |

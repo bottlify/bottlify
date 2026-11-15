@@ -86,8 +86,9 @@ export const SETTINGS = {
         doc: 'A version above the translator\'s own: every record of another version'
             + ' misses.' },
     feed: { kind: 'host', value: undefined, shown: '`\'frame\'`',
-        doc: 'When candidates are formed: once a frame, or after every slice (`\'slice\'`, a'
-            + ' program that never presents; `createMachine`\'s).' },
+        doc: 'When candidates are formed: once a frame, and at a slice\'s end once the program'
+            + ' has run a frame\'s worth with none presented, or after every slice (`\'slice\'`;'
+            + ' `createMachine`\'s).' },
     sharedMemory: { kind: 'host', value: undefined, shown: '`true` where possible',
         doc: 'Guest memory a `SharedArrayBuffer` where the page is cross-origin isolated;'
             + ' `false` keeps it private and the program on one executor.' },

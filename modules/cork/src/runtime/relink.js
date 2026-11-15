@@ -24,6 +24,67 @@ import { relinkBatch } from './emit-built.js';
 /** @typedef {import('./state.js').Held} Held */
 
 /**
+ * What a call formed into its region is taken to save, counted in the compares
+ * a call makes to find its callee among those formed in. A wasm call between
+ * regions and its return are about a hundred and forty machine instructions
+ * (the state written and read back on both sides, the entry hash, the call
+ * itself) and a compare with its branch two, which would say seventy; half of
+ * that leaves room for what a larger region costs besides - its compile, the
+ * registers V8 spills in a longer function.
+ */
+const CALL_IN_COMPARES = 32;
+/** The least share of a call's samples its callees formed in take together:
+ * below it the region is not worth forming again. */
+const WORTH_SHARE = 8;
+
+/**
+ * The callees of an indirect call worth forming into its region, by the
+ * samples of where it went (`targets`: a callee and how many of the `total`
+ * went to it): the most sampled first, as many of them as leave the call
+ * cheapest. A callee formed in saves its own calls the wasm call
+ * (`CALL_IN_COMPARES`) and costs every call that goes past it a compare, so
+ * the two dozen methods a virtual call is spread evenly over all pay, and of a
+ * call spread over hundreds none does: no share of it pays for the compares
+ * the rest would make. A callee's count is taken down by `doubt` first - of a
+ * call spread evenly over five hundred, a hundred samples show a few callees
+ * three times, which says nothing of them - and callees that together take
+ * under an eighth of the samples (`WORTH_SHARE`) are left: a few such, a little
+ * above the rest by chance, would have the region formed again for nothing.
+ *
+ * @param {Map<number, number>} targets @param {number} total
+ * @param {number} most  how many a call may have formed in
+ * @param {number} [doubt]
+ * @returns {number[]}  the callees, the most sampled first
+ */
+export function calleesWorth(targets, total, most, doubt = 1){
+    const ranked = [...targets].sort((a, b)=>b[1] - a[1]);
+    let best = 0;
+    let saved = 0;
+    let taken = 0;
+    let covered = 0;
+    let walked = 0;
+    for (let k = 1; k <= Math.min(most, ranked.length); k++)
+    {
+        const share = Math.max(0, ranked[k - 1][1] - doubt) / total;
+        if (share === 0)
+        {
+            break;
+        }
+        covered += share;
+        // A call to the k-th makes k compares, one that goes past them all k too.
+        walked += share * k;
+        const net = CALL_IN_COMPARES * covered - walked - (1 - covered) * k;
+        if (net > saved)
+        {
+            saved = net;
+            best = k;
+            taken = covered;
+        }
+    }
+    return taken * WORTH_SHARE >= 1 ? ranked.slice(0, best).map(([target])=>target) : [];
+}
+
+/**
  * @param {object} state  the runtime's state (`state.js`), typed inside: its type is
  *     made of what this returns
  */
@@ -326,12 +387,19 @@ export function createRelink(state){
     // Samples of one call before its callees are looked at: sixteen come in
     // a reading at most, the last calls of a slice.
     const PREDICT_AFTER = settings.predictAfter;
-    // A callee formed in takes an eighth of the call's samples, so as many as
-    // eight can: a call compares its target with all of them. At four, a call
-    // spread evenly over eight callees left the region for half of them, a
-    // way out and a way back each time (calls8: 593 k transfers, 25 k at eight).
-    const PREDICT_SHARE = 8;
-    const PREDICT_CALLEES = 8;
+    // The callees a call may have formed in, at most (`calleesWorth` says which):
+    // a call compares its target with each in turn. At eight, each an eighth of
+    // the samples or more, a virtual call over two dozen classes had none formed
+    // in and every call of it was a wasm call (the PE bench's entities: 7.39
+    // machine instructions a guest one, 3.82 with them).
+    const PREDICT_CALLEES = 32;
+    // Samples for each callee seen before a call's callees are looked at -
+    // at four, one callee in eleven had a sample or none and was left for a
+    // second forming of the region; at eight, one in three hundred - and
+    // what a callee's count is doubted by (`calleesWorth`): none of either
+    // where a test looks after a sample or two.
+    const SAMPLES_A_CALLEE = Math.min(8, PREDICT_AFTER);
+    const PREDICT_DOUBT = Math.min(1, PREDICT_AFTER - 1);
     // Times a region is formed again for one of its indirect calls. Counted by call, not by
     // region: three other sites of a region coming due first had spent a region's whole
     // budget, and a callee a site's first samples missed (a phase of the program) was never
@@ -406,7 +474,13 @@ export function createRelink(state){
                     one.samples++;
                 }
             }
-            if (++seen.total === PREDICT_AFTER)
+            // Due once the samples say where it goes: enough of them, and several
+            // for each callee seen - one spread over two dozen callees looked at
+            // after its first forty-eight had half of them formed in, and the
+            // region formed again for the rest. A call with more callees than
+            // may be formed in is due as it was.
+            if (++seen.total >= PREDICT_AFTER
+                && seen.total >= SAMPLES_A_CALLEE * Math.min(seen.targets.size, PREDICT_CALLEES))
             {
                 callsDue.add(site);
             }
@@ -460,9 +534,8 @@ export function createRelink(state){
                 continue;
             }
             counts.predictDue++;
-            const shared = [...seen.targets].filter(([, times])=>
-                times * PREDICT_SHARE >= seen.total)
-                .sort((a, b)=>b[1] - a[1]).map(([target])=>target);
+            const shared = calleesWorth(seen.targets, seen.total, PREDICT_CALLEES,
+                PREDICT_DOUBT);
             // Asked of each region holding the call, by what that region has: one
             // formed after the call's first due, or formed again without it, takes
             // its callees as the first did.
