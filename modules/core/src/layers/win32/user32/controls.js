@@ -348,6 +348,7 @@ const LB_GETITEMDATA = 0x0199;
 const LB_SETITEMDATA = 0x019a;
 const LB_SETITEMHEIGHT = 0x01a0;
 const LB_GETITEMHEIGHT = 0x01a1;
+const LB_GETLISTBOXINFO = 0x01b2;
 const LB_FINDSTRINGEXACT = 0x01a2;
 const LB_ERR = -1;
 const LBN_SELCHANGE = 1;
@@ -3045,6 +3046,12 @@ export function createControlProcedures(host){
             }
             case LB_GETITEMHEIGHT:
                 return state.itemHeight ?? editCell(record).height;
+            case LB_GETLISTBOXINFO: {
+                // How many items a column holds: the rows of the client area,
+                // at least one.
+                const row = Math.max(1, state.itemHeight ?? editCell(record).height);
+                return Math.max(1, Math.floor(host.clientSize(record).height / row));
+            }
             case LB_SETITEMHEIGHT:
                 state.itemHeight = message.lParam & 0xffff;
                 host.invalidate(record);
