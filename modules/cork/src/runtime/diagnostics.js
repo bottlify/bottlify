@@ -8,7 +8,7 @@
  * The runtime's diagnostics: the counters every part adds to (`counts`, the
  * exits by kind, what was refused), the journals kept for a hunt (stalls of
  * the engine thread, forced steps, interpreted starts, call sites, the store's
- * keys), and the two reports made of them -- `counters`, cheap enough for a
+ * keys), and the two reports made of them - `counters`, cheap enough for a
  * slice, and `diagnostics`, the whole snapshot. Apart so the parts that
  * translate hold only the counting, not the reporting; a shipped build reads
  * none of the journals.

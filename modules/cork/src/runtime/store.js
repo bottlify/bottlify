@@ -7,8 +7,8 @@
 /**
  * The store: where formed regions and their batches' modules are kept across
  * runs and between the runtimes sharing it. A region's key (`regionKey`) holds
- * everything its code depends on -- the translator's version, the features,
- * the layout, the variant and the modes it was formed in -- and a record names
+ * everything its code depends on - the translator's version, the features,
+ * the layout, the variant and the modes it was formed in - and a record names
  * its batch's module; `accepted` takes a record only where the bytes it was
  * formed from are the bytes now. Lookups happen before forming where the store
  * answers at once (`recordBefore`, `prefetch`), a credit's worth a call after
@@ -776,7 +776,7 @@ export function createStore(state){
      * A batch's lookups where the store cannot answer at once (`lookUpOn` said
      * 'later'): every region's record, the record beside it and its batch's
      * module are asked, the slice goes on, and `answered` is called once every
-     * region is settled -- between frames, as instantiation already is.
+     * region is settled - between frames, as instantiation already is.
      *
      * @param {any[]} formed @param {any} store @param {() => void} answered
      */

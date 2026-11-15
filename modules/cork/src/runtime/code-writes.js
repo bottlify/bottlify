@@ -11,9 +11,9 @@
  * written over too often is left to the other executor for a while
  * (`volatileUntil`) or taken for stubs (`STUB_WRITES`), and the pages'
  * generations tell a region formed before a write from one formed after. The
- * host's ways in -- its own writes (`stored`), the stores an executor met
+ * host's ways in - its own writes (`stored`), the stores an executor met
  * (`codeWritten`, `takeCodeWrites`), the write watch (`takeWrites`,
- * `markWritten`) and the threads' stacks (`noteStack`) -- all end here.
+ * `markWritten`) and the threads' stacks (`noteStack`) - all end here.
  */
 
 import { PageFlag } from './pages.js';

@@ -9,7 +9,7 @@
  * (`createCorkRuntime` builds it part by part, each part's factory taking it
  * and adding what it returns), in place of the closure the parts once shared.
  * This file holds its base: what the host hands the runtime and what follows
- * from it alone -- the settings, the features translated code is made for,
+ * from it alone - the settings, the features translated code is made for,
  * the page table, the function table, the entries and the views of guest
  * memory. Nothing here changes after the start.
  */

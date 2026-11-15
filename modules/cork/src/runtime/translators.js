@@ -8,7 +8,7 @@
  * The translation workers: which one takes a batch (`freeTranslator`), what
  * a batch out covers until it is published (`coveredOut`), the options the
  * emitter is given here and on a worker (`emitOptions`), the arena their
- * emit cache shares, and a worker's whole life -- attached when it loads or a
+ * emit cache shares, and a worker's whole life - attached when it loads or a
  * host's pool lends it, its answers taken (`onWorkerResults`), given up on
  * when overdue, detached when the pool takes it back. Forming and the store's
  * lookups stay on the engine thread, where the memory and the store are; the

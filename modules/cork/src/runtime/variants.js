@@ -10,9 +10,9 @@
  * f32 or rounded from doubles, a test of the x87 stack's shape at its entries,
  * reads tested against their pages (`checkReads`) and stores through esp
  * untested (`looseStacks`). Each starts at its fast end; a region that leaves
- * because the guest ran under another variant -- an exit the run loop names
+ * because the guest ran under another variant - an exit the run loop names
  * (`precisionMissed`, `floatMissed`, `shapeMissed`), a fault on a closed page,
- * code met on a stack -- moves its code, or the whole program, to the variant
+ * code met on a stack - moves its code, or the whole program, to the variant
  * that holds, and the code formed for the old one goes.
  */
 

@@ -8,7 +8,7 @@
  * The region table: every published region's record (`RegionRecord`), by its
  * entry and top and by each page it spans, the blocks closed in its loops,
  * the code granules it covers on each page, and `unpublish`, which takes
- * regions out -- their entries, their function-table slots and their pages'
+ * regions out - their entries, their function-table slots and their pages'
  * code marks. What publishes a region fills it; a store into code, an
  * eviction or a variant's switch empties it.
  */
