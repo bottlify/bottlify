@@ -113,6 +113,8 @@ const KERNEL_FEATURES = [
     [12, 0x20000000],   // PF_NX_ENABLED -> KF_NOEXECUTE
 ];
 const IMAGE_NT_SIGNATURE = 0x00004550;
+/** GetFinalPathNameByHandle's flag for a name under the volume's device. */
+const VOLUME_NAME_NT = 0x2;
 /** The HEAP_* flags RtlCreateHeap hands on to HeapCreate: no serialize, generate exceptions, executable. */
 const HEAP_CREATE_FLAGS = 0x00000001 | 0x00000004 | 0x00040000;
 
@@ -572,6 +574,33 @@ export function createNtdllFunctions(host){
             arena: host.arena,
             version: host.windows,
             handleType: host.handleType,
+            // A file's or folder's name is its path under the volume's device,
+            // as GetFinalPathNameByHandle's VOLUME_NAME_NT spells it.
+            objectName: handle=>{
+                const type = host.handleType?.(handle);
+                if ((type !== 'file' && type !== 'directory')
+                    || !kernel32.GetFinalPathNameByHandleW)
+                {
+                    return null;
+                }
+                const room = 32768;
+                const buffer = allocate(room * 2);
+                if (buffer === 0)
+                {
+                    return null;
+                }
+                try
+                {
+                    const length = kernel32.GetFinalPathNameByHandleW.handler([handle, buffer, room,
+                        VOLUME_NAME_NT]) >>> 0;
+                    return length === 0 || length >= room ? null
+                        : host.readWideString(buffer, length * 2);
+                }
+                finally
+                {
+                    free(buffer);
+                }
+            },
             processOf: host.processOf,
             askChild: host.askChild,
             divergence: host.divergence,
