@@ -326,10 +326,12 @@ export function createRelink(state){
     // Samples of one call before its callees are looked at: sixteen come in
     // a reading at most, the last calls of a slice.
     const PREDICT_AFTER = settings.predictAfter;
-    // A callee formed in takes an eighth of the call's samples, and a call
-    // compares its target with four at most.
+    // A callee formed in takes an eighth of the call's samples, so as many as
+    // eight can: a call compares its target with all of them. At four, a call
+    // spread evenly over eight callees left the region for half of them, a
+    // way out and a way back each time (calls8: 593 k transfers, 25 k at eight).
     const PREDICT_SHARE = 8;
-    const PREDICT_CALLEES = 4;
+    const PREDICT_CALLEES = 8;
     // Times a region is formed again for one of its indirect calls. Counted by call, not by
     // region: three other sites of a region coming due first had spent a region's whole
     // budget, and a callee a site's first samples missed (a phase of the program) was never

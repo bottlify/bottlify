@@ -66,7 +66,7 @@ a browser (numbers below). This is where the speed comes from:
 - **Translated code stays in WebAssembly.** Regions go from one to another with plain calls between
   WebAssembly functions, never through JavaScript.
 - **It guesses where virtual calls go.** cork watches where calls through a pointer actually land.
-  When a call goes mostly to a few small functions (up to four, each taking at least an eighth of
+  When a call goes mostly to a few small functions (up to eight, each taking at least an eighth of
   its calls), they are built right into the region and the call becomes a comparison.
 - **The program never waits for the translator.** Translation runs in worker threads while the
   program keeps going in the interpreter. The main thread gives the translator a few milliseconds
