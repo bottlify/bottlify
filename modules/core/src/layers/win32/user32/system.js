@@ -2159,7 +2159,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
      * each, the pair counting two of nIcons. Without an array it is how
      * many icons the file holds. piconid, when given, gets each icon's
      * resource id, zero for an icon file's. The answer is how many icons
-     * were made; a file that is none, or has none, makes none.
+     * were made; a file that is none, or has none, makes none; an empty
+     * name answers ~0.
      *
      * @param {number[]} args @param {boolean} wide
      * @returns {number | Promise<number>}
@@ -2167,7 +2168,12 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
     const extractIcons = ([file, index, cx, cy, icons, ids, count], wide)=>{
         const volume = host.files;
         const path = (readText(host, file >>> 0, wide, MAX_PATH) ?? '').trim();
-        if (!volume || path === '')
+        // An empty name is ~0, not a count (Wine's resource test_PrivateExtractIcons).
+        if (path === '')
+        {
+            return 0xffffffff;
+        }
+        if (!volume)
         {
             return 0;
         }
