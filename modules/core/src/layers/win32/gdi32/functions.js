@@ -24,9 +24,10 @@ import { createGdiObjects } from './objects.js';
 import { DEFAULT_PALETTE_COLORS, createDrawingFunctions } from './drawing.js';
 import { copyPath, pathMoved } from './paths.js';
 import { createMetafileFunctions } from './metafiles.js';
+import { createFontResources } from './font-resources.js';
 import {
-    FACES, FF_MODERN, FF_ROMAN, FIXED_PITCH, faceNamed, fontFamilies, outlineCell, rasterFace,
-    rasterRealization, windowsMetrics,
+    FACES, FF_MODERN, FF_ROMAN, FF_SWISS, FIXED_PITCH, VARIABLE_PITCH, faceNamed, fontFamilies,
+    outlineCell, rasterFace, rasterRealization, windowsMetrics,
 } from './faces.js';
 import { ANSI_PAGE, OEM_PAGE, decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { DISPLAY_DEVICE_NAME } from '../devices.js';
@@ -72,6 +73,11 @@ const HS_API_MAX = 12;
 const WHITE_PEN = 6;
 const BLACK_PEN = 7;
 const NULL_PEN = 8;
+const OEM_FIXED_FONT = 10;
+const ANSI_FIXED_FONT = 11;
+const ANSI_VAR_FONT = 12;
+/** The OEM code page's character set, the one a console's font is in. */
+const OEM_CHARSET = 255;
 const SYSTEM_FONT = 13;
 const DEVICE_DEFAULT_FONT = 14;
 const DEFAULT_PALETTE = 15;
@@ -505,6 +511,9 @@ const LAST_CHAR = 0xff;
 const DEFAULT_CHAR = 0x1f;
 const BREAK_CHAR = 0x20;
 
+/** How far a file name is read: Windows' MAX_PATH, in characters. */
+const MAX_PATH_CHARS = 260;
+
 /** Nothing bounds a face name but the field it came out of. */
 const MAX_FACE_NAME = 64;
 
@@ -563,6 +572,10 @@ const RASTER_FONTTYPE = 0x0001;
  * @property {(hdc: number) => void} [windowContextCurrent]
  *           Brings a window's context up to where its window now is and what
  *           of it shows, before it draws: the window manager's to say.
+ * @property {(path: string) => Promise<Uint8Array | null>} [readFile]
+ *           A file's bytes from the volume, for a font file a program adds.
+ * @property {(path: string) => string} [fullPath]
+ *           A path as the program's current directory makes it absolute.
  * @property {(address: number, length: number) => boolean} [canWrite]
  *           Whether the program's buffer can take that many bytes. A gdi32
  *           call probes its out buffer and fails with ERROR_NOACCESS; writing
@@ -702,9 +715,24 @@ export function createGdiFunctions(host){
             case SYSTEM_FIXED_FONT:
                 return { type: 'font',
                     attributes: logFont({ height: 16, pitchAndFamily: 1, faceName: 'Fixedsys' }) };
+            // The ANSI code page's bitmap faces at 12, which realise at their
+            // 13-pixel sizes, and the OEM one a console draws in.
+            case ANSI_FIXED_FONT:
+                return { type: 'font', attributes: logFont({ height: 12, width: 9,
+                    weight: FW_NORMAL, pitchAndFamily: FF_MODERN | FIXED_PITCH,
+                    faceName: 'Courier' }) };
+            case ANSI_VAR_FONT:
+                return { type: 'font', attributes: logFont({ height: 12, width: 9,
+                    weight: FW_NORMAL, pitchAndFamily: FF_SWISS | VARIABLE_PITCH,
+                    faceName: 'MS Sans Serif' }) };
+            case OEM_FIXED_FONT:
+                return { type: 'font', attributes: logFont({ height: 12, width: 8,
+                    weight: FW_NORMAL, charSet: OEM_CHARSET,
+                    pitchAndFamily: FF_MODERN | FIXED_PITCH, faceName: 'Terminal' }) };
             case DEFAULT_GUI_FONT:
                 return { type: 'font',
-                    attributes: logFont({ height: -11, faceName: 'MS Shell Dlg' }) };
+                    attributes: logFont({ height: -11, weight: FW_NORMAL,
+                        faceName: 'MS Shell Dlg' }) };
             case DEFAULT_PALETTE:
                 // PALETTEENTRYs, red in the low byte.
                 return { type: 'palette', attributes: { version: 0x300,
@@ -1792,6 +1820,59 @@ export function createGdiFunctions(host){
     /** @param {any} dc @returns {import('./structs.js').TextMetricFields} */
     const currentMetrics = dc=>metricsOf(currentFont(dc));
 
+    /** The font files the program added, drawn and enumerated with the system's faces. */
+    const fontResources = createFontResources({
+        readFile: host.readFile, fullPath: host.fullPath,
+        addFont: host.graphics?.addFont
+            && ((family, bytes)=>host.graphics?.addFont?.(family, bytes) ?? false),
+    });
+    /**
+     * A face by name: the system's, or a family a font file added.
+     *
+     * @param {string} name
+     * @returns {import('./faces.js').Face | null}
+     */
+    const knownFace = name=>{
+        const system = faceNamed(name);
+        if (system || name === '')
+        {
+            return system;
+        }
+        const wanted = name.toLowerCase();
+        const family = fontResources.enumerable().find(added=>added.toLowerCase() === wanted);
+        return family ? { name: family, family: 0, pitch: VARIABLE_PITCH } : null;
+    };
+    /**
+     * A file name a font resource call is given, in its own width.
+     *
+     * @param {number} address @param {boolean} wide
+     */
+    const nameAt = (address, wide)=>{
+        if ((address >>> 0) === 0)
+        {
+            return '';
+        }
+        if (!wide)
+        {
+            const text = host.readCString(address >>> 0, MAX_PATH_CHARS);
+            return decodeAnsi(Uint8Array.from(text, character=>character.charCodeAt(0)));
+        }
+        // A unit at a time: a name ends wherever its NUL is, maybe at the
+        // end of its page.
+        let text = '';
+        for (let at = 0; at < MAX_PATH_CHARS; at++)
+        {
+            const bytes = host.readMemory((address >>> 0) + at * 2, 2);
+            const unit = bytes[0] | bytes[1] << 8;
+            if (unit === 0)
+            {
+                break;
+            }
+            text += String.fromCharCode(unit);
+        }
+        return text;
+    };
+
     /** The handles AddFontMemResourceEx gave out and RemoveFontMemResourceEx has not taken back. */
     const memoryFonts = new Set();
     let lastMemoryFont = 0;
@@ -1928,7 +2009,7 @@ export function createGdiFunctions(host){
      */
     const currentFace = dc=>{
         const font = currentFont(dc);
-        const named = font.faceName === '' ? null : faceNamed(font.faceName);
+        const named = font.faceName === '' ? null : knownFace(font.faceName);
         if (named)
         {
             return named.name;
@@ -2401,10 +2482,13 @@ export function createGdiFunctions(host){
         const request = asked !== undefined ? asked : (logfont >>> 0) === 0 ? null
             : (wide ? readLogFontW : readLogFont)(host, logfont >>> 0);
         const charSet = request ? request.charSet : DEFAULT_CHARSET;
-        const named = request && request.faceName !== '' ? faceNamed(request.faceName) : null;
+        const named = request && request.faceName !== '' ? knownFace(request.faceName) : null;
         const faces = charSet !== DEFAULT_CHARSET && charSet !== ANSI_CHARSET ? []
             : request && request.faceName !== '' ? (named ? [named] : [])
-                : FACES.filter(face=>!face.substitute);
+                : [...FACES.filter(face=>!face.substitute), ...fontResources.enumerable()
+                    .filter(family=>!faceNamed(family))
+                    .map(family=>/** @type {import('./faces.js').Face} */ (
+                        { name: family, family: 0, pitch: VARIABLE_PITCH }))];
         const call = host.call;
         if (!call || (proc >>> 0) === 0 || faces.length === 0)
         {
@@ -4372,12 +4456,11 @@ export function createGdiFunctions(host){
         },
 
         /**
-         * The font table here is fixed: a font file cannot be added to it,
-         * and a scalable font resource cannot be written for one. Zero is the
-         * documented failure of each, which an installer notes and moves on
-         * from -- the file itself was already copied. Every spelling answers
-         * the same way, the private ones included, and nothing can be removed
-         * that was never added. A font in memory is the exception, below.
+         * A font file the program adds is read and drawn, counted, and
+         * enumerated unless it says FR_NOT_ENUM (`font-resources.js`); the
+         * spellings without Ex add and remove with no flags. A scalable font
+         * resource cannot be written: zero, the documented failure, which an
+         * installer notes and moves on from.
          *
          * int AddFontResourceA(LPCSTR lpszFilename)
          * int AddFontResourceW(LPCWSTR lpszFilename)
@@ -4390,10 +4473,16 @@ export function createGdiFunctions(host){
          * BOOL CreateScalableFontResourceA(DWORD fdwHidden, LPCSTR lpszFontRes,
          *                                  LPCSTR lpszFontFile, LPCSTR lpszCurrentPath)
          */
-        AddFontResourceA: { argBytes: 4, handler: ()=>0 },
-        AddFontResourceW: { argBytes: 4, handler: ()=>0 },
-        AddFontResourceExA: { argBytes: 12, handler: ()=>0 },
-        AddFontResourceExW: { argBytes: 12, handler: ()=>0 },
+        AddFontResourceA: { argBytes: 4,
+            handler: (/** @type {number[]} */ [name])=>fontResources.add(nameAt(name, false), 0) },
+        AddFontResourceW: { argBytes: 4,
+            handler: (/** @type {number[]} */ [name])=>fontResources.add(nameAt(name, true), 0) },
+        AddFontResourceExA: { argBytes: 12,
+            handler: (/** @type {number[]} */ [name, flags])=>
+                fontResources.add(nameAt(name, false), flags) },
+        AddFontResourceExW: { argBytes: 12,
+            handler: (/** @type {number[]} */ [name, flags])=>
+                fontResources.add(nameAt(name, true), flags) },
         /**
          * HANDLE AddFontMemResourceEx(PVOID pFileView, DWORD cjSize, PVOID pvResrved,
          *                             DWORD *pNumFonts)
@@ -4434,10 +4523,16 @@ export function createGdiFunctions(host){
                     });
             },
         },
-        RemoveFontResourceA: { argBytes: 4, handler: ()=>0 },
-        RemoveFontResourceW: { argBytes: 4, handler: ()=>0 },
-        RemoveFontResourceExA: { argBytes: 12, handler: ()=>0 },
-        RemoveFontResourceExW: { argBytes: 12, handler: ()=>0 },
+        RemoveFontResourceA: { argBytes: 4,
+            handler: (/** @type {number[]} */ [name])=>fontResources.remove(nameAt(name, false), 0) },
+        RemoveFontResourceW: { argBytes: 4,
+            handler: (/** @type {number[]} */ [name])=>fontResources.remove(nameAt(name, true), 0) },
+        RemoveFontResourceExA: { argBytes: 12,
+            handler: (/** @type {number[]} */ [name, flags])=>
+                fontResources.remove(nameAt(name, false), flags) },
+        RemoveFontResourceExW: { argBytes: 12,
+            handler: (/** @type {number[]} */ [name, flags])=>
+                fontResources.remove(nameAt(name, true), flags) },
         // The face stays drawable: a run keeps the fonts it was given.
         RemoveFontMemResourceEx: {
             argBytes: 4,
@@ -4878,7 +4973,6 @@ export function createGdiFunctions(host){
             handler: ([handle])=>{
                 const dc = dcOf(handle);
                 const charSet = dc ? currentMetrics(dc).charSet : DEFAULT_CHARSET;
-                const OEM_CHARSET = 255;
                 const MAC_CHARSET = 77;
                 if (charSet === OEM_CHARSET)
                 {

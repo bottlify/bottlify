@@ -1861,37 +1861,89 @@ test('EnumFontFamiliesEx calls nothing when it cannot, and refuses what is not a
     assert.equal(enumeration.seen.length, 0);
 });
 
-test('a font file cannot be added to the fixed font table, with the stack intact', ()=>{
-    const { fns } = setup();
-    assert.equal(fns.AddFontResourceA.handler(), 0);
-    assert.equal(fns.CreateScalableFontResourceA.handler(), 0);
-    assert.deepEqual([fns.AddFontResourceA.argBytes, fns.CreateScalableFontResourceA.argBytes],
-        [4, 16]);
+test('a font file a program adds is read, drawn, counted and named', async()=>{
+    // A game ships its title face as a .ttf, adds it, and creates its font by
+    // family; refused, its text fell back to another face.
+    const context = setup();
+    /** @type {string[]} */
+    const drawn = [];
+    const files = new Map([
+        ['C:\\GAME\\TITLE.TTF', fontWithNames([[3, 0x409, 'Trajan Pro']])],
+        ['C:\\WINDOWS\\FONTS\\SHARED.TTF', fontWithNames([[3, 0x409, 'Shared Sans']])],
+        ['C:\\GAME\\README.TXT', new TextEncoder().encode('not a font')],
+    ]);
+    const fns = createGdiFunctions({
+        readMemory: (address, length)=>context.memory.readMemory(address, length),
+        writeMemory: (address, data)=>context.memory.writeMemory(address, data),
+        readCString: (address, maxLength)=>context.memory.readCString(address, maxLength),
+        handles: context.handles,
+        surfaces: context.surfaces,
+        readFile: async path=>files.get(path.toUpperCase()) ?? null,
+        fullPath: path=>(/[\\:]/.test(path) ? path : `C:\\GAME\\${path}`),
+        graphics: { addFont: async family=>{
+            drawn.push(family);
+            return true;
+        } },
+    }).table;
+    const FR_PRIVATE = 0x10;
+    /** @param {string} name */
+    const named = name=>{
+        context.memory.putString(FACE_NAME, name);
+        return FACE_NAME;
+    };
+    assert.equal(await fns.AddFontResourceExA.handler([named('C:\\game\\title.ttf'),
+        FR_PRIVATE, 0]), 1, 'one face in it');
+    assert.deepEqual(drawn, ['Trajan Pro'], 'handed to the engine to draw with');
+    assert.equal(await fns.AddFontResourceExA.handler([named('title.ttf'), FR_PRIVATE, 0]), 1,
+        'the same file again, by a path the current directory completes');
+    assert.deepEqual(drawn, ['Trajan Pro'], 'and not loaded twice');
+
+    const hdc = fns.GetDC.handler([HWND]);
+    putLogFont(context.memory, { height: -20, faceName: 'Trajan Pro' });
+    fns.SelectObject.handler([hdc, fns.CreateFontIndirectA.handler([STRUCT])]);
+    assert.ok(fns.GetTextFaceA.handler([hdc, 32, OUT]) > 0);
+    assert.equal(context.memory.readCString(OUT, 32), 'Trajan Pro', 'the family is a face now');
+
+    assert.equal(fns.RemoveFontResourceExA.handler([named('title.ttf'), 0, 0]), 0,
+        'a remove whose flags are not the add\'s fails');
+    assert.equal(fns.RemoveFontResourceExA.handler([named('title.ttf'), FR_PRIVATE, 0]), 1);
+    assert.equal(fns.RemoveFontResourceExA.handler([named('title.ttf'), FR_PRIVATE, 0]), 1,
+        'as many removes as adds');
+    assert.equal(fns.RemoveFontResourceExA.handler([named('title.ttf'), FR_PRIVATE, 0]), 0);
+
+    assert.equal(await fns.AddFontResourceA.handler([named('shared.ttf')]), 1,
+        'a bare name not beside the program is looked for in the Fonts folder');
+    assert.equal(await fns.AddFontResourceA.handler([named('readme.txt')]), 0, 'no font');
+    assert.equal(await fns.AddFontResourceA.handler([named('missing.ttf')]), 0, 'no file');
+    assert.equal(fns.RemoveFontResourceA.handler([named('missing.ttf')]), 0, 'never added');
 });
 
-test('every spelling of adding and removing a font fails the same way, popping its arguments',
-    ()=>{
-        // gdi32.spec: each is stdcall with these arities. Without a font
-        // engine nothing can be added, so every add answers zero fonts and
-        // every remove FALSE -- the in-memory pair too, whose handle is NULL.
-        const { fns, memory } = setup();
-        const table = /** @type {Record<string, { argBytes: number,
-            handler: (args: number[]) => number }>} */ (/** @type {unknown} */ (fns));
-        memory.putU32s(OUT, [UNTOUCHED]);
-        /** @type {[string, number][]} */
-        const spellings = [
-            ['AddFontResourceW', 4], ['AddFontResourceExA', 12], ['AddFontResourceExW', 12],
-            ['AddFontMemResourceEx', 16], ['RemoveFontResourceA', 4],
-            ['RemoveFontResourceW', 4], ['RemoveFontResourceExA', 12],
-            ['RemoveFontResourceExW', 12], ['RemoveFontMemResourceEx', 4],
-        ];
-        for (const [name, argBytes] of spellings)
-        {
-            assert.equal(table[name]?.argBytes, argBytes, `${name} is exported`);
-            assert.equal(table[name].handler([FACE_NAME, 0x10, 0, OUT]), 0, name);
-        }
-        assert.equal(memory.u32(OUT), UNTOUCHED, 'no font count is claimed');
-    });
+test('every spelling of adding and removing a font is exported, popping its arguments', async()=>{
+    // gdi32.spec: each is stdcall with these arities. With no volume to
+    // read, every add answers zero fonts and every remove FALSE -- the
+    // in-memory pair too, whose handle is NULL with no engine.
+    const { fns, memory } = setup();
+    const table = /** @type {Record<string, { argBytes: number,
+        handler: (args: number[]) => number | Promise<number> }>} */ (
+        /** @type {unknown} */ (fns));
+    memory.putU32s(OUT, [UNTOUCHED]);
+    memory.putString(FACE_NAME, 'C:\\font.ttf');
+    /** @type {[string, number][]} */
+    const spellings = [
+        ['AddFontResourceA', 4], ['AddFontResourceW', 4], ['AddFontResourceExA', 12],
+        ['AddFontResourceExW', 12], ['AddFontMemResourceEx', 16], ['RemoveFontResourceA', 4],
+        ['RemoveFontResourceW', 4], ['RemoveFontResourceExA', 12],
+        ['RemoveFontResourceExW', 12], ['RemoveFontMemResourceEx', 4],
+    ];
+    for (const [name, argBytes] of spellings)
+    {
+        assert.equal(table[name]?.argBytes, argBytes, `${name} is exported`);
+        assert.equal(await table[name].handler([FACE_NAME, 0x10, 0, OUT]), 0, name);
+    }
+    assert.equal(memory.u32(OUT), UNTOUCHED, 'no font count is claimed');
+    assert.equal(fns.CreateScalableFontResourceA.handler(), 0, 'no .fot is written');
+    assert.equal(fns.CreateScalableFontResourceA.argBytes, 16);
+});
 
 test('GetTextCharset is the selected font\'s set, and DEFAULT_CHARSET means failure', ()=>{
     const { fns, memory, hdc } = withDC();
@@ -2486,6 +2538,30 @@ test('GetObjectType names each kind of GDI object, a context by whether it is in
     assert.equal(fns.GetObjectType.handler([fns.CreateBitmap.handler([4, 4, 1, 1, 0])]), 7);
     assert.equal(fns.GetObjectType.handler([fns.CreateRectRgn.handler([0, 0, 4, 4])]), 8);
     assert.equal(fns.GetObjectType.handler([0x9999]), 0, 'no such object');
+});
+
+test('the stock fonts are the faces and sizes Windows makes them', ()=>{
+    // Wine's test_stock_fonts: ANSI_FIXED_FONT and ANSI_VAR_FONT are the
+    // bitmap Courier and MS Sans Serif asked at 12, which realise at 13;
+    // DEFAULT_GUI_FONT says its weight.
+    const { fns, memory, hdc } = withDC();
+    /** @param {number} index */
+    const stock = index=>{
+        const font = fns.GetStockObject.handler([index]);
+        assert.notEqual(font, 0, `stock object ${index}`);
+        assert.equal(fns.GetObjectA.handler([font, LOGFONTA.SIZE, OUT]), LOGFONTA.SIZE);
+        const before = fns.SelectObject.handler([hdc, font]);
+        fns.GetTextMetricsA.handler([hdc, STRUCT]);
+        fns.SelectObject.handler([hdc, before]);
+        return [memory.i32(OUT + LOGFONTA.lfHeight), memory.i32(OUT + LOGFONTA.lfWeight),
+            memory.bytes[OUT + LOGFONTA.lfCharSet],
+            memory.readCString(OUT + LOGFONTA.lfFaceName, 32),
+            memory.i32(STRUCT + TEXTMETRICA.tmHeight)];
+    };
+    assert.deepEqual(stock(11), [12, 400, 0, 'Courier', 13], 'ANSI_FIXED_FONT');
+    assert.deepEqual(stock(12), [12, 400, 0, 'MS Sans Serif', 13], 'ANSI_VAR_FONT');
+    assert.deepEqual(stock(10).slice(0, 4), [12, 400, 255, 'Terminal'], 'OEM_FIXED_FONT');
+    assert.deepEqual(stock(17).slice(0, 4), [-11, 400, 0, 'MS Shell Dlg'], 'DEFAULT_GUI_FONT');
 });
 
 test('D3DKMT opens the one adapter by name, closes it, and keeps no kernel information', ()=>{

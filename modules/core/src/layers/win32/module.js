@@ -1812,6 +1812,9 @@ export function createWin32Module(){
                 call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
                 callerThread: ()=>bridge.callerThread(),
                 setLastError: setError,
+                // A font file the program adds: read where its path leads.
+                readFile: path=>readVolumeFile(path),
+                fullPath: path=>filesystem.resolve(path).path || path,
             });
 
             // The transport is injected, as the GPU device and the block store are.
