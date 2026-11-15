@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildExe } from '../../../../../../tools/fixtures/make-pe.mjs';
 import { frameworkNeeded, managedImageOf } from './need.js';
-import { managedExe } from './managed.fixture.js';
+import { managedExe } from '../../../../../../tools/fixtures/managed-exe.mjs';
 
 test('a managed image is known by its COM descriptor, with its runtime and width', ()=>{
     assert.deepEqual(managedImageOf(managedExe()), { bits: 32, runtime: 'v4.0.30319' });

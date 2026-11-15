@@ -867,6 +867,15 @@
    "tests": []
   },
   {
+   "path": "tools/fixtures/managed-exe.mjs",
+   "category": "fixtures",
+   "kind": "fixture",
+   "browser": false,
+   "question": "A managed (.NET) program image for the packages' tests",
+   "command": "",
+   "tests": []
+  },
+  {
    "path": "tools/fixtures/d3d9-program.mjs",
    "category": "fixtures",
    "kind": "fixture",

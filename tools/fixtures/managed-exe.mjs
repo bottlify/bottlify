@@ -10,8 +10,8 @@
  */
 
 import assert from 'node:assert/strict';
-import { buildExe } from '../../../../../../tools/fixtures/make-pe.mjs';
-import { parsePe, rvaToFileOffset } from '../../loader/internal/pe.js';
+import { buildExe } from './make-pe.mjs';
+import { parsePe, rvaToFileOffset } from '../../modules/core/src/layers/loader/internal/pe.js';
 
 const MARKER = [0x43, 0x4f, 0x52, 0x32, 0x30, 0x48, 0x44, 0x52];
 

@@ -16,7 +16,7 @@ import assert from 'node:assert/strict';
 import { createApp } from '../../../app.js';
 import { assemble, buildExe } from '../../../../../../tools/fixtures/make-pe.mjs';
 import { rewriteResources } from '../kernel32/resource-update.js';
-import { managedExe } from './managed.fixture.js';
+import { managedExe } from '../../../../../../tools/fixtures/managed-exe.mjs';
 
 const SHIM = 'C:\\WINDOWS\\Microsoft.NET\\Framework\\v4.0.30319\\mscoreei.dll';
 const SETUP = 'C:\\App\\ndp48-x86-x64-allos-enu.exe';

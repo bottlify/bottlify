@@ -353,7 +353,7 @@ function openTestKeeper(){
  * @param {Partial<import('./messages.js').StartOptions>} [options]
  * @param {{ threaded?: boolean, now?: () => number, gpu?: any,
  *     journal?: { capacity?: number, shared?: boolean }, audioShared?: boolean,
- *     duringBuild?: (app: any) => void }} [deps]
+ *     duringBuild?: (app: any) => void, on?: Record<string, (event: any) => void> }} [deps]
  */
 async function connect(options = {}, { journal, audioShared, duringBuild, on, ...deps } = {}){
     const channel = new MessageChannel();
