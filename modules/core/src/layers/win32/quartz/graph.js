@@ -57,7 +57,10 @@ import { createStreaming } from './stream.js';
 import { createSystemClock } from './clock.js';
 import { createMemoryAllocator } from './allocator.js';
 import { IAM_FILTER_DATA_SLOTS, IID_IAM_FILTER_DATA, createFilterMapper } from './mapper.js';
-import { registerWindowsFilters } from './registrations.js';
+import {
+    WINDOWS_REGISTRATIONS, deviceRegistrations, registerWindowsFilters,
+} from './registrations.js';
+import { SYSTEM_CODECS } from '../msvfw32/codecs.js';
 import { CLSID_SEEKING_PASS_THRU, createPassThru } from './passthru.js';
 import {
     CLSID_SYSTEM_DEVICE_ENUM, CLSID_DEVICE_MONIKER, createDeviceEnumeration,
@@ -1740,9 +1743,8 @@ export function createQuartz(host){
 
     /**
      * IFilterMapper2, which is where a filter DLL's DllRegisterServer announces
-     * itself. Nothing here builds graphs out of registered filters, so the
-     * registration is accepted and forgotten -- which is what a filter that
-     * registers successfully and is never chosen looks like from inside.
+     * itself. These answers stand only without the device store; with it,
+     * `mapper.js`'s mapper replaces them and a registration is kept.
      *
      * @type {Record<string, (state: null, args: number[]) => number>}
      */
@@ -2195,7 +2197,10 @@ export function registerQuartzClasses(registry, host){
     // and a program walking a category to find; only what is made here.
     if (host.devices)
     {
-        registerWindowsFilters(host.devices.store, clsid=>registry.isRegistered(clsid));
+        registerWindowsFilters(host.devices.store, clsid=>registry.isRegistered(clsid), [
+            ...WINDOWS_REGISTRATIONS,
+            ...deviceRegistrations(SYSTEM_CODECS),
+        ]);
     }
     return { tick: quartz.tick, film: quartz.film };
 }

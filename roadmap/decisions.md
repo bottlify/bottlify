@@ -2281,5 +2281,8 @@ binds through its class, as on Windows, but a registration made by one run is no
 A program registers its filters from DllRegisterServer, which an installer calls once, so a filter it
 expects to find later through the mapper is not found; nothing builds a graph from registered filters
 yet (`quartz/graph.js` renders through the media layer), so nothing the engine does depends on it.
-This stands until the registry's FilterData is written and read, which is also what the system's own
-filters being enumerated in their categories needs. *2026-11-15.*
+The system's own filters and the devices devenum lists itself (the audio renderers, each installed
+video compressor as an `@device:cm:` moniker) are written into the same store when quartz starts, so
+they are enumerated in their categories and their monikers' property bags answer FilterData; a
+program that opens `CLSID\{category}\Instance` in the registry itself finds nothing there. This stands
+until the registry's FilterData is written and read. *2026-11-15.*

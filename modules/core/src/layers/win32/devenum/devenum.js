@@ -567,7 +567,11 @@ export function createDeviceEnumeration(host, store){
             {
                 return E_POINTER;
             }
-            const filters = store.list(readGuid(category >>> 0));
+            // A DMO category lists the DMOs registered in it (msdmo), as
+            // Windows' devenum lists them beside the filters.
+            const asked = readGuid(category >>> 0).toUpperCase();
+            const filters = [...store.list(asked),
+                ...(host.dmos?.() ?? []).filter(dmo=>dmo.category.toUpperCase() === asked)];
             if (filters.length === 0)
             {
                 // An empty category hands out no enumerator, as the documentation says.

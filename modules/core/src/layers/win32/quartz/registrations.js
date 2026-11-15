@@ -19,6 +19,7 @@
 
 import { CLSID_ACTIVE_MOVIE_CATEGORIES, CLSID_LEGACY_AM_FILTER_CATEGORY } from '../devenum/devenum.js';
 import { GUID_NULL, MEDIATYPE_AUDIO, MEDIATYPE_STREAM, MEDIATYPE_VIDEO } from './filter.js';
+import { SOUND_ADAPTER_NAME, SOUND_DEVICE_GUID } from '../devices.js';
 import { CLSID_ASYNC_READER } from './interfaces.js';
 
 /** CLSID_AudioRendererCategory: where a program finds the machine's audio outputs. */
@@ -60,6 +61,9 @@ const pin = (name, output, types, flags = {})=>({ name, output, renderer: flags.
  * @property {string} [category]  CLSID_LegacyAmFilterCategory where absent.
  * @property {string} [instance]  The class's CLSID where absent.
  * @property {boolean} [always]   Written whatever is made: a category is no class.
+ * @property {string} [display]   Its moniker's name where it is not `@device:sw:`: a device
+ *           devenum lists itself is `@device:cm:{category}\instance`.
+ * @property {[string, string | number][]} [properties]  What its key holds besides.
  */
 
 /**
@@ -137,13 +141,6 @@ export const WINDOWS_REGISTRATIONS = [
             { renderer: true })],
     },
     {
-        clsid: '{79376820-07D0-11CF-A24D-0020AFD79767}', name: 'Default DirectSound Device',
-        merit: MERIT.PREFERRED, category: CLSID_AUDIO_RENDERER_CATEGORY,
-        instance: 'Default DirectSound Device',
-        pins: [pin('Audio Input pin (rendered)', false, [[MEDIATYPE_AUDIO, MEDIASUBTYPE_PCM]],
-            { renderer: true })],
-    },
-    {
         clsid: '{C1F400A4-3F08-11D3-9F0B-006008039E37}', name: 'Null Renderer',
         merit: MERIT.DO_NOT_USE,
         pins: [pin('In', false, [[GUID_NULL, GUID_NULL]], { renderer: true })],
@@ -172,7 +169,74 @@ export function registerWindowsFilters(store, made, registrations = WINDOWS_REGI
             name: entry.name,
             merit: entry.merit,
             pins: entry.pins,
-            properties: new Map(),
+            properties: new Map(entry.properties ?? []),
+            ...entry.display ? { display: entry.display } : {},
         });
     }
+}
+
+/** CLSID_VideoCompressorCategory: the installable compressors, each a device of its own. */
+const CLSID_VIDEO_COMPRESSOR_CATEGORY = '{33D9A760-90C8-11D0-BD43-00A0C911CE86}';
+/** CLSID_AVICo: the filter a video compressor's moniker binds to. */
+const CLSID_AVI_CO = '{D76E2820-1563-11CF-AC98-00AA004C0FA9}';
+const CLSID_AUDIO_RENDER = '{E30629D1-27E5-11CE-875D-00608CB78066}';
+const CLSID_DSOUND_RENDER = '{79376820-07D0-11CF-A24D-0020AFD79767}';
+const GUID_NULL_TEXT = '{00000000-0000-0000-0000-000000000000}';
+
+/**
+ * The devices devenum lists itself, as `@device:cm:` monikers: among the
+ * audio renderers the default wave output (WaveOutId -1) and DirectSound
+ * device (DSGuid GUID_NULL), then the machine's one sound adapter as each
+ * (WaveOutId 0, its DirectSound GUID); and each installed video compressor,
+ * by its FOURCC, under CLSID_AVICo, which a program reads the codecs off and
+ * which is not a filter the graph connects with (its merit is DO_NOT_USE).
+ *
+ * @param {{ handler: number, description: string }[]} codecs  The installable compressors.
+ * @returns {WindowsRegistration[]}
+ */
+export function deviceRegistrations(codecs){
+    /** @param {string} category @param {string} instance */
+    const display = (category, instance)=>`@device:cm:${category}\\${instance}`;
+    const audioPin = pin('Audio Input pin (rendered)', false, [[MEDIATYPE_AUDIO, MEDIASUBTYPE_PCM]],
+        { renderer: true });
+    /** @param {number} handler */
+    const fourcc = handler=>String.fromCharCode(handler & 0xff, handler >>> 8 & 0xff,
+        handler >>> 16 & 0xff, handler >>> 24 & 0xff);
+    return [
+        {
+            clsid: CLSID_AUDIO_RENDER, name: 'Default WaveOut Device', merit: MERIT.PREFERRED,
+            category: CLSID_AUDIO_RENDERER_CATEGORY, instance: 'Default WaveOut Device',
+            display: display(CLSID_AUDIO_RENDERER_CATEGORY, 'Default WaveOut Device'),
+            properties: [['WaveOutId', -1]], pins: [audioPin],
+        },
+        {
+            clsid: CLSID_DSOUND_RENDER, name: 'Default DirectSound Device', merit: MERIT.PREFERRED,
+            category: CLSID_AUDIO_RENDERER_CATEGORY, instance: 'Default DirectSound Device',
+            display: display(CLSID_AUDIO_RENDERER_CATEGORY, 'Default DirectSound Device'),
+            properties: [['DSGuid', GUID_NULL_TEXT]], pins: [audioPin],
+        },
+        {
+            clsid: CLSID_AUDIO_RENDER, name: SOUND_ADAPTER_NAME, merit: MERIT.NORMAL,
+            category: CLSID_AUDIO_RENDERER_CATEGORY, instance: SOUND_ADAPTER_NAME,
+            display: display(CLSID_AUDIO_RENDERER_CATEGORY, SOUND_ADAPTER_NAME),
+            properties: [['WaveOutId', 0]], pins: [audioPin],
+        },
+        {
+            clsid: CLSID_DSOUND_RENDER, name: `DirectSound: ${SOUND_ADAPTER_NAME}`,
+            merit: MERIT.NORMAL, category: CLSID_AUDIO_RENDERER_CATEGORY,
+            instance: `DirectSound: ${SOUND_ADAPTER_NAME}`,
+            display: display(CLSID_AUDIO_RENDERER_CATEGORY, `DirectSound: ${SOUND_ADAPTER_NAME}`),
+            properties: [['DSGuid', SOUND_DEVICE_GUID]], pins: [audioPin],
+        },
+        ...codecs.map(codec=>{
+            const handler = fourcc(codec.handler);
+            return {
+                clsid: CLSID_AVI_CO, name: codec.description, merit: MERIT.DO_NOT_USE,
+                category: CLSID_VIDEO_COMPRESSOR_CATEGORY, instance: handler,
+                display: display(CLSID_VIDEO_COMPRESSOR_CATEGORY, handler),
+                properties: /** @type {[string, string | number][]} */ ([['FccHandler', handler]]),
+                pins: [], always: true,
+            };
+        }),
+    ];
 }

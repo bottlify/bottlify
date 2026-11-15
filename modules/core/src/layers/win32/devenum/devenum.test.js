@@ -15,7 +15,7 @@ import {
     IID_IPROPERTY_BAG,
     createDeviceEnumeration, createFilterStore, encodeFilterData,
 } from './devenum.js';
-import { registerWindowsFilters } from '../quartz/registrations.js';
+import { deviceRegistrations, registerWindowsFilters } from '../quartz/registrations.js';
 
 const S_OK = 0;
 const S_FALSE = 1;
@@ -285,3 +285,49 @@ test('a filter\'s key answers FilterData, a category\'s Merit, as the registry h
         assert.equal(m.memory.getUint32(0x408, true), 0x200000);
         assert.equal(await read(category, 'FilterData'), NOT_FOUND);
     });
+
+test('the devices devenum lists itself are @device:cm: monikers with what their keys hold',
+    async()=>{
+        const m = machine();
+        const VIDEO_COMPRESSORS = '{33D9A760-90C8-11D0-BD43-00A0C911CE86}';
+        const AUDIO_RENDERERS = '{E0F158E1-CB04-11D0-BD4E-00A0C911CE86}';
+        registerWindowsFilters(m.store, ()=>true, deviceRegistrations([
+            { handler: 0x64697663, description: 'Cinepak Codec by Radius' },
+        ]));
+        const codec = m.store.find(VIDEO_COMPRESSORS, 'cvid');
+        assert.equal(codec?.display, `@device:cm:${VIDEO_COMPRESSORS}\\cvid`);
+        assert.deepEqual([codec?.name, codec?.clsid, codec?.properties.get('FccHandler')],
+            ['Cinepak Codec by Radius', '{D76E2820-1563-11CF-AC98-00AA004C0FA9}', 'cvid']);
+        const names = m.store.list(AUDIO_RENDERERS).map(device=>device.name);
+        assert.deepEqual(names, ['Default WaveOut Device', 'Default DirectSound Device',
+            'Bottlify Sound Adapter', 'DirectSound: Bottlify Sound Adapter']);
+        assert.equal(m.store.find(AUDIO_RENDERERS, 'Default WaveOut Device')
+            ?.properties.get('WaveOutId'), -1);
+        assert.equal(m.store.find(AUDIO_RENDERERS, 'DirectSound: Bottlify Sound Adapter')
+            ?.properties.get('DSGuid'), '{00000001-0000-0000-0000-000000000000}');
+        // Parsed by its name, as a program finds a codec it knows.
+        m.putWide(`@device:cm:${VIDEO_COMPRESSORS}\\cvid`, 0x500);
+        const parser = createComObject(CLSID_DEVICE_MONIKER, m.devices.deviceMoniker());
+        assert.equal(await m.call(parser, IID_IPARSE_DISPLAY_NAME, 'ParseDisplayName',
+            [0, 0x500, 0x600, 0x604]), S_OK);
+        const moniker = m.objects.get(m.memory.getUint32(0x604, true));
+        m.host.writeMemory(0x100, /** @type {Uint8Array} */ (parseGuid(IID_IPROPERTY_BAG)));
+        m.call(moniker, IID_IMONIKER, 'BindToStorage', [0, 0, 0x100, 0x200]);
+        const bag = m.objects.get(m.memory.getUint32(0x200, true));
+        m.putWide('FccHandler', 0x300);
+        assert.equal(await m.call(bag, IID_IPROPERTY_BAG, 'Read', [0x300, 0x400, 0]), S_OK);
+        assert.equal(m.host.readWideString(m.memory.getUint32(0x408, true), 64), 'cvid');
+    });
+
+test('a DMO category lists the DMOs registered in it', ()=>{
+    const m = machine();
+    const AUDIO_DECODERS = '{57F2DB8B-E6BB-4513-9D43-DCD2A6593125}';
+    const DMO = '{33333333-0000-0000-0000-000000000001}';
+    const devices = createDeviceEnumeration({ ...m.host, dmos: ()=>[{ category: AUDIO_DECODERS,
+        instance: DMO, clsid: DMO, name: 'A DMO', merit: 0x600800, pins: [],
+        properties: new Map(), display: `@device:dmo:${DMO}${AUDIO_DECODERS}` }] }, m.store);
+    const enumerator = createComObject(CLSID_SYSTEM_DEVICE_ENUM, devices.systemDeviceEnum());
+    m.host.writeMemory(0x100, /** @type {Uint8Array} */ (parseGuid(AUDIO_DECODERS)));
+    assert.equal(m.call(enumerator, IID_ICREATE_DEV_ENUM, 'CreateClassEnumerator',
+        [0x100, 0x200, 0]), S_OK, 'a category with a DMO in it is not empty');
+});

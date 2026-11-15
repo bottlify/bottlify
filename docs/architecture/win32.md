@@ -96,7 +96,9 @@ sequenceDiagram
   quartz's own filters (File Source, the WAVE Parser, the AVI Splitter, the AVI Decompressor
   over msvfw32, the ACM Wrapper over msacm32, the Color Space Converter, the renderers) are one base, `quartz/filter.js`: pins, media type
   negotiation, allocators. Each is registered as DllRegisterServer registers it, its moniker's
-  property bag answering the FilterData a program reads (`devenum.js`). A filter pushes its
+  property bag answering the FilterData a program reads (`devenum.js`); the devices devenum
+  lists itself (the audio renderers, each installed video compressor) are `@device:cm:` monikers
+  whose bags answer what their keys hold (`registrations.js`). A filter pushes its
   samples downstream from the graph's streaming thread - the same guest thread that feeds a
   renderer the program wrote - so a call into a peer never runs on the thread that started it.
 - **Callbacks:** a window procedure, a COM callback, `DllMain`. The bridge stops the thread, builds a
