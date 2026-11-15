@@ -14,7 +14,7 @@
  *   node tools/run/install-watch.mjs <setup.exe | disc.iso | archive.zip [--entry PATH]>
  *       | --bundle ID [--which PATH]
  *       [--every 30] [--minutes 20]
- *       [--journal SECONDS] [--memory MB] [--key Code@S]... [--click X,Y@S]...
+ *       [--journal SECONDS] [--memory MB] [--machine MB] [--key Code@S]... [--click X,Y@S]...
  *       [--shots DIR] [--list 'C:\Program Files'] [--collect]
  *       [--screen 1024x768] [--cat 'C:\WINDOWS\DirectX.log']... [--siblings]
  *       [--copy 'C:\WINDOWS\TEMP' temp]...
@@ -106,7 +106,7 @@
  * own settings (`EngineConfig`), and `--graphics JSON` the graphics layer's
  * (`{"guestCode":false}` traps every Direct3D call).
  */
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { Worker } from 'node:worker_threads';
@@ -165,6 +165,8 @@ const traceOnFault = argv.includes('--trace-fault');
 const journalAt = number('--journal', 0) || traceAt
     || (traceOnBox || traceOnFault ? 1e6 : 0);
 const memory = number('--memory', 0);
+/** `--machine MB`: every process of the run together held to that (createApp's machineMemory). */
+const machine = number('--machine', 0);
 const listAt = argv.includes('--list') ? argv[argv.indexOf('--list') + 1] : null;
 // The launcher hands a program the size of the screen it is on; the engine's
 // own default is 640x480, which a wizard laid out for 800x600 overhangs.
@@ -313,6 +315,62 @@ const importWatches = argv.flatMap((flag, index)=>{
  * same machine; the outputs (`--list`, `--copy`, `--registry`, `--cat`) are taken after the
  * last. */
 const thenLines = argv.flatMap((arg, at)=>(argv[at - 1] === '--then' ? [arg] : []));
+/** `--keep DIR`: before each `--then` program, the volume and hive the runs left, written under
+ * DIR (a folder a drive, `registry.json`, the hive before any program, `hive-before.json`), so a
+ * run cut short goes on from there with `--from DIR`: the first program is not run again, and the
+ * `--then` programs run on what DIR holds. A setup and its ngen take hours, and a machine short of
+ * memory takes a run at any point of them. */
+const keepDir = argv.includes('--keep') ? argv[argv.indexOf('--keep') + 1] : null;
+const fromDir = argv.includes('--from') ? argv[argv.indexOf('--from') + 1] : null;
+/** @param {string} dir @param {{ files: any[], registry: any }} session @param {any} before */
+const keepSession = (dir, session, before)=>{
+    rmSync(dir, { recursive: true, force: true });
+    for (const written of session.files)
+    {
+        const [, drive, rest] = /^([A-Za-z]):\\(.*)$/.exec(written.path) ?? [];
+        if (!drive)
+        {
+            continue;
+        }
+        const target = join(dir, drive.toUpperCase(), ...rest.split('\\'));
+        mkdirSync(dirname(target), { recursive: true });
+        writeFileSync(target, written.bytes);
+    }
+    writeFileSync(join(dir, 'registry.json'), JSON.stringify(session.registry));
+    writeFileSync(join(dir, 'hive-before.json'), JSON.stringify(before));
+};
+/** @param {string} dir @returns {{ session: { files: any[], registry: any }, before: any }} */
+const readSession = dir=>{
+    /** @type {{ path: string, bytes: Uint8Array }[]} */
+    const files = [];
+    /** @param {string} at @param {string} guest */
+    const walk = (at, guest)=>{
+        for (const entry of readdirSync(at, { withFileTypes: true }))
+        {
+            const host = join(at, entry.name);
+            if (entry.isDirectory())
+            {
+                walk(host, `${guest}\\${entry.name}`);
+            }
+            else
+            {
+                files.push({ path: `${guest}\\${entry.name}`,
+                    bytes: new Uint8Array(readFileSync(host)) });
+            }
+        }
+    };
+    for (const entry of readdirSync(dir, { withFileTypes: true }))
+    {
+        if (entry.isDirectory() && /^[A-Z]$/.test(entry.name))
+        {
+            walk(join(dir, entry.name), `${entry.name}:`);
+        }
+    }
+    /** @param {string} name */
+    const json = name=>JSON.parse(readFileSync(join(dir, name), 'utf8'));
+    return { session: { files, registry: json('registry.json') },
+        before: json('hive-before.json') };
+};
 const runOptions = {
     ...importWatches.length > 0 ? {
         watchImport: (/** @type {string} */ dll, /** @type {string | null} */ name)=>{
@@ -369,6 +427,7 @@ const runOptions = {
     // on the desktop and waits for a key or a click like any dialog.
     unattended: !argv.includes('--attended'),
     ...memory > 0 ? { memorySize: memory * 1048576 } : {},
+    ...machine > 0 ? { machineMemory: machine * 1048576 } : {},
     ...screenWidth > 0
         ? { screen: { width: screenWidth, height: screenHeight, bitsPerPixel: 32 } } : {},
     // Every pointer argument peeked for a string, so a journal line names
@@ -393,7 +452,8 @@ const runOptions = {
 };
 let app = await createApp(runOptions);
 // The machine's hive before any program ran: what a `--layer` leaves out of its registry.
-const hiveBefore = app.registry().toJSON();
+const resumed = fromDir ? readSession(fromDir) : null;
+const hiveBefore = resumed?.before ?? app.registry().toJSON();
 /** @param {any} running */
 const watchEvents = running=>{
     for (const name of ['process-create', 'process-child', 'process-started', 'process-resumed',
@@ -950,18 +1010,33 @@ for (const entry of all('--reg'))
         : Uint8Array.from([...value, '\0'], character=>character.charCodeAt(0) & 0xff));
 }
 
-try
+if (resumed)
 {
-    console.log('run ->', await app.run({ maxTurns: Number.MAX_SAFE_INTEGER,
-        timeoutMs: number('--minutes', 20) * 60000 }));
+    console.log(`run: not run again, going on from ${fromDir}`);
 }
-catch (e){
-    console.log('stopped:', e instanceof Error ? e.stack?.slice(0, 1500) : e);
+else
+{
+    try
+    {
+        console.log('run ->', await app.run({ maxTurns: Number.MAX_SAFE_INTEGER,
+            timeoutMs: number('--minutes', 20) * 60000 }));
+    }
+    catch (e){
+        console.log('stopped:', e instanceof Error ? e.stack?.slice(0, 1500) : e);
+    }
 }
+let goingOn = resumed?.session ?? null;
 for (const line of thenLines)
 {
     // The files the run wrote (its names and links) and its hive, as a saved session holds them.
-    const session = { files: await app.session.export(), registry: app.registry().toJSON() };
+    const session = goingOn
+        ?? { files: await app.session.export(), registry: app.registry().toJSON() };
+    goingOn = null;
+    if (keepDir)
+    {
+        keepSession(keepDir, session, hiveBefore);
+        console.log(seconds(), `kept: ${session.files.length} files in ${keepDir}`);
+    }
     const [, quoted, bare] = /^\s*(?:"([^"]+)"|(\S+))/.exec(line) ?? [];
     const imagePath = quoted ?? bare;
     const image = session.files.find((/** @type {any} */ one)=>

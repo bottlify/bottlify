@@ -23,6 +23,10 @@ test('a layer is what the runs wrote on C:, under its drive folder, less their s
             { path: 'C:\\Documents and Settings\\User\\Local Settings\\Temp\\x.tmp',
                 bytes: bytes('') },
             { path: 'C:\\97476d1986e5182a495ef1e5aa1d8c20\\netfx_core.msi', bytes: bytes('msi') },
+            { path: 'C:\\0261063325c5eaf0bd1086\\Setup.exe', bytes: bytes('setup') },
+            { path: 'C:\\WINDOWS\\Installer\\1a2b3c.msi', bytes: bytes('cached') },
+            { path: 'C:\\WINDOWS\\Microsoft.NET\\Framework\\v4.0.30319\\SetupCache\\v4.8.03761'
+                + '\\NetFx_Full.mzz', bytes: bytes('repair') },
             { path: 'C:\\Install\\ndp48-x86-x64-allos-enu.exe', bytes: bytes('setup') },
             { path: 'D:\\setup.exe', bytes: bytes('disc') },
         ],
