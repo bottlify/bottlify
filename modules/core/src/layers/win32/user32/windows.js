@@ -215,6 +215,9 @@ const HTSIZEFIRST = 10;
 const HTSIZELAST = 17;
 
 const WM_SETCURSOR = 0x0020;
+const WM_NOTIFYFORMAT = 0x0055;
+const NFR_ANSI = 1;
+const NFR_UNICODE = 2;
 
 /**
  * Where a host procedure's address is when there is no bridge to hand one
@@ -5932,6 +5935,11 @@ export function createWindowFunctions(host){
             // every window such a program tries to make.
             case WM_NCCREATE:
                 return 1;
+            // A common control asks its parent which spelling its
+            // notifications are to be in; a parent that does not answer
+            // itself is answered by what its procedure reads.
+            case WM_NOTIFYFORMAT:
+                return procReads(record) ? NFR_UNICODE : NFR_ANSI;
             case WM_NCCALCSIZE: {
                 // The client area inside the frame the style describes.
                 const at = message.lParam >>> 0;
