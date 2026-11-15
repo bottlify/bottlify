@@ -5979,7 +5979,10 @@ export function createWin32Module(){
                     files: volume }),
             };
             libraries['MSVCR80.dll'] = createMsvcr80Functions(libraries['msvcrt.dll'],
-                { readMemory, writeMemory, pointerSize });
+                { readMemory, writeMemory, pointerSize,
+                    // What calls the program's invalid-parameter handler.
+                    callGuest: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
+                    currentThread: ()=>kernel.currentThread() });
             // And its C++ library, over that runtime's operator new and delete.
             libraries['MSVCP80.dll'] = createMsvcp80Functions(libraries['MSVCR80.dll'],
                 { readMemory, writeMemory, fillMemory });

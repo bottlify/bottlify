@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { INVALID_PARAMETERS, createInvalidParameterWatch } from './invalid-parameter.js';
 import { createUcrtbaseFunctions } from './ucrtbase.js';
 import { fusedMultiplyAdd } from './ucrt-math.js';
 import { moduleKeyOf } from '../../../app.js';
@@ -22,8 +23,10 @@ const IOB = 0x1000;
  * out blocks from a counter, so what is checked is the runtime's own part.
  *
  * @param {Record<number, string>} [texts]  the text each format address prints
+ * @param {{ watched?: boolean }} [options]  with msvcrt's invalid-parameter
+ *     watch, ending the process into `called`
  */
-function setup(texts = {}){
+function setup(texts = {}, { watched = false } = {}){
     const memory = new Uint8Array(0x10000);
     /** @type {any[]} */
     const called = [];
@@ -82,6 +85,12 @@ function setup(texts = {}){
             next += bytes;
             return block;
         } },
+        ...watched ? { [INVALID_PARAMETERS]: {
+            watch: createInvalidParameterWatch(),
+            exitProcess: (/** @type {number} */ code)=>called.push(['ended', code]),
+            report: (/** @type {string} */ api, /** @type {string} */ detail,
+                /** @type {string} */ kind)=>called.push([kind, api, detail]),
+        } } : {},
     };
     // The texts in memory too, where the printers in the guest read their formats.
     for (const [at, text] of Object.entries(texts))
@@ -199,18 +208,39 @@ test('a DLL\'s exit table grows as it is registered to, and runs last first, onc
     assert.equal(ucrt._register_onexit_function.handler([0, 1]), -1, 'no table');
 });
 
-test('an installed invalid-parameter handler is called and the caller goes on', async()=>{
-    const { ucrt, called } = setup();
-    await ucrt._invalid_parameter_noinfo.handler([]);
-    assert.deepEqual(called, ['ended'], 'none installed: the process ends');
+test('an invalid parameter reaches the handler installed, the thread\'s first, or ends the process',
+    async()=>{
+        const { ucrt, called, readU32 } = setup({}, { watched: true });
+        // A refusal with no handler: the process ends as _invoke_watson ends
+        // it, said as an error naming the function and its arguments.
+        await ucrt._set_fmode.handler([0x1234]);
+        assert.deepEqual(called.at(-1), ['ended', 0xc0000417]);
+        assert.match(called.at(-2)[2], /^_set_fmode\(0x1234\): an invalid parameter/);
+        assert.equal(called.at(-2)[0], 'loss');
 
-    called.length = 0;
-    assert.equal(ucrt._set_invalid_parameter_handler.handler([0x5000]), 0);
-    assert.equal(ucrt._get_invalid_parameter_handler.handler([]), 0x5000);
-    assert.equal(await ucrt._invalid_parameter_noinfo.handler([]), 0);
-    assert.deepEqual(called, [['guest', 0x5000, 0, 0, 0, 0, 0]]);
-    assert.equal(ucrt._set_invalid_parameter_handler.handler([0]), 0x5000, 'the one before');
-});
+        called.length = 0;
+        assert.equal(ucrt._set_invalid_parameter_handler.handler([0x5000]), 0);
+        assert.equal(ucrt._get_invalid_parameter_handler.handler([]), 0x5000);
+        assert.equal(await ucrt._set_fmode.handler([0x1234]), 22,
+            'the function answers its failure after the handler');
+        assert.equal(readU32(ERRNO), 22);
+        assert.deepEqual(called, [['guest', 0x5000, 0, 0, 0, 0, 0]],
+            'called with nothing known, as a release runtime calls it');
+        assert.equal(ucrt._set_fmode.handler([0x8000]), 0, 'an argument it takes calls nothing');
+        assert.equal(called.length, 1);
+
+        called.length = 0;
+        assert.equal(ucrt._set_thread_local_invalid_parameter_handler.handler([0x6000]), 0);
+        assert.equal(ucrt._get_thread_local_invalid_parameter_handler.handler([]), 0x6000);
+        await ucrt._invalid_parameter_noinfo.handler([]);
+        assert.deepEqual(called, [['guest', 0x6000, 0, 0, 0, 0, 0]], 'the thread\'s own first');
+
+        called.length = 0;
+        await ucrt._invalid_parameter.handler([0x10, 0x20, 0x30, 7, 0]);
+        assert.deepEqual(called, [['guest', 0x6000, 0x10, 0x20, 0x30, 7, 0]],
+            '_invalid_parameter hands on the details it was given');
+        assert.equal(ucrt._set_invalid_parameter_handler.handler([0]), 0x5000, 'the one before');
+    });
 
 test('_set_fmode takes the modes there are, and _get_fmode reads the same variable', ()=>{
     const { ucrt, readU32 } = setup();
