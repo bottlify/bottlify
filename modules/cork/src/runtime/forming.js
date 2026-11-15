@@ -21,6 +21,12 @@ import { trackRegion } from '../emit/x87.js';
 import { keyOf } from './entries.js';
 import { usesX87 } from './variants.js';
 
+/**
+ * The share of the engine thread's time over a while the translator's work may
+ * take (`holdMs` refills at it): what a frame gives up to new code.
+ */
+const HOLD_SHARE = 0.5;
+
 /** @typedef {import('./state.js').Pending} Pending */
 /** @typedef {import('./state.js').Forming} Forming */
 
@@ -77,8 +83,6 @@ export function createForming(state){
      * emits here, and has no frames to keep.
      */
     const holding = ()=>settings.holdMs > 0 && workerUrl !== null;
-    /** The share of the engine thread's time over a while the translator's work may take. */
-    const HOLD_SHARE = settings.holdShare;
     /** The engine thread's time forming may take now (`holdMs`), refilled at
      * `HOLD_SHARE` of the time that passes, and when it was last brought up to date. */
     let credit = settings.holdMs;

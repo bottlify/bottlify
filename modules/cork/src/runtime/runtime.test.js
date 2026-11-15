@@ -1783,28 +1783,6 @@ test('a host write into the page of a region\'s switch table drops the region, t
     assert.equal(m.runtime.diagnostics().invalidations, 1);
 });
 
-test('structure left unset is structure on, in the store\'s key as in the code', async()=>{
-    const { memoryTranslationStore } = await import('./cache.js');
-    const settle = ()=>new Promise(resolve=>setTimeout(resolve, 0));
-    const store = memoryTranslationStore();
-    /** @param {{ structure?: boolean }} setting */
-    const hits = async setting=>{
-        const m = machine({ store, bundleId: 'test', ...setting });
-        m.write(CODE, COUNTDOWN);
-        m.setReg(4, 0x80000);
-        m.runtime.noteHot(CODE);
-        await m.runtime.translatePending();
-        await settle();
-        assert.equal(m.runtime.run(m.runtime.entryOf(CODE), 1_000_000).kind, 'halt');
-        return m.runtime.diagnostics().cacheHits;
-    };
-    assert.equal(await hits({ structure: undefined }), 0);
-    assert.equal(await hits({ structure: false }), 0,
-        'the loop emitted as a wasm loop is not taken for a run without structure');
-    assert.equal(await hits({ structure: true }), 1, 'unset and on emit the same code');
-    assert.equal(await hits({ structure: false }), 1);
-});
-
 test('a store does not answer at an entry for other bytes that agree in 32 bits of their hash',
     async()=>{
         const { memoryTranslationStore } = await import('./cache.js');
@@ -2563,26 +2541,21 @@ test('a ret that both answers the call waiting for it and returns to a call its 
         0, 'no call left waiting');
 });
 
-test('a block profile counts each jump back by how it is taken: to a loop\'s head, or through'
-    + ' the dispatch where the region is laid out flat', async()=>{
+test('a block profile counts each jump back to a loop\'s head as one', async()=>{
     // mov ecx, 100; L: inc eax; test cl, 1; jz S; inc edx; S: dec ecx; jnz L; hlt -- a loop
     // of three blocks, its jump back taken 99 times.
     const code = [0xb9, 100, 0, 0, 0, 0x40, 0xf6, 0xc1, 0x01, 0x74, 0x01, 0x42, 0x49, 0x75, 0xf6,
         0xf4];
-    for (const [structure, counted, other] of /** @type {const} */ ([
-        [true, 'JUMP_LOOP', 'JUMP_DISPATCH'], [false, 'JUMP_DISPATCH', 'JUMP_LOOP']]))
-    {
-        const m = machine({ blockProfile: true, structure });
-        m.write(CODE, code);
-        m.runtime.noteHot(CODE);
-        await m.runtime.translatePending();
-        const exit = m.runtime.run(m.runtime.entryOf(CODE), 1_000_000);
-        assert.equal(exit.kind, 'halt');
-        assert.deepEqual([m.reg(0), m.reg(2)], [100, 50]);
-        const { mechanisms } = /** @type {any} */ (m.runtime.diagnostics());
-        assert.equal(mechanisms[counted], 99, `structure ${structure}: dec ecx; jnz L, taken`);
-        assert.equal(mechanisms[other] + mechanisms.JUMP_OUT, 0, `structure ${structure}`);
-    }
+    const m = machine({ blockProfile: true });
+    m.write(CODE, code);
+    m.runtime.noteHot(CODE);
+    await m.runtime.translatePending();
+    const exit = m.runtime.run(m.runtime.entryOf(CODE), 1_000_000);
+    assert.equal(exit.kind, 'halt');
+    assert.deepEqual([m.reg(0), m.reg(2)], [100, 50]);
+    const { mechanisms } = /** @type {any} */ (m.runtime.diagnostics());
+    assert.equal(mechanisms.JUMP_LOOP, 99, 'dec ecx; jnz L, taken');
+    assert.equal(mechanisms.JUMP_DISPATCH + mechanisms.JUMP_OUT, 0);
 });
 
 test('a block profile says what the hot code is made of: each form\'s executions and the wasm'

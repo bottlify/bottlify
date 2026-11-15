@@ -311,7 +311,6 @@ export function engineContractProblem(engineModule, url){
  *     tested once at an entry. Default true.
  * @property {number} [checkedAfter]  Failed shape tests before a region is formed again with no
  *     test. Default 4.
- * @property {boolean} [structure]  A region's loops as wasm loops. Default true.
  * @property {boolean} [looseStacks]  A store through esp alone tests no page while no
  *     translated code lies on a stack. Default true.
  * @property {number} [translators]  Translation workers the runtime opens itself (0: a host's
@@ -338,8 +337,6 @@ export function engineContractProblem(engineModule, url){
  *     the store's hits compiled off the thread, their compiles started and they and a worker's
  *     answers published a few at a call (0: a batch formed and published whole in one call).
  *     Default 4.
- * @property {number} [holdShare]  The share of the engine thread's time over a while that
- *     `holdMs` refills at: what a frame gives up to new code. Default 0.5.
  * @property {number} [yieldChunk]  `createMachine` alone (cork's machine for its tests): the
  *     instructions translated code runs at a time. Default 2^24.
  * @property {number} [interpretChunk]  `createMachine` alone: the instructions its interpreter

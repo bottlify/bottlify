@@ -158,10 +158,6 @@ export function runtimeSettings(config){
         // (false: every region so from the start).
         x87Shapes: true,
         checkedAfter: 4,
-        // A region's loops as wasm loops, the loops of its control flow
-        // (`planStructure`), a block inside one entered through a copy of its
-        // own (false: every backward jump through the region's dispatch).
-        structure: true,
         // Everything the translator relaxes for speed kept exact instead: the x87
         // exception flags and their tests, signalling NaNs, underflow and C1, and
         // the flags an instruction leaves undefined -- off, what the cheapest code
@@ -216,7 +212,7 @@ export function runtimeSettings(config){
         // it (a batch that never comes back is freed after a time).
         timings: false,
         // The engine thread's time the translator's work may take at a
-        // stretch (and `HOLD_SHARE` of its time over a while), where a worker is
+        // stretch (and `HOLD_SHARE` of its time over a while, `forming.js`), where a worker is
         // wanted: a batch goes on forming in the calls after, the store's
         // hits are compiled off the thread, their compiles started and they
         // and a worker's answers published a share's worth a call, and a call
@@ -228,9 +224,6 @@ export function runtimeSettings(config){
         // the guest did not run, its sound late -- where the translation is
         // the one to wait.
         holdMs: 4,
-        // The share of the engine thread's time over a while the translator's work
-        // may take (`holdMs` refills at it): what a frame gives up to new code.
-        holdShare: 0.5,
         // Indirect-call prediction (`callTargets`): samples of a call before its
         // callees are looked at, and the window a call's samples are counted in
         // (`PREDICT_AFTER`, `CALL_WINDOW`).

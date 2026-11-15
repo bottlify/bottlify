@@ -162,7 +162,6 @@ export function createTranslators(state){
         crossTailCalls: settings.crossTailCalls !== false,
         ...(settings.callDepth === CallStack.LIMIT ? {} : { callDepth: settings.callDepth }),
         resume: resumable,
-        structure: settings.structure,
         precise: settings.precise === true,
         checkReads: rt.readsChecked,
         zeroPage: settings.zeroPage === true,

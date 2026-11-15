@@ -51,7 +51,6 @@ the reference arm of a differential gate.
 | `checkReads` | unset | `true` tests every read's pages from the start, `false` never closes a page; unset, reads are wrapped into RAM until the program first faults on a closed page, and tested from then on. |
 | `zeroPage` | false | Whether the guest's first page is the RAM's zeros that nothing writes and a store to faults (the host's `zeroReadsBelow` over it): a tested read inside it reads them in translated code rather than leaving to the host. The cpu layer sets it where that holds. |
 | `looseStacks` | `true` | `false` tests the pages of every store through `esp`. |
-| `structure` | `true` | `false` sends every back edge of a region through its dispatch. |
 | `callReturn` | `true` | `false` makes every call and return out of a region a transfer through the entry hash. |
 | `leafCalls` | `true` | `false` forms no leaf callee into its caller. |
 | `helpers` | `true` | `false` makes every call to a compiler's or C runtime's function the dictionary knows as it is, rather than as what it does (`memcpy` as one `memory.copy`). |
@@ -81,7 +80,6 @@ default is the product's.
 | `maxQueued` | 8192 | Candidates waiting; past it the coldest is dropped. |
 | `batchRegions`, `maxBatchRegions` | 32, 256 | Regions per wasm module, and the most a deep queue's batch takes. |
 | `holdMs` | 4 | The engine thread's time the translator's work may take at a stretch where a worker is wanted (0: a batch formed and published whole in one call). |
-| `holdShare` | 0.5 | The share of the engine thread's time over a while that `holdMs` refills at: what a frame gives up to new code. |
 | `inFlightMs` | 10000 | How long a batch may be with a worker before it is given up. |
 | `volatileAfter`, `volatileWindowMs`, `volatileHoldMs` | 8, 100, 2000 | Writes dropping a page's code within the window before the page is interpreted, and for how long. |
 | `maxRegionBlocks` | 128 | Blocks of the largest region. |

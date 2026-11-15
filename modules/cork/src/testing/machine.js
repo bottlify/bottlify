@@ -33,7 +33,7 @@ const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
 /**
  * @param {{ ramSize?: number, trapPort?: number,
  *     trap?: (value: number) => number, rdtsc?: () => bigint,
- *     leaveOut?: string[], precise?: boolean, structure?: boolean,
+ *     leaveOut?: string[], precise?: boolean,
  *     resume?: boolean, looseStacks?: boolean, executor?: number, hashSlots?: number,
  *     processors?: number, shared?: boolean, growing?: { floor: number, tablesAt: number },
  *     atomic?: boolean, features?: Partial<import('../wasm/features.js').Features> }} [given]
@@ -41,9 +41,7 @@ const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
  *     `trap` from inside the region (answering 1 when it moved EIP), as under a host with
  *     a call channel; without `trap`, one that answers 0; precise: nothing relaxed -- on
  *     unless a test asks, since the tests and the corpus judge the processor's behaviour;
- *     structure: the regions' loops as wasm loops (`prepareModule`), as the emitter's default
- *     unless a test asks or `CORK_STRUCTURE` in the environment says 0 or 1, so a suite can
- *     be run under the other form; resume: a miss of the hash calls what `setTier` put in the
+ *     resume: a miss of the hash calls what `setTier` put in the
  *     table's `TIER_SLOT`; looseStacks: a store through esp alone tests no page, outside
  *     precise (`prepareModule`); executor: the machine is that executor of a memory with room
  *     for it, its state page and tables past the first's (`executorLayout`), 0 by default;
@@ -61,9 +59,6 @@ export function createTestMachine(given = {}){
     const { ramSize = 1 << 20, trapPort, trap, rdtsc, leaveOut = [],
         precise = true, resume = false, looseStacks = false, executor = 0, shared = false,
         atomic = false } = given;
-    const forced = globalThis.process?.env?.CORK_STRUCTURE;
-    const structure = given.structure
-        ?? (forced === '1' ? true : forced === '0' ? false : undefined);
     // A small entry hash: a test's program has few block starts, and a machine
     // per test zeroing the engine's default would be most of the suite's time.
     const growing = given.growing;
@@ -191,7 +186,6 @@ export function createTestMachine(given = {}){
             const context = prepareModule(m, emitLayout, found, {}, {
                 undoLog, hash: table !== null && hash, wide, narrow, precise, resume, looseStacks,
                 atomic,
-                ...(structure === undefined ? {} : { structure }),
                 ...(trapPort === undefined ? {} : { trapPort }), leaveOut: new Set(leaveOut),
             });
             const translation = emitRegion(context, region,
