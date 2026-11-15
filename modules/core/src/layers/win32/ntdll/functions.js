@@ -43,6 +43,7 @@ import { createNtdllCrt } from './crt.js';
 import { createRandomFunctions } from './random.js';
 import { createChecksumFunctions } from './checksum.js';
 import { createIpStringFunctions } from './ip-strings.js';
+import { createCompressionFunctions } from './lznt1.js';
 import { createHandleTableFunctions } from './handle-table.js';
 import { createSecurityFunctions } from './security.js';
 import { MEMORY_ENTRIES, createMemoryFunctions } from './memory.js';
@@ -112,6 +113,8 @@ const KERNEL_FEATURES = [
     [12, 0x20000000],   // PF_NX_ENABLED -> KF_NOEXECUTE
 ];
 const IMAGE_NT_SIGNATURE = 0x00004550;
+/** The HEAP_* flags RtlCreateHeap hands on to HeapCreate: no serialize, generate exceptions, executable. */
+const HEAP_CREATE_FLAGS = 0x00000001 | 0x00000004 | 0x00040000;
 
 const KERNEL32_ALIASES = Object.freeze({
     RtlAddVectoredExceptionHandler: 'AddVectoredExceptionHandler',
@@ -153,6 +156,11 @@ const KERNEL32_ALIASES = Object.freeze({
     // kernel32's is ntdll's on Windows (kernel32.spec forwards it); clr.dll
     // imports it from ntdll to raise its exceptions.
     RtlCaptureContext: 'RtlCaptureContext',
+    // kernel32's pointer encoding is ntdll's (kernel32.spec forwards both).
+    RtlEncodePointer: 'EncodePointer',
+    RtlDecodePointer: 'DecodePointer',
+    RtlEncodeSystemPointer: 'EncodeSystemPointer',
+    RtlDecodeSystemPointer: 'DecodeSystemPointer',
 });
 
 /**
@@ -463,6 +471,39 @@ export function createNtdllFunctions(host){
 
     const table = {
         ...alias(kernel32, KERNEL32_ALIASES),
+        ...kernel32.HeapCreate && kernel32.HeapDestroy ? {
+            /**
+             * PVOID RtlCreateHeap(ULONG Flags, PVOID HeapBase, SIZE_T ReserveSize,
+             *   SIZE_T CommitSize, PVOID Lock, PRTL_HEAP_PARAMETERS Parameters)
+             *
+             * HeapCreate's heap, which is what kernel32's is on Windows. A heap
+             * laid over memory the caller gives is not made here: NULL.
+             */
+            RtlCreateHeap: {
+                argBytes: 24,
+                /** @param {number[]} args */
+                handler: ([flags, base, reserve, commit])=>{
+                    if ((base >>> 0) !== 0)
+                    {
+                        host.divergence?.('RtlCreateHeap', 'a heap over memory the caller'
+                            + ' gives is not made');
+                        return 0;
+                    }
+                    return kernel32.HeapCreate.handler([flags & HEAP_CREATE_FLAGS,
+                        commit >>> 0, reserve >>> 0]) >>> 0;
+                },
+            },
+            /**
+             * PVOID RtlDestroyHeap(PVOID Heap)
+             *
+             * NULL once the heap is gone; the heap itself when it could not be.
+             */
+            RtlDestroyHeap: {
+                argBytes: 4,
+                /** @param {number[]} args */
+                handler: ([heap])=>(kernel32.HeapDestroy.handler([heap]) !== 0 ? 0 : heap >>> 0),
+            },
+        } : {},
         ...natives,
         ...registry?.entries ?? {},
         // And the token calls on advapi32's, whose handles they open.
@@ -498,6 +539,8 @@ export function createNtdllFunctions(host){
         ...createRandomFunctions({ readMemory: host.readMemory, writeMemory: host.writeMemory }),
         ...createChecksumFunctions({ readMemory: host.readMemory }),
         ...createIpStringFunctions({ readMemory: host.readMemory, writeMemory: host.writeMemory }),
+        ...createCompressionFunctions({ readMemory: host.readMemory,
+            writeMemory: host.writeMemory }),
         ...createHandleTableFunctions({ readMemory: host.readMemory,
             writeMemory: host.writeMemory, allocate, free }),
 

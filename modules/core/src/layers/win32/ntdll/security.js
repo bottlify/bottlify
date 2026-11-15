@@ -18,6 +18,17 @@
 const STATUS_SUCCESS = 0;
 const STATUS_UNSUCCESSFUL = 0xc0000001;
 const STATUS_INVALID_SID = 0xc0000078;
+const STATUS_INVALID_PARAMETER = 0xc000000d;
+const STATUS_UNKNOWN_REVISION = 0xc0000058;
+const SECURITY_DESCRIPTOR_REVISION = 1;
+/** SECURITY_DESCRIPTOR_CONTROL's bits these read. */
+const SE_OWNER_DEFAULTED = 0x0001;
+const SE_GROUP_DEFAULTED = 0x0002;
+const SE_SELF_RELATIVE = 0x8000;
+/** ACL_REVISION and ACL_REVISION_DS, the revisions an ACL has; and its header's size. */
+const MIN_ACL_REVISION = 2;
+const MAX_ACL_REVISION = 4;
+const ACL_HEADER = 8;
 
 /** The Win32 errors these calls fail with, as the statuses they were made of. */
 const STATUS_OF_ERROR = new Map([
@@ -120,6 +131,85 @@ export function createSecurityFunctions(host){
             };
         }
     }
+    /** @param {number} at */
+    const dword = at=>new DataView(host.readMemory(at >>> 0, 4).slice().buffer)
+        .getUint32(0, true);
+    /** @param {number} at */
+    const word = at=>dword(at) & 0xffff;
+    /** @param {number} at @param {number} value */
+    const putDword = (at, value)=>host.writeMemory(at >>> 0, Uint8Array.of(value & 0xff,
+        value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24));
+
+    /**
+     * NTSTATUS RtlGetOwnerSecurityDescriptor(PSECURITY_DESCRIPTOR, PSID *Owner,
+     *   PBOOLEAN OwnerDefaulted) and the group's twin: the SID where the
+     * descriptor keeps it (a pointer, or an offset in a self-relative one) and
+     * its defaulted bit as a BOOLEAN - one byte where advapi32's is a BOOL.
+     *
+     * @param {number} slot  the field's offset in the absolute layout
+     * @param {number} defaultedBit  SE_OWNER_DEFAULTED or SE_GROUP_DEFAULTED
+     */
+    const sidOf = (slot, defaultedBit)=>({
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: ([descriptor, out, defaulted])=>{
+            if ((descriptor >>> 0) === 0)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+            if ((dword(descriptor) & 0xff) !== SECURITY_DESCRIPTOR_REVISION)
+            {
+                return STATUS_UNKNOWN_REVISION;
+            }
+            const control = word(descriptor + 2);
+            const value = dword(descriptor + slot);
+            const sid = (control & SE_SELF_RELATIVE) === 0 || value === 0 ? value
+                : (descriptor + value) >>> 0;
+            putDword(out, sid);
+            host.writeMemory(defaulted >>> 0, Uint8Array.of(sid !== 0
+                && (control & defaultedBit) !== 0 ? 1 : 0));
+            return STATUS_SUCCESS;
+        },
+    });
+    table.RtlGetOwnerSecurityDescriptor = sidOf(4, SE_OWNER_DEFAULTED);
+    table.RtlGetGroupSecurityDescriptor = sidOf(8, SE_GROUP_DEFAULTED);
+
+    /**
+     * BOOLEAN RtlFirstFreeAce(PACL Acl, PVOID *FirstFree)
+     *
+     * Where the next ACE would go, after the ACL's last: NULL with TRUE when
+     * the ACL is full, FALSE for a revision no ACL has or ACEs that run past
+     * its size.
+     */
+    table.RtlFirstFreeAce = {
+        argBytes: 8,
+        /** @param {number[]} args */
+        handler: ([acl, out])=>{
+            putDword(out, 0);
+            const revision = dword(acl) & 0xff;
+            if (revision < MIN_ACL_REVISION || revision > MAX_ACL_REVISION)
+            {
+                return 0;
+            }
+            const end = (acl >>> 0) + word(acl + 2);
+            const count = word(acl + 4);
+            let at = (acl >>> 0) + ACL_HEADER;
+            for (let index = 0; index < count; index++)
+            {
+                if (at >= end)
+                {
+                    return 0;
+                }
+                at += word(at + 2);
+            }
+            if (at < end)
+            {
+                putDword(out, at);
+            }
+            return 1;
+        },
+    };
+
     if (advapi32.AllocateAndInitializeSid)
     {
         const entry = advapi32.AllocateAndInitializeSid;
