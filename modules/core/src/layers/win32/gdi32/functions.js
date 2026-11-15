@@ -5371,6 +5371,95 @@ export function createGdiFunctions(host){
         },
 
         /**
+         * A device-dependent bitmap of bits this layer holds, in CreateBitmap's
+         * layout - rows top-down, padded to a WORD - copied: what GetIconInfo
+         * hands out as an icon's mask and colour, bitmaps the caller owns.
+         *
+         * @param {number} width @param {number} height @param {number} bitCount
+         * @param {Uint8Array} pixels
+         * @returns {number} the bitmap, or 0 where it cannot be made
+         */
+        bitmapFromBits(width, height, bitCount, pixels){
+            const attributes = deviceBitmap(width, height, bitCount);
+            if (!attributes)
+            {
+                return 0;
+            }
+            attributes.pixels.set(pixels.subarray(0, attributes.pixels.length));
+            return objects.create('bitmap', attributes);
+        },
+
+        /**
+         * CopyImage of a bitmap: a new one, stretched to the size asked for
+         * (zero keeps the side), drawn through StretchBlt as Windows copies
+         * it. LR_CREATEDIBSECTION makes a DIB section of the original's depth
+         * and colours, and outranks LR_MONOCHROME; LR_MONOCHROME makes a
+         * monochrome bitmap; otherwise the copy is a device bitmap - of the
+         * display's depth, or monochrome where the original is a monochrome
+         * bitmap or a one-bit section whose two colours are black and white
+         * (Wine's cursoricon test_CopyImage_Bitmap).
+         *
+         * @param {number} handle @param {number} width @param {number} height
+         * @param {number} flags
+         * @returns {number} the copy, or 0 for a handle that is no bitmap
+         */
+        copyBitmap(handle, width, height, flags){
+            const LR_MONOCHROME = 0x1;
+            const LR_CREATEDIBSECTION = 0x2000;
+            const record = objects.get(handle >>> 0);
+            if (!record || record.type !== 'bitmap')
+            {
+                return 0;
+            }
+            const source = record.attributes;
+            const across = (width | 0) > 0 ? width | 0 : source.width;
+            const down = (height | 0) > 0 ? height | 0 : source.height;
+            /** @param {number} colour */
+            const blackOrWhite = colour=>(colour & 0xffffff) === 0
+                || (colour & 0xffffff) === 0xffffff;
+            const monochrome = source.bitCount === 1 && ((source.section >>> 0) === 0
+                || (source.palette?.length === 2 && source.palette.every(blackOrWhite)
+                    && (source.palette[0] & 0xffffff) !== (source.palette[1] & 0xffffff)));
+            let copy;
+            if ((flags & LR_CREATEDIBSECTION) !== 0)
+            {
+                const bytes = dibSize(across, down, source.bitCount);
+                const address = bytes > 0xffffffff ? 0 : host.surfaces.allocate(bytes);
+                if (address === 0)
+                {
+                    return 0;
+                }
+                host.fillMemory?.(address, 0, bytes);
+                // A device bitmap's colours are the display's: black and white
+                // for a monochrome one, none to copy for a deeper one.
+                const palette = source.palette ? [...source.palette]
+                    : source.bitCount === 1 ? [0x000000, 0xffffff] : undefined;
+                copy = objects.create('bitmap', {
+                    width: across, height: down, planes: 1, bitCount: source.bitCount,
+                    topDown: false, usage: 0, bits: address, section: address, palette,
+                    compression: source.compression ?? 0,
+                    bitfields: [...(source.bitfields ?? [0, 0, 0])], pelsPerMeter: [0, 0],
+                });
+            }
+            else
+            {
+                const attributes = deviceBitmap(across, down,
+                    (flags & LR_MONOCHROME) !== 0 || monochrome ? 1 : screen.bitsPerPixel);
+                copy = attributes ? objects.create('bitmap', attributes) : 0;
+            }
+            if (copy === 0)
+            {
+                return 0;
+            }
+            /** @param {string} name @param {...number} args */
+            const call = (name, ...args)=>(/** @type {any} */ (aliased))[name].handler(args);
+            lend(copy, (/** @type {number} */ target)=>lend(handle >>> 0,
+                (/** @type {number} */ from)=>call('StretchBlt', target, 0, 0, across, down,
+                    from, 0, 0, source.width, source.height, SRCCOPY)));
+            return copy;
+        },
+
+        /**
          * The rectangle a region object holds, or null for a handle that is
          * not a region: what user32 reads when a program names an area to
          * repaint by a region rather than by a rectangle.

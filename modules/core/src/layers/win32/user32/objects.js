@@ -30,6 +30,9 @@
  */
 
 import { ddbToBgra, dibToBgra, planesToBgra } from './cursors.js';
+import {
+    bitsFromPicture, blankBits, maskFromPixels, pictureFromBits, scaleBits,
+} from './icon-bits.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { readText, readWideString, writeText } from './unicode.js';
 import { charactersOf, readToTerminator } from '../common/scan-windows.js';
@@ -170,6 +173,7 @@ const MENUITEMINFO = Object.freeze({
 const MIIM_STATE = 0x0001;
 const MIIM_ID = 0x0002;
 const MIIM_SUBMENU = 0x0004;
+const MIIM_CHECKMARKS = 0x0008;
 const MIIM_TYPE = 0x0010;
 const MIIM_DATA = 0x0020;
 const MIIM_STRING = 0x0040;
@@ -273,7 +277,7 @@ function destroyObjectHandle(host, handle){
  * A parsed menu template: items end to end, a popup's own items nested in it.
  *
  * @typedef {Object} ParsedMenuItem
- * @property {number} id
+ * @property {number | null} id  null for an old-style popup, whose id is its submenu's handle
  * @property {number} type
  * @property {number} state
  * @property {ParsedMenuItem[] | null} popup  The items a popup holds, else null.
@@ -291,7 +295,10 @@ function destroyObjectHandle(host, handle){
  * @property {number} command
  */
 
-/** How deep a menu resource may nest before it is read as damaged. */
+/**
+ * How deep a menu may nest: a resource deeper is read as damaged, and a
+ * submenu that would make a live menu deeper is refused (decisions.md A250).
+ */
 const MAX_MENU_DEPTH = 16;
 
 /**
@@ -378,9 +385,11 @@ const parseMenuLevel = (bytes, start, depth, topLevel)=>{
             || (!popup && id === 0 && named.text === '');
         /** @type {ParsedMenuItem} */
         const item = {
-            id: popup ? 0 : id,
+            // An old-style popup has no id of its own: its submenu's handle is.
+            id: popup ? null : id,
             type: (separator ? MFT_SEPARATOR : 0) | (option & MF_OWNERDRAW),
-            state: option & (MF_GRAYED | MF_DISABLED | MF_CHECKED),
+            state: (option & (MF_GRAYED | MF_DISABLED | MF_CHECKED))
+                | (separator ? MF_GRAYED | MF_DISABLED : 0),
             popup: null,
             text: separator || (option & (MF_BITMAP | MF_OWNERDRAW)) !== 0 ? '' : named.text,
         };
@@ -523,7 +532,19 @@ const parseMenuTemplate = (bytes, bounded = true)=>{
  *           open.
  */
 
+/**
+ * An icon's or cursor's bits: those it was made with, else those its picture
+ * draws, else black of its size.
+ *
+ * @param {any} object
+ * @returns {import('./icon-bits.js').IconBits}
+ */
+const iconBits = object=>object.bits
+    ?? (object.picture?.bgra ? bitsFromPicture(object.picture)
+        : blankBits(object.width ?? 32, object.height ?? 32));
+
 /** CopyImage's image types it copies, and the flag that lets the original go. */
+const IMAGE_BITMAP = 0;
 const IMAGE_ICON = 1;
 const IMAGE_CURSOR = 2;
 const LR_COPYDELETEORG = 0x8;
@@ -543,8 +564,14 @@ const ERROR_INVALID_CURSOR_HANDLE = 1402;
  *     thread?: unknown) => number | Promise<number>} [options.send]
  *        SendMessage, for what the clipboard viewer chain is told. Absent,
  *        the chain is kept and told nothing.
+ * @param {(record: any) => { x: number, y: number, width: number,
+ *     height: number }} [options.menuBar]
+ *        Where a window's menu bar lies: its client area's top-left on the
+ *        screen, which the bar sits just above, the bar's width and height.
+ *        Absent, a menu bar has no place and its items no rectangles.
  */
-export function createObjectFunctions({ host, live, clipboardService, menuChanged, send }){
+export function createObjectFunctions(options){
+    const { host, live, clipboardService, menuChanged, send, menuBar } = options;
     /** @type {Map<number, any>} */
     const menus = new Map();
     /** @type {Map<number, any>} */
@@ -1014,17 +1041,19 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
             const at = id | 0;
             return at >= 0 && at < menu.items.length ? { menu, at } : null;
         }
+        // A popup item's own id is its submenu's handle, and its submenu is
+        // searched before it.
         for (let at = 0; at < menu.items.length; at++)
         {
-            if (menu.items[at].id === (id >>> 0))
-            {
-                return { menu, at };
-            }
             const child = menuOf(menu.items[at].submenu);
             const nested = child ? findItem(child, id, flags) : null;
             if (nested)
             {
                 return nested;
+            }
+            if (menu.items[at].id === (id >>> 0))
+            {
+                return { menu, at };
             }
         }
         return null;
@@ -1090,6 +1119,8 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
             typeData: notText && (type & MF_BITMAP) !== 0 ? typeData : 0,
             // hbmpItem, which a structure of the older size does not have.
             bitmap: declared === MENUITEMINFO.SIZE ? readU32(address + MENUITEMINFO.hbmpItem) : 0,
+            checked: readU32(address + MENUITEMINFO.hbmpChecked),
+            unchecked: readU32(address + MENUITEMINFO.hbmpUnchecked),
         };
     };
 
@@ -1114,9 +1145,10 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
         menus.set(record.handle, record);
         for (const item of parsed)
         {
+            const submenu = item.popup === null ? 0 : materializeMenu(item.popup, true, item.help);
             record.items.push({
-                id: item.id, type: item.type, state: item.state, data: 0, text: item.text,
-                submenu: item.popup === null ? 0 : materializeMenu(item.popup, true, item.help),
+                id: item.id ?? submenu, type: item.type, state: item.state, data: 0,
+                text: item.text, submenu,
             });
         }
         return record.handle;
@@ -1200,12 +1232,17 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
         const bitmap = (flags & MF_BITMAP) !== 0;
         const text = !separator && !bitmap && (flags & MF_OWNERDRAW) === 0;
         return {
-            id: popup ? 0 : id >>> 0,
+            // A popup's id is its submenu's handle, as MENUITEMINFO's wID
+            // reads it back.
+            id: id >>> 0,
             // The layout flags are the item's type as MENUITEMINFO reads it
             // back, MF_BITMAP among them.
             type: (separator ? MFT_SEPARATOR : 0)
                 | (flags & (MF_OWNERDRAW | MF_BITMAP | MF_MENUBARBREAK | MF_MENUBREAK | MF_HELP)),
-            state: flags & (MF_GRAYED | MF_DISABLED | MF_CHECKED | MF_HILITE),
+            // A separator is never chosen: it is grayed and disabled whatever
+            // the flags say (Wine's menu test_CheckMenuRadioItem).
+            state: (flags & (MF_GRAYED | MF_DISABLED | MF_CHECKED | MF_HILITE))
+                | (separator ? MF_GRAYED | MF_DISABLED : 0),
             submenu: popup ? id >>> 0 : 0,
             data: (flags & MF_OWNERDRAW) !== 0 ? newItem >>> 0 : 0,
             // A bitmap item's last argument is its HBITMAP, a magic
@@ -1240,11 +1277,134 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ [handle, flags, id, newItem])=>{
             const menu = menuOf(handle);
-            if (!menu)
+            if (!menu || ((flags & MF_POPUP) !== 0 && !mayHang(menu.handle, id)))
             {
                 return 0;
             }
             menu.items.splice(endOf(menu), 0, flaggedItem(flags, id, newItem, wide));
+            return 1;
+        },
+    });
+
+    /**
+     * What a menu bar's layout depends on: a layout made before any of it
+     * changed is no longer the menu's, as Windows recomputes the bar only
+     * when it is drawn or asked where an item is.
+     *
+     * @param {{ items: any[] }} menu
+     */
+    const layoutKey = menu=>JSON.stringify(menu.items.map((/** @type {any} */ item)=>
+        [item.id, item.type, item.bitmap ?? 0, item.text]));
+
+    /**
+     * Lays a window's menu bar out, one row from the left: each item as wide
+     * as its text in the menu font and a margin either side, a bitmap item
+     * a square of the bar's height, a separator nothing. The rectangles are
+     * relative to the client area's top-left, the bar above it, and kept
+     * with the menu until it changes.
+     *
+     * @param {any} record @param {any} menu
+     */
+    const layOutBar = (record, menu)=>{
+        const bar = menuBar?.(record);
+        if (!bar)
+        {
+            return null;
+        }
+        const MARGIN = 8;
+        let x = 0;
+        const rects = menu.items.map((/** @type {any} */ item)=>{
+            const text = String(item.text ?? '').replace(/&(.)/g, '$1').split('\t')[0];
+            const width = (item.type & MFT_SEPARATOR) !== 0 ? 0
+                : (item.bitmap ?? 0) !== 0 || (item.type & MF_BITMAP) !== 0 ? bar.height
+                    : (host.draw?.measure(0, text).width ?? text.length * 8) + 2 * MARGIN;
+            const rect = { left: x, top: -bar.height, right: x + width, bottom: -1 };
+            x += width;
+            return rect;
+        });
+        menu.barLayout = { key: layoutKey(menu), width: bar.width, rects };
+        return menu.barLayout;
+    };
+
+    /**
+     * A bar's layout as it stands, or null where none was made or the menu
+     * changed since.
+     *
+     * @param {any} menu
+     */
+    const currentLayout = menu=>(menu.barLayout && menu.barLayout.key === layoutKey(menu)
+        ? menu.barLayout : null);
+
+    /**
+     * How deep a menu tree is: one for a menu with no submenus. A submenu
+     * met again on its own path counts as past any limit, the cycle no
+     * menu may hold.
+     *
+     * @param {number} handle @param {Set<number>} [path]
+     * @returns {number}
+     */
+    const depthOf = (handle, path = new Set())=>{
+        const menu = menuOf(handle);
+        if (!menu)
+        {
+            return 0;
+        }
+        if (path.has(menu.handle))
+        {
+            return Infinity;
+        }
+        path.add(menu.handle);
+        let deepest = 0;
+        for (const item of menu.items)
+        {
+            deepest = Math.max(deepest, depthOf(item.submenu, path));
+        }
+        path.delete(menu.handle);
+        return 1 + deepest;
+    };
+
+    /**
+     * Whether a submenu may hang under an item of a menu: not the menu
+     * itself or a menu above it, which would make the tree a cycle, and not
+     * a tree as deep as MAX_MENU_DEPTH already (decisions.md A250). The
+     * refusal leaves the last error alone (Wine's menu test_menu_maxdepth,
+     * test_menu_circref).
+     *
+     * @param {number} parent @param {number} submenu
+     */
+    const mayHang = (parent, submenu)=>{
+        /** @param {number} handle @param {Set<number>} seen @returns {boolean} */
+        const holds = (handle, seen)=>{
+            const menu = menuOf(handle);
+            if (!menu || seen.has(menu.handle))
+            {
+                return false;
+            }
+            seen.add(menu.handle);
+            return menu.handle === (parent >>> 0)
+                || menu.items.some((/** @type {any} */ item)=>holds(item.submenu, seen));
+        };
+        return !holds(submenu, new Set()) && depthOf(submenu) < MAX_MENU_DEPTH;
+    };
+
+    /** ModifyMenuA or ModifyMenuW. @param {boolean} wide */
+    const modifyMenu = wide=>({
+        argBytes: 20,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [handle, position, flags, id, newItem])=>{
+            const menu = menuOf(handle);
+            const found = menu ? findItem(menu, position, flags) : null;
+            if (!found)
+            {
+                return 0;
+            }
+            if ((flags & MF_POPUP) !== 0 && !mayHang(found.menu.handle, id))
+            {
+                return 0;
+            }
+            const held = found.menu.items[found.at];
+            found.menu.items[found.at] = { ...flaggedItem(flags, id, newItem, wide),
+                checked: held.checked ?? 0, unchecked: held.unchecked ?? 0 };
             return 1;
         },
     });
@@ -1261,6 +1421,10 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
             }
             const found = findItem(menu, position, flags);
             const into = found?.menu ?? menu;
+            if ((flags & MF_POPUP) !== 0 && !mayHang(into.handle, id))
+            {
+                return 0;
+            }
             into.items.splice(found ? found.at : endOf(into), 0,
                 flaggedItem(flags, id, newItem, wide));
             return 1;
@@ -1314,6 +1478,8 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
                 noText: described.text === null || described.noText,
                 typeData: given(MIIM_TYPE, described.typeData),
                 bitmap: given(MIIM_BITMAP, described.bitmap),
+                checked: given(MIIM_CHECKMARKS, described.checked),
+                unchecked: given(MIIM_CHECKMARKS, described.unchecked),
             });
             return 1;
         },
@@ -1373,6 +1539,8 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
                 [MIIM_ID, MENUITEMINFO.wID, held.id],
                 [MIIM_SUBMENU, MENUITEMINFO.hSubMenu, held.submenu],
                 [MIIM_DATA, MENUITEMINFO.dwItemData, held.data],
+                [MIIM_CHECKMARKS, MENUITEMINFO.hbmpChecked, held.checked ?? 0],
+                [MIIM_CHECKMARKS, MENUITEMINFO.hbmpUnchecked, held.unchecked ?? 0],
             ];
             if (declared === MENUITEMINFO.SIZE)
             {
@@ -1440,6 +1608,7 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
             const members = [
                 [MIIM_TYPE | MIIM_FTYPE, 'type'], [MIIM_STATE, 'state'], [MIIM_ID, 'id'],
                 [MIIM_SUBMENU, 'submenu'], [MIIM_DATA, 'data'], [MIIM_BITMAP, 'bitmap'],
+                [MIIM_CHECKMARKS, 'checked'], [MIIM_CHECKMARKS, 'unchecked'],
             ];
             for (const [bit, name] of members)
             {
@@ -1776,17 +1945,22 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
                 {
                     return 0;
                 }
-                for (const item of menu.items)
-                {
-                    const child = menuOf(item.submenu);
-                    if (child)
+                // The menu and every submenu under it, each once: a submenu
+                // may hang under two items, or be gone already.
+                /** @param {any} each */
+                const destroy = each=>{
+                    menus.delete(each.handle);
+                    host.handles.close(each.handle);
+                    for (const item of each.items)
                     {
-                        menus.delete(child.handle);
-                        host.handles.close(child.handle);
+                        const child = menuOf(item.submenu);
+                        if (child)
+                        {
+                            destroy(child);
+                        }
                     }
-                }
-                menus.delete(menu.handle);
-                host.handles.close(menu.handle);
+                };
+                destroy(menu);
                 return 1;
             },
         },
@@ -1925,33 +2099,35 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
         /**
          * BOOL ModifyMenuA(HMENU, UINT uPosition, UINT uFlags, UINT_PTR uIDNewItem,
          *                  LPCSTR lpNewItem)
+         * BOOL ModifyMenuW(...)
+         *
+         * The item named by command or by place made over as AppendMenu
+         * would describe it, its check-mark pictures kept; no such item is
+         * FALSE (Wine's menu test_system_menu).
+         */
+        ModifyMenuA: modifyMenu(false),
+        ModifyMenuW: modifyMenu(true),
+
+        /**
          * BOOL SetMenuItemBitmaps(HMENU, UINT uPosition, UINT uFlags,
          *                         HBITMAP hBitmapUnchecked, HBITMAP hBitmapChecked)
          *
-         * The old-style edit and the check-mark pictures. Neither changes a
-         * menu here, and each says so once: a program that redraws its menu on
-         * every command would otherwise be told, silently, that every one of
-         * those redraws failed.
+         * The pictures an item shows unchecked and checked, which
+         * GetMenuItemInfo's MIIM_CHECKMARKS reads back; no such item is FALSE.
          */
-        ModifyMenuA: {
-            argBytes: 20,
-            handler: ()=>{
-                host.divergence?.('ModifyMenuA', 'the item is left as it was');
-                return 1;
-            },
-        },
-        ModifyMenuW: {
-            argBytes: 20,
-            handler: ()=>{
-                host.divergence?.('ModifyMenuW', 'the item is left as it was');
-                return 1;
-            },
-        },
-
         SetMenuItemBitmaps: {
             argBytes: 20,
-            handler: ()=>{
-                host.divergence?.('SetMenuItemBitmaps', 'a menu draws no check-mark pictures here');
+            /** @param {number[]} args */
+            handler: ([handle, position, flags, unchecked, checked])=>{
+                const menu = menuOf(handle);
+                const found = menu ? findItem(menu, position, flags) : null;
+                if (!found)
+                {
+                    return 0;
+                }
+                const item = found.menu.items[found.at];
+                item.unchecked = unchecked >>> 0;
+                item.checked = checked >>> 0;
                 return 1;
             },
         },
@@ -2136,6 +2312,11 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
                 }
                 const previous = record.menu;
                 record.menu = menu >>> 0;
+                const bar = menuOf(menu);
+                if (bar)
+                {
+                    layOutBar(record, bar);
+                }
                 return menuChanged?.(record, previous) ?? 1;
             },
         },
@@ -2143,14 +2324,143 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
         /**
          * BOOL DrawMenuBar(HWND hWnd)
          *
-         * Nothing draws a menu bar, and nothing lays one out either -- so there
-         * is no cached layout for this to invalidate. It succeeds for a window
-         * that exists, which is what a caller checks.
+         * The bar laid out again for what its menu now holds. Nothing draws
+         * a menu bar here yet; its layout is what GetMenuItemRect and
+         * GetMenuBarInfo answer from.
          */
         DrawMenuBar: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([hwnd])=>(live(hwnd) ? 1 : 0),
+            handler: ([hwnd])=>{
+                const record = live(hwnd);
+                if (!record)
+                {
+                    return 0;
+                }
+                const bar = menuOf(record.menu);
+                if (bar)
+                {
+                    layOutBar(record, bar);
+                }
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL GetMenuItemRect(HWND hWnd, HMENU hMenu, UINT uItem, LPRECT lprcItem)
+         *
+         * Where an item is on the screen. An item of the window's menu bar is
+         * laid out now, the bar recomputed for what it holds; an item of a
+         * popup has the rectangle its last showing gave it - none, for one
+         * never shown - offset by the window's client area.
+         */
+        GetMenuItemRect: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([hwnd, handle, item, out])=>{
+                const menu = menuOf(handle);
+                if (!menu || (item >>> 0) >= menu.items.length || (out >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const record = live(hwnd);
+                const origin = record ? menuBar?.(record) ?? { x: 0, y: 0 } : { x: 0, y: 0 };
+                const layout = record && (record.menu >>> 0) === (handle >>> 0)
+                    ? layOutBar(record, menu) : null;
+                const rect = layout?.rects[item >>> 0] ?? { left: 0, top: 0, right: 0, bottom: 0 };
+                writeU32s(out, [rect.left + origin.x, rect.top + origin.y,
+                    rect.right + origin.x, rect.bottom + origin.y]);
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL GetMenuBarInfo(HWND hwnd, LONG idObject, LONG idItem, PMENUBARINFO pmbi)
+         *
+         * A window's menu bar (OBJID_MENU), the whole of it for item 0 and
+         * an item from 1, on the screen as it was last laid out - nothing
+         * since its menu changed. No window is ERROR_INVALID_WINDOW_HANDLE;
+         * OBJID_CLIENT names a popup menu's own window, which this is not,
+         * ERROR_INVALID_MENU_HANDLE; no menu bar, another object, or an item
+         * past the last is FALSE with the error untouched; a structure of
+         * another size ERROR_INVALID_PARAMETER (Wine's menu test_getmenubarinfo).
+         */
+        GetMenuBarInfo: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([hwnd, object, item, out])=>{
+                const OBJID_MENU = -3;
+                const OBJID_CLIENT = -4;
+                const MENUBARINFO_SIZE = 32;
+                const record = live(hwnd);
+                if (!record)
+                {
+                    host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
+                    return 0;
+                }
+                if ((object | 0) === OBJID_CLIENT)
+                {
+                    host.setLastError?.(ERROR_INVALID_MENU_HANDLE);
+                    return 0;
+                }
+                const menu = (object | 0) === OBJID_MENU ? menuOf(record.menu) : null;
+                if (!menu)
+                {
+                    return 0;
+                }
+                if ((out >>> 0) === 0 || readU32(out) !== MENUBARINFO_SIZE)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                if ((item | 0) < 0 || (item | 0) > menu.items.length)
+                {
+                    return 0;
+                }
+                const layout = currentLayout(menu);
+                const origin = menuBar?.(record) ?? { x: 0, y: 0, width: 0 };
+                /** @type {{ left: number, top: number, right: number, bottom: number } | null} */
+                let rect = null;
+                if (layout && (item | 0) === 0 && layout.rects.length > 0)
+                {
+                    rect = { left: 0, top: layout.rects[0].top, right: layout.width,
+                        bottom: layout.rects[0].bottom };
+                }
+                else if (layout && (item | 0) > 0)
+                {
+                    rect = layout.rects[(item | 0) - 1];
+                }
+                writeU32s(out + 4, rect
+                    ? [rect.left + origin.x, rect.top + origin.y, rect.right + origin.x,
+                        rect.bottom + origin.y]
+                    : [0, 0, 0, 0]);
+                writeU32s(out + 20, [record.menu >>> 0, 0, 0]);
+                return 1;
+            },
+        },
+
+        /**
+         * int MenuItemFromPoint(HWND hWnd, HMENU hMenu, POINT ptScreen)
+         *
+         * The item of a window's menu bar under a point on the screen, by
+         * its last layout; -1 for none.
+         */
+        MenuItemFromPoint: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([hwnd, handle, x, y])=>{
+                const menu = menuOf(handle);
+                const record = live(hwnd);
+                const layout = menu ? currentLayout(menu) : null;
+                const origin = record ? menuBar?.(record) : null;
+                if (!layout || !origin)
+                {
+                    return -1;
+                }
+                return layout.rects.findIndex((/** @type {any} */ rect)=>
+                    (x | 0) >= rect.left + origin.x && (x | 0) < rect.right + origin.x
+                    && (y | 0) >= rect.top + origin.y && (y | 0) <= rect.bottom + origin.y);
+            },
         },
 
         /**
@@ -2733,10 +3043,14 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
                 const read = plane=>((plane >>> 0) === 0
                     ? new Uint8Array(size) : host.readMemory(plane >>> 0, size));
                 const hotSpot = { x: x | 0, y: y | 0 };
+                const andPlane = read(and);
+                const xorPlane = read(xor);
+                const bits = { width: across, height: down, colour: null,
+                    mask: Uint8Array.from([...andPlane, ...xorPlane]) };
                 return host.handles.open('cursor', {
-                    hotSpot, width: across, height: down,
+                    hotSpot, width: across, height: down, bits,
                     picture: { width: across, height: down, hotSpot,
-                        bgra: planesToBgra(across, down, read(and), read(xor)) },
+                        bgra: planesToBgra(across, down, andPlane, xorPlane) },
                 });
             },
         },
@@ -2752,11 +3066,11 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
         CreateIcon: {
             argBytes: 28,
             /** @param {number[]} args */
-            handler: ([, width, height, planes, bits, and, xor])=>{
+            handler: ([, width, height, planes, bitsPixel, and, xor])=>{
                 const MAX_SIDE = 256;
                 const across = width | 0;
                 const down = height | 0;
-                const depth = (planes & 0xff) * (bits & 0xff);
+                const depth = (planes & 0xff) * (bitsPixel & 0xff);
                 if (across <= 0 || down <= 0 || across > MAX_SIDE || down > MAX_SIDE
                     || ![1, 4, 8, 16, 24, 32].includes(depth))
                 {
@@ -2768,8 +3082,16 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
                 const mask = read(and, ((across + 15) >>> 4) * 2 * down);
                 const colour = read(xor, ((across * depth + 15) >>> 4) * 2 * down);
                 const hotSpot = { x: across >> 1, y: down >> 1 };
+                // A one-bit icon is monochrome: its mask the two planes, no colour.
+                const bits = depth === 1
+                    ? { width: across, height: down, colour: null,
+                        mask: Uint8Array.from([...mask, ...colour]) }
+                    : { width: across, height: down, mask,
+                        colour: bitsFromPicture({ width: across, height: down,
+                            bgra: ddbToBgra(across, down, depth,
+                                new Uint8Array(mask.length), colour) }).colour };
                 return host.handles.open('icon', {
-                    hotSpot, width: across, height: down,
+                    hotSpot, width: across, height: down, bits,
                     picture: { width: across, height: down, hotSpot,
                         bgra: ddbToBgra(across, down, depth, mask, colour) },
                 });
@@ -2841,25 +3163,30 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
                 const maskSize = maskHandle === 0 ? null
                     : host.bitmapSize?.(maskHandle) ?? (host.bitmapSize ? null
                         : { width: 32, height: mono ? 64 : 32 });
-                if (!maskSize)
+                // No mask is refused with the last error left as it was (Wine's
+                // cursoricon test_CreateIcon); a monochrome mask one line tall
+                // makes an icon no lines tall, which Windows makes.
+                if (!maskSize || maskSize.width <= 0)
                 {
-                    host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
                 const width = maskSize.width;
                 const height = mono ? maskSize.height >> 1 : maskSize.height;
-                if (width <= 0 || height <= 0)
-                {
-                    host.setLastError?.(ERROR_INVALID_PARAMETER);
-                    return 0;
-                }
                 const hotSpot = isIcon ? { x: width >> 1, y: height >> 1 }
                     : { x: hotX, y: hotY };
                 const mask = host.bitmapPixels?.(maskHandle) ?? null;
                 const colour = mono ? mask : host.bitmapPixels?.(colourHandle) ?? null;
+                // The bitmaps copied as GetIconInfo hands them back: the mask
+                // monochrome, the colour at the display's depth and the mask's size.
+                const bits = mask && colour ? {
+                    width, height, maskHeight: mask.height, mask: maskFromPixels(mask),
+                    colour: mono ? null : scaleBits({ width: colour.width,
+                        height: colour.height, mask: new Uint8Array(0),
+                        colour: Uint8Array.from(colour.bgra) }, width, height).colour,
+                } : null;
                 /** @type {any} */
                 let picture = null;
-                if (mask && colour)
+                if (mask && colour && height > 0)
                 {
                     const bgra = new Uint8Array(width * height * 4);
                     /** @param {any} from @param {number} x @param {number} y */
@@ -2893,7 +3220,7 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
                     picture = { width, height, hotSpot, bgra };
                 }
                 return host.handles.open(isIcon ? 'icon' : 'cursor',
-                    { hotSpot, width, height, picture });
+                    { hotSpot, width, height, picture, bits });
             },
         },
 
@@ -2938,20 +3265,29 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
         /**
          * HANDLE CopyImage(HANDLE h, UINT type, int cx, int cy, UINT flags)
          *
-         * An icon or cursor copied as the picture it is, at the size it has:
-         * the handle is new, the object behind it the same drawing, and
-         * LR_COPYDELETEORG lets the original go. A bitmap is GDI's, and not
-         * copied here.
+         * A bitmap copied by GDI, in the form the flags ask (copyBitmap). An
+         * icon or cursor copied at the size asked for, zero keeping a side:
+         * a new handle with its own bits, stretched where the size changes.
+         * LR_COPYDELETEORG lets the original go.
          */
         CopyImage: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([handle, type, , , flags])=>{
+            handler: ([handle, type, cx, cy, flags])=>{
+                if (type >>> 0 === IMAGE_BITMAP)
+                {
+                    const copy = host.copyBitmap?.(handle >>> 0, cx | 0, cy | 0, flags >>> 0) ?? 0;
+                    if (copy !== 0 && (flags & LR_COPYDELETEORG) !== 0)
+                    {
+                        host.deleteObject?.(handle >>> 0);
+                    }
+                    return copy;
+                }
                 const kind = type >>> 0 === IMAGE_ICON ? 'icon'
                     : type >>> 0 === IMAGE_CURSOR ? 'cursor' : null;
                 if (kind === null)
                 {
-                    host.divergence?.('CopyImage', `image type ${type >>> 0} is not copied`);
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
                 /** @param {string} which */
@@ -2970,7 +3306,19 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
                 {
                     return 0;
                 }
-                const copy = host.handles.open(kind, { ...object });
+                const width = (cx | 0) > 0 ? cx | 0 : object.width ?? 32;
+                const height = (cy | 0) > 0 ? cy | 0 : object.height ?? 32;
+                /** @type {any} */
+                const copied = { ...object };
+                if (width !== object.width || height !== object.height)
+                {
+                    const bits = scaleBits(iconBits(object), width, height);
+                    const hotSpot = kind === 'icon' ? { x: width >> 1, y: height >> 1 }
+                        : object.hotSpot ?? { x: 0, y: 0 };
+                    Object.assign(copied, { width, height, hotSpot, bits,
+                        picture: pictureFromBits(bits, hotSpot), standard: undefined });
+                }
+                const copy = host.handles.open(kind, copied);
                 if ((flags & LR_COPYDELETEORG) !== 0)
                 {
                     destroyObjectHandle(host, handle >>> 0);
@@ -2982,9 +3330,10 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
         /**
          * BOOL GetIconInfo(HICON hIcon, PICONINFO piconinfo)
          *
-         * Whether it is an icon and where its hot spot is. The mask and
-         * colour bitmaps a caller would own are not made: the picture is
-         * kept as pixels, not as GDI bitmaps, so both come back empty.
+         * Whether it is an icon, where its hot spot is, and its two bitmaps,
+         * new ones the caller owns and deletes: the monochrome mask - twice
+         * the height for a monochrome icon, which has no colour bitmap - and
+         * the colour at the display's depth.
          */
         GetIconInfo: {
             argBytes: 8,
@@ -3007,15 +3356,27 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
                     host.setLastError?.(ERROR_INVALID_CURSOR_HANDLE);
                     return 0;
                 }
-                host.divergence?.('GetIconInfo', 'the mask and colour bitmaps are not made');
                 const hotSpot = object.hotSpot ?? (icon
                     ? { x: (object.width ?? 32) >> 1, y: (object.height ?? 32) >> 1 }
                     : { x: 0, y: 0 });
+                const bits = iconBits(object);
+                const maskBitmap = host.bitmapFromBits?.(bits.width,
+                    bits.maskHeight ?? (bits.colour ? bits.height : bits.height * 2), 1,
+                    bits.mask) ?? 0;
+                const colourBitmap = bits.colour
+                    ? host.bitmapFromBits?.(bits.width, bits.height, 32, bits.colour) ?? 0 : 0;
+                if (maskBitmap === 0)
+                {
+                    host.divergence?.('GetIconInfo', 'no bitmap can be made here: the mask'
+                        + ' and colour bitmaps come back empty');
+                }
                 const bytes = new Uint8Array(20);
                 const view = new DataView(bytes.buffer);
                 view.setUint32(0, icon ? 1 : 0, true);
                 view.setUint32(4, hotSpot.x >>> 0, true);
                 view.setUint32(8, hotSpot.y >>> 0, true);
+                view.setUint32(12, maskBitmap >>> 0, true);
+                view.setUint32(16, colourBitmap >>> 0, true);
                 host.writeMemory(out >>> 0, bytes);
                 return 1;
             },

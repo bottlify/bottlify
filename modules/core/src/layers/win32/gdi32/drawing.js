@@ -1399,6 +1399,112 @@ export function createDrawingFunctions(
     };
 
     /**
+     * An arc as a path keeps it: cubic curves along the ellipse, one for each
+     * quarter of it the arc crosses - split where the ellipse is at its top,
+     * bottom, left or right - each made of the two ends and the control
+     * points a quarter's curve takes (4/3 tan of a quarter of its angle along
+     * the tangent). The angles are the ellipse's own parameter, on the screen
+     * with y down, so a growing angle turns clockwise.
+     *
+     * @param {number} cx @param {number} cy @param {number} rx @param {number} ry
+     * @param {number} from @param {number} to
+     * @returns {{ start: { x: number, y: number },
+     *     curves: { x: number, y: number }[][] }}
+     */
+    const arcCurves = (cx, cy, rx, ry, from, to)=>{
+        const QUARTER = Math.PI / 2;
+        /** @param {number} t */
+        const point = t=>({ x: cx + rx * Math.cos(t), y: cy + ry * Math.sin(t) });
+        /** @param {number} t */
+        const slope = t=>({ x: -rx * Math.sin(t), y: ry * Math.cos(t) });
+        /** @param {{ x: number, y: number }} p */
+        const rounded = p=>({ x: Math.round(p.x), y: Math.round(p.y) });
+        const way = to >= from ? 1 : -1;
+        const cuts = [from];
+        let quarter = way > 0 ? Math.floor(from / QUARTER) + 1 : Math.ceil(from / QUARTER) - 1;
+        // An arc that ends on a quarter's edge is cut there too, and ends
+        // in a curve of no length, as Windows' path holds it (Wine's path
+        // test_anglearc).
+        while (way > 0 ? quarter * QUARTER <= to + 1e-9 : quarter * QUARTER >= to - 1e-9)
+        {
+            cuts.push(quarter * QUARTER);
+            quarter += way;
+        }
+        cuts.push(to);
+        const curves = [];
+        for (let at = 1; at < cuts.length; at++)
+        {
+            const [a, b] = [cuts[at - 1], cuts[at]];
+            const k = 4 / 3 * Math.tan((b - a) / 4);
+            const [start, end] = [point(a), point(b)];
+            const [leaving, arriving] = [slope(a), slope(b)];
+            curves.push([
+                rounded({ x: start.x + k * leaving.x, y: start.y + k * leaving.y }),
+                rounded({ x: end.x - k * arriving.x, y: end.y - k * arriving.y }),
+                rounded(end),
+            ]);
+        }
+        return { start: rounded(point(from)), curves };
+    };
+
+    /**
+     * Arc's and ArcTo's arc as a path keeps it, in the DC's direction: from
+     * where the start radial meets the ellipse to where the end radial does,
+     * the same radial twice the whole ellipse.
+     *
+     * @param {any} dc @param {number[]} box  left, top, right, bottom, then the radials.
+     */
+    const directedArcCurves = (dc, box)=>{
+        const { left, top, right, bottom } = ellipseBox(box);
+        const [xStart, yStart, xEnd, yEnd] = box.slice(4).map(value=>value | 0);
+        const cx = (left + right) / 2;
+        const cy = (top + bottom) / 2;
+        const rx = Math.max((right - left) / 2, 0.5);
+        const ry = Math.max((bottom - top) / 2, 0.5);
+        /** @param {number} x @param {number} y */
+        const angle = (x, y)=>Math.atan2((y - cy) / ry, (x - cx) / rx);
+        const from = angle(xStart, yStart);
+        let to = angle(xEnd, yEnd);
+        if (dc?.arcDirection === AD_CLOCKWISE)
+        {
+            while (to <= from)
+            {
+                to += 2 * Math.PI;
+            }
+        }
+        else
+        {
+            while (to >= from)
+            {
+                to -= 2 * Math.PI;
+            }
+        }
+        return arcCurves(cx, cy, rx, ry, from, to);
+    };
+
+    /**
+     * An arc into a path: from the current position by a line, or a new
+     * figure begun at its start, then its curves.
+     *
+     * @param {any} interfaces @param {number} handle
+     * @param {ReturnType<typeof arcCurves>} arc @param {boolean} joined
+     */
+    const arcIntoPath = (interfaces, handle, arc, joined)=>{
+        if (joined)
+        {
+            interfaces.lineTo(handle >>> 0, arc.start.x, arc.start.y);
+        }
+        else
+        {
+            interfaces.moveToEx(handle >>> 0, arc.start.x, arc.start.y);
+        }
+        for (const [first, second, end] of arc.curves)
+        {
+            interfaces.bezierTo(handle >>> 0, first, second, end);
+        }
+    };
+
+    /**
      * Chord and Pie: the arc closed into a figure -- by its chord, or through
      * the ellipse's centre -- filled with the brush and outlined with the
      * pen. A rectangle with no inside has no ellipse, and nothing is drawn.
@@ -2089,6 +2195,12 @@ export function createDrawingFunctions(
                 {
                     return 0;
                 }
+                // A path keeps the arc as curves, as Windows' does.
+                if (interfaces.bezierTo)
+                {
+                    arcIntoPath(interfaces, handle, directedArcCurves(dcOf(handle), box), false);
+                    return 1;
+                }
                 const points = directedArc(dcOf(handle), box);
                 const back = interfaces.moveToEx(handle >>> 0, points[0].x, points[0].y);
                 for (const point of points.slice(1))
@@ -2196,6 +2308,11 @@ export function createDrawingFunctions(
                 if (!interfaces)
                 {
                     return 0;
+                }
+                if (interfaces.bezierTo)
+                {
+                    arcIntoPath(interfaces, handle, directedArcCurves(dcOf(handle), box), true);
+                    return 1;
                 }
                 lineThrough(interfaces, handle, directedArc(dcOf(handle), box));
                 return 1;
@@ -2422,6 +2539,13 @@ export function createDrawingFunctions(
                     return 0;
                 }
                 const r = radius | 0;
+                if (interfaces.bezierTo)
+                {
+                    // Counterclockwise on the screen is a falling angle.
+                    arcIntoPath(interfaces, handle,
+                        arcCurves(x | 0, y | 0, r, r, -from, -(from + turn)), true);
+                    return 1;
+                }
                 // A segment for about every two pixels of the way, as the
                 // other arcs are drawn, and no more than a turn's worth of
                 // them for each turn a sweep asks for.

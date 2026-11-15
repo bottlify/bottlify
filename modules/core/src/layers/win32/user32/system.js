@@ -26,6 +26,8 @@ import {
 } from '../kernel32/locale.js';
 import { RT_GROUP_CURSOR, RT_GROUP_ICON, loadResourceObject } from './objects.js';
 import { cursorFilePicture, dibToBgra, groupImageId, iconFilePicture } from './cursors.js';
+import { readFileIcons } from '../shell32/icons.js';
+import { bitsFromPicture, pictureFromBits, scaleBits } from './icon-bits.js';
 import { characterOf, codeForScan, codeForVk, keyFor, keyForCharacter } from './keys.js';
 import { displayModes, refreshOf, registryMode } from './display.js';
 import {
@@ -1138,6 +1140,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
     host.pictures?.(cursorPicture);
     const SM_CXCURSOR = 13;
     const SM_CXICON = 11;
+    const SM_CYICON = 12;
 
     /**
      * A cursor's or icon's picture out of a module: the image of the standard
@@ -2034,7 +2037,9 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                     ? loadIconFile(readText(host, name >>> 0, wide, MAX_PATH), size)
                     : loadResourceObject(host, 'icon', RT_GROUP_ICON, instance, name, wide);
             case IMAGE_CURSOR:
-                return loadResourceObject(host, 'cursor', RT_GROUP_CURSOR, instance, name, wide);
+                return (flags & LR_LOADFROMFILE) !== 0
+                    ? loadCursorFile(readText(host, name >>> 0, wide, MAX_PATH))
+                    : loadResourceObject(host, 'cursor', RT_GROUP_CURSOR, instance, name, wide);
             case IMAGE_BITMAP:
                 return (flags & LR_LOADFROMFILE) !== 0
                     ? loadBitmapFile(readText(host, name >>> 0, wide, MAX_PATH))
@@ -2122,6 +2127,10 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         /** @param {Uint8Array} bytes */
         const done = bytes=>{
             files.close(node);
+            // The file opened and read leaves the last error clear, whether or
+            // not it holds an image of the kind asked for (Wine's
+            // cursoricon test_LoadImageFile).
+            host.setLastError?.(0);
             return make(bytes);
         };
         const read = files.read(node, 0, stat.size);
@@ -2142,6 +2151,78 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 height: picture.height, picture })
             : 0;
     });
+
+    /**
+     * PrivateExtractIcons: the icons of an executable, a library or an .ico
+     * file from an index on, each made at the size asked for - the low word
+     * of cxIcon, and with a second size in its high word a second icon of
+     * each, the pair counting two of nIcons. Without an array it is how
+     * many icons the file holds. piconid, when given, gets each icon's
+     * resource id, zero for an icon file's. The answer is how many icons
+     * were made; a file that is none, or has none, makes none; an empty
+     * name answers ~0.
+     *
+     * @param {number[]} args @param {boolean} wide
+     * @returns {number | Promise<number>}
+     */
+    const extractIcons = ([file, index, cx, cy, icons, ids, count], wide)=>{
+        const volume = host.files;
+        const path = (readText(host, file >>> 0, wide, MAX_PATH) ?? '').trim();
+        // An empty name is ~0, not a count (Wine's resource test_PrivateExtractIcons).
+        if (path === '')
+        {
+            return 0xffffffff;
+        }
+        if (!volume)
+        {
+            return 0;
+        }
+        /**
+         * @template T, U
+         * @param {T | Promise<T>} value @param {(value: T) => U | Promise<U>} then
+         * @returns {U | Promise<U>}
+         */
+        const after = (value, then)=>(value instanceof Promise ? value.then(then) : then(value));
+        if ((icons >>> 0) === 0)
+        {
+            return after(readFileIcons(volume, path, -1), found=>found.count);
+        }
+        const sides = [[cx & 0xffff, cy & 0xffff], [cx >>> 16, cy >>> 16]]
+            .filter(([across])=>across > 0);
+        const wanted = count >>> 0;
+        /**
+         * @param {number} made @returns {number | Promise<number>}
+         */
+        const next = made=>{
+            if (made >= wanted)
+            {
+                return made;
+            }
+            const [across, down] = sides[made % sides.length]
+                ?? [metric(SM_CXICON), metric(SM_CYICON)];
+            const at = (index | 0) + Math.floor(made / sides.length);
+            return after(readFileIcons(volume, path, at, across), found=>{
+                if (!found.picture?.bgra)
+                {
+                    return made;
+                }
+                // The icon is made at the size asked for, its image stretched
+                // to it, and its hot spot is its centre whatever the file says.
+                const height = down > 0 ? down : across;
+                const hotSpot = { x: across >> 1, y: height >> 1 };
+                const bits = scaleBits(bitsFromPicture(found.picture), across, height);
+                const handle = host.handles.open('icon', { hotSpot, width: across, height,
+                    bits, picture: pictureFromBits(bits, hotSpot) });
+                writeU32s(host, (icons >>> 0) + made * 4, [handle]);
+                if ((ids >>> 0) !== 0)
+                {
+                    writeU32s(host, (ids >>> 0) + made * 4, [found.id ?? 0]);
+                }
+                return next(made + 1);
+            });
+        };
+        return next(0);
+    };
 
     /**
      * A cursor out of a .cur or .ani file, as LoadCursorFromFile loads one: a
@@ -5618,6 +5699,23 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             /** @param {number[]} args */
             handler: ([instance, name, type, cx, , flags])=>
                 loadImage(instance, name, type, true, flags, cx),
+        },
+
+        /**
+         * UINT PrivateExtractIconsA(LPCSTR szFileName, int nIconIndex, int cxIcon,
+         *   int cyIcon, HICON *phicon, UINT *piconid, UINT nIcons, UINT flags)
+         */
+        PrivateExtractIconsA: {
+            argBytes: 32,
+            /** @param {number[]} args */
+            handler: args=>extractIcons(args, false),
+        },
+
+        /** UINT PrivateExtractIconsW(LPCWSTR szFileName, ...): the same, the name wide. */
+        PrivateExtractIconsW: {
+            argBytes: 32,
+            /** @param {number[]} args */
+            handler: args=>extractIcons(args, true),
         },
 
         /** HCURSOR LoadCursorA(HINSTANCE hInstance, LPCSTR lpCursorName) */

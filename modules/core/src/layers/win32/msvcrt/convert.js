@@ -880,6 +880,12 @@ export function createConversionFunctions(host){
         /** char *_i64toa(__int64 value, char *buffer, int radix) */
         _i64toa: toText(2, true),
 
+        /** wchar_t *_ui64tow(unsigned __int64 value, wchar_t *buffer, int radix) */
+        _ui64tow: toText(2, false, true),
+
+        /** wchar_t *_i64tow(__int64 value, wchar_t *buffer, int radix) */
+        _i64tow: toText(2, true, true),
+
         /** int abs(int value) -- in the guest */
         abs: guestEntry(inGuest.abs, COMPILED.abs, {}),
 

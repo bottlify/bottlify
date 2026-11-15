@@ -341,3 +341,24 @@ test('a viewport the screen\'s size is the screen, whatever window has a client 
     assert.deepEqual(viewportOrigin(800, 600, { width: 1920, height: 1080 },
         [client(114, 104, 800, 600)]), own, 'a smaller window\'s picture is its own');
 });
+
+test('input a program put in with SendInput is not shown to the low-level hooks again', async()=>{
+    // SendInput shows the hooks itself before it hands the input here; showing
+    // it again had a WH_KEYBOARD_LL hook see each injected key twice.
+    const { api, queue, drain } = await open();
+    /** @type {number[]} */
+    const shown = [];
+    queue.lowLevel = {
+        hooked: ()=>true,
+        show: (/** @type {string} */ _kind, /** @type {any} */ message)=>{
+            shown.push(message.message);
+            return 0;
+        },
+    };
+    api.send({ kind: 'key', code: 'KeyA', down: true, injected: true });
+    assert.equal(drain()[0]?.message, WM.KEYDOWN, 'posted at once, nothing held');
+    assert.deepEqual(shown, [], 'no hook was shown it');
+    api.send({ kind: 'key', code: 'KeyB', down: true });
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.deepEqual(shown, [WM.KEYDOWN], 'a key from the device still is');
+});

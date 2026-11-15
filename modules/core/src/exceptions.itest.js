@@ -364,3 +364,66 @@ test('a frame whose handler no region holds is passed over for the next one',
         const { code } = await runExecutable(t, buildUnmappedHandlerExe());
         assert.equal(code, 0x5a, 'the outer handler ran');
     });
+
+/**
+ * A TIMERPROC that raises, dispatched by DispatchMessage: Windows calls the
+ * procedure inside an __except of its own (UOI_TIMERPROC_EXCEPTION_SUPPRESSION
+ * is on by default), so the exception ends the call answering zero and the
+ * program goes on after DispatchMessage. The procedure raises the way a
+ * compiler's tail call does, leaving RaiseException standing on the
+ * procedure's own frame. Exits 0x5a once it has, with the
+ * procedure run once; 0x66 if it ran another number of times, 0x77 if
+ * DispatchMessage answered anything but zero.
+ */
+function buildTimerProcExceptionExe(){
+    return buildExe({
+        imports: { 'USER32.dll': ['SetTimer', 'DispatchMessageA'],
+            'KERNEL32.dll': ['ExitProcess', 'RaiseException'] },
+        data: { msg: new Array(28).fill(0), count: [0, 0, 0, 0] },
+        codeSize: 0x100,
+        code: ({ iat, at, code })=>{
+            const proc = code(0x80);
+            const main = [
+                0x68, ...u32(proc),                              // push proc
+                0x68, ...u32(1000),                              // push 1000
+                0x6a, 0x00, 0x6a, 0x00,                          // push 0; push 0
+                0xff, 0x15, ...u32(iat('SetTimer')),             // call SetTimer
+                0xa3, ...u32(at('msg') + 8),                     // mov [msg.wParam], eax
+                0xc7, 0x05, ...u32(at('msg') + 4), ...u32(0x113), // msg.message = WM_TIMER
+                0xc7, 0x05, ...u32(at('msg') + 12), ...u32(proc), // msg.lParam = proc
+                0x68, ...u32(at('msg')),                         // push &msg
+                0xff, 0x15, ...u32(iat('DispatchMessageA')),     // call DispatchMessageA
+                0x85, 0xc0,                                      // test eax, eax
+                0x75, 0x19,                                      // jnz to the 0x77 exit
+                0x83, 0x3d, ...u32(at('count')), 0x01,           // cmp dword [count], 1
+                0x75, 0x08,                                      // jne to the 0x66 exit
+                0x6a, 0x5a, 0xff, 0x15, ...u32(iat('ExitProcess')), // exit 0x5a
+                0x6a, 0x66, 0xff, 0x15, ...u32(iat('ExitProcess')), // ran another number of times
+                0x6a, 0x77, 0xff, 0x15, ...u32(iat('ExitProcess')), // DispatchMessage answered
+            ];
+            // As a compiler ends a void procedure on a call: RaiseException's
+            // four arguments written over its own, and a jump, so the raise
+            // returns where the procedure would have.
+            const timerProc = [
+                0xff, 0x05, ...u32(at('count')),                 // inc dword [count]
+                0xc7, 0x44, 0x24, 0x04, ...u32(0xe000beef),      // mov [esp+4], code
+                0xc7, 0x44, 0x24, 0x08, ...u32(0),               // mov [esp+8], 0
+                0xc7, 0x44, 0x24, 0x0c, ...u32(0),               // mov [esp+12], 0
+                0xc7, 0x44, 0x24, 0x10, ...u32(0),               // mov [esp+16], 0
+                0xff, 0x25, ...u32(iat('RaiseException')),       // jmp [RaiseException]
+            ];
+            const bytes = new Array(0x100).fill(0xcc);
+            bytes.splice(0, main.length, ...main);
+            bytes.splice(0x80, timerProc.length, ...timerProc);
+            return bytes;
+        },
+    });
+}
+
+test('an exception a TIMERPROC leaves ends DispatchMessage\'s call to it answering zero',
+    { timeout: 60000 },
+    async t=>{
+        const { code } = await runExecutable(t, buildTimerProcExceptionExe());
+        assert.equal(code, 0x5a, '0x77: DispatchMessage answered nonzero; 0x66: the procedure'
+            + ' ran another number of times; anything else: the exception ended the process');
+    });

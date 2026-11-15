@@ -467,9 +467,10 @@ test('ntdll\'s printers are the runtime\'s own, the wide one with them', ()=>{
 
 test('ntdll\'s wide conversions and character classes are the runtime\'s own', ()=>{
     // Windows' ntdll exports them beside the narrow ones; Wine's ntdll:string
-    // looked each up and called through the null it got back.
+    // looked each up and called through the null it got back. The number-to-text
+    // family, the case changes and the classes are ntdll's own (`crt.js`).
     const host = fakeHost();
-    const names = ['_wtoi', 'wcstol', '_itow', 'towlower', 'iswalpha', '_wcsnicmp', '_snprintf_s'];
+    const names = ['_wtoi', 'wcstol', '_snprintf_s'];
     for (const name of names)
     {
         Object.assign(host.crt, { [name]: { convention: 'cdecl', argBytes: 8, handler: ()=>0 } });
@@ -478,6 +479,10 @@ test('ntdll\'s wide conversions and character classes are the runtime\'s own', (
     for (const name of names)
     {
         assert.equal(fns[name], /** @type {any} */ (host.crt)[name], name);
+    }
+    for (const name of ['_itow', '_i64tow', 'towlower', '_wcsupr', 'iswalpha', '_wcsnicmp'])
+    {
+        assert.notEqual(fns[name], undefined, name);
     }
 });
 

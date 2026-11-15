@@ -18,7 +18,8 @@ import { createLoopbackAdapter } from './loopback.js';
 import {
     AF_INET, FD_ACCEPT, FD_CLOSE, FD_CONNECT, FD_READ, FD_WRITE, FIONBIO, FIONREAD,
     INVALID_SOCKET, SOCKET_ERROR, SOCK_DGRAM, SOCK_STREAM,
-    SOL_SOCKET, SO_TYPE, WSADATA, WSAEINVAL, WSAEMSGSIZE, WSAENOTSOCK, WSAEWOULDBLOCK,
+    SOL_SOCKET, SO_RCVBUF, SO_SNDBUF, SO_TYPE, WSADATA, WSAEINVAL, WSAEMSGSIZE, WSAENOTSOCK,
+    WSAEWOULDBLOCK,
     WSAHOST_NOT_FOUND, WSANOTINITIALISED, WSA_IO_PENDING, WS2_32_ORDINALS, WSOCK32_ORDINALS,
 } from './constants.js';
 import { SOCKADDR_IN_SIZE, writeSockaddr } from './sockaddr.js';
@@ -1694,4 +1695,91 @@ test('WSAHtonl, WSAHtons, WSANtohl and WSANtohs write network order for a socket
     assert.equal(fx.call('WSAGetLastError'), WSAENOTSOCK);
     assert.equal(fx.call('WSAHtonl', [socket, 1, 0]), SOCKET_ERROR);
     assert.equal(fx.call('WSAGetLastError'), WSAEFAULT);
+});
+
+/**
+ * A connected pair whose connection holds `held` bytes: the client sends with
+ * no buffer of its own, the accepted end receives into `held`.
+ *
+ * @param {ReturnType<typeof fixture>} fx @param {number} held
+ */
+function narrow(fx, held){
+    const pair = connected(fx);
+    fx.setDword(OUT2, 0);
+    assert.equal(fx.call('setsockopt', [pair.client, SOL_SOCKET, SO_SNDBUF, OUT2, 4]), 0);
+    fx.setDword(OUT2, held);
+    assert.equal(fx.call('setsockopt', [pair.accepted, SOL_SOCKET, SO_RCVBUF, OUT2, 4]), 0);
+    return pair;
+}
+
+test('a sender that never stops is told it would block, and FD_WRITE comes again', async()=>{
+    const fx = fixture();
+    const { client, accepted } = narrow(fx, 8);
+    const EVENT_HANDLE = 0x78;
+    const EVENTS = 0x700;
+    assert.equal(fx.call('WSAEventSelect', [client, EVENT_HANDLE, FD_WRITE]), 0);
+    assert.deepEqual(fx.signalled, [EVENT_HANDLE], 'a connected socket is writable at once');
+    fx.call('WSAEnumNetworkEvents', [client, EVENT_HANDLE, EVENTS]);
+
+    // The loop Wine's afd test and many a game make, ended by the connection filling.
+    fx.put(BUFFER, 'abcdef');
+    let sends = 0;
+    while (fx.call('send', [client, BUFFER, 6, 0]) === 6)
+    {
+        sends++;
+        assert.ok(sends < 10, 'the connection never filled');
+    }
+    assert.equal(fx.call('send', [client, BUFFER, 6, 0]), SOCKET_ERROR);
+    assert.equal(fx.call('WSAGetLastError'), WSAEWOULDBLOCK);
+    fx.setDword(OUT2, 0);
+    fx.call('ioctlsocket', [accepted, FIONREAD, OUT2]);
+    assert.equal(fx.dword(OUT2), 8, 'the receiver holds what its buffer holds');
+
+    fx.signalled.length = 0;
+    assert.equal(await fx.call('recv', [accepted, OUT, 4, 0]), 4);
+    assert.deepEqual(fx.signalled, [EVENT_HANDLE], 'room made, FD_WRITE again');
+    assert.equal(fx.call('WSAEnumNetworkEvents', [client, EVENT_HANDLE, EVENTS]), 0);
+    assert.equal(fx.dword(EVENTS), FD_WRITE);
+});
+
+test('a blocking send waits until the connection has taken all of it', async()=>{
+    const fx = fixture();
+    const { client, accepted } = narrow(fx, 4);
+
+    fx.put(BUFFER, 'abcdefghij');
+    const sending = fx.call('send', [client, BUFFER, 10, 0]);
+    assert.ok(sending instanceof Promise, 'ten bytes do not fit in four');
+    let answered = false;
+    sending.then(()=>{
+        answered = true;
+    });
+
+    assert.equal(await fx.call('recv', [accepted, OUT, 16, 0]), 4);
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(answered, false, 'six bytes still to go');
+    assert.equal(await fx.call('recv', [accepted, OUT + 4, 16, 0]), 4);
+    assert.equal(await fx.call('recv', [accepted, OUT + 8, 16, 0]), 2);
+    assert.equal(await sending, 10, 'a blocking send answers with every byte');
+    assert.equal(fx.read(OUT, 10), 'abcdefghij');
+});
+
+test('select lists a full socket as not writable, and waits for room', async()=>{
+    const fx = fixture();
+    const { client, accepted } = narrow(fx, 2);
+    fx.put(BUFFER, 'ab');
+    assert.equal(fx.call('send', [client, BUFFER, 2, 0]), 2);
+
+    fx.setDword(FDSET, 1);
+    fx.setDword(FDSET + 4, client);
+    fx.setDword(TIMEVAL, 0);
+    fx.setDword(TIMEVAL + 4, 0);
+    assert.equal(fx.call('select', [0, 0, FDSET, 0, TIMEVAL]), 0, 'full: not writable');
+
+    fx.setDword(FDSET, 1);
+    fx.setDword(FDSET + 4, client);
+    const waiting = fx.call('select', [0, 0, FDSET, 0, 0]);
+    assert.ok(waiting instanceof Promise);
+    await fx.call('recv', [accepted, OUT, 1, 0]);
+    assert.equal(await waiting, 1);
+    assert.equal(fx.dword(FDSET + 4), client);
 });

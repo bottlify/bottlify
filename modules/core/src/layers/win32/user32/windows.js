@@ -34,7 +34,8 @@ import { createDirectoryListFunctions } from './dlgdir.js';
 import { createMdi } from './mdi.js';
 import { createWinEventHooks } from './hooks.js';
 import {
-    WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPSIBLINGS, WS_DISABLED, WS_THICKFRAME, contains,
+    MENU_HEIGHT, WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPSIBLINGS, WS_DISABLED, WS_THICKFRAME,
+    contains,
     createGeometry, createdStyles, edgeFor, frameOf, frameRings, intersect, isEmpty,
 } from './frame.js';
 import {
@@ -734,9 +735,13 @@ const MAX_WINDOW_TEXT = 1 << 16;
  *           Told each activation this layer decides: the window asked for,
  *           the one active before, and whether its thread answers here --
  *           what the messages it then sends cannot say when none is sent.
- * @property {(wndProc: number, message: DispatchedMessage, thread?: unknown) => number} dispatch
+ * @property {(wndProc: number, message: DispatchedMessage, thread?: unknown,
+ *           guarded?: boolean) => number} dispatch
  *           Runs a window procedure. One line from being the bridge's callback.
- *           A caller that has awaited names the thread whose call it answers.
+ *           A caller that has awaited names the thread whose call it answers;
+ *           `guarded` calls it inside a frame of the host's own that ends the
+ *           call answering zero on an exception the procedure leaves
+ *           (`kernel32/dllentry.js`).
  * @property {(entry: number, args: number[], thread?: unknown) => number} [call]
  *           Runs any guest routine with the arguments it declares -- a hook
  *           procedure. Absent in a build with no bridge, and then no hook is
@@ -785,6 +790,15 @@ const MAX_WINDOW_TEXT = 1 << 16;
  *           A GDI bitmap's pixels, top row first, four bytes each in blue,
  *           green, red and a fourth byte: what CreateIconIndirect copies.
  *           Absent, an icon made from bitmaps has its size and no picture.
+ * @property {(width: number, height: number, bitCount: number,
+ *     pixels: Uint8Array) => number} [bitmapFromBits]
+ *           A new device bitmap of bits in CreateBitmap's layout: the mask and
+ *           colour GetIconInfo hands out. Absent, both come back empty.
+ * @property {(handle: number, width: number, height: number,
+ *     flags: number) => number} [copyBitmap]
+ *           CopyImage of a bitmap, GDI's to make. Absent, no bitmap is copied.
+ * @property {(handle: number) => void} [deleteObject]
+ *           DeleteObject, for CopyImage's LR_COPYDELETEORG on a bitmap.
  * @property {import('../kernel32/files.js').FileSystem} [files]
  *           The volume every file call uses, which an image loaded from a
  *           file is read from. Absent, no file is there to load.
@@ -3337,12 +3351,16 @@ export function createWindowFunctions(host){
             {
                 return 0;
             }
+            // Inside a frame of DispatchMessage's own, as Windows' __except
+            // around the call: an exception the procedure does not take ends
+            // the call answering zero (UOI_TIMERPROC_EXCEPTION_SUPPRESSION,
+            // on by default).
             return host.dispatch(message.lParam >>> 0, {
                 ...message,
                 // A TIMERPROC takes the tick count where a window procedure
                 // takes the lParam.
                 lParam: message.time ?? 0,
-            }, thread);
+            }, thread, true);
         }
         // Not `live`: a WM_DESTROY still has to reach the procedure of the
         // window it is telling about its own end.
@@ -7846,6 +7864,15 @@ export function createWindowFunctions(host){
                     0x0001 | 0x0002 | 0x0010]);
             } }),
         ...createObjectFunctions({ host, live, send,
+            // The bar sits just above the client area, the frame's menu height
+            // tall, and as wide as the window inside its edges.
+            menuBar: record=>{
+                const origin = geometry.clientOrigin(record);
+                const window = geometry.windowRect(record);
+                const inset = origin.x - window.left;
+                return { x: origin.x, y: origin.y, width: window.right - window.left - 2 * inset,
+                    height: geometry.frame(record).menu || MENU_HEIGHT };
+            },
             clipboardService: service=>{
                 clipboardAccess = service;
             },

@@ -577,6 +577,17 @@
    ]
   },
   {
+   "path": "tools/checks/check-decision-numbers.mjs",
+   "category": "checks",
+   "kind": "check",
+   "browser": false,
+   "question": "Each decision number is one heading, and every citation of one is carried",
+   "command": "npm run check:boundaries",
+   "tests": [
+    "tools/checks/check-decision-numbers.test.js"
+   ]
+  },
+  {
    "path": "tools/checks/emit-digest.mjs",
    "category": "checks",
    "kind": "check",

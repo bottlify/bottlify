@@ -87,7 +87,7 @@ import {
     shellFolders,
 } from './advapi32/registry.js';
 import { createGdiFunctions } from './gdi32/functions.js';
-import { createWinsockFunctions } from './wsock32/functions.js';
+import { HOSTNAME, createWinsockFunctions } from './wsock32/functions.js';
 import { createLibcefFunctions } from './libcef/functions.js';
 import { createSteamStart } from './steamclient/steam-start.js';
 import { STEAM_PATH, announceSteamClient, createSteamclientFunctions, steamClientDll,
@@ -1567,6 +1567,22 @@ export function createWin32Module(){
                     },
                 },
             });
+            /**
+             * Sets a kernel event by its handle, for WSAEventSelect and an ICMP
+             * echo's: a stale or mistyped handle is the program's mistake, not
+             * a fault here.
+             *
+             * @param {number} handle
+             */
+            const signalEvent = handle=>{
+                try
+                {
+                    kernel.setEvent(kernel.handles.resolve(handle, 'event'));
+                }
+                catch (e){
+                    void e;
+                }
+            };
             const winsock = createWinsockFunctions({
                 readMemory,
                 // The WSA events are kernel32's events, and TransmitFile reads
@@ -1606,18 +1622,7 @@ export function createWin32Module(){
                 // ever runs once the machine is up and the queue exists.
                 /** @param {import('./user32/messages.js').PostedMessage} message */
                 post: message=>queue.post(message),
-                // Readiness as a kernel event, for WSAEventSelect. A stale or
-                // mistyped handle is the program's mistake, not a fault here.
-                /** @param {number} handle */
-                signalEvent: handle=>{
-                    try
-                    {
-                        kernel.setEvent(kernel.handles.resolve(handle, 'event'));
-                    }
-                    catch (e){
-                        void e;
-                    }
-                },
+                signalEvent,
             });
 
             // The host's half of a critical section: the queue behind a contended
@@ -3494,7 +3499,12 @@ export function createWin32Module(){
                         .handler([0x40, bytes]) >>> 0,
                     free: address=>void libraries['KERNEL32.dll'].LocalFree
                         .handler([address]),
-                    handles,
+                    handles, sockets: ()=>sockets.all(), hostName: ()=>HOSTNAME,
+                    setLastError: setError, divergence: config?.divergence, signalEvent,
+                    processId: ()=>processId,
+                    // NotifyAddrChange's handle, which a program may wait on.
+                    openEvent: (/** @type {string} */ name)=>kernel.handles.open('event',
+                        kernel.createEvent({ manualReset: true, signalled: false, name })),
                 }),
                 // TransmitFile is wsock32's and mswsock's, never ws2_32's.
                 'WS2_32.dll': Object.fromEntries(Object.entries(winsock.sockets)
@@ -4614,15 +4624,16 @@ export function createWin32Module(){
                             journal.write('trace', 'input.activate', '{0}', text);
                         }
                     },
-                    dispatch: (wndProc, message, thread)=>bridge.callGuest({
-                        entry: wndProc,
+                    dispatch: (wndProc, message, thread, guarded)=>{
                         // The four arguments a window procedure declares, in
                         // order: at 64 bits a WPARAM widens as the UINT it is
                         // kept as, an LPARAM as the LONG (`callback.js`).
-                        args: [message.hwnd >>> 0, message.message >>> 0,
-                            message.wParam >>> 0, message.lParam | 0],
-                        thread,
-                    }),
+                        const args = [message.hwnd >>> 0, message.message >>> 0,
+                            message.wParam >>> 0, message.lParam | 0];
+                        return guarded
+                            ? callGuarded({ entry: wndProc, args, thread, failed: 0 })
+                            : bridge.callGuest({ entry: wndProc, args, thread });
+                    },
                     call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
                     callerThread: ()=>bridge.callerThread(),
                     answering: (thread, fn)=>bridge.answering(thread, fn),
@@ -4778,6 +4789,11 @@ export function createWin32Module(){
                     // And its pixels, which an icon or a cursor made of it is drawn from.
                     /** @param {number} bitmap */
                     bitmapPixels: bitmap=>gdi.bitmapPixels(bitmap),
+                    // The bitmaps GetIconInfo hands out, and CopyImage of a bitmap.
+                    bitmapFromBits: gdi.bitmapFromBits,
+                    copyBitmap: gdi.copyBitmap,
+                    /** @param {number} handle */
+                    deleteObject: handle=>gdi.table.DeleteObject.handler([handle]),
                     // Shows the desktop once a paint pass has finished. The
                     // graphics layer is above this one and is reached the way the
                     // drawing engine is: through what the assembling caller hands
@@ -5539,6 +5555,11 @@ export function createWin32Module(){
             // VirtualAlloc2 -- finds kernel32's entries, one implementation
             // under the two names.
             libraries['KERNELBASE.dll'] = libraries['KERNEL32.dll'];
+
+            // advapi32 exports the walk over the registry's time zones, which
+            // Windows keeps beside the zone rules in kernelbase: one entry.
+            libraries['ADVAPI32.dll'].EnumDynamicTimeZoneInformation =
+                libraries['KERNEL32.dll'].EnumDynamicTimeZoneInformation;
 
             /** Every function, whichever library exports it. */
             const flat = ()=>Object.assign({}, ...Object.values(libraries));
