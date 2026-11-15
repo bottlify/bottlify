@@ -11553,22 +11553,26 @@ export async function createApp(options){
             ? Math.max(0, START_BYTES - (start.reused?.memory.buffer.byteLength ?? 0))
             : PROCESS_TABLES_BYTES) + START_SLACK_BYTES;
         const fits = ()=>view.fits(wantedNow() + PROCESS_ENGINE_BYTES);
-        while (!fits() && spareMemories.length > 0)
-        {
-            dropSpare(spareMemories.shift());
-        }
-        if (!fits() && start.reused)
-        {
-            spareToRun(start.reused, holder);
-            dropSpare(start.reused);
-            start.reused = null;
-        }
-        const wanted = wantedNow();
+        // Again at every look while it waits: a process that ends meanwhile
+        // leaves its memory kept for the next, which holds the room it gave back.
+        const makeRoom = ()=>{
+            while (!fits() && spareMemories.length > 0)
+            {
+                dropSpare(spareMemories.shift());
+            }
+            if (!fits() && start.reused)
+            {
+                spareToRun(start.reused, holder);
+                dropSpare(start.reused);
+                start.reused = null;
+            }
+        };
         const waitMs = options.machineWaitMs ?? MACHINE_WAIT_MS;
         const until = Date.now() + waitMs;
-        while (!(view.fits(wanted + PROCESS_ENGINE_BYTES)
-            && view.take(PROCESS_ENGINE_BYTES, 'engine')))
+        makeRoom();
+        while (!(fits() && view.take(PROCESS_ENGINE_BYTES, 'engine')))
         {
+            makeRoom();
             if (Date.now() >= until)
             {
                 throw Object.assign(new Error('the machine\'s memory had no room for the'
@@ -11576,6 +11580,7 @@ export async function createApp(options){
             }
             await new Promise(resolve=>setTimeout(resolve, 50));
         }
+        const wanted = wantedNow();
         if (!view.take(wanted))
         {
             view.give(PROCESS_ENGINE_BYTES, 'engine');
