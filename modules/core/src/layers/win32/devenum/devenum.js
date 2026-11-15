@@ -35,6 +35,7 @@ export const IID_IMONIKER = '{0000000F-0000-0000-C000-000000000046}';
 export const IID_IPERSIST_STREAM = '{00000109-0000-0000-C000-000000000046}';
 export const IID_IPERSIST = '{0000010C-0000-0000-C000-000000000046}';
 export const IID_IPROPERTY_BAG = '{55272A00-42CB-11CE-8135-00AA004BB851}';
+export const IID_IPARSE_DISPLAY_NAME = '{0000011A-0000-0000-C000-000000000046}';
 
 const S_OK = 0x00000000;
 const S_FALSE = 0x00000001;
@@ -43,13 +44,19 @@ const E_INVALIDARG = 0x80070057;
 /** HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND): a property the bag does not hold. */
 const PROPERTY_NOT_FOUND = 0x80070002;
 const MK_E_NOSTORAGE = 0x800401ed;
+const MK_E_SYNTAX = 0x800401e4;
+const REGDB_E_CLASSNOTREG = 0x80040154;
 /** MK_S_REDUCED_TO_SELF: a device moniker reduces to nothing simpler. */
 const MK_S_REDUCED_TO_SELF = 0x000401e2;
 /** MKSYS_NONE: not one of the system's monikers. */
 const MKSYS_NONE = 0;
 
 const VT_EMPTY = 0;
+const VT_I4 = 3;
 const VT_BSTR = 8;
+const VT_UI1 = 17;
+const VT_ARRAY = 0x2000;
+const E_OUTOFMEMORY = 0x8007000e;
 
 /** @type {[string, number][]} */
 const ICREATE_DEV_ENUM_SLOTS = [['CreateClassEnumerator', 3]];
@@ -80,6 +87,8 @@ const IMONIKER_SLOTS = [
 ];
 /** @type {[string, number][]} */
 const IPROPERTY_BAG_SLOTS = [['Read', 3], ['Write', 2]];
+/** @type {[string, number][]} */
+const IPARSE_DISPLAY_NAME_SLOTS = [['ParseDisplayName', 4]];
 
 /**
  * A pin as a registration describes it, for matching a request against.
@@ -101,7 +110,8 @@ const IPROPERTY_BAG_SLOTS = [['Read', 3], ['Write', 2]];
  * @property {string} name      Its friendly name.
  * @property {number} merit
  * @property {RegisteredPin[]} pins
- * @property {Map<string, string>} properties  What a program wrote to its property bag.
+ * @property {Map<string, string | number | Uint8Array>} properties  What a program wrote
+ *     to its property bag, in the type it gave: a string, a number, bytes.
  * @property {string} [display]  Its moniker's display name where it is not a software
  *     device's: a DMO is `@device:dmo:{clsid}{category}`.
  */
@@ -153,8 +163,13 @@ export function createFilterStore(){
  * @property {(bytes: number) => number} allocate  Task memory, which CoTaskMemFree frees.
  * @property {(object: import('../ole32/objects.js').ComObject, iid: string) => number} publish
  * @property {(text: string) => number | Promise<number>} allocateString  A BSTR.
+ * @property {(bytes: Uint8Array) => number | Promise<number>} [allocateBytes]  A SAFEARRAY
+ *           of VT_UI1 holding the bytes, as SafeArrayCreateVector makes one.
+ * @property {(address: number, length: number) => Uint8Array} [readMemory]
  * @property {(clsid: string, iid: number, out: number) => number | Promise<number>} createInstance
  *           CoCreateInstance of a class in this process, for the interface at `iid`.
+ * @property {(pointer: number) => any} [objectAt]  The engine's object behind an
+ *           interface pointer, null where the program made it.
  * @property {() => RegisteredFilter[]} [dmos]  The DMOs registered, as the filter
  *           mapper enumerates them beside the filters.
  */
@@ -209,23 +224,32 @@ export function createDeviceEnumeration(host, store){
                 return E_POINTER;
             }
             const wanted = host.readWideString(name >>> 0, NAME_BYTES);
-            const value = wanted === 'FriendlyName' ? filter.name
-                : wanted === 'CLSID' ? filter.clsid
+            const value = wanted === 'FriendlyName' ? filter.name || undefined
+                : wanted === 'CLSID' ? filter.clsid || undefined
                     : filter.properties.get(wanted);
             if (value === undefined)
             {
                 return PROPERTY_NOT_FOUND;
             }
-            // A string property answers as a BSTR whatever type was asked for,
-            // as an empty VARIANT or a BSTR one is the ask that has an answer.
+            // A value answers in the type it is kept in - a string as a BSTR, a
+            // number as a VT_I4, bytes as a SAFEARRAY of VT_UI1, as REG_SZ,
+            // REG_DWORD and REG_BINARY read back - when that or nothing was asked.
+            const natural = typeof value === 'string' ? VT_BSTR
+                : typeof value === 'number' ? VT_I4 : VT_ARRAY | VT_UI1;
             const asked = host.readU32(variant >>> 0) & 0xffff;
-            if (asked !== VT_EMPTY && asked !== VT_BSTR)
+            if (asked !== VT_EMPTY && asked !== natural)
             {
                 return E_INVALIDARG;
             }
-            const bstr = await host.allocateString(value);
-            host.writeMemory(variant >>> 0, dword(VT_BSTR));
-            host.writeMemory((variant >>> 0) + 8, dword(bstr));
+            const payload = typeof value === 'string' ? await host.allocateString(value)
+                : typeof value === 'number' ? value
+                    : await host.allocateBytes?.(value) ?? 0;
+            if (typeof value === 'object' && payload === 0)
+            {
+                return E_OUTOFMEMORY;
+            }
+            host.writeMemory(variant >>> 0, dword(natural));
+            host.writeMemory((variant >>> 0) + 8, dword(payload));
             return S_OK;
         },
         /** HRESULT Write(LPCOLESTR pszPropName, VARIANT *pVar) */
@@ -234,12 +258,50 @@ export function createDeviceEnumeration(host, store){
             {
                 return E_POINTER;
             }
-            if ((host.readU32(variant >>> 0) & 0xffff) !== VT_BSTR)
+            const type = host.readU32(variant >>> 0) & 0xffff;
+            const data = host.readU32((variant >>> 0) + 8);
+            /** @type {string | number | Uint8Array} */
+            let written;
+            if (type === VT_BSTR)
+            {
+                written = host.readWideString(data, NAME_BYTES);
+            }
+            else if (type === VT_I4)
+            {
+                written = data | 0;
+            }
+            else if (type === (VT_ARRAY | VT_UI1) && data !== 0)
+            {
+                // SAFEARRAY: cDims, fFeatures, cbElements, cLocks, pvData, then
+                // the one dimension's count.
+                written = host.readMemory?.(host.readU32(data + 12), host.readU32(data + 16))
+                    ?? new Uint8Array(0);
+            }
+            else
             {
                 return E_INVALIDARG;
             }
-            const text = host.readWideString(host.readU32((variant >>> 0) + 8), NAME_BYTES);
-            filter.properties.set(host.readWideString(name >>> 0, NAME_BYTES), text);
+            const text = typeof written === 'string' ? written : '';
+            const property = host.readWideString(name >>> 0, NAME_BYTES);
+            // FriendlyName and CLSID are the registration's own: a moniker
+            // parsed from a name nothing was under becomes a device in its
+            // category once written to, as the key Windows creates does.
+            if (property === 'FriendlyName' && typeof written === 'string')
+            {
+                filter.name = text;
+            }
+            else if (property === 'CLSID' && typeof written === 'string')
+            {
+                filter.clsid = text.toUpperCase();
+            }
+            else
+            {
+                filter.properties.set(property, written);
+            }
+            if (filter.category !== '' && !store.find(filter.category, filter.instance))
+            {
+                store.register(filter);
+            }
             return S_OK;
         },
     };
@@ -251,9 +313,11 @@ export function createDeviceEnumeration(host, store){
     /** @type {Record<string, (filter: RegisteredFilter, args: number[], self: any) => number | Promise<number>>} */
     const moniker = {
         GetClassID: (filter, [out])=>{
+            // Windows' device moniker answers a missing out pointer here as a
+            // bad argument, where its other methods answer E_POINTER.
             if ((out >>> 0) === 0)
             {
-                return E_POINTER;
+                return E_INVALIDARG;
             }
             host.writeMemory(out >>> 0, guidBytes(CLSID_DEVICE_MONIKER));
             return S_OK;
@@ -264,6 +328,12 @@ export function createDeviceEnumeration(host, store){
             if ((out >>> 0) === 0)
             {
                 return E_POINTER;
+            }
+            if (!filter.clsid)
+            {
+                // A device whose key holds no CLSID binds to no class.
+                host.writeMemory(out >>> 0, dword(0));
+                return REGDB_E_CLASSNOTREG;
             }
             return host.createInstance(filter.clsid, iid >>> 0, out >>> 0);
         },
@@ -286,8 +356,20 @@ export function createDeviceEnumeration(host, store){
             return S_OK;
         },
         Reduce: (filter, [, , , out])=>((out >>> 0) === 0 ? E_POINTER : MK_S_REDUCED_TO_SELF),
-        /** HRESULT IsEqual(IMoniker *pmkOtherMoniker) */
-        IsEqual: (filter, [other])=>((other >>> 0) === 0 ? E_INVALIDARG : S_FALSE),
+        /**
+         * HRESULT IsEqual(IMoniker *pmkOtherMoniker): another device moniker
+         * naming the same registration; a moniker the program made is not one.
+         */
+        IsEqual: (filter, [other])=>{
+            if ((other >>> 0) === 0)
+            {
+                return E_INVALIDARG;
+            }
+            const peer = host.objectAt?.(other >>> 0);
+            const named = peer?.clsid === CLSID_DEVICE_MONIKER ? peer.state : null;
+            return named && displayName(named).toLowerCase() === displayName(filter).toLowerCase()
+                ? S_OK : S_FALSE;
+        },
         /** HRESULT Hash(DWORD *pdwHash) */
         Hash: (filter, [out])=>{
             if ((out >>> 0) === 0)
@@ -419,6 +501,79 @@ export function createDeviceEnumeration(host, store){
         interfaces: [describe(IID_ICREATE_DEV_ENUM, ICREATE_DEV_ENUM_SLOTS, createDevEnum)],
     });
 
-    return { systemDeviceEnum, monikerFor, enumerate, readGuid, guidBytes };
+    /**
+     * The registration a display name names: `@device:sw:{category}\instance`,
+     * or a DMO's `@device:dmo:{clsid}{category}`, matched as their monikers
+     * name them.
+     *
+     * @param {string} text
+     */
+    const named = text=>{
+        const lower = text.toLowerCase();
+        const dmos = host.dmos?.() ?? [];
+        return [...store.list(), ...dmos].find(filter=>displayName(filter).toLowerCase() === lower);
+    };
+
+    /**
+     * A software device's name nothing is registered under: its moniker all
+     * the same, as Windows' parses any well-formed name, binding to nothing
+     * until a filter is registered there.
+     *
+     * @param {string} text
+     * @returns {RegisteredFilter | undefined}
+     */
+    const unregistered = text=>{
+        if (!/^@device:/i.test(text))
+        {
+            return undefined;
+        }
+        // A name with no category in it parses all the same, and names its
+        // own text: nothing is ever registered under it.
+        const match = /^@device:sw:(\{[0-9a-f-]{36}\})\\(.+)$/i.exec(text);
+        return { category: match ? match[1].toUpperCase() : '', instance: match ? match[2] : text,
+            clsid: '', name: '', merit: 0, pins: [], properties: new Map(),
+            display: match ? undefined : text };
+    };
+
+    /**
+     * IParseDisplayName::ParseDisplayName and IMoniker::ParseDisplayName of
+     * CLSID_CDeviceMoniker: the moniker of the registration a whole display
+     * name names, which MkParseDisplayName reaches through the "device" ProgID.
+     *
+     * @param {number} nameAt @param {number} eaten @param {number} out
+     */
+    const parse = (nameAt, eaten, out)=>{
+        if ((nameAt >>> 0) === 0 || (eaten >>> 0) === 0 || (out >>> 0) === 0)
+        {
+            return E_POINTER;
+        }
+        const text = host.readWideString(nameAt >>> 0, NAME_BYTES);
+        host.writeMemory(out >>> 0, dword(0));
+        const filter = named(text) ?? unregistered(text);
+        if (!filter)
+        {
+            host.writeMemory(eaten >>> 0, dword(0));
+            return MK_E_SYNTAX;
+        }
+        host.writeMemory(eaten >>> 0, dword(text.length));
+        host.writeMemory(out >>> 0, dword(monikerFor(filter)));
+        return S_OK;
+    };
+
+    /**
+     * CLSID_CDeviceMoniker made by CoCreateInstance: a device moniker naming
+     * nothing yet, which parses a display name into the one that does.
+     *
+     * @returns {import('../ole32/objects.js').ComClassDefinition}
+     */
+    const deviceMoniker = ()=>({
+        state: null,
+        interfaces: [describe(IID_IPARSE_DISPLAY_NAME, IPARSE_DISPLAY_NAME_SLOTS, {
+            /** HRESULT ParseDisplayName(IBindCtx*, LPOLESTR, ULONG *pchEaten, IMoniker **ppmkOut) */
+            ParseDisplayName: (state, [, name, eaten, out])=>parse(name, eaten, out),
+        })],
+    });
+
+    return { systemDeviceEnum, deviceMoniker, monikerFor, enumerate, readGuid, guidBytes };
 }
 

@@ -57,8 +57,9 @@ import { createStreaming } from './stream.js';
 import { createSystemClock } from './clock.js';
 import { createMemoryAllocator } from './allocator.js';
 import { IAM_FILTER_DATA_SLOTS, IID_IAM_FILTER_DATA, createFilterMapper } from './mapper.js';
+import { registerWindowsFilters } from './registrations.js';
 import {
-    CLSID_SYSTEM_DEVICE_ENUM, createDeviceEnumeration,
+    CLSID_SYSTEM_DEVICE_ENUM, CLSID_DEVICE_MONIKER, createDeviceEnumeration,
 } from '../devenum/devenum.js';
 import { CLSID_ASYNC_READER, CLSID_MEMORY_ALLOCATOR, CLSID_SYSTEM_CLOCK } from './interfaces.js';
 import { createFilterBase } from './filter.js';
@@ -2109,6 +2110,7 @@ export function createQuartz(host){
     };
 
     return { filterGraph, filterMapper1, filterMapper2, systemDeviceEnum: devices?.systemDeviceEnum,
+        deviceMoniker: devices?.deviceMoniker,
         tick, film };
 }
 
@@ -2145,6 +2147,10 @@ export function registerQuartzClasses(registry, host){
     {
         registry.registerClass(CLSID_SYSTEM_DEVICE_ENUM, quartz.systemDeviceEnum);
     }
+    if (quartz.deviceMoniker)
+    {
+        registry.registerClass(CLSID_DEVICE_MONIKER, quartz.deviceMoniker);
+    }
     if (host.stream)
     {
         registry.registerClass(CLSID_MEMORY_ALLOCATOR, createMemoryAllocator(host.stream));
@@ -2160,6 +2166,12 @@ export function registerQuartzClasses(registry, host){
         {
             registry.registerClass(clsid, define);
         }
+    }
+    // Registered as DllRegisterServer registers them, for intelligent connect
+    // and a program walking a category to find; only what is made here.
+    if (host.devices)
+    {
+        registerWindowsFilters(host.devices.store, clsid=>registry.isRegistered(clsid));
     }
     return { tick: quartz.tick, film: quartz.film };
 }

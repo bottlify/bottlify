@@ -1466,6 +1466,7 @@ export function createWin32Module(){
                 // its names out as oleaut32's BSTRs.
                 devices: {
                     store: createFilterStore(),
+                    objectAt: pointer=>bridge.interfaceObject(pointer),
                     readU32: address=>memory.readU32(address),
                     readWideString: (address, maxLength)=>readWideString(address, maxLength),
                     writeMemory,
@@ -1474,6 +1475,17 @@ export function createWin32Module(){
                     allocateString: text=>lent(new Uint8Array(Uint16Array.from(
                         [...text, '\0'].map(char=>char.charCodeAt(0))).buffer),
                     at=>libraries['OLEAUT32.dll'].SysAllocString.handler([at])),
+                    readMemory: (address, length)=>memory.readBytes(address, length),
+                    allocateBytes: async bytes=>{
+                        // VT_UI1's vector, its data where pvData points.
+                        const array = await libraries['OLEAUT32.dll'].SafeArrayCreateVector
+                            .handler([17, 0, bytes.length]) >>> 0;
+                        if (array !== 0)
+                        {
+                            writeMemory(memory.readU32(array + 12), bytes);
+                        }
+                        return array;
+                    },
                     createInstance: (clsid, iid, out)=>lent(/** @type {Uint8Array} */ (parseGuid(clsid)), at=>
                         libraries['ole32.dll'].CoCreateInstance.handler([at, 0, 1, iid, out])),
                     // A DMO enumerates as the DMO wrapper filter registers it: at

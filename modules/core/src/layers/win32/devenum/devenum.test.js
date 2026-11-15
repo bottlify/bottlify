@@ -10,8 +10,11 @@ import { createComObject } from '../ole32/objects.js';
 import { parseGuid } from '../ole32/guid.js';
 import {
     CLSID_LEGACY_AM_FILTER_CATEGORY, CLSID_SYSTEM_DEVICE_ENUM, IID_ICREATE_DEV_ENUM,
-    IID_IENUM_MONIKER, IID_IMONIKER, IID_IPROPERTY_BAG, createDeviceEnumeration, createFilterStore,
+    CLSID_DEVICE_MONIKER, IID_IENUM_MONIKER, IID_IMONIKER, IID_IPARSE_DISPLAY_NAME,
+    IID_IPROPERTY_BAG,
+    createDeviceEnumeration, createFilterStore,
 } from './devenum.js';
+import { CLSID_ACTIVE_MOVIE_CATEGORIES, registerWindowsFilters } from '../quartz/registrations.js';
 
 const S_OK = 0;
 const S_FALSE = 1;
@@ -56,6 +59,19 @@ function machine(){
             const pointer = 0x30000 + objects.size * 16;
             objects.set(pointer, object);
             return pointer;
+        },
+        /** @param {number} pointer */
+        objectAt: pointer=>objects.get(pointer) ?? null,
+        /** @param {number} at @param {number} length */
+        readMemory: (at, length)=>new Uint8Array(memory.buffer.slice(at, at + length)),
+        /** @param {Uint8Array} bytes a SAFEARRAY of the bytes, its data at +12, count at +16 */
+        allocateBytes: bytes=>{
+            const array = host.allocate(24);
+            const data = host.allocate(bytes.length);
+            bytes.forEach((b, i)=>memory.setUint8(data + i, b));
+            memory.setUint32(array + 12, data, true);
+            memory.setUint32(array + 16, bytes.length, true);
+            return array;
         },
         allocateString: (/** @type {string} */ text)=>{
             const at = host.allocate(text.length * 2 + 2);
@@ -125,4 +141,87 @@ test('a moniker\'s storage is a property bag with the filter\'s name and class',
     m.putWide('Nothing', 0x300);
     m.memory.setUint16(0x400, 0, true);
     assert.equal(await m.call(bag, IID_IPROPERTY_BAG, 'Read', [0x300, 0x400, 0]) >>> 0, NOT_FOUND);
+});
+
+test('a display name parses to its device\'s moniker, and to one naming nothing where none is',
+    async()=>{
+        const m = machine();
+        const filter = { category: CLSID_LEGACY_AM_FILTER_CATEGORY, instance: FILTER, clsid: FILTER,
+            name: 'A filter', merit: 0, pins: [], properties: new Map() };
+        m.store.register(filter);
+        const parser = createComObject(CLSID_DEVICE_MONIKER, m.devices.deviceMoniker());
+        m.putWide(`@device:sw:${CLSID_LEGACY_AM_FILTER_CATEGORY.toLowerCase()}\\${FILTER}`, 0x300);
+        assert.equal(m.call(parser, IID_IPARSE_DISPLAY_NAME, 'ParseDisplayName',
+            [0, 0x300, 0x400, 0x404]), S_OK);
+        const parsed = m.objects.get(m.memory.getUint32(0x404, true));
+        const listed = m.devices.monikerFor(filter);
+        assert.equal(m.call(parsed, IID_IMONIKER, 'IsEqual', [listed]), S_OK,
+            'the same registration, whichever way its moniker was made');
+
+        // A name nothing is under parses, and writing to it makes it a device.
+        const other = `@device:sw:${CLSID_LEGACY_AM_FILTER_CATEGORY}\\test`;
+        m.putWide(other, 0x300);
+        assert.equal(m.call(parser, IID_IPARSE_DISPLAY_NAME, 'ParseDisplayName',
+            [0, 0x300, 0x400, 0x404]), S_OK);
+        assert.equal(m.memory.getUint32(0x400, true), other.length, 'the whole name eaten');
+        const fresh = m.objects.get(m.memory.getUint32(0x404, true));
+        assert.equal(m.call(fresh, IID_IMONIKER, 'IsEqual', [listed]), S_FALSE);
+        m.host.writeMemory(0x100, /** @type {Uint8Array} */ (parseGuid(IID_IPROPERTY_BAG)));
+        m.call(fresh, IID_IMONIKER, 'BindToStorage', [0, 0, 0x100, 0x200]);
+        const bag = m.objects.get(m.memory.getUint32(0x200, true));
+        m.putWide('FriendlyName', 0x300);
+        assert.equal(await m.call(bag, IID_IPROPERTY_BAG, 'Read', [0x300, 0x500, 0]) >>> 0,
+            NOT_FOUND, 'nothing written yet');
+        m.memory.setUint16(0x500, 8, true);
+        m.memory.setUint32(0x508, m.host.allocateString('test device'), true);
+        assert.equal(await m.call(bag, IID_IPROPERTY_BAG, 'Write', [0x300, 0x500]), S_OK);
+        assert.equal(m.store.find(CLSID_LEGACY_AM_FILTER_CATEGORY, 'test')?.name, 'test device');
+
+        m.putWide('test', 0x300);
+        assert.equal(m.call(parser, IID_IPARSE_DISPLAY_NAME, 'ParseDisplayName',
+            [0, 0x300, 0x400, 0x404]) >>> 0, 0x800401e4,
+        'not a device moniker\'s name: MK_E_SYNTAX');
+    });
+
+test('a property is read back in the type it was written in: a number, bytes, a string', async()=>{
+    const m = machine();
+    const filter = { category: CLSID_LEGACY_AM_FILTER_CATEGORY, instance: FILTER, clsid: FILTER,
+        name: 'A filter', merit: 0, pins: [], properties: new Map() };
+    m.store.register(filter);
+    const moniker = m.objects.get(m.devices.monikerFor(filter));
+    m.host.writeMemory(0x100, /** @type {Uint8Array} */ (parseGuid(IID_IPROPERTY_BAG)));
+    m.call(moniker, IID_IMONIKER, 'BindToStorage', [0, 0, 0x100, 0x200]);
+    const bag = m.objects.get(m.memory.getUint32(0x200, true));
+    m.putWide('Number', 0x300);
+    m.memory.setUint16(0x500, 3, true);
+    m.memory.setInt32(0x508, -7, true);
+    assert.equal(await m.call(bag, IID_IPROPERTY_BAG, 'Write', [0x300, 0x500]), S_OK);
+    m.memory.setUint16(0x600, 0, true);
+    assert.equal(await m.call(bag, IID_IPROPERTY_BAG, 'Read', [0x300, 0x600, 0]), S_OK);
+    assert.equal(m.memory.getUint16(0x600, true), 3, 'VT_I4');
+    assert.equal(m.memory.getInt32(0x608, true), -7);
+
+    m.putWide('Bytes', 0x300);
+    const array = m.host.allocateBytes(new Uint8Array([1, 2, 3]));
+    m.memory.setUint16(0x500, 0x2011, true);
+    m.memory.setUint32(0x508, array, true);
+    assert.equal(await m.call(bag, IID_IPROPERTY_BAG, 'Write', [0x300, 0x500]), S_OK);
+    m.memory.setUint16(0x600, 0, true);
+    assert.equal(await m.call(bag, IID_IPROPERTY_BAG, 'Read', [0x300, 0x600, 0]), S_OK);
+    assert.equal(m.memory.getUint16(0x600, true), 0x2011, 'VT_ARRAY | VT_UI1');
+    const back = m.memory.getUint32(0x608, true);
+    assert.deepEqual([...m.host.readMemory(m.memory.getUint32(back + 12, true), 3)], [1, 2, 3]);
+    m.memory.setUint16(0x600, 8, true);
+    assert.equal(await m.call(bag, IID_IPROPERTY_BAG, 'Read', [0x300, 0x600, 0]) >>> 0, 0x80070057,
+        'asked for another type: E_INVALIDARG');
+});
+
+test('Windows\' registrations are written for the classes made here, and every category', ()=>{
+    const store = createFilterStore();
+    const made = new Set(['{1B544C20-FD0B-11CE-8C63-00AA0044B51E}']);
+    registerWindowsFilters(store, clsid=>made.has(clsid));
+    const filters = store.list(CLSID_LEGACY_AM_FILTER_CATEGORY);
+    assert.deepEqual(filters.map(f=>f.name), ['AVI Splitter'], 'only what CoCreateInstance makes');
+    assert.equal(filters[0].merit, 0x600000);
+    assert.ok(store.list(CLSID_ACTIVE_MOVIE_CATEGORIES).some(c=>c.name === 'DirectShow Filters'));
 });

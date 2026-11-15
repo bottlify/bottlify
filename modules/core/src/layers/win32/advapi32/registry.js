@@ -520,6 +520,14 @@ const SCRIPT_ENGINES = Object.freeze([
 ]);
 
 /**
+ * devenum's device moniker, by the name MkParseDisplayName reads off
+ * "@device:..." to find the class that parses the rest.
+ */
+const DEVICE_MONIKER = Object.freeze([
+    { clsid: '{4315D437-5B8C-11D0-BD3B-00A0C911CE86}', progIds: ['device'] },
+]);
+
+/**
  * The keys and values every Windows installation carries before any program
  * has run, as far as a program of the era asks for them: where programs go,
  * where the shared-library counts live, where an installer registers what it
@@ -564,12 +572,13 @@ const machineKeys = (windows, directx, processors)=>{
         // CLSIDFromProgID reads for a host that asks for "JScript" or
         // "Msxml2.DOMDocument" by name; the classes themselves are served by
         // the engine.
-        ...[...SCRIPT_ENGINES, ...DOCUMENT_CLASSES].flatMap(({ clsid, progIds })=>[
-            { root: HKEY_LOCAL_MACHINE, path: `${MACHINE_CLASSES}\\CLSID\\${clsid}\\ProgID`,
-                values: { '': progIds[0] } },
-            ...progIds.map(progId=>({ root: HKEY_LOCAL_MACHINE,
-                path: `${MACHINE_CLASSES}\\${progId}\\CLSID`, values: { '': clsid } })),
-        ]),
+        ...[...SCRIPT_ENGINES, ...DOCUMENT_CLASSES, ...DEVICE_MONIKER]
+            .flatMap(({ clsid, progIds })=>[
+                { root: HKEY_LOCAL_MACHINE, path: `${MACHINE_CLASSES}\\CLSID\\${clsid}\\ProgID`,
+                    values: { '': progIds[0] } },
+                ...progIds.map(progId=>({ root: HKEY_LOCAL_MACHINE,
+                    path: `${MACHINE_CLASSES}\\${progId}\\CLSID`, values: { '': clsid } })),
+            ]),
         // Windows Installer's file types, as it registers them: a setup that
         // opens a package with ShellExecuteEx gets msiexec.
         ...[['.msi', 'Msi.Package'], ['.msp', 'Msi.Patch']].map(([extension, type])=>({
