@@ -1462,6 +1462,8 @@ test('DefDlgProcA(WM_NEXTDLGCTL) moves the focus to the next tab stop, or the on
         return fns.CreateWindowExA.handler([0, TEXT, 0, WS_CHILD | WS_VISIBLE | WS_TABSTOP
             | style, 0, 0, 40, 20, dialog, id, HINSTANCE, 0]);
     };
+    assert.equal(fns.DefDlgProcA.handler([dialog, DM_GETDEFID, 0, 0]), (0x534b << 16 | 1) >>> 0,
+        'with no default push button the default id is IDOK');
     const edit = control('Edit', 101, 0);
     const first = control('Button', 201, BS_PUSHBUTTON);
     const second = control('Button', IDCANCEL, BS_PUSHBUTTON);

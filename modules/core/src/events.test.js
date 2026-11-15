@@ -8,6 +8,18 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { REPLAY_LIMIT, createEvents, diagnosticsSummary } from './events.js';
 
+test('what was kept for a first subscriber and is no longer so is taken back', ()=>{
+    const events = createEvents();
+    events.emit('sound-table', { id: 1 });
+    events.emit('sound-table', { id: 2 });
+    events.withdraw('sound-table', (/** @type {any} */ payload)=>payload.id === 1);
+    events.withdraw('never-emitted', ()=>true);
+    /** @type {any[]} */
+    const seen = [];
+    events.on('sound-table', (/** @type {any} */ payload)=>seen.push(payload));
+    assert.deepEqual(seen, [{ id: 2 }], 'only what is still so is handed over');
+});
+
 test('handlers run in registration order until one answers', ()=>{
     const events = createEvents();
     /** @type {string[]} */

@@ -415,7 +415,8 @@ export function reallocLongCode(p){
 /**
  * HGLOBAL GlobalAlloc(UINT uFlags, SIZE_T dwBytes): HeapAlloc's routine on
  * the process heap, GMEM_ZEROINIT zeroing; a request for no bytes, which the
- * host answers with a block of one, is the host's.
+ * host answers with a block of one, and a moveable one, an entry of the
+ * host's handle table, are the host's.
  *
  * @param {Placement} p @param {number} heap
  * @returns {LongRoutine}
@@ -424,6 +425,8 @@ export function globalAllocLongCode(p, heap){
     return assembleLong([
         [0x48, 0x85, 0xd2],                                  // test rdx, rdx
         { jump: JZ, to: 'slow' },
+        [0xf6, 0xc1, 0x02],                                  // test cl, GMEM_MOVEABLE
+        { jump: JNZ, to: 'slow' },
         [0x48, 0x81, 0xfa, ...dword(SMALL_LIMIT)],           // cmp rdx, 1024
         { jump: JA, to: 'slow' },
         [0x49, 0x89, 0xd0],                                  // mov r8, rdx
@@ -434,7 +437,8 @@ export function globalAllocLongCode(p, heap){
 
 /**
  * HGLOBAL GlobalFree(HGLOBAL hMem): NULL for a cell of the process heap
- * taken back, and for NULL; anything else goes to the host's GlobalFree.
+ * taken back, and for NULL; anything else - a moveable handle, eight past an
+ * alignment of sixteen, among it - goes to the host's GlobalFree.
  *
  * @param {Placement} p @param {number} heap
  * @returns {LongRoutine}

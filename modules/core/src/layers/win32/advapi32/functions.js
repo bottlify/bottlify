@@ -26,7 +26,7 @@
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { COMPUTER_NAME } from '../kernel32/drives.js';
 import {
-    HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, HKEY_USERS,
+    HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, HKEY_USERS,
 } from './registry.js';
 import { STATUS } from '../ntdll/status.js';
 import { USER_NAME } from './tokens.js';
@@ -40,6 +40,8 @@ const ERROR_FILE_NOT_FOUND = 2;
 const ERROR_ACCESS_DENIED = 5;
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_PARAMETER = 87;
+const ERROR_BAD_PATHNAME = 161;
+const ERROR_BADKEY = 1010;
 const ERROR_MORE_DATA = 234;
 const ERROR_INSUFFICIENT_BUFFER = 122;
 const ERROR_NO_MORE_ITEMS = 259;
@@ -192,6 +194,8 @@ export { USER_NAME };
  *           Another library's export, called as the program would call it:
  *           the performance-data block reads kernel32's clocks through it.
  * @property {string} [computerName]  This machine's name, in the perf block.
+ * @property {(text: string) => string} [expandEnvironment]  `%NAME%` expanded
+ *     against the process's environment, as ExpandEnvironmentStrings does.
  */
 
 /** @param {number[]} numbers */
@@ -272,9 +276,12 @@ export function createRegistryFunctions(host){
             }
             return result;
         },
-        /** @param {any} key @param {string} name @param {number} type @param {Uint8Array} data */
-        setValue(key, name, type, data){
-            const value = host.hive.setValue(key, name, type, data);
+        /**
+         * @param {any} key @param {string} name @param {number} type @param {Uint8Array} data
+         * @param {boolean} [exact]
+         */
+        setValue(key, name, type, data, exact = false){
+            const value = host.hive.setValue(key, name, type, data, exact);
             notify(key, REG_NOTIFY_CHANGE_LAST_SET);
             return value;
         },
@@ -872,11 +879,21 @@ export function createRegistryFunctions(host){
     /**
      * @param {any} key @param {string | null} subKey
      * @param {number} result @param {number} disposition @param {string} [keyClass]
+     * @param {number} [missing]  the answer to no handle to fill: RegCreateKeyEx's
+     *     ERROR_BADKEY, the older call's ERROR_INVALID_PARAMETER
      */
-    const createKey = (key, subKey, result, disposition, keyClass = '')=>{
+    const createKey = (key, subKey, result, disposition, keyClass = '',
+        missing = ERROR_INVALID_PARAMETER)=>
+    {
         if (result === 0)
         {
-            return ERROR_INVALID_PARAMETER;
+            return missing;
+        }
+        // A name is relative to the key it is given: one that begins at a
+        // backslash is no path under it.
+        if (subKey?.startsWith('\\'))
+        {
+            return ERROR_BAD_PATHNAME;
         }
         const made = hive.create(key, subKey, keyClass);
         writeDword(result, allocate(made.key));
@@ -887,7 +904,8 @@ export function createRegistryFunctions(host){
     const createKeyEx = {
         argBytes: 36,
         handler: onKey((key, [, subKey, , keyClass, , , , result, disposition])=>
-            createKey(key, readText(subKey), result, disposition, readText(keyClass) ?? '')),
+            createKey(key, readText(subKey), result, disposition, readText(keyClass) ?? '',
+                ERROR_BADKEY)),
     };
 
     /**
@@ -898,12 +916,40 @@ export function createRegistryFunctions(host){
      */
     const openKeyExWith = read=>({
         argBytes: 20,
-        handler: onKey((key, [, subKey, , , result])=>{
+        /** @param {number[]} args */
+        handler: ([handle, subKey, , , result])=>{
             if (result === 0)
             {
                 return ERROR_INVALID_PARAMETER;
             }
-            const found = hive.open(key, read(subKey));
+            const key = keyOf(handle);
+            if (!key)
+            {
+                // The wide form clears the handle it was given room for.
+                if (read === readWideText)
+                {
+                    writeDword(result, 0);
+                }
+                return ERROR_INVALID_HANDLE;
+            }
+            let name = read(subKey);
+            // No name under a predefined root is the root itself, no new handle.
+            if ((name ?? '') === '' && hive.root(handle >>> 0))
+            {
+                writeDword(result, handle);
+                return ERROR_SUCCESS;
+            }
+            if (name?.startsWith('\\'))
+            {
+                // HKEY_CLASSES_ROOT's merged view takes a name from its root;
+                // under any other key a leading backslash is no path.
+                if ((handle >>> 0) !== HKEY_CLASSES_ROOT)
+                {
+                    return ERROR_BAD_PATHNAME;
+                }
+                name = name.slice(1);
+            }
+            const found = hive.open(key, name);
             if (!found)
             {
                 // Windows leaves *phkResult undefined here; zeroing it keeps a
@@ -913,9 +959,47 @@ export function createRegistryFunctions(host){
             }
             writeDword(result, allocate(found));
             return ERROR_SUCCESS;
-        }),
+        },
     });
     const openKeyEx = openKeyExWith(readText);
+
+    /**
+     * LONG RegOpenKeyA(HKEY, LPCSTR, PHKEY) and RegOpenKeyW: RegOpenKeyEx with
+     * no options, except that no name answers the very handle passed in,
+     * whatever key it is, and a NULL one with it.
+     *
+     * @param {(pointer: number) => string | null} read
+     */
+    const openKeyWith = read=>({
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: ([handle, subKey, result])=>{
+            if (result === 0)
+            {
+                return ERROR_INVALID_PARAMETER;
+            }
+            // The performance keys are no keys to open, under any name.
+            if (PERFORMANCE_KEYS.has(handle >>> 0))
+            {
+                return ERROR_INVALID_HANDLE;
+            }
+            const name = read(subKey);
+            if ((name ?? '') === '')
+            {
+                writeDword(result, handle);
+                return ERROR_SUCCESS;
+            }
+            if (!keyOf(handle))
+            {
+                return ERROR_INVALID_HANDLE;
+            }
+            if (name?.startsWith('\\'))
+            {
+                return ERROR_BAD_PATHNAME;
+            }
+            return openKeyExWith(read).handler([handle, subKey, 0, 0, result]);
+        },
+    });
 
     /**
      * LONG RegQueryValueExA(HKEY, LPCSTR, LPDWORD, LPDWORD lpType, LPBYTE lpData,
@@ -1048,16 +1132,34 @@ export function createRegistryFunctions(host){
                     writeDword(size, required);
                     return ERROR_SUCCESS;
                 }
-                if (readDword(size) < required)
+                const room = readDword(size);
+                if (room < required)
                 {
                     writeDword(size, required);
                     return ERROR_MORE_DATA;
                 }
                 host.writeMemory(data, bytes);
+                terminateIfRoom(value.type, data, bytes, room, wide ? 2 : 1);
                 writeDword(size, required);
                 return ERROR_SUCCESS;
             })(args)),
     });
+
+    /**
+     * A string answered without its terminator gets one after it where the
+     * caller's buffer has room, uncounted: one, a multi-string's second never.
+     *
+     * @param {number} type @param {number} data @param {Uint8Array} bytes
+     * @param {number} room @param {number} unit
+     */
+    function terminateIfRoom(type, data, bytes, room, unit){
+        const last = bytes.length - unit;
+        const ended = last >= 0 && bytes[last] === 0 && bytes[bytes.length - 1] === 0;
+        if (STRING_TYPES.has(type) && !ended && room >= bytes.length + unit)
+        {
+            host.writeMemory(data + bytes.length, new Uint8Array(unit));
+        }
+    }
 
     /**
      * How text arrives and leaves, the whole of the difference between an A
@@ -1123,7 +1225,8 @@ export function createRegistryFunctions(host){
             const value = values[at];
             const bytes = text.answer(value);
             const nameFits = fitsName(name, nameSize, value.name);
-            const dataFits = data === 0 || readDword(size) >= bytes.length;
+            const room = size === 0 ? 0 : readDword(size);
+            const dataFits = data === 0 || room >= bytes.length;
             writeDwordIf(type, value.type);
             writeDwordIf(size, bytes.length);
             if (!nameFits || !dataFits)
@@ -1135,6 +1238,7 @@ export function createRegistryFunctions(host){
             if (data !== 0)
             {
                 host.writeMemory(data, bytes);
+                terminateIfRoom(value.type, data, bytes, room, text.unit);
             }
             return ERROR_SUCCESS;
         }),
@@ -1359,8 +1463,8 @@ export function createRegistryFunctions(host){
      * data zeroed for RRF_ZEROONFAILURE), and a binary value asked for as a
      * DWORD or a QWORD is ERROR_DATATYPE_MISMATCH unless it is that long. A
      * string is answered terminated whether it was stored so or not. A
-     * REG_EXPAND_SZ without RRF_NOEXPAND is answered as REG_SZ, as Windows
-     * answers it, but unexpanded: this library has no environment to read.
+     * REG_EXPAND_SZ without RRF_NOEXPAND is answered as REG_SZ, expanded
+     * against the process's environment, as Windows answers it.
      *
      * @param {TextForm} text
      */
@@ -1381,11 +1485,15 @@ export function createRegistryFunctions(host){
                 return ERROR_FILE_NOT_FOUND;
             }
             let type = value.type;
+            let answered = value;
             if (type === REG_EXPAND_SZ && (flags & RRF_NOEXPAND) === 0)
             {
                 type = REG_SZ;
+                const stored = decodeAnsi(value.data).replace(/\0.*$/s, '');
+                const expanded = host.expandEnvironment?.(stored) ?? stored;
+                answered = { ...value, data: encodeAnsi(`${expanded}\0`) };
             }
-            let bytes = text.answer(value);
+            let bytes = text.answer(answered);
             if (STRING_TYPES.has(value.type))
             {
                 const last = bytes.length < text.unit
@@ -1457,10 +1565,32 @@ export function createRegistryFunctions(host){
         {
             return ERROR_NOACCESS;
         }
+        // A string whose count stops one character short of the terminator
+        // right after it gets the terminator, as NT counts it in; any other
+        // count is stored as it is, terminated or not.
+        let counted = length;
+        if (STRING_TYPES.has(type >>> 0) && length >= text.unit)
+        {
+            /** @type {Uint8Array | null} */
+            let edge = null;
+            try
+            {
+                edge = host.readMemory(data + length - text.unit, text.unit * 2);
+            }
+            catch {
+                // The count reaches the end of what is mapped: nothing follows.
+            }
+            const unitAt = (/** @type {Uint8Array} */ bytes, /** @type {number} */ at)=>
+                (text.unit === 2 ? bytes[at] | bytes[at + 1] << 8 : bytes[at]);
+            if (edge && unitAt(edge, 0) !== 0 && unitAt(edge, text.unit) === 0)
+            {
+                counted += text.unit;
+            }
+        }
         // The memory layer may hand back a view onto guest memory, and what is
         // stored here outlives the call.
-        const bytes = length === 0 ? new Uint8Array(0) : host.readMemory(data, length).slice();
-        hive.setValue(key, name ?? '', type >>> 0, text.store(type >>> 0, bytes));
+        const bytes = counted === 0 ? new Uint8Array(0) : host.readMemory(data, counted).slice();
+        hive.setValue(key, name ?? '', type >>> 0, text.store(type >>> 0, bytes), true);
         return ERROR_SUCCESS;
     };
 
@@ -1801,12 +1931,7 @@ export function createRegistryFunctions(host){
          * The 16-bit ancestor of RegOpenKeyExA, and still called: no options,
          * no access mask, otherwise the same function.
          */
-        RegOpenKeyA: {
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([handle, subKey, result])=>
-                openKeyEx.handler([handle, subKey, 0, 0, result]),
-        },
+        RegOpenKeyA: openKeyWith(readText),
 
         /**
          * LONG RegCreateKeyExA(HKEY, LPCSTR, DWORD, LPSTR lpClass, DWORD, REGSAM,
@@ -1822,7 +1947,7 @@ export function createRegistryFunctions(host){
             argBytes: 36,
             handler: onKey((key, [, subKey, , keyClass, , , , result, disposition])=>
                 createKey(key, readWideText(subKey), result, disposition,
-                    readWideText(keyClass) ?? '')),
+                    readWideText(keyClass) ?? '', ERROR_BADKEY)),
         },
 
         /**
@@ -1835,9 +1960,7 @@ export function createRegistryFunctions(host){
          */
         RegCreateKeyA: {
             argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([handle, subKey, result])=>
-                createKeyEx.handler([handle, subKey, 0, 0, 0, 0, 0, result, 0]),
+            handler: onKey((key, [, subKey, result])=>createKey(key, readText(subKey), result, 0)),
         },
 
         /**
@@ -2198,12 +2321,7 @@ export function createRegistryFunctions(host){
         RegQueryInfoKeyW: queryInfoKey(WIDE),
 
         /** LONG RegOpenKeyW(HKEY, LPCWSTR, PHKEY) */
-        RegOpenKeyW: {
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([handle, subKey, result])=>
-                openKeyExWith(readWideText).handler([handle, subKey, 0, 0, result]),
-        },
+        RegOpenKeyW: openKeyWith(readWideText),
 
         /** LONG RegCreateKeyW(HKEY, LPCWSTR, PHKEY) */
         RegCreateKeyW: {

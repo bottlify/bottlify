@@ -1,0 +1,384 @@
+/*
+ * Copyright © 2026 Bottlify Project
+ * Licensed under the Mozilla Public License, version 2.0
+ * See LICENSE for details
+ */
+
+/**
+ * ntdll's environment calls: query, expand and set a variable, create and
+ * destroy a block, make one the process's.
+ *
+ * A block is the Unicode form kernel32 hands out: NAME=VALUE entries, each
+ * terminated, an empty one closing the block. Every call takes a block, or
+ * NULL for the process's own - and then it is kernel32's store that answers,
+ * so a variable set through either library is read back through the other.
+ * Names compare without regard to case, as RtlEqualUnicodeString compares
+ * them with CaseInSensitive set.
+ */
+
+import { STATUS } from './status.js';
+
+const STATUS_VARIABLE_NOT_FOUND = 0xc0000100;
+/** The most a block may hold, in UTF-16 units; a walk stops there. */
+const BLOCK_LIMIT = 0x100000;
+
+/**
+ * @typedef {Object} EnvironmentHost
+ * @property {(address: number, length: number) => Uint8Array} readMemory
+ * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {Record<string, { handler: Function }>} kernel32
+ * @property {(bytes: number) => number} allocate  From the process heap.
+ * @property {(address: number) => boolean} free
+ */
+
+/**
+ * @param {EnvironmentHost} host
+ * @returns {Record<string, { argBytes: number, handler: Function }>}
+ */
+export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, allocate, free }){
+    /** @param {number} address */
+    const u32 = address=>new DataView(readMemory(address, 4).buffer.slice(0)).getUint32(0, true);
+    /** @param {number} address @param {number} value */
+    const setU32 = (address, value)=>{
+        const bytes = new Uint8Array(4);
+        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
+        writeMemory(address, bytes);
+    };
+    /** @param {number} address @param {number} units */
+    const readUnits = (address, units)=>{
+        const bytes = readMemory(address, units * 2);
+        let text = '';
+        for (let at = 0; at + 1 < bytes.length; at += 2)
+        {
+            text += String.fromCharCode(bytes[at] | bytes[at + 1] << 8);
+        }
+        return text;
+    };
+    /** @param {string} text */
+    const wide = text=>{
+        const bytes = new Uint8Array(text.length * 2);
+        for (let at = 0; at < text.length; at++)
+        {
+            bytes[at * 2] = text.charCodeAt(at) & 0xff;
+            bytes[at * 2 + 1] = text.charCodeAt(at) >>> 8;
+        }
+        return bytes;
+    };
+    /** A UNICODE_STRING's text. @param {number} address */
+    const counted = address=>readUnits(u32(address + 4), (readMemory(address, 2)[0]
+        | readMemory(address, 2)[1] << 8) >>> 1);
+
+    /**
+     * The entries of a block, in order.
+     *
+     * @param {number} block
+     * @returns {[string, string][]}
+     */
+    const entries = block=>{
+        /** @type {[string, string][]} */
+        const list = [];
+        let at = block;
+        let entry = '';
+        for (let units = 0; units < BLOCK_LIMIT; units++, at += 2)
+        {
+            const pair = readMemory(at, 2);
+            const code = pair[0] | pair[1] << 8;
+            if (code !== 0)
+            {
+                entry += String.fromCharCode(code);
+                continue;
+            }
+            if (entry === '')
+            {
+                break;
+            }
+            // A name may itself begin with '=' (the drives' current folders).
+            const split = entry.indexOf('=', 1);
+            list.push(split < 0 ? [entry, ''] : [entry.slice(0, split), entry.slice(split + 1)]);
+            entry = '';
+        }
+        return list;
+    };
+    /** The process's block, kernel32's, read and given back. */
+    const processEntries = ()=>{
+        const block = kernel32.GetEnvironmentStringsW.handler([]) >>> 0;
+        try
+        {
+            return entries(block);
+        }
+        finally
+        {
+            kernel32.FreeEnvironmentStringsW?.handler([block]);
+        }
+    };
+    /**
+     * A variable's value in a block, or the process's where it is NULL.
+     *
+     * @param {number} block @param {string} name
+     * @returns {string | undefined}
+     */
+    const lookup = (block, name)=>{
+        const wanted = name.toUpperCase();
+        return (block === 0 ? processEntries() : entries(block))
+            .find(([key])=>key.toUpperCase() === wanted)?.[1];
+    };
+    /**
+     * `%NAME%` replaced by its value; one with no variable left as it was.
+     *
+     * @param {number} block @param {string} text
+     */
+    const expand = (block, text)=>text.replace(/%([^%]+)%/g,
+        (whole, name)=>lookup(block, name) ?? whole);
+    /** A new block of these entries. @param {[string, string][]} list */
+    const blockOf = list=>{
+        const text = `${list.map(([key, value])=>`${key}=${value}\0`).join('')}\0`;
+        const at = allocate(text.length * 2);
+        if (at !== 0)
+        {
+            writeMemory(at, wide(text));
+        }
+        return at;
+    };
+    /**
+     * A value into a buffer of `room` bytes, terminated where the terminator
+     * fits too: the status says whether it did.
+     *
+     * @param {string} value @param {number} buffer @param {number} room
+     */
+    const put = (value, buffer, room)=>{
+        if (value.length * 2 > room)
+        {
+            return STATUS.BUFFER_TOO_SMALL;
+        }
+        writeMemory(buffer, wide(value.length * 2 + 2 <= room ? `${value}\0` : value));
+        return STATUS.SUCCESS;
+    };
+
+    return {
+        /**
+         * NTSTATUS RtlQueryEnvironmentVariable_U(PWSTR Environment,
+         *     PUNICODE_STRING Name, PUNICODE_STRING Value)
+         *
+         * Value.Length is the value's length in bytes whether or not it fitted
+         * in Value.MaximumLength.
+         */
+        RtlQueryEnvironmentVariable_U: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([block, name, value])=>{
+                const found = lookup(block >>> 0, counted(name >>> 0));
+                if (found === undefined)
+                {
+                    return STATUS_VARIABLE_NOT_FOUND;
+                }
+                const head = readMemory(value >>> 0, 4);
+                const room = head[2] | head[3] << 8;
+                writeMemory(value >>> 0, Uint8Array.of(found.length * 2 & 0xff,
+                    found.length * 2 >>> 8 & 0xff));
+                return put(found, u32((value >>> 0) + 4), room);
+            },
+        },
+
+        /**
+         * NTSTATUS RtlQueryEnvironmentVariable(PWSTR Environment, PCWSTR Name,
+         *     SIZE_T NameLength, PWSTR Value, SIZE_T ValueLength, PSIZE_T ReturnLength)
+         *
+         * Lengths in characters.
+         */
+        RtlQueryEnvironmentVariable: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([block, name, nameLength, value, valueLength, returned])=>{
+                const found = lookup(block >>> 0, readUnits(name >>> 0, nameLength >>> 0));
+                if (found === undefined)
+                {
+                    return STATUS_VARIABLE_NOT_FOUND;
+                }
+                // A buffer that holds the value and its terminator gets both and
+                // the value's length; a smaller one, nothing and the length the
+                // terminator needs too.
+                if (found.length + 1 > (valueLength >>> 0))
+                {
+                    setU32(returned >>> 0, found.length + 1);
+                    return STATUS.BUFFER_TOO_SMALL;
+                }
+                setU32(returned >>> 0, found.length);
+                return put(found, value >>> 0, (valueLength >>> 0) * 2);
+            },
+        },
+
+        /**
+         * NTSTATUS RtlExpandEnvironmentStrings_U(PWSTR Environment,
+         *     PUNICODE_STRING Source, PUNICODE_STRING Destination, PULONG ReturnLength)
+         *
+         * ReturnLength is the expansion's size in bytes with its terminator.
+         */
+        RtlExpandEnvironmentStrings_U: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([block, source, destination, returned])=>{
+                const expanded = expand(block >>> 0, counted(source >>> 0));
+                if ((returned >>> 0) !== 0)
+                {
+                    setU32(returned >>> 0, expanded.length * 2 + 2);
+                }
+                const head = readMemory(destination >>> 0, 4);
+                const room = head[2] | head[3] << 8;
+                if (expanded.length * 2 + 2 > room)
+                {
+                    return STATUS.BUFFER_TOO_SMALL;
+                }
+                writeMemory(destination >>> 0, Uint8Array.of(expanded.length * 2 & 0xff,
+                    expanded.length * 2 >>> 8 & 0xff));
+                return put(expanded, u32((destination >>> 0) + 4), room);
+            },
+        },
+
+        /**
+         * NTSTATUS RtlExpandEnvironmentStrings(PWSTR Environment, PWSTR Source,
+         *     SIZE_T SourceLength, PWSTR Destination, SIZE_T DestinationLength,
+         *     PSIZE_T ReturnLength)
+         *
+         * In characters, the count including the terminator.
+         */
+        RtlExpandEnvironmentStrings: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([block, source, sourceLength, destination, destinationLength, returned])=>{
+                const expanded = expand(block >>> 0, readUnits(source >>> 0, sourceLength >>> 0));
+                if ((returned >>> 0) !== 0)
+                {
+                    setU32(returned >>> 0, expanded.length + 1);
+                }
+                if (expanded.length + 1 > (destinationLength >>> 0))
+                {
+                    return STATUS.BUFFER_TOO_SMALL;
+                }
+                return put(expanded, destination >>> 0, (destinationLength >>> 0) * 2);
+            },
+        },
+
+        /**
+         * NTSTATUS RtlSetEnvironmentVariable(PWSTR *Environment,
+         *     PUNICODE_STRING Name, PUNICODE_STRING Value)
+         *
+         * Into the block *Environment names, which is replaced by a new one and
+         * the old freed; into the process's where Environment is NULL. A NULL
+         * value removes the variable; a name with '=' past its first character
+         * is no name.
+         */
+        RtlSetEnvironmentVariable: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([where, name, value])=>{
+                const key = counted(name >>> 0);
+                if (key === '' || key.indexOf('=', 1) >= 0)
+                {
+                    return STATUS.INVALID_PARAMETER;
+                }
+                const text = (value >>> 0) === 0 ? null : counted(value >>> 0);
+                if ((where >>> 0) === 0)
+                {
+                    set(key, text);
+                    return STATUS.SUCCESS;
+                }
+                const old = u32(where >>> 0);
+                const list = (old === 0 ? [] : entries(old))
+                    .filter(([entry])=>entry.toUpperCase() !== key.toUpperCase());
+                if (text !== null)
+                {
+                    list.push([key, text]);
+                }
+                const fresh = blockOf(list);
+                if (fresh === 0)
+                {
+                    return STATUS.NO_MEMORY;
+                }
+                setU32(where >>> 0, fresh);
+                if (old !== 0)
+                {
+                    free(old);
+                }
+                return STATUS.SUCCESS;
+            },
+        },
+
+        /**
+         * NTSTATUS RtlCreateEnvironment(BOOLEAN CloneCurrent, PWSTR *Environment)
+         *
+         * A copy of the process's block, or an empty one.
+         */
+        RtlCreateEnvironment: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([clone, out])=>{
+                const fresh = blockOf((clone & 0xff) !== 0 ? processEntries() : []);
+                if (fresh === 0)
+                {
+                    return STATUS.NO_MEMORY;
+                }
+                setU32(out >>> 0, fresh);
+                return STATUS.SUCCESS;
+            },
+        },
+
+        /** NTSTATUS RtlDestroyEnvironment(PWSTR Environment) */
+        RtlDestroyEnvironment: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([block])=>{
+                free(block >>> 0);
+                return STATUS.SUCCESS;
+            },
+        },
+
+        /**
+         * NTSTATUS RtlSetCurrentEnvironment(PWSTR NewEnvironment, PWSTR *OldEnvironment)
+         *
+         * The block's variables become the process's, all others gone; the
+         * process's as they were are handed back as a block of their own. The
+         * block stays the caller's: the store copies what it holds.
+         */
+        RtlSetCurrentEnvironment: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([block, old])=>{
+                const before = processEntries();
+                if ((old >>> 0) !== 0)
+                {
+                    setU32(old >>> 0, blockOf(before));
+                }
+                // No block is no variables at all.
+                const after = (block >>> 0) === 0 ? [] : entries(block >>> 0);
+                const kept = new Set(after.map(([key])=>key.toUpperCase()));
+                for (const [key] of before)
+                {
+                    if (!kept.has(key.toUpperCase()))
+                    {
+                        set(key, null);
+                    }
+                }
+                for (const [key, value] of after)
+                {
+                    set(key, value);
+                }
+                return STATUS.SUCCESS;
+            },
+        },
+    };
+
+    /** @param {string} key @param {string | null} value */
+    function set(key, value){
+        const scratch = allocate((key.length + (value?.length ?? 0) + 2) * 2);
+        try
+        {
+            writeMemory(scratch, wide(`${key}\0${value ?? ''}\0`));
+            kernel32.SetEnvironmentVariableW.handler([scratch,
+                value === null ? 0 : scratch + (key.length + 1) * 2]);
+        }
+        finally
+        {
+            free(scratch);
+        }
+    }
+}

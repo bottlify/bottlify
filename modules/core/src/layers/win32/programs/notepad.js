@@ -202,7 +202,7 @@ export async function runNotepad(context){
  * @param {import('./msiexec.js').ProgramContext} context @param {string} path
  * @returns {Promise<string | null>}
  */
-async function readText(context, path){
+export async function readText(context, path){
     const { call } = context;
     const handle = await call('KERNEL32.dll', 'CreateFileW', [context.wide(path), GENERIC_READ,
         FILE_SHARE_READ, 0, OPEN_EXISTING, 0, 0]);

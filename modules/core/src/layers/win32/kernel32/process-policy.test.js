@@ -25,9 +25,11 @@ const CURRENT_THREAD = 0xfffffffe;
  * @param {{ registers?: Record<string, number>,
  *     setRegisters?: (values: Record<string, number>) => void,
  *     divergence?: (api: string, detail: string) => void,
- *     flushProcessWrites?: () => true | Promise<true> }} [options]
+ *     flushProcessWrites?: () => true | Promise<true>,
+ *     processors?: { count: () => number, systemMask: () => number } }} [given]
  */
-function machine({ registers = {}, setRegisters, divergence, flushProcessWrites } = {}){
+function machine(given = {}){
+    const { registers = {}, setRegisters, divergence, flushProcessWrites, processors } = given;
     const bytes = new Uint8Array(0x10000);
     const view = new DataView(bytes.buffer);
     /** @type {number[]} */
@@ -69,6 +71,7 @@ function machine({ registers = {}, setRegisters, divergence, flushProcessWrites 
             processId: 0x100,
             setRegisters,
             divergence,
+            processors,
         }));
     /** @param {string} name @param {...number} args */
     const call = (name, ...args)=>(name === 'NtContinue'
@@ -279,6 +282,30 @@ test('the handle count, debugging, power and memory notifications', ()=>{
     assert.equal(call('WerRegisterFile', 0x2000, 1, 0), 0);
     assert.equal(call('WerRegisterMemoryBlock', 0x2000, 16), 0);
     assert.equal(call('FlushProcessWriteBuffers'), 0);
+});
+
+test('the one NUMA node holds every processor, and no other node or processor is one', ()=>{
+    // MSDN GetNumaNodeProcessorMask(Ex), GetNumaProcessorNode(Ex); one node, as
+    // GetNumaHighestNodeNumber says.
+    const { view, errors, call } = machine({ processors: { count: ()=>4, systemMask: ()=>0xf } });
+    assert.equal(call('GetNumaNodeProcessorMask', 0, 0x2000), 1);
+    assert.equal(view.getBigUint64(0x2000, true), 0xfn);
+    assert.equal(call('GetNumaNodeProcessorMask', 1, 0x2000), 0);
+    assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER);
+    assert.equal(call('GetNumaNodeProcessorMaskEx', 0, 0x2010), 1);
+    assert.deepEqual([view.getUint32(0x2010, true), view.getUint16(0x2014, true)], [0xf, 0],
+        'the mask, in group 0');
+
+    assert.equal(call('GetNumaProcessorNode', 3, 0x2020), 1);
+    assert.equal(view.getUint8(0x2020), 0);
+    assert.equal(call('GetNumaProcessorNode', 4, 0x2020), 0, 'a fifth processor is none');
+    assert.equal(view.getUint8(0x2020), 0xff);
+    view.setUint32(0x2030, 0x00020000, true);
+    assert.equal(call('GetNumaProcessorNodeEx', 0x2030, 0x2040), 1, 'group 0, number 2');
+    assert.equal(view.getUint16(0x2040, true), 0);
+    view.setUint32(0x2030, 0x00000001, true);
+    assert.equal(call('GetNumaProcessorNodeEx', 0x2030, 0x2040), 0, 'group 1 is none');
+    assert.equal(view.getUint16(0x2040, true), 0xffff);
 });
 
 test('FlushProcessWriteBuffers returns once the other executors have passed a barrier', async()=>{

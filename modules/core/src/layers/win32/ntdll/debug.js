@@ -79,6 +79,21 @@ export function createDebugFunctions(host){
     /** @param {number} pointer @param {number} value */
     const writeU32 = (pointer, value)=>host.writeMemory(pointer >>> 0, dword(value));
 
+    /**
+     * The argument slots a va_list points at, as many as DbgPrint reads.
+     *
+     * @param {number} list
+     * @returns {number[]}
+     */
+    const slots = list=>{
+        if ((list >>> 0) === 0)
+        {
+            return [];
+        }
+        const view = new DataView(host.readMemory(list >>> 0, VARIADIC_SLOTS * 4).slice().buffer);
+        return Array.from({ length: VARIADIC_SLOTS }, (_, at)=>view.getUint32(at * 4, true));
+    };
+
     /** @type {Record<string, any>} */
     const functions = {
         /**
@@ -137,6 +152,48 @@ export function createDebugFunctions(host){
             argBytes: 12 + VARIADIC_SLOTS * 4,
             /** @param {number[]} args */
             handler: args=>functions.DbgPrint.handler(args.slice(2)),
+        },
+
+        /**
+         * ULONG vDbgPrintEx(ULONG ComponentId, ULONG Level, PCCH Format, va_list)
+         *
+         * DbgPrintEx with its arguments where the va_list points.
+         */
+        vDbgPrintEx: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([, , format, list])=>functions.DbgPrint.handler([format, ...slots(list)]),
+        },
+
+        /**
+         * ULONG vDbgPrintExWithPrefix(PCCH Prefix, ULONG ComponentId, ULONG Level,
+         *   PCCH Format, va_list)
+         *
+         * The prefix, then the message, as one line.
+         */
+        vDbgPrintExWithPrefix: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([prefix, , , format, list])=>{
+                const lead = (prefix >>> 0) === 0 ? '' : host.readCString(prefix >>> 0,
+                    DBG_PRINT_LIMIT);
+                const print = host.crt._snprintf;
+                const say = host.kernel32.OutputDebugStringA;
+                const buffer = host.allocate(DBG_PRINT_LIMIT + 1);
+                if (!print || !say || buffer === 0 || (format >>> 0) === 0)
+                {
+                    return STATUS.SUCCESS;
+                }
+                const head = Uint8Array.from([...lead].map(ch=>ch.charCodeAt(0) & 0xff))
+                    .subarray(0, DBG_PRINT_LIMIT);
+                host.writeMemory(buffer, head);
+                print.handler([buffer + head.length, DBG_PRINT_LIMIT - head.length, format,
+                    ...slots(list)]);
+                host.writeMemory(buffer + DBG_PRINT_LIMIT, new Uint8Array(1));
+                say.handler([buffer]);
+                host.free(buffer);
+                return STATUS.SUCCESS;
+            },
         },
 
         /**

@@ -199,7 +199,7 @@ test('PrintDlg and PageSetupDlg find no printer, and the default asked with sett
         assert.equal(m.said.filter(line=>line.startsWith('PrintDlgA:')).length, 1, 'said once');
     });
 
-test('PrintDlgEx answers an HRESULT: the argument, the owner, then no printer', ()=>{
+test('PrintDlgEx answers an HRESULT: the argument, the owner, the pages, then no printer', ()=>{
     const m = dialogsOver();
     const E_INVALIDARG = 0x80070057;
     const E_HANDLE = 0x80070006;
@@ -213,7 +213,14 @@ test('PrintDlgEx answers an HRESULT: the argument, the owner, then no printer', 
         m.put32(RECORD, [84, 0x999]);
         assert.equal(m.fns[name].handler([RECORD]), E_HANDLE, 'an owner that is no window');
         m.put32(RECORD, [84, 0x100]);
-        assert.equal(m.fns[name].handler([RECORD]), E_FAIL);
+        assert.equal(m.fns[name].handler([RECORD]), E_INVALIDARG, 'page 0 of no property pages');
+        m.put32(RECORD + 76, [0xffffffff]);
+        assert.equal(m.fns[name].handler([RECORD]), E_INVALIDARG, 'no room for page ranges');
+        m.put32(RECORD + 36, [1, 0x300]);
+        assert.equal(m.fns[name].handler([RECORD]), E_FAIL, 'ranges with room for them');
+        m.put32(RECORD + 36, [0, 0]);
+        m.put32(RECORD + 20, [0x0008]);
+        assert.equal(m.fns[name].handler([RECORD]), E_FAIL, 'PD_NOPAGENUMS: none to hand in');
         assert.equal(m.error(), PDERR_NODEFAULTPRN);
     }
 });

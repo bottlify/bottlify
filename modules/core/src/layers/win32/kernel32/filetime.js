@@ -29,6 +29,8 @@ import { ZONE_KEYS, zoneForYear } from './timezones.js';
 /** Codes this surface reports. */
 const ERROR_ACCESS_DENIED = 5;
 const ERROR_INVALID_HANDLE = 6;
+/** What a call needing a privilege the caller has not enabled answers. */
+const ERROR_PRIVILEGE_NOT_HELD = 1314;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_BAD_LENGTH = 24;
 const ERROR_MORE_DATA = 234;
@@ -904,16 +906,21 @@ export function createFileTimeFunctions(host){
         },
 
         /**
-         * BOOL SetLocalTime(const SYSTEMTIME *lpSystemTime)
+         * BOOL SetLocalTime(const SYSTEMTIME *lpSystemTime) and
+         * BOOL SetSystemTime(const SYSTEMTIME *lpSystemTime)
          *
-         * Refused. The clock is the guest's own and is what every timestamp and
-         * every elapsed-time measurement in the run is taken against; letting a
-         * program move it would make a measurement that spans the call
-         * meaningless, and there is no user whose wall clock this would be.
+         * Refused as Windows refuses a process without SE_SYSTEMTIME_NAME
+         * enabled, which no program here has: ERROR_PRIVILEGE_NOT_HELD. The
+         * clock is what every timestamp and elapsed time in the run is taken
+         * against, and there is no user whose wall clock this would be.
          */
         SetLocalTime: {
             argBytes: 4,
-            handler: ()=>fail(ERROR_INVALID_PARAMETER),
+            handler: ()=>fail(ERROR_PRIVILEGE_NOT_HELD),
+        },
+        SetSystemTime: {
+            argBytes: 4,
+            handler: ()=>fail(ERROR_PRIVILEGE_NOT_HELD),
         },
 
         /**

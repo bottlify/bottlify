@@ -646,6 +646,19 @@ test('on a 64-bit machine a 32-bit process runs under WOW64 and sees the x64 mac
             'the rest the same, in the 32-bit layout');
     });
 
+test('redirection is not implemented on a 32-bit system and turned off under WOW64', ()=>{
+    const plain = fakeHost();
+    const none = createSystemFunctions(plain);
+    assert.equal(none.Wow64DisableWow64FsRedirection.handler([0x200]), 0);
+    assert.deepEqual(plain.errors, [120], 'ERROR_CALL_NOT_IMPLEMENTED');
+    const host = Object.assign(fakeHost(), { machine64: true, pointerSize: 4 });
+    const fns = createSystemFunctions(host);
+    assert.equal(fns.Wow64DisableWow64FsRedirection.handler([0x200]), 1);
+    assert.equal(host.view.getUint32(0x200, true), 1, 'the old value, for the revert');
+    assert.equal(fns.Wow64RevertWow64FsRedirection.handler([1]), 1);
+    assert.deepEqual(host.errors, []);
+});
+
 test('a 64-bit machine\'s WOW64 directory, to a process of either width', ()=>{
     for (const pointerSize of [4, 8])
     {

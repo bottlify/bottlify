@@ -9,7 +9,7 @@ import { COUNTERS, criticalLayout, enterCode, enterLongCode, leaveCode, leaveLon
 import { INTERLOCKED, INTERLOCKED_64 } from './interlocked.js';
 import { createSlimSync } from './slimsync.js';
 import { createSListFunctions } from './slist.js';
-import { isStandardHandle, untagged } from './handle-tags.js';
+import { FILE_OBJECT_KINDS, isStandardHandle, untagged } from './handle-tags.js';
 import { createChangeNotifications } from './changes.js';
 import { SELECTORS } from './seh.js';
 import { MAXIMUM_PROCESSORS, createProcessors } from './processor.js';
@@ -624,6 +624,7 @@ export function createSyncFunctions(host){
             processId: host.processId,
             threadOf,
             objectOf: object,
+            processors,
         }),
         ...createThreadInfoFunctions({
             kernel,
@@ -1002,7 +1003,8 @@ export function createSyncFunctions(host){
                     const kind = kernel.handles.typeOf?.(untagged(handle));
                     objects.push(kind === 'process' ? target.exited
                         : kind === 'process-thread'
-                            ? threadEnd({ kernel, askChild: host.askChild }, target) : target);
+                            ? threadEnd({ kernel, askChild: host.askChild }, target)
+                            : FILE_OBJECT_KINDS.has(kind ?? '') ? alwaysReady() : target);
                     indices.push(at);
                 }
 

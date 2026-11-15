@@ -51,6 +51,26 @@ function fakeImage(){
     };
 }
 
+test('LdrProcessRelocationBlock moves a dword, a word\'s high and low halves; the next block', ()=>{
+    const memory = new Uint8Array(0x100);
+    const view = new DataView(memory.buffer);
+    const fns = createImageFunctions({
+        readMemory: (address, length)=>memory.slice(address, address + length),
+        writeMemory: (address, data)=>memory.set(data, address),
+    });
+    view.setUint32(0x10, 0x50005, true);
+    view.setUint16(0x20, 0x505, true);
+    view.setUint16(0x30, 0x505, true);
+    // HIGHLOW at +0x10, HIGH at +0x20, LOW at +0x30, then ABSOLUTE padding.
+    [0x3010, 0x1020, 0x2030, 0x0000].forEach((entry, i)=>view.setUint16(0x80 + i * 2, entry, true));
+    assert.equal(fns.LdrProcessRelocationBlock.handler([0, 3, 0x80, 0x500050]), 0x86);
+    assert.equal(view.getUint32(0x10, true), 0x550055);
+    assert.equal(view.getUint16(0x20, true), 0x555);
+    assert.equal(view.getUint16(0x30, true), 0x555, 'the low half of 0x500050 added');
+    view.setUint16(0x80, 0x7010, true);
+    assert.equal(fns.LdrProcessRelocationBlock.handler([0, 1, 0x80, 1]), 0, 'an unknown type');
+});
+
 test('RtlImageDirectoryEntryToData finds a directory in a mapped image and in a file', ()=>{
     const host = fakeImage();
     const { RtlImageDirectoryEntryToData: entry } = createImageFunctions(host);

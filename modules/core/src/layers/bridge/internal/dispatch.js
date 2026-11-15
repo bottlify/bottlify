@@ -402,8 +402,8 @@ const NO_ERROR = ()=>0;
  * @param {any} deps.parking   Brackets each handler and issues the parked token.
  * @param {(answer: Promise<number> | import('./drive.js').Driven, frame: any) => void}
  *     [deps.suspend]
- * @param {() => number} [deps.now]  The clock call rates are measured by;
- *        performance.now unless a test keeps its own.
+ * @param {() => number} [deps.now]  The dispatcher's clock: call rates and each
+ *        timed call's host time; performance.now unless a test keeps its own.
  *        What to do with a handler that has not finished; wired by the module.
  * @param {() => number} [deps.lastError]
  *        The running thread's last error, for the trace. Injected because it
@@ -1840,7 +1840,7 @@ class Dispatcher {
         {
             this.innerWeight = TRAP_SAMPLE;
         }
-        const began = performance.now();
+        const began = this.now();
         try
         {
             this.cross(id);
@@ -1850,7 +1850,7 @@ class Dispatcher {
             const entry = this.functions[id];
             if (entry !== undefined)
             {
-                entry.sampledMs += performance.now() - began;
+                entry.sampledMs += this.now() - began;
                 entry.sampledCalls++;
             }
             this.innerWeight = outer;

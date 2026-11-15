@@ -20,6 +20,7 @@
  */
 
 import { pointerArg } from '../common/pointers.js';
+import { createGlobalMemory } from './moveable.js';
 import { IMAGE_ALLOCATION_PROTECT, imageLayout } from './image-protection.js';
 import { askChild } from './cross-process.js';
 import { guestEntry } from '../msvcrt/guest-code.js';
@@ -36,12 +37,22 @@ import {
 /** Flags the guest passes; the rest of HeapAlloc's flags do not change behaviour here. */
 const HEAP_ZERO_MEMORY = 0x00000008;
 
-/** GlobalAlloc's spelling of the same request. */
-const GMEM_MOVEABLE = 0x00000002;
-const GMEM_ZEROINIT = 0x00000040;
-const GMEM_MODIFY = 0x00000080;
-const GMEM_INVALID_HANDLE = 0x8000;
 const HEAP_REALLOC_IN_PLACE_ONLY = 0x00000010;
+
+/**
+ * A fixed heap - one HeapCreate gave a maximum size - as Windows keeps it: a
+ * block may not reach the virtual-memory threshold (HeapAlloc's documented
+ * 0x7FFF8 at 32 bits, slightly under a megabyte at 64), each block takes a
+ * header, and the heap's own records take a part of its maximum. Its handle
+ * is aligned on 64 KiB, as every heap's is.
+ */
+const FIXED_HEAP = Symbol('fixed heap');
+const FIXED_HEAP_HANDLE = 0x40;
+const FIXED_HEAP_ALIGNMENT = 0x10000;
+const FIXED_HEAP_OVERHEAD = 0x600;
+const FIXED_HEAP_LARGEST = 0x7fff8;
+const FIXED_HEAP_LARGEST_64 = 0xfff00;
+const BLOCK_HEADER = 8;
 
 const MEM_COMMIT = 0x00001000;
 const MEM_RESERVE = 0x00002000;
@@ -286,6 +297,15 @@ const VIRTUAL = Symbol('virtual');
  * system DLL's are, and no heap's (ddraw1 test_vtbl_protection).
  */
 export const TABLES = Symbol('tables');
+
+/**
+ * The heap's user values and the global family's handle table, for the
+ * libraries that stand on them: ntdll's RtlGetUserInfoHeap family, and a
+ * memory stream over an HGLOBAL. Carried under a symbol, so no export is made
+ * of them.
+ */
+export const HEAP_USER_INFO = Symbol('heap user info');
+export const GLOBAL_MEMORY = Symbol('global memory');
 
 /** @param {number} value @param {number} to */
 const roundUp = (value, to)=>Math.ceil(value / to) * to;
@@ -1150,6 +1170,38 @@ export function createHeapFunctions(host){
     const unserialized = new Set();
     /** Heaps the program turned the low-fragmentation heap on for. */
     const lowFragmentation = new Set();
+    /**
+     * Fixed heaps - made with a maximum size - and the bytes their blocks may
+     * take, the heap's own records taken off.
+     *
+     * @type {Map<number, number>}
+     */
+    const bounded = new Map();
+    /**
+     * Whether a fixed heap has room for a block of `size` in place of one of
+     * `previous`: no block of one is as large as the virtual-memory threshold
+     * (HeapAlloc's documented limit for a heap that does not grow), and its
+     * blocks with their headers stay within its maximum. Any other heap grows.
+     *
+     * @param {number} heap @param {number} size @param {number} previous
+     */
+    const fits = (heap, size, previous)=>{
+        const room = bounded.get(heap);
+        if (room === undefined)
+        {
+            return true;
+        }
+        if (size >= ((host.pointerSize ?? 4) === 8 ? FIXED_HEAP_LARGEST_64 : FIXED_HEAP_LARGEST))
+        {
+            return false;
+        }
+        let taken = 0;
+        for (const address of allocator.owned(heap))
+        {
+            taken += (allocator.block(address)?.size ?? 0) + BLOCK_HEADER;
+        }
+        return taken - (previous === 0 ? 0 : previous + BLOCK_HEADER) + size + BLOCK_HEADER <= room;
+    };
 
     /**
      * An allocation the arena could not serve, said with what was asked and
@@ -1778,6 +1830,39 @@ export function createHeapFunctions(host){
     };
 
     /**
+     * The heap user value and flags of the blocks that carry them
+     * (RtlSetUserValueHeap, a moveable handle's block), by address; a block
+     * freed through the host loses them.
+     *
+     * @type {Map<number, { value: number, flags: number }>}
+     */
+    const userInfo = new Map();
+
+    const globals = createGlobalMemory({
+        allocate: bytes=>allocator.allocate(bytes, { owner: processHeap }),
+        free: address=>{
+            userInfo.delete(address);
+            return allocator.free(address);
+        },
+        block: address=>allocator.block(address),
+        reallocate: (block, wanted, how)=>{
+            const moved = reallocate(block, wanted, how);
+            const info = userInfo.get(block.address);
+            if (moved !== 0 && moved !== block.address && info)
+            {
+                userInfo.delete(block.address);
+                userInfo.set(moved, info);
+            }
+            return moved;
+        },
+        zero: (address, length)=>zeroHandedOver(address, length),
+        writeMemory: host.writeMemory,
+        setLastError: code=>host.setLastError(code),
+        userInfo,
+        pointerSize: host.pointerSize === 8 ? 8 : 4,
+    });
+
+    /**
      * The guest's routines, placed once on the first bind of any of them: each
      * falls back to its export's handler through a trap of its own.
      *
@@ -2150,8 +2235,26 @@ export function createHeapFunctions(host){
         HeapCreate: {
             argBytes: 12,
             /** @param {number[]} [args] */
-            handler: ([options] = [0])=>{
-                const heap = makeHeap();
+            handler: ([options, initial, maximum] = [0, 0, 0])=>{
+                // A heap with a maximum is fixed: it is a handle of its own,
+                // with no control block the guest's small blocks are kept in,
+                // so every allocation from it is the host's and counted.
+                const most = Math.max(maximum >>> 0, initial >>> 0);
+                const heap = (maximum >>> 0) === 0 ? makeHeap()
+                    : allocator.allocate(FIXED_HEAP_HANDLE,
+                        { alignment: FIXED_HEAP_ALIGNMENT, owner: FIXED_HEAP });
+                if (heap === 0)
+                {
+                    host.setLastError(ERROR_NOT_ENOUGH_MEMORY);
+                    return 0;
+                }
+                if ((maximum >>> 0) !== 0)
+                {
+                    // No word of an earlier heap's control block left in it
+                    // to make the guest's routine take it for one.
+                    zero(heap, FIXED_HEAP_HANDLE);
+                    bounded.set(heap, roundUp(most, PAGE_SIZE) - FIXED_HEAP_OVERHEAD);
+                }
                 heaps.add(heap);
                 if ((options & HEAP_NO_SERIALIZE) !== 0)
                 {
@@ -2267,6 +2370,10 @@ export function createHeapFunctions(host){
                 {
                     allocator.free(address);
                 }
+                if (bounded.delete(heap))
+                {
+                    allocator.free(heap);
+                }
                 heaps.delete(heap);
                 unserialized.delete(heap);
                 lowFragmentation.delete(heap);
@@ -2285,6 +2392,11 @@ export function createHeapFunctions(host){
                     return 0;
                 }
                 const size = bytes >>> 0;
+                if (!fits(heap, size, 0))
+                {
+                    host.setLastError(ERROR_NOT_ENOUGH_MEMORY);
+                    return 0;
+                }
                 const address = allocator.allocate(size, { owner: heap });
                 // Out of memory is a NULL, not an exception: the guest tests the
                 // pointer, and a throw here would take down a program that was
@@ -2315,6 +2427,11 @@ export function createHeapFunctions(host){
                 {
                     return 0;
                 }
+                if (!fits(heap, bytes >>> 0, block.size))
+                {
+                    host.setLastError(ERROR_NOT_ENOUGH_MEMORY);
+                    return 0;
+                }
                 return reallocate(block, bytes >>> 0, {
                     zeroTail: (flags & HEAP_ZERO_MEMORY) !== 0,
                     mayMove: (flags & HEAP_REALLOC_IN_PLACE_ONLY) === 0,
@@ -2339,6 +2456,7 @@ export function createHeapFunctions(host){
                 {
                     return 0;
                 }
+                userInfo.delete(address);
                 return allocator.free(address) ? 1 : 0;
             },
             ...routine('free'),
@@ -2597,87 +2715,39 @@ export function createHeapFunctions(host){
         },
 
         /**
-         * HGLOBAL GlobalAlloc(UINT uFlags, SIZE_T dwBytes)
+         * The global family (`moveable.js`): a fixed block is its own handle,
+         * a moveable one an entry of the process's handle table that GlobalLock
+         * turns into a pointer.
          *
-         * The 16-bit inheritance: a moveable allocation was a handle that had to
-         * be locked into a pointer, and a fixed one was already a pointer. Win32
-         * kept both spellings and made them the same thing, so the handle a
-         * program locks is the pointer it gets back, and GlobalLock is identity.
-         * Programs still write the lock/unlock pairs, and they still have to
-         * balance -- so they are answered, they are simply not moving anything.
+         * HGLOBAL GlobalAlloc(UINT uFlags, SIZE_T dwBytes)
          */
         GlobalAlloc: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([flags, bytes])=>{
-                const size = bytes >>> 0;
-                // The process heap's, as on Windows NT and as the guest's
-                // routine allocates it: HeapFree and HeapSize of the process
-                // heap take the block too.
-                const address = allocator.allocate(size === 0 ? 1 : size, { owner: processHeap });
-                if (address === 0)
-                {
-                    return 0;
-                }
-                if (flags & GMEM_ZEROINIT)
-                {
-                    zeroHandedOver(address, size);
-                }
-                return address;
-            },
+            handler: ([flags, bytes])=>globals.global.allocate(flags >>> 0, bytes >>> 0),
             ...routine('globalAlloc'),
         },
 
-        /**
-         * HGLOBAL GlobalReAlloc(HGLOBAL hMem, SIZE_T dwBytes, UINT uFlags)
-         *
-         * A fixed block stays put unless the caller allowed it to move, which
-         * is what GMEM_MOVEABLE means on this call; GMEM_MODIFY changes only
-         * attributes, and there are none here to change.
-         */
+        /** HGLOBAL GlobalReAlloc(HGLOBAL hMem, SIZE_T dwBytes, UINT uFlags) */
         GlobalReAlloc: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([handle, bytes, flags])=>{
-                const block = allocator.block(handle >>> 0);
-                if (!block)
-                {
-                    return 0;
-                }
-                if (flags & GMEM_MODIFY)
-                {
-                    return handle >>> 0;
-                }
-                return reallocate(block, bytes >>> 0, {
-                    zeroTail: (flags & GMEM_ZEROINIT) !== 0,
-                    mayMove: (flags & GMEM_MOVEABLE) !== 0,
-                });
-            },
+            handler: ([handle, bytes, flags])=>
+                globals.global.reallocate(handle >>> 0, bytes >>> 0, flags >>> 0),
         },
 
-        /**
-         * UINT GlobalFlags(HGLOBAL hMem)
-         *
-         * Nothing here is discardable or moveable and nothing is locked, so a
-         * live block has no flags and no lock count; a handle that is not a
-         * block is GMEM_INVALID_HANDLE.
-         */
+        /** UINT GlobalFlags(HGLOBAL hMem) */
         GlobalFlags: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([handle])=>allocator.block(handle >>> 0) ? 0 : GMEM_INVALID_HANDLE,
+            handler: ([handle])=>globals.global.flags(handle >>> 0),
         },
 
-        /** HGLOBAL GlobalFree(HGLOBAL hMem) */
+        /** HGLOBAL GlobalFree(HGLOBAL hMem): NULL on success, the handle back on failure. */
         GlobalFree: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([handle])=>{
-                const address = handle >>> 0;
-                // Windows returns NULL on success and the handle back on failure,
-                // which is the opposite of almost everything else in this file.
-                return allocator.free(address) ? 0 : address;
-            },
+            handler: ([handle])=>globals.global.free(handle >>> 0),
             ...routine('globalFree'),
         },
 
@@ -2685,26 +2755,20 @@ export function createHeapFunctions(host){
         GlobalLock: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([handle])=>allocator.block(handle >>> 0) ? handle >>> 0 : 0,
+            handler: ([handle])=>globals.global.lock(handle >>> 0),
         },
 
-        /**
-         * BOOL GlobalUnlock(HGLOBAL hMem)
-         *
-         * Nothing is locked, so the count never reaches zero and this reports
-         * "still locked" -- which is what Windows reports for a fixed block, and
-         * what a caller of a fixed allocation therefore already handles.
-         */
+        /** BOOL GlobalUnlock(HGLOBAL hMem): TRUE while the block stays locked. */
         GlobalUnlock: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([handle])=>allocator.block(handle >>> 0) ? 1 : 0,
+            handler: ([handle])=>globals.global.unlock(handle >>> 0),
         },
 
         /**
          * GlobalWire and GlobalFix, GlobalUnWire and GlobalUnfix: the 16-bit
          * calls that fixed a block in low memory, which on Win32 lock and
-         * unlock it -- and a block here never moves.
+         * unlock it.
          *
          * LPVOID GlobalWire(HGLOBAL), VOID GlobalFix(HGLOBAL),
          * BOOL GlobalUnWire(HGLOBAL), VOID GlobalUnfix(HGLOBAL)
@@ -2712,71 +2776,60 @@ export function createHeapFunctions(host){
         GlobalWire: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([handle])=>allocator.block(handle >>> 0) ? handle >>> 0 : 0,
+            handler: ([handle])=>globals.global.lock(handle >>> 0),
         },
         GlobalFix: {
             argBytes: 4,
-            handler: ()=>0,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                globals.global.lock(handle >>> 0);
+                return 0;
+            },
         },
         GlobalUnWire: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([handle])=>allocator.block(handle >>> 0) ? 1 : 0,
+            handler: ([handle])=>globals.global.unlock(handle >>> 0),
         },
         GlobalUnfix: {
             argBytes: 4,
-            handler: ()=>0,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                globals.global.unlock(handle >>> 0);
+                return 0;
+            },
         },
 
         /** SIZE_T GlobalSize(HGLOBAL hMem) */
         GlobalSize: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([handle])=>allocator.block(handle >>> 0)?.size ?? 0,
+            handler: ([handle])=>globals.global.size(handle >>> 0),
+        },
+
+        /** HGLOBAL GlobalHandle(LPCVOID pMem) */
+        GlobalHandle: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([address])=>globals.global.handleOf(address >>> 0),
         },
 
         /**
-         * HLOCAL LocalAlloc(UINT uFlags, SIZE_T uBytes)
-         *
-         * The other spelling of the same heap: LMEM_ZEROINIT is GMEM_ZEROINIT's
-         * value, and a block one family allocates the other may free.
+         * HLOCAL LocalAlloc(UINT uFlags, SIZE_T uBytes): the global family in
+         * the local spelling, whose LMEM_DISCARDABLE is 0x0f00 and which has
+         * no DDE sharing; a handle one spelling makes the other takes.
          */
         LocalAlloc: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([flags, bytes])=>{
-                const size = bytes >>> 0;
-                const address = allocator.allocate(size === 0 ? 1 : size, { owner: processHeap });
-                if (address !== 0 && (flags & GMEM_ZEROINIT))
-                {
-                    zeroHandedOver(address, size);
-                }
-                return address;
-            },
+            handler: ([flags, bytes])=>globals.local.allocate(flags >>> 0, bytes >>> 0),
         },
 
         /** HLOCAL LocalFree(HLOCAL hMem) */
         LocalFree: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([handle])=>{
-                const address = handle >>> 0;
-                return allocator.free(address) ? 0 : address;
-            },
-        },
-        /**
-         * HGLOBAL GlobalHandle(LPCVOID pMem)
-         *
-         * A handle and a pointer are the same number here, because every block
-         * this allocator hands out is fixed -- there is no moveable memory to
-         * indirect through. The call still has to check the pointer: its whole
-         * purpose is to turn a pointer a caller is unsure about into a handle or
-         * a failure.
-         */
-        GlobalHandle: {
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([address])=>allocator.block(address >>> 0) ? address >>> 0 : 0,
+            handler: ([handle])=>globals.local.free(handle >>> 0),
         },
 
         /**
@@ -3409,6 +3462,26 @@ export function createHeapFunctions(host){
     // same heap, the same handles, the same flag values.
     return {
         ...table,
+        /**
+         * A live block's user value and flags, the record made when asked to
+         * set one; null for an address that is no block of the heap.
+         *
+         * @param {number} heap @param {number} address @param {boolean} [make]
+         */
+        [HEAP_USER_INFO]: (heap, address, make = false)=>{
+            if (address === 0 || !blockOf(heap, address))
+            {
+                return null;
+            }
+            let info = userInfo.get(address);
+            if (!info && make)
+            {
+                info = { value: 0, flags: 0 };
+                userInfo.set(address, info);
+            }
+            return info ?? { value: undefined, flags: 0 };
+        },
+        [GLOBAL_MEMORY]: globals,
         /** LPVOID VirtualAllocEx(HANDLE, LPVOID, SIZE_T, DWORD, DWORD) */
         VirtualAllocEx: inProcess('VirtualAlloc', 20),
         /**
@@ -3423,12 +3496,23 @@ export function createHeapFunctions(host){
         VirtualProtectEx: inProcess('VirtualProtect', 20),
         /** SIZE_T VirtualQueryEx(HANDLE, LPCVOID, PMEMORY_BASIC_INFORMATION, SIZE_T) */
         VirtualQueryEx: inProcess('VirtualQuery', 16),
-        LocalReAlloc: table.GlobalReAlloc,
+        /** HLOCAL LocalReAlloc(HLOCAL hMem, SIZE_T uBytes, UINT uFlags) */
+        LocalReAlloc: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, bytes, flags])=>
+                globals.local.reallocate(handle >>> 0, bytes >>> 0, flags >>> 0),
+        },
         LocalLock: table.GlobalLock,
         LocalUnlock: table.GlobalUnlock,
         LocalSize: table.GlobalSize,
         LocalHandle: table.GlobalHandle,
-        LocalFlags: table.GlobalFlags,
+        /** UINT LocalFlags(HLOCAL hMem): LMEM_DISCARDABLE in the local spelling. */
+        LocalFlags: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>globals.local.flags(handle >>> 0),
+        },
 
         /**
          * SIZE_T GlobalCompact(DWORD dwMinFree), SIZE_T LocalCompact(UINT uMinFree)

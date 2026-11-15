@@ -300,6 +300,107 @@ export function scanDecimal(text){
 }
 
 /**
+ * The key the universal runtime's readings of a number are carried under in
+ * the runtime's table: a symbol, so it is no export a program could name.
+ */
+export const STANDARD_NUMBERS = Symbol('standard numbers');
+
+/**
+ * A hexadecimal significand's digits and the power of two they are scaled
+ * by, as the nearest double: ties to even, the digits past the kept ones
+ * counted in `sticky`, a subnormal rounded at its own last bit.
+ *
+ * @param {bigint} significand @param {number} scale @param {boolean} sticky
+ */
+function scaledBinary(significand, scale, sticky){
+    if (significand === 0n)
+    {
+        return 0;
+    }
+    const top = significand.toString(2).length - 1 + scale;
+    if (top > 1100)
+    {
+        return Infinity;
+    }
+    if (top < -1200)
+    {
+        return 0;
+    }
+    // The power of two the double's last bit stands for: 52 below the top
+    // bit, or the subnormals' fixed one.
+    const last = Math.max(top - 52, -1074);
+    const drop = last - scale;
+    let kept = significand;
+    if (drop > 0)
+    {
+        const shift = BigInt(drop);
+        kept = significand >> shift;
+        const rest = significand & (1n << shift) - 1n;
+        const half = 1n << shift - 1n;
+        if (rest > half || rest === half && (sticky || (kept & 1n) === 1n))
+        {
+            kept += 1n;
+        }
+    }
+    else if (drop < 0)
+    {
+        kept = significand << BigInt(-drop);
+    }
+    return Number(kept) * 2 ** last;
+}
+
+/**
+ * What the universal runtime's strtod reads (C99): white space and a sign,
+ * then `inf` or `infinity`, `nan` with an optional `(chars)`, a hexadecimal
+ * number after `0x` with its exponent after `p`, or decimal digits with a
+ * point among them and an exponent after `e`, no other letter; null where
+ * none is there. Out of range is an infinity from finite digits or a zero
+ * from digits that were not all zero; a subnormal is in range.
+ *
+ * @param {string} text
+ * @returns {{ value: number, end: number, range: boolean } | null}
+ */
+export function scanStandardDecimal(text){
+    const lead = /^[ \t\n\v\f\r]*([+-]?)/.exec(text) ?? ['', ''];
+    const sign = lead[1] === '-' ? -1 : 1;
+    const rest = text.slice(lead[0].length);
+    const special = /^(?:(infinity|inf)|(nan)(?:\([0-9A-Za-z_]*\))?)/i.exec(rest);
+    if (special)
+    {
+        return { value: special[1] ? sign * Infinity : NaN,
+            end: lead[0].length + special[0].length, range: false };
+    }
+    const hex = /^0[xX]([0-9a-fA-F]*)(?:\.([0-9a-fA-F]*))?/.exec(rest);
+    if (hex && (hex[1] !== '' || (hex[2] ?? '') !== ''))
+    {
+        const exponent = /^[pP]([+-]?[0-9]+)/.exec(rest.slice(hex[0].length));
+        const whole = hex[1];
+        const fraction = hex[2] ?? '';
+        // Forty digits are more than a double holds; the rest only say
+        // whether anything follows the last of them.
+        const all = (whole + fraction).replace(/^0+/, '');
+        const kept = all.slice(0, 40);
+        const scale = 4 * (all.length - kept.length - fraction.length)
+            + Number(exponent?.[1] ?? 0);
+        const value = sign * scaledBinary(kept === '' ? 0n : BigInt(`0x${kept}`), scale,
+            /[1-9a-fA-F]/.test(all.slice(40)));
+        return { value, end: lead[0].length + hex[0].length + (exponent?.[0].length ?? 0),
+            range: kept !== '' && (value === 0 || !Number.isFinite(value)) };
+    }
+    const match = /^(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?/.exec(rest);
+    if (!match)
+    {
+        return null;
+    }
+    const value = sign * Number(match[0]);
+    return {
+        value,
+        end: lead[0].length + match[0].length,
+        range: !Number.isFinite(value) || value === 0 && /^[^eE]*[1-9]/.test(match[0]),
+    };
+}
+
+/**
  * @typedef {Object} ConversionHost
  * @property {(address: number, maxLength: number) => string} readCString
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
@@ -779,6 +880,12 @@ export function createConversionFunctions(host){
         /** char *_i64toa(__int64 value, char *buffer, int radix) */
         _i64toa: toText(2, true),
 
+        /** wchar_t *_ui64tow(unsigned __int64 value, wchar_t *buffer, int radix) */
+        _ui64tow: toText(2, false, true),
+
+        /** wchar_t *_i64tow(__int64 value, wchar_t *buffer, int radix) */
+        _i64tow: toText(2, true, true),
+
         /** int abs(int value) -- in the guest */
         abs: guestEntry(inGuest.abs, COMPILED.abs, {}),
 
@@ -986,6 +1093,53 @@ export function createConversionFunctions(host){
         return decimal(scanned);
     };
 
+    /**
+     * strtod's and wcstod's handlers as the universal runtime reads: the
+     * whole string, by `scanStandardDecimal`.
+     *
+     * @param {(pointer: number) => string} textAt @param {number} unit  bytes a character
+     */
+    const standardReading = (textAt, unit)=>(/** @type {number[]} */ args)=>{
+        if ((args[0] >>> 0) === 0)
+        {
+            host.errno?.(EINVAL);
+            writeInt(args[1], 0);
+            return 0;
+        }
+        const scanned = scanStandardDecimal(textAt(args[0]));
+        writeEnd(args[1], scanned ? args[0] + scanned.end * unit : args[0]);
+        return decimal(scanned);
+    };
+
+    /** @param {any} guest */
+    const standardNumbers = guest=>{
+        const fpu = /** @type {import('./float.js').FloatHost} */ (host.fpu);
+        const narrow = standardReading(readString, 1);
+        const entries = {
+            strtod: returningDouble(fpu, 8, narrow),
+            atof: returningDouble(fpu, 4, args=>narrow([args[0], 0])),
+            _strtod_l: returningDouble(fpu, 12, narrow),
+            _atof_l: returningDouble(fpu, 8, args=>narrow([args[0], 0])),
+        };
+        if (!readMemory)
+        {
+            return entries;
+        }
+        const read = readMemory;
+        const wide = standardReading(pointer=>wideStringAt(read, pointer), 2);
+        return {
+            ...entries,
+            strtod: guestEntry(inGuestFloat.strtod, FLOAT_CODE.strtod, guest, entries.strtod),
+            atof: guestEntry(inGuestFloat.atof, FLOAT_CODE.atof, guest, entries.atof),
+            wcstod: guestEntry(inGuestFloat.wcstod, FLOAT_CODE.wcstod, guest,
+                returningDouble(fpu, 8, wide)),
+            _wtof: guestEntry(inGuestFloat._wtof, FLOAT_CODE._wtof, guest,
+                returningDouble(fpu, 4, args=>wide([args[0], 0]))),
+            _wcstod_l: returningDouble(fpu, 12, wide),
+            _wtof_l: returningDouble(fpu, 8, args=>wide([args[0], 0])),
+        };
+    };
+
     const handlers = {
         /** double atof(const char *str) */
         atof: returningDouble(host.fpu, 4, args=>strtod([args[0], 0])),
@@ -1019,5 +1173,10 @@ export function createConversionFunctions(host){
         _atof_l: returningDouble(host.fpu, 8, args=>strtod([args[0], 0])),
         /** double _strtod_l(const char *str, char **end, _locale_t locale) */
         _strtod_l: returningDouble(host.fpu, 12, strtod),
+
+        // The universal runtime's, which read C99's infinities, NaNs and
+        // hexadecimal numbers too; the code in the guest is the same, and
+        // hands those to these.
+        [STANDARD_NUMBERS]: standardNumbers(guest),
     };
 }

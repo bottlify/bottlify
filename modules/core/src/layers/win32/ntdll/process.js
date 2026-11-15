@@ -201,6 +201,72 @@ export function createProcessFunctions(host){
             (flags & PROCESS_PARAMS_FLAG_NORMALIZED) !== 0 ? 0 : block);
     };
 
+    /**
+     * RtlCreateProcessParameters' and RtlCreateProcessParametersEx's block: one
+     * allocation in the process heap, the fixed part, then each string
+     * terminated and four-aligned. Its pointers are offsets from the block -
+     * the form the system hands back - unless `normalized` asks for them as
+     * addresses.
+     *
+     * @param {number[]} args @param {boolean} normalized
+     */
+    const createParameters = (args, normalized)=>{
+        const [out, image, dllPath, directory, commandLine, environment, title, desktop, shell,
+            runtime] = args;
+        if ((out >>> 0) === 0 || (image >>> 0) === 0)
+        {
+            return STATUS.INVALID_PARAMETER;
+        }
+        const own = ownParameters();
+        const imagePath = counted(image) ?? '';
+        /** @type {[number, string, number][]} field, text, room */
+        const strings = [
+            [PARAMETERS.CurrentDirectory, counted(directory)
+                ?? (own ? parameter(own, PARAMETERS.CurrentDirectory) : null) ?? '',
+            CURRENT_DIRECTORY_ROOM],
+            [PARAMETERS.DllPath, counted(dllPath)
+                ?? (own ? parameter(own, PARAMETERS.DllPath) : null) ?? '', 0],
+            [PARAMETERS.ImagePathName, imagePath, 0],
+            [PARAMETERS.CommandLine, counted(commandLine) ?? imagePath, 0],
+            [PARAMETERS.WindowTitle, counted(title) ?? '', 0],
+            [PARAMETERS.DesktopInfo, counted(desktop) ?? '', 0],
+            [PARAMETERS.ShellInfo, counted(shell) ?? '', 0],
+            [PARAMETERS.RuntimeData, counted(runtime) ?? '', 0],
+        ];
+        const roomOf = (/** @type {string} */ text, /** @type {number} */ least)=>
+            (Math.max(text.length * 2 + 2, least) + 3) & ~3;
+        let total = PARAMETERS.SIZE;
+        for (const [, text, least] of strings)
+        {
+            total += roomOf(text, least);
+        }
+        const block = host.allocate(total) >>> 0;
+        if (block === 0)
+        {
+            return STATUS.NO_MEMORY;
+        }
+        const bytes = new Uint8Array(total);
+        const view = new DataView(bytes.buffer);
+        view.setUint32(PARAMETERS.MaximumLength, total, true);
+        view.setUint32(PARAMETERS.Length, total, true);
+        view.setUint32(PARAMETERS.Flags, normalized ? PROCESS_PARAMS_FLAG_NORMALIZED : 0, true);
+        view.setUint32(PARAMETERS.Environment, (environment >>> 0) !== 0 ? environment
+            : own ? readU32(own + PARAMETERS.Environment) : 0, true);
+        let cursor = PARAMETERS.SIZE;
+        for (const [field, text, least] of strings)
+        {
+            const room = roomOf(text, least);
+            view.setUint16(field, text.length * 2, true);
+            view.setUint16(field + 2, room, true);
+            view.setUint32(field + 4, normalized ? block + cursor : cursor, true);
+            bytes.set(utf16(text), cursor);
+            cursor += room;
+        }
+        host.writeMemory(block, bytes);
+        writeU32(out, block);
+        return STATUS.SUCCESS;
+    };
+
     return {
         /**
          * NTSTATUS NtResumeThread(HANDLE ThreadHandle, PULONG SuspendCount)
@@ -383,60 +449,22 @@ export function createProcessFunctions(host){
         RtlCreateProcessParameters: {
             argBytes: 40,
             /** @param {number[]} args */
-            handler: ([out, image, dllPath, directory, commandLine, environment, title,
-                desktop, shell, runtime])=>{
-                if ((out >>> 0) === 0 || (image >>> 0) === 0)
-                {
-                    return STATUS.INVALID_PARAMETER;
-                }
-                const own = ownParameters();
-                const imagePath = counted(image) ?? '';
-                /** @type {[number, string, number][]} field, text, room */
-                const strings = [
-                    [PARAMETERS.CurrentDirectory, counted(directory)
-                        ?? (own ? parameter(own, PARAMETERS.CurrentDirectory) : null) ?? '',
-                    CURRENT_DIRECTORY_ROOM],
-                    [PARAMETERS.DllPath, counted(dllPath)
-                        ?? (own ? parameter(own, PARAMETERS.DllPath) : null) ?? '', 0],
-                    [PARAMETERS.ImagePathName, imagePath, 0],
-                    [PARAMETERS.CommandLine, counted(commandLine) ?? imagePath, 0],
-                    [PARAMETERS.WindowTitle, counted(title) ?? '', 0],
-                    [PARAMETERS.DesktopInfo, counted(desktop) ?? '', 0],
-                    [PARAMETERS.ShellInfo, counted(shell) ?? '', 0],
-                    [PARAMETERS.RuntimeData, counted(runtime) ?? '', 0],
-                ];
-                const roomOf = (/** @type {string} */ text, /** @type {number} */ least)=>
-                    (Math.max(text.length * 2 + 2, least) + 3) & ~3;
-                let total = PARAMETERS.SIZE;
-                for (const [, text, least] of strings)
-                {
-                    total += roomOf(text, least);
-                }
-                const block = host.allocate(total) >>> 0;
-                if (block === 0)
-                {
-                    return STATUS.NO_MEMORY;
-                }
-                const bytes = new Uint8Array(total);
-                const view = new DataView(bytes.buffer);
-                view.setUint32(PARAMETERS.MaximumLength, total, true);
-                view.setUint32(PARAMETERS.Length, total, true);
-                view.setUint32(PARAMETERS.Environment, (environment >>> 0) !== 0 ? environment
-                    : own ? readU32(own + PARAMETERS.Environment) : 0, true);
-                let cursor = PARAMETERS.SIZE;
-                for (const [field, text, least] of strings)
-                {
-                    const room = roomOf(text, least);
-                    view.setUint16(field, text.length * 2, true);
-                    view.setUint16(field + 2, room, true);
-                    view.setUint32(field + 4, cursor, true);
-                    bytes.set(utf16(text), cursor);
-                    cursor += room;
-                }
-                host.writeMemory(block, bytes);
-                writeU32(out, block);
-                return STATUS.SUCCESS;
-            },
+            handler: args=>createParameters(args, false),
+        },
+
+        /**
+         * NTSTATUS RtlCreateProcessParametersEx(PRTL_USER_PROCESS_PARAMETERS *pProcessParameters,
+         *   ..., PUNICODE_STRING RuntimeData, ULONG Flags)
+         *
+         * RtlCreateProcessParameters' block; with RTL_USER_PROC_PARAMS_NORMALIZED
+         * its strings are pointers and its Flags say so, as a running
+         * process's are.
+         */
+        RtlCreateProcessParametersEx: {
+            argBytes: 44,
+            /** @param {number[]} args */
+            handler: args=>createParameters(args.slice(0, 10),
+                ((args[10] >>> 0) & PROCESS_PARAMS_FLAG_NORMALIZED) !== 0),
         },
 
         /**

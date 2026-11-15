@@ -26,6 +26,8 @@ import {
 } from '../kernel32/locale.js';
 import { RT_GROUP_CURSOR, RT_GROUP_ICON, loadResourceObject } from './objects.js';
 import { cursorFilePicture, dibToBgra, groupImageId, iconFilePicture } from './cursors.js';
+import { readFileIcons } from '../shell32/icons.js';
+import { bitsFromPicture, pictureFromBits, scaleBits } from './icon-bits.js';
 import { characterOf, codeForScan, codeForVk, keyFor, keyForCharacter } from './keys.js';
 import { displayModes, refreshOf, registryMode } from './display.js';
 import {
@@ -63,6 +65,9 @@ import { charactersOf, readToTerminator } from '../common/scan-windows.js';
 /** GetSystemMetrics indices this build has a real answer for. */
 /** How many argument slots a `va_list` is read for, since it carries no count. */
 const VA_LIST_SLOTS = 64;
+
+/** The list box message GetListBoxInfo is. */
+const LB_GETLISTBOXINFO = 0x01b2;
 
 /** The longest path a file name argument is read to. */
 const MAX_PATH = 260;
@@ -329,6 +334,7 @@ const modifiersIn = state=>({
     shift: state ? (state[0x10] & 0x80) !== 0 : false,
     capsLock: state ? (state[0x14] & 0x01) !== 0 : false,
     control: state ? (state[0x11] & 0x80) !== 0 : false,
+    alt: state ? (state[0x12] & 0x80) !== 0 : false,
 });
 
 /** A key-up, in the scan code ToUnicode and ToAscii are handed. */
@@ -1137,6 +1143,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
     host.pictures?.(cursorPicture);
     const SM_CXCURSOR = 13;
     const SM_CXICON = 11;
+    const SM_CYICON = 12;
 
     /**
      * A cursor's or icon's picture out of a module: the image of the standard
@@ -1380,8 +1387,10 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
      * first mode it is offered keeps the depth it had.
      */
     const userModes = ()=>{
-        const own = displayModes(screen);
-        return screen.bitsPerPixel === 16 || launchBits !== 32 ? own
+        // The list is the display's as launched, whatever depth a program
+        // has set since: a display set to 16 bits goes back to its 32.
+        const own = displayModes({ ...screen, bitsPerPixel: launchBits });
+        return launchBits !== 32 ? own
             : [...own, ...own.map(one=>({ ...one, bitsPerPixel: 16 }))];
     };
 
@@ -2012,9 +2021,9 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
 
     /**
      * LoadImage in either spelling: a cursor or an icon out of a module's
-     * resources, as LoadCursor and LoadIcon load them; a device bitmap stands
-     * in for LR_CREATEDIBSECTION's section, since selected and blitted the two
-     * draw the same.
+     * resources, as LoadCursor and LoadIcon load them; a bitmap is a device
+     * bitmap, or with LR_CREATEDIBSECTION a DIB section of the resource's own
+     * depth, whose bits a program reads through GetObject's bmBits.
      *
      * @param {number} instance @param {number} name @param {number} type
      * @param {boolean} wide @param {number} [flags]  fuLoad.
@@ -2031,11 +2040,27 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                     ? loadIconFile(readText(host, name >>> 0, wide, MAX_PATH), size)
                     : loadResourceObject(host, 'icon', RT_GROUP_ICON, instance, name, wide);
             case IMAGE_CURSOR:
-                return loadResourceObject(host, 'cursor', RT_GROUP_CURSOR, instance, name, wide);
-            case IMAGE_BITMAP:
                 return (flags & LR_LOADFROMFILE) !== 0
+                    ? loadCursorFile(readText(host, name >>> 0, wide, MAX_PATH))
+                    : loadResourceObject(host, 'cursor', RT_GROUP_CURSOR, instance, name, wide);
+            case IMAGE_BITMAP:
+                return andThen((flags & LR_LOADFROMFILE) !== 0
                     ? loadBitmapFile(readText(host, name >>> 0, wide, MAX_PATH))
-                    : loadBitmap(instance, name, wide);
+                    : loadBitmap(instance, name, wide), loaded=>{
+                    const LR_CREATEDIBSECTION = 0x2000;
+                    if ((flags & LR_CREATEDIBSECTION) === 0 || (loaded >>> 0) === 0
+                        || !host.copyBitmap)
+                    {
+                        return loaded;
+                    }
+                    const section = host.copyBitmap(loaded >>> 0, 0, 0, LR_CREATEDIBSECTION) >>> 0;
+                    if (section === 0)
+                    {
+                        return loaded;
+                    }
+                    host.deleteObject?.(loaded >>> 0);
+                    return section;
+                });
             default:
                 return 0;
         }
@@ -2119,6 +2144,10 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         /** @param {Uint8Array} bytes */
         const done = bytes=>{
             files.close(node);
+            // The file opened and read leaves the last error clear, whether or
+            // not it holds an image of the kind asked for (Wine's
+            // cursoricon test_LoadImageFile).
+            host.setLastError?.(0);
             return make(bytes);
         };
         const read = files.read(node, 0, stat.size);
@@ -2139,6 +2168,78 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 height: picture.height, picture })
             : 0;
     });
+
+    /**
+     * PrivateExtractIcons: the icons of an executable, a library or an .ico
+     * file from an index on, each made at the size asked for - the low word
+     * of cxIcon, and with a second size in its high word a second icon of
+     * each, the pair counting two of nIcons. Without an array it is how
+     * many icons the file holds. piconid, when given, gets each icon's
+     * resource id, zero for an icon file's. The answer is how many icons
+     * were made; a file that is none, or has none, makes none; an empty
+     * name answers ~0.
+     *
+     * @param {number[]} args @param {boolean} wide
+     * @returns {number | Promise<number>}
+     */
+    const extractIcons = ([file, index, cx, cy, icons, ids, count], wide)=>{
+        const volume = host.files;
+        const path = (readText(host, file >>> 0, wide, MAX_PATH) ?? '').trim();
+        // An empty name is ~0, not a count (Wine's resource test_PrivateExtractIcons).
+        if (path === '')
+        {
+            return 0xffffffff;
+        }
+        if (!volume)
+        {
+            return 0;
+        }
+        /**
+         * @template T, U
+         * @param {T | Promise<T>} value @param {(value: T) => U | Promise<U>} then
+         * @returns {U | Promise<U>}
+         */
+        const after = (value, then)=>(value instanceof Promise ? value.then(then) : then(value));
+        if ((icons >>> 0) === 0)
+        {
+            return after(readFileIcons(volume, path, -1), found=>found.count);
+        }
+        const sides = [[cx & 0xffff, cy & 0xffff], [cx >>> 16, cy >>> 16]]
+            .filter(([across])=>across > 0);
+        const wanted = count >>> 0;
+        /**
+         * @param {number} made @returns {number | Promise<number>}
+         */
+        const next = made=>{
+            if (made >= wanted)
+            {
+                return made;
+            }
+            const [across, down] = sides[made % sides.length]
+                ?? [metric(SM_CXICON), metric(SM_CYICON)];
+            const at = (index | 0) + Math.floor(made / sides.length);
+            return after(readFileIcons(volume, path, at, across), found=>{
+                if (!found.picture?.bgra)
+                {
+                    return made;
+                }
+                // The icon is made at the size asked for, its image stretched
+                // to it, and its hot spot is its centre whatever the file says.
+                const height = down > 0 ? down : across;
+                const hotSpot = { x: across >> 1, y: height >> 1 };
+                const bits = scaleBits(bitsFromPicture(found.picture), across, height);
+                const handle = host.handles.open('icon', { hotSpot, width: across, height,
+                    bits, picture: pictureFromBits(bits, hotSpot) });
+                writeU32s(host, (icons >>> 0) + made * 4, [handle]);
+                if ((ids >>> 0) !== 0)
+                {
+                    writeU32s(host, (ids >>> 0) + made * 4, [found.id ?? 0]);
+                }
+                return next(made + 1);
+            });
+        };
+        return next(0);
+    };
 
     /**
      * A cursor out of a .cur or .ani file, as LoadCursorFromFile loads one: a
@@ -2301,7 +2402,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             return andThen(shown, (/** @type {number} */ taken)=>{
                 if ((taken | 0) === 0)
                 {
-                    host.sendInput?.(piece.input);
+                    host.sendInput?.({ ...piece.input, injected: true });
                 }
                 return next(index + 1);
             });
@@ -2409,7 +2510,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             {
                 if (!up)
                 {
-                    host.sendInput?.({ kind: 'type', text: String.fromCharCode(wScan) });
+                    host.sendInput?.({ kind: 'type', text: String.fromCharCode(wScan),
+                        injected: true });
                 }
                 return true;
             }
@@ -2418,7 +2520,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             const named = (flags & KEYEVENTF_SCANCODE) !== 0
                 ? { scan: wScan, extended }
                 : { vk: wVk, scanGiven: wScan, extended };
-            host.sendInput?.({ kind: 'key', ...named, down: !up });
+            host.sendInput?.({ kind: 'key', ...named, down: !up, injected: true });
             return true;
         });
     };
@@ -4378,6 +4480,18 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         },
 
         /**
+         * DWORD GetListBoxInfo(HWND hwnd)
+         *
+         * What the list box answers LB_GETLISTBOXINFO with, as the
+         * documentation says this call is: the items one column holds.
+         */
+        GetListBoxInfo: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([hwnd])=>host.send?.(hwnd >>> 0, LB_GETLISTBOXINFO, 0, 0) ?? 0,
+        },
+
+        /**
          * BOOL GetComboBoxInfo(HWND hwndCombo, PCOMBOBOXINFO pcbi)
          *
          * A combo box's field and drop-down button, in its client
@@ -5367,7 +5481,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([instance, id, buffer, size])=>{
-                const text = host.loadString?.(instance >>> 0, id >>> 0) ?? null;
+                // The id is a 16-bit resource id: what lies above it is not read.
+                const text = host.loadString?.(instance >>> 0, id & 0xffff) ?? null;
                 if (text === null || (buffer >>> 0) === 0 || (size | 0) <= 0)
                 {
                     if ((buffer >>> 0) !== 0 && (size | 0) > 0)
@@ -5399,7 +5514,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([instance, id, buffer, size])=>{
-                const text = host.loadString?.(instance >>> 0, id >>> 0) ?? null;
+                // The id is a 16-bit resource id: what lies above it is not read.
+                const text = host.loadString?.(instance >>> 0, id & 0xffff) ?? null;
                 if (text === null || (buffer >>> 0) === 0 || (size | 0) <= 0)
                 {
                     if ((buffer >>> 0) !== 0 && (size | 0) > 0)
@@ -5612,6 +5728,23 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             /** @param {number[]} args */
             handler: ([instance, name, type, cx, , flags])=>
                 loadImage(instance, name, type, true, flags, cx),
+        },
+
+        /**
+         * UINT PrivateExtractIconsA(LPCSTR szFileName, int nIconIndex, int cxIcon,
+         *   int cyIcon, HICON *phicon, UINT *piconid, UINT nIcons, UINT flags)
+         */
+        PrivateExtractIconsA: {
+            argBytes: 32,
+            /** @param {number[]} args */
+            handler: args=>extractIcons(args, false),
+        },
+
+        /** UINT PrivateExtractIconsW(LPCWSTR szFileName, ...): the same, the name wide. */
+        PrivateExtractIconsW: {
+            argBytes: 32,
+            /** @param {number[]} args */
+            handler: args=>extractIcons(args, true),
         },
 
         /** HCURSOR LoadCursorA(HINSTANCE hInstance, LPCSTR lpCursorName) */

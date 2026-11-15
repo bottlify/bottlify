@@ -38,6 +38,14 @@ function setup(){
     /** @type {((thread: any) => void)[]} */
     const timeouts = [];
     let current = 'main';
+    /** @type {{ timer: any, due: number, fired: () => void }[]} */
+    const timers = [];
+    /** @type {number[]} */
+    const events = [];
+    /** @type {{ thread: any, routine: number, args: number[] }[]} */
+    const apcs = [];
+    /** @type {{ file: number, transferred: number, status: number, value: number }[]} */
+    const packets = [];
     const slots = createMailslots({
         kernel: {
             block: (/** @type {any} */ thread, /** @type {string} */ reason,
@@ -48,6 +56,18 @@ function setup(){
             },
             onTimeout: (/** @type {(thread: any) => void} */ handler)=>timeouts.push(handler),
             clock: { virtualTime: ()=>now },
+            createTimer: ()=>({}),
+            /**
+             * @param {any} timer @param {number} due @param {number} period
+             * @param {() => void} fired
+             */
+            armTimer: (timer, due, period, fired)=>{
+                timers.push({ timer, due, fired });
+                return true;
+            },
+            cancelTimer: (/** @type {any} */ timer)=>{
+                timers.splice(0, timers.length, ...timers.filter(one=>one.timer !== timer));
+            },
         },
         handles: {
             open: (type, object)=>{
@@ -81,6 +101,12 @@ function setup(){
         setLastErrorFor: (thread, code)=>threadErrors.set(thread, code),
         currentThread: ()=>current,
         park: ()=>'parked',
+        setEvent: event=>events.push(event),
+        queueApc: (thread, routine, args)=>apcs.push({ thread, routine, args }),
+        posted: (file, transferred, status, value)=>{
+            packets.push({ file, transferred, status, value });
+            return true;
+        },
     });
     /** @param {number} at @param {string} text */
     const ansi = (at, text)=>{
@@ -96,7 +122,7 @@ function setup(){
         return [0x300, 0x304, 0x308, 0x30c].map(dword);
     };
     return { slots, functions, bytes, errors, threadErrors, blocked, woken, timeouts, ansi, dword,
-        info, table, setNow: (/** @type {number} */ ms)=>{
+        info, table, timers, events, apcs, packets, setNow: (/** @type {number} */ ms)=>{
             now = ms;
         }, setThread: (/** @type {string} */ thread)=>{
             current = thread;
@@ -249,4 +275,35 @@ test('the native calls answer with statuses, touching the block only on a transf
     }
     assert.equal(t.slots.information(slot, 5), 'unknown class');
     assert.equal(t.slots.information(0x9999, 26), null);
+});
+
+test('a native read of a slot made without synchronous I/O does not wait', ()=>{
+    // CreateMailslot's handle is asynchronous on Windows: NtReadFile answers
+    // STATUS_PENDING and finishes through its block, event, APC and port.
+    const t = setup();
+    const slot = t.functions.CreateMailslotA.handler([t.ansi(0x100, NAME), 0, 300, 0]);
+    const writer = /** @type {{ handle: number }} */ (t.slots.open(NAME, GENERIC_WRITE)).handle;
+    const block = 0x700;
+    const io = { event: 0x44, apc: 0x401000, context: 0xc0de };
+    t.bytes.fill(0xef, block, block + 8);
+    assert.equal(t.slots.read(slot, 0x400, 16, block, true, 0, io), 0x103, 'STATUS_PENDING');
+    assert.equal(t.blocked.length, 0, 'nothing waits');
+    assert.equal(t.dword(block), 0xefefefef);
+    assert.equal(t.timers.at(-1)?.due, 300, 'the read timeout is a timer');
+
+    t.bytes.set([5, 6], 0x200);
+    assert.equal(t.slots.write(writer, 0x200, 2, 0x600), 1);
+    assert.deepEqual([t.dword(block), t.dword(block + 4), t.bytes[0x400], t.bytes[0x401]],
+        [0, 2, 5, 6]);
+    assert.deepEqual(t.events, [0x44]);
+    assert.deepEqual(t.apcs.at(-1)?.args, [0xc0de, block, 0]);
+    assert.deepEqual(t.packets.at(-1), { file: slot, transferred: 2, status: 0, value: 0xc0de });
+    assert.equal(t.timers.length, 0, 'its timer goes with it');
+
+    // Nothing comes: the timer ends it with STATUS_IO_TIMEOUT.
+    assert.equal(t.slots.read(slot, 0x400, 16, block, true, 0, io), 0x103);
+    t.timers.at(-1)?.fired();
+    assert.deepEqual([t.dword(block), t.dword(block + 4)], [0xc00000b5, 0]);
+    assert.equal(t.slots.write(writer, 0x200, 2, 0x600), 1);
+    assert.deepEqual(t.info(slot).slice(1, 3), [2, 1], 'the next message waits in the slot');
 });

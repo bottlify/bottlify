@@ -93,6 +93,21 @@ test('DbgPrint formats, goes to the log through OutputDebugStringA, and succeeds
     assert.equal(fns.DbgPrint.handler([0]), STATUS_SUCCESS, 'no format prints nothing');
 });
 
+test('vDbgPrintEx reads its arguments where the va_list points; WithPrefix leads with it', ()=>{
+    const { bytes, fns, said } = setup();
+    const view = new DataView(bytes.buffer);
+    bytes.set([...new TextEncoder().encode('frame %d\n'), 0], 0x100);
+    view.setUint32(0x180, 7, true);
+    assert.equal(fns.vDbgPrintEx.handler([0, 0, 0x100, 0x180]), STATUS_SUCCESS);
+    assert.deepEqual(said, ['frame 7\n']);
+    bytes.set([...new TextEncoder().encode('ntdll: '), 0], 0x200);
+    assert.equal(fns.vDbgPrintExWithPrefix.handler([0x200, 0, 0, 0x100, 0x180]),
+        STATUS_SUCCESS);
+    assert.deepEqual(said, ['frame 7\n', 'ntdll: frame 7\n']);
+    assert.equal(fns.vDbgPrintEx.argBytes, 16);
+    assert.equal(fns.vDbgPrintExWithPrefix.argBytes, 20);
+});
+
 test('the thread\'s debug object is kept in its thread block, NULL until set', ()=>{
     const { bytes, fns } = setup();
     assert.equal(fns.DbgUiGetThreadDebugObject.handler([]), 0);

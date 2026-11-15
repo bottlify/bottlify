@@ -25,14 +25,16 @@
  *   `_execute_onexit_table`).
  */
 
-import { scanDecimal } from './convert.js';
+import { addSecondNames, UCRTBASE_SECOND_NAMES } from './second-names.js';
+import { scanStandardDecimal, STANDARD_NUMBERS } from './convert.js';
 import { SYSTEM_ERRORS } from './errors.js';
 import { setSingle } from './float.js';
-import { VARIADIC_SLOTS } from './scan.js';
+import { STANDARD_SCAN, VARIADIC_SLOTS } from './scan.js';
 import { PRINT_STYLE } from './format.js';
 import { fileLayout } from './stdio.js';
 import { STANDARD_TIME_FORMATS } from './time.js';
 import { UNIVERSAL_CXX } from './classes.js';
+import { UNIVERSAL_EH } from './eh.js';
 import { guestEntry } from './guest-code.js';
 import * as inGuestPrint from './inguest-print.js';
 import { COMPILED as PRINT_CODE } from './inguest-print.x86.js';
@@ -62,12 +64,6 @@ const LEGACY_THREE_DIGIT_EXPONENTS = 0x10;
 const STANDARD_ROUNDING = 0x20;
 /** The bit of `__stdio_common_vsscanf` and its kin that makes `%s` and `%c` take a size after each pointer. */
 const SECURE_SCANF = 0x1;
-/**
- * The functions ucrtbase also exports with an `_o_` before the name, those a
- * program has been seen to import that way.
- */
-const O_PREFIXED = ['_execute_onexit_table', '_initialize_onexit_table',
-    '_register_onexit_function', 'malloc', 'tolower', 'toupper'];
 /** DLL_PROCESS_DETACH: what a thread-local exit callback is told at exit. */
 const PROCESS_DETACH = 0;
 
@@ -447,11 +443,14 @@ export function createUcrtbaseFunctions(crt, host){
             /** @param {number[]} args */
             handler: ([options, , buffer, count, format, , list])=>{
                 const pointers = pointersAt(list);
+                const scans = /** @type {any} */ (crt)[STANDARD_SCAN];
+                const secure = (options & SECURE_SCANF) !== 0;
                 if ((count >>> 0) !== TRUNCATE)
                 {
-                    return crt._snscanf.handler([buffer, count, format, ...pointers]);
+                    return (secure ? scans._snscanf_s : scans._snscanf)
+                        .handler([buffer, count, format, ...pointers]);
                 }
-                return (options & SECURE_SCANF ? crt.sscanf_s : crt.sscanf)
+                return (secure ? scans.sscanf_s : scans.sscanf)
                     .handler([buffer, format, ...pointers]);
             },
         },
@@ -751,14 +750,17 @@ export function createUcrtbaseFunctions(crt, host){
                 /** @param {number[]} args */
                 handler: ([text, end])=>{
                     const scanned = (text >>> 0) === 0 ? null
-                        : scanDecimal(/** @type {NonNullable<typeof host.readCString>} */ (
+                        : scanStandardDecimal(/** @type {NonNullable<typeof host.readCString>} */ (
                             host.readCString)(text >>> 0, 1024));
                     if ((end >>> 0) !== 0)
                     {
                         writePointer(end, scanned ? text + scanned.end : text);
                     }
                     const value = Math.fround(scanned?.value ?? 0);
-                    if (scanned && (scanned.range || !Number.isFinite(value)
+                    // Past a float's range from a finite double; an infinity or
+                    // a NaN read as such is none.
+                    if (scanned && (scanned.range
+                        || Number.isFinite(scanned.value) && !Number.isFinite(value)
                         || value === 0 && scanned.value !== 0))
                     {
                         fail(ERANGE);
@@ -998,19 +1000,17 @@ export function createUcrtbaseFunctions(crt, host){
         // strftime and its kin with C99's conversions, which msvcrt's refuse.
         ...standardTime ?? {},
 
+        // strtod, atof and their kin reading C99's infinities, NaNs and
+        // hexadecimal numbers, which msvcrt's read as nothing.
+        .../** @type {any} */ (crt)[STANDARD_NUMBERS] ?? {},
+
         // std::exception's message and typeid's names, which msvcrt lacks.
         .../** @type {any} */ (crt)[UNIVERSAL_CXX] ?? {},
+        // The thread's exception state, vcruntime's too.
+        .../** @type {any} */ (crt)[UNIVERSAL_EH] ?? {},
     };
 
-    // The `_o_` exports are the same functions under a second name, which the
-    // runtime's own import library binds some of the headers' calls to: one
-    // entry, so a program reaching either name reaches the same state.
-    for (const name of O_PREFIXED)
-    {
-        if (exports[name])
-        {
-            exports[`_o_${name}`] = exports[name];
-        }
-    }
-    return exports;
+    // The `_o_`, `_l`, `_nolock` and long double names are the same entries
+    // under a second name: a program reaching either reaches the same state.
+    return addSecondNames(exports, UCRTBASE_SECOND_NAMES);
 }

@@ -39,6 +39,9 @@ const ILC_COLORMASK = 0x00fe;
 const ILC_COLOR4 = 0x0004;
 const ILC_COLOR24 = 0x0018;
 
+/** ImageList_Copy exchanges the two images rather than copying one over the other. */
+const ILCF_SWAP = 0x0001;
+
 /**
  * How many overlay masks a list has (MSDN: fifteen since 4.71), and how many
  * of them ILHEAD records, its ovls being four words.
@@ -1137,6 +1140,91 @@ export function createImageLists(host){
                         list.cx * list.max, list.cy, source, 0, 0, SRCCOPY));
                 }
                 return copy;
+            },
+        },
+
+        /** DWORD ImageList_GetFlags(HIMAGELIST himl) - the ILC_ flags it was made with. */
+        ImageList_GetFlags: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>listOf(handle)?.flags ?? 0,
+        },
+
+        /**
+         * BOOL ImageList_Copy(HIMAGELIST himlDst, int iDst, HIMAGELIST himlSrc, int iSrc,
+         *                     UINT uFlags)
+         *
+         * An image copied over another of the same list (ILCF_MOVE), or the
+         * two exchanged (ILCF_SWAP), masks with them. Between two lists, or
+         * at an index past the end, it is refused, as the documentation says
+         * the call works within one list.
+         */
+        ImageList_Copy: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([destination, to, source, from, flags])=>{
+                const list = listOf(source);
+                if (!list || destination >>> 0 !== source >>> 0
+                    || [to, from].some(index=>(index | 0) < 0 || (index | 0) >= list.count))
+                {
+                    return 0;
+                }
+                const blit = (/** @type {number} */ bitmap, /** @type {number} */ x,
+                    /** @type {number} */ y)=>withDCs([bitmap], dc=>gdi('BitBlt', dc,
+                    x * list.cx, 0, list.cx, list.cy, dc, y * list.cx, 0, SRCCOPY));
+                for (const bitmap of [list.image, list.mask].filter(b=>b !== 0))
+                {
+                    if (flags & ILCF_SWAP)
+                    {
+                        // Through a spare place one image wide, made for the swap.
+                        const spare = gdi('CreateBitmap', list.cx, list.cy, 1,
+                            bitmap === list.mask ? 1 : 32, 0);
+                        withDCs([spare, bitmap], (keep, strip)=>{
+                            gdi('BitBlt', keep, 0, 0, list.cx, list.cy, strip, (to | 0) * list.cx,
+                                0, SRCCOPY);
+                            gdi('BitBlt', strip, (to | 0) * list.cx, 0, list.cx, list.cy, strip,
+                                (from | 0) * list.cx, 0, SRCCOPY);
+                            gdi('BitBlt', strip, (from | 0) * list.cx, 0, list.cx, list.cy, keep,
+                                0, 0, SRCCOPY);
+                        });
+                        gdi('DeleteObject', spare);
+                    }
+                    else
+                    {
+                        blit(bitmap, to | 0, from | 0);
+                    }
+                }
+                return 1;
+            },
+        },
+
+        /**
+         * UINT ImageList_SetColorTable(HIMAGELIST himl, UINT uStartIndex, UINT cEntries,
+         *                              const RGBQUAD *prgb) - #390
+         *
+         * The palette of a list of four or eight bits a pixel: how many
+         * entries were set, none for a list of more. The images are kept at
+         * thirty-two bits here, so what is added after keeps its own colours
+         * rather than the palette's nearest, and the call says so once.
+         */
+        '#390': {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([handle, start, entries])=>{
+                const list = listOf(handle);
+                const depth = list ? list.flags & ILC_COLORMASK : 0;
+                if (!list || depth > 8)
+                {
+                    return 0;
+                }
+                const size = 1 << depth;
+                const set = Math.max(0, Math.min(entries >>> 0, size - (start >>> 0)));
+                if (set > 0)
+                {
+                    host.divergence?.('ImageList_SetColorTable',
+                        'images are kept at 32 bits, so the palette does not change their colours');
+                }
+                return set;
             },
         },
 

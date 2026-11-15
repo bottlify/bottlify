@@ -282,6 +282,8 @@ const MAX_PROGID = 255;
  *     through writeMemory costs an allocation and two extra passes.
  * @property {() => any} currentThread  The record apartment state hangs on.
  * @property {OleHeap} heap             Where task memory comes from.
+ * @property {() => import('../kernel32/moveable.js').GlobalMemory | undefined} [globalMemory]
+ *     kernel32's global family, which an HGLOBAL a memory stream stands on is of.
  * @property {((api: string, detail: string) => void) | undefined} [divergence]
  *           Where a class this build does not have is named. A program asking
  *           for one is asking for a component it shipped or expects installed,
@@ -1214,18 +1216,30 @@ export function createOleFunctions(host){
      * @param {string} clsid @param {number} outer @param {string} iid @param {number} out
      */
     const createBuiltIn = (clsid, outer, iid, out)=>{
-        if ((outer >>> 0) !== 0)
+        // Aggregation: the object is made inside the controlling unknown and
+        // hands it its own IUnknown, the only interface that may be asked for
+        // (`objects.js` Aggregation). A class that cannot be made so says
+        // so, as the documentation has it.
+        const aggregation = (outer >>> 0) === 0 ? null : {
+            outer: outer >>> 0,
+            /** @param {number} slot @param {number[]} args */
+            call: (slot, args)=>callMethod(outer >>> 0, slot, args),
+        };
+        const object = aggregation
+            ? host.registry.createAggregated(clsid, aggregation) : host.registry.create(clsid);
+        if (object === false)
         {
-            // Aggregation makes the outer object's IUnknown the one this
-            // object answers with, and nothing here can do that. Saying
-            // so is the documented answer; succeeding would hand back an
-            // object whose identity is wrong.
             return CLASS_E_NOAGGREGATION;
         }
-        const object = host.registry.create(clsid);
         if (!object)
         {
             return CLASS_E_CLASSNOTAVAILABLE;
+        }
+        if (aggregation && canonicalGuid(iid) !== IID_IUNKNOWN)
+        {
+            object.release();
+            writePointer(out, 0);
+            return E_NOINTERFACE;
         }
         const record = object.queryInterface(iid);
         if (!record)
@@ -2931,6 +2945,7 @@ export function createOleFunctions(host){
         readMemory: host.readMemory,
         writeMemory: host.writeMemory,
         heap: host.heap,
+        globalMemory: host.globalMemory,
         callMethod,
         queryPointer,
         callerThread: ()=>host.callerThread?.(),

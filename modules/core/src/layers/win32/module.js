@@ -11,7 +11,7 @@ import { createNamedObjects, createRemoteNamedObjects } from './kernel32/named-o
 import { createRegistryService } from './advapi32/registry-service.js';
 import { createDebugFunctions } from './kernel32/debug.js';
 import {
-    ALIGNMENT_64, TABLES, createHeapAllocator, createHeapFunctions,
+    ALIGNMENT_64, GLOBAL_MEMORY, TABLES, createHeapAllocator, createHeapFunctions,
 } from './kernel32/heap.js';
 import { createProcessFunctions, createThreadState } from './kernel32/process.js';
 import { blockLayouts } from './kernel32/teb.js';
@@ -28,8 +28,8 @@ import { guestEntry } from './msvcrt/guest-code.js';
 import * as kernel32InGuest from './kernel32/inguest.js';
 import { COMPILED as KERNEL32_COMPILED } from './kernel32/inguest.x86.js';
 import {
-    ENVIRONMENT_NOW, createEnvironmentFunctions, createUserenvFunctions, defaultEnvironment,
-    machineArchitecture, sessionEnvironment,
+    ENVIRONMENT_NOW, EXPAND_ENVIRONMENT, createEnvironmentFunctions, createUserenvFunctions,
+    defaultEnvironment, machineArchitecture, sessionEnvironment,
 } from './kernel32/environment.js';
 import { createThreadPool } from './kernel32/pool.js';
 import { serveCall } from './kernel32/cross-process.js';
@@ -50,7 +50,7 @@ import { GUEST_EXCEPTION } from './common/raise.js';
 import { createEntryPointCaller, createGuardedCaller } from './kernel32/dllentry.js';
 import { createThreadCalls, DLL_THREAD_DETACH } from './kernel32/thread-calls.js';
 import { createCrtSeh } from './msvcrt/seh.js';
-import { createCxxExceptions } from './msvcrt/eh.js';
+import { createCxxExceptions, UNIVERSAL_EH } from './msvcrt/eh.js';
 import { createCxxExceptions64 } from './msvcrt/eh64.js';
 import { createApcs } from './kernel32/apc.js';
 import { createResourceFunctions } from './kernel32/resources.js';
@@ -68,6 +68,7 @@ import { createCrtdllFunctions } from './msvcrt/crtdll.js';
 import { createMsvcr80Functions } from './msvcrt/msvcr80.js';
 import { createMsvcp80Functions } from './msvcrt/msvcp80.js';
 import { createUcrtbaseFunctions } from './msvcrt/ucrtbase.js';
+import { addSecondNames, MSVCRT_SECOND_NAMES } from './msvcrt/second-names.js';
 import { UNIVERSAL_CXX } from './msvcrt/classes.js';
 import { createWindowFunctions } from './user32/windows.js';
 import { createWindowDirectory } from './user32/directory.js';
@@ -82,11 +83,11 @@ import { SERVICE_BY_NAME, SERVICE_SECURITY, createServiceFunctions } from './adv
 import { createCryptoFunctions } from './advapi32/crypto.js';
 import {
     DIRECTX_RELEASES, HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE,
-    MACHINE_ENVIRONMENT, REG_EXPAND_SZ, REG_SZ, createHive, shellFolderDirectories,
+    MACHINE_ENVIRONMENT, REG_BINARY, REG_EXPAND_SZ, REG_SZ, createHive, shellFolderDirectories,
     shellFolders,
 } from './advapi32/registry.js';
 import { createGdiFunctions } from './gdi32/functions.js';
-import { createWinsockFunctions } from './wsock32/functions.js';
+import { HOSTNAME, createWinsockFunctions } from './wsock32/functions.js';
 import { createLibcefFunctions } from './libcef/functions.js';
 import { createSteamStart } from './steamclient/steam-start.js';
 import { STEAM_PATH, announceSteamClient, createSteamclientFunctions, steamClientDll,
@@ -105,6 +106,7 @@ import { SHELL32_ORDINALS, createShellFunctions } from './shell32/functions.js';
 import { registerShellLinkClasses } from './shell32/shelllink.js';
 import { registerDragDropHelperClass } from './shell32/dragdrop.js';
 import { registerTaskbarListClass } from './shell32/taskbar.js';
+import { registerFileDialogClasses } from './comdlg32/itemdialog.js';
 import { registerInternetShortcutClass } from './shell32/internet-shortcut.js';
 import { registerWbemClasses } from './ole32/wbem.js';
 import { registerMsxmlClasses } from './msxml/dom.js';
@@ -144,6 +146,7 @@ import { createDwmapiFunctions, createSessionInformationFunctions,
 import { createDwriteFunctions } from './dwrite/functions.js';
 import { createImageCertificateFunctions } from './dbghelp/image-certificates.js';
 import { createMsvfwFunctions } from './msvfw32/functions.js';
+import { createMsdmoFunctions, listDmos } from './msdmo/functions.js';
 import { createAvifilFunctions } from './avifil32/functions.js';
 import { DPLAYX_ORDINALS, createDplayFunctions, registerDplayClasses } from './dplayx/functions.js';
 import { createIostreamFunctions } from './msvcirt/functions.js';
@@ -183,6 +186,8 @@ import { createNtdllFunctions } from './ntdll/functions.js';
 import { longFloatResults } from './msvcrt/float.js';
 import { createComObject, createComRegistry } from './ole32/objects.js';
 import { registerQuartzClasses } from './quartz/graph.js';
+import { createFilterStore } from './devenum/devenum.js';
+import { parseGuid } from './ole32/guid.js';
 import { createMfplatFunctions } from './mfplat/functions.js';
 import { createUiaFunctions } from './uiautomationcore/functions.js';
 import { createDxva2Functions } from './dxva2/functions.js';
@@ -386,6 +391,32 @@ const KNOWN_DLLS = new Set([
     'wldap32.dll', 'wow64.dll', 'wow64cpu.dll', 'wow64win.dll', 'wowarmhw.dll',
     'ws2_32.dll', 'xtajit.dll', 'xtajit64.dll',
 ]);
+
+/**
+ * What shcore.dll exports that shlwapi.dll has too (Windows 8.1 on, where
+ * shlwapi forwards them to it): its strings, registry, streams, thread
+ * references and COM helpers.
+ */
+const SHCORE_FROM_SHLWAPI = [
+    'IStream_Copy', 'IStream_Read', 'IStream_ReadStr', 'IStream_Reset', 'IStream_Size',
+    'IStream_Write', 'IStream_WriteStr', 'IUnknown_AtomicRelease', 'IUnknown_GetSite',
+    'IUnknown_QueryService', 'IUnknown_Set', 'IUnknown_SetSite', 'SHAnsiToAnsi',
+    'SHAnsiToUnicode', 'SHCopyKeyA', 'SHCopyKeyW', 'SHCreateMemStream',
+    'SHCreateStreamOnFileA', 'SHCreateStreamOnFileEx', 'SHCreateStreamOnFileW',
+    'SHCreateThread', 'SHCreateThreadRef', 'SHCreateThreadWithHandle', 'SHDeleteEmptyKeyA',
+    'SHDeleteEmptyKeyW', 'SHDeleteKeyA', 'SHDeleteKeyW', 'SHDeleteValueA', 'SHDeleteValueW',
+    'SHEnumKeyExA', 'SHEnumKeyExW', 'SHEnumValueA', 'SHEnumValueW', 'SHGetThreadRef',
+    'SHGetValueA', 'SHGetValueW', 'SHOpenRegStream2A', 'SHOpenRegStream2W', 'SHOpenRegStreamA',
+    'SHOpenRegStreamW', 'SHQueryInfoKeyA', 'SHQueryInfoKeyW', 'SHQueryValueExA',
+    'SHQueryValueExW', 'SHRegDuplicateHKey', 'SHRegGetIntW', 'SHRegGetPathA', 'SHRegGetPathW',
+    'SHRegGetValueA', 'SHRegGetValueW', 'SHRegSetPathA', 'SHRegSetPathW', 'SHReleaseThreadRef',
+    'SHSetThreadRef', 'SHSetValueA', 'SHSetValueW', 'SHStrDupA', 'SHStrDupW',
+    'SHUnicodeToAnsi', 'SHUnicodeToUnicode',
+];
+
+/** And what it exports that shell32.dll has: the process's application identity. */
+const SHCORE_FROM_SHELL32 = ['CommandLineToArgvW', 'GetCurrentProcessExplicitAppUserModelID',
+    'SetCurrentProcessExplicitAppUserModelID'];
 
 /**
  * What imagehlp.dll exports of dbghelp's (Wine's imagehlp.spec forwards them
@@ -1194,6 +1225,7 @@ export function createWin32Module(){
             const ports = createIoCompletionPorts({
                 pointerSize,
                 kernel,
+                divergence: config?.divergence,
                 readMemory,
                 writeMemory,
                 setLastError: setError,
@@ -1213,6 +1245,25 @@ export function createWin32Module(){
                         void e;
                     }
                 },
+                /**
+                 * Whether a handle was opened for synchronous I/O: a file or pipe
+                 * end without FILE_FLAG_OVERLAPPED, which no port takes. Any other
+                 * handle (a socket, a folder) is the port's to take.
+                 *
+                 * @param {number} handle
+                 */
+                synchronous: handle=>{
+                    const type = kernel.handles.typeOf(handle >>> 0);
+                    if (type !== 'file' && type !== 'pipe')
+                    {
+                        return false;
+                    }
+                    const object = kernel.handles.resolve(handle >>> 0, type);
+                    return type === 'file' ? !object?.overlapped : object?.overlapped === false;
+                },
+                // An alertable dequeue: the routines queued to the thread run
+                // first, and one queued while it waits ends it.
+                alertably: (alertable, wait, answer)=>apcs.waitWith(alertable, wait, answer),
                 /** @param {string} text */
                 trace: text=>trace(text),
             });
@@ -1260,6 +1311,21 @@ export function createWin32Module(){
                 processId,
                 completed: (file, transferred, overlapped, status, skip)=>
                     ports.completed(file, transferred, overlapped, status, skip),
+                // A native read on an asynchronous end finishes as NtReadFile's:
+                // its event set, its APC queued, its ApcContext the port's value.
+                posted: (file, transferred, status, value)=>
+                    ports.posted(file, transferred, status, value),
+                /** @param {number} handle */
+                setEvent: handle=>{
+                    try
+                    {
+                        kernel.setEvent(kernel.handles.resolve(handle, 'event'));
+                    }
+                    catch (e){
+                        void e;
+                    }
+                },
+                queueApc: (thread, routine, args)=>apcs.queue(thread, routine, args),
                 divergence: config?.divergence,
             });
 
@@ -1296,6 +1362,20 @@ export function createWin32Module(){
                 setLastErrorFor: setErrorOn,
                 currentThread: ()=>kernel.currentThread(),
                 park: ()=>bridge.park(),
+                // A native read on an asynchronous slot finishes as NtReadFile's.
+                /** @param {number} handle */
+                setEvent: handle=>{
+                    try
+                    {
+                        kernel.setEvent(kernel.handles.resolve(handle, 'event'));
+                    }
+                    catch (e){
+                        void e;
+                    }
+                },
+                queueApc: (thread, routine, args)=>apcs.queue(thread, routine, args),
+                posted: (file, transferred, status, value)=>
+                    ports.posted(file, transferred, status, value),
             });
 
             /**
@@ -1304,6 +1384,45 @@ export function createWin32Module(){
              * @type {{ hwnd: number, message: number, at: number }[]}
              */
             const dispatching = [];
+
+            // The DMOs' registry, under the classes root where Windows keeps it:
+            // msdmo writes it, and the filter mapper enumerates it beside the filters.
+            /** @type {import('./msdmo/functions.js').DmoRegistry} */
+            const dmoRegistry = (()=>{
+                const classes = ()=>/** @type {any} */ (hive.root(HKEY_CLASSES_ROOT));
+                /** @param {any} key */
+                const removeTree = key=>{
+                    for (const name of hive.subkeys(key))
+                    {
+                        removeTree(hive.open(key, name));
+                        hive.remove(key, name);
+                    }
+                };
+                return {
+                    exists: path=>hive.open(classes(), path) !== null,
+                    subkeys: path=>{
+                        const key = hive.open(classes(), path);
+                        return key ? hive.subkeys(key) : [];
+                    },
+                    get: (path, name)=>{
+                        const key = hive.open(classes(), path);
+                        return key ? hive.getValue(key, name)?.data ?? null : null;
+                    },
+                    set: (path, name, data, binary)=>{
+                        const { key } = hive.create(classes(), path);
+                        hive.setValue(key, name, binary ? REG_BINARY : REG_SZ, data);
+                    },
+                    create: path=>void hive.create(classes(), path),
+                    remove: path=>{
+                        const key = hive.open(classes(), path);
+                        if (key)
+                        {
+                            removeTree(key);
+                            hive.remove(classes(), path);
+                        }
+                    },
+                };
+            })();
 
             // Registered here rather than by the graphics layer, because a filter
             // graph is not a drawing device: a program reaches it through
@@ -1321,9 +1440,157 @@ export function createWin32Module(){
                 readWideString: (address, maxLength)=>readWideString(address, maxLength),
                 video: config?.video,
                 divergence: config?.divergence,
+                // The event IMediaEvent::GetEventHandle hands out; a stale
+                // handle is the program's mistake, as for the ports' events.
+                events: {
+                    create: ()=>kernel.handles.open('event',
+                        kernel.createEvent({ manualReset: true, signalled: false })),
+                    /** @param {number} handle */
+                    set: handle=>{
+                        try { kernel.setEvent(kernel.handles.resolve(handle, 'event')); }
+                        catch (e){ void e; }
+                    },
+                    /** @param {number} handle */
+                    reset: handle=>{
+                        try { kernel.resetEvent(kernel.handles.resolve(handle, 'event')); }
+                        catch (e){ void e; }
+                    },
+                    /** @param {number} handle */
+                    close: handle=>{
+                        try { kernel.handles.close(handle); }
+                        catch (e){ void e; }
+                    },
+                },
+                // The filter mappers' registrations and the device enumerator
+                // over them; a moniker binds through CoCreateInstance and hands
+                // its names out as oleaut32's BSTRs.
+                devices: {
+                    store: createFilterStore(),
+                    objectAt: pointer=>bridge.interfaceObject(pointer),
+                    readU32: address=>memory.readU32(address),
+                    readWideString: (address, maxLength)=>readWideString(address, maxLength),
+                    writeMemory,
+                    allocate: bytes=>heap.allocate(bytes),
+                    publish: (object, iid)=>bridge.publishInterface(object, iid),
+                    allocateString: text=>lent(new Uint8Array(Uint16Array.from(
+                        [...text, '\0'].map(char=>char.charCodeAt(0))).buffer),
+                    at=>libraries['OLEAUT32.dll'].SysAllocString.handler([at])),
+                    readMemory: (address, length)=>memory.readBytes(address, length),
+                    allocateBytes: async bytes=>{
+                        // VT_UI1's vector, its data where pvData points.
+                        const array = await libraries['OLEAUT32.dll'].SafeArrayCreateVector
+                            .handler([17, 0, bytes.length]) >>> 0;
+                        if (array !== 0)
+                        {
+                            writeMemory(memory.readU32(array + 12), bytes);
+                        }
+                        return array;
+                    },
+                    createInstance: (clsid, iid, out)=>lent(/** @type {Uint8Array} */ (parseGuid(clsid)), at=>
+                        libraries['ole32.dll'].CoCreateInstance.handler([at, 0, 1, iid, out])),
+                    // A DMO enumerates as the DMO wrapper filter registers it: at
+                    // MERIT_NORMAL + 0x800, its pins its registered types.
+                    dmos: ()=>listDmos(dmoRegistry).map(dmo=>({
+                        category: dmo.category, instance: dmo.clsid, clsid: dmo.clsid,
+                        name: dmo.name, merit: 0x00600800, properties: new Map(),
+                        display: `@device:dmo:${dmo.clsid}${dmo.category}`,
+                        pins: [
+                            { name: 'in0', output: false, renderer: false, zero: false,
+                                many: false, types: dmo.inputs.map(type=>/** @type {[string, string]} */ (
+                                    [type.type, type.subtype])) },
+                            { name: 'out0', output: true, renderer: false, zero: false,
+                                many: false, types: dmo.outputs.map(type=>/** @type {[string, string]} */ (
+                                    [type.type, type.subtype])) },
+                        ],
+                    })),
+                },
+                // CLSID_SystemClock: the machine's millisecond clock, and an
+                // advise as a kernel timer the scheduler honours.
+                clock: {
+                    now: ()=>kernel.clock.virtualTime(),
+                    at: (due, period, fired)=>{
+                        const timer = kernel.createTimer({ manualReset: true,
+                            name: 'quartz clock' });
+                        kernel.armTimer(timer, due, period, ()=>fired());
+                        return { cancel: ()=>kernel.cancelTimer(timer) };
+                    },
+                    /** @param {number} handle */
+                    setEvent: handle=>{
+                        try { kernel.setEvent(kernel.handles.resolve(handle, 'event')); }
+                        catch (e){ void e; }
+                    },
+                    /** @param {number} handle */
+                    releaseSemaphore: handle=>{
+                        try
+                        {
+                            kernel.releaseSemaphore(kernel.handles.resolve(handle, 'semaphore'), 1);
+                        }
+                        catch (e){
+                            void e;
+                        }
+                    },
+                    writeMemory,
+                },
                 // A renderer the program wrote is fed from a thread of its own,
                 // as quartz feeds one from its streaming thread; made on the
                 // first sample, so a program with no such filter has none.
+                // quartz's own filters: File Source reads the volume's files.
+                filters: {
+                    readU32: address=>memory.readU32(address),
+                    readMemory,
+                    writeMemory,
+                    // A filter's streaming - samples pushed downstream, the end of
+                    // a stream - is made from the graph's streaming thread.
+                    notices: {
+                        deliver: (entry, args, done, tag)=>
+                            streamNotices.deliver(entry, args, done, tag),
+                    },
+                    // The AVI Decompressor's codecs are msvfw32's installable
+                    // compressors, through the same entries a program calls.
+                    icm: {
+                        locate: (type, handler, input, output, mode)=>libraries['MSVFW32.dll']
+                            .ICLocate.handler([type, handler, input, output, mode]),
+                        send: (hic, message, first, second)=>libraries['MSVFW32.dll']
+                            .ICSendMessage.handler([hic, message, first, second]),
+                        close: hic=>libraries['MSVFW32.dll'].ICClose.handler([hic]),
+                        decompress: (hic, flags, format, data, output, bits)=>
+                            libraries['MSVFW32.dll'].ICDecompress
+                                .handler([hic, flags, format, data, output, bits]),
+                    },
+                    readWideString: (address, maxLength)=>readWideString(address, maxLength),
+                    allocate: bytes=>heap.allocate(bytes),
+                    free: address=>heap.free(address),
+                    callGuest: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
+                    currentThread: ()=>kernel.currentThread(),
+                    publish: (object, iid)=>bridge.publishInterface(object, iid),
+                    createInstance: async(clsid, iid)=>{
+                        const at = heap.allocate(36);
+                        writeMemory(at, /** @type {Uint8Array} */ (parseGuid(clsid)));
+                        writeMemory(at + 16, /** @type {Uint8Array} */ (parseGuid(iid)));
+                        writeMemory(at + 32, new Uint8Array(4));
+                        const made = await libraries['ole32.dll'].CoCreateInstance
+                            .handler([at, 0, 1, at + 16, at + 32]);
+                        const pointer = (made | 0) < 0 ? 0 : memory.readU32(at + 32);
+                        heap.free(at);
+                        return pointer;
+                    },
+                    files: {
+                        open: async path=>{
+                            const entry = volume.stat(path);
+                            const node = entry && !entry.isDirectory
+                                ? volume.open(path, { read: true }) : null;
+                            if (!entry || !node)
+                            {
+                                return null;
+                            }
+                            return {
+                                size: entry.size,
+                                read: async(offset, length)=>volume.read(node, offset, length),
+                                close: ()=>volume.close(node),
+                            };
+                        },
+                    },
+                },
                 stream: {
                     readU32: address=>memory.readU32(address),
                     writeMemory,
@@ -1503,6 +1770,9 @@ export function createWin32Module(){
                 // GetObject's BITMAP, DIBSECTION, LOGBRUSH and EXTLOGPEN at the
                 // process's width.
                 pointerSize,
+                // A packed DIB's HGLOBAL, read where kernel32's GlobalLock puts it.
+                lockGlobal: handle=>/** @type {any} */ (libraries['KERNEL32.dll'])
+                    ?.[GLOBAL_MEMORY]?.pointer(handle) || handle,
                 readMemory,
                 writeMemory,
                 fillMemory,
@@ -1566,6 +1836,22 @@ export function createWin32Module(){
                     },
                 },
             });
+            /**
+             * Sets a kernel event by its handle, for WSAEventSelect and an ICMP
+             * echo's: a stale or mistyped handle is the program's mistake, not
+             * a fault here.
+             *
+             * @param {number} handle
+             */
+            const signalEvent = handle=>{
+                try
+                {
+                    kernel.setEvent(kernel.handles.resolve(handle, 'event'));
+                }
+                catch (e){
+                    void e;
+                }
+            };
             const winsock = createWinsockFunctions({
                 readMemory,
                 // The WSA events are kernel32's events, and TransmitFile reads
@@ -1605,18 +1891,7 @@ export function createWin32Module(){
                 // ever runs once the machine is up and the queue exists.
                 /** @param {import('./user32/messages.js').PostedMessage} message */
                 post: message=>queue.post(message),
-                // Readiness as a kernel event, for WSAEventSelect. A stale or
-                // mistyped handle is the program's mistake, not a fault here.
-                /** @param {number} handle */
-                signalEvent: handle=>{
-                    try
-                    {
-                        kernel.setEvent(kernel.handles.resolve(handle, 'event'));
-                    }
-                    catch (e){
-                        void e;
-                    }
-                },
+                signalEvent,
             });
 
             // The host's half of a critical section: the queue behind a contended
@@ -1664,6 +1939,31 @@ export function createWin32Module(){
             // The thread a filter graph calls a program's own filters on: the
             // samples it feeds a renderer the program wrote, and the flushes and
             // releases it owes that renderer.
+            // The thread Media Foundation's work queues call a program's
+            // IMFAsyncCallback::Invoke on, made with the first work put.
+            const mfNotices = createNoticeThread({
+                name: 'mfplat',
+                reason: 'a work queue item',
+                trap: '<mfplat-queue>',
+                /** @param {number} bytes */
+                allocate: bytes=>heap.allocate(bytes),
+                writeMemory,
+                register: (name, fn)=>bridge.register(name, fn),
+                /** @param {{ entry: number, name: string }} options */
+                createThread: options=>{
+                    const thread = kernel.createThread(options);
+                    threadMade(thread);
+                    return thread;
+                },
+                currentThread: ()=>kernel.currentThread(),
+                /** @param {any} thread @param {string} reason */
+                block: (thread, reason)=>kernel.block(thread, reason),
+                /** @param {any} thread @param {number} result */
+                wake: (thread, result)=>kernel.wake(thread, result),
+                /** @param {any} thread */
+                park: thread=>bridge.park(thread),
+            });
+
             const streamNotices = createNoticeThread({
                 name: 'quartz',
                 reason: 'a filter graph sample',
@@ -2151,6 +2451,7 @@ export function createWin32Module(){
             registerShellLinkClasses(com, shortcutHost);
             registerDragDropHelperClass(com);
             registerTaskbarListClass(com);
+            registerFileDialogClasses(com, { ...shortcutHost, publish: comVtables.publish });
             // The `.url` beside it: a setup's link to its publisher's site.
             registerInternetShortcutClass(com, /** @type {any} */ (shortcutHost));
 
@@ -2230,9 +2531,41 @@ export function createWin32Module(){
             });
 
             // The audio endpoints a program walks to find the device it plays to.
+            // A path as the object manager names it: the drive's device, as
+            // QueryDosDevice answers it, and the rest; null where it has no drive.
+            const nativePathOf = (/** @type {string} */ path)=>{
+                const parts = /^([A-Za-z]):(\\.*)$/.exec(path);
+                const kernel32 = /** @type {any} */ (libraries['KERNEL32.dll']);
+                const scratch = parts && kernel32.QueryDosDeviceA
+                    ? allocator.allocate(0x110) : 0;
+                if (!parts || scratch === 0)
+                {
+                    return null;
+                }
+                try
+                {
+                    writeMemory(scratch, new Uint8Array(
+                        [parts[1].charCodeAt(0), 0x3a, 0]));
+                    return kernel32.QueryDosDeviceA.handler([scratch, scratch + 0x10,
+                        0x100]) === 0 ? null : readCString(scratch + 0x10, 0x100)
+                        + parts[2];
+                }
+                finally
+                {
+                    allocator.free(scratch);
+                }
+            };
+
             registerMmDevApiClasses({
                 registry: com, vtables: comVtables, heap, readMemory, writeMemory, readWideString,
                 pointerSize, windows, divergence: config?.divergence,
+                // A stream plays into the mixer waveOut writes to, against the
+                // guest's clock where nothing listens, and an event-driven one is
+                // woken by the multimedia timers.
+                now: ()=>kernel.clock.virtualTime(), output: config?.output, timers: mmTimers,
+                // A session is named after the program, as the object manager names it.
+                program: ()=>nativePathOf(modules.imagePath()) ?? modules.imagePath(),
+                processId: ()=>processId,
             });
 
             // DirectPlay's session and lobby objects, which a program makes
@@ -2277,8 +2610,99 @@ export function createWin32Module(){
             };
             // Media Foundation: its objects, and its reader's class factory,
             // which a program reaches through COM as well as through exports.
+            /** @param {string} name @param {number[]} args @returns {Promise<number>} */
+            const kernel32Call = async(name, args)=>
+                (await libraries['KERNEL32.dll'][name].handler(args)) >>> 0;
+            /** @returns {import('./mfplat/bytestream.js').FileCalls} */
+            const mfFiles = ()=>({
+                open: async(path, access, share, disposition, flags)=>{
+                    const name = heap.allocate((path.length + 1) * 2);
+                    writeMemory(name, wideText(path));
+                    try
+                    {
+                        const handle = await kernel32Call('CreateFileW',
+                            [name, access, share, 0, disposition, flags | 0x80, 0]);
+                        return handle === 0xffffffff
+                            ? { error: await kernel32Call('GetLastError', []) } : { handle };
+                    }
+                    finally
+                    {
+                        heap.free(name);
+                    }
+                },
+                transfer: async(handle, position, buffer, length, write)=>{
+                    const done = heap.allocate(4);
+                    try
+                    {
+                        await kernel32Call('SetFilePointerEx', [handle,
+                            Number(position & 0xffffffffn), Number(position >> 32n), 0, 0]);
+                        const ok = await kernel32Call(write ? 'WriteFile' : 'ReadFile',
+                            [handle, buffer, length, done, 0]);
+                        return ok ? { done: memory.readU32(done) }
+                            : { error: await kernel32Call('GetLastError', []) };
+                    }
+                    finally
+                    {
+                        heap.free(done);
+                    }
+                },
+                size: async handle=>{
+                    const out = heap.allocate(8);
+                    try
+                    {
+                        await kernel32Call('GetFileSizeEx', [handle, out]);
+                        return BigInt(memory.readU32(out)) | BigInt(memory.readU32(out + 4)) << 32n;
+                    }
+                    finally
+                    {
+                        heap.free(out);
+                    }
+                },
+                setSize: async(handle, size)=>{
+                    await kernel32Call('SetFilePointerEx', [handle, Number(size & 0xffffffffn),
+                        Number(size >> 32n), 0, 0]);
+                    return (await kernel32Call('SetEndOfFile', [handle])) !== 0;
+                },
+                flush: async handle=>(await kernel32Call('FlushFileBuffers', [handle])) !== 0,
+                modified: async handle=>{
+                    const out = heap.allocate(8);
+                    try
+                    {
+                        writeMemory(out, new Uint8Array(8));
+                        await kernel32Call('GetFileTime', [handle, 0, 0, out]);
+                        return Uint8Array.from(readMemory(out, 8));
+                    }
+                    finally
+                    {
+                        heap.free(out);
+                    }
+                },
+                close: handle=>{
+                    void libraries['KERNEL32.dll'].CloseHandle.handler([handle]);
+                },
+            });
             const mediaFoundation = createMfplatFunctions({
-                readMemory, writeMemory, heap, vtables: comVtables,
+                readMemory, writeMemory, heap, vtables: comVtables, setRegisters,
+                now: ()=>kernel.clock.virtualTime(),
+                // A byte stream's file is kernel32's, opened and read through
+                // its own calls, so it fails as CreateFile and ReadFile do.
+                files: mfFiles(),
+                notices: {
+                    /** @param {number} entry @param {number[]} args @param {() => void} [done] */
+                    deliver: (entry, args, done)=>mfNotices.deliver(entry, args, done),
+                },
+                tempPath: async()=>{
+                    const buffer = heap.allocate(520);
+                    try
+                    {
+                        const length = await kernel32Call('GetTempPathW', [260, buffer]);
+                        return readWideString(buffer, (length >>> 0) * 2);
+                    }
+                    finally
+                    {
+                        heap.free(buffer);
+                    }
+                },
                 objectAt: pointer=>bridge.interfaceObject(pointer),
                 callGuest: call=>bridge.callGuest(call),
                 callerThread: ()=>bridge.callerThread(),
@@ -2682,6 +3106,8 @@ export function createWin32Module(){
                         writeMemory,
                         setLastError: setError,
                         namedObjects,
+                        /** @param {number} handle @param {any} object */
+                        closed: (handle, object)=>ports.closed(handle, object),
                         currentThread: ()=>kernel.currentThread(),
                         park: (/** @type {any} */ thread)=>bridge.park(thread),
                         // Where a start routine returns to. Registered once, the
@@ -3169,30 +3595,7 @@ export function createWin32Module(){
                             writeThroughProtection(/** @type {any} */ (memory), address, bytes),
                         startup: ()=>config?.startup ?? null,
                         divergence: config?.divergence,
-                        // A path as the object manager names it: the drive's
-                        // device, as QueryDosDevice answers it, and the rest.
-                        nativePath: (/** @type {string} */ path)=>{
-                            const parts = /^([A-Za-z]):(\\.*)$/.exec(path);
-                            const kernel32 = /** @type {any} */ (libraries['KERNEL32.dll']);
-                            const scratch = parts && kernel32.QueryDosDeviceA
-                                ? allocator.allocate(0x110) : 0;
-                            if (!parts || scratch === 0)
-                            {
-                                return null;
-                            }
-                            try
-                            {
-                                writeMemory(scratch, new Uint8Array(
-                                    [parts[1].charCodeAt(0), 0x3a, 0]));
-                                return kernel32.QueryDosDeviceA.handler([scratch, scratch + 0x10,
-                                    0x100]) === 0 ? null : readCString(scratch + 0x10, 0x100)
-                                    + parts[2];
-                            }
-                            finally
-                            {
-                                allocator.free(scratch);
-                            }
-                        },
+                        nativePath: nativePathOf,
                         askChild,
                         currentThread: ()=>kernel.currentThread(),
                         setLastErrorFor: setErrorOn,
@@ -3309,6 +3712,8 @@ export function createWin32Module(){
                             completed: (file, n, overlapped)=>ports.completed(file, n, overlapped),
                             /** @param {number} handle @param {any} object */
                             closed: (handle, object)=>ports.closed(handle, object),
+                            /** @param {number} file @param {number} port @param {number} key */
+                            bind: (file, port, key)=>ports.bind(file, port, key),
                         },
                     }),
                 },
@@ -3456,6 +3861,7 @@ export function createWin32Module(){
                         abort: abortProcess,
                         park: ()=>bridge.park(),
                         divergence: config?.divergence,
+                        allocate: bytes=>heap.allocate(bytes),
                     }).table,
                     // The C language handler a 64-bit function names in its
                     // unwind data; the dispatcher reads its scope table rather
@@ -3483,7 +3889,12 @@ export function createWin32Module(){
                         .handler([0x40, bytes]) >>> 0,
                     free: address=>void libraries['KERNEL32.dll'].LocalFree
                         .handler([address]),
-                    handles,
+                    handles, sockets: ()=>sockets.all(), hostName: ()=>HOSTNAME,
+                    setLastError: setError, divergence: config?.divergence, signalEvent,
+                    processId: ()=>processId,
+                    // NotifyAddrChange's handle, which a program may wait on.
+                    openEvent: (/** @type {string} */ name)=>kernel.handles.open('event',
+                        kernel.createEvent({ manualReset: true, signalled: false, name })),
                 }),
                 // TransmitFile is wsock32's and mswsock's, never ws2_32's.
                 'WS2_32.dll': Object.fromEntries(Object.entries(winsock.sockets)
@@ -3540,6 +3951,9 @@ export function createWin32Module(){
                     // CreateMappedBitmap reads and writes a bitmap's bits
                     // through gdi32's own calls, looked up when called.
                     gdi32: name=>libraries['GDI32.dll']?.[name],
+                    // The arrays and the allocator take their memory through
+                    // kernel32's heaps, looked up when called.
+                    kernel32: name=>libraries['KERNEL32.dll']?.[name]?.handler,
                     allocate: bytes=>heap.allocate(bytes),
                     release: address=>heap.free(address),
                     call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
@@ -3614,6 +4028,10 @@ export function createWin32Module(){
                     // them, which carry a version all the same.
                     /** @param {string} name */
                     systemLibrary: name=>modules.systemLibrary?.(name) ?? false,
+                    // The system folder's programs the engine runs itself.
+                    /** @param {string} path */
+                    systemProgram: path=>systemProgramAt(path) !== null,
+                    currentDirectory: ()=>filesystem.currentDirectory(),
                     // Where VerInstallFile reads a compressed source and writes the
                     // expanded file: the same volume every other file call uses.
                     files: volume,
@@ -3742,6 +4160,8 @@ export function createWin32Module(){
                     free: address=>heap.free(address),
                     call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
                     callerThread: ()=>bridge.callerThread(),
+                    // SHCreateThreadRef's object is the engine's own.
+                    publish: (object, iid)=>bridge.publishInterface(object, iid),
                 }) },
 
                 'ADVPACK.dll': createAdvpackFunctions({
@@ -3939,11 +4359,85 @@ export function createWin32Module(){
                 // The device tree: its root alone, with no bus resources.
                 'CFGMGR32.dll': createCfgmgrFunctions({ writeMemory, readCString }),
 
-                // Video for Windows with no compressors and no MCI video device.
-                'MSVFW32.dll': createMsvfwFunctions({ writeMemory }),
+                // Video for Windows: the compressor manager with the codecs
+                // Windows installs, DrawDib, and no MCI video device.
+                'MSVFW32.dll': createMsvfwFunctions({
+                    readMemory, writeMemory, readCString, readWideString,
+                    // The registry's list of codec drivers, its values strings.
+                    drivers: {
+                        values: path=>{
+                            const key = hive.open(/** @type {any} */ (hive.root(HKEY_LOCAL_MACHINE)), path);
+                            return (key ? hive.values(key) : []).map((/** @type {any} */ value)=>{
+                                const end = value.data.indexOf(0);
+                                return [value.name, decodeAnsi(value.data.subarray(0,
+                                    end < 0 ? value.data.length : end))];
+                            });
+                        },
+                        get: (path, name)=>{
+                            const key = hive.open(/** @type {any} */ (hive.root(HKEY_LOCAL_MACHINE)), path);
+                            const value = key ? hive.getValue(key, name) : null;
+                            return value ? decodeAnsi(value.data).replace(/\0[\s\S]*$/, '') : null;
+                        },
+                        set: (path, name, value)=>{
+                            const { key } = hive.create(/** @type {any} */ (hive.root(HKEY_LOCAL_MACHINE)), path);
+                            hive.setValue(key, name, REG_SZ, encodeAnsi(`${value}\0`));
+                        },
+                        remove: (path, name)=>{
+                            const key = hive.open(/** @type {any} */ (hive.root(HKEY_LOCAL_MACHINE)), path);
+                            return key ? hive.deleteValue(key, name) : false;
+                        },
+                    },
+                    // A codec's DriverProc is the program's code, called as it calls one.
+                    call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
+                    callerThread: ()=>bridge.callerThread(),
+                    allocate: bytes=>libraries['KERNEL32.dll'].GlobalAlloc
+                        .handler([0x40, bytes]) >>> 0,
+                    free: address=>void libraries['KERNEL32.dll'].GlobalFree.handler([address]),
+                    stretchDIBits: args=>libraries['GDI32.dll'].StretchDIBits.handler(args),
+                    // A codec DLL a game installed: loaded as the program loads a
+                    // library, and its DriverProc found by name.
+                    loadDriver: async file=>{
+                        const kernel32 = libraries['KERNEL32.dll'];
+                        const names = encodeAnsi(`${file}\0DriverProc\0`);
+                        const at = kernel32.GlobalAlloc.handler([0x40, names.length]) >>> 0;
+                        writeMemory(at, names);
+                        const module = await kernel32.LoadLibraryA.handler([at]) >>> 0;
+                        const proc = module
+                            ? await kernel32.GetProcAddress
+                                .handler([module, at + file.length + 1]) >>> 0
+                            : 0;
+                        kernel32.GlobalFree.handler([at]);
+                        return proc;
+                    },
+                    // system.ini's [drivers32], read as GetPrivateProfileString reads it.
+                    iniDriver: name=>{
+                        const kernel32 = libraries['KERNEL32.dll'];
+                        const strings = encodeAnsi(`drivers32\0${name}\0\0system.ini\0`);
+                        const at = kernel32.GlobalAlloc.handler([0x40, strings.length + 260]) >>> 0;
+                        writeMemory(at, strings);
+                        const key = at + 10;
+                        const none = key + name.length + 1;
+                        const length = kernel32.GetPrivateProfileStringA.handler([at, key, none,
+                            at + strings.length, 260, none + 1]) >>> 0;
+                        const value = length ? readCString(at + strings.length, 260) : null;
+                        kernel32.GlobalFree.handler([at]);
+                        return value;
+                    },
+                    divergence: config?.divergence,
+                }),
 
                 // The AVIFile library with no file handlers registered.
                 'AVIFIL32.dll': createAvifilFunctions({ writeMemory }),
+
+                // The DMOs' registry, kept under the classes root where Windows
+                // keeps it, and the media type helpers in task memory.
+                'msdmo.dll': createMsdmoFunctions({
+                    readMemory, writeMemory, readWideString,
+                    allocate: bytes=>heap.allocate(bytes),
+                    free: address=>heap.free(address),
+                    publish: (object, iid)=>bridge.publishInterface(object, iid),
+                    registry: dmoRegistry,
+                }),
 
                 // DirectPlay with no service provider, and a lobby that did
                 // not launch the program.
@@ -4603,15 +5097,16 @@ export function createWin32Module(){
                             journal.write('trace', 'input.activate', '{0}', text);
                         }
                     },
-                    dispatch: (wndProc, message, thread)=>bridge.callGuest({
-                        entry: wndProc,
+                    dispatch: (wndProc, message, thread, guarded)=>{
                         // The four arguments a window procedure declares, in
                         // order: at 64 bits a WPARAM widens as the UINT it is
                         // kept as, an LPARAM as the LONG (`callback.js`).
-                        args: [message.hwnd >>> 0, message.message >>> 0,
-                            message.wParam >>> 0, message.lParam | 0],
-                        thread,
-                    }),
+                        const args = [message.hwnd >>> 0, message.message >>> 0,
+                            message.wParam >>> 0, message.lParam | 0];
+                        return guarded
+                            ? callGuarded({ entry: wndProc, args, thread, failed: 0 })
+                            : bridge.callGuest({ entry: wndProc, args, thread });
+                    },
                     call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
                     callerThread: ()=>bridge.callerThread(),
                     answering: (thread, fn)=>bridge.answering(thread, fn),
@@ -4767,6 +5262,11 @@ export function createWin32Module(){
                     // And its pixels, which an icon or a cursor made of it is drawn from.
                     /** @param {number} bitmap */
                     bitmapPixels: bitmap=>gdi.bitmapPixels(bitmap),
+                    // The bitmaps GetIconInfo hands out, and CopyImage of a bitmap.
+                    bitmapFromBits: gdi.bitmapFromBits,
+                    copyBitmap: gdi.copyBitmap,
+                    /** @param {number} handle */
+                    deleteObject: handle=>gdi.table.DeleteObject.handler([handle]),
                     // Shows the desktop once a paint pass has finished. The
                     // graphics layer is above this one and is reached the way the
                     // drawing engine is: through what the assembling caller hands
@@ -4797,6 +5297,10 @@ export function createWin32Module(){
                             ...createCommonControls(controlHost, toolkit, imageLists, {
                                 loadBitmap: (instance, id)=>libraries['USER32.dll']
                                     ?.LoadBitmapA?.handler([instance, id]) ?? 0,
+                                // A tooltip's text may be a string resource of
+                                // the instance its tool names.
+                                loadString: (instance, id)=>modules.loadString?.(instance, id)
+                                    ?? null,
                                 // A control that subclasses another window -- an
                                 // up-down control its buddy -- does it with
                                 // comctl32's own SetWindowSubclass.
@@ -4837,6 +5341,8 @@ export function createWin32Module(){
                     allocate: bytes=>heap.allocate(bytes),
                     /** @param {number} address */
                     release: address=>heap.free(address),
+                    /** @param {number} address */
+                    block: address=>heap.block(address),
                 }),
 
                 'ADVAPI32.dll': {
@@ -4851,6 +5357,11 @@ export function createWin32Module(){
                         /** @param {string} library @param {string} name @param {number[]} args */
                         system: (library, name, args)=>libraries[library]?.[name]?.handler(args),
                         computerName: COMPUTER_NAME,
+                        // RegGetValue answers a REG_EXPAND_SZ expanded, against
+                        // the process's environment as it is when asked.
+                        /** @param {string} text */
+                        expandEnvironment: text=>/** @type {any} */ (libraries['KERNEL32.dll'])
+                            ?.[EXPAND_ENVIRONMENT]?.(text) ?? text,
                         // Where RegSaveKey writes a hive and RegLoadKey reads one.
                         files: volume,
                         // The run's file-security store, and how a path is made
@@ -5028,6 +5539,9 @@ export function createWin32Module(){
                     fillMemory,
                     currentThread: ()=>kernel.currentThread(),
                     heap,
+                    // An HGLOBAL a memory stream stands on is kernel32's, whose
+                    // table is still being built here.
+                    globalMemory: ()=>/** @type {any} */ (libraries['KERNEL32.dll'])?.[GLOBAL_MEMORY],
                     registry: com,
                     taskAllocator,
                     divergence: config?.divergence,
@@ -5278,6 +5792,55 @@ export function createWin32Module(){
                 delete libraries['combase.dll'];
             }
 
+            // The reference the process holds to keep its host alive is the
+            // shell core's, and shell32's Explorer reference is the same one:
+            // never shlwapi's own export.
+            const processReference = {
+                GetProcessReference: libraries['SHLWAPI.dll'].GetProcessReference,
+                SetProcessReference: libraries['SHLWAPI.dll'].SetProcessReference,
+            };
+            delete libraries['SHLWAPI.dll'].GetProcessReference;
+            delete libraries['SHLWAPI.dll'].SetProcessReference;
+            libraries['SHELL32.dll'].SHGetInstanceExplorer = processReference.GetProcessReference;
+            libraries['SHELL32.dll'].SHSetInstanceExplorer = processReference.SetProcessReference;
+            Object.assign(libraries['SHCORE.dll'], processReference);
+
+            // comctl32 registers a class of its own on user32's asking from
+            // Vista on; XP's library has no such entry.
+            if (windows.major < 6)
+            {
+                delete libraries['COMCTL32.dll'].RegisterClassNameW;
+            }
+
+            // The shell's core came with Windows 8.1, and took over shlwapi's
+            // strings, registry, streams, thread references and COM helpers
+            // and shell32's application identity: shlwapi and shell32 forward
+            // those names to it, so each is one entry under both libraries. A
+            // Windows before it has none, and a program that looks finds none.
+            if (windows.major < 10)
+            {
+                delete libraries['SHCORE.dll'];
+            }
+            else
+            {
+                const shcore = libraries['SHCORE.dll'];
+                for (const name of SHCORE_FROM_SHLWAPI)
+                {
+                    shcore[name] ??= libraries['SHLWAPI.dll'][name];
+                }
+                for (const name of SHCORE_FROM_SHELL32)
+                {
+                    shcore[name] ??= libraries['SHELL32.dll'][name];
+                }
+                for (const name of Object.keys(shcore))
+                {
+                    if (shcore[name] === undefined)
+                    {
+                        delete shcore[name];
+                    }
+                }
+            }
+
             // The .NET shim is part of the system from Windows 7 on, and the
             // .NET Framework 4's setup there installs only its implementation,
             // mscoreei.dll, which it forwards to (A247). XP has none of its
@@ -5388,6 +5951,9 @@ export function createWin32Module(){
             // The runtime before msvcrt, built from it: the same entries under the
             // same names, and its own few beside them.
             libraries['CRTDLL.dll'] = createCrtdllFunctions(libraries['msvcrt.dll']);
+            // msvcrt's second names for what it has, the locale forms above
+            // all, before the runtimes built over it take its table.
+            addSecondNames(libraries['msvcrt.dll'], MSVCRT_SECOND_NAMES);
             // Visual C++ 2005's, likewise, with the names that runtime added.
             // imagehlp, the older library dbghelp grew out of: the same
             // functions under the names it had then.
@@ -5444,6 +6010,7 @@ export function createWin32Module(){
                     .map(name=>[name, libraries['msvcrt.dll'][name]])),
                 // std::exception's message and typeid's names, ucrtbase's too.
                 .../** @type {any} */ (libraries['msvcrt.dll'])[UNIVERSAL_CXX] ?? {},
+                .../** @type {any} */ (libraries['msvcrt.dll'])[UNIVERSAL_EH] ?? {},
             };
             if (cxx64)
             {
@@ -5477,6 +6044,9 @@ export function createWin32Module(){
                 setRegisters,
                 windows,
                 handleType: (/** @type {number} */ handle)=>kernel.handles.typeOf(handle),
+                // The name the run's namespace keeps for the object a handle opens.
+                namedObjectName: (/** @type {number} */ handle)=>
+                    runObjects.nameOf(kernel.handles.resolve(handle)),
                 processOf: (/** @type {number} */ handle)=>
                     (kernel.handles.typeOf(handle) === 'process'
                         ? kernel.handles.resolve(handle, 'process') : null),
@@ -5524,6 +6094,11 @@ export function createWin32Module(){
             // VirtualAlloc2 -- finds kernel32's entries, one implementation
             // under the two names.
             libraries['KERNELBASE.dll'] = libraries['KERNEL32.dll'];
+
+            // advapi32 exports the walk over the registry's time zones, which
+            // Windows keeps beside the zone rules in kernelbase: one entry.
+            libraries['ADVAPI32.dll'].EnumDynamicTimeZoneInformation =
+                libraries['KERNEL32.dll'].EnumDynamicTimeZoneInformation;
 
             /** Every function, whichever library exports it. */
             const flat = ()=>Object.assign({}, ...Object.values(libraries));

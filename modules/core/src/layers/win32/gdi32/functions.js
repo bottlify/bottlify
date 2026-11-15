@@ -27,7 +27,7 @@ import { createMetafileFunctions } from './metafiles.js';
 import {
     FACES, FF_MODERN, FF_ROMAN, FIXED_PITCH, faceNamed, fontFamilies, windowsMetrics,
 } from './faces.js';
-import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
+import { ANSI_PAGE, OEM_PAGE, decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { DISPLAY_DEVICE_NAME } from '../devices.js';
 import {
     BITMAP,
@@ -110,8 +110,8 @@ const BS_NULL = 1;
 const BS_HATCHED = 2;
 const BS_PATTERN = 3;
 /**
- * A packed DIB's brush: lbHatch the DIB -- an HGLOBAL, which is its address
- * here, or the address itself -- and lbColor its usage. BS_PATTERN8X8 is
+ * A packed DIB's brush: lbHatch the DIB -- an HGLOBAL, read where it locks
+ * to, or the address itself -- and lbColor its usage. BS_PATTERN8X8 is
  * BS_PATTERN under an older name.
  */
 const BS_DIBPATTERN = 5;
@@ -528,6 +528,9 @@ const ENUMERATED_FONTTYPE = 0x0004;
 
 /**
  * @typedef {Object} GdiHost
+ * @property {(handle: number) => number} [lockGlobal]
+ *     The address an HGLOBAL's bytes are at - a moveable handle's block, a
+ *     fixed one itself - as GlobalLock answers it.
  * @property {number} [pointerSize]  8 in a 64-bit process, whose structures
  *     have their pointers, handles and message parameters eight bytes wide.
  * @property {(address: number, length: number) => Uint8Array} readMemory
@@ -1951,6 +1954,17 @@ export function createGdiFunctions(host){
     };
 
     /**
+     * The average width of a DC's font as dialog units are measured by it -
+     * the extent of the 52 Latin letters, halved and rounded up over 26.
+     *
+     * @param {any} dc
+     */
+    const averageWidthOf = dc=>{
+        const letters = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
+        return Math.floor((Math.floor(extentOf(dc, letters) / 26) + 1) / 2);
+    };
+
+    /**
      * @param {any} dc
      * @param {number} index
      * @returns {number}
@@ -3012,9 +3026,28 @@ export function createGdiFunctions(host){
                     return stockObject(NULL_PEN);
                 }
                 const [brushStyle, color, hatch] = readU32s(host, brush >>> 0, 3);
+                // A cosmetic pen is drawn in a colour, so its brush is solid;
+                // a geometric one takes a solid, hatched, pattern or DIB
+                // pattern brush, and a hollow one is no pen at all (Wine's
+                // pen.c test_brush_pens). A pattern's colour is not the pen's.
+                const pattern = [BS_PATTERN, BS_DIBPATTERN, BS_DIBPATTERNPT]
+                    .includes(brushStyle >>> 0);
+                if (geometric && (brushStyle >>> 0) === BS_NULL)
+                {
+                    return stockObject(NULL_PEN);
+                }
+                if (geometric ? !pattern && ![BS_SOLID, BS_HATCHED].includes(brushStyle >>> 0)
+                    : (brushStyle >>> 0) !== BS_SOLID)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
                 return objects.create('pen', {
-                    style: kind, width: width | 0, color: color >>> 0, extended: style >>> 0,
-                    brushStyle: brushStyle >>> 0, hatch: hatch >>> 0,
+                    style: kind, width: width | 0, color: pattern ? 0 : color >>> 0,
+                    extended: style >>> 0,
+                    brushStyle: (brushStyle >>> 0) === BS_DIBPATTERN ? BS_DIBPATTERNPT
+                        : brushStyle >>> 0,
+                    hatch: hatch >>> 0,
                     entries: user ? readU32s(host, dashes >>> 0, count >>> 0) : [],
                 });
             },
@@ -3047,7 +3080,12 @@ export function createGdiFunctions(host){
                 {
                     return patternBrush(fields.hatch);
                 }
-                return fields.style === BS_DIBPATTERN || fields.style === BS_DIBPATTERNPT
+                if (fields.style === BS_DIBPATTERN)
+                {
+                    return dibPatternBrush(host.lockGlobal?.(fields.hatch) ?? fields.hatch,
+                        fields.color);
+                }
+                return fields.style === BS_DIBPATTERNPT
                     ? dibPatternBrush(fields.hatch, fields.color)
                     : objects.create('brush', fields);
             },
@@ -3071,7 +3109,7 @@ export function createGdiFunctions(host){
          * HBRUSH CreateDIBPatternBrush(HGLOBAL hglbDIBPacked, UINT fuColorSpec)
          *
          * A brush over a packed DIB, which the BS_DIBPATTERNPT and BS_DIBPATTERN
-         * forms of a LOGBRUSH describe; an HGLOBAL is the address it locks to.
+         * forms of a LOGBRUSH describe; an HGLOBAL is read where it locks to.
          */
         CreateDIBPatternBrushPt: {
             argBytes: 8,
@@ -3081,7 +3119,8 @@ export function createGdiFunctions(host){
         CreateDIBPatternBrush: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([packed, usage])=>dibPatternBrush(packed >>> 0, usage >>> 0),
+            handler: ([packed, usage])=>
+                dibPatternBrush(host.lockGlobal?.(packed >>> 0) ?? packed >>> 0, usage >>> 0),
         },
 
         /**
@@ -4726,6 +4765,64 @@ export function createGdiFunctions(host){
         },
 
         /**
+         * LONG GdiGetCharDimensions(HDC hdc, LPTEXTMETRICW lptm, LONG *height)
+         *
+         * The average width of the DC's font as dialog units are measured
+         * by it - the extent of the 52 Latin letters, halved and rounded up
+         * over 26 - with the font's metrics and height where asked. A
+         * handle that is not a DC answers 0 and leaves both alone.
+         */
+        GdiGetCharDimensions: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, out, height])=>{
+                const dc = dcOf(handle);
+                if (!dc)
+                {
+                    return 0;
+                }
+                const metrics = currentMetrics(dc);
+                if ((out >>> 0) !== 0)
+                {
+                    writeTextMetricsW(host, out >>> 0, metrics);
+                }
+                if ((height >>> 0) !== 0)
+                {
+                    host.writeMemory(height >>> 0, u32Bytes([metrics.height]));
+                }
+                return averageWidthOf(dc);
+            },
+        },
+
+        /**
+         * DWORD GdiGetCodePage(HDC hdc)
+         *
+         * The code page the DC's font's character set stands for: the
+         * system's ANSI page for DEFAULT_CHARSET and for a handle that is not
+         * a DC, its OEM page for OEM_CHARSET, the Macintosh Roman page for
+         * MAC_CHARSET, and TranslateCharsetInfo's page for every other set.
+         */
+        GdiGetCodePage: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                const dc = dcOf(handle);
+                const charSet = dc ? currentMetrics(dc).charSet : DEFAULT_CHARSET;
+                const OEM_CHARSET = 255;
+                const MAC_CHARSET = 77;
+                if (charSet === OEM_CHARSET)
+                {
+                    return OEM_PAGE;
+                }
+                if (charSet === MAC_CHARSET)
+                {
+                    return 10000;
+                }
+                return CHARSET_TABLE.find(entry=>entry.charSet === charSet)?.codePage ?? ANSI_PAGE;
+            },
+        },
+
+        /**
          * BOOL GetTextExtentExPointA/W/I(HDC hdc, LPCSTR/LPCWSTR/LPWORD text, int count,
          *   int nMaxExtent, LPINT lpnFit, LPINT lpnDx, LPSIZE lpSize)
          *
@@ -5312,6 +5409,95 @@ export function createGdiFunctions(host){
         },
 
         /**
+         * A device-dependent bitmap of bits this layer holds, in CreateBitmap's
+         * layout - rows top-down, padded to a WORD - copied: what GetIconInfo
+         * hands out as an icon's mask and colour, bitmaps the caller owns.
+         *
+         * @param {number} width @param {number} height @param {number} bitCount
+         * @param {Uint8Array} pixels
+         * @returns {number} the bitmap, or 0 where it cannot be made
+         */
+        bitmapFromBits(width, height, bitCount, pixels){
+            const attributes = deviceBitmap(width, height, bitCount);
+            if (!attributes)
+            {
+                return 0;
+            }
+            attributes.pixels.set(pixels.subarray(0, attributes.pixels.length));
+            return objects.create('bitmap', attributes);
+        },
+
+        /**
+         * CopyImage of a bitmap: a new one, stretched to the size asked for
+         * (zero keeps the side), drawn through StretchBlt as Windows copies
+         * it. LR_CREATEDIBSECTION makes a DIB section of the original's depth
+         * and colours, and outranks LR_MONOCHROME; LR_MONOCHROME makes a
+         * monochrome bitmap; otherwise the copy is a device bitmap - of the
+         * display's depth, or monochrome where the original is a monochrome
+         * bitmap or a one-bit section whose two colours are black and white
+         * (Wine's cursoricon test_CopyImage_Bitmap).
+         *
+         * @param {number} handle @param {number} width @param {number} height
+         * @param {number} flags
+         * @returns {number} the copy, or 0 for a handle that is no bitmap
+         */
+        copyBitmap(handle, width, height, flags){
+            const LR_MONOCHROME = 0x1;
+            const LR_CREATEDIBSECTION = 0x2000;
+            const record = objects.get(handle >>> 0);
+            if (!record || record.type !== 'bitmap')
+            {
+                return 0;
+            }
+            const source = record.attributes;
+            const across = (width | 0) > 0 ? width | 0 : source.width;
+            const down = (height | 0) > 0 ? height | 0 : source.height;
+            /** @param {number} colour */
+            const blackOrWhite = colour=>(colour & 0xffffff) === 0
+                || (colour & 0xffffff) === 0xffffff;
+            const monochrome = source.bitCount === 1 && ((source.section >>> 0) === 0
+                || (source.palette?.length === 2 && source.palette.every(blackOrWhite)
+                    && (source.palette[0] & 0xffffff) !== (source.palette[1] & 0xffffff)));
+            let copy;
+            if ((flags & LR_CREATEDIBSECTION) !== 0)
+            {
+                const bytes = dibSize(across, down, source.bitCount);
+                const address = bytes > 0xffffffff ? 0 : host.surfaces.allocate(bytes);
+                if (address === 0)
+                {
+                    return 0;
+                }
+                host.fillMemory?.(address, 0, bytes);
+                // A device bitmap's colours are the display's: black and white
+                // for a monochrome one, none to copy for a deeper one.
+                const palette = source.palette ? [...source.palette]
+                    : source.bitCount === 1 ? [0x000000, 0xffffff] : undefined;
+                copy = objects.create('bitmap', {
+                    width: across, height: down, planes: 1, bitCount: source.bitCount,
+                    topDown: false, usage: 0, bits: address, section: address, palette,
+                    compression: source.compression ?? 0,
+                    bitfields: [...(source.bitfields ?? [0, 0, 0])], pelsPerMeter: [0, 0],
+                });
+            }
+            else
+            {
+                const attributes = deviceBitmap(across, down,
+                    (flags & LR_MONOCHROME) !== 0 || monochrome ? 1 : screen.bitsPerPixel);
+                copy = attributes ? objects.create('bitmap', attributes) : 0;
+            }
+            if (copy === 0)
+            {
+                return 0;
+            }
+            /** @param {string} name @param {...number} args */
+            const call = (name, ...args)=>(/** @type {any} */ (aliased))[name].handler(args);
+            lend(copy, (/** @type {number} */ target)=>lend(handle >>> 0,
+                (/** @type {number} */ from)=>call('StretchBlt', target, 0, 0, across, down,
+                    from, 0, 0, source.width, source.height, SRCCOPY)));
+            return copy;
+        },
+
+        /**
          * The rectangle a region object holds, or null for a handle that is
          * not a region: what user32 reads when a program names an area to
          * repaint by a region rather than by a rectangle.
@@ -5496,8 +5682,10 @@ export function createGdiFunctions(host){
              * @param {number} brush  A brush handle the program owns.
              */
             fillWith: (hdc, rect, brush)=>{
-                metafiles.drawn.fill(hdc, rect, brush >>> 0);
-                return drawing.bound(hdc)?.fillRect(hdc >>> 0, rect, brush >>> 0) === true;
+                // No brush is the one the DC has selected (FillRect with NULL).
+                const used = (brush >>> 0) !== 0 ? brush >>> 0 : dcOf(hdc)?.brush ?? 0;
+                metafiles.drawn.fill(hdc, rect, used);
+                return drawing.bound(hdc)?.fillRect(hdc >>> 0, rect, used) === true;
             },
 
             /**
@@ -5695,6 +5883,42 @@ export function createGdiFunctions(host){
              * @param {number} hdc
              */
             isContext: (/** @type {number} */ hdc)=>dcOf(hdc) !== null,
+
+            /**
+             * Narrows a context's clip to a rectangle for as long as a
+             * control paints in it, as Windows' static and button controls
+             * do around WM_CTLCOLOR*: the parent sees a clip selected
+             * (GetClipRgn answers 1). Answers what `unclip` takes to put the
+             * clip back, or 0 for a handle that is no context.
+             *
+             * @param {number} hdc @param {{ left: number, top: number, right: number,
+             *     bottom: number }} rect
+             */
+            clipTo: (/** @type {number} */ hdc, /** @type {any} */ rect)=>{
+                const saved = table.SaveDC.handler([hdc]) | 0;
+                if (saved !== 0)
+                {
+                    table.IntersectClipRect.handler([hdc, rect.left, rect.top, rect.right,
+                        rect.bottom]);
+                }
+                return saved;
+            },
+            /** @param {number} hdc @param {number} saved */
+            unclip: (/** @type {number} */ hdc, /** @type {number} */ saved)=>{
+                if (saved !== 0)
+                {
+                    table.RestoreDC.handler([hdc, saved]);
+                }
+            },
+
+            /**
+             * The context's font's average character width, as
+             * GdiGetCharDimensions answers it: an edit's EC_USEFONTINFO
+             * margins are half of it.
+             *
+             * @param {number} hdc
+             */
+            averageWidth: (/** @type {number} */ hdc)=>averageWidthOf(dcOf(hdc) ?? { font: 0 }),
 
             /**
              * How much room a string takes in the context's font.

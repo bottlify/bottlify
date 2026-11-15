@@ -515,3 +515,28 @@ test('a child\'s handle is answered by the child about itself, or from its recor
             STATUS.INVALID_INFO_CLASS, 'and nothing else');
         assert.equal(asked.length, 1);
     });
+
+test('NtQueryObject names a file under its volume device, an unnamed object nothing', ()=>{
+    const host = fakeHost();
+    const fns = createQueryFunctions({ ...host,
+        handleType: handle=>(handle === 0x44 ? 'file' : handle === 0x48 ? 'event' : null),
+        objectName: handle=>(handle === 0x44 ? '\\Device\\HarddiskVolume1\\a.txt' : null),
+    });
+    const name = '\\Device\\HarddiskVolume1\\a.txt';
+    const size = 8 + (name.length + 1) * 2;
+    assert.equal(fns.NtQueryObject.handler([0x44, 1, BUFFER, 8, RETURN_LENGTH]),
+        STATUS.INFO_LENGTH_MISMATCH);
+    assert.equal(host.view.getUint32(RETURN_LENGTH, true), size, 'the room it takes');
+    assert.equal(fns.NtQueryObject.handler([0x44, 1, BUFFER, size, RETURN_LENGTH]),
+        STATUS.SUCCESS);
+    assert.equal(host.view.getUint16(BUFFER, true), name.length * 2);
+    assert.equal(host.view.getUint32(BUFFER + 4, true), BUFFER + 8, 'the name right after it');
+    assert.equal(String.fromCharCode(...Array.from({ length: name.length },
+        (_, at)=>host.view.getUint16(BUFFER + 8 + at * 2, true))), name);
+
+    host.bytes.fill(0xcd, BUFFER, BUFFER + 8);
+    assert.equal(fns.NtQueryObject.handler([0x48, 1, BUFFER, 64, RETURN_LENGTH]),
+        STATUS.SUCCESS);
+    assert.deepEqual([host.view.getUint32(BUFFER, true), host.view.getUint32(BUFFER + 4, true)],
+        [0, 0], 'no name: an empty string, no buffer');
+});

@@ -373,8 +373,14 @@ export function createDataCaches(context){
         }
         if (tymed === TYMED.MFPICT)
         {
-            const metafile = readU32(handle + 12);
-            const extent = { x: readI32(handle + 4), y: readI32(handle + 8) };
+            // The METAFILEPICT is an HGLOBAL's bytes, a moveable one's block.
+            const picture = util.globalBytes(handle);
+            if (!picture || picture.size < 16)
+            {
+                return null;
+            }
+            const metafile = readU32(picture.at + 12);
+            const extent = { x: readI32(picture.at + 4), y: readI32(picture.at + 8) };
             const size = await gdi(thread, 'GDI32.dll', 'GetMetaFileBitsEx', [metafile, 0, 0]);
             const block = size > 0 ? env.heap.allocate(size) : 0;
             if (block === 0)
@@ -410,8 +416,9 @@ export function createDataCaches(context){
             sayOnce('IOleCache::SetData', 'a bitmap is kept without its bits');
             return { data: new Uint8Array(0), extent: { x: 0, y: 0 } };
         }
-        const block = env.heap.block(handle);
-        const data = block ? env.readMemory(handle, block.size).slice() : new Uint8Array(0);
+        const bytes = util.globalBytes(handle);
+        const data = bytes && bytes.size !== 0 ? env.readMemory(bytes.at, bytes.size).slice()
+            : new Uint8Array(0);
         return { data, extent: dibExtent(data, 0) };
     };
 

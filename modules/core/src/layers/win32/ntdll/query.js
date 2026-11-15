@@ -75,6 +75,8 @@ const PROCESS_BASIC = Object.freeze({
 
 /** The information classes answered here. */
 const SYSTEM_BASIC_INFORMATION = 0;
+/** SystemBasicInformation, SystemEmulationBasicInformation, SystemNativeBasicInformation. */
+const BASIC_CLASSES = new Set([SYSTEM_BASIC_INFORMATION, 62, 114]);
 const SYSTEM_PROCESS_INFORMATION = 5;
 /** The class NtSetSystemInformation takes here, and its structure's size on 32-bit Windows. */
 const SYSTEM_FILECACHE_INFORMATION = 21;
@@ -116,6 +118,8 @@ const PROCESS_EXECUTE_FLAGS = 0x22;
  */
 const EXECUTE_FLAGS = 0x2 | 0x8;
 const OBJECT_BASIC_INFORMATION = 0;
+/** OBJECT_NAME_INFORMATION: the object's name in the object namespace. */
+const OBJECT_NAME_INFORMATION = 1;
 
 /**
  * OBJECT_BASIC_INFORMATION: attributes, granted access, the two counts, pool
@@ -269,6 +273,9 @@ const NORMAL_BASE_PRIORITY = 8;
  *           The machine's Windows, for the two fields the process block does
  *           not hold: the suite and the product type, which Windows keeps in
  *           the page the kernel shares with every process. Absent, the default.
+ * @property {(handle: number) => string | null} [objectName]  The name a handle's
+ *           object has in the object namespace (a file's under
+ *           `\Device\HarddiskVolume1`), or null for one nothing keeps a name for
  * @property {(handle: number) => string | null} [handleType]  What a handle
  *           names, or null when it names nothing. Without it NtQueryObject
  *           answers every handle as invalid.
@@ -285,6 +292,18 @@ const NORMAL_BASE_PRIORITY = 8;
  * @property {(record: any, call: import('../kernel32/cross-process.js').CrossCall)
  *     => Promise<import('../kernel32/cross-process.js').CrossAnswer | null> | null} [askChild]
  *           A call made in a child, answered there.
+ * @property {Record<number, SystemClass>} [systemClasses]  More classes of
+ *           NtQuerySystemInformation, answered by the family whose state they
+ *           read (the clock's and the zone's in time.js).
+ */
+
+/**
+ * A class of NtQuerySystemInformation another family answers: the bytes it
+ * reads now, and whether a buffer of another size is refused outright
+ * (`exact`) or given as much as fits (`partial`) - a structure Windows copies
+ * a prefix of.
+ *
+ * @typedef {{ read: () => Uint8Array, exact?: boolean, partial?: boolean }} SystemClass
  */
 
 /**
@@ -371,6 +390,45 @@ export function createQueryFunctions(host){
             new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
             host.writeMemory(at, bytes);
         }
+    };
+
+    /**
+     * OBJECT_NAME_INFORMATION: a UNICODE_STRING and the name after it,
+     * terminated; an object with no name has an empty string and no buffer.
+     *
+     * @param {number} handle @param {number} buffer @param {number} length
+     * @param {number} returnLength
+     */
+    const objectNameOf = (handle, buffer, length, returnLength)=>{
+        const name = host.objectName?.(handle) ?? null;
+        if (name === null)
+        {
+            host.divergence?.('NtQueryObject', `the name of a ${host.handleType?.(handle)}`
+                + ' handle is not kept: none answered');
+        }
+        const wide = host.pointerSize === 8;
+        const head = wide ? 16 : 8;
+        const text = name ?? '';
+        const size = head + (text.length > 0 ? (text.length + 1) * 2 : 0);
+        writeU32If(returnLength, size);
+        if (length < size || buffer === 0)
+        {
+            return STATUS.INFO_LENGTH_MISMATCH;
+        }
+        const struct = new Uint8Array(size);
+        const view = new DataView(struct.buffer);
+        if (text.length > 0)
+        {
+            view.setUint16(0, text.length * 2, true);
+            view.setUint16(2, (text.length + 1) * 2, true);
+            view.setUint32(wide ? 8 : 4, buffer + head, true);
+            for (let at = 0; at < text.length; at++)
+            {
+                view.setUint16(head + at * 2, text.charCodeAt(at), true);
+            }
+        }
+        host.writeMemory(buffer, struct);
+        return STATUS.SUCCESS;
     };
 
     /** @returns {number} the process block, or zero when there is none yet */
@@ -598,15 +656,48 @@ export function createQueryFunctions(host){
                     host.writeMemory(buffer >>> 0, chain);
                     return STATUS.SUCCESS;
                 }
-                if ((infoClass >>> 0) !== SYSTEM_BASIC_INFORMATION)
+                const other = host.systemClasses?.[infoClass >>> 0];
+                if (other)
+                {
+                    const bytes = other.read();
+                    const given = length >>> 0;
+                    const fits = other.partial ? given <= bytes.length
+                        : other.exact ? given === bytes.length : given >= bytes.length;
+                    if (!fits)
+                    {
+                        writeU32If(returnLength >>> 0, other.partial ? 0 : bytes.length);
+                        return STATUS.INFO_LENGTH_MISMATCH;
+                    }
+                    if ((buffer >>> 0) === 0 && given !== 0)
+                    {
+                        return STATUS.ACCESS_VIOLATION;
+                    }
+                    const written = other.partial ? bytes.subarray(0, given) : bytes;
+                    if (written.length > 0)
+                    {
+                        host.writeMemory(buffer >>> 0, written);
+                    }
+                    writeU32If(returnLength >>> 0, written.length);
+                    return STATUS.SUCCESS;
+                }
+                // The emulated and the native views of the basic structure are
+                // the basic structure itself in a process of the machine's width.
+                if (!BASIC_CLASSES.has(infoClass >>> 0))
                 {
                     return STATUS.INVALID_INFO_CLASS;
                 }
-                writeU32If(returnLength >>> 0, SYSTEM_BASIC.SIZE);
-                if ((length >>> 0) < SYSTEM_BASIC.SIZE || buffer === 0)
+                // The basic structure is asked for at its exact size; one the
+                // right size with nowhere to go is the kernel's probe failing.
+                if ((length >>> 0) !== SYSTEM_BASIC.SIZE)
                 {
+                    writeU32If(returnLength >>> 0, SYSTEM_BASIC.SIZE);
                     return STATUS.INFO_LENGTH_MISMATCH;
                 }
+                if ((buffer >>> 0) === 0)
+                {
+                    return STATUS.ACCESS_VIOLATION;
+                }
+                writeU32If(returnLength >>> 0, SYSTEM_BASIC.SIZE);
 
                 const struct = new Uint8Array(SYSTEM_BASIC.SIZE);
                 const view = new DataView(struct.buffer);
@@ -836,6 +927,10 @@ export function createQueryFunctions(host){
                     }
                     host.writeMemory(buffer >>> 0, struct);
                     return STATUS.SUCCESS;
+                }
+                if ((infoClass >>> 0) === OBJECT_NAME_INFORMATION && host.objectName)
+                {
+                    return objectNameOf(named, buffer >>> 0, length >>> 0, returnLength >>> 0);
                 }
                 if ((infoClass >>> 0) !== OBJECT_BASIC_INFORMATION)
                 {

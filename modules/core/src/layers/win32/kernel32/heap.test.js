@@ -37,6 +37,9 @@ const MBI = {
 const GRANULARITY = 64 * 1024;
 const GMEM_MOVEABLE = 0x0002;
 const GMEM_ZEROINIT = 0x0040;
+const GMEM_MODIFY = 0x0080;
+const GMEM_DISCARDABLE = 0x0100;
+const GMEM_DDESHARE = 0x2000;
 
 const ARENA = { base: 0x1000, size: 0x4000 };
 /** For the VirtualAlloc tests: room for several whole allocation granules. */
@@ -801,29 +804,107 @@ test('every function declares the stack it pops', ()=>{
     assert.equal(fns.VirtualFree.argBytes, 12);
 });
 
-test('a global allocation is already the pointer a caller has to lock for', ()=>{
-    // The 16-bit inheritance: moveable memory was a handle you locked into a
-    // pointer. Win32 made them the same thing, but programs still write the
-    // lock/unlock pairs and those still have to balance.
-    const { fns } = setup();
+test('a moveable allocation is an entry of the handle table, locked into its block', ()=>{
+    // Windows' layout, which programs read through the handle and Wine's heap
+    // test reads whole: two words, flags then the block, the handle the
+    // second's address; in use 1, moveable 2, the lock count from bit 16.
+    /** @type {number[]} */
+    const errors = [];
+    const host = { ...fakeHost(ARENA), setLastError: (/** @type {number} */ code)=>errors.push(code) };
+    const fns = createHeapFunctions(host);
+    const view = new DataView(host.bytes.buffer);
+    const entry = (/** @type {number} */ handle)=>
+        [view.getUint32(handle - 4, true), view.getUint32(handle, true)];
 
     const handle = fns.GlobalAlloc.handler([GMEM_MOVEABLE, 64]);
-    assert.notEqual(handle, 0);
-    assert.equal(fns.GlobalLock.handler([handle]), handle, 'locking moves nothing');
-    assert.equal(fns.GlobalUnlock.handler([handle]), 1);
+    assert.equal(handle % 8, 4, 'a pointer past an alignment of two, where no block starts');
+    const [flags, block] = entry(handle);
+    assert.equal(flags, 0x3);
+    assert.equal(fns.HeapSize.handler([fns.GetProcessHeap.handler(), 0, block]), 64);
+    assert.equal(fns.GlobalLock.handler([handle]), block, 'locking hands out the block');
+    assert.equal(fns.GlobalLock.handler([handle]), block);
+    assert.deepEqual(entry(handle), [0x20003, block]);
+    assert.equal(fns.GlobalFlags.handler([handle]), 2, 'the lock count');
+    assert.equal(fns.GlobalHandle.handler([block]), handle, 'the block knows its handle');
     assert.equal(fns.GlobalSize.handler([handle]), 64);
+    assert.equal(fns.GlobalUnlock.handler([handle]), 1, 'still locked');
+    assert.equal(fns.GlobalUnlock.handler([handle]), 0, 'the last unlock');
+    assert.equal(errors.at(-1), 0, 'answered with ERROR_SUCCESS');
+    assert.equal(fns.GlobalUnlock.handler([handle]), 0);
+    assert.equal(errors.at(-1), 158, 'and once more, ERROR_NOT_LOCKED');
+
+    assert.equal(fns.GlobalFree.handler([handle]), 0);
+    assert.notEqual(entry(handle)[0], 0, 'a freed entry links to the next free one');
+    assert.equal(entry(handle)[1], 0);
+    assert.equal(fns.GlobalFree.handler([handle]), handle, 'freeing it twice fails');
+    assert.equal(errors.at(-1), 6);
+    assert.equal(fns.GlobalFlags.handler([handle]), 0x8000);
+    assert.equal(fns.GlobalLock.handler([handle]), 0);
+});
+
+test('a moveable allocation of nothing is discarded, and one asked discardable says so', ()=>{
+    /** @type {number[]} */
+    const errors = [];
+    const host = { ...fakeHost(ARENA), setLastError: (/** @type {number} */ code)=>errors.push(code) };
+    const fns = createHeapFunctions(host);
+    const view = new DataView(host.bytes.buffer);
+
+    const empty = fns.GlobalAlloc.handler([GMEM_MOVEABLE | GMEM_DISCARDABLE, 0]);
+    assert.equal(view.getUint32(empty - 4, true), 0xf, 'in use, moveable, discardable, discarded');
+    assert.equal(fns.GlobalFlags.handler([empty]), 0x4000 | 0x100);
+    assert.equal(fns.LocalFlags.handler([empty]), 0x4000 | 0x0f00,
+        'LMEM_DISCARDABLE in its spelling');
+    assert.equal(fns.GlobalLock.handler([empty]), 0);
+    assert.equal(errors.at(-1), 157, 'ERROR_DISCARDED');
+    assert.equal(fns.GlobalSize.handler([empty]), 0);
+    assert.equal(fns.GlobalReAlloc.handler([empty, 16, GMEM_MOVEABLE]), empty,
+        'given a block again');
+    assert.equal(view.getUint32(empty - 4, true), 0x7);
+    assert.equal(fns.GlobalSize.handler([empty]), 16);
+    assert.equal(fns.GlobalReAlloc.handler([empty, 0, GMEM_MOVEABLE]), empty, 'and discarded');
+    assert.equal(view.getUint32(empty, true), 0);
+
+    const shared = fns.GlobalAlloc.handler([GMEM_MOVEABLE | GMEM_DISCARDABLE | GMEM_DDESHARE, 1]);
+    assert.equal(view.getUint32(shared - 4, true), 0x8007);
+    assert.equal(fns.GlobalFlags.handler([shared]), 0x2000 | 0x100);
+});
+
+test('a locked moveable block moves only when asked, and a fixed one turns moveable', ()=>{
+    const { host, fns } = setup();
+    const view = new DataView(host.bytes.buffer);
+    const handle = fns.GlobalAlloc.handler([GMEM_MOVEABLE, 12]);
+    const block = fns.GlobalLock.handler([handle]);
+    host.writeMemory(block, new Uint8Array([1, 2, 3, 4]));
+    assert.equal(fns.GlobalReAlloc.handler([handle, 4096, 0]), 0, 'locked, it may not move');
+    assert.equal(fns.GlobalReAlloc.handler([handle, 0, GMEM_MOVEABLE]), 0, 'nor be discarded');
+    assert.equal(fns.GlobalReAlloc.handler([handle, 4096, GMEM_MOVEABLE]), handle, 'unless asked');
+    const moved = view.getUint32(handle, true);
+    assert.deepEqual([...host.bytes.subarray(moved, moved + 4)], [1, 2, 3, 4]);
+    assert.equal(fns.GlobalHandle.handler([moved]), handle, 'the handle went with the block');
+    assert.equal(fns.GlobalReAlloc.handler([handle, 16, GMEM_MODIFY | GMEM_DISCARDABLE]), handle);
+    assert.equal(view.getUint32(handle - 4, true) & 0xffff, 0x7, 'GMEM_MODIFY made it discardable');
+
+    const fixed = fns.GlobalAlloc.handler([0, 16]);
+    assert.equal(fns.GlobalReAlloc.handler([fixed, 0, GMEM_MODIFY]), fixed,
+        'GMEM_MODIFY alone: as it was');
+    const converted = fns.GlobalReAlloc.handler([fixed, 0, GMEM_MODIFY | GMEM_MOVEABLE]);
+    assert.equal(converted % 8, 4, 'a handle now');
+    assert.equal(fns.GlobalLock.handler([converted]), fixed, 'over the same block');
+    assert.equal(fns.GlobalSize.handler([converted]), 16);
 });
 
 test('GlobalWire and GlobalFix lock a block, GlobalUnWire and GlobalUnfix unlock it', ()=>{
     // The 16-bit calls a heap library still looks up: each the lock or the
-    // unlock it stood for, and a block here never moves.
+    // unlock it stood for.
     const { fns } = setup();
     const handle = fns.GlobalAlloc.handler([GMEM_MOVEABLE, 64]);
-    assert.equal(fns.GlobalWire.handler([handle]), handle);
-    assert.equal(fns.GlobalUnWire.handler([handle]), 1);
-    assert.equal(fns.GlobalFix.handler(), 0);
-    assert.equal(fns.GlobalUnfix.handler(), 0);
-    assert.equal(fns.GlobalWire.handler([handle + 0x10000]), 0, 'no block, no pointer');
+    const block = fns.GlobalWire.handler([handle]);
+    assert.notEqual(block, 0);
+    assert.equal(fns.GlobalFix.handler([handle]), 0);
+    assert.equal(fns.GlobalFlags.handler([handle]), 2);
+    assert.equal(fns.GlobalUnfix.handler([handle]), 0);
+    assert.equal(fns.GlobalUnWire.handler([handle]), 0, 'the last unlock');
+    assert.equal(fns.GlobalWire.handler([handle + 0x10000]), 0, 'no entry, no pointer');
     assert.deepEqual([fns.GlobalWire, fns.GlobalFix, fns.GlobalUnWire, fns.GlobalUnfix]
         .map(fn=>fn.argBytes), [4, 4, 4, 4]);
 });
@@ -900,13 +981,13 @@ test('a global block grows in place when it can and moves only when allowed to',
     assert.equal(fns.GlobalReAlloc.argBytes, 12);
 });
 
-test('a live global block has no flags and a stranger is GMEM_INVALID_HANDLE', ()=>{
+test('a live fixed block has no flags and a stranger is GMEM_INVALID_HANDLE', ()=>{
     const { fns } = setup();
-    const handle = fns.GlobalAlloc.handler([GMEM_MOVEABLE, 16]);
+    const handle = fns.GlobalAlloc.handler([0, 16]);
     assert.equal(fns.GlobalFlags.handler([handle]), 0);
     assert.equal(fns.GlobalFlags.handler([0x1234]), 0x8000);
     assert.equal(fns.GlobalFlags.argBytes, 4);
-    assert.equal(fns.LocalFlags, fns.GlobalFlags, 'LocalFlags is the same call');
+    assert.equal(fns.LocalFlags.argBytes, 4);
 });
 
 test('HeapSummary adds up the heap\'s live blocks, and wants its own size first', ()=>{
@@ -1967,3 +2048,33 @@ test('in a gone process\'s memory a reservation is zeroed as it is committed, pa
     assert.ok(host.bytes.subarray(whole, whole + GRANULARITY).every(byte=>byte === 0),
         'committed with its reservation: zero at once');
 });
+
+test('a heap made with a maximum is fixed: no block reaches the threshold, nor the whole past it',
+    ()=>{
+        // HeapAlloc's documented limit for a heap that does not grow, and the
+        // maximum itself less the heap's own records (kernel32's heap test).
+        /** @type {number[]} */
+        const errors = [];
+        const host = { ...fakeHost({ base: 0x10000, size: 0x400000 }),
+            setLastError: (/** @type {number} */ code)=>errors.push(code) };
+        const fns = createHeapFunctions(host);
+        const small = fns.HeapCreate.handler([0, 0x20000, 0x20000]);
+        assert.equal(small & 0xffff, 0, 'aligned as every heap is');
+        const first = fns.HeapAlloc.handler([small, 0, 0x20000 - 0x700]);
+        assert.notEqual(first, 0);
+        assert.equal(fns.HeapAlloc.handler([small, 0, 0x100]), 0, 'and nothing past its maximum');
+        assert.equal(errors.at(-1), 8);
+        assert.equal(fns.HeapFree.handler([small, 0, first]), 1);
+        assert.equal(fns.HeapAlloc.handler([small, 0, 0x20000 - 0x400]), 0,
+            'its records take a part');
+
+        const large = fns.HeapCreate.handler([0, 0x100000, 0x100000]);
+        assert.equal(fns.HeapAlloc.handler([large, 0, 0x80000]), 0, 'a block past the threshold');
+        const block = fns.HeapAlloc.handler([large, 0, 0x20000]);
+        assert.notEqual(fns.HeapReAlloc.handler([large, 0, block, 0x40000]), 0,
+            'growing within it');
+        assert.equal(fns.HeapDestroy.handler([large]), 1);
+        const growable = fns.HeapCreate.handler([0, 0, 0]);
+        assert.notEqual(fns.HeapAlloc.handler([growable, 0, 0x80000]), 0,
+            'a growable heap has no such limit');
+    });

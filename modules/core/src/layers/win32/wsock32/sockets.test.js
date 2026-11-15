@@ -15,8 +15,9 @@ import { createSocketRegistry } from './sockets.js';
 import { createLoopbackAdapter } from './loopback.js';
 import {
     AF_INET, INADDR_ANY, INADDR_LOOPBACK, SD_SEND, SOCK_DGRAM, SOCK_STREAM,
-    SO_ERROR, WSAECONNREFUSED, WSAENOTCONN, WSAEWOULDBLOCK,
+    SO_ERROR, SO_RCVBUF, SO_SNDBUF, WSAECONNREFUSED, WSAENOTCONN, WSAEWOULDBLOCK,
 } from './constants.js';
+import { DEFAULT_SOCKET_BUFFER } from './sockets.js';
 
 const PORT = 6112;
 const bytes = (/** @type {string} */ text)=>new TextEncoder().encode(text);
@@ -265,7 +266,7 @@ test('waiting on several sockets settles once and detaches from all of them', as
     const other = make(SOCK_DGRAM);
     registry.bind(other, { host: INADDR_ANY, port: 7777 });
 
-    const waiting = registry.anyReadableSoon([accepted, other], null);
+    const waiting = registry.anyReadySoon([accepted, other], [], null);
     registry.send(client, bytes('go'));
     await waiting;
 
@@ -279,7 +280,7 @@ test('a wait with a timeout gives up on its own, and cancels its timer', async()
     registry.bind(idle, { host: INADDR_ANY, port: 7778 });
 
     const started = Date.now();
-    await registry.anyReadableSoon([idle], 20);
+    await registry.anyReadySoon([idle], [], 20);
     assert.ok(Date.now() - started >= 15, 'it actually waited');
     assert.deepEqual(idle.waiters, [], 'and let go afterwards');
 });
@@ -292,7 +293,7 @@ test('a wait answered before its timeout leaves no timer running', async()=>{
 
     // If the timer outlived the wait, node would hold the process open past
     // this test and the fd_set it would have written belongs to a dead call.
-    const waiting = registry.anyReadableSoon([receiver], 60_000);
+    const waiting = registry.anyReadySoon([receiver], [], 60_000);
     registry.send(sender, bytes('x'), { host: INADDR_LOOPBACK, port: 7779 });
     await waiting;
 
@@ -336,4 +337,51 @@ test('a socket is numbered by the handle table it is given, and gives the number
     registry.close(registry.get(0x104));
     assert.equal(table.size, 0);
     assert.equal(registry.get(0x104), null);
+});
+
+test('a connection holds what its two buffers hold, and a send past that would block', async()=>{
+    const { registry, make, server } = listening();
+    const client = make(SOCK_STREAM);
+    registry.connect(client, { host: INADDR_LOOPBACK, port: PORT });
+    const accepted = registry.get(registry.accept(server).value);
+    assert.equal(registry.readOption(client, SO_SNDBUF), DEFAULT_SOCKET_BUFFER,
+        'a buffer nobody set reads as the default');
+
+    registry.writeOption(client, SO_SNDBUF, 4);
+    registry.writeOption(accepted, SO_RCVBUF, 6);
+    assert.deepEqual(registry.send(client, bytes('abcdefghijkl')), { value: 10 },
+        'as much as the send and receive buffers hold, the rest the caller\'s to send again');
+    assert.deepEqual(registry.send(client, bytes('x')), { error: WSAEWOULDBLOCK });
+    assert.equal(registry.writable(client), false);
+    assert.deepEqual(registry.poll([], [client], []).write, []);
+
+    const room = registry.writableSoon(client);
+    assert.equal(text(registry.receive(accepted, 3).bytes), 'abc');
+    await room;
+    assert.equal(registry.writable(client), true, 'a read makes room, and the sender hears of it');
+    assert.deepEqual(registry.send(client, bytes('klmnop')), { value: 3 });
+    assert.equal(text(registry.receive(accepted, 64).bytes), 'defghijklm');
+    assert.equal(registry.available(accepted), 0);
+});
+
+test('a wait for a socket to take a send settles on room, not on a read alone', async()=>{
+    const { registry, make, server } = listening();
+    const client = make(SOCK_STREAM);
+    registry.connect(client, { host: INADDR_LOOPBACK, port: PORT });
+    const accepted = registry.get(registry.accept(server).value);
+    registry.writeOption(client, SO_SNDBUF, 0);
+    registry.writeOption(accepted, SO_RCVBUF, 2);
+    registry.send(client, bytes('ab'));
+
+    let settled = false;
+    const waiting = registry.anyReadySoon([], [client], null).then(()=>{
+        settled = true;
+    });
+    // Bytes arriving on the full socket make it readable, not writable.
+    registry.send(accepted, bytes('z'));
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(settled, false);
+    registry.receive(accepted, 1);
+    await waiting;
+    assert.equal(settled, true);
 });

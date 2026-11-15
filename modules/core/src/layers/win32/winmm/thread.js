@@ -35,22 +35,30 @@
  * words leaves nothing behind.
  */
 
-/** Guest-side layout of a notice: the routine, then its five arguments. */
+/**
+ * Guest-side layout of a notice: the routine, then its arguments - five for a
+ * wave callback, seven words for the widest COM call made from here
+ * (IPin::NewSegment: the pin, two REFERENCE_TIMEs and a double).
+ */
+const ARGS = 7;
 const RECORD = {
     ENTRY: 0,
     ARGS: 4,
-    SIZE: 24,
+    SIZE: 4 + ARGS * 4,
 };
 
 /** How long the loop is. */
-export const LOOP_BYTES = 28;
+export const LOOP_BYTES = 35;
 
 /**
  * The loop, as x86. `stub` is where the trap lives and `at` is where these
  * bytes will be, because the call to the stub is relative.
  *
- *     loop: call stub              ; EAX = the record
+ *     loop: push eax               ; what the last routine answered
+ *           call stub              ; EAX = the record (the stub pops its word)
  *           mov esi, esp           ; callee-saved, so it outlives the call
+ *           push dword [eax+28]    ; the seventh word
+ *           push dword [eax+24]    ; the sixth
  *           push dword [eax+20]    ; dwParam2
  *           push dword [eax+16]    ; dwParam1
  *           push dword [eax+12]    ; dwInstance
@@ -65,11 +73,14 @@ export const LOOP_BYTES = 28;
  * @returns {Uint8Array}
  */
 export function loopCode(stub, at){
-    const relative = (stub - (at + 5)) | 0;
+    const relative = (stub - (at + 6)) | 0;
     return new Uint8Array([
+        0x50,
         0xe8, relative & 0xff, relative >>> 8 & 0xff,
         relative >>> 16 & 0xff, relative >>> 24 & 0xff,
         0x89, 0xe6,
+        0xff, 0x70, 0x1c,
+        0xff, 0x70, 0x18,
         0xff, 0x70, 0x14,
         0xff, 0x70, 0x10,
         0xff, 0x70, 0x0c,
@@ -77,7 +88,7 @@ export function loopCode(stub, at){
         0xff, 0x70, 0x04,
         0xff, 0x10,
         0x89, 0xf4,
-        0xeb, 0xe4,
+        0xeb, 0xdd,
     ]);
 }
 
@@ -86,7 +97,8 @@ export function loopCode(stub, at){
  * @property {(bytes: number) => number} allocate
  *           Guest memory the processor may execute and the host may write.
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(name: string, fn: { argBytes: number, handler: () => any }) => number} register
+ * @property {(name: string, fn: { argBytes: number, handler: (args?: number[]) => any })
+ *     => number} register
  *           Puts a host function behind a guest address.
  * @property {(options: { entry: number, name: string }) => any} createThread
  * @property {() => any} currentThread
@@ -106,10 +118,10 @@ export function createNoticeThread(deps){
     const name = deps.name ?? 'winmm';
     const reason = deps.reason ?? 'a wave notice';
     const trap = deps.trap ?? '<wave-notices>';
-    /** @type {{ entry: number, args: number[], done?: () => void, tag?: any }[]} */
+    /** @type {{ entry: number, args: number[], done?: (answer: number) => void, tag?: any }[]} */
     const queue = [];
     /** The notice whose routine is running: its loop has not asked again yet. */
-    /** @type {{ done?: () => void } | null} */
+    /** @type {{ done?: (answer: number) => void } | null} */
     let running = null;
     /** @type {any} */
     let thread = null;
@@ -126,22 +138,26 @@ export function createNoticeThread(deps){
 
     /** Writes the next notice where the loop reads it. @returns {number} */
     const handOut = ()=>{
-        const next = /** @type {{ entry: number, args: number[], done?: () => void }} */ (
+        const next = /** @type {{ entry: number, args: number[], done?: (answer: number) => void }} */ (
             queue.shift());
         deps.writeMemory(record + RECORD.ENTRY, dword(next.entry));
-        [0, 1, 2, 3, 4].forEach(index=>
-            deps.writeMemory(record + RECORD.ARGS + index * 4, dword(next.args[index] ?? 0)));
+        for (let index = 0; index < ARGS; index++)
+        {
+            deps.writeMemory(record + RECORD.ARGS + index * 4, dword(next.args[index] ?? 0));
+        }
         delivered++;
         running = next;
         return record;
     };
 
     /** What the loop's trap answers: the next notice, or nothing until there is one. */
-    const fetch = ()=>{
-        // Asking again is how the loop says the last routine returned.
+    /** @param {number[]} args  What the last routine left in EAX; nothing on the first ask. */
+    const fetch = ([answer] = [])=>{
+        // Asking again is how the loop says the last routine returned, and
+        // what it returned comes with it: a COM method's HRESULT.
         const finished = running;
         running = null;
-        finished?.done?.();
+        finished?.done?.((answer ?? 0) >>> 0);
         if (queue.length > 0)
         {
             return handOut();
@@ -154,7 +170,7 @@ export function createNoticeThread(deps){
 
     const start = ()=>{
         record = deps.allocate(RECORD.SIZE);
-        const stub = deps.register(trap, { argBytes: 0, handler: fetch });
+        const stub = deps.register(trap, { argBytes: 4, handler: fetch });
         const code = deps.allocate(LOOP_BYTES);
         deps.writeMemory(code, loopCode(stub, code));
         thread = deps.createThread({ entry: code, name });
@@ -165,13 +181,14 @@ export function createNoticeThread(deps){
          * Queues a call to the program's routine, on the thread, in order.
          *
          * @param {number} entry
-         * @param {number[]} args  Up to five; the loop pushes five whatever the
-         *        routine takes, and missing ones are zero.
-         * @param {() => void} [done]  Called once the routine has returned.
+         * @param {number[]} args  Up to seven words; the loop pushes seven whatever
+         *        the routine takes, and missing ones are zero.
+         * @param {(answer: number) => void} [done]  Called once the routine has
+         *        returned, with what it returned.
          * @param {any} [tag]  What `drop` finds it by.
          */
         deliver(entry, args, done, tag){
-            queue.push({ entry, args: args.slice(0, 5), done, tag });
+            queue.push({ entry, args: args.slice(0, ARGS), done, tag });
             if (thread === null)
             {
                 start();
@@ -191,10 +208,11 @@ export function createNoticeThread(deps){
          * for.
          *
          * @param {any} tag
-         * @returns {{ entry: number, args: number[], done?: () => void }[]} what was taken back
+         * @returns {{ entry: number, args: number[], done?: (answer: number) => void }[]}
+         *          what was taken back
          */
         drop(tag){
-            /** @type {{ entry: number, args: number[], done?: () => void }[]} */
+            /** @type {{ entry: number, args: number[], done?: (answer: number) => void }[]} */
             const dropped = [];
             for (let at = queue.length - 1; at >= 0; at--)
             {

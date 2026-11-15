@@ -193,6 +193,13 @@ export function createOverlay({
      */
     const changed = (path, kind)=>onChanged?.({ path, kind });
     const root = makeNode(null, '');
+    /**
+     * A copy up a miss stopped, and how far it had gone, at the writable path
+     * it was copying to.
+     *
+     * @type {WeakMap<Node, { path: string, at: number }>}
+     */
+    const copying = new WeakMap();
     root.directory = true;
     root.inSource = source !== null;
     root.inWritable = true;
@@ -440,6 +447,12 @@ export function createOverlay({
      * A piece at a time: a game's archive of a gigabyte read whole was the
      * gigabyte held three times over at once -- read, decoded, written.
      *
+     * A source that fetches what is not here stops the copy at the first
+     * piece it lacks (a miss), and the copy done again goes on where it
+     * stopped rather than from the start: a source that keeps what it read in
+     * a bounded cache (`session-source.js`) would otherwise have let go of the
+     * first pieces by the time it reached the last, and never finish.
+     *
      * @param {Node} node
      */
     const copyUp = node=>{
@@ -449,12 +462,20 @@ export function createOverlay({
         }
         materialise(/** @type {Node} */ (node.parent));
         const size = source?.stat(node.sourcePath)?.size ?? 0;
-        writable.write(node.path, 0, new Uint8Array(0));
-        for (let at = 0; at < size; at += PIECE_SIZE)
+        const begun = copying.get(node);
+        let at = begun && begun.path === node.path
+            && (writable.stat(node.path)?.size ?? -1) >= begun.at ? begun.at : 0;
+        if (at === 0)
         {
+            writable.write(node.path, 0, new Uint8Array(0));
+        }
+        for (; at < size; at += PIECE_SIZE)
+        {
+            copying.set(node, { path: node.path, at });
             const part = source?.read(node.sourcePath, at, Math.min(PIECE_SIZE, size - at));
             writable.write(node.path, at, part ?? new Uint8Array(0));
         }
+        copying.delete(node);
         node.inWritable = true;
     };
 
@@ -494,6 +515,7 @@ export function createOverlay({
      * @param {Node} node
      */
     const forget = node=>{
+        copying.delete(node);
         if (node.body)
         {
             unname(node);
@@ -912,10 +934,11 @@ export function createOverlay({
 
         /**
          * Gives a file another name with its bytes where they are: what a
-         * rename is for a file only the writable layer holds. False, with
-         * nothing done, for one the source holds too -- the source keeps its
-         * name whatever happens -- or a store that cannot move a file; the
-         * caller copies it then.
+         * rename is for a file the writable layer holds. One the source holds
+         * is copied up first, as a write would, and its old name left a
+         * tombstone - the source keeps the name whatever happens. False, with
+         * nothing done, for a directory or a store that cannot move a file;
+         * the caller copies it then.
          *
          * @param {string[]} from @param {string[]} to
          * @returns {boolean}
@@ -927,7 +950,7 @@ export function createOverlay({
             {
                 return renameName(node, to);
             }
-            if (node.directory || node.inSource || !node.inWritable || !writable.move)
+            if (node.directory || !(node.inWritable || node.inSource) || !writable.move)
             {
                 return false;
             }
@@ -942,6 +965,7 @@ export function createOverlay({
             {
                 throw fsError(ErrorCode.ALREADY_EXISTS, `"${existing.path}" already exists`);
             }
+            copyUp(node);
             materialise(parent);
             writable.move(node.path, joinPath(parent.path, name));
             const target = childFor(parent, name);
@@ -1196,6 +1220,45 @@ export function createOverlay({
                             path: child.path,
                             size: writable.stat(child.path)?.size ?? 0,
                         });
+                    }
+                }
+            };
+            walk(root);
+            return found;
+        },
+
+        /**
+         * The files the source keeps as its own (`SourceStore.kept`) that the
+         * program has neither written nor deleted, as the source keeps them:
+         * the rest of a session laid under the writable layer.
+         *
+         * @returns {object[]}
+         */
+        keptFiles(){
+            /** @type {object[]} */
+            const found = [];
+            if (!source?.kept)
+            {
+                return found;
+            }
+            /** @param {Node} node */
+            const walk = node=>{
+                for (const child of node.children.values())
+                {
+                    if (child.tombstone)
+                    {
+                        continue;
+                    }
+                    if (child.directory)
+                    {
+                        walk(child);
+                        continue;
+                    }
+                    const kept = !child.inWritable && child.inSource
+                        ? source.kept?.(child.sourcePath) : null;
+                    if (kept)
+                    {
+                        found.push(kept);
                     }
                 }
             };

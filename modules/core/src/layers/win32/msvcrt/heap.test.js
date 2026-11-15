@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHeapFunctions } from './heap.js';
+import { createHeapFunctions, LATER_HEAP } from './heap.js';
 import { fakeMemory } from './harness.test.js';
 
 /**
@@ -128,6 +128,35 @@ test('_aligned_realloc moves the contents to a block aligned anew, and frees the
     assert.equal(fresh % 64, 0, 'no block is _aligned_malloc');
     assert.equal(table._aligned_realloc.argBytes, 12);
 });
+
+test('the later runtimes\' recalloc forms zero what the block did not hold, and msvcrt has none',
+    ()=>{
+        const { memory, errno, table } = build();
+        const later = /** @type {Record<string, any>} */ (/** @type {any} */ (table)[LATER_HEAP]);
+        for (const name of Object.keys(later))
+        {
+            assert.equal(Object.hasOwn(table, name), false, `${name} is not msvcrt.dll's`);
+        }
+        // Wine's ucrtbase test__aligned_recalloc: 4 of 8 at 16, then 8 of 8.
+        const first = later._aligned_recalloc.handler([0, 4, 8, 16]);
+        assert.equal(first % 16, 0);
+        assert.equal(later._aligned_msize.handler([first, 16, 0]), 32, 'what it was made with');
+        memory.writeMemory(first, new Uint8Array(32).fill(0xcc));
+        const grown = later._aligned_recalloc.handler([first, 8, 8, 16]);
+        assert.deepEqual([...memory.bytes.subarray(grown, grown + 64)],
+            [...new Array(32).fill(0xcc), ...new Array(32).fill(0)]);
+        assert.equal(later._aligned_recalloc.handler([grown, 0xffffffff, 2, 16]), 0);
+        assert.deepEqual(errno, [12], 'a product past the address space is ENOMEM');
+        const offset = later._aligned_offset_recalloc.handler([0, 3, 8, 32, 8]);
+        assert.equal((offset + 8) % 32, 0, 'the byte at the offset is aligned');
+        assert.equal(later._aligned_msize.handler([0, 16, 0]), 0xffffffff);
+
+        const plain = table.malloc.handler([4]);
+        memory.writeMemory(plain, Uint8Array.of(1, 2, 3, 4));
+        const moved = later._recalloc.handler([plain, 4, 4]);
+        assert.deepEqual([...memory.bytes.subarray(moved, moved + 16)],
+            [1, 2, 3, 4, ...new Array(12).fill(0)]);
+    });
 
 test('malloc answers a distinct address and _msize remembers the request', ()=>{
     const { table } = build();

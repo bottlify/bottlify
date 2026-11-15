@@ -46,7 +46,7 @@ import {
 import {
     PT_BEZIERTO, PT_CLOSEFIGURE, PT_LINETO, PT_MOVETO, bezierPoints, createPath,
     ellipseCurves, figuresOf, flattened, pathBezierTo, pathClose, pathFigure, pathLineTo,
-    pathMoved, widened,
+    pathMoved, roundRectCurves, widened,
 } from './paths.js';
 import {
     BITMAP,
@@ -525,31 +525,6 @@ const hasAlphaChannel = shape=>shape.bitCount === 32 && (shape.compression !== B
         (shape.bitfields?.[index] >>> 0) === mask));
 
 /**
- * Whether a PolyDraw type array is one Windows draws: every entry a move, a
- * line (closing or not) or the first of three curve points whose middle one
- * does not close. Nothing is drawn from an array that is not.
- *
- * @param {Uint8Array} types
- */
-export function isPolyDrawable(types){
-    for (let index = 0; index < types.length; index++)
-    {
-        const type = types[index];
-        if (type === PT_MOVETO || (type & ~PT_CLOSEFIGURE) === PT_LINETO)
-        {
-            continue;
-        }
-        if (type !== PT_BEZIERTO || index + 2 >= types.length || types[index + 1] !== PT_BEZIERTO
-            || (types[index + 2] & ~PT_CLOSEFIGURE) !== PT_BEZIERTO)
-        {
-            return false;
-        }
-        index += 2;
-    }
-    return true;
-}
-
-/**
  * @param {Object} options
  * @param {any} options.host
  * @param {any} options.objects   The GDI object table.
@@ -860,8 +835,15 @@ export function createDrawingFunctions(
             // test_rectangle).
             rectangle: (hdc, left, top, right, bottom)=>{
                 const box = deviceBox(left, top, right, bottom);
-                if (!inclusive && box.right > box.left && box.bottom > box.top)
+                if (!inclusive)
                 {
+                    // GM_COMPATIBLE leaves out a box with no width or no
+                    // height in device units, as nothing of it is drawn
+                    // (Wine's path.c test_rectangle); GM_ADVANCED keeps it.
+                    if (box.right === box.left || box.bottom === box.top)
+                    {
+                        return true;
+                    }
                     box.right--;
                     box.bottom--;
                 }
@@ -871,12 +853,37 @@ export function createDrawingFunctions(
                     : corners, { closed: true });
                 return true;
             },
+            roundRect: (hdc, left, top, right, bottom, width, height)=>{
+                const box = deviceBox(left, top, right, bottom);
+                if (!inclusive)
+                {
+                    if (box.right === box.left || box.bottom === box.top)
+                    {
+                        return true;
+                    }
+                    box.right--;
+                    box.bottom--;
+                }
+                // The corner ellipse in device units, no larger than the box.
+                const a = device(at(left, top));
+                const b = device(at((left | 0) + (width | 0), (top | 0) + (height | 0)));
+                const { points, types } = roundRectCurves(box,
+                    Math.min(Math.abs(b.x - a.x), box.right - box.left),
+                    Math.min(Math.abs(b.y - a.y), box.bottom - box.top), clockwise);
+                pathFigure(path, points, { closed: true, types });
+                return true;
+            },
             ellipse: (hdc, left, top, right, bottom)=>{
                 const box = deviceBox(left, top, right, bottom);
                 if (!inclusive)
                 {
-                    box.right = Math.max(box.left, box.right - 1);
-                    box.bottom = Math.max(box.top, box.bottom - 1);
+                    // As a rectangle: no figure from a box with no width or height.
+                    if (box.right === box.left || box.bottom === box.top)
+                    {
+                        return true;
+                    }
+                    box.right--;
+                    box.bottom--;
                 }
                 pathFigure(path, ellipseCurves(box, clockwise), { closed: true, curves: true });
                 return true;
@@ -1399,6 +1406,112 @@ export function createDrawingFunctions(
     };
 
     /**
+     * An arc as a path keeps it: cubic curves along the ellipse, one for each
+     * quarter of it the arc crosses - split where the ellipse is at its top,
+     * bottom, left or right - each made of the two ends and the control
+     * points a quarter's curve takes (4/3 tan of a quarter of its angle along
+     * the tangent). The angles are the ellipse's own parameter, on the screen
+     * with y down, so a growing angle turns clockwise.
+     *
+     * @param {number} cx @param {number} cy @param {number} rx @param {number} ry
+     * @param {number} from @param {number} to
+     * @returns {{ start: { x: number, y: number },
+     *     curves: { x: number, y: number }[][] }}
+     */
+    const arcCurves = (cx, cy, rx, ry, from, to)=>{
+        const QUARTER = Math.PI / 2;
+        /** @param {number} t */
+        const point = t=>({ x: cx + rx * Math.cos(t), y: cy + ry * Math.sin(t) });
+        /** @param {number} t */
+        const slope = t=>({ x: -rx * Math.sin(t), y: ry * Math.cos(t) });
+        /** @param {{ x: number, y: number }} p */
+        const rounded = p=>({ x: Math.round(p.x), y: Math.round(p.y) });
+        const way = to >= from ? 1 : -1;
+        const cuts = [from];
+        let quarter = way > 0 ? Math.floor(from / QUARTER) + 1 : Math.ceil(from / QUARTER) - 1;
+        // An arc that ends on a quarter's edge is cut there too, and ends
+        // in a curve of no length, as Windows' path holds it (Wine's path
+        // test_anglearc).
+        while (way > 0 ? quarter * QUARTER <= to + 1e-9 : quarter * QUARTER >= to - 1e-9)
+        {
+            cuts.push(quarter * QUARTER);
+            quarter += way;
+        }
+        cuts.push(to);
+        const curves = [];
+        for (let at = 1; at < cuts.length; at++)
+        {
+            const [a, b] = [cuts[at - 1], cuts[at]];
+            const k = 4 / 3 * Math.tan((b - a) / 4);
+            const [start, end] = [point(a), point(b)];
+            const [leaving, arriving] = [slope(a), slope(b)];
+            curves.push([
+                rounded({ x: start.x + k * leaving.x, y: start.y + k * leaving.y }),
+                rounded({ x: end.x - k * arriving.x, y: end.y - k * arriving.y }),
+                rounded(end),
+            ]);
+        }
+        return { start: rounded(point(from)), curves };
+    };
+
+    /**
+     * Arc's and ArcTo's arc as a path keeps it, in the DC's direction: from
+     * where the start radial meets the ellipse to where the end radial does,
+     * the same radial twice the whole ellipse.
+     *
+     * @param {any} dc @param {number[]} box  left, top, right, bottom, then the radials.
+     */
+    const directedArcCurves = (dc, box)=>{
+        const { left, top, right, bottom } = ellipseBox(box);
+        const [xStart, yStart, xEnd, yEnd] = box.slice(4).map(value=>value | 0);
+        const cx = (left + right) / 2;
+        const cy = (top + bottom) / 2;
+        const rx = Math.max((right - left) / 2, 0.5);
+        const ry = Math.max((bottom - top) / 2, 0.5);
+        /** @param {number} x @param {number} y */
+        const angle = (x, y)=>Math.atan2((y - cy) / ry, (x - cx) / rx);
+        const from = angle(xStart, yStart);
+        let to = angle(xEnd, yEnd);
+        if (dc?.arcDirection === AD_CLOCKWISE)
+        {
+            while (to <= from)
+            {
+                to += 2 * Math.PI;
+            }
+        }
+        else
+        {
+            while (to >= from)
+            {
+                to -= 2 * Math.PI;
+            }
+        }
+        return arcCurves(cx, cy, rx, ry, from, to);
+    };
+
+    /**
+     * An arc into a path: from the current position by a line, or a new
+     * figure begun at its start, then its curves.
+     *
+     * @param {any} interfaces @param {number} handle
+     * @param {ReturnType<typeof arcCurves>} arc @param {boolean} joined
+     */
+    const arcIntoPath = (interfaces, handle, arc, joined)=>{
+        if (joined)
+        {
+            interfaces.lineTo(handle >>> 0, arc.start.x, arc.start.y);
+        }
+        else
+        {
+            interfaces.moveToEx(handle >>> 0, arc.start.x, arc.start.y);
+        }
+        for (const [first, second, end] of arc.curves)
+        {
+            interfaces.bezierTo(handle >>> 0, first, second, end);
+        }
+    };
+
+    /**
      * Chord and Pie: the arc closed into a figure -- by its chord, or through
      * the ellipse's centre -- filled with the brush and outlined with the
      * pen. A rectangle with no inside has no ellipse, and nothing is drawn.
@@ -1417,8 +1530,24 @@ export function createDrawingFunctions(
         {
             return 1;
         }
-        const points = directedArc(dcOf(handle), box);
+        const dc = dcOf(handle);
         const centre = { x: Math.round((left + right) / 2), y: Math.round((top + bottom) / 2) };
+        if (interfaces.bezierTo && dc.path?.open)
+        {
+            // A path keeps the arc as curves, a pie's line to the centre after
+            // them, the figure closed and the current position where it was
+            // (Wine's path.c all_funcs_path).
+            const back = { ...dc.position };
+            arcIntoPath(interfaces, handle, directedArcCurves(dc, box), false);
+            if (pie)
+            {
+                interfaces.lineTo(handle >>> 0, centre.x, centre.y);
+            }
+            pathClose(dc.path);
+            interfaces.moveToEx(handle >>> 0, back.x, back.y);
+            return 1;
+        }
+        const points = directedArc(dc, box);
         return interfaces.polygon(handle >>> 0, pie ? [centre, ...points] : points) ? 1 : 0;
     };
 
@@ -2089,6 +2218,24 @@ export function createDrawingFunctions(
                 {
                     return 0;
                 }
+                // A path keeps the arc as curves, as Windows' does.
+                if (interfaces.bezierTo)
+                {
+                    // A figure of its own: the current position is not the
+                    // arc's, and the next line starts another figure from it
+                    // (Wine's path.c all_funcs_path).
+                    const back = { ...dcOf(handle).position };
+                    arcIntoPath(interfaces, handle, directedArcCurves(dcOf(handle), box), false);
+                    interfaces.moveToEx(handle >>> 0, back.x, back.y);
+                    return 1;
+                }
+                const { left, top, right, bottom } = ellipseBox(box);
+                if (right < left || bottom < top)
+                {
+                    // A box with no width or height has no ellipse to draw a
+                    // part of (Wine's bitmap.c test_arcs, "0-pixel arc").
+                    return 1;
+                }
                 const points = directedArc(dcOf(handle), box);
                 const back = interfaces.moveToEx(handle >>> 0, points[0].x, points[0].y);
                 for (const point of points.slice(1))
@@ -2197,6 +2344,11 @@ export function createDrawingFunctions(
                 {
                     return 0;
                 }
+                if (interfaces.bezierTo)
+                {
+                    arcIntoPath(interfaces, handle, directedArcCurves(dcOf(handle), box), true);
+                    return 1;
+                }
                 lineThrough(interfaces, handle, directedArc(dcOf(handle), box));
                 return 1;
             },
@@ -2237,10 +2389,17 @@ export function createDrawingFunctions(
          * BOOL PolyDraw(HDC hdc, const POINT *apt, const BYTE *aj, int cpt)
          *
          * Moves, lines and curves from the current position, each point's
-         * type saying which; a type with PT_CLOSEFIGURE also draws a line back
-         * to where the figure began -- the last move, or the position the
-         * call started from. The position ends where the drawing did. A type
-         * array Windows would not draw is refused before anything is drawn.
+         * type saying which, taken one after another. A type with
+         * PT_CLOSEFIGURE closes the figure at that point: in a path its last
+         * point carries the close, drawn it is a line back to where the
+         * figure began - the last move, or the position the call started
+         * from - and either way the position stays at the point. An entry
+         * Windows does not draw (a close alone, a move that closes, a curve
+         * of fewer than three points) ends the call with FALSE where it
+         * stands: what came before it is drawn, or kept in the path, and the
+         * position goes back to where the call began, the path's next
+         * figure starting from there as if nothing had moved it (Wine's
+         * path.c test_polydraw).
          */
         PolyDraw: {
             argBytes: 16,
@@ -2255,37 +2414,58 @@ export function createDrawingFunctions(
                     return 0;
                 }
                 const types = total === 0 ? new Uint8Array(0) : host.readMemory(kinds >>> 0, total);
-                if (!isPolyDrawable(types))
-                {
-                    return 0;
-                }
                 const through = pointsAt(points >>> 0, total);
-                let current = { ...dc.position };
-                let figure = current;
+                const began = { ...dc.position };
+                const path = dc.path?.open ? dc.path : null;
+                const restart = path?.pending ? path.restart : null;
+                let current = began;
+                let figure = began;
                 for (let at = 0; at < total; at++)
                 {
                     const point = through[at];
-                    if (types[at] === PT_MOVETO)
+                    const type = types[at];
+                    if (type === PT_MOVETO)
                     {
                         interfaces.moveToEx(handle >>> 0, point.x, point.y);
                         current = figure = point;
+                        continue;
                     }
-                    else if (types[at] === PT_BEZIERTO)
+                    if ((type & ~PT_CLOSEFIGURE) === PT_LINETO)
+                    {
+                        interfaces.lineTo(handle >>> 0, point.x, point.y);
+                    }
+                    else if (type === PT_BEZIERTO && at + 2 < total
+                        && types[at + 1] === PT_BEZIERTO
+                        && (types[at + 2] & ~PT_CLOSEFIGURE) === PT_BEZIERTO)
                     {
                         curveTo(interfaces, handle, current, point, through[at + 1],
                             through[at + 2]);
                         at += 2;
-                        current = through[at];
                     }
                     else
                     {
-                        interfaces.lineTo(handle >>> 0, point.x, point.y);
-                        current = point;
+                        // Back to where the call began, and a path's next
+                        // figure from there - or from where a closed figure
+                        // began, if one was what the call started after.
+                        interfaces.moveToEx(handle >>> 0, began.x, began.y);
+                        if (path && restart)
+                        {
+                            path.restart = restart;
+                        }
+                        return 0;
                     }
+                    current = through[at];
                     if ((types[at] & PT_CLOSEFIGURE) !== 0)
                     {
-                        interfaces.lineTo(handle >>> 0, figure.x, figure.y);
-                        current = figure;
+                        if (path)
+                        {
+                            pathClose(path);
+                        }
+                        else
+                        {
+                            interfaces.lineTo(handle >>> 0, figure.x, figure.y);
+                            interfaces.moveToEx(handle >>> 0, current.x, current.y);
+                        }
                     }
                 }
                 return 1;
@@ -2422,6 +2602,13 @@ export function createDrawingFunctions(
                     return 0;
                 }
                 const r = radius | 0;
+                if (interfaces.bezierTo)
+                {
+                    // Counterclockwise on the screen is a falling angle.
+                    arcIntoPath(interfaces, handle,
+                        arcCurves(x | 0, y | 0, r, r, -from, -(from + turn)), true);
+                    return 1;
+                }
                 // A segment for about every two pixels of the way, as the
                 // other arcs are drawn, and no more than a turn's worth of
                 // them for each turn a sweep asks for.
@@ -2772,6 +2959,12 @@ export function createDrawingFunctions(
                     left: Math.min(left | 0, right | 0), top: Math.min(top | 0, bottom | 0),
                     right: Math.max(left | 0, right | 0), bottom: Math.max(top | 0, bottom | 0),
                 };
+                if ((width | 0) !== 0 && (height | 0) !== 0 && interfaces.roundRect)
+                {
+                    // A path keeps the corners as curves.
+                    return interfaces.roundRect(handle >>> 0, left | 0, top | 0, right | 0,
+                        bottom | 0, width | 0, height | 0) ? 1 : 0;
+                }
                 const cornerX = Math.min(Math.abs(width | 0), box.right - box.left) / 2;
                 const cornerY = Math.min(Math.abs(height | 0), box.bottom - box.top) / 2;
                 if (cornerX < 1 || cornerY < 1)

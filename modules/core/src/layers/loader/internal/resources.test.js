@@ -195,6 +195,8 @@ test('a resource is found by type and name, both by id', ()=>{
     assert.ok(found, 'the bitmap is there');
     assert.equal(found.size, 4);
     assert.equal(found.language, 0x409, 'and it reports the language it was tagged with');
+    assert.deepEqual(findResource(bytes, image, '#2', '#101'), found,
+        'a "#" and digits names that id, type and name alike');
 });
 
 test('the leaf offset is an RVA, unlike every other offset in the tree', ()=>{

@@ -109,6 +109,12 @@ const FIXED_FILE_VERSION_LS = 12;
  *           Whether the engine answers for a library of this file name
  *           itself, with no file behind it. Absent, it answers for none, and
  *           such a library reads as a file that is not there.
+ * @property {() => string} [currentDirectory]  The process's current directory,
+ *           where VerFindFile looks for a copy as OpenFile does.
+ * @property {(path: string) => boolean} [systemProgram]
+ *           Whether a path names a program of the system folder the engine
+ *           runs itself (msiexec, regsvr32 and the like), which carries the
+ *           system's version as the system's libraries do.
  * @property {import('../kernel32/versions.js').WindowsVersion} [windows]
  * @property {string} [directx]  The DirectX version a DirectX library's file names.
  *           The Windows the machine is, whose version its own libraries carry
@@ -135,6 +141,7 @@ const VS_FFI_STRUCVERSION = 0x00010000;
 const VS_FFI_FILEFLAGSMASK = 0x0000003f;
 const VOS_NT_WINDOWS32 = 0x00040004;
 const VFT_DLL = 2;
+const VFT_APP = 1;
 
 /** US English in UTF-16, the one translation the block carries. */
 const TRANSLATION = '040904B0';
@@ -209,7 +216,7 @@ export function systemVersionResource(
     const most = (quad[0] << 16 | quad[1]) >>> 0;
     const least = (quad[2] << 16 | quad[3]) >>> 0;
     [VS_FFI_SIGNATURE, VS_FFI_STRUCVERSION, most, least, most, least, VS_FFI_FILEFLAGSMASK, 0,
-        VOS_NT_WINDOWS32, VFT_DLL].forEach((field, index)=>view.setUint32(index * 4, field, true));
+        VOS_NT_WINDOWS32, /\.exe$/i.test(name) ? VFT_APP : VFT_DLL].forEach((field, index)=>view.setUint32(index * 4, field, true));
     return buildNode('VS_VERSION_INFO', fixed, [
         buildNode('StringFileInfo', null, [buildNode(TRANSLATION, null, [
             buildNode('FileVersion', spelled),
@@ -472,6 +479,11 @@ export function createVersionFunctions(host){
         {
             return systemVersionResource(library, host.windows, host.directx);
         }
+        if (host.systemProgram?.(path))
+        {
+            return systemVersionResource(path.slice(Math.max(path.lastIndexOf('\\'),
+                path.lastIndexOf('/')) + 1), host.windows, host.directx);
+        }
         fail(exists ? ERROR_RESOURCE_DATA_NOT_FOUND : ERROR_FILE_NOT_FOUND);
         return null;
     });
@@ -575,7 +587,10 @@ export function createVersionFunctions(host){
 
         const path = subBlock.split('\\').filter(step=>step.length > 0);
         const node = find(block, path);
-        if (!node || node.valueLength === 0)
+        // A name with no value is still there: Windows answers it as found,
+        // with a length of zero and a pointer to where its value would be.
+        // Only the root has to carry the fixed information to be answered.
+        if (!node || (node.valueLength === 0 && path.length === 0))
         {
             return 0;
         }
@@ -678,7 +693,8 @@ export function createVersionFunctions(host){
          * is found -- the destination first, then the Windows directory for a
          * shared file -- and empty when there is none, which is what an
          * installer of a fresh program reads. Zero means "install where
-         * recommended"; VFF_CURNEDEST says a copy lives somewhere else.
+         * recommended"; VFF_CURNEDEST says the two differ - a copy lives
+         * somewhere else, or none lives anywhere and the destination is named.
          *
          * Nothing here can tell whether a file is in use, so VFF_FILEINUSE is
          * never reported: the installer then copies over it, which is what the
@@ -690,12 +706,25 @@ export function createVersionFunctions(host){
             handler: ([flags, fileName, , appDir, curDir, curDirLen, destDir, destDirLen])=>{
                 const leaf = narrow(fileName);
                 const shared = ((flags >>> 0) & VFFF_ISSHAREDFILE) !== 0;
-                const destination = shared ? SYSTEM_DIRECTORY : narrow(appDir);
-                const candidates = shared ? [destination, WINDOWS_DIRECTORY] : [destination];
-                const current = candidates.find(
-                    dir=>host.files?.stat(joinPath(dir, leaf))?.exists) ?? '';
+                const application = narrow(appDir);
+                const destination = shared ? SYSTEM_DIRECTORY : application;
+                // Where OpenFile would find a copy: the program's directory, the
+                // current one, then the system directory and the Windows directory
+                // - a shared file looked for in the system's first, as it belongs there.
+                const here = host.currentDirectory?.() ?? '';
+                const candidates = (shared
+                    ? [SYSTEM_DIRECTORY, WINDOWS_DIRECTORY, application, here]
+                    : [application, here, SYSTEM_DIRECTORY, WINDOWS_DIRECTORY])
+                    .filter(dir=>dir !== '');
+                const current = candidates.find(dir=>{
+                    const path = joinPath(dir, leaf);
+                    return statOrNull(path)?.exists || host.systemProgram?.(path);
+                }) ?? '';
 
-                let result = current !== '' && current !== destination ? VFF_CURNEDEST : 0;
+                // Any difference counts, a file found nowhere included: its empty
+                // current directory is not where it should go.
+                let result = current.toLowerCase() !== destination.toLowerCase()
+                    ? VFF_CURNEDEST : 0;
                 result |= writeDirectory(curDir, curDirLen, current);
                 result |= writeDirectory(destDir, destDirLen, destination);
                 return result;

@@ -30,14 +30,16 @@
  */
 
 import { CHECK_MARK, RADIO_DOT, RADIO_RING_DARK, RADIO_RING_LIGHT, layoutText } from './paint.js';
-import { encodeAnsi } from '../kernel32/locale.js';
+import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { createTabWalk } from './tabwalk.js';
 import { directoryItems } from './dlgdir.js';
 
 /** Messages the controls answer. */
 export const WM_CREATE = 0x0001;
 export const WM_SETFOCUS = 0x0007;
+const WM_SIZE = 0x0005;
 export const WM_KILLFOCUS = 0x0008;
+const WM_NCDESTROY = 0x0082;
 export const WM_ENABLE = 0x000a;
 export const WM_SETTEXT = 0x000c;
 export const WM_GETTEXT = 0x000d;
@@ -192,6 +194,7 @@ const SS_CENTERIMAGE = 0x200;
 /** A static control's image stretched to the control rather than the control to it. */
 const SS_REALSIZECONTROL = 0x40;
 const SS_SUNKEN = 0x1000;
+const WS_EX_STATICEDGE = 0x00020000;
 const STM_SETICON = 0x170;
 const STM_GETICON = 0x171;
 const STM_SETIMAGE = 0x172;
@@ -201,6 +204,9 @@ const STN_DBLCLK = 1;
 /** STM_SETIMAGE's image types. */
 const IMAGE_BITMAP = 0;
 const IMAGE_ICON = 1;
+const IMAGE_CURSOR = 2;
+const IMAGE_ENHMETAFILE = 3;
+const SS_ENHMETAFILE = 0x0f;
 
 /** The window styles a dialog's Tab order is read from. */
 const WS_TABSTOP = 0x00010000;
@@ -208,6 +214,7 @@ const WS_DISABLED = 0x08000000;
 const WS_VISIBLE = 0x10000000;
 const WS_MINIMIZE = 0x20000000;
 const WS_CHILD = 0x40000000;
+const WS_EX_CONTROLPARENT = 0x00010000;
 /** WM_ACTIVATE: the window gaining or losing the activation. */
 const WM_ACTIVATE = 0x0006;
 
@@ -222,7 +229,11 @@ const ES_WANTRETURN = 0x1000;
 const EM_GETSEL = 0x00b0;
 const EM_SETSEL = 0x00b1;
 const WM_NEXTDLGCTL = 0x0028;
+const EM_GETHANDLE = 0x00bd;
+const EM_SETHANDLE = 0x00bc;
 const EM_GETRECT = 0x00b2;
+const EM_SETRECT = 0x00b3;
+const EM_SETRECTNP = 0x00b4;
 const EM_SCROLL = 0x00b5;
 const EM_LINESCROLL = 0x00b6;
 const EM_SCROLLCARET = 0x00b7;
@@ -242,12 +253,16 @@ const WM_COPY = 0x0301;
 const WM_PASTE = 0x0302;
 const WM_CLEAR = 0x0303;
 const WM_UNDO = 0x0304;
+/** The control characters an edit answers as commands: Ctrl+C, V, X and Z. */
+const EDIT_CONTROL_CHARACTERS = new Map([[0x03, WM_COPY], [0x16, WM_PASTE], [0x18, WM_CUT],
+    [0x1a, WM_UNDO]]);
 const EM_EMPTYUNDOBUFFER = 0x00cd;
 const EM_GETFIRSTVISIBLELINE = 0x00ce;
 const EM_SETREADONLY = 0x00cf;
 const EM_SETPASSWORDCHAR = 0x00cc;
 const EM_GETPASSWORDCHAR = 0x00d2;
 const EM_SETMARGINS = 0x00d3;
+const EM_GETMARGINS = 0x00d4;
 const EM_GETLIMITTEXT = 0x00d5;
 const EM_POSFROMCHAR = 0x00d6;
 const EM_CHARFROMPOS = 0x00d7;
@@ -258,6 +273,23 @@ const EN_UPDATE = 0x0400;
 const EN_MAXTEXT = 0x0501;
 /** The room an edit leaves between its border and its text. */
 const EDIT_MARGIN = 1;
+/** EM_SETMARGINS' sides, and the value that asks for the font's own margin. */
+const EC_LEFTMARGIN = 0x0001;
+const EC_RIGHTMARGIN = 0x0002;
+const EC_USEFONTINFO = 0xffff;
+/**
+ * The client width the font's margins are judged against when the client
+ * area is empty: Windows lays out a zero-sized edit as if it were this wide.
+ */
+const EMPTY_EDIT_WIDTH = 80;
+/** How much room past its text an edit's buffer is given, so typing does not move it. */
+const EDIT_BUFFER_STEP = 64;
+/** WM_SIZE's kinds that lay an edit out again; a minimized one keeps its rectangle. */
+const SIZE_RESTORED = 0;
+const SIZE_MAXIMIZED = 2;
+const WS_EX_CLIENTEDGE = 0x00000200;
+/** SM_CYBORDER: a thin border's height, which an edit's WS_BORDER insets by and one. */
+const THIN_BORDER = 1;
 /** What a program that never set a limit may type: the documented default. */
 const DEFAULT_EDIT_LIMIT = 0x7ffffffe;
 
@@ -344,6 +376,7 @@ const LB_GETITEMDATA = 0x0199;
 const LB_SETITEMDATA = 0x019a;
 const LB_SETITEMHEIGHT = 0x01a0;
 const LB_GETITEMHEIGHT = 0x01a1;
+const LB_GETLISTBOXINFO = 0x01b2;
 const LB_FINDSTRINGEXACT = 0x01a2;
 const LB_ERR = -1;
 const LBN_SELCHANGE = 1;
@@ -535,6 +568,11 @@ const OPAQUE = 2;
  *           colour, in its own mode; otherwise over what is there.
  * @property {(hdc: number, text: string) => { width: number, height: number,
  *     ascent: number }} measure
+ * @property {(hdc: number) => number} [averageWidth]  The context's font's average
+ *     character width, as GdiGetCharDimensions measures it.
+ * @property {(hdc: number, rect: Rect) => number} [clipTo]  The context's clip narrowed
+ *     to a rectangle while a control paints; answers what `unclip` puts back.
+ * @property {(hdc: number, saved: number) => void} [unclip]
  * @property {(hdc: number, x: number, y: number, bitmap: number, width?: number,
  *     height?: number) => boolean} bitmap  Stretched to a size when one is given.
  * @property {(bitmap: number) => { width: number, height: number, corner: number } | null}
@@ -638,6 +676,9 @@ export const imagePlace = (record, rect, shape)=>{
  *           build with no heap behind it, and then a notification that needs
  *           a structure cannot be sent.
  * @property {(address: number) => void} [release]
+ * @property {(address: number) => { size: number, capacity: number } | null} [block]
+ *           A block of the process heap an address starts, as LocalSize and an
+ *           in-place LocalReAlloc see it: an edit's text buffer is one.
  * @property {(entry: number, args: number[], thread?: unknown) => number | Promise<number>} [call]
  *           Calls the program's own code: a callback a control is handed.
  * @property {(api: string, detail: string) => void} [divergence]
@@ -930,10 +971,14 @@ export function createControlProcedures(host){
      *
      * @param {any} record @param {number} code @param {unknown} [thread]
      */
-    const notify = (record, code, thread)=>(record.parent
-        ? host.send(record.parent, WM_COMMAND,
-            ((code & 0xffff) << 16 | record.id & 0xffff) >>> 0, record.hwnd, thread)
-        : 0);
+    const notify = (record, code, thread)=>{
+        // The window CreateWindowEx was handed as the parent: a child's
+        // parent, or a top-level control's owner, which it was given the same
+        // way and which hears it the same way on Windows.
+        const to = record.parent || record.owner;
+        return to ? host.send(to, WM_COMMAND,
+            ((code & 0xffff) << 16 | record.id & 0xffff) >>> 0, record.hwnd, thread) : 0;
+    };
 
     /**
      * Asks the parent which brush a control's background is painted with:
@@ -1541,20 +1586,55 @@ export function createControlProcedures(host){
     const staticProc = (record, message, thread)=>{
         const state = stateOf(record);
         switch (message.message){
+            case WM_CREATE: {
+                // An etched line or a sunken static is drawn by its edge:
+                // Windows gives it WS_EX_STATICEDGE, and an etched line is the
+                // edge alone - a horizontal one has no client height, a
+                // vertical one no client width. A system class's procedure is
+                // first told WM_CREATE, so the frame is laid again here.
+                const type = record.style & SS_TYPEMASK;
+                const etched = type === SS_ETCHEDHORZ || type === SS_ETCHEDVERT;
+                if ((!etched && (record.style & SS_SUNKEN) === 0) || !host.move)
+                {
+                    return common(record, message, thread);
+                }
+                record.exStyle = (record.exStyle | WS_EX_STATICEDGE) >>> 0;
+                const framed = host.move(record.hwnd, record.x, record.y, record.width,
+                    record.height);
+                return after(framed, ()=>{
+                    if (!etched)
+                    {
+                        return common(record, message, thread);
+                    }
+                    const size = host.clientSize(record);
+                    return after(host.move?.(record.hwnd, record.x, record.y,
+                        type === SS_ETCHEDVERT ? record.width - size.width : record.width,
+                        type === SS_ETCHEDHORZ ? record.height - size.height : record.height),
+                    ()=>common(record, message, thread));
+                });
+            }
             case WM_PAINT:
                 // An owner-drawn static is its parent's to draw, all of it:
-                // asked for a colour first, as every static asks.
-                return painting(record, (hdc, rect)=>after(
-                    controlColor(record, WM_CTLCOLORSTATIC, hdc, thread), brush=>{
-                        if ((record.style & SS_TYPEMASK) === SS_OWNERDRAW)
-                        {
-                            return drawItem(record, hdc, rect, { type: ODT_STATIC,
-                                action: ODA_DRAWENTIRE,
-                                state: disabled(record) ? ODS_DISABLED : 0 }, thread);
-                        }
-                        paintStatic(record, hdc, rect, brush);
-                        return 0;
-                    }));
+                // asked for a colour first, as every static asks. The
+                // context is clipped to the control while it paints, so the
+                // parent answering WM_CTLCOLORSTATIC finds a clip selected.
+                return painting(record, (hdc, rect)=>{
+                    const saved = host.draw?.clipTo?.(hdc, clientRect(record)) ?? 0;
+                    return after(after(controlColor(record, WM_CTLCOLORSTATIC, hdc, thread),
+                        brush=>{
+                            if ((record.style & SS_TYPEMASK) === SS_OWNERDRAW)
+                            {
+                                return drawItem(record, hdc, rect, { type: ODT_STATIC,
+                                    action: ODA_DRAWENTIRE,
+                                    state: disabled(record) ? ODS_DISABLED : 0 }, thread);
+                            }
+                            paintStatic(record, hdc, rect, brush);
+                            return 0;
+                        }), answer=>{
+                        host.draw?.unclip?.(hdc, saved);
+                        return answer;
+                    });
+                });
             case WM_ERASEBKGND:
                 return 1;
             case WM_NCHITTEST:
@@ -1567,22 +1647,34 @@ export function createControlProcedures(host){
                 return (record.style & SS_NOTIFY) !== 0 ? notify(record, STN_DBLCLK, thread) : 0;
             case STM_SETICON:
             case STM_SETIMAGE: {
+                // A static takes only the image its style shows - an icon or
+                // a cursor for SS_ICON, a bitmap for SS_BITMAP, a metafile for
+                // SS_ENHMETAFILE - and answers 0 for another, keeping none.
+                const asked = message.message === STM_SETICON
+                    ? IMAGE_ICON : message.wParam & 0xffff;
+                const type = record.style & SS_TYPEMASK;
+                const shows = type === SS_ICON ? asked === IMAGE_ICON || asked === IMAGE_CURSOR
+                    : type === SS_BITMAP ? asked === IMAGE_BITMAP
+                        : type === SS_ENHMETAFILE && asked === IMAGE_ENHMETAFILE;
+                if (!shows)
+                {
+                    return 0;
+                }
                 const previous = state.image ?? 0;
                 state.image = (message.message === STM_SETICON
                     ? message.wParam : message.lParam) >>> 0;
-                state.imageType = message.message === STM_SETICON
-                    ? IMAGE_ICON : message.wParam & 0xffff;
+                state.imageType = asked === IMAGE_CURSOR ? IMAGE_ICON : asked;
                 host.invalidate(record);
                 // Neither centred nor stretched, the image is the control's
                 // size: it ignores the size it was made with and takes the
                 // image's, so what lies beside it in the template shows.
                 const sized = (record.style & (SS_CENTERIMAGE | SS_REALSIZECONTROL)) === 0
                     ? imageSize(state.image) : null;
-                return sized && host.move
+                const moved = sized && host.move
                     && (sized.width !== record.width || sized.height !== record.height)
-                    ? after(host.move(record.hwnd, record.x, record.y, sized.width, sized.height),
-                        ()=>previous)
-                    : previous;
+                    ? host.move(record.hwnd, record.x, record.y, sized.width, sized.height) : 0;
+                // Drawn at once, its parent asked for the colour again.
+                return after(moved, ()=>after(host.update?.(record, thread) ?? 1, ()=>previous));
             }
             case STM_GETICON:
                 return state.imageType === IMAGE_ICON ? state.image ?? 0 : 0;
@@ -1922,6 +2014,52 @@ export function createControlProcedures(host){
     };
 
     /**
+     * Enter, Escape and Tab reaching a multi-line edit in a dialog, which
+     * asked for every key: Enter without ES_WANTRETURN goes to the dialog's
+     * default button (focus on it, then the key posted to it), Escape closes
+     * the dialog, Tab moves to the next or previous control. Null for any
+     * other key.
+     *
+     * @param {any} record @param {number} key @param {unknown} thread
+     * @returns {number | Promise<number> | null}
+     */
+    const dialogKeyOfEdit = (record, key, thread)=>{
+        const parent = record.parent;
+        if (key === VK_ESCAPE)
+        {
+            host.post({ hwnd: parent, message: WM_CLOSE, wParam: 0, lParam: 0 });
+            return 0;
+        }
+        if (key === VK_TAB)
+        {
+            return after(host.send(parent, WM_NEXTDLGCTL, host.keyDown(VK_SHIFT) ? 1 : 0, 0,
+                thread), ()=>0);
+        }
+        if (key !== VK_RETURN || (record.style & ES_WANTRETURN) !== 0)
+        {
+            return null;
+        }
+        return after(host.send(parent, DM_GETDEFID, 0, 0, thread), answer=>{
+            if ((answer >>> 16) !== DC_HASDEFID)
+            {
+                return 0;
+            }
+            const owner = host.live(parent);
+            const button = owner ? host.children(owner)
+                .find(child=>(child.id & 0xffff) === (answer & 0xffff)) : undefined;
+            if (!button)
+            {
+                return 0;
+            }
+            return after(host.send(parent, WM_NEXTDLGCTL, button.hwnd, 1, thread), ()=>{
+                host.post({ hwnd: button.hwnd, message: WM_KEYDOWN, wParam: VK_RETURN,
+                    lParam: 0 });
+                return 0;
+            });
+        });
+    };
+
+    /**
      * A character arriving at an editing field: an edit's, or the field of an
      * editable combo box. Backspace narrows or deletes the selection, a return
      * belongs to a multi-line edit that asked for one, control characters are
@@ -1946,16 +2084,25 @@ export function createControlProcedures(host){
             }
             return replaceSelection(record, '', thread, codes);
         }
-        if (character === VK_RETURN)
+        // Return and tab are text to a multi-line edit, whatever its
+        // ES_WANTRETURN: that style says what the edit does with the key in a
+        // dialog (WM_KEYDOWN), not with the character.
+        // In a dialog the keys themselves did the work - moved the focus,
+        // pressed the default button - and the character they translate to
+        // is not typed.
+        const inDialog = state.dialogMode === true;
+        if (inDialog && multiline(record) && (character === VK_TAB
+            || (character === VK_RETURN && (record.style & ES_WANTRETURN) === 0)))
         {
-            if (!multiline(record) || (record.style & ES_WANTRETURN) === 0)
-            {
-                return 0;
-            }
-            rememberUndo(record, true);
-            return replaceSelection(record, '\r\n', thread, codes);
+            return 0;
         }
-        if (character < VK_SPACE || character === VK_TAB || character === VK_ESCAPE)
+        if ((character === VK_RETURN || character === VK_TAB) && multiline(record))
+        {
+            rememberUndo(record, true);
+            return replaceSelection(record, character === VK_RETURN ? '\r\n' : '\t',
+                thread, codes);
+        }
+        if (character < VK_SPACE || character === VK_ESCAPE || character === 0x7f)
         {
             return 0;
         }
@@ -2135,9 +2282,113 @@ export function createControlProcedures(host){
     };
 
     /**
+     * The text an edit holds in the buffer EM_GETHANDLE handed out or
+     * EM_SETHANDLE gave it: the program may write it in place, so it is read
+     * before every message and written after one that changed the text. An
+     * ANSI window's buffer is ANSI, a Unicode one's UTF-16 (user32's edit;
+     * Common Controls 6's is always UTF-16).
+     *
+     * @param {any} record
+     */
+    const pullEditBuffer = record=>{
+        const state = editState(record);
+        const block = host.block?.(state.handle);
+        if (!block)
+        {
+            return;
+        }
+        const bytes = host.readMemory(state.handle, block.size);
+        if (record.unicode === true)
+        {
+            let text = '';
+            for (let at = 0; at + 1 < bytes.length; at += 2)
+            {
+                const unit = bytes[at] | bytes[at + 1] << 8;
+                if (unit === 0)
+                {
+                    break;
+                }
+                text += String.fromCharCode(unit);
+            }
+            record.title = text;
+        }
+        else
+        {
+            const end = bytes.indexOf(0);
+            record.title = decodeAnsi(bytes.subarray(0, end < 0 ? bytes.length : end));
+        }
+    };
+    /** @param {any} record @param {string} text @returns {Uint8Array} */
+    const encodeEditBuffer = (record, text)=>{
+        if (record.unicode !== true)
+        {
+            return encodeAnsi(`${text}\0`);
+        }
+        const bytes = new Uint8Array((text.length + 1) * 2);
+        for (let at = 0; at < text.length; at++)
+        {
+            bytes[2 * at] = text.charCodeAt(at) & 0xff;
+            bytes[2 * at + 1] = text.charCodeAt(at) >>> 8;
+        }
+        return bytes;
+    };
+    /**
+     * Writes the text back into the buffer: in place while the block holds
+     * it, else into a larger block that replaces it, as LocalReAlloc moves a
+     * fixed block - the program asks EM_GETHANDLE again for where it went.
+     *
+     * @param {any} record
+     */
+    const pushEditBuffer = record=>{
+        const state = editState(record);
+        const bytes = encodeEditBuffer(record, record.title);
+        const block = host.block?.(state.handle);
+        if (block && bytes.length <= block.capacity)
+        {
+            host.writeMemory(state.handle, bytes);
+            return;
+        }
+        const grown = host.allocate?.(bytes.length + EDIT_BUFFER_STEP) ?? 0;
+        if (grown === 0)
+        {
+            host.divergence?.('Edit', 'no memory to grow the text buffer EM_GETHANDLE handed out');
+            return;
+        }
+        host.writeMemory(grown, bytes);
+        if (block)
+        {
+            host.release?.(state.handle);
+        }
+        state.handle = grown;
+    };
+
+    /**
+     * An edit's messages, its text read from and written back to the
+     * program's buffer around each where it has one (EM_GETHANDLE).
+     *
      * @param {any} record @param {ControlMessage} message @param {unknown} [thread]
      */
     const editProc = (record, message, thread)=>{
+        const state = editState(record);
+        if (!state.handle)
+        {
+            return editMessage(record, message, thread);
+        }
+        pullEditBuffer(record);
+        const before = record.title;
+        return after(editMessage(record, message, thread), answer=>{
+            if (state.handle && record.title !== before)
+            {
+                pushEditBuffer(record);
+            }
+            return answer;
+        });
+    };
+
+    /**
+     * @param {any} record @param {ControlMessage} message @param {unknown} [thread]
+     */
+    const editMessage = (record, message, thread)=>{
         const state = editState(record);
         const readOnly = ()=>(record.style & ES_READONLY) !== 0;
         switch (message.message){
@@ -2153,9 +2404,17 @@ export function createControlProcedures(host){
             case WM_ERASEBKGND:
                 return 1;
             case WM_GETDLGCODE:
+                // Asked with the message the dialog manager is about to
+                // handle, the edit knows it lives in a dialog, and a
+                // multi-line one then answers Enter, Escape and Tab itself
+                // (WM_KEYDOWN below). It wants every key whatever
+                // ES_WANTRETURN says.
+                if ((message.lParam >>> 0) !== 0)
+                {
+                    state.dialogMode = true;
+                }
                 return DLGC_WANTCHARS | DLGC_WANTARROWS | DLGC_HASSETSEL
-                    | (multiline(record) && (record.style & ES_WANTRETURN) !== 0
-                        ? DLGC_WANTALLKEYS : 0);
+                    | (multiline(record) ? DLGC_WANTALLKEYS : 0);
             case WM_SETFOCUS:
                 takeCaret(record);
                 host.invalidate(record);
@@ -2178,12 +2437,29 @@ export function createControlProcedures(host){
                 host.invalidate(record);
                 return after(host.setFocus(record.hwnd, thread), ()=>0);
             }
-            case WM_CHAR:
-                return editCharacter(record, message.wParam & 0xffff, thread,
-                    EDIT_NOTICES, readOnly());
+            case WM_CHAR: {
+                // Ctrl+C, V, X and Z are the clipboard's and undo's, sent to the
+                // edit as their own messages; every character answers 1.
+                const character = message.wParam & 0xffff;
+                const command = EDIT_CONTROL_CHARACTERS.get(character);
+                if (command !== undefined)
+                {
+                    return after(host.send(record.hwnd, command, 0, 0, thread), ()=>1);
+                }
+                return after(editCharacter(record, character, thread, EDIT_NOTICES, readOnly()),
+                    ()=>1);
+            }
             case WM_KEYDOWN: {
                 const key = message.wParam & 0xff;
                 const rows = editGridRows(record);
+                if (state.dialogMode === true && multiline(record) && record.parent)
+                {
+                    const answered = dialogKeyOfEdit(record, key, thread);
+                    if (answered !== null)
+                    {
+                        return answered;
+                    }
+                }
                 switch (key){
                     case VK_LEFT:
                         moveCaret(record, state.selEnd - 1);
@@ -2400,9 +2676,114 @@ export function createControlProcedures(host){
                 return 0;
             case EM_GETPASSWORDCHAR:
                 return (record.style & ES_PASSWORD) !== 0 ? state.passwordChar ?? 0x2a : 0;
-            case EM_SETMARGINS:
-            case EM_GETRECT:
+            case EM_GETHANDLE: {
+                // A single-line edit has no buffer to hand out. The block is
+                // the process heap's, so LocalLock, LocalSize and LocalFree
+                // know it.
+                if (!multiline(record))
+                {
+                    return 0;
+                }
+                if (!state.handle)
+                {
+                    const bytes = encodeEditBuffer(record, record.title);
+                    const at = host.allocate?.(bytes.length + EDIT_BUFFER_STEP) ?? 0;
+                    if (at === 0)
+                    {
+                        return 0;
+                    }
+                    host.writeMemory(at, bytes);
+                    state.handle = at;
+                }
+                return state.handle;
+            }
+            case EM_SETHANDLE: {
+                // The program's buffer becomes the text; the one it replaces is
+                // the program's to free (EM_GETHANDLE's documented contract),
+                // and the edit frees the last one it holds when destroyed.
+                if (!multiline(record) || (message.wParam >>> 0) === 0)
+                {
+                    return 0;
+                }
+                state.handle = message.wParam >>> 0;
+                pullEditBuffer(record);
+                state.selStart = state.selEnd = 0;
+                state.firstLine = 0;
+                state.modified = false;
+                state.undo = null;
+                host.invalidate(record);
                 return 0;
+            }
+            case WM_NCDESTROY:
+                if (state.handle && host.block?.(state.handle))
+                {
+                    host.release?.(state.handle);
+                }
+                state.handle = 0;
+                return common(record, message, thread);
+            case EM_GETRECT:
+                if ((message.lParam >>> 0) !== 0)
+                {
+                    writeRect(message.lParam >>> 0, formatRect(record));
+                }
+                return 0;
+            case EM_SETRECT:
+            case EM_SETRECTNP: {
+                // A rectangle no larger than the client area either way is
+                // not taken (Windows 10 keeps the one it has); none at all
+                // puts the default back. wParam 1 offsets the current one.
+                if ((message.lParam >>> 0) === 0)
+                {
+                    state.setRect = null;
+                }
+                else
+                {
+                    const asked = readRect(message.lParam >>> 0);
+                    const current = formatRect(record);
+                    const margins = state.margins ?? { left: 0, right: 0 };
+                    const rect = (message.wParam & 1) !== 0
+                        ? { left: current.left - margins.left + asked.left,
+                            top: current.top + asked.top,
+                            right: current.right + margins.right + asked.right,
+                            bottom: current.bottom + asked.bottom }
+                        : asked;
+                    const size = host.clientSize(record);
+                    if (rect.right - rect.left > size.width && rect.bottom - rect.top > size.height)
+                    {
+                        state.setRect = rect;
+                    }
+                }
+                if (message.message === EM_SETRECT)
+                {
+                    host.invalidate(record);
+                }
+                return 0;
+            }
+            case EM_SETMARGINS:
+                setMargins(record, message.wParam, message.lParam & 0xffff,
+                    message.lParam >>> 16 & 0xffff);
+                host.invalidate(record);
+                return 0;
+            case EM_GETMARGINS: {
+                const margins = state.margins ?? { left: 0, right: 0 };
+                return ((margins.right & 0xffff) << 16 | margins.left & 0xffff) >>> 0;
+            }
+            case WM_SIZE:
+                // Laid out again for a size it is restored or maximized to:
+                // a rectangle EM_SETRECT gave goes. The size in lParam is not
+                // read - the client area is asked.
+                if (message.wParam === SIZE_RESTORED || message.wParam === SIZE_MAXIMIZED)
+                {
+                    state.setRect = null;
+                }
+                return common(record, message, thread);
+            case WM_SETFONT:
+                state.cell = null;
+                return after(common(record, message, thread), answer=>{
+                    setMargins(record, EC_LEFTMARGIN | EC_RIGHTMARGIN, EC_USEFONTINFO,
+                        EC_USEFONTINFO);
+                    return answer;
+                });
             case EM_POSFROMCHAR:
             case EM_CHARFROMPOS:
                 return -1;
@@ -2459,6 +2840,112 @@ export function createControlProcedures(host){
     const writeU32 = (address, value)=>host.writeMemory(address >>> 0, new Uint8Array([
         value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff,
     ]));
+
+    /** @param {number} address @returns {Rect} */
+    const readRect = address=>{
+        const bytes = host.readMemory(address >>> 0, 16);
+        const at = (/** @type {number} */ offset)=>(bytes[offset] | bytes[offset + 1] << 8
+            | bytes[offset + 2] << 16 | bytes[offset + 3] << 24);
+        return { left: at(0), top: at(4), right: at(8), bottom: at(12) };
+    };
+    /** @param {number} address @param {Rect} rect */
+    const writeRect = (address, rect)=>{
+        writeU32(address, rect.left);
+        writeU32(address + 4, rect.top);
+        writeU32(address + 8, rect.right);
+        writeU32(address + 12, rect.bottom);
+    };
+
+    /**
+     * How far inside its client area an edit lays its text out: a pixel for
+     * WS_EX_CLIENTEDGE, a thin border and one for WS_BORDER, which Windows
+     * draws inside the client area of an edit.
+     *
+     * @param {any} record
+     */
+    const editInset = record=>((record.exStyle & WS_EX_CLIENTEDGE) !== 0 ? 1
+        : (record.style & WS_BORDER) !== 0 ? THIN_BORDER + 1 : 0);
+
+    /**
+     * The formatting rectangle EM_GETRECT reports and the text is laid out
+     * in: the client area inside the edit's border and margins, or the
+     * rectangle EM_SETRECT gave inside the margins. The border's inset is
+     * kept vertically only where a line still fits between, as Windows
+     * does; a single-line edit is one line high, cut by the client area,
+     * and a multi-line one fills it (Windows 10's model, which Wine's test
+     * measures against).
+     *
+     * @param {any} record @returns {Rect}
+     */
+    const formatRect = record=>{
+        const state = editState(record);
+        const margins = state.margins ?? { left: 0, right: 0 };
+        if (state.setRect)
+        {
+            return { ...state.setRect, left: state.setRect.left + margins.left,
+                right: state.setRect.right - margins.right };
+        }
+        const size = host.clientSize(record);
+        const inset = editInset(record);
+        const line = editCell(record).height;
+        const down = size.height >= line + 2 * inset ? inset : 0;
+        const top = down;
+        const bottom = multiline(record) ? size.height - down
+            : Math.min(top + line, size.height);
+        return { left: inset + margins.left, top,
+            right: size.width - inset - margins.right, bottom };
+    };
+
+    /**
+     * The margins EC_USEFONTINFO asks for: half the font's average
+     * character width a side, which the edit takes only when its client
+     * area is at least that and two average characters wide - a narrower
+     * edit keeps the margins it has, and an empty one is judged as
+     * EMPTY_EDIT_WIDTH wide.
+     *
+     * @param {any} record @returns {{ left: number, right: number } | null}
+     */
+    const fontMargins = record=>{
+        const draw = host.draw;
+        if (!draw?.averageWidth)
+        {
+            return null;
+        }
+        const { hdc } = host.contextOn(record);
+        const average = hdc !== 0 ? draw.averageWidth(hdc) : 0;
+        host.endPaint(record, hdc);
+        if (average <= 0)
+        {
+            return null;
+        }
+        const half = Math.floor(average / 2);
+        const size = host.clientSize(record);
+        const width = size.width <= 0 || size.height <= 0 ? EMPTY_EDIT_WIDTH : size.width;
+        return width >= 2 * half + 2 * average ? { left: half, right: half } : null;
+    };
+
+    /**
+     * EM_SETMARGINS' rule, which WM_SETFONT follows for both sides: a side
+     * named takes its value, or the font's margin where the value is
+     * EC_USEFONTINFO and the edit is wide enough for it.
+     *
+     * @param {any} record @param {number} sides @param {number} left @param {number} right
+     */
+    const setMargins = (record, sides, left, right)=>{
+        const state = editState(record);
+        const margins = { ...state.margins ?? { left: 0, right: 0 } };
+        const font = left === EC_USEFONTINFO || right === EC_USEFONTINFO
+            ? fontMargins(record) : null;
+        if ((sides & EC_LEFTMARGIN) !== 0 && (left !== EC_USEFONTINFO || font))
+        {
+            margins.left = left === EC_USEFONTINFO ? /** @type {any} */ (font).left : left;
+        }
+        if ((sides & EC_RIGHTMARGIN) !== 0 && (right !== EC_USEFONTINFO || font))
+        {
+            margins.right = right === EC_USEFONTINFO ? /** @type {any} */ (font).right : right;
+        }
+        state.margins = margins;
+    };
 
     /**
      * In the ANSI page, as the text was read.
@@ -2961,6 +3448,12 @@ export function createControlProcedures(host){
             }
             case LB_GETITEMHEIGHT:
                 return state.itemHeight ?? editCell(record).height;
+            case LB_GETLISTBOXINFO: {
+                // How many items a column holds: the rows of the client area,
+                // at least one.
+                const row = Math.max(1, state.itemHeight ?? editCell(record).height);
+                return Math.max(1, Math.floor(host.clientSize(record).height / row));
+            }
             case LB_SETITEMHEIGHT:
                 state.itemHeight = message.lParam & 0xffff;
                 host.invalidate(record);
@@ -4163,9 +4656,9 @@ export function createControlProcedures(host){
             // program names another; the dialog manager keeps it on the
             // dialog's record, where making the dialog sets it.
             case DM_GETDEFID:
-                return record.defaultId !== undefined
-                    ? ((DC_HASDEFID << 16) | record.defaultId & 0xffff) >>> 0
-                    : 0;
+                // A dialog starts with IDOK as its default id, push button or
+                // none: Enter in a dialog with no default button is IDOK.
+                return ((DC_HASDEFID << 16) | (record.defaultId ?? IDOK) & 0xffff) >>> 0;
             case DM_SETDEFID: {
                 // The style moves with it: off the old default, onto the new
                 // one if it is a push button.
@@ -4213,9 +4706,18 @@ export function createControlProcedures(host){
                 // The control named when lParam's low word says so, else the
                 // next or previous tab stop from the focus; the default id
                 // stays, and only the buttons' look follows the focus.
+                // A dialog inside another as a control parent (a property
+                // sheet's page) walks the tab stops of the dialog it is in,
+                // as the dialog manager searches through it.
+                let walker = record;
+                while ((walker.style & WS_CHILD) !== 0
+                    && (walker.exStyle & WS_EX_CONTROLPARENT) !== 0 && host.live(walker.parent))
+                {
+                    walker = host.live(walker.parent);
+                }
                 const target = (message.lParam & 0xffff) !== 0 ? host.live(message.wParam)
-                    : tabWalk.nextTabStop(record, host.focus(), message.wParam === 0);
-                return target ? giveFocus(record, target, thread) : 0;
+                    : tabWalk.nextTabStop(walker, host.focus(), message.wParam === 0);
+                return target ? giveFocus(walker, target, thread) : 0;
             }
             case WM_CLOSE:
                 // Closing a dialog is Cancel: what the person could have

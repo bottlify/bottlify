@@ -26,6 +26,9 @@ import { TOOLBAR_CLASS, TOOLBAR_ATOM, createToolbarProcedure } from './toolbar.j
 import { STATUSBAR_CLASS, STATUSBAR_ATOM, createStatusBarProcedure } from './statusbar.js';
 import { TRACKBAR_CLASS, TRACKBAR_ATOM, createTrackbarProcedure } from './trackbar.js';
 import { UPDOWN_CLASS, UPDOWN_ATOM, createUpDownProcedure } from './updown.js';
+import { TOOLTIPS_CLASS, TOOLTIPS_ATOM, createTooltipProcedure } from './tooltips.js';
+import { HEADER_CLASS, HEADER_ATOM, createHeaderProcedure } from './header.js';
+import { LISTVIEW_CLASS, LISTVIEW_ATOM, createListViewProcedure } from './listview.js';
 
 /** The face colour's brush, as a class's background names it: the index plus one. */
 const FACE_BACKGROUND = 15 + 1;
@@ -38,7 +41,8 @@ const FACE_BACKGROUND = 15 + 1;
  * @param {import('./toolbar.js').ToolbarImages} [images]  The image lists a tab and a
  *     toolbar draw from.
  * @param {{ loadBitmap?: (instance: number, id: number) => number,
- *     subclassing?: import('./updown.js').Subclassing }} [resources]
+ *     subclassing?: import('./updown.js').Subclassing,
+ *     loadString?: (instance: number, id: number) => string | null }} [resources]
  *     A module's bitmap resources, which a toolbar takes its images from, and
  *     comctl32's subclassing, which an up-down control hooks its buddy with.
  * @returns {{ name: string, procedure: any, atom: number,
@@ -82,6 +86,21 @@ export function createCommonControls(host, toolkit, images, resources){
             name: UPDOWN_CLASS,
             atom: UPDOWN_ATOM,
             procedure: createUpDownProcedure(host, toolkit, resources?.subclassing),
+        },
+        {
+            name: TOOLTIPS_CLASS,
+            atom: TOOLTIPS_ATOM,
+            procedure: createTooltipProcedure(host, toolkit, resources),
+        },
+        {
+            name: HEADER_CLASS,
+            atom: HEADER_ATOM,
+            procedure: createHeaderProcedure(host, toolkit),
+        },
+        {
+            name: LISTVIEW_CLASS,
+            atom: LISTVIEW_ATOM,
+            procedure: createListViewProcedure(host, toolkit),
         },
     ];
 }

@@ -68,16 +68,25 @@ event, an error. Neither stops the program.
 - DirectSound 3D keeps every parameter but does not position the sound: a 3D buffer plays as with
   3D processing off.
 - No capture: recording answers `DSERR_NODRIVER`.
-- No playing straight to an endpoint (WASAPI): MMDevAPI's enumerator lists the speakers, and an
-  endpoint activates no `IAudioClient` (E_NOINTERFACE). The enumerator is there from Vista on;
-  on XP it is not registered, so a program that would play to an endpoint plays through
-  DirectSound, as on XP.
+- WASAPI (`IMMDevice::Activate` for `IAudioClient`) plays in shared mode only, as XAudio2's
+  redistributable and FMOD do on Vista and later: exclusive mode answers
+  `AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED`, as on a machine whose user has not allowed it, and a
+  loopback stream is refused. Session notifications are kept and never sent: nothing outside the
+  program changes its session.
+  The enumerator is there from Vista on; on XP it is not registered, so a program that would play
+  to an endpoint plays through DirectSound, as on XP.
 - Media Foundation describes media and decodes none (`roadmap/decisions.md` A238): `mfplat`'s
   attributes, media types, memory buffers, samples and events are there, and `propsys`'s
   PROPVARIANT conversions, but no source, decoder, transform or work queue. A source reader
   (`MFCreateSourceReaderFromURL`, `MFCreateSourceReaderFromByteStream`) is refused and the loss
   is said with the file's name: XNA's songs and videos through FNA (WMA, WMV) and FAudio's xWMA do
   not play. Registering a transform is refused with `E_ACCESSDENIED`.
+- Video for Windows has the codecs Windows installs - Cinepak (`cvid`, decoded only), Microsoft
+  Video 1 (`MSVC`, decoded only) and Microsoft RLE (`mrle`, both ways) - and a codec a game installs
+  (a `Drivers32` registry value, a `[drivers32]` line of `system.ini`, or a function given to
+  `ICInstall`) is loaded and sent its messages through its own `DriverProc`. DrawDib draws through
+  StretchDIBits on a true-colour display: it realizes no palette. There is no MCI video device, so
+  an MCIWnd is never made.
 
 ## Input
 

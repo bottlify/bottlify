@@ -402,7 +402,11 @@ export function createVtables({ memory, register, heap, long = ()=>false, unimpl
         // (`COUNT_CODE`); a program sees only the vtable pointer and assumes
         // nothing after it.
         const word = wordSize();
-        const block = heap.allocate(3 * word);
+        // An object whose documented layout goes on past the vtable pointer
+        // (MFASYNCRESULT's fields after IMFAsyncResult's) asks for the bytes
+        // it needs; they start zeroed and are the object's to write.
+        const words = Math.max(3, Math.ceil((object.bodyBytes?.() ?? 0) / word));
+        const block = heap.allocate(words * word);
         if (block === 0)
         {
             // Nothing left in the arena. Carrying on writes the pointer over
@@ -417,6 +421,10 @@ export function createVtables({ memory, register, heap, long = ()=>false, unimpl
         writeWord(block, vtable);
         writeWord(block + word, (object.guestState?.() ?? 0) >>> 0);
         writeWord(block + 2 * word, (object.countCell?.() ?? 0) >>> 0);
+        for (let at = 3; at < words; at++)
+        {
+            writeWord(block + at * word, 0);
+        }
         owners.set(block, { object, interfaceId, methods: table, vtable });
         byInterface.set(interfaceId, block);
         interfaces++;
@@ -633,10 +641,11 @@ export function createVtables({ memory, register, heap, long = ()=>false, unimpl
             return 0x8007000e; // E_OUTOFMEMORY
         }
         // The reference belongs to the interface the caller asked for, not to
-        // the one it asked through.
-        object.addRef(record.sharedWith ?? wanted);
+        // the one it asked through: for an aggregated object's other faces that
+        // is its controlling unknown's, a call into the program to wait for.
         writeWord(ppv >>> 0, pointer);
-        return 0; // S_OK
+        const added = object.addRef(record.sharedWith ?? wanted);
+        return typeof added?.then === 'function' ? added.then(()=>0) : 0; // S_OK
     }
 
     /**

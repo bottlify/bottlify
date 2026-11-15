@@ -32,6 +32,11 @@ import { formatMessageText } from './format-message.js';
 import { systemMessage } from './system-messages.js';
 import { compareStrings, decodeAnsi, encodeAnsi } from './locale.js';
 import { THREAD_ERROR_MODES, fromRtlMode, toRtlMode } from './error-mode.js';
+import { STATUS } from '../ntdll/status.js';
+
+const STATUS_SUCCESS = STATUS.SUCCESS;
+const STATUS_ACCESS_VIOLATION = STATUS.ACCESS_VIOLATION;
+const STATUS_NOT_IMPLEMENTED = STATUS.NOT_IMPLEMENTED;
 import { HANDLE_STDERR, HANDLE_STDIN } from './console.js';
 import {
     PROCESSOR_CACHES, PROCESSOR_FEATURES, PROCESSOR_LEVEL, PROCESSOR_REVISION, createProcessors,
@@ -1041,6 +1046,38 @@ export function createSystemFunctions(host){
         },
     });
 
+    /**
+     * The calls that turn a 32-bit process's file-system redirection off and
+     * on. On a 32-bit system there is no WOW64 and they fail as
+     * GetSystemWow64Directory is documented to, with ERROR_CALL_NOT_IMPLEMENTED.
+     * Under WOW64 they answer TRUE: this machine redirects nothing, a 32-bit
+     * process's System32 being System32, so turning redirection off is done,
+     * and turning it on is said as a divergence.
+     *
+     * @param {'disable' | 'revert' | 'enable'} kind
+     */
+    const redirection = kind=>({
+        argBytes: 4,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [argument])=>{
+            if (!wow64)
+            {
+                host.setLastError(ERROR_CALL_NOT_IMPLEMENTED);
+                return 0;
+            }
+            if (kind === 'disable' && (argument >>> 0) !== 0)
+            {
+                host.writeMemory(argument >>> 0, Uint8Array.of(1, 0, 0, 0));
+            }
+            if (kind === 'enable' && (argument & 0xff) !== 0)
+            {
+                host.divergence?.('kernel32',
+                    'Wow64EnableWow64FsRedirection: System32 is not redirected to SysWOW64');
+            }
+            return 1;
+        },
+    });
+
     /** Both time queries answer the same thing; see GetLocalTime. */
     const nowAsSystemTime = ()=>systemTimeFrom(
         BigInt(Math.trunc(host.systemTimeMs())) * 10_000n + FILETIME_AT_UNIX_EPOCH);
@@ -1296,6 +1333,40 @@ export function createSystemFunctions(host){
          * zero, and ERROR_CALL_NOT_IMPLEMENTED -- the documented answer a
          * program takes for "this is not a 64-bit system".
          */
+        /** BOOL Wow64DisableWow64FsRedirection(PVOID *OldValue) */
+        Wow64DisableWow64FsRedirection: {
+            ...redirection('disable'),
+            // The native forms, over the same answer: on a 32-bit system
+            // there is no redirection to turn off (STATUS_NOT_IMPLEMENTED).
+            natives: {
+                /** NTSTATUS RtlWow64EnableFsRedirection(BOOLEAN Enable) */
+                RtlWow64EnableFsRedirection: {
+                    argBytes: 4,
+                    handler: ()=>(wow64 ? STATUS_SUCCESS : STATUS_NOT_IMPLEMENTED),
+                },
+                /** NTSTATUS RtlWow64EnableFsRedirectionEx(ULONG Disable, PULONG OldValue) */
+                RtlWow64EnableFsRedirectionEx: {
+                    argBytes: 8,
+                    /** @param {number[]} args */
+                    handler: ([, old])=>{
+                        if (!wow64)
+                        {
+                            return STATUS_NOT_IMPLEMENTED;
+                        }
+                        if ((old >>> 0) === 0)
+                        {
+                            return STATUS_ACCESS_VIOLATION;
+                        }
+                        host.writeMemory(old >>> 0, Uint8Array.of(0, 0, 0, 0));
+                        return STATUS_SUCCESS;
+                    },
+                },
+            },
+        },
+        /** BOOL Wow64RevertWow64FsRedirection(PVOID OldValue) */
+        Wow64RevertWow64FsRedirection: redirection('revert'),
+        /** BOOLEAN Wow64EnableWow64FsRedirection(BOOLEAN Wow64FsEnableRedirection) */
+        Wow64EnableWow64FsRedirection: redirection('enable'),
         GetSystemWow64DirectoryA: wow64Directory(false),
         GetSystemWow64DirectoryW: wow64Directory(true),
 

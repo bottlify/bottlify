@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     createProcessBlocks, TEB, PEB, PARAMS, LDR_DATA, LDR_ENTRY, END_OF_EXCEPTION_LIST, TLS_SLOTS,
-    TEB64, PEB64, PARAMS64, LDR_DATA64, LDR_ENTRY64,
+    TEB64, PEB64, PARAMS64, LDR_DATA64, LDR_ENTRY64, INTERACTIVE_SESSION,
 } from './teb.js';
 import { WINDOWS_VERSIONS } from './versions.js';
 
@@ -263,7 +263,8 @@ test('the process block points at its parameters, and they say they are normalis
     const { peb, params } = build(memory);
 
     assert.equal(memory.view.getUint32(peb + PEB.PROCESS_PARAMETERS, true), params);
-    assert.notEqual(memory.view.getUint32(params + PARAMS.FLAGS, true) & 0x80000000, 0);
+    assert.notEqual(memory.view.getUint32(params + PARAMS.FLAGS, true) & 0x1, 0,
+        'RTL_USER_PROC_PARAMS_NORMALIZED: pointers, not offsets');
     assert.equal(memory.view.getUint32(peb + PEB.IMAGE_BASE_ADDRESS, true), 0x00400000);
 });
 
@@ -282,6 +283,15 @@ test('the process block counts the processors the machine has, one when it is no
     assert.equal(memory.view.getUint32(build(memory).peb + PEB.NUMBER_OF_PROCESSORS, true), 1);
     const { peb } = build(memory, { processors: 4 });
     assert.equal(memory.view.getUint32(peb + PEB.NUMBER_OF_PROCESSORS, true), 4);
+});
+
+test('the process block names the session the process runs in', ()=>{
+    // PEB->SessionId, read with no call by code naming its session's objects
+    // (\Sessions\1\BaseNamedObjects); ProcessIdToSessionId answers the same.
+    const memory = guest();
+    const { peb } = build(memory);
+    assert.equal(memory.view.getUint32(peb + PEB.SESSION_ID, true), INTERACTIVE_SESSION);
+    assert.equal(INTERACTIVE_SESSION, 1);
 });
 
 test('the process block holds the version and its service pack where a program reads them', ()=>{

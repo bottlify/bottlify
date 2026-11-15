@@ -104,3 +104,99 @@ test('IUnknown_QueryService answers QueryInterface\'s refusal, and E_FAIL for no
     assert.equal(view.getUint32(0x800, true), 0);
     assert.equal(await fns.IUnknown_QueryService.handler([OBJECT, 0x700, 0x710, 0]), E_FAIL);
 });
+
+/**
+ * A guest object whose AddRef and Release are counted, for the references
+ * a thread and the process hold, and the slot helpers.
+ */
+function counted(){
+    const memory = new Uint8Array(0x1000);
+    const view = new DataView(memory.buffer);
+    const OBJECT = 0x100, VTABLE = 0x120;
+    view.setUint32(OBJECT, VTABLE, true);
+    [0xa0, 0xa1, 0xa2].forEach((entry, slot)=>view.setUint32(VTABLE + slot * 4, entry, true));
+    /** @type {string[]} */
+    const calls = [];
+    let thread = 'main';
+    /** @type {any[]} */
+    const published = [];
+    const fns = createUnknownFunctions({
+        readMemory: (address, length)=>memory.subarray(address, address + length),
+        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        allocate: ()=>0x800,
+        free: ()=>{},
+        callerThread: ()=>thread,
+        call: entry=>{
+            calls.push(entry === 0xa1 ? 'AddRef' : entry === 0xa2 ? 'Release' : `${entry}`);
+            return 1;
+        },
+        publish: object=>{
+            published.push(object);
+            return 0x700;
+        },
+    });
+    return { memory, view, fns: /** @type {any} */ (fns), calls, published, OBJECT,
+        /** @param {string} name */
+        on: name=>{
+            thread = name;
+        } };
+}
+
+test('a thread\'s reference: kept as given, handed out with one more, then released', async()=>{
+    const m = counted();
+    assert.equal(await m.fns.SHGetThreadRef.handler([0x40]), E_NOINTERFACE, 'none held');
+    assert.equal(m.view.getUint32(0x40, true), 0);
+    assert.equal(m.fns.SHSetThreadRef.handler([m.OBJECT]), 0);
+    assert.deepEqual(m.calls, [], 'set adds no reference');
+    assert.equal(await m.fns.SHGetThreadRef.handler([0x40]), 0);
+    assert.equal(m.view.getUint32(0x40, true), m.OBJECT);
+    assert.deepEqual(m.calls, ['AddRef']);
+    m.on('worker');
+    assert.equal(await m.fns.SHGetThreadRef.handler([0x40]), E_NOINTERFACE, 'each thread its own');
+    m.on('main');
+    assert.equal(await m.fns.SHReleaseThreadRef.handler([]), 0);
+    assert.deepEqual(m.calls, ['AddRef', 'Release']);
+    assert.equal(await m.fns.SHReleaseThreadRef.handler([]), E_FAIL, 'nothing left to release');
+});
+
+test('a thread reference object counts in the caller\'s LONG and answers it', ()=>{
+    const m = counted();
+    assert.equal(m.fns.SHCreateThreadRef.handler([0x40, 0x44]), 0);
+    assert.equal(m.view.getInt32(0x40, true), 1, 'one to start with');
+    assert.equal(m.view.getUint32(0x44, true), 0x700);
+    const [object] = m.published;
+    assert.equal(object.addRef(), 2);
+    assert.equal(m.view.getInt32(0x40, true), 2);
+    assert.equal(object.release(), 1);
+    assert.equal(object.release(), 0);
+    assert.equal(object.destroyed, true, 'the last holder let go');
+    assert.ok(object.interfaceFor('{00000000-0000-0000-C000-000000000046}'));
+    assert.equal(m.fns.SHCreateThreadRef.handler([0, 0x44]), 0x80070057 | 0, 'no LONG');
+});
+
+test('the process\'s reference: E_FAIL until set, then handed out with one more', async()=>{
+    const m = counted();
+    assert.equal(await m.fns.GetProcessReference.handler([0x40]), E_FAIL);
+    m.fns.SetProcessReference.handler([m.OBJECT]);
+    assert.equal(await m.fns.GetProcessReference.handler([0x40]), 0);
+    assert.equal(m.view.getUint32(0x40, true), m.OBJECT);
+    assert.deepEqual(m.calls, ['AddRef']);
+});
+
+test('IUnknown_AtomicRelease clears the slot before the release; IUnknown_Set swaps', async()=>{
+    const m = counted();
+    m.view.setUint32(0x40, m.OBJECT, true);
+    await m.fns.IUnknown_AtomicRelease.handler([0x40]);
+    assert.equal(m.view.getUint32(0x40, true), 0);
+    assert.deepEqual(m.calls, ['Release']);
+    await m.fns.IUnknown_AtomicRelease.handler([0x40]);
+    assert.deepEqual(m.calls, ['Release'], 'an empty slot is left alone');
+    await m.fns.IUnknown_Set.handler([0x40, m.OBJECT]);
+    assert.equal(m.view.getUint32(0x40, true), m.OBJECT);
+    assert.deepEqual(m.calls, ['Release', 'AddRef']);
+    await m.fns.IUnknown_Set.handler([0x40, 0]);
+    assert.equal(m.view.getUint32(0x40, true), 0);
+    assert.deepEqual(m.calls, ['Release', 'AddRef', 'Release']);
+    assert.deepEqual([UNKNOWN_ORDINALS[169], UNKNOWN_ORDINALS[199]],
+        ['IUnknown_AtomicRelease', 'IUnknown_Set']);
+});

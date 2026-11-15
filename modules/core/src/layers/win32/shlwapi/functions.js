@@ -37,6 +37,9 @@ const FILE_ATTRIBUTE_DIRECTORY = 0x10;
 const ERROR_SUCCESS = 0;
 const ERROR_NOT_ENOUGH_MEMORY = 8;
 const ERROR_CALL_NOT_IMPLEMENTED = 120;
+const MAXIMUM_ALLOWED = 0x02000000;
+/** RegGetValue's restriction to a string, an expandable one expanded. */
+const RRF_RT_REG_SZ = 0x2;
 const ERROR_KEY_HAS_CHILDREN = 1020;
 const KEY_READ = 0x20019;
 
@@ -649,6 +652,77 @@ export function createShlwapiFunctions(host){
         },
     });
 
+    /**
+     * The copies between the two widths and within one (SHAnsiToUnicode,
+     * SHUnicodeToAnsi, SHAnsiToAnsi, SHUnicodeToUnicode): as much of the
+     * source as fits with its terminator, no character cut in two, and the
+     * characters written - the terminator counted - as the answer; nothing
+     * written and 0 for no room at all. A NULL source is the empty string.
+     *
+     * @param {(address: number) => string | null} read
+     * @param {(text: string) => Uint8Array} encode  one character, unterminated
+     * @param {number} unit  the bytes a character of the destination takes
+     */
+    const copyText = (read, encode, unit)=>({
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: ([source, destination, room])=>{
+            const limit = room | 0;
+            if (limit <= 0 || (destination >>> 0) === 0)
+            {
+                return 0;
+            }
+            const text = read(source) ?? '';
+            /** @type {number[]} */
+            const bytes = [];
+            let written = 0;
+            for (const char of text)
+            {
+                const piece = encode(char);
+                if (bytes.length + piece.length + unit > limit * unit)
+                {
+                    break;
+                }
+                bytes.push(...piece);
+                written += piece.length / unit;
+            }
+            bytes.push(...new Array(unit).fill(0));
+            host.writeMemory(destination >>> 0, Uint8Array.from(bytes));
+            return written + 1;
+        },
+    });
+    /**
+     * SHRegGetPath for either width.
+     *
+     * @param {'A' | 'W'} width
+     */
+    const registryPath = width=>({
+        argBytes: 20,
+        /** @param {number[]} args */
+        handler: async([key, subKey, value, path])=>{
+            if (!host.advapi32 || !host.allocate)
+            {
+                return ERROR_CALL_NOT_IMPLEMENTED;
+            }
+            const size = host.allocate(4);
+            try
+            {
+                const bytes = MAX_PATH * (width === 'W' ? 2 : 1);
+                host.writeMemory(size, Uint8Array.of(bytes & 0xff, bytes >>> 8, 0, 0));
+                return /** @type {number} */ (await host.advapi32()[`RegGetValue${width}`]
+                    .handler([key, subKey, value, RRF_RT_REG_SZ, 0, path, size])) >>> 0;
+            }
+            finally
+            {
+                host.free?.(size);
+            }
+        },
+    });
+    /** @param {string} char */
+    const ansiChar = char=>encodeAnsi(char);
+    /** @param {string} char */
+    const wideChar = char=>wide(char).subarray(0, char.length * 2);
+
     const widths = createWidths(host);
     const unattached = createRefusals(host)('SHAutoComplete', { argBytes: 8, answer: S_OK,
         why: 'no autocompletion: the edit control is left as it is' });
@@ -700,6 +774,80 @@ export function createShlwapiFunctions(host){
          */
         StrToInt64ExA: strToIntEx(pathAt, 8),
         StrToInt64ExW: strToIntEx(widePathAt, 8),
+
+        /** int SHAnsiToUnicode(LPCSTR pszSrc, LPWSTR pwszDst, int cwchBuf) */
+        SHAnsiToUnicode: copyText(pathAt, wideChar, 2),
+        /** int SHUnicodeToAnsi(LPCWSTR pwszSrc, LPSTR pszDst, int cchBuf) */
+        SHUnicodeToAnsi: copyText(widePathAt, ansiChar, 1),
+        /** int SHAnsiToAnsi(LPCSTR pszSrc, LPSTR pszDst, int cchBuf) */
+        SHAnsiToAnsi: copyText(pathAt, ansiChar, 1),
+        /** int SHUnicodeToUnicode(LPCWSTR pwzSrc, LPWSTR pwzDst, int cwchBuf) */
+        SHUnicodeToUnicode: copyText(widePathAt, wideChar, 2),
+
+        /**
+         * LSTATUS SHRegGetValueA(HKEY hkey, LPCSTR pszSubKey, LPCSTR pszValue,
+         *   SRRFLAGS srrfFlags, DWORD *pdwType, void *pvData, DWORD *pcbData)
+         *
+         * RegGetValue's work: the SRRF flags are its RRF ones, bit for bit.
+         */
+        SHRegGetValueA: through('RegGetValueA', 28),
+        /** LSTATUS SHRegGetValueW(HKEY, LPCWSTR, LPCWSTR, SRRFLAGS, DWORD *, void *, DWORD *) */
+        SHRegGetValueW: through('RegGetValueW', 28),
+
+        /**
+         * LSTATUS SHRegGetPathA(HKEY hKey, LPCSTR pcszSubKey, LPCSTR pcszValue,
+         *   LPSTR pszPath, DWORD dwFlags)
+         *
+         * A path the registry keeps, into a buffer of MAX_PATH characters: a
+         * string value, its environment variables expanded where it is
+         * REG_EXPAND_SZ - RegGetValue's answer for RRF_RT_REG_SZ. The flags
+         * are reserved.
+         */
+        SHRegGetPathA: registryPath('A'),
+        /** LSTATUS SHRegGetPathW(HKEY, LPCWSTR, LPCWSTR, LPWSTR, DWORD) */
+        SHRegGetPathW: registryPath('W'),
+
+        /**
+         * LSTATUS SHCopyKeyA(HKEY hkeySrc, LPCSTR pszSrcSubKey, HKEY hkeyDest, DWORD fReserved)
+         *
+         * The subkey's values and every key beneath it into the destination:
+         * RegCopyTree's work, the reserved word not passed on.
+         */
+        SHCopyKeyA: { argBytes: 16, handler: (/** @type {number[]} */ args)=>
+            through('RegCopyTreeA', 12).handler(args.slice(0, 3)) },
+        /** LSTATUS SHCopyKeyW(HKEY, LPCWSTR, HKEY, DWORD) */
+        SHCopyKeyW: { argBytes: 16, handler: (/** @type {number[]} */ args)=>
+            through('RegCopyTreeW', 12).handler(args.slice(0, 3)) },
+
+        /**
+         * HKEY SHRegDuplicateHKey(HKEY hKey)
+         *
+         * A second handle on the same key, which the caller closes on its
+         * own: RegOpenKeyEx of no subkey; NULL when it cannot be had.
+         */
+        SHRegDuplicateHKey: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: async([key])=>{
+                if (!host.advapi32 || !host.allocate || !host.readMemory)
+                {
+                    return 0;
+                }
+                const out = host.allocate(4);
+                try
+                {
+                    const status = /** @type {number} */ (await host.advapi32().RegOpenKeyExW
+                        .handler([key, 0, 0, MAXIMUM_ALLOWED, out])) >>> 0;
+                    return status === ERROR_SUCCESS
+                        ? new DataView(host.readMemory(out, 4).slice().buffer).getUint32(0, true)
+                        : 0;
+                }
+                finally
+                {
+                    host.free?.(out);
+                }
+            },
+        },
 
         /** HRESULT DllGetVersion(DLLVERSIONINFO *pdvi) */
         DllGetVersion: {

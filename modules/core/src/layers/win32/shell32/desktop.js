@@ -18,7 +18,6 @@
 import { createRefusals } from '../common/refusal.js';
 
 const E_FAIL = 0x80004005 | 0;
-const E_INVALIDARG = 0x80070057 | 0;
 
 /**
  * SHGetSettings' mask bits, each naming one bit of the SHELLFLAGSTATE it
@@ -89,8 +88,6 @@ export function createDesktopFunctions(host){
     /** Explorer's about box, answered as a person who closed it at once. */
     const about = refuse('ShellAbout', { argBytes: 16, answer: 1,
         why: 'the about box is not shown: answered as dismissed' });
-    const noExplorer = refuse('SHGetInstanceExplorer', { argBytes: 4, answer: E_FAIL,
-        why: 'no Explorer process to hold a reference on' });
 
     /** @type {AppBar[]} The bars, in the order they were registered. */
     const bars = [];
@@ -258,26 +255,6 @@ export function createDesktopFunctions(host){
          */
         ShellAboutA: about,
         ShellAboutW: about,
-
-        /**
-         * HRESULT SHGetInstanceExplorer(IUnknown **ppunk)
-         *
-         * The reference a thread holds on Explorer's process to keep it alive.
-         * Called from a process that is not Explorer it answers E_FAIL with a
-         * null interface, which is every process here.
-         */
-        SHGetInstanceExplorer: {
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([out])=>{
-                if ((out >>> 0) === 0)
-                {
-                    return E_INVALIDARG;
-                }
-                host.writeMemory(out >>> 0, dword(0));
-                return noExplorer.handler();
-            },
-        },
 
         /**
          * HRESULT SHLoadInProc(REFCLSID rclsid)

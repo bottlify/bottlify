@@ -96,5 +96,16 @@ export function createUnionSource(sources){
             }
             return owner.store.read(owner.path, offset, length);
         },
+
+        /**
+         * What the winning source keeps of a file as its own (`session-source.js`):
+         * null for one no source keeps, a bundle's.
+         *
+         * @param {string} path
+         */
+        kept(path){
+            const owner = owners.get(foldName(path));
+            return owner && !owner.directory ? owner.store.kept?.(owner.path) ?? null : null;
+        },
     };
 }

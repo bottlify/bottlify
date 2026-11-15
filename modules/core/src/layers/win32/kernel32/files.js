@@ -29,6 +29,7 @@
  */
 
 import { HANDLE_STDIN, HANDLE_STDOUT, HANDLE_STDERR } from './console.js';
+import { FILE_OBJECT_KINDS } from './handle-tags.js';
 import { fileAttributes, fileIndex, msToFileTime } from './filetime.js';
 import { decodeAnsi, decodeOem, encodeAnsi, encodeOem } from './locale.js';
 import { createCommFunctions } from './comm.js';
@@ -200,6 +201,11 @@ const STATUS_MEDIA_WRITE_PROTECTED = 0xc00000a2;
 const STATUS_FILE_IS_A_DIRECTORY = 0xc00000ba;
 const STATUS_NOT_A_DIRECTORY = 0xc0000103;
 const STATUS_CANNOT_DELETE = 0xc0000121;
+const STATUS_SHARING_VIOLATION = 0xc0000043;
+const STATUS_DIRECTORY_NOT_EMPTY = 0xc0000101;
+const STATUS_NO_SUCH_FILE = 0xc000000f;
+const STATUS_NO_MORE_FILES = 0x80000006;
+const STATUS_EAS_NOT_SUPPORTED = 0xc000004f;
 
 /** dwCreationDisposition. */
 const CREATE_NEW = 1;
@@ -352,6 +358,28 @@ const FILE_INFO = Object.freeze({ BASIC: 0, RENAME: 3, DISPOSITION: 4, ALLOCATIO
 const FILE_INFO_SIZES = new Map([[FILE_INFO.BASIC, 40], [FILE_INFO.RENAME, 16],
     [FILE_INFO.DISPOSITION, 1], [FILE_INFO.ALLOCATION, 8], [FILE_INFO.END_OF_FILE, 8],
     [FILE_INFO.IO_PRIORITY_HINT, 4], [FILE_INFO.DISPOSITION_EX, 4], [FILE_INFO.RENAME_EX, 16]]);
+/**
+ * NtSetInformationFile's FILE_INFORMATION_CLASS values that are the same
+ * records as SetFileInformationByHandle's, and the FILE_INFO class each is.
+ *
+ * @type {Map<number, number>}
+ */
+const NATIVE_SET_CLASSES = new Map([[4, FILE_INFO.BASIC], [10, FILE_INFO.RENAME],
+    [13, FILE_INFO.DISPOSITION], [19, FILE_INFO.ALLOCATION], [20, FILE_INFO.END_OF_FILE],
+    [43, FILE_INFO.IO_PRIORITY_HINT], [64, FILE_INFO.DISPOSITION_EX], [65, FILE_INFO.RENAME_EX]]);
+/** The native classes that are NtSetInformationFile's own. */
+const FILE_POSITION_SET = 14;
+const FILE_MODE_SET = 16;
+const FILE_COMPLETION_INFORMATION = 30;
+const FILE_VALID_DATA_LENGTH_INFORMATION = 39;
+/** FILE_IO_COMPLETION_NOTIFICATION_INFORMATION: the completion modes, a ULONG. */
+const FILE_IO_COMPLETION_NOTIFICATION_INFORMATION = 41;
+/** NtReadFile's and NtWriteFile's two negative offsets: the end, the file pointer. */
+const FILE_WRITE_TO_END_OF_FILE = 0xffffffff;
+const FILE_USE_FILE_POINTER_POSITION = 0xfffffffe;
+/** FILE_MODE_INFORMATION's bits a handle's mode may be set to. */
+const FILE_WRITE_THROUGH = 0x2;
+const FILE_SYNCHRONOUS_IO_ALERT = 0x10;
 const FILE_DISPOSITION_FLAG_DELETE = 0x1;
 const FILE_RENAME_FLAG_REPLACE_IF_EXISTS = 0x1;
 /** Milliseconds between 1601 and 1970, what a FILETIME counts from. */
@@ -443,16 +471,20 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write', 'p
  *     laid out wider (`overlappedLayout`); absent, 4.
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {{ read: (handle: number, buffer: number, length: number, out: number,
- *     native?: boolean, overlapped?: number) => any,
+ *     native?: boolean, overlapped?: number,
+ *     io?: { event: number, apc: number, context: number }) => any,
  *     write: (handle: number, buffer: number, length: number, out: number,
  *     native?: boolean, overlapped?: number) => any }[]} [streams]
  *           Handles the reads and writes hand on before taking them for files:
  *           each answers the call, or null for a handle that is not its own.
  *           `native` asks for NtReadFile's answers: `out` is the IO_STATUS_BLOCK.
  * @property {{ open: (name: string, access: number) => { handle: number } | { error: number },
- *     information: (handle: number, kind: number) => Uint8Array | 'unknown class' | null }}
+ *     information: (handle: number, kind: number) => Uint8Array | 'unknown class' | null,
+ *     setInformation?: (handle: number, kind: number, from: number, length: number)
+ *     => number | null }}
  *     [mailslots]  Opens a client of the mailslot CreateFile is given the name of, and
- *     answers NtQueryInformationFile of a mailslot handle (null: not one).
+ *     answers NtQueryInformationFile and NtSetInformationFile of a mailslot handle
+ *     (null: not one).
  * @property {ReturnType<typeof import('./pipes.js').createNamedPipes>} [pipes]
  *           Named pipes: CreateFile opens a client end by a pipe's name, a closed
  *           end is told, CancelIo and CancelIoEx cancel what waits on one.
@@ -494,7 +526,9 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write', 'p
  * @property {(thread: any, code: number) => void} [setLastErrorFor]
  * @property {{ offsetOf: (overlapped: number) => number,
  *              completed: (file: number, transferred: number, overlapped: number) => boolean,
- *              closed: (handle: number, object: any) => void }} [ports]
+ *              closed: (handle: number, object: any) => void,
+ *              bind?: (file: number, port: number, key: number)
+ *                  => boolean | 'synchronous' }} [ports]
  *           Completion ports. Absent, overlapped I/O still reads and writes;
  *           what it does not do is tell anyone it finished.
  * @property {(thread: any, routine: number, args: number[]) => void} [queueApc]
@@ -1384,48 +1418,50 @@ export function createFileFunctions(host){
     });
 
     /**
-     * The move both spellings and the extended form share.
+     * The move both spellings, the extended form and a rename through a handle
+     * share: the Win32 error it ends in, 0 when it moved.
      *
      * @param {string} source @param {string} destination @param {boolean} replace
+     * @returns {number | Promise<number>}
      */
-    const renamePath = (source, destination, replace)=>{
+    const moveError = (source, destination, replace)=>{
         const moving = files.stat(source);
         if (!moving?.exists)
         {
-            return fail(missing(source));
+            return missing(source);
         }
         // A name cannot hold a wildcard.
         if (/[*?]/.test(destination.slice(destination.lastIndexOf('\\') + 1)))
         {
-            return fail(ERROR_INVALID_NAME);
+            return ERROR_INVALID_NAME;
         }
         // Its own name, in any case: nothing is replaced, and only the
         // spelling may change.
         if (source.toLowerCase() === destination.toLowerCase())
         {
-            return files.rename(source, destination) ? 1 : fail(denied(source));
+            return files.rename(source, destination) ? 0 : denied(source);
         }
         const present = files.stat(destination);
         if (present?.exists && !replace)
         {
-            return fail(ERROR_ALREADY_EXISTS);
+            return ERROR_ALREADY_EXISTS;
         }
         // A file is renamed as it is deleted: an open that does not share
         // deletion keeps its name.
         if (!moving.isDirectory && files.removalRefused?.(source) === 'SHARING_VIOLATION')
         {
-            return fail(ERROR_SHARING_VIOLATION);
+            return ERROR_SHARING_VIOLATION;
         }
         if (present?.exists)
         {
             // What is replaced must be a file nobody holds open.
             if (present.isDirectory || files.isOpen?.(destination))
             {
-                return fail(ERROR_ACCESS_DENIED);
+                return ERROR_ACCESS_DENIED;
             }
             if (readOnlyFile(present) || !files.remove(destination))
             {
-                return fail(denied(destination));
+                return denied(destination);
             }
         }
         // A move off a disc has to delete what it moved, so the disc refuses
@@ -1437,12 +1473,24 @@ export function createFileFunctions(host){
         const answer = done=>{
             if (!done)
             {
-                return fail(denied(onReadOnlyMedia(source) ? source : destination));
+                return denied(onReadOnlyMedia(source) ? source : destination);
             }
             follow(source, destination);
-            return 1;
+            return 0;
         };
         return typeof moved === 'boolean' ? answer(moved) : moved.then(answer);
+    };
+
+    /**
+     * The move as a Win32 call answers it: TRUE, or FALSE and the last error.
+     *
+     * @param {string} source @param {string} destination @param {boolean} replace
+     */
+    const renamePath = (source, destination, replace)=>{
+        const error = moveError(source, destination, replace);
+        /** @param {number} code */
+        const answer = code=>(code === 0 ? 1 : fail(code));
+        return typeof error === 'number' ? answer(error) : error.then(answer);
     };
 
     /**
@@ -2436,7 +2484,7 @@ export function createFileFunctions(host){
      * native open's own.
      *
      * @param {number} attributes  OBJECT_ATTRIBUTES
-     * @returns {{ path: string } | { status: number }}
+     * @returns {{ path: string, status?: undefined } | { status: number, path?: undefined }}
      */
     const nativeName = attributes=>{
         const root = readDword(attributes + 4);
@@ -2455,6 +2503,18 @@ export function createFileFunctions(host){
         {
             name += String.fromCharCode(raw[at] | (raw[at + 1] << 8));
         }
+        return resolveNative(root, name);
+    };
+
+    /**
+     * A native name, relative to a directory handle or in the object
+     * namespace's DOS devices, as the path on a volume it names.
+     *
+     * @param {number} root  a directory handle, or 0
+     * @param {string} name
+     * @returns {{ path: string, status?: undefined } | { status: number, path?: undefined }}
+     */
+    const resolveNative = (root, name)=>{
         if (root !== 0)
         {
             const directory = object(root, 'directory');
@@ -2492,6 +2552,11 @@ export function createFileFunctions(host){
         [ERROR_ALREADY_EXISTS]: STATUS_OBJECT_NAME_COLLISION,
         [ERROR_INVALID_PARAMETER]: STATUS_INVALID_PARAMETER,
         [ERROR_WRITE_PROTECT]: STATUS_MEDIA_WRITE_PROTECTED,
+        [ERROR_INVALID_HANDLE]: STATUS_INVALID_HANDLE,
+        [ERROR_SHARING_VIOLATION]: STATUS_SHARING_VIOLATION,
+        [ERROR_DIR_NOT_EMPTY]: STATUS_DIRECTORY_NOT_EMPTY,
+        [ERROR_INVALID_NAME]: STATUS_OBJECT_NAME_INVALID,
+        [ERROR_BAD_LENGTH]: STATUS_INFO_LENGTH_MISMATCH,
     };
 
     /**
@@ -2738,17 +2803,19 @@ export function createFileFunctions(host){
             }
             // A no-op on anything that was never named.
             host.namedObjects?.forget(closed);
+            // A pipe end goes with its last handle, in whichever process. Its
+            // operations still pending end cancelled first, and each still
+            // reaches the port the handle was bound to, as on Windows.
+            if (type === 'pipe')
+            {
+                host.pipes?.closed(handle, closed);
+            }
             // Handle numbers are recycled, so anything keyed by this one
             // has to go now: a completion-port association that outlives
             // its handle sends the next file's packets to a port nobody
             // is reading, and a thread parked on a port that has just
             // closed waits on something nothing can reach.
             host.ports?.closed(handle, closed);
-            // A pipe end goes with its last handle, in whichever process.
-            if (type === 'pipe')
-            {
-                host.pipes?.closed(handle, closed);
-            }
             return true;
         }
         catch (e){
@@ -3114,9 +3181,16 @@ export function createFileFunctions(host){
             };
             for (const stream of streams)
             {
+                // A handle opened for overlapped I/O does not wait: the stream
+                // finishes the call through these, as Windows does.
+                const io = { event: event >>> 0, apc: apc >>> 0, context: context >>> 0 };
                 const answer = writing
                     ? stream.write(handle, buffer, length, block, true)
-                    : stream.read(handle, buffer, length, block, true);
+                    : stream.read(handle, buffer, length, block, true, 0, io);
+                if (answer === STATUS_PENDING && (event >>> 0) !== 0)
+                {
+                    host.resetEvent?.(event >>> 0);
+                }
                 if (answer !== null)
                 {
                     return typeof answer === 'number' ? status(answer) : answer;
@@ -3131,18 +3205,32 @@ export function createFileFunctions(host){
             {
                 return STATUS_ACCESS_DENIED;
             }
+            // The kernel probes the buffer before the transfer: none for a
+            // count is refused whether or not anything would have moved (a
+            // read at the end of the file included), the status block untouched.
+            if ((buffer >>> 0) === 0 && (length >>> 0) !== 0)
+            {
+                return STATUS_ACCESS_VIOLATION;
+            }
             let at = file.position;
             if ((offset >>> 0) !== 0)
             {
                 const lower = readDword(offset >>> 0);
                 const upper = readDword((offset >>> 0) + 4);
-                if (upper !== 0xffffffff)
+                if ((upper & 0x80000000) === 0)
                 {
                     at = upper * 0x100000000 + lower;
                 }
-                else if (writing && lower === 0xffffffff)
+                else if (writing && upper === 0xffffffff && lower === FILE_WRITE_TO_END_OF_FILE)
                 {
                     at = sizeOf(file);
+                }
+                else if (upper !== 0xffffffff || lower !== FILE_USE_FILE_POINTER_POSITION)
+                {
+                    // A negative offset is none of the two the call names
+                    // (the end, the file pointer): refused before anything
+                    // is done, the status block untouched.
+                    return STATUS_INVALID_PARAMETER;
                 }
             }
             /** @param {number} done @param {number} code */
@@ -3300,6 +3388,16 @@ export function createFileFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([handle, block, out, length, kind])=>{
+                if ((kind >>> 0) === FILE_IO_COMPLETION_NOTIFICATION_INFORMATION && host.pipes
+                    && (host.handles.typeOf?.(handle >>> 0) ?? null) !== null)
+                {
+                    if ((length >>> 0) < 4)
+                    {
+                        return report(block >>> 0, STATUS_INFO_LENGTH_MISMATCH, 0);
+                    }
+                    writeDword(out >>> 0, host.pipes.completionModes.of(handle));
+                    return report(block >>> 0, STATUS_SUCCESS, 4);
+                }
                 const slot = host.mailslots?.information(handle, kind >>> 0) ?? null;
                 const file = slot === null ? object(handle, 'file') : null;
                 if (slot === null && !file)
@@ -3330,6 +3428,285 @@ export function createFileFunctions(host){
                 }
                 host.writeMemory(out >>> 0, data);
                 return report(block >>> 0, STATUS_SUCCESS, data.length);
+            },
+        },
+
+        /**
+         * NTSTATUS NtQueryAttributesFile(POBJECT_ATTRIBUTES, PFILE_BASIC_INFORMATION)
+         *
+         * FileBasicInformation of a file named rather than opened.
+         */
+        NtQueryAttributesFile: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([attributes, out])=>attributesOfName(attributes >>> 0, out >>> 0,
+                FILE_BASIC_INFORMATION),
+        },
+
+        /**
+         * NTSTATUS NtQueryFullAttributesFile(POBJECT_ATTRIBUTES,
+         *                                    PFILE_NETWORK_OPEN_INFORMATION)
+         */
+        NtQueryFullAttributesFile: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([attributes, out])=>attributesOfName(attributes >>> 0, out >>> 0,
+                FILE_NETWORK_OPEN_INFORMATION),
+        },
+
+        /**
+         * NTSTATUS NtDeleteFile(POBJECT_ATTRIBUTES)
+         *
+         * A file, or a folder with nothing in it, deleted by name: a read-only
+         * file cannot be (STATUS_CANNOT_DELETE), an open that does not share
+         * deletion keeps it, and a folder with anything in it stays.
+         */
+        NtDeleteFile: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([attributes])=>{
+                if ((attributes >>> 0) === 0)
+                {
+                    return STATUS_ACCESS_VIOLATION;
+                }
+                const named = nativeName(attributes >>> 0);
+                if (named.status !== undefined)
+                {
+                    return named.status;
+                }
+                const { path } = named;
+                const entry = files.stat(path);
+                if (!entry?.exists)
+                {
+                    return NATIVE_FAILURES[missing(path)];
+                }
+                if (onReadOnlyMedia(path))
+                {
+                    return STATUS_MEDIA_WRITE_PROTECTED;
+                }
+                if (entry.isDirectory)
+                {
+                    return files.remove(path) ? STATUS_SUCCESS : STATUS_DIRECTORY_NOT_EMPTY;
+                }
+                if (readOnlyFile(entry) || files.mappedAs?.(path) === 'image')
+                {
+                    return STATUS_CANNOT_DELETE;
+                }
+                if (files.removalRefused?.(path) === 'SHARING_VIOLATION')
+                {
+                    return STATUS_SHARING_VIOLATION;
+                }
+                return files.remove(path) ? STATUS_SUCCESS : STATUS_ACCESS_DENIED;
+            },
+        },
+
+        /**
+         * NTSTATUS NtFlushBuffersFile(HANDLE, PIO_STATUS_BLOCK)
+         *
+         * Every write here is in the volume when the call that made it
+         * returns, so there is nothing to flush; a handle that cannot write
+         * is refused as Windows refuses it.
+         */
+        NtFlushBuffersFile: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, block])=>{
+                const file = object(handle, 'file');
+                if (!file)
+                {
+                    return STATUS_INVALID_HANDLE;
+                }
+                return report(block >>> 0, file.write ? STATUS_SUCCESS : STATUS_ACCESS_DENIED, 0);
+            },
+        },
+
+        /**
+         * NTSTATUS NtSetEaFile(HANDLE, PIO_STATUS_BLOCK, PVOID Buffer, ULONG Length)
+         *
+         * The volume keeps no extended attributes, and says so as FAT does.
+         */
+        NtSetEaFile: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([handle, block])=>{
+                if (!fileOrDirectory(handle))
+                {
+                    return STATUS_INVALID_HANDLE;
+                }
+                host.divergence?.('NtSetEaFile', 'the volume keeps no extended attributes');
+                return report(block >>> 0, STATUS_EAS_NOT_SUPPORTED, 0);
+            },
+        },
+
+        /**
+         * NTSTATUS NtQueryEaFile(HANDLE, PIO_STATUS_BLOCK, PVOID Buffer, ULONG Length,
+         *   BOOLEAN ReturnSingleEntry, PVOID EaList, ULONG EaListLength,
+         *   PULONG EaIndex, BOOLEAN RestartScan)
+         *
+         * No file has any (FileEaInformation says a size of 0 for every one).
+         */
+        NtQueryEaFile: {
+            argBytes: 36,
+            /** @param {number[]} args */
+            handler: ([handle, block])=>{
+                if (!fileOrDirectory(handle))
+                {
+                    return STATUS_INVALID_HANDLE;
+                }
+                return report(block >>> 0, STATUS_EAS_NOT_SUPPORTED, 0);
+            },
+        },
+
+        /**
+         * NTSTATUS NtQueryDirectoryFile(HANDLE, HANDLE Event, PIO_APC_ROUTINE,
+         *   PVOID ApcContext, PIO_STATUS_BLOCK, PVOID FileInformation, ULONG Length,
+         *   FILE_INFORMATION_CLASS, BOOLEAN ReturnSingleEntry,
+         *   PUNICODE_STRING FileName, BOOLEAN RestartScan)
+         *
+         * A folder's entries a call at a time, from where the last call left
+         * off. The mask is the first call's (none is `*`); a restart begins
+         * the listing again, under a new mask if it names one. The call
+         * finishes before it answers: the event, if any, is signalled.
+         */
+        NtQueryDirectoryFile: {
+            argBytes: 44,
+            /** @param {number[]} args */
+            handler: ([handle, event, , , block, out, length, kind, single, mask, restart])=>{
+                const listed = directoryRecords(handle >>> 0, block >>> 0, out >>> 0, length >>> 0,
+                    kind >>> 0, (single & 0xff) !== 0, mask >>> 0, (restart & 0xff) !== 0);
+                if ((event >>> 0) !== 0 && listed.reported)
+                {
+                    host.setEvent?.(event >>> 0);
+                }
+                return listed.status;
+            },
+        },
+
+        /**
+         * NTSTATUS NtSetInformationFile(HANDLE, PIO_STATUS_BLOCK, PVOID,
+         *                               ULONG Length, FILE_INFORMATION_CLASS)
+         *
+         * The classes SetFileInformationByHandle has, through the same code;
+         * the position, the mode, the completion port a handle reports to and a
+         * mailslot's read timeout, which are this call's own. A rename's name
+         * is a native one, relative to the record's root directory or in
+         * `\??\`. A class nothing keeps is refused, and the refusal said.
+         */
+        NtSetInformationFile: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([handle, block, from, length, kind])=>{
+                const slot = host.mailslots?.setInformation?.(handle >>> 0, kind >>> 0,
+                    from >>> 0, length >>> 0) ?? null;
+                if (slot !== null)
+                {
+                    return report(block >>> 0, slot, 0);
+                }
+                // The completion modes are any handle's, kept with the pipes as
+                // SetFileCompletionNotificationModes keeps them.
+                if ((kind >>> 0) === FILE_IO_COMPLETION_NOTIFICATION_INFORMATION && host.pipes)
+                {
+                    if ((length >>> 0) < 4)
+                    {
+                        return report(block >>> 0, STATUS_INFO_LENGTH_MISMATCH, 0);
+                    }
+                    const error = host.pipes.completionModes.set(handle >>> 0,
+                        readDword(from >>> 0));
+                    return report(block >>> 0, error === 0 ? STATUS_SUCCESS
+                        : error === ERROR_INVALID_PARAMETER ? STATUS_INVALID_PARAMETER
+                            : STATUS_INVALID_HANDLE, 0);
+                }
+                // Any file object reports to a port - a pipe's end as well as a
+                // file on the volume.
+                if ((kind >>> 0) === FILE_COMPLETION_INFORMATION)
+                {
+                    if ((length >>> 0) < 8)
+                    {
+                        return report(block >>> 0, STATUS_INFO_LENGTH_MISMATCH, 0);
+                    }
+                    const held = host.handles.typeOf?.(handle >>> 0) ?? '';
+                    const fileObject = held === 'pipe' || FILE_OBJECT_KINDS.has(held);
+                    const bound = fileObject && host.ports?.bind?.(handle >>> 0,
+                        readDword(from >>> 0), readDword((from >>> 0) + 4));
+                    // A handle no port takes is refused before any I/O: the
+                    // status block is left as it was.
+                    return bound === 'synchronous' ? STATUS_INVALID_PARAMETER
+                        : report(block >>> 0, bound ? STATUS_SUCCESS : STATUS_INVALID_HANDLE, 0);
+                }
+                const open = fileOrDirectory(handle);
+                if (!open)
+                {
+                    return report(block >>> 0, STATUS_INVALID_HANDLE, 0);
+                }
+                const type = NATIVE_SET_CLASSES.get(kind >>> 0);
+                const own = (kind >>> 0) === FILE_POSITION_SET || (kind >>> 0) === FILE_MODE_SET
+                    || (kind >>> 0) === FILE_COMPLETION_INFORMATION
+                    || (kind >>> 0) === FILE_VALID_DATA_LENGTH_INFORMATION;
+                if (type === undefined && !own)
+                {
+                    host.divergence?.('NtSetInformationFile',
+                        `information class ${kind >>> 0} is not kept`);
+                    return report(block >>> 0, STATUS_INVALID_INFO_CLASS, 0);
+                }
+                const size = type !== undefined ? /** @type {number} */ (FILE_INFO_SIZES.get(type))
+                    : (kind >>> 0) === FILE_MODE_SET ? 4 : 8;
+                if ((length >>> 0) < size)
+                {
+                    return report(block >>> 0, STATUS_INFO_LENGTH_MISMATCH, 0);
+                }
+                if ((from >>> 0) === 0)
+                {
+                    return STATUS_ACCESS_VIOLATION;
+                }
+                const bytes = host.readMemory(from >>> 0, length >>> 0).slice();
+                const view = new DataView(bytes.buffer);
+                const { file, kind: what } = open;
+                switch (kind >>> 0)
+                {
+                    case FILE_POSITION_SET: {
+                        const at = view.getBigInt64(0, true);
+                        if (at < 0n)
+                        {
+                            return report(block >>> 0, STATUS_INVALID_PARAMETER, 0);
+                        }
+                        file.position = Number(at);
+                        return report(block >>> 0, STATUS_SUCCESS, 0);
+                    }
+                    case FILE_MODE_SET: {
+                        // Only the write-through and sequential hints change;
+                        // a synchronous handle may switch between alerting and
+                        // not, and an asynchronous one cannot become either.
+                        const mode = view.getUint32(0, true);
+                        const synchronous = mode & (FILE_SYNCHRONOUS_IO_ALERT
+                            | FILE_SYNCHRONOUS_IO_NONALERT);
+                        if ((mode & ~(FILE_WRITE_THROUGH | FILE_SEQUENTIAL_ONLY
+                            | FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT)) !== 0
+                            || synchronous === (FILE_SYNCHRONOUS_IO_ALERT
+                                | FILE_SYNCHRONOUS_IO_NONALERT)
+                            || (synchronous !== 0) !== !file.overlapped)
+                        {
+                            return report(block >>> 0, STATUS_INVALID_PARAMETER, 0);
+                        }
+                        file.sequential = (mode & FILE_SEQUENTIAL_ONLY) !== 0;
+                        return report(block >>> 0, STATUS_SUCCESS, 0);
+                    }
+                    case FILE_VALID_DATA_LENGTH_INFORMATION:
+                        // Every byte of a file here is data written: there is
+                        // no tail of unwritten allocation to declare valid.
+                        return report(block >>> 0, what === 'file' && file.write
+                            ? STATUS_SUCCESS : STATUS_ACCESS_DENIED, 0);
+                    default:
+                        break;
+                }
+                const error = informationError(file, what, /** @type {number} */ (type), bytes,
+                    // A bare name with no root renames the file where it is.
+                    asked=>(view.getUint32(4, true) === 0 && !asked.includes(SEPARATOR)
+                        ? renameTarget(file.path, asked)
+                        : resolveNative(view.getUint32(4, true), asked).path ?? null));
+                /** @param {number} code */
+                const answer = code=>report(block >>> 0, code === 0 ? STATUS_SUCCESS
+                    : NATIVE_FAILURES[code] ?? STATUS_UNSUCCESSFUL, 0);
+                return typeof error === 'number' ? answer(error) : error.then(answer);
             },
         },
 
@@ -3427,16 +3804,314 @@ export function createFileFunctions(host){
         : `${current.slice(0, current.lastIndexOf('\\'))}\\${asked}`);
 
     /**
-     * SetFileInformationByHandle's classes a C++ runtime sets: the basic
-     * times and attributes, the end of the file and its allocation, a
-     * rename, deletion on close. Each the size the class has, at least.
+     * A record of informationOf for a file named in an OBJECT_ATTRIBUTES,
+     * written where the caller asks: NtQueryAttributesFile's and
+     * NtQueryFullAttributesFile's answer.
+     *
+     * @param {number} attributes @param {number} out @param {number} kind
+     */
+    const attributesOfName = (attributes, out, kind)=>{
+        if (attributes === 0 || out === 0)
+        {
+            return STATUS_ACCESS_VIOLATION;
+        }
+        const named = nativeName(attributes);
+        if (named.status !== undefined)
+        {
+            return named.status;
+        }
+        const entry = files.stat(named.path);
+        if (!entry?.exists)
+        {
+            return NATIVE_FAILURES[missing(named.path)];
+        }
+        const record = informationOf({ path: named.path, directory: entry.isDirectory }, kind);
+        if (!(record instanceof Uint8Array))
+        {
+            return STATUS_INVALID_INFO_CLASS;
+        }
+        host.writeMemory(out, record);
+        return STATUS_SUCCESS;
+    };
+
+    /**
+     * The FILE_INFORMATION_CLASS values NtQueryDirectoryFile lists in, each
+     * with where its name starts: FileDirectoryInformation's times, sizes and
+     * attributes come first in all but the names-only one, then the EA size,
+     * the short name (none: a name here has no 8.3 alias) and the file's id.
+     *
+     * @type {Map<number, { name: number, ea?: number, id?: number }>}
+     */
+    const DIRECTORY_CLASSES = new Map([
+        [1, { name: 64 }], [2, { name: 68, ea: 64 }], [3, { name: 94, ea: 64 }],
+        [12, { name: 12 }], [37, { name: 104, ea: 64, id: 96 }],
+        [38, { name: 80, ea: 64, id: 72 }]]);
+    const FILE_NAMES_INFORMATION = 12;
+
+    /**
+     * Lists a folder handle's next entries into a buffer, each record eight
+     * aligned and linked to the next by its offset. The first record that
+     * does not fit is cut to the room with STATUS_BUFFER_OVERFLOW; nothing
+     * matching at the first call is STATUS_NO_SUCH_FILE, nothing left
+     * STATUS_NO_MORE_FILES.
+     *
+     * @param {number} handle @param {number} block  the IO_STATUS_BLOCK
+     * @param {number} out @param {number} length @param {number} kind
+     * @param {boolean} single @param {number} mask  a UNICODE_STRING, or 0
+     * @param {boolean} restart
+     * @returns {{ status: number, reported: boolean }}
+     */
+    const directoryRecords = (handle, block, out, length, kind, single, mask, restart)=>{
+        const directory = object(handle, 'directory');
+        if (!directory)
+        {
+            return { status: object(handle, 'file') ? STATUS_INVALID_PARAMETER
+                : STATUS_INVALID_HANDLE, reported: false };
+        }
+        const shape = DIRECTORY_CLASSES.get(kind);
+        if (shape === undefined)
+        {
+            host.divergence?.('NtQueryDirectoryFile', `information class ${kind} is not kept`);
+            return { status: STATUS_INVALID_INFO_CLASS, reported: false };
+        }
+        if (length < shape.name)
+        {
+            return { status: STATUS_INFO_LENGTH_MISMATCH, reported: false };
+        }
+        if (!directory.listing || restart)
+        {
+            let pattern = directory.listing?.pattern ?? '*';
+            if (mask !== 0)
+            {
+                const units = readDword(mask) & 0xffff;
+                const buffer = readDword(mask + 4);
+                const raw = buffer === 0 ? new Uint8Array(0) : host.readMemory(buffer, units & ~1);
+                pattern = '';
+                for (let at = 0; at + 1 < raw.length; at += 2)
+                {
+                    pattern += String.fromCharCode(raw[at] | raw[at + 1] << 8);
+                }
+            }
+            directory.listing = { pattern, entries: files.list(directory.path, pattern), next: 0,
+                first: true };
+        }
+        const listing = directory.listing;
+        const first = listing.first;
+        listing.first = false;
+        if (listing.next >= listing.entries.length)
+        {
+            return { status: first ? STATUS_NO_SUCH_FILE : STATUS_NO_MORE_FILES,
+                reported: false };
+        }
+        const bytes = new Uint8Array(length);
+        const view = new DataView(bytes.buffer);
+        let at = 0;
+        let previous = -1;
+        let status = STATUS_SUCCESS;
+        while (listing.next < listing.entries.length)
+        {
+            const entry = listing.entries[listing.next];
+            const name = entry.name;
+            const size = shape.name + name.length * 2;
+            if (at + size > length)
+            {
+                if (previous >= 0)
+                {
+                    break;
+                }
+                status = STATUS_BUFFER_OVERFLOW;
+            }
+            listing.next++;
+            if (previous >= 0)
+            {
+                view.setUint32(previous, at - previous, true);
+            }
+            const fill = (/** @type {() => void} */ write)=>{
+                try
+                {
+                    write();
+                }
+                catch (e){
+                    // A field past the room is not written: the record is cut.
+                    if (!(e instanceof RangeError))
+                    {
+                        throw e;
+                    }
+                }
+            };
+            if (kind === FILE_NAMES_INFORMATION)
+            {
+                fill(()=>view.setUint32(at + 8, name.length * 2, true));
+            }
+            else
+            {
+                const time = msToFileTime(entry.modified ?? 0);
+                const bytesOf = BigInt(entry.isDirectory ? 0 : entry.size ?? 0);
+                fill(()=>{
+                    for (let field = 0; field < 4; field++)
+                    {
+                        view.setBigUint64(at + 8 + field * 8, time, true);
+                    }
+                    view.setBigUint64(at + 40, bytesOf, true);
+                    view.setBigUint64(at + 48, (bytesOf + 4095n) & ~4095n, true);
+                    view.setUint32(at + 56, attributesOf(entry), true);
+                    view.setUint32(at + 60, name.length * 2, true);
+                    if (shape.id !== undefined)
+                    {
+                        const identity = entry.identity ?? `${directory.path}\\${name}`;
+                        view.setBigUint64(at + shape.id, BigInt(fileIndex(identity)), true);
+                    }
+                });
+            }
+            for (let unit = 0; unit < name.length && at + shape.name + unit * 2 + 1 < length;
+                unit++)
+            {
+                view.setUint16(at + shape.name + unit * 2, name.charCodeAt(unit), true);
+            }
+            previous = at;
+            at = Math.min(length, (at + size + 7) & ~7);
+            if (single || status !== STATUS_SUCCESS)
+            {
+                break;
+            }
+        }
+        const used = status === STATUS_BUFFER_OVERFLOW ? length
+            : previous + shape.name + listing.entries[listing.next - 1].name.length * 2;
+        host.writeMemory(out, bytes.subarray(0, used));
+        return { status: report(block, status, used), reported: true };
+    };
+
+    /**
+     * The settable classes of an open file, as SetFileInformationByHandle and
+     * NtSetInformationFile both set them: the basic times and attributes, the
+     * end of the file and its allocation, a rename, deletion on close. The
+     * Win32 error it ends in, 0 when it held.
+     *
+     * @param {any} file @param {string} kind  'file' or 'directory'
+     * @param {number} type  a FILE_INFO class
+     * @param {Uint8Array} bytes  the record, at least its class's size
+     * @param {(name: string) => string | null} target  where a rename's name
+     *     leads, null for one that leads nowhere
+     * @returns {number | Promise<number>}
+     */
+    const informationError = (file, kind, type, bytes, target)=>{
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        switch (type)
+        {
+            case FILE_INFO.BASIC: {
+                if (!(file.writeAttributes ?? file.write ?? true))
+                {
+                    return ERROR_ACCESS_DENIED;
+                }
+                const written = view.getBigInt64(16, true);
+                if (written > 0n)
+                {
+                    files.setModified?.(file.path,
+                        Number(written / 10000n) - FILETIME_EPOCH_MS);
+                }
+                const attributes = view.getUint32(32, true);
+                if (attributes !== 0)
+                {
+                    files.setAttributes?.(file.path, attributes & SETTABLE_ATTRIBUTES);
+                }
+                return 0;
+            }
+            case FILE_INFO.END_OF_FILE:
+            case FILE_INFO.ALLOCATION: {
+                if (kind !== 'file' || !file.write)
+                {
+                    return ERROR_ACCESS_DENIED;
+                }
+                const at = Number(view.getBigInt64(0, true));
+                if (at < 0)
+                {
+                    return ERROR_INVALID_PARAMETER;
+                }
+                const current = files.stat(file.path)?.size ?? 0;
+                // An allocation only ever cuts a file shorter: room reserved
+                // past its end is not part of it.
+                if (type === FILE_INFO.END_OF_FILE || at < current)
+                {
+                    files.truncate(file.node, at);
+                }
+                return 0;
+            }
+            case FILE_INFO.DISPOSITION:
+            case FILE_INFO.DISPOSITION_EX: {
+                const deleting = type === FILE_INFO.DISPOSITION ? bytes[0] !== 0
+                    : (view.getUint32(0, true) & FILE_DISPOSITION_FLAG_DELETE) !== 0;
+                if (deleting)
+                {
+                    const entry = files.stat(file.path);
+                    if (readOnlyFile(entry) || onReadOnlyMedia(file.path))
+                    {
+                        return ERROR_ACCESS_DENIED;
+                    }
+                    if (entry?.isDirectory && files.list(file.path, '*')
+                        .some(each=>each.name !== '.' && each.name !== '..'))
+                    {
+                        return ERROR_DIR_NOT_EMPTY;
+                    }
+                }
+                file.deleteOnClose = deleting;
+                return 0;
+            }
+            case FILE_INFO.RENAME:
+            case FILE_INFO.RENAME_EX: {
+                const replace = type === FILE_INFO.RENAME ? bytes[0] !== 0
+                    : (view.getUint32(0, true) & FILE_RENAME_FLAG_REPLACE_IF_EXISTS) !== 0;
+                const nameBytes = view.getUint32(8, true);
+                if (12 + nameBytes > bytes.length || nameBytes === 0)
+                {
+                    return ERROR_INVALID_PARAMETER;
+                }
+                let asked = '';
+                for (let at = 12; at + 1 < 12 + nameBytes; at += 2)
+                {
+                    asked += String.fromCharCode(bytes[at] | bytes[at + 1] << 8);
+                }
+                const destination = target(asked);
+                if (destination === null)
+                {
+                    return ERROR_PATH_NOT_FOUND;
+                }
+                const moved = moveError(file.path, destination, replace);
+                /** @param {number} code */
+                const settle = code=>{
+                    if (code === 0)
+                    {
+                        file.path = destination;
+                    }
+                    return code;
+                };
+                return typeof moved === 'number' ? settle(moved) : moved.then(settle);
+            }
+            default:
+                // FileIoPriorityHintInfo: a hint with nothing to prioritise.
+                return 0;
+        }
+    };
+
+    /**
+     * The file or directory a handle names, with which of the two it is.
+     *
+     * @param {number} handle
+     */
+    const fileOrDirectory = handle=>{
+        const kind = host.handles.typeOf?.(handle >>> 0);
+        const file = kind === 'file' || kind === 'directory' ? object(handle, kind) : null;
+        return file ? { file, kind: /** @type {string} */ (kind) } : null;
+    };
+
+    /**
+     * SetFileInformationByHandle: its classes, each the size the class has
+     * at least; a rename's name is relative to the file's folder or a path.
      *
      * @param {number} handle @param {number} type @param {number} from @param {number} length
      */
     const setInformationByHandle = (handle, type, from, length)=>{
-        const kind = host.handles.typeOf?.(handle >>> 0);
-        const file = kind === 'file' || kind === 'directory' ? object(handle, kind) : null;
-        if (!file)
+        const open = fileOrDirectory(handle);
+        if (!open)
         {
             return fail(ERROR_INVALID_HANDLE);
         }
@@ -3450,94 +4125,11 @@ export function createFileFunctions(host){
             return fail(ERROR_BAD_LENGTH);
         }
         const bytes = host.readMemory(from, Math.max(length, size)).slice();
-        const view = new DataView(bytes.buffer);
-        switch (type)
-        {
-            case FILE_INFO.BASIC: {
-                if (!(file.writeAttributes ?? file.write ?? true))
-                {
-                    return fail(ERROR_ACCESS_DENIED);
-                }
-                const written = view.getBigInt64(16, true);
-                if (written > 0n)
-                {
-                    files.setModified?.(file.path,
-                        Number(written / 10000n) - FILETIME_EPOCH_MS);
-                }
-                const attributes = view.getUint32(32, true);
-                if (attributes !== 0)
-                {
-                    files.setAttributes?.(file.path, attributes & SETTABLE_ATTRIBUTES);
-                }
-                return 1;
-            }
-            case FILE_INFO.END_OF_FILE:
-            case FILE_INFO.ALLOCATION: {
-                if (kind !== 'file' || !file.write)
-                {
-                    return fail(ERROR_ACCESS_DENIED);
-                }
-                const at = Number(view.getBigInt64(0, true));
-                if (at < 0)
-                {
-                    return fail(ERROR_INVALID_PARAMETER);
-                }
-                const current = files.stat(file.path)?.size ?? 0;
-                // An allocation only ever cuts a file shorter: room reserved
-                // past its end is not part of it.
-                if (type === FILE_INFO.END_OF_FILE || at < current)
-                {
-                    files.truncate(file.node, at);
-                }
-                return 1;
-            }
-            case FILE_INFO.DISPOSITION:
-            case FILE_INFO.DISPOSITION_EX: {
-                const deleting = type === FILE_INFO.DISPOSITION ? bytes[0] !== 0
-                    : (view.getUint32(0, true) & FILE_DISPOSITION_FLAG_DELETE) !== 0;
-                if (deleting)
-                {
-                    const entry = files.stat(file.path);
-                    if (readOnlyFile(entry) || onReadOnlyMedia(file.path))
-                    {
-                        return fail(ERROR_ACCESS_DENIED);
-                    }
-                    if (entry?.isDirectory && files.list(file.path, '*')
-                        .some(each=>each.name !== '.' && each.name !== '..'))
-                    {
-                        return fail(ERROR_DIR_NOT_EMPTY);
-                    }
-                }
-                file.deleteOnClose = deleting;
-                return 1;
-            }
-            case FILE_INFO.RENAME:
-            case FILE_INFO.RENAME_EX: {
-                const replace = type === FILE_INFO.RENAME ? bytes[0] !== 0
-                    : (view.getUint32(0, true) & FILE_RENAME_FLAG_REPLACE_IF_EXISTS) !== 0;
-                const nameBytes = view.getUint32(8, true);
-                if (12 + nameBytes > Math.max(length, size) || nameBytes === 0)
-                {
-                    return fail(ERROR_INVALID_PARAMETER);
-                }
-                const units = host.readMemory(from + 12, nameBytes);
-                let asked = '';
-                for (let at = 0; at + 1 < units.length; at += 2)
-                {
-                    asked += String.fromCharCode(units[at] | units[at + 1] << 8);
-                }
-                const target = renameTarget(file.path, asked);
-                const answer = renamePath(file.path, target, replace);
-                if (answer === 1)
-                {
-                    file.path = target;
-                }
-                return answer;
-            }
-            default:
-                // FileIoPriorityHintInfo: a hint with nothing to prioritise.
-                return 1;
-        }
+        const error = informationError(open.file, open.kind, type, bytes,
+            asked=>renameTarget(open.file.path, asked));
+        /** @param {number} code */
+        const answer = code=>(code === 0 ? 1 : fail(code));
+        return typeof error === 'number' ? answer(error) : error.then(answer);
     };
 
     /**

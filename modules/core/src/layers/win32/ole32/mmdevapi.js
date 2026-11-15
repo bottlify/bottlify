@@ -15,12 +15,16 @@
  * Windows XP has none of it (MMDevAPI came with Vista): there the class is not
  * registered.
  *
- * Playing straight to the endpoint (IMMDevice::Activate for IAudioClient) is not
- * here: a program plays through XAudio2 or DirectSound, which this machine has,
- * and is told E_NOINTERFACE, said once as a divergence.
+ * Playing straight to the endpoint is IMMDevice::Activate for IAudioClient,
+ * a shared-mode stream into the machine's mixer, and its sessions are
+ * IAudioSessionManager's (`audio-client.js`); another
+ * interface of the endpoint is not here, and is told E_NOINTERFACE, said once
+ * as a divergence.
  */
 
 import { createComObject } from './objects.js';
+import { IID_IAUDIO_CLIENT, IID_IAUDIO_SESSION_MANAGER, createAudioClients, guidAt }
+    from './audio-client.js';
 
 export const CLSID_MMDEVICE_ENUMERATOR = '{BCDE0395-E52F-467C-8E3D-C4579291692E}';
 export const IID_IMMDEVICE_ENUMERATOR = '{A95664D2-9614-4F35-A746-DE8DB63617E6}';
@@ -112,6 +116,13 @@ function mixFormat(){
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {{ major: number }} [windows]  The Windows the machine says it is:
  *     MMDevAPI came with Vista, and an XP has no such class to make
+ * @property {() => number} [now]  The guest's clock, in milliseconds, which a stream plays
+ *     against where nothing is listening.
+ * @property {() => any} [output]  The machine's mixer, when anything is listening.
+ * @property {import('./audio-client.js').AudioClientHost['timers']} [timers]  The multimedia
+ *     timers, which set an event-driven stream's event.
+ * @property {() => string} [program]  The program as the object manager names it.
+ * @property {() => number} [processId]
  */
 
 /** @param {MmDevApiHost} host */
@@ -143,6 +154,13 @@ export function registerMmDevApiClasses(host){
         }
         return at;
     };
+    const audioClients = createAudioClients({
+        readMemory: host.readMemory, writeMemory: host.writeMemory, heap: host.heap,
+        readWideString: host.readWideString,
+        vtables: host.vtables, writePointer, now: host.now ?? (()=>Date.now()),
+        output: host.output, timers: host.timers, divergence: host.divergence,
+        program: host.program, processId: host.processId,
+    }, { id: SPEAKERS.id, rate: SPEAKERS.rate, channels: SPEAKERS.channels, mixFormat });
     /** @type {Set<string>} */
     const said = new Set();
     /** @param {string} api @param {string} detail */
@@ -271,15 +289,23 @@ export function registerMmDevApiClasses(host){
              * HRESULT Activate(REFIID iid, DWORD dwClsCtx, PROPVARIANT *pActivationParams,
              *     void **ppInterface)
              */
-            { name: 'Activate', argBytes: 20, invoke: (_, [, , , out])=>{
-                if ((out >>> 0) === 0)
+            { name: 'Activate', argBytes: 20, invoke: (_, [iid, , , out])=>{
+                if ((iid >>> 0) === 0 || (out >>> 0) === 0)
                 {
                     return E_POINTER;
                 }
                 writePointer(out, 0);
-                diverge('IMMDevice::Activate',
-                    'no interface of an endpoint is activated: a program plays through XAudio2'
-                    + ' or DirectSound');
+                const wanted = guidAt(host.readMemory, iid);
+                if (wanted === IID_IAUDIO_CLIENT)
+                {
+                    return audioClients.activate(out);
+                }
+                if (wanted === IID_IAUDIO_SESSION_MANAGER)
+                {
+                    return audioClients.manager(out);
+                }
+                diverge(`IMMDevice::Activate ${wanted}`,
+                    `the endpoint's interface ${wanted} is not activated here`);
                 return E_NOINTERFACE;
             } },
             /** HRESULT OpenPropertyStore(DWORD stgmAccess, IPropertyStore **ppProperties) */

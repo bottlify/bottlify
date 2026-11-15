@@ -9,7 +9,6 @@ import assert from 'node:assert/strict';
 import { createShellFunctions } from './functions.js';
 
 const E_FAIL = 0x80004005 | 0;
-const E_INVALIDARG = 0x80070057 | 0;
 
 function machine(){
     const memory = new Uint8Array(0x400).fill(0xaa);
@@ -92,19 +91,15 @@ test('SHGetSettings sets the bits asked for as a fresh profile has them', ()=>{
     assert.equal(m.shell.SHGetSettings.argBytes, 8);
 });
 
-test('the about box is answered as closed, Explorer\'s process as absent', ()=>{
+test('the about box is answered as closed, an object in Explorer\'s process refused', ()=>{
     const m = machine();
     assert.equal(m.shell.ShellAboutA.handler([0, 0, 0, 0]), 1);
     assert.equal(m.shell.ShellAboutW.handler([0, 0, 0, 0]), 1);
     assert.equal(m.shell.ShellAboutW.argBytes, 16);
-    m.view.setUint32(0x100, 0xdeadbeef, true);
-    assert.equal(m.shell.SHGetInstanceExplorer.handler([0x100]), E_FAIL);
-    assert.equal(m.view.getUint32(0x100, true), 0, 'a null interface');
-    assert.equal(m.shell.SHGetInstanceExplorer.handler([0]), E_INVALIDARG);
     assert.equal(m.shell.SHLoadInProc.handler([0x100]), E_FAIL);
     assert.equal(m.shell.SHAddToRecentDocs.handler([2, 0x100]), 0);
-    assert.deepEqual([m.shell.SHGetInstanceExplorer.argBytes, m.shell.SHLoadInProc.argBytes,
-        m.shell.SHAddToRecentDocs.argBytes], [4, 4, 8]);
+    assert.deepEqual([m.shell.SHLoadInProc.argBytes, m.shell.SHAddToRecentDocs.argBytes],
+        [4, 8]);
     assert.deepEqual(m.diverged.map(line=>line.split(':')[0]),
-        ['ShellAbout', 'SHGetInstanceExplorer', 'SHLoadInProc', 'SHAddToRecentDocs']);
+        ['ShellAbout', 'SHLoadInProc', 'SHAddToRecentDocs']);
 });

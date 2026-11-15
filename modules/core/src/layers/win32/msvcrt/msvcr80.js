@@ -17,6 +17,7 @@
  */
 
 import { guestEntry } from './guest-code.js';
+import { LATER_HEAP } from './heap.js';
 import { settle } from './io.js';
 import * as inGuest from './inguest.js';
 import { COMPILED } from './inguest.x86.js';
@@ -165,6 +166,8 @@ export function createMsvcr80Functions(crt, host){
 
     return {
         ...crt,
+        // The heap functions this runtime added: _recalloc, the aligned ones'.
+        .../** @type {any} */ (crt)[LATER_HEAP] ?? {},
 
         _encode_pointer: encode,
         _decode_pointer: encode,

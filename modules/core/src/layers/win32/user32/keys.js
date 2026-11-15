@@ -240,6 +240,7 @@ const WITH_CONTROL = new Map([[0xdb, 0x1b], [0xdc, 0x1c], [0xdd, 0x1d], [0x0d, 0
  * @property {boolean} [shift]
  * @property {boolean} [capsLock]
  * @property {boolean} [control]
+ * @property {boolean} [alt]
  */
 
 /**
@@ -250,14 +251,20 @@ const WITH_CONTROL = new Map([[0xdb, 0x1b], [0xdc, 0x1c], [0xdd, 0x1d], [0x0d, 0
  *
  * Control with a letter is the letter's control code (Ctrl+A is 1), as a
  * terminal and every edit control read it; with most other keys it is
- * nothing at all.
+ * nothing at all. Control and Alt together are AltGr, which this layout
+ * gives no character to.
  *
  * @param {number} vk
  * @param {Modifiers} [modifiers]
  * @returns {number | null}
  */
-export function characterOf(vk, { shift = false, capsLock = false, control = false } = {}){
+export function characterOf(vk, modifiers = {}){
+    const { shift = false, capsLock = false, control = false, alt = false } = modifiers;
     const isLetter = vk >= 0x41 && vk <= 0x5a;
+    if (control && alt)
+    {
+        return null;
+    }
     if (control)
     {
         return isLetter ? vk - 0x40 : WITH_CONTROL.get(vk) ?? null;

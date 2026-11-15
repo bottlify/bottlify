@@ -520,6 +520,14 @@ const SCRIPT_ENGINES = Object.freeze([
 ]);
 
 /**
+ * devenum's device moniker, by the name MkParseDisplayName reads off
+ * "@device:..." to find the class that parses the rest.
+ */
+const DEVICE_MONIKER = Object.freeze([
+    { clsid: '{4315D437-5B8C-11D0-BD3B-00A0C911CE86}', progIds: ['device'] },
+]);
+
+/**
  * The keys and values every Windows installation carries before any program
  * has run, as far as a program of the era asks for them: where programs go,
  * where the shared-library counts live, where an installer registers what it
@@ -564,12 +572,13 @@ const machineKeys = (windows, directx, processors)=>{
         // CLSIDFromProgID reads for a host that asks for "JScript" or
         // "Msxml2.DOMDocument" by name; the classes themselves are served by
         // the engine.
-        ...[...SCRIPT_ENGINES, ...DOCUMENT_CLASSES].flatMap(({ clsid, progIds })=>[
-            { root: HKEY_LOCAL_MACHINE, path: `${MACHINE_CLASSES}\\CLSID\\${clsid}\\ProgID`,
-                values: { '': progIds[0] } },
-            ...progIds.map(progId=>({ root: HKEY_LOCAL_MACHINE,
-                path: `${MACHINE_CLASSES}\\${progId}\\CLSID`, values: { '': clsid } })),
-        ]),
+        ...[...SCRIPT_ENGINES, ...DOCUMENT_CLASSES, ...DEVICE_MONIKER]
+            .flatMap(({ clsid, progIds })=>[
+                { root: HKEY_LOCAL_MACHINE, path: `${MACHINE_CLASSES}\\CLSID\\${clsid}\\ProgID`,
+                    values: { '': progIds[0] } },
+                ...progIds.map(progId=>({ root: HKEY_LOCAL_MACHINE,
+                    path: `${MACHINE_CLASSES}\\${progId}\\CLSID`, values: { '': clsid } })),
+            ]),
         // Windows Installer's file types, as it registers them: a setup that
         // opens a package with ShellExecuteEx gets msiexec.
         ...[['.msi', 'Msi.Package'], ['.msp', 'Msi.Patch']].map(([extension, type])=>({
@@ -613,6 +622,12 @@ const machineKeys = (windows, directx, processors)=>{
                 PathName: 'C:\\WINDOWS',
             },
             owned: VERSION_VALUES },
+        // The video codecs Windows installs, as the compressor manager finds
+        // them (msvfw32/icm.js): a codec a game installs is a value beside them.
+        { root: HKEY_LOCAL_MACHINE,
+            path: 'SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Drivers32',
+            values: { 'vidc.cvid': 'iccvid.dll', 'vidc.mrle': 'msrle32.dll',
+                'vidc.msvc': 'msvidc32.dll' } },
         { root: HKEY_LOCAL_MACHINE, path: 'SYSTEM\\CurrentControlSet\\Control\\Session Manager' },
         // The system Path a fresh install sets, which an installer adds its
         // own folder to (Windows Installer's Environment table, `[~];...`).
@@ -1190,10 +1205,14 @@ export function createHive(
         /**
          * @param {RegistryKey} key @param {string} name
          * @param {number} type @param {Uint8Array} data
+         * @param {boolean} [exact]  The bytes as they are, as a program's
+         *     RegSetValueEx stores them; without it a string the engine sets
+         *     is kept terminated (`terminate`).
          * @returns {RegistryValue}
          */
-        setValue(key, name, type, data){
-            const value = { name, type: type >>> 0, data: terminate(type >>> 0, data) };
+        setValue(key, name, type, data, exact = false){
+            const value = { name, type: type >>> 0,
+                data: exact ? data : terminate(type >>> 0, data) };
             const node = writable(key);
             // A classes key both sides have since deleted takes the value nowhere.
             if (node)

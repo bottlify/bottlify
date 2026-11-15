@@ -185,11 +185,13 @@ function fakeSurfaces(){
     };
 }
 
-function setup(){
+/** @param {Partial<import('./functions.js').GdiHost>} [extra] */
+function setup(extra = {}){
     const memory = fakeMemory();
     const handles = fakeHandles();
     const surfaces = fakeSurfaces();
     const gdi = createGdiFunctions({
+        ...extra,
         readMemory: (address, length)=>memory.readMemory(address, length),
         writeMemory: (address, data)=>memory.writeMemory(address, data),
         fillMemory: (address, value, length)=>memory.bytes.fill(value, address, address + length),
@@ -557,6 +559,19 @@ test('ExtCreatePen takes its colour from a brush and checks its width and dashes
     assert.equal(fns.ExtCreatePen.handler([PS_GEOMETRIC | PS_SOLID, 5, STRUCT, 2, STRUCT]), 0,
         'dashes on a style that takes none');
     assert.equal(fns.ExtCreatePen.handler([PS_GEOMETRIC | PS_SOLID, 5, 0, 0, 0]), 0, 'no brush');
+
+    // Wine's test_brush_pens: a cosmetic pen's brush is solid; a geometric
+    // one is solid, hatched or a pattern; a hollow brush is the null pen.
+    memory.putU32s(STRUCT, [BS_HATCHED, 0x00123456, HS_CROSS]);
+    assert.equal(fns.ExtCreatePen.handler([PS_SOLID, 1, STRUCT, 0, 0]), 0,
+        'a hatched cosmetic pen');
+    assert.ok(fns.ExtCreatePen.handler([PS_GEOMETRIC | PS_SOLID, 3, STRUCT, 0, 0]) > 0);
+    memory.putU32s(STRUCT, [4, 0x00123456, 0]);
+    assert.equal(fns.ExtCreatePen.handler([PS_GEOMETRIC | PS_SOLID, 3, STRUCT, 0, 0]), 0,
+        'BS_INDEXED is no pen\'s brush');
+    memory.putU32s(STRUCT, [BS_NULL, 0, 0]);
+    assert.equal(fns.ExtCreatePen.handler([PS_GEOMETRIC | PS_SOLID, 3, STRUCT, 0, 0]),
+        fns.GetStockObject.handler([8]), 'a hollow brush makes the stock NULL_PEN');
 });
 
 test('CreateBrushIndirect reads LOGBRUSH at the documented offsets', ()=>{
@@ -611,6 +626,22 @@ test('a pattern brush names its bitmap and no colour, and outlives the bitmap', 
 
     memory.putU32s(STRUCT, [3, 0, 0x9999]);
     assert.equal(fns.CreateBrushIndirect.handler([STRUCT]), 0, 'no bitmap, no pattern');
+});
+
+test('a DIB pattern brush over a moveable HGLOBAL reads the DIB where the handle locks to', ()=>{
+    // CreateDIBPatternBrush and LOGBRUSH's BS_DIBPATTERN take an HGLOBAL: a
+    // moveable one is an entry of kernel32's table, its bytes elsewhere.
+    const HANDLE = 0x1234c;
+    const DIB = STRUCT + 0x40;
+    const { fns, memory } = setup({ lockGlobal: handle=>(handle === HANDLE ? DIB : handle) });
+    memory.putU32s(DIB, [40, 32, 32, 1 | (1 << 16), 0, 0, 0, 0, 2, 0]);
+    memory.putU32s(DIB + 40, [0, 0x00ffffff]);
+    assert.ok(fns.CreateDIBPatternBrush.handler([HANDLE, 0]) > 0, 'the DIB found through it');
+    memory.putU32s(STRUCT, [5, 0, HANDLE]);
+    assert.ok(fns.CreateBrushIndirect.handler([STRUCT]) > 0);
+    memory.putU32s(STRUCT, [6, 0, HANDLE]);
+    assert.equal(fns.CreateBrushIndirect.handler([STRUCT]), 0,
+        'BS_DIBPATTERNPT is a pointer, not a handle');
 });
 
 test('a DIB pattern brush reads back as BS_DIBPATTERN naming its packed DIB', ()=>{
@@ -2994,4 +3025,108 @@ test('GdiEntry13 (DdQueryDisplaySettingsUniqueness) moves when the display mode 
     screen.width = 1024;
     screen.height = 768;
     assert.notEqual(table.GdiEntry13.handler(), first);
+});
+
+test('GdiGetCharDimensions is the dialog-unit average width, and GdiGetCodePage the font\'s page',
+    ()=>{
+        const { fns, memory, hdc } = withDC();
+        const RUSSIAN_CHARSET = 204;
+        const OEM_CHARSET = 255;
+        const letters = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
+        const TEXT_AT = OUT + 0x100;
+        letters.split('').forEach((c, i)=>memory.writeMemory(TEXT_AT + 2 * i,
+            Uint8Array.of(c.charCodeAt(0), 0)));
+        fns.GetTextExtentPoint32W.handler([hdc, TEXT_AT, letters.length, OUT + 0x200]);
+        const extent = memory.u32(OUT + 0x200);
+        const height = memory.u32(OUT + 0x204);
+        assert.equal(fns.GdiGetCharDimensions.handler([hdc, 0, OUT]),
+            Math.floor((Math.floor(extent / 26) + 1) / 2), '(extent / 26 + 1) / 2');
+        assert.equal(memory.u32(OUT), height, 'and the font\'s height');
+        assert.equal(fns.GdiGetCharDimensions.handler([0x9999, 0, OUT + 0x300]), 0,
+            'not a DC');
+
+        assert.equal(fns.GdiGetCodePage.handler([hdc]), 1252, 'the system font is ANSI');
+        assert.equal(fns.GdiGetCodePage.handler([0x9999]), 1252, 'not a DC: the ANSI page');
+        fns.SelectObject.handler([hdc, fns.CreateFontIndirectA.handler([putLogFont(memory,
+            { charSet: RUSSIAN_CHARSET })])]);
+        assert.equal(fns.GdiGetCodePage.handler([hdc]), 1251);
+        fns.SelectObject.handler([hdc, fns.CreateFontIndirectA.handler([putLogFont(memory,
+            { charSet: OEM_CHARSET })])]);
+        assert.equal(fns.GdiGetCodePage.handler([hdc]), 437);
+    });
+
+test('CopyImage\'s bitmap copy takes the form its flags ask and the size given', ()=>{
+    // Wine's cursoricon test_CopyImage_Bitmap: a device bitmap at the display's
+    // depth unless monochrome, a section of the original's depth with
+    // LR_CREATEDIBSECTION, zero keeping a side.
+    const { fns, memory, gdi, hdc } = withDC();
+    const LR_MONOCHROME = 0x1;
+    const LR_CREATEDIBSECTION = 0x2000;
+    const display = fns.GetDeviceCaps.handler([hdc, 12]);
+    /** @param {number} bitmap @returns {number[]} width, height, depth, whether a section */
+    const shape = bitmap=>{
+        assert.equal(fns.GetObjectA.handler([bitmap, 24, OUT]), 24);
+        return [memory.u32(OUT + 4), memory.u32(OUT + 8), memory.u32(OUT + 16) >>> 16,
+            memory.u32(OUT + 20) === 0 ? 0 : 1];
+    };
+    const colour = fns.CreateBitmap.handler([2, 2, 1, 32, 0]);
+    assert.deepEqual(shape(gdi.copyBitmap(colour, 0, 0, 0)), [2, 2, display, 0]);
+    assert.deepEqual(shape(gdi.copyBitmap(colour, 5, 0, 0)), [5, 2, display, 0]);
+    assert.deepEqual(shape(gdi.copyBitmap(colour, 0, 5, LR_MONOCHROME)), [2, 5, 1, 0]);
+    assert.deepEqual(shape(gdi.copyBitmap(colour, 5, 5, LR_CREATEDIBSECTION | LR_MONOCHROME)),
+        [5, 5, 32, 1], 'a section outranks monochrome');
+    const mono = fns.CreateBitmap.handler([2, 2, 1, 1, 0]);
+    assert.deepEqual(shape(gdi.copyBitmap(mono, 0, 0, 0)), [2, 2, 1, 0]);
+
+    // A one-bit section is copied monochrome only when its colours are black and white.
+    putBitmapInfo(memory, { width: 2, height: 2, bitCount: 1 });
+    memory.putU32s(STRUCT + BITMAPINFOHEADER.SIZE, [0x0000ff, 0x00ff00]);
+    const tinted = fns.CreateDIBSection.handler([hdc, STRUCT, 0, BITS_POINTER, 0, 0]);
+    assert.deepEqual(shape(gdi.copyBitmap(tinted, 0, 0, 0)), [2, 2, display, 0]);
+    memory.putU32s(STRUCT + BITMAPINFOHEADER.SIZE, [0xffffff, 0x000000]);
+    const plain = fns.CreateDIBSection.handler([hdc, STRUCT, 0, BITS_POINTER, 0, 0]);
+    assert.deepEqual(shape(gdi.copyBitmap(plain, 0, 0, 0)), [2, 2, 1, 0]);
+    assert.equal(gdi.copyBitmap(hdc, 0, 0, 0), 0, 'no bitmap, no copy');
+});
+
+test('a bitmap made of bits this layer holds reads back those bits', ()=>{
+    const { fns, memory, gdi } = setup();
+    const bits = Uint8Array.of(0xa5, 0x00, 0x5a, 0x00);
+    const bitmap = gdi.bitmapFromBits(9, 2, 1, bits);
+    assert.equal(fns.GetBitmapBits.handler([bitmap, 16, OUT]), 4,
+        'nine pixels a line, padded to a WORD');
+    assert.deepEqual([...memory.readMemory(OUT, 4)], [...bits]);
+});
+
+test('a path keeps an arc as curves, one a quarter of the ellipse', ()=>{
+    // Wine's path test_arcto and test_anglearc, within the two pixels they allow.
+    const { fns, memory, hdc } = withDC();
+    const AD_CLOCKWISE = 2;
+    const PT_LINETO = 2;
+    const PT_BEZIERTO = 4;
+    fns.BeginPath.handler([hdc]);
+    fns.SetArcDirection.handler([hdc, AD_CLOCKWISE]);
+    assert.equal(fns.ArcTo.handler([hdc, 200, 200, 400, 300, 200, 200, 400, 300]), 1);
+    fns.EndPath.handler([hdc]);
+    const count = fns.GetPath.handler([hdc, OUT, STRUCT, 64]);
+    assert.equal(count, 11, 'the line to the start and three curves of three points');
+    const types = [...memory.readMemory(STRUCT, count)];
+    assert.deepEqual(types.slice(1, 3), [PT_LINETO, PT_BEZIERTO]);
+    /** @param {number} at */
+    const point = at=>[memory.i32(OUT + at * 8), memory.i32(OUT + at * 8 + 4)];
+    const expected = [[229, 215], [248, 205], [273, 200], [300, 200], [355, 200], [399, 222],
+        [399, 250], [399, 263], [389, 275], [370, 285]];
+    expected.forEach(([x, y], index)=>{
+        const [gotX, gotY] = point(index + 1);
+        assert.ok(Math.abs(gotX - x) <= 2 && Math.abs(gotY - y) <= 2,
+            `point ${index + 1}: (${gotX},${gotY}) for (${x},${y})`);
+    });
+
+    // An arc ending on a quarter's edge ends in a curve of no length.
+    fns.BeginPath.handler([hdc]);
+    const float = (/** @type {number} */ value)=>new Uint32Array(Float32Array.of(value).buffer)[0];
+    assert.equal(fns.AngleArc.handler([hdc, 300, 300, 100, float(45), float(135)]), 1);
+    fns.EndPath.handler([hdc]);
+    assert.equal(fns.GetPath.handler([hdc, OUT, STRUCT, 64]), 11);
+    assert.deepEqual([point(8), point(9), point(10)], [[200, 300], [200, 300], [200, 300]]);
 });

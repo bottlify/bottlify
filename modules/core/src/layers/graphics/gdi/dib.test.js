@@ -271,6 +271,18 @@ test('StretchDIBits into a clip its rectangle misses reads no bits and answers a
     }
 });
 
+test('a 32-bit BI_RGB pixel keeps its fourth byte through a decode; a BI_BITFIELDS one does not',
+    ()=>{
+        // Wine's test_StretchDIBits: copying 0xFEDCBA98 into a 32-bit bitmap
+        // leaves 0xFEDCBA98, and AND with 0x89ABCDEF gives 0x88888888.
+        const bits = new Uint8Array([0x98, 0xba, 0xdc, 0xfe]);
+        const plain = decodeDib({ header: header(1, 1, 32), bits });
+        assert.equal(plain?.read(0, 0), 0xfedcba98);
+        const fields = decodeDib({ header: { ...header(1, 1, 32), compression: BI_BITFIELDS },
+            bits, masks: [0xff0000, 0xff00, 0xff] });
+        assert.equal(fields?.read(0, 0), 0x00dcba98, 'no channel holds the fourth byte there');
+    });
+
 test('a negative source height in StretchDIBits mirrors the rows below ySrc', ()=>{
     // As a negative extent runs everywhere in GDI: ySrc 2 and a height of -2
     // are the same two rows as ySrc 0 and 2, upside down; ySrc 0 and -2 lie

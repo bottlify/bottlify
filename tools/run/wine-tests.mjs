@@ -52,6 +52,9 @@
  *                         a runtime the tests need that is not part of the engine
  *                         (the .NET Framework, for the tests of its libraries)
  *     --cork-config <json>  the translator's settings, over the ones used here
+ *     --windows <name>    the Windows the machine is (win2000, winxp, win7,
+ *                         win10; winxp by default): a library that came with a
+ *                         later Windows - combase, shcore - is there only on one
  *     --browser           run each test in a headless browser on WebGPU, through
  *                         tools/run/game.mjs: what a test draws is drawn and
  *                         read back, where in node every read-back is zero, so the
@@ -250,6 +253,9 @@ export function parseOutput(text, test, mainProcess){
  * @property {string[]} unresolved
  */
 
+/** The exit codes of a process the system refused to start (0xC0000135, 0xC0150002). */
+const NOT_STARTED = new Set([0xc0000135, 0xc0150002, 0xc0000135 | 0, 0xc0150002 | 0]);
+
 /**
  * The class of one run's result.
  *
@@ -258,6 +264,9 @@ export function parseOutput(text, test, mainProcess){
  * have shown too. A guest fault the engine stopped on is `guest-fault`: on
  * Windows the program's own filter would have printed it and ended the
  * process. `unimplemented` is a call into an import with no implementation.
+ * `not-loaded` is a program the system refused to start: its manifest names a
+ * side-by-side assembly the machine does not have, or a library it imports is
+ * nowhere (STATUS_DLL_NOT_FOUND, STATUS_SXS_CANT_GEN_ACTCTX as its exit code).
  * `empty` is a program that got to its closing count having checked nothing:
  * every check skipped (a library or class it looks for is not there) or none
  * compiled in. It is not a pass - nothing was held to Windows.
@@ -284,6 +293,8 @@ export function classify(result, parsed){
             case 'deadlock':
             case 'no-threads':
                 return 'deadlock';
+            case 'side-by-side':
+                return 'not-loaded';
             case 'guest-fault':
                 // A call into a function nobody wrote stops the machine rather
                 // than answering wrongly: a gap, not a wrong answer.
@@ -303,7 +314,7 @@ export function classify(result, parsed){
     }
     if (!parsed.summary)
     {
-        return 'no-summary';
+        return NOT_STARTED.has(result.exitCode ?? 0) ? 'not-loaded' : 'no-summary';
     }
     if (parsed.summary.failures > 0)
     {
@@ -442,7 +453,7 @@ async function filesUnder(host, guest){
  * run ended from outside still reports how far it got.
  *
  * @param {string} exePath @param {string} test
- * @param {{ timeout: number, corkConfig: object, volume?: string }} settings
+ * @param {{ timeout: number, corkConfig: object, volume?: string, windows?: string }} settings
  */
 async function runChild(exePath, test, settings){
     const send = (/** @type {any} */ message)=>new Promise(resolve=>{
@@ -484,6 +495,7 @@ async function runChild(exePath, test, settings){
                     'modules/cork/src/runtime/translator.worker.js', ROOT).href,
                 ...settings.corkConfig } },
             storage: null,
+            ...settings.windows ? { windows: settings.windows } : {},
         });
         app.attachLog((/** @type {number} */ stream, /** @type {string} */ text)=>
             send({ type: 'output', stream, text }));
@@ -690,7 +702,7 @@ function parseArgs(argv){
     };
     const flags = new Set(['--winetest', '--preset', '--timeout', '--jobs', '--failures', '--out',
         '--baseline', '--cork-config', '--winetest-url', '--gpu-adapter', '--graphics-config',
-        '--volume']);
+        '--volume', '--windows']);
     /** @type {string[]} */
     const specs = [];
     for (let i = 0; i < argv.length; i++)
@@ -720,6 +732,7 @@ function parseArgs(argv){
         gate: argv.includes('--gate'),
         corkConfig: JSON.parse(value('--cork-config', '{}') ?? '{}'),
         volume: value('--volume'),
+        windows: value('--windows'),
         graphicsConfig: value('--graphics-config')
             ? JSON.parse(/** @type {string} */ (value('--graphics-config'))) : undefined,
         specs,
@@ -834,7 +847,10 @@ export function regressions(report, baseline){
         {
             continue;
         }
-        if (rank(test.status) > rank(was.status))
+        // A test that stops loading has lost everything it checked, from any
+        // status; one that did not load before and still does not is the same.
+        if (rank(test.status) > rank(was.status)
+            || (test.status === 'not-loaded' && was.status !== 'not-loaded'))
         {
             worse.push(`${key(test)}: ${was.status} -> ${test.status}`);
         }
@@ -1074,7 +1090,7 @@ async function main(){
     const extracted = new URL('extracted/', LOCAL);
     await mkdir(extracted, { recursive: true });
     const settings = { timeout: options.timeout, corkConfig: options.corkConfig,
-        volume: options.volume,
+        volume: options.volume, windows: options.windows,
         adapter: options.adapter, graphicsConfig: options.graphicsConfig };
     /** @type {Map<string, string>} module -> its bundle, for --browser */
     const bundles = new Map();

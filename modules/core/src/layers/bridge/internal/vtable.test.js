@@ -837,3 +837,41 @@ test('a method with a slot and no implementation answers E_NOTIMPL, and is said'
     assert.equal(handlers.get(`${IID}::SetLOD`).handler([pointer, 1]) >>> 0, 0x80004001);
     assert.deepEqual(said, [`${IID}::SetLOD`]);
 });
+
+test('an object whose layout goes on past the vtable pointer is given its bytes, zeroed', ()=>{
+    /** @type {number[]} */
+    const sizes = [];
+    /** @type {Map<number, number>} */
+    const words = new Map();
+    let next = 0x8000;
+    const table = createVtables({
+        memory: {
+            /** @param {number} address @param {number} value */
+            writeU32: (address, value)=>words.set(address, value),
+            /** @param {number} address @param {number} length */
+            readBytes: (address, length)=>new Uint8Array(length),
+        },
+        register: ()=>{
+            next += 0x10;
+            return next;
+        },
+        heap: {
+            /** @param {number} size */
+            allocate: size=>{
+                sizes.push(size);
+                next += size + 0x10;
+                return next - size;
+            },
+        },
+    });
+    // MFASYNCRESULT: the vtable pointer, an OVERLAPPED, then four fields - 40 bytes.
+    const pointer = table.publish({ ...object, bodyBytes: ()=>40 }, IID);
+    assert.notEqual(pointer, 0);
+    assert.equal(sizes.at(-1), 40, 'the block is the layout\'s size, not three words');
+    for (let at = 12; at < 40; at += 4)
+    {
+        assert.equal(words.get(pointer + at), 0, `offset ${at} starts zeroed`);
+    }
+    table.publish({ ...object }, IID);
+    assert.equal(sizes.at(-1), 12, 'an object that asks nothing gets the three words');
+});

@@ -85,10 +85,25 @@ sequenceDiagram
   other, except those that run in the guest: IUnknown's `AddRef` and `Release` for an object
   whose count lives in guest memory, and the Direct3D 8 and 9 methods a program calls most
   (section 7). Methods are stdcall, with the interface pointer as the first argument on the
-  stack.
+  stack. An object whose documented layout goes on past that first word (Media Foundation's
+  `MFASYNCRESULT`, whose status and callback a program reads and writes itself) is given the
+  bytes it needs after it, zeroed, and keeps its fields there.
+  A class that may be aggregated (DirectShow's filters and clocks) is made inside the program's
+  controlling unknown when CoCreateInstance is given one: the program gets the object's own
+  IUnknown, which counts the object alone, and every other interface it hands out answers
+  QueryInterface, AddRef and Release through the controlling unknown, as COM's aggregation
+  rules have it. Any other class answers CLASS_E_NOAGGREGATION.
+  quartz's own filters (File Source, the WAVE Parser, the AVI Splitter, the renderers) are one
+  base, `quartz/filter.js`: pins, media type negotiation, allocators. A filter pushes its
+  samples downstream from the graph's streaming thread - the same guest thread that feeds a
+  renderer the program wrote - so a call into a peer never runs on the thread that started it.
 - **Callbacks:** a window procedure, a COM callback, `DllMain`. The bridge stops the thread, builds a
   frame on the program's stack and runs the program's code until it returns into a sentinel trap.
-  A host call that calls the program back many times in a row (a D3DX effect's pass setting each
+  Where Windows calls the program inside an `__except` of its own (`DllMain` in the loader, a COM
+  method a stub runs for another process, a `TIMERPROC` in `DispatchMessage`), the host puts a
+  frame of its own on the chain just above the callback (`kernel32/dllentry.js`): an exception the
+  routine leaves unwinds to it and ends the call with a fixed answer instead of reaching the
+  caller's handlers. A host call that calls the program back many times in a row (a D3DX effect's pass setting each
   state through the program's own state manager) is written as steps (`bridge.drive`): a generator
   that yields each guest call. The bridge sends the thread into each routine in the slice the call
   came in and takes its answer at the sentinel there, with no park and no turn of the run loop
@@ -162,7 +177,7 @@ flowchart TD
   textures through the device's own creates, the compiles go to `D3DCompile`.
 - **Where an engine library stands as a file:** in the system folder, as a file a setup or a
   program can find, read and replace (`withSystemLibraries`). The programs the engine runs in
-  place of the system's (`msiexec`, `rundll32`, `regsvr32`, `reg`, `notepad`) stand the same way
+  place of the system's (`msiexec`, `rundll32`, `regsvr32`, `reg`, `regedit`, `notepad`) stand the same way
   where Windows keeps them: a setup checks that the Windows Installer service's `msiexec.exe` is
   there before it installs anything.
 - **The Windows Imaging Component** (`windowscodecs.dll`) is the engine's too, its factory a COM

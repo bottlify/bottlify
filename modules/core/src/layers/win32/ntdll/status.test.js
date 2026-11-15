@@ -138,6 +138,9 @@ test('every status translated here answers what Wine\'s ntdll error tests expect
         [STATUS.PIPE_LISTENING, 536],
         [STATUS.PIPE_CLOSING, 232],
         [STATUS.CANCELLED, 995],
+        [STATUS.OBJECT_NAME_EXISTS, 698],
+        [STATUS.MUTANT_NOT_OWNED, 288],
+        [STATUS.SEMAPHORE_LIMIT_EXCEEDED, 298],
     ];
     for (const [status, expected] of rows)
     {

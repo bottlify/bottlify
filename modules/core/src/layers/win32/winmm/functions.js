@@ -443,6 +443,128 @@ const MM_WOM_OPEN = 0x03bb;
 const MM_WOM_CLOSE = 0x03bc;
 const MM_WOM_DONE = 0x03bd;
 
+const WAVERR_BADFORMAT = 32;
+const WAVE_FORMAT_PCM = 1;
+const WAVE_FORMAT_IEEE_FLOAT = 3;
+const WAVE_FORMAT_ALAW = 6;
+const WAVE_FORMAT_MULAW = 7;
+/** waveOutOpen's flags: only asked whether it would open; no conversion through the mapper. */
+const WAVE_FORMAT_QUERY = 0x0001;
+const WAVE_FORMAT_DIRECT = 0x0008;
+const WAVE_FORMAT_EXTENSIBLE = 0xfffe;
+/** The tail every KSDATAFORMAT_SUBTYPE GUID for a plain tag ends in, after its tag word. */
+const SUBTYPE_TAIL = [0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71];
+
+/**
+ * A wave format as waveOutOpen judges it, by the rules Windows applies: a
+ * plain tag is PCM, float, A-law or mu-law with at most two channels; an
+ * extensible one names its sub-format and holds the whole extension. Then
+ * the header's arithmetic, then the sample widths a device takes -- 8, 16,
+ * 24 and 32-bit PCM (24 valid in 32 too) and 32-bit float. A-law and mu-law
+ * are the mapper's to convert, so a stream asked to go straight to the
+ * device (WAVE_FORMAT_DIRECT) cannot have them, and a width no device has is
+ * there MMSYSERR_INVALPARAM where the mapper says WAVERR_BADFORMAT.
+ *
+ * @param {Uint8Array} header  the format's first 40 bytes, or as many as there are
+ * @param {boolean} direct
+ * @returns {{ result: number, tag: number, bits: number, valid: number }}
+ */
+export function judgeWaveFormat(header, direct){
+    const view = new DataView(header.buffer, header.byteOffset, header.byteLength);
+    const word = (/** @type {number} */ at)=>(at + 2 <= header.length ? view.getUint16(at, true) : 0);
+    const dword = (/** @type {number} */ at)=>(at + 4 <= header.length ? view.getUint32(at, true) : 0);
+    const plain = word(0);
+    const channels = word(2);
+    const rate = dword(4);
+    const average = dword(8);
+    const block = word(12);
+    const bits = word(14);
+    const extensible = plain === WAVE_FORMAT_EXTENSIBLE;
+    const bad = (/** @type {number} */ result)=>({ result, tag: plain, bits, valid: bits });
+    let tag = plain;
+    let valid = bits;
+    if (extensible)
+    {
+        if (word(16) < 22)
+        {
+            return bad(WAVERR_BADFORMAT);
+        }
+        valid = word(18);
+        const sub = dword(24);
+        tag = SUBTYPE_TAIL.every((byte, index)=>header[28 + index] === byte) && sub <= 0xffff
+            ? sub : -1;
+    }
+    else if (![WAVE_FORMAT_PCM, WAVE_FORMAT_IEEE_FLOAT, WAVE_FORMAT_ALAW, WAVE_FORMAT_MULAW]
+        .includes(plain) || channels > 2)
+    {
+        return bad(WAVERR_BADFORMAT);
+    }
+    /** @param {number} result */
+    const answer = result=>({ result, tag, bits, valid });
+    if (channels === 0 || rate === 0 || block !== Math.floor(channels * bits / 8))
+    {
+        return answer(WAVERR_BADFORMAT);
+    }
+    if (extensible && average !== block * rate)
+    {
+        return answer(direct ? MMSYSERR_INVALPARAM : WAVERR_BADFORMAT);
+    }
+    if (tag === WAVE_FORMAT_PCM)
+    {
+        if (bits % 8 !== 0 || bits === 0 || (bits === 32 && (valid === 0 || valid > bits)))
+        {
+            return answer(WAVERR_BADFORMAT);
+        }
+        if (![8, 16, 24, 32].includes(bits))
+        {
+            return answer(direct ? MMSYSERR_INVALPARAM : WAVERR_BADFORMAT);
+        }
+        return answer(bits === 32 && valid === 24 ? MMSYSERR_NOERROR
+            : valid !== bits ? WAVERR_BADFORMAT : MMSYSERR_NOERROR);
+    }
+    if (tag === WAVE_FORMAT_IEEE_FLOAT)
+    {
+        if (bits % 8 !== 0 || bits === 0 || valid === 0 || valid > bits)
+        {
+            return answer(WAVERR_BADFORMAT);
+        }
+        if (bits !== 32 && bits !== 64)
+        {
+            return answer(direct ? MMSYSERR_INVALPARAM : WAVERR_BADFORMAT);
+        }
+        return answer(bits !== 32 || valid !== bits ? WAVERR_BADFORMAT : MMSYSERR_NOERROR);
+    }
+    if (tag === WAVE_FORMAT_ALAW || tag === WAVE_FORMAT_MULAW)
+    {
+        return answer(direct || extensible || bits !== 8 || valid !== bits
+            ? WAVERR_BADFORMAT : MMSYSERR_NOERROR);
+    }
+    return answer(WAVERR_BADFORMAT);
+}
+
+/**
+ * One G.711 byte as the 16-bit sample it stands for: A-law's or mu-law's
+ * eight-bit logarithmic code expanded (ITU-T G.711), which the mapper does
+ * for a stream of either before the device sees it.
+ *
+ * @param {number} byte @param {boolean} alaw
+ */
+export function expandG711(byte, alaw){
+    if (alaw)
+    {
+        const code = byte ^ 0x55;
+        const exponent = (code >> 4) & 7;
+        const mantissa = code & 0x0f;
+        const magnitude = exponent === 0 ? (mantissa << 4) + 8
+            : ((mantissa << 4) + 0x108) << (exponent - 1);
+        return (code & 0x80) !== 0 ? magnitude : -magnitude;
+    }
+    const code = ~byte & 0xff;
+    const exponent = (code >> 4) & 7;
+    const magnitude = ((((code & 0x0f) << 3) + 0x84) << exponent) - 0x84;
+    return (code & 0x80) !== 0 ? -magnitude : magnitude;
+}
+
 /** PlaySound's flags: where the sound is, and whether the call waits for it. */
 const SND_ASYNC = 0x0001;
 const SND_MEMORY = 0x0004;
@@ -556,6 +678,8 @@ export function createWinmmFunctions(host){
      * @property {boolean} paused
      * @property {any} track           The mixer's source, or null.
      * @property {number} trackBytes   Guest bytes the device had played last time.
+     * @property {number} companded    WAVE_FORMAT_ALAW or _MULAW where the track is given the
+     *                                 16-bit samples a byte expands to; 0 otherwise.
      * @property {import('./notify.js').WaveNotice[]} pending  Owed, not yet told.
      * @property {boolean} delivering  A flush() is walking `pending` right now.
      * @property {number} written      Buffers handed over, ever.
@@ -907,9 +1031,11 @@ export function createWinmmFunctions(host){
             //
             // Taken as a difference rather than as a position because the
             // cursor is relative to the head of the queue, which moves.
-            const played = device.track.playedBytes
+            // A G.711 byte went to the track as two.
+            const played = (device.track.playedBytes
                 ? device.track.playedBytes()
-                : device.track.played() * device.bytesPerSecond / device.track.rate;
+                : device.track.played() * device.bytesPerSecond / device.track.rate)
+                / (device.companded ? 2 : 1);
             device.playedBytes += Math.max(0, played - device.trackBytes);
             device.trackBytes = played;
         }
@@ -1406,7 +1532,20 @@ export function createWinmmFunctions(host){
                     return MMSYSERR_INVALPARAM;
                 }
 
-                const header = host.readMemory(format >>> 0, WAVEFORMATEX.size);
+                const head = host.readMemory(format >>> 0, WAVEFORMATEX.size);
+                // The extension too, where the tag says there is one.
+                const header = u16(head, WAVEFORMATEX.wFormatTag) === WAVE_FORMAT_EXTENSIBLE
+                    ? host.readMemory(format >>> 0, 40) : head;
+                const judged = judgeWaveFormat(header, ((flags >>> 0) & WAVE_FORMAT_DIRECT) !== 0);
+                if (judged.result !== MMSYSERR_NOERROR)
+                {
+                    // An open that fails leaves no handle; a query touches nothing.
+                    if (((flags >>> 0) & WAVE_FORMAT_QUERY) === 0 && (out >>> 0) !== 0)
+                    {
+                        host.writeMemory(out >>> 0, dword(0));
+                    }
+                    return judged.result;
+                }
                 let bytesPerSecond = u32(header, WAVEFORMATEX.nAvgBytesPerSec);
                 if (bytesPerSecond === 0)
                 {
@@ -1421,10 +1560,15 @@ export function createWinmmFunctions(host){
                     return MMSYSERR_INVALPARAM;
                 }
 
-                if (((flags >>> 0) & 0x0001) !== 0)
+                if (((flags >>> 0) & WAVE_FORMAT_QUERY) !== 0)
                 {
-                    return MMSYSERR_NOERROR; // WAVE_FORMAT_QUERY
+                    return MMSYSERR_NOERROR;
                 }
+                // A-law and mu-law reach the device as the 16-bit samples they
+                // expand to; float is told to the mixer, and 24 valid bits in 32
+                // play as 32.
+                const companded = judged.tag === WAVE_FORMAT_ALAW
+                    || judged.tag === WAVE_FORMAT_MULAW ? judged.tag : 0;
 
                 const handle = nextHandle++;
                 const mixer = host.output?.() ?? null;
@@ -1445,8 +1589,10 @@ export function createWinmmFunctions(host){
                     track: mixer?.open({
                         sampleRate: u32(header, WAVEFORMATEX.nSamplesPerSec),
                         channels: u16(header, WAVEFORMATEX.nChannels),
-                        bitsPerSample: u16(header, WAVEFORMATEX.wBitsPerSample) || 16,
+                        bitsPerSample: companded ? 16 : judged.bits,
+                        ...judged.tag === WAVE_FORMAT_IEEE_FLOAT ? { float: true } : {},
                     }) ?? null,
+                    companded,
                     trackBytes: 0,
                     pending: [],
                     delivering: false,
@@ -1516,7 +1662,10 @@ export function createWinmmFunctions(host){
             if (device.track && length > 0)
             {
                 const data = u32(host.readMemory(at + WAVEHDR.lpData, 4), 0);
-                device.track.write(host.readMemory(data, length));
+                const bytes = host.readMemory(data, length);
+                device.track.write(device.companded ? Uint8Array.from(new Uint8Array(
+                    Int16Array.from(bytes, byte=>expandG711(byte,
+                        device.companded === WAVE_FORMAT_ALAW)).buffer)) : bytes);
             }
             return MMSYSERR_NOERROR;
         }),

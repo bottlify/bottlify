@@ -1141,6 +1141,10 @@ async()=>{
         [VK_TAB, [VK_CONTROL], 1], [VK_TAB, [VK_CONTROL, VK_SHIFT], 0]];
     for (const [key, held, page] of steps)
     {
+        // The focus off the page's multi-line edit, which wants every key
+        // itself (DLGC_WANTALLKEYS): with it focused, the sheet leaves the key
+        // to it.
+        context.fns.SetFocus.handler([context.fns.GetDlgItem.handler([hwnd, IDCANCEL])]);
         context.heard.length = 0;
         assert.equal(await context.press(hwnd, key, held, true), 1, `key ${key} taken`);
         assert.equal(active(), page, `key ${key} with ${held}`);

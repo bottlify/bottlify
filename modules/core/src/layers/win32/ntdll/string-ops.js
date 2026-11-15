@@ -397,6 +397,25 @@ export function createStringOperations(host){
             handler: ([character])=>upperByte(character & 0xff),
         },
 
+        /**
+         * WCHAR RtlAnsiCharToUnicodeChar(PUCHAR *SourceCharacter)
+         *
+         * The ANSI character the pointer points at, as a WCHAR, and the
+         * pointer moved past it: one byte, the ANSI page being single-byte.
+         */
+        RtlAnsiCharToUnicodeChar: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([pointer])=>{
+                const at = readU32(pointer >>> 0);
+                const unit = decodeAnsi(host.readMemory(at, 1)).charCodeAt(0);
+                const next = at + 1 >>> 0;
+                host.writeMemory(pointer >>> 0,
+                    Uint8Array.of(next & 0xff, next >>> 8 & 0xff, next >>> 16 & 0xff, next >>> 24));
+                return unit;
+            },
+        },
+
         /** VOID RtlUpperString(PSTRING Destination, const STRING *Source) */
         RtlUpperString: {
             argBytes: 8,

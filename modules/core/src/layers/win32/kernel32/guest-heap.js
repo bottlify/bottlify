@@ -1172,14 +1172,17 @@ export function reallocCode(p, at, trap){
 /**
  * GlobalAlloc as guest code: the process heap's HeapAlloc, as on Windows NT,
  * with GMEM_ZEROINIT turned into HEAP_ZERO_MEMORY; a request for no bytes,
- * which the host answers with a block of one, is the host's. A main thread
- * that allocates and frees a few thousand times a second, on another
+ * which the host answers with a block of one, and a moveable one, which is an
+ * entry of the host's handle table (`moveable.js`), are the host's. A main
+ * thread that allocates and frees a few thousand times a second, on another
  * executor, waited each time for the process's executor to answer.
  *
  *     mov eax, [esp+8]            ; bytes
  *     test eax, eax
  *     jz slow
  *     mov ecx, [esp+4]
+ *     test cl, GMEM_MOVEABLE
+ *     jnz slow
  *     and ecx, GMEM_ZEROINIT
  *     shr ecx, 3                  ; HEAP_ZERO_MEMORY
  *     push eax
@@ -1195,32 +1198,37 @@ export function reallocCode(p, at, trap){
  * @returns {Uint8Array}
  */
 export function globalAllocCode(at, trap, heap, alloc){
-    const slow = 33;
+    const slow = 38;
     return new Uint8Array([
         0x8b, 0x44, 0x24, 0x08,                              // 0: mov eax, [esp+8]
         0x85, 0xc0,                                          // 4: test eax, eax
         0x74, slow - 8,                                      // 6: jz slow
         0x8b, 0x4c, 0x24, 0x04,                              // 8: mov ecx, [esp+4]
-        0x83, 0xe1, 0x40,                                    // 12: and ecx, GMEM_ZEROINIT
-        0xc1, 0xe9, 0x03,                                    // 15: shr ecx, 3
-        0x50,                                                // 18: push eax
-        0x51,                                                // 19: push ecx
-        0x68, ...dword(heap),                                // 20: push heap
-        0xe8, ...dword(alloc - (at + 30)),                   // 25: call alloc
-        0xc2, 0x08, 0x00,                                    // 30: ret 8
-        0xe9, ...dword(trap - (at + slow + 5)),              // 33: jmp trap
+        0xf6, 0xc1, 0x02,                                    // 12: test cl, GMEM_MOVEABLE
+        0x75, slow - 17,                                     // 15: jnz slow
+        0x83, 0xe1, 0x40,                                    // 17: and ecx, GMEM_ZEROINIT
+        0xc1, 0xe9, 0x03,                                    // 20: shr ecx, 3
+        0x50,                                                // 23: push eax
+        0x51,                                                // 24: push ecx
+        0x68, ...dword(heap),                                // 25: push heap
+        0xe8, ...dword(alloc - (at + 35)),                   // 30: call alloc
+        0xc2, 0x08, 0x00,                                    // 35: ret 8
+        0xe9, ...dword(trap - (at + slow + 5)),              // 38: jmp trap
     ]);
 }
 
 /**
  * GlobalFree as guest code: the process heap's HeapFree, answered NULL when it
- * took the block back; a block it does not -- another heap's, or not a block --
- * goes to the host's GlobalFree as the call was made, which frees any block
- * and answers a failure with the handle back.
+ * took the block back; a moveable handle (an entry of the host's table, four
+ * past an alignment of eight) and a block it does not take -- another heap's,
+ * or not a block -- go to the host's GlobalFree as the call was made, which
+ * frees any block and answers a failure with the handle back.
  *
  *     mov eax, [esp+4]
  *     test eax, eax
  *     jz none                     ; NULL: NULL
+ *     test al, 4
+ *     jnz slow                    ; a moveable handle
  *     push eax
  *     push 0
  *     push heap
@@ -1238,20 +1246,22 @@ export function globalAllocCode(at, trap, heap, alloc){
  * @returns {Uint8Array}
  */
 export function globalFreeCode(at, trap, heap, free){
-    const none = 25;
-    const slow = 30;
+    const none = 29;
+    const slow = 34;
     return new Uint8Array([
         0x8b, 0x44, 0x24, 0x04,                              // 0: mov eax, [esp+4]
         0x85, 0xc0,                                          // 4: test eax, eax
         0x74, none - 8,                                      // 6: jz none
-        0x50,                                                // 8: push eax
-        0x6a, 0x00,                                          // 9: push 0
-        0x68, ...dword(heap),                                // 11: push heap
-        0xe8, ...dword(free - (at + 21)),                    // 16: call free
-        0x85, 0xc0,                                          // 21: test eax, eax
-        0x74, slow - 25,                                     // 23: jz slow
-        0x31, 0xc0,                                          // 25: xor eax, eax
-        0xc2, 0x04, 0x00,                                    // 27: ret 4
-        0xe9, ...dword(trap - (at + slow + 5)),              // 30: jmp trap
+        0xa8, 0x04,                                          // 8: test al, 4
+        0x75, slow - 12,                                     // 10: jnz slow
+        0x50,                                                // 12: push eax
+        0x6a, 0x00,                                          // 13: push 0
+        0x68, ...dword(heap),                                // 15: push heap
+        0xe8, ...dword(free - (at + 25)),                    // 20: call free
+        0x85, 0xc0,                                          // 25: test eax, eax
+        0x74, slow - 29,                                     // 27: jz slow
+        0x31, 0xc0,                                          // 29: xor eax, eax
+        0xc2, 0x04, 0x00,                                    // 31: ret 4
+        0xe9, ...dword(trap - (at + slow + 5)),              // 34: jmp trap
     ]);
 }
