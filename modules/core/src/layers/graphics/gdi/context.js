@@ -33,8 +33,8 @@
 
 import { BS_SOLID, OPAQUE, createPattern, solidPattern } from './brush.js';
 import {
-    BLACKONWHITE, STRETCH_MODES, alphaBlend, bitBlt, patBlt, sourceConversion, stretchBlt,
-    transparentBlt,
+    BLACKONWHITE, STRETCH_MODES, WHITEONBLACK, alphaBlend, bitBlt, patBlt, sourceConversion,
+    stretchBlt, transparentBlt,
 } from './blit.js';
 import { DSTINVERT, PATCOPY, PATINVERT, R2_COPYPEN } from './rop.js';
 import {
@@ -594,17 +594,38 @@ export function createGdiDrawing(options = {}){
             {
                 return false;
             }
+            // A negative extent runs back from its origin and takes the
+            // origin's own pixel with it: (1, -2) is pixels 1 and 0, where the
+            // blit's rectangles read it as 0 and -1 (Wine's test_StretchBlt).
+            // StretchDIBits keeps the other reading for its source, as there.
+            const from0 = (/** @type {number} */ origin, /** @type {number} */ extent)=>
+                (extent < 0 ? origin + 1 : origin);
+            const left = from0(x, width);
+            const top = from0(y, height);
+            const srcLeft = from0(srcX, srcWidth);
+            const srcTop = from0(srcY, srcHeight);
+            // Shrunk to a single pixel by ANDing or ORing, a source running
+            // forward gives up its last pixel to the fold: two pixels into one
+            // is the first alone, four the first three (Wine's
+            // test_StretchBlt). Running back it folds whole, as StretchDIBits
+            // folds whole either way.
+            const mode = stretchModeOf(context);
+            const folds = mode === BLACKONWHITE || mode === WHITEONBLACK;
+            const fold = (/** @type {number} */ dest, /** @type {number} */ extent)=>
+                (folds && Math.abs(dest) === 1 && extent > 1 ? extent - 1 : extent);
+            const across = fold(width, srcWidth);
+            const down = fold(height, srcHeight);
             return clipped(context, ()=>stretchBlt({
                 dest: context.surface,
                 clip: context.clip,
-                x, y, width, height,
+                x: left, y: top, width, height,
                 src: from.surface,
-                srcX, srcY, srcWidth, srcHeight,
+                srcX: srcLeft, srcY: srcTop, srcWidth: across, srcHeight: down,
                 rop,
-                mode: stretchModeOf(context),
+                mode,
                 pattern: patternOf(context),
                 convert: conversionOf(context, from),
-            }), { x: x - srcX, y: y - srcY });
+            }), { x: left - srcLeft, y: top - srcTop });
         },
 
         /**

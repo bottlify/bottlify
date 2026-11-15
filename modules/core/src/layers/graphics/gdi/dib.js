@@ -301,6 +301,18 @@ export function decodeDib(image, area){
                 words[line + x] = ((bits[at + 2] << 16) | (bits[at + 1] << 8) | bits[at]) >>> 0;
             }
         }
+        else if (bitCount === 32 && header.compression !== BI_BITFIELDS)
+        {
+            // A BI_RGB pixel's fourth byte is no channel, yet it is the
+            // pixel's: a raster operation works on the whole word and a copy
+            // into a thirty-two-bit bitmap keeps it, as an alpha a later
+            // AlphaBlend reads.
+            for (let x = left, at = row + (left * 4); x < right; x++, at += 4)
+            {
+                words[line + x] = (bits[at] | (bits[at + 1] << 8) | (bits[at + 2] << 16)
+                    | (bits[at + 3] << 24)) >>> 0;
+            }
+        }
         else if (bitCount === 32)
         {
             for (let x = left, at = row + (left * 4); x < right; x++, at += 4)

@@ -337,6 +337,28 @@ test('the stretch mode is per context and reaches StretchBlt', ()=>{
     assert.equal(drawing.getPixel(HDC, 0, 0), 0x000000ff, 'and now only the first survives');
 });
 
+test('StretchBlt reads a negative extent from its origin\'s own pixel, and shrinking to one'
+    + ' pixel by a fold drops the last source pixel', ()=>{
+    // Wine's test_StretchBlt: (1, -2) is pixels 1 and 0; four pixels ANDed
+    // into one are the first three.
+    const { drawing, surface } = fixture({ width: 4, height: 4 });
+    const source = createSurface({ width: 4, height: 1 });
+    [0x0000ff00, 0x0000f0f0, 0x0000cccc, 0x0000aaaa]
+        .forEach((pixel, x)=>source.write(x, 0, pixel));
+    drawing.bind(SOURCE_HDC, source);
+    drawing.stretchBlt(HDC, 0, 0, 2, 1, SOURCE_HDC, 1, 0, -2, 1, SRCCOPY);
+    assert.equal(surface.read(0, 0), 0x0000f0f0, 'mirrored: pixel 1 first');
+    assert.equal(surface.read(1, 0), 0x0000ff00, 'then pixel 0');
+    drawing.stretchBlt(HDC, 0, 1, 1, 1, SOURCE_HDC, 0, 0, 4, 1, SRCCOPY);
+    assert.equal(surface.read(0, 1), 0x0000ff00 & 0x0000f0f0 & 0x0000cccc);
+    drawing.stretchBlt(HDC, 0, 2, 1, 1, SOURCE_HDC, 2, 0, -2, 1, SRCCOPY);
+    assert.equal(surface.read(0, 2), 0x0000f0f0 & 0x0000cccc,
+        'running back it folds whole');
+    drawing.setStretchBltMode(HDC, COLORONCOLOR);
+    drawing.stretchBlt(HDC, 0, 3, 2, 1, SOURCE_HDC, 0, 0, 4, 1, SRCCOPY);
+    assert.equal(surface.read(1, 3), 0x0000cccc, 'two wide, the boxes are as ever');
+});
+
 test('BitBlt between two bound contexts moves pixels between their surfaces', ()=>{
     const { drawing, surface } = fixture();
     const source = createSurface({ width: 4, height: 4 });
