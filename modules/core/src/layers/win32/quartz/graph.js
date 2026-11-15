@@ -56,6 +56,10 @@ import { parseGuid } from '../ole32/guid.js';
 import { createStreaming } from './stream.js';
 import { createSystemClock } from './clock.js';
 import { createMemoryAllocator } from './allocator.js';
+import { IAM_FILTER_DATA_SLOTS, IID_IAM_FILTER_DATA, createFilterMapper } from './mapper.js';
+import {
+    CLSID_SYSTEM_DEVICE_ENUM, createDeviceEnumeration,
+} from '../devenum/devenum.js';
 import { CLSID_MEMORY_ALLOCATOR, CLSID_SYSTEM_CLOCK } from './interfaces.js';
 
 /**
@@ -347,6 +351,11 @@ function newGraphState(){
  *           Kernel events by handle: the one IMediaEvent::GetEventHandle hands
  *           out, manual-reset and signalled while the queue holds an event.
  *           Absent, GetEventHandle refuses as before.
+ * @property {(import('../devenum/devenum.js').DevEnumHost
+ *     & { store: import('../devenum/devenum.js').FilterStore }) | undefined} [devices]
+ *           What the filter mappers and the device enumerator keep their
+ *           registrations in and hand them out through. Absent, a registration
+ *           is accepted and forgotten, and nothing is enumerated.
  * @property {import('./clock.js').ClockHost | undefined} [clock]
  *           The machine's clock and its timers, which CLSID_SystemClock is built
  *           on. Absent, the class is not registered, as on a machine without it.
@@ -363,6 +372,11 @@ function newGraphState(){
  * @param {QuartzHost} host
  */
 export function createQuartz(host){
+    // The mappers' registrations and the device enumerator over them (`mapper.js`).
+    const devices = host.devices
+        ? createDeviceEnumeration(host.devices, host.devices.store) : null;
+    const mapping = host.devices && devices
+        ? createFilterMapper(host.devices, host.devices.store, devices) : null;
     /** @param {number} address @param {number} value @returns {number} an HRESULT */
     const writeLong = (address, value)=>{
         if ((address >>> 0) === 0)
@@ -1739,10 +1753,21 @@ export function createQuartz(host){
         };
     };
 
-    /** @returns {import('../ole32/objects.js').ComClassDefinition} */
+    /**
+     * The filter mapper's class: both mappers, the third's device enumerator,
+     * and IAMFilterData, as quartz's mapper answers for them.
+     *
+     * @returns {import('../ole32/objects.js').ComClassDefinition}
+     */
     const filterMapper2 = ()=>({
         state: null,
-        interfaces: [describe(IID_IFILTER_MAPPER2, IFILTER_MAPPER2_SLOTS, filterMapper)],
+        aggregatable: true,
+        interfaces: [
+            describe(IID_IFILTER_MAPPER2, IFILTER_MAPPER2_SLOTS, filterMapper),
+            describe(IID_IFILTER_MAPPER3, IFILTER_MAPPER3_SLOTS, filterMapper),
+            describe(IID_IFILTER_MAPPER, IFILTER_MAPPER_SLOTS, firstMapper),
+            describe(IID_IAM_FILTER_DATA, IAM_FILTER_DATA_SLOTS, mapping?.filterData ?? {}),
+        ],
     });
 
     /**
@@ -1776,10 +1801,16 @@ export function createQuartz(host){
         UnregisterFilterInstance: ()=>S_OK,
         UnregisterPin: ()=>S_OK,
     };
+    if (mapping)
+    {
+        Object.assign(filterMapper, mapping.mapper2);
+        Object.assign(firstMapper, mapping.mapper1);
+    }
 
     /** @returns {import('../ole32/objects.js').ComClassDefinition} */
     const filterMapper1 = ()=>({
         state: null,
+        aggregatable: true,
         interfaces: [describe(IID_IFILTER_MAPPER, IFILTER_MAPPER_SLOTS, firstMapper)],
     });
 
@@ -1866,7 +1897,8 @@ export function createQuartz(host){
         };
     };
 
-    return { filterGraph, filterMapper1, filterMapper2, tick, film };
+    return { filterGraph, filterMapper1, filterMapper2, systemDeviceEnum: devices?.systemDeviceEnum,
+        tick, film };
 }
 
 /**
@@ -1897,6 +1929,10 @@ export function registerQuartzClasses(registry, host){
     if (host.clock)
     {
         registry.registerClass(CLSID_SYSTEM_CLOCK, createSystemClock(host.clock));
+    }
+    if (quartz.systemDeviceEnum)
+    {
+        registry.registerClass(CLSID_SYSTEM_DEVICE_ENUM, quartz.systemDeviceEnum);
     }
     if (host.stream)
     {

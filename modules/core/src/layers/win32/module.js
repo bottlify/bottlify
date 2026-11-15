@@ -185,6 +185,8 @@ import { createNtdllFunctions } from './ntdll/functions.js';
 import { longFloatResults } from './msvcrt/float.js';
 import { createComObject, createComRegistry } from './ole32/objects.js';
 import { registerQuartzClasses } from './quartz/graph.js';
+import { createFilterStore } from './devenum/devenum.js';
+import { parseGuid } from './ole32/guid.js';
 import { createMfplatFunctions } from './mfplat/functions.js';
 import { createUiaFunctions } from './uiautomationcore/functions.js';
 import { createDxva2Functions } from './dxva2/functions.js';
@@ -1370,6 +1372,22 @@ export function createWin32Module(){
                         try { kernel.handles.close(handle); }
                         catch (e){ void e; }
                     },
+                },
+                // The filter mappers' registrations and the device enumerator
+                // over them; a moniker binds through CoCreateInstance and hands
+                // its names out as oleaut32's BSTRs.
+                devices: {
+                    store: createFilterStore(),
+                    readU32: address=>memory.readU32(address),
+                    readWideString: (address, maxLength)=>readWideString(address, maxLength),
+                    writeMemory,
+                    allocate: bytes=>heap.allocate(bytes),
+                    publish: (object, iid)=>bridge.publishInterface(object, iid),
+                    allocateString: text=>lent(new Uint8Array(Uint16Array.from(
+                        [...text, '\0'].map(char=>char.charCodeAt(0))).buffer),
+                    at=>libraries['OLEAUT32.dll'].SysAllocString.handler([at])),
+                    createInstance: (clsid, iid, out)=>lent(/** @type {Uint8Array} */ (parseGuid(clsid)), at=>
+                        libraries['ole32.dll'].CoCreateInstance.handler([at, 0, 1, iid, out])),
                 },
                 // CLSID_SystemClock: the machine's millisecond clock, and an
                 // advise as a kernel timer the scheduler honours.
