@@ -242,6 +242,9 @@ const WM_COPY = 0x0301;
 const WM_PASTE = 0x0302;
 const WM_CLEAR = 0x0303;
 const WM_UNDO = 0x0304;
+/** The control characters an edit answers as commands: Ctrl+C, V, X and Z. */
+const EDIT_CONTROL_CHARACTERS = new Map([[0x03, WM_COPY], [0x16, WM_PASTE], [0x18, WM_CUT],
+    [0x1a, WM_UNDO]]);
 const EM_EMPTYUNDOBUFFER = 0x00cd;
 const EM_GETFIRSTVISIBLELINE = 0x00ce;
 const EM_SETREADONLY = 0x00cf;
@@ -1922,6 +1925,52 @@ export function createControlProcedures(host){
     };
 
     /**
+     * Enter, Escape and Tab reaching a multi-line edit in a dialog, which
+     * asked for every key: Enter without ES_WANTRETURN goes to the dialog's
+     * default button (focus on it, then the key posted to it), Escape closes
+     * the dialog, Tab moves to the next or previous control. Null for any
+     * other key.
+     *
+     * @param {any} record @param {number} key @param {unknown} thread
+     * @returns {number | Promise<number> | null}
+     */
+    const dialogKeyOfEdit = (record, key, thread)=>{
+        const parent = record.parent;
+        if (key === VK_ESCAPE)
+        {
+            host.post({ hwnd: parent, message: WM_CLOSE, wParam: 0, lParam: 0 });
+            return 0;
+        }
+        if (key === VK_TAB)
+        {
+            return after(host.send(parent, WM_NEXTDLGCTL, host.keyDown(VK_SHIFT) ? 1 : 0, 0,
+                thread), ()=>0);
+        }
+        if (key !== VK_RETURN || (record.style & ES_WANTRETURN) !== 0)
+        {
+            return null;
+        }
+        return after(host.send(parent, DM_GETDEFID, 0, 0, thread), answer=>{
+            if ((answer >>> 16) !== DC_HASDEFID)
+            {
+                return 0;
+            }
+            const owner = host.live(parent);
+            const button = owner ? host.children(owner)
+                .find(child=>(child.id & 0xffff) === (answer & 0xffff)) : undefined;
+            if (!button)
+            {
+                return 0;
+            }
+            return after(host.send(parent, WM_NEXTDLGCTL, button.hwnd, 1, thread), ()=>{
+                host.post({ hwnd: button.hwnd, message: WM_KEYDOWN, wParam: VK_RETURN,
+                    lParam: 0 });
+                return 0;
+            });
+        });
+    };
+
+    /**
      * A character arriving at an editing field: an edit's, or the field of an
      * editable combo box. Backspace narrows or deletes the selection, a return
      * belongs to a multi-line edit that asked for one, control characters are
@@ -1946,16 +1995,25 @@ export function createControlProcedures(host){
             }
             return replaceSelection(record, '', thread, codes);
         }
-        if (character === VK_RETURN)
+        // Return and tab are text to a multi-line edit, whatever its
+        // ES_WANTRETURN: that style says what the edit does with the key in a
+        // dialog (WM_KEYDOWN), not with the character.
+        // In a dialog the keys themselves did the work - moved the focus,
+        // pressed the default button - and the character they translate to
+        // is not typed.
+        const inDialog = state.dialogMode === true;
+        if (inDialog && multiline(record) && (character === VK_TAB
+            || (character === VK_RETURN && (record.style & ES_WANTRETURN) === 0)))
         {
-            if (!multiline(record) || (record.style & ES_WANTRETURN) === 0)
-            {
-                return 0;
-            }
-            rememberUndo(record, true);
-            return replaceSelection(record, '\r\n', thread, codes);
+            return 0;
         }
-        if (character < VK_SPACE || character === VK_TAB || character === VK_ESCAPE)
+        if ((character === VK_RETURN || character === VK_TAB) && multiline(record))
+        {
+            rememberUndo(record, true);
+            return replaceSelection(record, character === VK_RETURN ? '\r\n' : '\t',
+                thread, codes);
+        }
+        if (character < VK_SPACE || character === VK_ESCAPE || character === 0x7f)
         {
             return 0;
         }
@@ -2153,9 +2211,17 @@ export function createControlProcedures(host){
             case WM_ERASEBKGND:
                 return 1;
             case WM_GETDLGCODE:
+                // Asked with the message the dialog manager is about to
+                // handle, the edit knows it lives in a dialog, and a
+                // multi-line one then answers Enter, Escape and Tab itself
+                // (WM_KEYDOWN below). It wants every key whatever
+                // ES_WANTRETURN says.
+                if ((message.lParam >>> 0) !== 0)
+                {
+                    state.dialogMode = true;
+                }
                 return DLGC_WANTCHARS | DLGC_WANTARROWS | DLGC_HASSETSEL
-                    | (multiline(record) && (record.style & ES_WANTRETURN) !== 0
-                        ? DLGC_WANTALLKEYS : 0);
+                    | (multiline(record) ? DLGC_WANTALLKEYS : 0);
             case WM_SETFOCUS:
                 takeCaret(record);
                 host.invalidate(record);
@@ -2178,12 +2244,29 @@ export function createControlProcedures(host){
                 host.invalidate(record);
                 return after(host.setFocus(record.hwnd, thread), ()=>0);
             }
-            case WM_CHAR:
-                return editCharacter(record, message.wParam & 0xffff, thread,
-                    EDIT_NOTICES, readOnly());
+            case WM_CHAR: {
+                // Ctrl+C, V, X and Z are the clipboard's and undo's, sent to the
+                // edit as their own messages; every character answers 1.
+                const character = message.wParam & 0xffff;
+                const command = EDIT_CONTROL_CHARACTERS.get(character);
+                if (command !== undefined)
+                {
+                    return after(host.send(record.hwnd, command, 0, 0, thread), ()=>1);
+                }
+                return after(editCharacter(record, character, thread, EDIT_NOTICES, readOnly()),
+                    ()=>1);
+            }
             case WM_KEYDOWN: {
                 const key = message.wParam & 0xff;
                 const rows = editGridRows(record);
+                if (state.dialogMode === true && multiline(record) && record.parent)
+                {
+                    const answered = dialogKeyOfEdit(record, key, thread);
+                    if (answered !== null)
+                    {
+                        return answered;
+                    }
+                }
                 switch (key){
                     case VK_LEFT:
                         moveCaret(record, state.selEnd - 1);
@@ -4163,9 +4246,9 @@ export function createControlProcedures(host){
             // program names another; the dialog manager keeps it on the
             // dialog's record, where making the dialog sets it.
             case DM_GETDEFID:
-                return record.defaultId !== undefined
-                    ? ((DC_HASDEFID << 16) | record.defaultId & 0xffff) >>> 0
-                    : 0;
+                // A dialog starts with IDOK as its default id, push button or
+                // none: Enter in a dialog with no default button is IDOK.
+                return ((DC_HASDEFID << 16) | (record.defaultId ?? IDOK) & 0xffff) >>> 0;
             case DM_SETDEFID: {
                 // The style moves with it: off the old default, onto the new
                 // one if it is a push button.

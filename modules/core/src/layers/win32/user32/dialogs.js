@@ -46,7 +46,7 @@
  */
 
 import { ANY_WINDOW, WM_QUIT, threadIdOf } from './messages.js';
-import { readMessage, readRect, userLayouts, writeRect } from './structs.js';
+import { readMessage, readRect, userLayouts, writeMessage, writeRect } from './structs.js';
 import { WS_CAPTION, WS_VISIBLE, frameOf } from './frame.js';
 import { createTabWalk } from './tabwalk.js';
 import { readText, translated, writeText } from './unicode.js';
@@ -913,7 +913,8 @@ export function createDialogFunctions(options){
      * the focus asked to see the key itself.
      *
      * @param {number} dialog
-     * @param {{ hwnd: number, message: number, wParam: number, lParam: number }} message
+     * @param {{ hwnd: number, message: number, wParam: number, lParam: number,
+     *     time?: number, x?: number, y?: number }} message
      * @param {unknown} [thread]
      * @returns {number | Promise<number> | null}  null when the message is not
      *     the dialog manager's; otherwise what was done with it.
@@ -934,8 +935,24 @@ export function createDialogFunctions(options){
             return null;
         }
         const focused = host.focus();
+        // The control is asked with the message itself, as Windows asks it:
+        // a control that answers its own keys in a dialog (a multi-line edit)
+        // learns from that lParam that it is in one.
+        const layouts = userLayouts(host.pointerSize);
+        const lent = focused !== 0 && within(focused, dialog)
+            ? host.allocate?.(layouts.MSG.SIZE) ?? 0 : 0;
+        if (lent !== 0)
+        {
+            writeMessage(host, lent, { x: 0, y: 0, time: 0, ...message }, layouts);
+        }
         const asked = focused !== 0 && within(focused, dialog)
-            ? host.send(focused, WM_GETDLGCODE, key, 0, thread)
+            ? after(host.send(focused, WM_GETDLGCODE, key, lent, thread), code=>{
+                if (lent !== 0)
+                {
+                    host.release?.(lent);
+                }
+                return code;
+            })
             : 0;
         return after(asked, code=>{
             const wants = code >>> 0;
