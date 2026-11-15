@@ -11505,11 +11505,19 @@ export async function createApp(options){
      * others to end, up to `MACHINE_WAIT_MS`; past that it is built on what the
      * machine has, and a start that cannot finish is the child failing.
      *
-     * @param {SpareMemory | null} reused  the gone process's memory it is built in, if any
+     * Before it waits, the memories of gone processes go to make room: the
+     * ones kept for the next process, then the one this process took - it is
+     * built in a memory of its own instead. Kept, they held the room the
+     * processes taking them waited for: four children, each in a memory a
+     * child before them was given 100 MiB in, waited on each other and none
+     * started.
+     *
+     * @param {{ reused: SpareMemory | null }} start  the gone process's memory it
+     *     is built in, if any; null once that is let go for room
      * @param {number} holder  the process's holder
      * @returns {Promise<{ left: number } | undefined>}
      */
-    const roomForProcess = async(reused, holder)=>{
+    const roomForProcess = async(start, holder)=>{
         if (machineMemory === null)
         {
             return undefined;
@@ -11520,9 +11528,21 @@ export async function createApp(options){
         // what it is given: its images, its first stack and heap. And the
         // engine's own part of a process (`PROCESS_ENGINE_BYTES`), held as long
         // as it stands.
-        const wanted = (byLength
-            ? Math.max(0, START_BYTES - (reused?.memory.buffer.byteLength ?? 0))
+        const wantedNow = ()=>(byLength
+            ? Math.max(0, START_BYTES - (start.reused?.memory.buffer.byteLength ?? 0))
             : PROCESS_TABLES_BYTES) + START_SLACK_BYTES;
+        const fits = ()=>view.fits(wantedNow() + PROCESS_ENGINE_BYTES);
+        while (!fits() && spareMemories.length > 0)
+        {
+            dropSpare(spareMemories.shift());
+        }
+        if (!fits() && start.reused)
+        {
+            spareToRun(start.reused, holder);
+            dropSpare(start.reused);
+            start.reused = null;
+        }
+        const wanted = wantedNow();
         const waitMs = options.machineWaitMs ?? MACHINE_WAIT_MS;
         const until = Date.now() + waitMs;
         while (!(view.fits(wanted + PROCESS_ENGINE_BYTES)
@@ -11590,20 +11610,21 @@ export async function createApp(options){
         const holder = machineMemory === null ? RUN_HOLDER
             : given ?? machineMemory.claim();
         spareToProcess(reusedMemory, holder);
-        const memoryCredit = await roomForProcess(reusedMemory, holder).catch(e=>{
+        const start = { reused: reusedMemory };
+        const memoryCredit = await roomForProcess(start, holder).catch(e=>{
             // No room: the memory it was to run in goes back to the run.
             if (given === undefined)
             {
-                releaseHolder(holder, [reusedMemory]);
+                releaseHolder(holder, [start.reused]);
             }
-            else if (reusedMemory)
+            else if (start.reused)
             {
-                spareToRun(reusedMemory, holder);
-                keepSpare(reusedMemory);
+                spareToRun(start.reused, holder);
+                keepSpare(start.reused);
             }
             throw e;
         });
-        const built = await buildApp(machine({ ...extra, reusedMemory, memoryCredit,
+        const built = await buildApp(machine({ ...extra, reusedMemory: start.reused, memoryCredit,
             ...machineMemory === null ? {} : { memoryHolder: holder },
             com: { table: classTable, process },
             // With concurrency a child runs from CreateProcess on, beside

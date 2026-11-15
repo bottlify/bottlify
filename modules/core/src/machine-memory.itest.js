@@ -113,15 +113,18 @@ function countMemories(t){
  * Runs the parent, and answers each child's exit code.
  *
  * @param {{ budget?: SharedArrayBuffer | ArrayBuffer, machineMemory?: number,
- *     cores?: number, concurrency?: 1 | 2, guestCharge?: 'length' | 'given' }} how
+ *     cores?: number, concurrency?: 1 | 2, guestCharge?: 'length' | 'given',
+ *     machineWaitMs?: number }} how
  */
-async function runParent({ budget, machineMemory, cores = 1, concurrency = 1, guestCharge }){
+async function runParent(how){
+    const { budget, machineMemory, cores = 1, concurrency = 1, guestCharge,
+        machineWaitMs = 5000 } = how;
     const app = await createApp({
         executable: parentOf(4, 2),
         imagePath: 'C:\\App\\parent.exe',
         memorySize: MEMORY_SIZE,
         // A child the machine has no room for fails to start after this, not ten minutes.
-        machineWaitMs: 5000,
+        machineWaitMs,
         cpu: { cores, ...guestCharge ? { guestCharge } : {} },
         concurrency,
         ...budget ? { memoryBudget: budget } : {},
@@ -174,18 +177,37 @@ for (const { guestCharge, cores, concurrency } of CASES)
     });
 }
 
+/**
+ * The machine each way of counting is run on: by length a child's memory is
+ * its whole 512 MiB, and none has room to start; by what it is given, one
+ * child of four has room for its block and the rest are refused theirs. At
+ * 640 MiB four children by what they were given all but fitted, and whether
+ * one was refused hung on when the round before let its memory go.
+ */
+const MACHINE = { length: 640 * MiB, given: 384 * MiB };
 for (const guestCharge of CHARGES)
 {
     test(`a run made with machineMemory reports it, and a block past it is refused, not a fault`
     + ` (guests counted by ${guestCharge})`,
     { timeout: 300_000 }, async()=>{
-        const { codes, diagnostics } = await runParent({ machineMemory: 640 * MiB,
-            guestCharge });
+        const limit = MACHINE[guestCharge];
+        const { codes, diagnostics } = await runParent({ machineMemory: limit, guestCharge,
+            // Each child of a round waits for the one before it to end.
+            ...guestCharge === 'given' ? { machineWaitMs: 60_000 } : {} });
+        assert.equal(codes.length, 8, 'every child ran');
         assert.ok(codes.some(code=>code === 1 || code === NO_MEMORY),
             `a child was told there is no memory: ${codes}`);
+        if (guestCharge === 'given')
+        {
+            // The second round starts in the memories of the first, which the
+            // machine counts as given: kept for the children that took them,
+            // they held the room those children waited for, and none started.
+            assert.ok(codes.every(code=>code === 0 || code === 1),
+                `every child started, and had its block or was refused it: ${codes}`);
+        }
         const cpu = diagnostics.find((/** @type {any} */ table)=>table.name === 'cpu');
         const machine = cpu?.metrics?.machineMemory;
-        assert.ok(machine && machine.limit === 640 * MiB, JSON.stringify(machine));
+        assert.ok(machine && machine.limit === limit, JSON.stringify(machine));
         assert.ok(machine.peak <= machine.limit);
     });
 }
