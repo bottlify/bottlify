@@ -126,3 +126,11 @@ test('an append of nothing succeeds, and one that does not fit changes nothing',
     assert.equal(call('RtlAppendStringToString', DEST, SOURCE), STATUS.BUFFER_TOO_SMALL);
     assert.equal(view.getUint16(DEST, true), 4);
 });
+
+test('an ANSI character becomes its WCHAR and the pointer moves past it', ()=>{
+    const { view, call } = machine();
+    view.setUint8(TEXT, 0x80);
+    view.setUint32(OUT, TEXT, true);
+    assert.equal(call('RtlAnsiCharToUnicodeChar', OUT), 0x20ac, 'the euro sign of page 1252');
+    assert.equal(view.getUint32(OUT, true), TEXT + 1);
+});

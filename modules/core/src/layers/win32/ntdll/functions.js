@@ -39,6 +39,7 @@ import { createEnvironmentFunctions } from './environment.js';
 import { LOADER_ENTRIES, createLoaderFunctions } from './loader.js';
 import { POOL_ENTRIES, createPoolFunctions } from './pool.js';
 import { createStringOperations } from './string-ops.js';
+import { createNtdllCrt } from './crt.js';
 import { MEMORY_ENTRIES, createMemoryFunctions } from './memory.js';
 import { createDebugFunctions } from './debug.js';
 import { createProcessFunctions } from './process.js';
@@ -464,6 +465,8 @@ export function createNtdllFunctions(host){
         // advapi32's is ntdll's on Windows (advapi32.spec forwards it).
         ...host.advapi32?.IsTextUnicode ? { RtlIsTextUnicode: host.advapi32.IsTextUnicode } : {},
         ...alias(crt, Object.fromEntries(CRT_EXPORTS.map(name=>[name, name]))),
+        // Where ntdll's own runtime answers otherwise than msvcrt (`crt.js`).
+        ...createNtdllCrt({ readMemory: host.readMemory, writeMemory: host.writeMemory }),
 
         ...createCountedStringFunctions({
             readMemory: host.readMemory,
