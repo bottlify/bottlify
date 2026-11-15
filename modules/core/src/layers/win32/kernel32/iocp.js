@@ -119,6 +119,8 @@ const HANG_AFTER_MS = 10_000;
  * @property {() => any} currentThread
  * @property {(thread?: any) => any} park        Stops a thread; returns the parked token.
  * @property {(handle: number) => void} signalEvent
+ * @property {(handle: number) => boolean} [synchronous]  a handle opened for synchronous
+ *     I/O, which no port takes
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {(text: string) => void} [trace]
  * @property {() => number} [hostTime]
@@ -376,13 +378,18 @@ export function createIoCompletionPorts(host){
                     {
                         return fail(ERROR_INVALID_HANDLE);
                     }
-                    if (!bindable)
+                    if (!bindable || host.synchronous?.(file >>> 0))
                     {
-                        // Naming a port and no file asks for nothing at all.
+                        // Naming a port and no file asks for nothing at all; a
+                        // handle opened for synchronous I/O completes nothing.
                         return fail(ERROR_INVALID_PARAMETER);
                     }
                     associations.set(file >>> 0, { port, key: key >>> 0 });
                     return existing >>> 0;
+                }
+                if (bindable && host.synchronous?.(file >>> 0))
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
                 }
                 const port = makePort();
                 if (bindable)
@@ -807,18 +814,51 @@ export function createIoCompletionPorts(host){
         },
 
         /**
+         * A native call on an asynchronous handle has finished: its packet goes
+         * to the port the handle is bound to with the call's ApcContext as the
+         * completion value, which is what NtReadFile and NtWriteFile hand a
+         * port where ReadFile hands its OVERLAPPED. Nothing is written for it:
+         * the call's own IO_STATUS_BLOCK is the caller's to fill.
+         *
+         * @param {number} file @param {number} transferred @param {number} status
+         * @param {number} value
+         * @returns {boolean} whether a port took it
+         */
+        posted(file, transferred, status, value){
+            const association = associations.get(file >>> 0);
+            if (!association)
+            {
+                return false;
+            }
+            const error = (status >>> 0) === 0 ? 0 : toDosError(status >>> 0);
+            post(association.port, {
+                transferred: transferred >>> 0,
+                key: association.key,
+                overlapped: value >>> 0,
+                status: status >>> 0,
+                ...error !== 0 ? { error } : {},
+            });
+            return true;
+        },
+
+        /**
          * Binds a file handle to a port under a key: what CreateIoCompletionPort
          * does with an existing port, and NtSetInformationFile's
          * FileCompletionInformation, which is the same binding.
          *
          * @param {number} file @param {number} portHandle @param {number} key
-         * @returns {boolean} false when the port handle names no port
+         * @returns {boolean | 'synchronous'} false when the port handle names no
+         *     port, 'synchronous' for a handle opened for synchronous I/O
          */
         bind(file, portHandle, key){
             const port = portOf(portHandle);
             if (!port)
             {
                 return false;
+            }
+            if (host.synchronous?.(file >>> 0))
+            {
+                return 'synchronous';
             }
             associations.set(file >>> 0, { port, key: key >>> 0 });
             return true;

@@ -372,6 +372,8 @@ const FILE_POSITION_SET = 14;
 const FILE_MODE_SET = 16;
 const FILE_COMPLETION_INFORMATION = 30;
 const FILE_VALID_DATA_LENGTH_INFORMATION = 39;
+/** FILE_IO_COMPLETION_NOTIFICATION_INFORMATION: the completion modes, a ULONG. */
+const FILE_IO_COMPLETION_NOTIFICATION_INFORMATION = 41;
 /** NtReadFile's and NtWriteFile's two negative offsets: the end, the file pointer. */
 const FILE_WRITE_TO_END_OF_FILE = 0xffffffff;
 const FILE_USE_FILE_POINTER_POSITION = 0xfffffffe;
@@ -469,7 +471,8 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write', 'p
  *     laid out wider (`overlappedLayout`); absent, 4.
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {{ read: (handle: number, buffer: number, length: number, out: number,
- *     native?: boolean, overlapped?: number) => any,
+ *     native?: boolean, overlapped?: number,
+ *     io?: { event: number, apc: number, context: number }) => any,
  *     write: (handle: number, buffer: number, length: number, out: number,
  *     native?: boolean, overlapped?: number) => any }[]} [streams]
  *           Handles the reads and writes hand on before taking them for files:
@@ -524,7 +527,8 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write', 'p
  * @property {{ offsetOf: (overlapped: number) => number,
  *              completed: (file: number, transferred: number, overlapped: number) => boolean,
  *              closed: (handle: number, object: any) => void,
- *              bind?: (file: number, port: number, key: number) => boolean }} [ports]
+ *              bind?: (file: number, port: number, key: number)
+ *                  => boolean | 'synchronous' }} [ports]
  *           Completion ports. Absent, overlapped I/O still reads and writes;
  *           what it does not do is tell anyone it finished.
  * @property {(thread: any, routine: number, args: number[]) => void} [queueApc]
@@ -2799,17 +2803,19 @@ export function createFileFunctions(host){
             }
             // A no-op on anything that was never named.
             host.namedObjects?.forget(closed);
+            // A pipe end goes with its last handle, in whichever process. Its
+            // operations still pending end cancelled first, and each still
+            // reaches the port the handle was bound to, as on Windows.
+            if (type === 'pipe')
+            {
+                host.pipes?.closed(handle, closed);
+            }
             // Handle numbers are recycled, so anything keyed by this one
             // has to go now: a completion-port association that outlives
             // its handle sends the next file's packets to a port nobody
             // is reading, and a thread parked on a port that has just
             // closed waits on something nothing can reach.
             host.ports?.closed(handle, closed);
-            // A pipe end goes with its last handle, in whichever process.
-            if (type === 'pipe')
-            {
-                host.pipes?.closed(handle, closed);
-            }
             return true;
         }
         catch (e){
@@ -3175,9 +3181,16 @@ export function createFileFunctions(host){
             };
             for (const stream of streams)
             {
+                // A handle opened for overlapped I/O does not wait: the stream
+                // finishes the call through these, as Windows does.
+                const io = { event: event >>> 0, apc: apc >>> 0, context: context >>> 0 };
                 const answer = writing
                     ? stream.write(handle, buffer, length, block, true)
-                    : stream.read(handle, buffer, length, block, true);
+                    : stream.read(handle, buffer, length, block, true, 0, io);
+                if (answer === STATUS_PENDING && (event >>> 0) !== 0)
+                {
+                    host.resetEvent?.(event >>> 0);
+                }
                 if (answer !== null)
                 {
                     return typeof answer === 'number' ? status(answer) : answer;
@@ -3375,6 +3388,16 @@ export function createFileFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([handle, block, out, length, kind])=>{
+                if ((kind >>> 0) === FILE_IO_COMPLETION_NOTIFICATION_INFORMATION && host.pipes
+                    && (host.handles.typeOf?.(handle >>> 0) ?? null) !== null)
+                {
+                    if ((length >>> 0) < 4)
+                    {
+                        return report(block >>> 0, STATUS_INFO_LENGTH_MISMATCH, 0);
+                    }
+                    writeDword(out >>> 0, host.pipes.completionModes.of(handle));
+                    return report(block >>> 0, STATUS_SUCCESS, 4);
+                }
                 const slot = host.mailslots?.information(handle, kind >>> 0) ?? null;
                 const file = slot === null ? object(handle, 'file') : null;
                 if (slot === null && !file)
@@ -3579,6 +3602,20 @@ export function createFileFunctions(host){
                 {
                     return report(block >>> 0, slot, 0);
                 }
+                // The completion modes are any handle's, kept with the pipes as
+                // SetFileCompletionNotificationModes keeps them.
+                if ((kind >>> 0) === FILE_IO_COMPLETION_NOTIFICATION_INFORMATION && host.pipes)
+                {
+                    if ((length >>> 0) < 4)
+                    {
+                        return report(block >>> 0, STATUS_INFO_LENGTH_MISMATCH, 0);
+                    }
+                    const error = host.pipes.completionModes.set(handle >>> 0,
+                        readDword(from >>> 0));
+                    return report(block >>> 0, error === 0 ? STATUS_SUCCESS
+                        : error === ERROR_INVALID_PARAMETER ? STATUS_INVALID_PARAMETER
+                            : STATUS_INVALID_HANDLE, 0);
+                }
                 // Any file object reports to a port - a pipe's end as well as a
                 // file on the volume.
                 if ((kind >>> 0) === FILE_COMPLETION_INFORMATION)
@@ -3589,9 +3626,12 @@ export function createFileFunctions(host){
                     }
                     const held = host.handles.typeOf?.(handle >>> 0) ?? '';
                     const fileObject = held === 'pipe' || FILE_OBJECT_KINDS.has(held);
-                    return report(block >>> 0, fileObject && host.ports?.bind?.(handle >>> 0,
-                        readDword(from >>> 0), readDword((from >>> 0) + 4))
-                        ? STATUS_SUCCESS : STATUS_INVALID_HANDLE, 0);
+                    const bound = fileObject && host.ports?.bind?.(handle >>> 0,
+                        readDword(from >>> 0), readDword((from >>> 0) + 4));
+                    // A handle no port takes is refused before any I/O: the
+                    // status block is left as it was.
+                    return bound === 'synchronous' ? STATUS_INVALID_PARAMETER
+                        : report(block >>> 0, bound ? STATUS_SUCCESS : STATUS_INVALID_HANDLE, 0);
                 }
                 const open = fileOrDirectory(handle);
                 if (!open)

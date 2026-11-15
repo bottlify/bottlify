@@ -27,7 +27,6 @@ const ERROR_PIPE_NOT_CONNECTED = 233;
 const ERROR_MORE_DATA = 234;
 const ERROR_PIPE_CONNECTED = 535;
 const ERROR_PIPE_LISTENING = 536;
-const ERROR_OPERATION_ABORTED = 995;
 const ERROR_IO_PENDING = 997;
 
 const PIPE_ACCESS_INBOUND = 0x1;
@@ -78,6 +77,8 @@ function processOn(table, id = 1){
     const packets = [];
     /** @type {Set<number>} */
     const bound = new Set();
+    /** @type {{ thread: any, routine: number, args: number[] }[]} */
+    const apcs = [];
     let current = `p${id}:main`;
     const pipes = createNamedPipes({
         kernel: {
@@ -153,6 +154,16 @@ function processOn(table, id = 1){
             }
             return false;
         },
+        posted: (file, transferred, status, value)=>{
+            if (!bound.has(file))
+            {
+                return false;
+            }
+            packets.push({ file, transferred, overlapped: value, status });
+            return true;
+        },
+        setEvent: (/** @type {number} */ event)=>events.push(event),
+        queueApc: (thread, routine, args)=>apcs.push({ thread, routine, args }),
     });
     const fns = /** @type {Record<string, { handler: (args: number[]) => any }>} */ (
         /** @type {unknown} */ (pipes.functions));
@@ -169,7 +180,7 @@ function processOn(table, id = 1){
     const u32 = (/** @type {number} */ at)=>view.getUint32(at, true);
     return {
         pipes, fns, bytes, view, u32, putString, putWide, blocked, woken, timeouts, events,
-        packets, bound, handles,
+        packets, bound, handles, apcs,
         error: ()=>lastError.get(current),
         errorOf: (/** @type {any} */ thread)=>lastError.get(thread),
         /** @param {string} thread */
@@ -447,7 +458,7 @@ test('two processes talk through one namespace, each answered in its own memory'
     assert.equal(parent.u32(STATE), 2);
 });
 
-test('cancelled: a pending read ends ERROR_OPERATION_ABORTED, and so does a closing handle\'s',
+test('cancelled: a pending read ends ERROR_OPERATION_ABORTED; a closing handle\'s breaks the pipe',
     ()=>{
         const p = processOn(new Map());
         const server = p.server(PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED);
@@ -462,8 +473,39 @@ test('cancelled: a pending read ends ERROR_OPERATION_ABORTED, and so does a clos
 
         p.as('p1:reader');
         assert.equal(p.read(server, 10), 'parked');
+        // The pipe driver completes what is pending on the end being closed
+        // as the pipe broken (Wine's ntdll:file test_iocp_fileio, recorded
+        // on Windows), not as cancelled.
         p.pipes.closed(server, p.handles.get(server)?.object);
-        assert.equal(p.errorOf('p1:reader'), ERROR_OPERATION_ABORTED);
+        assert.equal(p.errorOf('p1:reader'), ERROR_BROKEN_PIPE);
+    });
+
+test('NtReadFile on an end opened for overlapped I/O does not wait: block, event, APC, port',
+    ()=>{
+        const p = processOn(new Map());
+        const server = p.server(PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED);
+        p.bound.add(server);
+        const client = p.client();
+        const BLOCK = COUNT + 0x40;
+        const io = { event: 0x77, apc: 0x401000, context: 0xc0de };
+        p.view.setUint32(BLOCK, 0xdeadbeef, true);
+        assert.equal(p.pipes.read(server, BUFFER, 10, BLOCK, true, 0, io), STATUS_PENDING);
+        assert.equal(p.u32(BLOCK), 0xdeadbeef, 'the block is written when the read is done');
+        assert.equal(p.blocked.length, 0, 'nothing waits');
+
+        assert.equal(p.write(client, 'hey'), 1);
+        assert.deepEqual([p.u32(BLOCK), p.u32(BLOCK + 4)], [0, 3]);
+        assert.equal(p.text(3), 'hey');
+        assert.ok(p.events.includes(0x77), 'its event is set');
+        assert.deepEqual(p.apcs.at(-1)?.args, [0xc0de, BLOCK, 0], 'its APC is queued');
+        assert.deepEqual(p.packets.at(-1), { file: server, transferred: 3, overlapped: 0xc0de,
+            status: 0 }, 'the port is handed the ApcContext');
+
+        // On an end opened without FILE_FLAG_OVERLAPPED the same call waits.
+        const p2 = processOn(new Map());
+        const plain = p2.server(PIPE_ACCESS_DUPLEX);
+        p2.client();
+        assert.equal(p2.pipes.read(plain, BUFFER, 10, BLOCK, true, 0, io), 'parked');
     });
 
 test('a nowait end answers at once, and an end held twice breaks with its last handle', ()=>{

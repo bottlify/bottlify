@@ -182,7 +182,8 @@ function fakeKernel(){
     return kernel;
 }
 
-function setup(){
+/** @param {{ synchronous?: (handle: number) => boolean }} [extra] */
+function setup(extra = {}){
     const memory = fakeMemory();
     const kernel = fakeKernel();
     const main = kernel.thread('main');
@@ -213,6 +214,7 @@ function setup(){
         /** @param {string} text */
         trace: text=>traced.push(text),
         hostTime: ()=>host,
+        ...extra,
     });
 
     return {
@@ -632,4 +634,32 @@ test('a port is signalled while a packet waits, and the last thread to wait is w
     fns.PostQueuedCompletionStatus.handler([port, 0, 2, 0]);
     assert.equal(second.blocked, false, 'the latest waiter, as Windows wakes them');
     assert.equal(main.blocked, true);
+});
+
+test('a handle opened for synchronous I/O is bound to no port', ()=>{
+    // Windows refuses it with ERROR_INVALID_PARAMETER, and the native
+    // FileCompletionInformation with STATUS_INVALID_PARAMETER: nothing it does
+    // completes later, so nothing would ever reach the port.
+    const SYNC = 0x88;
+    const ASYNC = 0x8c;
+    const { fns, ports, main } = setup({ synchronous: handle=>handle === SYNC });
+    const port = makePort(fns);
+    assert.equal(fns.CreateIoCompletionPort.handler([SYNC, port, 1, 0]), 0);
+    assert.equal(main.error, ERROR_INVALID_PARAMETER);
+    assert.equal(fns.CreateIoCompletionPort.handler([SYNC, 0, 1, 0]), 0, 'nor a new port');
+    assert.equal(ports.bind(SYNC, port, 1), 'synchronous');
+    assert.equal(ports.bind(ASYNC, port, 1), true);
+});
+
+test('a native call\'s packet carries its ApcContext as the completion value', ()=>{
+    const FILE = 0x90;
+    const { fns, ports, memory } = setup();
+    const port = makePort(fns);
+    assert.equal(ports.posted(FILE, 3, 0, 0xc0de), false, 'a handle bound to nothing');
+    ports.bind(FILE, port, 0x55);
+    assert.equal(ports.posted(FILE, 3, 0, 0xc0de), true);
+    assert.equal(fns.GetQueuedCompletionStatus.handler([port, OUT_BYTES, OUT_KEY, OUT_OVERLAPPED,
+        0]), 1);
+    assert.deepEqual([memory.dword(OUT_BYTES), memory.dword(OUT_KEY), memory.dword(OUT_OVERLAPPED)],
+        [3, 0x55, 0xc0de]);
 });

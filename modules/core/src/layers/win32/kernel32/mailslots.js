@@ -46,6 +46,10 @@ const FILE_WRITE_DATA = 0x2;
 
 /** What GetMailslotInfo says of the next message when there is none. */
 const MAILSLOT_NO_MESSAGE = 0xffffffff;
+/** CreateOptions' two synchronous modes: a handle without either does not wait. */
+const FILE_SYNCHRONOUS_IO_ALERT = 0x10;
+const FILE_SYNCHRONOUS_IO_NONALERT = 0x20;
+const STATUS_PENDING = 0x103;
 /** A read timeout that never runs out. */
 const MAILSLOT_WAIT_FOREVER = 0xffffffff;
 
@@ -67,6 +71,9 @@ const LOCAL_PREFIX = '\\\\.\\mailslot\\';
  * @property {number} timeout  milliseconds, or MAILSLOT_WAIT_FOREVER
  * @property {Uint8Array[]} messages
  * @property {Reader[]} readers
+ * @property {boolean} [asynchronous]  made without FILE_SYNCHRONOUS_IO_*: a native read
+ *     answers STATUS_PENDING and finishes later, as CreateMailslot's and
+ *     NtCreateMailslotFile's handles do on Windows
  */
 
 /**
@@ -78,6 +85,10 @@ const LOCAL_PREFIX = '\\\\.\\mailslot\\';
  * @property {number} length
  * @property {boolean} native  NtReadFile's, answered with a status
  * @property {number} out  the count's address, or the IO_STATUS_BLOCK's
+ * @property {{ event: number, apc: number, context: number }} [async]  a native read
+ *     that did not wait: it finishes through its block, event, APC and port
+ * @property {any} [timer]  the kernel timer that ends an asynchronous read's wait
+ * @property {number} [handle]
  */
 
 /**
@@ -95,6 +106,10 @@ const LOCAL_PREFIX = '\\\\.\\mailslot\\';
  * @property {(thread: any, code: number) => void} setLastErrorFor
  * @property {() => any} currentThread
  * @property {() => any} park
+ * @property {(event: number) => void} [setEvent]
+ * @property {(thread: any, routine: number, args: number[]) => void} [queueApc]
+ * @property {(file: number, transferred: number, status: number, value: number) => boolean}
+ *     [posted]  a native read's packet to the handle's port, its ApcContext the value
  */
 
 /** A name read whole, as Windows reads it. */
@@ -170,9 +185,10 @@ export function createMailslots(host){
      * Makes a slot under a name: its handle, or the Win32 error that refused it.
      *
      * @param {string | null} name @param {number} maxSize @param {number} timeout
+     * @param {boolean} [asynchronous]
      * @returns {{ handle: number } | { error: number }}
      */
-    const make = (name, maxSize, timeout)=>{
+    const make = (name, maxSize, timeout, asynchronous = true)=>{
         if (name === null)
         {
             return { error: ERROR_PATH_NOT_FOUND };
@@ -188,7 +204,7 @@ export function createMailslots(host){
         }
         /** @type {Slot} */
         const slot = { key, maxSize: maxSize >>> 0, timeout: timeout >>> 0, messages: [],
-            readers: [] };
+            readers: [], asynchronous };
         slots.set(key, slot);
         return { handle: host.handles.open('mailslot', slot) };
     };
@@ -231,7 +247,7 @@ export function createMailslots(host){
      *
      * @param {number[]} args
      */
-    const ntCreateMailslotFile = ([out, , attributes, block, , , maxSize, timeout])=>{
+    const ntCreateMailslotFile = ([out, , attributes, block, options, , maxSize, timeout])=>{
         if ((out >>> 0) === 0 || (attributes >>> 0) === 0)
         {
             return STATUS_ACCESS_VIOLATION;
@@ -254,7 +270,8 @@ export function createMailslots(host){
                 .getBigInt64(0, true);
             milliseconds = interval > 0n ? MAILSLOT_WAIT_FOREVER : Number(-interval / 10000n);
         }
-        const made = make(asked, maxSize, milliseconds);
+        const made = make(asked, maxSize, milliseconds, ((options >>> 0)
+            & (FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT)) === 0);
         if ('error' in made)
         {
             return made.error === ERROR_ALREADY_EXISTS ? STATUS_OBJECT_NAME_COLLISION
@@ -304,12 +321,50 @@ export function createMailslots(host){
     const refuse = (caller, code, status)=>(caller.native ? status : fail(code));
 
     /**
+     * Finishes a native read that did not wait: its block, its event, its APC
+     * on the thread that asked, and a packet for the handle's port.
+     *
+     * @param {Reader} reader @param {number} status @param {number} count
+     */
+    const finishAsync = (reader, status, count)=>{
+        const io = /** @type {NonNullable<Reader['async']>} */ (reader.async);
+        if (reader.timer)
+        {
+            kernel.cancelTimer?.(reader.timer);
+        }
+        writeDwordIf(reader.out, status);
+        writeDwordIf(reader.out + 4, count);
+        if (io.event !== 0)
+        {
+            host.setEvent?.(io.event);
+        }
+        if (io.apc !== 0)
+        {
+            host.queueApc?.(reader.thread, io.apc, [io.context, reader.out, 0]);
+        }
+        host.posted?.(reader.handle ?? 0, count, status, io.context);
+        return true;
+    };
+
+    /**
      * Gives a parked reader its answer and wakes it.
      *
      * @param {Reader} reader @param {Uint8Array | null} message  null: too big for it
      * @returns {boolean} whether the reader was still waiting
      */
     const answerReader = (reader, message)=>{
+        if (reader.async)
+        {
+            if (message === null)
+            {
+                return finishAsync(reader, STATUS_BUFFER_TOO_SMALL, 0);
+            }
+            if (message.length > 0)
+            {
+                host.writeMemory(reader.buffer, message);
+            }
+            return finishAsync(reader, STATUS_SUCCESS, message.length);
+        }
         if (message === null)
         {
             if (!reader.native)
@@ -353,8 +408,12 @@ export function createMailslots(host){
      * @param {number} handle @param {number} buffer @param {number} length
      * @param {number} out  the count's address, or the IO_STATUS_BLOCK's
      * @param {boolean} [native]  NtReadFile's answers rather than ReadFile's
+     * @param {number} [overlapped]  ReadFile's, which a mailslot read here waits for
+     * @param {{ event: number, apc: number, context: number }} [io]  NtReadFile's
+     *     event, APC and context: on an asynchronous handle the read does not wait
      */
-    const read = (handle, buffer, length, out, native = false)=>{
+    const read = (handle, buffer, length, out, native = false, overlapped = 0, io = undefined)=>{
+        void overlapped;
         const kind = host.handles.typeOf?.(handle >>> 0) ?? null;
         /** @type {Caller} */
         const caller = { native, out: out >>> 0 };
@@ -388,6 +447,29 @@ export function createMailslots(host){
         if (slot.timeout === 0)
         {
             return refuse(caller, ERROR_SEM_TIMEOUT, STATUS_IO_TIMEOUT);
+        }
+        if (native && io && slot.asynchronous)
+        {
+            /** @type {Reader} */
+            const reader = { thread: host.currentThread(), buffer: buffer >>> 0,
+                length: length >>> 0, ...caller, async: io, handle: handle >>> 0 };
+            slot.readers.push(reader);
+            if (slot.timeout !== MAILSLOT_WAIT_FOREVER)
+            {
+                // The read timeout ends it with STATUS_IO_TIMEOUT in its block.
+                reader.timer = kernel.createTimer?.({ manualReset: true,
+                    name: `mailslot ${slot.key}` });
+                kernel.armTimer?.(reader.timer, kernel.clock.virtualTime() + slot.timeout, 0,
+                    ()=>{
+                        if (slot.readers.includes(reader))
+                        {
+                            slot.readers = slot.readers.filter(one=>one !== reader);
+                            reader.timer = undefined;
+                            finishAsync(reader, STATUS_IO_TIMEOUT, 0);
+                        }
+                    });
+            }
+            return STATUS_PENDING;
         }
         // Answered by the write that brings a message, or by the clock.
         if (!native)
