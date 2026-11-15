@@ -27,6 +27,7 @@
  */
 
 import { createCountedStringFunctions } from './strings.js';
+import { HEAP_USER_INFO } from '../kernel32/heap.js';
 import { createQueryFunctions } from './query.js';
 import { createImageFunctions } from './image.js';
 import { createIntegerFunctions } from './integer.js';
@@ -236,36 +237,30 @@ const LAST_STATUS = { 4: 0xbf4, 8: 0x1250 };
 /** The option bits NtOpenKeyEx knows: REG_OPTION_BACKUP_RESTORE and REG_OPTION_OPEN_LINK. */
 const OPEN_KEY_OPTIONS = 0x4 | 0x8;
 
-/** The user flags a heap block may carry, HEAP_SETTABLE_USER_FLAGS, and a new block's. */
+/** The user flags a heap block may carry, HEAP_SETTABLE_USER_FLAGS. */
 const SETTABLE_USER_FLAGS = 0xe00;
-const DEFAULT_USER_FLAGS = 0x200;
 const ERROR_INVALID_PARAMETER = 87;
 
 /**
  * The value and flags a program may keep in a heap block of its own:
  * RtlSetUserValueHeap, RtlSetUserFlagsHeap and RtlGetUserInfoHeap, over the
- * blocks kernel32's heaps hand out. A pointer that is no live block of the
- * heap is refused, as the heap refuses it.
+ * record kernel32's heap keeps for each block (`HEAP_USER_INFO`) - the same
+ * one a moveable global handle's block carries its handle in. A pointer that
+ * is no live block of the heap is refused, as the heap refuses it; a block
+ * nothing was kept for has no flags, and its value is left unwritten.
  *
  * @param {Record<string, Entry>} kernel32
  * @param {(address: number, bytes: Uint8Array) => void} writeMemory
  * @returns {Record<string, Entry>}
  */
 function createUserInfoFunctions(kernel32, writeMemory){
-    /** @type {Map<number, { value: number, flags: number }>} by block */
-    const kept = new Map();
-    /** @param {number} heap @param {number} block */
-    const infoOf = (heap, block)=>{
-        if (kernel32.HeapValidate.handler([heap, 0, block]) === 0 || block === 0)
-        {
-            kernel32.SetLastError?.handler([ERROR_INVALID_PARAMETER]);
-            return null;
-        }
-        let info = kept.get(block);
+    const records = /** @type {any} */ (kernel32)[HEAP_USER_INFO];
+    /** @param {number} heap @param {number} block @param {boolean} [make] */
+    const infoOf = (heap, block, make = false)=>{
+        const info = records(heap, block, make);
         if (!info)
         {
-            info = { value: 0, flags: DEFAULT_USER_FLAGS };
-            kept.set(block, info);
+            kernel32.SetLastError?.handler([ERROR_INVALID_PARAMETER]);
         }
         return info;
     };
@@ -286,7 +281,7 @@ function createUserInfoFunctions(kernel32, writeMemory){
                 {
                     return 0;
                 }
-                if ((value >>> 0) !== 0)
+                if ((value >>> 0) !== 0 && info.value !== undefined)
                 {
                     writeU32(value >>> 0, info.value);
                 }
@@ -302,7 +297,7 @@ function createUserInfoFunctions(kernel32, writeMemory){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([heap, , block, value])=>{
-                const info = infoOf(heap >>> 0, block >>> 0);
+                const info = infoOf(heap >>> 0, block >>> 0, true);
                 if (!info)
                 {
                     return 0;
@@ -321,7 +316,7 @@ function createUserInfoFunctions(kernel32, writeMemory){
                     kernel32.SetLastError?.handler([ERROR_INVALID_PARAMETER]);
                     return 0;
                 }
-                const info = infoOf(heap >>> 0, block >>> 0);
+                const info = infoOf(heap >>> 0, block >>> 0, true);
                 if (!info)
                 {
                     return 0;
@@ -643,7 +638,8 @@ export function createNtdllFunctions(host){
                 currentThread: host.currentThread, lastErrorOf: host.lastErrorOf })
             : {}),
 
-        ...(kernel32.HeapValidate ? createUserInfoFunctions(kernel32, host.writeMemory) : {}),
+        ...(/** @type {any} */ (kernel32)[HEAP_USER_INFO]
+            ? createUserInfoFunctions(kernel32, host.writeMemory) : {}),
 
         ...createDebugFunctions({
             readMemory: host.readMemory,

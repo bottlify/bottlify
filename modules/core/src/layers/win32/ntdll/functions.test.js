@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { HEAP_USER_INFO } from '../kernel32/heap.js';
 import { createNtdllFunctions } from './functions.js';
 import { STATUS } from './status.js';
 import { UNLOAD_KEY } from '../advapi32/functions.js';
@@ -416,26 +417,40 @@ test('NtQuerySystemTime is GetSystemTimeAsFileTime answered as a status', ()=>{
 });
 
 test('a heap block keeps a user value and user flags, and a pointer no block is refused', ()=>{
-    // kernel32's heap test: RtlSetUserValueHeap, RtlSetUserFlagsHeap, RtlGetUserInfoHeap.
+    // kernel32's heap test: RtlSetUserValueHeap, RtlSetUserFlagsHeap, RtlGetUserInfoHeap,
+    // over the record kernel32's heap keeps for a block (HEAP_USER_INFO).
     const host = fakeHost();
     /** @type {number[]} */
     const errors = [];
+    /** @type {Map<number, { value: number, flags: number }>} */
+    const kept = new Map();
     host.kernel32 = /** @type {any} */ ({ ...host.kernel32,
-        HeapValidate: { argBytes: 12, handler: (/** @type {number[]} */ [, , block])=>
-            (block === 0x2000 ? 1 : 0) },
+        /** @param {number} heap @param {number} block @param {boolean} make */
+        [HEAP_USER_INFO]: (heap, block, make)=>{
+            if (block !== 0x2000)
+            {
+                return null;
+            }
+            if (!kept.has(block) && make)
+            {
+                kept.set(block, { value: 0, flags: 0 });
+            }
+            return kept.get(block) ?? { value: undefined, flags: 0 };
+        },
         SetLastError: { argBytes: 4, handler: (/** @type {number[]} */ [code])=>errors.push(code) },
     });
     const fns = createNtdllFunctions(host);
     const view = new DataView(host.bytes.buffer);
+    view.setUint32(0x180, 0xdeadbeef, true);
     assert.equal(fns.RtlGetUserInfoHeap.handler([0x10, 0, 0x2000, 0x180, 0x184]), 1);
-    assert.deepEqual([view.getUint32(0x180, true), view.getUint32(0x184, true)], [0, 0x200]);
-    assert.equal(fns.RtlSetUserValueHeap.handler([0x10, 0, 0x2000, 0xdeadbeef]), 1);
+    assert.deepEqual([view.getUint32(0x180, true), view.getUint32(0x184, true)], [0xdeadbeef, 0],
+        'a block nothing was kept for: no flags, and its value left unwritten');
+    assert.equal(fns.RtlSetUserValueHeap.handler([0x10, 0, 0x2000, 0x1234]), 1);
     assert.equal(fns.RtlSetUserFlagsHeap.handler([0x10, 0, 0x2000, 0, 0x1000]), 0,
         'a flag no program may set');
-    assert.equal(fns.RtlSetUserFlagsHeap.handler([0x10, 0, 0x2000, 0x400, 0x800]), 1);
+    assert.equal(fns.RtlSetUserFlagsHeap.handler([0x10, 0, 0x2000, 0x400, 0xa00]), 1);
     fns.RtlGetUserInfoHeap.handler([0x10, 0, 0x2000, 0x180, 0x184]);
-    assert.deepEqual([view.getUint32(0x180, true), view.getUint32(0x184, true)],
-        [0xdeadbeef, 0xa00]);
+    assert.deepEqual([view.getUint32(0x180, true), view.getUint32(0x184, true)], [0x1234, 0xa00]);
     assert.equal(fns.RtlGetUserInfoHeap.handler([0x10, 0, 0x3000, 0x180, 0x184]), 0,
         'no block there');
     assert.deepEqual(errors, [87, 87]);

@@ -28,6 +28,10 @@ import {
     parseCompoundFile, serializeCompoundFile,
 } from './cfb.js';
 
+/** The block CreateStreamOnHGlobal makes for itself: GMEM_MOVEABLE | GMEM_NODISCARD | GMEM_SHARE. */
+const GMEM_MOVEABLE = 0x0002;
+const GMEM_NODISCARD = 0x0020;
+const GMEM_SHARE = 0x2000;
 const S_OK = 0;
 const S_FALSE = 1;
 const E_NOINTERFACE = 0x80004002 | 0;
@@ -176,6 +180,10 @@ const MAX_PATH = 260;
  *              block: (address: number) => { size: number } | null,
  *              resize: (address: number, bytes: number) => boolean }} heap
  *           Task memory: STATSTG names, and the block a memory stream grows in.
+ * @property {() => import('../kernel32/moveable.js').GlobalMemory | undefined} [globalMemory]
+ *           kernel32's global family, which an HGLOBAL a memory stream stands
+ *           on belongs to: a moveable handle's block is found, grown and freed
+ *           through it, under the same handle.
  * @property {import('./objects.js').ComRegistry} registry
  * @property {{ publish: (object: import('./objects.js').ComObject,
  *              interfaceId: string) => number }} vtables
@@ -1461,28 +1469,44 @@ export function createStorageFunctions(host){
      * @returns {StreamBacking | number} the backing, or an HRESULT
      */
     const memoryBacking = (hGlobal, deleteOnRelease)=>{
+        const memory = host.globalMemory?.();
         let handle = hGlobal;
         if (handle === 0)
         {
-            handle = host.heap.allocate(1);
+            // As Windows makes it: a moveable, shareable block of nothing,
+            // which GetHGlobalFromStream hands back for GlobalLock.
+            handle = memory ? memory.global.allocate(GMEM_MOVEABLE | GMEM_NODISCARD | GMEM_SHARE, 0)
+                : host.heap.allocate(1);
             if (handle === 0)
             {
                 return E_OUTOFMEMORY;
             }
         }
-        const block = host.heap.block(handle);
-        if (!block)
+        const moveable = memory?.isHandle(handle) ?? false;
+        /** Where the handle's block is now; 0 while it is discarded. */
+        const at = ()=>(moveable ? /** @type {NonNullable<typeof memory>} */ (memory).pointer(handle)
+            : handle);
+        const blockSize = ()=>{
+            const pointer = at();
+            return pointer === 0 ? 0 : host.heap.block(pointer)?.size ?? 0;
+        };
+        if (!(moveable ? memory?.has(handle) : host.heap.block(handle)))
         {
             return E_INVALIDARG;
         }
         // A block handed in is used whole, which is the documented
         // starting size; one made here is empty.
-        let size = hGlobal === 0 ? 0 : block.size;
+        let size = hGlobal === 0 ? 0 : blockSize();
         /** @param {number} wanted */
         const grow = wanted=>{
-            if (wanted <= (host.heap.block(handle)?.size ?? 0))
+            if (wanted <= blockSize())
             {
                 return true;
+            }
+            if (moveable)
+            {
+                return /** @type {NonNullable<typeof memory>} */ (memory).global
+                    .reallocate(handle, wanted, GMEM_MOVEABLE) !== 0;
             }
             if (host.heap.resize(handle, wanted))
             {
@@ -1501,14 +1525,18 @@ export function createStorageFunctions(host){
         // A block the program freed under the stream is one the stream no
         // longer has: it reads as empty and refuses to grow, as ole32's
         // hglobalstream tests free one and go on using the stream.
-        const alive = ()=>host.heap.block(handle) !== null;
+        const alive = ()=>(moveable ? /** @type {NonNullable<typeof memory>} */ (memory).has(handle)
+            : host.heap.block(handle) !== null);
+        const release = ()=>(moveable
+            ? /** @type {NonNullable<typeof memory>} */ (memory).global.free(handle)
+            : host.heap.free(handle));
         /** @type {StreamBacking} */
         const backing = {
             name: null,
             entry: null,
             handle: ()=>handle,
             size: ()=>(alive() ? size : 0),
-            read: (offset, length)=>host.readMemory(handle + offset, length).slice(),
+            read: (offset, length)=>host.readMemory(at() + offset, length).slice(),
             write: (offset, bytes)=>{
                 if (!alive() || !grow(offset + bytes.length))
                 {
@@ -1516,9 +1544,9 @@ export function createStorageFunctions(host){
                 }
                 if (offset > size)
                 {
-                    host.fillMemory(handle + size, 0, offset - size);
+                    host.fillMemory(at() + size, 0, offset - size);
                 }
-                host.writeMemory(handle + offset, bytes);
+                host.writeMemory(at() + offset, bytes);
                 size = Math.max(size, offset + bytes.length);
                 return true;
             },
@@ -1529,7 +1557,7 @@ export function createStorageFunctions(host){
                 }
                 if (wanted > size)
                 {
-                    host.fillMemory(handle + size, 0, wanted - size);
+                    host.fillMemory(at() + size, 0, wanted - size);
                 }
                 size = wanted;
                 return true;
@@ -1543,7 +1571,7 @@ export function createStorageFunctions(host){
                     holders--;
                     if (holders === 0 && deleteOnRelease)
                     {
-                        host.heap.free(handle);
+                        release();
                     }
                 };
             },

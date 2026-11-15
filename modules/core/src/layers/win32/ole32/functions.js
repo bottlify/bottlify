@@ -282,6 +282,8 @@ const MAX_PROGID = 255;
  *     through writeMemory costs an allocation and two extra passes.
  * @property {() => any} currentThread  The record apartment state hangs on.
  * @property {OleHeap} heap             Where task memory comes from.
+ * @property {() => import('../kernel32/moveable.js').GlobalMemory | undefined} [globalMemory]
+ *     kernel32's global family, which an HGLOBAL a memory stream stands on is of.
  * @property {((api: string, detail: string) => void) | undefined} [divergence]
  *           Where a class this build does not have is named. A program asking
  *           for one is asking for a component it shipped or expects installed,

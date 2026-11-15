@@ -11,7 +11,7 @@ import { createNamedObjects, createRemoteNamedObjects } from './kernel32/named-o
 import { createRegistryService } from './advapi32/registry-service.js';
 import { createDebugFunctions } from './kernel32/debug.js';
 import {
-    ALIGNMENT_64, TABLES, createHeapAllocator, createHeapFunctions,
+    ALIGNMENT_64, GLOBAL_MEMORY, TABLES, createHeapAllocator, createHeapFunctions,
 } from './kernel32/heap.js';
 import { createProcessFunctions, createThreadState } from './kernel32/process.js';
 import { blockLayouts } from './kernel32/teb.js';
@@ -5519,6 +5519,9 @@ export function createWin32Module(){
                     fillMemory,
                     currentThread: ()=>kernel.currentThread(),
                     heap,
+                    // An HGLOBAL a memory stream stands on is kernel32's, whose
+                    // table is still being built here.
+                    globalMemory: ()=>/** @type {any} */ (libraries['KERNEL32.dll'])?.[GLOBAL_MEMORY],
                     registry: com,
                     taskAllocator,
                     divergence: config?.divergence,
