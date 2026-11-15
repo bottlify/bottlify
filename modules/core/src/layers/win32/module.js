@@ -3635,6 +3635,10 @@ export function createWin32Module(){
                     // them, which carry a version all the same.
                     /** @param {string} name */
                     systemLibrary: name=>modules.systemLibrary?.(name) ?? false,
+                    // The system folder's programs the engine runs itself.
+                    /** @param {string} path */
+                    systemProgram: path=>systemProgramAt(path) !== null,
+                    currentDirectory: ()=>filesystem.currentDirectory(),
                     // Where VerInstallFile reads a compressed source and writes the
                     // expanded file: the same volume every other file call uses.
                     files: volume,
