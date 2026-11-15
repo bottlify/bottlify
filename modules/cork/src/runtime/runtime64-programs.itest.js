@@ -24,6 +24,7 @@ import { interpret64 } from '../interp64.js';
 import {
     CALLS, CORPUS, EXIT, compare, load, machine, nested, pool, program, run,
 } from '../testing/long-machine.js';
+import { ifRoom } from '../testing/memory64.js';
 import { createRuntimeRunner64 } from '../testing/runtime-runner64.js';
 
 /**
@@ -46,7 +47,8 @@ const MMX_POOL = [
     'f20fd6dc',
 ].map(hex=>Buffer.from(hex, 'hex'));
 
-test('MMX runs translated as interpreted, the x87 unit it leaves in its state included', ()=>{
+test('MMX runs translated as interpreted, the x87 unit it leaves in its state'
+    + ' included', ifRoom(()=>{
     const cases = Array.from({ length: 400 }, (_, i)=>program(MMX_POOL, 0x3d00 + i, 3 + i % 14));
     for (const budget of [7, 100000])
     {
@@ -55,7 +57,7 @@ test('MMX runs translated as interpreted, the x87 unit it leaves in its state in
         assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
         assert.ok(stats.translated > stats.interpreted * 2, JSON.stringify(stats));
     }
-});
+}));
 
 /**
  * x87 forms at 64 bits, as bytes: loads, stores and arithmetic of every
@@ -76,7 +78,8 @@ const X87_POOL = [
     '39c8',
 ].map(hex=>Buffer.from(hex, 'hex'));
 
-test('x87 runs in regions as the interpreter runs it, the unit and what it leaves outside', ()=>{
+test('x87 runs in regions as the interpreter runs it, the unit and what it leaves'
+    + ' outside', ifRoom(()=>{
     const cases = Array.from({ length: 400 }, (_, i)=>program(X87_POOL, 0x8700 + i, 3 + i % 14));
     for (const budget of [7, 100000])
     {
@@ -87,9 +90,10 @@ test('x87 runs in regions as the interpreter runs it, the unit and what it leave
         // interpreter's until its region is formed for it.
         assert.ok(stats.translated > stats.interpreted / 2, JSON.stringify(stats));
     }
-});
+}));
 
-test('an x87 run whose later store finds a closed page faults where the interpreter faults', ()=>{
+test('an x87 run whose later store finds a closed page faults where the interpreter'
+    + ' faults', ifRoom(()=>{
     // fld qword [rbx]; fld qword [rbx + 8]; faddp; fstp qword [rcx]; fld1; fstp qword [rbx]
     const code = 'dd03dd4308dec1dd19d9e8dd1b';
     const base = CORPUS.cases[0];
@@ -110,9 +114,9 @@ test('an x87 run whose later store finds a closed page faults where the interpre
         assert.equal(exits, 1);
         assert.ok(stats.translated > 0);
     }
-});
+}));
 
-test('nested loops, jumps over them, out of them and into them run as interpreted', ()=>{
+test('nested loops, jumps over them, out of them and into them run as interpreted', ifRoom(()=>{
     const instructions = pool();
     const cases = Array.from({ length: 400 }, (_, i)=>nested(instructions, 0x1005 + i));
     for (const budget of [7, 1000])
@@ -123,9 +127,9 @@ test('nested loops, jumps over them, out of them and into them run as interprete
             `${failures.length} differences, budget ${budget}`);
         assert.ok(stats.translated > stats.interpreted, JSON.stringify(stats));
     }
-});
+}));
 
-test('a write to the trap port goes to the handler past it, trapped as interpreted', ()=>{
+test('a write to the trap port goes to the handler past it, trapped as interpreted', ifRoom(()=>{
     // loop: mov edx, 0xb077; lea eax, [rcx + 0x100]; out dx, eax   the trap port
     //       mov edx, 0x80; out dx, eax                              a device's port
     //       inc ecx; cmp ecx, 20; jb loop
@@ -175,9 +179,10 @@ test('a write to the trap port goes to the handler past it, trapped as interpret
     assert.deepEqual({ ...translated, traps: 0 }, { ...interpreted, traps: 0 });
     // Every write to the trap port answered from its region but the first, run cold.
     assert.ok(translated.traps >= 19, `${translated.traps} traps`);
-});
+}));
 
-test('an access across into a closed page or past 4 GiB faults where the interpreter faults', ()=>{
+test('an access across into a closed page or past 4 GiB faults where the interpreter'
+    + ' faults', ifRoom(()=>{
     const base = CORPUS.cases[0];
     const end = CORPUS.dataAt + CORPUS.dataSize;
     /** @param {string} code @param {bigint} rbx */
@@ -205,9 +210,9 @@ test('an access across into a closed page or past 4 GiB faults where the interpr
     assert.deepEqual(failures, []);
     // Some ran clean, most faulted: both ways were taken.
     assert.ok(exits > 0 && exits < cases.length, `${exits} of ${cases.length} ran to their exit`);
-});
+}));
 
-test('a store through rsp tests no page until code is translated on a noted stack', ()=>{
+test('a store through rsp tests no page until code is translated on a noted stack', ifRoom(()=>{
     // mov dword [rsp], 0x90c8ff48 over the next instruction, inc rax; nop, which
     // it makes dec rax: code on the page rsp points into.
     const code = 'c7042448ffc89048ffc090';
@@ -233,9 +238,10 @@ test('a store through rsp tests no page until code is translated on a noted stac
     // Loose with no stack named there, the store went untested: the code it
     // wrote over ran as it was, which a thread's stack never holds.
     assert.equal(rax(machine({ config: { precise: false } }), true), '11');
-});
+}));
 
-test('a translated read wraps into RAM until the program faults on a page, then faults', ()=>{
+test('a translated read wraps into RAM until the program faults on a page, then'
+    + ' faults', ifRoom(()=>{
     // mov rax, [rbx] with rbx on the closed page past the data.
     const base = CORPUS.cases[0];
     const closed = CORPUS.dataAt + CORPUS.dataSize + 0x10;
@@ -259,9 +265,10 @@ test('a translated read wraps into RAM until the program faults on a page, then 
     const interpreted = run(other, false);
     assert.equal(faulted.fault, interpreted.fault, 'after the switch it faults as the interpreter');
     assert.notEqual(faulted.fault, 'exit');
-});
+}));
 
-test('an instruction whose two operands are one register runs translated as interpreted', ()=>{
+test('an instruction whose two operands are one register runs translated as'
+    + ' interpreted', ifRoom(()=>{
     // xadd rax, rax; xadd eax, eax; xchg rax, rax; cmpxchg rax, rax; cmpxchg ecx, ecx;
     // bsf rax, rax; bsr eax, eax; imul rax, rax; bts rax, rax; btc eax, eax; mul rax;
     // div rdx; idiv rax; xadd al, al; xadd ah, ah (in 32-bit form)
@@ -274,9 +281,9 @@ test('an instruction whose two operands are one register runs translated as inte
     })));
     const { failures } = compare(cases);
     assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
-});
+}));
 
-test('a block that loops onto itself goes round in wasm until its budget is spent', ()=>{
+test('a block that loops onto itself goes round in wasm until its budget is spent', ifRoom(()=>{
     // mov ecx, 30000; l: add rax, rcx; dec ecx; jnz l
     const code = 'b9307500004801c8ffc975f9';
     const m = machine();
@@ -296,9 +303,10 @@ test('a block that loops onto itself goes round in wasm until its budget is spen
     const { failures } = compare([{ ...CORPUS.cases[0], text: 'self loop', code }],
         { budget: 1000 });
     assert.deepEqual(failures, []);
-});
+}));
 
-test('calls and returns run as interpreted, every call a wasm call or the leaves formed in', ()=>{
+test('calls and returns run as interpreted, every call a wasm call or the leaves formed'
+    + ' in', ifRoom(()=>{
     // `CALLS` (`testing/long-machine.js`): recursion past the wasm call depth, a
     // callee that returns elsewhere, callees formed in, indirect calls predicted
     // and not, a callee that jumps out past its caller, a region left by a jump
@@ -320,9 +328,10 @@ test('calls and returns run as interpreted, every call a wasm call or the leaves
             assert.ok(stats.translated > stats.interpreted, JSON.stringify(stats));
         }
     }
-});
+}));
 
-test('a store beside code on its page stays in the region; one into the code still leaves', ()=>{
+test('a store beside code on its page stays in the region; one into the code still'
+    + ' leaves', ifRoom(()=>{
     //         mov edi, 0x20001000; mov byte [rdi + 0xf00], 0xc3   f: ret, a page on
     //         lea rax, [rdi + 0xf00]; call rax                    f translated
     //         mov ecx, 2000
@@ -353,9 +362,9 @@ test('a store beside code on its page stays in the region; one into the code sti
         (/** @type {{ eip?: number }} */ error)=>error.eip === EXIT);
     assert.equal(flags[page], PageFlag.WRITTEN);
     assert.ok(m.runner.stats.translated > 2000, JSON.stringify(m.runner.stats));
-});
+}));
 
-test('a page whose code is written again and again runs as interpreted', ()=>{
+test('a page whose code is written again and again runs as interpreted', ifRoom(()=>{
     //         mov r8d, 0x20001000; scale's 24 bytes written there, a page on
     //         mov ecx, 3000
     // l:      mov esi, ecx; shr esi, 4; mov edi, ecx       a new factor every 16 calls
@@ -379,9 +388,10 @@ test('a page whose code is written again and again runs as interpreted', ()=>{
             assert.equal(exits, cases.length);
         }
     }
-});
+}));
 
-test('a callee predicted on code since rewritten is not formed in from what replaced it', ()=>{
+test('a callee predicted on code since rewritten is not formed in from what replaced'
+    + ' it', ifRoom(()=>{
     //         mov edi, 0x20002000                        a buffer two pages on
     //         mov dword [rdi], 0x01c58349; mov byte [rdi + 4], 0xc3     add r13, 1; ret
     //         mov rsi, rdi; lea r8, [rbx + 0x100]; mov ecx, 3000
@@ -407,7 +417,7 @@ test('a callee predicted on code since rewritten is not formed in from what repl
         // would leave it.
         assert.ok(stats.translated > 8 * stats.interpreted, JSON.stringify(stats));
     }
-});
+}));
 
 /** SSE forms, one instruction each, as llvm-mc assembles them. */
 const SSE_FORMS = [
@@ -465,7 +475,7 @@ const SSE_FORMS = [
     ['660fe0c1', 'pavgb xmm0, xmm1'],
 ];
 
-test('SSE on NaNs, infinities, zeros, denormals and the edges of conversion', ()=>{
+test('SSE on NaNs, infinities, zeros, denormals and the edges of conversion', ifRoom(()=>{
     const singles = [0x00000000, 0x80000000, 0x3f800000, 0xbf800000, 0x3fc00000, 0x40200000,
         0xc0200000, 0x3f000000, 0x4f000000, 0xcf000000, 0x4effffff, 0xcf000001, 0x7f800000,
         0xff800000, 0x7fc00001, 0x7f800001, 0xffc00002, 0xff800003, 0x00000001, 0x80000003,
@@ -529,4 +539,4 @@ test('SSE on NaNs, infinities, zeros, denormals and the edges of conversion', ()
         assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
         assert.ok(stats.translated > cases.length / 2, JSON.stringify(stats));
     }
-});
+}));
