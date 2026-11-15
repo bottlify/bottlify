@@ -296,6 +296,52 @@ export const IFILTER_MAPPER2_SLOTS = [
     ['EnumMatchingFilters', 15],
 ];
 
+/** The filter graph's other faces, as quartz's graph answers QueryInterface for them. */
+export const IID_IFILTER_GRAPH2 = '{36B73882-C2C8-11CF-8B46-00805F6CEF60}';
+export const IID_IBASIC_VIDEO2 = '{329BB360-F6EA-11D1-9038-00A0C9697298}';
+export const IID_IFILTER_MAPPER3 = '{B79BB0B1-33C1-11D1-ABE1-00A0C905F375}';
+export const IID_IGRAPH_CONFIG = '{03A1EB8E-32BF-4245-8502-114D08A9CB88}';
+export const IID_IGRAPH_VERSION = '{56A868AB-0AD4-11CE-B03A-0020AF0BA770}';
+export const IID_IOBJECT_WITH_SITE = '{FC4801A3-2BA9-11CF-A229-00AA003D7352}';
+export const IID_IVIDEO_FRAME_STEP = '{E46A9787-2B71-444D-A4B5-1FAB7B708D6A}';
+
+/** IFilterGraph2: IGraphBuilder and three more. @type {[string, number][]} */
+export const IFILTER_GRAPH2_SLOTS = [
+    ...IGRAPH_BUILDER_SLOTS,
+    ['AddSourceFilterForMoniker', 4],
+    ['ReconnectEx', 2],
+    ['RenderEx', 3],
+];
+
+/** IBasicVideo2: IBasicVideo and its preferred aspect ratio. @type {[string, number][]} */
+export const IBASIC_VIDEO2_SLOTS = [...IBASIC_VIDEO_SLOTS, ['GetPreferredAspectRatio', 2]];
+
+/** IFilterMapper3: IFilterMapper2 and the device enumerator it uses. @type {[string, number][]} */
+export const IFILTER_MAPPER3_SLOTS = [...IFILTER_MAPPER2_SLOTS, ['GetICreateDevEnum', 1]];
+
+/** IGraphConfig, the dynamic reconnection of a running graph. @type {[string, number][]} */
+export const IGRAPH_CONFIG_SLOTS = [
+    ['Reconnect', 8],
+    ['Reconfigure', 4],
+    ['AddFilterToCache', 1],
+    ['EnumCacheFilter', 1],
+    ['RemoveFilterFromCache', 1],
+    ['GetStartTime', 1],
+    ['PushThroughData', 3],
+    ['SetFilterFlags', 2],
+    ['GetFilterFlags', 2],
+    ['RemoveFilterEx', 2],
+];
+
+/** IGraphVersion. @type {[string, number][]} */
+export const IGRAPH_VERSION_SLOTS = [['QueryVersion', 1]];
+
+/** IObjectWithSite. @type {[string, number][]} */
+export const IOBJECT_WITH_SITE_SLOTS = [['SetSite', 1], ['GetSite', 2]];
+
+/** IVideoFrameStep. @type {[string, number][]} */
+export const IVIDEO_FRAME_STEP_SLOTS = [['Step', 2], ['CanStep', 2], ['CancelStep', 0]];
+
 /*
  * The streaming half: the interfaces a filter a program wrote itself -- a
  * renderer that copies frames into a texture, built on the SDK's base classes

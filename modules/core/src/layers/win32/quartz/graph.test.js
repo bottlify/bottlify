@@ -13,6 +13,9 @@ import {
     IID_IFILTER_MAPPER, IID_IBASIC_AUDIO, IID_IBASIC_VIDEO, IID_IFILTER_GRAPH, IID_IFILTER_MAPPER2,
     IID_IGRAPH_BUILDER, IID_IMEDIA_CONTROL, IID_IMEDIA_EVENT, IID_IMEDIA_EVENT_EX,
     IID_IMEDIA_POSITION, IID_IMEDIA_SEEKING, IID_IVIDEO_WINDOW,
+    IID_IFILTER_GRAPH2, IID_IBASIC_VIDEO2, IID_IFILTER_MAPPER3, IID_IGRAPH_CONFIG,
+    IID_IGRAPH_VERSION, IID_IMEDIA_FILTER, IID_IOBJECT_WITH_SITE, IID_IVIDEO_FRAME_STEP,
+    IID_IBASE_FILTER,
 } from './interfaces.js';
 
 const S_OK = 0;
@@ -196,18 +199,21 @@ test('CoCreateInstance finds the filter graph under both of its class ids', ()=>
     }
 });
 
-test('one object answers QueryInterface for every interface a player asks for', ()=>{
+test('one object answers QueryInterface for every interface Windows\' graph has', ()=>{
     const { object } = createObject();
     for (const iid of [
-        IID_IFILTER_GRAPH, IID_IGRAPH_BUILDER, IID_IMEDIA_CONTROL, IID_IMEDIA_EVENT,
-        IID_IMEDIA_EVENT_EX, IID_IVIDEO_WINDOW, IID_IBASIC_VIDEO, IID_IBASIC_AUDIO,
-        IID_IMEDIA_POSITION, IID_IMEDIA_SEEKING,
+        IID_IFILTER_GRAPH, IID_IGRAPH_BUILDER, IID_IFILTER_GRAPH2, IID_IMEDIA_CONTROL,
+        IID_IMEDIA_EVENT, IID_IMEDIA_EVENT_EX, IID_IVIDEO_WINDOW, IID_IBASIC_VIDEO,
+        IID_IBASIC_VIDEO2, IID_IBASIC_AUDIO, IID_IMEDIA_POSITION, IID_IMEDIA_SEEKING,
+        // The graph is the system's filter mapper too, as quartz's is.
+        IID_IFILTER_MAPPER, IID_IFILTER_MAPPER2, IID_IFILTER_MAPPER3, IID_IGRAPH_CONFIG,
+        IID_IGRAPH_VERSION, IID_IMEDIA_FILTER, IID_IOBJECT_WITH_SITE, IID_IVIDEO_FRAME_STEP,
     ])
     {
         assert.ok(object.queryInterface(iid), iid);
     }
-    // A graph is not a filter mapper, and saying so is an answer a program handles.
-    assert.equal(object.queryInterface(IID_IFILTER_MAPPER2), null);
+    // It runs filters, it is not one.
+    assert.equal(object.queryInterface(IID_IBASE_FILTER), null);
 });
 
 test('IGraphBuilder derives from IUnknown, so its own methods start at slot 3', ()=>{
