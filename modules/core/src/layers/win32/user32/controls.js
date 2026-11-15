@@ -208,6 +208,7 @@ const WS_DISABLED = 0x08000000;
 const WS_VISIBLE = 0x10000000;
 const WS_MINIMIZE = 0x20000000;
 const WS_CHILD = 0x40000000;
+const WS_EX_CONTROLPARENT = 0x00010000;
 /** WM_ACTIVATE: the window gaining or losing the activation. */
 const WM_ACTIVATE = 0x0006;
 
@@ -4296,9 +4297,18 @@ export function createControlProcedures(host){
                 // The control named when lParam's low word says so, else the
                 // next or previous tab stop from the focus; the default id
                 // stays, and only the buttons' look follows the focus.
+                // A dialog inside another as a control parent (a property
+                // sheet's page) walks the tab stops of the dialog it is in,
+                // as the dialog manager searches through it.
+                let walker = record;
+                while ((walker.style & WS_CHILD) !== 0
+                    && (walker.exStyle & WS_EX_CONTROLPARENT) !== 0 && host.live(walker.parent))
+                {
+                    walker = host.live(walker.parent);
+                }
                 const target = (message.lParam & 0xffff) !== 0 ? host.live(message.wParam)
-                    : tabWalk.nextTabStop(record, host.focus(), message.wParam === 0);
-                return target ? giveFocus(record, target, thread) : 0;
+                    : tabWalk.nextTabStop(walker, host.focus(), message.wParam === 0);
+                return target ? giveFocus(walker, target, thread) : 0;
             }
             case WM_CLOSE:
                 // Closing a dialog is Cancel: what the person could have

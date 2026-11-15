@@ -66,6 +66,8 @@ export const threadIdOf = thread=>{
  * @property {number} [x]         Cursor position, for messages that carry one.
  * @property {number} [y]
  * @property {boolean} [unicode]  Posted by a wide caller, so a character is a UTF-16 unit.
+ * @property {number} [side]     The input layer's left or right key of a shift, control
+ *     or alt, which the wParam names as one.
  * @property {number | null} [thread]  The thread whose queue it goes to, for a
  *     message with no window; null for whichever thread looks first. Left out,
  *     a window's message goes to the thread that created the window.
@@ -190,6 +192,13 @@ const VK_MBUTTON = 0x04;
 const VK_XBUTTON1 = 0x05;
 const VK_XBUTTON2 = 0x06;
 
+/** Each modifier's left and right keys, by the virtual key both share. */
+const MODIFIER_SIDES = new Map([[0x10, [0xa0, 0xa1]], [0x11, [0xa2, 0xa3]], [0x12, [0xa4, 0xa5]]]);
+/** The right shift's scan code: the one shift a key message tells apart by it. */
+const RIGHT_SHIFT_SCAN = 0x36;
+/** A key message's lParam bit for a key with the E0 prefix. */
+const EXTENDED_KEY = 1 << 24;
+
 /**
  * What an input message changes in the synchronous key state: the keys it
  * presses or lets go, or null for a message that is no key or button. A
@@ -299,22 +308,40 @@ export function createMessageQueue(options = {}){
      * An input message taken: its key's or button's transition, in the
      * taking thread's state. A press of a key that was up flips its toggle.
      *
-     * @param {any} thread @param {{ message: number, wParam: number }} entry
+     * @param {any} thread
+     * @param {{ message: number, wParam: number, lParam?: number, side?: number }} entry
      */
-    const takeInput = (thread, { message, wParam })=>{
+    const takeInput = (thread, { message, wParam, lParam = 0, side = undefined })=>{
         const change = inputChange(message, wParam);
         if (change === null)
         {
             return;
         }
         const table = syncedOf(thread);
-        for (const vk of change.keys)
-        {
-            if (change.down && (table[vk] & 0x80) === 0)
+        /** @param {number} vk @param {boolean} down */
+        const set = (vk, down)=>{
+            if (down && (table[vk] & 0x80) === 0)
             {
                 table[vk] ^= 0x01;
             }
-            table[vk] = (table[vk] & 0x01) | (change.down ? 0x80 : 0);
+            table[vk] = (table[vk] & 0x01) | (down ? 0x80 : 0);
+        };
+        for (const vk of change.keys)
+        {
+            // A shift, control or alt is two keys under one name: the side
+            // the message's scan code or extended bit names goes with it, and
+            // the name is down while either side is.
+            const sides = MODIFIER_SIDES.get(vk);
+            if (!sides)
+            {
+                set(vk, change.down);
+                continue;
+            }
+            const right = side !== undefined ? side === sides[1]
+                : vk === VK_SHIFT ? (lParam >>> 16 & 0xff) === RIGHT_SHIFT_SCAN
+                    : (lParam & EXTENDED_KEY) !== 0;
+            set(right ? sides[1] : sides[0], change.down);
+            set(vk, ((table[sides[0]] | table[sides[1]]) & 0x80) !== 0);
         }
     };
 
@@ -907,6 +934,8 @@ export function createMessageQueue(options = {}){
             y: (message.y ?? 0) | 0,
             // Posted by a wide caller: a character in it is a UTF-16 unit.
             ...message.unicode ? { unicode: true } : {},
+            // The input layer's left or right modifier key, for the key state.
+            ...message.side !== undefined ? { side: message.side } : {},
         };
         if (message.x !== undefined)
         {

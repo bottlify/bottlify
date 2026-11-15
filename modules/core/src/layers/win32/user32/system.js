@@ -329,6 +329,7 @@ const modifiersIn = state=>({
     shift: state ? (state[0x10] & 0x80) !== 0 : false,
     capsLock: state ? (state[0x14] & 0x01) !== 0 : false,
     control: state ? (state[0x11] & 0x80) !== 0 : false,
+    alt: state ? (state[0x12] & 0x80) !== 0 : false,
 });
 
 /** A key-up, in the scan code ToUnicode and ToAscii are handed. */
@@ -2303,7 +2304,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             return andThen(shown, (/** @type {number} */ taken)=>{
                 if ((taken | 0) === 0)
                 {
-                    host.sendInput?.(piece.input);
+                    host.sendInput?.({ ...piece.input, injected: true });
                 }
                 return next(index + 1);
             });
@@ -2411,7 +2412,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             {
                 if (!up)
                 {
-                    host.sendInput?.({ kind: 'type', text: String.fromCharCode(wScan) });
+                    host.sendInput?.({ kind: 'type', text: String.fromCharCode(wScan),
+                        injected: true });
                 }
                 return true;
             }
@@ -2420,7 +2422,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             const named = (flags & KEYEVENTF_SCANCODE) !== 0
                 ? { scan: wScan, extended }
                 : { vk: wVk, scanGiven: wScan, extended };
-            host.sendInput?.({ kind: 'key', ...named, down: !up });
+            host.sendInput?.({ kind: 'key', ...named, down: !up, injected: true });
             return true;
         });
     };

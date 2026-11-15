@@ -191,7 +191,8 @@ export function createInputModule(){
              */
             const sendDevice = event=>{
                 const seam = queue?.lowLevel ?? null;
-                const watched = seam !== null && (seam.hooked('mouse') || seam.hooked('keyboard'));
+                const watched = seam !== null && event.injected !== true
+                    && (seam.hooked('mouse') || seam.hooked('keyboard'));
                 if (!watched && behind === null)
                 {
                     return router.send(event);
@@ -208,7 +209,8 @@ export function createInputModule(){
                 {
                     holding = null;
                 }
-                const shown = held.filter(each=>each.message && seam !== null
+                const shown = held.filter(each=>event.injected !== true && each.message
+                    && seam !== null
                     && hookedAs(each.message.message) !== null
                     && seam.hooked(/** @type {'mouse' | 'keyboard'} */ (hookedAs(each.message.message))));
                 /** @param {number} index @returns {Promise<boolean>} */

@@ -276,7 +276,12 @@ function setup(
         /** @param {number} x @param {number} y */
         placeCursor: (x, y)=>placed.push({ x, y }),
         /** @param {any} event */
-        sendInput: event=>sent.push(event),
+        // A program's input is marked so: the low-level hooks were shown it
+        // here, and the input layer does not show it them again.
+        sendInput: ({ injected, ...event })=>{
+            assert.equal(injected, true, 'SendInput\'s input is marked injected');
+            sent.push(event);
+        },
     });
     // Cast once: the table's handlers declare only the arguments they read, and
     // a guest call always arrives with the whole argument array.
