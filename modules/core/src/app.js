@@ -11821,6 +11821,8 @@ export async function createApp(options){
                 if (told)
                 {
                     told = false;
+                    // Its table is not handed to a speaker connected later.
+                    events.withdraw('sound-table', (/** @type {any} */ event)=>event.id === id);
                     events.emit('sound-table-closed', { id });
                 }
             },
