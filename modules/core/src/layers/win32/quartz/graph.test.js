@@ -334,7 +334,7 @@ test('a graph with no notify window still queues the event and posts nothing', (
     assert.equal(call(object, IID_IMEDIA_EVENT_EX, 'GetEvent', [OUT, OUT + 4, OUT + 8, 0]), S_OK);
 });
 
-test('AM_MEDIAEVENT_NONOTIFY suppresses the message without losing the event', ()=>{
+test('AM_MEDIAEVENT_NONOTIFY posts nothing and queues nothing, as SetNotifyFlags documents', ()=>{
     const { object, host } = createObject();
     call(object, IID_IMEDIA_EVENT_EX, 'SetNotifyWindow', [0x40, 0x8001, 0]);
     assert.equal(call(object, IID_IMEDIA_EVENT_EX, 'SetNotifyFlags', [1]), S_OK);
@@ -342,7 +342,8 @@ test('AM_MEDIAEVENT_NONOTIFY suppresses the message without losing the event', (
     assert.equal(host.i32(OUT), 1);
     call(object, IID_IMEDIA_CONTROL, 'Run');
     assert.equal(host.posted.length, 0);
-    assert.equal(call(object, IID_IMEDIA_EVENT_EX, 'GetEvent', [OUT, OUT + 4, OUT + 8, 0]), S_OK);
+    assert.equal(call(object, IID_IMEDIA_EVENT_EX, 'GetEvent', [OUT, OUT + 4, OUT + 8, 0]),
+        E_ABORT, 'the queue takes no event while notification is off');
     assert.equal(call(object, IID_IMEDIA_EVENT_EX, 'SetNotifyFlags', [2]), E_INVALIDARG);
 });
 
@@ -356,10 +357,66 @@ test('WaitForCompletion answers with the abort code, and only while running', ()
     assert.equal(call(object, IID_IMEDIA_EVENT_EX, 'WaitForCompletion', [0, OUT]), E_ABORT);
 });
 
-test('GetEventHandle fails cleanly rather than handing out a handle that never signals', ()=>{
+test('GetEventHandle with no kernel events behind it refuses and zeroes the pointer', ()=>{
     const { object, host } = createObject();
     assert.equal(call(object, IID_IMEDIA_EVENT_EX, 'GetEventHandle', [OUT]), E_NOTIMPL);
     assert.equal(host.i32(OUT), 0);
+});
+
+/** Kernel events as a host keeps them: a handle each, raised or not, closed or not. */
+function fakeEvents(){
+    /** @type {Map<number, { up: boolean, closed: boolean }>} */
+    const made = new Map();
+    return {
+        made,
+        create: ()=>{
+            const handle = 0x100 + made.size * 4;
+            made.set(handle, { up: false, closed: false });
+            return handle;
+        },
+        /** @param {number} handle */
+        set: handle=>{ /** @type {any} */ (made.get(handle)).up = true; },
+        /** @param {number} handle */
+        reset: handle=>{ /** @type {any} */ (made.get(handle)).up = false; },
+        /** @param {number} handle */
+        close: handle=>{ /** @type {any} */ (made.get(handle)).closed = true; },
+    };
+}
+
+test('the event handle is one for the graph, up exactly while the queue holds an event', ()=>{
+    const host = createHost({});
+    const events = fakeEvents();
+    const registry = createComRegistry();
+    registerQuartzClasses(registry, { ...host, events });
+    const object = /** @type {any} */ (registry.create(CLSID_FILTER_GRAPH));
+    assert.equal(call(object, IID_IMEDIA_EVENT_EX, 'GetEventHandle', [0]), E_POINTER);
+    assert.equal(call(object, IID_IMEDIA_EVENT_EX, 'GetEventHandle', [OUT]), S_OK);
+    const handle = host.i32(OUT);
+    assert.equal(events.made.get(handle)?.up, false, 'nothing queued yet');
+    call(object, IID_IGRAPH_BUILDER, 'RenderFile', [PATH, 0]);
+    call(object, IID_IMEDIA_CONTROL, 'Run');
+    assert.equal(events.made.get(handle)?.up, true, 'EC_COMPLETE raises it');
+    assert.equal(call(object, IID_IMEDIA_EVENT_EX, 'GetEventHandle', [OUT + 16]), S_OK);
+    assert.equal(host.i32(OUT + 16), handle, 'the same handle every time');
+    assert.equal(call(object, IID_IMEDIA_EVENT_EX, 'GetEvent', [OUT, OUT + 4, OUT + 8, 0]), S_OK);
+    assert.equal(events.made.get(handle)?.up, false,
+        'the GetEvent that empties the queue lowers it');
+
+    // With notification off, only the end of a stream raises it.
+    call(object, IID_IMEDIA_CONTROL, 'Stop');
+    call(object, IID_IMEDIA_EVENT_EX, 'SetNotifyFlags', [1]);
+    call(object, IID_IGRAPH_BUILDER, 'RenderFile', [PATH, 0]);
+    call(object, IID_IMEDIA_CONTROL, 'Run');
+    assert.equal(events.made.get(handle)?.up, true);
+    assert.equal(call(object, IID_IMEDIA_EVENT_EX, 'GetEvent', [OUT, OUT + 4, OUT + 8, 0]),
+        E_ABORT);
+
+    while (object.release() > 0)
+    {
+        // The graph's own references.
+    }
+    assert.equal(events.made.get(handle)?.closed, true,
+        'the graph closes its handle when it goes');
 });
 
 test('Stop and Pause move the reported state', ()=>{

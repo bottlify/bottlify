@@ -1349,6 +1349,27 @@ export function createWin32Module(){
                 readWideString: (address, maxLength)=>readWideString(address, maxLength),
                 video: config?.video,
                 divergence: config?.divergence,
+                // The event IMediaEvent::GetEventHandle hands out; a stale
+                // handle is the program's mistake, as for the ports' events.
+                events: {
+                    create: ()=>kernel.handles.open('event',
+                        kernel.createEvent({ manualReset: true, signalled: false })),
+                    /** @param {number} handle */
+                    set: handle=>{
+                        try { kernel.setEvent(kernel.handles.resolve(handle, 'event')); }
+                        catch (e){ void e; }
+                    },
+                    /** @param {number} handle */
+                    reset: handle=>{
+                        try { kernel.resetEvent(kernel.handles.resolve(handle, 'event')); }
+                        catch (e){ void e; }
+                    },
+                    /** @param {number} handle */
+                    close: handle=>{
+                        try { kernel.handles.close(handle); }
+                        catch (e){ void e; }
+                    },
+                },
                 // A renderer the program wrote is fed from a thread of its own,
                 // as quartz feeds one from its streaming thread; made on the
                 // first sample, so a program with no such filter has none.

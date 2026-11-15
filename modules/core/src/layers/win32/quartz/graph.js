@@ -206,6 +206,8 @@ const AUDIO_PROPERTIES = ['Volume', 'Balance'];
  *           a pause or a decode that could not keep up cost. Null until the
  *           first tick after Run, so that Run needs no clock of its own.
  * @property {boolean} finished        Whether EC_COMPLETE has been raised.
+ * @property {number} eventHandle  The kernel event GetEventHandle hands out, made with the
+ *           graph's first ask; zero until then.
  * @property {number} version   IGraphVersion's: one more each time a filter joins or leaves.
  * @property {number} syncSource  The reference clock IMediaFilter was given, one reference held.
  * @property {number} site        The site IObjectWithSite was given, one reference held.
@@ -315,6 +317,7 @@ function newGraphState(){
         filters: [],
         source: null,
         version: 0,
+        eventHandle: 0,
         syncSource: 0,
         site: 0,
     };
@@ -336,6 +339,11 @@ function newGraphState(){
  * @property {((api: string, detail: string) => void) | undefined} [divergence]
  *           Where "this call succeeded and did not do all of what it promises"
  *           goes, once per distinct difference.
+ * @property {{ create: () => number, set: (handle: number) => void,
+ *     reset: (handle: number) => void, close: (handle: number) => void } | undefined} [events]
+ *           Kernel events by handle: the one IMediaEvent::GetEventHandle hands
+ *           out, manual-reset and signalled while the queue holds an event.
+ *           Absent, GetEventHandle refuses as before.
  * @property {import('./stream.js').StreamHost | undefined} [stream]
  *           What joining a program's own filters to a graph needs: calling into
  *           its objects, handing out ours, and a thread to call it from. Absent,
@@ -428,12 +436,42 @@ export function createQuartz(host){
      * @param {number} code @param {number} param1 @param {number} param2
      */
     const raise = (graph, code, param1, param2)=>{
-        graph.events.push({ code, param1: param1 >>> 0, param2: param2 >>> 0 });
         const { hwnd, message, instance, flags } = graph.notify;
-        if (hwnd !== 0 && (flags & AM_MEDIAEVENT_NONOTIFY) === 0)
+        // With notification turned off nothing is queued, and the handle is
+        // raised only by the end of a stream: the program waits for the film to
+        // finish without reading events (SetNotifyFlags' documentation).
+        if ((flags & AM_MEDIAEVENT_NONOTIFY) !== 0)
+        {
+            if (code === EC_COMPLETE && graph.eventHandle !== 0)
+            {
+                host.events?.set(graph.eventHandle);
+            }
+            return;
+        }
+        graph.events.push({ code, param1: param1 >>> 0, param2: param2 >>> 0 });
+        if (graph.eventHandle !== 0)
+        {
+            host.events?.set(graph.eventHandle);
+        }
+        if (hwnd !== 0)
         {
             host.post({ hwnd, message, wParam: 0, lParam: instance });
         }
+    };
+
+    /**
+     * The next event, the handle lowered once the queue is empty: it is up
+     * exactly while there is something to collect.
+     *
+     * @param {FilterGraphState} graph @returns {GraphEvent | undefined}
+     */
+    const takeEvent = graph=>{
+        const event = graph.events.shift();
+        if (graph.events.length === 0 && graph.eventHandle !== 0)
+        {
+            host.events?.reset(graph.eventHandle);
+        }
+        return event;
     };
 
     const streaming = host.stream ? createStreaming(host.stream) : null;
@@ -1112,12 +1150,31 @@ export function createQuartz(host){
         /**
          * HRESULT GetEventHandle(OAEVENT *hEvent)
          *
-         * The other way to learn an event is waiting: a handle the program
-         * waits on itself. There is no event object behind this graph, and
-         * handing out a handle that never signals would be worse than saying
-         * so -- a program told this fails uses the notify window instead.
+         * The other way to learn an event is waiting: a manual-reset event the
+         * graph owns, signalled while its queue holds an event and lowered by
+         * the GetEvent that empties it. The program waits on it and must not
+         * close it; the graph closes it when it goes. One handle for the
+         * graph's life, made with the first ask.
          */
-        GetEventHandle: (graph, [out])=>refuse(out, E_NOTIMPL),
+        GetEventHandle: (graph, [out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return E_POINTER;
+            }
+            if (!host.events)
+            {
+                return refuse(out, E_NOTIMPL);
+            }
+            if (graph.eventHandle === 0)
+            {
+                graph.eventHandle = host.events.create();
+                if (graph.events.length > 0)
+                {
+                    host.events.set(graph.eventHandle);
+                }
+            }
+            return writeLong(out, graph.eventHandle);
+        },
 
         /**
          * HRESULT GetEvent(long *lEventCode, LONG_PTR *lParam1, LONG_PTR *lParam2,
@@ -1134,7 +1191,7 @@ export function createQuartz(host){
             {
                 return E_POINTER;
             }
-            const event = graph.events.shift();
+            const event = takeEvent(graph);
             if (!event)
             {
                 return E_ABORT;
@@ -1157,7 +1214,7 @@ export function createQuartz(host){
             {
                 return VFW_E_WRONG_STATE;
             }
-            const event = graph.events.shift();
+            const event = takeEvent(graph);
             if (!event)
             {
                 return E_ABORT;
@@ -1189,6 +1246,16 @@ export function createQuartz(host){
                 return E_INVALIDARG;
             }
             graph.notify.flags = flags >>> 0;
+            // Turning notification off drops what is queued, as quartz does:
+            // a program that stops reading is not handed stale events later.
+            if (graph.notify.flags !== 0)
+            {
+                graph.events = [];
+                if (graph.eventHandle !== 0)
+                {
+                    host.events?.reset(graph.eventHandle);
+                }
+            }
             return S_OK;
         },
 
@@ -1600,6 +1667,11 @@ export function createQuartz(host){
              */
             destroy: ()=>{
                 playing.delete(state);
+                if (state.eventHandle !== 0)
+                {
+                    host.events?.close(state.eventHandle);
+                    state.eventHandle = 0;
+                }
                 state.clip?.close();
                 state.clip = null;
                 // Reached without the program's Release -- nothing here is
