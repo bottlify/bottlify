@@ -383,6 +383,35 @@ export function createCountedStringFunctions(host){
             },
         },
 
+        /**
+         * BOOLEAN RtlCreateUnicodeString(PUNICODE_STRING Destination, PCWSTR Source)
+         *
+         * The wide string copied into a buffer of its own, terminated, for
+         * RtlFreeUnicodeString to give back; FALSE where it would not fit a
+         * UNICODE_STRING or there is no room for it.
+         */
+        RtlCreateUnicodeString: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([destination, source])=>{
+                const text = host.readWideString(source >>> 0, MAX_WIDE_BYTES);
+                const total = text.length * 2 + 2;
+                if (total > MAX_MAXIMUM)
+                {
+                    return 0;
+                }
+                const buffer = host.allocate(total);
+                if (buffer === 0)
+                {
+                    return 0;
+                }
+                writeWide(buffer, text);
+                writeDescriptor(destination >>> 0,
+                    { length: total - 2, maximumLength: total, buffer });
+                return 1;
+            },
+        },
+
         /** VOID RtlFreeAnsiString(PANSI_STRING AnsiString) */
         RtlFreeAnsiString: {
             argBytes: 4,
