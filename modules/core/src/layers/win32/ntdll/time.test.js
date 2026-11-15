@@ -74,7 +74,8 @@ test('1601-01-01 was a Monday, and a field out of range makes no time', ()=>{
     call('RtlTimeToTimeFields', TIME, FIELDS);
     assert.deepEqual(fieldsOf(view), [1601, 1, 1, 0, 0, 0, 0, 1]);
     // 1900-02-29: 1900 is no leap year.
-    [1900, 2, 29, 0, 0, 0, 0, 0].forEach((field, index)=>view.setInt16(FIELDS + index * 2, field, true));
+    [1900, 2, 29, 0, 0, 0, 0, 0]
+        .forEach((field, index)=>view.setInt16(FIELDS + index * 2, field, true));
     view.setBigInt64(OUT, -1n, true);
     assert.equal(call('RtlTimeFieldsToTime', FIELDS, OUT), 0);
     assert.equal(view.getBigInt64(OUT, true), -1n, 'nothing written');

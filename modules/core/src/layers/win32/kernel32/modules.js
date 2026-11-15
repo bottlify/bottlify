@@ -45,6 +45,9 @@ const ERROR_INVALID_PARAMETER = 87;
  */
 const DEFAULT_DLL_DIRECTORIES = 0x200 | 0x400 | 0x800 | 0x1000;
 
+/** Where AddDllDirectory's cookies start: above the null page, four apart. */
+const DLL_DIRECTORY_COOKIE_BASE = 0x10000;
+
 /** What FreeLibrary says of a data-file handle that names no mapping. */
 const ERROR_BAD_EXE_FORMAT = 193;
 const ERROR_INVALID_HANDLE = 6;
@@ -206,23 +209,26 @@ export function createModuleFunctions(host){
         // than after them; the loader's own search is one step that cannot
         // be split, so a name the system also answers for comes from the
         // system here.
+        // Then each directory AddDllDirectory named, in the order added.
         const bare = !/[\\/:]/.test(name);
-        if (!bare || dllDirectory === null || dllDirectory === '')
-        {
-            return typeof answer === 'number' ? settle(answer) : answer.then(settle);
-        }
-        const beside = `${dllDirectory.replace(/\\+$/, '')}\\${name}`;
-        /** @param {number} base */
-        const retry = base=>{
-            if (base !== 0)
+        const besides = (bare ? [dllDirectory, ...userDirectories.values()] : [])
+            .filter(directory=>directory !== null && directory !== '')
+            .map(directory=>`${/** @type {string} */ (directory).replace(/\\+$/, '')}\\${name}`);
+        /**
+         * @param {number} base @param {number} next
+         * @returns {number | Promise<number>}
+         */
+        const retry = (base, next)=>{
+            if (base !== 0 || next >= besides.length)
             {
-                return base;
+                return settle(base, next === 0 ? name : besides[next - 1]);
             }
-            const again = loadOnce(beside, flags);
-            return typeof again === 'number' ? settle(again, beside)
-                : again.then(found=>settle(found, beside));
+            const again = loadOnce(besides[next], flags);
+            return typeof again === 'number' ? retry(again, next + 1)
+                : again.then(found=>retry(found, next + 1));
         };
-        return typeof answer === 'number' ? retry(answer) : answer.then(retry);
+        return typeof answer === 'number' ? retry(answer, 0)
+            : answer.then(found=>retry(found, 0));
     };
 
     /**
@@ -246,6 +252,14 @@ export function createModuleFunctions(host){
      * @type {string | null}
      */
     let dllDirectory = null;
+    /**
+     * The directories AddDllDirectory added, by the cookie it handed back.
+     *
+     * @type {Map<number, string>}
+     */
+    const userDirectories = new Map();
+    /** The next cookie: a nonzero value no other handle is, counting up. */
+    let nextCookie = DLL_DIRECTORY_COOKIE_BASE;
 
     /**
      * Writes a NUL-terminated string and reports what a Win32 out-parameter of
@@ -266,6 +280,52 @@ export function createModuleFunctions(host){
         const written = Math.min(text.length, size - 1);
         host.writeMemory(buffer, encodeAnsi(`${text.slice(0, written)}\0`));
         return written;
+    };
+
+    /**
+     * GetModuleFileName, either width: the path and its terminator where they
+     * fit, the length without it answered and the last error cleared; where
+     * they do not, as many
+     * characters as fit with the terminator last, nSize answered and
+     * ERROR_INSUFFICIENT_BUFFER left - the one way a caller tells a cut path
+     * from a whole one. No room at all is the same error and nothing written.
+     *
+     * @param {number} handle @param {number} buffer @param {number} size
+     * @param {boolean} wide
+     */
+    const moduleFileName = (handle, buffer, size, wide)=>{
+        const module = handle === 0 ? host.find(null) : host.byBase(handle >>> 0);
+        if (!module)
+        {
+            host.setLastError(ERROR_MOD_NOT_FOUND);
+            return 0;
+        }
+        const path = handle === 0 ? host.imagePath() : fileNameOf(module);
+        const room = size >>> 0;
+        if (room === 0)
+        {
+            host.setLastError(ERROR_INSUFFICIENT_BUFFER);
+            return 0;
+        }
+        const fits = path.length < room;
+        const kept = `${fits ? path : path.slice(0, room - 1)}\0`;
+        if (wide)
+        {
+            const bytes = new Uint8Array(kept.length * 2);
+            for (let at = 0; at < kept.length; at++)
+            {
+                bytes[at * 2] = kept.charCodeAt(at) & 0xff;
+                bytes[at * 2 + 1] = kept.charCodeAt(at) >> 8;
+            }
+            host.writeMemory(buffer >>> 0, bytes);
+        }
+        else
+        {
+            host.writeMemory(buffer >>> 0, encodeAnsi(kept));
+        }
+        // A whole path clears the last error, as Windows' does.
+        host.setLastError(fits ? 0 : ERROR_INSUFFICIENT_BUFFER);
+        return fits ? path.length : room;
     };
 
     /**
@@ -463,6 +523,45 @@ export function createModuleFunctions(host){
                 return 1;
             },
         },
+        /**
+         * DLL_DIRECTORY_COOKIE AddDllDirectory(PCWSTR NewDirectory)
+         *
+         * A directory searched for a bare name after the default search (and
+         * after SetDllDirectory's), until RemoveDllDirectory takes it out; a
+         * path that is not absolute is ERROR_INVALID_PARAMETER and no cookie.
+         */
+        AddDllDirectory: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([path])=>{
+                const directory = (path >>> 0) === 0 ? ''
+                    : host.readWideString(path >>> 0, MAX_NAME * 2);
+                if (!/^([a-z]:\\|\\\\)/i.test(directory))
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                const cookie = nextCookie;
+                nextCookie += 4;
+                userDirectories.set(cookie, directory);
+                return cookie;
+            },
+        },
+
+        /** BOOL RemoveDllDirectory(DLL_DIRECTORY_COOKIE Cookie): a cookie never handed out refused. */
+        RemoveDllDirectory: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([cookie])=>{
+                if (!userDirectories.delete(cookie >>> 0))
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                return 1;
+            },
+        },
+
         SetDllDirectoryW: {
             argBytes: 4,
             /** @param {number[]} args */
@@ -611,30 +710,7 @@ export function createModuleFunctions(host){
         GetModuleFileNameW: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([handle, buffer, size])=>{
-                const module = handle === 0 ? host.find(null) : host.byBase(handle >>> 0);
-                if (!module)
-                {
-                    host.setLastError(ERROR_MOD_NOT_FOUND);
-                    return 0;
-                }
-                const path = handle === 0 ? host.imagePath() : fileNameOf(module);
-                const room = size >>> 0;
-                if (buffer === 0 || room === 0)
-                {
-                    return 0;
-                }
-                const kept = path.slice(0, room - 1);
-                const bytes = new Uint8Array((kept.length + 1) * 2);
-                for (let at = 0; at < kept.length; at++)
-                {
-                    const code = kept.charCodeAt(at);
-                    bytes[at * 2] = code & 0xff;
-                    bytes[at * 2 + 1] = code >> 8;
-                }
-                host.writeMemory(buffer >>> 0, bytes);
-                return kept.length;
-            },
+            handler: ([handle, buffer, size])=>moduleFileName(handle, buffer, size, true),
         },
 
         /**
@@ -737,16 +813,7 @@ export function createModuleFunctions(host){
         GetModuleFileNameA: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([handle, buffer, size])=>{
-                const module = handle === 0 ? host.find(null) : host.byBase(handle >>> 0);
-                if (!module)
-                {
-                    host.setLastError(ERROR_MOD_NOT_FOUND);
-                    return 0;
-                }
-                const path = handle === 0 ? host.imagePath() : fileNameOf(module);
-                return writeString(buffer >>> 0, size >>> 0, path);
-            },
+            handler: ([handle, buffer, size])=>moduleFileName(handle, buffer, size, false),
         },
     };
 }

@@ -385,6 +385,53 @@ test("K32GetModuleInformation reads a module's base, size and entry from its own
     assert.equal(lastError(), 6, 'ERROR_INVALID_HANDLE');
 });
 
+test('a path cut by a short buffer ends in its terminator, answers nSize and says so', ()=>{
+    const f = hostFor({});
+    const host = /** @type {any} */ (f.host);
+    host.find = (/** @type {string | null} */ name)=>(name === null
+        ? record('app.exe', 0x400000) : null);
+    /** @type {Uint8Array[]} */
+    const written = [];
+    host.writeMemory = (/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>{
+        written.push(bytes.slice());
+    };
+    const fns = createModuleFunctions(f.host);
+    // C:\App\speedDemo.exe is 20 characters.
+    assert.equal(fns.GetModuleFileNameW.handler([0, 0x1000, 8]), 8);
+    assert.equal(f.lastError(), 122, 'ERROR_INSUFFICIENT_BUFFER');
+    assert.equal(written[0].length, 16, 'seven characters and the terminator');
+    assert.equal(written[0][14] | written[0][15], 0);
+    assert.equal(fns.GetModuleFileNameA.handler([0, 0x1000, 21]), 20);
+    assert.equal(f.lastError(), 0, 'a whole path clears the error');
+    assert.equal(fns.GetModuleFileNameA.handler([0, 0x1000, 0]), 0);
+    assert.equal(f.lastError(), 122);
+});
+
+test('AddDllDirectory\'s directories are searched for a bare name until removed', ()=>{
+    /** @type {string[]} */
+    const asked = [];
+    const loader = (/** @type {string} */ name)=>{
+        asked.push(name);
+        return name === 'E:\\Plugins\\fx.dll' ? 0x30000000 : 0;
+    };
+    const { host, say, lastError } = hostFor({ load: /** @type {any} */ (loader) });
+    const fns = createModuleFunctions(/** @type {any} */ (host));
+    say(0x100, 'fx.dll');
+    say(0x200, 'E:\\Plugins');
+    say(0x300, 'relative\\dir');
+    assert.equal(fns.AddDllDirectory.handler([0x300]), 0, 'a relative path is refused');
+    assert.equal(lastError(), 87);
+    const cookie = fns.AddDllDirectory.handler([0x200]);
+    assert.notEqual(cookie, 0);
+    assert.equal(fns.LoadLibraryW.handler([0x100]), 0x30000000);
+    assert.deepEqual(asked, ['fx.dll', 'E:\\Plugins\\fx.dll']);
+    assert.equal(fns.RemoveDllDirectory.handler([cookie]), 1);
+    assert.equal(fns.RemoveDllDirectory.handler([cookie]), 0, 'only once');
+    asked.length = 0;
+    assert.equal(fns.LoadLibraryW.handler([0x100]), 0);
+    assert.deepEqual(asked, ['fx.dll']);
+});
+
 test('SetDllDirectory adds its directory to a bare name\'s search; NULL takes it away', async()=>{
     /** @type {string[]} */
     const asked = [];

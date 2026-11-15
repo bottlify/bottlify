@@ -36,6 +36,7 @@ import { createPathFunctions } from './paths.js';
 import { createAtomTableFunctions } from './atoms.js';
 import { createTimeFunctions } from './time.js';
 import { createEnvironmentFunctions } from './environment.js';
+import { LOADER_ENTRIES, createLoaderFunctions } from './loader.js';
 import { createStringOperations } from './string-ops.js';
 import { MEMORY_ENTRIES, createMemoryFunctions } from './memory.js';
 import { createDebugFunctions } from './debug.js';
@@ -488,6 +489,11 @@ export function createNtdllFunctions(host){
         ...createBitmapFunctions({ readMemory: host.readMemory, writeMemory: host.writeMemory }),
 
         ...time.table,
+
+        ...(LOADER_ENTRIES.every(name=>kernel32[name])
+            ? createLoaderFunctions({ readMemory: host.readMemory,
+                writeMemory: host.writeMemory, kernel32, allocate, free })
+            : {}),
 
         ...(['GetEnvironmentStringsW', 'SetEnvironmentVariableW'].every(name=>kernel32[name])
             ? createEnvironmentFunctions({ readMemory: host.readMemory,
