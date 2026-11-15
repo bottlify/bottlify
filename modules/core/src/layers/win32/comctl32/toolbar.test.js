@@ -17,7 +17,7 @@ import {
     TB_ADDBUTTONSA, TB_INSERTBUTTONA, TB_DELETEBUTTON, TB_BUTTONCOUNT, TB_GETBUTTON,
     TB_GETITEMRECT, TB_COMMANDTOINDEX, TB_ISBUTTONENABLED, TB_ISBUTTONCHECKED,
     TB_ISBUTTONPRESSED, TB_CHECKBUTTON, TB_ENABLEBUTTON, TB_SETPARENT, TB_GETSTATE,
-    TB_HITTEST, TB_REPLACEBITMAP,
+    TB_HITTEST, TB_REPLACEBITMAP, TB_GETBUTTONINFOA, TB_SETBUTTONINFOA,
 } from './toolbar.js';
 
 /** The fixture over the graphics layer's drawing engine. */
@@ -254,4 +254,34 @@ test('TB_ADDBITMAP takes a module\'s bitmap resource, counts comctl32\'s standar
     assert.equal(context.send([hwnd, TB_REPLACEBITMAP, 0, ITEM]), 1);
     context.memory.put32s(ITEM, [0, strip, 0, plain, 3]);
     assert.equal(context.send([hwnd, TB_REPLACEBITMAP, 0, ITEM]), 0, 'it is gone');
+});
+
+test('TBBUTTONINFO reads and sets a button by command or by index, and is refused at any '
+    + 'other size', async()=>{
+    const context = setupBars();
+    await context.makeParent();
+    const { hwnd } = await toolbar(context, MFC_STYLE, [{ command: 100 }, { command: 101 }]);
+    /** A TBBUTTONINFO at OUT of this size and mask. */
+    const info = (/** @type {number} */ size, /** @type {number} */ mask)=>{
+        context.memory.bytes.fill(0, OUT, OUT + 32);
+        context.memory.put32s(OUT, [size, mask]);
+        return OUT;
+    };
+    for (const size of [0, 28, 31, 33, 48])
+    {
+        assert.equal(context.send([hwnd, TB_GETBUTTONINFOA, 101, info(size, 0x20)]) | 0, -1,
+            `size ${size}`);
+    }
+    // The lParam and width set, then read back by index.
+    const set = info(32, 0x10 | 0x40);
+    context.memory.put32s(set + 20, [0xbeef]);
+    context.memory.bytes[set + 18] = 40;
+    assert.equal(context.send([hwnd, TB_SETBUTTONINFOA, 100, set]), 1);
+    assert.equal(context.send([hwnd, TB_GETBUTTONINFOA, 0, info(32, 0x80000000 | 0x10 | 0x40
+        | 0x20)]), 0, 'the index answered');
+    assert.deepEqual([context.memory.i32(OUT + 8), context.memory.i32(OUT + 20),
+        context.memory.bytes[OUT + 18]], [100, 0xbeef, 40]);
+    assert.deepEqual(itemRect(context, hwnd, 1).rect.slice(0, 1), [40],
+        'the next button follows a button of its own width');
+    assert.equal(context.send([hwnd, TB_GETBUTTONINFOA, 999, info(32, 0x20)]) | 0, -1);
 });
