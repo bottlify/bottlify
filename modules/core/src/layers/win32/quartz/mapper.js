@@ -52,7 +52,7 @@ const PIN_TYPE = { MAJOR: 0, MINOR: 4, BYTES: 8 };
 const REGFILTER_BYTES = 20;
 
 /** A name read whole, as long as a registry key name may be. */
-const NAME_LIMIT = 255 * 2;
+const NAME_BYTES = 255 * 2;
 
 /** @type {[string, number][]} */
 export const IENUM_REG_FILTERS_SLOTS = [['Next', 3], ['Skip', 1], ['Reset', 0], ['Clone', 1]];
@@ -135,7 +135,7 @@ export function createFilterMapper(host, store, devices){
                 const at = array + i * PINS1.BYTES;
                 const name = host.readU32(at + PINS1.NAME);
                 return {
-                    name: name === 0 ? '' : host.readWideString(name, NAME_LIMIT),
+                    name: name === 0 ? '' : host.readWideString(name, NAME_BYTES),
                     renderer: host.readU32(at + PINS1.RENDERED) !== 0,
                     output: host.readU32(at + PINS1.OUTPUT) !== 0,
                     zero: host.readU32(at + PINS1.ZERO) !== 0,
@@ -230,7 +230,7 @@ export function createFilterMapper(host, store, devices){
             }
             const filter = readGuid(clsid >>> 0);
             const name = (instance >>> 0) === 0 ? filter
-                : host.readWideString(instance >>> 0, NAME_LIMIT);
+                : host.readWideString(instance >>> 0, NAME_BYTES);
             return store.unregister(categoryOf(category), name) ? S_OK : NOT_REGISTERED;
         },
         /**
@@ -252,9 +252,9 @@ export function createFilterMapper(host, store, devices){
             const filter = {
                 category: categoryOf(category),
                 instance: (instance >>> 0) === 0 ? filterClass
-                    : host.readWideString(instance >>> 0, NAME_LIMIT),
+                    : host.readWideString(instance >>> 0, NAME_BYTES),
                 clsid: filterClass,
-                name: host.readWideString(name >>> 0, NAME_LIMIT),
+                name: host.readWideString(name >>> 0, NAME_BYTES),
                 merit: registration.merit,
                 pins: registration.pins,
                 properties: new Map(),
@@ -367,7 +367,7 @@ export function createFilterMapper(host, store, devices){
             const clsid = guidOf([a, b, c, d]);
             store.register({
                 category: CLSID_LEGACY_AM_FILTER_CATEGORY, instance: clsid, clsid,
-                name: host.readWideString(name >>> 0, NAME_LIMIT), merit: merit >>> 0,
+                name: host.readWideString(name >>> 0, NAME_BYTES), merit: merit >>> 0,
                 pins: legacy(clsid)?.pins ?? [], properties: new Map(),
             });
             return S_OK;
@@ -382,7 +382,7 @@ export function createFilterMapper(host, store, devices){
             {
                 return VFW_E_NOT_FOUND;
             }
-            const pinName = (name >>> 0) === 0 ? '' : host.readWideString(name >>> 0, NAME_LIMIT);
+            const pinName = (name >>> 0) === 0 ? '' : host.readWideString(name >>> 0, NAME_BYTES);
             filter.pins = filter.pins.filter(pin=>pin.name !== pinName);
             filter.pins.push({ name: pinName, renderer: rendered !== 0, output: output !== 0,
                 zero: zero !== 0, many: many !== 0, types: [] });
@@ -391,7 +391,7 @@ export function createFilterMapper(host, store, devices){
         /** HRESULT RegisterPinType(CLSID clsFilter, LPCWSTR strName, CLSID clsMajorType, CLSID clsSubType) */
         RegisterPinType: (state, [a, b, c, d, name, ...types])=>{
             const filter = legacy(guidOf([a, b, c, d]));
-            const pinName = (name >>> 0) === 0 ? '' : host.readWideString(name >>> 0, NAME_LIMIT);
+            const pinName = (name >>> 0) === 0 ? '' : host.readWideString(name >>> 0, NAME_BYTES);
             const pin = filter?.pins.find(one=>one.name === pinName);
             if (!pin)
             {
@@ -412,7 +412,7 @@ export function createFilterMapper(host, store, devices){
             {
                 return VFW_E_NOT_FOUND;
             }
-            const pinName = (name >>> 0) === 0 ? '' : host.readWideString(name >>> 0, NAME_LIMIT);
+            const pinName = (name >>> 0) === 0 ? '' : host.readWideString(name >>> 0, NAME_BYTES);
             filter.pins = filter.pins.filter(pin=>pin.name !== pinName);
             return S_OK;
         },

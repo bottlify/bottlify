@@ -174,7 +174,7 @@ const wide = text=>{
 };
 
 /** A name read whole, up to the longest a registry value name may be. */
-const NAME_LIMIT = 16384 * 2;
+const NAME_BYTES = 16384 * 2;
 
 /**
  * The device enumerator's class, and the monikers and enumerators the filter
@@ -204,7 +204,7 @@ export function createDeviceEnumeration(host, store){
             {
                 return E_POINTER;
             }
-            const wanted = host.readWideString(name >>> 0, NAME_LIMIT);
+            const wanted = host.readWideString(name >>> 0, NAME_BYTES);
             const value = wanted === 'FriendlyName' ? filter.name
                 : wanted === 'CLSID' ? filter.clsid
                     : filter.properties.get(wanted);
@@ -234,8 +234,8 @@ export function createDeviceEnumeration(host, store){
             {
                 return E_INVALIDARG;
             }
-            const text = host.readWideString(host.readU32((variant >>> 0) + 8), NAME_LIMIT);
-            filter.properties.set(host.readWideString(name >>> 0, NAME_LIMIT), text);
+            const text = host.readWideString(host.readU32((variant >>> 0) + 8), NAME_BYTES);
+            filter.properties.set(host.readWideString(name >>> 0, NAME_BYTES), text);
             return S_OK;
         },
     };
