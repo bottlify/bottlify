@@ -1772,3 +1772,80 @@ test('GetIconInfo hands out new mask and colour bitmaps, and CopyImage stretches
     assert.equal(fns.CopyImage.handler([0x123, IMAGE_BITMAP, 5, 6, 0x2000]), 0x777);
     assert.deepEqual(copied, [[0x123, 5, 6, 0x2000]], 'a bitmap is copied by GDI');
 });
+
+test('ModifyMenu makes an item over, keeps its check marks, refuses one that is not there', ()=>{
+    const { memory, fns } = setup();
+    const MIIM_CHECKMARKS = 0x8;
+    const menu = fns.CreateMenu.handler([]);
+    memory.putString(TITLE, 'Old');
+    fns.AppendMenuA.handler([menu, 0, 7, TITLE]);
+    assert.equal(fns.SetMenuItemBitmaps.handler([menu, 7, 0, 0x41, 0x42]), 1);
+    memory.putString(TITLE, 'New');
+    assert.equal(fns.ModifyMenuA.handler([menu, 7, 0, 8, TITLE]), 1);
+    assert.equal(fns.ModifyMenuA.handler([menu, 7, 0, 9, TITLE]), 0, 'id 7 is gone');
+    assert.equal(fns.ModifyMenuA.handler([menu, 5, MF_BYPOSITION, 9, TITLE]), 0);
+    putItemInfo(memory, { mask: MIIM_ID | MIIM_CHECKMARKS });
+    assert.equal(fns.GetMenuItemInfoA.handler([menu, 0, 1, INFO]), 1);
+    assert.deepEqual([memory.u32(INFO + MENUITEMINFO.wID),
+        memory.u32(INFO + MENUITEMINFO.hbmpChecked),
+        memory.u32(INFO + MENUITEMINFO.hbmpUnchecked)], [8, 0x42, 0x41]);
+
+    // A popup's id is its submenu's handle; a separator is grayed whatever it was given.
+    const popup = fns.CreatePopupMenu.handler([]);
+    fns.AppendMenuA.handler([menu, MF_POPUP, popup, TITLE]);
+    fns.AppendMenuA.handler([menu, MF_SEPARATOR, 0, 0]);
+    putItemInfo(memory, { mask: MIIM_ID | MIIM_STATE });
+    fns.GetMenuItemInfoA.handler([menu, 1, 1, INFO]);
+    assert.equal(memory.u32(INFO + MENUITEMINFO.wID), popup);
+    fns.GetMenuItemInfoA.handler([menu, 2, 1, INFO]);
+    assert.equal(memory.u32(INFO + MENUITEMINFO.fState), 3);
+
+    // A submenu holding the menu it would hang under is a cycle, refused.
+    assert.equal(fns.AppendMenuA.handler([popup, MF_POPUP, menu, TITLE]), 0);
+    assert.equal(fns.AppendMenuA.handler([popup, MF_POPUP, popup, TITLE]), 0);
+    assert.equal(fns.DestroyMenu.handler([menu]), 1);
+    assert.equal(fns.IsMenu.handler([popup]), 0, 'the submenu went with it');
+});
+
+test('a menu tree nests at most sixteen deep', ()=>{
+    // decisions.md A250: Windows refuses a too-deep tree, with the error untouched.
+    const { memory, fns } = setup();
+    memory.putString(TITLE, 'x');
+    let below = fns.CreatePopupMenu.handler([]);
+    let depth = 1;
+    for (; depth < 40; depth++)
+    {
+        const above = fns.CreatePopupMenu.handler([]);
+        if (!fns.AppendMenuA.handler([above, MF_POPUP, below, TITLE]))
+        {
+            break;
+        }
+        below = above;
+    }
+    assert.equal(depth, 16);
+});
+
+test('the menu bar is laid out for GetMenuItemRect, its layout stale once it changes', ()=>{
+    const { memory, fns } = setup();
+    const OBJID_MENU = -3;
+    const hwnd = makeWindow(memory, fns);
+    const menu = fns.CreateMenu.handler([]);
+    memory.putString(TITLE, 'File');
+    fns.AppendMenuA.handler([menu, 0, 1, TITLE]);
+    fns.AppendMenuA.handler([menu, 0, 2, TITLE]);
+    assert.equal(fns.SetMenu.handler([hwnd, menu]), 1);
+    assert.equal(fns.GetMenuItemRect.handler([hwnd, menu, 1, OUT]), 1);
+    const second = [0, 4, 8, 12].map(at=>memory.u32(OUT + at) | 0);
+    assert.ok(second[2] > second[0] && second[3] > second[1], 'a rectangle with room');
+    memory.putU32s(OUT, [32]);
+    assert.equal(fns.GetMenuBarInfo.handler([hwnd, OBJID_MENU, 2, OUT]), 1);
+    assert.deepEqual([4, 8, 12, 16].map(at=>memory.u32(OUT + at) | 0), second);
+    assert.equal(fns.MenuItemFromPoint.handler([hwnd, menu, second[0] + 1, second[1] + 1]), 1);
+
+    fns.RemoveMenu.handler([menu, 0, MF_BYPOSITION]);
+    assert.equal(fns.GetMenuBarInfo.handler([hwnd, OBJID_MENU, 1, OUT]), 1);
+    assert.deepEqual([4, 8, 12, 16].map(at=>memory.u32(OUT + at)), [0, 0, 0, 0],
+        'not laid out since it changed');
+    memory.putU32s(OUT, [1000]);
+    assert.equal(fns.GetMenuBarInfo.handler([hwnd, OBJID_MENU, 0, OUT]), 0);
+});

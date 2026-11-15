@@ -34,7 +34,8 @@ import { createDirectoryListFunctions } from './dlgdir.js';
 import { createMdi } from './mdi.js';
 import { createWinEventHooks } from './hooks.js';
 import {
-    WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPSIBLINGS, WS_DISABLED, WS_THICKFRAME, contains,
+    MENU_HEIGHT, WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPSIBLINGS, WS_DISABLED, WS_THICKFRAME,
+    contains,
     createGeometry, createdStyles, edgeFor, frameOf, frameRings, intersect, isEmpty,
 } from './frame.js';
 import {
@@ -7855,6 +7856,15 @@ export function createWindowFunctions(host){
                     0x0001 | 0x0002 | 0x0010]);
             } }),
         ...createObjectFunctions({ host, live, send,
+            // The bar sits just above the client area, the frame's menu height
+            // tall, and as wide as the window inside its edges.
+            menuBar: record=>{
+                const origin = geometry.clientOrigin(record);
+                const window = geometry.windowRect(record);
+                const inset = origin.x - window.left;
+                return { x: origin.x, y: origin.y, width: window.right - window.left - 2 * inset,
+                    height: geometry.frame(record).menu || MENU_HEIGHT };
+            },
             clipboardService: service=>{
                 clipboardAccess = service;
             },

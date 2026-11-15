@@ -2252,3 +2252,11 @@ itself runs on .NET before then finds no Framework, as on a machine without one.
 the session's first program is the file itself: that is how the layer is built. A managed program
 on a volume with no Framework that runs it asks for the same layer, and goes on as it would
 without one. *2026-11-15.*
+
+**A250. A menu nests at most sixteen deep.** Windows refuses a submenu that would make a menu tree
+too deep, and documents no number for it; Wine's menu test only checks that some limit below a
+hundred exists, and that the refusal leaves the last error alone. The engine refuses a submenu whose
+own tree is already sixteen menus deep - the depth past which it already reads a menu resource as
+damaged, so a live menu and a loaded one have one limit - and a submenu that holds the menu it is
+put under, which would make the tree a cycle, through AppendMenu, InsertMenu and ModifyMenu.
+Revisit if a program is found that builds a deeper menu. *2026-11-15.*
