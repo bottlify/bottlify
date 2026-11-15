@@ -517,6 +517,38 @@ test('ImageList_Duplicate is a list of its own with the same images', ()=>{
     assert.equal(m.fns.ImageList_Duplicate.argBytes, 4);
 });
 
+test('ImageList_Copy moves or swaps images within one list, and refuses between two', ()=>{
+    const m = machine();
+    const list = maskedList(m, [[[0x111111, 0x222222], [false, true]],
+        [[0x333333, 0x444444], [false, false]]]);
+    const other = maskedList(m, [[[0x555555, 0x666666], [false, false]]]);
+    assert.equal(m.fns.ImageList_Copy.handler([other, 0, list, 1, 0]), 0, 'between two lists');
+    assert.equal(m.fns.ImageList_Copy.handler([list, 0, list, 2, 0]), 0, 'past the end');
+    const screen = m.target(2);
+    const drawn = (/** @type {number} */ index)=>{
+        screen.fill(0x777777);
+        m.fns.ImageList_Draw.handler([list, index, screen.dc, 0, 0, ILD_TRANSPARENT]);
+        return screen.pixels().map(pixel=>pixel & 0xffffff);
+    };
+    assert.equal(m.fns.ImageList_Copy.handler([list, 0, list, 1, 1]), 1, 'ILCF_SWAP');
+    assert.deepEqual(drawn(0), [0x333333, 0x444444]);
+    assert.deepEqual(drawn(1), [0x111111, 0x777777], 'the mask went with it');
+    assert.equal(m.fns.ImageList_Copy.handler([list, 0, list, 1, 0]), 1, 'ILCF_MOVE');
+    assert.deepEqual(drawn(0), [0x111111, 0x777777]);
+    assert.equal(m.fns.ImageList_GetFlags.handler([list]) & ILC_MASK, ILC_MASK);
+    assert.equal(m.fns.ImageList_Copy.argBytes, 20);
+});
+
+test('ImageList_SetColorTable sets the entries a palette of the list\'s depth has', ()=>{
+    const m = machine();
+    const four = m.fns.ImageList_Create.handler([1, 1, 0x0004, 1, 1]);
+    const deep = m.fns.ImageList_Create.handler([1, 1, ILC_COLOR32, 1, 1]);
+    assert.equal(m.fns['#390'].handler([four, 0, 2, 0]), 2);
+    assert.equal(m.fns['#390'].handler([four, 14, 8, 0]), 2, 'no further than sixteen');
+    assert.equal(m.fns['#390'].handler([deep, 0, 2, 0]), 0, 'no palette at 32 bits');
+    assert.equal(m.fns.ImageList_GetFlags.handler([four]), 0x0004);
+});
+
 test('ImageList_LoadImageW loads through user32\'s wide LoadImage', ()=>{
     /** @type {string[]} */
     const asked = [];

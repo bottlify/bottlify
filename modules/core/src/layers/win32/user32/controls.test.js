@@ -1479,6 +1479,20 @@ test('a list box keeps its items and a click selects one with LBN_SELCHANGE', as
         [[400, LBN_SELCHANGE, list]]);
 });
 
+test('GetListBoxInfo is how many items a column of the list box holds', async()=>{
+    const context = setup();
+    const dialog = await openDialog(context);
+    context.memory.putString(TEXT, 'ListBox');
+    const list = context.fns.CreateWindowExA.handler([0, TEXT, 0,
+        WS_CHILD | WS_VISIBLE, 8, 60, 100, 60, dialog, 400, HINSTANCE, 0]);
+    const row = context.fns.SendMessageA.handler([list, 0x01a1, 0, 0]);
+    context.fns.GetClientRect.handler([list, OUT]);
+    const rows = Math.floor(context.memory.u32(OUT + 12) / row);
+    assert.ok(rows >= 1);
+    assert.equal(await context.fns.GetListBoxInfo.handler([list]), rows);
+    assert.equal(context.fns.SendMessageA.handler([list, 0x01b2, 0, 0]), rows, 'LB_GETLISTBOXINFO');
+});
+
 test('an item and a line of upper-half bytes read back as those bytes', async()=>{
     // The text is read as Windows-1252, where 0x80 is the euro sign, 0x99 the
     // trade mark and 0x97 an em dash; LB_GETTEXT and EM_GETLINE write it back

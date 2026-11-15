@@ -66,6 +66,9 @@ import { charactersOf, readToTerminator } from '../common/scan-windows.js';
 /** How many argument slots a `va_list` is read for, since it carries no count. */
 const VA_LIST_SLOTS = 64;
 
+/** The list box message GetListBoxInfo is. */
+const LB_GETLISTBOXINFO = 0x01b2;
+
 /** The longest path a file name argument is read to. */
 const MAX_PATH = 260;
 
@@ -4460,6 +4463,18 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 ]);
                 return 1;
             },
+        },
+
+        /**
+         * DWORD GetListBoxInfo(HWND hwnd)
+         *
+         * What the list box answers LB_GETLISTBOXINFO with, as the
+         * documentation says this call is: the items one column holds.
+         */
+        GetListBoxInfo: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([hwnd])=>host.send?.(hwnd >>> 0, LB_GETLISTBOXINFO, 0, 0) ?? 0,
         },
 
         /**

@@ -100,7 +100,12 @@ const FINDREPLACE_SIZE = 40;
 /** Where PRINTDLG and PAGESETUPDLG keep their flags and the settings handed in. */
 const PRINTDLG = Object.freeze({ hwndOwner: 4, hDevMode: 8, hDevNames: 12, Flags: 20 });
 const PAGESETUPDLG = Object.freeze({ hwndOwner: 4, hDevMode: 8, hDevNames: 12, Flags: 16 });
-const PRINTDLGEX = Object.freeze({ hwndOwner: 4, hDevMode: 8, hDevNames: 12, Flags: 20 });
+const PRINTDLGEX = Object.freeze({ hwndOwner: 4, hDevMode: 8, hDevNames: 12, Flags: 20,
+    nPageRanges: 32, nMaxPageRanges: 36, lpPageRanges: 40, nPropertyPages: 68, nStartPage: 76 });
+/** PD_NOPAGENUMS: no page ranges to hand in. */
+const PD_NOPAGENUMS = 0x0008;
+/** The general page, rather than one of the program's property pages, opens first. */
+const START_PAGE_GENERAL = 0xffffffff;
 /** PD_RETURNDEFAULT and PSD_RETURNDEFAULT: the default's settings, no dialog. */
 const RETURNDEFAULT = 0x0400;
 
@@ -252,7 +257,8 @@ export function createCommonDialogFunctions(host){
 
     /**
      * PrintDlgEx, whose answer is an HRESULT: a bad argument or owner is
-     * said so at once; no printer is E_FAIL with the extended error.
+     * said so at once - the structure's size, its owner, the page it opens
+     * on, its page ranges - and no printer is E_FAIL with the extended error.
      *
      * @param {string} name
      */
@@ -270,6 +276,23 @@ export function createCommonDialogFunctions(host){
                 if (!isOwner(field(address, PRINTDLGEX.hwndOwner)))
                 {
                     return E_HANDLE;
+                }
+                // The page to open first is the general one or one of the
+                // program's; ranges are handed in with room for them unless
+                // PD_NOPAGENUMS says there are none, and never more than room.
+                const start = field(address, PRINTDLGEX.nStartPage);
+                if (start !== START_PAGE_GENERAL
+                    && start >= field(address, PRINTDLGEX.nPropertyPages))
+                {
+                    return E_INVALIDARG;
+                }
+                if (!(field(address, PRINTDLGEX.Flags) & PD_NOPAGENUMS)
+                    && (field(address, PRINTDLGEX.nMaxPageRanges) === 0
+                        || field(address, PRINTDLGEX.lpPageRanges) === 0
+                        || field(address, PRINTDLGEX.nPageRanges)
+                            > field(address, PRINTDLGEX.nMaxPageRanges)))
+                {
+                    return E_INVALIDARG;
                 }
                 extendedError = defaultFailure(address, PRINTDLGEX);
                 return refused.handler();

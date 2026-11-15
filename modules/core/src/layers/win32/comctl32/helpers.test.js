@@ -10,6 +10,7 @@ import { COMCTL32_ORDINALS, createComctlFunctions } from './functions.js';
 import { createHelperFunctions } from './helpers.js';
 import { TB_ADDBITMAP, TB_ADDBUTTONSA, TB_BUTTONSTRUCTSIZE, TB_SETBITMAPSIZE,
     TB_SETBUTTONSIZE } from './toolbar.js';
+import { DATA_ORDINALS } from './dpa.js';
 
 /**
  * Guest memory, a bump allocator, and user32 and gdi32 stand-ins that record
@@ -218,8 +219,9 @@ test('MakeDragList is refused, and the ordinals are the 5.82 library\'s', ()=>{
     assert.equal(m.diverged.length, 1);
     assert.equal(m.fns.MakeDragList.argBytes, 4);
     // Wine's comctl32.spec, from the 5.81 library, and 5.82 alike.
-    assert.deepEqual(COMCTL32_ORDINALS, { 8: 'CreateMappedBitmap', 13: 'MakeDragList',
-        14: 'LBItemFromPt', 17: 'InitCommonControls', 410: 'SetWindowSubclass',
+    assert.deepEqual(COMCTL32_ORDINALS, { ...DATA_ORDINALS, 8: 'CreateMappedBitmap',
+        13: 'MakeDragList',
+        14: 'LBItemFromPt', 17: 'InitCommonControls', 390: '#390', 410: 'SetWindowSubclass',
         411: 'GetWindowSubclass', 412: 'RemoveWindowSubclass', 413: 'DefSubclassProc' });
     const all = /** @type {Record<string, unknown>} */ (/** @type {unknown} */ (
         createComctlFunctions(/** @type {any} */ ({ ...m.host }))));

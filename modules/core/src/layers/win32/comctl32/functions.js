@@ -11,6 +11,7 @@
  * subclassing (subclass.js).
  */
 
+import { DATA_ORDINALS, createDataStructureFunctions } from './dpa.js';
 import { createFlatScrollBarFunctions } from './flatsb.js';
 import { createHelperFunctions } from './helpers.js';
 import { createImageListFunctions } from './imagelist-stream.js';
@@ -41,6 +42,9 @@ import { UDM_SETBUDDY, UDM_SETPOS, UDM_SETRANGE, UPDOWN_CLASS } from './updown.j
  *           size is accepted and nothing is tracked.
  * @property {(name: string) => ({ handler: (args: number[]) => any } | undefined)} [user32]
  *           user32's exports, which a property sheet is built with.
+ * @property {(name: string) => ((args: number[]) => any) | undefined} [kernel32]
+ *           kernel32's handlers, which the arrays and the allocator take their
+ *           memory through (dpa.js).
  * @property {(bytes: number) => number} [allocate]
  * @property {(address: number) => void} [release]
  * @property {(entry: number, args: number[], thread?: unknown) => number | Promise<number>} [call]
@@ -80,10 +84,13 @@ const DLLVERSIONINFO2_SIZE = 32;
  * @type {Readonly<Record<number, string>>}
  */
 export const COMCTL32_ORDINALS = Object.freeze({
+    ...DATA_ORDINALS,
     8: 'CreateMappedBitmap',
     13: 'MakeDragList',
     14: 'LBItemFromPt',
     17: 'InitCommonControls',
+    // An image list's palette, exported by number alone.
+    390: '#390',
     // Exported by number alone before Windows XP, and found so still.
     410: 'SetWindowSubclass',
     411: 'GetWindowSubclass',
@@ -92,12 +99,24 @@ export const COMCTL32_ORDINALS = Object.freeze({
 });
 
 /**
+ * The window classes comctl32 owns (version 6 registers the user controls'
+ * too), by the lower-case names RegisterClassNameW is asked for.
+ */
+const COMCTL32_CLASSES = new Set(['button', 'combobox', 'combolbox', 'edit', 'listbox', 'static',
+    'comboboxex32', 'msctls_hotkey32', 'msctls_progress32', 'msctls_statusbar32',
+    'msctls_trackbar32', 'msctls_updown32', 'nativefontctl', 'rebarwindow32', 'sysanimate32',
+    'sysdatetimepick32', 'sysheader32', 'sysipaddress32', 'syslink', 'syslistview32',
+    'sysmonthcal32', 'syspager', 'systabcontrol32', 'systreeview32', 'toolbarwindow32',
+    'tooltips_class32']);
+
+/**
  * @param {ComctlHost} host
  */
 export function createComctlFunctions(host){
     const sheets = createPropertySheetFunctions(host);
     const images = createImageListFunctions(host);
     return {
+        ...createDataStructureFunctions(host),
         /**
          * void InitCommonControls(void)
          *
@@ -161,6 +180,52 @@ export function createComctlFunctions(host){
          * or DLLVERSIONINFO2, 32, which adds flags and the version as one
          * 64-bit number -- and any other size is refused.
          */
+        /**
+         * BOOL RegisterClassNameW(LPCWSTR className)
+         *
+         * What user32 asks comctl32 for from Vista on when a window is made of
+         * a class nobody registered: the library registers that one of its
+         * own classes. Here the common controls are classes of the window
+         * manager from the start, so the call answers whether the name is one
+         * of comctl32's and is there; a name of another library's, or one
+         * this machine has no control for, is refused.
+         */
+        RegisterClassNameW: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([name])=>{
+                if (name >>> 0 === 0)
+                {
+                    return 0;
+                }
+                const units = [];
+                for (let at = name >>> 0; units.length < 256; at += 2)
+                {
+                    const unit = host.readMemory(at, 2);
+                    const code = unit[0] | unit[1] << 8;
+                    if (code === 0)
+                    {
+                        break;
+                    }
+                    units.push(code);
+                }
+                const text = String.fromCharCode(...units);
+                if (!COMCTL32_CLASSES.has(text.toLowerCase()) || !host.allocate || !host.user32)
+                {
+                    return 0;
+                }
+                const info = host.allocate(40);
+                try
+                {
+                    return host.user32('GetClassInfoW')?.handler([0, name >>> 0, info]) ? 1 : 0;
+                }
+                finally
+                {
+                    host.release?.(info);
+                }
+            },
+        },
+
         DllGetVersion: {
             argBytes: 4,
             /** @param {number[]} args */
