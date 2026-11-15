@@ -206,12 +206,15 @@ test('the dynamic zone calls: the machine\'s zone by its key, another by its key
     assert.equal(fns.EnumDynamicTimeZoneInformation.handler([100000, DYNAMIC]), 259);
 });
 
-test('the clock cannot be set', ()=>{
+test('the clock cannot be set: no program holds the privilege it takes', ()=>{
     // It is what every timestamp and every elapsed-time measurement in the run
-    // is taken against; letting a program move it makes a measurement that
-    // spans the call meaningless.
-    const { fns } = setup();
+    // is taken against; Windows refuses a process without SE_SYSTEMTIME_NAME
+    // enabled the same way, and Wine's kernel32:timer skips on it.
+    const { fns, errors } = setup();
     assert.equal(fns.SetLocalTime.handler(), 0);
+    assert.equal(errors.at(-1), 1314);
+    assert.equal(fns.SetSystemTime.handler(), 0);
+    assert.equal(errors.at(-1), 1314);
 });
 
 test('GetFileInformationByHandleEx answers the four classes and refuses the rest', ()=>{
