@@ -58,7 +58,7 @@
 import { CF, PF, ZF, AF, SF, OF } from '../decode/table.js';
 import { isX87Opcode } from '../decode/decoder.js';
 import { Body, EMPTY, ValType } from '../wasm/encoder.js';
-import { I32 } from './flags.js';
+import { I32, floatConditionOf } from './flags.js';
 import { Local, Exit, STATE_PARAMS } from './region.js';
 import { accessAddress, prepare, readAddress, writeReg } from './integer.js';
 import { PRECISION, noteStore, ram, ramAt } from './memory.js';
@@ -3925,17 +3925,26 @@ export function emitX87(e, instruction, flagsLive){
             b.localGet(a).localGet(a).op(F64.ne).localGet(c).localGet(c).op(F64.ne).op(I32.or);
             b.localGet(Local.t1).op(I32.or);
             b.localSet(Local.t1);
-            // Only the branch after it reading the flags: the branch compares.
-            // The operands are kept aside, since what stands between (a pop
-            // into ST(1)) may write the registers they are in.
-            if (flagsLive && clear && e.fusesCompare(
-                e.region.blocks[e.blockIndex].instructions.indexOf(instruction), keepsCompare))
+            // The branch after it compares the operands itself, kept aside,
+            // since what stands between (a pop into ST(1)) may write the
+            // registers they are in. Read by that branch alone, the flags are
+            // never made; read past it, they wait in the record as the
+            // operands' bits. A compare that may fault its stack answers
+            // unordered whatever its operands, and makes the word.
+            const at = e.region.blocks[e.blockIndex].instructions.indexOf(instruction);
+            const branch = flagsLive && clear && e.branchReads(at, keepsCompare);
+            const alone = branch && e.fusesCompare(at, keepsCompare);
+            if (flagsLive && clear && !alone)
+            {
+                e.recordFloatCompare(a, c, true);
+            }
+            if (branch)
             {
                 b.localGet(a).localSet(x.base + 11);
                 b.localGet(c).localSet(x.base + 12);
-                e.fcmp = { a: x.base + 11, c: x.base + 12, double: true };
+                e.fcmp = { a: x.base + 11, c: x.base + 12, double: true, recorded: !alone };
             }
-            else if (flagsLive)
+            else if (flagsLive && !clear)
             {
                 e.eagerWrite(CF | PF | AF | ZF | SF | OF);
                 b.localGet(Local.t1);
@@ -4172,9 +4181,11 @@ export function emitX87(e, instruction, flagsLive){
 
 /**
  * A float compare's operands, in locals, for the branch that reads its flags
- * (`fusesCompare` in `region.js`): f64 locals for the x87's, f32 or f64 for SSE's.
+ * (`branchReads` in `region.js`): f64 locals for the x87's, f32 or f64 for SSE's.
+ * `recorded` when the compare left its record too (`recordFloatCompare`), the
+ * flags being read past the branch: a way out between the two then owes nothing.
  *
- * @typedef {{ a: number, c: number, double: boolean }} FloatCompare
+ * @typedef {{ a: number, c: number, double: boolean, recorded?: boolean }} FloatCompare
  */
 
 /**
@@ -4191,40 +4202,13 @@ function keepsCompare(instruction){
 }
 
 /**
- * Pushes 0/1 for a condition code read from a float compare's operands, as
- * `fcomi` and `comiss` set the flags: CF less or unordered, ZF equal or
- * unordered, PF unordered, OF SF AF clear.
+ * Pushes 0/1 for a condition code read from a float compare's operands, held
+ * in locals (`floatConditionOf`).
  *
  * @param {Body} b @param {FloatCompare} compare @param {number} cc
  */
 export function floatCondition(b, { a, c, double }, cc){
-    // f64 or f32: ne, lt, gt, ge
-    const [ne, lt, gt, ge] = double ? [F64.ne, F64.lt, F64.gt, F64.ge] : [0x5c, 0x5d, 0x5e, 0x60];
-    const equalOrUnordered = ()=>{
-        b.localGet(a).localGet(c).op(lt).localGet(a).localGet(c).op(gt).op(I32.or).op(I32.eqz);
-    };
-    switch (cc >> 1)
-    {
-        case 1: // b: CF
-            b.localGet(a).localGet(c).op(ge).op(I32.eqz);
-            break;
-        case 2: // e: ZF
-        case 7: // le: ZF, SF and OF being equal
-            equalOrUnordered();
-            break;
-        case 3: // be: CF or ZF
-            b.localGet(a).localGet(c).op(gt).op(I32.eqz);
-            break;
-        case 5: // p: PF
-            b.localGet(a).localGet(a).op(ne).localGet(c).localGet(c).op(ne).op(I32.or);
-            break;
-        default: // o, s, l: OF, SF, SF != OF
-            b.i32const(0);
-    }
-    if ((cc & 1) === 1)
-    {
-        b.op(I32.eqz);
-    }
+    floatConditionOf(b, ()=>b.localGet(a), ()=>b.localGet(c), double, cc);
 }
 
 /** The status word's bits a module that is not `precise` does not keep: the

@@ -24,6 +24,13 @@
  * EFLAGS always, and the six arithmetic flags only while the kind is
  * EAGER; a partially lazy kind (INC keeps CF; SHIFT keeps CF and OF in
  * the word) says which of them the word still owns.
+ *
+ * A float compare (`comiss`, `ucomisd`, `fcomi`) leaves a record too
+ * (FCMP): its two operands' bits, which a later read compares again as
+ * floats -- CF less or unordered, ZF equal or unordered, PF unordered, the
+ * other three clear. Its width code is 2 for singles and 3 for doubles; a
+ * double's bits take the 32-bit record's four fields, low halves in the
+ * operands' and high halves in the result's and the carry's.
  */
 
 import { AF, CF, OF, PF, SF, ZF } from '../decode/table.js';
@@ -41,6 +48,7 @@ export const Kind = Object.freeze({
     DEC: 7,    // res = op1 - 1; CF stays in the word
     NEG: 8,    // res = -op2; CF = op2 != 0
     SHIFT: 9,  // res; CF and OF stay in the word; AF undefined
+    FCMP: 10,  // a float compare's operands, as bits (`floatOperands`): comiss, fcomi
 });
 
 /** @param {number} size */
@@ -109,6 +117,99 @@ const MASKS = [0xff, 0xffff, 0xffffffff];
  *     quadword's (code 3), whose formulas are the i64 ones
  */
 
+/** Float opcodes the compare's formulas use. */
+const F = Object.freeze({
+    single: { ne: 0x5c, lt: 0x5d, gt: 0x5e, ge: 0x60 },
+    double: { ne: 0x62, lt: 0x63, gt: 0x64, ge: 0x66 },
+    reinterpretI32: 0xbe, reinterpretI64: 0xbf,
+});
+
+/**
+ * How an FCMP record's two operands are pushed as the floats they were, from
+ * the fields their bits were left in (`floatBits`).
+ *
+ * @param {Body} b @param {FlagLocals} l @param {number} width  2 singles, 3 doubles
+ * @returns {{ a: () => void, c: () => void, double: boolean }}
+ */
+function floatOperands(b, l, width){
+    const double = width === 3;
+    const wide = l.wide === true;
+    /** @type {(low: number, high: number) => () => void} */
+    const operand = (low, high)=>()=>{
+        if (!double)
+        {
+            b.localGet(low);
+            if (wide)
+            {
+                b.op(I64.wrap);
+            }
+            b.op(F.reinterpretI32);
+        }
+        else if (wide)
+        {
+            b.localGet(low).op(F.reinterpretI64);
+        }
+        else
+        {
+            b.localGet(low).op(I64.extendU).localGet(high).op(I64.extendU).i64const(32n)
+                .op(I64.shl).op(I64.or).op(F.reinterpretI64);
+        }
+    };
+    return { a: operand(l.op1, l.res), c: operand(l.op2, l.cin), double };
+}
+
+/**
+ * Pushes 0/1 for a condition code read from a float compare's operands, as
+ * `fcomi` and `comiss` set the flags: CF less or unordered, ZF equal or
+ * unordered, PF unordered, OF SF AF clear.
+ *
+ * @param {Body} b @param {() => void} a  pushes the first operand
+ * @param {() => void} c  pushes the second @param {boolean} double @param {number} cc
+ */
+export function floatConditionOf(b, a, c, double, cc){
+    const { ne, lt, gt, ge } = double ? F.double : F.single;
+    /** @type {(op: number) => void} */
+    const compare = op=>{
+        a();
+        c();
+        b.op(op);
+    };
+    switch (cc >> 1)
+    {
+        case 1: // b: CF
+            compare(ge);
+            b.op(OP.eqz);
+            break;
+        case 2: // e: ZF
+        case 7: // le: ZF, SF and OF being equal
+            compare(lt);
+            compare(gt);
+            b.op(OP.or).op(OP.eqz);
+            break;
+        case 3: // be: CF or ZF
+            compare(gt);
+            b.op(OP.eqz);
+            break;
+        case 5: // p: PF
+            a();
+            a();
+            b.op(ne);
+            c();
+            c();
+            b.op(ne).op(OP.or);
+            break;
+        default: // o, s, l: OF, SF, SF != OF
+            b.i32const(0);
+    }
+    if ((cc & 1) === 1)
+    {
+        b.op(OP.eqz);
+    }
+}
+
+/** The condition code that is each flag a float compare can set, read alone. */
+const FLOAT_FLAG_CC = new Map([[CF, 2], [ZF, 4], [PF, 10]]);
+
 /**
  * Emits the value 0/1 of one flag from a record whose kind is known
  * statically (the common case: a read right after the write, in the same
@@ -125,6 +226,18 @@ export function emitFlag(b, l, kind, width, flag){
     if ((eager & flag) !== 0)
     {
         b.localGet(l.flags).i32const(flag).op(OP.and).i32const(0).op(OP.ne);
+        return;
+    }
+    if (kind === Kind.FCMP)
+    {
+        const cc = FLOAT_FLAG_CC.get(flag);
+        if (cc === undefined)
+        {
+            b.i32const(0);
+            return;
+        }
+        const { a, c, double } = floatOperands(b, l, width);
+        floatConditionOf(b, a, c, double, cc);
         return;
     }
     if (width === 3)
@@ -343,6 +456,12 @@ function quadFlag(b, l, kind, flag){
  * @param {number} cc
  */
 export function emitCondition(b, l, kind, width, cc){
+    if (kind === Kind.FCMP)
+    {
+        const { a, c, double } = floatOperands(b, l, width);
+        floatConditionOf(b, a, c, double, cc);
+        return;
+    }
     const test = cc >> 1;
     const negate = (cc & 1) === 1;
     if (kind === Kind.SUB && width === 3)
@@ -449,25 +568,25 @@ export function addMaterialiseHelper(m, wide = false){
     // One block per (kind, width): br_table on the folded kind, each case
     // building the word from the formulas above and returning it.
     const cases = [];
-    for (let kind = 1; kind < 10; kind++)
+    for (let kind = 1; kind < Kind.FCMP; kind++)
     {
         for (let width = 0; width < widths; width++)
         {
             cases.push([kind, width]);
         }
     }
+    // A float compare's, singles and doubles as one case, in either mode.
+    cases.push([Kind.FCMP, 2]);
     // Outer block for EAGER (and any unknown kind): the word as it is.
     b.block(ValType.i32);
-    // The dispatch: cases are numbered kind*4+width; a width code 3 does not
-    // exist but in long mode, and lands with EAGER.
+    // The dispatch: cases are numbered kind*4+width; an integer's width code 3
+    // does not exist but in long mode, and lands with EAGER, as a float
+    // compare's 0 and 1 do.
     const labels = [];
-    for (let folded = 0; folded < 40; folded++)
+    for (let folded = 0; folded < (Kind.FCMP + 1) * 4; folded++)
     {
-        const kind = folded >> 2;
-        const width = folded & 3;
-        labels.push(kind >= 1 && width < widths
-            ? cases.findIndex(c=>c[0] === kind && c[1] === width) + 1
-            : 0);
+        const width = folded >> 2 === Kind.FCMP && (folded & 3) === 3 ? 2 : folded & 3;
+        labels.push(cases.findIndex(c=>c[0] === folded >> 2 && c[1] === width) + 1);
     }
     // Blocks nested: the innermost is case 0; label n = case n-1 (1-based),
     // label 0 = "no case" -> falls to the eager answer. br_table depths are
@@ -489,16 +608,57 @@ export function addMaterialiseHelper(m, wide = false){
         b.drop();
         // flags & ~ARITH, then each flag or'ed in.
         b.localGet(l.flags).i32const(~ARITH).op(OP.and);
-        for (const flag of [CF, PF, AF, ZF, SF, OF])
+        if (kind === Kind.FCMP)
         {
-            emitFlag(b, l, kind, width, flag);
-            b.i32const(flag).op(0x6c); // i32.mul: 0/1 * flag
-            b.op(OP.or);
+            floatWord(b, l);
+        }
+        else
+        {
+            for (const flag of [CF, PF, AF, ZF, SF, OF])
+            {
+                emitFlag(b, l, kind, width, flag);
+                b.i32const(flag).op(0x6c); // i32.mul: 0/1 * flag
+                b.op(OP.or);
+            }
         }
         b.br(cases.length - i - 1);
     }
     b.end();
-    return m.function(type, [], b.toBytes());
+    return m.function(type, [ValType.f64, ValType.f64], b.toBytes());
+}
+
+/**
+ * The helper's case for a float compare's record, of either width: the two
+ * operands made doubles in the helper's own locals -- a single promoted, which
+ * keeps its order and its being a NaN -- and CF, ZF and PF or'ed into the word
+ * on the stack, the other three left clear.
+ *
+ * @param {Body} b @param {FlagLocals} l  the helper's parameters
+ */
+function floatWord(b, l){
+    const [a, c] = [6, 7];
+    const single = floatOperands(b, l, 2);
+    const double = floatOperands(b, l, 3);
+    for (const [local, which] of /** @type {[number, 'a' | 'c'][]} */ ([[a, 'a'], [c, 'c']]))
+    {
+        b.localGet(l.kind).i32const(1).op(OP.and);
+        b.if(ValType.f64);
+        double[which]();
+        b.else();
+        single[which]();
+        b.op(0xbb); // f64.promote_f32
+        b.end();
+        b.localSet(local);
+    }
+    const { ne, lt, gt, ge } = F.double;
+    // CF: less or unordered
+    b.localGet(a).localGet(c).op(ge).op(OP.eqz).op(OP.or);
+    // ZF: equal or unordered
+    b.localGet(a).localGet(c).op(lt).localGet(a).localGet(c).op(gt).op(OP.or).op(OP.eqz)
+        .i32const(6).op(OP.shl).op(OP.or);
+    // PF: unordered
+    b.localGet(a).localGet(a).op(ne).localGet(c).localGet(c).op(ne).op(OP.or)
+        .i32const(2).op(OP.shl).op(OP.or);
 }
 
 /** @type {((...record: number[]) => number) | null} */
