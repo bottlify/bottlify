@@ -29,6 +29,7 @@ export { translatesLong } from './long-ops.js';
 import { AF, CF, DF, OF, PF, SF, ZF } from '../decode/table.js';
 import { SYSTEM_TABLES, cpuidLeaves, topologyOf } from '../cpuid.js';
 import { EMPTY, ValType } from '../wasm/encoder.js';
+import { LocalSet } from '../wasm/local-set.js';
 import { I32, I64, Kind, MASKS, SIGN_BITS, widthCode } from './flags.js';
 import { CallStack, Exit, Local, STATE_PARAMS, keepsFlags } from './region.js';
 import {
@@ -328,15 +329,15 @@ function callAndReturn(e, next, target, mechanism){
     // left out (`fillDeferred`).
     /** @type {import('./region.js').CallSite | undefined} */
     const call = e.b.written === null ? undefined
-        : { block: e.blockIndex, written: new Set(e.b.written) };
+        : { block: e.blockIndex, written: e.b.written.copy() };
     if (call !== undefined)
     {
         e.callSites.set(e.blockIndex, call);
         if (e.pathStores)
         {
-            call.must = new Set(e.segment?.must ?? []);
+            call.must = e.segment?.must.copy() ?? new LocalSet();
             call.segment = e.segment;
-            call.after = new Set();
+            call.after = new LocalSet();
             e.sites.push(call);
         }
     }
@@ -2567,76 +2568,6 @@ const loadKind = size=>(size === 1 ? 'i32_8u' : size === 2 ? 'i32_16u' : 'i32');
 const storeKind = size=>(size === 1 ? 'i32_8' : size === 2 ? 'i32_16' : 'i32');
 
 /**
- * Whether the ordered variant makes an access to this operand atomic.
- *
- * On an x86 host the engine's plain loads and stores are the processor's,
- * in its order, and a program that writes its data and then a flag with
- * plain `mov`s -- what x86 lets it do -- has another thread see the flag
- * after the data. A host that reorders plain accesses (arm64) does not keep
- * that: a thread may see the flag first, or read the data before the flag
- * it waits for. The ordered variant makes an integer operand's load an
- * atomic load and its store an atomic store, each ordered with every other
- * atomic access and with the plain ones on either side of it -- the data a
- * thread stored before the flag, and the data it reads after. An address not
- * a multiple of the width stays plain (a wasm atomic traps there), and so do
- * an access through esp, a thread's own stack, the x87's and the vector
- * registers' operands, and the string instructions: data around a flag, not
- * the flag.
- *
- * @param {E} e @param {Operand} operand
- */
-const ordered = (e, operand)=>e.context.ordered === true && operand.base !== 4;
-
-/**
- * The ordered variant's load of `size` bytes at `Local.addr`, zero-extended
- * (an atomic kind is named by the store kind of its width).
- *
- * @param {E} e @param {number} size
- */
-function orderedLoad(e, size){
-    const { b } = e;
-    const offset = e.layout.ramBase;
-    if (size === 1)
-    {
-        b.localGet(Local.addr).atomic(`load_${storeKind(size)}`, ramAt(offset));
-        return;
-    }
-    b.localGet(Local.addr).i32const(size - 1).op(I32.and);
-    e.openGuard('misread', ValType.i32);
-    b.localGet(Local.addr).load(loadKind(size), ramAt(offset));
-    b.else();
-    b.localGet(Local.addr).atomic(`load_${storeKind(size)}`, ramAt(offset));
-    e.close();
-}
-
-/**
- * The ordered variant's store of `size` bytes at `Local.addr` of what
- * `pushValue` pushes.
- *
- * @param {E} e @param {number} size @param {() => void} pushValue
- */
-function orderedStore(e, size, pushValue){
-    const { b } = e;
-    const offset = e.layout.ramBase;
-    if (size === 1)
-    {
-        b.localGet(Local.addr);
-        pushValue();
-        b.atomic(`store_${storeKind(size)}`, ramAt(offset));
-        return;
-    }
-    const value = e.orderedLocal();
-    pushValue();
-    b.localSet(value);
-    b.localGet(Local.addr).i32const(size - 1).op(I32.and);
-    e.openGuard('miswrite', EMPTY);
-    b.localGet(Local.addr).localGet(value).store(storeKind(size), ramAt(offset));
-    b.else();
-    b.localGet(Local.addr).localGet(value).atomic(`store_${storeKind(size)}`, ramAt(offset));
-    e.close();
-}
-
-/**
  * Pushes an operand's value, zero-extended to i32.
  *
  * @param {E} e @param {Operand} operand
@@ -2685,11 +2616,6 @@ export function readOp(e, operand){
                 b.localGet(Local.addr).load('i64', ram(e));
                 return;
             }
-            if (ordered(e, operand))
-            {
-                orderedLoad(e, operand.size);
-                return;
-            }
             b.load(loadKind(operand.size), ramAt(readAddress(e, operand)));
             return;
         default:
@@ -2720,11 +2646,6 @@ export function writeOp(e, operand, pushValue, exact = false){
                 b.localGet(Local.addr);
                 pushValue();
                 b.store('i64', ram(e));
-                return;
-            }
-            if (ordered(e, operand))
-            {
-                orderedStore(e, operand.size, pushValue);
                 return;
             }
             {

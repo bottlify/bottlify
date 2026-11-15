@@ -75,6 +75,7 @@ is ignored; `executors`, the older name of `cpu.cores`, is refused.
 | `host` | `'worker'` \| `'thread'` | `'worker'` where `Worker` exists | Where the engine runs. `thread` runs it on the calling thread over the same protocol. |
 | `workerUrl` | string \| `URL` | beside the module | Where `engine.worker.js` is loaded from, for a bundler that moves it. |
 | `transfer` | `Transferable[]` | none | Buffers in the options to hand over instead of copying (the wasm binaries). |
+| `on` | `{ [event]: handler }` | none | Events subscribed before the start, for what the engine tells while it starts (`bundle-preload`, `layer-needed`), before the app it answers with can be subscribed on. |
 | `screen` | `{ width, height, bitsPerPixel }` | 640 × 480, 32 | The display the program is told it has. |
 | `desktop` | `{ picture? }` | none | What the desktop shows where no window is: `picture` is `{ width, height, bits }`, 32 bits a pixel (B, G, R, unused), top row first, scaled to the screen. Absent: the desktop colour. |
 | `maxFps` | number | 60 | The display's refresh rate the program is told, which its vertical sync keeps to; 0 for none. |
@@ -226,6 +227,7 @@ counts the frames that went so.
 | `bundle-fetching` | `{ fetching }` | The program waits on bundle data not yet on this device (`true`), or has all it asked for again (`false`): a page can say a stall is the download. |
 | `bundle`, `bundle-*` | details | The bundle was opened; a fetch is retried, a block is unavailable, prefetch, translations it carries. A layer's carry its `layer` (its id). |
 | `layer-files-unmounted` | `{ files, layer }` | A layer holds files outside its system files, which are not on the volume. |
+| `layer-needed` | `{ layer, program? }` | The machine lacks a runtime a layer carries: a managed program (`program`, its path) is loaded on a volume with no .NET Framework that runs it, or a program started the .NET Framework 4's setup, which succeeds (A249). `layer` names it: `dotnet48-x86`, the .NET Framework 4.8 for a 32-bit program or machine, `dotnet48-amd64` for a 64-bit one. The program goes on as it would without; mount the layer (`bundle.layers`) from the next start. |
 | `storage-full` | `{ bundle, reason }` | A block could not be kept for lack of room, with nothing left the engine may remove; said once a run. The run goes on, the block held in memory. |
 | `libraries`, `libraries-missing`, `library-*`, `import-unresolved`, `unimplemented` | names | Which DLLs were bound, which are missing, which imports nothing implements. |
 | `process-*` | details | A child process was created, started or ended. `process-resumed` carries its exit code and, as `diagnostics`, each of its layers' name, status and the numbers and flags of its metrics (and of a metric's fields), not their lists or text; an `error` about a process in a worker carries the same on its error. |

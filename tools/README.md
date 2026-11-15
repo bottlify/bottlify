@@ -16,6 +16,7 @@ runners are in [`run/README.md`](run/README.md), the live switches in
 | `live/` | attach to a game a person is playing |
 | `read/` | read what a run left behind: a trace, a capture, shaders, a recording |
 | `translator/` | cork's work on a real program: its mix, its code, its calls, its cost |
+| `bench/` | cork's stand: the same work on every machine and browser, and its speed on this one |
 | `bundles/` | make, inspect and audit bottles, archives and installers |
 | `gates/` | two paths of the engine compared on a real GPU (npm run cdp:*) |
 | `checks/` | the rules of the code check:boundaries holds (and one run by hand) |
@@ -270,6 +271,30 @@ best of several executors: T=2 K=- H=- E=2  x1.53
 
 From `executor-sweep.mjs --threads 2 --executors 1,2 --host 0 --sync 0 --reps 3`. A row a point: the mean of its three fastest runs [each run], the ratio to one executor, MIPS, and the share run elsewhere. Here two threads ran 1.53 times as fast on two executors. Runs of one point that differ threefold (an earlier run of this sweep on the loaded machine gave 7.23 against 0.78 s) are the machine, not the engine: rerun on a quiet one.
 
+### Does the translator do here the work recorded, to the unit, and how fast is it on this machine -- or how fast is one checkout against another?
+
+[`bench/stand.mjs`](bench/stand.mjs): `node tools/bench/stand.mjs [--roots A,B] [--bits 32|64|both] [--only a,b] [--work] [--write]`
+
+```
+calls512-scatter-x87        519 MIPS  noise ±27.8 %  work as recorded
+vcall-x87                  5365 MIPS  noise ±15.4 %  work as recorded
+vm-x87                     3803 MIPS  noise ±1.6 %  work as recorded
+calls512-scatter-x64        631 MIPS  noise ±4.8 %  work as recorded
+vcall-x64                  3979 MIPS  noise ±2.7 %  work as recorded
+vm-x64                     2477 MIPS  noise ±2.1 %  work as recorded
+geometric mean, 32-bit: 2196 MIPS
+geometric mean, 64-bit: 1839 MIPS
+```
+
+From `node tools/bench/stand.mjs --only vm,vcall,calls512-scatter on cork 94512c08 with the stand, Node 22.22.0, a 4-core Xeon VM at 2.10 GHz, 2026-11-14`. Each workload runs on the guest's own clock, so its work (instructions, regions, every way between regions) is the same on any machine: "as recorded" is the translator doing what expected.json says; DIFFERS is the code, never the machine. MIPS is this machine's speed, the median of 7 rounds; noise is how far those rounds part (half their interquartile range): a difference inside it is not one this machine shows, and a second run can land outside it when the engine optimises otherwise (lua-x87 1290 and 2069 MIPS in two runs here). With --roots A,B a ratio column gives B against A round by round.
+
+### How fast is cork on this device, in its own browser, and is one build of cork faster than another there, over several runs?
+
+[`bench/index.html`](bench/index.html): `node tools/bench/serve.mjs, then open the address it prints (this checkout); or node tools/bench/build.mjs --arm A=REV --arm B=. and serve or publish tools/bench/dist/ (two builds side by side)`
+
+Needs the shared browser, a GPU or a phone: no sample yet from this
+machine's data. Run `node tools/bench/serve.mjs, then open the address it prints (this checkout); or node tools/bench/build.mjs --arm A=REV --arm B=. and serve or publish tools/bench/dist/ (two builds side by side)` and put what it prints here.
+
 ### What does a title import, or look up by name, that this build does not export?
 
 [`bundles/import-audit.mjs`](bundles/import-audit.mjs): `node tools/bundles/import-audit.mjs <file|dir|bundle.btl|disc.iso>... [--dynamic --specs DIR]`
@@ -312,6 +337,10 @@ From `make-btl.mjs tree 3dmark03 2; make-btl.mjs zip list to_install/3dmark11/3d
 From `arg-bytes-audit.mjs dbg/wine-specs`. Every stdcall entry of the win32 layer against its Wine spec; a line per entry that pops another number of bytes, each one a caller's stack moved a call at a time. Run by hand: the specs are fetched once (import-audit --fetch-specs) and not kept in the repository.
 
 ## Everything else
+
+### `bench/`
+
+- [`bench/serve.mjs`](bench/serve.mjs) - Does the stand's page run in Chromium and do the work recorded there, as in Node? (`npm run cdp:bench  (node tools/bench/serve.mjs [--dir DIR] --check [--timed] [--runs N] [--bits 32|64] [--agent STRING])`)
 
 ### `gates/`
 
@@ -381,6 +410,7 @@ From `arg-bytes-audit.mjs dbg/wine-specs`. Every stdcall entry of the win32 laye
 ### `fixtures/`
 
 - [`fixtures/make-pe.mjs`](fixtures/make-pe.mjs) - Build PE programs for the packages' tests
+- [`fixtures/managed-exe.mjs`](fixtures/managed-exe.mjs) - A managed (.NET) program image for the packages' tests
 - [`fixtures/d3d9-program.mjs`](fixtures/d3d9-program.mjs) - A Direct3D 9 test program
 - [`fixtures/gl-program.mjs`](fixtures/gl-program.mjs) - The pieces of an OpenGL test program
 - [`fixtures/gl-glsl-program.mjs`](fixtures/gl-glsl-program.mjs) - An OpenGL 2.0 GLSL test program (also triangle.mjs --glsl)

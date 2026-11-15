@@ -47,6 +47,7 @@
 
 import { CF, DF, PF, ZF, ARITH_FLAGS } from '../decode/table.js';
 import { Body, EMPTY, ValType } from '../wasm/encoder.js';
+import { LocalSet } from '../wasm/local-set.js';
 import {
     ARITH, CARRY_IN_WORD, I32, I64, Kind, MASKS, eagerFlagsOf, emitCondition, emitFlag, kindOf,
     recordOffsets, widthCode,
@@ -191,8 +192,8 @@ export const CallStack = Object.freeze({
  * (`must`), the locals the code after the call reads before writing (`after`),
  * and what the return reloads (`reloads`).
  *
- * @typedef {{ block: number, written: Set<number>, must?: Set<number>,
- *     segment?: Segment | null, after?: Set<number>, reloads?: Set<number> }} CallSite
+ * @typedef {{ block: number, written: LocalSet, must?: LocalSet,
+ *     segment?: Segment | null, after?: LocalSet, reloads?: LocalSet }} CallSite
  */
 
 /**
@@ -202,8 +203,8 @@ export const CallStack = Object.freeze({
  * locals written so far where no branch skips the write (`must`), and those
  * written before its first way to another block (`kill`).
  *
- * @typedef {{ block: number, exposed: Set<number>, must: Set<number>,
- *     kill: Set<number> | null, after: CallSite | null, entry: boolean }} Segment
+ * @typedef {{ block: number, exposed: LocalSet, must: LocalSet,
+ *     kill: LocalSet | null, after: CallSite | null, entry: boolean }} Segment
  */
 
 /**
@@ -213,7 +214,7 @@ export const CallStack = Object.freeze({
  * call site's; `stores` what `planPaths` has it store.
  *
  * @typedef {{ kind: 'exit' | 'ret' | 'full', segment: Segment | null,
- *     written: Set<number>, must: Set<number>, stores?: Set<number>,
+ *     written: LocalSet, must: LocalSet, stores?: Set<number>,
  *     entry?: number }} StorePoint
  */
 
@@ -373,8 +374,6 @@ const recordFieldsOf = layout=>{
  *     rounds to single with no test of its own, and a block leaves with `PRECISION` if it
  *     finds another precision set
  * @property {boolean} [atomic]  locked instructions as wasm atomics (`locked.js`)
- * @property {boolean} [ordered]  with atomic, a load or store of an integer operand not
- *     through esp as a wasm atomic where its address allows (`readOp`, `writeOp`)
  * @property {boolean} [checkReads]  an instruction that only reads tests its pages too
  * @property {boolean} [zeroPage]  the guest's first page is the RAM's, zeros nothing writes
  *     (its stores fault): a tested window of reads that lies in it reads them there
@@ -429,7 +428,7 @@ const recordFieldsOf = layout=>{
  *     countTransfers?: boolean, wide?: boolean, narrow?: boolean, blockProfile?: boolean,
  *     structure?: boolean, precise?: boolean, place?: number, profileCalls?: boolean,
  *     resume?: boolean, callReturn?: boolean, linkedCalls?: boolean,
- *     looseStacks?: boolean, atomic?: boolean, ordered?: boolean, checkReads?: boolean,
+ *     looseStacks?: boolean, atomic?: boolean, checkReads?: boolean,
  *     zeroPage?: boolean,
  *     expansion?: ExpansionNote | null, markBlocks?: boolean, crossTailCalls?: boolean,
  *     callDepth?: number }}
@@ -439,9 +438,7 @@ const recordFieldsOf = layout=>{
  *     instruction that only reads tests its pages too, so a page the program cannot read
  *     faults (a reservation not committed, PAGE_NOACCESS) rather than reading RAM;
  *     atomic: locked instructions as wasm atomics (`locked.js`), for a process
- *     whose threads run on more than one executor; ordered: with atomic, the integer
- *     loads and stores not through esp as wasm atomics too, for such a process on a
- *     host that reorders plain accesses (`readOp`); looseStacks: a store through esp alone
+ *     whose threads run on more than one executor; looseStacks: a store through esp alone
  *     tests no page (`emitGroupChecks`), which holds while no translated code lies on a
  *     thread's stack (the runtime's
  *     `noteStack`); undoLog:
@@ -463,7 +460,7 @@ export function prepareModule(m, layout, features, memory = {},
     { undoLog = false, hash = false, trapPort, leaveOut = new Set(), countTransfers = false,
         wide = false, narrow = false, blockProfile = false, structure = true, precise = false,
         place = 0, profileCalls = false, resume = false, callReturn = false,
-        linkedCalls = true, looseStacks = false, atomic = false, ordered = false,
+        linkedCalls = true, looseStacks = false, atomic = false,
         checkReads = false, zeroPage = false, expansion = null, markBlocks = false,
         crossTailCalls = true,
         callDepth = CallStack.LIMIT } = {})
@@ -602,10 +599,6 @@ export function prepareModule(m, layout, features, memory = {},
     if (atomic && width.bits === 32)
     {
         context.atomic = true;
-        if (ordered)
-        {
-            context.ordered = true;
-        }
     }
     if (profileCalls && (layout.callProfile ?? -1) >= 0)
     {
@@ -1239,7 +1232,7 @@ export class RegionEmitter {
         /**
          * By block, the locals its code writes, every copy of it in this function
          * together: what a path through it leaves out of step with the state block.
-         * @type {(Set<number> | undefined)[]}
+         * @type {(LocalSet | undefined)[]}
          */
         this.blockWrites = [];
         /**
@@ -1263,10 +1256,10 @@ export class RegionEmitter {
         this.points = [];
         /** The code being emitted, as `planPaths` follows it. @type {Segment | null} */
         this.segment = null;
-        /** By block, what its code reads before writing it. @type {(Set<number> | undefined)[]} */
+        /** By block, what its code reads before writing it. @type {(LocalSet | undefined)[]} */
         this.blockExposed = [];
         /** By block, what every copy of it writes before its first way to another
-         * block. @type {(Set<number> | undefined)[]} */
+         * block. @type {(LocalSet | undefined)[]} */
         this.blockKill = [];
         /** Whether a block's code has been emitted yet. */
         this.segmentsBegun = false;
@@ -1497,8 +1490,6 @@ export class RegionEmitter {
         this.blockDepth = 0;
         /** @type {number[]} */
         this.localTypes = [...this.width.locals];
-        /** The ordered variant's store value (`orderedLocal`), -1 until made. */
-        this.orderedValue = -1;
         this.entryTop = entryTop;
         // A region that translates both classes keeps the eight registers as one
         // set with two views, so every register needs an mm local (the mantissa)
@@ -1709,19 +1700,6 @@ export class RegionEmitter {
             this.mmWritten.add(index);
         }
         return /** @type {number} */ (this.mmLocals.get(index));
-    }
-
-    /**
-     * The local the ordered variant holds a store's value in (`writeOp`), made
-     * at its first store: a region of the other variants has none.
-     */
-    orderedLocal(){
-        if (this.orderedValue < 0)
-        {
-            this.orderedValue = this.localTypes.length + STATE_PARAMS;
-            this.localTypes.push(ValType.i32);
-        }
-        return this.orderedValue;
     }
 
     mmxTouchedLocal(){
@@ -2399,7 +2377,7 @@ export class RegionEmitter {
      * return reloaded all it names: the record above all, which the code after
      * a call nearly always writes before it leaves.
      *
-     * @param {Set<number>[]} onEntry  `writtenOnEntry`
+     * @param {LocalSet[]} onEntry  `writtenOnEntry`
      * @returns {number[][]}  the kinds' locals, all the region writes first
      */
     planPaths(onEntry){
@@ -2451,7 +2429,7 @@ export class RegionEmitter {
         }
         // What the stores read, where the code before them did not write it.
         /** @param {Segment | null | undefined} segment @param {Iterable<number>} locals
-         *  @param {Set<number>} must */
+         *  @param {LocalSet} must */
         const read = (segment, locals, must)=>{
             for (const local of locals)
             {
@@ -2469,7 +2447,7 @@ export class RegionEmitter {
         {
             const entered = onEntry[site.block];
             read(site.segment, stored.filter(local=>site.written.has(local)
-                || entered.has(local)), /** @type {Set<number>} */ (site.must));
+                || entered.has(local)), /** @type {LocalSet} */ (site.must));
         }
         // What is read before written from the start of each block on, the way a
         // call's return goes on into its block after the call, its reloads.
@@ -2485,7 +2463,7 @@ export class RegionEmitter {
         {
             sitesOf.set(site.block, [...sitesOf.get(site.block) ?? [], site]);
         }
-        const live = blocks.map(()=>new Set());
+        const live = blocks.map(()=>new LocalSet());
         for (let changed = true; changed;)
         {
             changed = false;
@@ -2500,29 +2478,28 @@ export class RegionEmitter {
                 const after = this.labels.get(blocks[i].exit.next);
                 for (const site of sites)
                 {
-                    const reloads = site.reloads ??= new Set();
-                    for (const local of [...after === undefined ? [] : live[after],
-                        .../** @type {Set<number>} */ (site.after)])
+                    const reloads = site.reloads ??= new LocalSet();
+                    if (after !== undefined)
                     {
-                        reloads.add(local);
+                        reloads.addAll(live[after]);
                     }
+                    reloads.addAll(/** @type {LocalSet} */ (site.after));
+                }
+                if (live[i].addAll(exposed))
+                {
+                    changed = true;
                 }
                 // Past a call nothing goes on with the block's own locals: a return reloads.
-                const on = sites.length > 0 ? [] : next[i].flatMap(j=>[...live[j]]);
-                const kill = this.blockKill[i];
-                const before = live[i].size;
-                for (const local of exposed)
+                if (sites.length === 0)
                 {
-                    live[i].add(local);
-                }
-                for (const local of on)
-                {
-                    if (kill?.has(local) !== true)
+                    for (const j of next[i])
                     {
-                        live[i].add(local);
+                        if (live[i].addAllBut(live[j], this.blockKill[i]))
+                        {
+                            changed = true;
+                        }
                     }
                 }
-                changed ||= live[i].size !== before;
             }
         }
         if (this.storesOutside)
@@ -2530,7 +2507,7 @@ export class RegionEmitter {
             // A store no block's code holds: whatever any reads.
             for (const site of this.sites)
             {
-                site.reloads = new Set([...width.regLocal,
+                site.reloads = new LocalSet([...width.regLocal,
                     ...this.recordFields.map(field=>field.local), Local.flags]);
             }
         }
@@ -2585,12 +2562,11 @@ export class RegionEmitter {
      * region starts what follows anew, as an entry does. A block not emitted in
      * this function runs nothing here.
      *
-     * @returns {Set<number>[]}  by block, the locals
+     * @returns {LocalSet[]}  by block, the locals
      */
     writtenOnEntry(){
         const blocks = this.region.blocks;
-        /** @type {Set<number>[]} */
-        const into = blocks.map(()=>new Set());
+        const into = blocks.map(()=>new LocalSet());
         const ways = blocks.map(block=>jumpsOf(block, this.returns, this.callReturn, this.labels)
             .flatMap(target=>{
                 const at = this.labels.get(target);
@@ -2608,24 +2584,10 @@ export class RegionEmitter {
             {
                 continue;
             }
-            // Added from both into each way's set, not joined into a set of
-            // their own first: the join was a tenth of what translating made
-            // for the collector.
             for (const j of ways[i])
             {
-                const before = into[j].size;
-                if (j !== i)
-                {
-                    for (const local of into[i])
-                    {
-                        into[j].add(local);
-                    }
-                }
-                for (const local of written)
-                {
-                    into[j].add(local);
-                }
-                if (into[j].size !== before && !queued.has(j))
+                const grew = j !== i && into[j].addAll(into[i]);
+                if ((into[j].addAll(written) || grew) && !queued.has(j))
                 {
                     queued.add(j);
                     work.push(j);
@@ -3944,8 +3906,8 @@ export class RegionEmitter {
         }
         this.closeSegment();
         this.segmentsBegun = true;
-        const exposed = after?.after ?? (this.blockExposed[index] ??= new Set());
-        const segment = { block: index, exposed, must: new Set(), kill: null, after, entry };
+        const exposed = after?.after ?? (this.blockExposed[index] ??= new LocalSet());
+        const segment = { block: index, exposed, must: new LocalSet(), kill: null, after, entry };
         this.segment = segment;
         this.b.exposed = exposed;
         this.b.must = segment.must;
@@ -3962,10 +3924,9 @@ export class RegionEmitter {
         this.freezeKill();
         if (segment.after === null && !segment.entry)
         {
-            const kill = /** @type {Set<number>} */ (segment.kill);
+            const kill = /** @type {LocalSet} */ (segment.kill);
             const before = this.blockKill[segment.block];
-            this.blockKill[segment.block] = before === undefined ? kill
-                : new Set([...before].filter(local=>kill.has(local)));
+            this.blockKill[segment.block] = before === undefined ? kill : before.retainAll(kill);
         }
         this.segment = null;
         this.b.exposed = null;
@@ -3982,7 +3943,7 @@ export class RegionEmitter {
     freezeKill(){
         if (this.segment !== null && this.segment.kill === null)
         {
-            this.segment.kill = new Set(this.segment.must);
+            this.segment.kill = this.segment.must.copy();
         }
     }
 
@@ -4001,8 +3962,9 @@ export class RegionEmitter {
         }
         /** @type {StorePoint} */
         const point = { kind, segment,
-            written: new Set(segment?.entry === true ? [] : this.b.written ?? []),
-            must: new Set(segment?.must ?? []) };
+            written: segment?.entry === true || this.b.written === null ? new LocalSet()
+                : this.b.written.copy(),
+            must: segment?.must.copy() ?? new LocalSet() };
         this.points.push(point);
         return point;
     }
@@ -4041,7 +4003,7 @@ export class RegionEmitter {
         this.at = -1;
         // Until the next block starts, what is written is this block's: its
         // instructions and its ways out.
-        this.b.written = this.blockWrites[index] ??= new Set();
+        this.b.written = this.blockWrites[index] ??= new LocalSet();
         const tested = this.testedOnce.get(index);
         if (tested !== undefined && !this.copying)
         {

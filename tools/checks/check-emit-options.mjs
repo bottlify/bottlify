@@ -6,7 +6,7 @@
 
 /**
  * Fails when a setting the cork runtime hands its emitter (`emitOptions` in
- * runtime.js) does not reach the emitted code: every one must be read by
+ * runtime/translators.js) does not reach the emitted code: every one must be read by
  * `emitBatch` (emit-built.js), and every one `emitBatch` gives `prepareModule`
  * must be in the key its emitted functions are cached under (`contextKey`).
  *
@@ -21,7 +21,8 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-const RUNTIME = fileURLToPath(new URL('../../modules/cork/src/runtime/runtime.js', import.meta.url));
+const RUNTIME = fileURLToPath(
+    new URL('../../modules/cork/src/runtime/translators.js', import.meta.url));
 const BUILT = fileURLToPath(new URL('../../modules/cork/src/runtime/emit-built.js', import.meta.url));
 
 /**

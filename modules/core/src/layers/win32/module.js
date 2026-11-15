@@ -2233,7 +2233,7 @@ export function createWin32Module(){
             // The audio endpoints a program walks to find the device it plays to.
             registerMmDevApiClasses({
                 registry: com, vtables: comVtables, heap, readMemory, writeMemory, readWideString,
-                pointerSize, divergence: config?.divergence,
+                pointerSize, windows, divergence: config?.divergence,
             });
 
             // DirectPlay's session and lobby objects, which a program makes
@@ -5268,6 +5268,8 @@ export function createWin32Module(){
                 writeMemory,
                 readWideString,
                 readMemory,
+                /** @param {string} layer */
+                need: layer=>config?.onLayerNeeded?.(layer),
             });
 
             // The Windows Runtime's library came with Windows 8: on 7 and XP

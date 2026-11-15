@@ -177,3 +177,7 @@ jobs:
       - run: npm run cdp:pull
         env:
           CDP_TEST_CHROME: ${{ steps.chrome.outputs.chrome-path }}
+      # cork's stand in the browser: the same work as Node's record.
+      - run: npm run cdp:bench
+        env:
+          CDP_TEST_CHROME: ${{ steps.chrome.outputs.chrome-path }}

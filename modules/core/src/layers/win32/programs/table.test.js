@@ -105,6 +105,28 @@ test('DirectX\'s setup a title brings is run as the engine\'s own, known by its 
     assert.equal(programInPlaceOf(new Uint8Array(64)), null, 'and bytes that are no image');
 });
 
+test('the .NET Framework 4\'s setups are run as the engine\'s own, known by their version', ()=>{
+    // The version blocks of the 4.0 and 4.8 offline installers as they are.
+    for (const [description, original] of [
+        ['Microsoft .NET Framework 4 Setup', 'dotNetFx40_Full_x86_x64.exe'],
+        ['Microsoft .NET Framework 4.8 Setup', 'NDP48-x86-x64-AllOS-ENU.exe'],
+        ['Microsoft .NET Framework 4.7.2 Setup', 'NDP472-KB4054531-Web.exe'],
+        ['Microsoft .NET Framework 4 Client Profile Setup', 'dotNetFx40_Client_x86_x64.exe']])
+    {
+        const bytes = programInPlaceOf(imageWith({ CompanyName: 'Microsoft Corporation',
+            FileDescription: description, OriginalFilename: original }));
+        assert.ok(bytes, description);
+        assert.equal(readImports(bytes, parsePe(bytes))[0].entries[0].name, 'netfxsetup');
+    }
+    // What the setup unpacks and runs is not it: the Framework is not installed by parts.
+    assert.equal(programInPlaceOf(imageWith({ CompanyName: 'Microsoft Corporation',
+        FileDescription: 'Setup Installer', OriginalFilename: 'SetupUI.exe' })), null);
+    assert.equal(programInPlaceOf(imageWith({ CompanyName: 'Microsoft Corporation',
+        FileDescription: 'Microsoft .NET Framework 3.5 SP1 Setup' })), null, 'not CLR 2\'s');
+    assert.equal(programInPlaceOf(imageWith({ CompanyName: 'A Vendor',
+        FileDescription: 'Microsoft .NET Framework 4.8 Setup' })), null, 'only Microsoft\'s');
+});
+
 test('DXSETUP\'s place, nothing beside it: succeeds, no restart, shows nothing', async()=>{
     const functions = createProgramFunctions(/** @type {any} */ ({
         callerThread: ()=>null,

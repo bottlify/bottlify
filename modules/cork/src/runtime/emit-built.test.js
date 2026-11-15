@@ -248,3 +248,32 @@ test('a region formed again on a worker is the region the runtime formed, wherev
     assert.ok(roomy.blocks.some(block=>block.exit.predicted), 'the call is predicted');
     assert.ok(roomy.pages.has(0x402));
 });
+
+test('regions of one batch are formed on the worker over each one\'s own pages, not all of'
+    + ' theirs', ()=>{
+    // 0x401000: nop; jmp 0x402000, formed where 0x402 may not be formed on from it (a page
+    // of stubs, which holds only regions entered there); 0x402000: ret, entered there, on
+    // its own page. Batched together, the first told the pages both may form on went on
+    // into the second's page, its hash was not the runtime's, and its entry was answered
+    // `changed` - barren for good, its bytes never written.
+    /** @type {Map<number, Uint8Array>} */
+    const pages = new Map([[0x401, [0x90, 0xe9, 0xfa, 0x0f, 0x00, 0x00]], [0x402, [0xc3]]]
+        .map(([page, bytes])=>{
+            const copy = new Uint8Array(4096);
+            copy.set(/** @type {number[]} */ (bytes));
+            const at = /** @type {number} */ (page);
+            return [at, copy];
+        }));
+    const read = (/** @type {number} */ address)=>pages.get(address >>> 12)?.[address & 0xfff] ?? 0;
+    const jump = formRegion(read, 0x401000, { ...FORM,
+        translatable: address=>address >>> 12 === 0x401 });
+    const stub = formRegion(read, 0x402000, { ...FORM,
+        translatable: address=>address >>> 12 === 0x402 });
+    assert.ok(!jump.pages.has(0x402), 'the jump\'s region stops at the stub page');
+    const built = relinkBatch({
+        jobs: [{ entry: 0x401000, entryTop: 0, hash: jump.hash, formable: [...jump.pages] },
+            { entry: 0x402000, entryTop: 0, hash: stub.hash, formable: [...stub.pages] }],
+        pages: [...pages], form: FORM,
+    }, layout, FEATURES, OPTIONS);
+    assert.deepEqual(built.results.map(one=>(one.ok ? 'ok' : one.message)), ['ok', 'ok']);
+});

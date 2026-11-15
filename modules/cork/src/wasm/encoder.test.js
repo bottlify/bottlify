@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Body, EMPTY, ModuleBuilder, ValType, leb128s32, leb128s64, leb128u } from './encoder.js';
-import { allowMemory64 } from '../testing/memory64.js';
+import { allowMemory64, wide } from '../testing/memory64.js';
 import { features, memory64 } from './features.js';
 
 /**
@@ -348,7 +348,7 @@ test('atomic read-modify-writes on a shared memory answer the old value at every
     assert.throws(()=>new Body().atomic('nand_i32'), /no such atomic/);
 });
 
-test('a second memory, memory64, read and written past 4 GiB beside the first', ()=>{
+test('a second memory, memory64, read and written past 4 GiB beside the first', wide(()=>{
     allowMemory64();
     const state = new WebAssembly.Memory({ initial: 1, maximum: 1, shared: true });
     const ram = memory64(2 ** 33, true);
@@ -366,9 +366,9 @@ test('a second memory, memory64, read and written past 4 GiB beside the first', 
     /** @type {any} */ (instantiate(m, { env: { state, ram } })).f(BigInt(high - 4));
     assert.equal(new DataView(state.buffer).getUint32(0, true), 0xc0ffee);
     assert.equal(new DataView(ram.buffer).getUint32(high + 4, true), 0xc0ffef);
-});
+}));
 
-test('a guest access in a wide window: the i32 address widened by the high local', ()=>{
+test('a guest access in a wide window: the i32 address widened by the high local', wide(()=>{
     allowMemory64();
     const ram = memory64(2 ** 33);
     const at = 2 ** 32 + 0x5000;
@@ -393,4 +393,4 @@ test('a guest access in a wide window: the i32 address widened by the high local
     assert.equal(view.getUint32(at + 20, true), 0x1234568, 'the vector went past 4 GiB too');
     assert.equal(new Body().load('i32', { guest: true }).length, 3,
         'a 4 GiB window\'s guest access is a plain one');
-});
+}));

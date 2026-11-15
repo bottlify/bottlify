@@ -17,6 +17,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { CORPUS, load, machine, run } from '../testing/long-machine.js';
+import { wide } from '../testing/memory64.js';
 import { fingerprint } from '../helpers.js';
 import { codeRangesAt, pageFlagsAt } from '../runtime/layout.js';
 import { CRT_DICTIONARY } from '../crt-dictionary.js';
@@ -260,7 +261,7 @@ for (const where of WHERE)
     {
         const name = /** @type {keyof typeof FUNCTIONS} */ (does === 'memcpy' ? 'memmove' : does);
         test(`${where.title} ${does}: seeded calls answer the same made as the operation as`
-            + ' through the body', ()=>calls(where, name, does));
+            + ' through the body', wide(()=>calls(where, name, does)));
     }
 }
 
@@ -363,7 +364,7 @@ function runChkstk(where, size, limit, helpers){
 for (const where of [{ high: 0 }, { window: 2 ** 33, high: 2 ** 32 }])
 {
     test(`long mode's __chkstk${where.window === undefined ? '' : ' in a wide window'}: made as`
-        + ' the operation as through the body', ()=>{
+        + ' the operation as through the body', wide(()=>{
         const helpers = [{ name: '__chkstk', does: 'chkstk64', bits: 64, length: CHKSTK.length,
             hash: fingerprint(at=>CHKSTK[at] ?? 0, 0, CHKSTK.length) }];
         let formed = 0;
@@ -388,7 +389,7 @@ for (const where of [{ high: 0 }, { window: 2 ** 33, high: 2 ** 32 }])
             }
         }
         assert.ok(formed > 8 && made > 8, `${formed} formed, ${made} made as they were`);
-    });
+    }));
 }
 
 /**
@@ -444,7 +445,7 @@ function runCookie(where, cookieValue, argument, helpers){
 for (const where of [{ high: 0 }, { window: 2 ** 33, high: 2 ** 32, codeHigh: 2 ** 32 }])
 {
     test(`long mode's __security_check_cookie${where.window === undefined ? ''
-        : ' in a wide window'}: made as the test as through the body`, ()=>{
+        : ' in a wide window'}: made as the test as through the body`, wide(()=>{
         const [entry] = CRT_DICTIONARY.filter(one=>one.does === 'gscookie64');
         let formed = 0;
         for (const [cookieValue, argument] of /** @type {[bigint, bigint][]} */ ([
@@ -458,7 +459,7 @@ for (const where of [{ high: 0 }, { window: 2 ** 33, high: 2 ** 32, codeHigh: 2 
             formed += retired < bodyRetired ? 1 : 0;
         }
         assert.equal(formed, 2, 'the two calls whose rcx is the cookie, its high 16 bits clear');
-    });
+    }));
 }
 
 test('long mode\'s call through an import slot to a memset the dictionary knows is made as the'

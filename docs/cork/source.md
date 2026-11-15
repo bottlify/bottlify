@@ -8,7 +8,7 @@
 | Region former | [`src/region.js`](../../modules/cork/src/region.js), [`src/helpers.js`](../../modules/cork/src/helpers.js), [`src/crt-dictionary.js`](../../modules/cork/src/crt-dictionary.js) | Forms a region from an entry, its small callees formed in whole or not at all. Recognises the compiler's helpers and the C runtime's functions a program links in by their bytes and puts what they do in place of the call (`emit/crt.js`; the list is in [How cork works](how-it-works.md#functions-cork-knows-by-their-bytes)), and forms a direct call to an import thunk (`jmp [slot]`) as the call through its slot. |
 | Emitter | [`src/emit/`](../../modules/cork/src/emit/) | Turns a region into one WebAssembly function: integer instructions, flags, memory, the x87, MMX and SSE (`simd.js`), `lock`-prefixed instructions as atomics (`locked.js`), each in a file of its own. It works straight from the decoded instructions, with no intermediate language. |
 | Encoder | [`src/wasm/`](../../modules/cork/src/wasm/) | Writes the WebAssembly bytes, and finds out what the engine supports (SIMD, tail calls). |
-| Runtime | [`src/runtime/`](../../modules/cork/src/runtime/) | Everything around translation: the candidate queue, batches, translation workers (`translator.worker.js`), the shared memory finished code is kept in (`arena.js`), publishing, the entry hash, page flags (`pages.js`), dropping rewritten code, indirect call prediction, gathering small modules into big ones, the records kept in the translation store (`cache.js`), the compiled modules and formed regions the processes sharing a store share (`shared-modules.js`, `shared-forms.js`), and what the executors of one process share about code (`shared-code.js`). |
+| Runtime | [`src/runtime/`](../../modules/cork/src/runtime/) | Everything around translation. `runtime.js` assembles it and runs regions (`run`, the host's notes); its parts are made over one state object (`state.js`, the settings in `settings.js`), each in a file of its own: the candidate queue (`queue.js`), forming batches under the engine thread's time credit (`forming.js`), the translation workers (`translators.js`, `translator.worker.js`), the translation store's keys and lookups (`store.js`, its records in `cache.js`), publishing (`publish.js`), the modules translated code lives in and their eviction (`modules.js`), the published regions (`regions.js`), the variants a region is formed in (`variants.js`), dropping rewritten code (`code-writes.js`), relinks, merges, indirect call prediction and copies (`relink.js`) and the diagnostics (`diagnostics.js`). Beside them: the shared memory finished code is kept in (`arena.js`), the entry hash (`entries.js`), page flags (`pages.js`), the compiled modules and formed regions the processes sharing a store share (`shared-modules.js`, `shared-forms.js`), and what the executors of one process share about code (`shared-code.js`). |
 | Interpreters | [`src/interp.js`](../../modules/cork/src/interp.js), [`src/fast.js`](../../modules/cork/src/fast.js), [`src/interp-wasm.c`](../../modules/cork/src/interp-wasm.c) | An interpreter in JavaScript for the very first steps, then one built from C into WebAssembly (in Bottlify; cork's own machine keeps to the JavaScript one). |
 | Instruction model | [`src/ir.js`](../../modules/cork/src/ir.js), [`src/ir-x87.js`](../../modules/cork/src/ir-x87.js), [`src/ir-simd.js`](../../modules/cork/src/ir-simd.js) | A slow, simple account of what each instruction does. The JavaScript interpreter runs on it, and translated code is checked against it. |
 
@@ -23,6 +23,8 @@ npm test -w @bottlify/cork                  # unit tests and gates, a minute or 
 npm run test:integration -w @bottlify/cork  # the suites over the corpus, and the gates
 node modules/cork/bench/run.mjs             # the benchmark (bench/README.md)
 node modules/cork/bench/micro/run.mjs       # what the benchmark does not cover, x86-64 too
+node tools/bench/stand.mjs                  # the stand: the work recorded, and the speed here
+node tools/bench/serve.mjs                  # the same stand as a page, for any browser
 ```
 
 - **Instruction corpus** ([`src/x86-corpus.json.gz`](../../modules/cork/src/x86-corpus.json.gz), in the
@@ -57,5 +59,13 @@ node modules/cork/bench/micro/run.mjs       # what the benchmark does not cover,
   translates the same code however busy the machine is, which
   [`virtual-clock.test.js`](../../modules/core/src/layers/cpu/internal/virtual-clock.test.js)
   checks against a clock that jumps.
+- **The stand** ([`tools/bench/`](../../tools/bench/)): the micro workloads on the guest's own
+  clock, so each one's work (instructions, regions, every way between regions) is the same on any
+  machine and in any browser, held to `tools/bench/expected.json`; its speed is the machine's,
+  with the noise of its rounds beside it. The page runs it in a person's own browser;
+  `npm run cdp:bench` runs the page in Chromium and holds its work to the record Node made.
+  `tools/bench/build.mjs --arm A=REV --arm B=.` makes the page with two builds of cork as static
+  files, run on a device several times over with B's speed against A's in each run. A change that
+  makes cork form otherwise records it again (`node tools/bench/stand.mjs --write`).
 
 Plain ES modules with JSDoc, tests on `node:test`. Licensed MPL-2.0.

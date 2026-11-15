@@ -31,6 +31,7 @@ export const CATEGORIES = {
     live: 'attach to a game a person is playing',
     read: 'read what a run left behind: a trace, a capture, shaders, a recording',
     translator: "cork's work on a real program: its mix, its code, its calls, its cost",
+    bench: "cork's stand: the same work on every machine and browser, and its speed on this one",
     bundles: 'make, inspect and audit bottles, archives and installers',
     gates: 'two paths of the engine compared on a real GPU (npm run cdp:*)',
     checks: 'the rules of the code check:boundaries holds (and one run by hand)',
