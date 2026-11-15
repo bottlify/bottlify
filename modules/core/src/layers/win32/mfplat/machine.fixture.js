@@ -16,7 +16,8 @@ import { createMfplatFunctions } from './functions.js';
 const IID_IUNKNOWN = '{00000000-0000-0000-C000-000000000046}';
 
 /**
- * @param {{ propVariant?: any, files?: import('./bytestream.js').FileCalls }} [options]
+ * @param {{ propVariant?: any, files?: import('./bytestream.js').FileCalls,
+ *     notices?: import('./async.js').AsyncHost['notices'] }} [options]
  */
 export function mfMachine(options = {}){
     const memory = new Uint8Array(1 << 20);
@@ -112,6 +113,7 @@ export function mfMachine(options = {}){
         divergence: (api, detail, kind)=>said.push({ api, detail, kind }),
         propVariant: options.propVariant,
         files: options.files,
+        notices: options.notices,
         /** @param {{ edx?: number }} values */
         setRegisters: values=>Object.assign(registers, values),
         now: ()=>1234.5,

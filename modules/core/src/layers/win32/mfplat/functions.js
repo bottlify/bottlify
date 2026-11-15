@@ -22,10 +22,13 @@ import { createMfObjects } from './objects.js';
 import { frameRateToTime, imageSize, mulDiv, timeToFrameRate } from './formats.js';
 import { deserialize, serialize } from './blob.js';
 import { createByteStreams } from './bytestream.js';
+import { createAsync } from './async.js';
 import { formatGuid, parseGuid } from '../ole32/guid.js';
 
 export const MF_E_BAD_STARTUP_VERSION = 0xc00d36e3 | 0;
 const MF_E_BUFFERTOOSMALL = 0xc00d36b1 | 0;
+/** What a work queue answers before MFStartup and after the last MFShutdown. */
+const MF_E_SHUTDOWN = 0xc00d3e85 | 0;
 const E_ACCESSDENIED = 0x80070005 | 0;
 const GUID_NULL = '{00000000-0000-0000-0000-000000000000}';
 
@@ -42,6 +45,7 @@ const SDK_VERSIONS = new Set([1, 2]);
  *     setRegisters?: (values: { edx?: number }) => void,
  *     now?: () => number,
  *     files?: import('./bytestream.js').FileCalls,
+ *     notices?: import('./async.js').AsyncHost['notices'],
  *     tempPath?: () => Promise<string> }} MfplatHost
  *     `setRegisters` carries a LONGLONG's high half back in EDX; `now` is the
  *     machine's clock in milliseconds, which MFGetSystemTime reads.
@@ -55,6 +59,7 @@ export function createMfplatFunctions(host){
     const objects = createMfObjects(kit, host);
     const { guidAt } = kit;
     const streams = createByteStreams(kit, host, objects.attributes, host.files);
+    const async = createAsync(kit, host);
     /** MFStartup's count, which MFShutdown takes down to zero and no further. */
     let started = 0;
     let locks = 0;
@@ -323,6 +328,86 @@ export function createMfplatFunctions(host){
                     flags >>> 0, `${folder}${globalThis.crypto.randomUUID()}.tmp`, true))
                     .then(made=>(typeof made === 'number' ? made : kit.give(out, made)));
             } },
+
+        /**
+         * HRESULT MFCreateAsyncResult(IUnknown *object, IMFAsyncCallback *callback,
+         *     IUnknown *state, IMFAsyncResult **result)
+         */
+        MFCreateAsyncResult: { argBytes: 16,
+            handler: (/** @type {number[]} */ [object, callback, state, out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const made = async.create(object, callback, state);
+                if (!made)
+                {
+                    return E_OUTOFMEMORY;
+                }
+                return drive((function* (){
+                    for (const ref of made.held)
+                    {
+                        yield ref;
+                    }
+                    return kit.give(out, made.made);
+                })());
+            } },
+        /** HRESULT MFInvokeCallback(IMFAsyncResult *result) */
+        MFInvokeCallback: { argBytes: 4, handler: (/** @type {number[]} */ [result])=>
+            (started === 0 ? MF_E_SHUTDOWN : async.invoke(result)) },
+        /**
+         * HRESULT MFPutWorkItem(DWORD queue, IMFAsyncCallback *callback, IUnknown *state)
+         *
+         * A result made for the callback and invoked on the platform's thread;
+         * the work holds it, the caller never sees it.
+         */
+        MFPutWorkItem: { argBytes: 12, handler: (/** @type {number[]} */ [queue, callback, state])=>{
+            if (started === 0)
+            {
+                return MF_E_SHUTDOWN;
+            }
+            if ((callback >>> 0) === 0)
+            {
+                return E_INVALIDARG;
+            }
+            const checked = async.lockQueue(queue, 0);
+            if (checked !== S_OK)
+            {
+                return checked;
+            }
+            const made = async.create(0, callback, state);
+            if (!made)
+            {
+                return E_OUTOFMEMORY;
+            }
+            return drive((function* (){
+                for (const ref of made.held)
+                {
+                    yield ref;
+                }
+                const hr = async.invoke(made.pointer);
+                made.made.release();
+                return hr;
+            })());
+        } },
+        /** HRESULT MFAllocateWorkQueue(DWORD *queue) */
+        MFAllocateWorkQueue: { argBytes: 4, handler: (/** @type {number[]} */ [out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return E_INVALIDARG;
+            }
+            if (started === 0)
+            {
+                return MF_E_SHUTDOWN;
+            }
+            kit.putU32s(out, [async.allocateQueue()]);
+            return S_OK;
+        } },
+        /** HRESULT MFLockWorkQueue(DWORD queue), MFUnlockWorkQueue(DWORD queue) */
+        MFLockWorkQueue: { argBytes: 4, handler: (/** @type {number[]} */ [queue])=>
+            async.lockQueue(queue, 1) },
+        MFUnlockWorkQueue: { argBytes: 4, handler: (/** @type {number[]} */ [queue])=>
+            async.lockQueue(queue, -1) },
 
         /**
          * HRESULT MFTRegister(CLSID clsid, GUID category, LPWSTR name, UINT32 flags,

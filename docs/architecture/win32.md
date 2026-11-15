@@ -85,7 +85,9 @@ sequenceDiagram
   other, except those that run in the guest: IUnknown's `AddRef` and `Release` for an object
   whose count lives in guest memory, and the Direct3D 8 and 9 methods a program calls most
   (section 7). Methods are stdcall, with the interface pointer as the first argument on the
-  stack.
+  stack. An object whose documented layout goes on past that first word (Media Foundation's
+  `MFASYNCRESULT`, whose status and callback a program reads and writes itself) is given the
+  bytes it needs after it, zeroed, and keeps its fields there.
 - **Callbacks:** a window procedure, a COM callback, `DllMain`. The bridge stops the thread, builds a
   frame on the program's stack and runs the program's code until it returns into a sentinel trap.
   Where Windows calls the program inside an `__except` of its own (`DllMain` in the loader, a COM

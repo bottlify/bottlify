@@ -1718,6 +1718,31 @@ export function createWin32Module(){
             // The thread a filter graph calls a program's own filters on: the
             // samples it feeds a renderer the program wrote, and the flushes and
             // releases it owes that renderer.
+            // The thread Media Foundation's work queues call a program's
+            // IMFAsyncCallback::Invoke on, made with the first work put.
+            const mfNotices = createNoticeThread({
+                name: 'mfplat',
+                reason: 'a work queue item',
+                trap: '<mfplat-queue>',
+                /** @param {number} bytes */
+                allocate: bytes=>heap.allocate(bytes),
+                writeMemory,
+                register: (name, fn)=>bridge.register(name, fn),
+                /** @param {{ entry: number, name: string }} options */
+                createThread: options=>{
+                    const thread = kernel.createThread(options);
+                    threadMade(thread);
+                    return thread;
+                },
+                currentThread: ()=>kernel.currentThread(),
+                /** @param {any} thread @param {string} reason */
+                block: (thread, reason)=>kernel.block(thread, reason),
+                /** @param {any} thread @param {number} result */
+                wake: (thread, result)=>kernel.wake(thread, result),
+                /** @param {any} thread */
+                park: thread=>bridge.park(thread),
+            });
+
             const streamNotices = createNoticeThread({
                 name: 'quartz',
                 reason: 'a filter graph sample',
@@ -2440,6 +2465,10 @@ export function createWin32Module(){
                 // A byte stream's file is kernel32's, opened and read through
                 // its own calls, so it fails as CreateFile and ReadFile do.
                 files: mfFiles(),
+                notices: {
+                    /** @param {number} entry @param {number[]} args @param {() => void} [done] */
+                    deliver: (entry, args, done)=>mfNotices.deliver(entry, args, done),
+                },
                 tempPath: async()=>{
                     const buffer = heap.allocate(520);
                     try
