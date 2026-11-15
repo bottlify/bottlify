@@ -68,4 +68,28 @@ node tools/bench/serve.mjs                  # the same stand as a page, for any 
   files, run on a device several times over with B's speed against A's in each run. A change that
   makes cork form otherwise records it again (`node tools/bench/stand.mjs --write`).
 
+## Judging a change
+
+Each stand answers one question, and a number from one is no evidence for another's. A change to
+cork is accepted when it is still right, is no slower on 32-bit and on x86-64 code, and is faster,
+smaller, simpler or holds less memory. It is judged in this order, the exact counts before any
+time, each arm a checkout of its own (a worktree or a copy, never the tree being edited):
+
+| Question | Run | How |
+| --- | --- | --- |
+| Is it still right? | `npm test -w @bottlify/cork`, `npm run test:integration -w @bottlify/cork` | Always, both. A change that reaches the core's cpu layer also runs `node --test "src/layers/cpu/**/*.test.js" "src/layers/cpu/**/*.itest.js"` in `modules/core`. |
+| Did the 32-bit translation change at all? | `node tools/checks/emit-digest.mjs --check` | A change meant to keep it fails here if it did not. One meant to change it writes the digest (`--write`) and raises `CACHE_VERSION`. |
+| Do regions still move between each other as recorded? | `region-shapes.itest.js` (in the integration run), `node tools/bench/stand.mjs --work` | A change that moves them on purpose records both again (`CORK_SHAPES_WRITE=5`, `stand.mjs --write`). |
+| What does translated code cost to run? | [`tools/translator/run-count.mjs`](../../tools/translator/run-count.mjs) `--qemu DIR --root BASE --root NEW` | Exact: machine instructions an iteration of each micro workload, 32-bit and x86-64 (the default `--bits both`, 100 warm, 20 counted). Read each workload's ratio, not only the geometric mean. |
+| What does translating cost? | [`tools/translator/emit-count.mjs`](../../tools/translator/emit-count.mjs) `--qemu DIR --root BASE --root NEW` | Exact. Judge by the work, V8's own compiles apart; the price list says where the cost moved. Same wasm bytes unless the change meant otherwise. |
+| What machine code does a form become? | [`tools/translator/cork-asm.mjs`](../../tools/translator/cork-asm.mjs) | With `--runner` a node whose V8 is the browsers' (node 22's is older and spills where they do not); arm64 through an arm64 node under `qemu-aarch64`. Its static weighing is a model: compare arms, never absolutes. |
+| What does a module hold in memory? | [`tools/translator/module-memory.mjs`](../../tools/translator/module-memory.mjs) | `node --expose-gc`, with each of the three flag sets its comment names. |
+| Is it faster on this machine? | `node tools/bench/stand.mjs --roots BASE,NEW` | Ten runs on a quiet machine, alternated; one run's rounds vary by a fifth. Only to confirm what the counts said. |
+| Is it faster on a person's device? | `node tools/bench/build.mjs --arm base=REV --arm new=.`, then the page (`serve.mjs --dir OUT`) | Five runs on the device; `--check` with `CDP_TEST_CHROME` holds the page's work to the record first. |
+| Is everything else still right? | the full set in the repository's rules | Before anything goes to main. |
+
+Nothing else runs beside a timed run on the same machine (a count does not depend on the load),
+and no source of an arm is edited while a suite runs from it. A result that did not pay goes into
+[`roadmap/negative-results.md`](../../roadmap/negative-results.md) with its numbers.
+
 Plain ES modules with JSDoc, tests on `node:test`. Licensed MPL-2.0.

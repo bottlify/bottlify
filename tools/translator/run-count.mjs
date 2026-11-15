@@ -13,12 +13,14 @@
  * between runs of one tree; this count repeats to the instruction, so a
  * change to the code cork emits is judged here before a timed run.
  *
- * The runtime's budgets read the clock, so the run's clock is its own,
- * moving a microsecond a reading: what it translates, and when, is the
- * same every run. Several roots are arms, each workload's count beside the
- * first's. The count is the whole process's (the translated code, the
- * runtime's lookups and the host between them), V8's optimising compiles
- * apart.
+ * The host runs as the stand's page runs it (`tools/bench/stand.js`): on
+ * the guest's own clock (`clock: 'virtual'`), translating on its thread, so
+ * what it translates, and when, is the same every run - a run whose
+ * translation came back from a worker by the machine's time counted a
+ * workload that keeps translating (`load`) a fifth apart run to run.
+ * Several roots are arms, each workload's count beside the first's. The
+ * count is the whole process's (the translated code, the runtime's lookups
+ * and the host between them), V8's optimising compiles apart.
  *
  *     node tools/translator/run-count.mjs --qemu DIR [--root DIR]... [--bits 32|64|both]
  *         [--warm N] [--iters N] [--jobs N] [workload...]
@@ -82,16 +84,16 @@ const optionsOf = argv=>{
  * @param {number} iters
  */
 const inner = async(root, name, bits, warm, iters)=>{
-    let now = 0;
-    performance.now = ()=>(now += 0.001);
-    Date.now = ()=>Math.floor(1.7e12 + now);
     const { createCorkHost } = await import(`${root}/modules/core/src/layers/cpu/internal/cork-host.js`);
     const engine = await import(`${root}/modules/cork/src/index.js`);
     const image = readFileSync(bits === 64
         ? `${root}/modules/cork/bench/micro/images64/${name}-x64.bin`
         : `${root}/modules/cork/bench/micro/images/${name}-x87.bin`);
+    // As the stand's page runs it (`tools/bench/stand.js`): the guest's own clock, the
+    // translation on this thread, the wasm interpreter from the first instruction.
     const host = createCorkHost({ engine, memorySize: 16 << 20, trapPort: 0xb077,
-        entryVector: ENTRY_VECTOR, initialStack: 0x800000, cork: {},
+        entryVector: ENTRY_VECTOR, initialStack: 0x800000,
+        cork: { clock: 'virtual', worker: false, wasmInterpreterAfter: 0 },
         ...bits === 64 ? { bits } : {} });
     host.writePhysical(IMAGE_BASE, new Uint8Array(image));
     const vector = new Uint8Array(4);

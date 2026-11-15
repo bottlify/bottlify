@@ -235,15 +235,12 @@ From `emit-count.mjs --qemu <qemu 8.2.2 built with plugins> --root <1851609d> --
 [`translator/run-count.mjs`](translator/run-count.mjs): `node tools/translator/run-count.mjs --qemu DIR [--root DIR]... [--bits 32|64|both] [--warm N] [--iters N] [workload...]`
 
 ```
-instructions an iteration (60 warm, 20 counted), arms: <a2791c91>, <a callee formed in at one call>
-  str-32                   2930633  3223381 (1.0999)
-  tree-32                  3275767  8501680 (2.5953)
-  lua-32                   37808258  38366401 (1.0148)
-  game-32                  1010468  1010468 (1.0000)
-  vcall-32                 2129041  2129041 (1.0000)
+instructions an iteration (100 warm, 20 counted), arms: <798a130a>, <798a130a>, <ae2d03ab>, <ae2d03ab>
+  load-32                  8505228  8505228 (1.0000)  8459295 (0.9946)  8459295 (0.9946)
+  str-32                   2932339  2932339 (1.0000)  2928703 (0.9988)  2928703 (0.9988)
 ```
 
-From `the micro images under qemu 8.2.2 with tools/lib/qemu-count.c, node 22.22.0, cork a2791c91 against the experiment that kept a callee formed in at one call of its region (roadmap/negative-results.md, 2026-11-15); two runs of one tree equal to the instruction`. Each cell is the instructions an iteration of the counted ones took, the whole process but V8's optimising compiles; the bracket is the arm's against the first. A tree counts the same in every run, so any ratio off 1.0000 is the change's; the geomean is over the workloads shown.
+From `run-count.mjs --bits 32 load str under qemu 8.2.2 with tools/lib/qemu-count.c, node 22.22.0, each of two trees twice (cork 798a130a, 2026-11-14, and ae2d03ab, 2026-11-15): a tree's two runs equal to the instruction, load included`. Each cell is the instructions an iteration of the counted ones took, the whole process but V8's optimising compiles; the bracket is the arm's against the first. A tree counts the same in every run, so any ratio off 1.0000 is the change's; the geomean is over the workloads shown.
 
 ### How much resident memory does a translated module cost past its bytes, compiled lazily, by the baseline compiler or by the optimising one?
 
