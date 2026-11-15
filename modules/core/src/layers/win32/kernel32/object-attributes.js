@@ -94,3 +94,22 @@ export function win32NameOf(given){
     }
     return /^\\(?:sessions\\\d+\\)?basenamedobjects\\(.+)$/i.exec(given.name)?.[1];
 }
+
+/**
+ * The native path a Win32 name stands for, win32NameOf's other way: names
+ * with the Global\ prefix live in \BaseNamedObjects, every other name in the
+ * interactive session's own (Local\ or no prefix alike).
+ *
+ * @param {string} name
+ * @param {number} session
+ * @returns {string}
+ */
+export function nativeNameOf(name, session){
+    const shared = /^global\\(.*)$/is.exec(name);
+    if (shared)
+    {
+        return `\\BaseNamedObjects\\${shared[1]}`;
+    }
+    const local = /^local\\(.*)$/is.exec(name)?.[1] ?? name;
+    return `\\Sessions\\${session}\\BaseNamedObjects\\${local}`;
+}

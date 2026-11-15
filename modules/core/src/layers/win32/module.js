@@ -6044,6 +6044,9 @@ export function createWin32Module(){
                 setRegisters,
                 windows,
                 handleType: (/** @type {number} */ handle)=>kernel.handles.typeOf(handle),
+                // The name the run's namespace keeps for the object a handle opens.
+                namedObjectName: (/** @type {number} */ handle)=>
+                    runObjects.nameOf(kernel.handles.resolve(handle)),
                 processOf: (/** @type {number} */ handle)=>
                     (kernel.handles.typeOf(handle) === 'process'
                         ? kernel.handles.resolve(handle, 'process') : null),

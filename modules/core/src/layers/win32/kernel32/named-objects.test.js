@@ -29,6 +29,16 @@ test('a fresh create is remembered and reported as success', ()=>{
     assert.deepEqual(errors, [ERROR_SUCCESS]);
 });
 
+test('an object answers the name it was made by, an unnamed one none', ()=>{
+    // NtQueryObject's ObjectNameInformation reads the name the table keeps.
+    const registry = createNamedObjects();
+    const { setLastError } = errorSink();
+    const named = { kind: 'event' };
+    registry.remember('Ready', 'event', named, false, setLastError);
+    assert.equal(registry.nameOf(named), 'Ready');
+    assert.equal(registry.nameOf({ kind: 'event' }), null);
+});
+
 test('a reuse is reported as already existing, and does not replace the object', ()=>{
     const registry = createNamedObjects();
     const { errors, setLastError } = errorSink();
