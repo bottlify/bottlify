@@ -14,7 +14,7 @@ const PARKED = Object.freeze({ parked: true });
 function machine(){
     const memory = new Uint8Array(0x1000);
     let free = 0x100;
-    /** @type {Record<string, { argBytes: number, handler: () => any }>} */
+    /** @type {Record<string, { argBytes: number, handler: (args?: number[]) => any }>} */
     const traps = {};
     /** @type {any[]} */
     const created = [];
@@ -62,10 +62,15 @@ function machine(){
         entry: get32(at),
         args: [4, 8, 12, 16, 20].map(offset=>get32(at + offset)),
     });
-    /** The loop asking for its next notice, as the trap sees it. */
-    const ask = ()=>{
+    /**
+     * The loop asking for its next notice, as the trap sees it, with what the
+     * last routine left in EAX.
+     *
+     * @param {number} [answer]
+     */
+    const ask = answer=>{
         current = created[0];
-        return traps['<wave-notices>'].handler();
+        return traps['<wave-notices>'].handler(answer === undefined ? undefined : [answer]);
     };
 
     return { memory, notices, created, woken, blocked, record, ask, get32 };
@@ -74,15 +79,16 @@ function machine(){
 test('the loop is the bytes it says it is, with the call made relative', ()=>{
     const code = loopCode(0x900, 0x200);
     assert.equal(code.length, LOOP_BYTES);
-    // call rel32: 0x900 - (0x200 + 5)
-    assert.deepEqual([...code.slice(0, 5)], [0xe8, 0xfb, 0x06, 0x00, 0x00]);
-    // mov esi, esp; five pushes of [eax+20] down to [eax+4]; call [eax];
+    // push eax (what the last routine answered); call rel32: 0x900 - (0x200 + 6)
+    assert.deepEqual([...code.slice(0, 6)], [0x50, 0xe8, 0xfa, 0x06, 0x00, 0x00]);
+    // mov esi, esp; seven pushes of [eax+28] down to [eax+4]; call [eax];
     // mov esp, esi; jmp back to the start
-    assert.deepEqual([...code.slice(5)], [
+    assert.deepEqual([...code.slice(6)], [
         0x89, 0xe6,
+        0xff, 0x70, 0x1c, 0xff, 0x70, 0x18,
         0xff, 0x70, 0x14, 0xff, 0x70, 0x10, 0xff, 0x70, 0x0c,
         0xff, 0x70, 0x08, 0xff, 0x70, 0x04, 0xff, 0x10,
-        0x89, 0xf4, 0xeb, 0xe4,
+        0x89, 0xf4, 0xeb, 0xdd,
     ]);
 });
 
@@ -187,4 +193,14 @@ test('notices taken back by their tag never reach the loop', ()=>{
     assert.equal(m.record(m.ask()).args[0], 1);
     assert.equal(m.record(m.ask()).args[0], 3);
     assert.equal(m.ask(), PARKED);
+});
+
+test('the routine\'s answer comes back with the next ask, to the one who queued it', ()=>{
+    const m = machine();
+    /** @type {number[]} */
+    const answers = [];
+    m.notices.deliver(0x38230b0, [1], answer=>answers.push(answer));
+    m.ask();
+    m.ask(0x80004005);
+    assert.deepEqual(answers, [0x80004005], 'an HRESULT the routine returned, unsigned');
 });
