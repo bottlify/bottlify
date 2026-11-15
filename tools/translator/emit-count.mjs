@@ -125,8 +125,17 @@ const inner = async({ roots: [root], regions, warm, reps })=>{
                 const offset = address - IMAGE_BASE;
                 return offset >= 0 && offset < image.length ? image[offset] : 0xf4;
             };
-            const bytesOf = (/** @type {number} */ start, /** @type {number} */ end)=>
-                Uint8Array.from({ length: end - start }, (_, at)=>read(start + at));
+            // A span's bytes at once, as the host copies them out of guest memory.
+            const bytesOf = (/** @type {number} */ start, /** @type {number} */ end)=>{
+                const bytes = new Uint8Array(end - start).fill(0xf4);
+                const from = Math.max(start, IMAGE_BASE);
+                const to = Math.min(end, IMAGE_BASE + image.length);
+                if (from < to)
+                {
+                    bytes.set(image.subarray(from - IMAGE_BASE, to - IMAGE_BASE), from - start);
+                }
+                return bytes;
+            };
             const form = { coldReach: COLD_REACH, bytesOf,
                 ...bits === 64 ? { mode: MODE_64 } : {} };
             const queue = [IMAGE_BASE];
