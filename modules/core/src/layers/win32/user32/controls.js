@@ -194,6 +194,7 @@ const SS_CENTERIMAGE = 0x200;
 /** A static control's image stretched to the control rather than the control to it. */
 const SS_REALSIZECONTROL = 0x40;
 const SS_SUNKEN = 0x1000;
+const WS_EX_STATICEDGE = 0x00020000;
 const STM_SETICON = 0x170;
 const STM_GETICON = 0x171;
 const STM_SETIMAGE = 0x172;
@@ -203,6 +204,9 @@ const STN_DBLCLK = 1;
 /** STM_SETIMAGE's image types. */
 const IMAGE_BITMAP = 0;
 const IMAGE_ICON = 1;
+const IMAGE_CURSOR = 2;
+const IMAGE_ENHMETAFILE = 3;
+const SS_ENHMETAFILE = 0x0f;
 
 /** The window styles a dialog's Tab order is read from. */
 const WS_TABSTOP = 0x00010000;
@@ -566,6 +570,9 @@ const OPAQUE = 2;
  *     ascent: number }} measure
  * @property {(hdc: number) => number} [averageWidth]  The context's font's average
  *     character width, as GdiGetCharDimensions measures it.
+ * @property {(hdc: number, rect: Rect) => number} [clipTo]  The context's clip narrowed
+ *     to a rectangle while a control paints; answers what `unclip` puts back.
+ * @property {(hdc: number, saved: number) => void} [unclip]
  * @property {(hdc: number, x: number, y: number, bitmap: number, width?: number,
  *     height?: number) => boolean} bitmap  Stretched to a size when one is given.
  * @property {(bitmap: number) => { width: number, height: number, corner: number } | null}
@@ -1579,20 +1586,55 @@ export function createControlProcedures(host){
     const staticProc = (record, message, thread)=>{
         const state = stateOf(record);
         switch (message.message){
+            case WM_CREATE: {
+                // An etched line or a sunken static is drawn by its edge:
+                // Windows gives it WS_EX_STATICEDGE, and an etched line is the
+                // edge alone - a horizontal one has no client height, a
+                // vertical one no client width. A system class's procedure is
+                // first told WM_CREATE, so the frame is laid again here.
+                const type = record.style & SS_TYPEMASK;
+                const etched = type === SS_ETCHEDHORZ || type === SS_ETCHEDVERT;
+                if ((!etched && (record.style & SS_SUNKEN) === 0) || !host.move)
+                {
+                    return common(record, message, thread);
+                }
+                record.exStyle = (record.exStyle | WS_EX_STATICEDGE) >>> 0;
+                const framed = host.move(record.hwnd, record.x, record.y, record.width,
+                    record.height);
+                return after(framed, ()=>{
+                    if (!etched)
+                    {
+                        return common(record, message, thread);
+                    }
+                    const size = host.clientSize(record);
+                    return after(host.move?.(record.hwnd, record.x, record.y,
+                        type === SS_ETCHEDVERT ? record.width - size.width : record.width,
+                        type === SS_ETCHEDHORZ ? record.height - size.height : record.height),
+                    ()=>common(record, message, thread));
+                });
+            }
             case WM_PAINT:
                 // An owner-drawn static is its parent's to draw, all of it:
-                // asked for a colour first, as every static asks.
-                return painting(record, (hdc, rect)=>after(
-                    controlColor(record, WM_CTLCOLORSTATIC, hdc, thread), brush=>{
-                        if ((record.style & SS_TYPEMASK) === SS_OWNERDRAW)
-                        {
-                            return drawItem(record, hdc, rect, { type: ODT_STATIC,
-                                action: ODA_DRAWENTIRE,
-                                state: disabled(record) ? ODS_DISABLED : 0 }, thread);
-                        }
-                        paintStatic(record, hdc, rect, brush);
-                        return 0;
-                    }));
+                // asked for a colour first, as every static asks. The
+                // context is clipped to the control while it paints, so the
+                // parent answering WM_CTLCOLORSTATIC finds a clip selected.
+                return painting(record, (hdc, rect)=>{
+                    const saved = host.draw?.clipTo?.(hdc, clientRect(record)) ?? 0;
+                    return after(after(controlColor(record, WM_CTLCOLORSTATIC, hdc, thread),
+                        brush=>{
+                            if ((record.style & SS_TYPEMASK) === SS_OWNERDRAW)
+                            {
+                                return drawItem(record, hdc, rect, { type: ODT_STATIC,
+                                    action: ODA_DRAWENTIRE,
+                                    state: disabled(record) ? ODS_DISABLED : 0 }, thread);
+                            }
+                            paintStatic(record, hdc, rect, brush);
+                            return 0;
+                        }), answer=>{
+                        host.draw?.unclip?.(hdc, saved);
+                        return answer;
+                    });
+                });
             case WM_ERASEBKGND:
                 return 1;
             case WM_NCHITTEST:
@@ -1605,22 +1647,34 @@ export function createControlProcedures(host){
                 return (record.style & SS_NOTIFY) !== 0 ? notify(record, STN_DBLCLK, thread) : 0;
             case STM_SETICON:
             case STM_SETIMAGE: {
+                // A static takes only the image its style shows - an icon or
+                // a cursor for SS_ICON, a bitmap for SS_BITMAP, a metafile for
+                // SS_ENHMETAFILE - and answers 0 for another, keeping none.
+                const asked = message.message === STM_SETICON
+                    ? IMAGE_ICON : message.wParam & 0xffff;
+                const type = record.style & SS_TYPEMASK;
+                const shows = type === SS_ICON ? asked === IMAGE_ICON || asked === IMAGE_CURSOR
+                    : type === SS_BITMAP ? asked === IMAGE_BITMAP
+                        : type === SS_ENHMETAFILE && asked === IMAGE_ENHMETAFILE;
+                if (!shows)
+                {
+                    return 0;
+                }
                 const previous = state.image ?? 0;
                 state.image = (message.message === STM_SETICON
                     ? message.wParam : message.lParam) >>> 0;
-                state.imageType = message.message === STM_SETICON
-                    ? IMAGE_ICON : message.wParam & 0xffff;
+                state.imageType = asked === IMAGE_CURSOR ? IMAGE_ICON : asked;
                 host.invalidate(record);
                 // Neither centred nor stretched, the image is the control's
                 // size: it ignores the size it was made with and takes the
                 // image's, so what lies beside it in the template shows.
                 const sized = (record.style & (SS_CENTERIMAGE | SS_REALSIZECONTROL)) === 0
                     ? imageSize(state.image) : null;
-                return sized && host.move
+                const moved = sized && host.move
                     && (sized.width !== record.width || sized.height !== record.height)
-                    ? after(host.move(record.hwnd, record.x, record.y, sized.width, sized.height),
-                        ()=>previous)
-                    : previous;
+                    ? host.move(record.hwnd, record.x, record.y, sized.width, sized.height) : 0;
+                // Drawn at once, its parent asked for the colour again.
+                return after(moved, ()=>after(host.update?.(record, thread) ?? 1, ()=>previous));
             }
             case STM_GETICON:
                 return state.imageType === IMAGE_ICON ? state.image ?? 0 : 0;

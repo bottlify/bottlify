@@ -2649,3 +2649,41 @@ test('a multi-line edit hands out its text as a buffer the program may write, an
         context.fns.SendMessageA.handler([edit, WM_GETTEXT, 16, OUT]);
         assert.equal(context.memory.readCString(OUT, 16), 'given');
     });
+
+test('a static takes only the image its style shows, and an etched line is its edge alone',
+    async()=>{
+        const STM_SETIMAGE = 0x172;
+        const STM_GETIMAGE = 0x173;
+        const SS_ICON = 0x03;
+        const SS_BITMAP = 0x0e;
+        const SS_ETCHEDHORZ = 0x10;
+        const WS_EX_STATICEDGE = 0x00020000;
+        const GWL_EXSTYLE = -20;
+        const IMAGE_BITMAP = 0;
+        const IMAGE_ICON = 1;
+        const context = setup({ reply: message=>(message.message === WM_INITDIALOG ? 1 : 0) });
+        const dialog = await openDialog(context);
+        context.memory.putString(TEXT, 'Static');
+        const make = (/** @type {number} */ style)=>context.fns.CreateWindowExA.handler([0, TEXT,
+            0, WS_CHILD | WS_VISIBLE | style, 5, 5, 100, 100, dialog, 0, HINSTANCE, 0]);
+        const bitmapStatic = make(SS_BITMAP);
+        const bitmap = context.gdi.table.CreateBitmap.handler([1, 1, 1, 32, 0]);
+        assert.equal(context.fns.SendMessageA.handler([bitmapStatic, STM_SETIMAGE, IMAGE_ICON,
+            0x1234]), 0, 'an icon on a bitmap static is refused');
+        assert.equal(context.fns.SendMessageA.handler([bitmapStatic, STM_SETIMAGE, IMAGE_BITMAP,
+            bitmap]), 0, 'the first image replaces none');
+        assert.equal(context.fns.SendMessageA.handler([bitmapStatic, STM_GETIMAGE, IMAGE_BITMAP,
+            0]), bitmap);
+        const iconStatic = make(SS_ICON);
+        assert.equal(context.fns.SendMessageA.handler([iconStatic, STM_SETIMAGE, IMAGE_BITMAP,
+            bitmap]), 0);
+        assert.equal(context.fns.SendMessageA.handler([iconStatic, STM_GETIMAGE, IMAGE_BITMAP,
+            0]), 0, 'and not kept');
+
+        const line = make(SS_ETCHEDHORZ);
+        assert.equal(context.fns.GetWindowLongA.handler([line, GWL_EXSTYLE]) & WS_EX_STATICEDGE,
+            WS_EX_STATICEDGE);
+        context.fns.GetClientRect.handler([line, OUT]);
+        assert.equal(context.memory.u32(OUT + 12), 0, 'no client height');
+        assert.ok(context.memory.u32(OUT + 8) > 0, 'its width kept');
+    });

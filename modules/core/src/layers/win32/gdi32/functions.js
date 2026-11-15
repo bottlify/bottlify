@@ -5857,6 +5857,33 @@ export function createGdiFunctions(host){
             isContext: (/** @type {number} */ hdc)=>dcOf(hdc) !== null,
 
             /**
+             * Narrows a context's clip to a rectangle for as long as a
+             * control paints in it, as Windows' static and button controls
+             * do around WM_CTLCOLOR*: the parent sees a clip selected
+             * (GetClipRgn answers 1). Answers what `unclip` takes to put the
+             * clip back, or 0 for a handle that is no context.
+             *
+             * @param {number} hdc @param {{ left: number, top: number, right: number,
+             *     bottom: number }} rect
+             */
+            clipTo: (/** @type {number} */ hdc, /** @type {any} */ rect)=>{
+                const saved = table.SaveDC.handler([hdc]) | 0;
+                if (saved !== 0)
+                {
+                    table.IntersectClipRect.handler([hdc, rect.left, rect.top, rect.right,
+                        rect.bottom]);
+                }
+                return saved;
+            },
+            /** @param {number} hdc @param {number} saved */
+            unclip: (/** @type {number} */ hdc, /** @type {number} */ saved)=>{
+                if (saved !== 0)
+                {
+                    table.RestoreDC.handler([hdc, saved]);
+                }
+            },
+
+            /**
              * The context's font's average character width, as
              * GdiGetCharDimensions answers it: an edit's EC_USEFONTINFO
              * margins are half of it.
