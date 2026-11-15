@@ -14,7 +14,7 @@
 extern "C" {
 
 /* The compiler may emit calls to these for an aggregate copy or clear. */
-void *memcpy(void *to, const void *from, u32 count)
+void *memcpy(void *to, const void *from, usize count)
 {
     u8 *d = (u8 *)to;
     const u8 *s = (const u8 *)from;
@@ -32,7 +32,7 @@ void *memcpy(void *to, const void *from, u32 count)
     return to;
 }
 
-void *memset(void *to, int value, u32 count)
+void *memset(void *to, int value, usize count)
 {
     u8 *d = (u8 *)to;
     u32 word = (u8)value * 0x01010101u;
@@ -49,7 +49,7 @@ void *memset(void *to, int value, u32 count)
     return to;
 }
 
-void *memmove(void *to, const void *from, u32 count)
+void *memmove(void *to, const void *from, usize count)
 {
     u8 *d = (u8 *)to;
     const u8 *s = (const u8 *)from;

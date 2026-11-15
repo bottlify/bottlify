@@ -5,16 +5,17 @@
  */
 
 /**
- * Builds the benchmark: `bin/bench-x87.exe` and `bin/bench-sse.exe` from
- * `src/`, and `bin/peload`, the Linux loader that runs either on the
- * processor itself (`native/peload.c`).
+ * Builds the benchmark: `bin/bench-x87.exe`, `bin/bench-sse.exe` and
+ * `bin/bench-x64.exe` from `src/`, and `bin/peload` and `bin/peload64`, the
+ * Linux loaders that run them on the processor itself (`native/peload.c`).
  *
- * The two programs are the same source compiled two ways: x87 arithmetic, as
- * the compilers of the era emitted it, and scalar SSE2, as later ones did.
- * Neither is vectorised, and neither links a C runtime: the imports are the
- * ones `src/` names, turned into import libraries here. `/Brepro` keeps the
- * output byte-identical from one build to the next, so the committed
- * executables are what this script makes.
+ * The three programs are the same source compiled three ways: 32-bit with x87
+ * arithmetic, as the compilers of the era emitted it, 32-bit with scalar SSE2,
+ * as later ones did, and x64, whose arithmetic is SSE2 too. None is vectorised,
+ * and none links a C runtime: the imports are the ones `src/` names, turned
+ * into import libraries here. `/Brepro` keeps the output byte-identical from
+ * one build to the next, so the committed executables are what this script
+ * makes.
  *
  * Needs clang, lld-link and llvm-dlltool on the PATH.
  *
@@ -45,7 +46,7 @@ const IMPORTS = {
 };
 
 const COMMON = [
-    '--target=i686-pc-windows-msvc', '-O2', '-std=c++17', '-fms-extensions',
+    '-O2', '-std=c++17', '-fms-extensions',
     '-fno-exceptions', '-fno-rtti',
     // Every call the source makes is one it spells: no library routine
     // substituted for a loop, and a square root is the instruction.
@@ -55,9 +56,13 @@ const COMMON = [
     '-fno-vectorize', '-fno-slp-vectorize',
 ];
 
+/** Each build: its compiler flags and its width (the import libraries and the link differ). */
 const VARIANTS = {
-    x87: ['-march=i686', '-mno-sse', '-mfpmath=387'],
-    sse: ['-march=pentium4', '-msse2', '-mfpmath=sse'],
+    x87: { flags: ['--target=i686-pc-windows-msvc', '-march=i686', '-mno-sse', '-mfpmath=387'],
+        wide: false },
+    sse: { flags: ['--target=i686-pc-windows-msvc', '-march=pentium4', '-msse2', '-mfpmath=sse'],
+        wide: false },
+    x64: { flags: ['--target=x86_64-pc-windows-msvc'], wide: true },
 };
 
 /**
@@ -80,17 +85,22 @@ await mkdir(BIN, { recursive: true });
 const work = await mkdtemp(join(tmpdir(), 'cork-bench-'));
 try
 {
-    /** @type {string[]} */
-    const libraries = [];
+    /** @type {Record<string, string[]>} by width: x64 names carry no stdcall decoration */
+    const libraries = { narrow: [], wide: [] };
     for (const [dll, names] of Object.entries(IMPORTS))
     {
-        const base = join(work, dll);
-        await writeFile(`${base}.def`, `LIBRARY ${dll}\nEXPORTS\n${names.join('\n')}\n`);
-        run('llvm-dlltool', ['-m', 'i386', '-k', '-d', `${base}.def`, '-l', `${base}.lib`]);
-        libraries.push(`${base}.lib`);
+        for (const wide of [false, true])
+        {
+            const base = join(work, `${wide ? 'x64-' : ''}${dll}`);
+            const exports = wide ? names.map(name=>name.replace(/@\d+$/, '')) : names;
+            await writeFile(`${base}.def`, `LIBRARY ${dll}\nEXPORTS\n${exports.join('\n')}\n`);
+            run('llvm-dlltool', ['-m', wide ? 'i386:x86-64' : 'i386', ...wide ? [] : ['-k'],
+                '-d', `${base}.def`, '-l', `${base}.lib`]);
+            libraries[wide ? 'wide' : 'narrow'].push(`${base}.lib`);
+        }
     }
     const sources = (await readdir(SOURCES)).filter(name=>name.endsWith('.cpp')).sort();
-    for (const [variant, flags] of Object.entries(VARIANTS))
+    for (const [variant, { flags, wide }] of Object.entries(VARIANTS))
     {
         const objects = sources.map(source=>{
             const object = join(work, `${variant}-${source.replace(/\.cpp$/, '.obj')}`);
@@ -98,20 +108,25 @@ try
             return object;
         });
         const out = join(BIN, `bench-${variant}.exe`);
+        // Both widths at 0x400000 with no relocations, where each loader maps them.
         run('lld-link', [
             '/nologo', '/entry:mainCRTStartup', '/subsystem:console', '/nodefaultlib',
-            '/safeseh:no', '/fixed', '/base:0x400000', '/Brepro', `/out:${out}`,
-            ...objects, ...libraries,
+            ...wide ? ['/machine:x64'] : ['/safeseh:no'], '/fixed', '/base:0x400000', '/Brepro',
+            `/out:${out}`, ...objects, ...libraries[wide ? 'wide' : 'narrow'],
         ]);
         console.log(`bin/bench-${variant}.exe`);
     }
-    // The loader sits well above the images it maps at 0x400000.
-    run('clang', [
-        '--target=i686-linux-gnu', '-O2', '-ffreestanding', '-fno-builtin', '-nostdlib', '-static',
-        '-fno-pie', '-mno-sse', '-mstackrealign', '-fuse-ld=lld', '-Wl,--image-base=0x10000000',
-        join(HERE, 'native', 'peload.c'), '-o', join(BIN, 'peload'),
-    ]);
-    console.log('bin/peload');
+    // The loaders sit well above the images they map at 0x400000.
+    for (const [name, target] of [['peload', ['--target=i686-linux-gnu', '-mno-sse',
+        '-mstackrealign']], ['peload64', ['--target=x86_64-linux-gnu']]])
+    {
+        run('clang', [
+            ...target, '-O2', '-ffreestanding', '-fno-builtin', '-nostdlib', '-static', '-fno-pie',
+            '-fuse-ld=lld', '-Wl,--image-base=0x10000000',
+            join(HERE, 'native', 'peload.c'), '-o', join(BIN, name),
+        ]);
+        console.log(`bin/${name}`);
+    }
 }
 finally
 {

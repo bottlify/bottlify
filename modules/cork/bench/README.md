@@ -1,9 +1,11 @@
 # cork bench
 
-A benchmark of guest code for the translator: one 32-bit Windows program in two builds,
-[`bin/bench-x87.exe`](bin/bench-x87.exe) (x87 arithmetic, as compilers of the era emitted it) and
-[`bin/bench-sse.exe`](bin/bench-sse.exe) (scalar SSE2), built from [`src/`](src/) with clang for the
-MSVC ABI and no C runtime. Each run executes one workload and exits with its checksum.
+A benchmark of guest code for the translator: one Windows program in three builds,
+[`bin/bench-x87.exe`](bin/bench-x87.exe) (32-bit, x87 arithmetic, as compilers of the era emitted
+it), [`bin/bench-sse.exe`](bin/bench-sse.exe) (32-bit, scalar SSE2) and
+[`bin/bench-x64.exe`](bin/bench-x64.exe) (x64, its arithmetic SSE2 too), built from [`src/`](src/)
+with clang for the MSVC ABI and no C runtime. Each run executes one workload and exits with its
+checksum; the SSE builds and the x64 one compute the same checksums.
 
 | workload | what it is |
 |---|---|
@@ -17,14 +19,16 @@ MSVC ABI and no C runtime. Each run executes one workload and exits with its che
 | `api` | kernel32 and msvcrt calls in a frame's proportions between short stretches of the program's own work |
 
 A checksum does not depend on who ran the program: no time, handle, thread id or address goes into
-it. [`native/peload.c`](native/peload.c) is a small 32-bit Linux loader: it maps the same
-executable at its base, binds its imports to functions of its own and runs it on the processor. So
+it. [`native/peload.c`](native/peload.c) is a small Linux loader, built 32-bit (`bin/peload`) for
+the 32-bit builds and 64-bit (`bin/peload64`, a PE32+ and Microsoft's x64 convention) for the x64
+one: it maps the same executable at its base, binds its imports to functions of its own and runs
+it on the processor. So
 the reference checksums in [`expected.json`](expected.json) are what the hardware computed from the
 same machine code the engine translates, and a run with `--native` also reports how many times
 slower the engine was.
 
     node modules/cork/bench/build.mjs          # clang, lld-link, llvm-dlltool
-    node modules/cork/bench/run.mjs            # every workload, both builds
+    node modules/cork/bench/run.mjs            # every workload, all three builds
     node modules/cork/bench/run.mjs --native --only spread,vm --reps 3
     node modules/cork/bench/run.mjs --cork '{"callTargets":true}'
 

@@ -16,7 +16,7 @@
  *
  *     '{"head":{},"calls":{"bundle":"head","cork":{"callTargets":true}}}'
  *
- *   --variants x87,sse    which builds (default both)
+ *   --variants x87,sse    which builds: x87, sse, x64 (default x87,sse)
  *   --only a,b,c          workloads to run (default all)
  *   --reps n              runs of each, the fastest kept (default 2)
  *   --out file.jsonl      one JSON line per run
@@ -68,8 +68,10 @@ const reps = Number(flag('--reps', '2'));
 const out = flag('--out', '');
 const jsFlags = flag('--js-flags', '');
 const scale = Number(flag('--scale', '1'));
-const PELOAD = join(BIN, 'peload');
-const haveNative = existsSync(PELOAD);
+/** The loader that runs a build on the processor: the x64 one is a PE32+. @param {string} variant */
+const loaderOf = variant=>join(BIN, variant === 'x64' ? 'peload64' : 'peload');
+/** @param {string} variant */
+const haveNative = variant=>existsSync(loaderOf(variant));
 /** @type {Record<string, Record<string, string>>} */
 const expected = JSON.parse(readFileSync(resolve(HERE, '../expected.json'), 'utf8'));
 // A bundle not built is a worker the page cannot load, which the browser reports
@@ -122,7 +124,7 @@ const nativeSums = new Map();
  * @param {string} variant @param {string} workload @param {number} iterations
  */
 function native(variant, workload, iterations){
-    const result = spawnSync(PELOAD, [join(BIN, `bench-${variant}.exe`), workload,
+    const result = spawnSync(loaderOf(variant), [join(BIN, `bench-${variant}.exe`), workload,
         String(iterations)], { encoding: 'utf8' });
     const ns = /native-ns (\d+)/.exec(result.stderr);
     const line = /^\S+ \d+ ([0-9a-f]{8})/m.exec(result.stdout);
@@ -229,7 +231,7 @@ try
             {
                 const iterations = ITERATIONS[workload] * scale;
                 const at = `${variant} ${workload}`;
-                if (haveNative)
+                if (haveNative(variant))
                 {
                     const processor = native(variant, workload, iterations);
                     nativeSums.set(at, processor.checksum);
@@ -293,7 +295,7 @@ const rate = (label, key)=>{
         ? fastest.get(`${labels[0]} ${key}`)?.instructions ?? 0 : run?.instructions ?? 0;
     return run ? instructions / run.ms / 1000 : 0;
 };
-const columns = haveNative ? [...labels, 'native'] : labels;
+const columns = variants.some(haveNative) ? [...labels, 'native'] : labels;
 /** @param {number} value @param {number} first @param {number} i */
 const cell = (value, first, i)=>
     `${Math.round(value)}${i ? ` (${(value / first).toFixed(2)}x)` : ''}`.padStart(16);
