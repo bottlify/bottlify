@@ -785,6 +785,15 @@ const MAX_WINDOW_TEXT = 1 << 16;
  *           A GDI bitmap's pixels, top row first, four bytes each in blue,
  *           green, red and a fourth byte: what CreateIconIndirect copies.
  *           Absent, an icon made from bitmaps has its size and no picture.
+ * @property {(width: number, height: number, bitCount: number,
+ *     pixels: Uint8Array) => number} [bitmapFromBits]
+ *           A new device bitmap of bits in CreateBitmap's layout: the mask and
+ *           colour GetIconInfo hands out. Absent, both come back empty.
+ * @property {(handle: number, width: number, height: number,
+ *     flags: number) => number} [copyBitmap]
+ *           CopyImage of a bitmap, GDI's to make. Absent, no bitmap is copied.
+ * @property {(handle: number) => void} [deleteObject]
+ *           DeleteObject, for CopyImage's LR_COPYDELETEORG on a bitmap.
  * @property {import('../kernel32/files.js').FileSystem} [files]
  *           The volume every file call uses, which an image loaded from a
  *           file is read from. Absent, no file is there to load.

@@ -4778,6 +4778,11 @@ export function createWin32Module(){
                     // And its pixels, which an icon or a cursor made of it is drawn from.
                     /** @param {number} bitmap */
                     bitmapPixels: bitmap=>gdi.bitmapPixels(bitmap),
+                    // The bitmaps GetIconInfo hands out, and CopyImage of a bitmap.
+                    bitmapFromBits: gdi.bitmapFromBits,
+                    copyBitmap: gdi.copyBitmap,
+                    /** @param {number} handle */
+                    deleteObject: handle=>gdi.table.DeleteObject.handler([handle]),
                     // Shows the desktop once a paint pass has finished. The
                     // graphics layer is above this one and is reached the way the
                     // drawing engine is: through what the assembling caller hands

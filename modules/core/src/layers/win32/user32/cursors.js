@@ -228,7 +228,10 @@ export function cursorFilePicture(bytes, size){
         const frame = firstFrame(bytes, 12, bytes.length, tag, view);
         return frame ? cursorFilePicture(frame, size) : null;
     }
-    return directoryPicture(bytes, size, 2);
+    // An icon file loads as a cursor too, its entry's two words read as the
+    // hot spot, as LoadImage loads one with IMAGE_CURSOR (Wine's cursoricon
+    // test_LoadImage).
+    return directoryPicture(bytes, size, 2) ?? directoryPicture(bytes, size, 1);
 }
 
 /**

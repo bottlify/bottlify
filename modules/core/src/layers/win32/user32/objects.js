@@ -30,6 +30,9 @@
  */
 
 import { ddbToBgra, dibToBgra, planesToBgra } from './cursors.js';
+import {
+    bitsFromPicture, blankBits, maskFromPixels, pictureFromBits, scaleBits,
+} from './icon-bits.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { readText, readWideString, writeText } from './unicode.js';
 import { charactersOf, readToTerminator } from '../common/scan-windows.js';
@@ -523,7 +526,19 @@ const parseMenuTemplate = (bytes, bounded = true)=>{
  *           open.
  */
 
+/**
+ * An icon's or cursor's bits: those it was made with, else those its picture
+ * draws, else black of its size.
+ *
+ * @param {any} object
+ * @returns {import('./icon-bits.js').IconBits}
+ */
+const iconBits = object=>object.bits
+    ?? (object.picture?.bgra ? bitsFromPicture(object.picture)
+        : blankBits(object.width ?? 32, object.height ?? 32));
+
 /** CopyImage's image types it copies, and the flag that lets the original go. */
+const IMAGE_BITMAP = 0;
 const IMAGE_ICON = 1;
 const IMAGE_CURSOR = 2;
 const LR_COPYDELETEORG = 0x8;
@@ -2733,10 +2748,14 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
                 const read = plane=>((plane >>> 0) === 0
                     ? new Uint8Array(size) : host.readMemory(plane >>> 0, size));
                 const hotSpot = { x: x | 0, y: y | 0 };
+                const andPlane = read(and);
+                const xorPlane = read(xor);
+                const bits = { width: across, height: down, colour: null,
+                    mask: Uint8Array.from([...andPlane, ...xorPlane]) };
                 return host.handles.open('cursor', {
-                    hotSpot, width: across, height: down,
+                    hotSpot, width: across, height: down, bits,
                     picture: { width: across, height: down, hotSpot,
-                        bgra: planesToBgra(across, down, read(and), read(xor)) },
+                        bgra: planesToBgra(across, down, andPlane, xorPlane) },
                 });
             },
         },
@@ -2752,11 +2771,11 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
         CreateIcon: {
             argBytes: 28,
             /** @param {number[]} args */
-            handler: ([, width, height, planes, bits, and, xor])=>{
+            handler: ([, width, height, planes, bitsPixel, and, xor])=>{
                 const MAX_SIDE = 256;
                 const across = width | 0;
                 const down = height | 0;
-                const depth = (planes & 0xff) * (bits & 0xff);
+                const depth = (planes & 0xff) * (bitsPixel & 0xff);
                 if (across <= 0 || down <= 0 || across > MAX_SIDE || down > MAX_SIDE
                     || ![1, 4, 8, 16, 24, 32].includes(depth))
                 {
@@ -2768,8 +2787,16 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
                 const mask = read(and, ((across + 15) >>> 4) * 2 * down);
                 const colour = read(xor, ((across * depth + 15) >>> 4) * 2 * down);
                 const hotSpot = { x: across >> 1, y: down >> 1 };
+                // A one-bit icon is monochrome: its mask the two planes, no colour.
+                const bits = depth === 1
+                    ? { width: across, height: down, colour: null,
+                        mask: Uint8Array.from([...mask, ...colour]) }
+                    : { width: across, height: down, mask,
+                        colour: bitsFromPicture({ width: across, height: down,
+                            bgra: ddbToBgra(across, down, depth,
+                                new Uint8Array(mask.length), colour) }).colour };
                 return host.handles.open('icon', {
-                    hotSpot, width: across, height: down,
+                    hotSpot, width: across, height: down, bits,
                     picture: { width: across, height: down, hotSpot,
                         bgra: ddbToBgra(across, down, depth, mask, colour) },
                 });
@@ -2841,25 +2868,30 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
                 const maskSize = maskHandle === 0 ? null
                     : host.bitmapSize?.(maskHandle) ?? (host.bitmapSize ? null
                         : { width: 32, height: mono ? 64 : 32 });
-                if (!maskSize)
+                // No mask is refused with the last error left as it was (Wine's
+                // cursoricon test_CreateIcon); a monochrome mask one line tall
+                // makes an icon no lines tall, which Windows makes.
+                if (!maskSize || maskSize.width <= 0)
                 {
-                    host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
                 const width = maskSize.width;
                 const height = mono ? maskSize.height >> 1 : maskSize.height;
-                if (width <= 0 || height <= 0)
-                {
-                    host.setLastError?.(ERROR_INVALID_PARAMETER);
-                    return 0;
-                }
                 const hotSpot = isIcon ? { x: width >> 1, y: height >> 1 }
                     : { x: hotX, y: hotY };
                 const mask = host.bitmapPixels?.(maskHandle) ?? null;
                 const colour = mono ? mask : host.bitmapPixels?.(colourHandle) ?? null;
+                // The bitmaps copied as GetIconInfo hands them back: the mask
+                // monochrome, the colour at the display's depth and the mask's size.
+                const bits = mask && colour ? {
+                    width, height, maskHeight: mask.height, mask: maskFromPixels(mask),
+                    colour: mono ? null : scaleBits({ width: colour.width,
+                        height: colour.height, mask: new Uint8Array(0),
+                        colour: Uint8Array.from(colour.bgra) }, width, height).colour,
+                } : null;
                 /** @type {any} */
                 let picture = null;
-                if (mask && colour)
+                if (mask && colour && height > 0)
                 {
                     const bgra = new Uint8Array(width * height * 4);
                     /** @param {any} from @param {number} x @param {number} y */
@@ -2893,7 +2925,7 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
                     picture = { width, height, hotSpot, bgra };
                 }
                 return host.handles.open(isIcon ? 'icon' : 'cursor',
-                    { hotSpot, width, height, picture });
+                    { hotSpot, width, height, picture, bits });
             },
         },
 
@@ -2938,20 +2970,29 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
         /**
          * HANDLE CopyImage(HANDLE h, UINT type, int cx, int cy, UINT flags)
          *
-         * An icon or cursor copied as the picture it is, at the size it has:
-         * the handle is new, the object behind it the same drawing, and
-         * LR_COPYDELETEORG lets the original go. A bitmap is GDI's, and not
-         * copied here.
+         * A bitmap copied by GDI, in the form the flags ask (copyBitmap). An
+         * icon or cursor copied at the size asked for, zero keeping a side:
+         * a new handle with its own bits, stretched where the size changes.
+         * LR_COPYDELETEORG lets the original go.
          */
         CopyImage: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([handle, type, , , flags])=>{
+            handler: ([handle, type, cx, cy, flags])=>{
+                if (type >>> 0 === IMAGE_BITMAP)
+                {
+                    const copy = host.copyBitmap?.(handle >>> 0, cx | 0, cy | 0, flags >>> 0) ?? 0;
+                    if (copy !== 0 && (flags & LR_COPYDELETEORG) !== 0)
+                    {
+                        host.deleteObject?.(handle >>> 0);
+                    }
+                    return copy;
+                }
                 const kind = type >>> 0 === IMAGE_ICON ? 'icon'
                     : type >>> 0 === IMAGE_CURSOR ? 'cursor' : null;
                 if (kind === null)
                 {
-                    host.divergence?.('CopyImage', `image type ${type >>> 0} is not copied`);
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
                 /** @param {string} which */
@@ -2970,7 +3011,19 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
                 {
                     return 0;
                 }
-                const copy = host.handles.open(kind, { ...object });
+                const width = (cx | 0) > 0 ? cx | 0 : object.width ?? 32;
+                const height = (cy | 0) > 0 ? cy | 0 : object.height ?? 32;
+                /** @type {any} */
+                const copied = { ...object };
+                if (width !== object.width || height !== object.height)
+                {
+                    const bits = scaleBits(iconBits(object), width, height);
+                    const hotSpot = kind === 'icon' ? { x: width >> 1, y: height >> 1 }
+                        : object.hotSpot ?? { x: 0, y: 0 };
+                    Object.assign(copied, { width, height, hotSpot, bits,
+                        picture: pictureFromBits(bits, hotSpot), standard: undefined });
+                }
+                const copy = host.handles.open(kind, copied);
                 if ((flags & LR_COPYDELETEORG) !== 0)
                 {
                     destroyObjectHandle(host, handle >>> 0);
@@ -2982,9 +3035,10 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
         /**
          * BOOL GetIconInfo(HICON hIcon, PICONINFO piconinfo)
          *
-         * Whether it is an icon and where its hot spot is. The mask and
-         * colour bitmaps a caller would own are not made: the picture is
-         * kept as pixels, not as GDI bitmaps, so both come back empty.
+         * Whether it is an icon, where its hot spot is, and its two bitmaps,
+         * new ones the caller owns and deletes: the monochrome mask - twice
+         * the height for a monochrome icon, which has no colour bitmap - and
+         * the colour at the display's depth.
          */
         GetIconInfo: {
             argBytes: 8,
@@ -3007,15 +3061,27 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
                     host.setLastError?.(ERROR_INVALID_CURSOR_HANDLE);
                     return 0;
                 }
-                host.divergence?.('GetIconInfo', 'the mask and colour bitmaps are not made');
                 const hotSpot = object.hotSpot ?? (icon
                     ? { x: (object.width ?? 32) >> 1, y: (object.height ?? 32) >> 1 }
                     : { x: 0, y: 0 });
+                const bits = iconBits(object);
+                const maskBitmap = host.bitmapFromBits?.(bits.width,
+                    bits.maskHeight ?? (bits.colour ? bits.height : bits.height * 2), 1,
+                    bits.mask) ?? 0;
+                const colourBitmap = bits.colour
+                    ? host.bitmapFromBits?.(bits.width, bits.height, 32, bits.colour) ?? 0 : 0;
+                if (maskBitmap === 0)
+                {
+                    host.divergence?.('GetIconInfo', 'no bitmap can be made here: the mask'
+                        + ' and colour bitmaps come back empty');
+                }
                 const bytes = new Uint8Array(20);
                 const view = new DataView(bytes.buffer);
                 view.setUint32(0, icon ? 1 : 0, true);
                 view.setUint32(4, hotSpot.x >>> 0, true);
                 view.setUint32(8, hotSpot.y >>> 0, true);
+                view.setUint32(12, maskBitmap >>> 0, true);
+                view.setUint32(16, colourBitmap >>> 0, true);
                 host.writeMemory(out >>> 0, bytes);
                 return 1;
             },

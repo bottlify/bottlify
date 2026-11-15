@@ -1728,3 +1728,47 @@ test('SetMenuInfo keeps a menu\'s own settings by mask, GetMenuInfo reads them b
     memory.putU32s(INFO, [28, MIM_STYLE]);
     assert.equal(fns.GetMenuInfo.handler([0x9999, INFO]), 0, 'no such menu');
 });
+
+test('GetIconInfo hands out new mask and colour bitmaps, and CopyImage stretches an icon', ()=>{
+    // Wine's cursoricon test_CreateIcon: a one-bit icon is monochrome, its mask
+    // both planes and no colour; the bitmaps are made each time, the caller's.
+    /** @type {[number, number, number, number[]][]} */
+    const made = [];
+    /** @type {number[][]} */
+    const copied = [];
+    /**
+     * @param {number} width @param {number} height @param {number} depth
+     * @param {Uint8Array} bits
+     */
+    const bitmapFromBits = (width, height, depth, bits)=>{
+        made.push([width, height, depth, [...bits.subarray(0, 4)]]);
+        return 0x500 + made.length;
+    };
+    const { memory, fns } = setup({
+        bitmapFromBits,
+        copyBitmap: (/** @type {number[]} */ ...args)=>{
+            copied.push(args);
+            return 0x777;
+        },
+    });
+    const planes = Uint8Array.from({ length: 64 }, (_, i)=>i);
+    memory.writeMemory(INFO, planes);
+    const mono = fns.CreateIcon.handler([0, 16, 16, 1, 1, INFO, INFO + 32]);
+    assert.ok(mono);
+    assert.equal(fns.GetIconInfo.handler([mono, OUT]), 1);
+    assert.deepEqual(made, [[16, 32, 1, [0, 1, 2, 3]]], 'the mask is the two planes');
+    assert.deepEqual([memory.u32(OUT), memory.u32(OUT + 4), memory.u32(OUT + 8),
+        memory.u32(OUT + 12), memory.u32(OUT + 16)], [1, 8, 8, 0x501, 0]);
+
+    const IMAGE_BITMAP = 0;
+    const IMAGE_ICON = 1;
+    const small = fns.CopyImage.handler([mono, IMAGE_ICON, 8, 0, 0]);
+    made.length = 0;
+    assert.equal(fns.GetIconInfo.handler([small, OUT]), 1);
+    assert.deepEqual(made.map(([width, height])=>[width, height]), [[8, 32]],
+        'eight across, the height kept, each half of the mask its sixteen lines');
+    assert.deepEqual([memory.u32(OUT + 4), memory.u32(OUT + 8)], [4, 8]);
+
+    assert.equal(fns.CopyImage.handler([0x123, IMAGE_BITMAP, 5, 6, 0x2000]), 0x777);
+    assert.deepEqual(copied, [[0x123, 5, 6, 0x2000]], 'a bitmap is copied by GDI');
+});

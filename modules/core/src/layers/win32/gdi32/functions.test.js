@@ -3023,3 +3023,46 @@ test('GdiGetCharDimensions is the dialog-unit average width, and GdiGetCodePage 
             { charSet: OEM_CHARSET })])]);
         assert.equal(fns.GdiGetCodePage.handler([hdc]), 437);
     });
+
+test('CopyImage\'s bitmap copy takes the form its flags ask and the size given', ()=>{
+    // Wine's cursoricon test_CopyImage_Bitmap: a device bitmap at the display's
+    // depth unless monochrome, a section of the original's depth with
+    // LR_CREATEDIBSECTION, zero keeping a side.
+    const { fns, memory, gdi, hdc } = withDC();
+    const LR_MONOCHROME = 0x1;
+    const LR_CREATEDIBSECTION = 0x2000;
+    const display = fns.GetDeviceCaps.handler([hdc, 12]);
+    /** @param {number} bitmap @returns {number[]} width, height, depth, whether a section */
+    const shape = bitmap=>{
+        assert.equal(fns.GetObjectA.handler([bitmap, 24, OUT]), 24);
+        return [memory.u32(OUT + 4), memory.u32(OUT + 8), memory.u32(OUT + 16) >>> 16,
+            memory.u32(OUT + 20) === 0 ? 0 : 1];
+    };
+    const colour = fns.CreateBitmap.handler([2, 2, 1, 32, 0]);
+    assert.deepEqual(shape(gdi.copyBitmap(colour, 0, 0, 0)), [2, 2, display, 0]);
+    assert.deepEqual(shape(gdi.copyBitmap(colour, 5, 0, 0)), [5, 2, display, 0]);
+    assert.deepEqual(shape(gdi.copyBitmap(colour, 0, 5, LR_MONOCHROME)), [2, 5, 1, 0]);
+    assert.deepEqual(shape(gdi.copyBitmap(colour, 5, 5, LR_CREATEDIBSECTION | LR_MONOCHROME)),
+        [5, 5, 32, 1], 'a section outranks monochrome');
+    const mono = fns.CreateBitmap.handler([2, 2, 1, 1, 0]);
+    assert.deepEqual(shape(gdi.copyBitmap(mono, 0, 0, 0)), [2, 2, 1, 0]);
+
+    // A one-bit section is copied monochrome only when its colours are black and white.
+    putBitmapInfo(memory, { width: 2, height: 2, bitCount: 1 });
+    memory.putU32s(STRUCT + BITMAPINFOHEADER.SIZE, [0x0000ff, 0x00ff00]);
+    const tinted = fns.CreateDIBSection.handler([hdc, STRUCT, 0, BITS_POINTER, 0, 0]);
+    assert.deepEqual(shape(gdi.copyBitmap(tinted, 0, 0, 0)), [2, 2, display, 0]);
+    memory.putU32s(STRUCT + BITMAPINFOHEADER.SIZE, [0xffffff, 0x000000]);
+    const plain = fns.CreateDIBSection.handler([hdc, STRUCT, 0, BITS_POINTER, 0, 0]);
+    assert.deepEqual(shape(gdi.copyBitmap(plain, 0, 0, 0)), [2, 2, 1, 0]);
+    assert.equal(gdi.copyBitmap(hdc, 0, 0, 0), 0, 'no bitmap, no copy');
+});
+
+test('a bitmap made of bits this layer holds reads back those bits', ()=>{
+    const { fns, memory, gdi } = setup();
+    const bits = Uint8Array.of(0xa5, 0x00, 0x5a, 0x00);
+    const bitmap = gdi.bitmapFromBits(9, 2, 1, bits);
+    assert.equal(fns.GetBitmapBits.handler([bitmap, 16, OUT]), 4,
+        'nine pixels a line, padded to a WORD');
+    assert.deepEqual([...memory.readMemory(OUT, 4)], [...bits]);
+});
