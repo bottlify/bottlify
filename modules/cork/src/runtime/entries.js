@@ -12,13 +12,16 @@
  * added under `ANY_TOP` and found whatever the top asked.
  */
 
+import { Tables } from './layout.js';
+
 /** The top a region indifferent to the x87 stack is registered under. */
 export const ANY_TOP = 8;
 
-import { Tables } from './layout.js';
-
-/** @param {number} eip @param {number} top */
-const keyOf = (eip, top)=>eip * 16 + top;
+/** The key of an address at an x87 top (`ANY_TOP` included) the entries and the
+ * runtime's queue, misses, barren addresses and records are kept by. Every "has an entry"
+ * question is for a top, so a region compiled for another top is no answer.
+ * @param {number} eip @param {number} top */
+export const keyOf = (eip, top)=>eip * 16 + top;
 
 /** The slot an address hashes to: the formula translated code probes with. */
 export const slotOf = (/** @type {number} */ eip, shift = 16)=>Math.imul(eip, 0x9e3779b1) >>> shift;

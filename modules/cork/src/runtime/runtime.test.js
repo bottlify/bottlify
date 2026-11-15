@@ -4225,7 +4225,7 @@ test('a region the worker forms otherwise from bytes nobody wrote is emitted her
     let answer;
     /** @type {any[]} */
     const asked = [];
-    m.runtime.attachTranslator({
+    /** @type {any} */ (m.runtime).attachTranslator({
         post: (/** @type {any} */ data)=>{
             if (data.ready === true)
             {
@@ -4254,7 +4254,7 @@ test('a region the worker forms otherwise from bytes nobody wrote is emitted her
     }
     assert.ok(asked.length > 0, 'the batch went to the translator');
     assert.ok(m.runtime.entryOf(CODE) >= 0, 'published, emitted here');
-    const d = m.runtime.diagnostics();
+    const d = /** @type {any} */ (m.runtime.diagnostics());
     assert.equal(d.formedApart, 1);
     assert.equal(d.emitFailures, 0);
     assert.equal(d.barren, 0);

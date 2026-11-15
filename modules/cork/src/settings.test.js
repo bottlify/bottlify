@@ -16,7 +16,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 
 const read = (/** @type {string} */ path)=>readFileSync(new URL(path, import.meta.url), 'utf8');
 
@@ -24,13 +24,13 @@ const read = (/** @type {string} */ path)=>readFileSync(new URL(path, import.met
 const NAME = '[a-zA-Z][a-zA-Z0-9]*';
 
 /**
- * The runtime's `settings` object, its defaults: each key with its value as
+ * The runtime's settings, its defaults (`runtimeSettings`): each key with its value as
  * written, several to a line where they share one.
  * @returns {Map<string, string>}
  */
 function runtimeDefaults(){
-    const source = read('./runtime/runtime.js');
-    const from = source.indexOf('const settings = {');
+    const source = read('./runtime/settings.js');
+    const from = source.indexOf('return {');
     const to = source.indexOf('...config,', from);
     assert.ok(from > 0 && to > from, 'the settings object is where it was');
     return new Map(source.slice(from, to).split('\n')
@@ -48,9 +48,15 @@ function runtimeDefaults(){
 const namesRead = (source, spellings)=>new Set(spellings.flatMap(spelling=>[
     ...source.matchAll(new RegExp(`${spelling}(${NAME})\\b`, 'g'))].map(match=>match[1])));
 
+/** The runtime's own sources: its parts, not their tests, nor their imports (a
+ * `'./settings.js'` is no setting). */
+const runtimeSources = ()=>readdirSync(new URL('./runtime/', import.meta.url))
+    .filter(name=>name.endsWith('.js') && !/\.i?test\.js$/.test(name))
+    .map(name=>read(`./runtime/${name}`).replace(/^import [^;]*;$/gm, '')).join('\n');
+
 /** What the runtime reads: its defaults' keys, and the keys it reads past them. */
 function runtimeReads(){
-    const source = read('./runtime/runtime.js');
+    const source = runtimeSources();
     return new Set([...runtimeDefaults().keys(),
         ...namesRead(source, ['\\bsettings\\.', '\\bsettings\\?\\.', '\\bconfig\\.'])]);
 }
