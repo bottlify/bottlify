@@ -37,7 +37,7 @@
  */
 export const FETCHED_PIECE_BYTES = 8 << 20;
 
-/** How many times a read or write fetches the blocks it misses before it fails (`fetchedAgain`). */
+/** How many times a read or write fetches blocks it fetched before and misses again before it fails (`fetchedAgain`). */
 export const MISS_FETCHES = 4;
 /**
  * Large reads kept whole, by the file's identity, size and last write, once
@@ -137,8 +137,9 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now } = {}){
 
     /**
      * An operation done again after its miss: the blocks the miss named
-     * fetched, then the operation again, and again fetched while it misses,
-     * up to `MISS_FETCHES` fetches. A block fetched can be gone before the
+     * fetched, then the operation again, and again fetched while it misses
+     * blocks it never fetched, or up to `MISS_FETCHES` fetches of blocks it
+     * had. A block fetched can be gone before the
      * operation comes back for it: a cache in the heap keeps 64 MiB and
      * another thread's reads landing between the fetch and the retry push the
      * oldest blocks out, and a read that waited on another read's request
@@ -155,8 +156,20 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now } = {}){
      */
     const fetchedAgain = async(operation, miss, what)=>{
         const fetch = /** @type {(blocks: any[]) => Promise<void>} */ (fetchBlocks);
-        for (let fetches = 1; ; fetches++)
+        /** @param {any} block */
+        const keyOf = block=>`${block.layer ?? 0}:${block.index}`;
+        /** Every block this operation has fetched. */
+        const fetched = new Set();
+        // Counted only when the operation asks again for nothing but blocks
+        // it had fetched: one that misses blocks it never asked for has gone
+        // further - a copy up stops at each piece it lacks (`tree.js`) and
+        // goes on from there - and would otherwise fail at its fifth piece.
+        for (let fetches = 1; ;)
         {
+            for (const block of miss.blocks)
+            {
+                fetched.add(keyOf(block));
+            }
             await fetch(miss.blocks);
             try
             {
@@ -168,10 +181,14 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now } = {}){
                 {
                     throw again;
                 }
-                if (fetches >= MISS_FETCHES)
+                if (again.blocks.every((/** @type {any} */ block)=>fetched.has(keyOf(block))))
                 {
-                    throw new Error(`${what}: ${again.blocks.length} blocks still absent`
-                        + ` after ${fetches} fetches`, { cause: e });
+                    if (fetches >= MISS_FETCHES)
+                    {
+                        throw new Error(`${what}: ${again.blocks.length} blocks still absent`
+                            + ` after ${fetches} fetches`, { cause: e });
+                    }
+                    fetches++;
                 }
                 miss = again;
             }
@@ -499,6 +516,23 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now } = {}){
             {
                 watch.changed(records);
             }
+        }
+    };
+
+    /**
+     * What follows a name moved: its open files and recorded attributes go
+     * with it, and the watches are told.
+     *
+     * @param {string} from @param {string} to
+     */
+    const moved = (from, to)=>{
+        carry(from, to);
+        if (watches.size > 0)
+        {
+            const kind = attempt(()=>fs.stat(to), null)?.directory
+                ? CHANGE_DIR_NAME : CHANGE_FILE_NAME;
+            changed([from, to], kind,
+                [FILE_ACTION_RENAMED_OLD_NAME, FILE_ACTION_RENAMED_NEW_NAME]);
         }
     };
 
@@ -928,7 +962,9 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now } = {}){
          * When one is absent the copy stops at it, so what was copied is
          * removed, the blocks are fetched and the move is done again -- as
          * many times as it meets blocks not here yet, each time with more of
-         * them here.
+         * them here. A directory's move stopped part way goes on from there:
+         * what it moved is under its new name, which is not there to move to
+         * again.
          *
          * @param {string} from @param {string} to
          * @returns {boolean | Promise<boolean>}
@@ -945,6 +981,17 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now } = {}){
                 {
                     throw miss;
                 }
+                if (!existed && attempt(()=>fs.stat(to), null)?.directory)
+                {
+                    return fetchBlocks(miss.blocks).then(()=>this.moveRest(from, to))
+                        .then(done=>{
+                            if (done)
+                            {
+                                moved(from, to);
+                            }
+                            return done;
+                        });
+                }
                 if (!existed)
                 {
                     attempt(()=>fs.deleteFile(to), null);
@@ -953,17 +1000,47 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now } = {}){
             }
         },
 
+        /**
+         * What is left of a directory's move a miss stopped, moved into the
+         * directory it was going to: everything under `to` is the move's own,
+         * so a file at both names is a copy the miss cut short.
+         *
+         * @param {string} from @param {string} to
+         * @returns {Promise<boolean>}
+         */
+        async moveRest(from, to){
+            for (const child of attempt(()=>fs.list(from), []))
+            {
+                const leaving = `${from}\\${child.name}`;
+                const arriving = `${to}\\${child.name}`;
+                const there = attempt(()=>fs.stat(arriving), null);
+                if (child.directory && there?.directory)
+                {
+                    if (!await this.moveRest(leaving, arriving))
+                    {
+                        return false;
+                    }
+                    continue;
+                }
+                if (there)
+                {
+                    attempt(()=>fs.deleteFile(arriving), null);
+                }
+                if (!await this.renameOrFetch(leaving, arriving))
+                {
+                    return false;
+                }
+            }
+            return attempt(()=>{
+                fs.removeDirectory(from);
+                return true;
+            }, false);
+        },
+
         /** @param {string} from @param {string} to @returns {boolean} */
         rename: (from, to)=>attempt(()=>{
             fs.rename(from, to);
-            carry(from, to);
-            if (watches.size > 0)
-            {
-                const kind = attempt(()=>fs.stat(to), null)?.directory
-                    ? CHANGE_DIR_NAME : CHANGE_FILE_NAME;
-                changed([from, to], kind,
-                    [FILE_ACTION_RENAMED_OLD_NAME, FILE_ACTION_RENAMED_NEW_NAME]);
-            }
+            moved(from, to);
             return true;
         }, false),
 

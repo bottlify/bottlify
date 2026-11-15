@@ -24,7 +24,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
-import { packSession, unpackSession } from './storage.js';
+import { opfsSession, packSession, unpackSession } from './storage.js';
 
 const FIXTURE = new URL('../test/fixtures/session.exe', import.meta.url);
 
@@ -133,17 +133,61 @@ test('a session arriving from outside is there before the first instruction',
 
 /**
  * The origin's file system as a worker sees it, in memory: a folder of files,
- * each with a synchronous access handle. `files` is every file made, by name.
+ * each with a synchronous access handle and the page's own interface - a File
+ * read in slices, a writable stream replaced on close. `files` is every file
+ * made, by name; `written` every name a stream closed on; `read` the bytes
+ * read of each entry of a session past its head (`opfsSession`).
  */
 function originDirectory(){
     /** @type {Map<string, { bytes: Uint8Array, open: boolean }>} */
     const files = new Map();
+    /** @type {string[]} */
+    const written = [];
+    /** @type {Map<string, number>} */
+    const read = new Map();
     const folder = {
         /** @param {string} name */
         getFileHandle: async name=>{
             const file = files.get(name) ?? { bytes: new Uint8Array(0), open: false };
             files.set(name, file);
             return {
+                getFile: async()=>{
+                    const bytes = file.bytes;
+                    const head = bytes.length >= 8 ? 8 + new DataView(bytes.buffer,
+                        bytes.byteOffset).getUint32(4, true) : 0;
+                    /** @param {number} start @param {number} end */
+                    const part = (start, end)=>({
+                        size: Math.max(0, Math.min(end, bytes.length) - start),
+                        arrayBuffer: async()=>{
+                            read.set(name, (read.get(name) ?? 0)
+                                + Math.max(0, Math.min(end, bytes.length) - Math.max(start, head)));
+                            return bytes.slice(start, end).buffer;
+                        },
+                    });
+                    return { ...part(0, bytes.length), lastModified: 0,
+                        slice: (start = 0, end = bytes.length)=>part(start, end) };
+                },
+                createWritable: async()=>{
+                    /** @type {Uint8Array[]} */
+                    const parts = [];
+                    return {
+                        write: async(/** @type {Uint8Array} */ chunk)=>{
+                            parts.push(chunk.slice());
+                        },
+                        close: async()=>{
+                            const whole = new Uint8Array(
+                                parts.reduce((sum, one)=>sum + one.length, 0));
+                            let at = 0;
+                            for (const one of parts)
+                            {
+                                whole.set(one, at);
+                                at += one.length;
+                            }
+                            file.bytes = whole;
+                            written.push(name);
+                        },
+                    };
+                },
                 createSyncAccessHandle: async()=>{
                     file.open = true;
                     return {
@@ -172,14 +216,17 @@ function originDirectory(){
             };
         },
         async* entries(){
-            yield* files;
+            for (const name of [...files.keys()])
+            {
+                yield [name, await folder.getFileHandle(name)];
+            }
         },
         /** @param {string} name */
         removeEntry: async name=>{
             files.delete(name);
         },
     };
-    return { files, root: { getDirectoryHandle: async()=>folder } };
+    return { files, written, read, root: { getDirectoryHandle: async()=>folder } };
 }
 
 test('on a page file, what the program wrote is saved, counted, and the file goes with the run',
@@ -220,3 +267,74 @@ test('on a page file, what the program wrote is saved, counted, and the file goe
             [['C:\\save.dat', PAYLOAD]]);
         assert.equal(origin.files.size, 0, 'the run\'s page file is taken away with it');
     });
+
+test("a session kept in the origin's storage is read where the program reads it, announced"
+    + ' nowhere, and saved where the program changed it', { timeout: 30000 }, async()=>{
+    const exe = await readFile(FIXTURE);
+    const origin = originDirectory();
+    const store = opfsSession('session', async()=>origin.root);
+    const SAVE = 'C:\\save.dat';
+    const GONE = 'C:\\Setup\\part7.cab';
+    /** @type {{ path: string, bytes: Uint8Array }[]} */
+    const files = [{ path: SAVE,
+        bytes: new Uint8Array([...'RESTORED'].map(character=>character.charCodeAt(0))) }];
+    for (let at = 0; at < 300; at++)
+    {
+        files.push({ path: `C:\\Setup\\part${at}.cab`,
+            bytes: new Uint8Array(64 << 10).fill(at & 0xff) });
+    }
+    await store.save({ files, registry: null });
+    origin.written.length = 0;
+    origin.read.clear();
+
+    /** @type {any[]} */
+    const announced = [];
+    const app = await createApp({
+        executable: new Uint8Array(exe),
+        storage: { load: ()=>store.load({ lazy: true }), save: store.save, readsWithinSave: true },
+    });
+    let printed = '';
+    try
+    {
+        app.on('output', (/** @type {any} */ payload)=>{
+            printed += payload.text;
+        });
+        app.on('session', (/** @type {any} */ payload)=>announced.push(...payload.changes));
+        assert.equal(await app.run({ maxTurns: 20000, timeoutMs: 20000 }), 0);
+        assert.equal(printed, 'RESTORED', 'the saved file is there before the first instruction');
+
+        const kept = app.session.export();
+        assert.equal(kept.length, 301, "the whole session is the volume's");
+        assert.ok(kept.filter((/** @type {any} */ file)=>!('bytes' in file)).length === 300,
+            'the files the program left alone, as the session handed them');
+        // The program deletes one of them, as DeleteFile would.
+        app.session.apply([{ path: GONE, delete: true }]);
+    }
+    finally
+    {
+        await app.dispose();
+    }
+    // The save the machine's going asked for, written.
+    const listed = await store.list();
+
+    const readOf = new Map([...origin.read].filter(([, bytes])=>bytes > 0));
+    assert.equal(readOf.size, 1, 'nothing of the session read but the file the program read');
+    assert.equal([...readOf.values()][0], 'RESTORED'.length);
+    assert.deepEqual([...new Set(announced.map(change=>change.path))].sort(),
+        [GONE, SAVE], 'restoring announced nothing');
+    const writtenPaths = origin.written.map(name=>{
+        const entry = /** @type {Uint8Array} */ (origin.files.get(name)?.bytes);
+        const end = 8 + new DataView(entry.buffer, entry.byteOffset).getUint32(4, true);
+        return new TextDecoder().decode(entry.subarray(8, end));
+    });
+    assert.ok(writtenPaths.includes(SAVE), 'the save wrote the file the program wrote');
+    assert.deepEqual(writtenPaths.filter(path=>path.startsWith('C:\\')), [SAVE],
+        'and nothing of what it left alone');
+    assert.equal(listed.length, 300);
+
+    const back = await opfsSession('session', async()=>origin.root).load();
+    assert.equal(back.files.length, 300, 'the deleted file is gone, every other kept');
+    assert.equal(String.fromCharCode(...back.files.find(file=>file.path === SAVE)
+        ?.bytes ?? []), PAYLOAD);
+    assert.ok(!back.files.some(file=>file.path === GONE));
+});

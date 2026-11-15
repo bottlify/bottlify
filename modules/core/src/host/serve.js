@@ -27,6 +27,7 @@ import { openGraphicsWorker } from './graphics-worker.js';
 import { gcNudgeOf } from '../layers/cpu/internal/gc-nudge.js';
 import { DEFAULT_MEMORY_SIZE } from '../layers/cpu/module.js';
 import { createLogReader } from '../layers/log/reader.js';
+import { PIECE_SIZE } from '../layers/filesystem/internal/memory-store.js';
 import { FEED_AHEAD_MS, createFeeder } from '../layers/audio/output/feed.js';
 import { gpuFeaturesOf, gpuLimitsOf } from '../layers/graphics/webgpu/features.js';
 
@@ -283,11 +284,26 @@ function buffersUnder(files){
  * archive file was one allocation more than the worker could make, and its
  * copy on the way another; the page reads it a block at a time.
  *
+ * A file of a session laid under the volume that the program did not touch
+ * (`session-source.js`) is read from the session here, a piece at a time.
+ *
  * @param {{ path: string, bytes: Uint8Array, contents?: { size: number,
- *     flat: Uint8Array | null, pieces: (Uint8Array | undefined)[] } }} file
- * @returns {{ path: string, size: number, pieces: (Uint8Array | null)[] }}
+ *     flat: Uint8Array | null, pieces: (Uint8Array | undefined)[] } }
+ *     | { path: string, size: number,
+ *         read: (offset?: number, length?: number) => Promise<Uint8Array> }} file
+ * @returns {Promise<{ path: string, size: number, pieces: (Uint8Array | null)[] }>}
  */
-function inPieces(file){
+async function inPieces(file){
+    if (!('bytes' in file))
+    {
+        /** @type {Uint8Array[]} */
+        const pieces = [];
+        for (let at = 0; at < file.size; at += PIECE_SIZE)
+        {
+            pieces.push(await file.read(at, Math.min(PIECE_SIZE, file.size - at)));
+        }
+        return { path: file.path, size: file.size, pieces };
+    }
     const contents = file.contents;
     if (!contents)
     {
@@ -800,7 +816,8 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
             return {
                 code,
                 registry,
-                files: started?.collectOnExit ? app.session.export().map(inPieces) : [],
+                files: started?.collectOnExit
+                    ? await Promise.all(app.session.export().map(inPieces)) : [],
                 // What an installer's output is sorted against: the libraries
                 // a bottle does not carry out of system32.
                 systemLibraries: started?.collectOnExit
