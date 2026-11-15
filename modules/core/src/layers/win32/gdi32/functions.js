@@ -1951,6 +1951,17 @@ export function createGdiFunctions(host){
     };
 
     /**
+     * The average width of a DC's font as dialog units are measured by it -
+     * the extent of the 52 Latin letters, halved and rounded up over 26.
+     *
+     * @param {any} dc
+     */
+    const averageWidthOf = dc=>{
+        const letters = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
+        return Math.floor((Math.floor(extentOf(dc, letters) / 26) + 1) / 2);
+    };
+
+    /**
      * @param {any} dc
      * @param {number} index
      * @returns {number}
@@ -4751,8 +4762,7 @@ export function createGdiFunctions(host){
                 {
                     host.writeMemory(height >>> 0, u32Bytes([metrics.height]));
                 }
-                const letters = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
-                return Math.floor((Math.floor(extentOf(dc, letters) / 26) + 1) / 2);
+                return averageWidthOf(dc);
             },
         },
 
@@ -5845,6 +5855,42 @@ export function createGdiFunctions(host){
              * @param {number} hdc
              */
             isContext: (/** @type {number} */ hdc)=>dcOf(hdc) !== null,
+
+            /**
+             * Narrows a context's clip to a rectangle for as long as a
+             * control paints in it, as Windows' static and button controls
+             * do around WM_CTLCOLOR*: the parent sees a clip selected
+             * (GetClipRgn answers 1). Answers what `unclip` takes to put the
+             * clip back, or 0 for a handle that is no context.
+             *
+             * @param {number} hdc @param {{ left: number, top: number, right: number,
+             *     bottom: number }} rect
+             */
+            clipTo: (/** @type {number} */ hdc, /** @type {any} */ rect)=>{
+                const saved = table.SaveDC.handler([hdc]) | 0;
+                if (saved !== 0)
+                {
+                    table.IntersectClipRect.handler([hdc, rect.left, rect.top, rect.right,
+                        rect.bottom]);
+                }
+                return saved;
+            },
+            /** @param {number} hdc @param {number} saved */
+            unclip: (/** @type {number} */ hdc, /** @type {number} */ saved)=>{
+                if (saved !== 0)
+                {
+                    table.RestoreDC.handler([hdc, saved]);
+                }
+            },
+
+            /**
+             * The context's font's average character width, as
+             * GdiGetCharDimensions answers it: an edit's EC_USEFONTINFO
+             * margins are half of it.
+             *
+             * @param {number} hdc
+             */
+            averageWidth: (/** @type {number} */ hdc)=>averageWidthOf(dcOf(hdc) ?? { font: 0 }),
 
             /**
              * How much room a string takes in the context's font.

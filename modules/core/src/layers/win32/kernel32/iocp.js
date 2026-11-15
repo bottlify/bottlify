@@ -59,6 +59,8 @@ const ENTRY_FIELDS = 4;
 /** IO_COMPLETION_INFORMATION_CLASS: IoCompletionBasicInformation, its Depth. */
 const IO_COMPLETION_BASIC_INFORMATION = 0;
 
+/** What an alertable wait an APC ended answers: WAIT_IO_COMPLETION, STATUS_USER_APC. */
+const WAIT_IO_COMPLETION = 0xc0;
 /** INVALID_HANDLE_VALUE, which CreateIoCompletionPort takes to mean "no file". */
 const INVALID_HANDLE_VALUE = 0xffffffff;
 
@@ -119,6 +121,10 @@ const HANG_AFTER_MS = 10_000;
  * @property {() => any} currentThread
  * @property {(thread?: any) => any} park        Stops a thread; returns the parked token.
  * @property {(handle: number) => void} signalEvent
+ * @property {(handle: number) => boolean} [synchronous]  a handle opened for synchronous
+ *     I/O, which no port takes
+ * @property {(alertable: boolean, wait: () => any, answer?: () => number) => any} [alertably]
+ *     a wait an APC may end, the routines queued run first (apc.js `waitWith`)
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {(text: string) => void} [trace]
  * @property {() => number} [hostTime]
@@ -302,9 +308,15 @@ export function createIoCompletionPorts(host){
         while (port.takers.length > 0)
         {
             const waiter = port.takers.pop();
+            // A thread that is no longer blocked -- terminated while parked, or
+            // its alertable wait ended by an APC -- takes nothing with it: the
+            // packet goes to whoever is next, and its out-parameters are left
+            // alone.
+            if (waiter.thread.state !== 'blocked')
+            {
+                continue;
+            }
             answer(waiter.out, packet);
-            // A thread that is no longer blocked -- terminated while parked --
-            // takes nothing with it: the packet goes to whoever is next.
             if (kernel.wake(waiter.thread, wakeValue(waiter, packet)))
             {
                 return;
@@ -376,13 +388,18 @@ export function createIoCompletionPorts(host){
                     {
                         return fail(ERROR_INVALID_HANDLE);
                     }
-                    if (!bindable)
+                    if (!bindable || host.synchronous?.(file >>> 0))
                     {
-                        // Naming a port and no file asks for nothing at all.
+                        // Naming a port and no file asks for nothing at all; a
+                        // handle opened for synchronous I/O completes nothing.
                         return fail(ERROR_INVALID_PARAMETER);
                     }
                     associations.set(file >>> 0, { port, key: key >>> 0 });
                     return existing >>> 0;
+                }
+                if (bindable && host.synchronous?.(file >>> 0))
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
                 }
                 const port = makePort();
                 if (bindable)
@@ -485,34 +502,78 @@ export function createIoCompletionPorts(host){
             /** @param {number[]} args */
             handler: ([handle, entries, count, removed, timeout, alertable])=>{
                 reportHangs();
-                if (alertable !== 0)
-                {
-                    host.divergence?.('GetQueuedCompletionStatusEx',
-                        'an alertable dequeue is not ended by an APC');
-                }
-                const port = portOf(handle);
-                if (!port)
-                {
-                    return fail(ERROR_INVALID_HANDLE);
-                }
-                if ((entries >>> 0) === 0 || (count >>> 0) === 0 || (removed >>> 0) === 0)
-                {
-                    return fail(ERROR_INVALID_PARAMETER);
-                }
-                if (drain(port, entries >>> 0, count >>> 0, removed >>> 0) > 0)
-                {
-                    host.setLastError(ERROR_SUCCESS);
-                    return 1;
-                }
-                if ((timeout >>> 0) === 0)
-                {
-                    return fail(WAIT_TIMEOUT);
-                }
-                host.setLastError(WAIT_TIMEOUT);
-                return parkOn(port, { form: 'entries', bytes: 0, key: 0,
-                    overlapped: entries >>> 0, removed: removed >>> 0 }, false, timeout >>> 0, 0);
+                // Packets queued are taken at once; a wait it would make is one an
+                // APC, queued first or while it waits, ends: FALSE with
+                // WAIT_IO_COMPLETION.
+                return alertable !== 0 && host.alertably && !holdsPackets(handle)
+                    ? host.alertably(true, ()=>dequeueEntries(handle, entries, count, removed,
+                        timeout), ()=>fail(WAIT_IO_COMPLETION))
+                    : dequeueEntries(handle, entries, count, removed, timeout);
             },
         },
+    };
+
+    /** Whether a port handle names a port with packets queued. @param {number} handle */
+    const holdsPackets = handle=>(portOf(handle)?.queue.length ?? 0) > 0;
+
+    /**
+     * NtRemoveIoCompletionEx's dequeue, made alertable or not by its caller.
+     *
+     * @param {number} handle @param {number} entries @param {number} count
+     * @param {number} removed @param {number} timeout
+     */
+    const removeEntries = (handle, entries, count, removed, timeout)=>{
+        const port = nativePort(handle);
+        if (typeof port === 'number')
+        {
+            return port;
+        }
+        if ((entries >>> 0) === 0 || (removed >>> 0) === 0)
+        {
+            return STATUS.ACCESS_VIOLATION;
+        }
+        if ((count >>> 0) === 0)
+        {
+            return STATUS.INVALID_PARAMETER;
+        }
+        if (drain(port, entries >>> 0, count >>> 0, removed >>> 0) > 0)
+        {
+            return STATUS.SUCCESS;
+        }
+        const wait = nativeWait(timeout);
+        return wait === 0 ? STATUS.TIMEOUT
+            : parkOn(port, { form: 'entries', bytes: 0, key: 0, overlapped: entries >>> 0,
+                removed: removed >>> 0 }, true, wait, STATUS.TIMEOUT);
+    };
+
+    /**
+     * GetQueuedCompletionStatusEx's dequeue, made alertable or not by its caller.
+     *
+     * @param {number} handle @param {number} entries @param {number} count
+     * @param {number} removed @param {number} timeout
+     */
+    const dequeueEntries = (handle, entries, count, removed, timeout)=>{
+        const port = portOf(handle);
+        if (!port)
+        {
+            return fail(ERROR_INVALID_HANDLE);
+        }
+        if ((entries >>> 0) === 0 || (count >>> 0) === 0 || (removed >>> 0) === 0)
+        {
+            return fail(ERROR_INVALID_PARAMETER);
+        }
+        if (drain(port, entries >>> 0, count >>> 0, removed >>> 0) > 0)
+        {
+            host.setLastError(ERROR_SUCCESS);
+            return 1;
+        }
+        if ((timeout >>> 0) === 0)
+        {
+            return fail(WAIT_TIMEOUT);
+        }
+        host.setLastError(WAIT_TIMEOUT);
+        return parkOn(port, { form: 'entries', bytes: 0, key: 0,
+            overlapped: entries >>> 0, removed: removed >>> 0 }, false, timeout >>> 0, 0);
     };
 
     /**
@@ -675,29 +736,14 @@ export function createIoCompletionPorts(host){
         NtRemoveIoCompletionEx: {
             argBytes: 24,
             /** @param {number[]} args */
-            handler: ([handle, entries, count, removed, timeout])=>{
-                const port = nativePort(handle);
-                if (typeof port === 'number')
-                {
-                    return port;
-                }
-                if ((entries >>> 0) === 0 || (removed >>> 0) === 0)
-                {
-                    return STATUS.ACCESS_VIOLATION;
-                }
-                if ((count >>> 0) === 0)
-                {
-                    return STATUS.INVALID_PARAMETER;
-                }
-                if (drain(port, entries >>> 0, count >>> 0, removed >>> 0) > 0)
-                {
-                    return STATUS.SUCCESS;
-                }
-                const wait = nativeWait(timeout);
-                return wait === 0 ? STATUS.TIMEOUT
-                    : parkOn(port, { form: 'entries', bytes: 0, key: 0, overlapped: entries >>> 0,
-                        removed: removed >>> 0 }, true, wait, STATUS.TIMEOUT);
-            },
+            handler: ([handle, entries, count, removed, timeout, alertable])=>
+                // Packets queued are taken at once; a wait it would make is one an
+                // APC, queued first or while it waits, ends with STATUS_USER_APC
+                // (WAIT_IO_COMPLETION's value).
+                ((alertable & 0xff) !== 0 && host.alertably && !holdsPackets(handle)
+                    ? host.alertably(true, ()=>removeEntries(handle, entries, count, removed,
+                        timeout))
+                    : removeEntries(handle, entries, count, removed, timeout)),
         },
         /**
          * NTSTATUS NtQueryIoCompletion(HANDLE, IO_COMPLETION_INFORMATION_CLASS,
@@ -807,18 +853,51 @@ export function createIoCompletionPorts(host){
         },
 
         /**
+         * A native call on an asynchronous handle has finished: its packet goes
+         * to the port the handle is bound to with the call's ApcContext as the
+         * completion value, which is what NtReadFile and NtWriteFile hand a
+         * port where ReadFile hands its OVERLAPPED. Nothing is written for it:
+         * the call's own IO_STATUS_BLOCK is the caller's to fill.
+         *
+         * @param {number} file @param {number} transferred @param {number} status
+         * @param {number} value
+         * @returns {boolean} whether a port took it
+         */
+        posted(file, transferred, status, value){
+            const association = associations.get(file >>> 0);
+            if (!association)
+            {
+                return false;
+            }
+            const error = (status >>> 0) === 0 ? 0 : toDosError(status >>> 0);
+            post(association.port, {
+                transferred: transferred >>> 0,
+                key: association.key,
+                overlapped: value >>> 0,
+                status: status >>> 0,
+                ...error !== 0 ? { error } : {},
+            });
+            return true;
+        },
+
+        /**
          * Binds a file handle to a port under a key: what CreateIoCompletionPort
          * does with an existing port, and NtSetInformationFile's
          * FileCompletionInformation, which is the same binding.
          *
          * @param {number} file @param {number} portHandle @param {number} key
-         * @returns {boolean} false when the port handle names no port
+         * @returns {boolean | 'synchronous'} false when the port handle names no
+         *     port, 'synchronous' for a handle opened for synchronous I/O
          */
         bind(file, portHandle, key){
             const port = portOf(portHandle);
             if (!port)
             {
                 return false;
+            }
+            if (host.synchronous?.(file >>> 0))
+            {
+                return 'synchronous';
             }
             associations.set(file >>> 0, { port, key: key >>> 0 });
             return true;

@@ -80,6 +80,8 @@ const FILE_WRITE_DATA = 0x2;
 /** SetFileCompletionNotificationModes' flags. */
 const FILE_SKIP_COMPLETION_PORT_ON_SUCCESS = 0x1;
 const FILE_SKIP_SET_EVENT_ON_HANDLE = 0x2;
+/** The native call's third flag: a fast I/O's own event left alone (ntifs.h). */
+const FILE_SKIP_SET_USER_EVENT_ON_FAST_IO = 0x4;
 
 /** The pipe statuses an OVERLAPPED is finished with. */
 const STATUS_PIPE_BROKEN = STATUS.PIPE_BROKEN;
@@ -141,6 +143,9 @@ export const isPipeName = name=>PREFIXES.some(prefix=>
  *     skip?: { port?: boolean, event?: boolean }) => boolean} [completed]
  *           Finishes an OVERLAPPED: its status, its count, its event, the port.
  * @property {(event: number) => void} [setEvent]
+ * @property {(file: number, transferred: number, status: number, value: number) => boolean}
+ *     [posted]  a native call's packet to the handle's port, its ApcContext the value
+ * @property {(thread: any, routine: number, args: number[]) => void} [queueApc]
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {PipesAcross | null} [across]  where the ends a process in a worker of
  *     its own was started with are served (`EndAcross`), by their numbers
@@ -282,8 +287,20 @@ export function pipeStandIn(id, described){
  * @property {number} length
  * @property {number} out  the count's address
  * @property {boolean} [native]  NtReadFile's: `out` is the IO_STATUS_BLOCK
+ * @property {NativeAsync} [async]  NtReadFile's on an end opened for overlapped I/O:
+ *     answered STATUS_PENDING, it finishes through its block, event, APC and port
  * @property {number} [statusAt]  the OVERLAPPED a call on a handle opened
  *     without FILE_FLAG_OVERLAPPED gave, which waits and is told its status there
+ */
+
+/**
+ * What NtReadFile is handed beside its IO_STATUS_BLOCK, for a call that does
+ * not wait.
+ *
+ * @typedef {Object} NativeAsync
+ * @property {number} event  0 for none
+ * @property {number} apc  the APC routine, 0 for none
+ * @property {number} context  the ApcContext: the APC's argument, the port's value
  */
 
 /**
@@ -426,6 +443,32 @@ export function createNamedPipes(host){
         total + message.bytes.length - message.at, 0);
 
     /**
+     * Finishes a native call that did not wait: its IO_STATUS_BLOCK, its event,
+     * its APC on the thread that asked, and a packet for the port the handle
+     * is bound to - each as NtReadFile completes one on Windows.
+     *
+     * @param {PipeHost} owner @param {number} handle @param {number} block
+     * @param {NativeAsync} io @param {any} thread @param {number} status @param {number} count
+     * @param {boolean} [skipPort]  finished in its own call on a handle that skips the port
+     */
+    function finishNative(owner, handle, block, io, thread, status, count, skipPort = false){
+        owner.writeMemory(block, dwordBytes(status));
+        owner.writeMemory(block + 4, dwordBytes(count));
+        if (io.event !== 0)
+        {
+            owner.setEvent?.(io.event);
+        }
+        if (io.apc !== 0)
+        {
+            owner.queueApc?.(thread, io.apc, [io.context, block, 0]);
+        }
+        if (!skipPort)
+        {
+            owner.posted?.(handle, count, status, io.context);
+        }
+    }
+
+    /**
      * Finishes an operation where its process asked it, and wakes that process's
      * thread when it was parked.
      *
@@ -456,6 +499,11 @@ export function createNamedPipes(host){
                     owner.setEvent?.(event);
                 }
             }
+            return;
+        }
+        if (op.async)
+        {
+            finishNative(owner, op.handle, op.out, op.async, op.thread, status, count);
             return;
         }
         if (op.native)
@@ -590,8 +638,15 @@ export function createNamedPipes(host){
         }
     };
 
-    /** Ends what waits on an end, as cancelled. @param {End} end @param {(op: Op) => boolean} which */
-    const abort = (end, which)=>{
+    /**
+     * Ends what waits on an end, as cancelled - or, where the end itself is
+     * closing, as the pipe broken, which is how a read still pending on the
+     * handle being closed completes on Windows.
+     *
+     * @param {End} end @param {(op: Op) => boolean} which
+     * @param {number} [status]
+     */
+    const abort = (end, which, status = STATUS_CANCELLED)=>{
         let count = 0;
         for (const op of [...end.readers, ...end.side === 'server' ? end.instance.connects : []])
         {
@@ -601,7 +656,7 @@ export function createNamedPipes(host){
             }
             end.readers = end.readers.filter(one=>one !== op);
             end.instance.connects = end.instance.connects.filter(one=>one !== op);
-            finish(op, STATUS_CANCELLED, 0);
+            finish(op, status, 0);
             count++;
         }
         return count;
@@ -632,7 +687,7 @@ export function createNamedPipes(host){
      */
     const closeEnd = end=>{
         end.closed = true;
-        abort(end, ()=>true);
+        abort(end, ()=>true, STATUS_PIPE_BROKEN);
         const { instance } = end;
         if (end.side === 'client')
         {
@@ -905,10 +960,25 @@ export function createNamedPipes(host){
      *
      * @param {End} end @param {number} handle @param {number} buffer @param {number} length
      * @param {number} out @param {number} overlapped @param {boolean} native
+     * @param {NativeAsync} [io]  NtReadFile's event, APC and context
      */
-    const startRead = (end, handle, buffer, length, out, overlapped, native)=>{
+    const startRead = (end, handle, buffer, length, out, overlapped, native, io)=>{
+        // A native read on an end opened for overlapped I/O does not wait.
+        const async = native && io !== undefined && /** @type {any} */ (end).overlapped === true
+            ? io : undefined;
         /** @param {number} status @param {number} count */
         const answerNow = (status, count)=>{
+            if (async)
+            {
+                // The block, the event and the APC are the native call's to
+                // answer (`ntTransfer`); a port still gets its packet.
+                const skip = status === STATUS.SUCCESS
+                    && ((ctx.modes.get(handle) ?? 0) & FILE_SKIP_COMPLETION_PORT_ON_SUCCESS) !== 0;
+                if (!skip)
+                {
+                    host.posted?.(handle, count, status, async.context);
+                }
+            }
             if (overlapped !== 0)
             {
                 const modes = ctx.modes.get(handle) ?? 0;
@@ -976,11 +1046,15 @@ export function createNamedPipes(host){
         const op = { kind: 'read', ctx, thread: host.currentThread(), handle,
             overlapped: waits ? 0 : overlapped >>> 0, buffer: buffer >>> 0,
             length: length >>> 0, out: out >>> 0, native, end,
-            ...waits ? { statusAt: overlapped >>> 0 } : {} };
+            ...waits ? { statusAt: overlapped >>> 0 } : {}, ...async ? { async } : {} };
         end.readers.push(op);
         if (end.signal)
         {
             kernel.resetEvent?.(end.signal);
+        }
+        if (async)
+        {
+            return STATUS.PENDING;
         }
         if (op.overlapped !== 0)
         {
@@ -1148,13 +1222,14 @@ export function createNamedPipes(host){
      *
      * @param {number} handle @param {number} buffer @param {number} length
      * @param {number} out @param {boolean} [native] @param {number} [overlapped]
+     * @param {NativeAsync} [io]  NtReadFile's event, APC and context
      */
-    const read = (handle, buffer, length, out, native = false, overlapped = 0)=>{
+    const read = (handle, buffer, length, out, native = false, overlapped = 0, io = undefined)=>{
         const end = endOf(handle);
         if (end)
         {
             return startRead(end, handle >>> 0, buffer, length, out >>> 0, overlapped >>> 0,
-                native);
+                native, io);
         }
         const standIn = standInOf(handle);
         return standIn ? readAcross(standIn, handle >>> 0, buffer, length, out >>> 0,
@@ -1534,20 +1609,33 @@ export function createNamedPipes(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([handle, flags])=>{
-                if ((flags >>> 0) & ~(FILE_SKIP_COMPLETION_PORT_ON_SUCCESS
-                    | FILE_SKIP_SET_EVENT_ON_HANDLE))
-                {
-                    return fail(ERROR_INVALID_PARAMETER);
-                }
-                if ((host.handles.typeOf?.(handle >>> 0) ?? null) === null)
-                {
-                    return fail(ERROR_INVALID_HANDLE);
-                }
-                ctx.modes.set(handle >>> 0, (ctx.modes.get(handle >>> 0) ?? 0) | (flags >>> 0));
-                return 1;
+                const error = setCompletionModes(handle, flags,
+                    FILE_SKIP_COMPLETION_PORT_ON_SUCCESS | FILE_SKIP_SET_EVENT_ON_HANDLE);
+                return error === 0 ? 1 : fail(error);
             },
         },
     };
+
+    /**
+     * Adds to a handle's completion modes, which are never taken off again:
+     * SetFileCompletionNotificationModes' and NtSetInformationFile's
+     * FileIoCompletionNotificationInformation, each with the flags it knows.
+     *
+     * @param {number} handle @param {number} flags @param {number} known
+     * @returns {number} 0, or the Win32 error the setting is refused with
+     */
+    function setCompletionModes(handle, flags, known){
+        if (((flags >>> 0) & ~known) !== 0)
+        {
+            return ERROR_INVALID_PARAMETER;
+        }
+        if ((host.handles.typeOf?.(handle >>> 0) ?? null) === null)
+        {
+            return ERROR_INVALID_HANDLE;
+        }
+        ctx.modes.set(handle >>> 0, (ctx.modes.get(handle >>> 0) ?? 0) | (flags >>> 0));
+        return 0;
+    }
 
     /** Numbers the unnamed pipes CreatePipe makes, the run's way Windows numbers them. */
     let anonymousCount = 0;
@@ -1595,6 +1683,17 @@ export function createNamedPipes(host){
          *
          * @param {number} handle
          */
+        /**
+         * The native call's side of the completion modes: set with every flag
+         * ntifs.h names, read back as they stand.
+         */
+        completionModes: {
+            set: (/** @type {number} */ handle, /** @type {number} */ flags)=>
+                setCompletionModes(handle, flags, FILE_SKIP_COMPLETION_PORT_ON_SUCCESS
+                    | FILE_SKIP_SET_EVENT_ON_HANDLE | FILE_SKIP_SET_USER_EVENT_ON_FAST_IO),
+            of: (/** @type {number} */ handle)=>ctx.modes.get(handle >>> 0) ?? 0,
+        },
+
         skipsPortOnSuccess: (/** @type {number} */ handle)=>
             ((ctx.modes.get(handle >>> 0) ?? 0) & FILE_SKIP_COMPLETION_PORT_ON_SUCCESS) !== 0,
 

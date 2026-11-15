@@ -106,6 +106,10 @@ export function createApcs(host){
      */
     const deliver = async thread=>{
         const queue = queueOf(thread);
+        // What the wait the routines ended answers, where it is not
+        // WAIT_IO_COMPLETION itself (`waitWith`'s `answer`).
+        const answer = thread.apcAnswer;
+        thread.apcAnswer = undefined;
         while (queue.length > 0)
         {
             const { routine, args } = /** @type {{ routine: number, args: number[] }} */
@@ -113,7 +117,7 @@ export function createApcs(host){
             delivered++;
             await host.callGuest({ entry: routine, args, thread });
         }
-        return WAIT_IO_COMPLETION;
+        return answer ? answer() : WAIT_IO_COMPLETION;
     };
 
     /** @type {number} */
@@ -165,18 +169,28 @@ export function createApcs(host){
      *
      * @param {boolean} alertable
      * @param {() => any} wait
+     * @param {() => number} [answer]  what the call answers once routines have
+     *     ended its wait, where that is not WAIT_IO_COMPLETION itself (a BOOL
+     *     call answers FALSE with WAIT_IO_COMPLETION as its last error)
      */
-    const waitWith = (alertable, wait)=>{
+    const waitWith = (alertable, wait, answer)=>{
         if (!alertable)
         {
             return wait();
         }
         const thread = host.currentThread();
+        thread.apcAnswer = answer;
         if (queueOf(thread).length > 0)
         {
             return deliver(thread);
         }
-        return kernel.alertably(thread, wait);
+        const result = kernel.alertably(thread, wait);
+        // Answered without blocking: nothing will deliver into it.
+        if (thread.state !== 'blocked')
+        {
+            thread.apcAnswer = undefined;
+        }
+        return result;
     };
 
     /** @param {any} thread */

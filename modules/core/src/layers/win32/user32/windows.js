@@ -815,6 +815,8 @@ const MAX_WINDOW_TEXT = 1 << 16;
  *           and then a window is made without telling its procedure -- which
  *           is what this used to do always.
  * @property {(address: number) => void} [release]
+ * @property {(address: number) => { size: number, capacity: number } | null} [block]
+ *           A block of the process heap an address starts: an edit's text buffer.
  * @property {() => Promise<void>} idle
  * @property {(args: number[], thread: number) => any} [waitForObjectsOrInput]
  *           A wait kernel32 holds on `count` handles and the thread's input: its
@@ -6500,6 +6502,7 @@ export function createWindowFunctions(host){
         keyDown: key=>((host.keyState?.(key) ?? 0) & 0x8000) !== 0,
         allocate: host.allocate,
         release: host.release,
+        block: host.block,
         call: host.call,
         divergence: host.divergence,
         caret: caret.table,

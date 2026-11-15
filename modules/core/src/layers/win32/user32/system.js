@@ -2021,9 +2021,9 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
 
     /**
      * LoadImage in either spelling: a cursor or an icon out of a module's
-     * resources, as LoadCursor and LoadIcon load them; a device bitmap stands
-     * in for LR_CREATEDIBSECTION's section, since selected and blitted the two
-     * draw the same.
+     * resources, as LoadCursor and LoadIcon load them; a bitmap is a device
+     * bitmap, or with LR_CREATEDIBSECTION a DIB section of the resource's own
+     * depth, whose bits a program reads through GetObject's bmBits.
      *
      * @param {number} instance @param {number} name @param {number} type
      * @param {boolean} wide @param {number} [flags]  fuLoad.
@@ -2044,9 +2044,23 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                     ? loadCursorFile(readText(host, name >>> 0, wide, MAX_PATH))
                     : loadResourceObject(host, 'cursor', RT_GROUP_CURSOR, instance, name, wide);
             case IMAGE_BITMAP:
-                return (flags & LR_LOADFROMFILE) !== 0
+                return andThen((flags & LR_LOADFROMFILE) !== 0
                     ? loadBitmapFile(readText(host, name >>> 0, wide, MAX_PATH))
-                    : loadBitmap(instance, name, wide);
+                    : loadBitmap(instance, name, wide), loaded=>{
+                    const LR_CREATEDIBSECTION = 0x2000;
+                    if ((flags & LR_CREATEDIBSECTION) === 0 || (loaded >>> 0) === 0
+                        || !host.copyBitmap)
+                    {
+                        return loaded;
+                    }
+                    const section = host.copyBitmap(loaded >>> 0, 0, 0, LR_CREATEDIBSECTION) >>> 0;
+                    if (section === 0)
+                    {
+                        return loaded;
+                    }
+                    host.deleteObject?.(loaded >>> 0);
+                    return section;
+                });
             default:
                 return 0;
         }

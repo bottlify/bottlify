@@ -270,6 +270,28 @@ test('RtlCreateProcessParameters builds the block with offsets, the image as the
         assert.equal(fns.RtlCreateProcessParameters.argBytes, 40);
     });
 
+test('RtlCreateProcessParametersEx with RTL_USER_PROC_PARAMS_NORMALIZED hands out addresses',
+    ()=>{
+        const { bytes, view, fns, counted } = setup();
+        const image = counted(STRING, 'C:\\game\\child.exe');
+        assert.equal(fns.RtlCreateProcessParametersEx.argBytes, 44);
+        assert.equal(fns.RtlCreateProcessParametersEx.handler(
+            [OUT, image, 0, 0, 0, 0, 0, 0, 0, 0, 1]), STATUS_SUCCESS);
+        const block = view.getUint32(OUT, true);
+        assert.equal(view.getUint32(block + 8, true), 1, 'its Flags say normalised');
+        const address = view.getUint32(block + 0x38 + 4, true);
+        assert.ok(address > block, 'the image name is an address in the block');
+        const length = view.getUint16(block + 0x38, true);
+        assert.equal(String.fromCharCode(...new Uint16Array(
+            bytes.slice(address, address + length).buffer)), 'C:\\game\\child.exe');
+
+        assert.equal(fns.RtlCreateProcessParametersEx.handler(
+            [OUT, image, 0, 0, 0, 0, 0, 0, 0, 0, 0]), STATUS_SUCCESS);
+        const plain = view.getUint32(OUT, true);
+        assert.equal(view.getUint32(plain + 8, true), 0, 'without the flag: offsets');
+        assert.ok(view.getUint32(plain + 0x38 + 4, true) < view.getUint32(plain, true));
+    });
+
 test('RtlCreateUserProcess is CreateProcessW over the parameters, its thread suspended', ()=>{
     const { view, fns, counted, created, lastError } = setup();
     const image = counted(STRING, 'C:\\game\\child.exe');

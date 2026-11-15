@@ -17,7 +17,7 @@
  * which every caller handles, and there is no result to get.
  */
 
-import { readGuid } from '../ole32/guid.js';
+import { canonicalGuid, formatGuid, readGuid } from '../ole32/guid.js';
 
 const S_OK = 0;
 const E_FAIL = 0x80004005 | 0;
@@ -39,6 +39,20 @@ const IID_IFILEDIALOGCUSTOMIZE = '{E6FDD21A-163F-4975-9C8C-A69F1BA37034}';
 const IID_IOLEWINDOW = '{00000114-0000-0000-C000-000000000046}';
 const IID_IOBJECTWITHSITE = '{FC4801A3-2BA9-11CF-A229-00AA003D7352}';
 const IID_ISERVICEPROVIDER = '{6D5140C1-7436-11CE-8034-00AA006009FA}';
+/** The second name Windows publishes IFileDialogCustomize under: the same interface. */
+const IID_IFILEDIALOGCUSTOMIZEALT = '{8016B7B3-3D49-4504-A0AA-2A37494E606F}';
+/** The dialog is its explorer browser's sink and its view's common-dialog browser. */
+const IID_IEXPLORERBROWSEREVENTS = '{361BBDC7-E6EE-4E13-BE58-58E2240C810F}';
+const IID_ICOMMDLGBROWSER = '{000214F1-0000-0000-C000-000000000046}';
+const IID_ICOMMDLGBROWSER2 = '{10339516-2894-11D2-9039-00C04F8EEB3E}';
+const IID_ICOMMDLGBROWSER3 = '{C8AD25A1-3294-41EE-8165-71174BD01C57}';
+/**
+ * The one service the dialog answers QueryService for: its frame's browser,
+ * whose service id the SDK defines as IID_ICommDlgBrowser.
+ */
+const SID_SEXPLORERBROWSERFRAME = IID_ICOMMDLGBROWSER;
+const S_FALSE = 1;
+const E_NOTIMPL = 0x80004001 | 0;
 const E_NOINTERFACE = 0x80004002 | 0;
 
 /** The options each dialog starts with, as the documentation of SetOptions gives them. */
@@ -50,6 +64,10 @@ const FOS_NOREADONLYRETURN = 0x00008000;
 export const OPEN_OPTIONS = FOS_PATHMUSTEXIST | FOS_FILEMUSTEXIST | FOS_NOCHANGEDIR;
 export const SAVE_OPTIONS = FOS_OVERWRITEPROMPT | FOS_NOREADONLYRETURN | FOS_PATHMUSTEXIST
     | FOS_NOCHANGEDIR;
+
+/** The FOS_* bits FILEOPENDIALOGOPTIONS leaves undefined, which SetOptions refuses. */
+const UNDEFINED_OPTIONS = 0x00000001 | 0x00000010 | 0x00000400 | 0x00080000 | 0x00400000
+    | 0x00800000 | 0x01000000 | 0x04000000 | 0x08000000;
 
 /** COMDLG_FILTERSPEC: a name and a pattern, two wide strings. */
 const FILTERSPEC_SIZE = 8;
@@ -63,6 +81,9 @@ const MAX_TEXT = 32767;
  * @property {(address: number, maxLength: number) => string} [readWideString]
  * @property {(bytes: number) => number} allocate  CoTaskMemAlloc: what the caller frees.
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {(object: any, interfaceId: string) => number} [publish]
+ *           The guest pointer of one of an object's interfaces, as QueryService
+ *           hands one out.
  */
 
 /**
@@ -130,9 +151,18 @@ export function registerFileDialogClasses(registry, host){
                 {
                     return E_UNEXPECTED;
                 }
-                if (types >>> 0 === 0 || specs >>> 0 === 0)
+                // Set once: none given leaves them unset, a second set is refused.
+                if (specs >>> 0 === 0)
                 {
                     return E_INVALIDARG;
+                }
+                if (state.types !== null)
+                {
+                    return E_UNEXPECTED;
+                }
+                if (types >>> 0 === 0)
+                {
+                    return S_OK;
                 }
                 state.types = Array.from({ length: types >>> 0 }, (_, i)=>({
                     name: wide(read32(specs + i * FILTERSPEC_SIZE)) ?? '',
@@ -141,7 +171,12 @@ export function registerFileDialogClasses(registry, host){
                 return S_OK;
             }],
             ['SetFileTypeIndex', 1, (state, [index])=>{
-                state.typeIndex = index >>> 0;
+                // One-based, held within the types there are; none set is E_FAIL.
+                if (state.types === null)
+                {
+                    return E_FAIL;
+                }
+                state.typeIndex = Math.max(1, Math.min(index >>> 0, state.types.length));
                 return S_OK;
             }],
             ['GetFileTypeIndex', 1, (state, [out])=>{
@@ -149,8 +184,8 @@ export function registerFileDialogClasses(registry, host){
                 {
                     return E_INVALIDARG;
                 }
-                // One-based; the first type once there are types and none was chosen.
-                write32(out, state.typeIndex || (state.types !== null ? 1 : 0));
+                // One-based; 0 until one is chosen, types set or not.
+                write32(out, state.typeIndex);
                 return S_OK;
             }],
             ['Advise', 2, (state, [sink, cookie])=>{
@@ -166,6 +201,12 @@ export function registerFileDialogClasses(registry, host){
             ['Unadvise', 1, (state, [cookie])=>(state.sinks.delete(cookie >>> 0)
                 ? S_OK : E_INVALIDARG)],
             ['SetOptions', 1, (state, [options])=>{
+                // A bit FILEOPENDIALOGOPTIONS does not define is refused, and the
+                // options stay as they were.
+                if ((options & UNDEFINED_OPTIONS) !== 0)
+                {
+                    return E_INVALIDARG;
+                }
                 state.options = options >>> 0;
                 return S_OK;
             }],
@@ -178,7 +219,7 @@ export function registerFileDialogClasses(registry, host){
                 return S_OK;
             }],
             ['SetDefaultFolder', 1, (_state, [item])=>(item >>> 0 === 0 ? E_INVALIDARG : S_OK)],
-            ['SetFolder', 1, (_state, [item])=>(item >>> 0 === 0 ? E_INVALIDARG : S_OK)],
+            ['SetFolder', 1, ()=>S_OK],
             ['GetFolder', 1, (_state, [out])=>{
                 if (out >>> 0 === 0)
                 {
@@ -225,15 +266,10 @@ export function registerFileDialogClasses(registry, host){
                 state.nameLabel = wide(text) ?? '';
                 return S_OK;
             }],
-            ['GetResult', 1, (_state, [out])=>{
-                if (out >>> 0 === 0)
-                {
-                    return E_POINTER;
-                }
-                // Nothing was chosen: the dialog was never answered.
-                write32(out, 0);
-                return E_UNEXPECTED;
-            }],
+            ['GetResult', 1, (_state, [out])=>(out >>> 0 === 0 ? E_INVALIDARG
+                // Nothing was chosen: the dialog was never answered, and the
+                // pointer is left as it was.
+                : E_UNEXPECTED)],
             ['AddPlace', 2, (_state, [item])=>(item >>> 0 === 0 ? E_INVALIDARG : S_OK)],
             ['SetDefaultExtension', 1, (state, [text])=>{
                 state.extension = wide(text) ?? '';
@@ -248,7 +284,7 @@ export function registerFileDialogClasses(registry, host){
                 state.client = readGuid(host, guid);
                 return S_OK;
             }],
-            ['ClearClientData', 0, ()=>S_OK],
+            ['ClearClientData', 0, state=>(state.client !== null ? S_OK : E_FAIL)],
             ['SetFilter', 1, ()=>S_OK],
         ];
         const tail = save
@@ -459,17 +495,74 @@ export function registerFileDialogClasses(registry, host){
         } },
     ];
 
-    /** IServiceProvider: the dialog offers no service of its own while it is not shown. */
+    /**
+     * IServiceProvider: the dialog's frame browser service is the dialog
+     * itself, asked by the interface wanted; every other service is
+     * E_NOTIMPL, as Windows 8 and later answer.
+     */
     const services = [
-        { name: 'QueryService', argBytes: 16, invoke: (/** @type {any} */ _object,
-            /** @type {number[]} */ [, , out])=>
+        { name: 'QueryService', argBytes: 16, invoke: (/** @type {any} */ object,
+            /** @type {number[]} */ [service, wanted, out])=>
         {
-            if (out >>> 0 !== 0)
+            if (out >>> 0 === 0)
             {
-                write32(out, 0);
+                return E_POINTER;
             }
-            return E_NOINTERFACE;
+            write32(out, 0);
+            if (guidAt(service) !== canonicalGuid(SID_SEXPLORERBROWSERFRAME))
+            {
+                return E_NOTIMPL;
+            }
+            const asked = guidAt(wanted);
+            if (asked === null || !host.publish || !object.queryInterface(asked))
+            {
+                return E_NOINTERFACE;
+            }
+            write32(out, host.publish(object, asked));
+            return S_OK;
         } },
+    ];
+    /** @param {number} at @returns {string | null} */
+    const guidAt = at=>(at >>> 0 === 0 ? null
+        : canonicalGuid(formatGuid(host.readMemory(at >>> 0, 16))));
+    /**
+     * IExplorerBrowserEvents: the dialog hears its browser's navigation; with
+     * no browser shown, nothing is to be done about it.
+     */
+    const browserEvents = ['OnNavigationPending', 'OnViewCreated', 'OnNavigationComplete',
+        'OnNavigationFailed'].map(name=>({ name, argBytes: 8, invoke: ()=>S_OK }));
+    /**
+     * ICommDlgBrowser3, and the two it extends: what the view asks the dialog
+     * - every object included, the default command and menu text the view's
+     * own, no filter and no view flags.
+     */
+    const browser = [
+        { name: 'OnDefaultCommand', argBytes: 8, invoke: ()=>S_FALSE },
+        { name: 'OnStateChange', argBytes: 12, invoke: ()=>S_OK },
+        { name: 'IncludeObject', argBytes: 12, invoke: ()=>S_OK },
+        { name: 'Notify', argBytes: 12, invoke: ()=>S_OK },
+        { name: 'GetDefaultMenuText', argBytes: 16, invoke: ()=>S_FALSE },
+        { name: 'GetViewFlags', argBytes: 8, invoke: (/** @type {any} */ _object,
+            /** @type {number[]} */ [flags])=>
+        {
+            if (flags >>> 0 === 0)
+            {
+                return E_POINTER;
+            }
+            write32(flags, 0);
+            return S_OK;
+        } },
+        { name: 'OnColumnClicked', argBytes: 12, invoke: ()=>S_OK },
+        { name: 'GetCurrentFilter', argBytes: 12, invoke: (/** @type {any} */ _object,
+            /** @type {number[]} */ [buffer, length])=>
+        {
+            if (buffer >>> 0 !== 0 && (length | 0) > 0)
+            {
+                host.writeMemory(buffer >>> 0, new Uint8Array(2));
+            }
+            return S_OK;
+        } },
+        { name: 'OnPreViewCreated', argBytes: 8, invoke: ()=>S_OK },
     ];
 
     for (const save of [false, true])
@@ -488,7 +581,11 @@ export function registerFileDialogClasses(registry, host){
                 { id: IID_IFILEDIALOG, methods: common },
                 { id: IID_IFILEDIALOG2, methods: second },
                 { id: IID_IMODALWINDOW, methods: common.slice(0, 1) },
-                { id: IID_IFILEDIALOGCUSTOMIZE, methods: customize },
+                { id: IID_IFILEDIALOGCUSTOMIZE, methods: customize,
+                    also: [IID_IFILEDIALOGCUSTOMIZEALT] },
+                { id: IID_IEXPLORERBROWSEREVENTS, methods: browserEvents },
+                { id: IID_ICOMMDLGBROWSER3, methods: browser,
+                    also: [IID_ICOMMDLGBROWSER, IID_ICOMMDLGBROWSER2] },
                 { id: IID_IOLEWINDOW, methods: oleWindow },
                 { id: IID_IOBJECTWITHSITE, methods: withSite },
                 { id: IID_ISERVICEPROVIDER, methods: services },

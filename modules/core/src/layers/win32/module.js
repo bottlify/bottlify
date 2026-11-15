@@ -1244,6 +1244,25 @@ export function createWin32Module(){
                         void e;
                     }
                 },
+                /**
+                 * Whether a handle was opened for synchronous I/O: a file or pipe
+                 * end without FILE_FLAG_OVERLAPPED, which no port takes. Any other
+                 * handle (a socket, a folder) is the port's to take.
+                 *
+                 * @param {number} handle
+                 */
+                synchronous: handle=>{
+                    const type = kernel.handles.typeOf(handle >>> 0);
+                    if (type !== 'file' && type !== 'pipe')
+                    {
+                        return false;
+                    }
+                    const object = kernel.handles.resolve(handle >>> 0, type);
+                    return type === 'file' ? !object?.overlapped : object?.overlapped === false;
+                },
+                // An alertable dequeue: the routines queued to the thread run
+                // first, and one queued while it waits ends it.
+                alertably: (alertable, wait, answer)=>apcs.waitWith(alertable, wait, answer),
                 /** @param {string} text */
                 trace: text=>trace(text),
             });
@@ -1291,6 +1310,21 @@ export function createWin32Module(){
                 processId,
                 completed: (file, transferred, overlapped, status, skip)=>
                     ports.completed(file, transferred, overlapped, status, skip),
+                // A native read on an asynchronous end finishes as NtReadFile's:
+                // its event set, its APC queued, its ApcContext the port's value.
+                posted: (file, transferred, status, value)=>
+                    ports.posted(file, transferred, status, value),
+                /** @param {number} handle */
+                setEvent: handle=>{
+                    try
+                    {
+                        kernel.setEvent(kernel.handles.resolve(handle, 'event'));
+                    }
+                    catch (e){
+                        void e;
+                    }
+                },
+                queueApc: (thread, routine, args)=>apcs.queue(thread, routine, args),
                 divergence: config?.divergence,
             });
 
@@ -1327,6 +1361,20 @@ export function createWin32Module(){
                 setLastErrorFor: setErrorOn,
                 currentThread: ()=>kernel.currentThread(),
                 park: ()=>bridge.park(),
+                // A native read on an asynchronous slot finishes as NtReadFile's.
+                /** @param {number} handle */
+                setEvent: handle=>{
+                    try
+                    {
+                        kernel.setEvent(kernel.handles.resolve(handle, 'event'));
+                    }
+                    catch (e){
+                        void e;
+                    }
+                },
+                queueApc: (thread, routine, args)=>apcs.queue(thread, routine, args),
+                posted: (file, transferred, status, value)=>
+                    ports.posted(file, transferred, status, value),
             });
 
             /**
@@ -2276,7 +2324,7 @@ export function createWin32Module(){
             registerShellLinkClasses(com, shortcutHost);
             registerDragDropHelperClass(com);
             registerTaskbarListClass(com);
-            registerFileDialogClasses(com, shortcutHost);
+            registerFileDialogClasses(com, { ...shortcutHost, publish: comVtables.publish });
             // The `.url` beside it: a setup's link to its publisher's site.
             registerInternetShortcutClass(com, /** @type {any} */ (shortcutHost));
 
@@ -5156,6 +5204,8 @@ export function createWin32Module(){
                     allocate: bytes=>heap.allocate(bytes),
                     /** @param {number} address */
                     release: address=>heap.free(address),
+                    /** @param {number} address */
+                    block: address=>heap.block(address),
                 }),
 
                 'ADVAPI32.dll': {

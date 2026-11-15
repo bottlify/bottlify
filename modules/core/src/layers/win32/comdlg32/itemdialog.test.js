@@ -82,11 +82,21 @@ test('a file dialog keeps its options, file types and name, and Show is dismisse
     assert.equal(d.view.getUint32(OUT, true), 0, 'no types, no index');
     d.view.setUint32(SPECS, d.wide(TEXT, 'Saves'), true);
     d.view.setUint32(SPECS + 4, d.wide(TEXT + 0x100, '*.sav'), true);
-    assert.equal(methods.SetFileTypes(0, SPECS), 0x80070057 | 0, 'no types is refused');
+    assert.equal(methods.SetFileTypes(0, 0), 0x80070057 | 0, 'no array is refused');
+    assert.equal(methods.SetFileTypeIndex(1), 0x80004005 | 0, 'no types to choose from');
+    assert.equal(methods.SetFileTypes(0, SPECS), 0, 'none given sets none');
     assert.equal(methods.SetFileTypes(1, SPECS), 0);
     assert.equal(methods.SetFileTypes(1, SPECS), 0x8000ffff | 0, 'the types are set once');
     methods.GetFileTypeIndex(OUT);
-    assert.equal(d.view.getUint32(OUT, true), 1, 'the first type, one-based');
+    assert.equal(d.view.getUint32(OUT, true), 0, 'none chosen yet');
+    assert.equal(methods.SetFileTypeIndex(100), 0);
+    methods.GetFileTypeIndex(OUT);
+    assert.equal(d.view.getUint32(OUT, true), 1, 'held within the types, one-based');
+
+    assert.equal(methods.SetOptions(0x10), 0x80070057 | 0, 'an undefined option is refused');
+    methods.GetOptions(OUT);
+    assert.equal(d.view.getUint32(OUT, true), OPEN_OPTIONS, 'and the options kept');
+    assert.equal(methods.ClearClientData(), 0x80004005 | 0, 'no client to clear');
 
     assert.equal(methods.Advise(0x4444, OUT), 0);
     const cookie = d.view.getUint32(OUT, true);
@@ -94,9 +104,26 @@ test('a file dialog keeps its options, file types and name, and Show is dismisse
     assert.equal(methods.Unadvise(cookie), 0x80070057 | 0);
 
     assert.equal(methods.Show(0), 0x800704c7 | 0, 'dismissed without a choice');
+    d.view.setUint32(OUT, 0xdeadbeef, true);
     assert.equal(methods.GetResult(OUT), 0x8000ffff | 0);
-    assert.equal(d.view.getUint32(OUT, true), 0);
+    assert.equal(d.view.getUint32(OUT, true), 0xdeadbeef, 'no result, the pointer untouched');
+    assert.equal(methods.GetResult(0), 0x80070057 | 0);
 });
+
+test('a file dialog answers its customization under both names, and its browser interfaces',
+    ()=>{
+        const d = dialogs();
+        const { definition } = d.make(CLSID_FILE_OPEN_DIALOG);
+        const customize = definition.interfaces.find((/** @type {any} */ i)=>
+            i.id === '{E6FDD21A-163F-4975-9C8C-A69F1BA37034}');
+        assert.deepEqual(customize.also, ['{8016B7B3-3D49-4504-A0AA-2A37494E606F}'],
+            'IFileDialogCustomizeAlt is the same interface');
+        for (const id of ['{361BBDC7-E6EE-4E13-BE58-58E2240C810F}',
+            '{C8AD25A1-3294-41EE-8165-71174BD01C57}'])
+        {
+            assert.ok(definition.interfaces.some((/** @type {any} */ i)=>i.id === id), id);
+        }
+    });
 
 test('a save dialog starts with its own options and answers the save dialog\'s interface', ()=>{
     const d = dialogs();

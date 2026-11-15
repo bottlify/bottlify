@@ -50,3 +50,48 @@ test('an Rtl form is advapi32\'s entry, or its error turned back into a status',
     assert.equal(table.RtlAllocateAndInitializeSid.handler([0x10, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0x20]),
         0);
 });
+
+test('the owner and group come back with a BOOLEAN defaulted, absolute or self-relative', ()=>{
+    const { table, view } = setup();
+    const SD = 0x300;
+    const OUT = 0x400;
+    const FLAG = 0x408;
+    // Absolute: revision 1, SE_GROUP_DEFAULTED, owner and group pointers.
+    view.setUint32(SD, 1 | 0x0002 << 16, true);
+    view.setUint32(SD + 4, 0x500, true);
+    view.setUint32(SD + 8, 0x600, true);
+    view.setUint32(FLAG, 0xaaaaaaaa, true);
+    assert.equal(table.RtlGetGroupSecurityDescriptor.handler([SD, OUT, FLAG]), 0);
+    assert.equal(view.getUint32(OUT, true), 0x600);
+    assert.equal(view.getUint32(FLAG, true), 0xaaaaaa01, 'one byte written, set');
+    assert.equal(table.RtlGetOwnerSecurityDescriptor.handler([SD, OUT, FLAG]), 0);
+    assert.equal(view.getUint32(OUT, true), 0x500);
+    assert.equal(view.getUint8(FLAG), 0, 'the owner is not defaulted');
+    // Self-relative: the fields are offsets from the descriptor.
+    view.setUint32(SD, 1 | 0x8000 << 16, true);
+    view.setUint32(SD + 8, 0x40, true);
+    assert.equal(table.RtlGetGroupSecurityDescriptor.handler([SD, OUT, FLAG]), 0);
+    assert.equal(view.getUint32(OUT, true), SD + 0x40);
+    view.setUint8(SD, 2);
+    assert.equal(table.RtlGetGroupSecurityDescriptor.handler([SD, OUT, FLAG]), 0xc0000058,
+        'STATUS_UNKNOWN_REVISION');
+});
+
+test('RtlFirstFreeAce finds where the next ACE goes, NULL when the ACL is full', ()=>{
+    const { table, view } = setup();
+    const ACL = 0x800;
+    const OUT = 0x900;
+    // Revision 2, 32 bytes, one ACE of 16.
+    view.setUint32(ACL, 2 | 32 << 16, true);
+    view.setUint32(ACL + 4, 1, true);
+    view.setUint16(ACL + 8 + 2, 16, true);
+    assert.equal(table.RtlFirstFreeAce.handler([ACL, OUT]), 1);
+    assert.equal(view.getUint32(OUT, true), ACL + 24);
+    view.setUint16(ACL + 2, 24, true);
+    assert.equal(table.RtlFirstFreeAce.handler([ACL, OUT]), 1);
+    assert.equal(view.getUint32(OUT, true), 0, 'full: no room past the last ACE');
+    view.setUint32(ACL + 4, 3, true);
+    assert.equal(table.RtlFirstFreeAce.handler([ACL, OUT]), 0, 'ACEs past the end');
+    view.setUint8(ACL, 1);
+    assert.equal(table.RtlFirstFreeAce.handler([ACL, OUT]), 0, 'no ACL has revision 1');
+});
