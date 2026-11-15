@@ -25,6 +25,7 @@
 /** ERROR_INVALID_PRINTER_NAME: what opening a printer that is not there says. */
 const ERROR_INVALID_PRINTER_NAME = 1801;
 const ERROR_SUCCESS = 0;
+const ERROR_FILE_NOT_FOUND = 2;
 const ERROR_ACCESS_DENIED = 5;
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_NOT_SUPPORTED = 50;
@@ -193,6 +194,19 @@ export function createSpoolerFunctions(host){
         },
     });
 
+    const noDefaultPrinter = {
+        argBytes: 8,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [, count])=>{
+            if (count >>> 0 === 0)
+            {
+                return fail(ERROR_INVALID_PARAMETER);
+            }
+            writeDword(count, 0);
+            return fail(ERROR_FILE_NOT_FOUND);
+        },
+    };
+
     /**
      * An installation the user may not make: a level the structure does not
      * have, then a missing structure, then no permission.
@@ -304,6 +318,26 @@ export function createSpoolerFunctions(host){
     const deviceCapabilities = noPrinter(20, -1);
 
     return {
+        /**
+         * BOOL GetDefaultPrinterW(LPWSTR pszBuffer, LPDWORD pcchBuffer)
+         *
+         * There is no default printer: FALSE, ERROR_FILE_NOT_FOUND as the
+         * documentation says, and no characters needed. A missing count is
+         * ERROR_INVALID_PARAMETER first.
+         */
+        GetDefaultPrinterW: noDefaultPrinter,
+        /** BOOL GetDefaultPrinterA(LPSTR, LPDWORD): GetDefaultPrinterW */
+        GetDefaultPrinterA: noDefaultPrinter,
+        /**
+         * BOOL SetDefaultPrinterW(LPCWSTR pszPrinter)
+         *
+         * No printer by any name to make the default, and NULL (the first
+         * printer there is) finds none either.
+         */
+        SetDefaultPrinterW: noPrinter(4),
+        /** BOOL SetDefaultPrinterA(LPCSTR): SetDefaultPrinterW */
+        SetDefaultPrinterA: noPrinter(4),
+
         /** BOOL OpenPrinterA(LPSTR pPrinterName, LPHANDLE phPrinter, LPPRINTER_DEFAULTSA) */
         OpenPrinterA: noPrinter(12),
         /** BOOL OpenPrinterW(LPWSTR, LPHANDLE, LPPRINTER_DEFAULTSW): OpenPrinterA */
