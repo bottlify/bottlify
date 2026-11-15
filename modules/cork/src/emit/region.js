@@ -1176,6 +1176,8 @@ export class RegionEmitter {
         this.wideLocals = new Map();
         /** @type {Map<number, number>} */
         this.labels = new Map(this.region.blocks.map((block, index)=>[block.start, index]));
+        /** `successorsOf`, once asked. @type {number[][] | null} */
+        this.successors = null;
         /** By block start, its index in the region as formed, for a diagnostic build's marks. */
         this.formedIndex = import.meta.BOTTLIFY_DIAGNOSTICS !== false && context.markBlocks
             ? new Map(region.blocks.map((block, index)=>[block.start, index])) : null;
@@ -2346,6 +2348,32 @@ export class RegionEmitter {
     }
 
     /**
+     * By block, the blocks of this function its jumps reach (`jumpsOf`), worked out
+     * once: the store and live passes walk the same edges.
+     *
+     * @returns {number[][]}
+     */
+    successorsOf(){
+        if (this.successors === null)
+        {
+            this.successors = this.region.blocks.map(block=>{
+                /** @type {number[]} */
+                const reached = [];
+                for (const target of jumpsOf(block, this.returns, this.callReturn, this.labels))
+                {
+                    const at = this.labels.get(target);
+                    if (at !== undefined)
+                    {
+                        reached.push(at);
+                    }
+                }
+                return reached;
+            });
+        }
+        return this.successors;
+    }
+
+    /**
      * What each way out of the region and each `ret` to its call store, and what
      * each call's return reloads (`pathStores`). A way out stores what some way
      * to it wrote since the state block last held it -- the run's start, or a
@@ -2441,11 +2469,7 @@ export class RegionEmitter {
         // What is read before written from the start of each block on, the way a
         // call's return goes on into its block after the call, its reloads.
         const blocks = this.region.blocks;
-        const next = blocks.map(block=>jumpsOf(block, this.returns, this.callReturn, this.labels)
-            .flatMap(target=>{
-                const at = this.labels.get(target);
-                return at === undefined ? [] : [at];
-            }));
+        const next = this.successorsOf();
         /** @type {Map<number, CallSite[]>} */
         const sitesOf = new Map();
         for (const site of this.sites)
@@ -2556,11 +2580,7 @@ export class RegionEmitter {
     writtenOnEntry(){
         const blocks = this.region.blocks;
         const into = blocks.map(()=>new LocalSet());
-        const ways = blocks.map(block=>jumpsOf(block, this.returns, this.callReturn, this.labels)
-            .flatMap(target=>{
-                const at = this.labels.get(target);
-                return at === undefined ? [] : [at];
-            }));
+        const ways = this.successorsOf();
         const work = blocks.map((_, i)=>i);
         const queued = new Set(work);
         while (work.length > 0)
@@ -2649,7 +2669,7 @@ export class RegionEmitter {
      * @returns {Set<number>}
      */
     reachedInLoops(starts){
-        const index = new Map(this.region.blocks.map((block, at)=>[block.start, at]));
+        const index = this.labels;
         const seen = new Set();
         const work = starts.filter(at=>this.interior.has(at));
         while (work.length > 0)
