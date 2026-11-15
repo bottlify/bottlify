@@ -17,7 +17,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { CORPUS, load, machine, run } from '../testing/long-machine.js';
-import { wide } from '../testing/memory64.js';
+import { ifRoom } from '../testing/memory64.js';
 import { fingerprint } from '../helpers.js';
 import { codeRangesAt, pageFlagsAt } from '../runtime/layout.js';
 import { CRT_DICTIONARY } from '../crt-dictionary.js';
@@ -261,7 +261,7 @@ for (const where of WHERE)
     {
         const name = /** @type {keyof typeof FUNCTIONS} */ (does === 'memcpy' ? 'memmove' : does);
         test(`${where.title} ${does}: seeded calls answer the same made as the operation as`
-            + ' through the body', wide(()=>calls(where, name, does)));
+            + ' through the body', ifRoom(()=>calls(where, name, does)));
     }
 }
 
@@ -364,7 +364,7 @@ function runChkstk(where, size, limit, helpers){
 for (const where of [{ high: 0 }, { window: 2 ** 33, high: 2 ** 32 }])
 {
     test(`long mode's __chkstk${where.window === undefined ? '' : ' in a wide window'}: made as`
-        + ' the operation as through the body', wide(()=>{
+        + ' the operation as through the body', ifRoom(()=>{
         const helpers = [{ name: '__chkstk', does: 'chkstk64', bits: 64, length: CHKSTK.length,
             hash: fingerprint(at=>CHKSTK[at] ?? 0, 0, CHKSTK.length) }];
         let formed = 0;
@@ -445,7 +445,7 @@ function runCookie(where, cookieValue, argument, helpers){
 for (const where of [{ high: 0 }, { window: 2 ** 33, high: 2 ** 32, codeHigh: 2 ** 32 }])
 {
     test(`long mode's __security_check_cookie${where.window === undefined ? ''
-        : ' in a wide window'}: made as the test as through the body`, wide(()=>{
+        : ' in a wide window'}: made as the test as through the body`, ifRoom(()=>{
         const [entry] = CRT_DICTIONARY.filter(one=>one.does === 'gscookie64');
         let formed = 0;
         for (const [cookieValue, argument] of /** @type {[bigint, bigint][]} */ ([
@@ -463,7 +463,7 @@ for (const where of [{ high: 0 }, { window: 2 ** 33, high: 2 ** 32, codeHigh: 2 
 }
 
 test('long mode\'s call through an import slot to a memset the dictionary knows is made as the'
-    + ' operation, and calls whatever function the slot holds once it is written', ()=>{
+    + ' operation, and calls whatever function the slot holds once it is written', ifRoom(()=>{
     const codeAt = CORPUS.codeAt;
     const slot = AREA + 0x900;
     const target = AREA + 0x1000;
@@ -505,4 +505,4 @@ test('long mode\'s call through an import slot to a memset the dictionary knows 
     assert.deepEqual(body.bytes, [...new Array(64).fill(2), 0], 'the first call fills, then none');
     assert.deepEqual({ ...made, retired: 0 }, { ...body, retired: 0 });
     assert.ok(made.retired < body.retired, `formed: ${made.retired} of ${body.retired} retired`);
-});
+}));

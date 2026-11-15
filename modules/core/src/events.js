@@ -224,6 +224,23 @@ export function createEvents(){
             return undefined;
         },
 
+        /**
+         * Takes back what is kept for a name's first subscriber and is no longer
+         * so: a process's sound table once the process is gone. Kept, it would
+         * be handed to a subscriber that comes later, and held until then - a
+         * table of 20 MB for every child of a run nobody plays the sound of.
+         *
+         * @param {string} name
+         * @param {(payload: any) => boolean} match  true for a payload to take back
+         */
+        withdraw(name, match){
+            const kept = unheard.get(name);
+            if (kept)
+            {
+                unheard.set(name, kept.filter(payload=>!match(payload)));
+            }
+        },
+
         /** @param {string} name */
         listening: name=>listeners(name).length > 0,
 

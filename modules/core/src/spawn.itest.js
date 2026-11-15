@@ -149,6 +149,40 @@ test('a child starts from its parent\'s registry, and the parent keeps its own a
 test('a parent waiting on its child goes on after the child exits, with what it left',
     { timeout: 120000 }, t=>spawnOn(t));
 
+test('a child\'s sound table is not kept for a speaker that never came, once the child is gone',
+    { timeout: 120000 }, async t=>{
+        // Kept for a first subscriber, every child's table of 20 MB stayed held
+        // for the run's life where nobody played its sound: a setup's dozens of
+        // helpers, in a run with no speaker, held hundreds of megabytes.
+        const [parent, child] = await Promise.all([
+            readFile(new URL('../test/fixtures/spawn.exe', import.meta.url)),
+            readFile(new URL('../test/fixtures/spawn_child.exe', import.meta.url)),
+        ]);
+        const app = await createApp({
+            executable: new Uint8Array(parent),
+            imagePath: 'C:\\App\\spawn.exe',
+            storage: { load: async()=>({
+                files: [{ path: 'C:\\App\\spawn_child.exe', bytes: new Uint8Array(child) }],
+            }) },
+        });
+        t.after(()=>app.dispose());
+        /** @type {string[]} */
+        const ended = [];
+        app.on('process-resumed', (/** @type {any} */ event)=>ended.push(event.image));
+        assert.equal(await app.run({ timeoutMs: 120_000 }), 0);
+        const run = app.audio.memory();
+        if (!run || !('table' in run))
+        {
+            t.skip('this build has no sound tables of its own for a process');
+            return;
+        }
+        assert.equal(ended.length, 2, 'both children ran and are gone');
+        /** @type {any[]} */
+        const handed = [];
+        app.on('sound-table', (/** @type {any} */ event)=>handed.push(event));
+        assert.deepEqual(handed, [], 'a speaker connected now is handed no gone child\'s table');
+    });
+
 /**
  * The origin's file system as a worker has it: a file with a synchronous
  * access handle open refuses a second one, and a writable, as OPFS does.

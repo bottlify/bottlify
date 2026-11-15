@@ -1,11 +1,16 @@
 # .NET Framework as a shared layer
 
-Status: steps 1 (need, A249) and 2 (mount) done 2026-11-15 and 2026-11-14. The build's two runs
-work by hand in Node, no launcher yet: 4.8's setup on a Windows 7 machine, then `ngen
-executeQueuedItems` to an empty queue (140 native images, a 797 MB layer); a console program prints
-and exits on that layer under 7 and XP alike (2026-11-14). A WinForms program stops at its first
-font: the engine's GDI+ has no `GdipCreateFontFromLogfontW`, nor any font or drawing. The rest: no
-code. Numbers marked *(not measured)* are estimates.
+Status: steps 1 (need, A249) and 2 (mount) done 2026-11-15 and 2026-11-14; the launcher mounts a
+prebuilt layer the server has and starts a bottle on it (a console program on XP, in a browser).
+Steps 3-5 have code in the launcher (2026-11-15: the installer served from `/redist/`, the build
+by stages with its modal, the layer kept in the origin's file system) and are not verified past the
+setup: in a browser the setup's run commits about twice what the engine's own memory account says
+(6-7 GB against 3), and a browser with an 8 GB ceiling took the page 15 to 45 minutes in, with no
+ngen run yet; Node commits the same 7.4 GB during the setup. The build's two runs work by hand in
+Node: 4.8's setup on a Windows 7 machine, then `ngen executeQueuedItems` to an empty queue (140
+native images, a 797 MB layer); a console program prints and exits on that layer under 7 and XP
+alike (2026-11-14). A WinForms program stops at its first font: the engine's GDI+ has no
+`GdipCreateFontFromLogfontW`, nor any font or drawing. Numbers marked *(not measured)* are estimates.
 
 ## Why
 

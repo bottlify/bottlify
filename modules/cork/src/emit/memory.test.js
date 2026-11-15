@@ -10,7 +10,9 @@ import { createTestMachine } from '../testing/machine.js';
 import { PageFlag } from '../runtime/pages.js';
 import { planLoop, planRegion, readUndoLog, resetUndoLog, spansOf, wrappedAddress }
     from './memory.js';
-import { Exit, emitRegion, enterRegion, mathImports, prepareModule } from './region.js';
+import {
+    Exit, emitRegion, enterRegion, mathImports, planStructure, prepareModule,
+} from './region.js';
 import { buildHelpersModule } from './helpers.js';
 import { formRegion, inlineReturns } from '../region.js';
 import { ModuleBuilder } from '../wasm/encoder.js';
@@ -752,18 +754,16 @@ function regionOf(bytes){
 }
 
 /**
- * Translates the region at `entry` over a test machine's memory, with the
- * region's structure (its loops as wasm loops) on or off, and answers a
+ * Translates the region at `entry` over a test machine's memory, and answers a
  * runner from any of its block starts.
  *
  * @param {ReturnType<typeof createTestMachine>} m @param {number} entry
- * @param {boolean} structure
  */
-function translateWith(m, entry, structure){
+function translateWith(m, entry){
     const bytes = new Uint8Array(m.memory.buffer);
     const region = formRegion(a=>bytes[m.layout.ramBase + a], entry);
     const builder = new ModuleBuilder();
-    const context = prepareModule(builder, m.layout, features(), {}, { structure, precise: true });
+    const context = prepareModule(builder, m.layout, features(), {}, { precise: true });
     const translation = emitRegion(context, region);
     builder.exportFunction('region', translation.functionIndex);
     const helpers = new WebAssembly.Instance(new WebAssembly.Module(
@@ -817,10 +817,10 @@ function interpretRest(m){
  * bytes over `[0x4000, 0x8000)` agree.
  *
  * @param {(m: ReturnType<typeof createTestMachine>) => void} setup
- * @param {number} entry @param {boolean} structure @param {string} what
+ * @param {number} entry @param {string} what
  * @returns {{ kind: number, vector: number }} the translated run's exit
  */
-function againstInterpreter(setup, entry, structure, what){
+function againstInterpreter(setup, entry, what){
     const names = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
     const alone = createTestMachine();
     setup(alone);
@@ -828,9 +828,9 @@ function againstInterpreter(setup, entry, structure, what){
     const expected = interpretRest(alone);
     const machine = createTestMachine();
     setup(machine);
-    const unit = translateWith(machine, CODE, structure);
+    const unit = translateWith(machine, CODE);
     const exit = (unit.translation.labels.has(entry) ? unit
-        : translateWith(machine, entry, structure)).run(entry);
+        : translateWith(machine, entry)).run(entry);
     const ended = exit.kind === Exit.FAULT
         ? `fault ${exit.vector} at ${machine.eip().toString(16)}`
         : exit.kind === Exit.HALT ? `halt at ${machine.eip().toString(16)}`
@@ -863,22 +863,18 @@ test('a window reaches a block only its block leads to, tested there only when e
         assert.deepEqual(plan.entry[1].map(w=>[w.base, w.lo, w.width]), [[3, 0x7fc, 4]],
             'entered elsewhere, B1 tests its own load\'s part');
         assert.equal(plan.entry[2].length, 0);
-        for (const structure of [false, true])
+        for (const [ebx, ecx, entry] of [[0x4a00, 0, CODE], [0x4a00, 1, CODE],
+            [0x4a00, 1, CODE + 6], [0x4000, 1, CODE + 6], [0x4000, 1, CODE]])
         {
-            for (const [ebx, ecx, entry] of [[0x4a00, 0, CODE], [0x4a00, 1, CODE],
-                [0x4a00, 1, CODE + 6], [0x4000, 1, CODE + 6], [0x4000, 1, CODE]])
-            {
-                const exit = againstInterpreter(m=>{
-                    m.write(CODE, bytes);
-                    m.setReg('esp', STACK);
-                    m.setReg('ebx', ebx);
-                    m.setReg('ecx', ecx);
-                    m.pages.markRange(0x5000, 0x1000, PageFlag.INACCESSIBLE);
-                }, entry, structure, `ebx ${ebx.toString(16)} ecx ${ecx} at ${entry.toString(16)}`
-                    + ` structure ${structure}`);
-                assert.equal(exit.kind === Exit.HALT, ebx === 0x4000,
-                    'a window reaching the page leaves, the path through it taken or not');
-            }
+            const exit = againstInterpreter(m=>{
+                m.write(CODE, bytes);
+                m.setReg('esp', STACK);
+                m.setReg('ebx', ebx);
+                m.setReg('ecx', ecx);
+                m.pages.markRange(0x5000, 0x1000, PageFlag.INACCESSIBLE);
+            }, entry, `ebx ${ebx.toString(16)} ecx ${ecx} at ${entry.toString(16)}`);
+            assert.equal(exit.kind === Exit.HALT, ebx === 0x4000,
+                'a window reaching the page leaves, the path through it taken or not');
         }
     });
 
@@ -918,7 +914,7 @@ test('a frame through esp and ebp, with the leave and ret closing it, is one win
             {
                 m.pages.markCode(0x4ff0, 0x10);
             }
-        }, CODE, false, `esp ${esp.toString(16)} ${shut ? 'inaccessible' : 'code'}`);
+        }, CODE, `esp ${esp.toString(16)} ${shut ? 'inaccessible' : 'code'}`);
         assert.equal(exit.kind === Exit.UNTRANSLATED && exit.vector === 1, esp === 0x5008,
             'held before the push where the window is not clean');
     }
@@ -942,21 +938,17 @@ test('two registers made one value before a block are not one window in it', ()=
     const planned = [...plan.blocks[1].entries()];
     assert.deepEqual(planned.map(([i, p])=>[i, p.checks.length, p.access !== null]),
         [[0, 1, true], [2, 0, true]]);
-    for (const structure of [false, true])
+    for (const [eax, edx, entry] of [[0, 0x4f00, CODE], [0x4ffc, 0x4f00, CODE + 7],
+        [0x4e00, 0x4f00, CODE + 7], [0x4e00, 0x5040, CODE + 7]])
     {
-        for (const [eax, edx, entry] of [[0, 0x4f00, CODE], [0x4ffc, 0x4f00, CODE + 7],
-            [0x4e00, 0x4f00, CODE + 7], [0x4e00, 0x5040, CODE + 7]])
-        {
-            againstInterpreter(m=>{
-                m.write(CODE, bytes);
-                m.setReg('esp', STACK);
-                m.setReg('eax', eax);
-                m.setReg('ecx', 1);
-                m.setReg('edx', edx);
-                m.pages.markRange(0x5000, 0x1000, PageFlag.INACCESSIBLE);
-            }, entry, structure, `eax ${eax.toString(16)} edx ${edx.toString(16)} at `
-                + `${entry.toString(16)} structure ${structure}`);
-        }
+        againstInterpreter(m=>{
+            m.write(CODE, bytes);
+            m.setReg('esp', STACK);
+            m.setReg('eax', eax);
+            m.setReg('ecx', 1);
+            m.setReg('edx', edx);
+            m.pages.markRange(0x5000, 0x1000, PageFlag.INACCESSIBLE);
+        }, entry, `eax ${eax.toString(16)} edx ${edx.toString(16)} at ${entry.toString(16)}`);
     }
 });
 
@@ -980,28 +972,29 @@ test('a trap carries no window, a call and a formed-in return do; a join takes t
         const region = regionOf(bytes);
         const { blocks } = region;
         assert.deepEqual(blocks.map(block=>block.start - CODE), [0, 7, 14, 19, 27, 28]);
-        const plan = planRegion(blocks, { entry: CODE, backward: true,
-            returns: inlineReturns(region) });
-        assert.deepEqual(plan.inherit, [-1, -1, 1, 2, 5, 3], 'B1 past the trap from none;'
-            + ' B2 from B1, its one way in; B3 from B2, the block before it, not B1; the'
-            + ' callee B5 from its call; B4 from the return');
+        // Planned in the order the region is emitted, the callee before the
+        // block its return comes back to; read back by address.
+        const returns = inlineReturns(region);
+        const { order } = planStructure(region, returns);
+        const plan = planRegion(order.map(at=>blocks[at]), { entry: CODE, returns });
+        const from = (/** @type {number} */ k)=>plan.inherit[order.indexOf(k)];
+        assert.deepEqual(blocks.map((_, k)=>(from(k) < 0 ? -1 : order[from(k)])),
+            [-1, -1, 1, 2, 5, 3], 'B1 past the trap from none; B2 from B1, its one way in; B3'
+            + ' from B2, the block before it, not B1; the callee B5 from its call; B4 from the'
+            + ' return');
         // The join's own load and the callee's are B1's window's: B1's way into
         // B3 goes through B3's test of them.
-        assert.deepEqual(plan.entry[3].map(w=>[w.lo, w.width]), [[16, 8]]);
-        for (const structure of [false, true])
+        assert.deepEqual(plan.entry[order.indexOf(3)].map(w=>[w.lo, w.width]), [[16, 8]]);
+        for (const [ebx, ecx] of [[0x4fe8, 0], [0x4fe8, 1], [0x4fec, 1], [0x4fec, 0],
+            [0x4ff0, 0]])
         {
-            for (const [ebx, ecx] of [[0x4fe8, 0], [0x4fe8, 1], [0x4fec, 1], [0x4fec, 0],
-                [0x4ff0, 0]])
-            {
-                againstInterpreter(m=>{
-                    m.write(CODE, bytes);
-                    m.setReg('esp', 0x4800);
-                    m.setReg('ebx', ebx);
-                    m.setReg('ecx', ecx);
-                    m.pages.markRange(0x5000, 0x1000, PageFlag.INACCESSIBLE);
-                }, CODE + 7, structure,
-                `ebx ${ebx.toString(16)} ecx ${ecx} structure ${structure}`);
-            }
+            againstInterpreter(m=>{
+                m.write(CODE, bytes);
+                m.setReg('esp', 0x4800);
+                m.setReg('ebx', ebx);
+                m.setReg('ecx', ecx);
+                m.pages.markRange(0x5000, 0x1000, PageFlag.INACCESSIBLE);
+            }, CODE + 7, `ebx ${ebx.toString(16)} ecx ${ecx}`);
         }
     });
 
@@ -1028,21 +1021,18 @@ test('a branch from up the chain goes past a join\'s test where its group covers
         const far = planRegion(regionOf(bytes(0x800)).blocks, { entry: CODE });
         assert.equal(far.skips[2], undefined,
             'esp + 0x800 lies outside the group: the branch goes through S\'s test');
-        for (const structure of [false, true])
+        for (const [offset, esp, eax, ecx] of [[0x10, 0x4f00, 1, 2], [0x10, 0x4f00, 2, 1],
+            [0x10, 0x4fd8, 1, 2], [0x800, 0x4f00, 1, 2], [0x800, 0x4f00, 2, 1],
+            [0x800, 0x4700, 1, 2]])
         {
-            for (const [offset, esp, eax, ecx] of [[0x10, 0x4f00, 1, 2], [0x10, 0x4f00, 2, 1],
-                [0x10, 0x4fd8, 1, 2], [0x800, 0x4f00, 1, 2], [0x800, 0x4f00, 2, 1],
-                [0x800, 0x4700, 1, 2]])
-            {
-                againstInterpreter(m=>{
-                    m.write(CODE, bytes(offset));
-                    m.setReg('esp', esp);
-                    m.setReg('eax', eax);
-                    m.setReg('ecx', ecx);
-                    m.pages.markRange(0x5000, 0x1000, PageFlag.INACCESSIBLE);
-                }, CODE, structure, `lea esp+${offset.toString(16)} esp ${esp.toString(16)}`
-                    + ` eax ${eax} ecx ${ecx} structure ${structure}`);
-            }
+            againstInterpreter(m=>{
+                m.write(CODE, bytes(offset));
+                m.setReg('esp', esp);
+                m.setReg('eax', eax);
+                m.setReg('ecx', ecx);
+                m.pages.markRange(0x5000, 0x1000, PageFlag.INACCESSIBLE);
+            }, CODE, `lea esp+${offset.toString(16)} esp ${esp.toString(16)}`
+                + ` eax ${eax} ecx ${ecx}`);
         }
     });
 
@@ -1074,68 +1064,24 @@ test('an entry test that leaves hands the x87 stack over as the block starts wit
         0xd9, 0x1d, 0x14, 0x60, 0, 0,       // fstp dword [0x6014]
         0xf4,                               // hlt
     ];
-    const plan = planRegion(regionOf(bytes).blocks, { entry: CODE, backward: true });
+    const plan = planRegion(regionOf(bytes).blocks, { entry: CODE });
     assert.deepEqual(plan.inherit, [-1, 0, 0, 2, 1, 4, 4]);
     assert.deepEqual(plan.entry[4].map(w=>[w.lo, w.width]), [[0x7fc, 4], [0x6010, 8]],
         'U\'s load off ebx, and T\'s stores into the window B0\'s loads opened');
-    for (const structure of [false, true])
+    for (const [ecx, edi, ebx] of [[1, 1, 0x4020], [1, 1, 0x4000], [0, 1, 0x4020],
+        [1, 0, 0x4020]])
     {
-        for (const [ecx, edi, ebx] of [[1, 1, 0x4020], [1, 1, 0x4000], [0, 1, 0x4020],
-            [1, 0, 0x4020]])
-        {
-            const exit = againstInterpreter(m=>{
-                m.write(CODE, bytes);
-                m.write(0x6000, [0, 0, 0x80, 0x3f, 0, 0, 0, 0x40]);  // 1.0, 2.0
-                m.setReg('esp', STACK);
-                m.setReg('ebx', ebx);
-                m.setReg('ecx', ecx);
-                m.setReg('edi', edi);
-                m.pages.markRange(0x5000, 0x1000, PageFlag.INACCESSIBLE);
-            }, CODE, structure, `ecx ${ecx} edi ${edi} ebx ${ebx.toString(16)}`
-                + ` structure ${structure}`);
-            assert.equal(exit.kind === Exit.UNTRANSLATED && exit.vector === 1,
-                ecx === 1 && edi === 1 && ebx === 0x4020, 'left at S\'s test');
-        }
-    }
-});
-
-test('a jump back carries a window only where the dispatch takes it past the test', ()=>{
-    const bytes = [
-        0xeb, 0x07,                         // jmp B2
-        0x8b, 0x43, 0x04,                   // B1: mov eax, [ebx+4]
-        0x8b, 0x53, 0x08,                   // mov edx, [ebx+8]
-        0xf4,                               // hlt
-        0x8b, 0x0b,                         // B2: mov ecx, [ebx]
-        0x85, 0xc9,                         // test ecx, ecx
-        0x75, 0xf3,                         // jnz B1
-        0xf4,                               // hlt
-    ];
-    const blocks = regionOf(bytes).blocks;
-    const back = planRegion(blocks, { entry: CODE, backward: true });
-    assert.deepEqual(back.inherit, [-1, 2, 0, 2]);
-    assert.deepEqual(back.entry[1].map(w=>[w.lo, w.width]), [[4, 8]]);
-    assert.equal(back.blocks[1].get(0)?.checks.length, 0);
-    const not = planRegion(blocks, { entry: CODE, backward: false });
-    assert.deepEqual(not.inherit, [-1, -1, 0, 2]);
-    for (const structure of [false, true])
-    {
-        for (const [ebx, value] of [[0x4ff8, 1], [0x4f00, 1], [0x4ff8, 0], [0x4000, 1]])
-        {
-            againstInterpreter(m=>{
-                m.write(CODE, bytes);
-                m.setReg('esp', STACK);
-                m.setReg('ebx', ebx);
-                m.writeU32(ebx, value);
-                m.pages.markRange(0x5000, 0x1000, PageFlag.INACCESSIBLE);
-            }, CODE, structure, `ebx ${ebx.toString(16)} [ebx] ${value} structure ${structure}`);
-            againstInterpreter(m=>{
-                m.write(CODE, bytes);
-                m.setReg('esp', STACK);
-                m.setReg('ebx', ebx);
-                m.pages.markRange(0x5000, 0x1000, PageFlag.INACCESSIBLE);
-            }, CODE + 2, structure,
-            `entered at B1, ebx ${ebx.toString(16)} structure ${structure}`);
-        }
+        const exit = againstInterpreter(m=>{
+            m.write(CODE, bytes);
+            m.write(0x6000, [0, 0, 0x80, 0x3f, 0, 0, 0, 0x40]);  // 1.0, 2.0
+            m.setReg('esp', STACK);
+            m.setReg('ebx', ebx);
+            m.setReg('ecx', ecx);
+            m.setReg('edi', edi);
+            m.pages.markRange(0x5000, 0x1000, PageFlag.INACCESSIBLE);
+        }, CODE, `ecx ${ecx} edi ${edi} ebx ${ebx.toString(16)}`);
+        assert.equal(exit.kind === Exit.UNTRANSLATED && exit.vector === 1,
+            ecx === 1 && edi === 1 && ebx === 0x4020, 'left at S\'s test');
     }
 });
 
@@ -1253,10 +1199,8 @@ test('random programs of several blocks, entered at any block, match the interpr
         const code = next(3) === 0;
         const fill = Array.from({ length: 0x4000 }, ()=>next(256));
         const entry = next(2) === 0 ? CODE : starts[next(count)];
-        const structure = next(2) === 0;
         const what = `round ${round}: ${bytes.map(x=>x.toString(16).padStart(2, '0')).join(' ')}`
-            + ` regs ${JSON.stringify(regs)} shut ${shut} code ${code} entry ${entry.toString(16)}`
-            + ` structure ${structure}`;
+            + ` regs ${JSON.stringify(regs)} shut ${shut} code ${code} entry ${entry.toString(16)}`;
         againstInterpreter(m=>{
             m.write(CODE, bytes);
             m.write(0x4000, fill);
@@ -1267,7 +1211,7 @@ test('random programs of several blocks, entered at any block, match the interpr
                 m.pages.markCode(0x4f80, 0x20);
                 m.pages.markCode(0x6f80, 0x20);
             }
-        }, entry, structure, what);
+        }, entry, what);
     }
 });
 

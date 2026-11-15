@@ -11,9 +11,22 @@ import { createTestMachine } from '../testing/machine.js';
 import { formRegion, inlineReturns } from '../region.js';
 import { ModuleBuilder } from '../wasm/encoder.js';
 import { ownLayout } from '../runtime/layout.js';
+import { blockState, interpret } from '../interp.js';
 import {
     Exit, RegionEmitter, deadFlagPass, emitRegion, liveFlagsOut, planStructure, prepareModule,
 } from './region.js';
+
+/**
+ * Runs the interpreter from the state a machine holds to its halt.
+ * @param {ReturnType<typeof createTestMachine>} m
+ */
+function interpretToHalt(m){
+    const state = blockState({ memory: m.memory, layout: m.layout });
+    state.syncIn();
+    interpret(state, 100_000);
+    assert.ok(state.halted, `halted at ${state.eip.toString(16)}`);
+    state.syncOut();
+}
 
 const CODE = 0x1000;
 const DATA = 0x3000;
@@ -337,16 +350,6 @@ test('a loop of several blocks runs as a wasm loop to its halt', ()=>{
     assert.equal(m.reg('ecx'), 0);
     // The mov, two turns of five (the jl taken), three of six, the hlt.
     assert.equal(m.counter(), 1 + 5 + 5 + 6 + 6 + 6 + 1);
-});
-
-test('under the flat dispatch a block in the middle of a loop is entered by its label', ()=>{
-    const m = createTestMachine({ structure: false });
-    m.write(CODE, LOOP);
-    m.setReg('ecx', 1);
-    const exit = m.translate(CODE).run(S, 1000);
-    assert.equal(exit.kind, Exit.HALT);
-    assert.equal(m.reg('ecx'), 0);
-    assert.equal(m.counter(), 3, 'dec, jnz not taken, hlt');
 });
 
 test('a spent budget leaves on the back edge of a loop at its head, and the rest carries on', ()=>{
@@ -853,7 +856,7 @@ test('a structured region runs its nested loops to the end from any budget, each
     + ' it was left', ()=>{
     for (let budget = 1; budget <= 80; budget++)
     {
-        const m = createTestMachine({ structure: true });
+        const m = createTestMachine();
         m.write(CODE, NESTED);
         const unit = m.translate(CODE);
         let exit = unit.run(CODE, budget);
@@ -872,7 +875,7 @@ test('a structured region runs its nested loops to the end from any budget, each
 
 test('a block inside a loop is entered by its copy, which goes on into the loop at its head',
     ()=>{
-        const m = createTestMachine({ structure: true });
+        const m = createTestMachine();
         m.write(CODE, LOOP);
         // The copy leaves at the head through the entry hash, as any transfer does.
         const unit = m.translate(CODE, { hash: true });
@@ -889,7 +892,7 @@ test('a block inside a loop is entered by its copy, which goes on into the loop 
     });
 
 test('without its copies, a block inside a loop has no entry, and the region runs the same', ()=>{
-    const m = createTestMachine({ structure: true });
+    const m = createTestMachine();
     m.write(CODE, LOOP);
     const unit = m.translate(CODE, { copies: false });
     assert.equal(unit.translation.copiesIndex, -1, 'no function of copies');
@@ -915,7 +918,7 @@ test('a loop onto itself inside another loop has an entry, through the head arou
     const { order, loops } = planStructure(region, new Map());
     assert.deepEqual(order, [0, 1, 2, 3, 4]);
     assert.deepEqual([...loops].sort((a, b)=>a[0] - b[0]), [[1, 3], [2, 2]]);
-    const m = createTestMachine({ structure: true });
+    const m = createTestMachine();
     m.write(CODE, SELF);
     const unit = m.translate(CODE, { copies: false });
     assert.deepEqual([...unit.translation.closed], [CODE + 16], 'only the outer loop\'s latch');
@@ -981,7 +984,7 @@ test('only the blocks a way in from outside reaches before a loop\'s head are co
 
 test('a nested loop\'s head is entered through the head of the loop around it', ()=>{
     const I = CODE + 10;
-    const m = createTestMachine({ structure: true });
+    const m = createTestMachine();
     m.write(CODE, NESTED);
     m.setReg('ecx', 2);
     m.setReg('edx', 3);
@@ -992,7 +995,7 @@ test('a nested loop\'s head is entered through the head of the loop around it', 
     assert.deepEqual([m.reg('eax'), m.reg('ecx'), m.reg('edx')], [7, 0, 0]);
 });
 
-test('every block start of a structured region runs as the flat dispatch runs it', ()=>{
+test('every block start of a structured region runs as the interpreter runs it', ()=>{
     // mov ecx, 4; L: call F; dec ecx; jnz L; hlt; F: add eax, 3; ret -- a formed-in callee
     // whose return jumps back into the loop.
     const CALLS = [0xb9, 4, 0, 0, 0, 0xe8, 4, 0, 0, 0, 0x49, 0x75, 0xf8, 0xf4, 0x83, 0xc0, 0x03,
@@ -1012,27 +1015,35 @@ test('every block start of a structured region runs as the flat dispatch runs it
         {
             for (const start of starts)
             {
-                /** @type {number[][]} */
-                const ends = [];
-                for (const structure of [true, false])
-                {
-                    const m = createTestMachine({ structure });
+                /** @param {ReturnType<typeof createTestMachine>} m */
+                const begin = m=>{
                     m.write(CODE, program);
                     // A return with nothing called comes back to the hlt of CALLS.
                     m.setReg('esp', 0x80000);
                     m.writeU32(0x80000, CODE + 0x0d);
                     m.setReg('ecx', 2);
                     m.setReg('edx', 1);
-                    const unit = m.translate(entry, { hash: true });
-                    if (!unit.translation.labels.has(start))
-                    {
-                        break;
-                    }
-                    const exit = unit.run(start, 10_000);
-                    ends.push([exit.kind, m.eip(), m.counter(),
-                        ...['eax', 'ecx', 'edx', 'ebx', 'esp'].map(name=>m.reg(name))]);
+                };
+                const m = createTestMachine();
+                begin(m);
+                const unit = m.translate(entry, { hash: true });
+                if (!unit.translation.labels.has(start))
+                {
+                    continue;
                 }
-                assert.deepEqual(ends[0], ends[1], `${program.length}-byte program, region at `
+                // Translated from the block, the interpreter going on where the
+                // region leaves, against the interpreter alone from it.
+                if (unit.run(start, 10_000).kind !== Exit.HALT)
+                {
+                    interpretToHalt(m);
+                }
+                const alone = createTestMachine();
+                begin(alone);
+                new DataView(alone.memory.buffer).setUint32(alone.layout.eip, start, true);
+                interpretToHalt(alone);
+                const end = (/** @type {typeof m} */ one)=>[one.eip(),
+                    ...['eax', 'ecx', 'edx', 'ebx', 'esp'].map(name=>one.reg(name))];
+                assert.deepEqual(end(m), end(alone), `${program.length}-byte program, region at `
                     + `${entry.toString(16)}, from ${start.toString(16)}`);
             }
         }

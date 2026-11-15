@@ -20,6 +20,8 @@ typedef unsigned int u32;
 typedef int i32;
 typedef unsigned long long u64;
 typedef long long i64;
+/* The size of an object and of a count of bytes: 32 bits in the x86 builds, 64 in the x64 one. */
+typedef decltype(sizeof 0) usize;
 
 extern "C" {
 __declspec(dllimport) void __stdcall ExitProcess(u32 code);
@@ -28,9 +30,9 @@ __declspec(dllimport) int __stdcall WriteFile(void *file, const void *bytes, u32
     u32 *written, void *overlapped);
 __declspec(dllimport) const char *__stdcall GetCommandLineA(void);
 
-void *memcpy(void *to, const void *from, u32 count);
-void *memset(void *to, int value, u32 count);
-void *memmove(void *to, const void *from, u32 count);
+void *memcpy(void *to, const void *from, usize count);
+void *memset(void *to, int value, usize count);
+void *memmove(void *to, const void *from, usize count);
 }
 
 void say(const char *text);
@@ -80,7 +82,7 @@ static inline u32 bitsOf(double d)
 }
 
 /* Placement new: what gives an object its vtable, with no runtime linked. */
-inline void *operator new(unsigned int, void *where)
+inline void *operator new(usize, void *where)
 {
     return where;
 }

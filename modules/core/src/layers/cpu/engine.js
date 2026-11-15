@@ -224,6 +224,10 @@ export function engineContractProblem(engineModule, url){
  *     the count of answers posted, and the doorbell the engine thread sleeps on. A
  *     thread that is not given its event loop on a timer hears an answer by them
  *     rather than at its next yield. Absent, nothing is rung.
+ * @property {{ at: number, index: number } | null} [sharedCode]  Where the process's record of
+ *     code shared between its executors lies in memory and which executor this runtime is,
+ *     when other executors share its page flags (cork's `shared-code.js`); the cpu layer sets
+ *     it. Absent or null, a process on one executor.
  * @property {() => boolean} [awaited]  Whether another executor waits for this thread's
  *     answer: forming and looking up regions stop at the next region, as when their time is
  *     up, and go on once it is answered. Absent, nothing waits.
@@ -311,7 +315,6 @@ export function engineContractProblem(engineModule, url){
  *     tested once at an entry. Default true.
  * @property {number} [checkedAfter]  Failed shape tests before a region is formed again with no
  *     test. Default 4.
- * @property {boolean} [structure]  A region's loops as wasm loops. Default true.
  * @property {boolean} [looseStacks]  A store through esp alone tests no page while no
  *     translated code lies on a stack. Default true.
  * @property {number} [translators]  Translation workers the runtime opens itself (0: a host's
@@ -338,12 +341,8 @@ export function engineContractProblem(engineModule, url){
  *     the store's hits compiled off the thread, their compiles started and they and a worker's
  *     answers published a few at a call (0: a batch formed and published whole in one call).
  *     Default 4.
- * @property {number} [holdShare]  The share of the engine thread's time over a while that
- *     `holdMs` refills at: what a frame gives up to new code. Default 0.5.
  * @property {number} [yieldChunk]  `createMachine` alone (cork's machine for its tests): the
  *     instructions translated code runs at a time. Default 2^24.
- * @property {number} [interpretChunk]  `createMachine` alone: the instructions its interpreter
- *     runs at a time. Default 2^16.
  * @property {number} [sliceMs]  How long a slice that has interpreted may take. Default 8.
  * @property {'host' | 'virtual'} [clock]  The clock the cork host and its translator take
  *     their decisions by: `host`, the machine's (the default); `virtual`, the instructions the

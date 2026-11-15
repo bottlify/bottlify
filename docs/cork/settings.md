@@ -7,8 +7,14 @@ host passes to wire cork into itself, switches that turn a path off or add an in
 defect or a cost is hunted, and levers tests need to reach a state quickly. None of them is for a
 shipped program to change.
 
+The tables below are written from the one table of them,
+[`SETTINGS`](../../modules/cork/src/runtime/settings.js), by
+`node tools/checks/check-cork-settings.mjs --write`; `npm run check:boundaries` fails where this
+page or the core's `EngineConfig` parts from it.
+
 **What a host passes**
 
+<!-- settings: host -->
 | Setting | Default | What it is |
 | --- | --- | --- |
 | `atomic` | `false` | `lock`-prefixed instructions and `xchg` with memory as wasm atomics: set by the core for a process whose threads run on several executors over one memory. |
@@ -17,10 +23,12 @@ shipped program to change.
 | `workerUrl` | beside the runtime | Where `translator.worker.js` is, when a bundler moves it. |
 | `translators` | 1 | Workers the runtime opens itself; 0 when a host's pool lends them. |
 | `arena` | none | The translation cache arena (`createArena`) every executor of a process shares; absent, the runtime makes its own. |
-| `sharedCode`, `doorbell` | none | Where the process's record of code shared between its executors lies and which executor this runtime is; the words a translation worker rings after it answers. |
+| `sharedCode` | none | Where the process's record of code shared between its executors lies and which executor this runtime is, when other executors share its page flags. |
+| `doorbell` | none | The words a translation worker rings after it answers: the count of answers posted and the bell the engine thread sleeps on. |
 | `tablesZeroed` | `false` | The host made the tables zero itself (a memory just made, or zeroed where they lie): the entry hash is not cleared at the start, which made all of it resident. |
 | `awaited` | none | Whether another executor waits for this one's answer: forming and lookups stop at the next region while it does. |
-| `store`, `bundleId` | none, `'unknown'` | Where translations are kept between runs (the core gives one per bundle in OPFS), and their namespace. |
+| `store` | none | Where translations are kept between runs (the core gives one per bundle in OPFS). |
+| `bundleId` | `'unknown'` | The namespace of the store's records. |
 | `cacheVersion` | the translator's | A version above the translator's own: every record of another version misses. |
 | `feed` | `'frame'` | When candidates are formed: once a frame, or after every slice (`'slice'`, a program that never presents; `createMachine`'s). |
 | `sharedMemory` | `true` where possible | Guest memory a `SharedArrayBuffer` where the page is cross-origin isolated; `false` keeps it private and the program on one executor. |
@@ -28,7 +36,10 @@ shipped program to change.
 | `charge` | none | Where a host bounds what its runtimes hold together: `{ take(bytes), give(bytes) }`. Each module held is taken by its wasm bytes and given back as it is let go; one it has no room for lets those gone longest without running go until there is, and where none is left one module is held past it (`unchargedBytes` in the diagnostics). |
 | `sharedModuleBytes` | 256 MiB | The wasm bytes of compiled batch modules kept for every runtime handed the same `store` (`shared-modules.js`): a process the run starts again instantiates what an earlier one compiled, its lazily compiled and tiered-up code with it (0: none kept). The store's own `hold`, where it has one, keeps each such module alive for runtimes in other threads too. A store made for one runtime (`alone: true`, as a process or an executor in a worker of its own is handed) is kept beside only from the second runtime handed it on; `hold` is called all the same. |
 | `sharedFormed` | 8192 | Formed regions kept for every runtime handed the same `store` that forms as this one does (`shared-forms.js`): a store hit whose every byte and page forming read answer as they did takes the region formed earlier instead of decoding it again (0: none kept). None kept for the first runtime handed a store made for one (`alone: true`). |
-| `crossTailCalls`, `dispatch`, `callDepth` | `true`, `false`, `CallStack.LIMIT` (256) | HACK until iOS ships [WebKit PR #76671](https://github.com/WebKit/WebKit/pull/76671): iOS 27 kills the page on a tail call into another instance ([WebKit bug 325447](https://bugs.webkit.org/show_bug.cgi?id=325447)) and overflows a 512 KB worker stack, so the core gives an iPhone `crossTailCalls: false`, `dispatch: true` and `callDepth: 64`. |
+| `crossTailCalls` | `true` | HACK until iOS ships [WebKit PR #76671](https://github.com/WebKit/WebKit/pull/76671): `false` keeps every tail call inside its own instance, as iOS 27, which kills the page on a tail call into another instance ([WebKit bug 325447](https://bugs.webkit.org/show_bug.cgi?id=325447)), is given it. |
+| `dispatch` | `false` | Each module placed in a range of the table, a transfer inside it a direct tail call: the core gives it an iPhone, with `crossTailCalls: false`. |
+| `callDepth` | 256 | With `callReturn`, the calls made as wasm calls that may wait at once (HACK until iOS ships the same PR): iOS overflows a 512 KB worker stack, so the core gives an iPhone 64. |
+<!-- /settings -->
 
 The core also takes `cork.pool`, `cork.poolPerProcess`, `cork.poolCapacity`, `cork.poolWindowMs` and `cork.poolDriver`
 beside `config`, and `quantum` and `executors` on `createApp`: see
@@ -40,6 +51,7 @@ Each turns a path off to rule it out, or adds an instrument; each is slower or l
 with `blockProfile` or with classes left out (`leaveOut`) keeps no translation store. Several are
 the reference arm of a differential gate.
 
+<!-- settings: debug -->
 | Setting | Default | What it does |
 | --- | --- | --- |
 | `translate` | `true` | `false` interprets everything: the reference a translated run is compared with. |
@@ -49,9 +61,8 @@ the reference arm of a differential gate.
 | `precise` | `false` | x87 exception flags, signalling NaNs, underflow, C1 and the flags an instruction leaves undefined kept as the processor keeps them; the conformance tests and the hardware corpus turn it on. |
 | `exactNaN` | `false` | Every NaN a float operation makes carries x86's sign, not the host's. |
 | `checkReads` | unset | `true` tests every read's pages from the start, `false` never closes a page; unset, reads are wrapped into RAM until the program first faults on a closed page, and tested from then on. |
-| `zeroPage` | false | Whether the guest's first page is the RAM's zeros that nothing writes and a store to faults (the host's `zeroReadsBelow` over it): a tested read inside it reads them in translated code rather than leaving to the host. The cpu layer sets it where that holds. |
+| `zeroPage` | `false` | Whether the guest's first page is the RAM's zeros that nothing writes and a store to faults (the host's `zeroReadsBelow` over it): a tested read inside it reads them in translated code rather than leaving to the host. The cpu layer sets it where that holds. |
 | `looseStacks` | `true` | `false` tests the pages of every store through `esp`. |
-| `structure` | `true` | `false` sends every back edge of a region through its dispatch. |
 | `callReturn` | `true` | `false` makes every call and return out of a region a transfer through the entry hash. |
 | `leafCalls` | `true` | `false` forms no leaf callee into its caller. |
 | `helpers` | `true` | `false` makes every call to a compiler's or C runtime's function the dictionary knows as it is, rather than as what it does (`memcpy` as one `memory.copy`). |
@@ -63,39 +74,48 @@ the reference arm of a differential gate.
 | `wideFirst` | `true` | `false` tests the precision control at every x87 rounding operation. |
 | `floatSingles` | `true` | `false` rounds every single-precision x87 result from a double. |
 | `x87Shapes` | `true` | `false` checks every x87 register access rather than the stack's shape once at an entry. |
-| `blockProfile`, `blockProfileFrom` | `false`, 0 | Execution counts per block, from a given second on, with `mechanisms` (how calls, returns and jumps went) and `forms` (each instruction form's executions and wasm bytes). |
-| `timings` | `false` | The translator's phases timed. |
-| `traceStore` | `false` | Translation store keys put and missed. |
-| `checkStale` | `false` | Regions still published whose bytes no longer form as they did. |
+| `blockProfile` | `false` | Execution counts per block, with `mechanisms` (how calls, returns and jumps went) and `forms` (each instruction form's executions and wasm bytes); a run with it keeps no translation store. |
+| `blockProfileFrom` | 0 | With `blockProfile`: seconds after the runtime is made at which the counts start over. |
+| `timings` | `false` | The translator's phases timed: forming, lookups, emitting, encoding, storing, instantiating and publishing, and the record of long holds. |
+| `traceStore` | `false` | Translation store keys put and missed, as `entry:hash:top`. |
+| `checkStale` | `false` | Regions still published whose bytes no longer form as they did (`staleRegions`). |
 | `countTransfers` | `false` | Transfers between regions through the hash; `transfers` in the diagnostics only with it. |
+<!-- /settings -->
 
 **For tests**
 
 Levers a test sets to reach a state in a few instructions or to make a run repeatable. The
 default is the product's.
 
+<!-- settings: test -->
 | Setting | Default | What it moves |
 | --- | --- | --- |
-| `hotThreshold` | 2 | Jumps to a target before it is a candidate (`createMachine`: 50). |
-| `missThreshold` | 64 | Exits to one address before it is a candidate. |
+| `hotThreshold` | 2 (`createMachine`: 50) | Jumps to a target before it is a candidate. |
+| `missThreshold` | 64 | Untranslated exits to one address before it is a candidate. |
 | `maxQueued` | 8192 | Candidates waiting; past it the coldest is dropped. |
-| `batchRegions`, `maxBatchRegions` | 32, 256 | Regions per wasm module, and the most a deep queue's batch takes. |
+| `batchRegions` | 32 | Regions per wasm module. |
+| `maxBatchRegions` | 256 | The most regions a deep queue's batch takes. |
 | `holdMs` | 4 | The engine thread's time the translator's work may take at a stretch where a worker is wanted (0: a batch formed and published whole in one call). |
-| `holdShare` | 0.5 | The share of the engine thread's time over a while that `holdMs` refills at: what a frame gives up to new code. |
 | `inFlightMs` | 10000 | How long a batch may be with a worker before it is given up. |
-| `volatileAfter`, `volatileWindowMs`, `volatileHoldMs` | 8, 100, 2000 | Writes dropping a page's code within the window before the page is interpreted, and for how long. |
+| `volatileAfter` | 8 | Writes dropping a page's code within `volatileWindowMs` of each other before the page is left to the interpreter. |
+| `volatileWindowMs` | 100 | The window those writes are counted in. |
+| `volatileHoldMs` | 2000 | How long a page is left to the interpreter, twice as long each time it is left again. |
 | `maxRegionBlocks` | 128 | Blocks of the largest region. |
 | `leafBytes` | 512 | Bytes of a leaf callee formed in. |
 | `coldReach` | 4096 | Bytes a callee's conditional branch may reach and still be followed; a farther one is a way out to cold code, not part of the callee (0: every branch followed). |
-| `predictAfter`, `callWindow` | 48, 1024 | Samples of an indirect call before its callees are looked at, and the readings they are kept for. |
-| `relinkAfter`, `relinkRegions`, `relinkCold` | 16, 512, 128 | Batch modules before running regions are gathered into large ones (0: never), regions in each, and in each module of the cold. |
-| `mergeAfter` | 2^16 | Transfers between two modules before they are merged (0: never). |
+| `predictAfter` | 48 | Samples of an indirect call before its callees are looked at. |
+| `callWindow` | 1024 | The readings an indirect call's samples are kept for. |
+| `relinkAfter` | 16 | Batch modules published before the running regions are gathered into large ones (0: never). |
+| `relinkRegions` | 512 | Regions in each gathered module. |
+| `relinkCold` | 128 | Regions in each module a relink builds of those no entry reached lately. |
+| `mergeAfter` | 2^16 | Transfers between two modules before they are merged on the translation worker (0: never). |
 | `checkedAfter` | 4 | Failed x87 shape tests before a region is formed again without one. |
 | `hashSlots` | 2^20 | Slots of the entry hash (12 bytes each). |
-| `yieldChunk` | 10000 | Instructions translated code runs at a time while a slice may end early (`createMachine`: 2^24). |
+| `yieldChunk` | 2^24 | `createMachine` alone (cork's machine for its tests): the instructions translated code runs at a time. |
 | `sliceMs` | 8 | How long an interpreting slice may take. |
 | `wasmInterpreterAfter` | 8192 | Work the JavaScript interpreter does before the wasm tier takes over. |
 | `clock` | `host` | The clock the cork host and the translator decide by. `virtual`: the instructions the guest retired, a million a millisecond, for a slice's length, the time-stamp counter and a page's rewrites, the translation done on the engine thread. The same program then translates and runs the same code on any machine however busy it is; the time it took is the machine's alone. For stands, not the product. |
+<!-- /settings -->
 
 A few sizes stay fixed because translated code or the prebuilt wasm interpreter are built around
 them: the state block's offsets, the page-flag table (one byte per 4 KiB page), the code-granule

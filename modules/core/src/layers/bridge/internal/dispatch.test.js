@@ -1792,15 +1792,14 @@ test('a function\'s host time is its timed calls weighed by its own calls, not t
         // Every call timed: three of 2 ms are 6 ms, where a weight of
         // TRAP_SAMPLE read them as 192 -- what made a call a few times a
         // second look like a fifth of the second.
-        const m = machine();
+        // On the test's own clock: a handler's 2 ms is 2 ms however loaded
+        // the machine running the test is.
+        let clock = 0;
+        const m = machine({ now: ()=>clock });
         m.dispatcher.sampleInterval = ()=>1;
         m.dispatcher.untilSample = 1;
         const spin = ()=>{
-            const until = performance.now() + 2;
-            while (performance.now() < until)
-            {
-                // The handler's own time.
-            }
+            clock += 2;
             return 0;
         };
         m.dispatcher.register(1, { name: 'X!Busy', ...STDCALL, argBytes: 0, handler: spin });
@@ -1812,7 +1811,7 @@ test('a function\'s host time is its timed calls weighed by its own calls, not t
         const busy = m.dispatcher.diagnostics().byFunction
             .find((/** @type {string} */ row)=>row.startsWith('X!Busy '));
         const ms = Number(/ (\d+)ms/.exec(String(busy))?.[1]);
-        assert.ok(ms >= 6 && ms < 40, String(busy));
+        assert.equal(ms, 6, String(busy));
         // One never timed is not measured, rather than none.
         m.dispatcher.sampleInterval = ()=>1000;
         m.dispatcher.untilSample = 1000;

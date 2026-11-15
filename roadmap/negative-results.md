@@ -51,7 +51,7 @@ plus at most five lines below its table of conditions the line cannot carry.
 | 2026-10-26 | long-mode regions laid out with wasm loops instead of the dispatch loop | 7-Zip mean 1513 vs 1523, 5 runs | stale: shared emitter structures them | - |
 | 2026-10-26 | a long-mode store's page test as one load of two pages' flags | 7-Zip 1542-1569 vs 1576-1616 | stale: shared `checkAccess` does it | - |
 | 2026-10-26 | no flag record for a long-mode write whose flags no one reads | 24.36 vs 24.32 G host instructions | stale: shared emitter's pass does it | - |
-| 2026-10-26 | a long-mode region of more or fewer blocks than 256 (16 KiB) | 128: Stockfish -10 %; 512: +7 % Stockfish, -2.6 % 7-Zip | stale: long mode now runs 128 | Stockfish and 7-Zip x64, 5 pairs |
+| 2026-10-26 | a long-mode region of more or fewer blocks than 256 (16 KiB) | 128: Stockfish -10 %; 512: +7 % Stockfish, -2.6 % 7-Zip | measured again 2026-11-15 (below) | Stockfish and 7-Zip x64, 5 pairs |
 | 2026-10-26 | long-mode indirect-call prediction on real programs | zstd 59.3 vs 66.8 MB/s; x264 alike | stale: on now, forming moved to worker | x264 and zstd, on / off |
 | 2026-10-26 | long-mode packs merged by levels | patch-x64 +10-14 %, load-x64 +17-28 %, Chromium | stale: long runner retired | - |
 | 2026-10-26 | the 32-bit translator's store into code, its slow path cut or moved out | 0.95-1.05 every workload, Chromium | holds | `noteCodeStore` shows in a profile |
@@ -94,12 +94,18 @@ plus at most five lines below its table of conditions the line cannot carry.
 | 2026-11-14 | every register in wasm parameters (calls bench), x64 run again | farcry params / state-direct 0.826 Node 22.23.4, 0.889 Chromium 153; TurboFan, depth 8, 9 runs | between the rule's branches: not built; arm64 still not run | the M4 |
 | 2026-11-14 | a region takes three registers in parameters on an x86-64 host, where V8 passes five (2a464ac) | machine instructions -1 to -6 %; PE vm x87 1.060 ms in Node, 8 of 9 pairs slower; Chromium geomean 0.995 | holds | vm's loss explained; paired Chromium runs |
 | 2026-11-14 | a `ret` answers its wasm call the address it took and the call compares it; no stack of return addresses | calls512-scatter machine instructions 32-bit -5.3 %, 64-bit +7.6 %; formed callees' returns 100 of 100 through the transfer | holds | a frame's count of formed calls; long mode's window test folded |
+| 2026-11-15 | regions of 256 blocks against the default 128, long mode and 32-bit | 256/128 geomean x64 0.99 (vm 1.08), sse 1.06 (vm 1.50) | holds: 128 kept | a game's region profile, not the bench's |
 
 The two 2026-11-14 lines on regions of a module as one, conditions: cork 3f877946, a cloud machine (Intel Xeon @ 2.10GHz, 4 cores,
 power plan not recorded), Chromium 153.0.8010.12 / V8 15.3.76.4 headless (`browser/suite.mjs --scale 10
 --reps 5`, both arms in one run, 5 reps an arm, a first run's sse spread +18 % not repeated in the
 second, 1.00); Node 22.23.4 `run.mjs` x10 with a worker, ms on/off 0.987 x87, 0.998 sse, spread 10-20 %;
 merges fired 0-1 a run, module bytes -1 to -12 % only from the linked calls `dispatch` drops.
+
+The 2026-11-15 line on region size, conditions: cork ec2c1353 + e2167a7e, the 4-core cloud VM with nothing else running,
+Node 22.22.0 `bench/run.mjs --iterations <10 x own> --reps 1 --cork '{"maxRegionBlocks":N}'`, 5 alternated pairs, both
+widths' builds of the same source (x64, sse), median ms of the 5: x64 vm 1815 / 1967, entities 3768 / 3603, spread 5271 / 5044;
+sse vm 1068 / 1605, path 777 / 890, spread 4696 / 4518; at own iterations (cold) 256 looked 4-16 % faster on x64.
 
 ## Executors and scheduler
 

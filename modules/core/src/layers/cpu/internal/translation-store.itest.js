@@ -176,10 +176,6 @@ test('a seed made with other features, another layout or another emitting settin
         ['another layout', { memorySize: 32 << 20 }, {}],
         // Each setting named on both sides, so a default that moves leaves
         // every case a pair of different settings.
-        ['structure off, against on', { cork: { structure: false } },
-            { cork: { structure: true } }],
-        ['structure unset, against off', { cork: { structure: undefined } },
-            { cork: { structure: false } }],
         ['precise, against not', { cork: { precise: true } }, { cork: { precise: false } }],
         ['dispatch, against none', { cork: { dispatch: true } }, { cork: { dispatch: false } }],
         ['no dispatch, against it', { cork: { dispatch: false } }, { cork: { dispatch: true } }],

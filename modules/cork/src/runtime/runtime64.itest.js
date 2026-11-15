@@ -19,20 +19,21 @@ import {
     flagsLeftUndefined, load,
     loopCases, machine, nested, pool, program, run,
 } from '../testing/long-machine.js';
+import { ifRoom } from '../testing/memory64.js';
 import { createRuntimeRunner64 } from '../testing/runtime-runner64.js';
 
 /** @param {WebAssembly.Memory} memory @param {any} layout */
 const runtime = (memory, layout)=>createRuntimeRunner64({ memory, layout });
 
-test('the shared runtime runs long-mode code as the interpreter does on the corpus', ()=>{
+test('the shared runtime runs long-mode code as the interpreter does on the corpus', ifRoom(()=>{
     const { failures, exits, stats } = compare(CORPUS.cases, { budget: 7, makeRunner: runtime });
     assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
     assert.ok(exits > CORPUS.cases.length * 0.9, `${exits} cases ran to their exit`);
     assert.ok(stats.translated > stats.interpreted * 4, JSON.stringify(stats));
-});
+}));
 
 test('outside precise, as a program runs, the corpus\'s cases that run to their end run as'
-    + ' interpreted', ()=>{
+    + ' interpreted', ifRoom(()=>{
     // A read left untested reads RAM where a closed page or one past the window
     // faults: the cases where the interpreter faults are another answer by design.
     // The flags a case leaves undefined are the emitter's to leave as it will there.
@@ -53,9 +54,9 @@ test('outside precise, as a program runs, the corpus\'s cases that run to their 
     assert.equal(exits, clean.length);
     assert.ok(clean.length > CORPUS.cases.length * 0.8, `${clean.length} cases`);
     assert.ok(stats.translated > stats.interpreted * 4, JSON.stringify(stats));
-});
+}));
 
-test('seeded long programs run in the shared runtime as interpreted', ()=>{
+test('seeded long programs run in the shared runtime as interpreted', ifRoom(()=>{
     const instructions = pool();
     const straight = Array.from({ length: 200 },
         (_, i)=>program(instructions, 0x7eed + i, 20 + i % 60));
@@ -67,9 +68,10 @@ test('seeded long programs run in the shared runtime as interpreted', ()=>{
         assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
         assert.ok(stats.translated > stats.interpreted, JSON.stringify(stats));
     }
-});
+}));
 
-test('calls and returns, switches among them, run in the shared runtime as interpreted', ()=>{
+test('calls and returns, switches among them, run in the shared runtime as'
+    + ' interpreted', ifRoom(()=>{
     const cases = [...Object.entries(CALLS), ['switches', SWITCHES],
         ['hoisted', HOISTED_SWITCHES], ['masked', MASKED_SWITCHES]].flatMap(([name, code])=>CORPUS
         .cases.slice(0, 4).map((/** @type {any} */ one, /** @type {number} */ i)=>{
@@ -84,9 +86,9 @@ test('calls and returns, switches among them, run in the shared runtime as inter
         assert.equal(exits, cases.length);
         assert.ok(stats.translated > stats.interpreted, JSON.stringify(stats));
     }
-});
+}));
 
-test('a return to its call\'s address past the 4 GiB window faults as interpreted', ()=>{
+test('a return to its call\'s address past the 4 GiB window faults as interpreted', ifRoom(()=>{
     // call f (or call rdi, f a region of its own whose ret goes back to the wasm call
     // waiting for it); jmp done; f: [bts qword [rsp], 32]; ret -- three turns on esi,
     // the last with the return address moved past the window: its low half the call's own.
@@ -100,9 +102,9 @@ test('a return to its call\'s address past the 4 GiB window faults as interprete
         assert.deepEqual(failures.slice(0, 20), [], `budget ${budget}`);
         assert.ok(stats.translated > 0, JSON.stringify(stats));
     }
-});
+}));
 
-test('a switch whose entry is rewritten past the 4 GiB window faults as interpreted', ()=>{
+test('a switch whose entry is rewritten past the 4 GiB window faults as interpreted', ifRoom(()=>{
     const cases = CORPUS.cases.slice(0, 4).map((/** @type {any} */ one, /** @type {number} */ i)=>
         ({ ...one, text: `far ${i}`, code: FAR_SWITCH }));
     for (const budget of [7, 100000])
@@ -111,10 +113,10 @@ test('a switch whose entry is rewritten past the 4 GiB window faults as interpre
         assert.deepEqual(failures.slice(0, 20), [], `budget ${budget}`);
         assert.ok(stats.translated > stats.interpreted, JSON.stringify(stats));
     }
-});
+}));
 
 test('loops whose accesses move by a stride run as interpreted, to the turn a page or the'
-    + ' 4 GiB window stops them', ()=>{
+    + ' 4 GiB window stops them', ifRoom(()=>{
     const cases = loopCases();
     for (const budget of [7, 100000])
     {
@@ -122,10 +124,10 @@ test('loops whose accesses move by a stride run as interpreted, to the turn a pa
         assert.deepEqual(failures.slice(0, 20), [], `budget ${budget}`);
         assert.ok(stats.translated > stats.interpreted, JSON.stringify(stats));
     }
-});
+}));
 
 test('the interpreter tier in wasm runs translated code\'s misses in place,'
-    + ' as interpreted', ()=>{
+    + ' as interpreted', ifRoom(()=>{
     // Every start hot at once and formed where it is first met: a miss is a target
     // the runtime has not formed yet, the tier taking it from inside the region.
     const tiered = (/** @type {WebAssembly.Memory} */ memory, /** @type {any} */ layout,
@@ -139,10 +141,10 @@ test('the interpreter tier in wasm runs translated code\'s misses in place,'
         assert.deepEqual(failures.slice(0, 20), [], `budget ${budget}`);
         assert.ok(stats.tiered > 0, JSON.stringify(stats));
     }
-});
+}));
 
 test('stos and movs run in the shared runtime as interpreted: by pages, across them,'
-    + ' into a closed one', ()=>{
+    + ' into a closed one', ifRoom(()=>{
     const base = CORPUS.cases[0];
     const cases = [];
     // stos and movs of every width: byte, word, dword, qword.
@@ -194,4 +196,4 @@ test('stos and movs run in the shared runtime as interpreted: by pages, across t
     assert.ok(exits > cases.length / 2 && exits < cases.length,
         `${exits} of ${cases.length} ran to their exit`);
     assert.ok(stats.translated > stats.interpreted, JSON.stringify(stats));
-});
+}));

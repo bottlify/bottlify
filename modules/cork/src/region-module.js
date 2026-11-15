@@ -26,14 +26,14 @@ import { MODE_64 } from './decode/decoder.js';
 /**
  * @param {{ code: ArrayLike<number>, at: number, entry?: number, precise?: boolean,
  *     atomic?: boolean, ramSize?: number, hash?: boolean, callReturn?: boolean,
- *     looseStacks?: boolean, structure?: boolean,
+ *     looseStacks?: boolean,
  *     expansion?: import('./emit/region.js').ExpansionNote | null, wide?: boolean,
  *     checked?: boolean, processors?: number, markBlocks?: boolean, ramBase?: number,
  *     hostFeatures?: Partial<import('./wasm/features.js').Features>,
  *     form?: Parameters<typeof formRegion>[2], bits?: 32 | 64 }} what
  *     the bytes and the guest address they lie at; `entry` where the region starts (`at` by
- *     default); `precise`, `atomic`, `hash`, `callReturn`, `looseStacks`,
- *     `structure`: as the translator's configuration has them; `expansion` told each
+ *     default); `precise`, `atomic`, `hash`, `callReturn`, `looseStacks`:
+ *     as the translator's configuration has them; `expansion` told each
  *     instruction's wasm bytes (a diagnostic build); `wide` the x87 compiled for double or
  *     extended precision, as a run whose control word says so has it; `checked` false the
  *     x87 stack's shape at the entry tested once rather than at every instruction, as the
@@ -49,7 +49,7 @@ import { MODE_64 } from './decode/decoder.js';
  */
 export function regionModule({ code, at, entry = at, precise = false, atomic = false,
     ramSize = 16 << 20, hash = false, callReturn = false, looseStacks = false,
-    structure = true, expansion = null, wide = false, checked = true, processors = 1,
+    expansion = null, wide = false, checked = true, processors = 1,
     markBlocks = false, ramBase = PAGE, hostFeatures = {}, form = {}, bits = 32 })
 {
     const bytes = Uint8Array.from(code);
@@ -62,7 +62,7 @@ export function regionModule({ code, at, entry = at, precise = false, atomic = f
     const m = new ModuleBuilder();
     const layout = ownLayout({ ramSize, processors, ramBase, ...bits === 64 ? { bits: 64 } : {} });
     const context = prepareModule(m, layout, { ...features(), ...hostFeatures }, {},
-        { precise, atomic, hash, callReturn: hash && callReturn, looseStacks, structure,
+        { precise, atomic, hash, callReturn: hash && callReturn, looseStacks,
             expansion, wide, markBlocks });
     const translation = emitRegion(context, region, { entryTop: 0, checked });
     finishModule(context, [translation.functionIndex]);

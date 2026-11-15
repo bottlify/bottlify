@@ -372,6 +372,7 @@ From `arg-bytes-audit.mjs dbg/wine-specs`. Every stdcall entry of the win32 laye
 - [`checks/check-decision-numbers.mjs`](checks/check-decision-numbers.mjs) - Each decision number is one heading, and every citation of one is carried (`npm run check:boundaries`)
 - [`checks/emit-digest.mjs`](checks/emit-digest.mjs) - The 32-bit translation is unchanged (--check against emit-digest.json) (`npm run check:boundaries`)
 - [`checks/check-catalog.mjs`](checks/check-catalog.mjs) - Every file under tools/ is in this catalog, in its category, and every instrument has a real sample (`npm run check:boundaries`)
+- [`checks/check-cork-settings.mjs`](checks/check-cork-settings.mjs) - cork's settings, its docs and the core's EngineConfig are one table (`npm run check:boundaries`)
 
 ### `generators/`
 
