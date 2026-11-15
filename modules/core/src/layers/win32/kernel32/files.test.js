@@ -2403,6 +2403,17 @@ test('a directory opens only with FILE_FLAG_BACKUP_SEMANTICS, and holds no bytes
     assert.equal(query.handler([directory, 0x300, 0x400, 8, 35]), 0);
     assert.equal(memory.dword(0x400) & 0x10, 0x10, 'FILE_ATTRIBUTE_DIRECTORY');
     assert.equal(fns.CloseHandle.handler([directory]), 1);
+    // A folder watched through a completion port (a FileSystemWatcher's) is
+    // opened for overlapped I/O, and the port takes only such a handle.
+    const FILE_MODE = 16;
+    const plain = openDir(OPEN_EXISTING, BACKUP);
+    assert.equal(query.handler([plain, 0x300, 0x400, 4, FILE_MODE]), 0);
+    assert.equal(memory.dword(0x400) & 0x20, 0x20, 'FILE_SYNCHRONOUS_IO_NONALERT as opened');
+    assert.equal(fns.CloseHandle.handler([plain]), 1);
+    const watched = openDir(OPEN_EXISTING, BACKUP | 0x40000000);
+    assert.equal(query.handler([watched, 0x300, 0x400, 4, FILE_MODE]), 0);
+    assert.equal(memory.dword(0x400) & 0x20, 0, 'opened overlapped, it is not synchronous');
+    assert.equal(fns.CloseHandle.handler([watched]), 1);
 });
 
 test('a volume\'s own name opens as its drive\'s root', ()=>{
