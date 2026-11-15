@@ -441,16 +441,21 @@ export function emitBatch(jobs, layout, features, options = {}, cache = undefine
  * into one module: the relink that gathers the regions of many small batch
  * modules into a few big ones. A region whose bytes no longer hash as they did
  * is answered as a failure (`changed`) and keeps the function it has. A job's
- * `targets` are the callees its indirect calls were predicted to (`callTargets`).
+ * `targets` are the callees its indirect calls were predicted to (`callTargets`),
+ * its `formable` the pages it was formed over: each region is formed again over
+ * its own, as the runtime formed it. Told the pages of every region of the batch,
+ * one beside a page of stubs (which holds only regions entered there) went on
+ * into it, hashed otherwise and was answered `changed` -- its entry barren for
+ * good, as its bytes were never written: CLR's hottest functions in a .NET game.
  *
  * @param {{ jobs: { entry: number, entryTop: number, hash: string, checked?: boolean,
  *         copies?: boolean, precision?: import('../emit/region.js').X87Precision,
- *         floats?: boolean, targets?: [number, number[]][] }[],
+ *         floats?: boolean, targets?: [number, number[]][], formable?: number[] }[],
  *     pages: [number, Uint8Array][], formable?: number[],
  *     form: { maxBlocks: number, leafCalls?: boolean,
  *         helpers?: boolean | readonly import('../helpers.js').RuntimeHelper[] } }} relink
  *     `pages` copies of every page forming read,
- *     `formable` the ones a region may span (all of `pages` when absent)
+ *     `formable` the ones a job without its own may span (all of `pages` when absent)
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
  * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean,
  *     armHost?: boolean }} features
@@ -462,9 +467,8 @@ export function relinkBatch({ jobs, pages, form, formable }, layout, features, o
     cache = undefined)
 {
     const byPage = new Map(pages);
-    // The pages a region may be formed over: the regions' own, when the copies hold more
-    // that forming only read.
-    const formablePages = formable === undefined ? byPage : new Set(formable);
+    // The pages a region may be formed over: its own, else the batch's, else the copies.
+    const batchFormable = formable === undefined ? byPage : new Set(formable);
     // The page read last, kept: forming reads a region's bytes in runs.
     let lastPage = -1;
     /** @type {Uint8Array | undefined} */
@@ -479,12 +483,22 @@ export function relinkBatch({ jobs, pages, form, formable }, layout, features, o
         }
         return lastBytes?.[address & 0xfff] ?? 0;
     };
-    // The pages the regions were formed over are the translatable ones: a page
-    // one of them was refused at is not among any region's pages.
-    /** @param {number} address */
-    const translatable = address=>formablePages.has(address >>> 12);
-    const shared = formShared();
+    // What forming found is shared between the regions told the same pages: a callee
+    // looked at for one is the same callee for the other only where both may form on it.
+    /** @type {Map<string, ReturnType<typeof formShared>>} */
+    const sharedBy = new Map();
     const formed = jobs.map(job=>{
+        const formablePages = job.formable === undefined ? batchFormable : new Set(job.formable);
+        const key = job.formable === undefined ? '' : [...job.formable].sort((a, b)=>a - b).join();
+        let shared = sharedBy.get(key);
+        if (shared === undefined)
+        {
+            shared = formShared();
+            sharedBy.set(key, shared);
+        }
+        // The pages the region was formed over are the translatable ones: a page
+        // it was refused at is not among them.
+        const translatable = (/** @type {number} */ address)=>formablePages.has(address >>> 12);
         const region = formRegion(read, job.entry, { ...form, translatable, shared,
             ...(job.targets === undefined ? {} : { callTargets: new Map(job.targets) }) });
         return region.hash === job.hash
