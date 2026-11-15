@@ -37,6 +37,7 @@ import { createAtomTableFunctions } from './atoms.js';
 import { createTimeFunctions } from './time.js';
 import { createEnvironmentFunctions } from './environment.js';
 import { LOADER_ENTRIES, createLoaderFunctions } from './loader.js';
+import { POOL_ENTRIES, createPoolFunctions } from './pool.js';
 import { createStringOperations } from './string-ops.js';
 import { MEMORY_ENTRIES, createMemoryFunctions } from './memory.js';
 import { createDebugFunctions } from './debug.js';
@@ -489,6 +490,10 @@ export function createNtdllFunctions(host){
         ...createBitmapFunctions({ readMemory: host.readMemory, writeMemory: host.writeMemory }),
 
         ...time.table,
+
+        ...(POOL_ENTRIES.every(name=>kernel32[name])
+            ? createPoolFunctions({ kernel32, writeMemory: host.writeMemory })
+            : {}),
 
         ...(LOADER_ENTRIES.every(name=>kernel32[name])
             ? createLoaderFunctions({ readMemory: host.readMemory,
