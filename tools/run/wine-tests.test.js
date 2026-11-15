@@ -78,6 +78,9 @@ test('a run is classed by how it ended before by what it printed', ()=>{
     'unimplemented');
     assert.equal(classify(result({ error: { reason: 'guest-fault', message: 'page fault' } }),
         passed), 'guest-fault');
+    // Windows refuses the same program: its manifest's assembly is not there.
+    assert.equal(classify(result({ error: { reason: 'side-by-side',
+        message: 'the side-by-side configuration is incorrect' } }), passed), 'not-loaded');
 
     const empty = parseOutput('');
     assert.equal(classify(result(), empty), 'no-summary');

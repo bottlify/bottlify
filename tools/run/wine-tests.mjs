@@ -258,6 +258,8 @@ export function parseOutput(text, test, mainProcess){
  * have shown too. A guest fault the engine stopped on is `guest-fault`: on
  * Windows the program's own filter would have printed it and ended the
  * process. `unimplemented` is a call into an import with no implementation.
+ * `not-loaded` is a program Windows would not start either: its manifest names
+ * a side-by-side assembly the machine does not have.
  * `empty` is a program that got to its closing count having checked nothing:
  * every check skipped (a library or class it looks for is not there) or none
  * compiled in. It is not a pass - nothing was held to Windows.
@@ -284,6 +286,8 @@ export function classify(result, parsed){
             case 'deadlock':
             case 'no-threads':
                 return 'deadlock';
+            case 'side-by-side':
+                return 'not-loaded';
             case 'guest-fault':
                 // A call into a function nobody wrote stops the machine rather
                 // than answering wrongly: a gap, not a wrong answer.
