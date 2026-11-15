@@ -69,7 +69,7 @@ test('a program draws with GLSL into a framebuffer object and samples it in the 
         const reading = gpu.of('beginRenderPass').filter((/** @type {any} */ p)=>
             p.descriptor.depthStencilAttachment?.depthReadOnly);
         assert.equal(reading.length, 1, 'the draw reading the depth holds it read-only');
-        assert.equal(reading[0].descriptor.depthStencilAttachment.stencilReadOnly, true);
+        assert.equal(reading[0].descriptor.depthStencilAttachment.stencilStoreOp, 'store');
         assert.ok(gpu.of('setBindGroup').some((/** @type {any} */ c)=>c.pass === reading[0].pass
             && (c.group?.entries ?? []).some((/** @type {any} */ e)=>
                 e.resource?.texture === reading[0].descriptor.depthStencilAttachment.view.texture
