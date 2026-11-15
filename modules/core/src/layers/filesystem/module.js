@@ -182,7 +182,9 @@ export function createFilesystemModule(){
              * of junctions deeper than any a program makes is a loop, and stops.
              *
              * @param {any} tree @param {string} key @param {string[]} components
-             * @param {{ path: string, bytes: Uint8Array }[]} out @param {number} depth
+             * @param {({ path: string, bytes: Uint8Array }
+             *     | { path: string, size: number, read: () => Promise<Uint8Array> })[]} out
+             * @param {number} depth
              */
             const filesUnder = (tree, key, components, out, depth)=>{
                 if (depth > 64)
@@ -610,14 +612,16 @@ export function createFilesystemModule(){
                  *
                  * @param {string} [letter]
                  * @param {{ everyName?: boolean }} [options]
-                 * @returns {{ path: string, bytes: Uint8Array }[]}
+                 * @returns {({ path: string, bytes: Uint8Array }
+                 *     | { path: string, size: number, read: () => Promise<Uint8Array> })[]}
                  */
                 export(letter, options){
                     if (!live())
                     {
                         return [];
                     }
-                    /** @type {{ path: string, bytes: Uint8Array }[]} */
+                    /** @type {({ path: string, bytes: Uint8Array }
+                     *     | { path: string, size: number, read: () => Promise<Uint8Array> })[]} */
                     const out = [];
                     for (const [key, tree] of state.drives)
                     {
