@@ -2995,3 +2995,31 @@ test('GdiEntry13 (DdQueryDisplaySettingsUniqueness) moves when the display mode 
     screen.height = 768;
     assert.notEqual(table.GdiEntry13.handler(), first);
 });
+
+test('GdiGetCharDimensions is the dialog-unit average width, and GdiGetCodePage the font\'s page',
+    ()=>{
+        const { fns, memory, hdc } = withDC();
+        const RUSSIAN_CHARSET = 204;
+        const OEM_CHARSET = 255;
+        const letters = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
+        const TEXT_AT = OUT + 0x100;
+        letters.split('').forEach((c, i)=>memory.writeMemory(TEXT_AT + 2 * i,
+            Uint8Array.of(c.charCodeAt(0), 0)));
+        fns.GetTextExtentPoint32W.handler([hdc, TEXT_AT, letters.length, OUT + 0x200]);
+        const extent = memory.u32(OUT + 0x200);
+        const height = memory.u32(OUT + 0x204);
+        assert.equal(fns.GdiGetCharDimensions.handler([hdc, 0, OUT]),
+            Math.floor((Math.floor(extent / 26) + 1) / 2), '(extent / 26 + 1) / 2');
+        assert.equal(memory.u32(OUT), height, 'and the font\'s height');
+        assert.equal(fns.GdiGetCharDimensions.handler([0x9999, 0, OUT + 0x300]), 0,
+            'not a DC');
+
+        assert.equal(fns.GdiGetCodePage.handler([hdc]), 1252, 'the system font is ANSI');
+        assert.equal(fns.GdiGetCodePage.handler([0x9999]), 1252, 'not a DC: the ANSI page');
+        fns.SelectObject.handler([hdc, fns.CreateFontIndirectA.handler([putLogFont(memory,
+            { charSet: RUSSIAN_CHARSET })])]);
+        assert.equal(fns.GdiGetCodePage.handler([hdc]), 1251);
+        fns.SelectObject.handler([hdc, fns.CreateFontIndirectA.handler([putLogFont(memory,
+            { charSet: OEM_CHARSET })])]);
+        assert.equal(fns.GdiGetCodePage.handler([hdc]), 437);
+    });

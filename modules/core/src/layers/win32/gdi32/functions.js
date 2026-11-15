@@ -27,7 +27,7 @@ import { createMetafileFunctions } from './metafiles.js';
 import {
     FACES, FF_MODERN, FF_ROMAN, FIXED_PITCH, faceNamed, fontFamilies, windowsMetrics,
 } from './faces.js';
-import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
+import { ANSI_PAGE, OEM_PAGE, decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { DISPLAY_DEVICE_NAME } from '../devices.js';
 import {
     BITMAP,
@@ -4722,6 +4722,65 @@ export function createGdiFunctions(host){
                 const text = (string >>> 0) === 0 ? '' : wideText(string, count | 0, true);
                 writeSize(host, out, { cx: extentOf(dc, text), cy: currentMetrics(dc).height });
                 return 1;
+            },
+        },
+
+        /**
+         * LONG GdiGetCharDimensions(HDC hdc, LPTEXTMETRICW lptm, LONG *height)
+         *
+         * The average width of the DC's font as dialog units are measured
+         * by it - the extent of the 52 Latin letters, halved and rounded up
+         * over 26 - with the font's metrics and height where asked. A
+         * handle that is not a DC answers 0 and leaves both alone.
+         */
+        GdiGetCharDimensions: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, out, height])=>{
+                const dc = dcOf(handle);
+                if (!dc)
+                {
+                    return 0;
+                }
+                const metrics = currentMetrics(dc);
+                if ((out >>> 0) !== 0)
+                {
+                    writeTextMetricsW(host, out >>> 0, metrics);
+                }
+                if ((height >>> 0) !== 0)
+                {
+                    host.writeMemory(height >>> 0, u32Bytes([metrics.height]));
+                }
+                const letters = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
+                return Math.floor((Math.floor(extentOf(dc, letters) / 26) + 1) / 2);
+            },
+        },
+
+        /**
+         * DWORD GdiGetCodePage(HDC hdc)
+         *
+         * The code page the DC's font's character set stands for: the
+         * system's ANSI page for DEFAULT_CHARSET and for a handle that is not
+         * a DC, its OEM page for OEM_CHARSET, the Macintosh Roman page for
+         * MAC_CHARSET, and TranslateCharsetInfo's page for every other set.
+         */
+        GdiGetCodePage: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                const dc = dcOf(handle);
+                const charSet = dc ? currentMetrics(dc).charSet : DEFAULT_CHARSET;
+                const OEM_CHARSET = 255;
+                const MAC_CHARSET = 77;
+                if (charSet === OEM_CHARSET)
+                {
+                    return OEM_PAGE;
+                }
+                if (charSet === MAC_CHARSET)
+                {
+                    return 10000;
+                }
+                return CHARSET_TABLE.find(entry=>entry.charSet === charSet)?.codePage ?? ANSI_PAGE;
             },
         },
 
