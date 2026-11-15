@@ -35,10 +35,11 @@ import { createPorts } from './ports.js';
 /**
  * What a byte of a translated module held costs the tab, its own included:
  * the compiled machine code, the engine's metadata for the module, and the
- * translator's records of its regions on the JavaScript heap. Measured on a
- * .NET Framework setup in Chrome (`roadmap/decisions.md` A245).
+ * translator's records of its regions on the JavaScript heap. Measured on the
+ * .NET Framework 4.8's setup in Chrome, five processes standing: 14
+ * (`roadmap/decisions.md` A245).
  */
-export const TRANSLATION_WEIGHT = 4;
+export const TRANSLATION_WEIGHT = 14;
 
 /** Register names in the state block's reg32 view, in index order. */
 const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
