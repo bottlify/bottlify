@@ -339,6 +339,16 @@ test('shfolder is the shell folder call under the name a program linked against'
     await win32Module.dispose();
 });
 
+test('advapi32 walks the time zones with kernel32\'s one entry', async()=>{
+    // Windows exports EnumDynamicTimeZoneInformation from advapi32; Wine's
+    // kernel32:time imports it from there and stopped on a missing import.
+    const api = await win32Module.create({}, stubHost());
+    const libraries = /** @type {Record<string, any>} */ (api.libraries());
+    assert.ok(libraries['KERNEL32.dll'].EnumDynamicTimeZoneInformation);
+    assert.equal(libraries['ADVAPI32.dll'].EnumDynamicTimeZoneInformation,
+        libraries['KERNEL32.dll'].EnumDynamicTimeZoneInformation);
+});
+
 test('msimg32 is gdi32\'s blending under the name a program linked against', async()=>{
     // Windows' msimg32 forwards its drawing exports to gdi32: a program that
     // imported AlphaBlend from it gets gdi32's implementation, not a missing

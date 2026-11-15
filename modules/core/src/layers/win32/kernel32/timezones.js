@@ -221,6 +221,31 @@ export const zoneNames = key=>({
  * @returns {Uint8Array | null}
  */
 export function zoneForYear(key, year){
+    const known = years.get(`${key}|${year}`);
+    if (known !== undefined)
+    {
+        return known === null ? null : known.slice();
+    }
+    const made = rulesForYear(key, year);
+    years.set(`${key}|${year}`, made);
+    return made === null ? null : made.slice();
+}
+
+/**
+ * Each zone's year as it was first worked out. Asking Intl for a year's
+ * changes walks the year in steps; a program converting a time in every zone
+ * for every year it shows (a world clock, Wine's kernel32:time) asks the same
+ * years again and again, and the answer does not change while it runs.
+ *
+ * @type {Map<string, Uint8Array | null>}
+ */
+const years = new Map();
+
+/**
+ * @param {string} key @param {number} year
+ * @returns {Uint8Array | null}
+ */
+function rulesForYear(key, year){
     const zone = IANA.get(key);
     if (zone === undefined)
     {

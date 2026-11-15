@@ -5546,6 +5546,11 @@ export function createWin32Module(){
             // under the two names.
             libraries['KERNELBASE.dll'] = libraries['KERNEL32.dll'];
 
+            // advapi32 exports the walk over the registry's time zones, which
+            // Windows keeps beside the zone rules in kernelbase: one entry.
+            libraries['ADVAPI32.dll'].EnumDynamicTimeZoneInformation =
+                libraries['KERNEL32.dll'].EnumDynamicTimeZoneInformation;
+
             /** Every function, whichever library exports it. */
             const flat = ()=>Object.assign({}, ...Object.values(libraries));
 
