@@ -73,6 +73,8 @@ export const IAM_FILTER_DATA_SLOTS = [['ParseFilterData', 3], ['CreateFilterData
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(bytes: number) => number} allocate  Task memory.
  * @property {(object: import('../ole32/objects.js').ComObject, iid: string) => number} publish
+ * @property {() => import('../devenum/devenum.js').RegisteredFilter[]} [dmos]
+ *     The DMOs registered, enumerated beside the filters as Windows 7 and later do.
  */
 
 /** @param {number} value */
@@ -190,7 +192,7 @@ export function createFilterMapper(host, store, devices){
     const matching = request=>{
         /** @type {Map<string, RegisteredFilter>} */
         const found = new Map();
-        for (const filter of store.list())
+        for (const filter of [...store.list(), ...host.dmos?.() ?? []])
         {
             if ((filter.merit >>> 0) < (request.merit >>> 0) || found.has(filter.clsid))
             {
