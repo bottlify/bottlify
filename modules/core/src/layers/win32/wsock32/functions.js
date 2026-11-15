@@ -510,6 +510,82 @@ export function createWinsockFunctions(host){
             return outcome.truncated ? fail(WSAEMSGSIZE) : ok(outcome.value);
         }, first);
 
+    /**
+     * A stream send past its first try, waiting for room until every byte is
+     * handed over: a blocking or overlapped send answers only when it has all
+     * gone, as on Windows. An error after some went is the answer, the rest
+     * lost with the connection.
+     *
+     * @param {any} socket @param {Uint8Array} bytes @param {number} sent
+     * @returns {Promise<any>}
+     */
+    const sendRest = async(socket, bytes, sent)=>{
+        while (sent < bytes.length)
+        {
+            const outcome = registry.send(socket, bytes.subarray(sent));
+            if (outcome.error === WSAEWOULDBLOCK)
+            {
+                if (socket.closed)
+                {
+                    return { error: WSAENOTSOCK };
+                }
+                await registry.writableSoon(socket);
+                continue;
+            }
+            if (outcome.error)
+            {
+                return outcome;
+            }
+            sent += outcome.value;
+        }
+        return { value: sent };
+    };
+
+    /**
+     * Every byte sent, now or once the connection has room for them.
+     *
+     * @param {any} socket @param {Uint8Array} bytes
+     * @param {{ host: number, port: number } | null} target
+     * @param {(outcome: any) => any} settle
+     */
+    const sendAll = (socket, bytes, target, settle)=>{
+        const first = registry.send(socket, bytes, target);
+        if (first.error === WSAEWOULDBLOCK)
+        {
+            return sendRest(socket, bytes, 0).then(settle);
+        }
+        if (first.error || first.value === bytes.length)
+        {
+            return settle(first);
+        }
+        return sendRest(socket, bytes, first.value).then(settle);
+    };
+
+    /** @param {any} outcome */
+    const settleSend = outcome=>(outcome.error ? fail(outcome.error) : ok(outcome.value));
+
+    /**
+     * send, sendto and WSASend without an overlapped: a non-blocking socket
+     * hands over what the connection holds, or says it would block and arms
+     * FD_WRITE again; a blocking one waits until all of it went.
+     *
+     * @param {any} socket @param {Uint8Array} bytes
+     * @param {{ host: number, port: number } | null} target
+     * @param {(outcome: any) => any} settle
+     */
+    const sendNow = (socket, bytes, target, settle)=>{
+        if (!socket.nonBlocking)
+        {
+            return sendAll(socket, bytes, target, settle);
+        }
+        const outcome = registry.send(socket, bytes, target);
+        if (outcome.error === WSAEWOULDBLOCK)
+        {
+            rearm(socket, 'write');
+        }
+        return settle(outcome);
+    };
+
     /** How many bytes writeHostentAt needs, past what the caller already has room for. */
     const HOSTENT_BLOCK_SIZE = HOSTENT.SIZE + 64;
 
@@ -643,8 +719,7 @@ export function createWinsockFunctions(host){
     /** @param {any} socket */
     const isStream = socket=>socket.type === SOCK_STREAM;
 
-    /** @param {any} socket */
-    const isWritable = socket=>!socket.closed && (!isStream(socket) || socket.connected);
+    const isWritable = registry.writable;
 
     /**
      * Checks every edge but FD_CONNECT, which only ever fires from the
@@ -683,12 +758,12 @@ export function createWinsockFunctions(host){
     };
 
     /**
-     * Re-enables FD_READ or FD_ACCEPT, then re-checks at once: the call that
-     * re-enabled it may itself have left more to report -- a `recv` for less
-     * than what was queued, an `accept` with another connection still
-     * backlogged.
+     * Re-enables FD_READ, FD_ACCEPT or FD_WRITE, then re-checks at once: the
+     * call that re-enabled it may itself have left more to report -- a `recv`
+     * for less than what was queued, an `accept` with another connection still
+     * backlogged, a send that found the connection full and room already made.
      *
-     * @param {any} socket @param {'read' | 'accept'} which
+     * @param {any} socket @param {'read' | 'accept' | 'write'} which
      */
     const rearm = (socket, which)=>{
         const state = selectionOf(socket);
@@ -699,6 +774,11 @@ export function createWinsockFunctions(host){
         if (which === 'read')
         {
             state.readArmed = true;
+        }
+        else if (which === 'write')
+        {
+            // FD_WRITE comes again only after a send found the connection full.
+            state.writeSent = false;
         }
         else
         {
@@ -1106,21 +1186,47 @@ export function createWinsockFunctions(host){
         }
         const overlapped = call.overlapped >>> 0;
         const event = overlapped === 0 ? 0 : eventOf(overlapped);
-        const outcome = registry.send(socket, gather(readBuffers(call.buffers, call.count >>> 0)),
-            target);
-        if (outcome.error)
+        const bytes = gather(readBuffers(call.buffers, call.count >>> 0));
+        /** @param {any} outcome */
+        const settle = outcome=>{
+            if (outcome.error)
+            {
+                return fail(outcome.error);
+            }
+            if (overlapped !== 0)
+            {
+                complete(overlapped, event, { error: 0, bytes: outcome.value }, socket);
+            }
+            if ((call.sent >>> 0) !== 0)
+            {
+                writeDword(call.sent, outcome.value);
+            }
+            return ok(0);
+        };
+        if (overlapped === 0)
         {
-            return fail(outcome.error);
+            return sendNow(socket, bytes, target, settle);
         }
-        if (overlapped !== 0)
+        // Overlapped, the send is queued whole: it completes in its
+        // WSAOVERLAPPED once the connection has taken every byte.
+        const first = registry.send(socket, bytes, target);
+        if (first.error && first.error !== WSAEWOULDBLOCK)
         {
-            complete(overlapped, event, { error: 0, bytes: outcome.value }, socket);
+            return fail(first.error);
         }
-        if ((call.sent >>> 0) !== 0)
+        const sent = first.error ? 0 : first.value;
+        if (sent === bytes.length)
         {
-            writeDword(call.sent, outcome.value);
+            return settle(first);
         }
-        return ok(0);
+        begin(overlapped);
+        inFlight.set(overlapped, sendRest(socket, bytes, sent).then(outcome=>{
+            complete(overlapped, event, outcome.error
+                ? { error: outcome.error === WSAENOTSOCK ? WSA_OPERATION_ABORTED : outcome.error,
+                    bytes: 0 }
+                : { error: 0, bytes: outcome.value }, socket, false);
+        }));
+        return fail(WSA_IO_PENDING);
     };
 
     /**
@@ -1488,8 +1594,7 @@ export function createWinsockFunctions(host){
                     return fail(WSAENOTSOCK);
                 }
                 const bytes = host.readMemory(buffer >>> 0, length >>> 0);
-                const outcome = registry.send(socket, bytes);
-                return outcome.error ? fail(outcome.error) : ok(outcome.value);
+                return sendNow(socket, bytes, null, settleSend);
             },
         },
 
@@ -1530,8 +1635,7 @@ export function createWinsockFunctions(host){
                     return fail(WSAEFAULT);
                 }
                 const bytes = host.readMemory(buffer >>> 0, length >>> 0);
-                const outcome = registry.send(socket, bytes, target);
-                return outcome.error ? fail(outcome.error) : ok(outcome.value);
+                return sendNow(socket, bytes, target, settleSend);
             },
         },
 
@@ -1893,9 +1997,9 @@ export function createWinsockFunctions(host){
                     {
                         return answer();
                     }
-                    return registry.anyReadableSoon(read, milliseconds).then(answer);
+                    return registry.anyReadySoon(read, write, milliseconds).then(answer);
                 }
-                return registry.anyReadableSoon(read, null).then(answer);
+                return registry.anyReadySoon(read, write, null).then(answer);
             },
         },
 
@@ -3099,7 +3203,11 @@ export function createWinsockFunctions(host){
                         body.set(part, at);
                         at += part.length;
                     }
-                    const outcome = registry.send(socket, body);
+                    return sendAll(socket, body, null, outcome=>settleTransmit(outcome));
+                };
+
+                /** What the send of the whole came to. @param {any} outcome */
+                const settleTransmit = outcome=>{
                     if (outcome.error)
                     {
                         return fail(outcome.error, 0);
@@ -3316,15 +3424,25 @@ export function createWinsockFunctions(host){
                 const event = (overlapped >>> 0) === 0 ? 0 : eventOf(overlapped >>> 0);
                 const payload = (data >>> 0) === 0 || (dataLength >>> 0) === 0 ? null
                     : host.readMemory(data >>> 0, dataLength >>> 0).slice();
-                /** @param {any} outcome @returns {{ error: number, bytes: number }} */
+                /** @param {any} delivery @returns {{ error: number, bytes: number }} */
+                const delivered = delivery=>({
+                    error: delivery.error ?? 0, bytes: delivery.value ?? 0,
+                });
+                /**
+                 * The connection made, then the payload sent whole.
+                 *
+                 * @param {any} outcome
+                 * @returns {{ error: number, bytes: number }
+                 *     | Promise<{ error: number, bytes: number }>}
+                 */
                 const connected = outcome=>{
                     notifyConnect(socket, outcome);
                     if (outcome.error)
                     {
                         return { error: outcome.error, bytes: 0 };
                     }
-                    const delivery = payload ? registry.send(socket, payload) : { value: 0 };
-                    return { error: delivery.error ?? 0, bytes: delivery.value ?? 0 };
+                    return payload ? sendAll(socket, payload, null, delivered)
+                        : { error: 0, bytes: 0 };
                 };
                 /** @param {{ error: number, bytes: number }} result */
                 const answer = result=>{
@@ -3345,15 +3463,28 @@ export function createWinsockFunctions(host){
                 const outcome = registry.connect(socket, address);
                 if (!(outcome instanceof Promise))
                 {
-                    return answer(connected(outcome));
+                    const result = connected(outcome);
+                    if (!(result instanceof Promise))
+                    {
+                        return answer(result);
+                    }
+                    if ((overlapped >>> 0) === 0)
+                    {
+                        return result.then(answer);
+                    }
+                    begin(overlapped >>> 0);
+                    inFlight.set(overlapped >>> 0, result.then(made=>{
+                        complete(overlapped >>> 0, event, made, socket, false);
+                    }));
+                    return fail(WSA_IO_PENDING, 0);
                 }
                 if ((overlapped >>> 0) === 0)
                 {
-                    return outcome.then(made=>answer(connected(made)));
+                    return outcome.then(made=>connected(made)).then(answer);
                 }
                 begin(overlapped >>> 0);
-                inFlight.set(overlapped >>> 0, outcome.then(made=>{
-                    complete(overlapped >>> 0, event, connected(made), socket, false);
+                inFlight.set(overlapped >>> 0, outcome.then(made=>connected(made)).then(result=>{
+                    complete(overlapped >>> 0, event, result, socket, false);
                 }));
                 return fail(WSA_IO_PENDING, 0);
             },

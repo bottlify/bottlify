@@ -38,6 +38,9 @@ flowchart TB
   `RELAY_ALLOW` for the launcher's; `*` alone allows every host. The relay resolves host names
   itself and remembers them, so the policy judges the name, not just the address. With an empty
   list, DNS answers nothing at all.
+- **A connection inside the tab holds 64 KiB a side** (SO_SNDBUF and SO_RCVBUF, decisions.md
+  A251): a send into a full one would block, as on Windows, and waits for the reader or says
+  WSAEWOULDBLOCK. A stream to the relay is not held in the tab.
 - **Frames.** Joining a room is JSON: `hello`, answered by `welcome` with the address and the list of
   peers. Data travels in binary frames: a 20-byte header and up to 64 KiB of payload. A UDP `send()`
   is one frame, so datagram boundaries are kept; a TCP `send()`, and what the relay reads from a
