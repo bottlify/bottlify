@@ -73,8 +73,8 @@ test('the drivers a Windows install has are enumerated, described and opened', a
     f.view.setUint32(DETAILS, 920, true);
     assert.equal(f.call('acmDriverDetailsA', [ima, DETAILS, 0]), 0);
     assert.equal(f.view.getUint32(DETAILS + 24, true), 1, 'a codec');
-    assert.equal(new TextDecoder().decode(f.bytes.subarray(DETAILS + 40, DETAILS + 49)),
-        'IMA ADPCM');
+    assert.equal(new TextDecoder().decode(f.bytes.subarray(DETAILS + 40, DETAILS + 59)),
+        'Microsoft IMA ADPCM');
 
     assert.equal(f.call('acmDriverOpen', [0x1400, ima, 0]), 0);
     const opened = f.view.getUint32(0x1400, true);
@@ -92,7 +92,11 @@ test('an IMA ADPCM block goes through a stream into 16-bit PCM', ()=>{
     const DESTINATION = 0x2100;
     writeFormat(f.view, SOURCE, { tag: 0x11, channels: 1, rate: 22050, blockAlign: 12,
         bits: 4, samplesPerBlock: 17 });
-    assert.equal(f.call('acmFormatSuggest', [0, SOURCE, DESTINATION, 18, 0]), 0);
+    // With no driver named, room for the largest format any driver lists.
+    assert.equal(f.call('acmFormatSuggest', [0, SOURCE, DESTINATION, 18, 0]), 11);
+    assert.equal(f.call('acmMetrics', [0, 50, 0x2300]), 0, 'ACM_METRIC_MAX_SIZE_FORMAT');
+    const largest = f.view.getUint32(0x2300, true);
+    assert.equal(f.call('acmFormatSuggest', [0, SOURCE, DESTINATION, largest, 0]), 0);
     assert.equal(f.view.getUint16(DESTINATION, true), 1, 'PCM');
     assert.equal(f.view.getUint16(DESTINATION + 14, true), 16);
     assert.equal(f.view.getUint32(DESTINATION + 4, true), 22050);
@@ -130,12 +134,12 @@ test('what no driver here can do is refused as Windows refuses it', ()=>{
     writeFormat(f.view, 0x2000, { tag: 1, channels: 2, rate: 44100, blockAlign: 4, bits: 16 });
     writeFormat(f.view, 0x2100, { tag: 0x11, channels: 2, rate: 44100, blockAlign: 2048,
         bits: 4, samplesPerBlock: 2041 });
-    assert.equal(f.call('acmStreamOpen', [0x2200, 0, 0x2000, 0x2100, 0, 0, 0, 0]), 0x203,
+    assert.equal(f.call('acmStreamOpen', [0x2200, 0, 0x2000, 0x2100, 0, 0, 0, 0]), 0x200,
         'encoding is not done here');
     writeFormat(f.view, 0x2100, { tag: 0x11, channels: 2, rate: 22050, blockAlign: 2048,
         bits: 4, samplesPerBlock: 2041 });
     writeFormat(f.view, 0x2000, { tag: 1, channels: 2, rate: 44100, blockAlign: 4, bits: 16 });
-    assert.equal(f.call('acmStreamOpen', [0x2200, 0, 0x2100, 0x2000, 0, 0, 0, 0]), 0x203,
+    assert.equal(f.call('acmStreamOpen', [0x2200, 0, 0x2100, 0x2000, 0, 0, 0, 0]), 0x200,
         'nor does a codec change the rate on the way');
     writeFormat(f.view, 0x2000, { tag: 1, channels: 2, rate: 44100, blockAlign: 4, bits: 16 });
     writeFormat(f.view, 0x2100, { tag: 1, channels: 1, rate: 44100, blockAlign: 1, bits: 8 });
@@ -193,10 +197,10 @@ test('the PCM converter changes the rate, joining one piece to the next', ()=>{
         const written = f.view.getUint32(HEADER + 36, true) / 4;
         return Array.from({ length: written }, (_, frame)=>f.view.getInt16(OUT + frame * 4, true));
     };
-    // Halfway between each pair; the last frame waits for the one after it.
-    assert.deepEqual(convert([0, 100, 200, 300]), [0, 50, 100, 150, 200, 250]);
+    // Each source frame held, never blended: what Windows' converter gives.
+    assert.deepEqual(convert([0, 100, 200, 300]), [0, 0, 100, 100, 200, 200, 300, 300]);
     assert.equal(f.view.getUint32(HEADER + 20, true), 8, 'the whole piece was taken');
-    assert.deepEqual(convert([400, 500]), [300, 350, 400, 450], 'joined at the seam');
+    assert.deepEqual(convert([400, 500]), [400, 400, 500, 500], 'joined at the seam');
 });
 
 test('a codec another layer installs is a driver like Windows\' own', async()=>{
@@ -252,7 +256,7 @@ test('a codec another layer installs is a driver like Windows\' own', async()=>{
     assert.equal(view.getUint32(HEADER + 36, true), 8, 'cbDstLengthUsed');
     assert.equal(bytes[0x2000], 7);
     writeFormat(view, DESTINATION, { tag: 1, channels: 2, rate: 44100, blockAlign: 4, bits: 16 });
-    assert.equal(fns.acmStreamOpen.handler([HANDLE, 0, SOURCE, DESTINATION, 0, 0, 0, 1]), 0x203,
+    assert.equal(fns.acmStreamOpen.handler([HANDLE, 0, SOURCE, DESTINATION, 0, 0, 0, 1]), 0x200,
         'what the codec cannot do is ACMERR_NOTPOSSIBLE');
 });
 
@@ -268,7 +272,7 @@ test('the source a destination is asked for converts into it, and a destination 
     const adpcm = f.view.getUint32(0x2200, true);
     assert.equal(f.call('acmStreamSize', [adpcm, 100, 0x2204, 1]), 0);
     assert.equal(f.view.getUint32(0x2204, true), 2 * 12, 'two blocks of 34 bytes fit in 100');
-    assert.equal(f.call('acmStreamSize', [adpcm, 20, 0x2204, 1]), 0x203,
+    assert.equal(f.call('acmStreamSize', [adpcm, 20, 0x2204, 1]), 0x200,
         'ACMERR_NOTPOSSIBLE: not one block fits');
 
     writeFormat(f.view, 0x2000, { tag: 1, channels: 1, rate: 8000, blockAlign: 2, bits: 16 });
@@ -288,4 +292,83 @@ test('the source a destination is asked for converts into it, and a destination 
     assert.equal(f.call('acmStreamConvert', [pcm, HEADER, 0]), 0);
     assert.equal(f.view.getUint32(HEADER + 20, true), source, 'all of the source used');
     assert.ok(f.view.getUint32(HEADER + 36, true) <= 30, 'into the room there was');
+});
+
+test('each driver suggests what it converts; with none named, an unknown tag has no driver', ()=>{
+    const f = fixture();
+    const [adpcm, , converter] = [0x41c00001, 0x41c00002, 0x41c00003];
+    const SOURCE = 0x2000;
+    const DESTINATION = 0x2100;
+    writeFormat(f.view, SOURCE, { tag: 1, channels: 1, rate: 8000, blockAlign: 2, bits: 16 });
+    assert.equal(f.call('acmDriverOpen', [0x2200, adpcm, 0]), 0);
+    const codec = f.view.getUint32(0x2200, true);
+    assert.equal(f.call('acmDriverOpen', [0x2200, converter, 0]), 0);
+    const pcm = f.view.getUint32(0x2200, true);
+    assert.equal(f.call('acmFormatSuggest', [codec, SOURCE, DESTINATION, 50, 0]), 0x200,
+        'the ADPCM codec here decodes only');
+    assert.equal(f.call('acmFormatSuggest', [pcm, SOURCE, DESTINATION, 16, 0]), 0,
+        'PCM to PCM, in a PCMWAVEFORMAT of room');
+    f.view.setUint16(DESTINATION, 1, true);
+    assert.equal(f.call('acmFormatSuggest', [codec, SOURCE, DESTINATION, 50, 0x10000]), 0x200,
+        'only the converter turns PCM into PCM');
+    assert.equal(f.call('acmFormatSuggest', [pcm, SOURCE, DESTINATION, 16, 0xffffffff]), 10,
+        'MMSYSERR_INVALFLAG');
+    f.view.setUint16(SOURCE, 0xbeef, true);
+    assert.equal(f.call('acmFormatSuggest', [0, SOURCE, DESTINATION, 50, 0]), 6,
+        'MMSYSERR_NODRIVER: no driver lists the tag');
+});
+
+test('a handle is judged before a pointer, a structure before flags, flags before the work', ()=>{
+    const f = fixture();
+    assert.equal(f.call('acmMetrics', [1, 2, 0]), 5, 'a bad object, then the null pointer');
+    assert.equal(f.call('acmMetrics', [1, 2, 0x2000]), 5, 'counts too');
+    assert.equal(f.call('acmDriverDetailsA', [1, 0, 0]), 11, 'no structure, whatever the handle');
+    f.view.setUint32(0x2000, 4, true);
+    assert.equal(f.call('acmDriverDetailsA', [0x41c00001, 0x2000, 0]), 0,
+        'a structure of four bytes takes its size and nothing more');
+    assert.equal(f.view.getUint32(0x2000, true), 4);
+    assert.equal(f.call('acmDriverDetailsA', [0x41c00001, 0x2000, 1]), 10);
+    assert.equal(f.call('acmDriverOpen', [0x2200, 0x41c00003, 0]), 0);
+    const opened = f.view.getUint32(0x2200, true);
+    assert.equal(f.call('acmDriverID', [opened, 0x2204, 1]), 10);
+    assert.equal(f.call('acmDriverClose', [opened, 1]), 10);
+    assert.equal(f.call('acmDriverClose', [opened, 0]), 0);
+});
+
+test('a driver\'s tags are enumerated to the program, each with its largest format', async()=>{
+    const f = fixture();
+    const DETAILS = 0x1000;
+    f.view.setUint32(DETAILS, 24 + 48 - 1, true);
+    assert.equal(f.call('acmFormatTagEnumA', [0, DETAILS, 0x7777, 9, 0]), 11, 'a short structure');
+    f.view.setUint32(DETAILS, 24 + 48, true);
+    assert.equal(f.call('acmFormatTagEnumA', [0, DETAILS, 0x7777, 9, 1]), 10);
+    assert.equal(await f.call('acmFormatTagEnumA', [0x41c00003, DETAILS, 0x7777, 9, 0]), 0);
+    assert.deepEqual(f.calls, [[0x7777, 0x41c00003, DETAILS, 9, 2]], 'the converter has PCM alone');
+    assert.equal(f.view.getUint32(DETAILS + 8, true), 1, 'WAVE_FORMAT_PCM');
+    assert.equal(f.view.getUint32(DETAILS + 12, true), 16, 'a PCMWAVEFORMAT');
+});
+
+test('the PCM converter adds two channels into one, saturated, and holds a frame going down', ()=>{
+    const f = fixture();
+    writeFormat(f.view, 0x2000, { tag: 1, channels: 2, rate: 22050, blockAlign: 4, bits: 16 });
+    writeFormat(f.view, 0x2100, { tag: 1, channels: 1, rate: 8000, blockAlign: 2, bits: 16 });
+    assert.equal(f.call('acmStreamOpen', [0x2200, 0, 0x2000, 0x2100, 0, 0, 0, 0]), 0);
+    const stream = f.view.getUint32(0x2200, true);
+    const IN = 0x3100;
+    for (let frame = 0; frame < 8; frame++)
+    {
+        f.view.setInt16(IN + frame * 4, frame * 1000, true);
+        f.view.setInt16(IN + frame * 4 + 2, frame === 6 ? 30000 : 1, true);
+    }
+    f.view.setUint32(0x3000, 84, true);
+    f.view.setUint32(0x3000 + 12, IN, true);
+    f.view.setUint32(0x3000 + 16, 32, true);
+    f.view.setUint32(0x3000 + 28, 0x3200, true);
+    f.view.setUint32(0x3000 + 32, 0x100, true);
+    assert.equal(f.call('acmStreamPrepareHeader', [stream, 0x3000, 0]), 0);
+    assert.equal(f.call('acmStreamConvert', [stream, 0x3000, 0]), 0);
+    // Output frame j holds source frame floor((j + 1/2) * 22050 / 8000): 1, 4, 6.
+    const out = [0, 1, 2].map(frame=>f.view.getInt16(0x3200 + frame * 2, true));
+    assert.deepEqual(out, [1001, 4001, 32767], 'the last one saturated');
+    assert.equal(f.view.getUint32(0x3000 + 36, true), 6, 'three frames');
 });

@@ -2231,9 +2231,41 @@ export function createWin32Module(){
             });
 
             // The audio endpoints a program walks to find the device it plays to.
+            // A path as the object manager names it: the drive's device, as
+            // QueryDosDevice answers it, and the rest; null where it has no drive.
+            const nativePathOf = (/** @type {string} */ path)=>{
+                const parts = /^([A-Za-z]):(\\.*)$/.exec(path);
+                const kernel32 = /** @type {any} */ (libraries['KERNEL32.dll']);
+                const scratch = parts && kernel32.QueryDosDeviceA
+                    ? allocator.allocate(0x110) : 0;
+                if (!parts || scratch === 0)
+                {
+                    return null;
+                }
+                try
+                {
+                    writeMemory(scratch, new Uint8Array(
+                        [parts[1].charCodeAt(0), 0x3a, 0]));
+                    return kernel32.QueryDosDeviceA.handler([scratch, scratch + 0x10,
+                        0x100]) === 0 ? null : readCString(scratch + 0x10, 0x100)
+                        + parts[2];
+                }
+                finally
+                {
+                    allocator.free(scratch);
+                }
+            };
+
             registerMmDevApiClasses({
                 registry: com, vtables: comVtables, heap, readMemory, writeMemory, readWideString,
                 pointerSize, windows, divergence: config?.divergence,
+                // A stream plays into the mixer waveOut writes to, against the
+                // guest's clock where nothing listens, and an event-driven one is
+                // woken by the multimedia timers.
+                now: ()=>kernel.clock.virtualTime(), output: config?.output, timers: mmTimers,
+                // A session is named after the program, as the object manager names it.
+                program: ()=>nativePathOf(modules.imagePath()) ?? modules.imagePath(),
+                processId: ()=>processId,
             });
 
             // DirectPlay's session and lobby objects, which a program makes
@@ -3170,30 +3202,7 @@ export function createWin32Module(){
                             writeThroughProtection(/** @type {any} */ (memory), address, bytes),
                         startup: ()=>config?.startup ?? null,
                         divergence: config?.divergence,
-                        // A path as the object manager names it: the drive's
-                        // device, as QueryDosDevice answers it, and the rest.
-                        nativePath: (/** @type {string} */ path)=>{
-                            const parts = /^([A-Za-z]):(\\.*)$/.exec(path);
-                            const kernel32 = /** @type {any} */ (libraries['KERNEL32.dll']);
-                            const scratch = parts && kernel32.QueryDosDeviceA
-                                ? allocator.allocate(0x110) : 0;
-                            if (!parts || scratch === 0)
-                            {
-                                return null;
-                            }
-                            try
-                            {
-                                writeMemory(scratch, new Uint8Array(
-                                    [parts[1].charCodeAt(0), 0x3a, 0]));
-                                return kernel32.QueryDosDeviceA.handler([scratch, scratch + 0x10,
-                                    0x100]) === 0 ? null : readCString(scratch + 0x10, 0x100)
-                                    + parts[2];
-                            }
-                            finally
-                            {
-                                allocator.free(scratch);
-                            }
-                        },
+                        nativePath: nativePathOf,
                         askChild,
                         currentThread: ()=>kernel.currentThread(),
                         setLastErrorFor: setErrorOn,

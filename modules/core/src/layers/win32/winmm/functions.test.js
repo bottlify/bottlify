@@ -69,7 +69,7 @@ function machine(){
 
 /** A WAVEFORMATEX at 0x100 and an opened device. @param {any} m */
 function opened(m, flags = 0, callback = 0){
-    m.put32(0x100, 16 | 2 << 16); // wFormatTag = PCM, nChannels = 2
+    m.put32(0x100, 1 | 2 << 16); // wFormatTag = PCM, nChannels = 2
     m.put32(0x104, 44100);
     m.put32(0x108, BYTES_PER_SECOND);
     m.put32(0x10c, 4 | 16 << 16); // nBlockAlign, wBitsPerSample
@@ -425,8 +425,8 @@ test('a device with no byte rate in its format is refused, not stalled', ()=>{
     {
         m.memory[at] = 0;
     }
-    assert.equal(m.winmm.waveOutOpen.handler([0x200, 0, 0x100, 0, 0, 0]), 11,
-        'MMSYSERR_INVALPARAM');
+    assert.equal(m.winmm.waveOutOpen.handler([0x200, 0, 0x100, 0, 0, 0]), 32,
+        'WAVERR_BADFORMAT: no tag, no rate');
 });
 
 test('a driven device retires buffers without the program asking anything', ()=>{
@@ -503,7 +503,7 @@ test('a build with no notify behaves exactly as it did', ()=>{
     const put32 = (at, value)=>memory.set(new Uint8Array([
         value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff,
     ]), at);
-    put32(0x100, 16 | 2 << 16);
+    put32(0x100, 1 | 2 << 16);
     put32(0x104, 44100);
     put32(0x108, BYTES_PER_SECOND);
     put32(0x10c, 4 | 16 << 16);
@@ -1256,3 +1256,36 @@ test('joyConfigChanged takes the notice: no joystick has settings to reread', ()
     assert.equal(m.winmm.joyConfigChanged.argBytes, 4);
     assert.equal(m.winmm.joyConfigChanged.handler([0]), 0, 'JOYERR_NOERROR');
 });
+
+test('waveOutOpen judges a format by Windows\' rules, through the mapper or straight to the device',
+    async()=>{
+        const { judgeWaveFormat, expandG711 } = await import('./functions.js');
+        /** @param {number} tag @param {number} channels @param {number} bits @param {number} [valid] */
+        const format = (tag, channels, bits, valid = bits)=>{
+            const bytes = new Uint8Array(40);
+            const view = new DataView(bytes.buffer);
+            const block = channels * bits / 8;
+            view.setUint16(0, tag > 0xff ? 0xfffe : tag, true);
+            view.setUint16(2, channels, true);
+            view.setUint32(4, 48000, true);
+            view.setUint32(8, block * 48000, true);
+            view.setUint16(12, block, true);
+            view.setUint16(14, bits, true);
+            view.setUint16(16, 22, true);
+            view.setUint16(18, valid, true);
+            view.setUint32(24, tag > 0xff ? tag >> 8 : 0, true);
+            bytes.set([0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71], 28);
+            return bytes;
+        };
+        assert.equal(judgeWaveFormat(format(1, 2, 16), false).result, 0, 'PCM');
+        assert.equal(judgeWaveFormat(format(3 << 8, 2, 32), false).result, 0, 'extensible float');
+        assert.equal(judgeWaveFormat(format(1 << 8, 2, 32, 24), true).result, 0, '24 valid in 32');
+        assert.equal(judgeWaveFormat(format(1, 4, 16), false).result, 32, 'a plain format of four');
+        assert.equal(judgeWaveFormat(format(6, 1, 8), false).result, 0, 'A-law, by the mapper');
+        assert.equal(judgeWaveFormat(format(6, 1, 8), true).result, 32, 'not to the device');
+        assert.equal(judgeWaveFormat(format(1 << 8, 1, 40), true).result, 11, 'no device has 40');
+        assert.equal(judgeWaveFormat(format(1 << 8, 1, 40), false).result, 32);
+        assert.deepEqual([0xd5, 0x55].map(byte=>expandG711(byte, true)), [8, -8], 'A-law');
+        assert.deepEqual([0xff, 0x80, 0x00].map(byte=>expandG711(byte, false)), [0, 32124, -32124],
+            'mu-law');
+    });
