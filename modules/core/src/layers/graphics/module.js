@@ -131,6 +131,24 @@ export function clientUncovered(windows, handle, screen){
 }
 
 /**
+ * Where the shown top-level windows over a window lie on the screen, bottom
+ * to top: what a picture that has the screen to itself is to show over it.
+ * None for a window not listed.
+ *
+ * @param {ListedWindow[]} windows  bottom to top
+ * @param {number} handle
+ * @param {import('./gdi/contract.js').Rect} screen
+ * @returns {import('./gdi/contract.js').Rect[]}
+ */
+export function windowsAbove(windows, handle, screen){
+    const tree = windowTree(windows);
+    const window = tree.byHandle.get(`0x${(handle >>> 0).toString(16)}`);
+    const at = window ? tree.topLevels.indexOf(tree.topLevelOf(window)) : -1;
+    return at < 0 ? [] : tree.topLevels.slice(at + 1)
+        .map(({ rect })=>intersectRect(rect, screen)).filter(rect=>!isEmptyRect(rect));
+}
+
+/**
  * The top-level window a primary surface belongs to: the cooperative
  * window's, else the topmost shown one; null when the program shows none.
  *
@@ -1202,6 +1220,26 @@ export function createGraphicsModule(){
             };
 
             /**
+             * The windows over a GPU's picture that has the screen, from the
+             * desktop composed, laid over it by the presenter: the picture has
+             * no guest bytes to compose the desktop onto, and the message box a
+             * program put up over its full-screen picture - the one that says
+             * why it ended - was not seen.
+             *
+             * @param {number} holder  The window whose picture has the screen.
+             */
+            const veilOver = holder=>{
+                const screen = services.screen;
+                const rects = windowsAbove(win32.windows?.() ?? [], holder,
+                    { left: 0, top: 0, right: screen.width, bottom: screen.height });
+                // ponytail: the whole desktop is uploaded at each paint while a
+                // window is over the picture; only the windows' rows if a
+                // dialog that paints often over a game shows in a profile.
+                const desktop = rects.length > 0 ? screens.compose() : null;
+                state.shown.overlay(desktop, desktop ? rects : []);
+            };
+
+            /**
              * Shows a DirectDraw primary surface.
              *
              * A primary belongs to a window -- the one the program named when it
@@ -1218,13 +1256,19 @@ export function createGraphicsModule(){
              * @param {number} [window]    The cooperative window, or zero.
              * @param {boolean} [exclusive]
              */
+
             const presentPrimary = (surface, window = 0, exclusive = false)=>{
                 fullScreen = exclusive ? { surface, window } : null;
+                if (!exclusive)
+                {
+                    state.shown.overlay(null, []);
+                }
                 const screen = services.screen;
                 // A picture the GPU owns has nothing worth reading in guest
                 // memory, and a primary of another size than the screen has no
-                // place on it. The ceiling on this: such a primary is shown as
-                // it is, and anything over it is not seen.
+                // place on it. Such a primary is shown as it is: the windows
+                // over a GPU's full-screen picture are laid over it at a paint
+                // (`veilOver`); over a primary of another size they are not seen.
                 const wholeScreen = { left: 0, top: 0, right: screen.width, bottom: screen.height };
                 const usable = !state.shown.isClaimed(surface.buffer)
                     && surface.width === screen.width && surface.height === screen.height;
@@ -1576,6 +1620,10 @@ export function createGraphicsModule(){
                         && (win32.windows?.() ?? []).some(
                             (/** @type {ListedWindow} */ listed)=>listed.hwnd === owner))
                     {
+                        if (state.shown.isClaimed(held.surface.buffer))
+                        {
+                            veilOver(held.window);
+                        }
                         presentPrimary(held.surface, held.window, true);
                         return;
                     }
@@ -1584,15 +1632,17 @@ export function createGraphicsModule(){
                     // composed over it put the device window's own surface,
                     // black, between its frames -- a loading screen flickering
                     // at every paint. While it holds the screen its last frame
-                    // stays. The ceiling: a window drawn over it is not seen.
+                    // stays, with the windows over it laid over it.
                     const covering = state.seam?.screenHeld?.() ?? 0;
                     const covered = covering && `0x${(covering >>> 0).toString(16)}`;
                     if (covered && !win32.applicationDeactivated?.()
                         && (win32.windows?.() ?? []).some(
                             (/** @type {ListedWindow} */ listed)=>listed.hwnd === covered))
                     {
+                        veilOver(covering);
                         return;
                     }
+                    state.shown.overlay(null, []);
                     const screen = screens.screen();
                     // A DXGI swap chain's frames are its window's
                     // client area, which DWM shows in place of what GDI drew

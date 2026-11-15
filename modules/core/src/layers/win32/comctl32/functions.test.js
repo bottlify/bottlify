@@ -6,7 +6,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { COMCTL32_ORDINALS, createComctlFunctions } from './functions.js';
+import {
+    COMCTL32_ORDINALS, VERSION_6_EXPORTS, commonControlsFaces, createComctlFunctions,
+} from './functions.js';
 
 /** @param {((bitmap: number) => { width: number, height: number }) | undefined} bitmapSize */
 function machine(bitmapSize = undefined){
@@ -24,8 +26,9 @@ function machine(bitmapSize = undefined){
     ]), at);
     const get32 = (/** @type {number} */ at)=>memory[at] | memory[at + 1] << 8
         | memory[at + 2] << 16 | memory[at + 3] << 24;
-    return { memory, put32, get32,
-        comctl: /** @type {any} */ (createComctlFunctions(host)) };
+    const faces = commonControlsFaces(host);
+    return { memory, put32, get32, comctl: /** @type {any} */ (faces.system),
+        assembly: /** @type {any} */ (faces.assembly) };
 }
 
 test('a list hands out indices, and Add reports the first of them', ()=>{
@@ -169,6 +172,41 @@ test('DllGetVersion answers the 5.82 common controls of Windows XP SP3', ()=>{
     assert.equal(m.comctl.DllGetVersion.handler([0x80]), E_INVALIDARG, 'a size of neither');
     assert.equal(view.getUint32(0x84, true), 0xaaaaaaaa, 'and nothing written');
     assert.equal(m.comctl.DllGetVersion.handler([0]), E_INVALIDARG, 'no structure');
+});
+
+test('Common Controls 6 is version 6, with the exports and classes the 5.82 library lacks', ()=>{
+    // misc.c's test_version and test_RegisterClassNameW, for each library.
+    const m = machine();
+    const view = new DataView(m.memory.buffer);
+    view.setUint32(0x10, 20, true);
+    assert.equal(m.assembly.DllGetVersion.handler([0x10]), 0);
+    assert.deepEqual([0x14, 0x18, 0x1c].map(at=>view.getUint32(at, true)), [6, 0, 2600]);
+    for (const name of VERSION_6_EXPORTS)
+    {
+        assert.equal(name in m.comctl, false, `${name} is version 6's alone`);
+    }
+    assert.ok('GetWindowSubclass' in m.assembly, 'one of them the engine has');
+    assert.equal(Object.keys(m.assembly).filter(name=>!(name in m.comctl)
+        && !VERSION_6_EXPORTS.includes(name)).length, 0, 'and nothing else differs in name');
+
+    /** @param {any} table @param {string} name */
+    const registers = (table, name)=>{
+        m.memory.fill(0, 0x100, 0x180);
+        [...name].forEach((unit, index)=>view.setUint16(0x100 + index * 2, unit.charCodeAt(0),
+            true));
+        return table.RegisterClassNameW.handler([0x100]);
+    };
+    // A machine with user32 behind the call, which knows every class.
+    const user32 = { handler: ()=>1 };
+    const faces = commonControlsFaces({ readMemory: (a, n)=>m.memory.slice(a, a + n),
+        writeMemory: (a, b)=>m.memory.set(b, a), allocate: ()=>0x200, user32: ()=>user32 });
+    m.memory.fill(0, 0x100);
+    for (const [name, five, six] of [['SysAnimate32', 1, 1], ['Button', 0, 1], ['SysLink', 0, 1],
+        ['flatsb_class32', 0, 0], ['non-existent', 0, 0]])
+    {
+        assert.equal(registers(faces.system, String(name)), five, `5.82: ${name}`);
+        assert.equal(registers(faces.assembly, String(name)), six, `6: ${name}`);
+    }
 });
 
 test('CreateUpDownControl makes the control by its class and sets its buddy, range and '

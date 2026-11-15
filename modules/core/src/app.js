@@ -6075,7 +6075,7 @@ async function buildApp(options){
                  * @param {string | null} name
                  */
                 find: name=>{
-                    const module = findModule(name);
+                    const module = moduleUnderContext(name);
                     return module?.loaded === false ? null : module;
                 },
                 /** @param {number} base */
@@ -6584,7 +6584,12 @@ async function buildApp(options){
      */
     const leftOutAt64 = [];
     builtLibraries = allLibraries;
-    Object.entries(allLibraries).forEach(([name, table])=>{
+    /**
+     * A table of ours made a module in guest memory, after the ones before it.
+     *
+     * @param {string} name @param {Record<string, any>} table
+     */
+    const synthesiseLibrary = (name, table)=>{
         // A library imported by number has to be synthesised with the numbers
         // the program compiled against; one we assigned ourselves would bind to
         // a different function, silently.
@@ -6684,9 +6689,55 @@ async function buildApp(options){
             /** @returns {number | Promise<number>} */
             release: ()=>releaseLibrary(record),
         };
+        return record;
+    };
+    for (const [name, table] of Object.entries(allLibraries))
+    {
+        const record = synthesiseLibrary(name, table);
         byName.set(moduleKeyOf(name), record);
-        byBase.set(base, record);
-    });
+        byBase.set(record.base, record);
+    }
+    /**
+     * The libraries an assembly of the engine's store carries in a version of
+     * its own (`win32.faces`), by key: a module beside system32's of the same
+     * name, found by no bare name, bound where a context puts the name in
+     * that assembly (`faceFor`).
+     *
+     * @type {Map<string, any>}
+     */
+    const faces = new Map();
+    for (const [name, table] of Object.entries(
+        /** @type {any} */ (win32).faces?.() ?? {}))
+    {
+        const record = synthesiseLibrary(name, table);
+        byBase.set(record.base, record);
+        faces.set(moduleKeyOf(name), record);
+    }
+    /**
+     * The face a load of `name` binds: where a context redirects the name to
+     * an assembly of the engine's (no file of its own, `source` null), that
+     * assembly's own version of the library, seen at the assembly's directory.
+     *
+     * @param {string} name
+     * @param {{ path: string, source: string | null } | null} redirected
+     */
+    const faceFor = (name, redirected)=>{
+        const face = redirected?.source === null ? faces.get(moduleKeyOf(name)) : undefined;
+        if (!face)
+        {
+            return null;
+        }
+        face.path ??= redirected?.path;
+        return face;
+    };
+    /**
+     * The library a bare name is under the running thread's context and the
+     * process default: a face where one redirects it, else the name's own.
+     *
+     * @param {string | null} name
+     */
+    const moduleUnderContext = name=>(name && !/[\\/]/.test(name)
+        ? faceFor(name, activation?.redirect(name) ?? null) : null) ?? findModule(name);
     for (const name of ALWAYS_LOADED)
     {
         markLoaded(byName.get(name) ?? null);
@@ -6710,7 +6761,7 @@ async function buildApp(options){
      * @param {number | null} ordinal
      */
     const resolveImport = (dll, name, ordinal)=>{
-        const module = findModule(dll);
+        const module = moduleUnderContext(dll);
         if (!module)
         {
             return null;
@@ -7396,29 +7447,30 @@ async function buildApp(options){
                 })();
             }
         }
-        if (loaded)
+        const table = faceFor(name, redirected) ?? loaded;
+        if (table)
         {
-            markLoaded(loaded);
-            loaded.references = (loaded.references ?? 0) + 1;
+            markLoaded(table);
+            table.references = (table.references ?? 0) + 1;
             // One of ours asked for unresolved is left unattached, and a later
             // load attaches it: its entry point is our own setup, which the
             // rest of it relies on.
-            if (loaded.attached !== false || !loaded.entryPoint || loaded.inert || unresolved)
+            if (table.attached !== false || !table.entryPoint || table.inert || unresolved)
             {
-                return loaded.base;
+                return table.base;
             }
             // Its first LoadLibrary: the entry point runs now, on the thread
             // that asked, exactly as a library read off the volume gets its
             // DllMain above. Marked first, so a load the entry point itself
             // provokes does not run it twice.
-            loaded.attached = true;
+            table.attached = true;
             return bridge.callGuest({
-                entry: loaded.entryPoint,
-                args: [loaded.base, DLL_PROCESS_ATTACH, 0],
+                entry: table.entryPoint,
+                args: [table.base, DLL_PROCESS_ATTACH, 0],
                 thread: asked,
             }).then(()=>{
-                attachOrder.push(loaded);
-                return loaded.base;
+                attachOrder.push(table);
+                return table.base;
             });
         }
         // Said out loud, because this is the failure a program reports as

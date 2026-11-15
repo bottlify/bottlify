@@ -54,6 +54,10 @@ event, an error. Neither stops the program.
   imports one still starts, and fails where it calls in. A static import of a library in no list
   and on no volume ends the process at its start with STATUS_DLL_NOT_FOUND (0xC0000135), as on
   Windows (`roadmap/decisions.md` A256).
+- Common Controls 6 is bound where a manifest asks for it (`roadmap/decisions.md` A257), but of the
+  exports only it has, GetWindowSubclass is there and TaskDialog, TaskDialogIndirect,
+  DrawShadowText, LoadIconMetric, LoadIconWithScaleDown, DPA_GetSize, DSA_Clone, DSA_GetSize,
+  ImageList_CoCreateInstance, ImageList_WriteEx, HIMAGELIST_QueryInterface and DllInstall are not.
 - An import nothing implements returns 0 when its argument size is known (a decorated name, a cdecl
   library, a library the program brought). Otherwise the program stops with `unimplemented import`
   and the function's name.

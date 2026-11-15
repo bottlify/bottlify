@@ -10,6 +10,14 @@ from these tables (PE32+, AMD64, in a 64-bit process) and places them in the pro
 with headers, an export table and code. So the address `GetProcAddress` returns is the one the import
 was bound to.
 
+One table can be two libraries. comctl32 is system32's 5.82 to a program without Common Controls 6
+in its manifest and version 6 to one with it, as on Windows: the same controls, two modules
+(`commonControlsFaces` in [`comctl32/functions.js`](../../modules/core/src/layers/win32/comctl32/functions.js)).
+The loader binds the second where the activation context puts the name in the engine's assembly
+(`faceFor` in [`app.js`](../../modules/core/src/app.js)), for an import, `LoadLibrary` and
+`GetModuleHandle` alike, and user32 makes a window by the class name the context redirects:
+version 6's Button, reported as `Button` (`roadmap/decisions.md` A257).
+
 | Where | What lives there |
 | --- | --- |
 | Engine thread (a process's own thread with `concurrency` above 1) | The function tables, image building, the bridge and the handlers |

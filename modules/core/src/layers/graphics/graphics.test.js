@@ -12,7 +12,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { clientDrawable, clientUncovered, graphicsModule, uncoveredRegion } from './module.js';
+import { clientDrawable, clientUncovered, graphicsModule, uncoveredRegion, windowsAbove }
+    from './module.js';
 import { createPresenter } from './webgpu/internal/presenter.js';
 import { createFakeDevice } from './webgpu/internal/fake-device.js';
 import { FVF } from './webgpu/internal/vertexformat.js';
@@ -1297,4 +1298,22 @@ test('a device\'s window is the picture while nothing over it reaches its client
         parent: '0x36' };
     assert.equal(clientUncovered([gui, demo, pane], 0x40, size), true,
         'a child window filling it, its top-level window topmost');
+});
+
+test('the windows over a window that has the screen are the shown top-levels above it', ()=>{
+    const screen = { left: 0, top: 0, right: 640, bottom: 480 };
+    const under = { hwnd: '0x9', rect: screen, client: screen, visible: true, parent: null };
+    const game = { hwnd: '0x10', rect: screen, client: screen, visible: true, parent: null };
+    const button = { hwnd: '0x11', rect: { left: 10, top: 10, right: 50, bottom: 30 },
+        client: { left: 10, top: 10, right: 50, bottom: 30 }, visible: true, child: true,
+        parent: '0x10' };
+    const box = { hwnd: '0x12', rect: { left: 500, top: 400, right: 800, bottom: 520 },
+        client: { left: 500, top: 400, right: 800, bottom: 520 }, visible: true, parent: null };
+    const hidden = { ...box, hwnd: '0x13', visible: false };
+    assert.deepEqual(windowsAbove([under, game, button, box, hidden], 0x10, screen),
+        [{ left: 500, top: 400, right: 640, bottom: 480 }],
+        'the box, on the screen; not the one under, the child inside, the hidden one');
+    assert.deepEqual(windowsAbove([under, game, button, box], 0x11, screen).length, 1,
+        'a child stands for its top-level window');
+    assert.deepEqual(windowsAbove([game, box], 0x77, screen), [], 'a window not listed');
 });

@@ -137,7 +137,10 @@ flowchart TB
   desktop window manager composes it (`graphics/gdi/screen.js`): each top-level window draws on a
   surface of its own, unclipped by the other top-level windows, and the screen is the desktop's
   background with the shown windows copied over it, bottom to top. A window moved, raised, hidden
-  or closed paints nothing; the screen is composed again.
+  or closed paints nothing; the screen is composed again. A full-screen picture a GPU drew (an
+  OpenGL context, a Direct3D device) has no bytes for the desktop to be composed onto, so the
+  windows over it - the message box a program ends with - are laid over each of its frames by the
+  presenter from the desktop the process composed (`overlay`), until they go.
 - **Several processes, one screen.** Each process's user32 tells the run's window manager
   (`win32/user32/manager.js`, on the engine thread beside the window directory) what every window
   of its is (class, title, style, rectangle, visibility), and the manager holds the z-order of

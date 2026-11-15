@@ -99,7 +99,7 @@ import { createMmioFunctions } from './winmm/mmio.js';
 import { createWaveNotifier } from './winmm/notify.js';
 import { createNoticeThread } from './winmm/thread.js';
 import { createTimerService } from './winmm/timers.js';
-import { COMCTL32_ORDINALS, createComctlFunctions } from './comctl32/functions.js';
+import { COMCTL32_ORDINALS, commonControlsFaces } from './comctl32/functions.js';
 import { createCommonControls } from './comctl32/controls.js';
 import { createImageLists } from './comctl32/imagelist.js';
 import { SHELL32_ORDINALS, createShellFunctions } from './shell32/functions.js';
@@ -3076,6 +3076,38 @@ export function createWin32Module(){
                 }
             };
 
+            // The common controls, one implementation and the two libraries it is:
+            // system32's 5.82 and Common Controls 6 (`commonControlsFaces`).
+            const commonControls = commonControlsFaces({
+                readMemory, writeMemory, divergence: config?.divergence, imageLists,
+                // What _TrackMouseEvent is documented to call where the
+                // system has it; looked up when called, as user32 is built
+                // beside it.
+                trackMouseEvent: request=>
+                    libraries['USER32.dll'].TrackMouseEvent.handler([request]),
+                // A property sheet is a dialog made with user32's own calls,
+                // as a program would make one, around a dialog procedure the
+                // bridge gives an address.
+                user32: name=>libraries['USER32.dll'][name],
+                // CreateMappedBitmap reads and writes a bitmap's bits
+                // through gdi32's own calls, looked up when called.
+                gdi32: name=>libraries['GDI32.dll']?.[name],
+                // The arrays and the allocator take their memory through
+                // kernel32's heaps, looked up when called.
+                kernel32: name=>libraries['KERNEL32.dll']?.[name]?.handler,
+                allocate: bytes=>heap.allocate(bytes),
+                release: address=>heap.free(address),
+                call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
+                callerThread: ()=>bridge.callerThread(),
+                procedure: (name, handler)=>bridge.register(`<${name}>`,
+                    { argBytes: 16, handler }),
+                findResource: (instance, type, name)=>
+                    modules.findResource?.(instance, type, name) ?? null,
+                moduleBase: instance=>modules.moduleBase?.(instance) ?? 0,
+                loadString: (instance, id)=>modules.loadString?.(instance, id) ?? null,
+                // A modal sheet's own loop, which user32 lends it.
+                modal: (hwnd, options)=>windowService.modalLoop(hwnd, options),
+            });
             // The libraries this build implements, standing in the system
             // folder for a setup that looks before it loads -- kernel32's
             // file calls and setupapi's alike. Every layer's, not only this
@@ -3941,36 +3973,10 @@ export function createWin32Module(){
                     }),
                 },
 
-                'COMCTL32.dll': createComctlFunctions({
-                    readMemory, writeMemory, divergence: config?.divergence, imageLists,
-                    // What _TrackMouseEvent is documented to call where the
-                    // system has it; looked up when called, as user32 is built
-                    // beside it.
-                    trackMouseEvent: request=>
-                        libraries['USER32.dll'].TrackMouseEvent.handler([request]),
-                    // A property sheet is a dialog made with user32's own calls,
-                    // as a program would make one, around a dialog procedure the
-                    // bridge gives an address.
-                    user32: name=>libraries['USER32.dll'][name],
-                    // CreateMappedBitmap reads and writes a bitmap's bits
-                    // through gdi32's own calls, looked up when called.
-                    gdi32: name=>libraries['GDI32.dll']?.[name],
-                    // The arrays and the allocator take their memory through
-                    // kernel32's heaps, looked up when called.
-                    kernel32: name=>libraries['KERNEL32.dll']?.[name]?.handler,
-                    allocate: bytes=>heap.allocate(bytes),
-                    release: address=>heap.free(address),
-                    call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
-                    callerThread: ()=>bridge.callerThread(),
-                    procedure: (name, handler)=>bridge.register(`<${name}>`,
-                        { argBytes: 16, handler }),
-                    findResource: (instance, type, name)=>
-                        modules.findResource?.(instance, type, name) ?? null,
-                    moduleBase: instance=>modules.moduleBase?.(instance) ?? 0,
-                    loadString: (instance, id)=>modules.loadString?.(instance, id) ?? null,
-                    // A modal sheet's own loop, which user32 lends it.
-                    modal: (hwnd, options)=>windowService.modalLoop(hwnd, options),
-                }),
+                // system32's 5.82; Common Controls 6, the other face of the
+                // same controls, is bound where a context asks for it
+                // (`faces` below).
+                'COMCTL32.dll': commonControls.system,
 
                 'SHELL32.dll': createShellFunctions({
                     pointerSize,
@@ -5292,6 +5298,10 @@ export function createWin32Module(){
                             wParam: wParam >>> 0, lParam: lParam >>> 0,
                         }),
                     }),
+                    // A class name under the thread's activation context: a
+                    // program with Common Controls 6 in its manifest makes
+                    // version 6's Button (`actctx.js`).
+                    windowClass: name=>activation.loaderApi.windowClass(name),
                     // The common controls are built-in classes of the window
                     // manager, built from the same host and drawing helpers its
                     // own system classes use: comctl32 owns their behaviour, not
@@ -5814,6 +5824,7 @@ export function createWin32Module(){
             if (windows.major < 6)
             {
                 delete libraries['COMCTL32.dll'].RegisterClassNameW;
+                delete commonControls.assembly.RegisterClassNameW;
             }
 
             // The shell's core came with Windows 8.1, and took over shlwapi's
@@ -6288,6 +6299,16 @@ export function createWin32Module(){
                     /** @param {number} hdc */
                     bitmapSurface: hdc=>gdi.bitmapSurface(hdc),
                 }),
+
+                /**
+                 * The libraries an assembly the engine's store holds carries in
+                 * a version of their own, beside system32's of the same name:
+                 * Common Controls 6's comctl32. The loader binds one where an
+                 * activation context puts the name in that assembly.
+                 *
+                 * @returns {Record<string, Record<string, any>>}
+                 */
+                faces: ()=>({ 'COMCTL32.dll': commonControls.assembly }),
 
                 /**
                  * Which ordinal is which export, for the libraries that have them.

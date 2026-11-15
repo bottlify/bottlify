@@ -205,6 +205,13 @@ const INERT_CLASSES = Object.freeze(['SysHeader32', 'ToolbarWindow32', 'ReBarWin
     'SysPager', 'NativeFontCtl', 'SysLink']);
 
 /**
+ * The classes only Common Controls 6 registers: a window of one is made by
+ * its versioned name, or by its plain one under a context that holds that
+ * assembly (`host.windowClass`), and by no other.
+ */
+const VERSION_6_CLASSES = new Set(['syslink']);
+
+/**
  * The standard arrow, as LoadCursor(NULL, IDC_ARROW) names it: the cursor of
  * every system class but the edit's, which is the I-beam above.
  */
@@ -707,6 +714,11 @@ const MAX_WINDOW_TEXT = 1 << 16;
  *           classes paint with, and the function that files a class under its
  *           name. Absent in a build with no common controls, and then a
  *           program that makes one gets no window for it.
+ * @property {(name: string) => ({ versioned: string, major: number } | null)} [windowClass]
+ *           The class a window class name is under the running thread's
+ *           activation context: its versioned name and the major version of
+ *           the assembly that registers it, or null when no context
+ *           redirects it. Absent, no name is redirected.
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, length: number) => boolean} [canWrite]
@@ -1000,10 +1012,57 @@ export function createWindowFunctions(host){
         {
             return null;
         }
-        const name = value <= LAST_ATOM
-            ? atoms.get(value)
-            : readText(host, value, unicode, MAX_CLASS_NAME);
-        return name === undefined ? null : classNamed(name);
+        if (value <= LAST_ATOM)
+        {
+            const name = atoms.get(value);
+            return name === undefined ? null : classNamed(name);
+        }
+        return classByName(readText(host, value, unicode, MAX_CLASS_NAME));
+    };
+
+    /**
+     * A class by a name a program passed: under a context that redirects
+     * the name, the class of the assembly's version - Common Controls 6's
+     * Button, not user32's - and otherwise the name's own.
+     *
+     * @param {string} name
+     * @returns {any | null}
+     */
+    const classByName = name=>{
+        const redirected = host.windowClass?.(name);
+        if (redirected)
+        {
+            return versionedClass(redirected.versioned, redirected.major) ?? classNamed(name);
+        }
+        // A versioned name asked for by itself, as a program that read it
+        // from its context's class section does.
+        const version = /^(\d+)\.\d+\.\d+\.\d+!/.exec(name);
+        return version ? versionedClass(name, Number(version[1])) : classNamed(name);
+    };
+
+    /**
+     * A system class by its versioned name, `6.0.2600.2180!Button`: the
+     * class that assembly registers, with a procedure address of its own and
+     * the version its windows answer as (`controlsVersion`), made the first
+     * time the name is wanted from the system class it is a version of.
+     * Null for a name with no system class behind it.
+     *
+     * @param {string} versioned @param {number} major
+     * @returns {any | null}
+     */
+    const versionedClass = (versioned, major)=>{
+        const key = versioned.toLowerCase();
+        if (!systemClasses.has(key))
+        {
+            const base = systemClasses.get(key.slice(key.indexOf('!') + 1));
+            if (!base)
+            {
+                return null;
+            }
+            systemClasses.set(key, { ...base, wndProc: 0, version: major,
+                label: versioned, since: undefined });
+        }
+        return classNamed(versioned);
     };
 
     /**
@@ -1028,7 +1087,9 @@ export function createWindowFunctions(host){
                 return cls;
             }
         }
-        const system = systemClasses.get(folded);
+        const found = systemClasses.get(folded);
+        // A class of a later version only by its versioned name.
+        const system = found?.since !== undefined && found.label === undefined ? null : found;
         if (system && system.wndProc === 0)
         {
             // The address is made when the class is first wanted rather than
@@ -1036,7 +1097,7 @@ export function createWindowFunctions(host){
             // the machine to be up, and a build that never makes a control
             // never needs one.
             system.wndProc = host.registerProcedure
-                ? host.registerProcedure(`<${system.name}>`,
+                ? host.registerProcedure(`<${system.label ?? system.name}>`,
                     message=>callProcedure(system.wndProc, message, host.callerThread?.()))
                 : HOST_PROCEDURE_BASE + system.atom * 16;
             procedures.set(system.wndProc, controlProcedures[system.name]);
@@ -3955,6 +4016,9 @@ export function createWindowFunctions(host){
         }
         const record = makeWindow({
             className: cls.name,
+            // The version of the common controls the window answers as: 6
+            // for a class of Common Controls 6, reached by its versioned name.
+            controlsVersion: cls.version ?? 5,
             title: (windowName >>> 0) === 0
                 ? '' : readText(host, windowName, unicode, MAX_WINDOW_TEXT),
             unicode: procedures.has(cls.wndProc) || cls.wndProc === 0
@@ -6523,6 +6587,7 @@ export function createWindowFunctions(host){
      */
     const registerSystemClass = definition=>{
         systemClasses.set(definition.name.toLowerCase(), {
+            ...VERSION_6_CLASSES.has(definition.name.toLowerCase()) ? { since: 6 } : {},
             name: definition.name,
             atom: definition.atom ?? 0,
             style: 0,
