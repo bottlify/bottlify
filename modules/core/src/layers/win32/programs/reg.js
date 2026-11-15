@@ -12,6 +12,7 @@
  *   reg add    <key> [/v name | /ve] [/t type] [/s separator] [/d data] [/f] [/reg:32|64]
  *   reg delete <key> [/v name | /ve | /va] [/f] [/reg:32|64]
  *   reg query  <key> [/v name | /ve] [/s] [/reg:32|64]
+ *   reg import <file.reg>
  *
  * A key is named from its root, by the short name or the long one (HKLM,
  * HKEY_LOCAL_MACHINE); a remote machine's is refused. The work is done through
@@ -28,16 +29,11 @@
  */
 
 import { argumentsOf, splitArguments } from './command-line.js';
+import { ROOTS, importRegEntries, parseRegFile } from './regfile.js';
+import { readText } from './notepad.js';
 
 export const REG_EXIT = Object.freeze({ SUCCESS: 0, FAILURE: 1 });
 
-const ROOTS = Object.freeze({
-    HKLM: 0x80000002, HKEY_LOCAL_MACHINE: 0x80000002,
-    HKCU: 0x80000001, HKEY_CURRENT_USER: 0x80000001,
-    HKCR: 0x80000000, HKEY_CLASSES_ROOT: 0x80000000,
-    HKU: 0x80000003, HKEY_USERS: 0x80000003,
-    HKCC: 0x80000005, HKEY_CURRENT_CONFIG: 0x80000005,
-});
 /** @type {Readonly<Record<number, string>>} */
 const LONG_NAMES = Object.freeze({ 0x80000002: 'HKEY_LOCAL_MACHINE',
     0x80000001: 'HKEY_CURRENT_USER', 0x80000000: 'HKEY_CLASSES_ROOT', 0x80000003: 'HKEY_USERS',
@@ -88,11 +84,15 @@ const CANCELLED = 'The operation was cancelled by the user.\r\n';
  * regard to case, each taking the argument after it where it has one.
  *
  * @param {string} line  The arguments after argv[0].
- * @returns {RegPlan | { error: string }}
+ * @returns {RegPlan | { operation: 'import', file: string } | { error: string }}
  */
 export function parseReg(line){
     const words = splitArguments(line).map(({ text })=>text);
     const operation = (words.shift() ?? '').toLowerCase();
+    if (operation === 'import')
+    {
+        return words.length === 1 ? { operation, file: words[0] } : { error: SYNTAX };
+    }
     if (operation !== 'add' && operation !== 'delete' && operation !== 'query')
     {
         return { error: SYNTAX };
@@ -340,12 +340,31 @@ export async function runReg(context){
         return REG_EXIT.FAILURE;
     };
 
-    const plan = parseReg(argumentsOf(context.commandLine));
-    if ('error' in plan)
+    const asked = parseReg(argumentsOf(context.commandLine));
+    if ('error' in asked)
     {
-        await say(plan.error);
+        await say(asked.error);
         return REG_EXIT.FAILURE;
     }
+    if ('file' in asked)
+    {
+        const text = await readText(context, asked.file);
+        const read = text === null ? null : parseRegFile(text);
+        if (read === null || 'error' in read)
+        {
+            await say('ERROR: Error opening the file. There may be a disk or file system error.'
+                + '\r\n');
+            return REG_EXIT.FAILURE;
+        }
+        const code = await importRegEntries(context, read.entries);
+        if (code !== ERROR_SUCCESS)
+        {
+            return failure(code);
+        }
+        await say(DONE);
+        return REG_EXIT.SUCCESS;
+    }
+    const plan = asked;
     /** @param {number} access @returns {Promise<[number, number]>} the code and the key */
     const open = async access=>{
         const out = context.block(4);

@@ -10,19 +10,19 @@ import { REG_TYPES, parseReg, shownValue, valueBytes } from './reg.js';
 
 test('the operation, the key by either name of its root, and the options in any case', ()=>{
     const add = parseReg('ADD "HKCU\\Software\\A B" /V Name /t reg_dword /D 0x10 -f /reg:32');
-    assert.ok(!('error' in add));
+    assert.ok('root' in add);
     assert.deepEqual({ ...add }, { operation: 'add', root: 0x80000001, path: 'Software\\A B',
         keyName: 'HKEY_CURRENT_USER\\Software\\A B', value: 'Name', allValues: false,
         type: REG_TYPES.REG_DWORD, separator: '\\0', data: '0x10', force: true, recurse: false,
         view: 0x200 });
     const remove = parseReg('DELETE "HKEY_LOCAL_MACHINE\\SOFTWARE\\Futuremark\\Futuremark'
         + ' SystemInfo" /f');
-    assert.ok(!('error' in remove));
+    assert.ok('root' in remove);
     assert.equal(remove.root, 0x80000002);
     assert.equal(remove.path, 'SOFTWARE\\Futuremark\\Futuremark SystemInfo');
     assert.equal(remove.value, null, 'the whole key');
     const query = parseReg('query HKLM\\SOFTWARE\\ /ve /s');
-    assert.ok(!('error' in query));
+    assert.ok('root' in query);
     assert.equal(query.path, 'SOFTWARE', 'a trailing backslash is not part of the name');
     assert.deepEqual([query.value, query.recurse], ['', true]);
 });
