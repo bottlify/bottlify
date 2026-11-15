@@ -62,7 +62,6 @@ function fakeMemory(){
     };
 }
 
-/** @param {number} [esp] */
 /**
  * Whether what `ref` points at is let go of: collected after the tasks a
  * disposed machine had already queued have run. A timer or a turn queued
@@ -85,6 +84,7 @@ async function letGo(ref, gc){
     return false;
 }
 
+/** @param {number} [esp] */
 async function makeKernel(esp){
     const memory = fakeMemory();
     const kernel = await kernelModule.create(
