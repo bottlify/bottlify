@@ -97,12 +97,21 @@ plus at most five lines below its table of conditions the line cannot carry.
 | 2026-11-15 | regions of 256 blocks against the default 128, long mode and 32-bit | 256/128 geomean x64 0.99 (vm 1.08), sse 1.06 (vm 1.50) | holds: 128 kept | a game's region profile, not the bench's |
 | 2026-11-15 | a callee formed in at one call of its region, its other calls wasm calls: its `ret` no edge from one loop into another, so both stay loops | instructions an iteration (exact) str 2.93 -> 3.22 M, tree 3.28 -> 8.50 M, lua 37.8 -> 38.4 M, game and vcall equal; str's jumps out 462 k -> 0 | holds | the callee's blocks formed once a call site (copies of blocks by place, not address) |
 | 2026-11-15 | an xmm register a region uses as a scalar alone (92 % of a game's hot SSE uses by the operand forms, 14 % once `rsqrtss`, packed copies and bitwise masks refuse it) kept as a scalar through the whole region, its other lanes in a vector local, or in the state block under a zeroed mask; and a scalar load writing the vector on arm64 too | machine instructions an executed guest instruction over Crysis's 30 hottest regions: x64 2.735 -> 2.755 (vector) / 2.800 (mask); arm64 2.476 -> 2.486 / 2.526; loads not owed on arm64 2.514 | holds | the lanes' traffic (8.7 % arm64, 6.8 % x64) cut without a second value live across the region: V8 spilled it, and a guest call made it whole each time |
+| 2026-11-15 | a float compare's carry kept in the flags word beside its lazy record (`Kind.FCMP`), so an `inc` after it needs no test | entities x87 7.75 -> 7.56 machine instructions a guest one (the record alone: 7.26), Crysis 30 regions 2.696 -> 2.700 | holds: the record alone was taken (048848df) | never: the carry costs some ten instructions a compare |
+| 2026-11-15 | the region's own entry (label 0, which every call takes) tested before its entry `br_table`: a test and a branch for the table's bounds check and jump through memory | exact machine instructions a guest one: entities SSE 6.862 -> 6.908, spread x87 4.289 -> 4.559 | holds | the entry dispatch is redone (V8 lays the entry block as a join and moves more) |
 
 The two 2026-11-14 lines on regions of a module as one, conditions: cork 3f877946, a cloud machine (Intel Xeon @ 2.10GHz, 4 cores,
 power plan not recorded), Chromium 153.0.8010.12 / V8 15.3.76.4 headless (`browser/suite.mjs --scale 10
 --reps 5`, both arms in one run, 5 reps an arm, a first run's sse spread +18 % not repeated in the
 second, 1.00); Node 22.23.4 `run.mjs` x10 with a worker, ms on/off 0.987 x87, 0.998 sse, spread 10-20 %;
 merges fired 0-1 a run, module bytes -1 to -12 % only from the linked calls `dispatch` drops.
+
+The 2026-11-15 lines on the float compare's carry and the entry test, conditions: cork fc755e19 with the change of
+048848df, node 26.13.1 (V8 14.6) on an x86-64 host. The carry: `tools/translator/cork-asm.mjs` weighted by the PE
+benchmark's entities block profile (x87 build, 2000 iterations) and by the Crysis CPU benchmark's 30 hottest regions.
+The entry test: every machine instruction of the process counted under QEMU 8.2.2 between 100 and 200 iterations of
+entities (SSE build) and between 1000 and 1100 of spread (x87 build), one run an arm (a count repeats to the
+instruction); V8's optimising compiles apart.
 
 The 2026-11-15 line on region size, conditions: cork ec2c1353 + e2167a7e, the 4-core cloud VM with nothing else running,
 Node 22.22.0 `bench/run.mjs --iterations <10 x own> --reps 1 --cork '{"maxRegionBlocks":N}'`, 5 alternated pairs, both
