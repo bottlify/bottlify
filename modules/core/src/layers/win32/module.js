@@ -1260,6 +1260,9 @@ export function createWin32Module(){
                     const object = kernel.handles.resolve(handle >>> 0, type);
                     return type === 'file' ? !object?.overlapped : object?.overlapped === false;
                 },
+                // An alertable dequeue: the routines queued to the thread run
+                // first, and one queued while it waits ends it.
+                alertably: (alertable, wait, answer)=>apcs.waitWith(alertable, wait, answer),
                 /** @param {string} text */
                 trace: text=>trace(text),
             });

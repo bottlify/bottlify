@@ -93,6 +93,10 @@ function fakeKernel(){
             const thread = {
                 name, blocked: false, reason: null, deadline: null,
                 timeoutResult: 0, result: null, error: ERROR_SUCCESS,
+                /** The kernel's own word for it, which the port reads. */
+                get state(){
+                    return this.blocked ? 'blocked' : 'ready';
+                },
             };
             threads.push(thread);
             return thread;
@@ -182,7 +186,10 @@ function fakeKernel(){
     return kernel;
 }
 
-/** @param {{ synchronous?: (handle: number) => boolean }} [extra] */
+/**
+ * @param {{ synchronous?: (handle: number) => boolean,
+ *     alertably?: (alertable: boolean, wait: () => any, answer?: () => number) => any }} [extra]
+ */
 function setup(extra = {}){
     const memory = fakeMemory();
     const kernel = fakeKernel();
@@ -662,4 +669,37 @@ test('a native call\'s packet carries its ApcContext as the completion value', (
         0]), 1);
     assert.deepEqual([memory.dword(OUT_BYTES), memory.dword(OUT_KEY), memory.dword(OUT_OVERLAPPED)],
         [3, 0x55, 0xc0de]);
+});
+
+test('an alertable dequeue takes queued packets at once, and only a wait is the APC\'s', ()=>{
+    // Windows removes an entry that is there; a user APC ends only the wait the
+    // call would make: FALSE with WAIT_IO_COMPLETION, the packets left alone.
+    /** @type {{ answer?: () => number }} */
+    const seen = {};
+    const { fns, memory, main } = setup({
+        alertably: (alertable, wait, answer)=>{
+            seen.answer = answer;
+            return 'apc';
+        },
+    });
+    const port = makePort(fns);
+    const ENTRIES = 0x200;
+    const REMOVED = 0x300;
+    assert.equal(fns.GetQueuedCompletionStatusEx.handler([port, ENTRIES, 4, REMOVED, 0, 1]),
+        'apc', 'nothing queued: the wait is the APC\'s');
+    assert.equal(seen.answer?.(), 0);
+    assert.equal(main.error, 0xc0, 'WAIT_IO_COMPLETION');
+    fns.PostQueuedCompletionStatus.handler([port, 7, 1, 2]);
+    assert.equal(fns.GetQueuedCompletionStatusEx.handler([port, ENTRIES, 4, REMOVED, 0, 1]), 1,
+        'a packet there is taken');
+    assert.equal(memory.dword(REMOVED), 1);
+
+    // A taker whose wait an APC ended is not handed the next packet.
+    fns.GetQueuedCompletionStatus.handler([port, OUT_BYTES, OUT_KEY, OUT_OVERLAPPED, INFINITE]);
+    main.blocked = false;
+    fns.PostQueuedCompletionStatus.handler([port, 9, 1, 2]);
+    assert.equal(main.result, null, 'the alerted thread is not woken with it');
+    assert.equal(fns.GetQueuedCompletionStatus.handler([port, OUT_BYTES, OUT_KEY, OUT_OVERLAPPED,
+        0]), 1, 'the packet waits on the port');
+    assert.equal(memory.dword(OUT_BYTES), 9);
 });
