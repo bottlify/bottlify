@@ -596,3 +596,33 @@ test('a 64-bit process binds to the store\'s amd64 Common Controls, a 32-bit one
             'C:\\app\\test.exe')), /Common-Controls/, 'an amd64 assembly is none of a 32-bit '
             + 'process\'s');
     });
+
+test('Common Controls 6 redirects its window classes to their versioned names', async()=>{
+    // Wine's comctl32 tests ask the active context for Button's class
+    // section entry and create the window by the versioned name it holds.
+    const manifest = `${HEAD}<dependency><dependentAssembly><assemblyIdentity type="win32" `
+        + 'name="Microsoft.Windows.Common-Controls" version="6.0.0.0" processorArchitecture="x86" '
+        + 'publicKeyToken="6595b64144ccf1df" language="*"/></dependentAssembly></dependency>'
+        + '</assembly>';
+    const t = setup({ 'C:\\app\\cc6.manifest': manifest });
+    assert.equal(t.loaderApi.windowClass('Button'), null, 'nothing active, no process default');
+    const handle = await t.create('cc6.manifest');
+    assert.equal(t.functions.ActivateActCtx.handler([handle, 0x314]), 1);
+    assert.deepEqual(t.loaderApi.windowClass('button'),
+        { versioned: '6.0.2600.2180!Button', major: 6 }, 'as the manifest spells it, any case');
+    assert.deepEqual(t.loaderApi.windowClass('SysLink'),
+        { versioned: '6.0.2600.2180!SysLink', major: 6 });
+    assert.equal(t.loaderApi.windowClass('ScrollBar'), null, 'user32\'s alone');
+
+    const data = 0x700;
+    t.view.setUint32(data, 64, true);
+    t.putWide(0x800, 'Button');
+    assert.equal(t.functions.FindActCtxSectionStringW.handler([0, 0, 3, 0x800, data]), 1);
+    const wnd = t.dword(data + 8);
+    const name = '6.0.2600.2180!Button';
+    assert.equal(t.wideAt(wnd + t.dword(wnd + 12), name.length), name);
+    assert.equal(t.wideAt(t.dword(data + 24) + t.dword(wnd + 20), 12), 'comctl32.dll');
+
+    assert.equal(t.functions.DeactivateActCtx.handler([0, t.dword(0x314)]), 1);
+    assert.equal(t.loaderApi.windowClass('Button'), null);
+});

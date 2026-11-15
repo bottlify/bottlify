@@ -35,6 +35,7 @@ import {
 import { encodeAnsi } from '../kernel32/locale.js';
 import { notifyWindow } from './notify.js';
 import { readText, writeText } from './strings.js';
+import { CCM_GETVERSION, CCM_SETVERSION, answerVersion } from './version.js';
 
 /** The class name a program creates the control by. */
 export const TOOLBAR_CLASS = 'ToolbarWindow32';
@@ -202,7 +203,7 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
      *     extended: number, list: number, ownList: boolean, disabledList: number,
      *     hotList: number, tooltips: number, textRows: number, strings: string[],
      *     images: number, sources: { instance: number, id: number, bitmap: number,
-     *         count: number }[], pressed: number, said: Set<number> }}
+     *         count: number }[], pressed: number, said: Set<number>, version?: number }}
      */
     const state = record=>{
         const held = tk.stateOf(record);
@@ -663,6 +664,9 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
             case TB_BUTTONSTRUCTSIZE:
                 held.structSize = wParam;
                 return 0;
+            case CCM_SETVERSION:
+            case CCM_GETVERSION:
+                return answerVersion(record, held, id, wParam);
             case TB_SETBITMAPSIZE:
                 // The size is the images', fixed once an image is in the list.
                 if (held.ownList && imageCall('ImageList_GetImageCount', held.list) > 0)

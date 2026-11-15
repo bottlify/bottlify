@@ -37,6 +37,7 @@ import { WM_CREATE, WM_PAINT, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_KEYDOWN, WM_GETD
 import { notifyWindow } from './notify.js';
 import { LPSTR_TEXTCALLBACK, MAX_TEXT, readText, writeText } from './strings.js';
 import { HDITEM, HDM, HEADER_CLASS } from './header.js';
+import { CCM_GETVERSION, CCM_SETVERSION, answerVersion } from './version.js';
 
 /** The class name a program creates the control by. */
 export const LISTVIEW_CLASS = 'SysListView32';
@@ -119,8 +120,6 @@ export const LVM = Object.freeze({
 });
 const CCM_SETUNICODEFORMAT = 0x2005;
 const CCM_GETUNICODEFORMAT = 0x2006;
-const CCM_SETVERSION = 0x2007;
-const CCM_GETVERSION = 0x2008;
 
 /** LVITEM, the same shape in both spellings: only the text differs. */
 export const LVITEM = Object.freeze({ mask: 0, iItem: 4, iSubItem: 8, state: 12, stateMask: 16,
@@ -329,7 +328,6 @@ export function createListViewProcedure(host, tk){
         held.scroll ??= { x: 0, y: 0 };
         held.iconSpacing ??= { ...ICON_SPACING };
         held.listWidth ??= LIST_COLUMN_WIDTH;
-        held.version ??= 5;
         held.selectedColumn ??= -1;
         held.tooltips ??= 0;
         return held;
@@ -2362,13 +2360,9 @@ export function createListViewProcedure(host, tk){
             }
             case CCM_GETUNICODEFORMAT:
                 return held.unicode ? 1 : 0;
-            case CCM_SETVERSION: {
-                const previous = held.version;
-                held.version = wParam | 0;
-                return previous;
-            }
+            case CCM_SETVERSION:
             case CCM_GETVERSION:
-                return held.version;
+                return answerVersion(record, held, message.message, wParam);
             default:
                 return tk.common(record, message, thread);
         }
