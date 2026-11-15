@@ -3048,15 +3048,16 @@ test('a region is built again by two merges at most', async t=>{
 /**
  * mov ecx, n; L: mov eax, ecx; and eax, 15; call [TABLE + eax*4]; dec ecx; jnz L; hlt;
  * F: add edx, 1; ret; G: add edx, 3; ret; H: add edx, 100; ret -- the table F and G in
- * turn, H in its last slot: F and G an indirect call's usual callees, H a rare one.
- * @param {number} n
+ * turn, H in its last slot: F and G an indirect call's usual callees, H a rare one, a
+ * sixteenth of the calls, or with a table of 128 slots (`and eax, 127`) one in 128.
+ * @param {number} n @param {16 | 128} [size]
  */
-const dispatchLoop = n=>{
+const dispatchLoop = (n, size = 16)=>{
     const table = CODE + 0x100;
     const code = [
         0xb9, n & 0xff, n >>> 8 & 0xff, n >>> 16 & 0xff, 0,
         0x89, 0xc8,
-        0x83, 0xe0, 0x0f,
+        0x83, 0xe0, size - 1,
         0xff, 0x14, 0x85, table & 0xff, table >>> 8 & 0xff, 0, 0,
         0x49, 0x75, 0xf1,
         0xf4,
@@ -3065,7 +3066,8 @@ const dispatchLoop = n=>{
         0x83, 0xc2, 0x64, 0xc3,
     ];
     const [f, g, h] = [CODE + 21, CODE + 25, CODE + 29];
-    const slots = Array.from({ length: 16 }, (_, k)=>(k === 15 ? h : k % 2 === 1 ? g : f));
+    const slots = Array.from({ length: size }, (_, k)=>
+        (k === size - 1 ? h : k % 2 === 1 ? g : f));
     return { code, table, slots, f, g, h };
 };
 
@@ -3077,7 +3079,7 @@ test('an indirect call sampled going to a few small callees has them formed into
         return;
     }
     const m = machine({ countTransfers: true, callTargets: true, callReturn: false });
-    const { code, table, slots, f, g, h } = dispatchLoop(1600);
+    const { code, table, slots, f, g, h } = dispatchLoop(1600, 128);
     m.write(CODE, code);
     m.write(table, slots.flatMap(slot=>[slot & 0xff, slot >>> 8 & 0xff, 0, 0]));
     for (const at of [f, g, h, CODE])
@@ -3085,14 +3087,14 @@ test('an indirect call sampled going to a few small callees has them formed into
         m.runtime.noteHot(at);
     }
     await m.runtime.translatePending();
-    /** The loop from its start, 1600 calls: F 800 times, G 700, H 100. */
+    /** The loop from its start, 1600 calls: F 800 times, G 788, H 12. */
     const run = ()=>{
         m.setReg(1, 1600);
         m.setReg(2, 0);
         m.setReg(4, 0x80000);
         const before = m.runtime.diagnostics().transfers ?? 0;
         assert.equal(m.runtime.run(m.runtime.entryOf(CODE + 5), 1_000_000).kind, 'halt');
-        assert.equal(m.reg(2), 800 + 700 * 3 + 100 * 100);
+        assert.equal(m.reg(2), 800 + 788 * 3 + 12 * 100);
         return (m.runtime.diagnostics().transfers ?? 0) - before;
     };
     assert.equal(run(), 3200, 'every call and every return a transfer');
@@ -3103,10 +3105,59 @@ test('an indirect call sampled going to a few small callees has them formed into
         await m.runtime.translatePending();
     }
     assert.equal(m.runtime.diagnostics().reforms, 1);
-    // Only H leaves: its call, and its return into the copy of the block after the call,
-    // which is inside the loop (`emitCopies`); the copy goes on to the loop's head by a call
-    // of the region's function (`rejoinAt`), not through the hash.
-    assert.equal(run(), 200, 'only H leaves, and its return comes back');
+    // Only H leaves, one call in 128, which the samples do not show: its call, and its
+    // return into the copy of the block after the call, which is inside the loop
+    // (`emitCopies`); the copy goes on to the loop's head by a call of the region's
+    // function (`rejoinAt`), not through the hash.
+    assert.equal(run(), 24, 'only H leaves, and its return comes back');
+});
+
+test('a callee that takes a sixteenth of an indirect call\'s calls is formed in with the two'
+    + ' that take the rest', async t=>{
+    if (!probeFeatures().tailCalls)
+    {
+        t.skip(NO_TAIL_CALLS);
+        return;
+    }
+    // The samples are written into the profile by hand, so how many show H is the
+    // test's: three of forty-eight, as its share says.
+    const m = machine({ countTransfers: true, callTargets: true, callReturn: false });
+    const { code, table, slots, f, g, h } = dispatchLoop(1600);
+    m.write(CODE, code);
+    m.write(table, slots.flatMap(slot=>[slot & 0xff, slot >>> 8 & 0xff, 0, 0]));
+    for (const at of [f, g, h, CODE])
+    {
+        m.runtime.noteHot(at);
+    }
+    await m.runtime.translatePending();
+    const at = /** @type {number} */ (m.layout.callProfile);
+    const words = new DataView(m.memory.buffer);
+    const site = CODE + 10;
+    for (let reading = 0; reading < 3; reading++)
+    {
+        if (words.getUint32(at, true) === 0)
+        {
+            await m.runtime.translatePending();
+        }
+        for (let i = 0; i < 16; i++)
+        {
+            words.setUint32(at + 8 + i * 8, site, true);
+            words.setUint32(at + 12 + i * 8, i === 15 ? h : i % 2 === 1 ? g : f, true);
+        }
+        await m.runtime.translatePending();
+    }
+    for (let i = 0; i < 4; i++)
+    {
+        await m.runtime.translatePending();
+    }
+    assert.equal(m.runtime.diagnostics().reforms, 1);
+    m.setReg(1, 1600);
+    m.setReg(2, 0);
+    m.setReg(4, 0x80000);
+    const before = m.runtime.diagnostics().transfers ?? 0;
+    assert.equal(m.runtime.run(m.runtime.entryOf(CODE + 5), 1_000_000).kind, 'halt');
+    assert.equal(m.reg(2), 800 + 700 * 3 + 100 * 100);
+    assert.equal((m.runtime.diagnostics().transfers ?? 0) - before, 0, 'no call leaves');
 });
 
 test('a call its prediction takes is not sampled: the calls that still leave are, and their'
@@ -3117,7 +3168,7 @@ test('a call its prediction takes is not sampled: the calls that still leave are
         return;
     }
     const m = machine({ countTransfers: true, callTargets: true, callReturn: false });
-    const { code, table, slots, f, g, h } = dispatchLoop(1600);
+    const { code, table, slots, f, g, h } = dispatchLoop(1600, 128);
     m.write(CODE, code);
     m.write(table, slots.flatMap(slot=>[slot & 0xff, slot >>> 8 & 0xff, 0, 0]));
     for (const at of [f, g, h, CODE])
@@ -3131,7 +3182,7 @@ test('a call its prediction takes is not sampled: the calls that still leave are
         m.setReg(4, 0x80000);
         const before = m.runtime.diagnostics().transfers ?? 0;
         assert.equal(m.runtime.run(m.runtime.entryOf(CODE + 5), 1_000_000).kind, 'halt');
-        assert.equal(m.reg(2), 800 + 700 * 3 + 100 * 100);
+        assert.equal(m.reg(2), 800 + 788 * 3 + 12 * 100);
         return (m.runtime.diagnostics().transfers ?? 0) - before;
     };
     for (let i = 0; i < 16 && m.runtime.diagnostics().reforms === 0; i++)
@@ -3139,10 +3190,10 @@ test('a call its prediction takes is not sampled: the calls that still leave are
         run();
         await m.runtime.translatePending();
     }
-    assert.equal(run(), 200, 'F and G formed in, H leaves: its call and its return');
-    // H is a sixteenth of the calls, under the share a callee needs among all of
-    // them; among the calls that leave it is every one.
-    for (let i = 0; i < 400 && m.runtime.diagnostics().reforms === 1; i++)
+    assert.equal(run(), 24, 'F and G formed in, H leaves: its call and its return');
+    // H is one call in 128, which the samples of all of them do not show; among the
+    // calls that leave it is every one.
+    for (let i = 0; i < 20000 && m.runtime.diagnostics().reforms === 1; i++)
     {
         run();
         await m.runtime.translatePending();
@@ -3153,9 +3204,8 @@ test('a call its prediction takes is not sampled: the calls that still leave are
 
 /**
  * The loop of `dispatchLoop` over sixty-four callees, one a slot (`and eax, 63`): H_k at
- * CODE + 0x200 + 4k adds k + 1 to edx -- an indirect call whose targets no callee takes an
- * eighth of. Sixteen, a period the profile's sampled calls are often apart by (144 calls),
- * gave one callee a quarter of the samples.
+ * CODE + 0x200 + 4k adds k + 1 to edx -- an indirect call spread over more callees than
+ * pay for their compares (`calleesWorth`).
  * @param {number} n
  */
 const spreadLoop = n=>{
@@ -3216,13 +3266,32 @@ test('an indirect call whose callees are spread is sampled until it comes due, t
         t.skip(NO_TAIL_CALLS);
         return;
     }
-    // Each of the sixty-four a sixty-fourth of the calls, under the eighth a callee needs.
-    const { m, run, counted } = await profiledLoop({}, spreadLoop(1600), 1600 + 25 * 2016);
+    // Each of the sixty-four a sixty-fourth of the calls: the thirty-two that may be
+    // formed in would not pay for the compares the other half of the calls make
+    // (`calleesWorth`). Looked at once there are eight samples for each of those.
+    const loop = spreadLoop(1600);
+    const { m, run, counted } = await profiledLoop({}, loop, 1600 + 25 * 2016);
     assert.equal(await counted(), 1600, 'every call counted while the profile is on');
-    for (let i = 0; i < 64 && m.runtime.diagnostics().reforms === 0; i++)
+    // The samples by hand, every callee as often as any other: the profile's own are
+    // the last calls of each run of the loop, the same few callees every time.
+    const at = /** @type {number} */ (m.layout.callProfile);
+    const words = new DataView(m.memory.buffer);
+    for (let reading = 0; reading < 64 && m.runtime.diagnostics().reforms === 0; reading++)
     {
-        run();
-        await m.runtime.translatePending();
+        if (words.getUint32(at, true) === 0)
+        {
+            await m.runtime.translatePending();
+        }
+        for (let i = 0; i < 16; i++)
+        {
+            words.setUint32(at + 8 + i * 8, CODE + 10, true);
+            words.setUint32(at + 12 + i * 8, loop.slots[(reading * 16 + i) % 64], true);
+        }
+        // The reading, then the batch the due call asked for, formed and published.
+        for (let i = 0; i < 5; i++)
+        {
+            await m.runtime.translatePending();
+        }
     }
     const d = m.runtime.diagnostics();
     assert.equal(d.reforms, 1);

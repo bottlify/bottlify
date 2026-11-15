@@ -90,6 +90,30 @@ test('a slice that ends before its budget credits no sample to where it stopped'
     await cpuModule.dispose();
 });
 
+test('a program that presents no frame has its translator fed as it runs: a call through a'
+    + ' register is sampled and its callee formed into its region', async()=>{
+    // L: mov eax, [TABLE]; call eax; jmp L, the callee `inc edx; ret`. No frame is ever
+    // sampled here: fed only by frames, the translator's step ran while the interpreter
+    // still met new code and never again, so the call's samples were never read.
+    const table = GUEST_CODE + 0x100;
+    const callee = GUEST_CODE + 0x40;
+    const { api } = await booted(new Uint8Array([0xa1, ...u32(table), 0xff, 0xd0, 0xeb, 0xf7]),
+        GUEST_CODE);
+    api.writePhysical(callee, new Uint8Array([0x42, 0xc3]));
+    api.writePhysical(table, new Uint8Array(u32(callee)));
+    const prediction = ()=>/** @type {any} */ (cpuModule.diagnostics().metrics ?? {}).cork
+        ?.prediction;
+    for (let slice = 0; slice < 4000 && !(prediction()?.reforms > 0); slice++)
+    {
+        api.runSlice(1 << 20);
+        // A translator on a worker answers between slices.
+        await new Promise(resolve=>setTimeout(resolve, 0));
+    }
+    assert.ok(prediction()?.reforms > 0, `formed again: ${JSON.stringify(prediction())}`);
+    api.stop();
+    await cpuModule.dispose();
+});
+
 test('slices credit the address the guest ran at', async()=>{
     const { api } = await booted(new Uint8Array([0x48, 0xeb, 0xfd]), GUEST_CODE);
 

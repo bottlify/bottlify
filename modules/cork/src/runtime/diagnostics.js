@@ -637,6 +637,10 @@ export function createDiagnostics(state){
                 reformsOut: counts.predictReformsOut, notFormed: counts.predictNotFormed,
                 noRegion: counts.predictNoRegion, held: counts.predictHeld,
                 quiet: counts.predictQuiet,
+                // The most callees one call has formed in, among the regions published.
+                callees: Math.max(0, ...[...rt.regions].flatMap(record=>
+                    (record.targets ?? []).map(([site, callees])=>callees.filter(callee=>
+                        record.unformed?.get(site)?.includes(callee) !== true).length))),
                 sites: [...siteLog].sort((a, b)=>b[1].samples - a[1].samples).slice(0, 4096)
                     .map(([site, one])=>({ site, ...one })),
                 reforms: counts.reforms },
