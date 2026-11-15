@@ -4915,8 +4915,19 @@ export function createGpuRenderer(services){
         }
         chain = chain.then(async()=>{
             const frame = backend.beginFrame();
-            const read = frame.snapshot(held.gpu);
-            frame.end();
+            /** @type {() => Promise<any>} */
+            let read;
+            // Ended whatever the read says: a format with no row pitch to
+            // read by (a depth-stencil) threw here, the frame stayed open, and
+            // every frame of the program after it was refused and lost.
+            try
+            {
+                read = frame.snapshot(held.gpu);
+            }
+            finally
+            {
+                frame.end();
+            }
             liveDump?.snapped?.(id, { ...await read(), format: held.format, info });
         }).catch(error=>{
             liveDump?.snapped?.(id, { width: 0, height: 0, format: 'missing',

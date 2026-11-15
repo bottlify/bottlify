@@ -22,8 +22,11 @@ import { createGpuRenderer } from './gpu.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 
-/** @param {string[]} [features] @param {boolean} [compressedTextures]  BC sampled as blocks */
-function rig(features = [], compressedTextures = false){
+/**
+ * @param {string[]} [features] @param {boolean} [compressedTextures]  BC sampled as blocks
+ * @param {any} [liveDump]  the switches of a running program (`app.debug`)
+ */
+function rig(features = [], compressedTextures = false, liveDump = null){
     const gpu = createFakeDevice({ features });
     const backend = createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{} });
     /** @type {string[]} */
@@ -31,6 +34,7 @@ function rig(features = [], compressedTextures = false){
     const renderer = createGpuRenderer({
         backend,
         compressedTextures,
+        liveDump,
         createSampler: descriptor=>({ kind: 'sampler', descriptor }),
         divergence: detail=>said.push(detail),
     });
@@ -628,3 +632,28 @@ test('a level kept in other bits than its own is copied here, to another format'
         width: 1, height: 1, depth: 1 }, GL.RED, TEX.HALF_FLOAT, 2)), [0x00, 0x3c],
     'the bits, here: the half float one');
 });
+
+test('a snapshot of a texture that cannot be read ends its frame, and the program draws on',
+    async()=>{
+        // A depth-stencil has no row pitch to be read by: the read threw with
+        // the snapshot's frame open, and every frame of the program after it
+        // was refused ("A frame is already open") - a debug switch froze the game.
+        /** @type {any[]} */
+        const snapped = [];
+        const live = { dumpFrames: 0, snapshot: '',
+            snapped: (/** @type {string} */ id, /** @type {any} */ got)=>snapped.push({ id, ...got }) };
+        const r = rig([], false, live);
+        const { depth } = depthReadRig(r);
+        r.draw();
+        await r.swap();
+        live.snapshot = 't' + depth;
+        for (let frame = 0; frame < 4; frame++)
+        {
+            r.draw();
+            await r.swap();
+        }
+        assert.equal(snapped.length, 1);
+        assert.match(snapped[0].info, /not read/);
+        assert.ok(!r.said.some(d=>/already open|lost/.test(d)), r.said.join(' | '));
+        assert.deepEqual(r.gpu.errors, []);
+    });
