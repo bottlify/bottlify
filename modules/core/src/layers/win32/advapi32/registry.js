@@ -613,6 +613,12 @@ const machineKeys = (windows, directx, processors)=>{
                 PathName: 'C:\\WINDOWS',
             },
             owned: VERSION_VALUES },
+        // The video codecs Windows installs, as the compressor manager finds
+        // them (msvfw32/icm.js): a codec a game installs is a value beside them.
+        { root: HKEY_LOCAL_MACHINE,
+            path: 'SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Drivers32',
+            values: { 'vidc.cvid': 'iccvid.dll', 'vidc.mrle': 'msrle32.dll',
+                'vidc.msvc': 'msvidc32.dll' } },
         { root: HKEY_LOCAL_MACHINE, path: 'SYSTEM\\CurrentControlSet\\Control\\Session Manager' },
         // The system Path a fresh install sets, which an installer adds its
         // own folder to (Windows Installer's Environment table, `[~];...`).

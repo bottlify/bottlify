@@ -81,6 +81,12 @@ event, an error. Neither stops the program.
   (`MFCreateSourceReaderFromURL`, `MFCreateSourceReaderFromByteStream`) is refused and the loss
   is said with the file's name: XNA's songs and videos through FNA (WMA, WMV) and FAudio's xWMA do
   not play. Registering a transform is refused with `E_ACCESSDENIED`.
+- Video for Windows has the codecs Windows installs - Cinepak (`cvid`, decoded only), Microsoft
+  Video 1 (`MSVC`, decoded only) and Microsoft RLE (`mrle`, both ways) - and a codec a game installs
+  (a `Drivers32` registry value, a `[drivers32]` line of `system.ini`, or a function given to
+  `ICInstall`) is loaded and sent its messages through its own `DriverProc`. DrawDib draws through
+  StretchDIBits on a true-colour display: it realizes no palette. There is no MCI video device, so
+  an MCIWnd is never made.
 
 ## Input
 
