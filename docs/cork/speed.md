@@ -52,6 +52,15 @@ the machine of that date):
 Translated code is over twenty times faster than the interpreter, and even a run of a few tenths of
 a second pays for its translation many times over.
 
+What translating itself costs is counted, not timed:
+[`tools/translator/emit-count.mjs`](../../tools/translator/emit-count.mjs) forms and emits a fixed
+set of 108 regions from the micro benchmark's 32-bit and x86-64 images, pass after pass under QEMU,
+and counts the machine instructions of a pass, without V8's own optimising compiles. A tree gives
+the same count in every run, so an emitter change of a per cent shows where a timed run on this
+machine varies by a tenth. Under Node 22.22.0, on 2026-11-15 at cork `39d13fe5`: 771 million
+instructions a pass, 7.1 million a region; the change that made the emitter's sets of locals bit
+sets took a pass from 903 to 774 million.
+
 ## Against v86
 
 [v86](https://github.com/copy/v86) is the best-known way to run x86 code in a browser, and it also

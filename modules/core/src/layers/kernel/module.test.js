@@ -84,7 +84,7 @@ async function letGo(ref, gc){
     return false;
 }
 
-/** @param {number} [esp] */
+/** @param {number} [esp]  What the stack pointer reads while a call is in flight. */
 async function makeKernel(esp){
     const memory = fakeMemory();
     const kernel = await kernelModule.create(
