@@ -2302,3 +2302,17 @@ font test (`test_height_selection_vdmx`) runs one face with each, and only the A
 the heights Windows answers. A face added with only an every-glyph record measures by its em
 square and OS/2 cell, as one with no VDMX does.
 *2026-11-15.*
+
+**A255. A function of the 2005 or the universal runtime that refuses an argument calls the
+invalid-parameter handler, and with none set ends the process; msvcrt.dll answers EINVAL alone.**
+As Windows' runtimes do: the handler a program set (`_set_invalid_parameter_handler`, and in the
+universal runtime the thread's own from `_set_thread_local_invalid_parameter_handler`, asked first)
+is called with the zeros a release runtime passes, and the function then answers its documented
+failure - an empty handler is how games live with the check. With no handler the process ends as
+`_invoke_watson` ends it, STATUS_INVALID_CRUNTIME_PARAMETER (0xC0000417). msvcrt.dll keeps no
+handler, so its same functions answer EINVAL and go on. The refusal is found where every function
+of the runtimes says it, the errno set to EINVAL during a call that came through MSVCR80's or
+ucrtbase's export (`msvcrt/invalid-parameter.js`); a call one function of a runtime makes into
+another belongs to the call the program made. The ending is loud on purpose: an error in the
+journal names the function and its arguments, because a parameter Windows lets through and ours
+refuses is a defect of our check, not something to stay quiet about. *2026-11-15.*

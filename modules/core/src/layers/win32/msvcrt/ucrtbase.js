@@ -25,6 +25,8 @@
  *   `_execute_onexit_table`).
  */
 
+import { INVALID_PARAMETERS, createInvalidParameterRuntime, watchedExports }
+    from './invalid-parameter.js';
 import { addSecondNames, UCRTBASE_SECOND_NAMES } from './second-names.js';
 import { scanStandardDecimal, STANDARD_NUMBERS } from './convert.js';
 import { SYSTEM_ERRORS } from './errors.js';
@@ -112,6 +114,7 @@ export function createUcrtbaseFunctions(crt, host){
     /** The calling thread's errno, set. @param {number} code */
     const fail = code=>{
         writeU32(crt._errno.handler([]), code);
+        seam?.watch.note(code);
         return code;
     };
     /**
@@ -138,8 +141,16 @@ export function createUcrtbaseFunctions(crt, host){
     /** @param {number} handler @param {number[]} args */
     const call = (handler, args)=>host.callGuest(handler >>> 0, args, host.currentThread?.());
 
-    /** What `_set_invalid_parameter_handler` was last given. */
-    let invalidParameterHandler = 0;
+    const seam = /** @type {any} */ (crt)[INVALID_PARAMETERS];
+    // The universal runtime's own handler, and each thread's (decisions.md A255).
+    const invalid = createInvalidParameterRuntime({
+        library: 'ucrtbase.dll',
+        threadLocal: true,
+        callGuest: host.callGuest,
+        currentThread: host.currentThread,
+        exitProcess: seam?.exitProcess,
+        report: seam?.report,
+    });
     /** What `_set_app_type` was given: unknown until the start-up says. */
     let appType = 0;
     /** What `at_quick_exit` registered, run backwards by `quick_exit`. @type {number[]} */
@@ -646,50 +657,76 @@ export function createUcrtbaseFunctions(crt, host){
          * _invalid_parameter_handler _set_invalid_parameter_handler(
          *     _invalid_parameter_handler handler)
          *
-         * The one installed before. The runtime calls it, where it is told an
-         * argument is invalid without the details (`_invalid_parameter_noinfo`),
-         * instead of ending the process.
+         * The one installed before. The runtime calls it for every argument
+         * one of its functions refuses, the thread's own first if it has one,
+         * and the function then answers its documented failure; with neither,
+         * the process ends (decisions.md A255).
          */
         _set_invalid_parameter_handler: {
             convention: 'cdecl',
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([handler])=>{
-                const before = invalidParameterHandler;
-                invalidParameterHandler = handler >>> 0;
-                return before;
-            },
+            handler: ([handler])=>invalid.set(handler),
         },
 
         /** _invalid_parameter_handler _get_invalid_parameter_handler(void) */
         _get_invalid_parameter_handler: {
             convention: 'cdecl',
             argBytes: 0,
-            handler: ()=>invalidParameterHandler,
+            handler: ()=>invalid.get(),
+        },
+
+        /**
+         * _invalid_parameter_handler _set_thread_local_invalid_parameter_handler(
+         *     _invalid_parameter_handler handler) and its getter: the calling
+         *     thread's own, asked before the process's.
+         */
+        _set_thread_local_invalid_parameter_handler: {
+            convention: 'cdecl',
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handler])=>invalid.setThread?.(handler) ?? 0,
+        },
+        _get_thread_local_invalid_parameter_handler: {
+            convention: 'cdecl',
+            argBytes: 0,
+            handler: ()=>invalid.getThread?.() ?? 0,
         },
 
         /**
          * void _invalid_parameter_noinfo(void)
          *
-         * With a handler installed it is called with nothing known and the
-         * caller goes on (and fails with EINVAL); without one the process ends,
-         * as the 2005 runtime ends it.
+         * The handler with nothing known and the caller goes on (and fails
+         * with EINVAL); with none, the process ends as `_invoke_watson` ends it.
          */
         _invalid_parameter_noinfo: {
             convention: 'cdecl',
             argBytes: 0,
-            handler: ()=>(invalidParameterHandler === 0
-                ? crt._invalid_parameter_noinfo.handler([])
-                : Promise.resolve(call(invalidParameterHandler, [0, 0, 0, 0, 0])).then(()=>0)),
+            handler: ()=>invalid.raise('_invalid_parameter_noinfo', [], 0),
         },
 
         /** void _invalid_parameter_noinfo_noreturn(void): the handler, then the end regardless. */
         _invalid_parameter_noinfo_noreturn: {
             convention: 'cdecl',
             argBytes: 0,
-            handler: ()=>Promise.resolve(invalidParameterHandler === 0 ? 0
-                : call(invalidParameterHandler, [0, 0, 0, 0, 0]))
-                .then(()=>crt._invalid_parameter_noinfo.handler([])),
+            handler: ()=>{
+                const after = invalid.raise('_invalid_parameter_noinfo_noreturn', [], 0);
+                const end = ()=>crt._invoke_watson.handler([0, 0, 0, 0, 0]);
+                return typeof after?.then === 'function' ? after.then(end) : end();
+            },
+        },
+
+        /**
+         * void _invalid_parameter(const wchar_t *expression, const wchar_t *function,
+         *     const wchar_t *file, unsigned int line, uintptr_t reserved)
+         *
+         * A debug build's report: the handler hears the details it was given.
+         */
+        _invalid_parameter: {
+            convention: 'cdecl',
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: args=>invalid.raise('_invalid_parameter', args, 0, args.slice(0, 5)),
         },
 
         /**
@@ -1012,5 +1049,8 @@ export function createUcrtbaseFunctions(crt, host){
 
     // The `_o_`, `_l`, `_nolock` and long double names are the same entries
     // under a second name: a program reaching either reaches the same state.
-    return addSecondNames(exports, UCRTBASE_SECOND_NAMES);
+    // Every export a call of this runtime, its handler hearing what its
+    // functions refuse; the second names are the same wrapped entries.
+    const named = addSecondNames(exports, UCRTBASE_SECOND_NAMES);
+    return seam ? watchedExports(named, seam.watch, invalid) : named;
 }

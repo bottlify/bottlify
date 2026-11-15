@@ -44,6 +44,7 @@
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { join } from 'node:path';
 import { isMain } from '../lib/common.mjs';
+import { ORIGINAL_EXPORT } from '../../modules/core/src/layers/win32/msvcrt/invalid-parameter.js';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const LAYERS = join(ROOT, 'modules', 'core', 'src', 'layers');
@@ -133,7 +134,9 @@ export async function sweep(libraries, sets, prepare = ()=>{}){
     {
         for (const [name, entry] of Object.entries(table ?? {}))
         {
-            const handler = entry?.handler;
+            // A runtime that wraps msvcrt's exports (the invalid-parameter
+            // watch) holds the same function: it is swept once, as msvcrt's.
+            const handler = (entry?.[ORIGINAL_EXPORT] ?? entry)?.handler;
             if (typeof handler !== 'function' || seen.has(handler) || ENDS.test(name))
             {
                 continue;

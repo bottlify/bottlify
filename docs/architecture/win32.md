@@ -157,6 +157,10 @@ flowchart TD
   runtimes the engine stands in for whoever's copy it is (`DSETUP.dll`, `MSVCR80.dll`,
   `Mp3dec.asi` for sound and `ijl15.dll` for media), and the C runtime's API sets
   (`api-ms-win-crt-*`), which are `ucrtbase.dll` under the names they are imported by.
+- **The C runtimes share msvcrt's functions** and differ where Windows' do: an argument a function
+  of `MSVCR80.dll` or `ucrtbase.dll` refuses calls that runtime's invalid-parameter handler, or
+  with none set ends the process with 0xC0000417 and an error naming the call; msvcrt.dll answers
+  EINVAL alone (decisions.md A255, `msvcrt/invalid-parameter.js`).
 - **Where `LoadLibrary` looks:** the `.exe` folder, then `C:\WINDOWS\system32\`, `C:\WINDOWS\` and
   the current folder. Static imports are looked up the same way, without the current folder. For
   a name the engine has a table for, the system directories are skipped: a copy an installer put
