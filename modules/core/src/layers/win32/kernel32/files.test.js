@@ -3158,3 +3158,115 @@ test('GetBinaryType tells programs apart by their headers, and refuses a library
     assert.equal(await fns.GetBinaryTypeW.handler([NAME, OUT_COUNT]), 0);
     assert.equal(error.code, 2);
 });
+
+test('NtReadFile refuses a negative offset and a missing buffer before it moves anything', ()=>{
+    const { memory, files, fns, open } = setup();
+    files.put('C:\\GAME\\SAVE.DAT', 'abcdef');
+    const handle = open('C:\\GAME\\SAVE.DAT', OPEN_EXISTING);
+    const natives = /** @type {any} */ (fns.CreateFileW).natives;
+    const block = 0x500;
+    const offset = 0x510;
+    memory.putDword(block, 0xdeadbeef);
+    memory.putDword(offset, -20 >>> 0);
+    memory.putDword(offset + 4, 0xffffffff);
+    assert.equal(natives.NtReadFile.handler([handle, 0, 0, 0, block, BUFFER, 4, offset, 0]),
+        0xc000000d, 'STATUS_INVALID_PARAMETER');
+    assert.equal(natives.NtWriteFile.handler([handle, 0, 0, 0, block, BUFFER, 4, offset, 0]),
+        0xc000000d, 'not the end of the file, not the pointer');
+    assert.equal(natives.NtReadFile.handler([handle, 0, 0, 0, block, 0, 4, 0, 0]),
+        0xc0000005, 'STATUS_ACCESS_VIOLATION');
+    assert.equal(memory.dword(block), 0xdeadbeef, 'the status block untouched by each');
+});
+
+test('NtSetInformationFile sets what SetFileInformationByHandle does, and its own classes', ()=>{
+    const { memory, files, fns } = setup();
+    const natives = /** @type {any} */ (fns.CreateFileW).natives;
+    files.put('C:\\GAME\\SAVE.DAT', 'abcdef');
+    assert.equal(natives.NtCreateFile.handler([NT_HANDLE, GENERIC_READ | GENERIC_WRITE | 0x10000,
+        objectAttributes(memory, '\\??\\C:\\GAME\\SAVE.DAT'), NT_STATUS, 0, 0, 7, FILE_OPEN,
+        FILE_NON_DIRECTORY_FILE, 0, 0]), 0);
+    const handle = memory.dword(NT_HANDLE);
+    const set = (/** @type {number} */ kind, /** @type {number[]} */ dwords)=>{
+        dwords.forEach((value, at)=>memory.putDword(BUFFER + at * 4, value));
+        return natives.NtSetInformationFile.handler([handle, NT_STATUS, BUFFER,
+            dwords.length * 4, kind]);
+    };
+
+    assert.equal(set(20, [2, 0]), 0, 'FileEndOfFileInformation');
+    assert.equal(files.stat('C:\\GAME\\SAVE.DAT')?.size, 2);
+    assert.equal(set(14, [1, 0]), 0, 'FilePositionInformation');
+    assert.equal(fns.ReadFile.handler([handle, BUFFER, 4, OUT_COUNT, 0]), 1);
+    assert.equal(memory.dword(OUT_COUNT), 1, 'read on from the position set');
+    assert.equal(set(14, [0, 0x80000000]), 0xc000000d, 'a negative position');
+    assert.equal(set(20, [0]), 0xc0000004, 'STATUS_INFO_LENGTH_MISMATCH');
+    assert.equal(set(9, [0, 0]), 0xc0000003, 'a class nothing keeps');
+
+    // FileRenameInformation: a bare name and no root stays in the folder.
+    const name = 'NEW.DAT';
+    memory.putDword(BUFFER, 0);
+    memory.putDword(BUFFER + 4, 0);
+    memory.putDword(BUFFER + 8, name.length * 2);
+    [...name].forEach((unit, at)=>memory.bytes.set([unit.charCodeAt(0), 0], BUFFER + 12 + at * 2));
+    assert.equal(natives.NtSetInformationFile.handler([handle, NT_STATUS, BUFFER,
+        12 + name.length * 2, 10]), 0);
+    assert.equal(files.stat('C:\\GAME\\NEW.DAT')?.exists, true);
+    assert.notEqual(files.stat('C:\\GAME\\SAVE.DAT')?.exists, true);
+
+    assert.equal(natives.NtFlushBuffersFile.handler([handle, NT_STATUS]), 0);
+    assert.equal(natives.NtSetInformationFile.handler([0x4321, NT_STATUS, BUFFER, 8, 20]),
+        0xc0000008, 'STATUS_INVALID_HANDLE');
+});
+
+test('a file named rather than opened: its attributes, its deletion', ()=>{
+    const { memory, files, fns } = setup();
+    const natives = /** @type {any} */ (fns.CreateFileW).natives;
+    files.put('C:\\GAME\\SAVE.DAT', 'abcdef');
+    files.mkdir('C:\\GAME\\FULL');
+    files.put('C:\\GAME\\FULL\\X.DAT', 'x');
+
+    assert.equal(natives.NtQueryFullAttributesFile.handler([objectAttributes(memory,
+        '\\??\\C:\\GAME\\SAVE.DAT'), BUFFER]), 0);
+    assert.equal(memory.dword(BUFFER + 40), 6, 'FILE_NETWORK_OPEN_INFORMATION.EndOfFile');
+    assert.equal(natives.NtQueryAttributesFile.handler([objectAttributes(memory,
+        '\\??\\C:\\GAME\\NONE.DAT'), BUFFER]), 0xc0000034, 'STATUS_OBJECT_NAME_NOT_FOUND');
+
+    assert.equal(natives.NtDeleteFile.handler([objectAttributes(memory,
+        '\\??\\C:\\GAME\\FULL')]), 0xc0000101, 'STATUS_DIRECTORY_NOT_EMPTY');
+    assert.equal(natives.NtDeleteFile.handler([objectAttributes(memory,
+        '\\??\\C:\\GAME\\SAVE.DAT')]), 0);
+    assert.notEqual(files.stat('C:\\GAME\\SAVE.DAT')?.exists, true);
+});
+
+test('NtQueryDirectoryFile lists a folder a call at a time, from where it left off', ()=>{
+    const { memory, files, fns } = setup();
+    const natives = /** @type {any} */ (fns.CreateFileW).natives;
+    files.mkdir('C:\\GAME\\DIR');
+    files.put('C:\\GAME\\DIR\\A.TXT', 'a');
+    files.put('C:\\GAME\\DIR\\B.TXT', 'bb');
+    assert.equal(natives.NtCreateFile.handler([NT_HANDLE, GENERIC_READ,
+        objectAttributes(memory, '\\??\\C:\\GAME\\DIR'), NT_STATUS, 0, 0, 7, FILE_OPEN,
+        FILE_DIRECTORY_FILE, 0, 0]), 0);
+    const handle = memory.dword(NT_HANDLE);
+    const names = [];
+    for (;;)
+    {
+        // FileNamesInformation, one entry a call.
+        const status = natives.NtQueryDirectoryFile.handler([handle, 0, 0, 0, NT_STATUS, BUFFER,
+            0x100, 12, 1, 0, 0]);
+        if (status !== 0)
+        {
+            assert.equal(status, 0x80000006, 'STATUS_NO_MORE_FILES at the end');
+            break;
+        }
+        const length = memory.dword(BUFFER + 8);
+        names.push(String.fromCharCode(...[...memory.bytes.subarray(BUFFER + 12,
+            BUFFER + 12 + length)].filter((_, at)=>at % 2 === 0)));
+    }
+    assert.deepEqual(names.filter(name=>!name.startsWith('.')), ['A.TXT', 'B.TXT']);
+    // A restart lists again; FileDirectoryInformation, every entry that fits,
+    // each record linked to the next at an eight-aligned offset.
+    assert.equal(natives.NtQueryDirectoryFile.handler([handle, 0, 0, 0, NT_STATUS, BUFFER,
+        0x100, 1, 0, 0, 1]), 0);
+    const next = memory.dword(BUFFER);
+    assert.ok(next > 0 && next % 8 === 0, `the next record at ${next}`);
+});

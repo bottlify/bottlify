@@ -42,6 +42,7 @@ import { createStringOperations } from './string-ops.js';
 import { createNtdllCrt } from './crt.js';
 import { createRandomFunctions } from './random.js';
 import { createChecksumFunctions } from './checksum.js';
+import { createIpStringFunctions } from './ip-strings.js';
 import { createHandleTableFunctions } from './handle-table.js';
 import { createSecurityFunctions } from './security.js';
 import { MEMORY_ENTRIES, createMemoryFunctions } from './memory.js';
@@ -496,6 +497,7 @@ export function createNtdllFunctions(host){
 
         ...createRandomFunctions({ readMemory: host.readMemory, writeMemory: host.writeMemory }),
         ...createChecksumFunctions({ readMemory: host.readMemory }),
+        ...createIpStringFunctions({ readMemory: host.readMemory, writeMemory: host.writeMemory }),
         ...createHandleTableFunctions({ readMemory: host.readMemory,
             writeMemory: host.writeMemory, allocate, free }),
 
@@ -1028,9 +1030,13 @@ export function createNtdllFunctions(host){
     // A native call is a system call: the kernel probes the pointers it is
     // handed and answers one it cannot reach with STATUS_ACCESS_VIOLATION,
     // where the same pointer handed to a user-mode Rtl function faults.
-    // An entry another library's table owns (kernel32's APC calls, advapi32's
-    // registry and token calls) is that table's own and stays the same entry.
-    const foreign = new Set([...Object.values(kernel32), ...Object.values(natives),
+    // An entry another library's table owns (a kernel32 entry ntdll exports
+    // under its own name, advapi32's registry and token calls) is that table's
+    // own and stays the same entry. The native calls kernel32's tables carry
+    // (NtReadFile, NtWriteFile, the APC calls) are ntdll's alone, and probed
+    // as every other one is: NtWriteFile of a NULL buffer answers
+    // STATUS_ACCESS_VIOLATION, as Wine's ntdll:file asks.
+    const foreign = new Set([...Object.values(kernel32),
         ...Object.values(registry?.entries ?? {}),
         ...Object.values(host.advapi32?.[TOKEN_NATIVES] ?? {})]);
     for (const [name, entry] of Object.entries(table))

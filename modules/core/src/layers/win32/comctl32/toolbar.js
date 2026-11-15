@@ -34,6 +34,7 @@ import {
 } from '../user32/controls.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 import { notifyWindow } from './notify.js';
+import { readText, writeText } from './strings.js';
 
 /** The class name a program creates the control by. */
 export const TOOLBAR_CLASS = 'ToolbarWindow32';
@@ -121,6 +122,25 @@ export const TB_MOVEBUTTON = WM_USER + 82;
 export const TB_GETMAXSIZE = WM_USER + 83;
 export const TB_SETEXTENDEDSTYLE = WM_USER + 84;
 export const TB_GETEXTENDEDSTYLE = WM_USER + 85;
+export const TB_GETBUTTONINFOW = WM_USER + 63;
+export const TB_SETBUTTONINFOW = WM_USER + 64;
+export const TB_GETBUTTONINFOA = WM_USER + 65;
+export const TB_SETBUTTONINFOA = WM_USER + 66;
+
+/**
+ * TBBUTTONINFO, the same shape in both spellings: its size, the mask of what
+ * it carries, the command, image, state and style, the width, lParam, text.
+ */
+const BUTTONINFO = Object.freeze({ cbSize: 0, dwMask: 4, idCommand: 8, iImage: 12,
+    fsState: 16, fsStyle: 17, cx: 18, lParam: 20, pszText: 24, cchText: 28, SIZE: 32 });
+const TBIF_IMAGE = 0x0001;
+const TBIF_TEXT = 0x0002;
+const TBIF_STATE = 0x0004;
+const TBIF_STYLE = 0x0008;
+const TBIF_LPARAM = 0x0010;
+const TBIF_COMMAND = 0x0020;
+const TBIF_SIZE = 0x0040;
+const TBIF_BYINDEX = 0x80000000;
 
 /** TBBUTTON: iBitmap, idCommand, fsState, fsStyle, two bytes, dwData, iString. */
 const TBBUTTON_SIZE = 20;
@@ -161,6 +181,7 @@ const DT_SINGLELINE = 0x0020;
  * @property {number} state @property {number} style
  * @property {number} data
  * @property {number | string} string  An index into the toolbar's strings, or the text.
+ * @property {number} [width]  TBBUTTONINFO's cx: a width of its own, not the toolbar's.
  */
 
 /**
@@ -209,23 +230,16 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
     /** @param {string} name @param {...number} args */
     const imageCall = (name, ...args)=>images?.functions[name]?.handler(args) ?? -1;
 
-    /** @param {number} address @param {boolean} wide */
-    const readText = (address, wide)=>{
-        if (!wide)
-        {
-            return host.readCString(address, 1024);
-        }
-        let text = '';
-        for (let at = address; text.length < 1024; at += 2)
-        {
-            const [low, high] = host.readMemory(at, 2);
-            if ((low | high) === 0)
-            {
-                break;
-            }
-            text += String.fromCharCode(low | high << 8);
-        }
-        return text;
+    /** @param {number} at */
+    const read32 = at=>{
+        const b = host.readMemory(at >>> 0, 4);
+        return (b[0] | b[1] << 8 | b[2] << 16 | b[3] << 24) >>> 0;
+    };
+    /** @param {number} at @param {number} value */
+    const write32 = (at, value)=>{
+        const v = value >>> 0;
+        host.writeMemory(at >>> 0,
+            Uint8Array.of(v & 0xff, v >>> 8 & 0xff, v >>> 16 & 0xff, v >>> 24));
     };
 
     /** @param {number} address @param {boolean} wide @returns {Button} */
@@ -241,8 +255,8 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
             data: view.getUint32(12, true),
             // Past the 64K an index can be, iString is the text itself; -1 is
             // no text at all.
-            string: string !== -1 && (string >>> 0) > 0xffff ? readText(string >>> 0, wide)
-                : string,
+            string: string !== -1 && (string >>> 0) > 0xffff
+                ? readText(host, string >>> 0, wide) : string,
         };
     };
 
@@ -284,8 +298,9 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
                 return null;
             }
             const separator = (button.style & TBSTYLE_SEP) !== 0;
-            const width = separator ? (button.image > 0 ? button.image : SEPARATOR_WIDTH)
-                : held.button.cx;
+            const width = button.width ? button.width
+                : separator ? (button.image > 0 ? button.image : SEPARATOR_WIDTH)
+                    : held.button.cx;
             const rect = { left: x, top: y, right: x + width, bottom: y + held.button.cy };
             x += width;
             if ((button.state & TBSTATE_WRAP) !== 0)
@@ -795,7 +810,7 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
                 const first = held.strings.length;
                 for (let at = lParam; at !== 0;)
                 {
-                    const text = readText(at, wide);
+                    const text = readText(host, at, wide);
                     if (text === '')
                     {
                         break;
@@ -804,6 +819,102 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
                     at += (text.length + 1) * (wide ? 2 : 1);
                 }
                 return first;
+            }
+            case TB_GETBUTTONINFOA:
+            case TB_GETBUTTONINFOW: {
+                // A structure of any other size is refused, as is a button
+                // the command (or, under TBIF_BYINDEX, the index) names none of.
+                if (lParam === 0 || read32(lParam + BUTTONINFO.cbSize) !== BUTTONINFO.SIZE)
+                {
+                    return -1;
+                }
+                const mask = read32(lParam + BUTTONINFO.dwMask);
+                const index = mask & TBIF_BYINDEX ? wParam | 0 : indexOf(record, wParam);
+                const button = held.buttons[index];
+                if (!button)
+                {
+                    return -1;
+                }
+                if (mask & TBIF_COMMAND)
+                {
+                    write32(lParam + BUTTONINFO.idCommand, button.command);
+                }
+                if (mask & TBIF_IMAGE)
+                {
+                    write32(lParam + BUTTONINFO.iImage, button.image);
+                }
+                if (mask & TBIF_STATE || mask & TBIF_STYLE)
+                {
+                    host.writeMemory(lParam + BUTTONINFO.fsState, Uint8Array.of(
+                        mask & TBIF_STATE ? button.state
+                            : host.readMemory(lParam + BUTTONINFO.fsState, 1)[0],
+                        mask & TBIF_STYLE ? button.style
+                            : host.readMemory(lParam + BUTTONINFO.fsStyle, 1)[0]));
+                }
+                if (mask & TBIF_SIZE)
+                {
+                    const rect = layout(record)[index];
+                    const width = rect ? rect.right - rect.left : button.width ?? 0;
+                    host.writeMemory(lParam + BUTTONINFO.cx, Uint8Array.of(width & 0xff,
+                        width >>> 8 & 0xff));
+                }
+                if (mask & TBIF_LPARAM)
+                {
+                    write32(lParam + BUTTONINFO.lParam, button.data);
+                }
+                if (mask & TBIF_TEXT)
+                {
+                    writeText(host, read32(lParam + BUTTONINFO.pszText), textOf(record, button),
+                        id === TB_GETBUTTONINFOW, read32(lParam + BUTTONINFO.cchText) | 0);
+                }
+                return index;
+            }
+            case TB_SETBUTTONINFOA:
+            case TB_SETBUTTONINFOW: {
+                if (lParam === 0 || read32(lParam + BUTTONINFO.cbSize) !== BUTTONINFO.SIZE)
+                {
+                    return 0;
+                }
+                const mask = read32(lParam + BUTTONINFO.dwMask);
+                const index = mask & TBIF_BYINDEX ? wParam | 0 : indexOf(record, wParam);
+                const button = held.buttons[index];
+                if (!button)
+                {
+                    return 0;
+                }
+                if (mask & TBIF_COMMAND)
+                {
+                    button.command = read32(lParam + BUTTONINFO.idCommand) | 0;
+                }
+                if (mask & TBIF_IMAGE)
+                {
+                    button.image = read32(lParam + BUTTONINFO.iImage) | 0;
+                }
+                if (mask & TBIF_STATE)
+                {
+                    button.state = host.readMemory(lParam + BUTTONINFO.fsState, 1)[0];
+                }
+                if (mask & TBIF_STYLE)
+                {
+                    button.style = host.readMemory(lParam + BUTTONINFO.fsStyle, 1)[0];
+                }
+                if (mask & TBIF_SIZE)
+                {
+                    const [low, high] = host.readMemory(lParam + BUTTONINFO.cx, 2);
+                    button.width = low | high << 8;
+                }
+                if (mask & TBIF_LPARAM)
+                {
+                    button.data = read32(lParam + BUTTONINFO.lParam);
+                }
+                if (mask & TBIF_TEXT)
+                {
+                    const pointer = read32(lParam + BUTTONINFO.pszText);
+                    button.string = pointer === 0 ? '' : readText(host, pointer,
+                        id === TB_SETBUTTONINFOW);
+                }
+                host.invalidate(record);
+                return 1;
             }
             case TB_GETBUTTONTEXTA:
             case TB_GETBUTTONTEXTW: {

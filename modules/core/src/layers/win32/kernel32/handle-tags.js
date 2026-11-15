@@ -47,3 +47,12 @@ export function isStandardHandle(handle){
     return (value >= HANDLE_STDIN && value <= HANDLE_STDERR)
         || (value >= STD_ERROR_HANDLE && value <= STD_INPUT_HANDLE);
 }
+
+/**
+ * The handle kinds that are file objects. A file object is waitable: it is
+ * signalled when no I/O on it is under way, and every transfer here finishes
+ * before the call that started it answers (an overlapped one included), so a
+ * wait on one is satisfied at once - as Windows answers a wait on a file whose
+ * I/O is done.
+ */
+export const FILE_OBJECT_KINDS = new Set(['file', 'directory', 'mailslot', 'mailslot-client']);

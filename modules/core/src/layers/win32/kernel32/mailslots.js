@@ -31,6 +31,12 @@ const ERROR_INVALID_PARAMETER = 87;
 const STATUS_SUCCESS = 0;
 const STATUS_ACCESS_VIOLATION = 0xc0000005;
 const STATUS_INVALID_PARAMETER = 0xc000000d;
+const STATUS_INVALID_INFO_CLASS = 0xc0000003;
+const STATUS_INFO_LENGTH_MISMATCH = 0xc0000004;
+const STATUS_OBJECT_NAME_INVALID = 0xc0000033;
+const STATUS_OBJECT_NAME_COLLISION = 0xc0000035;
+/** IO_STATUS_BLOCK.Information of a slot made. */
+const FILE_CREATED = 2;
 const STATUS_ACCESS_DENIED = 0xc0000022;
 const STATUS_BUFFER_TOO_SMALL = 0xc0000023;
 const STATUS_IO_TIMEOUT = 0xc00000b5;
@@ -46,6 +52,8 @@ const MAILSLOT_WAIT_FOREVER = 0xffffffff;
 /** NtQueryInformationFile's FileMailslotQueryInformation, and its record's size. */
 const FILE_MAILSLOT_QUERY_INFORMATION = 26;
 const MAILSLOT_QUERY_SIZE = 24;
+/** NtSetInformationFile's FileMailslotSetInformation: a pointer to the read timeout. */
+const FILE_MAILSLOT_SET_INFORMATION = 27;
 /** The read timeout a slot that waits for ever reports: the largest positive interval. */
 const FOREVER_INTERVAL = 0x7fffffffffffffffn;
 
@@ -159,30 +167,106 @@ export function createMailslots(host){
     });
 
     /**
-     * Makes a slot under a name, or says why not.
+     * Makes a slot under a name: its handle, or the Win32 error that refused it.
      *
      * @param {string | null} name @param {number} maxSize @param {number} timeout
+     * @returns {{ handle: number } | { error: number }}
      */
-    const create = (name, maxSize, timeout)=>{
+    const make = (name, maxSize, timeout)=>{
         if (name === null)
         {
-            return fail(ERROR_PATH_NOT_FOUND, INVALID_HANDLE_VALUE);
+            return { error: ERROR_PATH_NOT_FOUND };
         }
         if (!isMailslotName(name) || name.length === LOCAL_PREFIX.length)
         {
-            return fail(ERROR_INVALID_NAME, INVALID_HANDLE_VALUE);
+            return { error: ERROR_INVALID_NAME };
         }
         const key = name.toUpperCase();
         if (live(key))
         {
-            return fail(ERROR_ALREADY_EXISTS, INVALID_HANDLE_VALUE);
+            return { error: ERROR_ALREADY_EXISTS };
         }
         /** @type {Slot} */
         const slot = { key, maxSize: maxSize >>> 0, timeout: timeout >>> 0, messages: [],
             readers: [] };
         slots.set(key, slot);
+        return { handle: host.handles.open('mailslot', slot) };
+    };
+
+    /**
+     * CreateMailslot's answer: the handle, or INVALID_HANDLE_VALUE and the error.
+     *
+     * @param {string | null} name @param {number} maxSize @param {number} timeout
+     */
+    const create = (name, maxSize, timeout)=>{
+        const made = make(name, maxSize, timeout);
+        if ('error' in made)
+        {
+            return fail(made.error, INVALID_HANDLE_VALUE);
+        }
         host.setLastError(ERROR_SUCCESS);
-        return host.handles.open('mailslot', slot);
+        return made.handle;
+    };
+
+    /**
+     * NtCreateMailslotFile's name, in the object namespace (`\??\MAILSLOT\x`,
+     * `\Device\MailSlot\x`), as the Win32 one CreateMailslot takes, or null
+     * for a name that is not a mailslot's.
+     *
+     * @param {string} name
+     */
+    const win32Name = name=>{
+        const named = /^\\(?:\?\?\\MAILSLOT|Device\\MailSlot)\\(.+)$/i.exec(name);
+        return named ? `${LOCAL_PREFIX}${named[1]}` : null;
+    };
+
+    /**
+     * NTSTATUS NtCreateMailslotFile(PHANDLE, ULONG DesiredAccess, POBJECT_ATTRIBUTES,
+     *   PIO_STATUS_BLOCK, ULONG CreateOptions, ULONG MailslotQuota,
+     *   ULONG MaxMessageSize, PLARGE_INTEGER ReadTimeout)
+     *
+     * CreateMailslot's slot under its native name. The read timeout is an
+     * interval in 100 ns units, negative as a relative one is; none waits
+     * for ever.
+     *
+     * @param {number[]} args
+     */
+    const ntCreateMailslotFile = ([out, , attributes, block, , , maxSize, timeout])=>{
+        if ((out >>> 0) === 0 || (attributes >>> 0) === 0)
+        {
+            return STATUS_ACCESS_VIOLATION;
+        }
+        const dword = (/** @type {number} */ at)=>new DataView(host.readMemory(at, 4).slice()
+            .buffer).getUint32(0, true);
+        const string = dword((attributes >>> 0) + 8);
+        const nameBytes = string === 0 ? 0 : dword(string) & 0xffff;
+        const buffer = string === 0 ? 0 : dword(string + 4);
+        const name = buffer === 0 ? '' : host.readWideString(buffer, (nameBytes >>> 1) * 2);
+        const asked = win32Name(name);
+        if (asked === null)
+        {
+            return STATUS_OBJECT_NAME_INVALID;
+        }
+        let milliseconds = MAILSLOT_WAIT_FOREVER;
+        if ((timeout >>> 0) !== 0)
+        {
+            const interval = new DataView(host.readMemory(timeout >>> 0, 8).slice().buffer)
+                .getBigInt64(0, true);
+            milliseconds = interval > 0n ? MAILSLOT_WAIT_FOREVER : Number(-interval / 10000n);
+        }
+        const made = make(asked, maxSize, milliseconds);
+        if ('error' in made)
+        {
+            return made.error === ERROR_ALREADY_EXISTS ? STATUS_OBJECT_NAME_COLLISION
+                : STATUS_OBJECT_NAME_INVALID;
+        }
+        writeDwordIf(out >>> 0, made.handle);
+        if ((block >>> 0) !== 0)
+        {
+            writeDwordIf(block >>> 0, STATUS_SUCCESS);
+            writeDwordIf((block >>> 0) + 4, FILE_CREATED);
+        }
+        return STATUS_SUCCESS;
     };
 
     /**
@@ -403,6 +487,48 @@ export function createMailslots(host){
         return bytes;
     };
 
+    /**
+     * What NtSetInformationFile does to a mailslot handle, or null for a
+     * handle that is none. Only the server's FileMailslotSetInformation sets
+     * anything: the read timeout, an interval in 100 ns units (negative as a
+     * relative one is) behind a pointer, or none - a NULL pointer - to wait
+     * for ever.
+     *
+     * @param {number} handle @param {number} kind @param {number} from @param {number} length
+     * @returns {number | null}  the NTSTATUS
+     */
+    const setInformation = (handle, kind, from, length)=>{
+        const type = host.handles.typeOf?.(handle >>> 0) ?? null;
+        if (type !== 'mailslot' && type !== 'mailslot-client')
+        {
+            return null;
+        }
+        if (kind !== FILE_MAILSLOT_SET_INFORMATION || type !== 'mailslot')
+        {
+            return kind !== FILE_MAILSLOT_SET_INFORMATION ? STATUS_INVALID_INFO_CLASS
+                : STATUS_INVALID_PARAMETER;
+        }
+        if (length < 4)
+        {
+            return STATUS_INFO_LENGTH_MISMATCH;
+        }
+        /** @type {Slot} */
+        const slot = object(handle, type);
+        const pointer = new DataView(host.readMemory(from, 4).slice().buffer).getUint32(0, true);
+        if (pointer === 0)
+        {
+            slot.timeout = MAILSLOT_WAIT_FOREVER;
+            return 0;
+        }
+        const interval = new DataView(host.readMemory(pointer, 8).slice().buffer)
+            .getBigInt64(0, true);
+        // The largest interval is the one a slot that waits for ever reports
+        // (GetMailslotInfo's MAILSLOT_WAIT_FOREVER); a relative one is
+        // negative, and zero answers at once.
+        slot.timeout = interval > 0n ? MAILSLOT_WAIT_FOREVER : Number(-interval / 10000n);
+        return 0;
+    };
+
     const functions = {
         /**
          * HANDLE CreateMailslotA(LPCSTR lpName, DWORD nMaxMessageSize,
@@ -451,6 +577,8 @@ export function createMailslots(host){
         /** BOOL SetMailslotInfo(HANDLE hMailslot, DWORD lReadTimeout) */
         SetMailslotInfo: {
             argBytes: 8,
+            // The native call rides on a Win32 entry over the same slots.
+            natives: { NtCreateMailslotFile: { argBytes: 32, handler: ntCreateMailslotFile } },
             /** @param {number[]} args */
             handler: ([handle, timeout])=>{
                 const slot = /** @type {Slot | null} */ (object(handle, 'mailslot'));
@@ -465,5 +593,5 @@ export function createMailslots(host){
         },
     };
 
-    return { functions, open, read, write, information };
+    return { functions, open, read, write, information, setInformation };
 }

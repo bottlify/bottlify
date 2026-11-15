@@ -27,6 +27,8 @@ import { STATUSBAR_CLASS, STATUSBAR_ATOM, createStatusBarProcedure } from './sta
 import { TRACKBAR_CLASS, TRACKBAR_ATOM, createTrackbarProcedure } from './trackbar.js';
 import { UPDOWN_CLASS, UPDOWN_ATOM, createUpDownProcedure } from './updown.js';
 import { TOOLTIPS_CLASS, TOOLTIPS_ATOM, createTooltipProcedure } from './tooltips.js';
+import { HEADER_CLASS, HEADER_ATOM, createHeaderProcedure } from './header.js';
+import { LISTVIEW_CLASS, LISTVIEW_ATOM, createListViewProcedure } from './listview.js';
 
 /** The face colour's brush, as a class's background names it: the index plus one. */
 const FACE_BACKGROUND = 15 + 1;
@@ -89,6 +91,16 @@ export function createCommonControls(host, toolkit, images, resources){
             name: TOOLTIPS_CLASS,
             atom: TOOLTIPS_ATOM,
             procedure: createTooltipProcedure(host, toolkit, resources),
+        },
+        {
+            name: HEADER_CLASS,
+            atom: HEADER_ATOM,
+            procedure: createHeaderProcedure(host, toolkit),
+        },
+        {
+            name: LISTVIEW_CLASS,
+            atom: LISTVIEW_ATOM,
+            procedure: createListViewProcedure(host, toolkit),
         },
     ];
 }

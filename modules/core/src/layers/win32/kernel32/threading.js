@@ -5,7 +5,7 @@
  */
 
 import { encodeAnsi } from './locale.js';
-import { isStandardHandle, untagged } from './handle-tags.js';
+import { FILE_OBJECT_KINDS, isStandardHandle, untagged } from './handle-tags.js';
 import { TAKEN } from './named-objects.js';
 import { askChild, childThread, threadEnd } from './cross-process.js';
 import { MODIFY_STATE, SYNCHRONIZE, allows, grantedAccess } from './access.js';
@@ -1287,6 +1287,10 @@ export function createThreadingFunctions(host){
                 // deadline answered at once too, but left the thread queued on
                 // the object, and a later signal woke it out of whatever it
                 // was waiting on by then with an answer naming the wrong thing.
+                if (FILE_OBJECT_KINDS.has(kindOf(handle >>> 0) ?? ''))
+                {
+                    return WAIT_OBJECT_0;
+                }
                 // A pipe end is waited on as a file object is: through the
                 // event its pending operations hold down.
                 if (kindOf(handle >>> 0) === 'pipe')
