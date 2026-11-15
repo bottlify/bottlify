@@ -88,6 +88,11 @@ sequenceDiagram
   stack. An object whose documented layout goes on past that first word (Media Foundation's
   `MFASYNCRESULT`, whose status and callback a program reads and writes itself) is given the
   bytes it needs after it, zeroed, and keeps its fields there.
+  A class that may be aggregated (DirectShow's filters and clocks) is made inside the program's
+  controlling unknown when CoCreateInstance is given one: the program gets the object's own
+  IUnknown, which counts the object alone, and every other interface it hands out answers
+  QueryInterface, AddRef and Release through the controlling unknown, as COM's aggregation
+  rules have it. Any other class answers CLASS_E_NOAGGREGATION.
 - **Callbacks:** a window procedure, a COM callback, `DllMain`. The bridge stops the thread, builds a
   frame on the program's stack and runs the program's code until it returns into a sentinel trap.
   Where Windows calls the program inside an `__except` of its own (`DllMain` in the loader, a COM

@@ -54,6 +54,8 @@ import {
 import { describe } from './describe.js';
 import { parseGuid } from '../ole32/guid.js';
 import { createStreaming } from './stream.js';
+import { createSystemClock } from './clock.js';
+import { CLSID_SYSTEM_CLOCK } from './interfaces.js';
 
 /**
  * How far a name a program hands these is read: whole, as Windows reads it, up to
@@ -344,6 +346,9 @@ function newGraphState(){
  *           Kernel events by handle: the one IMediaEvent::GetEventHandle hands
  *           out, manual-reset and signalled while the queue holds an event.
  *           Absent, GetEventHandle refuses as before.
+ * @property {import('./clock.js').ClockHost | undefined} [clock]
+ *           The machine's clock and its timers, which CLSID_SystemClock is built
+ *           on. Absent, the class is not registered, as on a machine without it.
  * @property {import('./stream.js').StreamHost | undefined} [stream]
  *           What joining a program's own filters to a graph needs: calling into
  *           its objects, handing out ours, and a thread to call it from. Absent,
@@ -1888,5 +1893,9 @@ export function registerQuartzClasses(registry, host){
     registry.registerClass(CLSID_FILTER_GRAPH_NO_THREAD, quartz.filterGraph);
     registry.registerClass(CLSID_FILTER_MAPPER2, quartz.filterMapper2);
     registry.registerClass(CLSID_FILTER_MAPPER, quartz.filterMapper1);
+    if (host.clock)
+    {
+        registry.registerClass(CLSID_SYSTEM_CLOCK, createSystemClock(host.clock));
+    }
     return { tick: quartz.tick, film: quartz.film };
 }

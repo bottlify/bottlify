@@ -220,3 +220,41 @@ test('an object counting in a word of guest memory sees the guest\'s references 
     assert.equal(destroyed, 1);
     assert.equal(object.countCell?.(), 0, 'a destroyed object names no word');
 });
+
+test('an aggregated object counts its own IUnknown and hands its other faces to the outer one',
+    async()=>{
+        const registry = createComRegistry();
+        registry.registerClass(CLSID_TEST, ()=>({ ...definition(), aggregatable: true }));
+        /** @type {[number, number[]][]} */
+        const calls = [];
+        const aggregation = {
+            outer: 0x5000,
+            call: async(/** @type {number} */ slot, /** @type {number[]} */ args)=>{
+                calls.push([slot, args]);
+                return slot === 0 ? 0 : 7;
+            },
+        };
+
+        const object = /** @type {import('./objects.js').ComObject} */ (
+            registry.createAggregated(CLSID_TEST, aggregation));
+        assert.equal(object.aggregation, aggregation);
+        assert.equal(object.interfaceFor(IID_IUNKNOWN)?.methods[0].builtin, 'queryInterface',
+            'its own IUnknown is the non-delegating one');
+        const first = /** @type {any} */ (object.interfaceFor(IID_FIRST));
+        assert.equal(first.methods[0].builtin, undefined, 'another face delegates');
+        assert.equal(first.methods[3].name, 'Draw', 'its own methods follow');
+
+        assert.equal(object.addRef(IID_IUNKNOWN), 2, 'a reference on IUnknown is the inner one\'s');
+        assert.equal(await object.addRef(IID_FIRST), 7, 'one on another face is the outer\'s');
+        assert.deepEqual(calls, [[1, []]]);
+        await first.methods[0].invoke(object, [0x10, 0x20]);
+        assert.deepEqual(calls[1], [0, [0x10, 0x20]], 'QueryInterface through it goes outward');
+    });
+
+test('a class that may not be aggregated says so rather than making an object', ()=>{
+    /** @type {{ destroyed?: number }} */
+    const log = {};
+    const registry = setup(log);
+    assert.equal(registry.createAggregated(CLSID_TEST, { outer: 1, call: async()=>0 }), false);
+    assert.equal(log.destroyed, 1, 'what the factory made is let go');
+});

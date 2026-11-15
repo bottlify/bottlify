@@ -641,10 +641,11 @@ export function createVtables({ memory, register, heap, long = ()=>false, unimpl
             return 0x8007000e; // E_OUTOFMEMORY
         }
         // The reference belongs to the interface the caller asked for, not to
-        // the one it asked through.
-        object.addRef(record.sharedWith ?? wanted);
+        // the one it asked through: for an aggregated object's other faces that
+        // is its controlling unknown's, a call into the program to wait for.
         writeWord(ppv >>> 0, pointer);
-        return 0; // S_OK
+        const added = object.addRef(record.sharedWith ?? wanted);
+        return typeof added?.then === 'function' ? added.then(()=>0) : 0; // S_OK
     }
 
     /**

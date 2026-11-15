@@ -1371,6 +1371,33 @@ export function createWin32Module(){
                         catch (e){ void e; }
                     },
                 },
+                // CLSID_SystemClock: the machine's millisecond clock, and an
+                // advise as a kernel timer the scheduler honours.
+                clock: {
+                    now: ()=>kernel.clock.virtualTime(),
+                    at: (due, period, fired)=>{
+                        const timer = kernel.createTimer({ manualReset: true,
+                            name: 'quartz clock' });
+                        kernel.armTimer(timer, due, period, ()=>fired());
+                        return { cancel: ()=>kernel.cancelTimer(timer) };
+                    },
+                    /** @param {number} handle */
+                    setEvent: handle=>{
+                        try { kernel.setEvent(kernel.handles.resolve(handle, 'event')); }
+                        catch (e){ void e; }
+                    },
+                    /** @param {number} handle */
+                    releaseSemaphore: handle=>{
+                        try
+                        {
+                            kernel.releaseSemaphore(kernel.handles.resolve(handle, 'semaphore'), 1);
+                        }
+                        catch (e){
+                            void e;
+                        }
+                    },
+                    writeMemory,
+                },
                 // A renderer the program wrote is fed from a thread of its own,
                 // as quartz feeds one from its streaming thread; made on the
                 // first sample, so a program with no such filter has none.

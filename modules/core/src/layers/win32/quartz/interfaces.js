@@ -457,6 +457,23 @@ export const IMEDIA_SAMPLE_SLOTS = [
     ['SetMediaTime', 2],
 ];
 
+/** quartz's own reference clock, the one a graph runs on when no renderer offers one. */
+export const CLSID_SYSTEM_CLOCK = '{E436EBB1-524F-11CE-9F53-0020AF0BA770}';
+export const IID_IREFERENCE_CLOCK = '{56A86897-0AD4-11CE-B03A-0020AF0BA770}';
+
+/**
+ * IReferenceClock. The two Advise methods take two REFERENCE_TIMEs by value:
+ * six words each, the handle and the cookie's address after them.
+ *
+ * @type {[string, number][]}
+ */
+export const IREFERENCE_CLOCK_SLOTS = [
+    ['GetTime', 1],
+    ['AdviseTime', 6],
+    ['AdvisePeriodic', 6],
+    ['Unadvise', 1],
+];
+
 /** What a filter tells its graph through: `Notify(EventCode, Param1, Param2)`. @type {[string, number][]} */
 export const IMEDIA_EVENT_SINK_SLOTS = [
     ['Notify', 3],
