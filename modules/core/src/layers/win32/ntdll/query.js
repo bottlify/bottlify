@@ -75,6 +75,8 @@ const PROCESS_BASIC = Object.freeze({
 
 /** The information classes answered here. */
 const SYSTEM_BASIC_INFORMATION = 0;
+/** SystemBasicInformation, SystemEmulationBasicInformation, SystemNativeBasicInformation. */
+const BASIC_CLASSES = new Set([SYSTEM_BASIC_INFORMATION, 62, 114]);
 const SYSTEM_PROCESS_INFORMATION = 5;
 /** The class NtSetSystemInformation takes here, and its structure's size on 32-bit Windows. */
 const SYSTEM_FILECACHE_INFORMATION = 21;
@@ -285,6 +287,18 @@ const NORMAL_BASE_PRIORITY = 8;
  * @property {(record: any, call: import('../kernel32/cross-process.js').CrossCall)
  *     => Promise<import('../kernel32/cross-process.js').CrossAnswer | null> | null} [askChild]
  *           A call made in a child, answered there.
+ * @property {Record<number, SystemClass>} [systemClasses]  More classes of
+ *           NtQuerySystemInformation, answered by the family whose state they
+ *           read (the clock's and the zone's in time.js).
+ */
+
+/**
+ * A class of NtQuerySystemInformation another family answers: the bytes it
+ * reads now, and whether a buffer of another size is refused outright
+ * (`exact`) or given as much as fits (`partial`) - a structure Windows copies
+ * a prefix of.
+ *
+ * @typedef {{ read: () => Uint8Array, exact?: boolean, partial?: boolean }} SystemClass
  */
 
 /**
@@ -598,15 +612,48 @@ export function createQueryFunctions(host){
                     host.writeMemory(buffer >>> 0, chain);
                     return STATUS.SUCCESS;
                 }
-                if ((infoClass >>> 0) !== SYSTEM_BASIC_INFORMATION)
+                const other = host.systemClasses?.[infoClass >>> 0];
+                if (other)
+                {
+                    const bytes = other.read();
+                    const given = length >>> 0;
+                    const fits = other.partial ? given <= bytes.length
+                        : other.exact ? given === bytes.length : given >= bytes.length;
+                    if (!fits)
+                    {
+                        writeU32If(returnLength >>> 0, other.partial ? 0 : bytes.length);
+                        return STATUS.INFO_LENGTH_MISMATCH;
+                    }
+                    if ((buffer >>> 0) === 0 && given !== 0)
+                    {
+                        return STATUS.ACCESS_VIOLATION;
+                    }
+                    const written = other.partial ? bytes.subarray(0, given) : bytes;
+                    if (written.length > 0)
+                    {
+                        host.writeMemory(buffer >>> 0, written);
+                    }
+                    writeU32If(returnLength >>> 0, written.length);
+                    return STATUS.SUCCESS;
+                }
+                // The emulated and the native views of the basic structure are
+                // the basic structure itself in a process of the machine's width.
+                if (!BASIC_CLASSES.has(infoClass >>> 0))
                 {
                     return STATUS.INVALID_INFO_CLASS;
                 }
-                writeU32If(returnLength >>> 0, SYSTEM_BASIC.SIZE);
-                if ((length >>> 0) < SYSTEM_BASIC.SIZE || buffer === 0)
+                // The basic structure is asked for at its exact size; one the
+                // right size with nowhere to go is the kernel's probe failing.
+                if ((length >>> 0) !== SYSTEM_BASIC.SIZE)
                 {
+                    writeU32If(returnLength >>> 0, SYSTEM_BASIC.SIZE);
                     return STATUS.INFO_LENGTH_MISMATCH;
                 }
+                if ((buffer >>> 0) === 0)
+                {
+                    return STATUS.ACCESS_VIOLATION;
+                }
+                writeU32If(returnLength >>> 0, SYSTEM_BASIC.SIZE);
 
                 const struct = new Uint8Array(SYSTEM_BASIC.SIZE);
                 const view = new DataView(struct.buffer);

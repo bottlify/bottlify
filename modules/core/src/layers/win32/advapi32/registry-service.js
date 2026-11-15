@@ -140,11 +140,12 @@ export function createRegistryService(hive){
 
         /**
          * @param {number} key @param {string} name @param {number} type @param {Uint8Array} data
+         * @param {boolean} [exact]  the bytes as they are (`createHive`'s setValue)
          * @returns {import('./registry.js').RegistryValue | null}
          */
-        setValue(key, name, type, data){
+        setValue(key, name, type, data, exact = false){
             const at = keyOf(key);
-            return at ? hive.setValue(at, name, type, data) : null;
+            return at ? hive.setValue(at, name, type, data, exact) : null;
         },
 
         /**

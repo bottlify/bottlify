@@ -26,6 +26,7 @@ const OUT = 0x200;
 const SCRATCH = 0x300;
 const STREAM = 0x400;
 const HBITMAP = 0x5000;
+const SECTION_BITS = 0x80000;
 
 /**
  * Pictures over fake guest memory, GDI and user32 that record their calls,
@@ -46,6 +47,8 @@ function setup(streamBytes = new Uint8Array(0)){
     /** @type {string[]} */
     const said = [];
     let streamAt = 0;
+    /** The BITMAPINFO headers sections were made with. @type {Uint8Array[]} */
+    const sections = [];
     /** @type {number[]} */
     const written = [];
     // The stream's vtable: QueryInterface, AddRef, Release, Read (0x7003), Write (0x7004).
@@ -72,6 +75,13 @@ function setup(streamBytes = new Uint8Array(0)){
                 view.setInt32(args[2] + 4, 32, true);
                 view.setInt32(args[2] + 8, 16, true);
                 return 24;
+            }
+            if (name === 'CreateDIBSection')
+            {
+                // The section's bits, where the caller is told they are.
+                view.setUint32(args[3], SECTION_BITS, true);
+                sections.push(bytes.slice(args[1], args[1] + 48));
+                return HBITMAP + 2;
             }
             return name === 'CreateDIBitmap' ? HBITMAP + 1 : name === 'CreateCompatibleDC'
                 ? 0x77 : 1;
@@ -112,7 +122,7 @@ function setup(streamBytes = new Uint8Array(0)){
         const entry = object.interfaceFor(iid).methods.find((/** @type {any} */ m)=>m.name === name);
         return entry.invoke(object, args);
     };
-    return { pictures, view, bytes, calls, published, method, said, written, held };
+    return { pictures, view, bytes, calls, published, method, said, written, held, sections };
 }
 
 test('a bitmap is wrapped at its size in HIMETRIC, and drawn upright from the source'
@@ -172,16 +182,18 @@ function bmp(){
     return file;
 }
 
-test('a BMP in a stream is a bitmap compatible with the screen, and saved as it came', async()=>{
+test('a BMP in a stream is a DIB section of its own format, and saved as it came', async()=>{
     const file = bmp();
-    const { pictures, view, calls, method, written, held } = setup(file);
+    file.set([1, 2, 3, 4, 5, 6], 54);
+    const { pictures, view, bytes, calls, method, written, held, sections } = setup(file);
     assert.equal(await pictures.load(STREAM, 0, IID_IPICTURE, OUT), S_OK);
-    const made = calls.find(call=>call[0] === 'CreateDIBitmap');
-    assert.ok(made);
-    assert.equal(made[1], 0x66, 'with the screen\'s DC');
-    assert.ok(calls.some(call=>call[0] === 'ReleaseDC'), 'given back');
+    assert.ok(!calls.some(call=>call[0] === 'CreateDIBitmap'), 'no bitmap of the screen\'s format');
+    assert.deepEqual([...sections[0].subarray(0, 40)], [...file.subarray(14, 54)],
+        'the file\'s own BITMAPINFOHEADER');
+    assert.deepEqual([...bytes.subarray(SECTION_BITS, SECTION_BITS + 8)], [...file.subarray(54)],
+        'and its bits');
     method(IID_IPICTURE, 'get_Handle', SCRATCH);
-    assert.equal(view.getUint32(SCRATCH, true), HBITMAP + 1);
+    assert.equal(view.getUint32(SCRATCH, true), HBITMAP + 2);
     method(IID_IPICTURE, 'get_Width', SCRATCH);
     assert.equal(view.getInt32(SCRATCH, true), 53, '2 pixels');
     assert.equal(await method(IID_IPICTURE, 'SaveAsFile', STREAM, 1, SCRATCH), S_OK);
@@ -189,6 +201,80 @@ test('a BMP in a stream is a bitmap compatible with the screen, and saved as it 
     assert.equal(view.getUint32(SCRATCH, true), file.length);
     assert.equal(held.size, 0);
 });
+
+/** @param {Uint8Array} image @param {number} times @returns {Uint8Array} */
+const savedHeaders = (image, times)=>{
+    const saved = new Uint8Array(8 * times + image.length);
+    const view = new DataView(saved.buffer);
+    for (let at = 0; at < 8 * times; at += 8)
+    {
+        view.setUint32(at, 0x0000746c, true);
+        view.setUint32(at + 4, image.length, true);
+    }
+    saved.set(image, 8 * times);
+    return saved;
+};
+
+test('headers one after another are read past to the last, whose size says how much is the'
+    + ' picture, whatever size the caller gave', async()=>{
+    const file = bmp();
+    const { pictures, sections } = setup(savedHeaders(file, 3));
+    assert.equal(await pictures.load(STREAM, 8, IID_IPICTURE, OUT), S_OK);
+    assert.equal(sections.length, 1, 'the BMP after three headers');
+});
+
+test('a saved picture with nothing in it is an empty picture', async()=>{
+    const { pictures, view, method } = setup(savedHeaders(new Uint8Array(0), 1));
+    assert.equal(await pictures.load(STREAM, 0, IID_IPICTURE, OUT), S_OK);
+    method(IID_IPICTURE, 'get_Type', SCRATCH);
+    assert.equal(view.getInt16(SCRATCH, true), PICTYPE.NONE);
+});
+
+test('a GIF is an indexed DIB section as deep as its colour table needs', async()=>{
+    // 1 by 1, a two-entry global table (black, white), the one pixel index 1.
+    const gif = Uint8Array.from([0x47, 0x49, 0x46, 0x38, 0x37, 0x61, 1, 0, 1, 0, 0x80, 0, 0,
+        0, 0, 0, 0xff, 0xff, 0xff, 0x2c, 0, 0, 0, 0, 1, 0, 1, 0, 0, 2, 2, 0x4c, 0x01, 0, 0x3b]);
+    const { pictures, bytes, sections } = setup(gif);
+    assert.equal(await pictures.load(STREAM, 0, IID_IPICTURE, OUT), S_OK);
+    const header = new DataView(sections[0].buffer);
+    assert.deepEqual([header.getUint16(14, true), header.getUint32(32, true)], [1, 2],
+        'one bit a pixel, two colours');
+    assert.deepEqual([...sections[0].subarray(40, 48)], [0, 0, 0, 0, 0xff, 0xff, 0xff, 0],
+        'the table as RGBQUADs');
+    assert.equal(bytes[SECTION_BITS], 0x80, 'the pixel is index 1, the row\'s top bit');
+});
+
+test('IPersistStream saves a picture after its header and loads one back; GetSizeMax counts'
+    + ' both', async()=>{
+    const IID_IPERSISTSTREAM = '{00000109-0000-0000-C000-000000000046}';
+    const file = bmp();
+    const { pictures, view, method, written, sections } = setup(savedHeaders(file, 1));
+    assert.equal(await pictures.load(STREAM, 0, IID_IPICTURE, OUT), S_OK);
+    assert.equal(method(IID_IPERSISTSTREAM, 'GetSizeMax', SCRATCH), S_OK);
+    assert.equal(view.getUint32(SCRATCH, true), 8 + file.length);
+    assert.equal(method(IID_IPERSISTSTREAM, 'GetSizeMax', 0), E_INVALIDARG);
+    assert.equal(await method(IID_IPERSISTSTREAM, 'Save', STREAM, 1), S_OK);
+    assert.deepEqual(written, [...savedHeaders(file, 1)]);
+    method(IID_IPERSISTSTREAM, 'GetClassID', SCRATCH);
+    assert.equal(view.getUint32(SCRATCH, true), 0x0be35204, 'CLSID_StdPicture');
+    assert.equal(sections.length, 1);
+});
+
+test('a picture made from a bitmap is written as a file only when a copy is asked for',
+    async()=>{
+        const { pictures, view, method, written } = setup();
+        view.setUint32(DESC, 16, true);
+        view.setInt32(DESC + 4, PICTYPE.BITMAP, true);
+        view.setUint32(DESC + 8, HBITMAP, true);
+        assert.equal(pictures.create(DESC, IID_IPICTURE, false, OUT), S_OK);
+        view.setInt32(SCRATCH, -1, true);
+        assert.equal(await method(IID_IPICTURE, 'SaveAsFile', STREAM, 0, SCRATCH),
+            0x80004005 | 0, 'no file of its own: E_FAIL');
+        assert.equal(view.getInt32(SCRATCH, true), -1, 'and no size');
+        assert.equal(await method(IID_IPICTURE, 'SaveAsFile', STREAM, 1, SCRATCH), S_OK);
+        assert.deepEqual(written.slice(0, 2), [0x42, 0x4d], 'a BMP');
+        assert.equal(view.getUint32(SCRATCH, true), written.length);
+    });
 
 test('a saved StdPicture\'s "lt" header is read past; bytes of no picture are refused, said',
     async()=>{

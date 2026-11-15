@@ -124,7 +124,29 @@ const WALK_LIMIT = 4096;
  * @property {() => any} park  The answer of a call that does not return, for
  *           the ones that end the process from where they stand.
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {(bytes: number) => number} allocate  Guest memory for a thread's
+ *           block of the runtime's state, the first time it is asked for.
  */
+
+/**
+ * The runtime's state each thread keeps where the program can reach it, as
+ * vcruntime's per-thread block lays it out: the structured exception
+ * translator `_set_se_translator` installed for the thread, then the record
+ * and context of the exception a catch block is handling (`__current_exception`
+ * and `__current_exception_context` answer their addresses, what
+ * `std::current_exception` reads) and the count of exceptions thrown and not
+ * yet caught (`__processing_throw`, `std::uncaught_exceptions`), two slots on.
+ */
+/**
+ * The key the 32-bit runtime's table carries vcruntime's per-thread accessors
+ * under: msvcrt.dll exports none of them, and the universal runtime and
+ * vcruntime140 take them from here.
+ */
+export const UNIVERSAL_EH = Symbol('universal exception state');
+
+export const THREAD_DATA = Object.freeze({
+    TRANSLATOR: 0, CURRENT_EXCEPTION: 8, CURRENT_CONTEXT: 12, PROCESSING_THROW: 16, SIZE: 20,
+});
 
 /**
  * One catch the thread is inside.
@@ -173,16 +195,41 @@ export function createCxxExceptions(host){
     };
 
     /**
-     * Exceptions thrown on each thread and not yet caught, for
-     * `__uncaught_exception`.
+     * Each thread's block (`THREAD_DATA`), placed the first time the thread
+     * needs one, and the one for the runtime's calls made with no thread.
      *
      * @type {WeakMap<object, number>}
      */
-    const inFlight = new WeakMap();
+    const blocks = new WeakMap();
+    let threadless = 0;
+    /** @param {any} thread @returns {number} */
+    const threadData = thread=>{
+        const known = thread !== null && typeof thread === 'object' ? blocks.get(thread)
+            : threadless || undefined;
+        if (known !== undefined)
+        {
+            return known;
+        }
+        const at = host.allocate(THREAD_DATA.SIZE) >>> 0;
+        host.writeMemory(at, new Uint8Array(THREAD_DATA.SIZE));
+        if (thread !== null && typeof thread === 'object')
+        {
+            blocks.set(thread, at);
+        }
+        else
+        {
+            threadless = at;
+        }
+        return at;
+    };
+    /** Exceptions thrown on the thread and not yet caught. @param {any} thread */
+    const inFlight = thread=>readU32(threadData(thread) + THREAD_DATA.PROCESSING_THROW);
+    /** @param {any} thread @param {number} count */
+    const setInFlight = (thread, count)=>
+        writeU32(threadData(thread) + THREAD_DATA.PROCESSING_THROW, Math.max(0, count));
 
     let terminateHandler = 0;
     let unexpectedHandler = 0;
-    let translator = 0;
 
     /** @param {number} at */
     const funcInfo = at=>{
@@ -425,6 +472,7 @@ export function createCxxExceptions(host){
      *
      * @param {Object} found
      * @param {number} found.record
+     * @param {number} found.context
      * @param {number} found.frame
      * @param {ReturnType<typeof funcInfo>} found.info
      * @param {number} found.tryEntry
@@ -435,7 +483,8 @@ export function createCxxExceptions(host){
      * @param {Record<string, number>} found.entry  Registers when the handler was called.
      * @param {{ thread: any, stackAtRest: number }} found.how
      */
-    const catchIt = async({ record, frame, info, tryEntry, handler, catchable, object, throwInfo,
+    const catchIt = async({ record, context, frame, info, tryEntry, handler, catchable, object,
+        throwInfo,
         entry, how })=>{
         const { thread } = how;
         const tryLow = readI32(tryEntry + TRY_ENTRY.LOW);
@@ -469,7 +518,14 @@ export function createCxxExceptions(host){
             object, throwInfo, frame, tryLow, catchHigh, rethrown: false, savedEsp: saved,
         };
         list.push(mine);
-        inFlight.set(thread, Math.max(0, (inFlight.get(thread) ?? 1) - 1));
+        setInFlight(thread, inFlight(thread) - 1);
+        // The exception the block handles is the thread's current one while it
+        // runs, the one before it again once it is done.
+        const block = threadData(thread);
+        const outer = [readU32(block + THREAD_DATA.CURRENT_EXCEPTION),
+            readU32(block + THREAD_DATA.CURRENT_CONTEXT)];
+        writeU32(block + THREAD_DATA.CURRENT_EXCEPTION, record);
+        writeU32(block + THREAD_DATA.CURRENT_CONTEXT, context);
 
         const continuation = await host.callGuest({
             entry: readU32(handler + HANDLER.ADDRESS),
@@ -479,6 +535,8 @@ export function createCxxExceptions(host){
             registers: { ebp: frame + EH_FRAME.EBP },
         }) >>> 0;
 
+        writeU32(block + THREAD_DATA.CURRENT_EXCEPTION, outer[0]);
+        writeU32(block + THREAD_DATA.CURRENT_CONTEXT, outer[1]);
         // The block ended by returning, so it is still the innermost catch.
         const at = list.lastIndexOf(mine);
         if (at >= 0)
@@ -536,6 +594,7 @@ export function createCxxExceptions(host){
             && knownMagic(readU32((record >>> 0) + RECORD.INFORMATION));
         const state = stateOf(at);
 
+        const translator = readU32(threadData(thread) + THREAD_DATA.TRANSLATOR);
         if (!isCxx && translator !== 0)
         {
             // The program's translator turns a structured exception into a C++
@@ -574,7 +633,8 @@ export function createCxxExceptions(host){
                     // not at all by code built to leave them alone.
                     if (isEllipsis(handler) && (info.ehFlags & FI_EHS) === 0)
                     {
-                        return catchIt({ record: record >>> 0, frame: at, info, tryEntry, handler,
+                        return catchIt({ record: record >>> 0, context: context >>> 0,
+                            frame: at, info, tryEntry, handler,
                             catchable: 0, object: 0, throwInfo: 0, entry, how });
                     }
                     continue;
@@ -584,7 +644,8 @@ export function createCxxExceptions(host){
                     const catchable = readU32(catchables + 4 + type * 4);
                     if (matches(handler, catchable, throwInfo))
                     {
-                        return catchIt({ record: record >>> 0, frame: at, info, tryEntry, handler,
+                        return catchIt({ record: record >>> 0, context: context >>> 0,
+                            frame: at, info, tryEntry, handler,
                             catchable, object, throwInfo, entry, how });
                     }
                 }
@@ -642,10 +703,46 @@ export function createCxxExceptions(host){
         },
     };
 
+    /** The thread's own: a translator is set for each thread. */
+    const setTranslator = {
+        convention: 'cdecl',
+        argBytes: 4,
+        /** @param {number[]} args */
+        handler: ([handler])=>{
+            const slot = threadData(host.currentThread()) + THREAD_DATA.TRANSLATOR;
+            const previous = readU32(slot);
+            writeU32(slot, handler >>> 0);
+            return previous;
+        },
+    };
+
+    /** @param {number} offset */
+    const slotOfThread = offset=>({
+        convention: 'cdecl',
+        argBytes: 0,
+        handler: ()=>threadData(host.currentThread()) + offset,
+    });
+
     return {
         frameHandler,
 
         table: {
+            /**
+             * void **__current_exception(void), void **__current_exception_context(void),
+             * int *__processing_throw(void)
+             *
+             * Where the calling thread keeps the record and context of the
+             * exception its catch block handles and the count of exceptions
+             * in flight: always the same addresses for a thread.
+             */
+            [UNIVERSAL_EH]: {
+                __current_exception: slotOfThread(THREAD_DATA.CURRENT_EXCEPTION),
+                __current_exception_context: slotOfThread(THREAD_DATA.CURRENT_CONTEXT),
+                __processing_throw: slotOfThread(THREAD_DATA.PROCESSING_THROW),
+                // The C name the universal runtime gave the translator's setter.
+                _set_se_translator: setTranslator,
+            },
+
             /**
              * EXCEPTION_DISPOSITION __CxxFrameHandler(record, frame, context,
              *   dispatcher)
@@ -686,7 +783,7 @@ export function createCxxExceptions(host){
                         thrown = current.object;
                         info = current.throwInfo;
                     }
-                    inFlight.set(thread, (inFlight.get(thread) ?? 0) + 1);
+                    setInFlight(thread, inFlight(thread) + 1);
                     return host.raise({
                         code: EH_EXCEPTION_NUMBER,
                         flags: EXCEPTION_NONCONTINUABLE,
@@ -728,7 +825,7 @@ export function createCxxExceptions(host){
             __uncaught_exception: {
                 convention: 'cdecl',
                 argBytes: 0,
-                handler: ()=>((inFlight.get(host.currentThread()) ?? 0) > 0 ? 1 : 0),
+                handler: ()=>(inFlight(host.currentThread()) > 0 ? 1 : 0),
             },
 
             /** terminate_function set_terminate(terminate_function) */
@@ -761,16 +858,7 @@ export function createCxxExceptions(host){
              * msvcrt.dll exports this one under its C++ name only; the C name
              * is a later runtime's, and an import by it never binds here.
              */
-            '?_set_se_translator@@YAP6AXIPAU_EXCEPTION_POINTERS@@@ZP6AXI0@Z@Z': {
-                convention: 'cdecl',
-                argBytes: 4,
-                /** @param {number[]} args */
-                handler: ([handler])=>{
-                    const previous = translator;
-                    translator = handler >>> 0;
-                    return previous;
-                },
-            },
+            '?_set_se_translator@@YAP6AXIPAU_EXCEPTION_POINTERS@@@ZP6AXI0@Z@Z': setTranslator,
 
             /**
              * void abort(void)

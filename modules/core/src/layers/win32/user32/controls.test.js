@@ -2459,3 +2459,50 @@ test('LB_SELECTSTRING selects by prefix in a sorted list, CB_SELECTSTRING shows 
         assert.equal(String.fromCharCode(...context.memory.bytes.subarray(OUT, OUT + 8)),
             'Express' + String.fromCharCode(0), 'the field shows the item');
     });
+
+test('an edit answers the characters as Windows\' does: return and tab are a multi-line edit\'s '
+    + 'text, Ctrl+X/C/V/Z its commands, every character 1', async()=>{
+    // Wine's user32:edit test_enter, test_tab, test_undo and the WM_GETDLGCODE
+    // loop of test_edit_control_1, as Windows answers them.
+    const ES_WANTRETURN = 0x1000;
+    const WM_GETDLGCODE = 0x0087;
+    const context = setup();
+    const dialog = await openDialog(context);
+    const { fns, memory } = context;
+    /** @param {number} style */
+    const make = style=>{
+        memory.putString(TEXT, 'Edit');
+        return fns.CreateWindowExA.handler([0, TEXT, 0, WS_CHILD | WS_VISIBLE | style,
+            8, 110, 100, 20, dialog, 300, HINSTANCE, 0]);
+    };
+    /** @param {number} hwnd */
+    const text = hwnd=>{
+        fns.GetWindowTextA.handler([hwnd, OUT, 64]);
+        return memory.readCString(OUT, 64);
+    };
+    /** @param {number} hwnd @param {number} message @param {number} [wParam] */
+    const send = (hwnd, message, wParam = 0)=>fns.SendMessageA.handler([hwnd, message, wParam, 0]);
+
+    const multi = make(ES_MULTILINE);
+    const single = make(0);
+    const singleWantReturn = make(ES_WANTRETURN);
+    assert.equal(send(multi, WM_GETDLGCODE), 0x8d, 'a multi-line edit wants all keys');
+    assert.equal(send(single, WM_GETDLGCODE), 0x89);
+    assert.equal(send(singleWantReturn, WM_GETDLGCODE), 0x89, 'ES_WANTRETURN alone asks nothing');
+
+    assert.equal(send(multi, WM_CHAR, 0x0d), 1);
+    assert.equal(send(multi, WM_CHAR, 0x09), 1);
+    assert.equal(text(multi), '\r\n\t', 'a return without ES_WANTRETURN, and a tab, are typed');
+    assert.equal(send(single, WM_CHAR, 0x0d), 1, 'a character a single-line edit drops is 1');
+    assert.equal(send(single, WM_CHAR, 0x09), 1);
+    assert.equal(text(single), '');
+
+    memory.putString(TEXT, 'undo this');
+    fns.SetWindowTextA.handler([single, TEXT]);
+    fns.SendMessageA.handler([single, EM_SETSEL, 0, -1 >>> 0]);
+    assert.equal(send(single, WM_CHAR, 0x18), 1, 'Ctrl+X cuts');
+    assert.equal(text(single), '');
+    assert.equal(send(single, WM_CHAR, 0x1a), 1, 'Ctrl+Z undoes');
+    assert.equal(text(single), 'undo this');
+
+});

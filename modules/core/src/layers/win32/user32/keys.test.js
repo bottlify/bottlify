@@ -71,4 +71,7 @@ test('caps lock and shift cancel on a letter, and do nothing to a symbol key', (
     assert.equal(characterOf(0x41, { shift: true, capsLock: true }), 0x61);
     assert.equal(characterOf(0x31, { capsLock: true }), 0x31);
     assert.equal(characterOf(0x70), null, 'a function key types nothing');
+    assert.equal(characterOf(0x46, { control: true }), 0x06, 'Ctrl+F is its control code');
+    assert.equal(characterOf(0x46, { control: true, alt: true }), null,
+        'Ctrl+Alt is AltGr, which this layout types nothing with');
 });

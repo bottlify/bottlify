@@ -348,3 +348,16 @@ test('a by-reference variant at a NULL string crosses as a cell holding NULL, an
         assert.equal(held, 0, 'holding NULL');
         assert.equal((await crossed(0))[0], 0, 'no referent stays none');
     });
+
+test('IOleWindow and IOleClientSite cross apartments with no library, as ole32 marshals them',
+    async()=>{
+        const catalog = createInterfaceCatalog({ readFile: ()=>null });
+        const window = await catalog.describe('{00000114-0000-0000-C000-000000000046}');
+        assert.deepEqual(window?.methods.slice(3).map(method=>method?.name),
+            ['GetWindow', 'ContextSensitiveHelp']);
+        const site = await catalog.describe('{00000118-0000-0000-C000-000000000046}');
+        assert.deepEqual(site?.methods.slice(3).map(method=>method?.name), ['SaveObject',
+            'GetMoniker', 'GetContainer', 'ShowObject', 'OnShowWindow', 'RequestNewObjectLayout']);
+        assert.equal(site?.methods[4]?.parameters[2].type.kind, 'pointer',
+            'GetMoniker hands a moniker out');
+    });

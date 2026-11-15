@@ -50,7 +50,7 @@ import { GUEST_EXCEPTION } from './common/raise.js';
 import { createEntryPointCaller, createGuardedCaller } from './kernel32/dllentry.js';
 import { createThreadCalls, DLL_THREAD_DETACH } from './kernel32/thread-calls.js';
 import { createCrtSeh } from './msvcrt/seh.js';
-import { createCxxExceptions } from './msvcrt/eh.js';
+import { createCxxExceptions, UNIVERSAL_EH } from './msvcrt/eh.js';
 import { createCxxExceptions64 } from './msvcrt/eh64.js';
 import { createApcs } from './kernel32/apc.js';
 import { createResourceFunctions } from './kernel32/resources.js';
@@ -68,6 +68,7 @@ import { createCrtdllFunctions } from './msvcrt/crtdll.js';
 import { createMsvcr80Functions } from './msvcrt/msvcr80.js';
 import { createMsvcp80Functions } from './msvcrt/msvcp80.js';
 import { createUcrtbaseFunctions } from './msvcrt/ucrtbase.js';
+import { addSecondNames, MSVCRT_SECOND_NAMES } from './msvcrt/second-names.js';
 import { UNIVERSAL_CXX } from './msvcrt/classes.js';
 import { createWindowFunctions } from './user32/windows.js';
 import { createWindowDirectory } from './user32/directory.js';
@@ -3456,6 +3457,7 @@ export function createWin32Module(){
                         abort: abortProcess,
                         park: ()=>bridge.park(),
                         divergence: config?.divergence,
+                        allocate: bytes=>heap.allocate(bytes),
                     }).table,
                     // The C language handler a 64-bit function names in its
                     // unwind data; the dispatcher reads its scope table rather
@@ -5388,6 +5390,9 @@ export function createWin32Module(){
             // The runtime before msvcrt, built from it: the same entries under the
             // same names, and its own few beside them.
             libraries['CRTDLL.dll'] = createCrtdllFunctions(libraries['msvcrt.dll']);
+            // msvcrt's second names for what it has, the locale forms above
+            // all, before the runtimes built over it take its table.
+            addSecondNames(libraries['msvcrt.dll'], MSVCRT_SECOND_NAMES);
             // Visual C++ 2005's, likewise, with the names that runtime added.
             // imagehlp, the older library dbghelp grew out of: the same
             // functions under the names it had then.
@@ -5444,6 +5449,7 @@ export function createWin32Module(){
                     .map(name=>[name, libraries['msvcrt.dll'][name]])),
                 // std::exception's message and typeid's names, ucrtbase's too.
                 .../** @type {any} */ (libraries['msvcrt.dll'])[UNIVERSAL_CXX] ?? {},
+                .../** @type {any} */ (libraries['msvcrt.dll'])[UNIVERSAL_EH] ?? {},
             };
             if (cxx64)
             {

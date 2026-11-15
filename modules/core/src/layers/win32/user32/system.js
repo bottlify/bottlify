@@ -329,6 +329,7 @@ const modifiersIn = state=>({
     shift: state ? (state[0x10] & 0x80) !== 0 : false,
     capsLock: state ? (state[0x14] & 0x01) !== 0 : false,
     control: state ? (state[0x11] & 0x80) !== 0 : false,
+    alt: state ? (state[0x12] & 0x80) !== 0 : false,
 });
 
 /** A key-up, in the scan code ToUnicode and ToAscii are handed. */
@@ -1380,8 +1381,10 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
      * first mode it is offered keeps the depth it had.
      */
     const userModes = ()=>{
-        const own = displayModes(screen);
-        return screen.bitsPerPixel === 16 || launchBits !== 32 ? own
+        // The list is the display's as launched, whatever depth a program
+        // has set since: a display set to 16 bits goes back to its 32.
+        const own = displayModes({ ...screen, bitsPerPixel: launchBits });
+        return launchBits !== 32 ? own
             : [...own, ...own.map(one=>({ ...one, bitsPerPixel: 16 }))];
     };
 
@@ -2301,7 +2304,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             return andThen(shown, (/** @type {number} */ taken)=>{
                 if ((taken | 0) === 0)
                 {
-                    host.sendInput?.(piece.input);
+                    host.sendInput?.({ ...piece.input, injected: true });
                 }
                 return next(index + 1);
             });
@@ -2409,7 +2412,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             {
                 if (!up)
                 {
-                    host.sendInput?.({ kind: 'type', text: String.fromCharCode(wScan) });
+                    host.sendInput?.({ kind: 'type', text: String.fromCharCode(wScan),
+                        injected: true });
                 }
                 return true;
             }
@@ -2418,7 +2422,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             const named = (flags & KEYEVENTF_SCANCODE) !== 0
                 ? { scan: wScan, extended }
                 : { vk: wVk, scanGiven: wScan, extended };
-            host.sendInput?.({ kind: 'key', ...named, down: !up });
+            host.sendInput?.({ kind: 'key', ...named, down: !up, injected: true });
             return true;
         });
     };
@@ -5367,7 +5371,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([instance, id, buffer, size])=>{
-                const text = host.loadString?.(instance >>> 0, id >>> 0) ?? null;
+                // The id is a 16-bit resource id: what lies above it is not read.
+                const text = host.loadString?.(instance >>> 0, id & 0xffff) ?? null;
                 if (text === null || (buffer >>> 0) === 0 || (size | 0) <= 0)
                 {
                     if ((buffer >>> 0) !== 0 && (size | 0) > 0)
@@ -5399,7 +5404,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([instance, id, buffer, size])=>{
-                const text = host.loadString?.(instance >>> 0, id >>> 0) ?? null;
+                // The id is a 16-bit resource id: what lies above it is not read.
+                const text = host.loadString?.(instance >>> 0, id & 0xffff) ?? null;
                 if (text === null || (buffer >>> 0) === 0 || (size | 0) <= 0)
                 {
                     if ((buffer >>> 0) !== 0 && (size | 0) > 0)

@@ -30,7 +30,7 @@ import { HKEY_CLASSES_ROOT } from '../advapi32/registry.js';
 import { readGuid, writeGuid } from '../ole32/guid.js';
 import { createAdapter, createTypeLibraryObjects } from './objects.js';
 import { createErrorInfoObjects } from './errorinfo.js';
-import { createPictureObjects } from './picture.js';
+import { IID_IPICTURE, IID_IPICTUREDISP, createPictureObjects } from './picture.js';
 import { createStdDispatchObjects } from './stddispatch.js';
 import { createRecordInfoObjects } from './recordinfo.js';
 import { TKIND_DISPATCH, TKIND_INTERFACE, TKIND_RECORD } from './typelib.js';
@@ -130,6 +130,13 @@ const E_INVALIDARG = 0x80070057;
 const COLOR_MENUBAR = 30;
 const E_POINTER = 0x80004003;
 const E_NOTIMPL = 0x80004001;
+/** INET_E_RESOURCE_NOT_FOUND: what a URL moniker answers for a file that is not there. */
+const INET_E_RESOURCE_NOT_FOUND = 0x800c0005 | 0;
+/** INET_E_UNKNOWN_PROTOCOL: a name read as a URL whose protocol nothing serves. */
+const INET_E_UNKNOWN_PROTOCOL = 0x800c000d | 0;
+/** CTL_E_FILENOTFOUND and CTL_E_PATHFILEACCESSERROR: no file at a picture's path, or no path. */
+const CTL_E_FILENOTFOUND = 0x800a0035 | 0;
+const CTL_E_PATHFILEACCESSERROR = 0x800a004b | 0;
 const E_OUTOFMEMORY = 0x8007000e;
 const DISP_E_PARAMNOTFOUND = 0x80020004 | 0;
 const DISP_E_BADINDEX = 0x8002000b | 0;
@@ -1456,6 +1463,40 @@ export function createAutomationFunctions(host){
         }
         files.close(node);
         return bytes;
+    };
+
+    /**
+     * The picture in the file a name gives - a path, or a file: URL - read as
+     * a URL moniker reads it: a file that is not there is
+     * INET_E_RESOURCE_NOT_FOUND, a name that is neither a path from a drive
+     * or a share nor a URL of a protocol served here INET_E_UNKNOWN_PROTOCOL.
+     *
+     * @param {string} named @param {string} iid @param {number} out
+     * @returns {number | Promise<number>} the HRESULT
+     */
+    const pictureAtPath = (named, iid, out)=>{
+        if (!pictures)
+        {
+            report('OLE Automation', 'a picture from a file: no COM to publish with', 'loss');
+            return E_NOTIMPL;
+        }
+        const url = /^file:(\/\/\/?)?/i.exec(named);
+        const file = url ? decodeURIComponent(named.slice(url[0].length)).replace(/\//g, '\\')
+            : named;
+        if (!/^([a-z]:\\|\\\\)/i.test(file))
+        {
+            if (/^[a-z][a-z0-9+.-]+:\/\//i.test(named) && !url)
+            {
+                host.divergence?.('OleLoadPicturePath', `${named}: no network to read a URL from`);
+                return INET_E_RESOURCE_NOT_FOUND;
+            }
+            return INET_E_UNKNOWN_PROTOCOL;
+        }
+        const answer = (/** @type {Uint8Array | null} */ bytes)=>(bytes
+            ? pictures.fromFile(bytes, iid, out) : INET_E_RESOURCE_NOT_FOUND);
+        const bytes = fileBytes(file);
+        return bytes instanceof Promise ? bytes.then(answer, ()=>INET_E_RESOURCE_NOT_FOUND)
+            : answer(bytes);
     };
 
     /** @param {number} address @returns {string} the OLESTR there, or '' for NULL */
@@ -5214,6 +5255,68 @@ export function createAutomationFunctions(host){
         },
 
         /**
+         * HRESULT OleLoadPicturePath(LPOLESTR szURLorPath, LPUNKNOWN punkCaller,
+         *   DWORD dwReserved, OLE_COLOR clrReserved, REFIID riid, LPVOID *ppvRet)
+         *
+         * The picture in a file, named by its path or a file: URL. A file that
+         * is not there is INET_E_RESOURCE_NOT_FOUND, as URL monikers answer;
+         * a URL of another scheme has no network to come from here.
+         */
+        OleLoadPicturePath: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([path, , , , riid, out])=>{
+                // A call missing its name or its out pointer is refused whole,
+                // the out pointer left as it was.
+                if ((out >>> 0) === 0 || (path >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                host.writeMemory(out >>> 0, new Uint8Array(4));
+                return pictureAtPath(wideAt(path >>> 0),
+                    (riid >>> 0) === 0 ? IID_IPICTURE : readGuid(host, riid >>> 0), out >>> 0);
+            },
+        },
+
+        /**
+         * HRESULT OleLoadPictureFile(VARIANT varFileName, LPDISPATCH *lplpdispPicture)
+         *
+         * OleLoadPicturePath's picture, as its IPictureDisp, for a name in a
+         * BSTR. The VARIANT comes by value, sixteen bytes of the stack.
+         */
+        OleLoadPictureFile: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([type, , name, , out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_POINTER;
+                }
+                host.writeMemory(out >>> 0, new Uint8Array(4));
+                if ((type & 0xffff) !== VT_BSTR)
+                {
+                    return CTL_E_FILENOTFOUND;
+                }
+                // A file's path, never a URL: a name with a scheme is no path.
+                const file = wideAt(name >>> 0);
+                if (/^[a-z][a-z0-9+.-]+:\/\//i.test(file))
+                {
+                    return CTL_E_PATHFILEACCESSERROR;
+                }
+                if (!pictures)
+                {
+                    report('OLE Automation', 'OleLoadPictureFile: no COM to publish with', 'loss');
+                    return E_NOTIMPL;
+                }
+                const answer = (/** @type {Uint8Array | null} */ bytes)=>(bytes
+                    ? pictures.fromFile(bytes, IID_IPICTUREDISP, out >>> 0) : CTL_E_FILENOTFOUND);
+                const bytes = file === '' ? null : fileBytes(file);
+                return bytes instanceof Promise ? bytes.then(answer, ()=>CTL_E_FILENOTFOUND)
+                    : answer(bytes);
+            },
+        },
+
+        /**
          * HRESULT OleTranslateColor(OLE_COLOR clr, HPALETTE hpal, COLORREF *pcolorref)
          *
          * An OLE_COLOR made the COLORREF GDI draws with, by its high byte: an
@@ -6079,6 +6182,8 @@ export const OLEAUT32_ORDINALS = Object.freeze({
     419: 'OleCreatePictureIndirect',
     420: 'OleCreateFontIndirect',
     421: 'OleTranslateColor',
+    422: 'OleLoadPictureFile',
+    424: 'OleLoadPicturePath',
     425: 'VarUI4FromI8',
     426: 'VarUI4FromUI8',
     427: 'VarI8FromUI8',

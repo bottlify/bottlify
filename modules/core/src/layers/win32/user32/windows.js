@@ -6353,6 +6353,7 @@ export function createWindowFunctions(host){
                 shift: heldAsOfMessage(0x10),
                 capsLock: ((host.keyState?.(0x14) ?? 0) & 0x0001) !== 0,
                 control: heldAsOfMessage(0x11),
+                alt: heldAsOfMessage(0x12),
             })
             : null;
         if (character !== null)

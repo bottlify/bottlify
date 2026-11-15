@@ -6,7 +6,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createConversionFunctions, scanInteger, scanFloat } from './convert.js';
+import {
+    createConversionFunctions, scanInteger, scanFloat, scanStandardDecimal,
+} from './convert.js';
 import { fakeMemory, doubleSlots, fakeFpu } from './harness.test.js';
 
 const build = (/** @type {any} */ fpu = undefined)=>{
@@ -583,4 +585,34 @@ test('a long run of digits reads to its end, past every limit, at a step a digit
         'linear in the digits');
     assert.equal(scanInteger('18446744073709551615', 10)?.magnitude, (1n << 64n) - 1n,
         'below the cap every digit counts');
+});
+
+test('the universal runtime reads C99\'s infinities, NaNs and hexadecimal numbers', ()=>{
+    // Wine's ucrtbase test_strtod: the value, and how far the reading went.
+    /** @type {[string, number, number, boolean?][]} */
+    const cases = [
+        ['infinity', Infinity, 8], ['InFiNiTy', Infinity, 8], ['INF', Infinity, 3],
+        ['-inf', -Infinity, 4], ['inf42', Infinity, 3], ['infini', Infinity, 3],
+        ['0x42', 66, 4], ['-0x42', -66, 5], ['0x1p1', 2, 5], ['0x1p+1', 2, 6], ['0x2p-1', 1, 6],
+        ['0xABCDEF', 11259375, 8], ['0x1.1', 1.0625, 5], ['0x1.1p1', 2.125, 7],
+        ['0x1p1a', 2, 5], ['0xp3', 0, 1], ['0x.', 0, 1], ['0x.8', 0.5, 4], ['0x.8p', 0.5, 4],
+        ['0x0p10000000000000000000000000', 0, 30], ['0x1p-1026', 1.3906711615670009e-309, 9],
+        ['0x1ffffffffffffe.80000000000000000000', 9007199254740990, 37],
+        ['0x1ffffffffffffe.80000000000000000001', 9007199254740991, 37],
+        ['0x1fffffffffffff.80000000000000000000', 9007199254740992, 37],
+        ['1.7976931348623159e+308', Infinity, 23, true], ['2.48e-324', 5e-324, 9],
+        ['2.47e-324', 0, 9, true], [' \t12.5e1', 125, 8], ['1d2', 1, 1],
+    ];
+    for (const [text, value, end, range = false] of cases)
+    {
+        const scanned = scanStandardDecimal(text);
+        assert.deepEqual(scanned, { value, end, range }, text);
+    }
+    for (const text of ['nan', 'NaN', 'nan(ind)', '-nan'])
+    {
+        assert.ok(Number.isNaN(scanStandardDecimal(text)?.value), text);
+    }
+    assert.equal(scanStandardDecimal('nan(ind)')?.end, 8, 'the parenthesised part is read');
+    assert.equal(scanStandardDecimal('input'), null);
+    assert.equal(scanStandardDecimal('-input'), null);
 });

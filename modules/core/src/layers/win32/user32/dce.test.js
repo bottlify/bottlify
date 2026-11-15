@@ -292,3 +292,14 @@ test('a scroll clipped smaller than it scrolls leaves owed what would come in fr
             && right > left && bottom > top, `owed inside the clip: ${[left, top, right, bottom]}`);
         fns.EndPaint.handler([hwnd, PS]);
     });
+
+test('FillRect with no brush fills with the one the DC has selected', async()=>{
+    // Wine's user32:uitools: a memory DC's bitmap filled with the brush last
+    // selected when the call names none.
+    const { context, window } = await screen();
+    const held = context.fns.GetDC.handler([window]);
+    context.gdi32.SelectObject.handler([held, context.gdi32.CreateSolidBrush.handler([RED])]);
+    assert.equal(context.fns.FillRect.handler([held, RECT, 0]), 1);
+    const corner = context.toScreen(window, 10, 10);
+    assert.equal(context.desktop.read(corner.x, corner.y), 0xff0000, 'red, the selected brush');
+});

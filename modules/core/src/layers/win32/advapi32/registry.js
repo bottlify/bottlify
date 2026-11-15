@@ -1190,10 +1190,14 @@ export function createHive(
         /**
          * @param {RegistryKey} key @param {string} name
          * @param {number} type @param {Uint8Array} data
+         * @param {boolean} [exact]  The bytes as they are, as a program's
+         *     RegSetValueEx stores them; without it a string the engine sets
+         *     is kept terminated (`terminate`).
          * @returns {RegistryValue}
          */
-        setValue(key, name, type, data){
-            const value = { name, type: type >>> 0, data: terminate(type >>> 0, data) };
+        setValue(key, name, type, data, exact = false){
+            const value = { name, type: type >>> 0,
+                data: exact ? data : terminate(type >>> 0, data) };
             const node = writable(key);
             // A classes key both sides have since deleted takes the value nowhere.
             if (node)

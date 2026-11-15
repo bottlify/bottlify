@@ -455,6 +455,13 @@ export function strtod({ u8, setU32, controlWord, setControlWord, host, pointerB
         at++;
         c = u8(at);
     }
+    // An infinity, a NaN or a hexadecimal number is the handler's to read:
+    // the universal runtime spells them (C99), msvcrt converts no more of
+    // them than the code here would.
+    if ((seen === 0 && ((c | 0x20) === 0x69 || (c | 0x20) === 0x6e)) || (c | 0x20) === 0x78)
+    {
+        return host();
+    }
     if (seen === 0)
     {
         if (end !== 0)
@@ -613,6 +620,13 @@ export function atof({ u8, controlWord, setControlWord, host, pointerBytes }, te
         }
         at++;
         c = u8(at);
+    }
+    // An infinity, a NaN or a hexadecimal number is the handler's to read:
+    // the universal runtime spells them (C99), msvcrt converts no more of
+    // them than the code here would.
+    if ((seen === 0 && ((c | 0x20) === 0x69 || (c | 0x20) === 0x6e)) || (c | 0x20) === 0x78)
+    {
+        return host();
     }
     if (digits === 0)
     {
@@ -829,6 +843,13 @@ export function wcstod({ u16, setU32, controlWord, setControlWord, host, pointer
         at += 2;
         c = u16(at);
     }
+    // An infinity, a NaN or a hexadecimal number is the handler's to read:
+    // the universal runtime spells them (C99), msvcrt converts no more of
+    // them than the code here would.
+    if ((seen === 0 && ((c | 0x20) === 0x69 || (c | 0x20) === 0x6e)) || (c | 0x20) === 0x78)
+    {
+        return host();
+    }
     if (seen === 0)
     {
         if (end !== 0)
@@ -987,6 +1008,13 @@ export function _wtof({ u16, controlWord, setControlWord, host, pointerBytes }, 
         }
         at += 2;
         c = u16(at);
+    }
+    // An infinity, a NaN or a hexadecimal number is the handler's to read:
+    // the universal runtime spells them (C99), msvcrt converts no more of
+    // them than the code here would.
+    if ((seen === 0 && ((c | 0x20) === 0x69 || (c | 0x20) === 0x6e)) || (c | 0x20) === 0x78)
+    {
+        return host();
     }
     if (digits === 0)
     {

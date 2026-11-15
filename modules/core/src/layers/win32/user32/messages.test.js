@@ -86,6 +86,16 @@ test('GetKeyState\'s state moves as the thread takes its input, buttons and keys
     assert.equal(queue.syncedKeyState(0x41), 0x8001, 'SetKeyboardState sets the thread\'s');
     thread = main;
     assert.equal(queue.syncedKeyState(0x41), 0);
+
+    // A shift, control or alt keeps its side with the name: the input
+    // layer's side, or the extended bit of a message that names none.
+    queue.post({ hwnd: 0, message: WM_KEYDOWN, wParam: 0x10, lParam: 0x00010001, side: 0xa1 });
+    queue.post({ hwnd: 0, message: WM_KEYDOWN, wParam: 0x11, lParam: 0x01000001 });
+    queue.peek(ALL);
+    queue.peek(ALL);
+    const table = queue.syncedKeyboard() ?? new Uint8Array(256);
+    assert.deepEqual([0x10, 0xa0, 0xa1, 0x11, 0xa2, 0xa3].map(vk=>table[vk] & 0x80),
+        [0x80, 0, 0x80, 0x80, 0, 0x80]);
 });
 
 test('an empty queue answers with nothing rather than a placeholder', ()=>{

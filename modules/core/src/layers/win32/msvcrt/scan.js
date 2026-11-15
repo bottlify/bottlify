@@ -21,7 +21,7 @@
  * ran out before anything at all converted -- is -1 rather than 0.
  */
 
-import { scanInteger, scanFloat } from './convert.js';
+import { scanInteger, scanFloat, scanStandardDecimal } from './convert.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { wideStringAt } from './widetext.js';
 
@@ -49,13 +49,130 @@ const isSpace = character=>character !== undefined && ' \t\n\v\f\r'.includes(cha
  *
  * @param {string} modifier
  */
-function integerWidth(modifier){
+function integerWidth(modifier, standard = false, pointerBytes = 4){
     if (/ll|I64|j/.test(modifier))
     {
         return 8;
     }
+    if (standard)
+    {
+        // C99's hh is a char, and the universal runtime's I, z and t a
+        // pointer's width.
+        if (/hh/.test(modifier))
+        {
+            return 1;
+        }
+        if (/z|t/.test(modifier))
+        {
+            return pointerBytes;
+        }
+    }
+    if (/I(?!64)/.test(modifier))
+    {
+        return pointerBytes;
+    }
     // One h is a short; msvcrt reads a second as taking the first back.
     return (modifier.match(/h/g) ?? []).length === 1 ? 2 : 4;
+}
+
+/**
+ * A floating-point field as the universal runtime's scanf reads it, a
+ * character at a time with one to look ahead (C99): a sign, then `inf` or
+ * `infinity`, `nan` with an optional `(chars)`, a hexadecimal number after
+ * `0x` with its exponent after `p`, or decimal digits with a point among them
+ * and an exponent after `e`. What it began and could not finish -- an `e`
+ * with no digit after it, `infi` short of `infinity` -- is a failure, the
+ * characters read up to it consumed; no number begun at all is null.
+ *
+ * @param {string} field
+ * @returns {{ value: number, end: number, failed?: boolean } | null}
+ */
+export function scanStandardFloat(field){
+    let at = /^[+-]/.test(field) ? 1 : 0;
+    /** @param {string} spelt */
+    const word = spelt=>{
+        let read = 0;
+        while (read < spelt.length && field[at + read]?.toLowerCase() === spelt[read])
+        {
+            read++;
+        }
+        at += read;
+        return read === spelt.length;
+    };
+    const failed = ()=>({ value: 0, end: at, failed: true });
+    const value = ()=>({ value: scanStandardDecimal(field.slice(0, at))?.value ?? 0, end: at });
+    const first = field[at]?.toLowerCase();
+    if (first === 'i')
+    {
+        if (!word('inf'))
+        {
+            return failed();
+        }
+        return field[at]?.toLowerCase() === 'i' && !word('inity') ? failed() : value();
+    }
+    if (first === 'n')
+    {
+        if (!word('nan'))
+        {
+            return failed();
+        }
+        if (field[at] === '(')
+        {
+            at++;
+            while (/[0-9A-Za-z_]/.test(field[at] ?? ''))
+            {
+                at++;
+            }
+            if (field[at] !== ')')
+            {
+                return failed();
+            }
+            at++;
+        }
+        return value();
+    }
+    const hex = field[at] === '0' && /[xX]/.test(field[at + 1] ?? '');
+    const digit = hex ? /[0-9a-fA-F]/ : /[0-9]/;
+    if (hex)
+    {
+        at += 2;
+    }
+    let digits = 0;
+    while (digit.test(field[at] ?? ''))
+    {
+        at++;
+        digits++;
+    }
+    if (field[at] === '.')
+    {
+        at++;
+        while (digit.test(field[at] ?? ''))
+        {
+            at++;
+            digits++;
+        }
+    }
+    if (digits === 0)
+    {
+        return hex || at > 0 ? failed() : null;
+    }
+    if ((hex ? /[pP]/ : /[eE]/).test(field[at] ?? ''))
+    {
+        at++;
+        if (/[+-]/.test(field[at] ?? ''))
+        {
+            at++;
+        }
+        if (!/[0-9]/.test(field[at] ?? ''))
+        {
+            return failed();
+        }
+        while (/[0-9]/.test(field[at] ?? ''))
+        {
+            at++;
+        }
+    }
+    return value();
 }
 
 /**
@@ -125,12 +242,16 @@ function scanset(body){
  * @param {() => number} nextPointer  The next argument, taken only when a
  *        conversion is actually going to store through it.
  * @param {ScanStore} store
- * @param {{ wide?: boolean, secure?: boolean, progress?: ScanProgress }} [options]
+ * @param {{ wide?: boolean, secure?: boolean, standard?: boolean, pointerBytes?: number,
+ *     progress?: ScanProgress }} [options]
  *        `wide` for the wscanf family, where %s and %c are wide and %S and
  *        %C narrow; `secure` for the _s family, where each %c, %s and %[
  *        takes its buffer's size in characters after its pointer, and text
  *        that does not fit ends the scan with the buffer emptied and the
  *        assignments made so far answered, none of them EOF;
+ *        `standard` for the universal runtime's, which reads numbers as C99
+ *        spells them (`scanStandardFloat`), takes `hh`, `I`, `z` and `t`, a
+ *        pointer after `0x`, and stops at a conversion it does not know;
  *        `progress` is filled in with how far the scan read.
  * @returns {number} Assignments made, or SCAN_EOF.
  */
@@ -222,6 +343,12 @@ export function runScan(input, format, nextPointer, store, options = {}){
             {
                 f += 3;
             }
+            else if (format[f] === 'I')
+            {
+                // A pointer's width, the I32 or I64 the process's is.
+                modifier += 'I';
+                f++;
+            }
             else if ('hlLjztwFN'.includes(format[f] ?? '_'))
             {
                 modifier += format[f++];
@@ -238,7 +365,12 @@ export function runScan(input, format, nextPointer, store, options = {}){
         {
             return stop();
         }
-        const known = 'cCsSdiouxXpPneEfgGaA['.includes(conversion);
+        const known = (options.standard ? 'cCsSdiouxXpneEfgGaA[' : 'cCsSdiouxXpPneEfgGaA[')
+            .includes(conversion);
+        if (!known && options.standard)
+        {
+            return stop();
+        }
         if (!known)
         {
             // msvcrt matches a character it does not know as a conversion
@@ -266,7 +398,8 @@ export function runScan(input, format, nextPointer, store, options = {}){
             // nothing but %n returns zero however much was consumed.
             if (!suppress)
             {
-                store.integer(nextPointer(), BigInt(at), integerWidth(modifier));
+                store.integer(nextPointer(), BigInt(at),
+                    integerWidth(modifier, options.standard, options.pointerBytes));
             }
             continue;
         }
@@ -362,6 +495,26 @@ export function runScan(input, format, nextPointer, store, options = {}){
         const short = scanned=>field.length < limit
             && (scanned === null || /^[eEpPxX+-.]{0,2}$/.test(field.slice(scanned.end)));
 
+        if ('eEfgGaA'.includes(conversion) && options.standard)
+        {
+            const scanned = scanStandardFloat(field);
+            starved ||= scanned === null || scanned.end >= field.length;
+            if (scanned === null)
+            {
+                return stop();
+            }
+            at += scanned.end;
+            if (scanned.failed)
+            {
+                return stop();
+            }
+            if (!suppress)
+            {
+                store.real(nextPointer(), scanned.value, /[lL]/.test(modifier) ? 8 : 4);
+                assigned++;
+            }
+            continue;
+        }
         if ('eEfgGaA'.includes(conversion))
         {
             const scanned = scanFloat(field);
@@ -387,7 +540,8 @@ export function runScan(input, format, nextPointer, store, options = {}){
         const pointer = conversion === 'p' || conversion === 'P';
         const base = /** @type {Record<string, number>} */ ({ d: 10, u: 10, i: 0, o: 8, x: 16,
             X: 16 })[conversion] ?? 16;
-        const scanned = scanInteger(field, pointer ? 16 : base, true, !pointer);
+        const scanned = scanInteger(field, pointer ? 16 : base, true,
+            !pointer || options.standard === true);
         starved ||= short(scanned);
         if (scanned === null)
         {
@@ -398,7 +552,8 @@ export function runScan(input, format, nextPointer, store, options = {}){
         {
             store.integer(nextPointer(),
                 scanned.negative ? -scanned.magnitude : scanned.magnitude,
-                pointer ? 4 : integerWidth(modifier));
+                pointer ? options.pointerBytes ?? 4
+                    : integerWidth(modifier, options.standard, options.pointerBytes));
             assigned++;
         }
     }
@@ -477,7 +632,12 @@ export function createScanStore(host){
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, length: number) => Uint8Array} [readMemory]
  *           For the wide input and format of swscanf. Absent, it stays unexported.
+ * @property {number} [pointerSize]  8 in a 64-bit process, the width of a %p
+ *           and an I; absent, 4.
  */
+
+/** The key the universal runtime's scans are carried under in the runtime's table. */
+export const STANDARD_SCAN = Symbol('standard scans');
 
 /**
  * @param {ScanHost} host
@@ -495,7 +655,8 @@ export function createScanFunctions(host){
      * @param {boolean} [wide]
      * @param {boolean} [secure]
      */
-    const scanf = (fixed, inputOf, formatOf = readString, wide = false, secure = false)=>({
+    const scanf = (fixed, inputOf, formatOf = readString, wide = false, secure = false,
+        standard = false)=>({
         convention: 'cdecl',
         // The pointers to store through are the variadic tail, and only as
         // many slots as are declared are read: with the fixed part alone,
@@ -505,10 +666,11 @@ export function createScanFunctions(host){
         handler: (/** @type {number[]} */ args)=>{
             let taken = fixed;
             const assigned = runScan(inputOf(args), formatOf(args[fixed - 1]),
-                ()=>args[taken++] ?? 0, store, { wide, secure });
+                ()=>args[taken++] ?? 0, store,
+                { wide, secure, standard, pointerBytes: host.pointerSize ?? 4 });
             // msvcrt's wide scan answers no input with nothing assigned, not
             // with EOF, as the later runtimes do.
-            return wide && assigned === SCAN_EOF ? 0 : assigned;
+            return wide && !standard && assigned === SCAN_EOF ? 0 : assigned;
         },
     });
 
@@ -531,6 +693,17 @@ export function createScanFunctions(host){
 
         /** int sscanf_s(const char *buffer, const char *format, ...) */
         sscanf_s: scanf(2, args=>readString(args[0]), readString, false, true),
+
+        // The universal runtime's string scans (`runScan`'s `standard`), the
+        // count bounding the input or not, secure or not.
+        [STANDARD_SCAN]: {
+            sscanf: scanf(2, args=>readString(args[0]), readString, false, false, true),
+            sscanf_s: scanf(2, args=>readString(args[0]), readString, false, true, true),
+            _snscanf: scanf(3, args=>readString(args[0]).slice(0, args[1] >>> 0), readString,
+                false, false, true),
+            _snscanf_s: scanf(3, args=>readString(args[0]).slice(0, args[1] >>> 0), readString,
+                false, true, true),
+        },
 
         ...readMemory ? {
             /**
