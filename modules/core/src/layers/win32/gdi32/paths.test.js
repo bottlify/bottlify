@@ -232,7 +232,8 @@ test('a rectangle in a path runs from its top right corner, its far edges left o
     assert.deepEqual(pathOf(machine), [
         [39, 20, PT_MOVETO], [20, 20, L], [20, 39, L], [39, 39, C],
         [54, 35, PT_MOVETO], [30, 35, L], [30, 49, L], [54, 49, C],
-        [70, 70, PT_MOVETO], [50, 70, L], [50, 70, L], [70, 70, C],
+        // A box with no height adds nothing under GM_COMPATIBLE; one pixel
+        // square is a figure of one point four times.
         [80, 80, PT_MOVETO], [80, 80, L], [80, 80, L], [80, 80, C],
         [39, 39, PT_MOVETO], [20, 39, L], [20, 20, L], [39, 20, C],
     ]);
@@ -464,4 +465,71 @@ test('text drawn into a path adds nothing to it', ()=>{
     assert.equal(fns.TextOutA.handler([dc, 0, 0, POINTS, 1]), 1);
     fns.EndPath.handler([dc]);
     assert.equal(fns.GetPath.handler([dc, 0, 0, 0]), 0);
+});
+
+/** @param {ReturnType<typeof machineOf>} machine */
+function positionOf(machine){
+    machine.fns.GetCurrentPositionEx.handler([machine.dc, OUT]);
+    return [machine.view.getInt32(OUT, true), machine.view.getInt32(OUT + 4, true)];
+}
+
+test('PolyDraw in a path closes at a point, and stops where an entry is not one it draws', ()=>{
+    // Wine's test_polydraw: the drawn part stays, the position goes back, and
+    // the next figure starts as if the call had not moved it.
+    const machine = machineOf(4, 4);
+    const { fns, dc, bytes } = machine;
+    const L = PT_LINETO;
+    fns.MoveToEx.handler([dc, -20, -20, 0]);
+    fns.BeginPath.handler([dc]);
+    putPoints(machine, [p(10, 10), p(10, 15)]);
+    bytes.set([L, L | PT_CLOSEFIGURE], TYPES);
+    assert.equal(fns.PolyDraw.handler([dc, POINTS, TYPES, 2]), 1);
+    assert.deepEqual(positionOf(machine), [10, 15], 'the position stays at the closing point');
+    putPoints(machine, [p(15, 15), p(15, 20), p(20, 20), p(20, 25)]);
+    bytes.set([L, PT_BEZIERTO, L, L], TYPES);
+    assert.equal(fns.PolyDraw.handler([dc, POINTS, TYPES, 4]), 0, 'a curve of one point');
+    assert.deepEqual(positionOf(machine), [10, 15], 'and back where the call began');
+    putPoints(machine, [p(30, 30), p(30, 35), p(35, 35), p(35, 40)]);
+    bytes.set([PT_BEZIERTO, PT_BEZIERTO, PT_BEZIERTO, L], TYPES);
+    assert.equal(fns.PolyDraw.handler([dc, POINTS, TYPES, 4]), 1);
+    fns.EndPath.handler([dc]);
+    assert.deepEqual(pathOf(machine), [
+        [-20, -20, PT_MOVETO], [10, 10, L], [10, 15, L | PT_CLOSEFIGURE],
+        [-20, -20, PT_MOVETO], [15, 15, L],
+        [-20, -20, PT_MOVETO], [30, 30, PT_BEZIERTO], [30, 35, PT_BEZIERTO],
+        [35, 35, PT_BEZIERTO], [35, 40, L],
+    ]);
+});
+
+test('a path keeps a rounded rectangle\'s corners and a pie\'s arc as curves, an arc as a'
+    + ' figure of its own, and no ellipse of an empty box', ()=>{
+    // Wine's test_roundrect, test_ellipse and all_funcs_path.
+    const machine = machineOf(4, 4);
+    const { fns, dc } = machine;
+    const B = PT_BEZIERTO;
+    const L = PT_LINETO;
+    fns.BeginPath.handler([dc]);
+    fns.RoundRect.handler([dc, 20, 20, 40, 40, 10, 10]);
+    fns.Ellipse.handler([dc, 70, 70, 50, 70]);
+    fns.EndPath.handler([dc]);
+    assert.deepEqual(pathOf(machine), [
+        [39, 25, PT_MOVETO], [39, 22, B], [37, 20, B], [34, 20, B], [25, 20, L],
+        [22, 20, B], [20, 22, B], [20, 25, B], [20, 34, L], [20, 37, B], [22, 39, B],
+        [25, 39, B], [34, 39, L], [37, 39, B], [39, 37, B], [39, 34, B | PT_CLOSEFIGURE],
+    ]);
+
+    fns.BeginPath.handler([dc]);
+    fns.MoveToEx.handler([dc, 5, 5, 0]);
+    fns.Arc.handler([dc, 21, 21, 39, 29, 39, 29, 21, 21]);
+    fns.LineTo.handler([dc, 6, 6]);
+    fns.Pie.handler([dc, 52, 54, 65, 68, 39, 29, 21, 21]);
+    fns.EndPath.handler([dc]);
+    const path = pathOf(machine);
+    const types = path.map(point=>point[2]);
+    const second = types.indexOf(PT_MOVETO, 1);
+    assert.deepEqual(path[second].slice(0, 2), [5, 5],
+        'the line after the arc starts its own figure at the position');
+    assert.deepEqual(types.slice(-2), [B, L | PT_CLOSEFIGURE],
+        'the pie\'s arc, then its line to the centre, closed');
+    assert.deepEqual(positionOf(machine), [6, 6], 'neither the arc nor the pie moved it');
 });

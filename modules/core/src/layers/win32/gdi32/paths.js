@@ -138,18 +138,18 @@ export function pathClose(path){
  * the rest, and a close when it is a closed shape.
  *
  * @param {Path} path @param {Point[]} points
- * @param {{ closed?: boolean, curves?: boolean }} [shape]
+ * @param {{ closed?: boolean, curves?: boolean, types?: number[] }} [shape]  `types`
+ *     names each point after the first, for a figure of lines and curves both.
  */
-export function pathFigure(path, points, { closed = false, curves = false } = {}){
+export function pathFigure(path, points, { closed = false, curves = false, types } = {}){
     if (points.length === 0)
     {
         return;
     }
     push(path, points[0], PT_MOVETO);
-    for (const point of points.slice(1))
-    {
-        push(path, point, curves ? PT_BEZIERTO : PT_LINETO);
-    }
+    points.slice(1).forEach((point, index)=>{
+        push(path, point, types?.[index] ?? (curves ? PT_BEZIERTO : PT_LINETO));
+    });
     path.start = { ...points[0] };
     path.pending = false;
     path.restart = null;
@@ -182,6 +182,42 @@ export function ellipseCurves(box, clockwise){
         { x: cx + kx, y: box.bottom }, { x: box.right, y: cy + ky }, { x: box.right, y: cy },
     ];
     return clockwise ? points.reverse() : points;
+}
+
+/**
+ * The sixteen points of a rounded rectangle as a path holds it, from the
+ * bottom of its top right corner: each corner a quarter of the corner ellipse
+ * as one curve, the sides lines between them, counterclockwise on the screen
+ * or the same points the other way round (Wine's path.c test_roundrect). The
+ * corner's half sizes are whole pixels, a five-pixel ellipse's 2.
+ *
+ * @param {{ left: number, top: number, right: number, bottom: number }} box
+ * @param {number} width @param {number} height  The corner ellipse's size.
+ * @param {boolean} clockwise
+ * @returns {{ points: Point[], types: number[] }}
+ */
+export function roundRectCurves(box, width, height, clockwise){
+    const rx = Math.floor(width / 2);
+    const ry = Math.floor(height / 2);
+    const kx = rx * QUARTER;
+    const ky = ry * QUARTER;
+    const { left, top, right, bottom } = box;
+    const points = [
+        { x: right, y: top + ry },
+        { x: right, y: top + ry - ky }, { x: right - rx + kx, y: top }, { x: right - rx, y: top },
+        { x: left + rx, y: top },
+        { x: left + rx - kx, y: top }, { x: left, y: top + ry - ky }, { x: left, y: top + ry },
+        { x: left, y: bottom - ry },
+        { x: left, y: bottom - ry + ky }, { x: left + rx - kx, y: bottom },
+        { x: left + rx, y: bottom },
+        { x: right - rx, y: bottom },
+        { x: right - rx + kx, y: bottom }, { x: right, y: bottom - ry + ky },
+        { x: right, y: bottom - ry },
+    ];
+    const corner = [PT_BEZIERTO, PT_BEZIERTO, PT_BEZIERTO];
+    // The order of lines and curves reads the same either way round.
+    const types = [...corner, PT_LINETO, ...corner, PT_LINETO, ...corner, PT_LINETO, ...corner];
+    return { points: clockwise ? points.reverse() : points, types };
 }
 
 /**
