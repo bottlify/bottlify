@@ -142,19 +142,6 @@ test('a batch of formed regions and a relink of the same share what was emitted'
     assert.deepEqual(relinked.module, relinkBatch(relink, layout, FEATURES, OPTIONS).module);
 });
 
-test('a batch with structure left unset and one with it off do not share functions', ()=>{
-    // Unset is on (`prepareModule` reads `!== false`), so the two ask for
-    // different code, and the cache must keep them apart.
-    const relink = relinkOf('sort-x87', 6);
-    const cache = createEmitCache();
-    const flat = { ...OPTIONS, structure: false };
-    relinkBatch(relink, layout, FEATURES, flat, cache);
-    const kept = relinkBatch(relink, layout, FEATURES, OPTIONS, cache);
-    assert.deepEqual(kept.module, relinkBatch(relink, layout, FEATURES, OPTIONS).module);
-    const keptFlat = relinkBatch(relink, layout, FEATURES, flat, cache);
-    assert.deepEqual(keptFlat.module, relinkBatch(relink, layout, FEATURES, flat).module);
-});
-
 test('a region formed through an import slot is formed the same on the worker', ()=>{
     // call dword [slot]; ret -- the slot, on a data page of its own, holds a leaf that
     // the call is formed into (mov eax, 1; ret). The worker forms from copies of the pages

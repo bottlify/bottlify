@@ -21,6 +21,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { CORPUS, compare, load, machine } from '../testing/long-machine.js';
+import { ifRoom } from '../testing/memory64.js';
 
 /**
  * The forms, as bytes, and their registers: `source` and `target` the bases,
@@ -142,7 +143,7 @@ function cases(count){
     });
 }
 
-test('an indexed byte copy loop run whole leaves what the interpreter leaves', ()=>{
+test('an indexed byte copy loop run whole leaves what the interpreter leaves', ifRoom(()=>{
     const all = cases(700);
     for (const budget of [7, 300, 100000])
     {
@@ -151,9 +152,10 @@ test('an indexed byte copy loop run whole leaves what the interpreter leaves', (
         assert.ok(exits > all.length / 3, `${exits} ran to their exit`);
         assert.ok(stats.translated > stats.interpreted, JSON.stringify(stats));
     }
-});
+}));
 
-test('a budget that runs out part way through a copy stops the run where the loop would', ()=>{
+test('a budget that runs out part way through a copy stops the run where the loop'
+    + ' would', ifRoom(()=>{
     // Each run of the region ends at the first back edge past its budget,
     // a few instructions over it -- never a copy's worth.
     const m = machine();
@@ -192,4 +194,4 @@ test('a budget that runs out part way through a copy stops the run where the loo
         }
     }
     assert.ok(runs > 30, `${runs} runs`);
-});
+}));

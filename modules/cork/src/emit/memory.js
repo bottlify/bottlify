@@ -887,12 +887,11 @@ function placeOf({ operand, size, store, stack }){
  * than from the block it takes them from.
  *
  * @param {import('../region.js').Block[]} blocks  in address order
- * @param {{ entry?: number, backward?: boolean, heads?: Set<number>,
+ * @param {{ entry?: number, heads?: Set<number>,
  *     returns?: Map<number, number[]>, reach?: boolean, masked?: boolean,
  *     long?: boolean }} [options]  entry:
- *     the region's entry; backward: a jump back can carry windows (the dispatch
- *     takes an inner label for it); heads: blocks that take none (a
- *     structured region's loop heads); returns: by ret block, the return
+ *     the region's entry; heads: blocks that take none (the region's loop
+ *     heads); returns: by ret block, the return
  *     addresses it jumps to (`inlineReturns`); reach: false keeps every group
  *     within its block; masked: a read is wrapped into RAM rather than tested
  *     (`checkAccess`): a group that only reads is no window, and a store is
@@ -900,13 +899,13 @@ function placeOf({ operand, size, store, stack }){
  * @returns {RegionPlan}
  */
 export function planRegion(blocks, options = {}){
-    const { entry = blocks[0]?.start ?? 0, backward = false, heads = new Set(),
+    const { entry = blocks[0]?.start ?? 0, heads = new Set(),
         returns = new Map(), reach = true, masked = false, long = false } = options;
     const word = long ? 8 : 4;
     const regs = long ? 16 : 8;
     /** @type {{ into?: number[][] }} */
     const ways = {};
-    const inherit = reach ? inheritance(blocks, entry, backward, heads, returns, ways)
+    const inherit = reach ? inheritance(blocks, entry, heads, returns, ways)
         : blocks.map(()=>-1);
     // Most blocks take nothing and give nothing: what each keeps is made
     // only when it has something to keep.
@@ -1108,8 +1107,7 @@ export function planRegion(blocks, options = {}){
         }
     }));
     const skips = ways.into === undefined ? []
-        : passersBy({ blocks, inherit, into: ways.into, entries, depths, ends, joined, kept,
-            backward });
+        : passersBy({ blocks, inherit, into: ways.into, entries, depths, ends, joined, kept });
     return { blocks: blocks.map((_, s)=>plans[s] ?? NO_PLAN), entry: entries, inherit, skips };
 }
 
@@ -1138,11 +1136,11 @@ export const HOST_OPS = new Set(['call', 'out', 'outs', 'in', 'ins', 'int', 'int
  *
  * @param {{ blocks: import('../region.js').Block[], inherit: number[], into: number[][],
  *     entries: Group[][], depths: number[], ends: Values[], joined: (Joined | undefined)[],
- *     kept: Set<Growing>, backward: boolean }} plan
+ *     kept: Set<Growing> }} plan
  * @returns {(Set<number> | undefined)[]}
  */
 function passersBy(plan){
-    const { blocks, inherit, into, entries, depths, ends, joined, kept, backward } = plan;
+    const { blocks, inherit, into, entries, depths, ends, joined, kept } = plan;
     /** @type {(Set<number> | undefined)[]} */
     const skips = [];
     /** @type {(boolean | undefined)[]} */
@@ -1179,7 +1177,7 @@ function passersBy(plan){
         {
             const p = way >> 1;
             if ((way & 1) === 0 || p === inherit[t] || p === t || loopsOnto(blocks[p])
-                || (p > t && !backward))
+                || p > t)
             {
                 continue;
             }
@@ -1255,18 +1253,17 @@ export function planBlock(instructions){
  * instruction), nor a trap's way on, whose host call may change what is
  * accessible. The entry and a block that loops onto itself take none, and the
  * latter gives none either (its registers at its end are many turns'); a
- * jump back carries windows only where `backward` says the dispatch can take
- * it.
+ * jump back carries none.
  *
  * @param {import('../region.js').Block[]} blocks @param {number} entry
- * @param {boolean} backward @param {Set<number>} heads
+ * @param {Set<number>} heads
  * @param {Map<number, number[]>} returns  by ret block's start: the return
  *     addresses it jumps to inside the region
  * @param {{ into?: number[][] }} [out]  given, each block's ways in, as `2 * p + 1` for
  *     one from block p that carries windows and `2 * p` for one that does not
  * @returns {number[]}
  */
-function inheritance(blocks, entry, backward, heads, returns, out = undefined){
+function inheritance(blocks, entry, heads, returns, out = undefined){
     const count = blocks.length;
     /** @type {number[]} */
     const inherit = new Array(count).fill(-1);
@@ -1343,7 +1340,7 @@ function inheritance(blocks, entry, backward, heads, returns, out = undefined){
             const p = way >> 1;
             one &&= p === ways[0] >> 1;
             later ||= p >= s;
-            if ((way & 1) === 1 && p !== s && loops[p] === 0 && (p < s || backward))
+            if ((way & 1) === 1 && p !== s && loops[p] === 0 && p < s)
             {
                 before = p === s - 1 ? p : before;
                 lowest = lowest < 0 || p < lowest ? p : lowest;

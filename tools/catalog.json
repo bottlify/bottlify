@@ -600,6 +600,17 @@
    ]
   },
   {
+   "path": "tools/checks/check-cork-settings.mjs",
+   "category": "checks",
+   "kind": "check",
+   "browser": false,
+   "question": "cork's settings, its docs and the core's EngineConfig are one table",
+   "command": "npm run check:boundaries",
+   "tests": [
+    "tools/checks/check-cork-settings.test.js"
+   ]
+  },
+  {
    "path": "tools/generators/x86-corpus.mjs",
    "category": "generators",
    "kind": "generator",

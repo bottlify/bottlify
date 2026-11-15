@@ -1,9 +1,10 @@
 # How fast cork is
 
-Speed is measured with [`bench/`](../../modules/cork/bench/README.md): a 32-bit Windows program in C++ with eight
-workloads shaped like what games do. The same `.exe` also runs directly on the processor through a
-small Linux loader (`bench/bin/peload`). So cork and the processor run the same machine code, and
-every run checks that both got the same checksum.
+Speed is measured with [`bench/`](../../modules/cork/bench/README.md): a Windows program in C++ with eight
+workloads shaped like what games do, built 32-bit (x87 and SSE2) and x64. The same `.exe` also runs
+directly on the processor through a small Linux loader (`bench/bin/peload`, `peload64` for the x64
+build). So cork and the processor run the same machine code, and every run checks that both got the
+same checksum. The tables below are of the 32-bit builds.
 
 Each workload ran ten times its own length, so that translation and the cold start are a few per
 cent of the run and the numbers are the speed of the translated code itself. Best of three. 100%

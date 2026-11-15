@@ -105,17 +105,25 @@ import { translatesLong } from './emit/long-ops.js';
 /** Exits that end a block and are not followed into another block of this region. */
 const TERMINAL = new Set(['ret', 'indirect', 'call', 'trap', 'hlt', 'refused', 'fault']);
 
+/** The blocks of a region, at most, unless forming says otherwise (the runtime's
+ * `maxRegionBlocks`). */
+export const REGION_BLOCKS = 128;
 /** The callee a direct call is formed into its caller with, at most: a leaf,
- * or one with direct calls of its own (formed one level deep). */
+ * or one with direct calls of its own (formed one level deep; the runtime's
+ * `leafBytes`). */
 const LEAF_BLOCKS = 16;
-const LEAF_BYTES = 512;
+export const LEAF_BYTES = 512;
+/** Levels of callees formed in that may keep direct calls of their own (the
+ * runtime's `formDepth`). */
+export const FORM_DEPTH = 1;
 /** How large a callee formed into its caller may be, unless forming says otherwise. */
 const LEAF_LIMITS = Object.freeze({ blocks: LEAF_BLOCKS, bytes: LEAF_BYTES });
 /** Past the caps, for the callees the runtime predicted: four of the largest leaves. */
 const PREDICTED_ROOM = Object.freeze({ blocks: 4 * LEAF_BLOCKS, bytes: 4 * LEAF_BYTES });
 const NO_ROOM = Object.freeze({ blocks: 0, bytes: 0 });
-/** How far a callee's conditional branch may reach and still be followed (`coldBranch`). */
-const COLD_REACH = 4096;
+/** How far a callee's conditional branch may reach and still be followed (`coldBranch`;
+ * the runtime's `coldReach`). */
+export const COLD_REACH = 4096;
 
 /**
  * Whether a conditional branch of a callee formed in goes to cold code: farther from the
@@ -699,9 +707,9 @@ export function formShared(){
  * @returns {Region}
  */
 export function formRegion(read, entry,
-    { maxBlocks = 128, maxBytes = 8192, translatable = ()=>true, leafCalls = true,
+    { maxBlocks = REGION_BLOCKS, maxBytes = 8192, translatable = ()=>true, leafCalls = true,
         callTargets, shared, helpers = true, leafBlocks = LEAF_BLOCKS, leafBytes = LEAF_BYTES,
-        formDepth = 1, predictedRoom = PREDICTED_ROOM,
+        formDepth = FORM_DEPTH, predictedRoom = PREDICTED_ROOM,
         ownRoom = { blocks: maxBlocks, bytes: maxBytes },
         switchEntries = SWITCH_ENTRIES, bytesOf, mode, translates, baseOf,
         slotHelpers = true, coldReach = COLD_REACH } = {})

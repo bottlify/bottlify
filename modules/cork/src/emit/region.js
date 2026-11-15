@@ -27,9 +27,9 @@
  * label and branches back to the dispatch loop, charging the instructions
  * retired since the last charge against the budget and leaving with `budget`
  * when it is spent: only a backward jump can close a loop. A block that falls
- * through to the block emitted right after it does nothing at all. In a
- * structured region (the default, `planStructure`) the blocks are in the
- * order of the control flow rather than of their addresses, the region's
+ * through to the block emitted right after it does nothing at all. The
+ * blocks are in the order of the control flow rather than of their
+ * addresses (`planStructure`), the region's
  * loops are wasm loops a jump back to the head branches to, and the blocks
  * inside a loop are entered from outside through a second function of their
  * copies (`emitCopies`); only other backward jumps take the dispatch. Anything
@@ -366,8 +366,6 @@ const recordFieldsOf = layout=>{
  *     build that is never run)
  * @property {boolean} [profileCalls] an indirect call notes its address and target in the
  *     layout's call profile while the host has it on
- * @property {boolean} [flat]  every backward jump through the dispatch rather than the loops
- *     the region's structure gives
  * @property {boolean} [wide]  compiled for the wide precision controls (double, extended):
  *     no rounding to single, and a block leaves with `PRECISION` if it finds single set
  * @property {boolean} [narrow]  compiled for single precision: every rounding instruction
@@ -426,7 +424,7 @@ const recordFieldsOf = layout=>{
  * @param {{ shared?: boolean, maxPages?: number }} [memory]
  * @param {{ undoLog?: boolean, hash?: boolean, trapPort?: number, leaveOut?: Set<string>,
  *     countTransfers?: boolean, wide?: boolean, narrow?: boolean, blockProfile?: boolean,
- *     structure?: boolean, precise?: boolean, place?: number, profileCalls?: boolean,
+ *     precise?: boolean, place?: number, profileCalls?: boolean,
  *     resume?: boolean, callReturn?: boolean, linkedCalls?: boolean,
  *     looseStacks?: boolean, atomic?: boolean, checkReads?: boolean,
  *     zeroPage?: boolean,
@@ -448,17 +446,16 @@ const recordFieldsOf = layout=>{
  *     hash, the number of regions the module will hold, which the host places in a range
  *     of the table: a transfer into the range is a direct tail call, and one out of it is
  *     counted (`finishModule`); profileCalls: indirect calls note their targets in the
- *     layout's call profile, when it has one (`callProfile`); structure: a region's loops
- *     as wasm loops (`planStructure`), false for every backward jump through the dispatch;
- *     resume: with hash, a miss of the hash runs the interpreter
- *     tier in wasm through the table's `TIER_SLOT` (`finishModule`); crossTailCalls: false
+ *     layout's call profile, when it has one (`callProfile`); resume: with hash, a miss
+ *     of the hash runs the interpreter tier in wasm through the table's `TIER_SLOT`
+ *     (`finishModule`); crossTailCalls: false
  *     for an engine whose tail call into another instance faults, a transfer out of the
  *     module (all of them where it is not placed) leaving for the host's loop
  * @returns {ModuleContext}
  */
 export function prepareModule(m, layout, features, memory = {},
     { undoLog = false, hash = false, trapPort, leaveOut = new Set(), countTransfers = false,
-        wide = false, narrow = false, blockProfile = false, structure = true, precise = false,
+        wide = false, narrow = false, blockProfile = false, precise = false,
         place = 0, profileCalls = false, resume = false, callReturn = false,
         linkedCalls = true, looseStacks = false, atomic = false,
         checkReads = false, zeroPage = false, expansion = null, markBlocks = false,
@@ -603,10 +600,6 @@ export function prepareModule(m, layout, features, memory = {},
     if (profileCalls && (layout.callProfile ?? -1) >= 0)
     {
         context.profileCalls = true;
-    }
-    if (!structure)
-    {
-        context.flat = true;
     }
     if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && blockProfile)
     {
@@ -1075,7 +1068,7 @@ export function emitRegion(context, region, options = {}){
  *
  * @typedef {Object} RegionPlanning
  * @property {Map<number, number[]>} returns  by ret block, the return addresses it jumps to
- * @property {ReturnType<typeof planStructure> | null} structure
+ * @property {ReturnType<typeof planStructure>} structure
  * @property {import('../region.js').Region} region  in its emitting order
  * @property {import('./x87.js').X87Analysis} x87
  * @property {number[]} flagsOut  the flags live at each block's end
@@ -1153,12 +1146,10 @@ export class RegionEmitter {
         this.returnsToCall = false;
         /** The emitting order and its loops, in a structured region (`planStructure`). */
         this.structure = planned !== null ? planned.structure
-            : context.flat === true ? null
-                : planStructure(region, this.returns, this.callReturn);
+            : planStructure(region, this.returns, this.callReturn);
         // A structured region's blocks in the order they are emitted, which
         // is their labels' order too.
-        this.region = planned?.region ?? (this.structure === null
-            || this.structure.order.every((at, k)=>at === k)
+        this.region = planned?.region ?? (this.structure.order.every((at, k)=>at === k)
             ? region : { ...region, blocks: this.structure.order.map(at=>region.blocks[at]) });
         /** The planning of the region's x87 (`analyseX87`). */
         this.x87Plan = planned !== null ? planned.x87
@@ -1334,7 +1325,7 @@ export class RegionEmitter {
          * @type {number[][] | null} */
         this.flowsInto = null;
         /** Each loop head's last block (`planStructure`). @type {Map<number, number>} */
-        this.loopEnds = this.structure?.loops ?? new Map();
+        this.loopEnds = this.structure.loops;
         /**
          * The blocks inside a loop other than a loop's head, in order, each
          * emitted twice: in its loop, and as a copy in a function of the
@@ -1366,7 +1357,7 @@ export class RegionEmitter {
         // A predicted call's return inside a loop comes back from outside
         // whenever the call goes elsewhere: such a region has its copies from
         // the start.
-        const reentered = new Set((this.structure?.reentered ?? [])
+        const reentered = new Set(this.structure.reentered
             .map(at=>this.region.blocks.indexOf(region.blocks[at])));
         if (copied !== undefined)
         {
@@ -1723,14 +1714,12 @@ export class RegionEmitter {
     emit(){
         const { b } = this;
         const blocks = this.region.blocks;
-        const flat = this.structure === null;
         const { planned } = this;
         const flagsOut = planned?.flagsOut
             ?? liveFlagsOut(blocks, this.labels, this.context.precise === true);
-        // A jump back carries windows only through the flat dispatch; a block
-        // the x87 plan cuts runs nothing to take them for.
+        // A block the x87 plan cuts runs nothing to take windows for.
         const memoryPlan = planned !== null ? planned.memoryPlan
-            : planRegion(blocks, { entry: this.region.entry, backward: flat,
+            : planRegion(blocks, { entry: this.region.entry,
                 heads: new Set([...this.loopEnds.keys(), ...this.x87.cut]),
                 returns: this.returns, masked: readsWrapped(this.context),
                 long: this.width.bits === 64 });
@@ -1775,11 +1764,11 @@ export class RegionEmitter {
         this.flowsInto = null;
         this.flagsOut = flagsOut;
         this.memoryPlan = memoryPlan;
-        if (memoryPlan !== null && !flat && !this.copyFunction)
+        if (memoryPlan !== null && !this.copyFunction)
         {
             this.planTestedOnce(memoryPlan);
         }
-        if (!flat && !this.copyFunction)
+        if (!this.copyFunction)
         {
             this.planCarries();
         }

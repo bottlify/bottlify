@@ -760,7 +760,7 @@ function expansion(pieces){
             {
                 regionModule({ code: bytes, at: base, entry: base + start, hash: true,
                     callReturn: true,
-                    looseStacks: true, structure: true,
+                    looseStacks: true,
                     expansion: (instruction, wasm, lowered)=>{
                         if (!seen.has(instruction.eip))
                         {

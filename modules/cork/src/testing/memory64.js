@@ -10,7 +10,7 @@
  * (node 22.22 already, any V8 from 13 on); one that does not is given
  * `--experimental-wasm-memory64`, the flag an earlier V8 kept it behind and
  * a later one no longer knows (V8 14 prints it as unrecognized). A test of a
- * window the machine has no room for says so and is skipped (`wide`).
+ * memory the machine has no room for says so and is skipped (`ifRoom`).
  */
 
 import v8 from 'node:v8';
@@ -27,10 +27,11 @@ export function allowMemory64(){
 }
 
 /**
- * A wide window's test, run as node:test's function: where the machine gives
- * no memory for it (another job holding the address space, a limit on virtual
- * memory), it is skipped saying it measured nothing, instead of failing as if
- * the translator were wrong. Only a refusal for want of memory is taken so: an
+ * A test that makes a big memory - a wide window's memory64, long mode's 4 GiB
+ * (`testing/long-machine.js`) - run as node:test's function: where the machine
+ * gives no memory for it (another job holding the address space, a limit on
+ * virtual memory), it is skipped saying it measured nothing, instead of failing
+ * as if the translator were wrong. Only a refusal for want of memory is taken so: an
  * engine that cannot make memory64 at all fails the test, as it should. Asked
  * when the test runs, not ahead of it: a memory made to ask stays reserved
  * until collected, and the test's own would then be the one refused.
@@ -38,7 +39,7 @@ export function allowMemory64(){
  * @param {(t: import('node:test').TestContext) => void | Promise<void>} body
  * @returns {(t: import('node:test').TestContext) => void | Promise<void>}
  */
-export function wide(body){
+export function ifRoom(body){
     /** @param {import('node:test').TestContext} t @param {unknown} e */
     const refused = (t, e)=>{
         const message = String(/** @type {Error} */ (e)?.message ?? e);

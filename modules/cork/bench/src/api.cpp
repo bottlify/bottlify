@@ -48,9 +48,9 @@ __declspec(dllimport) u32 __cdecl strlen(const char *text);
 __declspec(dllimport) int __cdecl strcmp(const char *a, const char *b);
 __declspec(dllimport) char *__cdecl strcpy(char *to, const char *from);
 __declspec(dllimport) int __cdecl sprintf(char *to, const char *format, ...);
-__declspec(dllimport) void *__cdecl malloc(u32 bytes);
+__declspec(dllimport) void *__cdecl malloc(usize bytes);
 __declspec(dllimport) void __cdecl free(void *block);
-__declspec(dllimport) void __cdecl qsort(void *base, u32 count, u32 size,
+__declspec(dllimport) void __cdecl qsort(void *base, usize count, usize size,
     int(__cdecl *compare)(const void *, const void *));
 }
 
@@ -102,8 +102,8 @@ u32 workApi(u32 iterations)
             sum = mix(sum, GetLastError());
             time ^= GetCurrentThreadId();
 
-            TlsSetValue(slot, (void *)(u32)(x | 1));
-            sum = mix(sum, (u32)TlsGetValue(slot));
+            TlsSetValue(slot, (void *)(usize)(x | 1));
+            sum = mix(sum, (u32)(usize)TlsGetValue(slot));
 
             EnterCriticalSection(&section);
             sum = mix(sum, (u32)InterlockedIncrement(&counter));
