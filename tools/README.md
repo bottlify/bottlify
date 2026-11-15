@@ -230,17 +230,20 @@ From `cork-asm.mjs --bin modules/cork/bench/micro/images/crc-x87.bin --at 0x4010
 
 From `emit-count.mjs --qemu <qemu 8.2.2 built with plugins> --root <1851609d> --root <its helperAt keyed by looks> --regions 10 --warm 15 --reps 3, node 22.22.0`. "work" is what a pass costs without V8's optimising compiles, whose moments jump from pass to pass; it is the same in every run of a tree, and arms are compared by it ("of the first"); "passes" is the spread of the counted passes. The price lists are least squares over every region's own count: what one more region, block (with the jump that ends it), call, return, jump or other instruction costs in machine instructions, and its share of the part. Forming's fit is loose (its cost hangs on what the shared decoding already found); emitting's is close: the cost is the sum of those prices, nothing growing with a region's size. A negative price is a term the others absorb.
 
-### What does translated code cost to run, to the instruction an iteration, workload by workload and arm against arm?
+### What does translated code cost to run, to the instruction an iteration and for each of the guest's own instructions, workload by workload and arm against arm?
 
 [`translator/run-count.mjs`](translator/run-count.mjs): `node tools/translator/run-count.mjs --qemu DIR [--root DIR]... [--bits 32|64|both] [--warm N] [--iters N] [workload...]`
 
 ```
-instructions an iteration (100 warm, 20 counted), arms: <798a130a>, <798a130a>, <ae2d03ab>, <ae2d03ab>
-  load-32                  8505228  8505228 (1.0000)  8459295 (0.9946)  8459295 (0.9946)
-  str-32                   2932339  2932339 (1.0000)  2928703 (0.9988)  2928703 (0.9988)
+instructions an iteration (100 warm, 20 counted), in square brackets a guest instruction's cost in them, arms: <657107ac>, <657107ac>
+  str-32                   2555529 [2.549]  2555529 [2.549] (1.0000)
+  switch-32                545575 [2.209]  545575 [2.209] (1.0000)
+  vcall-32                 2076236 [4.414]  2076236 [4.414] (1.0000)
+<657107ac>: geomean 1.0000 of the first
+dearest first (the last arm): vcall-32 4.41, str-32 2.55, switch-32 2.21
 ```
 
-From `run-count.mjs --bits 32 load str under qemu 8.2.2 with tools/lib/qemu-count.c, node 22.22.0, each of two trees twice in one run (cork 798a130a, 2026-11-14, and ae2d03ab, 2026-11-15). Two runs started together agree to the instruction; separate runs of a tree agree on str and differ by a few per cent on load (V8's optimising compiles land when the machine has them done)`. Each cell is the instructions an iteration of the counted ones took, the whole process but V8's optimising compiles; the bracket is the arm's against the first. A tree counts the same in every run, so a ratio off 1.0000 is the change's - except on a workload that keeps translating (load), which varies by a few per cent between separate runs: read it over several. The geomean is over the workloads shown.
+From `run-count.mjs --bits 32 str switch vcall under qemu 8.2.2 with tools/lib/qemu-count.c, node 26.13.1, one tree (cork 657107ac, 2026-11-15) as both arms of one run. Two runs started together agree to the instruction; separate runs of a tree agree to a few hundredths of a per cent on these and differ by a few per cent on load (V8's optimising compiles land when the machine has them done)`. Each cell is the instructions an iteration of the counted ones took, the whole process but V8's optimising compiles; the square bracket is that count over the guest's own instructions in the iteration - a processor running the image takes 1 - and the round bracket the arm's count against the first. A tree counts the same in every run, so a ratio off 1.0000 is the change's - except on a workload that keeps translating (load), which varies by a few per cent between separate runs: read it over several. The geomean is over the workloads shown; the last line orders them by a guest instruction's cost, the dearest first.
 
 ### How much resident memory does a translated module cost past its bytes, compiled lazily, by the baseline compiler or by the optimising one?
 

@@ -26,7 +26,11 @@
  * the other workloads repeat to the instruction.
  * Several roots are arms, each workload's count beside the first's. The
  * count is the whole process's (the translated code, the runtime's lookups
- * and the host between them), V8's optimising compiles apart.
+ * and the host between them), V8's optimising compiles apart. Beside each
+ * count, in square brackets, what one of the guest's own instructions cost in
+ * it - a processor running the image itself takes one - and after the arms
+ * the workloads by that cost, the dearest first: where translated code is
+ * furthest from the program's own.
  *
  *     node tools/translator/run-count.mjs --qemu DIR [--root DIR]... [--bits 32|64|both]
  *         [--warm N] [--iters N] [--jobs N] [workload...]
@@ -118,13 +122,15 @@ const inner = async(root, name, bits, warm, iters)=>{
         iteration();
         await host.cork().translatePending();
     }
+    const before = host.instructionCount();
     mark();
     for (let i = 0; i < iters; i++)
     {
         iteration();
     }
     mark();
-    console.log(JSON.stringify({ eax: host.readReg?.(0) ?? null }));
+    console.log(JSON.stringify({ eax: host.readReg?.(0) ?? null,
+        guest: host.instructionCount() - before }));
 };
 
 /**
@@ -150,12 +156,14 @@ else
         { root, name, bits }))));
     /** @type {Map<string, number>} */
     const counts = new Map();
+    /** @type {Map<string, number>} the guest's own instructions an iteration */
+    const guests = new Map();
     let next = 0;
     const one = async()=>{
         while (next < jobs.length)
         {
             const { root, name, bits } = jobs[next++];
-            const { marks } = await runCounted(options.qemu, [fileURLToPath(import.meta.url),
+            const { marks, out } = await runCounted(options.qemu, [fileURLToPath(import.meta.url),
                 '--inner', '--root', root, '--warm', String(options.warm), '--iters',
                 String(options.iters), name, String(bits)]);
             if (marks.length !== 2)
@@ -163,11 +171,16 @@ else
                 throw new Error(`run-count: ${name}-${bits} on ${root} gave ${marks.length} marks`);
             }
             counts.set(`${root}|${name}|${bits}`, work(between(marks, 0, 1)) / options.iters);
+            guests.set(`${root}|${name}|${bits}`, JSON.parse(/** @type {string} */ (
+                out.trim().split('\n').pop())).guest / options.iters);
         }
     };
     await Promise.all(Array.from({ length: Math.min(options.jobs, jobs.length) }, one));
     console.log(`instructions an iteration (${options.warm} warm, ${options.iters} counted), `
-        + `arms: ${options.roots.join(', ')}`);
+        + `in square brackets a guest instruction's cost in them, arms: ${
+            options.roots.join(', ')}`);
+    /** @type {{ name: string, cost: number }[]} the last arm's workloads by a guest instruction's cost */
+    const costs = [];
     /** @type {number[][]} by arm past the first, its ratios */
     const ratios = options.roots.slice(1).map(()=>[]);
     for (const bits of widths)
@@ -178,11 +191,17 @@ else
             const base = /** @type {number} */ (counts.get(`${options.roots[0]}|${name}|${bits}`));
             const cells = options.roots.map((root, i)=>{
                 const count = /** @type {number} */ (counts.get(`${root}|${name}|${bits}`));
+                const cost = count / /** @type {number} */ (guests.get(`${root}|${name}|${bits}`));
                 if (i > 0)
                 {
                     ratios[i - 1].push(count / base);
                 }
-                return `${Math.round(count)}${i === 0 ? '' : ` (${(count / base).toFixed(4)})`}`;
+                if (i === options.roots.length - 1)
+                {
+                    costs.push({ name: `${name}-${bits}`, cost });
+                }
+                return `${Math.round(count)} [${cost.toFixed(3)}]${i === 0 ? ''
+                    : ` (${(count / base).toFixed(4)})`}`;
             });
             console.log(`  ${`${name}-${bits}`.padEnd(24)} ${cells.join('  ')}`);
         }
@@ -191,4 +210,7 @@ else
         const geomean = Math.exp(list.reduce((sum, r)=>sum + Math.log(r), 0) / list.length);
         console.log(`${options.roots[i + 1]}: geomean ${geomean.toFixed(4)} of the first`);
     });
+    console.log(`dearest first${options.roots.length > 1 ? ' (the last arm)' : ''}: `
+        + costs.sort((a, b)=>b.cost - a.cost).map(({ name, cost })=>`${name} ${cost.toFixed(2)}`)
+            .join(', '));
 }
