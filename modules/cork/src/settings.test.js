@@ -17,6 +17,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
+import { runtimeSettings } from './runtime/settings.js';
 
 const read = (/** @type {string} */ path)=>readFileSync(new URL(path, import.meta.url), 'utf8');
 
@@ -24,21 +25,10 @@ const read = (/** @type {string} */ path)=>readFileSync(new URL(path, import.met
 const NAME = '[a-zA-Z][a-zA-Z0-9]*';
 
 /**
- * The runtime's settings, its defaults (`runtimeSettings`): each key with its value as
- * written, several to a line where they share one.
- * @returns {Map<string, string>}
+ * The runtime's settings, its defaults (`runtimeSettings`): each key with its value.
+ * @returns {Map<string, unknown>}
  */
-function runtimeDefaults(){
-    const source = read('./runtime/settings.js');
-    const from = source.indexOf('return {');
-    const to = source.indexOf('...config,', from);
-    assert.ok(from > 0 && to > from, 'the settings object is where it was');
-    return new Map(source.slice(from, to).split('\n')
-        .map(line=>line.replace(/\/\*.*?\*\//g, ''))
-        .filter(line=>new RegExp(`^\\s{8}${NAME}:`).test(line))
-        .flatMap(line=>[...line.matchAll(new RegExp(`(${NAME}): ([^,]+?)(?=,|$)`, 'g'))])
-        .map(([, name, value])=>[name, value.trim()]));
-}
+const runtimeDefaults = ()=>new Map(Object.entries(runtimeSettings({})));
 
 /**
  * The names a source reads off a config by one of the spellings given (`settings.`,
@@ -75,7 +65,7 @@ function hostReads(){
 }
 
 /**
- * A default as the runtime writes it or a table gives it, as a value: a number
+ * A default as a table gives it, as a value: a number
  * (`1 << 20`, `48 << 20`, `10_000`; `2^20`, `48 MiB`), a boolean; anything
  * else -- `unset`, `none`, a sentence -- is undefined, compared with nothing.
  * @param {string} text
@@ -162,8 +152,7 @@ test('every default docs/cork/settings.md gives for a runtime setting is the run
             const compared = [...documented].filter(([name, text])=>runtime.has(name)
                 && valueOf(text) !== undefined);
             assert.ok(compared.length > 30, `${doc}: ${compared.length} defaults compared`);
-            const wrong = compared.filter(([name, text])=>valueOf(text)
-                !== valueOf(/** @type {string} */ (runtime.get(name))))
+            const wrong = compared.filter(([name, text])=>valueOf(text) !== runtime.get(name))
                 .map(([name, text])=>`${name}: ${text}, the runtime's ${runtime.get(name)}`);
             assert.deepEqual(wrong, [], doc);
         }

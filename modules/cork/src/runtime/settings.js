@@ -11,11 +11,12 @@
  */
 
 import { CallStack } from '../emit/region.js';
+import { COLD_REACH, FORM_DEPTH, LEAF_BYTES, REGION_BLOCKS } from '../region.js';
 
 /** @param {import('../../../core/src/layers/cpu/engine.js').EngineConfig} config */
 export function runtimeSettings(config){
     return {
-        maxRegionBlocks: 128, batchRegions: 32,
+        maxRegionBlocks: REGION_BLOCKS, batchRegions: 32,
         maxQueued: 8192, maxBatchRegions: 256,
         // Writes that drop a page's regions, inside `volatileWindowMs` of each
         // other, before the page is left to the other executor -- for
@@ -234,15 +235,15 @@ export function runtimeSettings(config){
         callWindow: 1024,
         // The bytes a callee formed into its caller (`leafCalls`) may have at
         // most; its blocks are `formRegion`'s own bound.
-        leafBytes: 512,
+        leafBytes: LEAF_BYTES,
         // Levels of callees formed in that may keep direct calls of their own,
         // their small callees formed in as well (`formRegion`).
-        formDepth: 1,
+        formDepth: FORM_DEPTH,
         // How far a conditional branch of a callee formed in may reach and still be
         // followed: a farther one goes to cold code, a way out of the region, so a small
         // function with a far error path is formed in as a leaf (`coldBranch` in
         // region.js; 0: every branch followed).
-        coldReach: 4096,
+        coldReach: COLD_REACH,
         // HACK until iOS ships https://github.com/WebKit/WebKit/pull/76671:
         // false keeps every tail call inside its own instance, a transfer to a
         // region of another module leaving for this loop, which enters it. iOS
