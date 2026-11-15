@@ -355,7 +355,7 @@ function openTestKeeper(){
  *     journal?: { capacity?: number, shared?: boolean }, audioShared?: boolean,
  *     duringBuild?: (app: any) => void }} [deps]
  */
-async function connect(options = {}, { journal, audioShared, duringBuild, ...deps } = {}){
+async function connect(options = {}, { journal, audioShared, duringBuild, on, ...deps } = {}){
     const channel = new MessageChannel();
     const app = fakeApp({ ...journal, audioShared });
     const keeper = openTestKeeper();
@@ -395,6 +395,7 @@ async function connect(options = {}, { journal, audioShared, duringBuild, ...dep
             ...options,
         },
         keeper: keeper.port,
+        on,
     });
     return { remote, app, worker, canvas, keeper, built: ()=>built, gpuFails: fail, gpuLost: lose,
         requested };
@@ -606,6 +607,25 @@ test('an event the engine emitted before the start answer still reaches a handle
         'and a live one after still arrives, in order behind the replayed one');
     await remote.dispose();
 });
+
+test('a handler given with the start hears what the engine told while the program was loaded',
+    async()=>{
+        // `layer-needed` is told as the program is loaded: before the start's answer,
+        // before any controller exists to subscribe on.
+        /** @type {any[]} */
+        const seen = [];
+        const { remote, app } = await connect({}, {
+            duringBuild: theApp=>theApp.emit('layer-needed', { layer: 'dotnet48-x86' }),
+            on: { 'layer-needed': (/** @type {any} */ payload)=>seen.push(payload) },
+        });
+        await settled();
+        assert.deepEqual(seen, [{ layer: 'dotnet48-x86' }]);
+        app.emit('layer-needed', { layer: 'dotnet48-amd64' });
+        await settled();
+        assert.deepEqual(seen[1], { layer: 'dotnet48-amd64' }, 'and a live one after it, once');
+        assert.equal(seen.length, 2);
+        await remote.dispose();
+    });
 
 test('a handler registered after a first one already claimed a name only sees '
     + 'what is live from then on', async()=>{

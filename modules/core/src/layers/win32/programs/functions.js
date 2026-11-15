@@ -36,6 +36,8 @@ const MAX_COMMAND_LINE = 32768;
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readWideString
  * @property {(address: number, length: number) => Uint8Array} [readMemory]
+ * @property {(layer: string) => void} [need]  Asks the embedder for a layer the
+ *     machine lacks (`layer-needed`).
  */
 
 /** @param {string} text */
@@ -96,6 +98,7 @@ export function createProgramFunctions(host){
                 ansi: text=>place(encodeAnsi(`${text}\0`)),
                 message: (text, caption, type)=>call('USER32.dll', 'MessageBoxW',
                     [0, wide(text), wide(caption), type]),
+                need: layer=>host.need?.(layer),
             })) >>> 0;
         }
         finally

@@ -5266,6 +5266,8 @@ export function createWin32Module(){
                 writeMemory,
                 readWideString,
                 readMemory,
+                /** @param {string} layer */
+                need: layer=>config?.onLayerNeeded?.(layer),
             });
 
             // The Windows Runtime's library came with Windows 8: on 7 and XP

@@ -72,6 +72,13 @@ await publish({ prefix, id: 'mygame', endpoint: { url: '', token } });   // POST
 headers, so serve it from the page's own origin (a reverse proxy passing `/bottles/` to it, as the
 launcher's server does); `url: ''` means that origin.
 
+A runtime installed once and shared by bottles (the .NET Framework) is kept as a layer instead:
+`collectLayer({ files, registry, before, leave })` takes what the runs wrote on C: under
+`.bottlify\drive_c`, less their temporary folders, the folders named in `leave` and a setup's own
+extraction folder (32 hex digits at the drive's root), and the keys and values the runs added to
+the hive they started from (`before`); `saveLayer({ files, directory, id })` keeps it in the
+origin's file system with a manifest of kind `layer`, for core's `bundle.layers`.
+
 `discOptions(media)` does the same for a disc image (mounted as `D:`, started from its
 `autorun.inf`), and `silentOptions(media)` returns the command line and answer files that run a
 known setup unattended, or null for a setup it does not know.

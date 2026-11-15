@@ -2237,3 +2237,18 @@ touch of a `PAGE_GUARD` page goes on, since the translator keeps no per-page wri
 permission and a check on every store would cost every program its speed. A program that relies on
 one of those faults is the case that reopens this.
 *2026-11-14.*
+
+**A249. The .NET Framework 4's setup a program starts is the engine's own, and succeeds whether
+or not the Framework's layer is there.** A bottle carries the .NET Framework only as a layer under
+it, built once per machine width and shared by every bottle (`roadmap/dotnet-layer.md`), never as a
+copy each installation makes. A setup of 4.0 to 4.8, offline or web - known by its version block,
+Microsoft's, described as `Microsoft .NET Framework 4[.n] [Client Profile] Setup` - is run in
+place of the file a program starts (`programs/netfx.js`, as `DXSETUP` is). Where the machine has
+no Framework 4 it asks the embedder for the layer (`layer-needed`: `dotnet48-x86`, or
+`dotnet48-amd64` on a 64-bit machine), and either way it exits 0 with no window and no restart:
+the installer that chained it goes on, as on a machine that had the Framework already. A failure
+would stop that installer at a runtime the bottle has from its next start; what the installation
+itself runs on .NET before then finds no Framework, as on a machine without one. A setup run as
+the session's first program is the file itself: that is how the layer is built. A managed program
+on a volume with no Framework that runs it asks for the same layer, and goes on as it would
+without one. *2026-11-15.*

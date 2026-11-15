@@ -433,6 +433,8 @@ export function parseMsiexec(line){
  *     A copy of a structure in the guest, for a call to read, held the same way.
  * @property {(text: string, caption: string, type: number) => Promise<number>} message
  *     A message box, as the program shows one.
+ * @property {(layer: string) => void} [need]  Asks the embedder for a layer the
+ *     machine lacks, by its name (`layer-needed`).
  */
 
 const USAGE = 'Windows Installer\n\n'

@@ -46,9 +46,11 @@ const MIN_SAVING = 0.04;
  */
 
 /**
- * @typedef {Object} PackInput
- * @property {string} path
- * @property {Uint8Array} bytes
+ * A file to pack: whole, in pieces, or read only when it is packed and let go after
+ * (`read`), so a layer packed from a session in the origin's file system holds one
+ * file at a time, not hundreds of megabytes.
+ *
+ * @typedef {import('./chunks.js').ChunkedFile} PackInput
  */
 
 /**
@@ -137,8 +139,10 @@ export async function packBundle({ files, directories = [], write, onProgress,
     let rawTotal = 0;
     let stored = 0;
 
-    for (const file of files)
+    for (const given of files)
     {
+        const file = given.read && !given.pieces && !given.contents
+            ? { path: given.path, bytes: await given.read() } : given;
         const firstBlock = blocks.length;
         // A block at a time out of the file's pieces: a file of a gigabyte is
         // never made whole here (`chunks.js`).
