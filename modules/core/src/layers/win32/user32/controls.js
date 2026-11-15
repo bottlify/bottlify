@@ -37,6 +37,7 @@ import { directoryItems } from './dlgdir.js';
 /** Messages the controls answer. */
 export const WM_CREATE = 0x0001;
 export const WM_SETFOCUS = 0x0007;
+const WM_SIZE = 0x0005;
 export const WM_KILLFOCUS = 0x0008;
 export const WM_ENABLE = 0x000a;
 export const WM_SETTEXT = 0x000c;
@@ -224,6 +225,8 @@ const EM_GETSEL = 0x00b0;
 const EM_SETSEL = 0x00b1;
 const WM_NEXTDLGCTL = 0x0028;
 const EM_GETRECT = 0x00b2;
+const EM_SETRECT = 0x00b3;
+const EM_SETRECTNP = 0x00b4;
 const EM_SCROLL = 0x00b5;
 const EM_LINESCROLL = 0x00b6;
 const EM_SCROLLCARET = 0x00b7;
@@ -252,6 +255,7 @@ const EM_SETREADONLY = 0x00cf;
 const EM_SETPASSWORDCHAR = 0x00cc;
 const EM_GETPASSWORDCHAR = 0x00d2;
 const EM_SETMARGINS = 0x00d3;
+const EM_GETMARGINS = 0x00d4;
 const EM_GETLIMITTEXT = 0x00d5;
 const EM_POSFROMCHAR = 0x00d6;
 const EM_CHARFROMPOS = 0x00d7;
@@ -262,6 +266,21 @@ const EN_UPDATE = 0x0400;
 const EN_MAXTEXT = 0x0501;
 /** The room an edit leaves between its border and its text. */
 const EDIT_MARGIN = 1;
+/** EM_SETMARGINS' sides, and the value that asks for the font's own margin. */
+const EC_LEFTMARGIN = 0x0001;
+const EC_RIGHTMARGIN = 0x0002;
+const EC_USEFONTINFO = 0xffff;
+/**
+ * The client width the font's margins are judged against when the client
+ * area is empty: Windows lays out a zero-sized edit as if it were this wide.
+ */
+const EMPTY_EDIT_WIDTH = 80;
+/** WM_SIZE's kinds that lay an edit out again; a minimized one keeps its rectangle. */
+const SIZE_RESTORED = 0;
+const SIZE_MAXIMIZED = 2;
+const WS_EX_CLIENTEDGE = 0x00000200;
+/** SM_CYBORDER: a thin border's height, which an edit's WS_BORDER insets by and one. */
+const THIN_BORDER = 1;
 /** What a program that never set a limit may type: the documented default. */
 const DEFAULT_EDIT_LIMIT = 0x7ffffffe;
 
@@ -540,6 +559,8 @@ const OPAQUE = 2;
  *           colour, in its own mode; otherwise over what is there.
  * @property {(hdc: number, text: string) => { width: number, height: number,
  *     ascent: number }} measure
+ * @property {(hdc: number) => number} [averageWidth]  The context's font's average
+ *     character width, as GdiGetCharDimensions measures it.
  * @property {(hdc: number, x: number, y: number, bitmap: number, width?: number,
  *     height?: number) => boolean} bitmap  Stretched to a size when one is given.
  * @property {(bitmap: number) => { width: number, height: number, corner: number } | null}
@@ -935,10 +956,14 @@ export function createControlProcedures(host){
      *
      * @param {any} record @param {number} code @param {unknown} [thread]
      */
-    const notify = (record, code, thread)=>(record.parent
-        ? host.send(record.parent, WM_COMMAND,
-            ((code & 0xffff) << 16 | record.id & 0xffff) >>> 0, record.hwnd, thread)
-        : 0);
+    const notify = (record, code, thread)=>{
+        // The window CreateWindowEx was handed as the parent: a child's
+        // parent, or a top-level control's owner, which it was given the same
+        // way and which hears it the same way on Windows.
+        const to = record.parent || record.owner;
+        return to ? host.send(to, WM_COMMAND,
+            ((code & 0xffff) << 16 | record.id & 0xffff) >>> 0, record.hwnd, thread) : 0;
+    };
 
     /**
      * Asks the parent which brush a control's background is painted with:
@@ -2485,9 +2510,69 @@ export function createControlProcedures(host){
                 return 0;
             case EM_GETPASSWORDCHAR:
                 return (record.style & ES_PASSWORD) !== 0 ? state.passwordChar ?? 0x2a : 0;
-            case EM_SETMARGINS:
             case EM_GETRECT:
+                if ((message.lParam >>> 0) !== 0)
+                {
+                    writeRect(message.lParam >>> 0, formatRect(record));
+                }
                 return 0;
+            case EM_SETRECT:
+            case EM_SETRECTNP: {
+                // A rectangle no larger than the client area either way is
+                // not taken (Windows 10 keeps the one it has); none at all
+                // puts the default back. wParam 1 offsets the current one.
+                if ((message.lParam >>> 0) === 0)
+                {
+                    state.setRect = null;
+                }
+                else
+                {
+                    const asked = readRect(message.lParam >>> 0);
+                    const current = formatRect(record);
+                    const margins = state.margins ?? { left: 0, right: 0 };
+                    const rect = (message.wParam & 1) !== 0
+                        ? { left: current.left - margins.left + asked.left,
+                            top: current.top + asked.top,
+                            right: current.right + margins.right + asked.right,
+                            bottom: current.bottom + asked.bottom }
+                        : asked;
+                    const size = host.clientSize(record);
+                    if (rect.right - rect.left > size.width && rect.bottom - rect.top > size.height)
+                    {
+                        state.setRect = rect;
+                    }
+                }
+                if (message.message === EM_SETRECT)
+                {
+                    host.invalidate(record);
+                }
+                return 0;
+            }
+            case EM_SETMARGINS:
+                setMargins(record, message.wParam, message.lParam & 0xffff,
+                    message.lParam >>> 16 & 0xffff);
+                host.invalidate(record);
+                return 0;
+            case EM_GETMARGINS: {
+                const margins = state.margins ?? { left: 0, right: 0 };
+                return ((margins.right & 0xffff) << 16 | margins.left & 0xffff) >>> 0;
+            }
+            case WM_SIZE:
+                // Laid out again for a size it is restored or maximized to:
+                // a rectangle EM_SETRECT gave goes. The size in lParam is not
+                // read - the client area is asked.
+                if (message.wParam === SIZE_RESTORED || message.wParam === SIZE_MAXIMIZED)
+                {
+                    state.setRect = null;
+                }
+                return common(record, message, thread);
+            case WM_SETFONT:
+                state.cell = null;
+                return after(common(record, message, thread), answer=>{
+                    setMargins(record, EC_LEFTMARGIN | EC_RIGHTMARGIN, EC_USEFONTINFO,
+                        EC_USEFONTINFO);
+                    return answer;
+                });
             case EM_POSFROMCHAR:
             case EM_CHARFROMPOS:
                 return -1;
@@ -2544,6 +2629,112 @@ export function createControlProcedures(host){
     const writeU32 = (address, value)=>host.writeMemory(address >>> 0, new Uint8Array([
         value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff,
     ]));
+
+    /** @param {number} address @returns {Rect} */
+    const readRect = address=>{
+        const bytes = host.readMemory(address >>> 0, 16);
+        const at = (/** @type {number} */ offset)=>(bytes[offset] | bytes[offset + 1] << 8
+            | bytes[offset + 2] << 16 | bytes[offset + 3] << 24);
+        return { left: at(0), top: at(4), right: at(8), bottom: at(12) };
+    };
+    /** @param {number} address @param {Rect} rect */
+    const writeRect = (address, rect)=>{
+        writeU32(address, rect.left);
+        writeU32(address + 4, rect.top);
+        writeU32(address + 8, rect.right);
+        writeU32(address + 12, rect.bottom);
+    };
+
+    /**
+     * How far inside its client area an edit lays its text out: a pixel for
+     * WS_EX_CLIENTEDGE, a thin border and one for WS_BORDER, which Windows
+     * draws inside the client area of an edit.
+     *
+     * @param {any} record
+     */
+    const editInset = record=>((record.exStyle & WS_EX_CLIENTEDGE) !== 0 ? 1
+        : (record.style & WS_BORDER) !== 0 ? THIN_BORDER + 1 : 0);
+
+    /**
+     * The formatting rectangle EM_GETRECT reports and the text is laid out
+     * in: the client area inside the edit's border and margins, or the
+     * rectangle EM_SETRECT gave inside the margins. The border's inset is
+     * kept vertically only where a line still fits between, as Windows
+     * does; a single-line edit is one line high, cut by the client area,
+     * and a multi-line one fills it (Windows 10's model, which Wine's test
+     * measures against).
+     *
+     * @param {any} record @returns {Rect}
+     */
+    const formatRect = record=>{
+        const state = editState(record);
+        const margins = state.margins ?? { left: 0, right: 0 };
+        if (state.setRect)
+        {
+            return { ...state.setRect, left: state.setRect.left + margins.left,
+                right: state.setRect.right - margins.right };
+        }
+        const size = host.clientSize(record);
+        const inset = editInset(record);
+        const line = editCell(record).height;
+        const down = size.height >= line + 2 * inset ? inset : 0;
+        const top = down;
+        const bottom = multiline(record) ? size.height - down
+            : Math.min(top + line, size.height);
+        return { left: inset + margins.left, top,
+            right: size.width - inset - margins.right, bottom };
+    };
+
+    /**
+     * The margins EC_USEFONTINFO asks for: half the font's average
+     * character width a side, which the edit takes only when its client
+     * area is at least that and two average characters wide - a narrower
+     * edit keeps the margins it has, and an empty one is judged as
+     * EMPTY_EDIT_WIDTH wide.
+     *
+     * @param {any} record @returns {{ left: number, right: number } | null}
+     */
+    const fontMargins = record=>{
+        const draw = host.draw;
+        if (!draw?.averageWidth)
+        {
+            return null;
+        }
+        const { hdc } = host.contextOn(record);
+        const average = hdc !== 0 ? draw.averageWidth(hdc) : 0;
+        host.endPaint(record, hdc);
+        if (average <= 0)
+        {
+            return null;
+        }
+        const half = Math.floor(average / 2);
+        const size = host.clientSize(record);
+        const width = size.width <= 0 || size.height <= 0 ? EMPTY_EDIT_WIDTH : size.width;
+        return width >= 2 * half + 2 * average ? { left: half, right: half } : null;
+    };
+
+    /**
+     * EM_SETMARGINS' rule, which WM_SETFONT follows for both sides: a side
+     * named takes its value, or the font's margin where the value is
+     * EC_USEFONTINFO and the edit is wide enough for it.
+     *
+     * @param {any} record @param {number} sides @param {number} left @param {number} right
+     */
+    const setMargins = (record, sides, left, right)=>{
+        const state = editState(record);
+        const margins = { ...state.margins ?? { left: 0, right: 0 } };
+        const font = left === EC_USEFONTINFO || right === EC_USEFONTINFO
+            ? fontMargins(record) : null;
+        if ((sides & EC_LEFTMARGIN) !== 0 && (left !== EC_USEFONTINFO || font))
+        {
+            margins.left = left === EC_USEFONTINFO ? /** @type {any} */ (font).left : left;
+        }
+        if ((sides & EC_RIGHTMARGIN) !== 0 && (right !== EC_USEFONTINFO || font))
+        {
+            margins.right = right === EC_USEFONTINFO ? /** @type {any} */ (font).right : right;
+        }
+        state.margins = margins;
+    };
 
     /**
      * In the ANSI page, as the text was read.

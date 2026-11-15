@@ -2520,3 +2520,81 @@ test('an edit answers the characters as Windows\' does: return and tab are a mul
     assert.equal(text(single), 'undo this');
 
 });
+
+test('an edit lays its text out in a formatting rectangle inside its border and margins',
+    async()=>{
+        const EM_GETRECT = 0x00b2;
+        const EM_SETRECT = 0x00b3;
+        const EM_SETMARGINS = 0x00d3;
+        const EM_GETMARGINS = 0x00d4;
+        const WS_BORDER = 0x00800000;
+        /** @param {any} context @param {number} edit */
+        const rectOf = (context, edit)=>{
+            context.fns.SendMessageA.handler([edit, EM_GETRECT, 0, OUT]);
+            return [0, 4, 8, 12].map(at=>context.memory.u32(OUT + at) | 0);
+        };
+        /** @param {any} context @param {number[]} rect */
+        const putRect = (context, rect)=>{
+            context.memory.writeMemory(OUT + 16, new Uint8Array(new Int32Array(rect).buffer));
+        };
+        const context = setup({ reply: message=>(message.message === WM_INITDIALOG ? 1 : 0) });
+        const dialog = await openDialog(context);
+        context.memory.putString(TEXT, 'Edit');
+        // A single-line edit with a border, roomy enough for the border's inset
+        // above and below its line: two pixels in on every side, a line high.
+        const single = context.fns.CreateWindowExA.handler([0, TEXT, 0,
+            WS_CHILD | WS_VISIBLE | WS_BORDER, 8, 8, 200, 60, dialog, 401, HINSTANCE, 0]);
+        context.fns.GetClientRect.handler([single, OUT + 32]);
+        const width = context.memory.u32(OUT + 40);
+        const height = context.memory.u32(OUT + 44);
+        const [left, top, right, bottom] = rectOf(context, single);
+        assert.deepEqual([left, top, right], [2, 2, width - 2]);
+        const line = bottom - top;
+        assert.ok(line > 0 && line < height - 4, 'one line high, not the client area');
+
+        // Margins move the sides in; the line stays where it is.
+        context.fns.SendMessageA.handler([single, EM_SETMARGINS, 3, 5 | 7 << 16]);
+        assert.equal(context.fns.SendMessageA.handler([single, EM_GETMARGINS, 0, 0]),
+            5 | 7 << 16);
+        assert.deepEqual(rectOf(context, single), [left + 5, top, right - 7, bottom]);
+
+        // A multi-line edit with no border fills its client area.
+        const multi = context.fns.CreateWindowExA.handler([0, TEXT, 0,
+            WS_CHILD | WS_VISIBLE | ES_MULTILINE, 8, 80, 120, 50, dialog, 402, HINSTANCE, 0]);
+        context.fns.GetClientRect.handler([multi, OUT + 32]);
+        const client = [0, 0, context.memory.u32(OUT + 40), context.memory.u32(OUT + 44)];
+        assert.deepEqual(rectOf(context, multi), client);
+        // EM_SETRECT takes a rectangle larger than the client area either way,
+        // and keeps the one it has for a smaller one.
+        putRect(context, [1, 1, 10, 10]);
+        context.fns.SendMessageA.handler([multi, EM_SETRECT, 0, OUT + 16]);
+        assert.deepEqual(rectOf(context, multi), client);
+        putRect(context, [1, 1, 500, 400]);
+        context.fns.SendMessageA.handler([multi, EM_SETRECT, 0, OUT + 16]);
+        assert.deepEqual(rectOf(context, multi), [1, 1, 500, 400]);
+    });
+
+test('a top-level edit tells the window it was created with what changed, as a child does',
+    async()=>{
+        const WM_SETTEXT = 0x000c;
+        /** @type {number[]} */
+        const heard = [];
+        const context = setup({
+            reply: message=>{
+                if (message.message === WM_COMMAND)
+                {
+                    heard.push(message.wParam >>> 16);
+                }
+                return message.message === WM_INITDIALOG ? 1 : 0;
+            },
+        });
+        const dialog = await openDialog(context);
+        context.memory.putString(TEXT, 'Edit');
+        const edit = context.fns.CreateWindowExA.handler([0, TEXT, 0, 0, 10, 10, 50, 50,
+            dialog, 0, HINSTANCE, 0]);
+        heard.length = 0;
+        context.memory.putString(TEXT + 0x40, 'typed');
+        context.fns.SendMessageA.handler([edit, WM_SETTEXT, 0, TEXT + 0x40]);
+        await context.pump(dialog);
+        assert.ok(heard.includes(EN_CHANGE), 'the owner hears EN_CHANGE');
+    });

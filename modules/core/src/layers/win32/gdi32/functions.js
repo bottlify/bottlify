@@ -1951,6 +1951,17 @@ export function createGdiFunctions(host){
     };
 
     /**
+     * The average width of a DC's font as dialog units are measured by it -
+     * the extent of the 52 Latin letters, halved and rounded up over 26.
+     *
+     * @param {any} dc
+     */
+    const averageWidthOf = dc=>{
+        const letters = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
+        return Math.floor((Math.floor(extentOf(dc, letters) / 26) + 1) / 2);
+    };
+
+    /**
      * @param {any} dc
      * @param {number} index
      * @returns {number}
@@ -4751,8 +4762,7 @@ export function createGdiFunctions(host){
                 {
                     host.writeMemory(height >>> 0, u32Bytes([metrics.height]));
                 }
-                const letters = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
-                return Math.floor((Math.floor(extentOf(dc, letters) / 26) + 1) / 2);
+                return averageWidthOf(dc);
             },
         },
 
@@ -5845,6 +5855,15 @@ export function createGdiFunctions(host){
              * @param {number} hdc
              */
             isContext: (/** @type {number} */ hdc)=>dcOf(hdc) !== null,
+
+            /**
+             * The context's font's average character width, as
+             * GdiGetCharDimensions answers it: an edit's EC_USEFONTINFO
+             * margins are half of it.
+             *
+             * @param {number} hdc
+             */
+            averageWidth: (/** @type {number} */ hdc)=>averageWidthOf(dcOf(hdc) ?? { font: 0 }),
 
             /**
              * How much room a string takes in the context's font.
