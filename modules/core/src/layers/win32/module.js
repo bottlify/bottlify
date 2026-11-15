@@ -2363,9 +2363,95 @@ export function createWin32Module(){
             };
             // Media Foundation: its objects, and its reader's class factory,
             // which a program reaches through COM as well as through exports.
+            /** @param {string} name @param {number[]} args @returns {Promise<number>} */
+            const kernel32Call = async(name, args)=>
+                (await libraries['KERNEL32.dll'][name].handler(args)) >>> 0;
+            /** @returns {import('./mfplat/bytestream.js').FileCalls} */
+            const mfFiles = ()=>({
+                open: async(path, access, share, disposition, flags)=>{
+                    const name = heap.allocate((path.length + 1) * 2);
+                    writeMemory(name, wideText(path));
+                    try
+                    {
+                        const handle = await kernel32Call('CreateFileW',
+                            [name, access, share, 0, disposition, flags | 0x80, 0]);
+                        return handle === 0xffffffff
+                            ? { error: await kernel32Call('GetLastError', []) } : { handle };
+                    }
+                    finally
+                    {
+                        heap.free(name);
+                    }
+                },
+                transfer: async(handle, position, buffer, length, write)=>{
+                    const done = heap.allocate(4);
+                    try
+                    {
+                        await kernel32Call('SetFilePointerEx', [handle,
+                            Number(position & 0xffffffffn), Number(position >> 32n), 0, 0]);
+                        const ok = await kernel32Call(write ? 'WriteFile' : 'ReadFile',
+                            [handle, buffer, length, done, 0]);
+                        return ok ? { done: memory.readU32(done) }
+                            : { error: await kernel32Call('GetLastError', []) };
+                    }
+                    finally
+                    {
+                        heap.free(done);
+                    }
+                },
+                size: async handle=>{
+                    const out = heap.allocate(8);
+                    try
+                    {
+                        await kernel32Call('GetFileSizeEx', [handle, out]);
+                        return BigInt(memory.readU32(out)) | BigInt(memory.readU32(out + 4)) << 32n;
+                    }
+                    finally
+                    {
+                        heap.free(out);
+                    }
+                },
+                setSize: async(handle, size)=>{
+                    await kernel32Call('SetFilePointerEx', [handle, Number(size & 0xffffffffn),
+                        Number(size >> 32n), 0, 0]);
+                    return (await kernel32Call('SetEndOfFile', [handle])) !== 0;
+                },
+                flush: async handle=>(await kernel32Call('FlushFileBuffers', [handle])) !== 0,
+                modified: async handle=>{
+                    const out = heap.allocate(8);
+                    try
+                    {
+                        writeMemory(out, new Uint8Array(8));
+                        await kernel32Call('GetFileTime', [handle, 0, 0, out]);
+                        return Uint8Array.from(readMemory(out, 8));
+                    }
+                    finally
+                    {
+                        heap.free(out);
+                    }
+                },
+                close: handle=>{
+                    void libraries['KERNEL32.dll'].CloseHandle.handler([handle]);
+                },
+            });
             const mediaFoundation = createMfplatFunctions({
                 readMemory, writeMemory, heap, vtables: comVtables, setRegisters,
                 now: ()=>kernel.clock.virtualTime(),
+                // A byte stream's file is kernel32's, opened and read through
+                // its own calls, so it fails as CreateFile and ReadFile do.
+                files: mfFiles(),
+                tempPath: async()=>{
+                    const buffer = heap.allocate(520);
+                    try
+                    {
+                        const length = await kernel32Call('GetTempPathW', [260, buffer]);
+                        return readWideString(buffer, length >>> 0);
+                    }
+                    finally
+                    {
+                        heap.free(buffer);
+                    }
+                },
                 objectAt: pointer=>bridge.interfaceObject(pointer),
                 callGuest: call=>bridge.callGuest(call),
                 callerThread: ()=>bridge.callerThread(),

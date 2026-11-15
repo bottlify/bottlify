@@ -16,10 +16,12 @@
  * rights to is (E_ACCESSDENIED), with the refusal said.
  */
 
-import { E_INVALIDARG, E_OUTOFMEMORY, E_POINTER, S_OK, createMfKit, drive } from './kit.js';
+import { E_INVALIDARG, E_NOTIMPL, E_OUTOFMEMORY, E_POINTER, S_OK, createMfKit, drive }
+    from './kit.js';
 import { createMfObjects } from './objects.js';
 import { frameRateToTime, imageSize, mulDiv, timeToFrameRate } from './formats.js';
 import { deserialize, serialize } from './blob.js';
+import { createByteStreams } from './bytestream.js';
 import { formatGuid, parseGuid } from '../ole32/guid.js';
 
 export const MF_E_BAD_STARTUP_VERSION = 0xc00d36e3 | 0;
@@ -38,7 +40,9 @@ const SDK_VERSIONS = new Set([1, 2]);
  *     propVariant?: { copy: (dest: number, src: number) => number | Promise<number>,
  *         clear: (at: number) => number | Promise<number> },
  *     setRegisters?: (values: { edx?: number }) => void,
- *     now?: () => number }} MfplatHost
+ *     now?: () => number,
+ *     files?: import('./bytestream.js').FileCalls,
+ *     tempPath?: () => Promise<string> }} MfplatHost
  *     `setRegisters` carries a LONGLONG's high half back in EDX; `now` is the
  *     machine's clock in milliseconds, which MFGetSystemTime reads.
  */
@@ -50,6 +54,7 @@ export function createMfplatFunctions(host){
     const kit = createMfKit(host);
     const objects = createMfObjects(kit, host);
     const { guidAt } = kit;
+    const streams = createByteStreams(kit, host, objects.attributes, host.files);
     /** MFStartup's count, which MFShutdown takes down to zero and no further. */
     let started = 0;
     let locks = 0;
@@ -279,6 +284,44 @@ export function createMfplatFunctions(host){
                     return E_INVALIDARG;
                 }
                 return objects.attributes.copyInto(attributes, items, host.callerThread?.());
+            } },
+
+        /**
+         * HRESULT MFCreateFile(MF_FILE_ACCESSMODE access, MF_FILE_OPENMODE open,
+         *     MF_FILE_FLAGS flags, LPCWSTR url, IMFByteStream **stream)
+         */
+        MFCreateFile: { argBytes: 20,
+            handler: (/** @type {number[]} */ [access, open, flags, url, out])=>{
+                if ((out >>> 0) === 0 || (url >>> 0) === 0)
+                {
+                    return E_POINTER;
+                }
+                kit.putU32s(out, [0]);
+                return streams.createFile(access >>> 0, open >>> 0, flags >>> 0,
+                    kit.wideString(url)).then(made=>(typeof made === 'number' ? made
+                    : kit.give(out, made)));
+            } },
+        /**
+         * HRESULT MFCreateTempFile(MF_FILE_ACCESSMODE access, MF_FILE_OPENMODE open,
+         *     MF_FILE_FLAGS flags, IMFByteStream **stream)
+         *
+         * A file of a new name in the user's temporary folder, deleted when
+         * the stream closes.
+         */
+        MFCreateTempFile: { argBytes: 16,
+            handler: (/** @type {number[]} */ [access, open, flags, out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_POINTER;
+                }
+                kit.putU32s(out, [0]);
+                if (!host.tempPath)
+                {
+                    return E_NOTIMPL;
+                }
+                return host.tempPath().then(folder=>streams.createFile(access >>> 0, open >>> 0,
+                    flags >>> 0, `${folder}${globalThis.crypto.randomUUID()}.tmp`, true))
+                    .then(made=>(typeof made === 'number' ? made : kit.give(out, made)));
             } },
 
         /**
