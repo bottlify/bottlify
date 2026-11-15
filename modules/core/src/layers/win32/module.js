@@ -5156,6 +5156,8 @@ export function createWin32Module(){
                     allocate: bytes=>heap.allocate(bytes),
                     /** @param {number} address */
                     release: address=>heap.free(address),
+                    /** @param {number} address */
+                    block: address=>heap.block(address),
                 }),
 
                 'ADVAPI32.dll': {

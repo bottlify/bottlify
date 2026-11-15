@@ -30,7 +30,7 @@
  */
 
 import { CHECK_MARK, RADIO_DOT, RADIO_RING_DARK, RADIO_RING_LIGHT, layoutText } from './paint.js';
-import { encodeAnsi } from '../kernel32/locale.js';
+import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { createTabWalk } from './tabwalk.js';
 import { directoryItems } from './dlgdir.js';
 
@@ -39,6 +39,7 @@ export const WM_CREATE = 0x0001;
 export const WM_SETFOCUS = 0x0007;
 const WM_SIZE = 0x0005;
 export const WM_KILLFOCUS = 0x0008;
+const WM_NCDESTROY = 0x0082;
 export const WM_ENABLE = 0x000a;
 export const WM_SETTEXT = 0x000c;
 export const WM_GETTEXT = 0x000d;
@@ -224,6 +225,8 @@ const ES_WANTRETURN = 0x1000;
 const EM_GETSEL = 0x00b0;
 const EM_SETSEL = 0x00b1;
 const WM_NEXTDLGCTL = 0x0028;
+const EM_GETHANDLE = 0x00bd;
+const EM_SETHANDLE = 0x00bc;
 const EM_GETRECT = 0x00b2;
 const EM_SETRECT = 0x00b3;
 const EM_SETRECTNP = 0x00b4;
@@ -275,6 +278,8 @@ const EC_USEFONTINFO = 0xffff;
  * area is empty: Windows lays out a zero-sized edit as if it were this wide.
  */
 const EMPTY_EDIT_WIDTH = 80;
+/** How much room past its text an edit's buffer is given, so typing does not move it. */
+const EDIT_BUFFER_STEP = 64;
 /** WM_SIZE's kinds that lay an edit out again; a minimized one keeps its rectangle. */
 const SIZE_RESTORED = 0;
 const SIZE_MAXIMIZED = 2;
@@ -664,6 +669,9 @@ export const imagePlace = (record, rect, shape)=>{
  *           build with no heap behind it, and then a notification that needs
  *           a structure cannot be sent.
  * @property {(address: number) => void} [release]
+ * @property {(address: number) => { size: number, capacity: number } | null} [block]
+ *           A block of the process heap an address starts, as LocalSize and an
+ *           in-place LocalReAlloc see it: an edit's text buffer is one.
  * @property {(entry: number, args: number[], thread?: unknown) => number | Promise<number>} [call]
  *           Calls the program's own code: a callback a control is handed.
  * @property {(api: string, detail: string) => void} [divergence]
@@ -2220,9 +2228,113 @@ export function createControlProcedures(host){
     };
 
     /**
+     * The text an edit holds in the buffer EM_GETHANDLE handed out or
+     * EM_SETHANDLE gave it: the program may write it in place, so it is read
+     * before every message and written after one that changed the text. An
+     * ANSI window's buffer is ANSI, a Unicode one's UTF-16 (user32's edit;
+     * Common Controls 6's is always UTF-16).
+     *
+     * @param {any} record
+     */
+    const pullEditBuffer = record=>{
+        const state = editState(record);
+        const block = host.block?.(state.handle);
+        if (!block)
+        {
+            return;
+        }
+        const bytes = host.readMemory(state.handle, block.size);
+        if (record.unicode === true)
+        {
+            let text = '';
+            for (let at = 0; at + 1 < bytes.length; at += 2)
+            {
+                const unit = bytes[at] | bytes[at + 1] << 8;
+                if (unit === 0)
+                {
+                    break;
+                }
+                text += String.fromCharCode(unit);
+            }
+            record.title = text;
+        }
+        else
+        {
+            const end = bytes.indexOf(0);
+            record.title = decodeAnsi(bytes.subarray(0, end < 0 ? bytes.length : end));
+        }
+    };
+    /** @param {any} record @param {string} text @returns {Uint8Array} */
+    const encodeEditBuffer = (record, text)=>{
+        if (record.unicode !== true)
+        {
+            return encodeAnsi(`${text}\0`);
+        }
+        const bytes = new Uint8Array((text.length + 1) * 2);
+        for (let at = 0; at < text.length; at++)
+        {
+            bytes[2 * at] = text.charCodeAt(at) & 0xff;
+            bytes[2 * at + 1] = text.charCodeAt(at) >>> 8;
+        }
+        return bytes;
+    };
+    /**
+     * Writes the text back into the buffer: in place while the block holds
+     * it, else into a larger block that replaces it, as LocalReAlloc moves a
+     * fixed block - the program asks EM_GETHANDLE again for where it went.
+     *
+     * @param {any} record
+     */
+    const pushEditBuffer = record=>{
+        const state = editState(record);
+        const bytes = encodeEditBuffer(record, record.title);
+        const block = host.block?.(state.handle);
+        if (block && bytes.length <= block.capacity)
+        {
+            host.writeMemory(state.handle, bytes);
+            return;
+        }
+        const grown = host.allocate?.(bytes.length + EDIT_BUFFER_STEP) ?? 0;
+        if (grown === 0)
+        {
+            host.divergence?.('Edit', 'no memory to grow the text buffer EM_GETHANDLE handed out');
+            return;
+        }
+        host.writeMemory(grown, bytes);
+        if (block)
+        {
+            host.release?.(state.handle);
+        }
+        state.handle = grown;
+    };
+
+    /**
+     * An edit's messages, its text read from and written back to the
+     * program's buffer around each where it has one (EM_GETHANDLE).
+     *
      * @param {any} record @param {ControlMessage} message @param {unknown} [thread]
      */
     const editProc = (record, message, thread)=>{
+        const state = editState(record);
+        if (!state.handle)
+        {
+            return editMessage(record, message, thread);
+        }
+        pullEditBuffer(record);
+        const before = record.title;
+        return after(editMessage(record, message, thread), answer=>{
+            if (state.handle && record.title !== before)
+            {
+                pushEditBuffer(record);
+            }
+            return answer;
+        });
+    };
+
+    /**
+     * @param {any} record @param {ControlMessage} message @param {unknown} [thread]
+     */
+    const editMessage = (record, message, thread)=>{
         const state = editState(record);
         const readOnly = ()=>(record.style & ES_READONLY) !== 0;
         switch (message.message){
@@ -2510,6 +2622,51 @@ export function createControlProcedures(host){
                 return 0;
             case EM_GETPASSWORDCHAR:
                 return (record.style & ES_PASSWORD) !== 0 ? state.passwordChar ?? 0x2a : 0;
+            case EM_GETHANDLE: {
+                // A single-line edit has no buffer to hand out. The block is
+                // the process heap's, so LocalLock, LocalSize and LocalFree
+                // know it.
+                if (!multiline(record))
+                {
+                    return 0;
+                }
+                if (!state.handle)
+                {
+                    const bytes = encodeEditBuffer(record, record.title);
+                    const at = host.allocate?.(bytes.length + EDIT_BUFFER_STEP) ?? 0;
+                    if (at === 0)
+                    {
+                        return 0;
+                    }
+                    host.writeMemory(at, bytes);
+                    state.handle = at;
+                }
+                return state.handle;
+            }
+            case EM_SETHANDLE: {
+                // The program's buffer becomes the text; the one it replaces is
+                // the program's to free (EM_GETHANDLE's documented contract),
+                // and the edit frees the last one it holds when destroyed.
+                if (!multiline(record) || (message.wParam >>> 0) === 0)
+                {
+                    return 0;
+                }
+                state.handle = message.wParam >>> 0;
+                pullEditBuffer(record);
+                state.selStart = state.selEnd = 0;
+                state.firstLine = 0;
+                state.modified = false;
+                state.undo = null;
+                host.invalidate(record);
+                return 0;
+            }
+            case WM_NCDESTROY:
+                if (state.handle && host.block?.(state.handle))
+                {
+                    host.release?.(state.handle);
+                }
+                state.handle = 0;
+                return common(record, message, thread);
             case EM_GETRECT:
                 if ((message.lParam >>> 0) !== 0)
                 {

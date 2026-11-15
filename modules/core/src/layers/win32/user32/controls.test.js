@@ -317,6 +317,16 @@ function setup({ reply = ()=>0, engine = false, desktopPicture = null } = {}){
     const keysDown = new Set();
     let presents = 0;
     let heapNext = HEAP;
+    /** The process heap's blocks as the fake gives them, by address: their sizes. */
+    /** @type {Map<number, number>} */
+    const blockSizes = new Map();
+    /** @param {number} bytes */
+    const allocate = bytes=>{
+        const at = heapNext;
+        heapNext += (bytes + 15) & ~15;
+        blockSizes.set(at, bytes);
+        return at;
+    };
     /** @type {string[]} */
     const faces = [];
     /** @param {{ height: number, faceName: string }} font */
@@ -390,12 +400,14 @@ function setup({ reply = ()=>0, engine = false, desktopPicture = null } = {}){
             presents++;
         },
         keyState: key=>(keysDown.has(key) ? 0x8000 : 0),
-        allocate: bytes=>{
-            const at = heapNext;
-            heapNext += (bytes + 15) & ~15;
-            return at;
+        allocate,
+        release: (/** @type {number} */ at)=>{
+            blockSizes.delete(at);
         },
-        release: ()=>{},
+        block: (/** @type {number} */ at)=>{
+            const size = blockSizes.get(at);
+            return size === undefined ? null : { size, capacity: (size + 15) & ~15 };
+        },
         registerControls: (controlHost, toolkit, register)=>{
             for (const definition of [...createCommonControls(controlHost, toolkit),
                 ...createRichEditControls(controlHost, toolkit)])
@@ -459,7 +471,7 @@ function setup({ reply = ()=>0, engine = false, desktopPicture = null } = {}){
 
     return {
         memory, queue, desktop, gdi, fns: table, dispatched, keysDown, pump, mouse, key, click,
-        commands, centre, faces, presents: ()=>presents, clock,
+        commands, centre, faces, presents: ()=>presents, clock, allocate,
     };
 }
 
@@ -2597,4 +2609,43 @@ test('a top-level edit tells the window it was created with what changed, as a c
         context.fns.SendMessageA.handler([edit, WM_SETTEXT, 0, TEXT + 0x40]);
         await context.pump(dialog);
         assert.ok(heard.includes(EN_CHANGE), 'the owner hears EN_CHANGE');
+    });
+
+test('a multi-line edit hands out its text as a buffer the program may write, and takes one',
+    async()=>{
+        const EM_GETHANDLE = 0x00bd;
+        const EM_SETHANDLE = 0x00bc;
+        const WM_SETTEXT = 0x000c;
+        const WM_GETTEXT = 0x000d;
+        const context = setup({ reply: message=>(message.message === WM_INITDIALOG ? 1 : 0) });
+        const dialog = await openDialog(context);
+        context.memory.putString(TEXT, 'Edit');
+        const single = context.fns.CreateWindowExA.handler([0, TEXT, 0, WS_CHILD | WS_VISIBLE,
+            8, 8, 100, 20, dialog, 501, HINSTANCE, 0]);
+        assert.equal(context.fns.SendMessageA.handler([single, EM_GETHANDLE, 0, 0]), 0,
+            'a single-line edit has none');
+        const edit = context.fns.CreateWindowExA.handler([0, TEXT, 0,
+            WS_CHILD | WS_VISIBLE | ES_MULTILINE, 8, 40, 100, 40, dialog, 502, HINSTANCE, 0]);
+        context.memory.putString(TEXT + 0x40, 'abc');
+        context.fns.SendMessageA.handler([edit, WM_SETTEXT, 0, TEXT + 0x40]);
+        const handle = context.fns.SendMessageA.handler([edit, EM_GETHANDLE, 0, 0]);
+        assert.notEqual(handle, 0);
+        assert.equal(context.memory.readCString(handle, 16), 'abc',
+            'an ANSI window\'s buffer is ANSI');
+        assert.equal(context.fns.SendMessageA.handler([edit, EM_GETHANDLE, 0, 0]), handle,
+            'asked again, the same buffer');
+        // The program writes the buffer; the edit reads it.
+        context.memory.putString(handle, 'xyz');
+        context.fns.SendMessageA.handler([edit, WM_GETTEXT, 16, OUT]);
+        assert.equal(context.memory.readCString(OUT, 16), 'xyz');
+        // A new text is written into the buffer.
+        context.memory.putString(TEXT + 0x40, 'new');
+        context.fns.SendMessageA.handler([edit, WM_SETTEXT, 0, TEXT + 0x40]);
+        assert.equal(context.memory.readCString(handle, 16), 'new');
+        // EM_SETHANDLE: the program's own buffer becomes the text.
+        const given = context.allocate(32);
+        context.memory.putString(given, 'given');
+        context.fns.SendMessageA.handler([edit, EM_SETHANDLE, given, 0]);
+        context.fns.SendMessageA.handler([edit, WM_GETTEXT, 16, OUT]);
+        assert.equal(context.memory.readCString(OUT, 16), 'given');
     });
