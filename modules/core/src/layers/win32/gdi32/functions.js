@@ -5555,8 +5555,10 @@ export function createGdiFunctions(host){
              * @param {number} brush  A brush handle the program owns.
              */
             fillWith: (hdc, rect, brush)=>{
-                metafiles.drawn.fill(hdc, rect, brush >>> 0);
-                return drawing.bound(hdc)?.fillRect(hdc >>> 0, rect, brush >>> 0) === true;
+                // No brush is the one the DC has selected (FillRect with NULL).
+                const used = (brush >>> 0) !== 0 ? brush >>> 0 : dcOf(hdc)?.brush ?? 0;
+                metafiles.drawn.fill(hdc, rect, used);
+                return drawing.bound(hdc)?.fillRect(hdc >>> 0, rect, used) === true;
             },
 
             /**

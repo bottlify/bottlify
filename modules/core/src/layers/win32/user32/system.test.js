@@ -2200,6 +2200,8 @@ test('LoadStringA and GetClassNameA write their text in the ANSI page', ()=>{
     assert.equal(fns.LoadStringA.handler([HINSTANCE, 0x10, OUT_BUFFER, 16]), 4);
     assert.deepEqual([...memory.bytes.subarray(OUT_BUFFER, OUT_BUFFER + 5)],
         [0x80, 0x99, 0x97, 0xe9, 0]);
+    assert.equal(fns.LoadStringA.handler([HINSTANCE, 0xffff0010, OUT_BUFFER, 16]), 4,
+        'the id is its low word (Wine\'s user32:resource)');
 
     memory.bytes.set([0x80, 0x99, 0x97, 0], CLASS_NAME);
     memory.putU32s(CLASS_STRUCT, [
@@ -2641,6 +2643,9 @@ test('ChangeDisplaySettingsA sets any listed mode, and the screen follows it', (
     assert.equal(fns.ChangeDisplaySettingsA.handler([DEVMODE_BUFFER, 0]),
         DISP_CHANGE_SUCCESSFUL, 'sixteen bits is set');
     assert.equal(screen.bitsPerPixel, 16, 'and the display is that deep');
+    memory.putU32s(DEVMODE_BUFFER + DEVMODEA.dmBitsPerPel, [SCREEN.bitsPerPixel]);
+    assert.equal(fns.ChangeDisplaySettingsA.handler([DEVMODE_BUFFER, CDS_TEST]),
+        DISP_CHANGE_SUCCESSFUL, 'at sixteen bits the display still lists its own depth');
     assert.equal(fns.ChangeDisplaySettingsA.handler([0, 0]), DISP_CHANGE_SUCCESSFUL);
     assert.equal(screen.bitsPerPixel, SCREEN.bitsPerPixel,
         'the registry mode puts the depth of the display back');

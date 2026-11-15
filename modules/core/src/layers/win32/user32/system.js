@@ -1380,8 +1380,10 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
      * first mode it is offered keeps the depth it had.
      */
     const userModes = ()=>{
-        const own = displayModes(screen);
-        return screen.bitsPerPixel === 16 || launchBits !== 32 ? own
+        // The list is the display's as launched, whatever depth a program
+        // has set since: a display set to 16 bits goes back to its 32.
+        const own = displayModes({ ...screen, bitsPerPixel: launchBits });
+        return launchBits !== 32 ? own
             : [...own, ...own.map(one=>({ ...one, bitsPerPixel: 16 }))];
     };
 
@@ -5367,7 +5369,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([instance, id, buffer, size])=>{
-                const text = host.loadString?.(instance >>> 0, id >>> 0) ?? null;
+                // The id is a 16-bit resource id: what lies above it is not read.
+                const text = host.loadString?.(instance >>> 0, id & 0xffff) ?? null;
                 if (text === null || (buffer >>> 0) === 0 || (size | 0) <= 0)
                 {
                     if ((buffer >>> 0) !== 0 && (size | 0) > 0)
@@ -5399,7 +5402,8 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([instance, id, buffer, size])=>{
-                const text = host.loadString?.(instance >>> 0, id >>> 0) ?? null;
+                // The id is a 16-bit resource id: what lies above it is not read.
+                const text = host.loadString?.(instance >>> 0, id & 0xffff) ?? null;
                 if (text === null || (buffer >>> 0) === 0 || (size | 0) <= 0)
                 {
                     if ((buffer >>> 0) !== 0 && (size | 0) > 0)

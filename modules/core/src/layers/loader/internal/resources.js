@@ -138,7 +138,7 @@ export function findResource(bytes, image, type, name, language = null, uiLangua
         return null;
     }
 
-    const byType = tree.lookup(tree.root, type);
+    const byType = tree.lookup(tree.root, numbered(type));
     if (byType === null)
     {
         return null;
@@ -151,7 +151,7 @@ export function findResource(bytes, image, type, name, language = null, uiLangua
         return tree.leaf(byType.offset, language ?? 0);
     }
 
-    const byName = tree.lookup(byType.offset, name);
+    const byName = tree.lookup(byType.offset, numbered(name));
     if (byName === null)
     {
         return null;
@@ -169,6 +169,23 @@ export function findResource(bytes, image, type, name, language = null, uiLangua
         return null;
     }
     return tree.leaf(byLanguage.offset, byLanguage.key);
+}
+
+/**
+ * A type or name given as text that is `#` and decimal digits names that
+ * integer, as FindResource documents: a resource script's numeric id
+ * travelling as a string ("#100" is 100), whoever looks it up.
+ *
+ * @param {number | string} key
+ * @returns {number | string}
+ */
+function numbered(key){
+    if (typeof key !== 'string')
+    {
+        return key;
+    }
+    const digits = /^#(\d+)$/.exec(key);
+    return digits && Number(digits[1]) < 0x10000 ? Number(digits[1]) : key;
 }
 
 /**
