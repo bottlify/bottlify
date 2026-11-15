@@ -1522,6 +1522,45 @@ export function createWin32Module(){
                 // A renderer the program wrote is fed from a thread of its own,
                 // as quartz feeds one from its streaming thread; made on the
                 // first sample, so a program with no such filter has none.
+                // quartz's own filters: File Source reads the volume's files.
+                filters: {
+                    readU32: address=>memory.readU32(address),
+                    readMemory,
+                    writeMemory,
+                    readWideString: (address, maxLength)=>readWideString(address, maxLength),
+                    allocate: bytes=>heap.allocate(bytes),
+                    free: address=>heap.free(address),
+                    callGuest: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
+                    currentThread: ()=>kernel.currentThread(),
+                    publish: (object, iid)=>bridge.publishInterface(object, iid),
+                    createInstance: async(clsid, iid)=>{
+                        const at = heap.allocate(36);
+                        writeMemory(at, /** @type {Uint8Array} */ (parseGuid(clsid)));
+                        writeMemory(at + 16, /** @type {Uint8Array} */ (parseGuid(iid)));
+                        writeMemory(at + 32, new Uint8Array(4));
+                        const made = await libraries['ole32.dll'].CoCreateInstance
+                            .handler([at, 0, 1, at + 16, at + 32]);
+                        const pointer = (made | 0) < 0 ? 0 : memory.readU32(at + 32);
+                        heap.free(at);
+                        return pointer;
+                    },
+                    files: {
+                        open: async path=>{
+                            const entry = volume.stat(path);
+                            const node = entry && !entry.isDirectory
+                                ? volume.open(path, { read: true }) : null;
+                            if (!entry || !node)
+                            {
+                                return null;
+                            }
+                            return {
+                                size: entry.size,
+                                read: async(offset, length)=>volume.read(node, offset, length),
+                                close: ()=>volume.close(node),
+                            };
+                        },
+                    },
+                },
                 stream: {
                     readU32: address=>memory.readU32(address),
                     writeMemory,
