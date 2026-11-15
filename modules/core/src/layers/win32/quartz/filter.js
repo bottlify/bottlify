@@ -159,6 +159,7 @@ const PIN_STREAM = { EndOfStream: 14, BeginFlush: 15, EndFlush: 16, NewSegment: 
  *           stream, is a call made from it, in order, never from the thread
  *           of the call that started the streaming.
  * @property {IcmHost} [icm]  The installable compressors, for the AVI Decompressor.
+ * @property {AcmHost} [acm]  The audio compression manager, for the ACM Wrapper.
  */
 
 /**
@@ -173,6 +174,13 @@ const PIN_STREAM = { EndOfStream: 14, BeginFlush: 15, EndFlush: 16, NewSegment: 
  * @property {(hic: number) => number | Promise<number>} close
  * @property {(hic: number, flags: number, format: number, data: number, output: number,
  *     bits: number) => number | Promise<number>} decompress
+ */
+
+/**
+ * @typedef {Object} AcmHost
+ * @property {(name: string, args: number[]) => number | Promise<number>} call
+ *           One of msacm32's functions, by name, with its arguments as the program
+ *           would pass them.
  */
 
 /**

@@ -69,6 +69,7 @@ import { createRenderers } from './renderers.js';
 import { createParsers } from './splitters.js';
 import { createTransforms } from './transforms.js';
 import { createColorSpaceConverter } from './colorspace.js';
+import { createAcmWrapper } from './acmwrapper.js';
 
 /**
  * How far a name a program hands these is read: whole, as Windows reads it, up to
@@ -2182,6 +2183,8 @@ export function registerQuartzClasses(registry, host){
         for (const [clsid, define] of [...createRenderers(base, host.filters, passThru),
             ...createParsers(base, host.filters),
             ...createColorSpaceConverter(base, host.filters, passThru),
+            ...host.filters.acm
+                ? createAcmWrapper(base, host.filters, host.filters.acm, passThru) : [],
             ...host.filters.icm
                 ? createTransforms(base, host.filters, host.filters.icm, passThru) : []])
         {

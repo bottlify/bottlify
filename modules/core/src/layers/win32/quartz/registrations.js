@@ -111,6 +111,13 @@ export const WINDOWS_REGISTRATIONS = [
         ],
     },
     {
+        clsid: '{6A08CF80-0E18-11CF-A24D-0020AFD79767}', name: 'ACM Wrapper', merit: MERIT.NORMAL,
+        pins: [
+            pin('Input', false, [[MEDIATYPE_AUDIO, GUID_NULL]]),
+            pin('Output', true, [[MEDIATYPE_AUDIO, MEDIASUBTYPE_PCM]]),
+        ],
+    },
+    {
         clsid: '{1643E180-90F5-11CE-97D5-00AA0055595A}', name: 'Color Space Converter',
         merit: MERIT.UNLIKELY + 1,
         pins: [

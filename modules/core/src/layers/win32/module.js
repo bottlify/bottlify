@@ -1557,6 +1557,7 @@ export function createWin32Module(){
                             libraries['MSVFW32.dll'].ICDecompress
                                 .handler([hic, flags, format, data, output, bits]),
                     },
+                    acm: { call: (name, args)=>libraries['MSACM32.dll'][name].handler(args) },
                     readWideString: (address, maxLength)=>readWideString(address, maxLength),
                     allocate: bytes=>heap.allocate(bytes),
                     free: address=>heap.free(address),
