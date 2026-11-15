@@ -457,6 +457,17 @@ export const IMEDIA_SAMPLE_SLOTS = [
     ['SetMediaTime', 2],
 ];
 
+/** The allocator two pins agree on when neither brings its own. */
+export const CLSID_MEMORY_ALLOCATOR = '{1E651CC0-B199-11D0-8212-00C04FC32C45}';
+export const IID_IMEDIA_SAMPLE2 = '{36B73884-C2C8-11CF-8B46-00805F6CEF60}';
+
+/** IMediaSample2: IMediaSample's slots, then the properties block both ways. @type {[string, number][]} */
+export const IMEDIA_SAMPLE2_SLOTS = [
+    ...IMEDIA_SAMPLE_SLOTS,
+    ['GetProperties', 2],
+    ['SetProperties', 2],
+];
+
 /** quartz's own reference clock, the one a graph runs on when no renderer offers one. */
 export const CLSID_SYSTEM_CLOCK = '{E436EBB1-524F-11CE-9F53-0020AF0BA770}';
 export const IID_IREFERENCE_CLOCK = '{56A86897-0AD4-11CE-B03A-0020AF0BA770}';

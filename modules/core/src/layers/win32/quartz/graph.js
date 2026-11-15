@@ -55,7 +55,8 @@ import { describe } from './describe.js';
 import { parseGuid } from '../ole32/guid.js';
 import { createStreaming } from './stream.js';
 import { createSystemClock } from './clock.js';
-import { CLSID_SYSTEM_CLOCK } from './interfaces.js';
+import { createMemoryAllocator } from './allocator.js';
+import { CLSID_MEMORY_ALLOCATOR, CLSID_SYSTEM_CLOCK } from './interfaces.js';
 
 /**
  * How far a name a program hands these is read: whole, as Windows reads it, up to
@@ -1896,6 +1897,10 @@ export function registerQuartzClasses(registry, host){
     if (host.clock)
     {
         registry.registerClass(CLSID_SYSTEM_CLOCK, createSystemClock(host.clock));
+    }
+    if (host.stream)
+    {
+        registry.registerClass(CLSID_MEMORY_ALLOCATOR, createMemoryAllocator(host.stream));
     }
     return { tick: quartz.tick, film: quartz.film };
 }
