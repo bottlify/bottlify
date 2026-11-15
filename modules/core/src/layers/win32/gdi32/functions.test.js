@@ -557,6 +557,19 @@ test('ExtCreatePen takes its colour from a brush and checks its width and dashes
     assert.equal(fns.ExtCreatePen.handler([PS_GEOMETRIC | PS_SOLID, 5, STRUCT, 2, STRUCT]), 0,
         'dashes on a style that takes none');
     assert.equal(fns.ExtCreatePen.handler([PS_GEOMETRIC | PS_SOLID, 5, 0, 0, 0]), 0, 'no brush');
+
+    // Wine's test_brush_pens: a cosmetic pen's brush is solid; a geometric
+    // one is solid, hatched or a pattern; a hollow brush is the null pen.
+    memory.putU32s(STRUCT, [BS_HATCHED, 0x00123456, HS_CROSS]);
+    assert.equal(fns.ExtCreatePen.handler([PS_SOLID, 1, STRUCT, 0, 0]), 0,
+        'a hatched cosmetic pen');
+    assert.ok(fns.ExtCreatePen.handler([PS_GEOMETRIC | PS_SOLID, 3, STRUCT, 0, 0]) > 0);
+    memory.putU32s(STRUCT, [4, 0x00123456, 0]);
+    assert.equal(fns.ExtCreatePen.handler([PS_GEOMETRIC | PS_SOLID, 3, STRUCT, 0, 0]), 0,
+        'BS_INDEXED is no pen\'s brush');
+    memory.putU32s(STRUCT, [BS_NULL, 0, 0]);
+    assert.equal(fns.ExtCreatePen.handler([PS_GEOMETRIC | PS_SOLID, 3, STRUCT, 0, 0]),
+        fns.GetStockObject.handler([8]), 'a hollow brush makes the stock NULL_PEN');
 });
 
 test('CreateBrushIndirect reads LOGBRUSH at the documented offsets', ()=>{

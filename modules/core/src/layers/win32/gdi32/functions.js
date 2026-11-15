@@ -3023,9 +3023,28 @@ export function createGdiFunctions(host){
                     return stockObject(NULL_PEN);
                 }
                 const [brushStyle, color, hatch] = readU32s(host, brush >>> 0, 3);
+                // A cosmetic pen is drawn in a colour, so its brush is solid;
+                // a geometric one takes a solid, hatched, pattern or DIB
+                // pattern brush, and a hollow one is no pen at all (Wine's
+                // pen.c test_brush_pens). A pattern's colour is not the pen's.
+                const pattern = [BS_PATTERN, BS_DIBPATTERN, BS_DIBPATTERNPT]
+                    .includes(brushStyle >>> 0);
+                if (geometric && (brushStyle >>> 0) === BS_NULL)
+                {
+                    return stockObject(NULL_PEN);
+                }
+                if (geometric ? !pattern && ![BS_SOLID, BS_HATCHED].includes(brushStyle >>> 0)
+                    : (brushStyle >>> 0) !== BS_SOLID)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
                 return objects.create('pen', {
-                    style: kind, width: width | 0, color: color >>> 0, extended: style >>> 0,
-                    brushStyle: brushStyle >>> 0, hatch: hatch >>> 0,
+                    style: kind, width: width | 0, color: pattern ? 0 : color >>> 0,
+                    extended: style >>> 0,
+                    brushStyle: (brushStyle >>> 0) === BS_DIBPATTERN ? BS_DIBPATTERNPT
+                        : brushStyle >>> 0,
+                    hatch: hatch >>> 0,
                     entries: user ? readU32s(host, dashes >>> 0, count >>> 0) : [],
                 });
             },
