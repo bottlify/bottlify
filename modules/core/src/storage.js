@@ -406,6 +406,15 @@ export function opfsSession(key, directory){
      * needs only what changed since and what the folder lacks.
      */
     let loadedWhole = false;
+    /**
+     * The files `load` handed out lazily, each its entry as the folder holds
+     * it: one handed back to `save` is kept as it is, never read to be written
+     * again (a session laid under the volume, `session-source.js`, hands back
+     * every file the program did not touch).
+     *
+     * @type {WeakSet<object>}
+     */
+    const held = new WeakSet();
     /** The links entry as the folder holds it since this run's first save; null for none. */
     /** @type {string | null} */
     let linksSaved = null;
@@ -573,9 +582,10 @@ export function opfsSession(key, directory){
             return writing;
         },
         /**
-         * The session as it was last saved. `lazy`: each file's path and size
-         * now and its bytes when `read` is called, so a session of a gigabyte
-         * is laid on the volume a file at a time rather than held whole at once.
+         * The session as it was last saved. `lazy`: each file's path, size and
+         * time now and its bytes when `read` is called, a range of them or all,
+         * so a session of gigabytes is read where the program reads it
+         * (`session-source.js`) rather than held whole at once.
          *
          * @param {{ lazy?: boolean }} [options]
          * @returns {Promise<Session>}  Lazily, each of `files` a `LazySessionFile`.
@@ -626,8 +636,14 @@ export function opfsSession(key, directory){
                         continue;
                     }
                     const start = head.start;
-                    files.push(/** @type {any} */ ({ path: head.path, size: file.size - start,
-                        read: async()=>new Uint8Array(await file.slice(start).arrayBuffer()) }));
+                    const size = file.size - start;
+                    /** @type {LazySessionFile} */
+                    const lazy = { path: head.path, size, modified: file.lastModified,
+                        read: async(offset = 0, length = size - offset)=>new Uint8Array(
+                            await file.slice(start + offset, start + offset + length)
+                                .arrayBuffer()) };
+                    held.add(lazy);
+                    files.push(/** @type {any} */ (lazy));
                     continue;
                 }
                 const raw = new Uint8Array(await file.arrayBuffer());
@@ -675,7 +691,10 @@ export function opfsSession(key, directory){
                     for (const file of files)
                     {
                         keep.add(await entryName(file.path));
-                        await put(folder, file.path, file);
+                        if (!held.has(file))
+                        {
+                            await put(folder, file.path, file);
+                        }
                     }
                     if (registry)
                     {
@@ -711,14 +730,14 @@ export function opfsSession(key, directory){
                     // The first save of a run that read the folder: the files
                     // laid over the session at the start (`files`) that it has no
                     // entry for, and the hive the bundle's registry was laid into.
-                    const held = new Set();
+                    const here = new Set();
                     for await (const [name] of folder.entries())
                     {
-                        held.add(name);
+                        here.add(name);
                     }
                     for (const file of files)
                     {
-                        if (!held.has(await entryName(file.path)))
+                        if (!held.has(file) && !here.has(await entryName(file.path)))
                         {
                             await put(folder, file.path, file);
                         }
@@ -742,7 +761,7 @@ export function opfsSession(key, directory){
                     }
                     const path = /** @type {string} */ (change.path);
                     const file = byPath.get(path);
-                    if (file)
+                    if (file && !held.has(file))
                     {
                         await put(folder, path, file);
                     }
@@ -805,7 +824,8 @@ const SAVE_SHARE = 0.1;
  * A file of a session loaded lazily: its path and size, its bytes read when
  * asked for.
  *
- * @typedef {{ path: string, size: number, read: () => Promise<Uint8Array> }} LazySessionFile
+ * @typedef {{ path: string, size: number, modified?: number,
+ *     read: (offset?: number, length?: number) => Promise<Uint8Array> }} LazySessionFile
  */
 
 /**

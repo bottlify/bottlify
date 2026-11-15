@@ -43,6 +43,10 @@ import { ErrorCode, fsError } from './errors.js';
  * @property {() => StoredEntry[]} list
  * @property {(path: string) => StoredStat | null} stat
  * @property {(path: string, offset: number, length: number) => Uint8Array} read
+ * @property {(path: string) => object | null} [kept]  A file the source keeps as
+ *           its own, which an export of the volume carries while the program
+ *           has not written it: a session's (`session-source.js`). A bundle keeps
+ *           none - it is fetched by digest, never uploaded.
  */
 
 /**
