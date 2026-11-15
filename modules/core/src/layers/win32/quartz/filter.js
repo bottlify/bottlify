@@ -104,6 +104,29 @@ const PIN = { QueryDirection: 9, EnumMediaTypes: 12 };
 /** ALLOCATOR_PROPERTIES: four LONGs. */
 const PROPERTIES_BYTES = 16;
 
+/** IMemAllocator's slots this calls, IUnknown's three counted. */
+const ALLOCATOR = { Commit: 5, Decommit: 6, GetBuffer: 7 };
+/** IMediaSample's. */
+const SAMPLE = {
+    GetPointer: 3, GetSize: 4, SetTime: 6, SetSyncPoint: 8, SetPreroll: 10,
+    SetActualDataLength: 12, SetDiscontinuity: 16,
+};
+/** IMemInputPin::Receive's, and IPin's that travel downstream. */
+const RECEIVE = 6;
+const PIN_STREAM = { EndOfStream: 14, BeginFlush: 15, EndFlush: 16, NewSegment: 17 };
+
+/**
+ * What a filter pushes downstream: a sample's bytes and what is said of them.
+ *
+ * @typedef {Object} Outgoing
+ * @property {Uint8Array} data
+ * @property {number} [start]   The stream time it starts at, in REFERENCE_TIME; none where absent.
+ * @property {number} [stop]
+ * @property {boolean} [sync]   A sync point: a key frame, or any sample of uncompressed data.
+ * @property {boolean} [discontinuity]
+ * @property {boolean} [preroll]
+ */
+
 /**
  * @typedef {Object} MediaType
  * @property {string} major
@@ -128,6 +151,11 @@ const PROPERTIES_BYTES = 16;
  * @property {(object: import('../ole32/objects.js').ComObject, iid: string) => number} publish
  * @property {(clsid: string, iid: string) => number | Promise<number>} createInstance
  *           A class of this process made for an interface, one reference held; 0 refused.
+ * @property {{ deliver: (entry: number, args: number[], done?: (answer: number) => void,
+ *     tag?: any) => void }} [notices]
+ *           The graph's streaming thread: a sample pushed downstream, an end of
+ *           stream, is a call made from it, in order, never from the thread
+ *           of the call that started the streaming.
  */
 
 /**
@@ -151,6 +179,8 @@ const PROPERTIES_BYTES = 16;
  *     | ((pin: Pin) => { buffers: number, size: number, align: number, prefix: number })}
  *     [allocator]  An output pin's buffers, asked of the allocator it connects with;
  *     an output pin with no allocator hands none (a pull pin, as File Source's).
+ * @property {boolean} [pull]     An input pin that pulls its data through the
+ *           peer's IAsyncReader, as a parser's does: it has no IMemInputPin.
  * @property {import('../ole32/objects.js').ComInterfaceDescriptor[]} [interfaces]
  *           What the pin answers beside IPin (and IMemInputPin for an input pin).
  */
@@ -265,6 +295,125 @@ export function createFilterBase(host){
     /** @param {number} pointer */
     const release = pointer=>call(pointer, VTABLE.Release);
 
+    /**
+     * A method of an object called from the streaming thread, in order with
+     * every other call made from it; what it answers. With no streaming thread
+     * (a host that gives none) it is called as any other.
+     *
+     * @param {number} self @param {number} slot @param {number[]} [args] @param {any} [tag]
+     * @returns {Promise<number>}
+     */
+    const callStreaming = (self, slot, args = [], tag)=>{
+        if (!host.notices)
+        {
+            return call(self, slot, args);
+        }
+        const notices = host.notices;
+        return new Promise(resolve=>notices.deliver(entryOf(self, slot), [self >>> 0, ...args],
+            answer=>resolve(answer >>> 0), tag));
+    };
+
+    /** @param {number} value @returns {[number, number]} a LONGLONG's two words */
+    const quad = value=>{
+        const whole = Math.trunc(value);
+        return [whole % 0x1_0000_0000 >>> 0, Math.floor(whole / 0x1_0000_0000) >>> 0];
+    };
+
+    /**
+     * Pushes one sample out of an output pin, as the base classes' output pin
+     * delivers one: a buffer from the connection's allocator, the bytes and
+     * what is said of them written into it, IMemInputPin::Receive on the peer,
+     * and the buffer let go. What Receive answered is the answer: S_FALSE or a
+     * failure tells the filter to stop pushing.
+     *
+     * @param {Pin} pin @param {Outgoing} sample
+     * @returns {Promise<number>}
+     */
+    const deliver = async(pin, sample)=>{
+        if (pin.peer === 0 || pin.memInput === 0 || pin.allocator === 0)
+        {
+            return VFW_E_NOT_CONNECTED;
+        }
+        const tag = pin.filter;
+        const scratch = host.allocate(24);
+        host.writeMemory(scratch, dword(0));
+        const got = await callStreaming(pin.allocator, ALLOCATOR.GetBuffer, [scratch, 0, 0, 0],
+            tag);
+        const media = host.readU32(scratch);
+        if (failed(got) || media === 0)
+        {
+            host.free(scratch);
+            return failed(got) ? got : E_UNEXPECTED;
+        }
+        await callStreaming(media, SAMPLE.GetPointer, [scratch + 4], tag);
+        // GetSize answers the buffer's size itself, not an HRESULT; what does
+        // not fit is not written, as a buffer's end is the allocator's.
+        const capacity = await callStreaming(media, SAMPLE.GetSize, [], tag) | 0;
+        const buffer = host.readU32(scratch + 4);
+        const size = buffer === 0 ? 0 : Math.max(0, Math.min(sample.data.length, capacity));
+        host.writeMemory(buffer, sample.data.subarray(0, size));
+        await callStreaming(media, SAMPLE.SetActualDataLength, [size], tag);
+        if (sample.start !== undefined)
+        {
+            const times = new Uint8Array(16);
+            const view = new DataView(times.buffer);
+            const [startLow, startHigh] = quad(sample.start);
+            const [stopLow, stopHigh] = quad(sample.stop ?? sample.start);
+            view.setUint32(0, startLow, true);
+            view.setUint32(4, startHigh, true);
+            view.setUint32(8, stopLow, true);
+            view.setUint32(12, stopHigh, true);
+            host.writeMemory(scratch + 8, times);
+            await callStreaming(media, SAMPLE.SetTime,
+                [scratch + 8, sample.stop === undefined ? 0 : scratch + 16], tag);
+        }
+        await callStreaming(media, SAMPLE.SetSyncPoint, [sample.sync ? 1 : 0], tag);
+        await callStreaming(media, SAMPLE.SetDiscontinuity, [sample.discontinuity ? 1 : 0], tag);
+        if (sample.preroll)
+        {
+            await callStreaming(media, SAMPLE.SetPreroll, [1], tag);
+        }
+        const answer = await callStreaming(pin.memInput, RECEIVE, [media], tag);
+        await callStreaming(media, VTABLE.Release, [], tag);
+        host.free(scratch);
+        return answer;
+    };
+
+    /**
+     * The end of an output pin's stream, told to its peer from the streaming
+     * thread after every sample before it.
+     *
+     * @param {Pin} pin
+     */
+    const deliverEndOfStream = pin=>(pin.peer === 0 ? Promise.resolve(S_OK)
+        : callStreaming(pin.peer, PIN_STREAM.EndOfStream, [], pin.filter));
+
+    /**
+     * A new segment told downstream: the stream times that follow start at
+     * `start` of the media and run to `stop`, at `rate`.
+     *
+     * @param {Pin} pin @param {number} start @param {number} stop @param {number} [rate]
+     */
+    const deliverNewSegment = (pin, start, stop, rate = 1)=>{
+        if (pin.peer === 0)
+        {
+            return Promise.resolve(S_OK);
+        }
+        const double = new DataView(new ArrayBuffer(8));
+        double.setFloat64(0, rate, true);
+        return callStreaming(pin.peer, PIN_STREAM.NewSegment, [...quad(start), ...quad(stop),
+            double.getUint32(0, true), double.getUint32(4, true)], pin.filter);
+    };
+
+    /**
+     * A flush told downstream, around the work a seek does while nothing flows.
+     *
+     * @param {Pin} pin @param {boolean} begin
+     */
+    const deliverFlush = (pin, begin)=>(pin.peer === 0 ? Promise.resolve(S_OK)
+        : callStreaming(pin.peer, begin ? PIN_STREAM.BeginFlush : PIN_STREAM.EndFlush, [],
+            pin.filter));
+
     /** @param {number} address @returns {MediaType} */
     const readMediaType = address=>{
         const bytes = host.readMemory(address >>> 0, MEDIA_TYPE.BYTES);
@@ -351,10 +500,11 @@ export function createFilterBase(host){
      * @param {string} iid @param {() => any[]} source @param {(item: any) => number} give
      * @param {number} [position]
      * @param {Filter} [owner]  A filter whose pins are listed: the enumerator holds it.
+     * @param {any[]} [items]  What it lists until it is reset; the source's now where absent.
      * @returns {number}
      */
-    const enumerator = (iid, source, give, position = 0, owner)=>{
-        const state = { position, items: source() };
+    const enumerator = (iid, source, give, position = 0, owner, items = source())=>{
+        const state = { position, items };
         if (owner)
         {
             void /** @type {any} */ (owner.object)?.addRef(IID_IBASE_FILTER);
@@ -399,7 +549,7 @@ export function createFilterBase(host){
                     return E_POINTER;
                 }
                 host.writeMemory(out >>> 0,
-                    dword(enumerator(iid, ()=>s.items, give, s.position, owner)));
+                    dword(enumerator(iid, source, give, s.position, owner, [...s.items])));
                 return S_OK;
             },
         };
@@ -959,6 +1109,19 @@ export function createFilterBase(host){
         {
             return answer;
         }
+        // An output pin's allocator is committed while its filter streams, as
+        // the base classes' pin does on its way out of stopped, and decommitted
+        // on its way back: a sample asked of a stopped filter's pin is refused.
+        if (from === STATE_STOPPED && to !== STATE_STOPPED)
+        {
+            for (const pin of filter.pins)
+            {
+                if (pin.spec.direction === 'output' && pin.allocator !== 0)
+                {
+                    await call(pin.allocator, ALLOCATOR.Commit);
+                }
+            }
+        }
         filter.state = to;
         if (to === STATE_STOPPED)
         {
@@ -966,6 +1129,11 @@ export function createFilterBase(host){
             {
                 pin.ended = false;
                 pin.flushing = false;
+                if (from !== STATE_STOPPED && pin.spec.direction === 'output'
+                    && pin.allocator !== 0)
+                {
+                    await call(pin.allocator, ALLOCATOR.Decommit);
+                }
             }
         }
         return answer;
@@ -1034,7 +1202,7 @@ export function createFilterBase(host){
             interfaces: [
                 describe(IID_IPIN, IPIN_SLOTS, pinMethods),
                 qualityControl,
-                ...spec.direction === 'input'
+                ...spec.direction === 'input' && !spec.pull
                     ? [describe(IID_IMEM_INPUT_PIN, IMEM_INPUT_PIN_SLOTS, memInputMethods)] : [],
                 ...spec.interfaces ?? [],
             ],
@@ -1104,6 +1272,8 @@ export function createFilterBase(host){
     return {
         defineFilter, makePin, mediaType, readMediaType, writeMediaType, createMediaType,
         deleteMediaType, call, queryInterface, addRef, release, guidAt, qualityControl,
-        changeState, STATE_STOPPED, STATE_PAUSED, STATE_RUNNING,
+        changeState, STATE_STOPPED, STATE_PAUSED, STATE_RUNNING, callStreaming, deliver,
+        dropConnection,
+        deliverEndOfStream, deliverNewSegment, deliverFlush,
     };
 }

@@ -93,6 +93,10 @@ sequenceDiagram
   IUnknown, which counts the object alone, and every other interface it hands out answers
   QueryInterface, AddRef and Release through the controlling unknown, as COM's aggregation
   rules have it. Any other class answers CLASS_E_NOAGGREGATION.
+  quartz's own filters (File Source, the WAVE Parser, the AVI Splitter, the renderers) are one
+  base, `quartz/filter.js`: pins, media type negotiation, allocators. A filter pushes its
+  samples downstream from the graph's streaming thread - the same guest thread that feeds a
+  renderer the program wrote - so a call into a peer never runs on the thread that started it.
 - **Callbacks:** a window procedure, a COM callback, `DllMain`. The bridge stops the thread, builds a
   frame on the program's stack and runs the program's code until it returns into a sentinel trap.
   Where Windows calls the program inside an `__except` of its own (`DllMain` in the loader, a COM

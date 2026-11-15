@@ -100,7 +100,7 @@ const STEPS_PER_TICK = 16;
  * @property {(object: ComObject, iid: string) => number} publish
  * @property {(pointer: number) => any} objectAt
  * @property {{ deliver: (entry: number, args: number[], done?: () => void, tag?: any) => void,
- *              drop: (tag: any) => { done?: () => void }[] }} notices
+ *              drop: (tag: any) => { done?: (answer: number) => void }[] }} notices
  *           The thread calls owed to the program's objects are made on; `drop`
  *           takes back the queued ones of a source that is going.
  */
@@ -633,9 +633,51 @@ export function createStreaming(host){
         later(filter, VTABLE.Release);
     };
 
+    /**
+     * Disconnects both ends of every connected pin of a filter, as a graph's
+     * RemoveFilter does: two filters connected hold each other through their
+     * pins, and a filter taken out of its graph with its connections left
+     * would keep its peer - and the file a source has open - for ever.
+     *
+     * @param {any} thread @param {number} filter
+     */
+    const disconnectPins = async(thread, filter)=>{
+        const slot = host.allocate(12);
+        host.writeMemory(slot, new Uint8Array(12));
+        if (failed(await call(thread, filter, VTABLE.FilterEnumPins, [slot])))
+        {
+            host.free(slot);
+            return;
+        }
+        // A filter that answered and handed out nothing has nothing to list.
+        const pins = host.readU32(slot);
+        if (pins === 0)
+        {
+            host.free(slot);
+            return;
+        }
+        while (await call(thread, pins, VTABLE.EnumNext, [1, slot + 4, 0]) === S_OK)
+        {
+            const pin = host.readU32(slot + 4);
+            host.writeMemory(slot + 8, new Uint8Array(4));
+            if (await call(thread, pin, VTABLE.PinConnectedTo, [slot + 8]) === S_OK
+                && host.readU32(slot + 8) !== 0)
+            {
+                const peer = host.readU32(slot + 8);
+                await call(thread, peer, VTABLE.PinDisconnect);
+                await call(thread, pin, VTABLE.PinDisconnect);
+                await call(thread, peer, VTABLE.Release);
+            }
+            await call(thread, pin, VTABLE.Release);
+        }
+        await call(thread, pins, VTABLE.Release);
+        host.free(slot);
+    };
+
     /** The same, on the calling thread. @param {number} filter */
     const remove = async filter=>{
         const thread = host.currentThread();
+        await disconnectPins(thread, filter);
         await call(thread, filter, VTABLE.FilterJoinGraph, [0, 0]);
         await call(thread, filter, VTABLE.Release);
         return S_OK;
@@ -687,6 +729,10 @@ export function createStreaming(host){
         if (source)
         {
             host.free(source.buffer);
+        }
+        for (const filter of filters)
+        {
+            await disconnectPins(thread, filter);
         }
         for (const filter of filters)
         {

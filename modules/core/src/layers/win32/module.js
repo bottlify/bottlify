@@ -1527,6 +1527,12 @@ export function createWin32Module(){
                     readU32: address=>memory.readU32(address),
                     readMemory,
                     writeMemory,
+                    // A filter's streaming - samples pushed downstream, the end of
+                    // a stream - is made from the graph's streaming thread.
+                    notices: {
+                        deliver: (entry, args, done, tag)=>
+                            streamNotices.deliver(entry, args, done, tag),
+                    },
                     readWideString: (address, maxLength)=>readWideString(address, maxLength),
                     allocate: bytes=>heap.allocate(bytes),
                     free: address=>heap.free(address),

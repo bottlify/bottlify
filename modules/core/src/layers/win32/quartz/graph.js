@@ -64,6 +64,7 @@ import { CLSID_ASYNC_READER, CLSID_MEMORY_ALLOCATOR, CLSID_SYSTEM_CLOCK } from '
 import { createFilterBase } from './filter.js';
 import { createFileSource } from './filesource.js';
 import { createRenderers } from './renderers.js';
+import { createParsers } from './splitters.js';
 
 /**
  * How far a name a program hands these is read: whole, as Windows reads it, up to
@@ -2152,7 +2153,8 @@ export function registerQuartzClasses(registry, host){
         const base = createFilterBase(host.filters);
         registry.registerClass(CLSID_ASYNC_READER, createFileSource(base, host.filters,
             host.filters.files));
-        for (const [clsid, define] of createRenderers(base, host.filters))
+        for (const [clsid, define] of [...createRenderers(base, host.filters),
+            ...createParsers(base, host.filters)])
         {
             registry.registerClass(clsid, define);
         }

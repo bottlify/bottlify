@@ -410,10 +410,14 @@ export const VTABLE = {
     FilterPause: 5,
     FilterRun: 6,
     FilterSetSyncSource: 8,
+    FilterEnumPins: 10,
     FilterJoinGraph: 13,
+    /** IEnumPins */
+    EnumNext: 3,
     /** IPin */
     PinReceiveConnection: 4,
     PinDisconnect: 5,
+    PinConnectedTo: 6,
     PinEndOfStream: 14,
     PinBeginFlush: 15,
     PinEndFlush: 16,
