@@ -52,7 +52,7 @@ import { encodeAnsi } from '../kernel32/locale.js';
 import { createRefusals } from '../common/refusal.js';
 
 /** The name this host answers to, and the only one it can resolve to itself. */
-const HOSTNAME = 'bottlify';
+export const HOSTNAME = 'bottlify';
 
 /**
  * The services of the services file Windows ships that a program may ask for

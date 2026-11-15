@@ -87,7 +87,7 @@ import {
     shellFolders,
 } from './advapi32/registry.js';
 import { createGdiFunctions } from './gdi32/functions.js';
-import { createWinsockFunctions } from './wsock32/functions.js';
+import { HOSTNAME, createWinsockFunctions } from './wsock32/functions.js';
 import { createLibcefFunctions } from './libcef/functions.js';
 import { createSteamStart } from './steamclient/steam-start.js';
 import { STEAM_PATH, announceSteamClient, createSteamclientFunctions, steamClientDll,
@@ -1567,6 +1567,22 @@ export function createWin32Module(){
                     },
                 },
             });
+            /**
+             * Sets a kernel event by its handle, for WSAEventSelect and an ICMP
+             * echo's: a stale or mistyped handle is the program's mistake, not
+             * a fault here.
+             *
+             * @param {number} handle
+             */
+            const signalEvent = handle=>{
+                try
+                {
+                    kernel.setEvent(kernel.handles.resolve(handle, 'event'));
+                }
+                catch (e){
+                    void e;
+                }
+            };
             const winsock = createWinsockFunctions({
                 readMemory,
                 // The WSA events are kernel32's events, and TransmitFile reads
@@ -1606,18 +1622,7 @@ export function createWin32Module(){
                 // ever runs once the machine is up and the queue exists.
                 /** @param {import('./user32/messages.js').PostedMessage} message */
                 post: message=>queue.post(message),
-                // Readiness as a kernel event, for WSAEventSelect. A stale or
-                // mistyped handle is the program's mistake, not a fault here.
-                /** @param {number} handle */
-                signalEvent: handle=>{
-                    try
-                    {
-                        kernel.setEvent(kernel.handles.resolve(handle, 'event'));
-                    }
-                    catch (e){
-                        void e;
-                    }
-                },
+                signalEvent,
             });
 
             // The host's half of a critical section: the queue behind a contended
@@ -3494,7 +3499,12 @@ export function createWin32Module(){
                         .handler([0x40, bytes]) >>> 0,
                     free: address=>void libraries['KERNEL32.dll'].LocalFree
                         .handler([address]),
-                    handles,
+                    handles, sockets: ()=>sockets.all(), hostName: ()=>HOSTNAME,
+                    setLastError: setError, divergence: config?.divergence, signalEvent,
+                    processId: ()=>processId,
+                    // NotifyAddrChange's handle, which a program may wait on.
+                    openEvent: (/** @type {string} */ name)=>kernel.handles.open('event',
+                        kernel.createEvent({ manualReset: true, signalled: false, name })),
                 }),
                 // TransmitFile is wsock32's and mswsock's, never ws2_32's.
                 'WS2_32.dll': Object.fromEntries(Object.entries(winsock.sockets)

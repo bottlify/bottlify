@@ -19,9 +19,21 @@
  * @property {(bytes: number) => number} [allocate]  Memory the caller frees
  *           with FreeMibTable (GetIfTable2's table); 0 when there is none.
  * @property {(address: number) => void} [free]
- * @property {{ open: (type: string, object: any) => number }} [handles]
- *           Where NotifyAddrChange's handle comes from.
+ * @property {{ open: (type: string, object: any) => number,
+ *     close?: (handle: number) => boolean }} [handles]
+ *           Where NotifyAddrChange's and IcmpCreateFile's handles come from.
+ * @property {() => any[]} [sockets]  The socket layer's sockets, which the
+ *           TCP and UDP tables list.
+ * @property {() => string} [hostName]
+ * @property {(code: number) => void} [setLastError]
+ * @property {(api: string, detail: string) => void} [divergence]
+ * @property {(handle: number) => void} [signalEvent]  An asynchronous echo's event.
+ * @property {() => number} [processId]  The owner the extended tables name.
+ * @property {(name: string) => number} [openEvent]  A kernel event, unset, by
+ *           its new handle: NotifyAddrChange's, which a program waits on.
  */
+
+import { createIphlpapiTables } from './tables.js';
 
 const NO_ERROR = 0;
 const ERROR_INVALID_PARAMETER = 87;
@@ -33,6 +45,8 @@ const ERROR_NOT_ENOUGH_MEMORY = 8;
 const ERROR_NOT_SUPPORTED = 50;
 const ERROR_NO_DATA = 232;
 const ERROR_IO_PENDING = 997;
+const STATUS_PENDING = 0x103;
+const STATUS_CANCELLED = 0xc0000120;
 const ERROR_NETWORK_UNREACHABLE = 1231;
 
 const AF_UNSPEC = 0;
@@ -478,9 +492,12 @@ export function createIphlpapiFunctions(host){
     };
 
     /** The overlapped structures NotifyAddrChange left pending, for CancelIPChangeNotify. */
-    const pendingChanges = new Set();
+    /** @type {Map<number, number>} */
+    const pendingChanges = new Map();
 
     return {
+        ...createIphlpapiTables(host, { interfaces, luidOf, interfaceRow, ifRow2, guidBytes }),
+
         /**
          * DWORD GetIfEntry(PMIB_IFROW pIfRow)
          *
@@ -670,37 +687,6 @@ export function createIphlpapiFunctions(host){
         },
 
         /**
-         * DWORD GetExtendedTcpTable(PVOID pTcpTable, PDWORD pdwSize, BOOL bOrder,
-         *   ULONG ulAf, TCP_TABLE_CLASS TableClass, ULONG Reserved)
-         *
-         * The table's count and no rows: the connections are the socket
-         * layer's, which this library does not see, so none is listed. The
-         * header is a DWORD, eight bytes for the module classes whose rows
-         * hold a 64-bit time.
-         */
-        GetExtendedTcpTable: {
-            argBytes: 24,
-            /** @param {number[]} args */
-            handler: ([table, size, , family, tableClass])=>{
-                const classOf = tableClass >>> 0;
-                if ((size >>> 0) === 0 || classOf > 8
-                    || ((family >>> 0) !== AF_INET && (family >>> 0) !== AF_INET6))
-                {
-                    return ERROR_INVALID_PARAMETER;
-                }
-                const header = classOf >= 6 ? 8 : 4;
-                if ((table >>> 0) === 0 || readU32(size >>> 0) < header)
-                {
-                    writeU32(size >>> 0, header);
-                    return ERROR_INSUFFICIENT_BUFFER;
-                }
-                host.writeMemory(table >>> 0, new Uint8Array(header));
-                writeU32(size >>> 0, header);
-                return NO_ERROR;
-            },
-        },
-
-        /**
          * NETIOAPI_API GetIfEntry2(PMIB_IF_ROW2 Row)
          *
          * The row of the interface the caller named: by InterfaceLuid when
@@ -849,11 +835,17 @@ export function createIphlpapiFunctions(host){
                 {
                     return new Promise(()=>{});
                 }
+                // A change would set it; none ever comes.
+                const opened = host.openEvent?.('ip-change') ?? 0;
                 if ((handle >>> 0) !== 0)
                 {
-                    writeU32(handle >>> 0, host.handles?.open('ip-change', {}) ?? 0);
+                    writeU32(handle >>> 0, opened);
                 }
-                pendingChanges.add(overlapped >>> 0);
+                pendingChanges.set(overlapped >>> 0, opened);
+                // Pending as an overlapped call is: STATUS_PENDING in Internal,
+                // which GetOverlappedResult reads as ERROR_IO_INCOMPLETE.
+                writeU32(overlapped >>> 0, STATUS_PENDING);
+                host.setLastError?.(ERROR_IO_PENDING);
                 return ERROR_IO_PENDING;
             },
         },
@@ -861,13 +853,35 @@ export function createIphlpapiFunctions(host){
         /**
          * BOOL CancelIPChangeNotify(LPOVERLAPPED notifyOverlapped)
          *
-         * TRUE for a request NotifyAddrChange left pending, which is
-         * forgotten; FALSE for any other.
+         * TRUE for a request NotifyAddrChange left pending, which completes
+         * as cancelled - STATUS_CANCELLED in its OVERLAPPED, its event and
+         * its handle set - so GetOverlappedResult answers
+         * ERROR_OPERATION_ABORTED; FALSE for any other.
          */
         CancelIPChangeNotify: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([overlapped])=>(pendingChanges.delete(overlapped >>> 0) ? 1 : 0),
+            handler: ([overlapped])=>{
+                const at = overlapped >>> 0;
+                const handle = pendingChanges.get(at);
+                if (handle === undefined)
+                {
+                    return 0;
+                }
+                pendingChanges.delete(at);
+                writeU32(at, STATUS_CANCELLED);
+                writeU32(at + 4, 0);
+                const event = readU32(at + 16);
+                if (event !== 0)
+                {
+                    host.signalEvent?.(event);
+                }
+                if (handle !== 0)
+                {
+                    host.signalEvent?.(handle);
+                }
+                return 1;
+            },
         },
 
         /**
