@@ -245,6 +245,17 @@ dearest first (the last arm): vcall-32 4.41, str-32 2.55, switch-32 2.21
 
 From `run-count.mjs --bits 32 str switch vcall under qemu 8.2.2 with tools/lib/qemu-count.c, node 26.13.1, one tree (cork 657107ac, 2026-11-15) as both arms of one run. Two runs started together agree to the instruction; separate runs of a tree agree to a few hundredths of a per cent on these and differ by a few per cent on load (V8's optimising compiles land when the machine has them done)`. Each cell is the instructions an iteration of the counted ones took, the whole process but V8's optimising compiles; the square bracket is that count over the guest's own instructions in the iteration - a processor running the image takes 1 - and the round bracket the arm's count against the first. A tree counts the same in every run, so a ratio off 1.0000 is the change's - except on a workload that keeps translating (load), which varies by a few per cent between separate runs: read it over several. The geomean is over the workloads shown; the last line orders them by a guest instruction's cost, the dearest first.
 
+### What does one of a program's own instructions cost once its code has settled, with the whole app around it and the machine's time taken out, arm against arm?
+
+[`translator/pe-count.mjs`](translator/pe-count.mjs): `node tools/translator/pe-count.mjs --qemu DIR [--root DIR]... [--variant x87|sse|x64] [--from MILLIONS] [--to MILLIONS] [--cork JSON] workload...`
+
+```
+machine instructions a guest instruction between 150 and 250 million of the guest's (in V8's code, then the whole process but V8's optimising compiles), arms: <657107ac>, <657107ac>
+  entities-sse     7.2629 7.3135 [115 regions, 0 formed again, 0 callees]  7.2629 7.3135 (1.0000) [115 regions, 0 formed again, 0 callees]
+```
+
+From `pe-count.mjs --variant sse --from 150 --to 250 entities under qemu 8.2.2 with tools/lib/qemu-count.c, node 26.13.1, one tree (cork 657107ac, 2026-11-15) as both arms. An early window, taken for the sample's length: no callee is formed in yet. The settled windows of that tree: entities-sse 2800-2900 million 4.2225 4.2459 (5 formed again, 24 callees), spread-x87 1200-1300 million 4.1643 4.1926, each twice the same to the last digit`. Each arm's first figure is machine instructions in V8's code (the translated code, cork's runtime, the app) over the guest instructions of the window, the second the whole process but V8's optimising compiles, the round bracket that against the first arm; a processor running the program takes 1. The square bracket says where the translator was at the second mark: its regions, how many it formed again with callees, the most callees one call has formed in - a window with regions still being formed again is not settled. Both marks are in one run and the run is on a closed clock (tools/lib/closed-clock.mjs), so one tree gives the same figures every time; the counts taken before this tool as the difference of two runs on the machine's clock differed by a tenth on one tree.
+
 ### How much resident memory does a translated module cost past its bytes, compiled lazily, by the baseline compiler or by the optimising one?
 
 [`translator/module-memory.mjs`](translator/module-memory.mjs): `node --expose-gc [--no-wasm-lazy-compilation --no-wasm-tier-up | --no-wasm-lazy-compilation --no-liftoff] tools/translator/module-memory.mjs [--regions N]`
@@ -436,6 +447,7 @@ From `arg-bytes-audit.mjs dbg/wine-specs`. Every stdcall entry of the win32 laye
 ### `lib/`
 
 - [`lib/common.mjs`](lib/common.mjs) - isMain, options, a median, where bundles lie (BOTTLIFY_BUNDLES)
+- [`lib/closed-clock.mjs`](lib/closed-clock.mjs) - the machine's time taken out of a counted run: the clock and the timers moved by what the program does
 - [`lib/qemu-count.mjs`](lib/qemu-count.mjs) - node under qemu-x86_64 with the counting plugin: marks, totals by kind of code, the plugin built
 - [`lib/btl.mjs`](lib/btl.mjs) - The tools' path to core's bundle reader and writer
 - [`lib/relay-option.mjs`](lib/relay-option.mjs) - --network and --roots for the runners

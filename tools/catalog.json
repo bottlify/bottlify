@@ -251,6 +251,18 @@
    "kind": "instrument"
   },
   {
+   "path": "tools/translator/pe-count.mjs",
+   "category": "translator",
+   "browser": false,
+   "question": "What does one of a program's own instructions cost once its code has settled, with the whole app around it and the machine's time taken out, arm against arm?",
+   "command": "node tools/translator/pe-count.mjs --qemu DIR [--root DIR]... [--variant x87|sse|x64] [--from MILLIONS] [--to MILLIONS] [--cork JSON] workload...",
+   "tests": [],
+   "sample": "machine instructions a guest instruction between 150 and 250 million of the guest's (in V8's code, then the whole process but V8's optimising compiles), arms: <657107ac>, <657107ac>\n  entities-sse     7.2629 7.3135 [115 regions, 0 formed again, 0 callees]  7.2629 7.3135 (1.0000) [115 regions, 0 formed again, 0 callees]",
+   "source": "pe-count.mjs --variant sse --from 150 --to 250 entities under qemu 8.2.2 with tools/lib/qemu-count.c, node 26.13.1, one tree (cork 657107ac, 2026-11-15) as both arms. An early window, taken for the sample's length: no callee is formed in yet. The settled windows of that tree: entities-sse 2800-2900 million 4.2225 4.2459 (5 formed again, 24 callees), spread-x87 1200-1300 million 4.1643 4.1926, each twice the same to the last digit",
+   "read": "Each arm's first figure is machine instructions in V8's code (the translated code, cork's runtime, the app) over the guest instructions of the window, the second the whole process but V8's optimising compiles, the round bracket that against the first arm; a processor running the program takes 1. The square bracket says where the translator was at the second mark: its regions, how many it formed again with callees, the most callees one call has formed in - a window with regions still being formed again is not settled. Both marks are in one run and the run is on a closed clock (tools/lib/closed-clock.mjs), so one tree gives the same figures every time; the counts taken before this tool as the difference of two runs on the machine's clock differed by a tenth on one tree.",
+   "kind": "instrument"
+  },
+  {
    "path": "tools/translator/module-memory.mjs",
    "category": "translator",
    "browser": false,
@@ -795,6 +807,15 @@
    "kind": "library",
    "browser": false,
    "question": "isMain, options, a median, where bundles lie (BOTTLIFY_BUNDLES)",
+   "command": "",
+   "tests": []
+  },
+  {
+   "path": "tools/lib/closed-clock.mjs",
+   "category": "lib",
+   "kind": "library",
+   "browser": false,
+   "question": "the machine's time taken out of a counted run: the clock and the timers moved by what the program does",
    "command": "",
    "tests": []
   },
