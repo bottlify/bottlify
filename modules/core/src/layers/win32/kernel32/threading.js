@@ -10,6 +10,8 @@ import { TAKEN } from './named-objects.js';
 import { askChild, childThread, threadEnd } from './cross-process.js';
 import { MODIFY_STATE, SYNCHRONIZE, allows, grantedAccess } from './access.js';
 import { STATUS, toDosError } from '../ntdll/status.js';
+import { FILETIME_EPOCH_MS, dueInMs, readLargeInteger } from './due-time.js';
+import { createSyncNatives } from './sync-natives.js';
 import { overlappedLayout } from '../common/overlapped.js';
 import { EVENT_SLOTS, EVENT_WORD_SLOTS, MUTEX_SLOTS, SEMAPHORE_SLOTS, eventStateCode,
     releaseMutexCode, waitOneCode } from './wait-one.js';
@@ -45,8 +47,6 @@ const WAIT_FAILED = 0xffffffff;
 const WAIT_TIMEOUT = 0x102;
 /** The object was signalled: the first of a set, or the one. */
 const WAIT_OBJECT_0 = 0;
-/** Milliseconds from the FILETIME epoch (1601) to the Unix one, for an absolute due time. */
-const FILETIME_EPOCH_MS = 11644473600000;
 
 /** The pseudo-handle for the running process; -1 on every Windows. */
 const CURRENT_PROCESS = 0xffffffff;
@@ -126,6 +126,8 @@ const DUPLICATE_CLOSE_SOURCE = 0x00000001;
  *           Keeps the SECURITY_ATTRIBUTES' descriptor a freshly created sync
  *           object was given, so GetKernelObjectSecurity hands it back.
  * @property {ReturnType<typeof import('./named-objects.js').createNamedObjects>} namedObjects
+ * @property {(handle: number, object: any) => void} [closed]  told of each handle
+ *     CloseHandle closes and what it named
  *           The one table every named sync object and file mapping shares --
  *           constructed once outside this process so a name a parent gave an
  *           object still finds it after a replacement rebuilds this layer.
@@ -665,116 +667,157 @@ export function createThreadingFunctions(host){
         inheritIf(namedOpen('timer', nameOf(namePointer, wide), access), inherit !== 0));
 
     /**
-     * The security descriptor a SECURITY_ATTRIBUTES points at, or 0: its
-     * lpSecurityDescriptor, the second of its three fields. Recorded as a
-     * fresh object's security, so a label set at creation is handed back;
-     * an object opened by an existing name keeps the security it was made
-     * with, as Windows ignores the attributes on an open.
+     * A fresh object's security descriptor, by its address, recorded so a
+     * label set at creation is handed back; one found by its name keeps what
+     * it was made with.
      *
-     * @param {number} attributes @param {object} made @param {any} found
+     * @param {number} sd @param {object} made @param {any} found
      */
-    const keepSecurity = (attributes, made, found)=>{
-        if (found !== null || (attributes >>> 0) === 0)
-        {
-            return;
-        }
-        const field = host.readMemory((attributes >>> 0) + 4, 4);
-        const sd = (field[0] | field[1] << 8 | field[2] << 16 | field[3] << 24) >>> 0;
-        if (sd !== 0)
+    const keepDescriptor = (sd, made, found)=>{
+        if (found === null && sd !== 0)
         {
             host.recordObjectSecurity?.(made, sd);
         }
     };
 
-    const createMutex = bothNamedForms(12, ([security, initialOwner, namePointer], wide)=>{
-        const name = nameOf(namePointer, wide);
-        const found = existing(name, 'mutex');
-        if (found === TAKEN)
-        {
-            host.setLastError(ERROR_INVALID_HANDLE);
-            return 0;
-        }
-        const mutex = found ?? kernel.createMutex({ name: name ?? 'mutex' });
-        if (initialOwner && found === null)
-        {
-            kernel.wait(mutex, host.currentThread());
-        }
-        keepSecurity(security, mutex, found);
-        remember(name, 'mutex', mutex, found !== null);
-        const handle = inheritIf(kernel.handles.open('mutex', mutex), inherits(security));
-        if (name === null)
-        {
-            mutex.name = `#${handle.toString(16)}`;
-        }
-        return handle;
-    });
-
-    const createEvent = bothNamedForms(16, ([security, manual, initial, namePointer], wide)=>{
-        const name = nameOf(namePointer, wide);
-        const found = existing(name, 'event');
-        if (found === TAKEN)
-        {
-            host.setLastError(ERROR_INVALID_HANDLE);
-            return 0;
-        }
-        const event = found ?? kernel.createEvent({
-            manualReset: Boolean(manual),
-            signalled: Boolean(initial),
-            name: name ?? 'event',
-        });
-        keepSecurity(security, event, found);
-        remember(name, 'event', event, found !== null);
-        const handle = inheritIf(kernel.handles.open('event', event), inherits(security));
-        // An unnamed object is most of them, and "event" tells a reader
-        // nothing when three threads are blocked on three of them. The handle
-        // is what the trace shows at every other call, so it is what ties a
-        // blocked thread to the code that made the object.
-        if (name === null)
-        {
-            event.name = `#${handle.toString(16)}`;
-        }
-        return handle;
-    });
-
     /**
-     * The counts are signed and both are checked, because the failure they
-     * guard against is silent: a maximum of zero or an initial count above it
-     * makes every later wait behave in a way the caller cannot explain. They
-     * are only checked on a fresh create -- the documented contract is that
-     * they are ignored, like a mutex's initial owner, when the name already
-     * names one.
+     * The creates of the four kinds, each over a name already read: the Win32
+     * forms read it from the caller's string, the native ones from an
+     * OBJECT_ATTRIBUTES (`sync-natives.js`). Each answers the handle, or 0 with
+     * the last error said; a name that held one already is opened again, as
+     * Windows does, with ERROR_ALREADY_EXISTS.
      */
-    const createSemaphore = bothNamedForms(16, ([security, initial, maximum, namePointer], wide)=>{
-        const name = nameOf(namePointer, wide);
-        const found = existing(name, 'semaphore');
-        if (found === TAKEN)
-        {
-            host.setLastError(ERROR_INVALID_HANDLE);
-            return 0;
-        }
-        if (found === null)
-        {
-            const start = initial | 0;
-            const limit = maximum | 0;
-            if (limit <= 0 || start < 0 || start > limit)
+    const creates = {
+        /** @param {string | null} name @param {boolean} owned @param {number} sd @param {boolean} inherit */
+        mutex: (name, owned, sd, inherit)=>{
+            const found = existing(name, 'mutex');
+            if (found === TAKEN)
+            {
+                host.setLastError(ERROR_INVALID_HANDLE);
+                return 0;
+            }
+            const mutex = found ?? kernel.createMutex({ name: name ?? 'mutex' });
+            if (owned && found === null)
+            {
+                kernel.wait(mutex, host.currentThread());
+            }
+            keepDescriptor(sd, mutex, found);
+            remember(name, 'mutex', mutex, found !== null);
+            const handle = inheritIf(kernel.handles.open('mutex', mutex), inherit);
+            if (name === null)
+            {
+                mutex.name = `#${handle.toString(16)}`;
+            }
+            return handle;
+        },
+        /**
+         * @param {string | null} name @param {boolean} manual @param {boolean} initial
+         * @param {number} sd @param {boolean} inherit
+         */
+        event: (name, manual, initial, sd, inherit)=>{
+            const found = existing(name, 'event');
+            if (found === TAKEN)
+            {
+                host.setLastError(ERROR_INVALID_HANDLE);
+                return 0;
+            }
+            const event = found ?? kernel.createEvent({
+                manualReset: manual,
+                signalled: initial,
+                name: name ?? 'event',
+            });
+            keepDescriptor(sd, event, found);
+            remember(name, 'event', event, found !== null);
+            const handle = inheritIf(kernel.handles.open('event', event), inherit);
+            // An unnamed object is most of them, and "event" tells a reader
+            // nothing when three threads are blocked on three of them. The
+            // handle is what the trace shows at every other call, so it is
+            // what ties a blocked thread to the code that made the object.
+            if (name === null)
+            {
+                event.name = `#${handle.toString(16)}`;
+            }
+            return handle;
+        },
+        /**
+         * The counts are signed and both are checked, because the failure they
+         * guard against is silent: a maximum of zero or an initial count above
+         * it makes every later wait behave in a way the caller cannot explain.
+         * They are only checked on a fresh create -- the documented contract is
+         * that they are ignored, like a mutex's initial owner, when the name
+         * already names one.
+         *
+         * @param {string | null} name @param {number} initial @param {number} maximum
+         * @param {number} sd @param {boolean} inherit
+         */
+        semaphore: (name, initial, maximum, sd, inherit)=>{
+            const found = existing(name, 'semaphore');
+            if (found === TAKEN)
+            {
+                host.setLastError(ERROR_INVALID_HANDLE);
+                return 0;
+            }
+            if (found === null && (maximum <= 0 || initial < 0 || initial > maximum))
             {
                 host.setLastError(ERROR_INVALID_PARAMETER);
                 return 0;
             }
-        }
-        const semaphore = found ?? kernel.createSemaphore({
-            initial: initial | 0, maximum: maximum | 0, name: name ?? 'semaphore',
-        });
-        keepSecurity(security, semaphore, found);
-        remember(name, 'semaphore', semaphore, found !== null);
-        const handle = inheritIf(kernel.handles.open('semaphore', semaphore),
-            inherits(security));
-        if (name === null)
-        {
-            semaphore.name = `#${handle.toString(16)}`;
-        }
-        return handle;
-    });
+            const semaphore = found ?? kernel.createSemaphore({
+                initial, maximum, name: name ?? 'semaphore',
+            });
+            keepDescriptor(sd, semaphore, found);
+            remember(name, 'semaphore', semaphore, found !== null);
+            const handle = inheritIf(kernel.handles.open('semaphore', semaphore), inherit);
+            if (name === null)
+            {
+                semaphore.name = `#${handle.toString(16)}`;
+            }
+            return handle;
+        },
+        /** @param {string | null} name @param {boolean} manual @param {number} sd @param {boolean} inherit */
+        timer: (name, manual, sd, inherit)=>{
+            const found = existing(name, 'timer');
+            if (found === TAKEN)
+            {
+                host.setLastError(ERROR_INVALID_HANDLE);
+                return 0;
+            }
+            const timer = found ?? kernel.createTimer({
+                manualReset: manual,
+                name: name ?? 'timer',
+            });
+            keepDescriptor(sd, timer, found);
+            remember(name, 'timer', timer, found !== null);
+            const handle = inheritIf(kernel.handles.open('timer', timer), inherit);
+            if (name === null)
+            {
+                timer.name = `#${handle.toString(16)}`;
+            }
+            return handle;
+        },
+    };
+    /**
+     * A SECURITY_ATTRIBUTES' lpSecurityDescriptor, the second of its three
+     * fields, or 0: recorded as a fresh object's security, so a label set at
+     * creation is handed back; an object opened by an existing name keeps the
+     * security it was made with, as Windows ignores the attributes on an open.
+     *
+     * @param {number} attributes  SECURITY_ATTRIBUTES, or 0
+     */
+    const descriptorOf = attributes=>((attributes >>> 0) === 0 ? 0
+        : readU32(host.readMemory((attributes >>> 0) + 4, 4), 0));
+
+    const createMutex = bothNamedForms(12, ([security, initialOwner, namePointer], wide)=>
+        creates.mutex(nameOf(namePointer, wide), Boolean(initialOwner), descriptorOf(security),
+            inherits(security)));
+
+    const createEvent = bothNamedForms(16, ([security, manual, initial, namePointer], wide)=>
+        creates.event(nameOf(namePointer, wide), Boolean(manual), Boolean(initial),
+            descriptorOf(security), inherits(security)));
+
+    const createSemaphore = bothNamedForms(16, ([security, initial, maximum, namePointer], wide)=>
+        creates.semaphore(nameOf(namePointer, wide), initial | 0, maximum | 0,
+            descriptorOf(security), inherits(security)));
 
     // The Ex forms: what the plain ones take as BOOLs arrives as flags, and an
     // access mask follows that nothing here checks, since every handle here
@@ -789,26 +832,9 @@ export function createThreadingFunctions(host){
         (wide ? createSemaphore.wide : createSemaphore.ansi).handler(
             [security, initial, maximum, namePointer]));
 
-    const createWaitableTimer = bothNamedForms(12, ([security, manualReset, namePointer], wide)=>{
-        const name = nameOf(namePointer, wide);
-        const found = existing(name, 'timer');
-        if (found === TAKEN)
-        {
-            host.setLastError(ERROR_INVALID_HANDLE);
-            return 0;
-        }
-        const timer = found ?? kernel.createTimer({
-            manualReset: Boolean(manualReset),
-            name: name ?? 'timer',
-        });
-        remember(name, 'timer', timer, found !== null);
-        const handle = inheritIf(kernel.handles.open('timer', timer), inherits(security));
-        if (name === null)
-        {
-            timer.name = `#${handle.toString(16)}`;
-        }
-        return handle;
-    });
+    const createWaitableTimer = bothNamedForms(12, ([security, manualReset, namePointer], wide)=>
+        creates.timer(nameOf(namePointer, wide), Boolean(manualReset), descriptorOf(security),
+            inherits(security)));
 
     /**
      * The Ex form: the manual-reset BOOL arrives as a flag, beside the
@@ -1709,15 +1735,8 @@ export function createThreadingFunctions(host){
                     host.setLastError(ERROR_INVALID_HANDLE);
                     return 0;
                 }
-                // A negative due time is relative, in hundreds of nanoseconds;
-                // a positive one is an absolute FILETIME.
-                const bytes = host.readMemory(dueTime >>> 0, 8);
-                const raw = new DataView(bytes.buffer, bytes.byteOffset, 8).getBigInt64(0, true);
-                const now = kernel.clock.virtualTime();
-                const due = raw < 0n
-                    ? now + Number(-raw) / 10000
-                    : now + Math.max(0,
-                        Number(raw / 10000n) - FILETIME_EPOCH_MS - kernel.clock.wallClock());
+                const due = kernel.clock.virtualTime() + dueInMs(
+                    readLargeInteger(host.readMemory, dueTime), kernel.clock.wallClock());
                 // A completion routine is queued to the thread that set the
                 // timer, once per expiry, with the time it expired as a
                 // FILETIME; it runs when that thread next waits alertably.
@@ -2048,6 +2067,9 @@ export function createThreadingFunctions(host){
                     const closed = kernel.handles.close(handle >>> 0);
                     // A no-op on anything that was never named.
                     host.namedObjects.forget(closed);
+                    // A completion port's waiters, and a file's association
+                    // with one, go with its handle (`iocp.js`).
+                    host.closed?.(handle >>> 0, closed);
                     return 1;
                 }
                 catch (e){
@@ -2103,8 +2125,18 @@ export function createThreadingFunctions(host){
         return asked;
     };
 
+    // The native calls over the same objects, which ntdll publishes: they ride
+    // on CreateEventW's entry, whose state they share (`sync-natives.js`).
+    const natives = createSyncNatives({
+        readMemory: host.readMemory, writeMemory: host.writeMemory, kernel, creates,
+        existing, reference: found=>host.namedObjects.reference(found), object,
+        currentThread: host.currentThread, park: host.park, queueApc: host.queueApc,
+        divergence: host.divergence,
+    });
+
     return {
         ...table,
+        CreateEventW: { ...table.CreateEventW, natives },
         CreateRemoteThread: {
             argBytes: 28,
             /** @param {number[]} args */

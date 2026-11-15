@@ -46,8 +46,13 @@ import {
     IMEDIA_CONTROL_SLOTS, IMEDIA_EVENT_EX_SLOTS, IMEDIA_EVENT_SLOTS, IMEDIA_POSITION_SLOTS,
     IMEDIA_SEEKING_SLOTS, IVIDEO_WINDOW_SLOTS, IID_IMEDIA_EVENT_SINK, IMEDIA_EVENT_SINK_SLOTS,
     IID_IBASE_FILTER, VTABLE,
+    IID_IFILTER_GRAPH2, IFILTER_GRAPH2_SLOTS, IID_IBASIC_VIDEO2, IBASIC_VIDEO2_SLOTS,
+    IID_IFILTER_MAPPER3, IFILTER_MAPPER3_SLOTS, IID_IGRAPH_CONFIG, IGRAPH_CONFIG_SLOTS,
+    IID_IGRAPH_VERSION, IGRAPH_VERSION_SLOTS, IID_IMEDIA_FILTER, IMEDIA_FILTER_SLOTS,
+    IID_IOBJECT_WITH_SITE, IOBJECT_WITH_SITE_SLOTS, IID_IVIDEO_FRAME_STEP, IVIDEO_FRAME_STEP_SLOTS,
 } from './interfaces.js';
 import { describe } from './describe.js';
+import { parseGuid } from '../ole32/guid.js';
 import { createStreaming } from './stream.js';
 
 /**
@@ -201,6 +206,9 @@ const AUDIO_PROPERTIES = ['Volume', 'Balance'];
  *           a pause or a decode that could not keep up cost. Null until the
  *           first tick after Run, so that Run needs no clock of its own.
  * @property {boolean} finished        Whether EC_COMPLETE has been raised.
+ * @property {number} version   IGraphVersion's: one more each time a filter joins or leaves.
+ * @property {number} syncSource  The reference clock IMediaFilter was given, one reference held.
+ * @property {number} site        The site IObjectWithSite was given, one reference held.
  * @property {number[]} filters
  *           Filters the program added itself, one reference held on each: a
  *           renderer it wrote, which the graph starts and stops with itself.
@@ -306,6 +314,9 @@ function newGraphState(){
         finished: false,
         filters: [],
         source: null,
+        version: 0,
+        syncSource: 0,
+        site: 0,
     };
 }
 
@@ -984,6 +995,7 @@ export function createQuartz(host){
                     if ((result | 0) >= 0)
                     {
                         graph.filters.push(filter >>> 0);
+                        graph.version++;
                     }
                     return result;
                 });
@@ -997,6 +1009,7 @@ export function createQuartz(host){
                 return VFW_E_NOT_FOUND;
             }
             graph.filters.splice(at, 1);
+            graph.version++;
             return streaming.remove(filter);
         },
 
@@ -1440,6 +1453,137 @@ export function createQuartz(host){
         },
     };
 
+    /**
+     * A method of an object the program gave the graph - a clock, a site -
+     * called through its own vtable, as the graph calls one.
+     *
+     * @param {number} self @param {number} slot @param {number[]} [args]
+     */
+    const callObject = async(self, slot, args = [])=>{
+        const stream = host.stream;
+        if (!stream || (self >>> 0) === 0)
+        {
+            return E_NOTIMPL;
+        }
+        const entry = stream.readU32(stream.readU32(self >>> 0) + slot * 4);
+        return (await stream.callGuest(entry, [self >>> 0, ...args], stream.currentThread())) >>> 0;
+    };
+    /** IUnknown's slots, as callObject numbers them. */
+    const QUERY_INTERFACE = 0;
+    const ADD_REF = 1;
+    const RELEASE = 2;
+    /** VFW_E_FRAME_STEP_UNSUPPORTED: no renderer in the graph steps a frame at a time. */
+    const VFW_E_FRAME_STEP_UNSUPPORTED = 0x8004028e;
+    const E_FAIL = 0x80004005;
+
+    /**
+     * IMediaFilter on the graph: the graph's own state, as IMediaControl
+     * drives it, its class as IPersist says, and the reference clock it runs
+     * on, a reference held on the clock it is given.
+     *
+     * @type {Record<string, (graph: FilterGraphState, args: number[], self: any) => any>}
+     */
+    const mediaFilter = {
+        GetClassID: (graph, [out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return E_POINTER;
+            }
+            host.writeMemory(out >>> 0, /** @type {Uint8Array} */ (parseGuid(CLSID_FILTER_GRAPH)));
+            return S_OK;
+        },
+        Stop: (graph, args)=>mediaControl.Stop(graph, args),
+        Pause: (graph, args)=>mediaControl.Pause(graph, args),
+        Run: (graph, args)=>mediaControl.Run(graph, args),
+        GetState: (graph, [timeout, out])=>((out >>> 0) === 0 ? E_POINTER
+            : mediaControl.GetState(graph, [timeout, out])),
+        SetSyncSource: async(graph, [clock])=>{
+            if ((clock >>> 0) !== 0)
+            {
+                await callObject(clock, ADD_REF);
+            }
+            const before = graph.syncSource;
+            graph.syncSource = clock >>> 0;
+            if (before)
+            {
+                await callObject(before, RELEASE);
+            }
+            return S_OK;
+        },
+        GetSyncSource: async(graph, [out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return E_POINTER;
+            }
+            writeLong(out, graph.syncSource);
+            if (graph.syncSource)
+            {
+                await callObject(graph.syncSource, ADD_REF);
+            }
+            return graph.syncSource ? S_OK : S_FALSE;
+        },
+    };
+
+    /** IGraphVersion: how many times a filter has joined or left. */
+    const graphVersion = {
+        /** @param {FilterGraphState} graph @param {number[]} args */
+        QueryVersion: (graph, [out])=>((out >>> 0) === 0 ? E_POINTER
+            : writeLong(out, graph.version)),
+    };
+
+    /** IObjectWithSite: the site is the program's object, asked through its own QueryInterface. */
+    const objectWithSite = {
+        /** @param {FilterGraphState} graph @param {number[]} args */
+        SetSite: async(graph, [site])=>{
+            if ((site >>> 0) !== 0)
+            {
+                await callObject(site, ADD_REF);
+            }
+            const before = graph.site;
+            graph.site = site >>> 0;
+            if (before)
+            {
+                await callObject(before, RELEASE);
+            }
+            return S_OK;
+        },
+        /** @param {FilterGraphState} graph @param {number[]} args */
+        GetSite: (graph, [iid, out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return E_POINTER;
+            }
+            if (!graph.site)
+            {
+                writeLong(out, 0);
+                return E_FAIL;
+            }
+            return callObject(graph.site, QUERY_INTERFACE, [iid >>> 0, out >>> 0]);
+        },
+    };
+
+    /** IVideoFrameStep: the graph renders through no filter that steps a frame at a time. */
+    const frameStep = {
+        Step: ()=>VFW_E_FRAME_STEP_UNSUPPORTED,
+        CanStep: ()=>S_FALSE,
+        CancelStep: ()=>S_OK,
+    };
+
+    /** IBasicVideo2's one addition: the picture's own aspect, its size. */
+    const basicVideo2 = {
+        ...basicVideo,
+        /** @param {FilterGraphState} graph @param {number[]} args */
+        GetPreferredAspectRatio: (graph, [x, y])=>{
+            if ((x >>> 0) === 0 || (y >>> 0) === 0)
+            {
+                return E_POINTER;
+            }
+            writeLong(x, graph.video.width);
+            writeLong(y, graph.video.height);
+            return S_OK;
+        },
+    };
+
     /** @returns {import('../ole32/objects.js').ComClassDefinition} */
     const filterGraph = ()=>{
         const state = newGraphState();
@@ -1501,6 +1645,18 @@ export function createQuartz(host){
                 describe(IID_IMEDIA_POSITION, IMEDIA_POSITION_SLOTS, mediaPosition),
                 describe(IID_IMEDIA_SEEKING, IMEDIA_SEEKING_SLOTS, mediaSeeking),
                 describe(IID_IMEDIA_EVENT_SINK, IMEDIA_EVENT_SINK_SLOTS, eventSink),
+                // The graph is also the system's filter mapper, as quartz's is,
+                // and answers for the faces Windows' graph has.
+                describe(IID_IFILTER_GRAPH2, IFILTER_GRAPH2_SLOTS, graphBuilder),
+                describe(IID_IBASIC_VIDEO2, IBASIC_VIDEO2_SLOTS, basicVideo2),
+                describe(IID_IFILTER_MAPPER, IFILTER_MAPPER_SLOTS, firstMapper),
+                describe(IID_IFILTER_MAPPER2, IFILTER_MAPPER2_SLOTS, filterMapper),
+                describe(IID_IFILTER_MAPPER3, IFILTER_MAPPER3_SLOTS, filterMapper),
+                describe(IID_IGRAPH_CONFIG, IGRAPH_CONFIG_SLOTS, {}),
+                describe(IID_IGRAPH_VERSION, IGRAPH_VERSION_SLOTS, graphVersion),
+                describe(IID_IMEDIA_FILTER, IMEDIA_FILTER_SLOTS, mediaFilter),
+                describe(IID_IOBJECT_WITH_SITE, IOBJECT_WITH_SITE_SLOTS, objectWithSite),
+                describe(IID_IVIDEO_FRAME_STEP, IVIDEO_FRAME_STEP_SLOTS, frameStep),
             ],
         };
     };

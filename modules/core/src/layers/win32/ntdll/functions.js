@@ -41,6 +41,9 @@ import { POOL_ENTRIES, createPoolFunctions } from './pool.js';
 import { createStringOperations } from './string-ops.js';
 import { createNtdllCrt } from './crt.js';
 import { createRandomFunctions } from './random.js';
+import { createChecksumFunctions } from './checksum.js';
+import { createHandleTableFunctions } from './handle-table.js';
+import { createSecurityFunctions } from './security.js';
 import { MEMORY_ENTRIES, createMemoryFunctions } from './memory.js';
 import { createDebugFunctions } from './debug.js';
 import { createProcessFunctions } from './process.js';
@@ -465,6 +468,9 @@ export function createNtdllFunctions(host){
         ...host.advapi32?.[TOKEN_NATIVES] ?? {},
         // advapi32's is ntdll's on Windows (advapi32.spec forwards it).
         ...host.advapi32?.IsTextUnicode ? { RtlIsTextUnicode: host.advapi32.IsTextUnicode } : {},
+        // The SID, ACL and descriptor calls are advapi32's (`security.js`).
+        ...createSecurityFunctions({ advapi32: host.advapi32 ?? {}, readMemory: host.readMemory,
+            writeMemory: host.writeMemory, teb: host.teb }),
         ...alias(crt, Object.fromEntries(CRT_EXPORTS.map(name=>[name, name]))),
         // Where ntdll's own runtime answers otherwise than msvcrt (`crt.js`).
         ...createNtdllCrt({ readMemory: host.readMemory, writeMemory: host.writeMemory }),
@@ -489,6 +495,9 @@ export function createNtdllFunctions(host){
         ...createImageFunctions({ readMemory: host.readMemory, writeMemory: host.writeMemory }),
 
         ...createRandomFunctions({ readMemory: host.readMemory, writeMemory: host.writeMemory }),
+        ...createChecksumFunctions({ readMemory: host.readMemory }),
+        ...createHandleTableFunctions({ readMemory: host.readMemory,
+            writeMemory: host.writeMemory, allocate, free }),
 
         ...createAtomTableFunctions({ readMemory: host.readMemory, writeMemory: host.writeMemory,
             readWideString: host.readWideString, allocate, free }),

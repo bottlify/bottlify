@@ -1221,6 +1221,7 @@ export function createWin32Module(){
             const ports = createIoCompletionPorts({
                 pointerSize,
                 kernel,
+                divergence: config?.divergence,
                 readMemory,
                 writeMemory,
                 setLastError: setError,
@@ -2746,6 +2747,8 @@ export function createWin32Module(){
                         writeMemory,
                         setLastError: setError,
                         namedObjects,
+                        /** @param {number} handle @param {any} object */
+                        closed: (handle, object)=>ports.closed(handle, object),
                         currentThread: ()=>kernel.currentThread(),
                         park: (/** @type {any} */ thread)=>bridge.park(thread),
                         // Where a start routine returns to. Registered once, the
@@ -3992,8 +3995,72 @@ export function createWin32Module(){
                 // The device tree: its root alone, with no bus resources.
                 'CFGMGR32.dll': createCfgmgrFunctions({ writeMemory, readCString }),
 
-                // Video for Windows with no compressors and no MCI video device.
-                'MSVFW32.dll': createMsvfwFunctions({ writeMemory }),
+                // Video for Windows: the compressor manager with the codecs
+                // Windows installs, DrawDib, and no MCI video device.
+                'MSVFW32.dll': createMsvfwFunctions({
+                    readMemory, writeMemory, readCString, readWideString,
+                    // The registry's list of codec drivers, its values strings.
+                    drivers: {
+                        values: path=>{
+                            const key = hive.open(/** @type {any} */ (hive.root(HKEY_LOCAL_MACHINE)), path);
+                            return (key ? hive.values(key) : []).map((/** @type {any} */ value)=>{
+                                const end = value.data.indexOf(0);
+                                return [value.name, decodeAnsi(value.data.subarray(0,
+                                    end < 0 ? value.data.length : end))];
+                            });
+                        },
+                        get: (path, name)=>{
+                            const key = hive.open(/** @type {any} */ (hive.root(HKEY_LOCAL_MACHINE)), path);
+                            const value = key ? hive.getValue(key, name) : null;
+                            return value ? decodeAnsi(value.data).replace(/\0[\s\S]*$/, '') : null;
+                        },
+                        set: (path, name, value)=>{
+                            const { key } = hive.create(/** @type {any} */ (hive.root(HKEY_LOCAL_MACHINE)), path);
+                            hive.setValue(key, name, REG_SZ, encodeAnsi(`${value}\0`));
+                        },
+                        remove: (path, name)=>{
+                            const key = hive.open(/** @type {any} */ (hive.root(HKEY_LOCAL_MACHINE)), path);
+                            return key ? hive.deleteValue(key, name) : false;
+                        },
+                    },
+                    // A codec's DriverProc is the program's code, called as it calls one.
+                    call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
+                    callerThread: ()=>bridge.callerThread(),
+                    allocate: bytes=>libraries['KERNEL32.dll'].GlobalAlloc
+                        .handler([0x40, bytes]) >>> 0,
+                    free: address=>void libraries['KERNEL32.dll'].GlobalFree.handler([address]),
+                    stretchDIBits: args=>libraries['GDI32.dll'].StretchDIBits.handler(args),
+                    // A codec DLL a game installed: loaded as the program loads a
+                    // library, and its DriverProc found by name.
+                    loadDriver: async file=>{
+                        const kernel32 = libraries['KERNEL32.dll'];
+                        const names = encodeAnsi(`${file}\0DriverProc\0`);
+                        const at = kernel32.GlobalAlloc.handler([0x40, names.length]) >>> 0;
+                        writeMemory(at, names);
+                        const module = await kernel32.LoadLibraryA.handler([at]) >>> 0;
+                        const proc = module
+                            ? await kernel32.GetProcAddress
+                                .handler([module, at + file.length + 1]) >>> 0
+                            : 0;
+                        kernel32.GlobalFree.handler([at]);
+                        return proc;
+                    },
+                    // system.ini's [drivers32], read as GetPrivateProfileString reads it.
+                    iniDriver: name=>{
+                        const kernel32 = libraries['KERNEL32.dll'];
+                        const strings = encodeAnsi(`drivers32\0${name}\0\0system.ini\0`);
+                        const at = kernel32.GlobalAlloc.handler([0x40, strings.length + 260]) >>> 0;
+                        writeMemory(at, strings);
+                        const key = at + 10;
+                        const none = key + name.length + 1;
+                        const length = kernel32.GetPrivateProfileStringA.handler([at, key, none,
+                            at + strings.length, 260, none + 1]) >>> 0;
+                        const value = length ? readCString(at + strings.length, 260) : null;
+                        kernel32.GlobalFree.handler([at]);
+                        return value;
+                    },
+                    divergence: config?.divergence,
+                }),
 
                 // The AVIFile library with no file handlers registered.
                 'AVIFIL32.dll': createAvifilFunctions({ writeMemory }),
