@@ -230,6 +230,21 @@ From `cork-asm.mjs --bin modules/cork/bench/micro/images/crc-x87.bin --at 0x4010
 
 From `emit-count.mjs --qemu <qemu 8.2.2 built with plugins> --root <1851609d> --root <its helperAt keyed by looks> --regions 10 --warm 15 --reps 3, node 22.22.0`. "work" is what a pass costs without V8's optimising compiles, whose moments jump from pass to pass; it is the same in every run of a tree, and arms are compared by it ("of the first"); "passes" is the spread of the counted passes. The price lists are least squares over every region's own count: what one more region, block (with the jump that ends it), call, return, jump or other instruction costs in machine instructions, and its share of the part. Forming's fit is loose (its cost hangs on what the shared decoding already found); emitting's is close: the cost is the sum of those prices, nothing growing with a region's size. A negative price is a term the others absorb.
 
+### What does translated code cost to run, to the instruction an iteration, workload by workload and arm against arm?
+
+[`translator/run-count.mjs`](translator/run-count.mjs): `node tools/translator/run-count.mjs --qemu DIR [--root DIR]... [--bits 32|64|both] [--warm N] [--iters N] [workload...]`
+
+```
+instructions an iteration (60 warm, 20 counted), arms: <a2791c91>, <a callee formed in at one call>
+  str-32                   2930633  3223381 (1.0999)
+  tree-32                  3275767  8501680 (2.5953)
+  lua-32                   37808258  38366401 (1.0148)
+  game-32                  1010468  1010468 (1.0000)
+  vcall-32                 2129041  2129041 (1.0000)
+```
+
+From `the micro images under qemu 8.2.2 with tools/lib/qemu-count.c, node 22.22.0, cork a2791c91 against the experiment that kept a callee formed in at one call of its region (roadmap/negative-results.md, 2026-11-15); two runs of one tree equal to the instruction`. Each cell is the instructions an iteration of the counted ones took, the whole process but V8's optimising compiles; the bracket is the arm's against the first. A tree counts the same in every run, so any ratio off 1.0000 is the change's; the geomean is over the workloads shown.
+
 ### How much resident memory does a translated module cost past its bytes, compiled lazily, by the baseline compiler or by the optimising one?
 
 [`translator/module-memory.mjs`](translator/module-memory.mjs): `node --expose-gc [--no-wasm-lazy-compilation --no-wasm-tier-up | --no-wasm-lazy-compilation --no-liftoff] tools/translator/module-memory.mjs [--regions N]`
@@ -421,6 +436,7 @@ From `arg-bytes-audit.mjs dbg/wine-specs`. Every stdcall entry of the win32 laye
 ### `lib/`
 
 - [`lib/common.mjs`](lib/common.mjs) - isMain, options, a median, where bundles lie (BOTTLIFY_BUNDLES)
+- [`lib/qemu-count.mjs`](lib/qemu-count.mjs) - node under qemu-x86_64 with the counting plugin: marks, totals by kind of code, the plugin built
 - [`lib/btl.mjs`](lib/btl.mjs) - The tools' path to core's bundle reader and writer
 - [`lib/relay-option.mjs`](lib/relay-option.mjs) - --network and --roots for the runners
 - [`lib/disk-directory.mjs`](lib/disk-directory.mjs) - A folder of this disk shaped as OPFS, for the translation store in Node

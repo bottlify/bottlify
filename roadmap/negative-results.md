@@ -95,6 +95,7 @@ plus at most five lines below its table of conditions the line cannot carry.
 | 2026-11-14 | a region takes three registers in parameters on an x86-64 host, where V8 passes five (2a464ac) | machine instructions -1 to -6 %; PE vm x87 1.060 ms in Node, 8 of 9 pairs slower; Chromium geomean 0.995 | holds | vm's loss explained; paired Chromium runs |
 | 2026-11-14 | a `ret` answers its wasm call the address it took and the call compares it; no stack of return addresses | calls512-scatter machine instructions 32-bit -5.3 %, 64-bit +7.6 %; formed callees' returns 100 of 100 through the transfer | holds | a frame's count of formed calls; long mode's window test folded |
 | 2026-11-15 | regions of 256 blocks against the default 128, long mode and 32-bit | 256/128 geomean x64 0.99 (vm 1.08), sse 1.06 (vm 1.50) | holds: 128 kept | a game's region profile, not the bench's |
+| 2026-11-15 | a callee formed in at one call of its region, its other calls wasm calls: its `ret` no edge from one loop into another, so both stay loops | instructions an iteration (exact) str 2.93 -> 3.22 M, tree 3.28 -> 8.50 M, lua 37.8 -> 38.4 M, game and vcall equal; str's jumps out 462 k -> 0 | holds | the callee's blocks formed once a call site (copies of blocks by place, not address) |
 
 The two 2026-11-14 lines on regions of a module as one, conditions: cork 3f877946, a cloud machine (Intel Xeon @ 2.10GHz, 4 cores,
 power plan not recorded), Chromium 153.0.8010.12 / V8 15.3.76.4 headless (`browser/suite.mjs --scale 10
@@ -106,6 +107,11 @@ The 2026-11-15 line on region size, conditions: cork ec2c1353 + e2167a7e, the 4-
 Node 22.22.0 `bench/run.mjs --iterations <10 x own> --reps 1 --cork '{"maxRegionBlocks":N}'`, 5 alternated pairs, both
 widths' builds of the same source (x64, sse), median ms of the 5: x64 vm 1815 / 1967, entities 3768 / 3603, spread 5271 / 5044;
 sse vm 1068 / 1605, path 777 / 890, spread 4696 / 4518; at own iterations (cold) 256 looked 4-16 % faster on x64.
+
+The 2026-11-15 line on a callee formed in once, conditions: cork a2791c91, the micro images' iterations under qemu-x86_64
+8.2.2 with emit-count's plugin, Node 22.22.0 --single-threaded --predictable, a clock of 1 us a reading, 60-100 warm-up
+iterations awaiting their translations, 20-50 counted; two runs of one tree equal to the instruction. A wasm call each
+inner turn costs more than the jump out to the region's copies and back (`rejoinAt`) each outer turn it replaced.
 
 ## Executors and scheduler
 
