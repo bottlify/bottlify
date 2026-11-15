@@ -38,7 +38,8 @@ import {
 } from './blit.js';
 import { DSTINVERT, PATCOPY, PATINVERT, R2_COPYPEN } from './rop.js';
 import {
-    PS_SOLID, createPainter, ellipse, fillRect, frameRect, line, polyPolygon, polygon, rectangle,
+    PS_NULL, PS_SOLID, createPainter, ellipse, fillRect, frameRect, line, polyPolygon, polygon,
+    rectangle,
 } from './shapes.js';
 import { MONOCHROME, colorToPixel, intersectRect, isEmptyRect, pixelToColor, surfaceBounds }
     from './surface.js';
@@ -50,6 +51,13 @@ import { paletteEntryToPixel } from '../../win32/gdi32/structs.js';
 
 /** SetBoundsRect's flag for a DC that accumulates what it draws. */
 const DCB_ENABLE = 4;
+/** ExtCreatePen's style fields. */
+const PS_TYPE_MASK = 0x000f0000;
+const PS_GEOMETRIC = 0x00010000;
+const PS_ENDCAP_MASK = 0x00000f00;
+const PS_ENDCAP_SQUARE = 0x00000100;
+const PS_JOIN_MASK = 0x0000f000;
+const PS_JOIN_MITER = 0x00002000;
 
 /** What a call that should have returned a COLORREF says when it failed. */
 export const CLR_INVALID = 0xffffffff;
@@ -113,6 +121,51 @@ export function createGdiDrawing(options = {}){
 
     /** @param {number} hdc @returns {any | null} */
     const contextOf = hdc=>contexts.get(hdc >>> 0) ?? null;
+
+    /**
+     * What a line drawn with a geometric pen adds to the DC's bounds: not the
+     * pixels it wrote but the segment's own rectangle grown by the pen, as
+     * Windows grows it - by the width plus two, five times that under a mitre
+     * join, and by part of that for the end caps (Wine's dc.c test_boundsrect,
+     * "the wide pen heuristics"), within the surface.
+     *
+     * @param {any} context @param {any} pen
+     * @param {number} x0 @param {number} y0 @param {number} x1 @param {number} y1
+     */
+    const widenForGeometricPen = (context, pen, x0, y0, x1, y1)=>{
+        const style = pen.extended;
+        if (context.state.boundsState !== DCB_ENABLE || style === undefined
+            || ((style >>> 0) & PS_TYPE_MASK) !== PS_GEOMETRIC || pen.style === PS_NULL)
+        {
+            return;
+        }
+        const join = (style >>> 0) & PS_JOIN_MASK;
+        const square = ((style >>> 0) & PS_ENDCAP_MASK) === PS_ENDCAP_SQUARE;
+        let inflate = Math.max(1, pen.width | 0) + 2;
+        let by;
+        if (join === PS_JOIN_MITER)
+        {
+            inflate *= 5;
+            by = square ? Math.floor((inflate * 3 + 1) / 2) : inflate;
+        }
+        else
+        {
+            by = square ? inflate - Math.floor(inflate / 4) : Math.floor((inflate + 1) / 2);
+        }
+        const grown = intersectRect(surfaceBounds(context.surface), {
+            left: Math.min(x0, x1) - by, top: Math.min(y0, y1) - by,
+            right: Math.max(x0, x1) + 1 + by, bottom: Math.max(y0, y1) + 1 + by,
+        });
+        if (isEmptyRect(grown))
+        {
+            return;
+        }
+        const was = context.state.boundingRect;
+        context.state.boundingRect = was ? {
+            left: Math.min(was.left, grown.left), top: Math.min(was.top, grown.top),
+            right: Math.max(was.right, grown.right), bottom: Math.max(was.bottom, grown.bottom),
+        } : grown;
+    };
 
     /** @param {any} context @returns {import("./shapes.js").Painter} */
     const painterOf = context=>createPainter(context.surface, context.clip, context.state.rop2);
@@ -1117,6 +1170,7 @@ export function createGdiDrawing(options = {}){
             const from = context.state.position;
             const pen = penOf(context);
             clipped(context, ()=>line(painterOf(context), from.x, from.y, x | 0, y | 0, pen));
+            widenForGeometricPen(context, pen, from.x, from.y, x | 0, y | 0);
             context.state.position = { x: x | 0, y: y | 0 };
             return true;
         },

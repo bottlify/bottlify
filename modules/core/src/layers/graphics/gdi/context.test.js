@@ -189,6 +189,31 @@ test('a blit inside one surface under a region reads its source before writing o
     assert.equal(surface.read(5, 7), 7, 'the hole kept its row');
 });
 
+test('a line drawn with a geometric pen widens the bounds by the pen, not by its pixels', ()=>{
+    // Wine's dc.c test_boundsrect: a one-pixel geometric pen with round join
+    // and cap grows the segment's rectangle by (1 + 2 + 1) / 2 on each side; a
+    // mitre join by five times the width plus two.
+    const { objects, drawing, context } = fixture({ width: 256, height: 256 });
+    context.state.boundsState = 4;
+    context.state.pen = objects.create('pen', { style: PS_SOLID, width: 1, color: RED_COLOR,
+        extended: 0x00010000 });
+    drawing.moveToEx(HDC, 100, 100);
+    drawing.lineTo(HDC, 160, 160);
+    assert.deepEqual(context.state.boundingRect, { left: 98, top: 98, right: 163, bottom: 163 });
+    context.state.boundingRect = null;
+    context.state.pen = objects.create('pen', { style: PS_SOLID, width: 1, color: RED_COLOR,
+        extended: 0x00012000 });
+    drawing.moveToEx(HDC, 100, 100);
+    drawing.lineTo(HDC, 160, 100);
+    assert.deepEqual(context.state.boundingRect, { left: 85, top: 85, right: 176, bottom: 116 });
+    context.state.boundingRect = null;
+    context.state.pen = objects.create('pen', { style: PS_SOLID, width: 1, color: RED_COLOR });
+    drawing.moveToEx(HDC, 100, 100);
+    drawing.lineTo(HDC, 160, 100);
+    assert.deepEqual(context.state.boundingRect, { left: 100, top: 100, right: 160, bottom: 101 },
+        'a cosmetic pen is counted by its pixels');
+});
+
 test('the selected pen and brush come from the shared object table', ()=>{
     const { objects, drawing, surface, context } = fixture();
     context.state.pen = objects.create('pen', { style: PS_SOLID, width: 1, color: RED_COLOR });
