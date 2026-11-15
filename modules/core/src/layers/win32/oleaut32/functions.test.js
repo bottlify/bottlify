@@ -2292,3 +2292,37 @@ test('OleTranslateColor makes an OLE_COLOR a COLORREF by its high byte', ()=>{
     assert.equal(call('OleTranslateColor', [0x03000000, 0, SLOT]), 0x80070057);
     assert.equal(call('OleTranslateColor', [0x80000005, 0, 0]), 0, 'no pointer: S_OK all the same');
 });
+
+test('OleLoadPicturePath reads a name as a URL moniker does, and OleLoadPictureFile as a path',
+    async()=>{
+        const lib = libraryHost('c:\\pictures\\here.bmp', new Uint8Array(8));
+        const fns = createAutomationFunctions(lib);
+        const IID = 0x3000;
+        lib.putU32(SLOT, 0xdeadbeef);
+        assert.equal(await fns.OleLoadPicturePath.handler([0, 0, 0, 0, IID, SLOT]) | 0,
+            0x80070057 | 0, 'no name: E_INVALIDARG');
+        assert.equal(lib.u32(SLOT), 0xdeadbeef, 'the out pointer left as it was');
+        lib.putWide(TEXT, 'here.bmp');
+        assert.equal(await fns.OleLoadPicturePath.handler([TEXT, 0, 0, 0, 0, SLOT]) | 0,
+            0x800c000d | 0, 'a name that is no path and no URL: INET_E_UNKNOWN_PROTOCOL');
+        assert.equal(lib.u32(SLOT), 0);
+        lib.putWide(TEXT, 'C:\\pictures\\gone.bmp');
+        assert.equal(await fns.OleLoadPicturePath.handler([TEXT, 0, 0, 0, IID, SLOT]) | 0,
+            0x800c0005 | 0, 'a path to nothing: INET_E_RESOURCE_NOT_FOUND');
+        lib.putWide(TEXT, 'file:///C:/pictures/gone.bmp');
+        assert.equal(await fns.OleLoadPicturePath.handler([TEXT, 0, 0, 0, IID, SLOT]) | 0,
+            0x800c0005 | 0, 'a file: URL to nothing, the same');
+        lib.putWide(TEXT, 'file:///C:/pictures/here.bmp');
+        assert.equal(await fns.OleLoadPicturePath.handler([TEXT, 0, 0, 0, IID, SLOT]) | 0,
+            0x800a01e1 | 0, 'the file read: eight bytes of no picture');
+
+        assert.equal(await fns.OleLoadPictureFile.handler([3, 0, TEXT, 0, SLOT]) | 0,
+            0x800a0035 | 0, 'a name that is no BSTR: CTL_E_FILENOTFOUND');
+        assert.equal(await fns.OleLoadPictureFile.handler([VT_BSTR, 0, TEXT, 0, SLOT]) | 0,
+            0x800a004b | 0, 'a URL is no path: CTL_E_PATHFILEACCESSERROR');
+        lib.putWide(TEXT, 'C:\\pictures\\gone.bmp');
+        assert.equal(await fns.OleLoadPictureFile.handler([VT_BSTR, 0, TEXT, 0, SLOT]) | 0,
+            0x800a0035 | 0, 'a path to nothing: CTL_E_FILENOTFOUND');
+        assert.equal(fns.OleLoadPicturePath.argBytes, 24);
+        assert.equal(fns.OleLoadPictureFile.argBytes, 20);
+    });
