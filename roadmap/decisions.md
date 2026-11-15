@@ -2166,7 +2166,15 @@ touched of them) and a translated module's weight (`TRANSLATION_WEIGHT`, 4: its 
 engine's metadata and the translator's records beside its wasm bytes) are not measured apart: on
 the .NET Framework 4 setup in Chrome with a budget of 2 GiB they held the renderer at 1.5 GB
 steady, with one sample of 2.1 GB (garbage the JavaScript heaps had not collected). The tab's own
-cost is counted only in a browser. *2026-11-13.*
+cost is counted only in a browser. *2026-11-13.* Measured again on the .NET Framework 4.8's setup
+(Chrome 156, Windows, one core, 1 GiB a process, a budget of 3 GiB), with five processes standing
+for ten minutes (the setup, its Setup.exe, ngen and two mscorsvw): the renderer held 6.2 GB
+private, flat, against an account of 3.1 GB (guest 1.36, engine 0.54, translation 1.16). Chrome's
+own dump (memory-infra) put 2.02 GB in array buffers, which the guest and engine kinds cover, 0.92
+GB in the workers' JavaScript heaps, 0.50 GB in malloc, 0.15 GB in Blink, and 2.49 GB in no
+allocator it lists - the compiled modules' code. Past the idle tab's 357 MiB that is 3.7 GB for
+the 266 MB of module bytes the translation kind charged, so a byte of a module costs 14, not 4
+(`TRANSLATION_WEIGHT`). *2026-11-15.*
 
 **A246. lodctr and unlodctr succeed and register nothing.** Windows keeps performance counters in
 Perflib, which `lodctr.exe` fills from a program's counter definitions and `unlodctr.exe` empties;

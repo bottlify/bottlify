@@ -29,7 +29,9 @@
  * where an installer put the tree, `C:\Program Files\Vendor\Game` -- what
  * `install-watch.mjs --collect` reports -- and the bottle is mounted there
  * rather than at `C:\App`, so the paths the installation wrote into the
- * registry hold. Both go into the manifest and stay there across a repack.
+ * registry hold. Both go into the manifest and stay there across a repack. A
+ * manifest of `"kind": "layer"` (a runtime bottles stand on) keeps none: a
+ * layer starts nothing, and its repack guesses no entry.
  *
  * `translations` puts a translation seed (a run's store, exported) into the
  * packed bundle without packing the game again, and rewrites the manifest's
@@ -169,8 +171,12 @@ async function pack(root, id, flags){
     manifest.revision = (Number.isInteger(manifest.revision) ? manifest.revision : 0) + 1;
 
     const bundle = await openBundle(output);
-    manifest.entry ??= guessEntry(bundle.list());
-    if (bundle.stat(manifest.entry ?? '') === null)
+    // A layer starts nothing (`"kind": "layer"`): no entry is guessed for one.
+    if (manifest.kind !== 'layer')
+    {
+        manifest.entry ??= guessEntry(bundle.list());
+    }
+    if (manifest.kind !== 'layer' && bundle.stat(manifest.entry ?? '') === null)
     {
         console.log(`  the entry ${manifest.entry} is not in the bundle: set "entry" in the`
             + ' manifest');

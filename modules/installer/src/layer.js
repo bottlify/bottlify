@@ -13,7 +13,10 @@
  * since the machine's own are every bottle's already and a layer only adds to
  * a machine. The run's scratch stays out: the temporary directories, the
  * folder the setup was put in to be run, and the folders a setup unpacks
- * itself into at the drive's root under a name of 32 hex digits.
+ * itself into at the drive's root under a name of hex digits. So does what a
+ * setup keeps of itself for a repair or a removal, which nothing running reads:
+ * Windows Installer's cache (23 MB of the 4.8's) and the .NET Framework's
+ * `SetupCache` (240 MB, near a third of the layer).
  */
 
 import { REGISTRY_PATH } from './prefix.js';
@@ -22,8 +25,10 @@ import { atPath } from './chunks.js';
 /** Where a layer's files are, under the drive's root as the bundle holds them. */
 export const LAYER_DRIVE = '.bottlify\\drive_c';
 
-/** A setup's own extraction folder at the drive's root: `C:\97476d1986e5182a495ef1e5aa1d8c20`. */
-const EXTRACTION = /^[0-9a-f]{32}\\/i;
+/** A setup's own extraction folder at the drive's root: `C:\0261063325c5eaf0bd1086`. */
+const EXTRACTION = /^[0-9a-f]{16,}\\/i;
+/** What a setup keeps for its repair or removal. */
+const KEPT_FOR_REPAIR = /^windows\\(installer|microsoft\.net\\framework(64)?\\v[^\\]+\\setupcache)\\/i;
 
 /**
  * What a run added to a hive and changed in it: keys and values not in
@@ -69,6 +74,7 @@ export function collectLayer({ files, registry, before, leave = [] }){
         const [, drive, rest] = /^([A-Za-z]):\\(.*)$/.exec(file.path) ?? [];
         const folder = rest?.slice(0, rest.lastIndexOf('\\') + 1) ?? '';
         if (drive?.toUpperCase() !== 'C' || /(^|\\)temp\\/i.test(folder) || EXTRACTION.test(rest)
+            || KEPT_FOR_REPAIR.test(rest)
             || left.some(prefix=>file.path.toLowerCase().startsWith(prefix)))
         {
             continue;

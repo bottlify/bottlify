@@ -2550,6 +2550,7 @@ const LOAD_AS_DATA = LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_IMAGE_RESOURCE
     | LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE;
 /** LoadLibrary's error for a file that is no image for the process. */
 const ERROR_BAD_EXE_FORMAT = 193;
+const ERROR_NOT_ENOUGH_MEMORY = 8;
 /** A page: a view of a file is mapped in whole ones. */
 const PAGE_SIZE = 0x1000;
 
@@ -6131,8 +6132,8 @@ async function buildApp(options){
                 /** @param {string} name @param {number} [flags] */
                 load: (name, flags)=>loadLibraryAtRuntime(name, flags),
                 /** @param {string} name */
-                loadError: name=>(badFormat.has(withLibraryExtension(name).toLowerCase()
-                    .replace(/\.dll$/, '')) ? ERROR_BAD_EXE_FORMAT : null),
+                loadError: name=>loadErrors.get(withLibraryExtension(name).toLowerCase()
+                    .replace(/\.dll$/, '')) ?? null,
                 /** @param {number} handle */
                 dataFile: handle=>dataFiles.get(handle >>> 0) ?? null,
                 /**
@@ -6919,13 +6920,14 @@ async function buildApp(options){
      */
     const absentLibraries = new Set();
     /**
-     * Libraries whose last look found a file that is no image for this process
-     * (not a PE, or the other machine's): LoadLibrary's error is then
-     * ERROR_BAD_EXE_FORMAT rather than ERROR_MOD_NOT_FOUND.
+     * Libraries whose last load failed for a reason of its own, and LoadLibrary's
+     * error for it in place of ERROR_MOD_NOT_FOUND: a file that is no image for
+     * this process (not a PE, or the other machine's) is ERROR_BAD_EXE_FORMAT, an
+     * image the machine's memory has no room for ERROR_NOT_ENOUGH_MEMORY.
      *
-     * @type {Set<string>}
+     * @type {Map<string, number>}
      */
-    const badFormat = new Set();
+    const loadErrors = new Map();
     /** Where the next runtime library goes. Set once the shipped ones are placed. */
     let nextLibraryBase = 0;
 
@@ -7134,7 +7136,7 @@ async function buildApp(options){
         const asked = thread ?? kernel.currentThread();
         const unresolved = (flags & DONT_RESOLVE_DLL_REFERENCES) !== 0;
         const key = name.toLowerCase().replace(/\.dll$/, '');
-        badFormat.delete(key);
+        loadErrors.delete(key);
         if (isKnownDll(name) && /[\\/]/.test(name))
         {
             broughtCopies.set(moduleKeyOf(name), name);
@@ -7225,7 +7227,7 @@ async function buildApp(options){
                         events.emit('library-missing', {
                             name, path: wanted, reason: /** @type {Error} */ (e).message,
                         });
-                        badFormat.add(key);
+                        loadErrors.set(key, ERROR_BAD_EXE_FORMAT);
                         return 0;
                     }
                     const place = placeLibrary(image, { next: nextLibraryBase, ...librarySpace });
@@ -7237,7 +7239,26 @@ async function buildApp(options){
                     }
 
                     const base = place.base;
-                    const mapped = loader.map(file, { base, name, bits: processBits });
+                    let mapped;
+                    try
+                    {
+                        mapped = loader.map(file, { base, name, bits: processBits });
+                    }
+                    catch (e){
+                        if (/** @type {any} */ (e)?.code !== 'MACHINE_MEMORY')
+                        {
+                            throw e;
+                        }
+                        // The machine's memory full: the load fails, as Windows
+                        // fails a view it cannot commit, and the program goes on
+                        // with the error to read. Thrown, it ended the process.
+                        librarySpace.giveBack(base);
+                        loadErrors.set(key, ERROR_NOT_ENOUGH_MEMORY);
+                        events.emit('library-missing', {
+                            name, path: wanted, reason: /** @type {Error} */ (e).message,
+                        });
+                        return 0;
+                    }
                     const { exports } = readExports(file, image);
                     const addresses = new Map(exports
                         .filter(entry=>entry.name !== null && entry.forwards === null)
@@ -11505,11 +11526,19 @@ export async function createApp(options){
      * others to end, up to `MACHINE_WAIT_MS`; past that it is built on what the
      * machine has, and a start that cannot finish is the child failing.
      *
-     * @param {SpareMemory | null} reused  the gone process's memory it is built in, if any
+     * Before it waits, the memories of gone processes go to make room: the
+     * ones kept for the next process, then the one this process took - it is
+     * built in a memory of its own instead. Kept, they held the room the
+     * processes taking them waited for: four children, each in a memory a
+     * child before them was given 100 MiB in, waited on each other and none
+     * started.
+     *
+     * @param {{ reused: SpareMemory | null }} start  the gone process's memory it
+     *     is built in, if any; null once that is let go for room
      * @param {number} holder  the process's holder
      * @returns {Promise<{ left: number } | undefined>}
      */
-    const roomForProcess = async(reused, holder)=>{
+    const roomForProcess = async(start, holder)=>{
         if (machineMemory === null)
         {
             return undefined;
@@ -11520,14 +11549,30 @@ export async function createApp(options){
         // what it is given: its images, its first stack and heap. And the
         // engine's own part of a process (`PROCESS_ENGINE_BYTES`), held as long
         // as it stands.
-        const wanted = (byLength
-            ? Math.max(0, START_BYTES - (reused?.memory.buffer.byteLength ?? 0))
+        const wantedNow = ()=>(byLength
+            ? Math.max(0, START_BYTES - (start.reused?.memory.buffer.byteLength ?? 0))
             : PROCESS_TABLES_BYTES) + START_SLACK_BYTES;
+        const fits = ()=>view.fits(wantedNow() + PROCESS_ENGINE_BYTES);
+        // Again at every look while it waits: a process that ends meanwhile
+        // leaves its memory kept for the next, which holds the room it gave back.
+        const makeRoom = ()=>{
+            while (!fits() && spareMemories.length > 0)
+            {
+                dropSpare(spareMemories.shift());
+            }
+            if (!fits() && start.reused)
+            {
+                spareToRun(start.reused, holder);
+                dropSpare(start.reused);
+                start.reused = null;
+            }
+        };
         const waitMs = options.machineWaitMs ?? MACHINE_WAIT_MS;
         const until = Date.now() + waitMs;
-        while (!(view.fits(wanted + PROCESS_ENGINE_BYTES)
-            && view.take(PROCESS_ENGINE_BYTES, 'engine')))
+        makeRoom();
+        while (!(fits() && view.take(PROCESS_ENGINE_BYTES, 'engine')))
         {
+            makeRoom();
             if (Date.now() >= until)
             {
                 throw Object.assign(new Error('the machine\'s memory had no room for the'
@@ -11535,6 +11580,7 @@ export async function createApp(options){
             }
             await new Promise(resolve=>setTimeout(resolve, 50));
         }
+        const wanted = wantedNow();
         if (!view.take(wanted))
         {
             view.give(PROCESS_ENGINE_BYTES, 'engine');
@@ -11590,20 +11636,21 @@ export async function createApp(options){
         const holder = machineMemory === null ? RUN_HOLDER
             : given ?? machineMemory.claim();
         spareToProcess(reusedMemory, holder);
-        const memoryCredit = await roomForProcess(reusedMemory, holder).catch(e=>{
+        const start = { reused: reusedMemory };
+        const memoryCredit = await roomForProcess(start, holder).catch(e=>{
             // No room: the memory it was to run in goes back to the run.
             if (given === undefined)
             {
-                releaseHolder(holder, [reusedMemory]);
+                releaseHolder(holder, [start.reused]);
             }
-            else if (reusedMemory)
+            else if (start.reused)
             {
-                spareToRun(reusedMemory, holder);
-                keepSpare(reusedMemory);
+                spareToRun(start.reused, holder);
+                keepSpare(start.reused);
             }
             throw e;
         });
-        const built = await buildApp(machine({ ...extra, reusedMemory, memoryCredit,
+        const built = await buildApp(machine({ ...extra, reusedMemory: start.reused, memoryCredit,
             ...machineMemory === null ? {} : { memoryHolder: holder },
             com: { table: classTable, process },
             // With concurrency a child runs from CreateProcess on, beside
