@@ -4926,6 +4926,10 @@ export function createWin32Module(){
                             ...createCommonControls(controlHost, toolkit, imageLists, {
                                 loadBitmap: (instance, id)=>libraries['USER32.dll']
                                     ?.LoadBitmapA?.handler([instance, id]) ?? 0,
+                                // A tooltip's text may be a string resource of
+                                // the instance its tool names.
+                                loadString: (instance, id)=>modules.loadString?.(instance, id)
+                                    ?? null,
                                 // A control that subclasses another window -- an
                                 // up-down control its buddy -- does it with
                                 // comctl32's own SetWindowSubclass.
