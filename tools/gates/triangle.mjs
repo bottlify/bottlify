@@ -246,9 +246,9 @@ export async function triangle(){
         srcDir: join(PACKAGE_DIR, 'src'),
         // The translator package beside core, where app.js resolves the default engine.
         extra: [{ prefix: '/cork/', root: join(PACKAGE_DIR, '..', 'cork') }],
-        // `--isolated`: the page is cross-origin isolated, so guest memory is
-        // a SharedArrayBuffer, as the product serves it.
-        coi: process.argv.includes('--isolated'),
+        // Cross-origin isolated, as the product serves it: guest memory is a
+        // SharedArrayBuffer, which the kernel cannot start without.
+        coi: true,
     });
     // `--chrome-flag F` (repeatable): `--use-webgpu-adapter=swiftshader` to judge pixels on
     // the software adapter rather than a driver's.
