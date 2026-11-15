@@ -3490,6 +3490,8 @@ export function createWin32Module(){
                             completed: (file, n, overlapped)=>ports.completed(file, n, overlapped),
                             /** @param {number} handle @param {any} object */
                             closed: (handle, object)=>ports.closed(handle, object),
+                            /** @param {number} file @param {number} port @param {number} key */
+                            bind: (file, port, key)=>ports.bind(file, port, key),
                         },
                     }),
                 },

@@ -32,6 +32,11 @@ import { formatMessageText } from './format-message.js';
 import { systemMessage } from './system-messages.js';
 import { compareStrings, decodeAnsi, encodeAnsi } from './locale.js';
 import { THREAD_ERROR_MODES, fromRtlMode, toRtlMode } from './error-mode.js';
+import { STATUS } from '../ntdll/status.js';
+
+const STATUS_SUCCESS = STATUS.SUCCESS;
+const STATUS_ACCESS_VIOLATION = STATUS.ACCESS_VIOLATION;
+const STATUS_NOT_IMPLEMENTED = STATUS.NOT_IMPLEMENTED;
 import { HANDLE_STDERR, HANDLE_STDIN } from './console.js';
 import {
     PROCESSOR_CACHES, PROCESSOR_FEATURES, PROCESSOR_LEVEL, PROCESSOR_REVISION, createProcessors,
@@ -1329,7 +1334,35 @@ export function createSystemFunctions(host){
          * program takes for "this is not a 64-bit system".
          */
         /** BOOL Wow64DisableWow64FsRedirection(PVOID *OldValue) */
-        Wow64DisableWow64FsRedirection: redirection('disable'),
+        Wow64DisableWow64FsRedirection: {
+            ...redirection('disable'),
+            // The native forms, over the same answer: on a 32-bit system
+            // there is no redirection to turn off (STATUS_NOT_IMPLEMENTED).
+            natives: {
+                /** NTSTATUS RtlWow64EnableFsRedirection(BOOLEAN Enable) */
+                RtlWow64EnableFsRedirection: {
+                    argBytes: 4,
+                    handler: ()=>(wow64 ? STATUS_SUCCESS : STATUS_NOT_IMPLEMENTED),
+                },
+                /** NTSTATUS RtlWow64EnableFsRedirectionEx(ULONG Disable, PULONG OldValue) */
+                RtlWow64EnableFsRedirectionEx: {
+                    argBytes: 8,
+                    /** @param {number[]} args */
+                    handler: ([, old])=>{
+                        if (!wow64)
+                        {
+                            return STATUS_NOT_IMPLEMENTED;
+                        }
+                        if ((old >>> 0) === 0)
+                        {
+                            return STATUS_ACCESS_VIOLATION;
+                        }
+                        host.writeMemory(old >>> 0, Uint8Array.of(0, 0, 0, 0));
+                        return STATUS_SUCCESS;
+                    },
+                },
+            },
+        },
         /** BOOL Wow64RevertWow64FsRedirection(PVOID OldValue) */
         Wow64RevertWow64FsRedirection: redirection('revert'),
         /** BOOLEAN Wow64EnableWow64FsRedirection(BOOLEAN Wow64FsEnableRedirection) */

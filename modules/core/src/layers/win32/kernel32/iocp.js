@@ -807,6 +807,24 @@ export function createIoCompletionPorts(host){
         },
 
         /**
+         * Binds a file handle to a port under a key: what CreateIoCompletionPort
+         * does with an existing port, and NtSetInformationFile's
+         * FileCompletionInformation, which is the same binding.
+         *
+         * @param {number} file @param {number} portHandle @param {number} key
+         * @returns {boolean} false when the port handle names no port
+         */
+        bind(file, portHandle, key){
+            const port = portOf(portHandle);
+            if (!port)
+            {
+                return false;
+            }
+            associations.set(file >>> 0, { port, key: key >>> 0 });
+            return true;
+        },
+
+        /**
          * A handle has been closed. Whatever it named, its association goes with
          * it -- handle numbers are recycled, and an association that outlives its
          * handle sends the next file's completions somewhere nobody is reading.

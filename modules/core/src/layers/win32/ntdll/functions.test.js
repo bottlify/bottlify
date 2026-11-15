@@ -289,13 +289,24 @@ test('a kernel32 entry\'s native calls are published under their own names', ()=
     // NtQueueApcThread and NtTestAlert are built over the APC queues, which
     // only kernel32's table holds, and ride on QueueUserAPC's entry.
     const host = fakeHost();
-    const native = { argBytes: 20, handler: ()=>0 };
+    let reach = true;
+    const native = { argBytes: 20, handler: ()=>{
+        if (!reach)
+        {
+            throw Object.assign(new Error('unreachable'), { code: 'GUEST_ACCESS' });
+        }
+        return 0;
+    } };
     Object.assign(host.kernel32, {
         QueueUserAPC: { argBytes: 12, handler: ()=>1, natives: { NtQueueApcThread: native } },
     });
     const fns = createNtdllFunctions(host);
-    assert.equal(fns.NtQueueApcThread, native);
+    assert.equal(fns.NtQueueApcThread.argBytes, 20);
+    assert.equal(fns.NtQueueApcThread.handler([]), 0, 'the call is kernel32\'s');
     assert.ok(!('QueueUserAPC' in fns), 'the entry itself stays kernel32\'s');
+    // Probed as every native call is: a pointer it cannot reach is a status.
+    reach = false;
+    assert.equal(fns.NtQueueApcThread.handler([]), 0xc0000005, 'STATUS_ACCESS_VIOLATION');
 });
 
 test('RtlWalkHeap is HeapWalk answered as a status, its end STATUS_NO_MORE_ENTRIES', ()=>{
