@@ -49,6 +49,9 @@ import { synthesiseProcessInit, DLL_PROCESS_ATTACH, DLL_PROCESS_DETACH }
     from './layers/loader/internal/init.js';
 import { BLOCK_MISS, createBundleSource } from './layers/filesystem/internal/bundle/source.js';
 import { createUnionSource } from './layers/filesystem/internal/union-source.js';
+import { SESSION_LAYER, createSessionSource }
+    from './layers/filesystem/internal/session-source.js';
+import { foldName } from './layers/filesystem/internal/paths.js';
 import { crc32 } from './layers/filesystem/internal/bundle/crc32.js';
 import { createSharingMemory, openSharedSharing } from './layers/filesystem/internal/shared-sharing.js';
 import { openPageFile } from './layers/filesystem/internal/page-file.js';
@@ -4313,17 +4316,76 @@ async function openSession(deps){
 }
 
 /**
+ * The run's read-only half with the session's files under C:'s writable layer
+ * and over the bundle, where the store hands them out to be read when asked
+ * (`LazySessionFile`): nothing of them is read before the program reads it
+ * (`session-source.js`), and a miss of theirs is fetched by the run's `fetch`
+ * as a bundle's block is. A file of another drive, and one that a link names,
+ * which a restored link copies up at once, is laid on whole (`eager`).
+ *
+ * @param {any} blocks  The run's bundle, or null.
+ * @param {{ files: any[], links?: any[] | null }} seeded
+ * @returns {{ blocks: any, eager: any[] }}
+ */
+function sessionUnder(blocks, seeded){
+    const linked = new Set((seeded.links ?? []).filter(record=>!record.junction)
+        .map(record=>foldName(record.owner)));
+    /** @type {{ path: string, file: any }[]} */
+    const lazy = [];
+    const eager = [];
+    for (const file of seeded.files)
+    {
+        if (typeof file.read === 'function' && /^c:\\/i.test(file.path)
+            && !linked.has(foldName(file.path)))
+        {
+            lazy.push({ path: file.path.slice(3), file });
+        }
+        else
+        {
+            eager.push(file);
+        }
+    }
+    if (lazy.length === 0)
+    {
+        return { blocks, eager };
+    }
+    const session = createSessionSource(lazy);
+    return {
+        eager,
+        blocks: {
+            ...blocks ?? { registry: undefined, stop(){}, ahead: ()=>0,
+                refetched: ()=>({ blocks: 0, bytes: 0 }), ranges: ()=>({ requests: 0, bytes: 0 }),
+                decoded: ()=>({ blocks: 0, bytes: 0, ms: 0 }) },
+            source: blocks ? createUnionSource([session, blocks.source]) : session,
+            /** @param {any[]} needed */
+            fetch: needed=>{
+                const own = needed.filter(block=>block.layer === SESSION_LAYER);
+                const rest = needed.filter(block=>block.layer !== SESSION_LAYER);
+                return Promise.all([own.length > 0 ? session.fetch(own) : null,
+                    rest.length > 0 ? blocks?.fetch(rest) : null]).then(()=>{});
+            },
+            held: ()=>({ ...blocks?.held?.(), ...session.held() }),
+        },
+    };
+}
+
+/**
  * Lays down the run's volume before its first instruction: the bundle under
  * C:, the discs, the session's files and the page's own over them; and the
  * registry the installation wrote into `registry`, when there is one to fill.
  *
  * @param {{ options: AppOptions, events: any, filesystem: any, blocks: any,
  *     seeded: { files: any[], registry?: any, links?: any[] | null }, registry: any }} deps
+ * @returns {Promise<any>}  The run's read-only half, the session's files in it
+ *     (`sessionUnder`): what fetches every block a read of C: misses.
  */
 async function furnishVolume({ options, events, filesystem, blocks, seeded, registry }){
-    if (blocks)
+    // The session's files under the writable layer and over the bundle, so
+    // that a saved file the bundle also carries is the one the program sees.
+    const laid = sessionUnder(blocks, seeded);
+    if (laid.blocks)
     {
-        filesystem.mount('C', { source: blocks.source });
+        filesystem.mount('C', { source: laid.blocks.source });
     }
     // What the installation wrote to the registry is the machine's before the
     // program's first instruction, as it was on the machine it was installed
@@ -4351,27 +4413,18 @@ async function furnishVolume({ options, events, filesystem, blocks, seeded, regi
     // holds once the machine's own disk is mounted.
     await mountDiscs({ discs: options.discs, filesystem, events });
 
-    // The session's files go onto the volume once the bundle is under it, so
-    // that a saved file the bundle also carries is the one the program sees.
-    // A store that reads them lazily is read a file at a time: an installed
-    // program's session of a gigabyte held whole at once was the gigabyte in
-    // memory before the program's first instruction.
-    if (seeded.files.some((/** @type {any} */ file)=>typeof file.read === 'function'))
+    // The rest of the session's files, laid on whole: restored, not written,
+    // so nothing is announced and nothing saves them again. One read lazily
+    // is read a file at a time, never the whole session held at once.
+    for (const file of laid.eager)
     {
-        for (const file of seeded.files)
-        {
-            filesystem.apply([typeof file.read === 'function'
-                ? { path: file.path, bytes: await file.read() } : file]);
-        }
-    }
-    else if (seeded.files.length > 0)
-    {
-        filesystem.apply(seeded.files);
+        filesystem.apply([typeof file.read === 'function'
+            ? { path: file.path, bytes: await file.read() } : file], { saved: true });
     }
     // The names a saved file had besides its own, once the files are down.
     if (seeded.links && seeded.links.length > 0)
     {
-        filesystem.applyLinks(seeded.links);
+        filesystem.applyLinks(seeded.links, { saved: true });
     }
     // The person's own edits to the title's files -- a realm list, a config
     // line -- laid over the session's, so they win over what the program
@@ -4380,6 +4433,7 @@ async function furnishVolume({ options, events, filesystem, blocks, seeded, regi
     {
         filesystem.apply(options.files);
     }
+    return laid.blocks;
 }
 
 /**
@@ -6336,8 +6390,12 @@ async function buildApp(options){
     // what the processes before it wrote.
     if (!(filesystem.inherited?.() ?? false))
     {
-        await furnishVolume({ options, events, filesystem, blocks, seeded,
+        blocks = await furnishVolume({ options, events, filesystem, blocks, seeded,
             registry: registryInherited ? null : core.api('win32').registry() });
+        if (options.system && blocks)
+        {
+            options.system.bundle = blocks;
+        }
     }
     // And what the process this one replaces had written. A self-extracting
     // installer unpacks its payload and then starts it; without this the
@@ -10064,10 +10122,10 @@ async function buildSystemHost(deps){
     const { seeded, saver, stopSavingRegistry } = await openSession({ options, events,
         filesystem, registry: system.registry, inherited: false, system });
     // Cork's own decoder reads the bundle's blocks: no processor is asked.
-    const blocks = await mountBundle({ options, events, translationStore });
-    system.bundle = blocks;
-    await furnishVolume({ options, events, filesystem, blocks, seeded,
+    const blocks = await furnishVolume({ options, events, filesystem,
+        blocks: await mountBundle({ options, events, translationStore }), seeded,
         registry: system.registry });
+    system.bundle = blocks;
     // The output every process plays into, each in a span of its arena lent
     // it; the page's worklet reads the table.
     const given = options.audio?.memory;

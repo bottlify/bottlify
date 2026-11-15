@@ -13,6 +13,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { filesystemModule } from '../../filesystem/module.js';
+import { createSessionSource } from '../../filesystem/internal/session-source.js';
+import { PIECE_SIZE } from '../../filesystem/internal/memory-store.js';
 import { createVolume, FETCHED_PIECE_BYTES, KEPT_IDLE_MS, KEPT_READ_BYTES, KEPT_READ_MIN,
     MISS_FETCHES } from './vfs.js';
 
@@ -323,6 +325,66 @@ test('a move that copies blocks not resident waits for them, its partial copy go
     vol.close(moved);
     assert.equal(vol.renameOrFetch('C:\\a.dat', 'C:\\b.dat'), false, 'nothing to move');
 });
+
+/**
+ * A volume whose C: stands on a session read a piece at a time
+ * (`session-source.js`), two pieces kept at once, and a counted fetch.
+ *
+ * @param {Record<string, Uint8Array>} contents  by path under C:
+ */
+async function onSession(contents){
+    const fs = await filesystemModule.create({});
+    const session = createSessionSource(Object.entries(contents).map(([path, bytes])=>({ path,
+        file: { path: `C:\\${path}`, size: bytes.length,
+            read: async(offset = 0, length = bytes.length - offset)=>
+                bytes.slice(offset, offset + length) } })), { residentBytes: 2 * PIECE_SIZE });
+    fs.mount('C', { source: session });
+    const counted = { fetches: 0 };
+    const vol = /** @type {any} */ (createVolume(fs, async blocks=>{
+        counted.fetches++;
+        await session.fetch(blocks);
+    }));
+    return { vol, counted };
+}
+
+/** @param {number} size @param {number} seed */
+const pattern = (size, seed)=>new Uint8Array(size).map((unused, at)=>(at * 29 + seed) & 0xff);
+
+test('a write into a file of many absent pieces copies it up, fetching each as it comes to it',
+    async()=>{
+        // A copy up stops at each piece it lacks and goes on from there: each
+        // miss names a piece never fetched, which is the write going further,
+        // not a fetch that did not deliver.
+        const big = pattern(6 * PIECE_SIZE + 3, 1);
+        const { vol, counted } = await onSession({ 'Saves\\slot1.sav': big });
+        const node = vol.open('C:\\Saves\\slot1.sav', { read: true, write: true });
+        assert.equal(await vol.writeOrFetch(node, PIECE_SIZE + 2, new Uint8Array([9, 9])), 2);
+        assert.equal(counted.fetches, 7, 'a fetch a piece');
+        const expected = big.slice();
+        expected.set([9, 9], PIECE_SIZE + 2);
+        assert.deepEqual(await vol.readFresh(node, 0, big.length), expected);
+        vol.close(node);
+    });
+
+test('a directory moved while its files\' pieces are absent is moved whole, its folders too',
+    async()=>{
+        const a = pattern(2 * PIECE_SIZE + 1, 2);
+        const b = pattern(PIECE_SIZE + 9, 3);
+        const { vol } = await onSession({
+            'Cache\\a.ni.dll': a, 'Cache\\Sub\\b.ni.dll': b, 'Cache\\Sub\\c.txt': pattern(5, 4),
+        });
+        assert.equal(await vol.renameOrFetch('C:\\Cache', 'C:\\Cache.old'), true);
+        assert.equal(vol.stat('C:\\Cache'), null, 'nothing left at the old name');
+        /** @type {[string, Uint8Array][]} */
+        const moved = [['C:\\Cache.old\\a.ni.dll', a], ['C:\\Cache.old\\Sub\\b.ni.dll', b],
+            ['C:\\Cache.old\\Sub\\c.txt', pattern(5, 4)]];
+        for (const [path, bytes] of moved)
+        {
+            const node = vol.open(path, { read: true });
+            assert.deepEqual(await vol.readFresh(node, 0, bytes.length), bytes, path);
+            vol.close(node);
+        }
+    });
 
 test('renaming moves the bytes and leaves nothing behind', async()=>{
     const { volume: vol } = await volume();

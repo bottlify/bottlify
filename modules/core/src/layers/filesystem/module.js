@@ -279,6 +279,9 @@ export function createFilesystemModule(){
             const touched = new Map();
             let generation = 0;
             let quiet = false;
+            // A batch `apply` puts in as what the session already holds:
+            // nothing about it is announced.
+            let saved = false;
             /** @type {((changes: any[]) => void) | null} */
             let listener = config?.onChanged ?? null;
             let notifying = false;
@@ -361,6 +364,10 @@ export function createFilesystemModule(){
                 {
                     touched.set(`${key}:${change.path}`,
                         { key, path: change.path, generation: ++generation });
+                }
+                if (saved)
+                {
+                    return;
                 }
                 changes.set(`${key}:${change.path}`, {
                     path: formatPath(key, splitComponents(change.path)),
@@ -480,8 +487,11 @@ export function createFilesystemModule(){
                  *
                  * @param {{ path: string, bytes?: Uint8Array, delete?: boolean,
                  *     contents?: import('./internal/memory-store.js').FileContents }[]} batch
-                 * @param {{ quiet?: boolean }} [options]  `quiet`: what arrives is
-                 *        another copy's, and `changesSince` does not report it back.
+                 * @param {{ quiet?: boolean, saved?: boolean }} [options]  `quiet`:
+                 *        what arrives is another copy's, and `changesSince` does not
+                 *        report it back. `saved`: it is what the session already
+                 *        holds, restored - quiet, and not announced to `onChanged`,
+                 *        so nothing saves it again.
                  * @returns {number} how many entries were applied
                  */
                 apply(batch, options){
@@ -489,7 +499,8 @@ export function createFilesystemModule(){
                     {
                         return 0;
                     }
-                    quiet = options?.quiet === true;
+                    saved = options?.saved === true;
+                    quiet = saved || options?.quiet === true;
                     try
                     {
                         for (const entry of batch)
@@ -543,6 +554,7 @@ export function createFilesystemModule(){
                     finally
                     {
                         quiet = false;
+                        saved = false;
                     }
                 },
 
@@ -585,7 +597,10 @@ export function createFilesystemModule(){
                  *
                  * The source is not in it. A bundle is named by its own digest and
                  * fetched, never uploaded, so what travels is only what the program
-                 * itself produced.
+                 * itself produced. A session laid under the writable layer is
+                 * (`session-source.js`): a file of it the program has not written
+                 * is in it as the session handed it - `{ path, size, read }`,
+                 * its bytes read when `read` is called.
                  *
                  * A file with more than one name is in it once, under the path
                  * its bytes are kept at, and `exportLinks` gives its other
@@ -619,6 +634,9 @@ export function createFilesystemModule(){
                                 out.push(file);
                             }
                         }
+                        // The session under the writable layer, the files the
+                        // program has not touched, as the session handed them.
+                        out.push(.../** @type {any[]} */ (tree.keptFiles?.() ?? []));
                         for (const record of options?.everyName ? tree.links() : [])
                         {
                             // A junction's files go under its name as well:
@@ -982,20 +1000,31 @@ export function createFilesystemModule(){
                  * span drives, or whose file is not there, is passed over.
                  *
                  * @param {{ owner: string, names: string[], junction?: boolean }[]} records
+                 * @param {{ saved?: boolean }} [options]  as `apply` takes it
                  */
-                applyLinks(records){
+                applyLinks(records, options){
                     if (!live())
                     {
                         return;
                     }
-                    for (const record of records)
+                    saved = options?.saved === true;
+                    quiet = saved;
+                    try
                     {
-                        const owner = locate(record.owner);
-                        const names = record.names.map(path=>locate(path))
-                            .filter(at=>at.tree === owner.tree);
-                        owner.tree.restoreLinks([{ owner: owner.components.join('\\'),
-                            names: names.map(at=>at.components.join('\\')),
-                            ...record.junction ? { junction: true } : {} }]);
+                        for (const record of records)
+                        {
+                            const owner = locate(record.owner);
+                            const names = record.names.map(path=>locate(path))
+                                .filter(at=>at.tree === owner.tree);
+                            owner.tree.restoreLinks([{ owner: owner.components.join('\\'),
+                                names: names.map(at=>at.components.join('\\')),
+                                ...record.junction ? { junction: true } : {} }]);
+                        }
+                    }
+                    finally
+                    {
+                        quiet = false;
+                        saved = false;
                     }
                 },
 
@@ -1072,14 +1101,13 @@ export function createFilesystemModule(){
                 /**
                  * Moves a name to another name.
                  *
-                 * A file only the writable layer holds, moved within its drive,
-                 * is given the new name and keeps its bytes: an installer writes
-                 * every file it unpacks under a temporary name and renames it, a
-                 * gigabyte at a time. Anything else may live in the read-only
-                 * source, where nothing can be renamed, so it is a copy followed
-                 * by a delete, which is what the overlay would have to do anyway
-                 * -- and the delete leaves the tombstone that keeps the old name
-                 * from coming back from the source.
+                 * A file moved within its drive is given the new name and keeps
+                 * its bytes: an installer writes every file it unpacks under a
+                 * temporary name and renames it, a gigabyte at a time. One the
+                 * read-only source holds, where nothing can be renamed, is copied
+                 * up first (`tree.js`), and its old name left the tombstone that
+                 * keeps it from coming back from the source. A file moved to
+                 * another drive is a copy followed by a delete.
                  *
                  * @param {string} from
                  * @param {string} to

@@ -581,3 +581,41 @@ test('a session loaded lazily names its files and reads each when asked', async(
     assert.equal(loaded.files[0].bytes, undefined, 'nothing read up front');
     assert.deepEqual([...await loaded.files[0].read()], [7, 8]);
 });
+
+test('a file loaded lazily is read a range at a time, and one handed back is kept as it is,'
+    + ' never read nor written again', async()=>{
+    const disk = fakeDirectory();
+    const big = { path: 'C:\\Data\\setup.cab',
+        bytes: new Uint8Array(3 << 20).map((unused, at)=>(at * 7 + (at >>> 20)) & 0xff) };
+    const save = { path: 'C:\\save.dat', bytes: new Uint8Array([1]) };
+    await opfsSession('game', async()=>disk.root).save({ files: [big, save], registry: null });
+
+    const store = opfsSession('game', async()=>disk.root);
+    const loaded = /** @type {any} */ (await store.load({ lazy: true }));
+    const cab = loaded.files.find((/** @type {any} */ file)=>file.path === big.path);
+    const middle = (1 << 20) - 2;
+    assert.deepEqual(await cab.read(middle, 4), big.bytes.subarray(middle, middle + 4),
+        'a range across a megabyte');
+    const read = cab.read;
+    let reads = 0;
+    cab.read = (/** @type {any[]} */ ...args)=>{
+        reads++;
+        return read(...args);
+    };
+
+    // A session laid under the volume hands back every file the program left
+    // alone as the store handed it: the first save writes the one it changed.
+    const before = disk.writes();
+    const save2 = { path: save.path, bytes: new Uint8Array([2]) };
+    await store.save({ files: [cab, save2], registry: null },
+        [{ kind: 'written', path: save.path }]);
+    assert.equal(disk.writes() - before, 1, 'the file written, nothing of the one handed back');
+    // A save that names no path writes everything it was handed - but not a
+    // file the folder holds already as it handed it out.
+    await store.save({ files: [cab, save2], registry: null });
+    assert.equal(disk.writes() - before, 2, 'the save written whole writes the one file again');
+    assert.equal(reads, 0, 'the file handed back was never read');
+    const back = await opfsSession('game', async()=>disk.root).load();
+    assert.deepEqual(back.files.map(file=>[file.path, file.bytes.length]).sort(),
+        [[big.path, 3 << 20], [save.path, 1]], 'and the folder still holds it');
+});
