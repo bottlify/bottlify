@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { fontFamilies, windowsMetrics } from './faces.js';
+import { fontFamilies, rasterFace, rasterRealization, windowsMetrics } from './faces.js';
 
 /**
  * The smallest font a name can be read from: an sfnt directory with one
@@ -76,3 +76,29 @@ test('the dialog faces advance as Windows draws them, so a line breaks where Win
             'C:\\Program Files\\Rockstar Games\\Max Payne 2 Demo'), 350);
         assert.equal(windowsMetrics({ faceName: 'Arial', height: 13, weight: 400 }), null);
     });
+
+test('a bitmap face is realised at one of its sizes, a whole number of times over', ()=>{
+    // Wine's test_bitmap_font_metrics and test_bitmap_font: a bitmap face is
+    // never drawn at the size asked, but at a size it has, repeated.
+    /** @param {string} faceName @param {number} height @param {number} [width] */
+    const realise = (faceName, height, width = 0)=>{
+        const raster = rasterRealization({ faceName, height, width });
+        assert.ok(raster, faceName);
+        return [raster.strike.height, raster.scaleX, raster.scaleY];
+    };
+    assert.equal(rasterRealization({ faceName: 'Arial', height: 13 }), null, 'an outline face');
+    assert.equal(rasterFace('Helv'), rasterFace('MS Sans Serif'), 'a substitute is its face');
+    // The largest size no larger than asked, the smallest when all are.
+    assert.deepEqual(realise('MS Sans Serif', 14), [13, 1, 1]);
+    assert.deepEqual(realise('MS Sans Serif', 18), [16, 1, 1]);
+    assert.deepEqual(realise('MS Sans Serif', 6), [13, 1, 1]);
+    assert.deepEqual(realise('MS Sans Serif', -11), [13, 1, 1], 'a character height');
+    assert.deepEqual(realise('MS Sans Serif', 0), [13, 1, 1], 'eight points');
+    // System has one size, 16: a quarter of it is the tolerance.
+    assert.deepEqual(realise('System', 28), [16, 1, 1], 'two times overshoots by four');
+    assert.deepEqual(realise('System', 29), [16, 2, 2]);
+    assert.deepEqual(realise('System', 44), [16, 3, 3], 'three times, four short');
+    assert.deepEqual(realise('System', 43), [16, 2, 2], 'five short is too far');
+    assert.deepEqual(realise('System', 32, 21), [16, 3, 2], 'a width scales across alone');
+    assert.deepEqual(realise('System', 0, 4), [16, 1, 1]);
+});

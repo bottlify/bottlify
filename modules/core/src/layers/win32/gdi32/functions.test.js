@@ -1537,13 +1537,16 @@ test('with a font engine the metrics are its measurements of the selected font',
 });
 
 test('with a font engine a string is as wide as the engine draws it', ()=>{
-    const { fns, memory, hdc } = withEngine();
+    const { fns, memory, hdc, gdi } = withEngine();
+    // An outline face: the DC's own System is a bitmap face, measured by its advances.
+    fns.SelectObject.handler([hdc, gdi.draw.createFont(
+        { pointSize: 8, faceName: 'Arial', weight: 0, italic: 0, charSet: 0 })]);
     memory.putString(FACE_NAME, 'AB');
 
     memory.fill(OUT, SIZE.SIZE / 4);
     assert.equal(fns.GetTextExtentPoint32A.handler([hdc, FACE_NAME, 2, OUT]), 1);
     assert.equal(memory.i32(OUT + SIZE.cx), 5 + 4, 'A is odd, B is even');
-    assert.equal(memory.i32(OUT + SIZE.cy), 16, 'as high as Windows\' System font, the DC\'s own');
+    assert.equal(memory.i32(OUT + SIZE.cy), 13, 'as high as the engine measures the font');
 
     memory.fill(OUT, 4);
     assert.equal(fns.GetCharWidth32A.handler([hdc, 0x41, 0x43, OUT]), 1);
@@ -1576,6 +1579,9 @@ test('an ANSI string is measured, and its face named, as its bytes are in the AN
         },
     }).table;
     const hdc = fns.GetDC.handler([HWND]);
+    // An outline face: the DC's own System is a bitmap face, measured by its advances.
+    putLogFont(context.memory, { height: -11, faceName: 'Arial' });
+    fns.SelectObject.handler([hdc, fns.CreateFontIndirectA.handler([STRUCT])]);
     context.memory.bytes.set([0x80, 0x99, 0x97], FACE_NAME);
     assert.equal(fns.GetTextExtentPoint32A.handler([hdc, FACE_NAME, 3, OUT]), 1);
     assert.equal(fns.GetCharWidth32A.handler([hdc, 0x99, 0x99, OUT]), 1);
@@ -1738,7 +1744,14 @@ test('EnumFontFamiliesEx lists every face offered, once each, in the one set dra
     const faces = seen.map(one=>one.face);
     assert.ok(['Arial', 'Times New Roman', 'Courier New', 'MS Sans Serif']
         .every(face=>faces.includes(face)));
-    assert.equal(new Set(faces).size, faces.length, 'each face once');
+    const bitmapSizes = { 'MS Sans Serif': 6, 'MS Serif': 8, Courier: 3, System: 1,
+        'Small Fonts': 6, Fixedsys: 1 };
+    for (const face of new Set(faces))
+    {
+        assert.equal(faces.filter(one=>one === face).length,
+            bitmapSizes[/** @type {keyof typeof bitmapSizes} */ (face)] ?? 1,
+            `${face}: an outline face once, a bitmap face once for each size it has`);
+    }
     assert.ok(!faces.includes('MS Shell Dlg') && !faces.includes('Helv'),
         'a substitute is found by name and never listed');
     for (const one of seen)
@@ -1749,7 +1762,8 @@ test('EnumFontFamiliesEx lists every face offered, once each, in the one set dra
         assert.equal(one.charSet, 0, 'ANSI_CHARSET, the one set the engine draws');
         assert.equal(one.height, one.tmHeight, 'Wine\'s arial_enum_proc: lfHeight is tmHeight');
         assert.equal(one.weight, one.tmWeight, 'and its enum_fonts_proc: lfWeight is tmWeight');
-        assert.equal(one.type, 4, 'TRUETYPE_FONTTYPE, as the faces are on Windows');
+        assert.equal(one.type, one.face in bitmapSizes ? 1 : 4,
+            'RASTER_FONTTYPE for a bitmap face, TRUETYPE_FONTTYPE for the rest, as on Windows');
         assert.equal(one.script, 'Western');
     }
     assert.deepEqual(surfaces.freed, surfaces.allocated.map(block=>block.address),
@@ -2633,7 +2647,10 @@ test('a world transform needs GM_ADVANCED, composes, and maps LPtoDP and DPtoLP'
 });
 
 test('GetGlyphOutline answers a glyph\'s metrics and refuses its shape', ()=>{
-    const { fns, hdc, memory } = withDC();
+    const { fns, hdc, memory, gdi } = withDC();
+    // The DC's own font is System, a bitmap face with no outline: an outline one.
+    fns.SelectObject.handler([hdc, gdi.draw.createFont(
+        { pointSize: 8, faceName: 'Arial', weight: 0, italic: 0, charSet: 0 })]);
     const GM = STRUCT + 0xa00;
     const MAT = STRUCT + 0xa40;
     memory.putU32s(MAT, [0x10000, 0, 0, 0x10000]);
@@ -2650,7 +2667,10 @@ test('GetGlyphOutline answers a glyph\'s metrics and refuses its shape', ()=>{
 test('GetGlyphOutline draws the bitmap of a glyph, one bit or one gray level a pixel', ()=>{
     // A game that builds its font textures from GGO_GRAY8_BITMAP got
     // GDI_ERROR for every character and drew no text at all.
-    const { fns, hdc, memory } = withEngine();
+    const { fns, hdc, memory, gdi } = withEngine();
+    // The DC's own font is System, a bitmap face with no outline: an outline one.
+    fns.SelectObject.handler([hdc, gdi.draw.createFont(
+        { pointSize: 8, faceName: 'Arial', weight: 0, italic: 0, charSet: 0 })]);
     const GM = STRUCT + 0xa00;
     const MAT = STRUCT + 0xa40;
     const BITS = STRUCT + 0xa80;
@@ -2704,7 +2724,10 @@ test('a font held in memory is drawn under its family name, and a handle says so
 });
 
 test('GetGlyphIndices maps each character, marking the ones outside the font', ()=>{
-    const { fns, hdc, memory } = withDC();
+    const { fns, hdc, memory, gdi } = withDC();
+    // The DC's own font is System, a bitmap face with no outline: an outline one.
+    fns.SelectObject.handler([hdc, gdi.draw.createFont(
+        { pointSize: 8, faceName: 'Arial', weight: 0, italic: 0, charSet: 0 })]);
     const TEXT = STRUCT + 0xb00;
     const INDICES = STRUCT + 0xb40;
     memory.putString(TEXT, 'A\x01');

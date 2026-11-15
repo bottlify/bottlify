@@ -59,6 +59,7 @@ export const FACES = Object.freeze([
     face('Fixedsys', FF_MODERN, FIXED_PITCH),
     face('Terminal', FF_MODERN, FIXED_PITCH),
     face('Lucida Console', FF_MODERN, FIXED_PITCH),
+    face('Small Fonts', FF_SWISS, VARIABLE_PITCH),
 ]);
 
 /**
@@ -162,6 +163,130 @@ export function windowsMetrics(font){
         return SYSTEM_CELL;
     }
     return null;
+}
+
+/**
+ * One size of a bitmap face, as its .fon holds it at 96 DPI: the cell, its
+ * split, the leadings and the widths GetTextMetrics answers.
+ *
+ * @typedef {Object} RasterStrike
+ * @property {number} height
+ * @property {number} ascent
+ * @property {number} descent
+ * @property {number} internalLeading
+ * @property {number} externalLeading
+ * @property {number} aveCharWidth
+ * @property {number} maxCharWidth
+ */
+
+/**
+ * A bitmap face: its sizes, smallest first, the weight they are drawn at and
+ * the character it answers for one it has not got.
+ *
+ * @typedef {Object} RasterFace
+ * @property {number} weight
+ * @property {number} defaultChar
+ * @property {readonly RasterStrike[]} strikes
+ */
+
+/** @param {number[]} row height, ascent, descent, internal and external leading, widths */
+const strikeOf = ([height, ascent, descent, internalLeading, externalLeading, aveCharWidth,
+    maxCharWidth])=>Object.freeze({ height, ascent, descent, internalLeading, externalLeading,
+    aveCharWidth, maxCharWidth });
+/** @param {number} weight @param {number} defaultChar @param {number[][]} rows */
+const bitmapFace = (weight, defaultChar, rows)=>Object.freeze({ weight, defaultChar,
+    strikes: Object.freeze(rows.map(strikeOf)) });
+
+/**
+ * The bitmap faces Windows installs for the ANSI code page (sserife.fon,
+ * serife.fon, coure.fon, vgasys.fon, smalle.fon, vgafix.fon), each size at
+ * 96 DPI as GetTextMetrics measures it - the rows Wine's
+ * test_bitmap_font_metrics holds Windows to. A bitmap face is not scaled: a
+ * request is realised as one of these sizes.
+ *
+ * @type {ReadonlyMap<string, RasterFace>}
+ */
+const RASTER_FACES = new Map([
+    ['ms sans serif', bitmapFace(400, 0x81, [[13, 11, 2, 2, 0, 5, 11], [16, 13, 3, 3, 0, 7, 14],
+        [20, 16, 4, 4, 0, 8, 16], [24, 19, 5, 6, 0, 9, 19], [29, 23, 6, 5, 0, 12, 24],
+        [37, 29, 8, 5, 0, 16, 32]])],
+    ['ms serif', bitmapFace(400, 0x80, [[10, 8, 2, 2, 0, 4, 8], [11, 9, 2, 2, 0, 5, 9],
+        [13, 11, 2, 2, 0, 5, 11], [16, 13, 3, 3, 0, 6, 14], [19, 15, 4, 3, 0, 8, 18],
+        [21, 16, 5, 3, 0, 9, 17], [27, 21, 6, 3, 0, 12, 23], [35, 27, 8, 3, 0, 16, 33]])],
+    ['courier', bitmapFace(400, 0x80, [[13, 11, 2, 0, 0, 8, 8], [16, 13, 3, 0, 0, 9, 9],
+        [20, 16, 4, 0, 0, 12, 12]])],
+    ['system', bitmapFace(700, 0x80, [[16, 13, 3, 3, 0, 7, 14]])],
+    ['small fonts', bitmapFace(400, 0x80, [[3, 2, 1, 0, 0, 1, 2], [5, 4, 1, 1, 0, 3, 4],
+        [6, 5, 1, 1, 0, 3, 13], [8, 7, 1, 1, 0, 4, 7], [10, 8, 2, 2, 0, 4, 8],
+        [11, 9, 2, 2, 0, 5, 9]])],
+    ['fixedsys', bitmapFace(400, 0x80, [[15, 12, 3, 3, 0, 8, 8]])],
+]);
+
+/**
+ * The bitmap face a font names, substitutes resolved; null for an outline one.
+ *
+ * @param {string} faceName
+ * @returns {RasterFace | null}
+ */
+export function rasterFace(faceName){
+    const named = faceNamed(faceName ?? '');
+    return RASTER_FACES.get((named?.substitute ?? named?.name ?? '').toLowerCase()) ?? null;
+}
+
+/**
+ * How a bitmap face realises a request, as GDI does it: the strike is the
+ * largest whose cell (a positive height) or character (a negative one) is no
+ * larger than asked, and the smallest when every one is; zero asks for the
+ * 8-point character height. A request well past the strike is that strike
+ * repeated a whole number of times: the multiple nearest above, unless that
+ * overshoots by more than a quarter of the strike (by a quarter or more for
+ * the step from one to two). A width scales across the same way from the
+ * average character width; with none, across as much as down.
+ *
+ * @typedef {Object} RasterRealization
+ * @property {RasterFace} face
+ * @property {RasterStrike} strike
+ * @property {number} scaleX
+ * @property {number} scaleY
+ * @property {Uint8Array | null} advances  The strike's own advances, 0x20 to
+ *           0xFF, where they are known.
+ */
+
+/** @param {number} target @param {number} base */
+const wholeScale = (target, base)=>{
+    let scale = Math.max(1, Math.ceil(target / base));
+    const over = scale * base - target;
+    if ((scale > 2 && over > base / 4) || (scale === 2 && over >= base / 4))
+    {
+        scale--;
+    }
+    return scale;
+};
+
+/**
+ * @param {{ faceName: string, height: number, width?: number }} font
+ * @returns {RasterRealization | null}
+ */
+export function rasterRealization(font){
+    const bitmap = rasterFace(font.faceName);
+    if (!bitmap)
+    {
+        return null;
+    }
+    const requested = (font.height | 0) || -11;
+    const size = (/** @type {RasterStrike} */ strike)=>requested > 0
+        ? strike.height : strike.height - strike.internalLeading;
+    const target = Math.abs(requested);
+    const fits = bitmap.strikes.filter(strike=>size(strike) <= target);
+    const strike = fits.length > 0 ? fits[fits.length - 1] : bitmap.strikes[0];
+    const scaleY = wholeScale(target, size(strike));
+    const width = Math.abs((font.width ?? 0) | 0);
+    const scaleX = width === 0 ? scaleY : wholeScale(width, strike.aveCharWidth);
+    const named = (faceNamed(font.faceName)?.substitute ?? faceNamed(font.faceName)?.name ?? '')
+        .toLowerCase();
+    const advances = named === 'ms sans serif' && strike.height === 13 ? MS_SANS_SERIF
+        : named === 'system' && strike.height === 16 ? SYSTEM : null;
+    return { face: bitmap, strike, scaleX, scaleY, advances };
 }
 
 /**

@@ -25,7 +25,8 @@ import { DEFAULT_PALETTE_COLORS, createDrawingFunctions } from './drawing.js';
 import { copyPath, pathMoved } from './paths.js';
 import { createMetafileFunctions } from './metafiles.js';
 import {
-    FACES, FF_MODERN, FF_ROMAN, FIXED_PITCH, faceNamed, fontFamilies, windowsMetrics,
+    FACES, FF_MODERN, FF_ROMAN, FIXED_PITCH, faceNamed, fontFamilies, rasterFace, rasterRealization,
+    windowsMetrics,
 } from './faces.js';
 import { ANSI_PAGE, OEM_PAGE, decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { DISPLAY_DEVICE_NAME } from '../devices.js';
@@ -525,6 +526,8 @@ const NEWTEXTMETRICEXW_SIZE = 100;
  * only, and of the tables GetFontData answers only 'cmap'.
  */
 const ENUMERATED_FONTTYPE = 0x0004;
+/** A bitmap face's FontType: one enumerated once for each size it has. */
+const RASTER_FONTTYPE = 0x0001;
 
 /**
  * @typedef {Object} GdiHost
@@ -1709,7 +1712,31 @@ export function createGdiFunctions(host){
             charSet: font.charSet === DEFAULT_CHARSET ? ANSI_CHARSET : font.charSet,
             ...measured,
             ...windowsFields(font),
+            ...rasterFields(font),
         };
+    };
+
+    /**
+     * What a bitmap face's size measures, over everything else: the strike
+     * it is realised at is Windows' own, drawn in the ANSI character set it
+     * is installed in, and neither scaled (no TMPF_VECTOR) nor TrueType.
+     *
+     * @param {import('./structs.js').LogFontFields} font
+     */
+    const rasterFields = font=>{
+        const raster = font.raster ?? rasterRealization(font);
+        const face = faceNamed(font.faceName);
+        if (!raster || !face)
+        {
+            return {};
+        }
+        const { strike, scaleX, scaleY } = raster;
+        return { height: strike.height * scaleY, ascent: strike.ascent * scaleY,
+            descent: strike.descent * scaleY, internalLeading: strike.internalLeading * scaleY,
+            externalLeading: strike.externalLeading * scaleY,
+            aveCharWidth: strike.aveCharWidth * scaleX, maxCharWidth: strike.maxCharWidth * scaleX,
+            weight: raster.face.weight, defaultChar: raster.face.defaultChar, charSet: ANSI_CHARSET,
+            pitchAndFamily: face.family | (face.pitch === FIXED_PITCH ? 0 : TMPF_FIXED_PITCH) };
     };
 
     /**
@@ -1729,7 +1756,27 @@ export function createGdiFunctions(host){
     };
 
     /** @param {any} dc @returns {import('./structs.js').LogFontFields} */
-    const currentFont = dc=>objects.get(dc.font)?.attributes ?? logFont({});
+    const currentFont = dc=>asDrawn(objects.get(dc.font)?.attributes ?? logFont({}));
+    /**
+     * A font as it is drawn: a bitmap face at the size it is realised at, so
+     * what is drawn and measured is that size whatever height was asked.
+     *
+     * @param {import('./structs.js').LogFontFields} font
+     */
+    const asDrawn = font=>{
+        const raster = rasterRealization(font);
+        if (!raster)
+        {
+            return font;
+        }
+        const { strike, scaleX, scaleY } = raster;
+        // A height that already names the size it is realised at stays as
+        // asked; any other becomes that size's cell.
+        const exact = scaleY === 1 && (font.height === strike.height
+            || font.height === strike.internalLeading - strike.height);
+        return { ...font, raster, height: exact ? font.height : strike.height * scaleY,
+            width: scaleX === scaleY ? 0 : strike.aveCharWidth * scaleX };
+    };
     /** The instance id of the font a DC draws with: its handle, which is never zero. */
     const realizationOf = (/** @type {number} */ handle)=>{
         const dc = dcOf(handle);
@@ -1776,6 +1823,11 @@ export function createGdiFunctions(host){
     const glyphOutline = ([handle, char, format, metrics, size, buffer, matrix], api)=>{
         const dc = dcOf(handle);
         if (!dc || (matrix >>> 0) === 0 || (metrics >>> 0) === 0)
+        {
+            return GDI_ERROR;
+        }
+        // A bitmap face has no outline to measure or draw a glyph from.
+        if (rasterFace(currentFont(dc).faceName))
         {
             return GDI_ERROR;
         }
@@ -1902,6 +1954,18 @@ export function createGdiFunctions(host){
         if (engine !== undefined && engine !== null)
         {
             return engine;
+        }
+        // Without an engine a bitmap face's size measures with its own
+        // advances, as wide again as it is scaled across.
+        const raster = font.raster;
+        const advances = raster?.advances;
+        if (raster && advances)
+        {
+            return Array.from(text, character=>{
+                const code = character.charCodeAt(0);
+                return (code >= 0x20 && code <= 0xff ? advances[code - 0x20]
+                    : raster.strike.aveCharWidth) * raster.scaleX;
+            }).reduce((sum, advance)=>sum + advance, 0);
         }
         const pitch = metricsOf(font).aveCharWidth;
         const windows = windowsMetrics(font)?.advances;
@@ -2357,10 +2421,14 @@ export function createGdiFunctions(host){
             let answer = 1;
             try
             {
-                for (const face of faces)
+                // A bitmap face is told of once for each size it has.
+                const sizes = faces.flatMap(face=>(rasterFace(face.name)?.strikes ?? [null])
+                    .map(strike=>({ face, strike })));
+                for (const { face, strike } of sizes)
                 {
                     const font = logFont({ faceName: face.name, charSet: ANSI_CHARSET,
-                        pitchAndFamily: face.family | face.pitch });
+                        pitchAndFamily: face.family | face.pitch,
+                        ...strike ? { height: strike.height } : {} });
                     const metrics = metricsOf(font);
                     const bytes = new Uint8Array(enumSize);
                     bytes.set(logFontBytes({ ...font, height: metrics.height,
@@ -2373,7 +2441,8 @@ export function createGdiFunctions(host){
                     host.writeMemory(block + enumSize, new Uint8Array(metricSize));
                     (wide ? writeTextMetricsW : writeTextMetrics)(host, block + enumSize, metrics);
                     answer = (await call(proc >>> 0,
-                        [block, block + enumSize, ENUMERATED_FONTTYPE, lParam >>> 0], thread)) | 0;
+                        [block, block + enumSize, strike ? RASTER_FONTTYPE : ENUMERATED_FONTTYPE,
+                            lParam >>> 0], thread)) | 0;
                     if (answer === 0)
                     {
                         break;
