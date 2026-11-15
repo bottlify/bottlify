@@ -1453,6 +1453,11 @@ test('Arc draws with the pen and puts the current position back', ()=>{
         ['moveToEx', hdc, 1, 2]);
     assert.ok(graphics.calls.filter(call=>call[0] === 'lineTo').length >= 8);
     assert.equal(fns.Arc.handler([0x7777, 0, 0, 1, 1, 0, 0, 0, 0]), 0, 'not a DC');
+    // Wine's test_arcs, "0-pixel arc": a box with no height has no ellipse.
+    const before = graphics.calls.length;
+    assert.equal(fns.Arc.handler([hdc, 10, 10, 40, 10, 0, 1, 1, 0]), 1);
+    assert.deepEqual(graphics.calls.slice(before).filter(call=>call[0] === 'lineTo'), [],
+        'and nothing of it is drawn');
 });
 
 test('Polyline draws through its points and keeps the position, PolylineTo moves it', ()=>{

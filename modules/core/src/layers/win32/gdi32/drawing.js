@@ -2229,6 +2229,13 @@ export function createDrawingFunctions(
                     interfaces.moveToEx(handle >>> 0, back.x, back.y);
                     return 1;
                 }
+                const { left, top, right, bottom } = ellipseBox(box);
+                if (right < left || bottom < top)
+                {
+                    // A box with no width or height has no ellipse to draw a
+                    // part of (Wine's bitmap.c test_arcs, "0-pixel arc").
+                    return 1;
+                }
                 const points = directedArc(dcOf(handle), box);
                 const back = interfaces.moveToEx(handle >>> 0, points[0].x, points[0].y);
                 for (const point of points.slice(1))
