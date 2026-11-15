@@ -58,6 +58,12 @@ event, an error. Neither stops the program.
   exports only it has, GetWindowSubclass is there and TaskDialog, TaskDialogIndirect,
   DrawShadowText, LoadIconMetric, LoadIconWithScaleDown, DPA_GetSize, DSA_Clone, DSA_GetSize,
   ImageList_CoCreateInstance, ImageList_WriteEx, HIMAGELIST_QueryInterface and DllInstall are not.
+  Version 6's button keeps what its BCM_ messages set (image list, text margin, split part,
+  command-link note) and answers BCM_GETIDEALSIZE by its own layout - the text in its font, the
+  image where the style puts it, its frame - which holds the content but is not Windows' pixel
+  for pixel. No button draws the image BM_SETIMAGE gives it, and version 6's draws neither the
+  split part, the image list nor the note. A program's own class
+  that its manifest versions is not registered by the versioned name.
 - An import nothing implements returns 0 when its argument size is known (a decorated name, a cdecl
   library, a library the program brought). Otherwise the program stops with `unimplemented import`
   and the function's name.

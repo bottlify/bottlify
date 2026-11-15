@@ -715,6 +715,8 @@ const MAX_WINDOW_TEXT = 1 << 16;
  *           name. Absent in a build with no common controls, and then a
  *           program that makes one gets no window for it.
  * @property {(name: string) => ({ versioned: string, major: number } | null)} [windowClass]
+ * @property {(himl: number) => ({ cx: number, cy: number } | null)} [imageListSize]
+ *           An image list's image size, comctl32's, for a version 6 button.
  *           The class a window class name is under the running thread's
  *           activation context: its versioned name and the major version of
  *           the assembly that registers it, or null when no context
@@ -1029,15 +1031,19 @@ export function createWindowFunctions(host){
      * @returns {any | null}
      */
     const classByName = name=>{
+        // Only a system class is redirected: a program's own registered by
+        // a versioned name is not yet registered under it (decisions.md A257).
         const redirected = host.windowClass?.(name);
         if (redirected)
         {
             return versionedClass(redirected.versioned, redirected.major) ?? classNamed(name);
         }
         // A versioned name asked for by itself, as a program that read it
-        // from its context's class section does.
+        // from its context's class section does: a class registered by that
+        // name, else the system class of that version.
         const version = /^(\d+)\.\d+\.\d+\.\d+!/.exec(name);
-        return version ? versionedClass(name, Number(version[1])) : classNamed(name);
+        return version ? classNamed(name) ?? versionedClass(name, Number(version[1]))
+            : classNamed(name);
     };
 
     /**
@@ -6490,6 +6496,9 @@ export function createWindowFunctions(host){
         readMemory: host.readMemory,
         draw,
         picture: (/** @type {number} */ handle)=>pictureOf(handle),
+        pointerSize: host.pointerSize === 8 ? 8 : 4,
+        setLastError: code=>host.setLastError?.(code),
+        imageListSize: himl=>host.imageListSize?.(himl) ?? null,
         live,
         windowOf: hwnd=>windows.get(hwnd >>> 0) ?? null,
         clientSize: record=>geometry.clientSize(record),
