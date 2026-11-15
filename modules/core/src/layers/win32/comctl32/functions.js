@@ -89,6 +89,8 @@ export const COMCTL32_ORDINALS = Object.freeze({
     13: 'MakeDragList',
     14: 'LBItemFromPt',
     17: 'InitCommonControls',
+    // An image list's palette, exported by number alone.
+    390: '#390',
     // Exported by number alone before Windows XP, and found so still.
     410: 'SetWindowSubclass',
     411: 'GetWindowSubclass',
