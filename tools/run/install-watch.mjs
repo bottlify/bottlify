@@ -14,7 +14,7 @@
  *   node tools/run/install-watch.mjs <setup.exe | disc.iso | archive.zip [--entry PATH]>
  *       | --bundle ID [--which PATH]
  *       [--every 30] [--minutes 20]
- *       [--journal SECONDS] [--memory MB] [--key Code@S]... [--click X,Y@S]...
+ *       [--journal SECONDS] [--memory MB] [--machine MB] [--key Code@S]... [--click X,Y@S]...
  *       [--shots DIR] [--list 'C:\Program Files'] [--collect]
  *       [--screen 1024x768] [--cat 'C:\WINDOWS\DirectX.log']... [--siblings]
  *       [--copy 'C:\WINDOWS\TEMP' temp]...
@@ -165,6 +165,8 @@ const traceOnFault = argv.includes('--trace-fault');
 const journalAt = number('--journal', 0) || traceAt
     || (traceOnBox || traceOnFault ? 1e6 : 0);
 const memory = number('--memory', 0);
+/** `--machine MB`: every process of the run together held to that (createApp's machineMemory). */
+const machine = number('--machine', 0);
 const listAt = argv.includes('--list') ? argv[argv.indexOf('--list') + 1] : null;
 // The launcher hands a program the size of the screen it is on; the engine's
 // own default is 640x480, which a wizard laid out for 800x600 overhangs.
@@ -369,6 +371,7 @@ const runOptions = {
     // on the desktop and waits for a key or a click like any dialog.
     unattended: !argv.includes('--attended'),
     ...memory > 0 ? { memorySize: memory * 1048576 } : {},
+    ...machine > 0 ? { machineMemory: machine * 1048576 } : {},
     ...screenWidth > 0
         ? { screen: { width: screenWidth, height: screenHeight, bitsPerPixel: 32 } } : {},
     // Every pointer argument peeked for a string, so a journal line names
