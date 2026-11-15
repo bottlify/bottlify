@@ -2180,7 +2180,8 @@ export function registerQuartzClasses(registry, host){
         registry.registerClass(CLSID_SEEKING_PASS_THRU, passThru.seekingPassThru);
         for (const [clsid, define] of [...createRenderers(base, host.filters, passThru),
             ...createParsers(base, host.filters),
-            ...host.filters.icm ? createTransforms(base, host.filters, host.filters.icm) : []])
+            ...host.filters.icm
+                ? createTransforms(base, host.filters, host.filters.icm, passThru) : []])
         {
             registry.registerClass(clsid, define);
         }

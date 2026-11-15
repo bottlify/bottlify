@@ -22,10 +22,6 @@
 import {
     FORMAT_VIDEO_INFO, MEDIATYPE_VIDEO, STATE_STOPPED,
 } from './filter.js';
-import { describe } from './describe.js';
-import {
-    IID_IMEDIA_POSITION, IID_IMEDIA_SEEKING, IMEDIA_POSITION_SLOTS, IMEDIA_SEEKING_SLOTS,
-} from './interfaces.js';
 import { videoSubtype } from './splitters.js';
 
 const S_OK = 0x00000000;
@@ -33,7 +29,6 @@ const E_FAIL = 0x80004005 | 0;
 const VFW_E_TYPE_NOT_ACCEPTED = 0x8004022a | 0;
 const VFW_E_NOT_CONNECTED = 0x80040209 | 0;
 const VFW_S_NO_STOP_TIME = 0x00040270;
-const E_NOTIMPL = 0x80004001 | 0;
 
 export const CLSID_AVI_DECOMPRESSOR = '{CF49D4E0-1115-11CE-B03A-0020AF0BA770}';
 
@@ -103,9 +98,10 @@ export function videoInfo(header, like){
  * @param {ReturnType<typeof import('./filter.js').createFilterBase>} base
  * @param {import('./filter.js').FilterHost} host
  * @param {import('./filter.js').IcmHost} icm
+ * @param {ReturnType<typeof import('./passthru.js').createPassThru>} passThru
  * @returns {Map<string, () => import('../ole32/objects.js').ComClassDefinition>}
  */
-export function createTransforms(base, host, icm){
+export function createTransforms(base, host, icm, passThru){
     /**
      * @typedef {Object} DecompressorState
      * @property {number} hic        The codec, open while the input is connected.
@@ -220,33 +216,6 @@ export function createTransforms(base, host, icm){
         host.free(out);
         return answer === ICERR_OK;
     };
-
-    /**
-     * A seeking interface on the output pin that is the input's peer's: a
-     * transform passes a seek upstream, to the filter that has the stream.
-     *
-     * @param {import('./filter.js').Filter} filter @param {string} iid
-     * @param {[string, number][]} slots
-     */
-    const passThrough = (filter, iid, slots)=>Object.fromEntries(slots.map(([name], index)=>[
-        name,
-        /** @param {any} pin @param {number[]} args */
-        async(pin, args)=>{
-            const input = filter.pins.find(each=>each.spec.direction === 'input');
-            if (!input || input.peer === 0)
-            {
-                return VFW_E_NOT_CONNECTED;
-            }
-            const upstream = await base.queryInterface(input.peer, iid);
-            if (upstream === 0)
-            {
-                return E_NOTIMPL;
-            }
-            const answer = await base.call(upstream, 3 + index, args);
-            await base.release(upstream);
-            return answer;
-        },
-    ]));
 
     /**
      * Ends a decompression begun, and frees the output's header.
@@ -371,12 +340,9 @@ export function createTransforms(base, host, icm){
                 accepts: async(pin, type)=>isVideo(type) && await query(pin.filter, type),
                 allocator: pin=>({ buffers: 1, size: Math.max(1, pin.type?.sampleSize ?? 1),
                     align: 1, prefix: 0 }),
-                interfaces: [
-                    describe(IID_IMEDIA_SEEKING, IMEDIA_SEEKING_SLOTS,
-                        passThrough(filter, IID_IMEDIA_SEEKING, IMEDIA_SEEKING_SLOTS)),
-                    describe(IID_IMEDIA_POSITION, IMEDIA_POSITION_SLOTS,
-                        passThrough(filter, IID_IMEDIA_POSITION, IMEDIA_POSITION_SLOTS)),
-                ],
+                // A transform passes a seek upstream, to the filter with the stream.
+                interfaces: passThru.seekingFaces(()=>filter.pins
+                    .find(each=>each.spec.direction === 'input')?.peer ?? 0, VFW_E_NOT_CONNECTED),
                 connected: async(pin, type)=>{
                     const state = stateOf(pin.filter);
                     if (state.source === null)

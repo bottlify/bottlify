@@ -53,52 +53,57 @@ export function createPassThru(base, host){
      * @param {string} iid @param {[string, number][]} slots
      * @param {(state: any) => number | Promise<number>} upstream  The output pin
      *     to ask, 0 where there is none.
+     * @param {number} unconnected  The answer where there is none.
      */
-    const forwarding = (iid, slots, upstream)=>Object.fromEntries(slots.map(([name], index)=>[
-        name,
-        DISPATCH.has(name)
-            ? (/** @type {any} */ _state, /** @type {number[]} */ args)=>{
+    const forwarding = (iid, slots, upstream, unconnected)=>Object.fromEntries(slots.map(
+        ([name], index)=>[
+            name,
+            DISPATCH.has(name)
+                ? (/** @type {any} */ _state, /** @type {number[]} */ args)=>{
                 // An IDispatch caller asks for type information this one has
                 // none of: no type info, and the methods by vtable only.
-                if (name === 'GetTypeInfoCount')
-                {
-                    if ((args[0] >>> 0) === 0)
+                    if (name === 'GetTypeInfoCount')
                     {
-                        return E_POINTER;
+                        if ((args[0] >>> 0) === 0)
+                        {
+                            return E_POINTER;
+                        }
+                        host.writeMemory(args[0] >>> 0, new Uint8Array(4));
+                        return S_OK;
                     }
-                    host.writeMemory(args[0] >>> 0, new Uint8Array(4));
-                    return S_OK;
-                }
-                return E_NOTIMPL;
-            }
-            : async(/** @type {any} */ state, /** @type {number[]} */ args)=>{
-                const pin = await upstream(state);
-                if (pin === 0)
-                {
                     return E_NOTIMPL;
                 }
-                const face = await base.queryInterface(pin, iid);
-                if (face === 0)
-                {
-                    return E_NOTIMPL;
-                }
-                const answer = await base.call(face, FIRST + index, args);
-                await base.release(face);
-                return answer;
-            },
-    ]));
+                : async(/** @type {any} */ state, /** @type {number[]} */ args)=>{
+                    const pin = await upstream(state);
+                    if (pin === 0)
+                    {
+                        return unconnected;
+                    }
+                    const face = await base.queryInterface(pin, iid);
+                    if (face === 0)
+                    {
+                        return E_NOTIMPL;
+                    }
+                    const answer = await base.call(face, FIRST + index, args);
+                    await base.release(face);
+                    return answer;
+                },
+        ]));
 
     /**
      * IMediaSeeking and IMediaPosition passed to `upstream`'s.
      *
      * @param {(state: any) => number | Promise<number>} upstream
+     * @param {number} [unconnected]  The answer with nothing upstream: a
+     *     filter's own seeking says E_NOTIMPL, as CPosPassThru does; a
+     *     transform's output pin VFW_E_NOT_CONNECTED, its input not being.
      * @returns {import('../ole32/objects.js').ComInterfaceDescriptor[]}
      */
-    const seekingFaces = upstream=>[
+    const seekingFaces = (upstream, unconnected = E_NOTIMPL)=>[
         describe(IID_IMEDIA_SEEKING, IMEDIA_SEEKING_SLOTS,
-            forwarding(IID_IMEDIA_SEEKING, IMEDIA_SEEKING_SLOTS, upstream)),
+            forwarding(IID_IMEDIA_SEEKING, IMEDIA_SEEKING_SLOTS, upstream, unconnected)),
         describe(IID_IMEDIA_POSITION, IMEDIA_POSITION_SLOTS,
-            forwarding(IID_IMEDIA_POSITION, IMEDIA_POSITION_SLOTS, upstream)),
+            forwarding(IID_IMEDIA_POSITION, IMEDIA_POSITION_SLOTS, upstream, unconnected)),
     ];
 
     /**
