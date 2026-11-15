@@ -2364,7 +2364,8 @@ export function createWin32Module(){
             // Media Foundation: its objects, and its reader's class factory,
             // which a program reaches through COM as well as through exports.
             const mediaFoundation = createMfplatFunctions({
-                readMemory, writeMemory, heap, vtables: comVtables,
+                readMemory, writeMemory, heap, vtables: comVtables, setRegisters,
+                now: ()=>kernel.clock.virtualTime(),
                 objectAt: pointer=>bridge.interfaceObject(pointer),
                 callGuest: call=>bridge.callGuest(call),
                 callerThread: ()=>bridge.callerThread(),

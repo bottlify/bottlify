@@ -86,6 +86,8 @@ export function mfMachine(options = {}){
     let nextEntry = 0x7000_0000;
     /** @type {{ api: string, detail: string, kind?: string }[]} */
     const said = [];
+    /** EDX as a LONGLONG answer left it. @type {{ edx?: number }} */
+    const registers = {};
 
     const host = {
         /** @param {number} at @param {number} length */
@@ -109,6 +111,9 @@ export function mfMachine(options = {}){
         /** @param {string} api @param {string} detail @param {string} [kind] */
         divergence: (api, detail, kind)=>said.push({ api, detail, kind }),
         propVariant: options.propVariant,
+        /** @param {{ edx?: number }} values */
+        setRegisters: values=>Object.assign(registers, values),
+        now: ()=>1234.5,
     };
     const mf = createMfplatFunctions(host);
 
@@ -245,5 +250,5 @@ export function mfMachine(options = {}){
     };
 
     return { memory, view, heap, freed, host, mf, said, u32, putU32, guid, guidAt, wide, wideAt,
-        out, call, make, foreign, owners, IID_IUNKNOWN };
+        out, call, make, foreign, owners, IID_IUNKNOWN, registers };
 }
