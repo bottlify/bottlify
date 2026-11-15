@@ -57,7 +57,10 @@ import { createStreaming } from './stream.js';
 import { createSystemClock } from './clock.js';
 import { createMemoryAllocator } from './allocator.js';
 import { IAM_FILTER_DATA_SLOTS, IID_IAM_FILTER_DATA, createFilterMapper } from './mapper.js';
-import { registerWindowsFilters } from './registrations.js';
+import {
+    WINDOWS_REGISTRATIONS, deviceRegistrations, registerWindowsFilters,
+} from './registrations.js';
+import { SYSTEM_CODECS } from '../msvfw32/codecs.js';
 import { CLSID_SEEKING_PASS_THRU, createPassThru } from './passthru.js';
 import {
     CLSID_SYSTEM_DEVICE_ENUM, CLSID_DEVICE_MONIKER, createDeviceEnumeration,
@@ -68,6 +71,8 @@ import { createFileSource } from './filesource.js';
 import { createRenderers } from './renderers.js';
 import { createParsers } from './splitters.js';
 import { createTransforms } from './transforms.js';
+import { createColorSpaceConverter } from './colorspace.js';
+import { createAcmWrapper } from './acmwrapper.js';
 
 /**
  * How far a name a program hands these is read: whole, as Windows reads it, up to
@@ -1738,9 +1743,8 @@ export function createQuartz(host){
 
     /**
      * IFilterMapper2, which is where a filter DLL's DllRegisterServer announces
-     * itself. Nothing here builds graphs out of registered filters, so the
-     * registration is accepted and forgotten -- which is what a filter that
-     * registers successfully and is never chosen looks like from inside.
+     * itself. These answers stand only without the device store; with it,
+     * `mapper.js`'s mapper replaces them and a registration is kept.
      *
      * @type {Record<string, (state: null, args: number[]) => number>}
      */
@@ -2180,6 +2184,9 @@ export function registerQuartzClasses(registry, host){
         registry.registerClass(CLSID_SEEKING_PASS_THRU, passThru.seekingPassThru);
         for (const [clsid, define] of [...createRenderers(base, host.filters, passThru),
             ...createParsers(base, host.filters),
+            ...createColorSpaceConverter(base, host.filters, passThru),
+            ...host.filters.acm
+                ? createAcmWrapper(base, host.filters, host.filters.acm, passThru) : [],
             ...host.filters.icm
                 ? createTransforms(base, host.filters, host.filters.icm, passThru) : []])
         {
@@ -2190,7 +2197,10 @@ export function registerQuartzClasses(registry, host){
     // and a program walking a category to find; only what is made here.
     if (host.devices)
     {
-        registerWindowsFilters(host.devices.store, clsid=>registry.isRegistered(clsid));
+        registerWindowsFilters(host.devices.store, clsid=>registry.isRegistered(clsid), [
+            ...WINDOWS_REGISTRATIONS,
+            ...deviceRegistrations(SYSTEM_CODECS),
+        ]);
     }
     return { tick: quartz.tick, film: quartz.film };
 }

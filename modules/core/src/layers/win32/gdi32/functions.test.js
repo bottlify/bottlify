@@ -1334,6 +1334,19 @@ test('GetDeviceCaps answers for what is modelled and zero for what is not', ()=>
     assert.equal(fns.GetDeviceCaps.handler([memoryDC, RASTERCAPS]), raster,
         'a memory DC answers for the display it is compatible with');
 
+    // CURVECAPS, LINECAPS, POLYGONALCAPS: every shape, GDI's own to draw, on
+    // the display and into a metafile alike (Wine's metafile getwinmetafilebits).
+    const enhanced = fns.CreateEnhMetaFileA.handler([0, 0, 0, 0]);
+    for (const context of [hdc, enhanced])
+    {
+        assert.deepEqual([28, 30, 32].map(index=>fns.GetDeviceCaps.handler([context, index])),
+            [511, 254, 255]);
+    }
+    // A Windows metafile's DC has no device: a metafile, and every
+    // capability zero (Wine's dc.c test_device_caps).
+    const windowsMetafile = fns.CreateMetaFileA.handler([0]);
+    assert.deepEqual([TECHNOLOGY, HORZRES, RASTERCAPS, 28].map(index=>
+        fns.GetDeviceCaps.handler([windowsMetafile, index])), [5, 0, 0, 0]);
     assert.equal(fns.GetDeviceCaps.handler([hdc, 118]), 0,
         'an index with no answer here reads as absent, not as garbage');
     assert.equal(fns.GetDeviceCaps.handler([0x9999, HORZRES]), 0);
@@ -1521,7 +1534,7 @@ function withEngine(/** @type {Record<string, any>} */ more = {}){
 
 test('with a font engine the metrics are its measurements of the selected font', ()=>{
     const { fns, memory, hdc, asked } = withEngine();
-    putLogFont(memory, { height: -12, faceName: 'Tahoma', weight: 700 });
+    putLogFont(memory, { height: -12, faceName: 'Arial', weight: 700 });
     fns.SelectObject.handler([hdc, fns.CreateFontIndirectA.handler([STRUCT])]);
 
     assert.equal(fns.GetTextMetricsA.handler([hdc, OUT]), 1);
@@ -1532,18 +1545,21 @@ test('with a font engine the metrics are its measurements of the selected font',
     assert.equal(memory.i32(OUT + TEXTMETRICA.tmMaxCharWidth), 9);
     assert.equal(memory.i32(OUT + TEXTMETRICA.tmWeight), 700, 'the rest is still the LOGFONT\'s');
     const font = asked.at(-1);
-    assert.equal(font?.faceName, 'Tahoma');
+    assert.equal(font?.faceName, 'Arial');
     assert.equal(font?.height, -12);
 });
 
 test('with a font engine a string is as wide as the engine draws it', ()=>{
-    const { fns, memory, hdc } = withEngine();
+    const { fns, memory, hdc, gdi } = withEngine();
+    // An outline face: the DC's own System is a bitmap face, measured by its advances.
+    fns.SelectObject.handler([hdc, gdi.draw.createFont(
+        { pointSize: 8, faceName: 'Arial', weight: 0, italic: 0, charSet: 0 })]);
     memory.putString(FACE_NAME, 'AB');
 
     memory.fill(OUT, SIZE.SIZE / 4);
     assert.equal(fns.GetTextExtentPoint32A.handler([hdc, FACE_NAME, 2, OUT]), 1);
     assert.equal(memory.i32(OUT + SIZE.cx), 5 + 4, 'A is odd, B is even');
-    assert.equal(memory.i32(OUT + SIZE.cy), 16, 'as high as Windows\' System font, the DC\'s own');
+    assert.equal(memory.i32(OUT + SIZE.cy), 13, 'as high as the engine measures the font');
 
     memory.fill(OUT, 4);
     assert.equal(fns.GetCharWidth32A.handler([hdc, 0x41, 0x43, OUT]), 1);
@@ -1576,6 +1592,9 @@ test('an ANSI string is measured, and its face named, as its bytes are in the AN
         },
     }).table;
     const hdc = fns.GetDC.handler([HWND]);
+    // An outline face: the DC's own System is a bitmap face, measured by its advances.
+    putLogFont(context.memory, { height: -11, faceName: 'Arial' });
+    fns.SelectObject.handler([hdc, fns.CreateFontIndirectA.handler([STRUCT])]);
     context.memory.bytes.set([0x80, 0x99, 0x97], FACE_NAME);
     assert.equal(fns.GetTextExtentPoint32A.handler([hdc, FACE_NAME, 3, OUT]), 1);
     assert.equal(fns.GetCharWidth32A.handler([hdc, 0x99, 0x99, OUT]), 1);
@@ -1738,7 +1757,14 @@ test('EnumFontFamiliesEx lists every face offered, once each, in the one set dra
     const faces = seen.map(one=>one.face);
     assert.ok(['Arial', 'Times New Roman', 'Courier New', 'MS Sans Serif']
         .every(face=>faces.includes(face)));
-    assert.equal(new Set(faces).size, faces.length, 'each face once');
+    const bitmapSizes = { 'MS Sans Serif': 6, 'MS Serif': 8, Courier: 3, System: 1,
+        'Small Fonts': 6, Fixedsys: 1 };
+    for (const face of new Set(faces))
+    {
+        assert.equal(faces.filter(one=>one === face).length,
+            bitmapSizes[/** @type {keyof typeof bitmapSizes} */ (face)] ?? 1,
+            `${face}: an outline face once, a bitmap face once for each size it has`);
+    }
     assert.ok(!faces.includes('MS Shell Dlg') && !faces.includes('Helv'),
         'a substitute is found by name and never listed');
     for (const one of seen)
@@ -1749,7 +1775,8 @@ test('EnumFontFamiliesEx lists every face offered, once each, in the one set dra
         assert.equal(one.charSet, 0, 'ANSI_CHARSET, the one set the engine draws');
         assert.equal(one.height, one.tmHeight, 'Wine\'s arial_enum_proc: lfHeight is tmHeight');
         assert.equal(one.weight, one.tmWeight, 'and its enum_fonts_proc: lfWeight is tmWeight');
-        assert.equal(one.type, 4, 'TRUETYPE_FONTTYPE, as the faces are on Windows');
+        assert.equal(one.type, one.face in bitmapSizes ? 1 : 4,
+            'RASTER_FONTTYPE for a bitmap face, TRUETYPE_FONTTYPE for the rest, as on Windows');
         assert.equal(one.script, 'Western');
     }
     assert.deepEqual(surfaces.freed, surfaces.allocated.map(block=>block.address),
@@ -1847,37 +1874,89 @@ test('EnumFontFamiliesEx calls nothing when it cannot, and refuses what is not a
     assert.equal(enumeration.seen.length, 0);
 });
 
-test('a font file cannot be added to the fixed font table, with the stack intact', ()=>{
-    const { fns } = setup();
-    assert.equal(fns.AddFontResourceA.handler(), 0);
-    assert.equal(fns.CreateScalableFontResourceA.handler(), 0);
-    assert.deepEqual([fns.AddFontResourceA.argBytes, fns.CreateScalableFontResourceA.argBytes],
-        [4, 16]);
+test('a font file a program adds is read, drawn, counted and named', async()=>{
+    // A game ships its title face as a .ttf, adds it, and creates its font by
+    // family; refused, its text fell back to another face.
+    const context = setup();
+    /** @type {string[]} */
+    const drawn = [];
+    const files = new Map([
+        ['C:\\GAME\\TITLE.TTF', fontWithNames([[3, 0x409, 'Trajan Pro']])],
+        ['C:\\WINDOWS\\FONTS\\SHARED.TTF', fontWithNames([[3, 0x409, 'Shared Sans']])],
+        ['C:\\GAME\\README.TXT', new TextEncoder().encode('not a font')],
+    ]);
+    const fns = createGdiFunctions({
+        readMemory: (address, length)=>context.memory.readMemory(address, length),
+        writeMemory: (address, data)=>context.memory.writeMemory(address, data),
+        readCString: (address, maxLength)=>context.memory.readCString(address, maxLength),
+        handles: context.handles,
+        surfaces: context.surfaces,
+        readFile: async path=>files.get(path.toUpperCase()) ?? null,
+        fullPath: path=>(/[\\:]/.test(path) ? path : `C:\\GAME\\${path}`),
+        graphics: { addFont: async family=>{
+            drawn.push(family);
+            return true;
+        } },
+    }).table;
+    const FR_PRIVATE = 0x10;
+    /** @param {string} name */
+    const named = name=>{
+        context.memory.putString(FACE_NAME, name);
+        return FACE_NAME;
+    };
+    assert.equal(await fns.AddFontResourceExA.handler([named('C:\\game\\title.ttf'),
+        FR_PRIVATE, 0]), 1, 'one face in it');
+    assert.deepEqual(drawn, ['Trajan Pro'], 'handed to the engine to draw with');
+    assert.equal(await fns.AddFontResourceExA.handler([named('title.ttf'), FR_PRIVATE, 0]), 1,
+        'the same file again, by a path the current directory completes');
+    assert.deepEqual(drawn, ['Trajan Pro'], 'and not loaded twice');
+
+    const hdc = fns.GetDC.handler([HWND]);
+    putLogFont(context.memory, { height: -20, faceName: 'Trajan Pro' });
+    fns.SelectObject.handler([hdc, fns.CreateFontIndirectA.handler([STRUCT])]);
+    assert.ok(fns.GetTextFaceA.handler([hdc, 32, OUT]) > 0);
+    assert.equal(context.memory.readCString(OUT, 32), 'Trajan Pro', 'the family is a face now');
+
+    assert.equal(fns.RemoveFontResourceExA.handler([named('title.ttf'), 0, 0]), 0,
+        'a remove whose flags are not the add\'s fails');
+    assert.equal(fns.RemoveFontResourceExA.handler([named('title.ttf'), FR_PRIVATE, 0]), 1);
+    assert.equal(fns.RemoveFontResourceExA.handler([named('title.ttf'), FR_PRIVATE, 0]), 1,
+        'as many removes as adds');
+    assert.equal(fns.RemoveFontResourceExA.handler([named('title.ttf'), FR_PRIVATE, 0]), 0);
+
+    assert.equal(await fns.AddFontResourceA.handler([named('shared.ttf')]), 1,
+        'a bare name not beside the program is looked for in the Fonts folder');
+    assert.equal(await fns.AddFontResourceA.handler([named('readme.txt')]), 0, 'no font');
+    assert.equal(await fns.AddFontResourceA.handler([named('missing.ttf')]), 0, 'no file');
+    assert.equal(fns.RemoveFontResourceA.handler([named('missing.ttf')]), 0, 'never added');
 });
 
-test('every spelling of adding and removing a font fails the same way, popping its arguments',
-    ()=>{
-        // gdi32.spec: each is stdcall with these arities. Without a font
-        // engine nothing can be added, so every add answers zero fonts and
-        // every remove FALSE -- the in-memory pair too, whose handle is NULL.
-        const { fns, memory } = setup();
-        const table = /** @type {Record<string, { argBytes: number,
-            handler: (args: number[]) => number }>} */ (/** @type {unknown} */ (fns));
-        memory.putU32s(OUT, [UNTOUCHED]);
-        /** @type {[string, number][]} */
-        const spellings = [
-            ['AddFontResourceW', 4], ['AddFontResourceExA', 12], ['AddFontResourceExW', 12],
-            ['AddFontMemResourceEx', 16], ['RemoveFontResourceA', 4],
-            ['RemoveFontResourceW', 4], ['RemoveFontResourceExA', 12],
-            ['RemoveFontResourceExW', 12], ['RemoveFontMemResourceEx', 4],
-        ];
-        for (const [name, argBytes] of spellings)
-        {
-            assert.equal(table[name]?.argBytes, argBytes, `${name} is exported`);
-            assert.equal(table[name].handler([FACE_NAME, 0x10, 0, OUT]), 0, name);
-        }
-        assert.equal(memory.u32(OUT), UNTOUCHED, 'no font count is claimed');
-    });
+test('every spelling of adding and removing a font is exported, popping its arguments', async()=>{
+    // gdi32.spec: each is stdcall with these arities. With no volume to
+    // read, every add answers zero fonts and every remove FALSE -- the
+    // in-memory pair too, whose handle is NULL with no engine.
+    const { fns, memory } = setup();
+    const table = /** @type {Record<string, { argBytes: number,
+        handler: (args: number[]) => number | Promise<number> }>} */ (
+        /** @type {unknown} */ (fns));
+    memory.putU32s(OUT, [UNTOUCHED]);
+    memory.putString(FACE_NAME, 'C:\\font.ttf');
+    /** @type {[string, number][]} */
+    const spellings = [
+        ['AddFontResourceA', 4], ['AddFontResourceW', 4], ['AddFontResourceExA', 12],
+        ['AddFontResourceExW', 12], ['AddFontMemResourceEx', 16], ['RemoveFontResourceA', 4],
+        ['RemoveFontResourceW', 4], ['RemoveFontResourceExA', 12],
+        ['RemoveFontResourceExW', 12], ['RemoveFontMemResourceEx', 4],
+    ];
+    for (const [name, argBytes] of spellings)
+    {
+        assert.equal(table[name]?.argBytes, argBytes, `${name} is exported`);
+        assert.equal(await table[name].handler([FACE_NAME, 0x10, 0, OUT]), 0, name);
+    }
+    assert.equal(memory.u32(OUT), UNTOUCHED, 'no font count is claimed');
+    assert.equal(fns.CreateScalableFontResourceA.handler(), 0, 'no .fot is written');
+    assert.equal(fns.CreateScalableFontResourceA.argBytes, 16);
+});
 
 test('GetTextCharset is the selected font\'s set, and DEFAULT_CHARSET means failure', ()=>{
     const { fns, memory, hdc } = withDC();
@@ -2474,6 +2553,30 @@ test('GetObjectType names each kind of GDI object, a context by whether it is in
     assert.equal(fns.GetObjectType.handler([0x9999]), 0, 'no such object');
 });
 
+test('the stock fonts are the faces and sizes Windows makes them', ()=>{
+    // Wine's test_stock_fonts: ANSI_FIXED_FONT and ANSI_VAR_FONT are the
+    // bitmap Courier and MS Sans Serif asked at 12, which realise at 13;
+    // DEFAULT_GUI_FONT says its weight.
+    const { fns, memory, hdc } = withDC();
+    /** @param {number} index */
+    const stock = index=>{
+        const font = fns.GetStockObject.handler([index]);
+        assert.notEqual(font, 0, `stock object ${index}`);
+        assert.equal(fns.GetObjectA.handler([font, LOGFONTA.SIZE, OUT]), LOGFONTA.SIZE);
+        const before = fns.SelectObject.handler([hdc, font]);
+        fns.GetTextMetricsA.handler([hdc, STRUCT]);
+        fns.SelectObject.handler([hdc, before]);
+        return [memory.i32(OUT + LOGFONTA.lfHeight), memory.i32(OUT + LOGFONTA.lfWeight),
+            memory.bytes[OUT + LOGFONTA.lfCharSet],
+            memory.readCString(OUT + LOGFONTA.lfFaceName, 32),
+            memory.i32(STRUCT + TEXTMETRICA.tmHeight)];
+    };
+    assert.deepEqual(stock(11), [12, 400, 0, 'Courier', 13], 'ANSI_FIXED_FONT');
+    assert.deepEqual(stock(12), [12, 400, 0, 'MS Sans Serif', 13], 'ANSI_VAR_FONT');
+    assert.deepEqual(stock(10).slice(0, 4), [12, 400, 255, 'Terminal'], 'OEM_FIXED_FONT');
+    assert.deepEqual(stock(17).slice(0, 4), [-11, 400, 0, 'MS Shell Dlg'], 'DEFAULT_GUI_FONT');
+});
+
 test('D3DKMT opens the one adapter by name, closes it, and keeps no kernel information', ()=>{
     const { fns, memory } = setup();
     const view = new DataView(memory.bytes.buffer);
@@ -2633,7 +2736,10 @@ test('a world transform needs GM_ADVANCED, composes, and maps LPtoDP and DPtoLP'
 });
 
 test('GetGlyphOutline answers a glyph\'s metrics and refuses its shape', ()=>{
-    const { fns, hdc, memory } = withDC();
+    const { fns, hdc, memory, gdi } = withDC();
+    // The DC's own font is System, a bitmap face with no outline: an outline one.
+    fns.SelectObject.handler([hdc, gdi.draw.createFont(
+        { pointSize: 8, faceName: 'Arial', weight: 0, italic: 0, charSet: 0 })]);
     const GM = STRUCT + 0xa00;
     const MAT = STRUCT + 0xa40;
     memory.putU32s(MAT, [0x10000, 0, 0, 0x10000]);
@@ -2650,7 +2756,10 @@ test('GetGlyphOutline answers a glyph\'s metrics and refuses its shape', ()=>{
 test('GetGlyphOutline draws the bitmap of a glyph, one bit or one gray level a pixel', ()=>{
     // A game that builds its font textures from GGO_GRAY8_BITMAP got
     // GDI_ERROR for every character and drew no text at all.
-    const { fns, hdc, memory } = withEngine();
+    const { fns, hdc, memory, gdi } = withEngine();
+    // The DC's own font is System, a bitmap face with no outline: an outline one.
+    fns.SelectObject.handler([hdc, gdi.draw.createFont(
+        { pointSize: 8, faceName: 'Arial', weight: 0, italic: 0, charSet: 0 })]);
     const GM = STRUCT + 0xa00;
     const MAT = STRUCT + 0xa40;
     const BITS = STRUCT + 0xa80;
@@ -2704,7 +2813,10 @@ test('a font held in memory is drawn under its family name, and a handle says so
 });
 
 test('GetGlyphIndices maps each character, marking the ones outside the font', ()=>{
-    const { fns, hdc, memory } = withDC();
+    const { fns, hdc, memory, gdi } = withDC();
+    // The DC's own font is System, a bitmap face with no outline: an outline one.
+    fns.SelectObject.handler([hdc, gdi.draw.createFont(
+        { pointSize: 8, faceName: 'Arial', weight: 0, italic: 0, charSet: 0 })]);
     const TEXT = STRUCT + 0xb00;
     const INDICES = STRUCT + 0xb40;
     memory.putString(TEXT, 'A\x01');
@@ -2731,7 +2843,8 @@ test('the glyph-index width calls read a glyph as the character GetGlyphIndices 
 
     const view = new DataView(memory.bytes.buffer);
     assert.equal(fns.GetCharWidthFloatA.handler([hdc, 65, 65, WIDTHS]), 1);
-    assert.equal(view.getFloat32(WIDTHS, true), a, 'the same width, as a float');
+    assert.equal(view.getFloat32(WIDTHS, true), a / 16,
+        'a sixteenth of the width, as Windows answers it (A253)');
     assert.equal(fns.GetCharABCWidthsFloatW.handler([hdc, 66, 66, WIDTHS]), 1);
     assert.equal(view.getFloat32(WIDTHS + 4, true), b);
     assert.equal(fns.GetCharABCWidthsFloatW.handler([0, 66, 66, WIDTHS]), 0);

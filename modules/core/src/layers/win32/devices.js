@@ -14,5 +14,7 @@
 
 export const VIDEO_ADAPTER_NAME = 'Bottlify WebGPU Video Adapter';
 export const SOUND_ADAPTER_NAME = 'Bottlify Sound Adapter';
+/** The sound adapter's DirectSound device GUID: DirectSoundEnumerate, devenum's DSGuid. */
+export const SOUND_DEVICE_GUID = '{00000001-0000-0000-0000-000000000000}';
 /** The one display's device name: EnumDisplayDevices, CreateDC, DxDiag. */
 export const DISPLAY_DEVICE_NAME = '\\\\.\\DISPLAY1';

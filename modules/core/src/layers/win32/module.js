@@ -1557,6 +1557,7 @@ export function createWin32Module(){
                             libraries['MSVFW32.dll'].ICDecompress
                                 .handler([hic, flags, format, data, output, bits]),
                     },
+                    acm: { call: (name, args)=>libraries['MSACM32.dll'][name].handler(args) },
                     readWideString: (address, maxLength)=>readWideString(address, maxLength),
                     allocate: bytes=>heap.allocate(bytes),
                     free: address=>heap.free(address),
@@ -1811,6 +1812,9 @@ export function createWin32Module(){
                 call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
                 callerThread: ()=>bridge.callerThread(),
                 setLastError: setError,
+                // A font file the program adds: read where its path leads.
+                readFile: path=>readVolumeFile(path),
+                fullPath: path=>filesystem.resolve(path).path || path,
             });
 
             // The transport is injected, as the GPU device and the block store are.

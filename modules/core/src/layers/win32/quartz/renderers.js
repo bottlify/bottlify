@@ -45,6 +45,8 @@ const NOTIFY = 3;
 
 export const CLSID_VIDEO_RENDERER = '{70E102B0-5556-11CE-97C0-00AA0055595A}';
 export const CLSID_DSOUND_RENDER = '{79376820-07D0-11CF-A24D-0020AFD79767}';
+/** The Audio Renderer that plays through waveOut, which devenum lists as each wave device. */
+export const CLSID_AUDIO_RENDER = '{E30629D1-27E5-11CE-875D-00608CB78066}';
 export const CLSID_NULL_RENDERER = '{C1F400A4-3F08-11D3-9F0B-006008039E37}';
 
 const MEDIASUBTYPE_PCM = '{00000001-0000-0010-8000-00AA00389B71}';
@@ -69,6 +71,13 @@ export const RENDERERS = [
     },
     {
         clsid: CLSID_DSOUND_RENDER, pin: 'Audio Input pin (rendered)', clock: true,
+        quality: true,
+        accepts: type=>type.major === MEDIATYPE_AUDIO && type.formatType === FORMAT_WAVE_FORMAT_EX
+            && (type.sub === MEDIASUBTYPE_PCM || type.sub === MEDIASUBTYPE_IEEE_FLOAT),
+    },
+    // The waveOut one takes what the DirectSound one takes, as Windows' does.
+    {
+        clsid: CLSID_AUDIO_RENDER, pin: 'Audio Input pin (rendered)', clock: true,
         quality: true,
         accepts: type=>type.major === MEDIATYPE_AUDIO && type.formatType === FORMAT_WAVE_FORMAT_EX
             && (type.sub === MEDIASUBTYPE_PCM || type.sub === MEDIASUBTYPE_IEEE_FLOAT),
