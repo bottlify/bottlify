@@ -474,7 +474,7 @@ export function createPresenter(options = {}){
     let converted = null;
     const counters = {
         presents: 0, uploads: 0, bytes: 0, shownByOwner: 0, shown: 0, gammaShown: 0,
-        dropped: 0, layered: 0, composed: 0, unshown: 0,
+        dropped: 0, layered: 0, composed: 0, unshown: 0, veiled: 0,
     };
     /**
      * Canvas copies by the label of the surface shown: a Direct3D target, a
@@ -893,6 +893,68 @@ export function createPresenter(options = {}){
     const uploadsFrom = {};
     /** @type {{ texture: any, width: number, height: number, format: string } | null} */
     let composed = null;
+    /**
+     * A process's windows over its own picture, by process, while a GPU's frame
+     * of it has the screen: the desktop it composed, uploaded, and where on it
+     * those windows are. Laid over each frame of that process as it is shown,
+     * into a texture of its own, so the frame kept as its layer is the frame.
+     *
+     * @type {Map<number, { texture: any, width: number, height: number,
+     *     rects: { left: number, top: number, right: number, bottom: number }[] }>}
+     */
+    const veils = new Map();
+    /** @type {Map<number, { texture: any, width: number, height: number }>} */
+    const veiled = new Map();
+
+    /**
+     * A process's picture as it is to be seen: its layer, with its veil laid
+     * over it when it has one.
+     *
+     * @param {number} source
+     * @param {{ texture: any, width: number, height: number, format: string }} layer
+     */
+    const pictureOf = (source, layer)=>{
+        const veil = veils.get(source);
+        if (!veil || layer.format !== FORMAT)
+        {
+            return layer;
+        }
+        let over = veiled.get(source);
+        if (!over || over.width !== layer.width || over.height !== layer.height)
+        {
+            over?.texture.destroy?.();
+            over = {
+                texture: /** @type {any} */ (gpu).createTexture({
+                    label: `windows over process ${source}`,
+                    size: { width: layer.width, height: layer.height },
+                    format: FORMAT,
+                    usage: TEXTURE_USAGE.COPY_SRC | TEXTURE_USAGE.COPY_DST
+                        | TEXTURE_USAGE.TEXTURE_BINDING,
+                }),
+                width: layer.width, height: layer.height,
+            };
+            veiled.set(source, over);
+        }
+        const encoder = /** @type {any} */ (gpu).createCommandEncoder({ label: 'veil' });
+        encoder.copyTextureToTexture({ texture: layer.texture }, { texture: over.texture },
+            { width: layer.width, height: layer.height, depthOrArrayLayers: 1 });
+        for (const rect of veil.rects)
+        {
+            const right = Math.min(rect.right, layer.width, veil.width);
+            const bottom = Math.min(rect.bottom, layer.height, veil.height);
+            if (right <= rect.left || bottom <= rect.top)
+            {
+                continue;
+            }
+            encoder.copyTextureToTexture(
+                { texture: veil.texture, origin: { x: rect.left, y: rect.top } },
+                { texture: over.texture, origin: { x: rect.left, y: rect.top } },
+                { width: right - rect.left, height: bottom - rect.top, depthOrArrayLayers: 1 });
+        }
+        /** @type {any} */ (queue).submit([encoder.finish()]);
+        counters.veiled++;
+        return { texture: over.texture, width: over.width, height: over.height, format: FORMAT };
+    };
 
     /**
      * A copy of a source's frame, as its layer.
@@ -954,10 +1016,13 @@ export function createPresenter(options = {}){
             };
         }
         const target = composed;
+        const plan = compositionPlan({ windows, layers, base, screen: screenSize });
+        const pictures = new Map([...new Set(plan.map(copy=>copy.source))].map(source=>
+            [source, pictureOf(source, /** @type {any} */ (layers.get(source)))]));
         const encoder = /** @type {any} */ (gpu).createCommandEncoder({ label: 'compose' });
-        for (const copy of compositionPlan({ windows, layers, base, screen: screenSize }))
+        for (const copy of plan)
         {
-            const layer = /** @type {any} */ (layers.get(copy.source));
+            const layer = /** @type {any} */ (pictures.get(copy.source));
             // A picture in another format is not copied into this one: its
             // windows show what is under them.
             if (layer.format !== target.format)
@@ -993,10 +1058,9 @@ export function createPresenter(options = {}){
         }
         const base = baseOf(windows, layers, options.foreground?.() ?? null);
         const layer = base === null ? undefined : layers.get(base);
-        if (layer)
+        if (base !== null && layer)
         {
-            showNow({ ...frame, surface: { texture: layer.texture, width: layer.width,
-                height: layer.height, format: layer.format, label: 'layer' } });
+            showNow({ ...frame, surface: { ...pictureOf(base, layer), label: 'layer' } });
         }
     };
 
@@ -1038,7 +1102,10 @@ export function createPresenter(options = {}){
             counters.unshown++;
             return;
         }
-        showNow(frame);
+        const layer = /** @type {any} */ (layers.get(source));
+        showNow(veils.has(source)
+            ? { ...frame, surface: { ...pictureOf(source, layer), label: frame.surface.label } }
+            : frame);
     };
 
     /**
@@ -1094,6 +1161,56 @@ export function createPresenter(options = {}){
 
         /** Whether a GPU owns the picture at this address. @param {number} buffer */
         isClaimed: (/** @type {number} */ buffer)=>from.claims.has(buffer >>> 0),
+
+        /**
+         * This machine's windows over its own picture while a GPU's frame of
+         * it has the screen: `desktop` the screen it composed, in its memory,
+         * and `rects` where those windows are on it. Null or no rects lifts
+         * it. The screen is shown again at once: a program stopped in a
+         * message box draws no frame to carry it. Nothing without a GPU here
+         * or a process to lay it over, where frames are no textures to lay
+         * it on.
+         *
+         * @param {PresentableSurface | null} desktop
+         * @param {{ left: number, top: number, right: number, bottom: number }[]} rects
+         */
+        overlay(desktop, rects){
+            if (from.source === undefined || !gpu || !queue)
+            {
+                return;
+            }
+            const source = from.source >>> 0;
+            if (!desktop || rects.length === 0)
+            {
+                if (veils.delete(source))
+                {
+                    reshow();
+                }
+                return;
+            }
+            let veil = veils.get(source);
+            if (!veil || veil.width !== desktop.width || veil.height !== desktop.height)
+            {
+                veil?.texture.destroy?.();
+                veil = {
+                    texture: gpu.createTexture({
+                        label: `desktop of process ${source}`,
+                        size: { width: desktop.width, height: desktop.height },
+                        format: FORMAT,
+                        usage: TEXTURE_USAGE.COPY_SRC | TEXTURE_USAGE.COPY_DST,
+                    }),
+                    width: desktop.width, height: desktop.height, rects,
+                };
+                veils.set(source, veil);
+            }
+            veil.rects = rects;
+            const bytes = new Uint8Array(desktop.width * 4 * desktop.height);
+            convert(from, desktop, bytes);
+            queue.writeTexture({ texture: veil.texture }, bytes,
+                { bytesPerRow: desktop.width * 4 },
+                { width: desktop.width, height: desktop.height });
+            reshow();
+        },
     });
 
     return {
@@ -1154,6 +1271,11 @@ export function createPresenter(options = {}){
          * @param {number} source
          */
         forget(source){
+            for (const held of [veils, veiled])
+            {
+                held.get(source >>> 0)?.texture.destroy?.();
+                held.delete(source >>> 0);
+            }
             const layer = layers.get(source >>> 0);
             if (!layer)
             {
@@ -1246,6 +1368,11 @@ export function createPresenter(options = {}){
                 layer.texture.destroy?.();
             }
             layers.clear();
+            for (const held of [veils, veiled])
+            {
+                held.forEach(each=>each.texture.destroy?.());
+                held.clear();
+            }
             composed?.texture.destroy?.();
             composed = null;
             texture = null;
