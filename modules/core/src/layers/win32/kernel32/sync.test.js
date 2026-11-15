@@ -819,6 +819,8 @@ test('GetThreadGroupAffinity answers the thread\'s mask in group zero, the mask 
                 new Array(8).fill(0), 'group zero, the reserved words zero');
             assert.equal(host.bytes[out + pointerSize + 8], 0xcc, 'and nothing past them');
             assert.equal(fns.GetThreadGroupAffinity.handler([0x1234, out]), 0, 'not a thread');
+            assert.equal(fns.GetThreadGroupAffinity.handler([0x20, 0]), 0,
+                'no structure to fill is refused, not written through');
         }
     });
 

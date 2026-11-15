@@ -1218,12 +1218,19 @@ export function createSyncFunctions(host){
          *
          * The thread's mask in the one processor group a machine of fewer than
          * 64 processors has: GROUP_AFFINITY's KAFFINITY Mask, a pointer wide,
-         * then the group, zero, and three reserved words, zero.
+         * then the group, zero, and three reserved words, zero. No structure
+         * to fill is ERROR_INVALID_PARAMETER (Wine's kernel32
+         * test_thread_processor), never a fault.
          */
         GetThreadGroupAffinity: {
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([handle, out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
                 const thread = threadOf(handle);
                 if (!thread)
                 {

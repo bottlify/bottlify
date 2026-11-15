@@ -411,6 +411,7 @@ From `arg-bytes-audit.mjs dbg/wine-specs`. Every stdcall entry of the win32 laye
 ### `fixtures/`
 
 - [`fixtures/make-pe.mjs`](fixtures/make-pe.mjs) - Build PE programs for the packages' tests
+- [`fixtures/managed-exe.mjs`](fixtures/managed-exe.mjs) - A managed (.NET) program image for the packages' tests
 - [`fixtures/d3d9-program.mjs`](fixtures/d3d9-program.mjs) - A Direct3D 9 test program
 - [`fixtures/gl-program.mjs`](fixtures/gl-program.mjs) - The pieces of an OpenGL test program
 - [`fixtures/gl-glsl-program.mjs`](fixtures/gl-glsl-program.mjs) - An OpenGL 2.0 GLSL test program (also triangle.mjs --glsl)

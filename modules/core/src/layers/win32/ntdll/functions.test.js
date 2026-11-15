@@ -432,6 +432,22 @@ test('ntdll\'s printers are the runtime\'s own, the wide one with them', ()=>{
         'msvcrt\'s formatting, entry and convention');
 });
 
+test('ntdll\'s wide conversions and character classes are the runtime\'s own', ()=>{
+    // Windows' ntdll exports them beside the narrow ones; Wine's ntdll:string
+    // looked each up and called through the null it got back.
+    const host = fakeHost();
+    const names = ['_wtoi', 'wcstol', '_itow', 'towlower', 'iswalpha', '_wcsnicmp', '_snprintf_s'];
+    for (const name of names)
+    {
+        Object.assign(host.crt, { [name]: { convention: 'cdecl', argBytes: 8, handler: ()=>0 } });
+    }
+    const fns = createNtdllFunctions(host);
+    for (const name of names)
+    {
+        assert.equal(fns[name], /** @type {any} */ (host.crt)[name], name);
+    }
+});
+
 test('the status an error was made from is the thread\'s to read back', ()=>{
     const host = { ...fakeHost(), teb: ()=>0x400 };
     const fns = createNtdllFunctions(host);

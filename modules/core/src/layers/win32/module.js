@@ -68,6 +68,7 @@ import { createCrtdllFunctions } from './msvcrt/crtdll.js';
 import { createMsvcr80Functions } from './msvcrt/msvcr80.js';
 import { createMsvcp80Functions } from './msvcrt/msvcp80.js';
 import { createUcrtbaseFunctions } from './msvcrt/ucrtbase.js';
+import { UNIVERSAL_CXX } from './msvcrt/classes.js';
 import { createWindowFunctions } from './user32/windows.js';
 import { createWindowDirectory } from './user32/directory.js';
 import { createMessageQueue } from './user32/messages.js';
@@ -517,6 +518,14 @@ export function createWin32Module(){
             const blocks = blockLayouts(pointerSize);
 
             const memory = host.requireApi('memory');
+            /**
+             * Whether a region holds the address: what an exception's dispatch
+             * asks before it reads a frame or calls a handler. `find` answers
+             * undefined for a gap, never null.
+             *
+             * @param {number} address
+             */
+            const isMapped = address=>memory.find(address) !== undefined;
             const kernel = host.requireApi('kernel');
             const bridge = host.requireApi('bridge');
             const filesystem = host.requireApi('filesystem');
@@ -1864,8 +1873,7 @@ export function createWin32Module(){
             const seh = createSeh({
                 readMemory,
                 writeMemory,
-                /** @param {number} address */
-                isMapped: address=>memory.find(address) !== null,
+                isMapped,
                 teb: ()=>kernel.currentThread()?.tebAddress ?? 0,
                 // With the flags: a raised exception's context carries them as a
                 // fault's does, and a handler that continues from it gets them back.
@@ -1960,8 +1968,7 @@ export function createWin32Module(){
                     readMemory,
                     writeMemory,
                     readCString,
-                    /** @param {number} address */
-                    isMapped: address=>memory.find(address) !== null,
+                    isMapped,
                     imageBaseOf: address=>modules.imageOf?.(address)?.base ?? 0,
                     raise: what=>dispatcher.raise(what),
                     dispatcherContextAt: address=>dispatcher.dispatcherContextAt(address),
@@ -2225,7 +2232,7 @@ export function createWin32Module(){
             // The audio endpoints a program walks to find the device it plays to.
             registerMmDevApiClasses({
                 registry: com, vtables: comVtables, heap, readMemory, writeMemory, readWideString,
-                pointerSize, divergence: config?.divergence,
+                pointerSize, windows, divergence: config?.divergence,
             });
 
             // DirectPlay's session and lobby objects, which a program makes
@@ -3016,7 +3023,8 @@ export function createWin32Module(){
                             /** @param {any} node @param {number} offset @param {Uint8Array} bytes */
                             write: (node, offset, bytes)=>volume.write(node, offset, bytes),
                             /** @param {any} node */
-                            size: node=>filesystem.size(node),
+                            size: node=>volume.standInImage?.(node)?.length
+                                ?? filesystem.size(node),
                             /** @param {any} node */
                             retain: node=>volume.retain(node),
                             /** @param {any} node */
@@ -3309,8 +3317,7 @@ export function createWin32Module(){
                     ...createCrtSeh({
                         readMemory,
                         writeMemory,
-                        /** @param {number} address */
-                        isMapped: address=>memory.find(address) !== null,
+                        isMapped,
                         registers: ()=>Object.fromEntries(
                             registerNames.map(name=>[name, cpuRegisters.read(name)])),
                         setRegisters,
@@ -3436,8 +3443,7 @@ export function createWin32Module(){
                         readMemory,
                         writeMemory,
                         readCString,
-                        /** @param {number} address */
-                        isMapped: address=>memory.find(address) !== null,
+                        isMapped,
                         registers: ()=>Object.fromEntries(
                             registerNames.map(name=>[name, cpuRegisters.read(name)])),
                         /** @param {any} call */
@@ -5260,6 +5266,8 @@ export function createWin32Module(){
                 writeMemory,
                 readWideString,
                 readMemory,
+                /** @param {string} layer */
+                need: layer=>config?.onLayerNeeded?.(layer),
             });
 
             // The Windows Runtime's library came with Windows 8: on 7 and XP
@@ -5430,9 +5438,13 @@ export function createWin32Module(){
             // Visual C++ 2015 on keeps the exception machinery and the memory
             // routines in vcruntime140, and a 64-bit build's compressed C++
             // tables' handler in vcruntime140_1.
-            libraries['VCRUNTIME140.dll'] = Object.fromEntries(VCRUNTIME_EXPORTS
-                .filter(name=>Object.hasOwn(libraries['msvcrt.dll'], name))
-                .map(name=>[name, libraries['msvcrt.dll'][name]]));
+            libraries['VCRUNTIME140.dll'] = {
+                ...Object.fromEntries(VCRUNTIME_EXPORTS
+                    .filter(name=>Object.hasOwn(libraries['msvcrt.dll'], name))
+                    .map(name=>[name, libraries['msvcrt.dll'][name]])),
+                // std::exception's message and typeid's names, ucrtbase's too.
+                .../** @type {any} */ (libraries['msvcrt.dll'])[UNIVERSAL_CXX] ?? {},
+            };
             if (cxx64)
             {
                 libraries['VCRUNTIME140_1.dll'] = {

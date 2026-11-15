@@ -43,7 +43,10 @@ async function bridge(){
     let onTrap = null;
     let nextTrap = 1;
 
-    /** @param {string} name @param {{ top: number, limit: number }} stack */
+    /**
+     * @param {string} name @param {{ top: number, limit: number }} stack
+     * @returns {{ name: string, stackTop: number, stackLimit: number, state?: string }}
+     */
     const thread = (name, stack)=>({ name, stackTop: stack.top, stackLimit: stack.limit });
     const main = thread('main', MAIN);
     const worker = thread('thread-3', WORKER);
@@ -283,6 +286,23 @@ test('a thread running on a stack of its own choosing is called back there', asy
     assert.equal(built.length, 1, 'the callback was started');
     assert.ok(built[0].esp < HEAP_STACK && built[0].esp > HEAP_STACK - 0x1000,
         `0x${built[0].esp.toString(16)} is on the stack the thread was running on`);
+});
+
+test('a stack an ended thread gave back is the next thread\'s to be called back on', async()=>{
+    // The ended thread's record stays while a handle to it is open, with the
+    // bounds of a stack the kernel has since handed to a new thread.
+    const machine = await bridge();
+    Object.assign(machine.worker,
+        { state: 'terminated', stackTop: MAIN.top, stackLimit: MAIN.limit });
+    machine.api.register('TEST.dll!CallsBack', {
+        argBytes: 4,
+        handler: ()=>machine.api.callGuest({ entry: 0x00402000, args: [1] }),
+    });
+    machine.trap(machine.lastTrap(), machine.main, MAIN.top - 0x100);
+    await settle();
+
+    assert.equal(machine.resumed.filter(frame=>frame.eip === 0x00402000).length, 1,
+        'the callback was started on the stack main runs on');
 });
 
 test('a second instance in one realm does not take the first one\'s state', async()=>{

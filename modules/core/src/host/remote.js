@@ -352,6 +352,17 @@ export async function createRemoteApp(wiring){
             ...(options.audio?.port && !transfer.includes(options.audio.port)
                 ? [options.audio.port] : [])]);
 
+    // The engine subscribed for what was asked before the start: an event it
+    // told while the program was loaded (`layer-needed`) is kept for its first
+    // subscriber, and is heard now.
+    for (const name of handlers.keys())
+    {
+        if (name !== 'frame')
+        {
+            request('on', [name]).catch(()=>{});
+        }
+    }
+
     // The first block, handed to the keeper. On an origin without shared
     // memory there is nothing to hand over, and the keeper is fed below by
     // relaying the engine's own answers.

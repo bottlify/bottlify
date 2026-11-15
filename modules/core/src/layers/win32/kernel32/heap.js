@@ -20,6 +20,7 @@
  */
 
 import { pointerArg } from '../common/pointers.js';
+import { IMAGE_ALLOCATION_PROTECT, imageLayout } from './image-protection.js';
 import { askChild } from './cross-process.js';
 import { guestEntry } from '../msvcrt/guest-code.js';
 import * as inGuest from './inguest.js';
@@ -123,6 +124,38 @@ const HEAP_SUMMARY_SIZE = 20;
  */
 const PAGE_NOACCESS = 0x01;
 const PAGE_EXECUTE_READWRITE = 0x40;
+/** A page's base protections, of which a protection names exactly one. */
+const PAGE_BASES = [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80];
+/** PAGE_WRITECOPY and PAGE_EXECUTE_WRITECOPY: a mapped file's, never private memory's. */
+const PAGE_WRITECOPIES = [0x08, 0x80];
+/** The modifiers a base protection may carry: PAGE_GUARD, PAGE_NOCACHE, PAGE_WRITECOMBINE. */
+const PAGE_MODIFIERS = 0x100 | 0x200 | 0x400;
+
+/**
+ * Whether a protection is one Windows takes for an image's pages: one base
+ * protection, copy-on-write included, with at most the modifiers.
+ *
+ * @param {number} protection
+ */
+const imageProtection = protection=>{
+    const base = protection & 0xff;
+    return (protection & ~(0xff | PAGE_MODIFIERS)) === 0 && PAGE_BASES.includes(base)
+        && (base !== PAGE_NOACCESS || (protection & PAGE_MODIFIERS) === 0);
+};
+
+/**
+ * Whether a protection is one Windows takes for private memory: one base
+ * protection, not a copy-on-write one, and at most the modifiers; NOACCESS
+ * with none of them.
+ *
+ * @param {number} protection
+ */
+const privateProtection = protection=>{
+    const base = protection & 0xff;
+    return (protection & ~(0xff | PAGE_MODIFIERS)) === 0 && PAGE_BASES.includes(base)
+        && !PAGE_WRITECOPIES.includes(base)
+        && (base !== PAGE_NOACCESS || (protection & PAGE_MODIFIERS) === 0);
+};
 /** What the pages of COM's method tables are (`TABLES`). */
 const PAGE_READWRITE = 0x04;
 
@@ -1256,6 +1289,92 @@ export function createHeapFunctions(host){
     const unreadable = new Map();
 
     /**
+     * What each reservation was given, as VirtualQuery answers it: the
+     * protection it was reserved with (AllocationProtect) and each committed
+     * page's, as its last commit or VirtualProtect set it. Only NOACCESS is
+     * enforced (`unreadable`); the rest is what the program asked and reads
+     * back.
+     *
+     * @type {Map<number, { allocation: number, pages: Map<number, number> }>}
+     */
+    const protections = new Map();
+
+    /**
+     * The protections VirtualProtect gave a loaded image's pages, by the
+     * image's base, with the header fields that tell that image from one
+     * mapped at the same base after it is gone.
+     *
+     * @type {Map<number, { stamp: string, pages: Map<number, number> }>}
+     */
+    const imageProtections = new Map();
+
+    /**
+     * The image `page` is in - an arena block the loader took for one, or a
+     * region mapped as one - with its layout read from its headers; null
+     * elsewhere, or where the headers are no image's.
+     *
+     * @param {number} page
+     * @returns {{ base: number, layout: NonNullable<ReturnType<typeof imageLayout>>,
+     *     changed: Map<number, number> | null } | null}
+     */
+    const imageAt = page=>{
+        const block = allocator.blockContaining(page);
+        const region = block ? null : host.regionAt?.(page) ?? null;
+        const base = block?.owner === 'image' ? block.address
+            : region?.kind === 'image' ? region.base : null;
+        if (base === null)
+        {
+            return null;
+        }
+        const layout = imageLayout(host.readMemory, base);
+        if (!layout || page >= base + layout.size)
+        {
+            return null;
+        }
+        const kept = imageProtections.get(base);
+        return { base, layout,
+            changed: kept && kept.stamp === imageStamp(base) ? kept.pages : null };
+    };
+
+    /**
+     * TimeDateStamp, CheckSum and SizeOfImage, which a different image at the
+     * same base does not share. @param {number} base
+     */
+    const imageStamp = base=>{
+        const nt = base + readDword(base + 0x3c);
+        return `${readDword(nt + 8)}:${readDword(nt + 24 + 64)}:${readDword(nt + 24 + 56)}`;
+    };
+
+    /**
+     * An image page's protection now: what VirtualProtect last gave it, else
+     * its section's.
+     *
+     * @param {NonNullable<ReturnType<typeof imageAt>>} image @param {number} page
+     */
+    const imagePageProtection = (image, page)=>image.changed?.get(page)
+        ?? image.layout.runs.find(run=>page - image.base < run.to)?.protect ?? PAGE_NOACCESS;
+
+    /**
+     * VirtualQuery's answer inside a loaded image: MEM_IMAGE, allocated
+     * PAGE_EXECUTE_WRITECOPY from its base, the run of pages sharing this
+     * one's protection.
+     *
+     * @param {NonNullable<ReturnType<typeof imageAt>>} image @param {number} page
+     * @returns {[number, number, number, number, number, number, number]}
+     */
+    const imageAnswer = (image, page)=>{
+        const protect = imagePageProtection(image, page);
+        const end = image.base + image.layout.size;
+        let to = page + PAGE_SIZE;
+        while (to < end && imagePageProtection(image, to) === protect)
+        {
+            to += PAGE_SIZE;
+        }
+        return [page, image.base, IMAGE_ALLOCATION_PROTECT, to - page, MEM_COMMIT, protect,
+            MEM_IMAGE];
+    };
+
+    /**
      * Opens what of [from, to) of a reservation the program may touch -- its
      * committed pages not protected PAGE_NOACCESS -- and closes the rest, where
      * the processor faults a closed page (`pageAccess`).
@@ -1294,6 +1413,14 @@ export function createHeapFunctions(host){
      * @param {number} protection
      */
     const noteProtection = (reservation, from, to, protection)=>{
+        const kept = protections.get(reservation)?.pages;
+        if (kept)
+        {
+            for (let page = from; page < to; page += PAGE_SIZE)
+            {
+                kept.set(page, protection);
+            }
+        }
         let pages = unreadable.get(reservation);
         if ((protection & 0xff) === PAGE_NOACCESS)
         {
@@ -1499,15 +1626,24 @@ export function createHeapFunctions(host){
         {
             const end = block.address + block.capacity;
             const ranges = committed.get(block.address) ?? [];
+            const kept = protections.get(block.address);
+            const allocation = kept?.allocation ?? PAGE_EXECUTE_READWRITE;
             const inside = ranges.find(range=>page >= range.from && page < range.to);
             if (inside)
             {
-                return [page, block.address, PAGE_EXECUTE_READWRITE,
-                    Math.min(inside.to, end) - page, MEM_COMMIT, PAGE_EXECUTE_READWRITE,
+                // The run of committed pages that share this one's protection.
+                const protection = kept?.pages.get(page) ?? allocation;
+                const runEnd = Math.min(inside.to, end);
+                let to = page + PAGE_SIZE;
+                while (to < runEnd && (kept?.pages.get(to) ?? allocation) === protection)
+                {
+                    to += PAGE_SIZE;
+                }
+                return [page, block.address, allocation, to - page, MEM_COMMIT, protection,
                     MEM_PRIVATE];
             }
             const next = ranges.find(range=>range.from > page);
-            return [page, block.address, PAGE_EXECUTE_READWRITE,
+            return [page, block.address, allocation,
                 (next ? Math.min(next.from, end) : end) - page, MEM_RESERVE, 0, MEM_PRIVATE];
         }
         const region = arenaRegion(allocator, page, host.arena.base, arenaEnd,
@@ -1551,6 +1687,11 @@ export function createHeapFunctions(host){
             const protection = view.writable ? PAGE_READWRITE_VIEW : PAGE_READONLY_VIEW;
             return [page, view.base, protection, (end >>> 0) - page, MEM_COMMIT, protection,
                 MEM_MAPPED];
+        }
+        const image = imageAt(page);
+        if (image)
+        {
+            return imageAnswer(image, page);
         }
         if (inArena)
         {
@@ -1747,8 +1888,11 @@ export function createHeapFunctions(host){
         const requested = pointer >>> 0;
         const protection = protect >>> 0;
         const acting = kind & (MEM_COMMIT | MEM_RESERVE | MEM_RESET);
+        // A protection is asked of a reservation as of a commit, and a reset
+        // takes any: it changes none.
         if ((kind & ~ALLOCATION_TYPES) !== 0 || acting === 0
-                || ((kind & MEM_RESET) !== 0 && acting !== MEM_RESET) || size === 0)
+                || ((kind & MEM_RESET) !== 0 && acting !== MEM_RESET) || size === 0
+                || (acting !== MEM_RESET && !privateProtection(protection)))
         {
             host.setLastError(ERROR_INVALID_PARAMETER);
             return 0;
@@ -1785,6 +1929,7 @@ export function createHeapFunctions(host){
             decommitted.delete(start);
             committed.set(start, []);
             unreadable.delete(start);
+            protections.set(start, { allocation: protection, pages: new Map() });
             // Committed with it, the whole of what was reserved: from
             // the granule's start, which is the address answered, not
             // from the page asked for -- a program writes from the
@@ -1924,6 +2069,7 @@ export function createHeapFunctions(host){
         decommitted.delete(address);
         committed.set(address, []);
         unreadable.delete(address);
+        protections.set(address, { allocation: protection, pages: new Map() });
         if ((kind & MEM_COMMIT) !== 0)
         {
             markCommitted(address, address, address + rounded, true);
@@ -2310,6 +2456,7 @@ export function createHeapFunctions(host){
                     decommitted.delete(address);
                     committed.delete(address);
                     unreadable.delete(address);
+                    protections.delete(address);
                     watched.delete(address);
                     return 1;
                 }
@@ -2340,6 +2487,14 @@ export function createHeapFunctions(host){
                 }
                 giveBack(block.address, Math.max(page, block.address), to);
                 markCommitted(block.address, Math.max(page, block.address), to, false);
+                const pages = protections.get(block.address)?.pages;
+                if (pages)
+                {
+                    for (let at = Math.max(page, block.address); at < to; at += PAGE_SIZE)
+                    {
+                        pages.delete(at);
+                    }
+                }
                 settleAccess(block.address, Math.max(page, block.address), to);
                 return 1;
             },
@@ -2774,10 +2929,12 @@ export function createHeapFunctions(host){
          * executable -- so a runtime making its generated code executable gets
          * what it asked for.
          *
-         * The old protection is not invented -- PAGE_NOACCESS where the first
-         * page was closed, otherwise what this build offers -- and
-         * lpflOldProtect must be written, because a caller that puts the
-         * protection back afterwards reads it from there.
+         * A reservation's page keeps the protection asked and hands it back
+         * as the old one (A248); a range reaching an uncommitted page, or a
+         * protection private memory cannot have, is refused. Elsewhere the
+         * old protection is what this build offers. lpflOldProtect must be
+         * written, because a caller that puts the protection back afterwards
+         * reads it from there.
          */
         VirtualProtect: {
             argBytes: 16,
@@ -2797,10 +2954,53 @@ export function createHeapFunctions(host){
                 }
                 const block = allocator.blockContaining(address >>> 0);
                 const first = ((address >>> 0) & ~(PAGE_SIZE - 1)) >>> 0;
+                if (block?.owner === VIRTUAL && !privateProtection(protect >>> 0))
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                // Only committed pages have a protection to change: a range
+                // that reaches a reserved one is refused whole.
+                if (block?.owner === VIRTUAL)
+                {
+                    const end = roundUp((address >>> 0) + (size >>> 0), PAGE_SIZE);
+                    const covered = (committed.get(block.address) ?? [])
+                        .some(range=>range.from <= first && range.to >= end);
+                    if (!covered)
+                    {
+                        host.setLastError(ERROR_INVALID_ADDRESS);
+                        return 0;
+                    }
+                }
+                const image = block?.owner === VIRTUAL ? null : imageAt(first);
+                if (image)
+                {
+                    // An image's pages keep what they are given, read back
+                    // and handed back as the old protection; the range stays
+                    // inside the image.
+                    const end = roundUp((address >>> 0) + (size >>> 0), PAGE_SIZE);
+                    if (end > image.base + image.layout.size || !imageProtection(protect >>> 0))
+                    {
+                        host.setLastError(end > image.base + image.layout.size
+                            ? ERROR_INVALID_ADDRESS : ERROR_INVALID_PARAMETER);
+                        return 0;
+                    }
+                    writeDword(oldProtect >>> 0, imagePageProtection(image, first));
+                    const changed = image.changed ?? new Map();
+                    imageProtections.set(image.base,
+                        { stamp: imageStamp(image.base), pages: changed });
+                    for (let page = first; page < end; page += PAGE_SIZE)
+                    {
+                        changed.set(page, protect >>> 0);
+                    }
+                    return 1;
+                }
+                const kept = block?.owner === VIRTUAL ? protections.get(block.address) : undefined;
                 const was = block?.owner === VIRTUAL
                     && unreadable.get(block.address)?.has(first) === true;
-                writeDword(oldProtect >>> 0, was ? PAGE_NOACCESS
-                    : block?.owner === TABLES ? PAGE_READWRITE : PAGE_EXECUTE_READWRITE);
+                writeDword(oldProtect >>> 0, kept?.pages.get(first)
+                    ?? (was ? PAGE_NOACCESS
+                        : block?.owner === TABLES ? PAGE_READWRITE : PAGE_EXECUTE_READWRITE));
                 if (block && block.owner === VIRTUAL)
                 {
                     const end = Math.min(roundUp((address >>> 0) + (size >>> 0), PAGE_SIZE),

@@ -329,9 +329,9 @@ test('a CBT hook hears of the dialog window and may subclass it before its first
     const dialog = fns.CreateDialogIndirectParamA.handler([HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]);
     assert.notEqual(dialog, 0);
     assert.deepEqual(hooked[0].slice(0, 3), [HOOK, 3, dialog], 'HCBT_CREATEWND, for the dialog');
-    assert.deepEqual(reached.filter(m=>m.hwnd === dialog).slice(0, 3).map(m=>m.message),
-        [0x81, 0x83, 0x1],
-        'WM_NCCREATE, WM_NCCALCSIZE and WM_CREATE reached the procedure the hook put in');
+    assert.deepEqual(reached.filter(m=>m.hwnd === dialog).slice(0, 4).map(m=>m.message),
+        [0x24, 0x81, 0x83, 0x1], 'WM_GETMINMAXINFO (an overlapped dialog), WM_NCCREATE,'
+            + ' WM_NCCALCSIZE and WM_CREATE reached the procedure the hook put in');
 });
 
 test('a dialog named in the resources is the template read where it was mapped', ()=>{

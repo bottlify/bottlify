@@ -534,7 +534,7 @@ test('the adapter answers what it can make, from the tables that make it', ()=>{
     // !!monitor). An adapter that does not exist has none.
     const user32 = createSystemFunctions({ host: {}, live: ()=>null, windows: new Map(),
         classes: new Map() });
-    assert.equal(ask('GetAdapterMonitor', [0]), user32.MonitorFromWindow.handler());
+    assert.equal(ask('GetAdapterMonitor', [0]), user32.MonitorFromWindow.handler([0, 1]));
     assert.notEqual(ask('GetAdapterMonitor', [0]), 0);
     assert.equal(ask('GetAdapterMonitor', [1]), 0);
     // No software rasteriser is ever plugged in, and Direct3D 9 answers the

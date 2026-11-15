@@ -106,7 +106,8 @@ export const standardRecords = (iob, pointerSize = 4)=>(iob === 0 ? []
  * @property {() => number} [iob]  Where `_iob` was placed, once it has been.
  * @property {(code: number) => void} [errno]  Where a failure says why.
  * @property {() => number} [errnoValue]  What errno holds, for fopen_s to answer.
- * @property {() => number} [exponentDigits]  The least digits of %e's exponent.
+ * @property {() => import('./format.js').PrintStyle} [printStyle]  How the
+ *           floating-point conversions are written; msvcrt's, absent.
  * @property {import('./io.js').Descriptors} [descriptors]
  *           The runtime's descriptor table, shared with `_open` and the rest;
  *           absent, the streams keep one of their own.
@@ -584,7 +585,7 @@ export function createStdioFunctions(host){
         }
         const text = formatToString(readString(format), values, readString,
             { readWideString: readWide, cLocale: true, decodeBytes: decodeAnsi,
-                exponentDigits: host.exponentDigits?.() ?? 3,
+                style: host.printStyle?.(),
                 ...guestAccess(host.readMemory, host.writeMemory) });
         return emit(stream, encodeAnsi(text)) === text.length ? text.length : EOF;
     };
@@ -719,7 +720,7 @@ export function createStdioFunctions(host){
             return -1;
         }
         const text = formatToString(readWide(format), values, readString,
-            { readWideString: readWide, wide: true, exponentDigits: host.exponentDigits?.() ?? 3,
+            { readWideString: readWide, wide: true, style: host.printStyle?.(),
                 ...guestAccess(host.readMemory, host.writeMemory) });
         return putUnits(stream, unitsOfText(text)) < 0 ? -1 : text.length;
     };

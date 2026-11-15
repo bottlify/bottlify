@@ -33,6 +33,8 @@ import { createIntegerFunctions } from './integer.js';
 import { createBitmapFunctions } from './bitmap.js';
 import { createWaitFunctions } from './waits.js';
 import { createPathFunctions } from './paths.js';
+import { createAtomTableFunctions } from './atoms.js';
+import { createStringOperations } from './string-ops.js';
 import { MEMORY_ENTRIES, createMemoryFunctions } from './memory.js';
 import { createDebugFunctions } from './debug.js';
 import { createProcessFunctions } from './process.js';
@@ -55,15 +57,19 @@ const CRT_EXPORTS = [
     'strcat', 'strchr', 'strcmp', 'strcpy', 'strcspn', 'strlen', 'strncat',
     'strncmp', 'strncpy', 'strpbrk', 'strrchr', 'strspn', 'strstr',
     '_stricmp', '_strnicmp', '_strlwr', '_strupr',
-    'atoi', 'atol', 'strtol', 'strtoul',
+    '_snprintf_s', '_snwprintf_s',
+    'atoi', 'atol', '_atoi64', 'strtol', 'strtoul',
+    '_wtoi', '_wtol', '_wtoi64', 'wcstol', 'wcstoul',
     '_itoa', '_ltoa', '_ultoa', '_i64toa', '_ui64toa',
-    'tolower', 'toupper',
-    'isalnum', 'isalpha', 'iscntrl', 'isdigit', 'islower',
+    '_itow', '_ltow', '_ultow', '_i64tow', '_ui64tow',
+    'tolower', 'toupper', 'towlower', 'towupper',
+    'isalnum', 'isalpha', 'iscntrl', 'isdigit', 'isgraph', 'islower',
     'isprint', 'ispunct', 'isspace', 'isupper', 'isxdigit',
+    'iswalpha', 'iswctype', 'iswdigit', 'iswlower', 'iswspace', 'iswxdigit',
     'abs', 'labs',
     'mbstowcs', 'wcstombs',
     'wcscat', 'wcschr', 'wcscmp', 'wcscpy', 'wcslen', 'wcsncat', 'wcsncmp',
-    'wcsncpy', 'wcsrchr', 'wcsstr', '_wcsicmp',
+    'wcsncpy', 'wcsrchr', 'wcsstr', '_wcsicmp', '_wcsnicmp', '_wcslwr', '_wcsupr',
 ];
 
 /**
@@ -321,6 +327,8 @@ export function createNtdllFunctions(host){
         ...registry?.entries ?? {},
         // And the token calls on advapi32's, whose handles they open.
         ...host.advapi32?.[TOKEN_NATIVES] ?? {},
+        // advapi32's is ntdll's on Windows (advapi32.spec forwards it).
+        ...host.advapi32?.IsTextUnicode ? { RtlIsTextUnicode: host.advapi32.IsTextUnicode } : {},
         ...alias(crt, Object.fromEntries(CRT_EXPORTS.map(name=>[name, name]))),
 
         ...createCountedStringFunctions({
@@ -332,7 +340,18 @@ export function createNtdllFunctions(host){
             free,
         }),
 
+        ...createStringOperations({
+            readMemory: host.readMemory,
+            writeMemory: host.writeMemory,
+            readCString: host.readCString,
+            readWideString: host.readWideString,
+            allocate,
+        }),
+
         ...createImageFunctions({ readMemory: host.readMemory, writeMemory: host.writeMemory }),
+
+        ...createAtomTableFunctions({ readMemory: host.readMemory, writeMemory: host.writeMemory,
+            readWideString: host.readWideString, allocate, free }),
 
         ...createBitmapFunctions({ readMemory: host.readMemory, writeMemory: host.writeMemory }),
 
@@ -711,6 +730,70 @@ export function createNtdllFunctions(host){
                     matched++;
                 }
                 return matched;
+            },
+        },
+
+        /**
+         * SIZE_T RtlCompareMemoryUlong(PVOID Source, SIZE_T Length, ULONG Pattern)
+         *
+         * How many bytes, in whole ULONGs from the start, hold the pattern; a
+         * length past the last whole ULONG is not looked at.
+         */
+        RtlCompareMemoryUlong: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([source, length, pattern])=>{
+                const words = (length >>> 0) >>> 2;
+                const bytes = words === 0 ? new Uint8Array(0)
+                    : host.readMemory(source >>> 0, words * 4);
+                const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.length);
+                let matched = 0;
+                while (matched < words && view.getUint32(matched * 4, true) === pattern >>> 0)
+                {
+                    matched++;
+                }
+                return matched * 4;
+            },
+        },
+
+        /** VOID RtlFillMemoryUlong(PVOID Destination, SIZE_T Length, ULONG Pattern) */
+        RtlFillMemoryUlong: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([destination, length, pattern])=>{
+                const words = (length >>> 0) >>> 2;
+                const bytes = new Uint8Array(words * 4);
+                const view = new DataView(bytes.buffer);
+                for (let at = 0; at < words; at++)
+                {
+                    view.setUint32(at * 4, pattern >>> 0, true);
+                }
+                if (words > 0)
+                {
+                    host.writeMemory(destination >>> 0, bytes);
+                }
+                return 0;
+            },
+        },
+
+        /** VOID RtlFillMemoryUlonglong(PVOID Destination, SIZE_T Length, ULONGLONG Pattern) */
+        RtlFillMemoryUlonglong: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([destination, length, low, high])=>{
+                const words = (length >>> 0) >>> 3;
+                const bytes = new Uint8Array(words * 8);
+                const view = new DataView(bytes.buffer);
+                for (let at = 0; at < words; at++)
+                {
+                    view.setUint32(at * 8, low >>> 0, true);
+                    view.setUint32(at * 8 + 4, high >>> 0, true);
+                }
+                if (words > 0)
+                {
+                    host.writeMemory(destination >>> 0, bytes);
+                }
+                return 0;
             },
         },
     };

@@ -33,8 +33,10 @@ event, an error. Neither stops the program.
 - The processor a program finds is a Nehalem (SSE4.2, POPCNT): AVX, AVX2, FMA, BMI, AES-NI and
   AVX-512 are not announced and fault as on that processor.
 - The engine has no .NET runtime of its own: the runtime and its assembly cache (`fusion.dll`)
-  are the .NET Framework's, which the bottle has once its setup ran there (a Steam app's
-  `_CommonRedist\DotNet` installer, run as any program is). On Windows 7 and 10 the shim,
+  are the .NET Framework's, which a bottle has as a layer mounted under it (`bundle.layers`): a
+  managed program on a volume without it, or a Framework 4 setup a program starts, asks the
+  embedder for that layer (`layer-needed`), and the setup itself succeeds in its place (A249).
+  A bottle whose own installation put a Framework in keeps it. On Windows 7 and 10 the shim,
   `mscoree.dll`, is the system's, as there: the engine's, which hands every call to the
   Framework 4's `mscoreei.dll` (`roadmap/decisions.md` A247); without the Framework a managed
   program ends at its start, and the loss is said. On XP the shim is the Framework's own file;
@@ -66,6 +68,10 @@ event, an error. Neither stops the program.
 - DirectSound 3D keeps every parameter but does not position the sound: a 3D buffer plays as with
   3D processing off.
 - No capture: recording answers `DSERR_NODRIVER`.
+- No playing straight to an endpoint (WASAPI): MMDevAPI's enumerator lists the speakers, and an
+  endpoint activates no `IAudioClient` (E_NOINTERFACE). The enumerator is there from Vista on;
+  on XP it is not registered, so a program that would play to an endpoint plays through
+  DirectSound, as on XP.
 - Media Foundation describes media and decodes none (`roadmap/decisions.md` A238): `mfplat`'s
   attributes, media types, memory buffers, samples and events are there, and `propsys`'s
   PROPVARIANT conversions, but no source, decoder, transform or work queue. A source reader

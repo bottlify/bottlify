@@ -324,3 +324,43 @@ test('a store through NULL faults where it stands, with the stack and frame of t
         assert.equal(code, 0, '1: the context\'s Esp was another; 2: the frame was another;'
             + ' 4: it went on on another stack; 0x77: the store went through');
     });
+
+/**
+ * Two frames on the chain: the inner one's handler at an address no region
+ * holds, the outer one's the program's own. A frame is checked by whether its
+ * memory is there (seh.js), so the inner frame is passed over and the outer
+ * handler ends the process with 0x5a.
+ */
+function buildUnmappedHandlerExe(){
+    return buildExe({
+        imports: { 'KERNEL32.dll': ['ExitProcess'] },
+        codeSize: 0x100,
+        code: ({ iat, code })=>{
+            const handler = code(0x80);
+            const main = [
+                0x68, ...u32(handler),                           // push handler
+                0x64, 0xff, 0x35, 0, 0, 0, 0,                    // push dword fs:[0]
+                0x64, 0x89, 0x25, 0, 0, 0, 0,                    // mov fs:[0], esp
+                0x68, ...u32(0xdead0000),                        // push unmapped handler
+                0x64, 0xff, 0x35, 0, 0, 0, 0,                    // push dword fs:[0]
+                0x64, 0x89, 0x25, 0, 0, 0, 0,                    // mov fs:[0], esp
+                0x0f, 0x0b,                                      // ud2
+                0x6a, 0x77, 0xff, 0x15, ...u32(iat('ExitProcess')), // not reached
+            ];
+            const handle = [
+                0x6a, 0x5a, 0xff, 0x15, ...u32(iat('ExitProcess')), // exit 0x5a
+            ];
+            const bytes = new Array(0x100).fill(0xcc);
+            bytes.splice(0, main.length, ...main);
+            bytes.splice(0x80, handle.length, ...handle);
+            return bytes;
+        },
+    });
+}
+
+test('a frame whose handler no region holds is passed over for the next one',
+    { timeout: 60000 },
+    async t=>{
+        const { code } = await runExecutable(t, buildUnmappedHandlerExe());
+        assert.equal(code, 0x5a, 'the outer handler ran');
+    });

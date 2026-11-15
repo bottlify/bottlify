@@ -699,6 +699,31 @@ export function createCxxExceptions(host){
             '__CxxLongjmpUnwind@4': cxxLongjmpUnwind,
             __CxxLongjmpUnwind: cxxLongjmpUnwind,
 
+            /**
+             * void __DestructExceptionObject(EXCEPTION_RECORD *record)
+             *
+             * The thrown object a C++ exception's record carries, destroyed by
+             * the destructor its throw information names; any other
+             * exception carries none, and is left alone.
+             */
+            __DestructExceptionObject: {
+                convention: 'cdecl',
+                argBytes: 4,
+                /** @param {number[]} args */
+                handler: ([record])=>{
+                    const at = record >>> 0;
+                    if (at === 0 || readU32(at + RECORD.CODE) !== EH_EXCEPTION_NUMBER
+                        || readU32(at + RECORD.PARAMETER_COUNT) !== 3
+                        || !knownMagic(readU32(at + RECORD.INFORMATION)))
+                    {
+                        return 0;
+                    }
+                    return destroy(readU32(at + RECORD.INFORMATION + 4),
+                        readU32(at + RECORD.INFORMATION + 8), { thread: host.currentThread() })
+                        .then(()=>0);
+                },
+            },
+
             /** bool __uncaught_exception(void) -- a C name in msvcrt.dll. */
             __uncaught_exception: {
                 convention: 'cdecl',

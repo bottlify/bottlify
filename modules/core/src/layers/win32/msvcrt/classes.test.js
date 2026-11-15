@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createClassFunctions } from './classes.js';
+import { UNIVERSAL_CXX, createClassFunctions } from './classes.js';
 import { createCxxFunctions } from './cxx.js';
 import { guestEntry } from './guest-code.js';
 import { __RTDynamicCast } from './inguest-rtti.js';
@@ -59,7 +59,8 @@ function build(){
     const cxx = createCxxFunctions({ readMemory: memory.readMemory,
         readCString: memory.readCString });
     /** @param {string} name @param {number[]} args */
-    const call = (name, args)=>table[name].handler(args);
+    const call = (name, args)=>(table[name] ?? /** @type {any} */ (table)[UNIVERSAL_CXX][name])
+        .handler(args);
     return { memory, table, freed, addresses, cxx, call };
 }
 
@@ -222,4 +223,66 @@ test('__unDName undecorates a type into the buffer given, or memory from the all
     const typeOnly = await run([0, memory.put('P8test@@BACXZ'), 0, 0x1234, 0, 0x2800]);
     assert.equal(memory.text(typeOnly), 'signed char (__cdecl test::*)(void)const ');
     assert.equal(table.__unDName.argBytes, 24);
+});
+
+test('__std_exception_copy copies a message the object owns and points at one it does not', ()=>{
+    const { memory, call, freed } = build();
+    const message = memory.put('owned');
+    const from = memory.allocate(8);
+    memory.setU32(from, message);
+    memory.writeMemory(from + 4, Uint8Array.of(1));
+    const to = memory.allocate(8);
+    call('__std_exception_copy', [from, to]);
+    assert.notEqual(memory.u32(to), message, 'copied');
+    assert.equal(memory.text(memory.u32(to)), 'owned');
+    assert.equal(memory.readMemory(to + 4, 1)[0], 1, 'and the copy is its to free');
+
+    memory.writeMemory(from + 4, Uint8Array.of(0));
+    call('__std_exception_copy', [from, to]);
+    assert.equal(memory.u32(to), message, 'a message it does not own is only pointed at');
+    assert.equal(memory.readMemory(to + 4, 1)[0], 0);
+
+    memory.writeMemory(from + 4, Uint8Array.of(1));
+    call('__std_exception_destroy', [from]);
+    assert.deepEqual(freed, [message], 'destroyed, an owned message is freed');
+    assert.equal(memory.u32(from), 0);
+    assert.equal(memory.readMemory(from + 4, 1)[0], 0);
+});
+
+test('__std_type_info_* compare, hash and name a type by its decorated name', ()=>{
+    const { memory, call, freed, table } = build();
+    assert.equal(table.__std_type_info_name, undefined, 'not an export of msvcrt\'s');
+    /** A __std_type_info_data: the undecorated name, then the decorated one. @param {string} name */
+    const data = name=>{
+        const at = memory.allocate(4 + name.length + 1);
+        memory.setU32(at, 0);
+        memory.writeMemory(at + 4, Uint8Array.from(`${name}\0`, c=>c.charCodeAt(0)));
+        return at;
+    };
+    const a = data('.?AVfoo@@');
+    const b = data('.?AVfoo@@');
+    const c = data('.?AVbar@@');
+    assert.equal(call('__std_type_info_compare', [a, b]), 0, 'the same name, another record');
+    assert.notEqual(call('__std_type_info_compare', [a, c]), 0);
+    assert.equal(call('__std_type_info_hash', [a]), call('__std_type_info_hash', [b]));
+    assert.notEqual(call('__std_type_info_hash', [a]), call('__std_type_info_hash', [c]));
+    // FNV-1a of "?AVfoo@@": the first character is not hashed.
+    let fnv = 2166136261;
+    for (const character of '?AVfoo@@')
+    {
+        fnv = Math.imul((fnv ^ character.charCodeAt(0)) >>> 0, 16777619) >>> 0;
+    }
+    assert.equal(call('__std_type_info_hash', [a]), fnv);
+
+    const list = memory.allocate(8);
+    memory.setU32(list, 0);
+    memory.setU32(list + 4, 0);
+    const name = call('__std_type_info_name', [a, list]);
+    assert.equal(memory.text(name), 'class foo');
+    assert.equal(memory.u32(a), name, 'kept in the record');
+    assert.equal(call('__std_type_info_name', [a, list]), name, 'and made once');
+    assert.equal(memory.u32(list), name - 4, 'on the caller\'s list');
+    call('__std_type_info_destroy_list', [list]);
+    assert.deepEqual(freed, [name - 4]);
+    assert.equal(memory.u32(list), 0, 'which is empty after');
 });

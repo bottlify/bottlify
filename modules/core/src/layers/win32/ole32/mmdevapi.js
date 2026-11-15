@@ -12,6 +12,9 @@
  * here records, so there is no capture endpoint, and the default one of that
  * flow is not found, as on a machine with no microphone.
  *
+ * Windows XP has none of it (MMDevAPI came with Vista): there the class is not
+ * registered.
+ *
  * Playing straight to the endpoint (IMMDevice::Activate for IAudioClient) is not
  * here: a program plays through XAudio2 or DirectSound, which this machine has,
  * and is told E_NOINTERFACE, said once as a divergence.
@@ -107,10 +110,19 @@ function mixFormat(){
  * @property {4 | 8} [pointerSize]  8 in a 64-bit process, whose pointers and
  *     PROPVARIANT are wider
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {{ major: number }} [windows]  The Windows the machine says it is:
+ *     MMDevAPI came with Vista, and an XP has no such class to make
  */
 
 /** @param {MmDevApiHost} host */
 export function registerMmDevApiClasses(host){
+    // On an XP CoCreateInstance answers REGDB_E_CLASSNOTREG, and a program
+    // that would play to an endpoint plays through DirectSound instead, as
+    // it does on Windows XP.
+    if (host.windows !== undefined && host.windows.major < 6)
+    {
+        return;
+    }
     const pointerSize = host.pointerSize ?? 4;
     /** @param {number} address @param {number} value */
     const writeU32 = (address, value)=>host.writeMemory(address >>> 0,

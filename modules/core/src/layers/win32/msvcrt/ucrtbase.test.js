@@ -331,3 +331,9 @@ test('ilogb is the exponent as an int; zero and NaN have their own answers', ()=
     single.setFloat32(0, 1024, true);
     assert.equal(ucrt.ilogbf.handler([single.getUint32(0, true)]), 10);
 });
+
+test('an _o_ name is the same entry as the plain one', ()=>{
+    const { ucrt } = setup();
+    assert.equal(ucrt._o_malloc, ucrt.malloc);
+    assert.equal(ucrt._o__execute_onexit_table, ucrt._execute_onexit_table);
+});

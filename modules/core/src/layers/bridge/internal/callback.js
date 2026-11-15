@@ -344,9 +344,11 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
         // says whose stack it was about to write on. Anywhere else is the
         // program's to choose: Windows runs a thread on any stack it switched
         // to (a fiber's, a coroutine's, a block of its heap), and calls it
-        // back there.
+        // back there. A thread that has ended owns no stack: its record
+        // outlives it while a handle is open, and its stack is handed to the
+        // next thread made.
         const other = kernel.threads().find((/** @type {any} */ one)=>one !== thread
-            && one.stackLimit !== undefined
+            && one.state !== 'terminated' && one.stackLimit !== undefined
             && frameBase >= one.stackLimit && frameBase <= one.stackTop);
         if (other)
         {

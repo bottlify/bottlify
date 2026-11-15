@@ -127,12 +127,27 @@ function rttiOf(name){
  *           its class's vtable into the object it builds.
  * @property {(entry: number, args: number[], thread?: any) => Promise<number>} callGuest
  * @property {() => any} [currentThread]
+ * @property {number} [pointerSize]  8 in a 64-bit process; absent, 4.
  */
+
+/**
+ * The key under which the table carries the C++ support of Visual C++ 2015
+ * on - std::exception's message, typeid's names and hashes - which
+ * vcruntime140 and ucrtbase export and msvcrt does not: a symbol, so it is
+ * no export of msvcrt's.
+ */
+export const UNIVERSAL_CXX = Symbol('universal C++ support');
+
+/** FNV-1a's offset basis and prime, 32 and 64 bits: `__std_type_info_hash`. */
+const FNV32 = Object.freeze({ BASIS: 2166136261, PRIME: 16777619 });
+const FNV64 = Object.freeze({ BASIS: 14695981039346656037n, PRIME: 1099511628211n });
 
 /**
  * @param {ClassesHost} host
  */
 export function createClassFunctions(host){
+    /** A pointer's bytes, and where the second field of a two-pointer record is. */
+    const pointer = host.pointerSize ?? 4;
     /** @param {number} address */
     const readU32 = address=>new DataView(host.readMemory(address, 4).slice().buffer)
         .getUint32(0, true);
@@ -453,5 +468,175 @@ export function createClassFunctions(host){
         },
     });
     Object.assign(table, rttiOf('type_info'));
+
+    /**
+     * The list `__std_type_info_name` keeps what it makes on: an SLIST_HEADER,
+     * whose first entry is its first pointer at 32 bits (the depth after it)
+     * and its second quadword at 64 (the depth in the first). An entry is
+     * the next one's address, the name after it.
+     */
+    const listHead = pointer === 8 ? 8 : 0;
+
+    /** @type {any} */ (table)[UNIVERSAL_CXX] = {
+        /**
+         * void __std_exception_copy(const __std_exception_data *from,
+         *                           __std_exception_data *to)
+         *
+         * std::exception's copy, over its two fields - the message and
+         * whether the object owns it: an owned message is copied for the new
+         * object to own, one only pointed at is pointed at again.
+         */
+        __std_exception_copy: {
+            convention: 'cdecl',
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([from, to])=>{
+                const message = readU32(from >>> 0);
+                const owned = (host.readMemory((from >>> 0) + pointer, 1)[0] & 0xff) !== 0;
+                const copy = owned && message !== 0 ? copyString(readString(message)) : 0;
+                writeU32(to >>> 0, owned && message !== 0 ? copy : message);
+                host.writeMemory((to >>> 0) + pointer, Uint8Array.of(copy !== 0 ? 1 : 0));
+                return 0;
+            },
+        },
+
+        /**
+         * void __std_exception_destroy(__std_exception_data *data)
+         *
+         * The message freed when the object owns it, and both fields cleared.
+         */
+        __std_exception_destroy: {
+            convention: 'cdecl',
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([data])=>{
+                const message = readU32(data >>> 0);
+                if ((host.readMemory((data >>> 0) + pointer, 1)[0] & 0xff) !== 0 && message !== 0)
+                {
+                    host.free(message);
+                }
+                writeU32(data >>> 0, 0);
+                host.writeMemory((data >>> 0) + pointer, Uint8Array.of(0));
+                return 0;
+            },
+        },
+
+        /**
+         * int __std_type_info_compare(const __std_type_info_data *left,
+         *                             const __std_type_info_data *right)
+         *
+         * typeid's ==: the same record, or the decorated names past their
+         * first character compared as strcmp compares them.
+         */
+        __std_type_info_compare: {
+            convention: 'cdecl',
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([left, right])=>{
+                if ((left >>> 0) === (right >>> 0))
+                {
+                    return 0;
+                }
+                const a = readString((left >>> 0) + pointer + 1);
+                const b = readString((right >>> 0) + pointer + 1);
+                return a === b ? 0 : a < b ? -1 : 1;
+            },
+        },
+
+        /**
+         * size_t __std_type_info_hash(const __std_type_info_data *data)
+         *
+         * FNV-1a over the decorated name past its first character, at the
+         * width of a size_t: the same type hashes the same in every module.
+         */
+        __std_type_info_hash: {
+            convention: 'cdecl',
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([data])=>{
+                const name = readString((data >>> 0) + pointer + 1);
+                if (pointer === 8)
+                {
+                    /** @type {bigint} */
+                    let hash = FNV64.BASIS;
+                    for (let at = 0; at < name.length; at++)
+                    {
+                        hash = BigInt.asUintN(64,
+                            (hash ^ BigInt(name.charCodeAt(at) & 0xff)) * FNV64.PRIME);
+                    }
+                    return hash;
+                }
+                let hash = FNV32.BASIS;
+                for (let at = 0; at < name.length; at++)
+                {
+                    hash = Math.imul((hash ^ (name.charCodeAt(at) & 0xff)) >>> 0,
+                        FNV32.PRIME) >>> 0;
+                }
+                return hash;
+            },
+        },
+
+        /**
+         * const char *__std_type_info_name(__std_type_info_data *data,
+         *                                  __type_info_node *root)
+         *
+         * typeid's name(): the undecorated name, made the first time and kept
+         * in the record, the list the caller passes owning it until
+         * `__std_type_info_destroy_list` frees what it holds.
+         */
+        __std_type_info_name: {
+            convention: 'cdecl',
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([data, root])=>{
+                const kept = readU32(data >>> 0);
+                if (kept !== 0)
+                {
+                    return kept;
+                }
+                const decorated = readString((data >>> 0) + pointer);
+                const text = undecorateType(decorated.slice(1)) ?? decorated;
+                const bytes = new Uint8Array(text.length + 1);
+                bytes.set([...text].map(character=>character.charCodeAt(0) & 0xff));
+                const entry = host.allocate(pointer + bytes.length);
+                if (entry === 0)
+                {
+                    return 0;
+                }
+                const name = entry + pointer;
+                host.writeMemory(name, bytes);
+                // Pushed on the caller's list, which owns it from then on.
+                const head = (root >>> 0) + listHead;
+                writeU32(entry, readU32(head));
+                writeU32(head, entry);
+                const depth = (root >>> 0) + (pointer === 8 ? 0 : 4);
+                const count = host.readMemory(depth, 2);
+                host.writeMemory(depth, Uint8Array.of((count[0] + 1) & 0xff,
+                    (count[1] + ((count[0] + 1) >> 8)) & 0xff));
+                writeU32(data >>> 0, name);
+                return name;
+            },
+        },
+
+        /** void __std_type_info_destroy_list(__type_info_node *root): every name on the list freed, the list empty. */
+        __std_type_info_destroy_list: {
+            convention: 'cdecl',
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([root])=>{
+                const head = (root >>> 0) + listHead;
+                let entry = readU32(head);
+                // A list damaged past this many names is not walked further.
+                for (let walked = 0; entry !== 0 && walked < 0x100000; walked++)
+                {
+                    const next = readU32(entry);
+                    host.free(entry);
+                    entry = next;
+                }
+                host.writeMemory(root >>> 0, new Uint8Array(pointer * 2));
+                return 0;
+            },
+        },
+    };
     return table;
 }

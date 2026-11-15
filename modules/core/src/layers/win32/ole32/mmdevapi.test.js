@@ -89,6 +89,18 @@ function setup(pointerSize = 4){
 const DEVICE_PROPERTIES = [0xa45c254e, 0x4efddf1c, 0xd1672080, 0xe050a846];
 const ENGINE_FORMAT = [0xf19f064d, 0x4e27082c, 0x826873bc, 0x4c8ebba1];
 
+test('Windows XP has no device enumerator to make; Vista and later have one', ()=>{
+    // A program that finds one plays to an endpoint (WASAPI), one that does
+    // not plays through DirectSound: on XP it must not find one.
+    for (const [major, registered] of [[5, false], [6, true], [10, true]])
+    {
+        const registry = createComRegistry();
+        registerMmDevApiClasses(/** @type {any} */ ({ registry, windows: { major } }));
+        assert.equal(registry.isRegistered(CLSID_MMDEVICE_ENUMERATOR), registered,
+            `major ${major}`);
+    }
+});
+
 test('the default render endpoint is the speakers; none of capture, as with no microphone', ()=>{
     const s = setup();
     assert.equal(s.enumerator('GetDefaultAudioEndpoint', [0, 1, OUT]), S_OK);

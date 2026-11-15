@@ -43,6 +43,11 @@ export const TEB = Object.freeze({
     TLS_POINTER: 0x2c,
     PEB: 0x30,
     LAST_ERROR: 0x34,
+    /**
+     * DeallocationStack: the bottom of the stack's reservation, below the
+     * committed StackLimit on Windows; GetCurrentThreadStackLimits' low end.
+     */
+    DEALLOCATION_STACK: 0xe0c,
     /** TlsSlots: the 64 values TlsGetValue and TlsSetValue keep, a pointer each. */
     TLS_SLOTS: 0xe10,
     /** The thread's error mode, in ntdll's bits (RTL_SEM_*). */
@@ -175,6 +180,7 @@ export const TEB64 = Object.freeze({
     TLS_POINTER: 0x58,
     PEB: 0x60,
     LAST_ERROR: 0x68,
+    DEALLOCATION_STACK: 0x1478,
     TLS_SLOTS: 0x1480,
     HARD_ERROR_MODE: 0x16b0,
     // Past TlsSlots (0x1480) and TlsLinks, the fields a program reads.
@@ -694,6 +700,9 @@ export function createProcessBlocks(options){
             }
             writePointer(teb + tebFields.STACK_BASE, stackBase);
             writePointer(teb + tebFields.STACK_LIMIT, stackLimit);
+            // The whole stack is committed here, so its reservation begins
+            // where its limit is.
+            writePointer(teb + tebFields.DEALLOCATION_STACK, stackLimit);
             // Programs read this to get the block's own address, because FS
             // cannot be turned into a pointer any other way.
             writePointer(teb + tebFields.SELF, teb);

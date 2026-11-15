@@ -243,3 +243,56 @@ test('a 64-bit caller\'s arguments are eight-byte slots, an int as much as a dou
     assert.equal(reordered && formatToString(reordered.format, reordered.slots, read),
         'uproject.Astro', 'a positional format, a slot an argument');
 });
+
+/** The universal runtime's style with no legacy bits. */
+const UCRT = { exponentDigits: 2, standardSpecials: true, c99Conversions: true,
+    exactDigits: true, evenTies: false };
+/** @param {string} format @param {number[]} varargs @param {object} [style] */
+const styled = (format, varargs, style = UCRT)=>
+    formatToString(format, varargs, readString, { style: /** @type {any} */ (style) });
+
+test('the universal runtime spells infinities and NaNs as C99 does, msvcrt as digits', ()=>{
+    const values = [...slots(Infinity), ...slots(Infinity), ...slots(-Infinity)];
+    assert.equal(styled('%f %F %e', values), 'inf INF -inf');
+    assert.equal(styled('%f %F', [...slots(NaN), ...slots(NaN)]), 'nan NAN');
+    assert.equal(styled('%f %F', [...INDEFINITE, ...INDEFINITE]), '-nan(ind) -NAN(IND)');
+    // No zeros for a value with no digits: the field is blanks.
+    assert.equal(styled('%06f', slots(Infinity)), '   inf');
+    assert.equal(render('%f', slots(Infinity)), '1.#INF00', 'msvcrt, absent a style');
+    assert.equal(styled('%e', slots(NaN), { ...UCRT, standardSpecials: false }), '1.#QNAN0e+00',
+        'the legacy bit keeps the digits, not the three-digit exponent');
+});
+
+test('the universal runtime writes %e\'s exponent in two digits, msvcrt in three', ()=>{
+    assert.equal(styled('%E', slots(1.23)), '1.230000E+00');
+    assert.equal(styled('%E', slots(1.23), { ...UCRT, exponentDigits: 3 }), '1.230000E+000');
+    assert.equal(render('%E', slots(1.23)), '1.230000E+000');
+});
+
+test('%a writes the binary value in hexadecimal, rounded where a precision cuts it', ()=>{
+    assert.equal(styled('%a', slots(1)), '0x1.0000000000000p+0');
+    assert.equal(styled('%A', slots(-0.1)), '-0X1.999999999999AP-4');
+    assert.equal(styled('%a', slots(0)), '0x0.0000000000000p+0');
+    assert.equal(styled('%.0a', slots(1.5)), '0x2p+0', 'a carry out of the leading digit');
+    assert.equal(styled('%.1a', slots(1.03125)), '0x1.1p+0', 'a tie rounded up');
+    assert.equal(styled('%.1a', slots(1.03125), { ...UCRT, evenTies: true }), '0x1.0p+0',
+        'and to even under standard rounding');
+    assert.equal(styled('%024a', slots(0.1)), '0x00001.999999999999ap-4',
+        'zeros between the 0x and the digits');
+    assert.equal(styled('%a', slots(NaN), { ...UCRT, standardSpecials: false }),
+        '0x1.#QNAN00000000p+0', 'msvcrt\'s NaN digits where the fraction goes');
+    assert.equal(render('%a', slots(1)), 'a', 'a letter msvcrt does not know');
+});
+
+test('the universal runtime writes every digit the double has, msvcrt seventeen', ()=>{
+    assert.equal(styled('%.30f', slots(1 / 3)), '0.333333333333333314829616256247');
+    assert.equal(render('%.30f', slots(1 / 3)), '0.333333333333333310000000000000');
+    assert.equal(styled('%.2f', slots(0.125)), '0.13', 'a tie rounded up');
+    assert.equal(styled('%.2f', slots(0.125), { ...UCRT, evenTies: true }), '0.12');
+});
+
+test('%F is the universal runtime\'s conversion, and far before a letter', ()=>{
+    assert.equal(styled('%F', slots(1.23)), '1.230000');
+    assert.equal(styled('%Fd %Nd', [123, 456]), '123 456');
+    assert.equal(render('%Fd', [123]), '123');
+});

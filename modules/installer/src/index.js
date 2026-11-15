@@ -35,7 +35,7 @@
  * path stops there rather than pretending.
  */
 
-import { REGISTRY_PATH, collect, prefixOptions } from './prefix.js';
+import { DRIVE_ROOT, REGISTRY_PATH, collect, prefixOptions } from './prefix.js';
 import { isDiscMedia } from './disc.js';
 import { packBundle } from './pack.js';
 import { bundleManifest, finish, partSink } from './upload.js';
@@ -47,6 +47,7 @@ export {
     prefixOptions,
 } from './prefix.js';
 export { archiveDisc, isZipArchive, readZip } from './archive.js';
+export { LAYER_DRIVE, collectLayer, hiveAdded } from './layer.js';
 export { DEFAULT_BLOCK_SIZE, packBundle, packBlock, sha256 } from './pack.js';
 export { chunkedFile, sizeOf } from './chunks.js';
 export {
@@ -213,15 +214,63 @@ export async function saveBottle({ prefix, directory, id, manifest = {}, report 
     }
 
     const folder = await directory.getDirectoryHandle(id, { create: true });
+    const packed = await packInto(folder, prefix, report);
+    const described = bundleManifest(packed, {
+        title: id,
+        root: prefix.root,
+        ...manifest,
+        entry: program.path,
+    });
+    await put(folder, 'entry', program.bytes);
+    await put(folder, 'manifest.json',
+        new TextEncoder().encode(JSON.stringify(described, null, 4)));
+    report?.({ stage: 'done', bytes: packed.bytes });
+    return { packed, manifest: described };
+}
+
+/**
+ * Keeps a layer in this browser (`collectLayer`), as a bottle is kept: a
+ * directory of the origin's file system holding `<id>/bundle.btl` and its
+ * `manifest.json`, whose kind is `layer` and which has no entry.
+ *
+ * @param {Object} options
+ * @param {import('./chunks.js').ChunkedFile[]} options.files  The layer's, `collectLayer`'s.
+ * @param {FileSystemDirectoryHandle} options.directory  Where layers are kept.
+ * @param {string} options.id                Names the layer, and its directory.
+ * @param {Record<string, unknown>} [options.manifest]  Its title, version.
+ * @param {(report: PublishReport) => void} [options.report]
+ * @returns {Promise<{ packed: import('./pack.js').PackedSummary,
+ *                      manifest: Record<string, unknown> }>}
+ */
+export async function saveLayer({ files, directory, id, manifest = {}, report }){
+    const folder = await directory.getDirectoryHandle(id, { create: true });
+    const packed = await packInto(folder, { root: DRIVE_ROOT, files, outside: [], entry: null },
+        report);
+    const described = bundleManifest(packed, { id, title: id, ...manifest, kind: 'layer' });
+    await put(folder, 'manifest.json',
+        new TextEncoder().encode(JSON.stringify(described, null, 4)));
+    report?.({ stage: 'done', bytes: packed.bytes });
+    return { packed, manifest: described };
+}
+
+/**
+ * Packs a prefix into `bundle.btl` in a folder as it is written: the blocks go
+ * to the file behind the room left for the header, the index after them, and
+ * the header, known last, into that room.
+ *
+ * @param {FileSystemDirectoryHandle} folder
+ * @param {import('./prefix.js').Prefix} prefix
+ * @param {((report: PublishReport) => void) | undefined} report
+ * @returns {Promise<import('./pack.js').PackedSummary>}
+ */
+async function packInto(folder, prefix, report){
     const stream = await (await folder.getFileHandle('bundle.btl', { create: true }))
         .createWritable();
-    /** @type {import('./pack.js').PackedSummary} */
-    let packed;
     try
     {
         await stream.write({ type: 'seek', position: HEADER_SIZE });
         report?.({ stage: 'packing', detail: `${prefix.files.length} files under ${prefix.root}` });
-        packed = await packBundle({
+        const packed = await packBundle({
             files: prefix.files,
             directories: prefix.directories ?? [],
             write: bytes=>stream.write(/** @type {Uint8Array<ArrayBuffer>} */ (bytes)),
@@ -236,26 +285,17 @@ export async function saveBottle({ prefix, directory, id, manifest = {}, report 
         await stream.write({ type: 'write', position: 0,
             data: /** @type {Uint8Array<ArrayBuffer>} */ (packed.header) });
         await stream.close();
+        return packed;
     }
     catch (e){
         await stream.abort?.();
         throw e;
     }
+}
 
-    const described = bundleManifest(packed, {
-        title: id,
-        root: prefix.root,
-        ...manifest,
-        entry: program.path,
-    });
-    /** @param {string} name @param {Uint8Array} bytes */
-    const put = async(name, bytes)=>{
-        const writing = await (await folder.getFileHandle(name, { create: true })).createWritable();
-        await writing.write(/** @type {Uint8Array<ArrayBuffer>} */ (bytes));
-        await writing.close();
-    };
-    await put('entry', program.bytes);
-    await put('manifest.json', new TextEncoder().encode(JSON.stringify(described, null, 4)));
-    report?.({ stage: 'done', bytes: packed.bytes });
-    return { packed, manifest: described };
+/** @param {FileSystemDirectoryHandle} folder @param {string} name @param {Uint8Array} bytes */
+async function put(folder, name, bytes){
+    const writing = await (await folder.getFileHandle(name, { create: true })).createWritable();
+    await writing.write(/** @type {Uint8Array<ArrayBuffer>} */ (bytes));
+    await writing.close();
 }
