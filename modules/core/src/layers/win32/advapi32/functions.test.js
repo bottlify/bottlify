@@ -1657,3 +1657,47 @@ test('a handle the program holds names the hive\'s key, for a library installing
     fns.RegCloseKey.handler([handle]);
     assert.equal(keyOf(handle), null, 'a handle closed names none');
 });
+
+test('a string stored as its count says, and read back terminated only where there is room', ()=>{
+    const { memory, fns, create } = setup();
+    const key = create('Software\\Vendor\\Termination');
+    memory.putString(NAME, 'text');
+    memory.putString(INPUT, 'FullString');
+    // Nine of ten characters: stored as nine, no terminator added.
+    assert.equal(fns.RegSetValueExA.handler([key, NAME, 0, REG_SZ, INPUT, 9]), ERROR_SUCCESS);
+    memory.putDword(OUT_SIZE, 9);
+    memory.bytes.fill(0xbd, OUT_DATA, OUT_DATA + 16);
+    assert.equal(fns.RegQueryValueExA.handler([key, NAME, 0, 0, OUT_DATA, OUT_SIZE]),
+        ERROR_SUCCESS);
+    assert.equal(memory.dword(OUT_SIZE), 9);
+    assert.equal(memory.bytes[OUT_DATA + 9], 0xbd, 'no room, no terminator');
+    memory.putDword(OUT_SIZE, 10);
+    fns.RegQueryValueExA.handler([key, NAME, 0, 0, OUT_DATA, OUT_SIZE]);
+    assert.equal(memory.dword(OUT_SIZE), 9, 'the terminator is not counted');
+    assert.equal(memory.bytes[OUT_DATA + 9], 0, 'room, a terminator');
+    // Ten, the terminator right after them: NT counts it in.
+    fns.RegSetValueExA.handler([key, NAME, 0, REG_SZ, INPUT, 10]);
+    memory.putDword(OUT_SIZE, 0);
+    fns.RegQueryValueExA.handler([key, NAME, 0, 0, 0, OUT_SIZE]);
+    assert.equal(memory.dword(OUT_SIZE), 11);
+});
+
+test('no name opens a predefined root as itself, and RegOpenKey hands back the key it got', ()=>{
+    const { memory, fns, create } = setup();
+    const key = create('Software\\Vendor\\Open');
+    memory.putString(SUBKEY, '');
+    assert.equal(fns.RegOpenKeyExA.handler([HKEY_LOCAL_MACHINE, SUBKEY, 0, 0, OUT_HANDLE]),
+        ERROR_SUCCESS);
+    assert.equal(memory.dword(OUT_HANDLE), HKEY_LOCAL_MACHINE);
+    assert.equal(fns.RegOpenKeyExA.handler([key, SUBKEY, 0, 0, OUT_HANDLE]), ERROR_SUCCESS);
+    assert.notEqual(memory.dword(OUT_HANDLE), key, 'a real key opens anew');
+    assert.equal(fns.RegOpenKeyA.handler([key, 0, OUT_HANDLE]), ERROR_SUCCESS);
+    assert.equal(memory.dword(OUT_HANDLE), key, 'RegOpenKey: the very handle');
+    memory.putString(SUBKEY, '\\Software');
+    assert.equal(fns.RegOpenKeyExA.handler([HKEY_LOCAL_MACHINE, SUBKEY, 0, 0, OUT_HANDLE]),
+        161, 'ERROR_BAD_PATHNAME');
+    memory.putString(SUBKEY, 'Sub');
+    assert.equal(fns.RegCreateKeyExA.handler([key, SUBKEY, 0, 0, 0, 0, 0, 0, 0]), 1010,
+        'ERROR_BADKEY for no handle to fill');
+    assert.equal(fns.RegCreateKeyA.handler([key, SUBKEY, 0]), 87);
+});
