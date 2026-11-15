@@ -207,7 +207,7 @@ async function pack(root, id, flags){
 async function verify(id){
     const path = join(BUNDLES_DIR, id, 'bundle.btl');
     const started = Date.now();
-    const { checked, bad } = await verifyBundle(path, progress=>{
+    const { checked, blocksChecked, badBlocks, bad } = await verifyBundle(path, progress=>{
         if (progress.checked % 10 === 0)
         {
             process.stdout.write(`  ${progress.checked}/${progress.total}\r`);
@@ -215,13 +215,22 @@ async function verify(id){
     });
     process.stdout.write(' '.repeat(40) + '\r');
     const seconds = (Date.now() - started) / 1000;
-    console.log(`${path}: ${checked} files checked in ${seconds.toFixed(0)}s, `
-        + `${bad.length} corrupt`);
+    console.log(`${path}: ${blocksChecked} blocks and ${checked} files' digests checked `
+        + `in ${seconds.toFixed(0)}s, ${bad.length} corrupt`);
+    if (blocksChecked === 0 && checked === 0)
+    {
+        console.log('  not checked: the bundle records neither block checksums nor file digests');
+        process.exitCode = 1;
+    }
     for (const corrupt of bad)
     {
         console.log(`  BAD ${corrupt}`);
     }
-    if (bad.length > 0)
+    if (badBlocks.length > 0)
+    {
+        console.log(`  damaged blocks: ${badBlocks.join(' ')}`);
+    }
+    if (bad.length > 0 || badBlocks.length > 0)
     {
         process.exitCode = 1;
     }

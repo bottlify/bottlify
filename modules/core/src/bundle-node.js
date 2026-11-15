@@ -549,8 +549,9 @@ export async function openBundle(path){
 }
 
 /**
- * Reads a whole bundle back and checks every file against the digest recorded
- * when it was written.
+ * Reads a whole bundle back and checks every block against its checksum and
+ * every file against the digest recorded when it was written, where there is
+ * one: `bad` names, once, each file a damaged block or a wrong digest is in.
  *
  * @param {string} path
  * @param {(progress: any) => void} [onProgress]
@@ -560,6 +561,47 @@ export async function verifyBundle(path, onProgress){
     let checked = 0;
     /** @type {string[]} */
     const bad = [];
+
+    // Every block against the checksum its index records, as a page checks
+    // each block it fetches: a bundle written in place records no file
+    // digests, and checking only those passed it with nothing checked.
+    let blocksChecked = 0;
+    /** @type {number[]} */
+    const badBlocks = [];
+    const handle = await open(path, 'r');
+    try
+    {
+        for (let at = 0; at < bundle.index.blocks.length; at++)
+        {
+            const block = bundle.index.blocks[at];
+            if (block.crc === null || block.crc === undefined)
+            {
+                continue;
+            }
+            const raw = Buffer.alloc(block.packed);
+            await handle.read(raw, 0, block.packed, block.offset);
+            if (crc32(raw) !== block.crc)
+            {
+                badBlocks.push(at);
+            }
+            blocksChecked++;
+        }
+    }
+    finally
+    {
+        await handle.close();
+    }
+    for (const at of badBlocks)
+    {
+        for (const file of bundle.list().filter((/** @type {any} */ one)=>one.blocks > 0
+            && at >= one.firstBlock && at < one.firstBlock + one.blocks))
+        {
+            if (!bad.includes(file.path))
+            {
+                bad.push(file.path);
+            }
+        }
+    }
 
     for (const file of bundle.list())
     {
@@ -572,7 +614,7 @@ export async function verifyBundle(path, onProgress){
         {
             digest.update(await bundle.read(file.path, at, bundle.blockSize));
         }
-        if (digest.digest('hex') !== file.sha256)
+        if (digest.digest('hex') !== file.sha256 && !bad.includes(file.path))
         {
             bad.push(file.path);
         }
@@ -590,7 +632,7 @@ export async function verifyBundle(path, onProgress){
     }
 
     await bundle.close();
-    return { checked, bad };
+    return { checked, blocksChecked, badBlocks, bad };
 }
 
 /** @param {string} directory */
