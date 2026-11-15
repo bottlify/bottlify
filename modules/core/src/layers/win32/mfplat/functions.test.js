@@ -523,3 +523,88 @@ test('an event keeps its type, extended type, status and a copy of its value', a
     await m.call(e, 'Release');
     assert.equal(cleared.length, 1, 'the value cleared as the event goes');
 });
+
+test('the format arithmetic exports: frame rates both ways, MFllMulDiv in EDX:EAX, image sizes',
+    ()=>{
+        const m = mfMachine();
+        const time = m.out(8);
+        assert.equal(m.mf.table.MFFrameRateToAverageTimePerFrame.handler([30000, 1001, time]),
+            S_OK);
+        assert.equal(m.u32(time), 333667);
+        const [numerator, denominator] = [m.out(4), m.out(4)];
+        assert.equal(m.mf.table.MFAverageTimePerFrameToFrameRate.handler(
+            [200000000, 0, numerator, denominator]), S_OK);
+        assert.deepEqual([m.u32(numerator), m.u32(denominator)], [1, 10]);
+
+        // (0x7fffffffffffffff * 4) / 2^32 is 0x1ffffffff: high word 1 in EDX.
+        assert.equal(m.mf.table.MFllMulDiv.handler([0xffffffff, 0x7fffffff, 4, 0, 0, 1, 0, 0]),
+            0xffffffff);
+        assert.equal(m.registers.edx, 1);
+
+        const size = m.out(4);
+        m.putU32(size, 1);
+        assert.equal(m.mf.table.MFCalculateImageSize.handler(
+            [m.guid('{00000000-0000-0000-C000-000000000046}'), 1, 1, size]), E_INVALIDARG);
+        assert.equal(m.u32(size), 0, 'an unknown subtype leaves the size zeroed');
+        assert.equal(m.mf.table.MFCalculateImageSize.handler([m.guid(RGB32), 320, 240, size]),
+            S_OK);
+        assert.equal(m.u32(size), 307200);
+    });
+
+test('MFHeapAlloc is the process heap, the timer ticks every 10 ms, the clock in 100 ns', ()=>{
+    const m = mfMachine();
+    const block = m.mf.table.MFHeapAlloc.handler([16, 0, 0, 0, 0]);
+    assert.notEqual(block, 0);
+    m.mf.table.MFHeapFree.handler([block]);
+    assert.ok(m.freed.has(block));
+    const period = m.out(4);
+    assert.equal(m.mf.table.MFGetTimerPeriodicity.handler([period]), S_OK);
+    assert.equal(m.u32(period), 10);
+    assert.equal(m.mf.table.MFGetSystemTime.handler(), 12345000, '1234.5 ms');
+    assert.equal(m.registers.edx, 0);
+});
+
+test('attributes as a blob: eight bytes empty, too short refused, every type but an interface back',
+    async()=>{
+        const m = mfMachine();
+        const source = await m.make('MFCreateAttributes', 0);
+        const dest = await m.make('MFCreateAttributes', 0);
+        const size = m.out(4);
+        assert.equal(await m.mf.table.MFGetAttributesAsBlobSize.handler([source, size]), S_OK);
+        assert.equal(m.u32(size), 8);
+        const empty = m.out(8);
+        assert.equal(await m.mf.table.MFGetAttributesAsBlob.handler([source, empty, 7]),
+            MF_E_BUFFERTOOSMALL);
+        assert.equal(await m.mf.table.MFGetAttributesAsBlob.handler([source, empty, 8]), S_OK);
+        assert.equal(await m.mf.table.MFInitAttributesFromBlob.handler([dest, empty, 7]),
+            E_INVALIDARG);
+        await m.call(dest, 'SetUINT32', m.guid(DUMMY1), 1);
+        assert.equal(await m.mf.table.MFInitAttributesFromBlob.handler([dest, empty, 8]), S_OK);
+        const count = m.out(4);
+        await m.call(dest, 'GetCount', count);
+        assert.equal(m.u32(count), 0, 'what the store held is cleared');
+
+        await m.call(source, 'SetUINT32', m.guid(DUMMY1), 456);
+        await m.call(source, 'SetUINT64', m.guid(DUMMY2), 123, 0);
+        await m.call(source, 'SetGUID', m.guid(DUMMY3), m.guid(PCM));
+        await m.call(source, 'SetString', m.guid(RGB32), m.wide('Text'));
+        await m.call(source, 'SetUnknown', m.guid(PCM), source);
+        assert.equal(await m.mf.table.MFGetAttributesAsBlobSize.handler([source, size]), S_OK);
+        const blob = m.out(m.u32(size));
+        assert.equal(await m.mf.table.MFGetAttributesAsBlob.handler([source, blob, m.u32(size)]),
+            S_OK);
+        assert.equal(await m.mf.table.MFInitAttributesFromBlob.handler([dest, blob, m.u32(size)]),
+            S_OK);
+        const value = m.out(16);
+        assert.equal(await m.call(dest, 'GetUINT32', m.guid(DUMMY1), value), S_OK);
+        assert.equal(m.u32(value), 456);
+        assert.equal(await m.call(dest, 'GetUINT64', m.guid(DUMMY2), value), S_OK);
+        assert.equal(m.u32(value), 123);
+        assert.equal(await m.call(dest, 'GetGUID', m.guid(DUMMY3), value), S_OK);
+        assert.equal(m.guidAt(value), PCM);
+        const length = m.out(4);
+        assert.equal(await m.call(dest, 'GetStringLength', m.guid(RGB32), length), S_OK);
+        assert.equal(m.u32(length), 4);
+        assert.equal(await m.call(dest, 'GetUnknown', m.guid(PCM), m.guid(m.IID_IUNKNOWN), value),
+            MF_E_ATTRIBUTENOTFOUND, 'an interface does not outlive its process');
+    });

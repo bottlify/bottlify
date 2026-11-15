@@ -657,7 +657,7 @@ export function createAttributes(kit, host){
         } },
     ];
 
-    return { methods, itemsOf, clear, store, itemAt, putItem, typed };
+    return { methods, itemsOf, copyInto, clear, store, itemAt, putItem, typed };
 }
 
 /** @typedef {ReturnType<typeof createAttributes>} Attributes */

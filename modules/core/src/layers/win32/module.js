@@ -1349,6 +1349,27 @@ export function createWin32Module(){
                 readWideString: (address, maxLength)=>readWideString(address, maxLength),
                 video: config?.video,
                 divergence: config?.divergence,
+                // The event IMediaEvent::GetEventHandle hands out; a stale
+                // handle is the program's mistake, as for the ports' events.
+                events: {
+                    create: ()=>kernel.handles.open('event',
+                        kernel.createEvent({ manualReset: true, signalled: false })),
+                    /** @param {number} handle */
+                    set: handle=>{
+                        try { kernel.setEvent(kernel.handles.resolve(handle, 'event')); }
+                        catch (e){ void e; }
+                    },
+                    /** @param {number} handle */
+                    reset: handle=>{
+                        try { kernel.resetEvent(kernel.handles.resolve(handle, 'event')); }
+                        catch (e){ void e; }
+                    },
+                    /** @param {number} handle */
+                    close: handle=>{
+                        try { kernel.handles.close(handle); }
+                        catch (e){ void e; }
+                    },
+                },
                 // A renderer the program wrote is fed from a thread of its own,
                 // as quartz feeds one from its streaming thread; made on the
                 // first sample, so a program with no such filter has none.
@@ -1697,6 +1718,31 @@ export function createWin32Module(){
             // The thread a filter graph calls a program's own filters on: the
             // samples it feeds a renderer the program wrote, and the flushes and
             // releases it owes that renderer.
+            // The thread Media Foundation's work queues call a program's
+            // IMFAsyncCallback::Invoke on, made with the first work put.
+            const mfNotices = createNoticeThread({
+                name: 'mfplat',
+                reason: 'a work queue item',
+                trap: '<mfplat-queue>',
+                /** @param {number} bytes */
+                allocate: bytes=>heap.allocate(bytes),
+                writeMemory,
+                register: (name, fn)=>bridge.register(name, fn),
+                /** @param {{ entry: number, name: string }} options */
+                createThread: options=>{
+                    const thread = kernel.createThread(options);
+                    threadMade(thread);
+                    return thread;
+                },
+                currentThread: ()=>kernel.currentThread(),
+                /** @param {any} thread @param {string} reason */
+                block: (thread, reason)=>kernel.block(thread, reason),
+                /** @param {any} thread @param {number} result */
+                wake: (thread, result)=>kernel.wake(thread, result),
+                /** @param {any} thread */
+                park: thread=>bridge.park(thread),
+            });
+
             const streamNotices = createNoticeThread({
                 name: 'quartz',
                 reason: 'a filter graph sample',
@@ -2342,8 +2388,99 @@ export function createWin32Module(){
             };
             // Media Foundation: its objects, and its reader's class factory,
             // which a program reaches through COM as well as through exports.
+            /** @param {string} name @param {number[]} args @returns {Promise<number>} */
+            const kernel32Call = async(name, args)=>
+                (await libraries['KERNEL32.dll'][name].handler(args)) >>> 0;
+            /** @returns {import('./mfplat/bytestream.js').FileCalls} */
+            const mfFiles = ()=>({
+                open: async(path, access, share, disposition, flags)=>{
+                    const name = heap.allocate((path.length + 1) * 2);
+                    writeMemory(name, wideText(path));
+                    try
+                    {
+                        const handle = await kernel32Call('CreateFileW',
+                            [name, access, share, 0, disposition, flags | 0x80, 0]);
+                        return handle === 0xffffffff
+                            ? { error: await kernel32Call('GetLastError', []) } : { handle };
+                    }
+                    finally
+                    {
+                        heap.free(name);
+                    }
+                },
+                transfer: async(handle, position, buffer, length, write)=>{
+                    const done = heap.allocate(4);
+                    try
+                    {
+                        await kernel32Call('SetFilePointerEx', [handle,
+                            Number(position & 0xffffffffn), Number(position >> 32n), 0, 0]);
+                        const ok = await kernel32Call(write ? 'WriteFile' : 'ReadFile',
+                            [handle, buffer, length, done, 0]);
+                        return ok ? { done: memory.readU32(done) }
+                            : { error: await kernel32Call('GetLastError', []) };
+                    }
+                    finally
+                    {
+                        heap.free(done);
+                    }
+                },
+                size: async handle=>{
+                    const out = heap.allocate(8);
+                    try
+                    {
+                        await kernel32Call('GetFileSizeEx', [handle, out]);
+                        return BigInt(memory.readU32(out)) | BigInt(memory.readU32(out + 4)) << 32n;
+                    }
+                    finally
+                    {
+                        heap.free(out);
+                    }
+                },
+                setSize: async(handle, size)=>{
+                    await kernel32Call('SetFilePointerEx', [handle, Number(size & 0xffffffffn),
+                        Number(size >> 32n), 0, 0]);
+                    return (await kernel32Call('SetEndOfFile', [handle])) !== 0;
+                },
+                flush: async handle=>(await kernel32Call('FlushFileBuffers', [handle])) !== 0,
+                modified: async handle=>{
+                    const out = heap.allocate(8);
+                    try
+                    {
+                        writeMemory(out, new Uint8Array(8));
+                        await kernel32Call('GetFileTime', [handle, 0, 0, out]);
+                        return Uint8Array.from(readMemory(out, 8));
+                    }
+                    finally
+                    {
+                        heap.free(out);
+                    }
+                },
+                close: handle=>{
+                    void libraries['KERNEL32.dll'].CloseHandle.handler([handle]);
+                },
+            });
             const mediaFoundation = createMfplatFunctions({
-                readMemory, writeMemory, heap, vtables: comVtables,
+                readMemory, writeMemory, heap, vtables: comVtables, setRegisters,
+                now: ()=>kernel.clock.virtualTime(),
+                // A byte stream's file is kernel32's, opened and read through
+                // its own calls, so it fails as CreateFile and ReadFile do.
+                files: mfFiles(),
+                notices: {
+                    /** @param {number} entry @param {number[]} args @param {() => void} [done] */
+                    deliver: (entry, args, done)=>mfNotices.deliver(entry, args, done),
+                },
+                tempPath: async()=>{
+                    const buffer = heap.allocate(520);
+                    try
+                    {
+                        const length = await kernel32Call('GetTempPathW', [260, buffer]);
+                        return readWideString(buffer, (length >>> 0) * 2);
+                    }
+                    finally
+                    {
+                        heap.free(buffer);
+                    }
+                },
                 objectAt: pointer=>bridge.interfaceObject(pointer),
                 callGuest: call=>bridge.callGuest(call),
                 callerThread: ()=>bridge.callerThread(),
