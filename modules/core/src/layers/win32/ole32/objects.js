@@ -53,6 +53,10 @@ export const IID_IUNKNOWN = '{00000000-0000-0000-C000-000000000046}';
  * @typedef {Object} ComInterfaceDescriptor
  * @property {string} id
  * @property {ComMethod[]} methods  In vtable order, after IUnknown's three.
+ * @property {string[]} [also]
+ *           Other interface ids the same interface answers to, with the same
+ *           pointer: one interface Windows publishes under two names (the item
+ *           dialog's IFileDialogCustomize and IFileDialogCustomizeAlt).
  */
 
 /**
@@ -99,6 +103,8 @@ export const IID_IUNKNOWN = '{00000000-0000-0000-C000-000000000046}';
  * @property {ComObject} object
  * @property {string} id
  * @property {readonly ComMethod[]} methods  IUnknown's three, then the declared ones.
+ * @property {string} [sharedWith]  The interface whose pointer this one is: another
+ *           name of it (ComInterfaceDescriptor's `also`).
  */
 
 /**
@@ -228,6 +234,11 @@ function delegatingMethodsOf(descriptor){
  */
 export function createComObject(clsid, definition, aggregation = null){
     const declared = new Map(definition.interfaces.map(checkDescriptor));
+    // An interface's other names lead to its record, so they are one pointer.
+    /** @type {Map<string, string>} */
+    const aliases = new Map(definition.interfaces.flatMap(descriptor=>(descriptor.also ?? [])
+        .map(other=>[requireGuid(other, 'interface id'),
+            requireGuid(descriptor.id, 'interface id')])));
     /** @type {Map<string, ComInterface>} */
     const published = new Map();
     // One reference, held by whoever asked for the object: a class factory hands
@@ -272,7 +283,28 @@ export function createComObject(clsid, definition, aggregation = null){
          * @param {string} id
          */
         interfaceFor(id){
-            const key = canonicalGuid(id);
+            const asked = canonicalGuid(id);
+            const primary = asked === null ? undefined : aliases.get(asked);
+            if (primary !== undefined && !destroyed)
+            {
+                // Another name of an interface: its record, sharing its
+                // pointer (`sharedWith`, as the bridge publishes one).
+                const known = published.get(/** @type {string} */ (asked));
+                if (known)
+                {
+                    return known;
+                }
+                const main = object.interfaceFor(primary);
+                if (!main)
+                {
+                    return null;
+                }
+                const named = Object.freeze({ ...main, id: /** @type {string} */ (asked),
+                    sharedWith: primary });
+                published.set(/** @type {string} */ (asked), named);
+                return named;
+            }
+            const key = asked;
             if (key === null || destroyed)
             {
                 return null;

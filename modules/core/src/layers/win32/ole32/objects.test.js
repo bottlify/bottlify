@@ -258,3 +258,19 @@ test('a class that may not be aggregated says so rather than making an object', 
     assert.equal(registry.createAggregated(CLSID_TEST, { outer: 1, call: async()=>0 }), false);
     assert.equal(log.destroyed, 1, 'what the factory made is let go');
 });
+
+test('an interface known by a second name answers it with its own methods, sharing its pointer',
+    ()=>{
+        const object = createComObject(CLSID_TEST, {
+            interfaces: [{ id: IID_FIRST, methods: [{ name: 'Draw', argBytes: 8 }],
+                also: [IID_ABSENT] }],
+        });
+        const main = object.interfaceFor(IID_FIRST);
+        const other = object.interfaceFor(IID_ABSENT.toLowerCase());
+        assert.ok(main && other);
+        assert.equal(other.id, IID_ABSENT);
+        assert.equal(/** @type {any} */ (other).sharedWith, IID_FIRST,
+            'published as the first one\'s pointer');
+        assert.equal(other.methods, main.methods);
+        assert.equal(object.interfaceFor(IID_ABSENT), other, 'the same record every time');
+    });

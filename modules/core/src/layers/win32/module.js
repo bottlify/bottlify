@@ -2276,7 +2276,7 @@ export function createWin32Module(){
             registerShellLinkClasses(com, shortcutHost);
             registerDragDropHelperClass(com);
             registerTaskbarListClass(com);
-            registerFileDialogClasses(com, shortcutHost);
+            registerFileDialogClasses(com, { ...shortcutHost, publish: comVtables.publish });
             // The `.url` beside it: a setup's link to its publisher's site.
             registerInternetShortcutClass(com, /** @type {any} */ (shortcutHost));
 
