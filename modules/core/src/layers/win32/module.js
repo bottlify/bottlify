@@ -106,6 +106,7 @@ import { SHELL32_ORDINALS, createShellFunctions } from './shell32/functions.js';
 import { registerShellLinkClasses } from './shell32/shelllink.js';
 import { registerDragDropHelperClass } from './shell32/dragdrop.js';
 import { registerTaskbarListClass } from './shell32/taskbar.js';
+import { registerFileDialogClasses } from './comdlg32/itemdialog.js';
 import { registerInternetShortcutClass } from './shell32/internet-shortcut.js';
 import { registerWbemClasses } from './ole32/wbem.js';
 import { registerMsxmlClasses } from './msxml/dom.js';
@@ -2230,6 +2231,7 @@ export function createWin32Module(){
             registerShellLinkClasses(com, shortcutHost);
             registerDragDropHelperClass(com);
             registerTaskbarListClass(com);
+            registerFileDialogClasses(com, shortcutHost);
             // The `.url` beside it: a setup's link to its publisher's site.
             registerInternetShortcutClass(com, /** @type {any} */ (shortcutHost));
 
