@@ -17,7 +17,13 @@
  * the guest's own clock (`clock: 'virtual'`), translating on its thread, so
  * what it translates, and when, is the same every run - a run whose
  * translation came back from a worker by the machine's time counted a
- * workload that keeps translating (`load`) a fifth apart run to run.
+ * workload that keeps translating (`load`) a fifth apart run to run. Such a
+ * workload still varies by a few per cent between runs (three of one tree:
+ * 136.9, 139.3 and 143.6 M instructions of its code, 5.9 to 24.9 M of the
+ * rest): when V8 has a function's optimised code ready is the machine's,
+ * and its code is new all the time. Two runs started together agree, so a
+ * difference of a few per cent on it is read over several runs, not one;
+ * the other workloads repeat to the instruction.
  * Several roots are arms, each workload's count beside the first's. The
  * count is the whole process's (the translated code, the runtime's lookups
  * and the host between them), V8's optimising compiles apart.

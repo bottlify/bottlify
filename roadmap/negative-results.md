@@ -96,6 +96,7 @@ plus at most five lines below its table of conditions the line cannot carry.
 | 2026-11-14 | a `ret` answers its wasm call the address it took and the call compares it; no stack of return addresses | calls512-scatter machine instructions 32-bit -5.3 %, 64-bit +7.6 %; formed callees' returns 100 of 100 through the transfer | holds | a frame's count of formed calls; long mode's window test folded |
 | 2026-11-15 | regions of 256 blocks against the default 128, long mode and 32-bit | 256/128 geomean x64 0.99 (vm 1.08), sse 1.06 (vm 1.50) | holds: 128 kept | a game's region profile, not the bench's |
 | 2026-11-15 | a callee formed in at one call of its region, its other calls wasm calls: its `ret` no edge from one loop into another, so both stay loops | instructions an iteration (exact) str 2.93 -> 3.22 M, tree 3.28 -> 8.50 M, lua 37.8 -> 38.4 M, game and vcall equal; str's jumps out 462 k -> 0 | holds | the callee's blocks formed once a call site (copies of blocks by place, not address) |
+| 2026-11-15 | an xmm register a region uses as a scalar alone (92 % of a game's hot SSE uses by the operand forms, 14 % once `rsqrtss`, packed copies and bitwise masks refuse it) kept as a scalar through the whole region, its other lanes in a vector local, or in the state block under a zeroed mask; and a scalar load writing the vector on arm64 too | machine instructions an executed guest instruction over Crysis's 30 hottest regions: x64 2.735 -> 2.755 (vector) / 2.800 (mask); arm64 2.476 -> 2.486 / 2.526; loads not owed on arm64 2.514 | holds | the lanes' traffic (8.7 % arm64, 6.8 % x64) cut without a second value live across the region: V8 spilled it, and a guest call made it whole each time |
 
 The two 2026-11-14 lines on regions of a module as one, conditions: cork 3f877946, a cloud machine (Intel Xeon @ 2.10GHz, 4 cores,
 power plan not recorded), Chromium 153.0.8010.12 / V8 15.3.76.4 headless (`browser/suite.mjs --scale 10
@@ -112,6 +113,12 @@ The 2026-11-15 line on a callee formed in once, conditions: cork a2791c91, the m
 8.2.2 with emit-count's plugin, Node 22.22.0 --single-threaded --predictable, a clock of 1 us a reading, 60-100 warm-up
 iterations awaiting their translations, 20-50 counted; two runs of one tree equal to the instruction. A wasm call each
 inner turn costs more than the jump out to the region's copies and back (`rejoinAt`) each outer turn it replaced.
+
+The 2026-11-15 line on scalars kept through a region, conditions: cork 686f31dd, Crysis SP demo's Benchmark_CPU in the node
+stand (1 executor, block profile from 450 s, 281 G guest instructions), `tools/translator/cork-asm.mjs --blocks --classes
+--atomic` on the 30 regions that ran most (173 G, 62 %), V8 14.6: node 26.13.1 x64, and its arm64 build under qemu-aarch64
+8.2.2 with `--no-wasm-bounds-checks` (macOS's model). A static weighing by the profile: one tool version, arms compared,
+not absolutes; no exact run was taken, the static weighing already said no.
 
 ## Executors and scheduler
 
