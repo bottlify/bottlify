@@ -432,7 +432,11 @@ export function trackRegion(region, entryTop, callReturn = false, guess = true){
     /** By block, the call block whose return address it is, or -1. */
     const callerOf = new Array(count).fill(-1);
     blocks.forEach((block, i)=>{
-        const j = block.exit.kind === 'call' ? index.get(block.exit.next) : undefined;
+        // A call through a register or a slot as one by its address: a virtual
+        // method returns its float as any function does.
+        const calls = block.exit.kind === 'call' || block.exit.kind === 'indirect'
+            && block.instructions[block.instructions.length - 1]?.op === 'call';
+        const j = calls ? index.get(block.exit.next) : undefined;
         if (j !== undefined && callerOf[j] < 0)
         {
             callerOf[j] = i;
@@ -456,8 +460,19 @@ export function trackRegion(region, entryTop, callReturn = false, guess = true){
                 continue;
             }
             const caller = callerOf[j];
+            if (caller >= 0 && states[caller] === null
+                && blocks[caller].instructions.length > 0)
+            {
+                // Its call's block has no state yet and is guessed in this pass or
+                // a later one: the pass after that knows the top the block ends
+                // with. Guessed beside it, a return address took the entry's top
+                // whatever the callee leaves, and the test after the call (which
+                // takes a float returned into account) never passed: every such
+                // return left for the host.
+                continue;
+            }
             const end = caller < 0 ? null : ends[caller];
-            const top = end === null ? entryTop : topAfterCall(blocks[j], end.top);
+            const top = caller < 0 ? entryTop : topAfterCall(blocks[j], end?.top ?? entryTop);
             guarded.set(j, top);
             seeds.set(j, { top, slot: [0, 1, 2, 3, 4, 5, 6, 7] });
             added = true;

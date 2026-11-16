@@ -319,8 +319,11 @@ function callAndReturn(e, next, target, mechanism){
     // What the callee does not take in its parameters goes through the state
     // block; the count is left alone, the callee answering what is left of
     // the budget when it returns.
-    const top = topAfterCall(e.region.blocks[/** @type {number} */ (e.labels.get(next))],
-        e.x87.current?.top ?? 0);
+    // The top the return address's block was compiled for, where the plan has
+    // one: the test after the call and that block's code are of one mind.
+    const after = /** @type {number} */ (e.labels.get(next));
+    const top = e.x87.states[after]?.top
+        ?? topAfterCall(e.region.blocks[after], e.x87.current?.top ?? 0);
     if (e.x87.active)
     {
         x87Normalise(e);
