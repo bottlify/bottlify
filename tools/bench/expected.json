@@ -539,12 +539,11 @@
     {
      "retired": 148911168,
      "eax": "136cc9c",
-     "regions": 293,
+     "regions": 292,
      "mechanisms": {
-      "APART_BLOCKS": 1014665,
+      "APART_BLOCKS": 1014684,
       "APART_FULL": 101217,
       "APART_NESTED": 207846,
-      "APART_SHAPE": 19,
       "APART_UNPREDICTED": 32831,
       "CALL_ELSEWHERE": 4118,
       "CALL_FORMED": 790436,
@@ -554,23 +553,22 @@
       "CALL_PREDICTED": 31448,
       "CALL_REL": 1304947,
       "JUMP_DISPATCH": 53017,
-      "JUMP_LOOP": 2758528,
+      "JUMP_LOOP": 2758534,
       "JUMP_OUT": 90268,
       "RET_FORMED": 758910,
       "RET_LEFT": 87439,
       "RET_TO_CALL": 1333214,
-      "TRANSFER": 331753
+      "TRANSFER": 331747
      }
     },
     {
      "retired": 148911168,
      "eax": "136cc9c",
-     "regions": 296,
+     "regions": 295,
      "mechanisms": {
-      "APART_BLOCKS": 1013326,
+      "APART_BLOCKS": 1013345,
       "APART_FULL": 101126,
       "APART_NESTED": 213992,
-      "APART_SHAPE": 19,
       "APART_UNPREDICTED": 32577,
       "CALL_ELSEWHERE": 937214,
       "CALL_FORMED": 785698,
@@ -1221,10 +1219,9 @@
      "eax": "136cc9c",
      "regions": 269,
      "mechanisms": {
-      "APART_BLOCKS": 995915,
+      "APART_BLOCKS": 995930,
       "APART_FULL": 101083,
       "APART_NESTED": 222443,
-      "APART_SHAPE": 15,
       "APART_UNPREDICTED": 31992,
       "CALL_ELSEWHERE": 4169,
       "CALL_FORMED": 782285,
@@ -1247,10 +1244,9 @@
      "eax": "136cc9c",
      "regions": 264,
      "mechanisms": {
-      "APART_BLOCKS": 995286,
+      "APART_BLOCKS": 995516,
       "APART_FULL": 101079,
       "APART_NESTED": 217650,
-      "APART_SHAPE": 230,
       "APART_UNPREDICTED": 31818,
       "CALL_ELSEWHERE": 1001849,
       "CALL_FORMED": 787451,
