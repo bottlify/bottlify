@@ -362,7 +362,7 @@ function snapshot(context){
  * buffers -- are only compared: the specification leaves it open whether one
  * made there is an error.
  */
-const INSIDE_TAKEN = /^gl(Vertex[234]f|Color[34]u?[bf]|TexCoord2f|Normal3f|End$)/;
+const INSIDE_TAKEN = /^gl(Vertex[234]f|Color[34]u?[bf]|TexCoord2f|MultiTexCoord[234]f|Normal3f|End$)/;
 const CLIENT_SIDE =
     /^gl(.*Pointer|.*ClientState|ClientActiveTexture|.*VertexAttribArray|Buffer|BindBuffer)/;
 
@@ -1070,6 +1070,28 @@ const CASES = {
     glNormal3fv: [{ label: 'a normal', args: ['data'], data: floats([0, 1, 0]),
         error: GL.NO_ERROR }],
 };
+
+// A unit's coordinates, every width and both names: the second unit, the last
+// one there is, one past it (an error), and through a null pointer.
+for (const count of [2, 3, 4])
+{
+    const values = [0.25, 4, -0.5, 2].slice(0, count);
+    for (const suffix of ['ARB', ''])
+    {
+        CASES[`glMultiTexCoord${count}f${suffix}`] = [
+            { label: 'the second unit', args: [GL.TEXTURE1, ...floats(values)],
+                error: GL.NO_ERROR },
+            { label: 'the last unit', args: [GL.TEXTURE0 + 7, ...floats(values)] },
+            { label: 'past the units', args: [GL.TEXTURE0 + 32, ...floats(values)] },
+        ];
+        CASES[`glMultiTexCoord${count}fv${suffix}`] = [
+            { label: 'the second unit', args: [GL.TEXTURE1, 'data'], data: floats(values),
+                error: GL.NO_ERROR },
+            { label: 'past the units', args: [GL.TEXTURE0 + 32, 'data'], data: floats(values) },
+            { label: 'none', args: [GL.TEXTURE1, 0] },
+        ];
+    }
+}
 
 /**
  * A fragment shader with a uniform of every kind the ring's uniform calls

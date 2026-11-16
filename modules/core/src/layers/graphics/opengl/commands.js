@@ -463,6 +463,29 @@ TABLE.glUniformMatrix4x2fv = {
         c.first('floats', (c.arg(1) | 0) * 8), 4, 2),
 };
 
+// A unit's texture coordinates in immediate mode, under the extension's names
+// and the core's: a multitextured program makes one a vertex for each unit (a
+// lightmap's beside the surface's), as many as its glVertex calls. Components
+// not given are r 0 and q 1.
+for (const count of [2, 3, 4])
+{
+    /** @param {(i: number) => number} at */
+    const coordinates = at=>[at(0), at(1), count > 2 ? at(2) : 0, count > 3 ? at(3) : 1];
+    /** @type {import('../d3d8/commands.js').CommandEntry} */
+    const given = { args: 1 + count,
+        make: (context, c)=>context.glMultiTexCoord4fARB(c.arg(0) >>> 0,
+            ...coordinates(i=>asFloat(c.arg(1 + i)))) };
+    /** @type {import('../d3d8/commands.js').CommandEntry} */
+    const pointed = { args: 2, pointer: 1, bytes: count * 4,
+        make: (context, c)=>context.glMultiTexCoord4fARB(c.arg(0) >>> 0,
+            ...coordinates(i=>c.floats[i])) };
+    for (const suffix of ['ARB', ''])
+    {
+        TABLE[`glMultiTexCoord${count}f${suffix}`] = given;
+        TABLE[`glMultiTexCoord${count}fv${suffix}`] = pointed;
+    }
+}
+
 /** The calls, numbered as the ring records them: their order here. */
 const NAMES = /** @type {[string, number][]} */ (Object.keys(TABLE).map(name=>[name, 0]));
 
