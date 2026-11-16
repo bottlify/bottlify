@@ -84,7 +84,27 @@ const PROVIDER_CERT_SIZE = 60;
  *   The configured root store, DER bytes or base64 each; absent for the default.
  * @property {() => number} now  The machine's time, in milliseconds since 1970.
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {(name: string, args: number[]) => number} [crypt32]  a crypt32 export,
+ *     called: the certificate contexts and chain a provider's data points at are its
+ * @property {(bytes: number) => number} [allocate]  zeroed memory; 0 when none is left
+ * @property {(address: number) => void} [free]
  */
+
+/** CRYPT_PROVIDER_DATA, 32-bit: its size and the fields laid out here. */
+const PROVIDER_DATA_SIZE = 136;
+const PROVIDER_DATA_WINTRUST = 4;
+const PROVIDER_DATA_FINAL_ERROR = 112;
+/** CRYPT_PROVIDER_SGNR's error and chain context; CRYPT_PROVIDER_CERT's certificate. */
+const SIGNER_ERROR = 28;
+const SIGNER_CHAIN_CONTEXT = 40;
+const CERT_POINTER = 4;
+const CERT_TRUSTED_ROOT = 12;
+const CERT_SELF_SIGNED = 16;
+/** crypt32's memory store, an encoding, an add that keeps duplicates, CERT_CHAIN_PARA's size. */
+const CERT_STORE_PROV_MEMORY = 2;
+const X509_ASN_ENCODING = 1;
+const CERT_STORE_ADD_ALWAYS = 4;
+const CHAIN_PARA_SIZE = 16;
 
 /**
  * @param {WintrustHost} host
@@ -123,6 +143,109 @@ export function createWintrustFunctions(host){
 
     /** Whether a program has been told once that no provider data is kept. */
     let saidNoProviderData = false;
+
+    /**
+     * A verification's provider data in guest memory, as Windows hands it to
+     * a caller that kept the state (WTD_STATEACTION_VERIFY): the one signer,
+     * its certificates as contexts from its own to the root, and the chain
+     * context crypt32 builds over them. A setup engine checks the publisher
+     * of what it downloads against the chain (WiX Burn's payload check); with
+     * none it fails as a signature it could not read. Null where there is no
+     * chain or no way to lay one out (a 64-bit process's layout is not here).
+     *
+     * @param {Uint8Array[]} chain @param {number} data @param {number} code
+     * @returns {{ address: number, release: () => void } | null}
+     */
+    const layProvider = (chain, data, code)=>{
+        const crypt32 = host.crypt32;
+        const allocate = host.allocate;
+        const free = host.free;
+        if (!crypt32 || !allocate || !free || chain.length === 0)
+        {
+            return null;
+        }
+        const store = crypt32('CertOpenStore', [CERT_STORE_PROV_MEMORY, 0, 0, 0, 0]) >>> 0;
+        if (store === 0)
+        {
+            return null;
+        }
+        const scratch = allocate(CHAIN_PARA_SIZE + 4 + Math.max(...chain.map(one=>one.length)));
+        /** @type {number[]} */
+        const contexts = [];
+        let chainContext = 0;
+        const block = scratch === 0 ? 0 : allocate(PROVIDER_DATA_SIZE + PROVIDER_SIGNER.SIZE
+            + PROVIDER_CERT_SIZE * chain.length);
+        const release = ()=>{
+            if (chainContext !== 0)
+            {
+                crypt32('CertFreeCertificateChain', [chainContext]);
+            }
+            contexts.forEach(context=>crypt32('CertFreeCertificateContext', [context]));
+            crypt32('CertCloseStore', [store, 0]);
+            if (block !== 0)
+            {
+                free(block);
+            }
+        };
+        try
+        {
+            if (block === 0)
+            {
+                release();
+                return null;
+            }
+            const out = scratch + CHAIN_PARA_SIZE;
+            const encoded = out + 4;
+            for (const certificate of chain)
+            {
+                host.writeMemory(encoded, certificate);
+                writeU32(out, 0);
+                crypt32('CertAddEncodedCertificateToStore', [store, X509_ASN_ENCODING, encoded,
+                    certificate.length, CERT_STORE_ADD_ALWAYS, out]);
+                contexts.push(readU32(out));
+            }
+            if (contexts.some(context=>context === 0))
+            {
+                release();
+                return null;
+            }
+            host.writeMemory(scratch, new Uint8Array(CHAIN_PARA_SIZE));
+            writeU32(scratch, CHAIN_PARA_SIZE);
+            writeU32(out, 0);
+            crypt32('CertGetCertificateChain', [0, contexts[0], 0, store, scratch, 0, 0, out]);
+            chainContext = readU32(out);
+        }
+        finally
+        {
+            if (scratch !== 0)
+            {
+                free(scratch);
+            }
+        }
+        const signer = block + PROVIDER_DATA_SIZE;
+        const certificates = signer + PROVIDER_SIGNER.SIZE;
+        writeU32(block, PROVIDER_DATA_SIZE);
+        writeU32(block + PROVIDER_DATA_WINTRUST, data);
+        writeU32(block + PROVIDER_DATA.SIGNERS, 1);
+        writeU32(block + PROVIDER_DATA.SIGNER_ARRAY, signer);
+        writeU32(block + PROVIDER_DATA_FINAL_ERROR, code);
+        writeU32(signer, PROVIDER_SIGNER.SIZE);
+        writeU32(signer + PROVIDER_SIGNER.CERTS, chain.length);
+        writeU32(signer + PROVIDER_SIGNER.CERT_ARRAY, certificates);
+        writeU32(signer + SIGNER_ERROR, code);
+        writeU32(signer + SIGNER_CHAIN_CONTEXT, chainContext);
+        contexts.forEach((context, index)=>{
+            const at = certificates + index * PROVIDER_CERT_SIZE;
+            writeU32(at, PROVIDER_CERT_SIZE);
+            writeU32(at + CERT_POINTER, context);
+            const last = index === contexts.length - 1;
+            writeU32(at + CERT_TRUSTED_ROOT, last && code === TRUST.OK ? 1 : 0);
+            writeU32(at + CERT_SELF_SIGNED, last && roots().some(root=>root.encoded.length
+                === chain[index].length && root.encoded.every((byte, i)=>byte
+                === chain[index][i])) ? 1 : 0);
+        });
+        return { address: block, release };
+    };
 
     /** The root store as certificates, parsed once per configuration. */
     const roots = ()=>{
@@ -204,6 +327,7 @@ export function createWintrustFunctions(host){
             const handle = readU32(data + WTD.STATE_DATA);
             if (handle !== 0 && isState(handle))
             {
+                host.handles.resolve(handle, 'wintrust-state').provider?.release();
                 host.handles.close(handle);
             }
             writeU32(data + WTD.STATE_DATA, 0);
@@ -239,15 +363,22 @@ export function createWintrustFunctions(host){
         const flags = readU32(data + WTD.PROVIDER_FLAGS);
         /** @param {Uint8Array | null} bytes @param {import('./subject.js').Subject | null} subject */
         const verdict = (bytes, subject)=>{
+            /** @type {Uint8Array[]} */
+            let chain = [];
             const code = bytes ? verifyAuthenticode(bytes, {
                 roots: roots(),
                 now: host.now(),
                 hashOnly: (flags & WTD_HASH_ONLY_FLAG) !== 0,
                 lifetime: (flags & WTD_LIFETIME_SIGNING_FLAG) !== 0,
+                signerChain: found=>{
+                    chain = found;
+                },
             }, subject) : CRYPT_E_FILE_ERROR;
             if (state === WTD_STATEACTION_VERIFY)
             {
-                writeU32(data + WTD.STATE_DATA, host.handles.open('wintrust-state', { code }));
+                const provider = layProvider(chain, data >>> 0, code);
+                writeU32(data + WTD.STATE_DATA, host.handles.open('wintrust-state',
+                    { code, provider }));
             }
             return answer(code);
         };
@@ -335,17 +466,21 @@ export function createWintrustFunctions(host){
         /**
          * CRYPT_PROVIDER_DATA *WTHelperProvDataFromStateData(HANDLE hStateData)
          *
-         * On Windows the state WTD_STATEACTION_VERIFY hands back is the
-         * provider's data itself. Here it is a handle over the verdict and
-         * nothing more -- no signer or chain is laid out in guest memory --
-         * so there is no provider data to hand back, and NULL is what a
-         * caller is documented to check for. Said once, so a program that
-         * wanted its publisher's name is seen not to get it.
+         * The provider data the verification laid out: the signer, its
+         * certificates and its chain (`layProvider`). Where none could be --
+         * no signer's chain, a file that is not signed -- NULL, what a caller
+         * is documented to check for, said once.
          */
         WTHelperProvDataFromStateData: {
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([state])=>{
+                const provider = (state >>> 0) !== 0 && isState(state >>> 0)
+                    ? host.handles.resolve(state >>> 0, 'wintrust-state').provider : null;
+                if (provider)
+                {
+                    return provider.address;
+                }
                 if ((state >>> 0) !== 0 && isState(state >>> 0) && !saidNoProviderData)
                 {
                     saidNoProviderData = true;
