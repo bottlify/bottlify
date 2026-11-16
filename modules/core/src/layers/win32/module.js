@@ -13,7 +13,8 @@ import { createDebugFunctions } from './kernel32/debug.js';
 import {
     ALIGNMENT_64, GLOBAL_MEMORY, TABLES, createHeapAllocator, createHeapFunctions,
 } from './kernel32/heap.js';
-import { createProcessFunctions, createThreadState } from './kernel32/process.js';
+import { createProcessFunctions, createThreadState, PERFORMANCE_FREQUENCY }
+    from './kernel32/process.js';
 import { blockLayouts } from './kernel32/teb.js';
 import { createModuleFunctions } from './kernel32/modules.js';
 import { createFileFunctions, withSystemLibraries } from './kernel32/files.js';
@@ -193,6 +194,28 @@ import { createMfplatFunctions } from './mfplat/functions.js';
 import { createUiaFunctions } from './uiautomationcore/functions.js';
 import { createDxva2Functions } from './dxva2/functions.js';
 import { PRIMARY_MONITOR } from './user32/system.js';
+import { createDpiFunctions, createDpiState } from './user32/dpi.js';
+import { refreshOf } from './user32/display.js';
+
+/** RT_MESSAGETABLE, and MESSAGE_RESOURCE_ENTRY's flag for UTF-16 text. */
+const RT_MESSAGETABLE = 11;
+const MESSAGE_RESOURCE_UNICODE = 0x0001;
+
+/**
+ * A MESSAGE_RESOURCE_ENTRY's text: its length (the header's four bytes
+ * included), its flags (UTF-16 or the ANSI code page), up to its terminator.
+ *
+ * @param {(address: number, length: number) => Uint8Array} readMemory
+ * @param {number} entry
+ */
+function messageEntryText(readMemory, entry){
+    const head = new DataView(readMemory(entry, 4).slice().buffer);
+    const text = readMemory(entry + 4, Math.max(0, head.getUint16(0, true) - 4)).slice();
+    const decoded = (head.getUint16(2, true) & MESSAGE_RESOURCE_UNICODE) !== 0
+        ? String.fromCharCode(...new Uint16Array(text.buffer, 0, text.length >>> 1))
+        : decodeAnsi(text);
+    return decoded.split(String.fromCharCode(0))[0];
+}
 import { CLSID_MF_READ_WRITE_CLASS_FACTORY, createMfReadWriteFunctions }
     from './mfreadwrite/functions.js';
 import { createPropsysFunctions } from './propsys/functions.js';
@@ -645,6 +668,7 @@ export function createWin32Module(){
                     return offered ?? found;
                 },
             } : runObjects;
+            const dpi = createDpiState();
             /** @type {import('./display/functions.js').DisplayHost} */
             const displayHost = {
                 readMemory: (address, length)=>readMemory(address, length),
@@ -657,6 +681,12 @@ export function createWin32Module(){
                 free: address=>void libraries['KERNEL32.dll'].LocalFree.handler([address]),
                 userName: USER_NAME,
                 computerName: COMPUTER_NAME,
+                dpi,
+                // The window manager's refresh, timed on QueryPerformanceCounter's clock.
+                refresh: refreshOf(config?.screen ?? {}),
+                now: ()=>kernel.clock.virtualTime(),
+                performanceFrequency: config?.performanceFrequency
+                    ?? Number(PERFORMANCE_FREQUENCY),
             };
             // This process's views of sections, by address: mapping.js keeps
             // them, VirtualQuery answers them as the regions they are.
@@ -3581,6 +3611,27 @@ export function createWin32Module(){
                         readMemory,
                         writeMemory,
                         setLastError: setError,
+                        // FormatMessage's FORMAT_MESSAGE_FROM_HMODULE: the entry
+                        // RtlFindMessage finds, in the width its flags say.
+                        findMessage: (/** @type {number} */ module,
+                            /** @type {number} */ language, /** @type {number} */ id)=>
+                        {
+                            const base = module !== 0 ? module
+                                : libraries['KERNEL32.dll'].GetModuleHandleW.handler([0]) >>> 0;
+                            const slot = heap.allocate(4);
+                            try
+                            {
+                                const found = libraries['ntdll.dll'].RtlFindMessage
+                                    .handler([base, RT_MESSAGETABLE, language, id, slot]) === 0;
+                                return found ? messageEntryText(readMemory,
+                                    new DataView(readMemory(slot, 4).slice().buffer)
+                                        .getUint32(0, true)) : null;
+                            }
+                            finally
+                            {
+                                heap.free(slot);
+                            }
+                        },
                         divergence: config?.divergence,
                         ramTop: arena.size > 0 ? arena.base + arena.size : 0,
                         systemTimeMs: ()=>kernel.clock.wallClock(),
@@ -5085,7 +5136,7 @@ export function createWin32Module(){
                     divergence: config?.divergence,
                 }),
 
-                'USER32.dll': createWindowFunctions({
+                'USER32.dll': { ...createWindowFunctions({
                     readMemory,
                     canWrite,
                     processId,
@@ -5394,6 +5445,10 @@ export function createWin32Module(){
                     /** @param {number} address */
                     block: address=>heap.block(address),
                 }),
+                // The process's DPI awareness, the one state shcore sets too.
+                ...createDpiFunctions(dpi, { setLastError: setError,
+                    callerThread: ()=>bridge.callerThread(),
+                    isWindow: hwnd=>libraries['USER32.dll'].IsWindow.handler([hwnd]) === 1 }) },
 
                 'ADVAPI32.dll': {
                     ...createRegistryFunctions({

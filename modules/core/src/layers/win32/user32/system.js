@@ -3738,9 +3738,6 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         return (wide ? writeWideString : writeString)(out >>> 0, record.className, room);
     };
 
-    /** Whether the process said it is DPI-aware. */
-    let dpiAware = false;
-
     /** A power notification's handle let go. @param {number} handle */
     const unregisterPower = handle=>{
         if (host.handles.typeOf?.(handle >>> 0) !== 'power-notification')
@@ -6088,21 +6085,6 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 return 1;
             },
         },
-
-        /**
-         * BOOL SetProcessDPIAware(void), BOOL IsProcessDPIAware(void)
-         *
-         * The one display is at 96 DPI, so an aware process and an unaware one
-         * see the same pixels; whether it said so is kept.
-         */
-        SetProcessDPIAware: {
-            argBytes: 0,
-            handler: ()=>{
-                dpiAware = true;
-                return 1;
-            },
-        },
-        IsProcessDPIAware: { argBytes: 0, handler: ()=>(dpiAware ? 1 : 0) },
 
         /**
          * BOOL GetLastInputInfo(PLASTINPUTINFO plii): cbSize, then dwTime, the

@@ -3403,11 +3403,8 @@ test('a power or suspend registration is a handle nothing uses, taken back once'
     assert.equal(fns.UnregisterPowerSettingNotification.handler([setting]), 1);
 });
 
-test('a desktop with no pens or touch, no display configuration database, at 96 DPI', ()=>{
+test('a desktop with no pens or touch, no display configuration database', ()=>{
     const { fns, memory } = setup();
-    assert.equal(fns.IsProcessDPIAware.handler([]), 0);
-    assert.equal(fns.SetProcessDPIAware.handler([]), 1);
-    assert.equal(fns.IsProcessDPIAware.handler([]), 1);
     memory.putU32s(0x7000, [8, 0xdead]);
     assert.equal(fns.GetLastInputInfo.handler([0x7000]), 1);
     assert.equal(memory.u32(0x7004), 0);
