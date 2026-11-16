@@ -1364,6 +1364,23 @@ test('MoveFileExW is the same move in wide names, flags and all', ()=>{
     assert.equal(fns.MoveFileExW.argBytes, 12);
 });
 
+test('a move into a folder that is not there is a path not found, and moves once it is made',
+    ()=>{
+        // A WiX setup moves a payload into its package cache, makes the folder
+        // on ERROR_PATH_NOT_FOUND and moves again; a refusal stopped it.
+        const { files, memory, fns, error } = setup();
+        files.put('C:\\TEMP\\PAYLOAD.EXE', 'payload');
+        const from = putWide(memory, NAME, 'C:\\TEMP\\PAYLOAD.EXE');
+        const to = putWide(memory, NAME2, 'C:\\CACHE\\HASH\\PAYLOAD.EXE');
+        assert.equal(fns.MoveFileExW.handler([from, to, 3]), 0);
+        assert.equal(error.code, 3, 'ERROR_PATH_NOT_FOUND');
+        assert.ok(files.stat('C:\\TEMP\\PAYLOAD.EXE')?.exists, 'nothing moved');
+        files.mkdir('C:\\CACHE');
+        files.mkdir('C:\\CACHE\\HASH');
+        assert.equal(fns.MoveFileExW.handler([from, to, 3]), 1);
+        assert.equal(files.text('C:\\CACHE\\HASH\\PAYLOAD.EXE'), 'payload');
+    });
+
 test('MoveFileWithProgressW moves as MoveFileExW does, and a rename calls no progress routine',
     ()=>{
         const { files, memory, fns, error } = setup();

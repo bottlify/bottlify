@@ -1446,6 +1446,14 @@ export function createFileFunctions(host){
         {
             return ERROR_ALREADY_EXISTS;
         }
+        // A folder that is not there to move into is a path not found, as
+        // Windows answers it: a caller makes the folder and moves again (a
+        // WiX setup putting a payload in its cache), where a refusal stopped it.
+        const into = files.stat(parentOf(destination));
+        if (!into?.exists || !into.isDirectory)
+        {
+            return ERROR_PATH_NOT_FOUND;
+        }
         // A file is renamed as it is deleted: an open that does not share
         // deletion keeps its name.
         if (!moving.isDirectory && files.removalRefused?.(source) === 'SHARING_VIOLATION')
