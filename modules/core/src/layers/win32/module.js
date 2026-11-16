@@ -2490,7 +2490,7 @@ export function createWin32Module(){
             };
             registerMsxmlClasses({
                 registry: com, vtables: comVtables, heap, readMemory, writeMemory, readWideString,
-                readFile: readVolumeFile,
+                readFile: readVolumeFile, setLastError: setError,
                 divergence: config?.divergence,
             });
 
@@ -4278,6 +4278,25 @@ export function createWin32Module(){
                 'gdiplus.dll': createGdiplusFunctions({ writeMemory, readMemory, pointerSize,
                     allocate: bytes=>allocator.allocate(bytes),
                     free: address=>allocator.free(address),
+                    readWideString: address=>readWideString(address, 0x8000),
+                    readFile: readVolumeFile,
+                    gdi32: (name, args)=>libraries['GDI32.dll'][name].handler(args) >>> 0,
+                    procAddress: async name=>{
+                        const at = heap.allocate(64);
+                        try
+                        {
+                            writeMemory(at, encodeAnsi(`gdiplus.dll\0`));
+                            const module = libraries['KERNEL32.dll'].GetModuleHandleA
+                                .handler([at]) >>> 0;
+                            writeMemory(at, encodeAnsi(`${name}\0`));
+                            return module === 0 ? 0 : await libraries['KERNEL32.dll']
+                                .GetProcAddress.handler([module, at]) >>> 0;
+                        }
+                        finally
+                        {
+                            heap.free(at);
+                        }
+                    },
                     divergence: config?.divergence }),
                 // The per-process generator under it, which a browser imports
                 // and then finds by GetModuleHandle: it must be a module.

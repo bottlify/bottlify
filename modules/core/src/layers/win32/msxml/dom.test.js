@@ -37,7 +37,11 @@ function harness(){
     /** @type {Map<any, number>} */
     const published = new Map();
     const registry = createComRegistry();
+    const thread = { lastError: 0 };
     registerMsxmlClasses({
+        setLastError: code=>{
+            thread.lastError = code;
+        },
         readMemory: (at, length)=>bytes.subarray(at, at + length),
         writeMemory: (at, data)=>bytes.set(data, at),
         readWideString: at=>{
@@ -103,7 +107,7 @@ function harness(){
     // The document as CoCreateInstance hands it out, asked for IXMLDOMDocument2.
     const documentPointer = allocate(16);
     pointers.set(documentPointer, { object: document, iid: IID.DOCUMENT2 });
-    return { bytes, view, bstr, readBstr, call, out, document: documentPointer, pointers,
+    return { bytes, view, bstr, readBstr, call, out, document: documentPointer, pointers, thread,
         u32: (/** @type {number} */ at)=>view.getUint32(at, true) };
 }
 
@@ -218,4 +222,39 @@ test('a node made by the document is answered as its kind and goes into the tree
     const xml = h.out();
     h.call(h.u32(root), 'get_xml', xml);
     assert.equal(h.readBstr(h.u32(xml)), '<root><child/></root>');
+});
+
+test('a child path finds the elements of a document in a default namespace, as a WiX'
+    + ' localization file is read', ()=>{
+    const h = harness();
+    const wxl = '<?xml version="1.0" encoding="utf-8"?>'
+        + '<WixLocalization Culture="en-us" Language="1033"'
+        + ' xmlns="http://schemas.microsoft.com/wix/2006/localization">'
+        + '<String Id="Caption">[WixBundleName] Setup</String>'
+        + '<String Id="Title">[WixBundleName]</String>'
+        + '<UI Control="InstallButton" X="10" Y="10" /></WixLocalization>';
+    const ok = h.out();
+    assert.equal(h.call(h.document, 'loadXML', h.bstr(wxl), ok), 0);
+    assert.equal(h.view.getInt16(ok, true), -1, 'parsed');
+    const element = h.out();
+    h.call(h.document, 'get_documentElement', element);
+    const list = h.out();
+    assert.equal(h.call(h.u32(element), 'selectNodes', h.bstr('String'), list), 0);
+    const length = h.out();
+    assert.equal(h.call(h.u32(list), 'get_length', length), 0);
+    assert.equal(h.u32(length), 2, 'both strings');
+    assert.equal(h.call(h.u32(element), 'selectNodes', h.bstr('UI'), list), 0);
+    assert.equal(h.call(h.u32(list), 'get_length', length), 0);
+    assert.equal(h.u32(length), 1, 'and the control');
+});
+
+test('a call into the DOM leaves the thread\'s last error ERROR_SUCCESS, as MSXML\'s own'
+    + ' TlsGetValue does', ()=>{
+    // WiX's ExitOnLastError reads GetLastError after a call that succeeded; an
+    // error an earlier call left (Wow64DisableWow64FsRedirection on a 32-bit
+    // system) failed the setup's loading of its strings.
+    const h = harness();
+    h.thread.lastError = 120;
+    h.call(h.document, 'loadXML', h.bstr('<a><b/></a>'), h.out());
+    assert.equal(h.thread.lastError, 0);
 });

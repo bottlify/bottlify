@@ -132,6 +132,7 @@ export const DOCUMENT_CLASSES = Object.freeze([
  * @property {(path: string) => Promise<Uint8Array | null>} readFile
  * @property {(path: string, bytes: Uint8Array) => Promise<boolean>} [writeFile]
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {(code: number) => void} [setLastError]  the calling thread's
  */
 
 /**
@@ -150,24 +151,6 @@ export const DOCUMENT_CLASSES = Object.freeze([
 
 const NO_ERROR = Object.freeze({ code: 0, reason: '', line: 0, column: 0, at: 0, source: '',
     url: '' });
-
-/**
- * Methods in vtable order, `words` the arguments each takes after `this`.
- *
- * @param {[string, number][]} slots
- * @param {Record<string, (args: number[], self: any) => number | Promise<number>>} handlers
- * @param {(name: string) => number} refuse
- * @returns {ComMethod[]}
- */
-const methods = (slots, handlers, refuse)=>slots.map(([name, words])=>({
-    name, argBytes: 4 + words * 4,
-    invoke: (/** @type {any} */ object, /** @type {number[]} */ args)=>{
-        // A document CoCreateInstance made is known by its node from its first call.
-        object?.state?.adopt?.(object);
-        const handler = handlers[name];
-        return handler ? handler(args, object) : refuse(name);
-    },
-}));
 
 const DISPATCH_SLOTS = /** @type {[string, number][]} */ ([['GetTypeInfoCount', 1],
     ['GetTypeInfo', 3], ['GetIDsOfNames', 5], ['Invoke', 8]]);
@@ -237,6 +220,29 @@ export function registerMsxmlClasses(host){
         diverge(`IXMLDOM::${name}`, 'not served by this DOM; refused');
         return E_NOTIMPL;
     };
+
+    /**
+     * Methods in vtable order, `words` the arguments each takes after `this`.
+     *
+     * @param {[string, number][]} slots
+     * @param {Record<string, (args: number[], self: any) => number | Promise<number>>} handlers
+     * @param {(name: string) => number} refused
+     * @returns {ComMethod[]}
+     */
+    const methods = (slots, handlers, refused)=>slots.map(([name, words])=>({
+        name, argBytes: 4 + words * 4,
+        invoke: (/** @type {any} */ object, /** @type {number[]} */ args)=>{
+            // MSXML finds its thread's state through TlsGetValue on every call,
+            // which leaves the last error ERROR_SUCCESS: a caller that reads
+            // GetLastError after a call that succeeded (WiX's ExitOnLastError)
+            // finds no error there, not one an earlier call left.
+            host.setLastError?.(0);
+            // A document CoCreateInstance made is known by its node from its first call.
+            object?.state?.adopt?.(object);
+            const handler = handlers[name];
+            return handler ? handler(args, object) : refused(name);
+        },
+    }));
 
     /** @param {number} address @param {number} value */
     const writeU32 = (address, value)=>{

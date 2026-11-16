@@ -10,18 +10,31 @@
  * locking their pixels, their size, format and palette, and cloning them.
  * A bitmap's pixels lie in guest memory, where LockBits hands them out.
  *
- * Decoding an image from a stream, a bitmap from a GDI one, and drawing are
- * not here: they answer NotImplemented, said once as a divergence, as from a
- * GDI+ whose codec or renderer failed - a program checks each Status.
+ * An image file is decoded by the codecs Windows' imaging component has
+ * (`windowscodecs/frames.js`), into 32bpp ARGB as GDI+ holds a decoded image,
+ * and a bitmap is handed to GDI as a DIB section. Decoding from a stream, a
+ * bitmap from a GDI one, and drawing are not here: they answer
+ * NotImplemented, said once as a divergence, as from a GDI+ whose codec or
+ * renderer failed - a program checks each Status.
  */
 
 import { pointerWidth } from '../common/pointers.js';
+import { CodecError, sniff } from '../windowscodecs/frames.js';
+import { convertRow, formatOf, rowBytes as wicRowBytes } from '../windowscodecs/formats.js';
 
 /** GpStatus (gdiplustypes.h). */
 const Ok = 0;
 const InvalidParameter = 2;
 const OutOfMemory = 3;
 const NotImplemented = 6;
+const GenericError = 1;
+const FileNotFound = 10;
+const UnknownImageFormat = 13;
+
+/** PixelFormat32bppARGB: what a decoded image of colour is held as. */
+const PIXEL_FORMAT_32BPP_ARGB = 0x26200a;
+/** GUID_WICPixelFormat32bppBGRA: the same bytes, B, G, R, A. */
+const WIC_32BPP_BGRA = '{6FDDC324-4E03-4BFE-B185-3D77768DC90F}';
 const WrongState = 8;
 const UnsupportedGdiplusVersion = 17;
 
@@ -55,6 +68,12 @@ const bytesPerPixel = format=>{
  * @property {(address: number) => void} free
  * @property {4 | 8} [pointerSize]
  * @property {(api: string, detail: string, kind?: string) => void} [divergence]
+ * @property {(address: number) => string} [readWideString]
+ * @property {(path: string) => Promise<Uint8Array | null> | Uint8Array | null} [readFile]
+ *     a file of the volume, whole; null for none
+ * @property {(name: string, args: number[]) => number} [gdi32]  a GDI32 export, called
+ * @property {(name: string) => Promise<number> | number} [procAddress]  where an export of
+ *     this library is, for a pointer to it handed out
  */
 
 /** @param {GdiplusHost} host */
@@ -136,19 +155,25 @@ export function createGdiplusFunctions(host){
          * Status GdiplusStartup(ULONG_PTR *token, const GdiplusStartupInput *input,
          *   GdiplusStartupOutput *output)
          *
-         * Versions 1 to 3 start; another is UnsupportedGdiplusVersion. There is no
-         * background thread to hand hooks for: an output is left with none.
+         * Versions 1 to 3 start; another is UnsupportedGdiplusVersion. A caller
+         * that suppressed the background thread is handed the hook and unhook
+         * it must call itself in the output, as GDI+ hands them - the library's
+         * own GdiplusNotificationHook and GdiplusNotificationUnhook - and must
+         * call: left null, its first call went to address zero.
          */
         GdiplusStartup: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([token, input, output])=>{
+            handler: async([token, input, output])=>{
                 if ((token >>> 0) === 0 || (input >>> 0) === 0)
                 {
                     return InvalidParameter;
                 }
-                const version = new DataView(host.readMemory(input >>> 0, 4).slice().buffer)
-                    .getUint32(0, true);
+                // GdiplusStartupInput: the version, the debug callback, then
+                // SuppressBackgroundThread.
+                const fields = new DataView(host.readMemory(input >>> 0, pointer.size * 2 + 4)
+                    .slice().buffer);
+                const version = fields.getUint32(0, true);
                 if (version < 1 || version > 3)
                 {
                     return UnsupportedGdiplusVersion;
@@ -156,10 +181,40 @@ export function createGdiplusFunctions(host){
                 putPointer(token, handle());
                 if ((output >>> 0) !== 0)
                 {
-                    host.writeMemory(output >>> 0, new Uint8Array(pointer.size * 2));
+                    const suppressed = fields.getUint32(pointer.size * 2, true) !== 0;
+                    const hook = suppressed
+                        ? await host.procAddress?.('GdiplusNotificationHook') ?? 0 : 0;
+                    const unhook = suppressed
+                        ? await host.procAddress?.('GdiplusNotificationUnhook') ?? 0 : 0;
+                    putPointer(output, hook);
+                    putPointer((output >>> 0) + pointer.size, unhook);
                 }
                 return Ok;
             },
+        },
+
+        /**
+         * Status GdiplusNotificationHook(ULONG_PTR *token): the work the background
+         * thread would do on the caller's message loop. There is none here; a
+         * token for the unhook.
+         */
+        GdiplusNotificationHook: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([token])=>{
+                if ((token >>> 0) === 0)
+                {
+                    return InvalidParameter;
+                }
+                putPointer(token, handle());
+                return Ok;
+            },
+        },
+
+        /** void GdiplusNotificationUnhook(ULONG_PTR token) */
+        GdiplusNotificationUnhook: {
+            argBytes: 4,
+            handler: ()=>0,
         },
 
         /** void GdiplusShutdown(ULONG_PTR token) */
@@ -200,6 +255,137 @@ export function createGdiplusFunctions(host){
             /** @param {number[]} args */
             handler: ([width, height, stride, format, scan0, out])=>
                 makeBitmap(width | 0, height | 0, stride, format >>> 0, scan0, out).status,
+        },
+
+        /**
+         * Status GdipCreateBitmapFromFile(const WCHAR *filename, GpBitmap **bitmap)
+         *
+         * The file's first image, decoded by the codec its first bytes name,
+         * as a bitmap of 32bpp ARGB in memory of its own. A file not there is
+         * FileNotFound; one no codec reads, UnknownImageFormat.
+         */
+        GdipCreateBitmapFromFile: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: async([name, out])=>{
+                if ((name >>> 0) === 0 || (out >>> 0) === 0 || !host.readWideString
+                    || !host.readFile)
+                {
+                    return InvalidParameter;
+                }
+                const bytes = await host.readFile(host.readWideString(name >>> 0));
+                if (!bytes)
+                {
+                    return FileNotFound;
+                }
+                const decode = sniff(bytes)?.decode;
+                /** @type {import('../windowscodecs/frames.js').DecodedFrame | undefined} */
+                let frame;
+                try
+                {
+                    frame = decode?.(bytes).frames[0];
+                }
+                catch (e){
+                    if (!(e instanceof CodecError))
+                    {
+                        throw e;
+                    }
+                }
+                if (!frame)
+                {
+                    return UnknownImageFormat;
+                }
+                const argb = /** @type {import('../windowscodecs/formats.js').PixelFormat} */ (
+                    formatOf(WIC_32BPP_BGRA));
+                const { status, made } = makeBitmap(frame.width, frame.height, 0,
+                    PIXEL_FORMAT_32BPP_ARGB, 0, out);
+                const held = made === undefined ? undefined : bitmaps.get(made);
+                if (!held)
+                {
+                    return status;
+                }
+                const from = wicRowBytes(frame.format, frame.width);
+                for (let y = 0; y < frame.height; y++)
+                {
+                    host.writeMemory(held.scan0 + y * held.stride, convertRow(frame.format, argb,
+                        frame.pixels.subarray(y * from, (y + 1) * from), frame.width,
+                        frame.palette, null));
+                }
+                return Ok;
+            },
+        },
+
+        /**
+         * Status GdipCreateHBITMAPFromBitmap(GpBitmap *bitmap, HBITMAP *hbm, ARGB background)
+         *
+         * A 32-bit DIB section of the bitmap's pixels, each laid over the
+         * background colour by its alpha, as GDI+ hands one to GDI. A bitmap of
+         * a format other than 32bpp ARGB is refused, said once.
+         */
+        GdipCreateHBITMAPFromBitmap: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([image, out, background])=>{
+                const held = bitmaps.get(image >>> 0);
+                if (!held || (out >>> 0) === 0 || !host.gdi32)
+                {
+                    return InvalidParameter;
+                }
+                if (held.format !== PIXEL_FORMAT_32BPP_ARGB)
+                {
+                    return notImplemented('GdipCreateHBITMAPFromBitmap',
+                        'only a bitmap of 32bpp ARGB is handed to GDI');
+                }
+                const { width, height } = held;
+                // BITMAPINFOHEADER, top-down, then the slot the bits' address lands in.
+                const info = host.allocate(44);
+                if (info === 0)
+                {
+                    return OutOfMemory;
+                }
+                try
+                {
+                    const header = new DataView(new ArrayBuffer(40));
+                    header.setUint32(0, 40, true);
+                    header.setInt32(4, width, true);
+                    header.setInt32(8, -height, true);
+                    header.setUint16(12, 1, true);
+                    header.setUint16(14, 32, true);
+                    host.writeMemory(info, new Uint8Array(header.buffer));
+                    const section = host.gdi32('CreateDIBSection', [0, info, 0, info + 40, 0, 0])
+                        >>> 0;
+                    if (section === 0)
+                    {
+                        return GenericError;
+                    }
+                    const bits = new DataView(host.readMemory(info + 40, 4).slice().buffer)
+                        .getUint32(0, true);
+                    const back = [background & 0xff, background >>> 8 & 0xff,
+                        background >>> 16 & 0xff];
+                    for (let y = 0; y < height; y++)
+                    {
+                        const row = host.readMemory(held.scan0 + y * held.stride, width * 4)
+                            .slice();
+                        for (let x = 0; x < width * 4; x += 4)
+                        {
+                            const alpha = row[x + 3];
+                            for (let c = 0; c < 3; c++)
+                            {
+                                row[x + c] = Math.round((row[x + c] * alpha
+                                    + back[c] * (255 - alpha)) / 255);
+                            }
+                            row[x + 3] = 255;
+                        }
+                        host.writeMemory(bits + y * width * 4, row);
+                    }
+                    putU32(out, section);
+                    return Ok;
+                }
+                finally
+                {
+                    host.free(info);
+                }
+            },
         },
 
         /** Status GdipCreateBitmapFromHBITMAP(HBITMAP hbm, HPALETTE hpal, GpBitmap **bitmap) */
