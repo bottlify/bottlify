@@ -605,7 +605,6 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
                 // devices then draw here, and the journal says why.
                 const answer = await openGraphicsWorker({ frames: returned,
                     software: rest.gpuAdapter === 'software',
-                    gpuTimes: rest.graphics?.gpuTimes === true,
                     gcNudge: gcNudgeOf(rest.cpu?.gcNudge, undefined,
                         rest.memorySize ?? DEFAULT_MEMORY_SIZE) });
                 if (answer.worker)

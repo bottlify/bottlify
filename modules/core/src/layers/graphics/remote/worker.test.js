@@ -600,8 +600,8 @@ test('a client port takes roots as the worker does, and is told when the GPU goe
             assert.deepEqual(told.map(({ type, reason, message })=>({ type, reason, message })),
                 [{ type: 'lost', reason: 'unknown', message: 'the adapter went away' }],
                 'and its devices are lost with the GPU');
-            assert.ok(told[0].recent.some((/** @type {string} */ made)=>/^buffer /.test(made)),
-                `with the last large things the device made: ${told[0].recent.join('; ')}`);
+            assert.ok(told[0].recent.some((/** @type {string} */ made)=>/^texture /.test(made)),
+                `with the last things the device made: ${told[0].recent.join('; ')}`);
             assert.ok(posted.some(message=>message.type === 'lost'));
         }
         finally

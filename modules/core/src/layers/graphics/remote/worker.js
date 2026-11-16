@@ -424,12 +424,8 @@ export function serveGraphics(scope, deps){
         });
     };
 
-    /**
-     * @param {boolean} software  The browser's software adapter, as the engine's
-     *     (AppOptions.gpuAdapter).
-     * @param {boolean} gpuTimes  Each pass timed on the GPU (`graphics.gpuTimes`).
-     */
-    const open = async(software, gpuTimes)=>{
+    /** @param {boolean} software  The browser's software adapter, as the engine's (AppOptions.gpuAdapter). */
+    const open = async software=>{
         const adapter = await gpu.requestAdapter(software
             ? { forceFallbackAdapter: true } : undefined);
         if (!adapter)
@@ -482,7 +478,7 @@ export function serveGraphics(scope, deps){
                 client.postMessage(refused);
             }
         });
-        const backend = createBackend({ device, queue: device.queue, gpuTimes,
+        const backend = createBackend({ device, queue: device.queue,
             presentTo: (/** @type {any} */ frame)=>present(device, frame) });
         heldBy = ()=>backend.dynamicHeld();
         return { device, backend, adapter: {
@@ -723,7 +719,7 @@ export function serveGraphics(scope, deps){
                     capture = createCapture();
                     capture.open(frames);
                 }
-                opened ??= open(data.software === true, data.gpuTimes === true);
+                opened ??= open(data.software === true);
                 opened.then(({ adapter })=>{
                     // SwiftShader in Chrome makes no picture of a worker's
                     // WebGPU canvas where it has no Vulkan below it: the GPU
