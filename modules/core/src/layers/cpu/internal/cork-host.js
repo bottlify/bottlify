@@ -603,6 +603,19 @@ export function createCorkHost(config){
     {
         Atomics.store(wholeWords, wrapWord, (ramFloor - 1) | 0);
     }
+    /**
+     * Tells translated code which processor this executor is (`layout.apic`, the
+     * word `cpuid`'s leaf 1 is answered from): its own, or the one it plays.
+     *
+     * @param {number} processor
+     */
+    const nameProcessor = processor=>{
+        if (layout.apic !== undefined && typeof engine.apicWord === 'function')
+        {
+            Atomics.store(wholeWords, layout.apic >>> 2, engine.apicWord(processor));
+        }
+    };
+    nameProcessor(layout.processor ?? 0);
     let held = heldNow();
     let ram = new Uint8Array(ramBuffer(), layout.ramBase, held);
     // The RAM's words and its view: over the memory itself, or a wide window's own.
@@ -935,8 +948,8 @@ export function createCorkHost(config){
     let interpreter = null;
     /**
      * The processor this executor plays while it is not its own (`playProcessor`):
-     * the one `cpuid` names. Translated code leaves `cpuid` to the interpreter
-     * under the shared layout, the only one a process of several executors has.
+     * the one `cpuid` names: the interpreter is told with each run, translated
+     * code reads it from the executor's state page (`nameProcessor`).
      *
      * @type {number | undefined}
      */
@@ -2302,6 +2315,7 @@ export function createCorkHost(config){
          */
         playProcessor(processor){
             played = processor;
+            nameProcessor(processor ?? layout.processor ?? 0);
         },
         halt(){
             halted = true;

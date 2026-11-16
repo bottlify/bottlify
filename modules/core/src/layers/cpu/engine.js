@@ -107,6 +107,9 @@ export function engineContractProblem(engineModule, url){
  * @property {number} [interrupt]  Cork's own, outside the state block, where the process has
  *     several executors: an i32 another executor stores when it needs this one's answer --
  *     not zero, every back edge of this one's translated code leaves as on a spent budget.
+ * @property {number} [apic]  Cork's own, beside `interrupt`: an i32 holding the processor this
+ *     executor is to the code it runs, where `cpuid`'s leaf 1 answers it (EBX[31:24]); a
+ *     translation made for every executor reads it there.
  * @property {boolean} [shared]  Cork's own: the process's shared layout (`sharedLayout`), whose
  *     state fields and tables are offsets from bases each instance is given.
  * @property {string} id           A hash of every field above.

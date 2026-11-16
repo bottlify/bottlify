@@ -731,11 +731,16 @@ export function emitInstruction(e, instruction, flagsLive){
         }
         case 'cpuid':
         {
-            if (e.context.stateBase !== undefined)
+            // Under the shared layout one translation runs on every executor,
+            // and each is a processor of its own; one of its own layout plays
+            // another's while the host trades them. The one field that tells
+            // processors apart, leaf 1's APIC id, is read from the executor's
+            // state page (`layout.apic`, there with several processors), and
+            // the rest is the same on all of them. A shared layout without
+            // the word leaves the instruction to the interpreter.
+            const apic = e.layout.apic;
+            if (e.context.stateBase !== undefined && apic === undefined)
             {
-                // Under the shared layout one translation runs on every
-                // executor, and each is a processor of its own (its APIC id):
-                // the interpreter answers, with the executor's own layout.
                 return false;
             }
             // The leaves `cpuid.js` lists, as constants -- with the
@@ -766,7 +771,17 @@ export function emitInstruction(e, instruction, flagsLive){
                     b.i32const(answer.eax).localSet(registerLocal(e, 0));
                     b.i32const(answer.ecx).localSet(registerLocal(e, 1));
                     b.i32const(answer.edx).localSet(registerLocal(e, 2));
-                    b.i32const(answer.ebx).localSet(registerLocal(e, 3));
+                    if (apic !== undefined && Number(leaf) === 1)
+                    {
+                        b.i32const(answer.ebx & 0x00ffffff);
+                        atState(e.context, b).load('i32', { offset: apic });
+                        b.op(I32.or);
+                    }
+                    else
+                    {
+                        b.i32const(answer.ebx);
+                    }
+                    b.localSet(registerLocal(e, 3));
                     e.close();
                 }
             }

@@ -34,7 +34,7 @@ export {
     ownLayout, executorLayout, executorBytes, sharedLayout, basesOf, pagesFor, layoutId, Tables,
     WINDOW, WIDE_WINDOWS, windowBits,
     tablesSize, blockFields, LOW_STATE, WRAP_SLACK, WRAP_WORD,
-    STATE_BLOCK_SIZE, STATE_BLOCK_SIZE_64, stateBlockSize, PAGE,
+    STATE_BLOCK_SIZE, STATE_BLOCK_SIZE_64, stateBlockSize, PAGE, apicWord,
 } from './runtime/layout.js';
 export { interpret, blockState } from './interp.js';
 export { interpret64, blockState64 } from './interp64.js';

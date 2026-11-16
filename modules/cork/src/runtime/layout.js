@@ -351,7 +351,12 @@ export function ownLayout({ ramSize, hashSlots = Tables.HASH_SLOTS, processors =
         // translated code reads at every back edge as the floor its budget is
         // looked at against (`spentTest`), so a slice ends there however long
         // it was given -- only where other executors run beside this one.
-        ...processors > 1 ? { processors, processor: 0, interrupt: state + 2048 } : {},
+        // And the word beside it: the processor this executor is to the code it
+        // runs, where leaf 1 of `cpuid` has it (its initial APIC id, EBX[31:24]).
+        // A translation made for every executor (`sharedLayout`) reads it there;
+        // whoever gives an executor its state page writes it (`apicWord`).
+        ...processors > 1
+            ? { processors, processor: 0, interrupt: state + 2048, apic: state + 2052 } : {},
     };
     return { ...fields, id: layoutId(fields) };
 }
@@ -458,7 +463,16 @@ export const windowBits = layout=>Math.log2(layout.window ?? WINDOW);
 /** The fields of a layout that lie in an executor's state page, each its own. */
 const STATE_FIELDS = Object.freeze(['regs', 'eip', 'previousIp', 'eflags', 'flagRecord',
     'x87', 'x87Top', 'x87Empty', 'x87Control', 'x87Status', 'x87Exact', 'xmm', 'mxcsr',
-    'fsBase', 'gsBase', 'counter', 'callProfile', 'origin', 'nanFirst', 'interrupt']);
+    'fsBase', 'gsBase', 'counter', 'callProfile', 'origin', 'nanFirst', 'interrupt',
+    'apic']);
+
+/**
+ * What an executor's `apic` word holds while it is processor `processor`: the
+ * number where `cpuid`'s leaf 1 answers it, EBX[31:24].
+ *
+ * @param {number} processor
+ */
+export const apicWord = processor=>processor << 24;
 
 /**
  * Where the page flags lie: the process's, which every executor of it reads and
