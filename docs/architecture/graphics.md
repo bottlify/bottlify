@@ -140,7 +140,13 @@ flowchart TB
   or closed paints nothing; the screen is composed again. A full-screen picture a GPU drew (an
   OpenGL context, a Direct3D device) has no bytes for the desktop to be composed onto, so the
   windows over it - the message box a program ends with - are laid over each of its frames by the
-  presenter from the desktop the process composed (`overlay`), until they go.
+  presenter from the desktop the process composed (`overlay`), until they go. Whether a
+  Direct3D 8 or 9 present is shown depends on the window it goes into, decided at each present
+  (`graphics/seam/present-window.js`): Present's override, else the swap chain's own window
+  (the device's for its own chain). A shown window shows the picture and a hidden one shows
+  nothing, as under the desktop window manager, so a device made on a hidden helper window
+  shows its frames through a chain into the program's visible window. A full-screen device
+  owns the screen.
 - **Several processes, one screen.** Each process's user32 tells the run's window manager
   (`win32/user32/manager.js`, on the engine thread beside the window directory) what every window
   of its is (class, title, style, rectangle, visibility), and the manager holds the z-order of

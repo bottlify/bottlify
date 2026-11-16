@@ -4769,8 +4769,8 @@ test('a frame submitted early for a read-back keeps the lines of its draws', asy
     assert.equal(device.BeginScene(), D3D_OK);
     assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 2,
         quad([0, 0, 8, 8], argb(255, 0, 0)), 20), D3D_OK);
-    // A chain presenting into a window the display does not show sends what
-    // the frame has so far to the GPU, without ending the frame.
+    // A chain presenting into a hidden window sends what the frame has so far
+    // to the GPU, without ending the frame.
     /** @type {{ swapChain?: any }} */
     const chain = {};
     assert.equal(device.CreateAdditionalSwapChain({ windowed: true, backBufferWidth: 8,

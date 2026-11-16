@@ -788,7 +788,7 @@ export function createWin32Module(){
              *     surfaceOf?: (hwnd: number) => { hwnd: number, rect: any } | null,
              *     modalPump?: (thread: unknown) => number | Promise<number>,
              *     surfaces?: () => { hwnd: number, rect: any, shown: boolean,
-             *         shape: any[] }[] }} */
+             *         shape: any[] }[], shownWindow?: (hwnd: number) => boolean }} */
             let windowService = {
                 list: ()=>[], clientRect: ()=>null, place: ()=>false, cover: ()=>{}, active: ()=>0,
                 deactivated: ()=>false, deactivations: ()=>0, rawInput: ()=>{},
@@ -6637,6 +6637,13 @@ export function createWin32Module(){
                 windowSurfaceOf: hwnd=>windowService.surfaceOf?.(hwnd) ?? null,
                 /** The top-level windows bottom to top, for the screen to be composed of. */
                 windowSurfaces: ()=>windowService.surfaces?.() ?? [],
+                /**
+                 * Whether a window and every ancestor of it is shown, as the
+                 * desktop shows what is presented into it; false for no window.
+                 *
+                 * @param {number} hwnd
+                 */
+                windowShown: hwnd=>windowService.shownWindow?.(hwnd) ?? false,
                 /** The window the program is active through, as GetForegroundWindow answers. */
                 activeWindow: ()=>windowService.active(),
 

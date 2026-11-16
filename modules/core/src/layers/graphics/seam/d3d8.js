@@ -57,6 +57,7 @@ import { createCursorTeller } from './cursor.js';
 import { fpuSetupCode } from './fpu.js';
 import { ADAPTER_GUID, describeAdapter } from './adapter.js';
 import { createPresentQueue, createRaster, rasterStatus } from './raster.js';
+import { createPresentWindows } from './present-window.js';
 import { PRESENTATION_INTERVALS, TEXTURE_OP_CAPS } from '../d3d8/validity.js';
 import { D3D_PRIVATE_DATA, createPrivateData } from './privatedata.js';
 import { declarationLength } from '../d3d8/declaration.js';
@@ -364,6 +365,9 @@ export function cursorMoved(device, x, y, cursorAt, placeCursor){
  *        The client area of a window, which is the size a back buffer asked
  *        for as zero by zero takes. Without it the configured display is the
  *        nearest size this layer knows.
+ * @param {(window: number) => boolean} [deps.windowShown]  Whether a window and its
+ *     ancestors are shown, which decides whether a present into it is (`present-window.js`);
+ *     absent, every present is.
  * @param {() => number} [deps.now]  The clock the display's raster runs on, in milliseconds.
  * @param {() => number} [deps.refresh]  The display's rate, in hertz: its raster's and its
  *     current mode's. REFRESH_HZ when none is given.
@@ -378,7 +382,7 @@ export function cursorMoved(device, x, y, cursorAt, placeCursor){
 export function createDirect3D8Seam(
     { focus: focusWindows = null, publisher, memory, screen, allocate, allocateCode,
         divergence, cursor, placeCursor, cursorAt, resolution, identity, callGuest, currentThread,
-        windowClientSize, now = ()=>performance.now(), waitUntil, presented,
+        windowClientSize, windowShown, now = ()=>performance.now(), waitUntil, presented,
         refresh = ()=>REFRESH_HZ,
         traps = new Set(), phases, ringBytes },
 )
@@ -771,13 +775,20 @@ export function createDirect3D8Seam(
     };
 
     /**
-     * The window each additional swap chain presents into. The display shows
-     * the device's window; a chain presenting anywhere else has its frame
-     * drawn and not shown.
+     * The window each additional swap chain presents into, where its pictures
+     * are seen.
      *
      * @type {WeakMap<object, number>}
      */
     const chainWindows = new WeakMap();
+    const presentWindows = createPresentWindows({ api: 'Direct3D 8', windowShown, divergence });
+    /**
+     * Whether a present is shown: one into a shown window is, and every one of
+     * a full-screen device.
+     *
+     * @param {any} device @param {number} window  Where it goes.
+     */
+    const shows = (device, window)=>presentWindows(window, fullScreen.has(device));
 
     /**
      * A target or depth-stencil asked for with samples is made with one, and
@@ -810,16 +821,15 @@ export function createDirect3D8Seam(
     };
 
     // IDirect3DSwapChain8: a present, whose rectangles are said and not
-    // honoured and whose window decides whether the display shows the
-    // picture, and the back buffers.
+    // honoured and whose window, the override or the chain's own, decides
+    // whether the display shows the picture, and the back buffers.
     const swapChainInterfaces = [describeResource(IID_IDirect3DSwapChain8,
         IDIRECT3DSWAPCHAIN8_SLOTS, {
         /** @param {any} chain @param {number[]} args */
             Present: (chain, [sourceRect, destinationRect, override])=>{
                 presentRects(sourceRect, destinationRect);
-                return pacedPresent(chain.Present(
-                    ((override >>> 0) || chainWindows.get(chain) || deviceWindow)
-                        === deviceWindow));
+                return pacedPresent(chain.Present(shows(owners.get(chain),
+                    (override >>> 0) || chainWindows.get(chain) || deviceWindow)));
             },
             /** @param {any} chain @param {number[]} args */
             GetBackBuffer: (chain, [index, type, out])=>{
@@ -1495,7 +1505,8 @@ export function createDirect3D8Seam(
         /** @param {any} device */
         EndScene: (/** @type {any} */ device)=>device.EndScene(),
 
-        // Present's rectangles are said; the window is the browser's.
+        // Present's rectangles are said; the window, the override or the
+        // device's, decides whether the display shows the picture.
         /** @param {any} device @param {number[]} args */
         Present: (/** @type {any} */ device, /** @type {number[]} */ args = [])=>{
             // Into a window that is gone, nothing is presented (Wine's d3d8
@@ -1506,8 +1517,12 @@ export function createDirect3D8Seam(
                 return D3DERR_INVALIDCALL;
             }
             presentRects(args[0], args[1]);
-            showScreen(device);
-            return pacedPresent(device.Present());
+            const shown = shows(device, window);
+            if (shown)
+            {
+                showScreen(device);
+            }
+            return pacedPresent(device.Present(shown));
         },
 
         /** @param {any} device @param {number[]} args */

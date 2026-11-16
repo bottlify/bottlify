@@ -90,6 +90,7 @@ import { COMPILED as IN_GUEST } from './inguest.x86.js';
 import { D3DTSS9 } from '../d3d9/samplerstates.js';
 import { COMMANDS, commandObjects, commandSlot } from '../d3d9/commands.js';
 import { loudRefusals } from './refusals.js';
+import { createPresentWindows } from './present-window.js';
 
 /**
  * Every interface here is its object's IUnknown: one inheritance chain, one
@@ -233,6 +234,9 @@ const MAX_SHADER_DWORDS = 1 << 16;
  *     The client area of a window, which is the size a back buffer asked for
  *     as zero by zero takes. Without it the configured display is the nearest
  *     size this layer knows.
+ * @param {(window: number) => boolean} [deps.windowShown]  Whether a window and its
+ *     ancestors are shown, which decides whether a present into it is (`present-window.js`);
+ *     absent, every present is.
  * @param {import('../d3d9/resources.js').SurfaceGdi} [deps.gdi]
  *     Device contexts over a surface's pixels, for GetDC; absent, none is handed out.
  * @param {() => number} [deps.now]  The clock the display's raster runs on, in milliseconds.
@@ -260,7 +264,7 @@ export function createDirect3D9Seam(
     { focus: focusWindows = null, publisher, memory, screen, divergence, cursor, placeCursor,
         cursorAt, devicePublished, resolution,
         identity, callGuest, currentThread,
-        windowClientSize, gdi, now = ()=>performance.now(), waitUntil, presented,
+        windowClientSize, windowShown, gdi, now = ()=>performance.now(), waitUntil, presented,
         refresh = ()=>REFRESH_HZ,
         allocate, allocateCode, ringBytes,
         traps = new Set(), phases, pointerSize = 4, floatResult },
@@ -451,16 +455,20 @@ export function createDirect3D9Seam(
     };
 
     /**
-     * The window each additional swap chain presents into. The display shows
-     * the device's window; a chain presenting anywhere else has its frame
-     * drawn and not shown.
+     * The window each additional swap chain presents into, where its pictures
+     * are seen; the device's own chain presents into the device's window.
      *
      * @type {WeakMap<object, number>}
      */
     const chainWindows = new WeakMap();
-    /** @param {any} chain @param {number} override  The window a present named, or 0. */
-    const shownIn = (chain, override)=>
-        ((override >>> 0) || chainWindows.get(chain) || deviceWindow) === deviceWindow;
+    const presentWindows = createPresentWindows({ api: 'Direct3D 9', windowShown, divergence });
+    /**
+     * Whether a present is shown: one into a shown window is, and every one of
+     * a full-screen device.
+     *
+     * @param {any} device @param {number} window  Where it goes.
+     */
+    const shows = (device, window)=>presentWindows(window, fullScreen.has(device));
 
     /**
      * Each device's block (`shadow.js`): its command ring, the buffers its
@@ -1561,13 +1569,18 @@ export function createDirect3D9Seam(
     };
 
     const swapChainMethods = {
-        // The window, the chain's own or the override, decides whether the
+        // The window, the override or the chain's own, decides whether the
         // display shows the picture.
         /** @param {any} chain @param {number[]} args */
         Present: (chain, [sourceRect, destinationRect, window])=>{
             presentRects(sourceRect, destinationRect);
-            showScreen(chainOwners.get(chain));
-            return pacedPresent(chain.Present(shownIn(chain, window)));
+            const shown = shows(owners.get(chain),
+                (window >>> 0) || chainWindows.get(chain) || deviceWindow);
+            if (shown)
+            {
+                showScreen(chainOwners.get(chain));
+            }
+            return pacedPresent(chain.Present(shown));
         },
         // The caller waits while the picture comes back from the GPU.
         /** @param {any} chain @param {number[]} args */
@@ -1961,11 +1974,16 @@ export function createDirect3D9Seam(
             return hr;
         },
 
-        // The window is the browser's; the rectangles are said.
+        // The rectangles are said; the window, the override or the device's,
+        // decides whether the display shows the picture.
         /** @param {any} device @param {number[]} args */
         Present: (/** @type {any} */ device, /** @type {number[]} */ args = [])=>{
             presentRects(args[0], args[1]);
-            showScreen(device);
+            const shown = shows(device, (args[2] >>> 0) || deviceWindow);
+            if (shown)
+            {
+                showScreen(device);
+            }
             // A mode switch resizes the window a fullscreen device presents
             // into, and the program hears WM_SIZE for it after its device
             // exists, since the switch is the device's creation. A program
@@ -1983,7 +2001,7 @@ export function createDirect3D9Seam(
                         fullscreen: true, announce: true,
                     });
             }
-            return pacedPresent(device.Present());
+            return pacedPresent(device.Present(shown));
         },
 
         /** @param {any} device @param {number[]} args */

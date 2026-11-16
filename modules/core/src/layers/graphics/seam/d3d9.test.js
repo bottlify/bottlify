@@ -215,9 +215,10 @@ function machine(){
  *           windowClientSize?: ((window: number) => { width: number,
  *               height: number } | null) | null,
  *           screen?: typeof SCREEN & { refresh?: number }, paced?: boolean,
- *           traps?: Set<string> }} [options]
+ *           traps?: Set<string>, windowShown?: (window: number) => boolean }} [options]
  *     `screen` the display, its rate among it; `paced` a Present's wait counted; `traps`
- *     the guest routines kept as traps, by name or group
+ *     the guest routines kept as traps, by name or group; `windowShown` the windows the
+ *     desktop shows
  */
 function seamed(options = {}){
     const box = machine();
@@ -262,6 +263,7 @@ function seamed(options = {}){
         waitUntil: options.paced ? (/** @type {number} */ deadline,
             /** @type {number} */ hr)=>hr : undefined,
         windowClientSize,
+        windowShown: options.windowShown,
         /** @param {string} api @param {string} detail */
         divergence: (api, detail)=>divergences.push(`${api}: ${detail}`),
         /** @param {number} w @param {number} h
@@ -1688,6 +1690,89 @@ test('an additional swap chain has back buffers of its own, and GetSwapChain nam
         assert.equal(h.release(device), 0);
         h.release(root);
     });
+
+test('a present is shown in the window it goes into, wherever the device\'s window is', ()=>{
+    // Under the desktop window manager a windowed present shows its back
+    // buffer in the window it presents into: the chain's own, the device's
+    // for its own chain, or the one Present names; a hidden window shows
+    // nothing. A device made on a hidden helper window shows every frame
+    // through a chain into the program's visible one.
+    const GAME = 0x00020050;
+    const OTHER = 0x00020060;
+    const shownWindows = new Set([GAME]);
+    const h = seamed({ windowShown: window=>shownWindows.has(window) });
+    const root = h.create();
+    const { device } = h.createDevice(root);
+    /** @type {[string, boolean][]} */
+    const presents = [];
+    const made = h.object(device);
+    const devicePresent = made.Present;
+    made.Present = (/** @type {boolean} */ shown)=>{
+        presents.push(['device', shown]);
+        return devicePresent(shown);
+    };
+    const at = 0x3400;
+    const out = 0x3000;
+    h.box.services.writeMemory(at, new Uint8Array(D3DPRESENT_PARAMETERS9.SIZE));
+    h.fields.writeStruct(at, D3DPRESENT_PARAMETERS9, { Windowed: 1, SwapEffect: 1,
+        BackBufferFormat: D3DFMT.X8R8G8B8, BackBufferWidth: 32, BackBufferHeight: 24,
+        BackBufferCount: 1, hDeviceWindow: GAME });
+    assert.equal(h.device(device, 'CreateAdditionalSwapChain', [at, out]), D3D_OK);
+    const chain = h.box.memory.readU32(out);
+    const madeChain = h.object(chain);
+    const chainPresent = madeChain.Present;
+    madeChain.Present = (/** @type {boolean} */ shown)=>{
+        presents.push(['chain', shown]);
+        return chainPresent(shown);
+    };
+    /** @param {number} window */
+    const presentChain = window=>
+        h.box.call(chain, slot(IDIRECT3DSWAPCHAIN9_SLOTS, 'Present'), [0, 0, window, 0, 0]);
+
+    assert.equal(presentChain(0), D3D_OK);
+    assert.equal(presentChain(OTHER), D3D_OK);
+    assert.equal(h.device(device, 'Present', [0, 0, 0, 0]), D3D_OK);
+    assert.equal(h.device(device, 'Present', [0, 0, GAME, 0]), D3D_OK);
+    assert.deepEqual(presents, [['chain', true], ['chain', false], ['device', false],
+        ['device', true]], 'into its own shown window, not into a hidden override, not into'
+        + ' the hidden device window, into the shown window the device\'s present names');
+    assert.deepEqual(h.resolutions, [[64, 64, HWND, false]],
+        'the device\'s first frame shown takes the screen');
+    assert.deepEqual(h.divergences.filter(line=>/shown window|not shown/.test(line)), [],
+        'one window showing pictures is done whole');
+
+    // The device's window shown as well: its picture is shown too, and two
+    // windows' pictures take the one screen in turn, which is said.
+    shownWindows.add(HWND);
+    presents.length = 0;
+    assert.equal(h.device(device, 'Present', [0, 0, 0, 0]), D3D_OK);
+    assert.equal(presentChain(0), D3D_OK);
+    assert.deepEqual(presents, [['device', true], ['chain', true]]);
+    assert.ok(h.divergences.some(line=>/two shown windows/.test(line)), h.divergences.join('\n'));
+
+    assert.equal(h.release(chain), 0);
+    assert.equal(h.release(device), 0);
+    h.release(root);
+});
+
+test('a full-screen device\'s present is shown whatever its window says', ()=>{
+    const h = seamed({ windowShown: ()=>false });
+    const root = h.create();
+    const { device } = h.createDevice(root, { BackBufferWidth: 640, BackBufferHeight: 480,
+        Windowed: 0, hDeviceWindow: HWND });
+    /** @type {boolean[]} */
+    const shown = [];
+    const made = h.object(device);
+    const present = made.Present;
+    made.Present = (/** @type {boolean} */ asked)=>{
+        shown.push(asked);
+        return present(asked);
+    };
+    assert.equal(h.device(device, 'Present', [0, 0, 0, 0]), D3D_OK);
+    assert.deepEqual(shown, [true], 'it owns the screen');
+    assert.equal(h.release(device), 0);
+    h.release(root);
+});
 
 // --- Direct3D 9Ex ---
 

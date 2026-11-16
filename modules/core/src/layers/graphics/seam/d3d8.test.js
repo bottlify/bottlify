@@ -217,12 +217,16 @@ function machine(){
  *           windowClientSize?: (window: number) => { width: number,
  *               height: number } | null,
  *           allocateCode?: (bytes: number) => number, caps?: object,
- *           guestCode?: boolean }} [options]
+ *           guestCode?: boolean, windowShown?: (window: number) => boolean }} [options]
  *     Whether the device keeps a block in guest memory, as it does under a
  *     running processor, how a window's client area is measured when a
- *     program asks for zero, and what the root is made with.
+ *     program asks for zero, what the root is made with, and which windows
+ *     the desktop shows.
  */
-function seamed({ shadow = false, windowClientSize, allocateCode, caps, guestCode } = {}){
+function seamed(
+    { shadow = false, windowClientSize, allocateCode, caps, guestCode, windowShown } = {},
+)
+{
     const box = machine();
     /** The display's clock, which the test moves. */
     const clock = { time: 0 };
@@ -267,6 +271,7 @@ function seamed({ shadow = false, windowClientSize, allocateCode, caps, guestCod
         // to be answered with; a test wanting the unmeasurable path passes a
         // measurer of its own that answers nothing.
         windowClientSize: windowClientSize ?? measureWindow,
+        windowShown,
         publisher,
         allocate: shadow ? box.allocate : undefined,
         allocateCode,
@@ -2515,6 +2520,66 @@ test('an additional chain\'s back buffer counts on the device, and may be taken 
         assert.equal(h.release(device), 0);
         h.release(root);
     });
+
+test('a present is shown in the window it goes into, wherever the device\'s window is', ()=>{
+    // Direct3D 9's case (seam/d3d9.test.js) in Direct3D 8: a chain into a
+    // shown window is shown there, a hidden window shows nothing, and the
+    // override decides for a device's present as for a chain's.
+    const GAME = 0x00020050;
+    const OTHER = 0x00020060;
+    const shownWindows = new Set([GAME]);
+    const h = seamed({
+        windowShown: window=>shownWindows.has(window),
+        windowClientSize: window=>([HWND, GAME, OTHER].includes(window)
+            ? { width: 640, height: 480 } : null),
+    });
+    const root = h.create();
+    const device = h.createDevice(root);
+    /** @type {[string, boolean][]} */
+    const presents = [];
+    const made = h.object(device);
+    const devicePresent = made.Present;
+    made.Present = (/** @type {boolean} */ shown)=>{
+        presents.push(['device', shown]);
+        return devicePresent(shown);
+    };
+    const at = 0xe400;
+    const out = 0xe000;
+    h.box.services.writeMemory(at, new Uint8Array(D3DPRESENT_PARAMETERS8.SIZE));
+    h.fields.writeStruct(at, D3DPRESENT_PARAMETERS8, { Windowed: 1, SwapEffect: 1,
+        BackBufferFormat: D3DFMT.X8R8G8B8, BackBufferWidth: 32, BackBufferHeight: 24,
+        BackBufferCount: 1, hDeviceWindow: GAME });
+    assert.equal(h.device(device, 'CreateAdditionalSwapChain', [at, out]), D3D_OK);
+    const chain = h.box.memory.readU32(out);
+    const madeChain = h.object(chain);
+    const chainPresent = madeChain.Present;
+    madeChain.Present = (/** @type {boolean} */ shown)=>{
+        presents.push(['chain', shown]);
+        return chainPresent(shown);
+    };
+    /** @param {number} window */
+    const presentChain = window=>
+        h.box.call(chain, slot(IDIRECT3DSWAPCHAIN8_SLOTS, 'Present'), [0, 0, window, 0]);
+
+    assert.equal(presentChain(0), D3D_OK);
+    assert.equal(presentChain(OTHER), D3D_OK);
+    assert.equal(h.device(device, 'Present', [0, 0, 0, 0]), D3D_OK);
+    assert.equal(h.device(device, 'Present', [0, 0, GAME, 0]), D3D_OK);
+    assert.deepEqual(presents, [['chain', true], ['chain', false], ['device', false],
+        ['device', true]]);
+    assert.deepEqual(h.divergences.filter(line=>/shown window|not shown/.test(line)), []);
+
+    shownWindows.add(HWND);
+    presents.length = 0;
+    assert.equal(h.device(device, 'Present', [0, 0, 0, 0]), D3D_OK);
+    assert.equal(presentChain(0), D3D_OK);
+    assert.deepEqual(presents, [['device', true], ['chain', true]]);
+    assert.ok(h.divergences.some(line=>/two shown windows/.test(line)), h.divergences.join('\n'));
+
+    assert.equal(h.release(chain), 0);
+    assert.equal(h.release(device), 0);
+    h.release(root);
+});
 
 test('D3DCAPS2_FULLSCREENGAMMA is claimed where a full-screen device\'s ramp is shown', ()=>{
     const h = seamed({ caps: { gamma: { set: ()=>{}, applies: ()=>true } } });

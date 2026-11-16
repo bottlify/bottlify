@@ -8,12 +8,13 @@
  * A swap chain a program makes beside its device's own, in either version:
  * back buffers of its own, presented into a window of its own.
  *
- * The display shows one window's picture, the device's. A chain presenting
- * into that window is shown there; one presenting into another window still
- * has its frame drawn -- its back buffers hold what was drawn into them, and
- * what it presented can be read back -- but its picture has nowhere to go,
- * which the device reports. Which is which is the caller's to say at each
- * present, since only the caller knows the windows.
+ * A present is shown in the window it goes into, as the desktop window
+ * manager shows it, whichever window the device was made on: a chain into a
+ * shown window is shown, one into a hidden window has its frame drawn - its
+ * back buffers hold what was drawn into them, and what it presented can be
+ * read back - and shows nothing. Which is which is the caller's to say at
+ * each present (`seam/present-window.js`), since only the caller knows the
+ * windows.
  */
 
 import { D3DERR_INVALIDCALL, D3D_OK } from './constants.js';
@@ -99,7 +100,7 @@ export function createAdditionalChain(options){
         },
 
         /**
-         * @param {boolean} [shown]  Whether the picture goes to the window the display shows.
+         * @param {boolean} [shown]  Whether the window it goes into shows the picture.
          * @returns {number | Promise<number>}
          */
         Present(shown = true){
