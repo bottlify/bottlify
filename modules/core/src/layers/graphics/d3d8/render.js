@@ -6189,6 +6189,15 @@ export function createRenderer(options){
      *     drawMs?: number, heldDraws?: number, replayMs?: number }[]} */
     const frameHistory = [];
     const FRAME_HISTORY = 240;
+    /**
+     * The last frame presented, in numbers only (`FrameFigures`): what a live
+     * view reads once a frame, where `frameHistory` is a report's.
+     *
+     * @type {import('../figures.js').LastFrame}
+     */
+    const presentedFrame = { index: -1, draws: 0, offscreenDraws: 0, offscreenTargets: 0, clears: 0,
+        clearColor: -1, viewportX: 0, viewportY: 0, viewportWidth: 0, viewportHeight: 0,
+        targetWidth: 0, targetHeight: 0 };
     /** How many frames `dumpEvery` keeps the account of. */
     const DUMPS_KEPT = 120;
 
@@ -11430,6 +11439,18 @@ export function createRenderer(options){
                 // Its replay comes later, and says how long it took then.
                 recorded.told = told;
             }
+            presentedFrame.index = told.index;
+            presentedFrame.draws = told.draws;
+            presentedFrame.offscreenDraws = told.offscreenDraws;
+            presentedFrame.offscreenTargets = told.offscreenTargets;
+            presentedFrame.clears = told.clears;
+            presentedFrame.clearColor = frameStats.clearColor;
+            presentedFrame.viewportX = rect.x;
+            presentedFrame.viewportY = rect.y;
+            presentedFrame.viewportWidth = rect.width;
+            presentedFrame.viewportHeight = rect.height;
+            presentedFrame.targetWidth = shown.Width;
+            presentedFrame.targetHeight = shown.Height;
             frameHistory.push(told);
             if (frameHistory.length > FRAME_HISTORY)
             {
@@ -11573,6 +11594,15 @@ export function createRenderer(options){
                 retiring.push(made);
             }
         },
+
+        /**
+         * The few numbers a live view reads once a frame, without the walk
+         * `diagnostics` makes: kept as they happen, handed out as they are.
+         *
+         * @returns {import('../figures.js').FrameFigures}
+         */
+        figures: ()=>({ draws: counters.draws, gpuFrames: timing.gpuFrames,
+            gpuMs: timing.gpuMs, last: presentedFrame.index < 0 ? null : presentedFrame }),
 
         diagnostics(){
             return Object.defineProperty({

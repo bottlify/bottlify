@@ -279,9 +279,11 @@ export function createTargetReads(){
  *     read: (buffer: ArrayBuffer, each: (call: import('./wire.js').ReadCall) => boolean | void,
  *         length?: number)
  *         => number | undefined,
- *     spent: (buffer: ArrayBuffer, give: () => void) => void }}
+ *     spent: (buffer: ArrayBuffer, give: () => void) => void,
+ *     figures: () => import('../figures.js').FrameFigures | null }}
  *     `read` reads a batch of calls for `play`, and answers how long the look
- *     at its objects at a count of zero took when the batch made one
+ *     at its objects at a count of zero took when the batch made one; `figures`
+ *     is the device made last's (`figures.js`), sent with every present
  */
 export function playedDirect3D(factory, services){
     const mirror = createMirror();
@@ -334,6 +336,8 @@ export function playedDirect3D(factory, services){
         read: live.read,
         spent: live.spent,
         counts: live.counts,
+        /** The device made last's figures (`figures.js`), sent with every present. */
+        figures: ()=>root.figures?.() ?? null,
     };
 }
 

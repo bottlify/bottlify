@@ -64,6 +64,11 @@ function plainOf(services){
  *     a root the program is given, whose twin the worker plays
  * @property {() => import('./channel.js').WorkerFrameTimes | null} frameTimes
  *     the worker's frames over every root, summed, as of each one's last present
+ * @property {() => import('../figures.js').FrameFigures | null} figures
+ *     the played device's figures (`figures.js`) as of its last present
+ * @property {() => import('./channel.js').WorkerPhases | null} phases
+ *     where the worker's thread spent its time on this process's batches, summed
+ *     over the roots, as each said it with its last present
  * @property {() => { roots: number, frames: number, dropped: number,
  *     waits: Record<string, { count: number, ms: number, maxMs: number }>, behind: number[],
  *     readBack: { sent: number, shared: number }, lent: Record<string, number>,
@@ -80,8 +85,8 @@ function plainOf(services){
  *     for the one before to be shown, their way here, showing them, and the answers' way
  *     back (null before a frame has come with its times); `phases`: where the worker's
  *     thread spent its time on this process's
- *     batches, summed over the roots that have answered a diagnostics ask (null before
- *     any has, or in a build that times nothing); `latency`: each root's bound on the
+ *     batches, summed over the roots that have presented or answered a diagnostics ask
+ *     (null before any has, or in a build that times nothing); `latency`: each root's bound on the
  *     frames the worker's GPU may still be drawing, with the presents that waited for it
  *     (`held`, `heldMs`), summed over the roots that have said it (null before any has);
  *     `waits`: what the program's thread waited on the worker for, by call;
@@ -574,6 +579,17 @@ export function connectGraphicsWorker(options){
                 gpuMs: (sum?.gpuMs ?? 0) + one.gpuMs,
                 replayMs: (sum?.replayMs ?? 0) + one.replayMs };
         }, null),
+        /**
+         * The played device's figures (`figures.js`) as of the last present of
+         * the first root that has presented, or null before any has. One
+         * device draws a program's frames; a root made only to ask what the
+         * hardware does never presents.
+         *
+         * @returns {import('../figures.js').FrameFigures | null}
+         */
+        figures: ()=>senders.map(sender=>sender.figures()).find(one=>one !== null) ?? null,
+        /** The worker's phase totals over every root, as each said them last; null before. */
+        phases: ()=>phasesOf(senders),
         diagnostics: ()=>{
             /** @type {Record<string, { count: number, ms: number, maxMs: number, queuedMs: number,
              *     heldMs: number, backMs: number }>} */

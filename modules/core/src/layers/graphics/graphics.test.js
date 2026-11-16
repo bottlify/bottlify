@@ -17,6 +17,8 @@ import { clientDrawable, clientUncovered, graphicsModule, uncoveredRegion, windo
 import { createPresenter } from './webgpu/internal/presenter.js';
 import { createFakeDevice } from './webgpu/internal/fake-device.js';
 import { FVF } from './webgpu/internal/vertexformat.js';
+import { createLogModule } from '../log/module.js';
+import { createLogReader } from '../log/reader.js';
 import { D3DERR_DEVICELOST, D3DFMT, D3DPOOL, D3DRTYPE, D3DUSAGE, D3D_OK } from './d3d9/constants.js';
 import { D3DLOCK, D3DPT, D3DTA, D3DTOP, D3DTSS } from './d3d8/constants.js';
 import { IID_IDirectDraw } from './seam/iids.js';
@@ -35,6 +37,8 @@ function hostWith(/** @type {any} */ memory){
             heap: ()=>({ allocate: ()=>0 }),
         },
         bridge: { callGuest: ()=>Promise.resolve(0) },
+        // A log with nowhere to publish: the layer's figures are another test's.
+        log: {},
     };
     return /** @type {any} */ ({
         requireApi: (/** @type {string} */ name)=>{
@@ -64,6 +68,25 @@ test('a build with no GPU still comes up', async()=>{
     assert.throws(()=>api.backend(), /no GPU device/);
 
     await graphicsModule.dispose();
+});
+
+test('the layer publishes the figures a live view reads into the log, not on request', async()=>{
+    // The overlay follows these once a second through the log keeper; the
+    // layer copies them into the log's tables as a frame closes, and a device
+    // that keeps none is said as not measured rather than as zero draws.
+    const logModule = createLogModule();
+    const log = await logModule.create({ now: ()=>0, shared: false });
+    const host = hostWith(fakeMemory());
+    const apis = { log };
+    const given = host.requireApi;
+    host.requireApi = (/** @type {string} */ name)=>(name === 'log' ? apis.log : given(name));
+    await graphicsModule.create({}, host);
+    log.endFrame();
+    const live = createLogReader({ memory: log.memory() }).live();
+    assert.deepEqual(live.graphics, { shown: 0, shownBy: {}, device: null, lastFrame: null,
+        worker: null });
+    await graphicsModule.dispose();
+    await logModule.dispose();
 });
 
 test('the backend is built once, on first use', async()=>{

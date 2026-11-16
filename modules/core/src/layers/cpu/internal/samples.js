@@ -25,14 +25,28 @@ const BUCKET_SHIFT = 6;
 /** Distinct buckets kept before a new one is refused and counted instead. */
 export const BUCKET_CAP = 16384;
 
+/** The columns of the published table (`cpu.samples`): one row a bucket, in the order made. */
+export const SAMPLE_COLUMNS = ['address', 'instructions'];
+
 /**
  * @typedef {{ instructions: number, samples: number, eip: number, noted: number,
- *     due: boolean }} Bucket
+ *     due: boolean, row: number }} Bucket
  */
 
-/** A fresh, empty sample table. */
-export function createSampleTable(){
+/**
+ * A fresh, empty sample table.
+ *
+ * With `published` (a log table of `BUCKET_CAP` rows over `SAMPLE_COLUMNS`),
+ * every credit also stores its bucket's count there, where it is made: a
+ * reader on another thread -- the log keeper -- ranks the buckets itself,
+ * and nothing here sorts or copies on anyone's request.
+ *
+ * @param {import('../../log/internal/table.js').TableWriter | null} [published]
+ */
+export function createSampleTable(published = null){
+    published?.used(0);
     return {
+        published,
         /** @type {Map<number, Bucket>} */
         buckets: new Map(),
         /** The buckets past the hot threshold whose last address is not yet the one
@@ -65,6 +79,10 @@ export function creditSample(table, eip, instructions, hot = Infinity){
         bucket.instructions += instructions;
         bucket.samples++;
         bucket.eip = eip >>> 0;
+        if (table.published)
+        {
+            table.published.values[bucket.row * 2 + 1] = bucket.instructions;
+        }
     }
     else if (table.buckets.size >= BUCKET_CAP)
     {
@@ -75,8 +93,15 @@ export function creditSample(table, eip, instructions, hot = Infinity){
     {
         // The exact address as well as the bucket: a translator's region starts
         // at an instruction, and the slice ended on one.
-        bucket = { instructions, samples: 1, eip: eip >>> 0, noted: -1, due: false };
+        bucket = { instructions, samples: 1, eip: eip >>> 0, noted: -1, due: false,
+            row: table.buckets.size };
         table.buckets.set(key, bucket);
+        if (table.published)
+        {
+            table.published.set(bucket.row, 0, key * (1 << BUCKET_SHIFT));
+            table.published.set(bucket.row, 1, instructions);
+            table.published.used(table.buckets.size);
+        }
     }
     if (!bucket.due && bucket.instructions >= hot && bucket.noted !== bucket.eip)
     {

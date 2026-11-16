@@ -651,6 +651,16 @@ export async function createRemoteApp(wiring){
             guestByModule: ()=>started.log ? ask('guestByModule')
                 : request('log.guestByModule'),
             /**
+             * What a view that follows the run reads once a second -- the
+             * guest's instructions, every phase, the threads, the regions, the
+             * hottest code, the hooks and the graphics figures -- cumulative
+             * since the start, answered by the keeper from the published
+             * tables (`docs/core/api.md`). Never a request to the engine: where
+             * nothing is shared it answers null, and the view says it is not
+             * measured rather than costing the running program.
+             */
+            live: ()=>(started.log ? ask('live') : Promise.resolve(null)),
+            /**
              * The journal itself: how much has been written, how much it
              * holds, how much was lapped before the keeper saw it, and how
              * much a level refused.

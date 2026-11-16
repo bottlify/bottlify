@@ -2018,10 +2018,14 @@ export function createDirectSound({
             // between for the mixer to play.
             skippedBytes: buffers.reduce((sum, buffer)=>sum + buffer.skipped.bytes, 0),
             skips: buffers.reduce((sum, buffer)=>sum + buffer.skipped.count, 0),
-            // What each live buffer holds now: whether a stream the program
-            // writes is sound or silence, which nothing else here can say.
+            // What each playing buffer holds now: whether a stream the program
+            // writes is sound or silence, which nothing else here can say. Only
+            // the playing ones: every byte of every loaded sound, copied and
+            // scanned, was 99 ms of the engine's thread for four hundred
+            // buffers of 64 KB, and a sound nobody plays is not heard either way.
             contents: buffers
-                .filter(buffer=>!buffer.destroyed && !buffer.primary && buffer.bytes > 0)
+                .filter(buffer=>!buffer.destroyed && !buffer.primary && buffer.bytes > 0
+                    && (buffer.status() & 1) !== 0)
                 .map(buffer=>{
                     const held = memory.readMemory(buffer.address >>> 0, buffer.bytes);
                     const sixteen = buffer.format?.bitsPerSample === 16;

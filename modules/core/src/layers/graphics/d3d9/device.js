@@ -592,7 +592,11 @@ export function createDirect3D9(options = {}){
         throw new Error('graphics/d3d9: a device that draws needs readMemory as well as a backend');
     }
     const count = createReferenceCount();
+    /** The device made last, whose figures a live view reads (`figures.js`). @type {any} */
+    let made = null;
     const root = {
+        /** @returns {import('../figures.js').FrameFigures | null} */
+        figures: ()=>made?.figures() ?? null,
         caps: resolved,
         get refCount(){
             return count.value;
@@ -831,7 +835,7 @@ export function createDirect3D9(options = {}){
             // once and still reach it through GetDirect3D (Wine's d3d8 and
             // d3d9 test_refcount).
             root.addRef();
-            out.device = createDeviceObject(
+            out.device = made = createDeviceObject(
                 normalisePresentParameters(parameters), resolved, services, {
                     direct3D: root,
                     AdapterOrdinal: creation.AdapterOrdinal ?? 0,
@@ -2715,6 +2719,9 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         },
 
         /** What the renderer has done and declined to do. Null without a backend. */
+        /** What a live view reads once a frame (`figures.js`). Null without a backend. */
+        figures: ()=>renderer?.figures() ?? null,
+
         diagnostics(){
             return renderer ? renderer.diagnostics() : null;
         },

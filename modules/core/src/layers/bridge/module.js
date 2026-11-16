@@ -31,6 +31,9 @@ import { createVtables } from './internal/vtable.js';
  */
 const DETAILED_IN_TABLE = 256;
 
+/** The hooks the published table (`bridge.hooks`) has rows for; a sidecar binds a few. */
+const HOOK_ROWS = 64;
+
 const CONTINUATION = Symbol('continuation');
 
 /**
@@ -393,6 +396,28 @@ export function createBridgeModule(){
                 // under `call.hook` -- off by default like every call area.
                 journal: /** @type {any} */ (host.requireApi('log')),
             });
+
+            // The hooks' own totals, copied into a table once a frame for a
+            // reader elsewhere (the log keeper): a handful of rows, and none at
+            // all while no hook is bound.
+            const log = /** @type {any} */ (host.requireApi('log'));
+            if (import.meta.BOTTLIFY_DIAGNOSTICS !== false
+                && typeof log.metrics?.table === 'function')
+            {
+                const table = log.metrics.table('bridge', 'hooks',
+                    { rows: HOOK_ROWS, columns: ['name', 'calls', 'ms'] });
+                log.metrics.onFrame(()=>{
+                    const hooks = state.dispatcher.hooks();
+                    const rows = Math.min(hooks.length, HOOK_ROWS);
+                    for (let row = 0; row < rows; row++)
+                    {
+                        table.set(row, 0, log.intern(hooks[row].name));
+                        table.set(row, 1, hooks[row].calls);
+                        table.set(row, 2, hooks[row].ms);
+                    }
+                    table.used(rows);
+                });
+            }
 
             /**
              * Whether this instance is still open. A trap that fires after

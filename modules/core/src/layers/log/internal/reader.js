@@ -73,6 +73,38 @@ function regionNamer(tables, cursor){
     };
 }
 
+/** How many of the cpu sampler's buckets `live` names, the heaviest. */
+const LIVE_SAMPLES = 64;
+
+/**
+ * The heaviest buckets of the cpu sampler's table (`cpu.samples`), by their
+ * address: ranked here, on the reader's thread, from the counts the engine
+ * stores as it credits them.
+ *
+ * @param {import('./table.js').TableDescriptor | undefined} descriptor
+ * @param {number} count
+ * @returns {{ address: number, instructions: number }[]}
+ */
+function topBuckets(descriptor, count){
+    if (!descriptor)
+    {
+        return [];
+    }
+    const table = readTable(descriptor);
+    const used = table.used();
+    const { values, columns } = table;
+    const address = columns.indexOf('address');
+    const instructions = columns.indexOf('instructions');
+    /** @type {{ address: number, instructions: number }[]} */
+    const buckets = [];
+    for (let row = 0; row < used; row++)
+    {
+        const at = row * columns.length;
+        buckets.push({ address: values[at + address], instructions: values[at + instructions] });
+    }
+    return buckets.sort((one, two)=>two.instructions - one.instructions).slice(0, count);
+}
+
 /**
  * @typedef {Object} Subscriber
  * @property {Set<string> | null} topics   Null for every topic.
@@ -443,6 +475,49 @@ export function createLogReader({ memory }){
                 .map(row=>({ name: cursor.word(row.name), bytes: row.bytes,
                     writes: row.writes }))
                 .sort((one, two)=>two.bytes - one.bytes);
+        },
+
+        /**
+         * What a view that follows a run reads once a second, in one answer:
+         * every figure cumulative since the engine started, so a view takes
+         * two and subtracts. Read from the tables the layers fill once a frame
+         * (`docs/core/api.md`, `log.live`); a layer that publishes nothing
+         * leaves its part empty or null, never zero.
+         */
+        live(){
+            const cpu = tables.cpu?.counters ? readTable(tables.cpu.counters).row(0) : null;
+            const graphics = tables.graphics?.counters
+                ? readTable(tables.graphics.counters).row(0) : null;
+            const last = tables.graphics?.lastFrame
+                ? readTable(tables.graphics.lastFrame).all() : [];
+            return {
+                instructions: cpu ? cpu.instructions : null,
+                // Every phase, not a top few: what no phase covered is the wall
+                // time less all of them, which a top few would overstate.
+                phases: tables.log?.phases ? readTable(tables.log.phases).all()
+                    .map(row=>({ name: cursor.word(row.name), kind: KINDS[row.kind] ?? 'host',
+                        count: row.count, selfMs: row.selfMs })) : [],
+                threads: this.threads().map((/** @type {any} */ thread)=>({ id: thread.id,
+                    name: thread.name, instructions: thread.instructions, state: thread.state })),
+                regions: tables.memory?.regions ? readTable(tables.memory.regions).all()
+                    .map(row=>({ name: cursor.word(row.name), base: row.base, size: row.size }))
+                    : [],
+                samples: topBuckets(tables.cpu?.samples, LIVE_SAMPLES),
+                hooks: tables.bridge?.hooks ? readTable(tables.bridge.hooks).all()
+                    .map(row=>({ name: cursor.word(row.name), calls: row.calls, ms: row.ms })) : [],
+                graphics: graphics && {
+                    shown: graphics.shown,
+                    shownBy: tables.graphics?.shownBy ? Object.fromEntries(
+                        readTable(tables.graphics.shownBy).all()
+                            .map(row=>[cursor.word(row.name), row.count])) : {},
+                    device: graphics.device === 1 ? { draws: graphics.draws,
+                        gpuFrames: graphics.gpuFrames, gpuMs: graphics.gpuMs } : null,
+                    lastFrame: last[0] ?? null,
+                    worker: graphics.worker === 1 ? { batches: graphics.workerBatches,
+                        readSelfMs: graphics.workerReadSelfMs,
+                        sweepMs: graphics.workerSweepMs } : null,
+                },
+            };
         },
 
         /**

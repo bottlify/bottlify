@@ -7,6 +7,7 @@
 import { createBackend } from './webgpu/backend.js';
 import { createDirectDraw } from './ddraw/objects.js';
 import { createDirect3D8 } from './d3d8/device.js';
+import { publishFigures } from './figures.js';
 import { ringTrace } from './d3d8/commands.js';
 import { createDirect3D9 } from './d3d9/device.js';
 import { createDirect3D10 } from './d3d10/root.js';
@@ -420,7 +421,7 @@ export function createGraphicsModule(){
     return {
         name: 'graphics',
         version: '0.1.0',
-        requires: /** @type {readonly string[]} */ (['win32', 'bridge', 'memory']),
+        requires: /** @type {readonly string[]} */ (['win32', 'bridge', 'memory', 'log']),
 
         /**
          * @param {any} config
@@ -441,6 +442,7 @@ export function createGraphicsModule(){
             const memory = host.requireApi('memory');
             const win32 = host.requireApi('win32');
             const bridge = host.requireApi('bridge');
+            const log = /** @type {any} */ (host.requireApi('log'));
             /**
              * Everything this instance owns, and whether it is still open.
              *
@@ -1698,6 +1700,23 @@ export function createGraphicsModule(){
                 /** Whether a ramp set reaches the picture at all. */
                 appliesGamma: ()=>displayGamma.applies(),
             });
+
+            // The figures a live view follows, into the log's tables once a
+            // frame (`figures.js`). A device in the graphics worker says its own
+            // with every present; one on this thread is asked only where there
+            // is no worker, since asking a recorded device would send the
+            // question to the worker as a call.
+            if (typeof log.metrics?.onFrame === 'function')
+            {
+                log.metrics.onFrame(publishFigures({
+                    metrics: log.metrics,
+                    intern: text=>log.intern(text),
+                    shown: ()=>state.presenter?.shown?.() ?? null,
+                    figures: ()=>(state.remote ? state.remote.figures()
+                        : state.seam?.figures?.() ?? null),
+                    worker: ()=>state.remote?.phases() ?? null,
+                }));
+            }
 
             current = state;
             return {
