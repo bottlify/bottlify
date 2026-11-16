@@ -65,6 +65,29 @@ const RETURNING = Symbol('returning');
 const isReturning = value=>typeof value === 'object' && value !== null
     && value[RETURNING] === true;
 
+/**
+ * A host call's failure as the run reports it: the call by name and the
+ * first place in our code it was thrown from, before what was thrown. A
+ * report that carried the message alone ("Offset is outside the bounds of
+ * the DataView") named no function of the hundreds a process calls.
+ *
+ * @param {unknown} thrown @param {string} call
+ * @returns {Error}
+ */
+export const named = (thrown, call)=>{
+    const error = thrown instanceof Error ? thrown : new Error(String(thrown));
+    if (/** @type {any} */ (error).hostCall === undefined)
+    {
+        // The first frame with a file and a line: the engine's own builtins
+        // (DataView.prototype.getUint32) say nothing about which code.
+        const at = error.stack?.split('\n').find(line=>/^\s+at .*:\d+:\d+\)?$/.test(line))?.trim()
+            .replace(/^at /, '');
+        Object.assign(error, { hostCall: call });
+        error.message = `${call}: ${error.message}${at ? ` (at ${at})` : ''}`;
+    }
+    return error;
+};
+
 /** The bridge layer's module for one graph; see `defaultModules`. */
 export function createBridgeModule(){
     /**
@@ -222,7 +245,7 @@ export function createBridgeModule(){
                     // throws would otherwise vanish and leave the guest parked
                     // forever. Whoever is driving the machine asks for this.
                     (/** @type {Error} */ error)=>{
-                        state.failure ??= error;
+                        state.failure ??= named(error, name);
                     });
             };
 
@@ -281,7 +304,7 @@ export function createBridgeModule(){
                         // As a promise's rejection: whoever drives the machine is
                         // told, and the thread waits on an answer that never comes.
                         kernel.holdThread();
-                        state.failure ??= /** @type {Error} */ (e);
+                        state.failure ??= named(e, name);
                         return;
                     }
                     if (!next.done)
@@ -328,7 +351,7 @@ export function createBridgeModule(){
                 }
                 catch (e){
                     kernel.holdThread();
-                    state.failure ??= /** @type {Error} */ (e);
+                    state.failure ??= named(e, name);
                     return;
                 }
                 if (answered !== undefined)
@@ -905,7 +928,7 @@ export function createBridgeModule(){
                             state.callbacks.finish(thread, value | 0);
                         },
                         (/** @type {Error} */ error)=>{
-                            state.failure ??= error;
+                            state.failure ??= named(error, where.name);
                         });
                 },
 
