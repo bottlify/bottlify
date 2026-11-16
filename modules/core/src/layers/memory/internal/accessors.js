@@ -105,6 +105,17 @@ export const decodeAnsiBytes = bytes=>{
  */
 export function createAccessors({ raw, regions, charge = null, reader = null }){
     /**
+     * The address a host handler means. Arguments cross the bridge as signed
+     * 32-bit numbers, and a page or an alignment worked out with JavaScript's
+     * bitwise operators comes out signed too, so a guest address above 2 GiB
+     * - a large-address-aware program's heap - arrives negative. It names the
+     * same guest byte; no guest address is negative.
+     *
+     * @param {number} address
+     */
+    const unsigned = address=>(address < 0 ? address >>> 0 : address);
+
+    /**
      * The last regions a read validated, by span and the table's version. A
      * host call reads several dwords -- its arguments on the stack, the fields
      * behind them, the TEB for the thread's last error -- and nearly all of
@@ -124,6 +135,7 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
      * @param {number} length
      */
     const readableSpan = (address, length)=>{
+        address = unsigned(address);
         const version = regions.version;
         for (let i = 0; i < readable.length; i++)
         {
@@ -152,6 +164,7 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
      * @returns {Uint8Array}
      */
     const read = (address, length)=>{
+        address = unsigned(address);
         // The region the last read fell in, as for a dword below: a handler
         // that reads a structure reads it out of the region its pointer is in.
         readableSpan(address, length);
@@ -174,6 +187,7 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
      * @param {number} address @param {number} length
      */
     const view = (address, length)=>{
+        address = unsigned(address);
         readableSpan(address, length);
         return raw.readPhysical(address, length);
     };
@@ -216,6 +230,7 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
      * @param {number} limit
      */
     const scannable = (address, limit)=>{
+        address = unsigned(address);
         const region = regions.find(address);
         return region ? Math.min(limit, region.base + region.size - address) : limit;
     };
@@ -239,6 +254,7 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
      * @param {Uint8Array} bytes
      */
     const write = (address, bytes)=>{
+        address = unsigned(address);
         regions.assert(address, bytes.length, 'write');
         if (charge)
         {
@@ -270,6 +286,7 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
      * @param {number} length
      */
     const fill = (address, value, length)=>{
+        address = unsigned(address);
         if (length <= 0)
         {
             return;
@@ -307,6 +324,7 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
      * @returns {number}
      */
     const readInteger = (address, length)=>{
+        address = unsigned(address);
         if (length === 4 && reader !== null)
         {
             return reader.readU32(address);
@@ -343,6 +361,7 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
      * @param {number} [at]  Where in `into` the first word lands.
      */
     const readU32sInto = (address, count, into, at = 0)=>{
+        address = unsigned(address);
         if (reader !== null)
         {
             try
@@ -401,6 +420,7 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
      * @param {number[] | Float32Array} into
      */
     const readF32sInto = (address, count, into)=>{
+        address = unsigned(address);
         if (raw.readF32)
         {
             let region;
@@ -455,6 +475,7 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
          * @param {number} address @param {number} length
          */
         adopt(address, length){
+            address = unsigned(address);
             if (length <= 0)
             {
                 return;
@@ -482,6 +503,7 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
          * @param {number} address @param {number} length
          */
         window(address, length){
+            address = unsigned(address);
             regions.assert(address, length, 'read');
             return raw.readPhysical(address, length);
         },
