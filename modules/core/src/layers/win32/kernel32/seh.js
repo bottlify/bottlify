@@ -643,8 +643,12 @@ export function createSeh(host){
         // whether it read or wrote there: what a caught one was after.
         const reached = what.code === STATUS.ACCESS_VIOLATION && what.parameters?.length === 2
             ? ` ${what.parameters[0] ? 'writing' : 'reading'} ${hex(what.parameters[1])}` : '';
-        host.trace?.(`exception ${hex(what.code)} at ${hex(what.address)}${reached}${refused}`
-            + `${caller}, `
+        // A raised one's parameters say what it is: a .NET exception's first
+        // is its HRESULT, a C++ one's its object and its type's throw info.
+        const told = what.raisedFrom !== undefined && (what.parameters?.length ?? 0) > 0
+            ? ` [${(what.parameters ?? []).slice(0, 4).map(hex).join(' ')}]` : '';
+        host.trace?.(`exception ${hex(what.code)}${told} at ${hex(what.address)}${reached}`
+            + `${refused}${caller}, `
             + `${frames.length} frame(s)${damaged ? ', chain damaged' : ''}`);
 
         // Windows calls each handler with a frame of its own at the head of
