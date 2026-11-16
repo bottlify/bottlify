@@ -539,6 +539,8 @@ export function engineContractProblem(engineModule, url){
  * @property {number} [shapeChecked]  x87 regions translated again checked for it.
  * @property {number} [floatMisses]  Single-precision operations on floats (`floatSingles`) that
  *     left for the host, their float result not the processor's.
+ * @property {number} [windowsOwn]  Regions translated again with each block testing its own
+ *     windows after they kept leaving for a window they did not reach.
  * @property {number} [floatsRounded]  Entries translated again rounding doubles after they kept
  *     leaving so.
  * @property {number} [x87RelaxedReads]  Translated x87 status-word reads (`fnstsw` into memory or

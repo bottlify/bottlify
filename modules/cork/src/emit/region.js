@@ -1047,7 +1047,7 @@ function addResume(m, layout, bases, materialise, transfer, width = WIDTH_32){
  *
  * @param {ModuleContext} context
  * @param {import('../region.js').Region} region
- * @param {{ entryTop?: number, checked?: boolean, copies?: boolean,
+ * @param {{ entryTop?: number, checked?: boolean, ownWindows?: boolean, copies?: boolean,
  *     precision?: X87Precision, floats?: boolean }} [options]  the x87 top the entry is
  *     compiled for; checked: the entries test nothing of the x87 stack's shape (`planStack`);
  *     copies: a structured region's blocks inside its loops are entered through copies of
@@ -1092,7 +1092,7 @@ export class RegionEmitter {
     /**
      * @param {ModuleContext} context
      * @param {import('../region.js').Region} region
-     * @param {{ entryTop?: number, checked?: boolean, copies?: boolean,
+     * @param {{ entryTop?: number, checked?: boolean, ownWindows?: boolean, copies?: boolean,
      *     precision?: X87Precision, floats?: boolean, copyFunction?: boolean,
      *     planned?: RegionPlanning | null, rejoin?: number, copied?: number[] }} [options]
      *     copies, precision and floats: as `emitRegion` takes them; copyFunction: this is the
@@ -1106,12 +1106,14 @@ export class RegionEmitter {
         { entryTop = 0, checked = false, copies = true, copyFunction = false,
             planned = null, precision = context.wide === true ? 'wide'
                 : context.narrow === true ? 'narrow' : 'mixed', floats = false,
-            rejoin = -1, copied = undefined } = {})
+            ownWindows = false, rejoin = -1, copied = undefined } = {})
     {
         this.context = context;
         /** The region as formed, and the options, for the function of its copies. */
         this.formed = region;
-        this.options = { entryTop, checked, precision, floats };
+        this.options = { entryTop, checked, precision, floats, ownWindows };
+        /** Each block tests its own windows: none is taken from the block before. */
+        this.ownWindows = ownWindows;
         /** Its x87 compiled for the wide precision controls, or for single (`X87Precision`). */
         this.wide = precision === 'wide';
         this.narrow = precision === 'narrow';
@@ -1749,7 +1751,7 @@ export class RegionEmitter {
             : planRegion(blocks, { entry: this.region.entry,
                 heads: new Set([...this.loopEnds.keys(), ...this.x87.cut]),
                 returns: this.returns, masked: readsWrapped(this.context),
-                long: this.width.bits === 64 });
+                long: this.width.bits === 64, reach: !this.ownWindows });
         this.flagsIn = blocks.map((block, i)=>block.instructions.reduceRight((live, instruction)=>
             liveBefore(instruction, live, this.context.precise === true), flagsOut[i]));
         if (this.copies.length > 0 && !this.copyFunction)

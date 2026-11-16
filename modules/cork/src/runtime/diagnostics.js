@@ -171,6 +171,9 @@ export function createDiagnostics(state){
         // Calls that found a batch whole and every translator busy (`holdMs`).
         formedWaiting: 0,
         shapeMisses: 0, shapeChecked: 0, x87RelaxedReads: 0, floatMisses: 0, floatsRounded: 0,
+        windowsOwn: 0,
+        // Stores into pages of code the runtime was told of (`storedInto`).
+        codeStores: 0,
         // The milliseconds of translating, by the part of a batch they are:
         // `translateMs` is their sum, so a frame's own figure and the split
         // always agree.
@@ -602,6 +605,9 @@ export function createDiagnostics(state){
             // leaving and went back to rounding from doubles (`floatSingles`).
             floatMisses: counts.floatMisses,
             floatsRounded: counts.floatsRounded,
+            // Regions translated again with each block testing its own windows after
+            // they kept leaving held (`heldMissed`).
+            windowsOwn: counts.windowsOwn,
             // Translated x87 status-word reads that may see what `precise`
             // alone keeps: where a strange result is worth a run with it.
             x87RelaxedReads: counts.x87RelaxedReads,

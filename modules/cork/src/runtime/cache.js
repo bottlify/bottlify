@@ -99,13 +99,15 @@ export function moduleKey({ version, features, variant = '', layoutId, bundleId 
  * bytes' hash, by indirect call the callees formed in (`targets`), its x87 precision and float
  * arithmetic, whether that precision is one its run moved the entry to
  * (`moved`), whether its entries test the x87 stack's shape (`checked`
- * not), whether its loops' blocks have entries of their own (`copies`), and
+ * not), whether each block tests its own windows (`ownWindows`: a region that kept
+ * leaving held for a window it does not reach), whether its loops' blocks have
+ * entries of their own (`copies`), and
  * what publishing asks of the formed region (`summary`, `summary.js`), with
  * which a later run takes it without forming the region.
  *
  * @typedef {{ hash: string, targets?: [number, number[]][],
  *     wide?: boolean, narrow?: boolean, floats?: boolean, moved?: boolean,
- *     checked?: boolean, copies?: boolean,
+ *     checked?: boolean, ownWindows?: boolean, copies?: boolean,
  *     summary?: import('./summary.js').RegionSummary }} RegionShape
  */
 

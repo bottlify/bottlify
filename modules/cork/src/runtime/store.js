@@ -119,6 +119,7 @@ export function createStore(state){
      * @param {{ region: { entry: number, hash: string }, entryTop: number,
      *     targets?: [number, number[]][],
      *     wide?: boolean, narrow?: boolean, floats?: boolean, checked?: boolean,
+     *     ownWindows?: boolean,
      *     copies?: boolean, summary?: import('./summary.js').RegionSummary }} one
      * @returns {import('./cache.js').RegionShape}
      */
@@ -129,6 +130,7 @@ export function createStore(state){
         ...(one.narrow === true ? { narrow: true } : {}),
         ...(one.floats === true ? { floats: true } : {}),
         ...(one.checked === true ? { checked: true } : {}),
+        ...(one.ownWindows === true ? { ownWindows: true } : {}),
         ...(one.copies === true ? { copies: true } : {}),
         ...summed(one) });
     /** A region's summary as its record's shape holds it: the formed region's, or
@@ -358,6 +360,7 @@ export function createStore(state){
             || flags.narrow !== (shape.narrow === true);
         const otherFloats = shape.floats === true && !flags.floats;
         if (otherPrecision || otherFloats
+            || (shape.ownWindows !== true && flags.ownWindows)
             || (shape.checked !== true && checkedAt(region, one.entryTop)))
         {
             counts.missChanged++;
@@ -376,6 +379,7 @@ export function createStore(state){
         one.narrow = shape.narrow === true;
         one.floats = shape.floats === true;
         one.checked = shape.checked === true;
+        one.ownWindows = shape.ownWindows === true;
         one.copies = shape.copies === true;
         if (shape.targets !== undefined)
         {

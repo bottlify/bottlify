@@ -26,6 +26,13 @@ import { throughStack, usesX87 } from './summary.js';
 export { usesX87 };
 
 /**
+ * How often a region leaves held before it is translated again with each block
+ * testing its own windows (`heldMissed`): past what one page of code written
+ * under it, or one fault, leaves it.
+ */
+const HELD_OWN = 64;
+
+/**
  * @param {object} state  the runtime's state (`state.js`), typed inside: its type is
  *     made of what this returns
  */
@@ -86,6 +93,12 @@ export function createVariants(state){
      */
     const roundedKeys = new Set();
     /**
+     * key(entry, top) of the regions that kept leaving held (`heldMissed`): formed
+     * again with every block testing its own windows.
+     * @type {Set<number>}
+     */
+    const ownKeys = new Set();
+    /**
      * A formed region's precision as a job and a record carry it, and whether its
      * single-precision arithmetic runs on floats (`floatSingles`).
      *
@@ -95,17 +108,20 @@ export function createVariants(state){
         const precision = precisionOf(region);
         return { wide: precision === 'wide', narrow: precision === 'narrow',
             floats: precision === 'narrow' && settings.floatSingles !== false
-                && !roundedKeys.has(keyOf(region.entry, entryTop)) };
+                && !roundedKeys.has(keyOf(region.entry, entryTop)),
+            ownWindows: ownKeys.has(keyOf(region.entry, entryTop)) };
     };
     /**
      * What a job's emitter is told of its precision: nothing for `mixed`, the
      * emitter's default.
      *
-     * @param {{ wide?: boolean, narrow?: boolean, floats?: boolean }} one
+     * @param {{ wide?: boolean, narrow?: boolean, floats?: boolean, ownWindows?: boolean }} one
      */
-    const precisionJob = one=>(one.wide === true ? { precision: /** @type {const} */ ('wide') }
-        : one.narrow === true ? { precision: /** @type {const} */ ('narrow'),
-            ...(one.floats === true ? { floats: true } : {}) } : {});
+    const precisionJob = one=>({
+        ...(one.wide === true ? { precision: /** @type {const} */ ('wide') }
+            : one.narrow === true ? { precision: /** @type {const} */ ('narrow'),
+                ...(one.floats === true ? { floats: true } : {}) } : {}),
+        ...(one.ownWindows === true ? { ownWindows: true } : {}) });
     /**
      * Whether regions test the pages they read (`checkReads`): from the
      * start when asked, or from the program's first fault on a page it cannot
@@ -206,6 +222,35 @@ export function createVariants(state){
     };
 
     /**
+     * A region left to the host on purpose (`HELD`): a window of its accesses would
+     * fault, or a store of it would land in code. The window is tested where the first
+     * block that reaches it is entered, for every access of it in the blocks after -
+     * the ones behind a branch too. A sort that swaps a second array only where the
+     * caller gave one (`test ebp, ebp; je`) keeps a null in the register it would
+     * index, and left at the test of a window it never touches: a thousand times a
+     * second, each to the interpreter. A region that keeps leaving so goes, its entry
+     * translated again with each block testing only its own windows (`ownKeys`); one
+     * that is so already leaves for a store it does make.
+     *
+     * @param {number} eip  where it left
+     */
+    const heldMissed = eip=>{
+        const going = [...byPage.get(eip >>> 12) ?? []].filter(record=>record.ownWindows !== true
+            && !ownKeys.has(keyOf(record.entry, record.entryTop))
+            && record.spans.some(([from, to])=>eip >= from && eip < to)
+            && (record.heldMisses = (record.heldMisses ?? 0) + 1) >= HELD_OWN);
+        for (const record of going)
+        {
+            ownKeys.add(keyOf(record.entry, record.entryTop));
+            counts.windowsOwn++;
+        }
+        if (going.length > 0)
+        {
+            unpublish(going);
+        }
+    };
+
+    /**
      * A region computing single precision on floats left before an operation whose
      * float result is not the processor's (`RANGE`): the host ran it. One that keeps
      * leaving -- data at a float's edge, a result past it -- goes, its entry
@@ -275,6 +320,8 @@ export function createVariants(state){
         readsFaulted,
         precisionMissed,
         floatMissed,
+        heldMissed,
+        ownKeys,
         shapeMissed,
         checkedAt,
     };

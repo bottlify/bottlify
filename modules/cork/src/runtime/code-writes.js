@@ -284,6 +284,7 @@ export function createCodeWrites(state){
      *     which run first where cold code runs
      */
     const storedInto = (address, size, own = true)=>{
+        counts.codeStores++;
         if (size <= 0)
         {
             return;

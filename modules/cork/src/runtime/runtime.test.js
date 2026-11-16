@@ -565,8 +565,8 @@ test('a page whose regions partly go keeps the code range of the ones left on it
     assert.deepEqual(m.runtime.pages.codeRange(next), [0, 0]);
 });
 
-test('a region that leaves a block inside its loop to the host on purpose is not formed again'
-    + ' for it', async()=>{
+test('a region that leaves a block inside its loop to the host on purpose is formed again once'
+    + ' for it, each block testing its own windows, and never copied', async()=>{
     const m = machine();
     // mov ecx, 10; L: inc edx; test dl, 1; jz N; mov [ebx], eax; mov [ebx+4], esi; N: dec
     // ecx; jnz L; hlt -- the stores a block of their own inside the loop, with no entry, one
@@ -576,8 +576,15 @@ test('a region that leaves a block inside its loop to the host on purpose is not
         0x89, 0x73, 0x04, 0x49, 0x75, 0xf2, 0xf4]);
     m.runtime.noteHot(CODE);
     await m.runtime.translatePending();
-    for (let i = 0; i < 100; i++)
+    for (let i = 0; i < 300; i++)
     {
+        if (m.runtime.entryOf(CODE) < 0)
+        {
+            // Gone once it kept leaving (`heldMissed`): translated again, it tests
+            // the window where the stores are and leaves there as before.
+            m.runtime.noteHot(CODE);
+            await m.runtime.translatePending();
+        }
         m.setReg(2, 0);
         m.setReg(3, 0x800000);
         const exit = m.runtime.run(m.runtime.entryOf(CODE), 1000);
@@ -586,6 +593,7 @@ test('a region that leaves a block inside its loop to the host on purpose is not
     }
     await m.runtime.translatePending();
     const d = m.runtime.diagnostics();
+    assert.equal(d.windowsOwn, 1, 'formed again once, and no more for an exit it means');
     assert.equal(d.copied, 0, 'no copies of the region for its own deliberate exit');
     assert.equal(d.queued, 0);
     assert.equal(d.exitsByTarget[0]?.address, CODE + 0xb, 'the exits still counted');
@@ -1210,6 +1218,63 @@ test('a region the store answers for at once is formed once, as its record says'
                 'a wait a batch: the records asked before forming are not asked again');
         }
     }
+});
+
+test('a region that keeps leaving held for a window behind a branch it does not take is'
+    + ' translated again with each block testing its own windows', async()=>{
+    // A second array written only where the caller gave one (ebx): the window off
+    // ebp opens in the first conditional block, and the join after it tests it at
+    // its start for the second - which a caller with no array never reaches.
+    const CLOSED = 0x300000;
+    const DATA = 0x200000;
+    const code = [
+        0x85, 0xdb,                         // A: test ebx, ebx
+        0x74, 0x03,                         //    je J
+        0x89, 0x55, 0x00,                   // B: mov [ebp], edx
+        0x83, 0xc0, 0x04,                   // J: add eax, 4
+        0x85, 0xdb,                         //    test ebx, ebx
+        0x74, 0x03,                         //    je K
+        0x89, 0x55, 0x04,                   // C: mov [ebp + 4], edx
+        0xf4,                               // K: hlt
+    ];
+    const m = machine();
+    m.write(CODE, code);
+    m.runtime.pages.markRange(CLOSED, 0x1000, PageFlag.INACCESSIBLE);
+    /** @param {number} given  the caller's array, 0 for none */
+    const run = given=>{
+        m.setReg(0, 0);
+        m.setReg(2, 0x1234);
+        m.setReg(3, given === 0 ? 0 : 1);
+        m.setReg(4, 0x80000);
+        m.setReg(5, given === 0 ? CLOSED : given);
+        return m.runtime.run(m.runtime.entryOf(CODE), 1000);
+    };
+    const translate = async()=>{
+        m.runtime.noteHot(CODE);
+        await m.runtime.translatePending();
+        await new Promise(resolve=>setTimeout(resolve, 0));
+    };
+    await translate();
+    const first = run(0);
+    assert.equal(first.kind, 'untranslated',
+        'left at the join\'s test of a window it never reaches');
+    assert.equal(m.eip(), CODE + 7);
+    let left = 1;
+    while (m.runtime.entryOf(CODE) >= 0)
+    {
+        assert.equal(run(0).kind, 'untranslated');
+        left++;
+        assert.ok(left < 1000, 'the region goes once it kept leaving');
+    }
+    await translate();
+    assert.equal(m.runtime.diagnostics().windowsOwn, 1);
+    assert.equal(run(0).kind, 'halt', 'no window but its own tested: it runs to its end');
+    assert.equal(m.reg(0), 4);
+    // And with an array it stores as before.
+    assert.equal(run(DATA).kind, 'halt');
+    const view = new DataView(m.memory.buffer);
+    assert.deepEqual([view.getUint32(m.layout.ramBase + DATA, true),
+        view.getUint32(m.layout.ramBase + DATA + 4, true)], [0x1234, 0x1234]);
 });
 
 test('the callees a region adds to its batch are asked of a store across a link before they'
