@@ -222,3 +222,4 @@ vcall 0.9995).
 | 2026-10-16 | invalidated: the host calls of `tools/executor-sweep.mjs` | - | invalidated: GetTickCount never left the executor | - |
 | 2026-10-29 | invalidated: arm64 executed counts of `tools/cork-asm.mjs` read before ab02ac9 | - | invalidated: x27 block marks misread | - |
 | 2026-10-31 | a CM Multi inflated in GameHub's worker without a Blob | 44.7 s vs 2.0-10.0 s idle | holds | where GameHub's work runs |
+| 2026-11-16 | timestamp queries (`gputime.js`) as what crashed the browser's GPU process under 3DMark Vantage's loading (Parallels VM, Chrome 157) | one run with them off reached Graphics Test 2; the next, with them off, crashed as before | refuted | - |

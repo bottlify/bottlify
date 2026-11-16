@@ -497,7 +497,7 @@ test('a draw with no viewport, target or vertex shader draws nothing and is coun
     assert.equal(h.gpu.count('draw'), 0);
     assert.deepEqual(h.device.diagnostics().skipped,
         { noViewport: 1, noTarget: 1, noShader: 1, untranslatable: 0, pipeline: 0,
-            stage: 0 });
+            unpositioned: 0, stage: 0 });
 });
 
 // --- constant buffers ---
@@ -2631,7 +2631,7 @@ test('a draw with no pixel shader writes depth and no render target (test_depth_
     assert.equal(h.gpu.count('draw'), 1, 'the draw runs');
     assert.deepEqual(h.device.diagnostics().skipped,
         { noViewport: 0, noTarget: 0, noShader: 0, untranslatable: 0, pipeline: 0,
-            stage: 0 });
+            unpositioned: 0, stage: 0 });
     const pipeline = h.gpu.of('createRenderPipeline').at(-1).descriptor;
     assert.equal(pipeline.depthStencil.format, 'depth32float');
     assert.equal(pipeline.depthStencil.depthWriteEnabled, true);
@@ -3444,3 +3444,26 @@ test('a draw\'s pipeline is built off the queue: one the device refuses loses th
         assert.deepEqual(diagnostics.failures, [], 'and the frame not lost with it');
         assert.equal(h.gpu.count('draw'), 0);
     });
+
+test('a draw whose vertices carry no SV_Position rasterizes nothing and loses nothing', async()=>{
+    // Direct3D 10 turns the rasterizer off this way: the vertex shader writes
+    // what is streamed out and no position, and nothing reaches a target.
+    const h = harness();
+    const { device } = h;
+    bindTriangle(h, TRIANGLE, [0, 0, 1, 1]);
+    /** @type {{ shader?: any }} */
+    const vs = {};
+    assert.equal(device.CreateVertexShader(assemble({
+        kind: SHADER_KIND.VERTEX,
+        inputs: [{ name: 'POSITION', systemValue: SYSTEM_VALUE.UNDEFINED, register: 0 }],
+        outputs: [{ name: 'TEXCOORD', systemValue: SYSTEM_VALUE.UNDEFINED, register: 0 }],
+        instructions: [dclInput(v(0)), dclOutput(o(0)), mov(o(0), v(0)), ret()],
+    }), vs), S_OK);
+    device.VSSetShader(vs.shader);
+    device.Draw(3, 0);
+    await h.present();
+    assert.equal(h.gpu.count('draw'), 0);
+    assert.equal(h.device.diagnostics().skipped.unpositioned, 1);
+    assert.equal(h.device.diagnostics().skipped.untranslatable, 0);
+    assert.ok(!h.divergences.some(line=>line.includes('lost:')), h.divergences.join('\n'));
+});

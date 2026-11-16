@@ -807,6 +807,8 @@ export function createRenderer(services){
             noShader: 0,
             untranslatable: 0,
             pipeline: 0,
+            /** A draw whose vertices carry no position: nothing to rasterize, as on Direct3D. */
+            unpositioned: 0,
             /**
              * A draw with a geometry shader bound, or one through the
              * tessellator Direct3D would not draw or that cannot be drawn.
@@ -5076,6 +5078,24 @@ export function createRenderer(services){
             }
             const drawnGeometry = geometryShader && !geometryShader.passThrough
                 ? geometry.drawn : null;
+            // The stage before the rasterizer writes no position: there is
+            // nothing to place, and Direct3D draws nothing - what a program
+            // that streams out of a vertex shader's bytecode, its pixel shader
+            // and depth off, does to have none (D3D10's way to turn the
+            // rasterizer off). Its stream output has been made above.
+            const rasterStage = drawnGeometry ? geometryShader
+                : pipeline.stages.ds?.shader ?? pipeline.stages.vs.shader;
+            if (rasterStage && !(rasterStage.container?.outputs ?? []).some(
+                (/** @type {any} */ element)=>element.systemValue === SYSTEM_VALUE.POSITION))
+            {
+                counters.skipped.unpositioned++;
+                if (pipeline.stages.ps?.shader)
+                {
+                    diverge('a draw whose vertices carry no SV_Position is not rasterized, its'
+                        + ' pixel shader bound or not');
+                }
+                return;
+            }
             /**
              * The draw into the targets' layer `layerPass` names, or into
              * their first where its primitives name none.
