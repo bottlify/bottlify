@@ -586,3 +586,34 @@ test('DelayLoadFailureHook offers no stand-in, leaving the delay-load helper to 
     assert.equal(fns.DelayLoadFailureHook.argBytes, 8);
     assert.equal(fns.DelayLoadFailureHook.handler([0x1000, 0x2000]), 0);
 });
+
+test('K32GetMappedFileName names the image an address lies in, as the object manager does', ()=>{
+    // A DRM wrapper resolves psapi's GetMappedFileNameA and checks its own
+    // image with it; without the export it gave up on starting the game.
+    const { host, lastError } = hostFor();
+    const image = new Uint8Array(0x400);
+    const view = new DataView(image.buffer);
+    view.setUint32(0x3c, 0x80, true);
+    view.setUint32(0x80 + 24 + 56, 0x9000, true);
+    /** @type {Uint8Array[]} */
+    const written = [];
+    const fns = createModuleFunctions({
+        ...host,
+        list: ()=>[{ base: 0x400000, path: 'C:\\App\\gta-vc.exe' }],
+        nativePath: path=>`\\Device\\HarddiskVolume1${path.slice(2)}`,
+        /** @param {number} address @param {number} length */
+        readMemory: (address, length)=>image.slice(address - 0x400000,
+            address - 0x400000 + length),
+        writeMemory: (_, bytes)=>{ written.push(bytes); },
+    });
+    const wanted = '\\Device\\HarddiskVolume1\\App\\gta-vc.exe';
+    assert.equal(fns.K32GetMappedFileNameA.argBytes, 16);
+    assert.equal(fns.K32GetMappedFileNameA.handler([0xffffffff, 0x401234, 0x500, 260]),
+        wanted.length);
+    assert.equal(String.fromCharCode(...written.at(-1) ?? []).replace(/\0$/, ''), wanted);
+    assert.equal(fns.K32GetMappedFileNameW.handler([0xffffffff, 0x408fff, 0x500, 260]),
+        wanted.length, 'the last byte of the image');
+    assert.equal(fns.K32GetMappedFileNameA.handler([0xffffffff, 0x409000, 0x500, 260]), 0,
+        'past SizeOfImage');
+    assert.equal(lastError(), 59, 'ERROR_UNEXP_NET_ERR: no file is mapped there');
+});

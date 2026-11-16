@@ -3711,6 +3711,7 @@ export function createWin32Module(){
                         imagePath: ()=>modules.imagePath(),
                         libraryHome,
                         list: ()=>modules.list?.() ?? [],
+                        nativePath: nativePathOf,
                         // Reading a library off the volume belongs to whoever
                         // assembled the process, so it is passed straight through.
                         // Without it LoadLibrary can only answer for what is
@@ -4260,12 +4261,13 @@ export function createWin32Module(){
                     }])),
                     ...Object.fromEntries(['EnumProcessModules', 'GetModuleFileNameExA',
                         'GetModuleFileNameExW', 'GetModuleBaseNameA', 'GetModuleBaseNameW',
-                        'GetModuleInformation'].map(name=>[name, {
-                        // Four arguments, each of them.
-                        argBytes: 16,
-                        handler: (/** @type {number[]} */ args)=>
-                            libraries['KERNEL32.dll'][`K32${name}`].handler(args),
-                    }])),
+                        'GetModuleInformation', 'GetMappedFileNameA', 'GetMappedFileNameW']
+                        .map(name=>[name, {
+                            // Four arguments, each of them.
+                            argBytes: 16,
+                            handler: (/** @type {number[]} */ args)=>
+                                libraries['KERNEL32.dll'][`K32${name}`].handler(args),
+                        }])),
                 },
 
                 // The debug help library with no symbol files: what a crash

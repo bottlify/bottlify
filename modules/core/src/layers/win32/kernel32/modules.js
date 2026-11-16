@@ -53,6 +53,8 @@ const ERROR_BAD_EXE_FORMAT = 193;
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_INSUFFICIENT_BUFFER = 122;
 const ERROR_NOACCESS = 998;
+/** What GetMappedFileName answers for an address no file is mapped at. */
+const ERROR_UNEXP_NET_ERR = 59;
 /** sizeof(MODULEINFO): the base, the image's size and its entry point. */
 const MODULEINFO_SIZE = 12;
 
@@ -139,6 +141,8 @@ export function searchesBesideProgram(knownDll, mappedFromFile){
  * @property {() => { base: number, path: string }[]} [list]
  *           Every module of the process, the image first: what psapi's
  *           EnumProcessModules hands out.
+ * @property {(path: string) => string | null} [nativePath]  A path as the object
+ *           manager names it (`\Device\HarddiskVolumeN\...`), null where it has none.
  * @property {(asked: { module: string, name: string, found: number }) => void} [resolved]
  *           Told what a program looked up at runtime and what it was given. A
  *           name we answer zero to is one the program then decides about, and
@@ -343,7 +347,17 @@ export function createModuleFunctions(host){
             return 0;
         }
         const path = handle === 0 ? host.imagePath() : fileNameOf(module);
-        const text = baseName ? path.slice(path.lastIndexOf(SEPARATOR) + 1) : path;
+        return cutText(baseName ? path.slice(path.lastIndexOf(SEPARATOR) + 1) : path,
+            buffer, size, wide);
+    };
+
+    /**
+     * Text cut to `size` characters with the terminator inside them, ANSI or
+     * wide, as psapi's name queries write it; the characters written.
+     *
+     * @param {string} text @param {number} buffer @param {number} size @param {boolean} wide
+     */
+    const cutText = (text, buffer, size, wide)=>{
         if ((size >>> 0) === 0)
         {
             host.setLastError(ERROR_INSUFFICIENT_BUFFER);
@@ -363,6 +377,39 @@ export function createModuleFunctions(host){
         host.writeMemory(buffer >>> 0, bytes);
         return kept.length;
     };
+
+    /**
+     * DWORD K32GetMappedFileNameA/W(HANDLE hProcess, LPVOID lpv, LPSTR/LPWSTR
+     *     lpFilename, DWORD nSize)
+     *
+     * The file mapped at an address, in the object manager's terms: here an
+     * image of the process, whose span its headers give (SizeOfImage). An
+     * address no image covers has no file: ERROR_UNEXP_NET_ERR, as Windows
+     * answers memory of its own (Wine's psapi test).
+     * ponytail: images only; a view of a file a program mapped itself is
+     * answered the same way once a program asks for one.
+     *
+     * @param {boolean} wide
+     */
+    const mappedFileName = wide=>({
+        argBytes: 16,
+        /** @param {number[]} args */
+        handler: ([, address, buffer, size])=>{
+            const at = address >>> 0;
+            const read = (/** @type {number} */ where)=>new DataView(
+                host.readMemory?.(where, 4).slice().buffer ?? new ArrayBuffer(4))
+                .getUint32(0, true);
+            const image = (host.list?.() ?? []).find(module=>at >= module.base
+                && at < module.base + read(module.base + read(module.base + 0x3c) + 24 + 56));
+            const path = image ? host.nativePath?.(image.path) ?? null : null;
+            if (path === null)
+            {
+                host.setLastError(ERROR_UNEXP_NET_ERR);
+                return 0;
+            }
+            return cutText(path, buffer, size, wide);
+        },
+    });
 
     /**
      * @param {number} size @param {number} buffer @param {boolean} wide
@@ -808,6 +855,9 @@ export function createModuleFunctions(host){
             /** @param {number[]} args */
             handler: ([, handle, buffer, size])=>moduleText(handle, buffer, size, true, true),
         },
+
+        K32GetMappedFileNameA: mappedFileName(false),
+        K32GetMappedFileNameW: mappedFileName(true),
 
         /** DWORD GetModuleFileNameA(HMODULE hModule, LPSTR lpFilename, DWORD nSize) */
         GetModuleFileNameA: {
