@@ -212,19 +212,6 @@ const HAS_ALPHA = new Set([GL.RGBA, GL.ALPHA, GL.LUMINANCE_ALPHA, GL.INTENSITY])
  */
 
 /**
- * Whether a draw writes its depth-stencil attachment, as WebGPU judges a
- * pipeline in a pass that holds the attachment read-only: the depth through
- * its mask (off with the test, `drawStateOf`), the stencil through a write
- * mask and an operation other than GL_KEEP on either face.
- *
- * @param {import('./wgsl.js').DrawState} state
- */
-const writesDepthStencil = state=>state.depth.write || (!!state.stencil
-    && state.stencil.writeMask !== 0
-    && [state.stencil, state.stencilBack ?? state.stencil].some(face=>
-        face.fail !== GL.KEEP || face.zfail !== GL.KEEP || face.zpass !== GL.KEEP));
-
-/**
  * The S3TC format a program uploaded → the block-compressed format a device
  * that has `texture-compression-bc` samples it as. Both DXT1 variants are the
  * same block layout; WebGPU has one BC1 format for either.
@@ -3159,18 +3146,21 @@ export function createGpuRenderer(services){
                     + ' components unswizzled');
             }
             // Sampled while it is drawn into: GL leaves it undefined, and
-            // WebGPU refuses the pass. The depth-stencil attachment of a draw
-            // writing neither aspect is only read, which WebGPU allows as a
-            // read-only attachment: a deferred light reads the scene's depth
-            // while testing against it.
-            if (texture === target.depthTexture && !writesDepthStencil(state))
+            // WebGPU refuses the pass. The depth of a draw that writes no depth
+            // is only read, which WebGPU allows as a read-only aspect of the
+            // attachment, its stencil written still: a deferred light reads the
+            // scene's depth while testing against it and marking its stencil.
+            if (texture === target.depthTexture && !state.depth.write)
             {
                 readsDepth = true;
             }
             else if (target.attached.has(texture))
             {
+                // Which one, and what the draw writes of it: whether the
+                // program reads what it draws or only holds it attached.
                 diverge('a draw sampled a texture its framebuffer draws into, and sampled'
-                    + ' black instead');
+                    + ' black instead: ' + (texture === target.depthTexture
+                    ? 'its depth attachment, which it writes' : 'a colour attachment'));
                 texture = incompleteTexture(entry.cube);
             }
             const sized = baseLevelOf(texture)?.sized;
@@ -4925,8 +4915,19 @@ export function createGpuRenderer(services){
         }
         chain = chain.then(async()=>{
             const frame = backend.beginFrame();
-            const read = frame.snapshot(held.gpu);
-            frame.end();
+            /** @type {() => Promise<any>} */
+            let read;
+            // Ended whatever the read says: a format with no row pitch to
+            // read by (a depth-stencil) threw here, the frame stayed open, and
+            // every frame of the program after it was refused and lost.
+            try
+            {
+                read = frame.snapshot(held.gpu);
+            }
+            finally
+            {
+                frame.end();
+            }
             liveDump?.snapped?.(id, { ...await read(), format: held.format, info });
         }).catch(error=>{
             liveDump?.snapped?.(id, { width: 0, height: 0, format: 'missing',
@@ -5094,8 +5095,10 @@ export function createGpuRenderer(services){
                     occlusion: counting,
                     depthTarget: drawn.depth ?? undefined,
                     depthStencilAttachment: !drawn.depth ? undefined
+                        // The stencil is another aspect, written still: a light
+                        // marks in it the pixels it reached while reading the depth.
                         : readsDepth ? { view: drawn.depth.view, depthReadOnly: true,
-                            stencilReadOnly: true }
+                            stencilLoadOp: 'load', stencilStoreOp: 'store' }
                             : {
                                 view: drawn.depth.view,
                                 depthLoadOp: 'load',

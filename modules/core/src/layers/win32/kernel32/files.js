@@ -2334,7 +2334,9 @@ export function createFileFunctions(host){
                 return { error: ERROR_FILE_EXISTS };
             }
             const handle = host.handles.open('file',
-                { path, node: null, directory: true, read: false, write: false, position: 0 });
+                { path, node: null, directory: true, read: false, write: false, position: 0,
+                    // A folder watched through a completion port is opened so.
+                    ...((flags >>> 0) & FILE_FLAG_OVERLAPPED) !== 0 ? { overlapped: true } : {} });
             return { handle, existed: true };
         }
         if (exists && disposition === CREATE_NEW)

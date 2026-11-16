@@ -466,7 +466,9 @@ export function createFakeDevice(options = {}){
         // WebGPU tells them apart by subresource, so a pass that draws a level
         // from the one above it is not this.
         // A depth attachment read-only in every aspect it has is read, not
-        // written, and may be sampled in the same pass.
+        // written, and may be sampled in the same pass; one read-only in its
+        // depth alone may be sampled through its depth (a depth-only view), the
+        // stencil written still, an aspect being a subresource of its own.
         const depthAttachment = descriptor.depthStencilAttachment;
         const depthFormat = depthAttachment?.view?.texture?.format ?? '';
         const depthReadOnly = depthAttachment?.depthReadOnly === true;
@@ -575,7 +577,11 @@ export function createFakeDevice(options = {}){
             stats.bindGroups++;
             const both =/** @type {any[]} */ (group?.entries ?? [])
                 .find(entry=>entry.resource?.texture && written.some(view=>
-                    overlaps(view, entry.resource)));
+                    overlaps(view, entry.resource) && !(view === depthAttachment?.view
+                        && ((depthReadOnly
+                            && entry.resource.viewDescriptor?.aspect === 'depth-only')
+                            || (stencilReadOnly
+                                && entry.resource.viewDescriptor?.aspect === 'stencil-only')))));
             if (both && !encoder.invalid)
             {
                 encoder.invalid = true;

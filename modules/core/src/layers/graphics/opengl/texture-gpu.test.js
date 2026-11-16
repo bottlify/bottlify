@@ -22,8 +22,11 @@ import { createGpuRenderer } from './gpu.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 
-/** @param {string[]} [features] @param {boolean} [compressedTextures]  BC sampled as blocks */
-function rig(features = [], compressedTextures = false){
+/**
+ * @param {string[]} [features] @param {boolean} [compressedTextures]  BC sampled as blocks
+ * @param {any} [liveDump]  the switches of a running program (`app.debug`)
+ */
+function rig(features = [], compressedTextures = false, liveDump = null){
     const gpu = createFakeDevice({ features });
     const backend = createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{} });
     /** @type {string[]} */
@@ -31,6 +34,7 @@ function rig(features = [], compressedTextures = false){
     const renderer = createGpuRenderer({
         backend,
         compressedTextures,
+        liveDump,
         createSampler: descriptor=>({ kind: 'sampler', descriptor }),
         divergence: detail=>said.push(detail),
     });
@@ -383,7 +387,8 @@ test('a draw writing neither depth nor stencil samples its depth attachment, hel
         assert.ok(at > 0, 'a pass that writes depth comes before the read-only one');
         const [before, reading, after] = passes.slice(at - 1, at + 2);
         assert.deepEqual(reading.attachment, { view: reading.attachment.view,
-            depthReadOnly: true, stencilReadOnly: true }, 'read-only, no load or store');
+            depthReadOnly: true, stencilLoadOp: 'load', stencilStoreOp: 'store' },
+        'the depth read-only, no load or store; the stencil written still');
         assert.equal(reading.draws, 2, 'both lights in the one read-only pass');
         assert.deepEqual(reading.sampled, ['depth-only'], 'bound once, through its depth');
         // What the first draw wrote is kept across the break and loaded after.
@@ -396,32 +401,43 @@ test('a draw writing neither depth nor stencil samples its depth attachment, hel
         assert.deepEqual(after.sampled, []);
     });
 
-test('a draw writing its depth or stencil while sampling the depth attachment samples black',
-    async()=>{
-        for (const writes of ['depth', 'stencil'])
+test('a draw sampling its depth attachment samples black when it writes depth, and the depth'
+    + ' itself when it writes the stencil alone', async()=>{
+    for (const writes of ['depth', 'stencil'])
+    {
+        const r = rig();
+        const { context } = r;
+        const { depth } = depthReadRig(r);
+        if (writes === 'depth')
         {
-            const r = rig();
-            const { context } = r;
-            const { depth } = depthReadRig(r);
-            if (writes === 'depth')
-            {
-                context.glDepthMask(true);
-            }
-            else
-            {
-                context.glDepthMask(false);
-                context.glStencilOp(GL.KEEP, GL.KEEP, GL.REPLACE);
-            }
-            r.draw();
-            await r.swap();
-            assert.deepEqual(r.gpu.errors, [], writes);
-            assert.ok(r.said.some(d=>/sampled a texture its framebuffer draws into/.test(d)),
-                writes);
-            const passes = depthPasses(r, depth);
-            assert.ok(passes.every(p=>!p.attachment.depthReadOnly), writes);
-            assert.ok(passes.every(p=>p.sampled.length === 0), `${writes}: the placeholder`);
+            context.glDepthMask(true);
         }
-    });
+        else
+        {
+            context.glDepthMask(false);
+            context.glStencilOp(GL.KEEP, GL.KEEP, GL.REPLACE);
+        }
+        r.draw();
+        await r.swap();
+        assert.deepEqual(r.gpu.errors, [], writes);
+        const passes = depthPasses(r, depth);
+        if (writes === 'stencil')
+        {
+            // A light that marks the stencil where it reached, reading the
+            // scene's depth: black in place of the depth left the scene dark.
+            assert.ok(!r.said.some(d=>/framebuffer draws into/.test(d)), r.said.join(' | '));
+            const reading = passes.filter(p=>p.attachment.depthReadOnly);
+            assert.equal(reading.length, 1);
+            assert.equal(reading[0].attachment.stencilStoreOp, 'store');
+            assert.deepEqual(reading[0].sampled, ['depth-only']);
+            continue;
+        }
+        assert.ok(r.said.some(d=>/sampled a texture its framebuffer draws into/.test(d)),
+            writes);
+        assert.ok(passes.every(p=>!p.attachment.depthReadOnly), writes);
+        assert.ok(passes.every(p=>p.sampled.length === 0), `${writes}: the placeholder`);
+    }
+});
 
 test('an attachment of a sized format answers its sizes, component type and encoding', ()=>{
     const { context } = rig();
@@ -616,3 +632,28 @@ test('a level kept in other bits than its own is copied here, to another format'
         width: 1, height: 1, depth: 1 }, GL.RED, TEX.HALF_FLOAT, 2)), [0x00, 0x3c],
     'the bits, here: the half float one');
 });
+
+test('a snapshot of a texture that cannot be read ends its frame, and the program draws on',
+    async()=>{
+        // A depth-stencil has no row pitch to be read by: the read threw with
+        // the snapshot's frame open, and every frame of the program after it
+        // was refused ("A frame is already open") - a debug switch froze the game.
+        /** @type {any[]} */
+        const snapped = [];
+        const live = { dumpFrames: 0, snapshot: '',
+            snapped: (/** @type {string} */ id, /** @type {any} */ got)=>snapped.push({ id, ...got }) };
+        const r = rig([], false, live);
+        const { depth } = depthReadRig(r);
+        r.draw();
+        await r.swap();
+        live.snapshot = 't' + depth;
+        for (let frame = 0; frame < 4; frame++)
+        {
+            r.draw();
+            await r.swap();
+        }
+        assert.equal(snapped.length, 1);
+        assert.match(snapped[0].info, /not read/);
+        assert.ok(!r.said.some(d=>/already open|lost/.test(d)), r.said.join(' | '));
+        assert.deepEqual(r.gpu.errors, []);
+    });
