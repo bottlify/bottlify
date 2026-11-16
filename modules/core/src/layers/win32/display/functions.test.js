@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createDpiState } from '../user32/dpi.js';
 import { createDwmapiFunctions, createSessionInformationFunctions, createShcoreFunctions,
     DWMAPI_ORDINALS }
     from './functions.js';
@@ -34,6 +35,11 @@ function setup(){
         free: address=>freed.push(address),
         userName: 'User',
         computerName: 'BOTTLE',
+        dpi: createDpiState(),
+        refresh: 60,
+        // 1 s and a quarter of a refresh on: the 61st refresh begun, 60 done.
+        now: ()=>1000 + 1000 / 240,
+        performanceFrequency: 10_000_000,
     };
     return { memory, view, errors, freed, host };
 }
@@ -108,4 +114,22 @@ test('the sessions, the services\' and the console\'s, and the user\'s token', (
     assert.deepEqual([asked, view.getUint32(0x200, true)], [[0x200], 0x44]);
     assert.equal(fns.WTSQueryUserToken.handler([0, 0x200]), 0, 'session 0 has no user');
     assert.equal(errors.at(-1), 1008, 'ERROR_NO_TOKEN');
+});
+
+test('the composition timing: 60 Hz, the last vertical blank on the counter clock', ()=>{
+    const { view, host } = setup();
+    const fns = createDwmapiFunctions(host);
+    view.setUint32(0x400, 292, true);
+    assert.equal(fns.DwmGetCompositionTimingInfo.handler([0, 0x400]), 0);
+    assert.deepEqual([view.getUint32(0x404, true), view.getUint32(0x408, true)], [60, 1],
+        'rateRefresh');
+    assert.equal(view.getBigUint64(0x40c, true), 166667n, 'qpcRefreshPeriod: 1/60 s');
+    assert.equal(view.getBigUint64(0x424, true), 60n, 'cRefresh');
+    assert.equal(view.getBigUint64(0x41c, true), 60n * 166667n, 'qpcVBlank: the 60th refresh');
+    assert.equal(view.getBigUint64(0x438, true), 60n, 'cFrame');
+    assert.equal(fns.DwmGetCompositionTimingInfo.handler([0x10010, 0x400]) >>> 0, 0x80070057,
+        'a window, from Windows 8.1');
+    view.setUint32(0x400, 288, true);
+    assert.equal(fns.DwmGetCompositionTimingInfo.handler([0, 0x400]) >>> 0, 0x80070057,
+        'cbSize not the structure size');
 });

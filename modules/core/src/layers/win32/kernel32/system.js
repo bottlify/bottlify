@@ -260,6 +260,9 @@ const EXECUTION_STATES = ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED | ES_USER_PRES
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {() => number} systemTimeMs   Guest wall clock, milliseconds since 1970.
  * @property {(code: number) => void} setLastError
+ * @property {(module: number, language: number, id: number) => string | null} [findMessage]
+ *     A module's own message table's text for an id (RtlFindMessage), the
+ *     process's image for module 0; null where it has none.
  * @property {(handle: number, type?: string) => any} resolveHandle
  * @property {(handle: number) => string | null} [handleType]  what kind of object a handle is
  * @property {(handle: number) => boolean} [standardFile]  whether a standard handle writes to
@@ -559,7 +562,7 @@ export function createSystemFunctions(host){
     const formatMessage = wide=>({
         argBytes: 28,
         /** @param {number[]} args */
-        handler: survivesFault(([flags, source, messageId, , buffer, size,
+        handler: survivesFault(([flags, source, messageId, language, buffer, size,
             argumentsPtr])=>{
             const asked = flags >>> 0;
             const allocating = (asked & FORMAT_MESSAGE_ALLOCATE_BUFFER) !== 0;
@@ -598,10 +601,15 @@ export function createSystemFunctions(host){
             }
             else
             {
-                // A module's own message table is not read here; the system's
-                // is, for the system's modules and FORMAT_MESSAGE_FROM_SYSTEM.
-                format = (asked & FORMAT_MESSAGE_FROM_SYSTEM) !== 0
-                    ? systemMessage(messageId >>> 0) : null;
+                // The module's own table first, then the system's when both
+                // are asked, as Windows looks.
+                format = (asked & FORMAT_MESSAGE_FROM_HMODULE) !== 0
+                    ? host.findMessage?.(source >>> 0, language >>> 0, messageId >>> 0) ?? null
+                    : null;
+                if (format === null && (asked & FORMAT_MESSAGE_FROM_SYSTEM) !== 0)
+                {
+                    format = systemMessage(messageId >>> 0);
+                }
                 if (format === null)
                 {
                     host.setLastError((asked & FORMAT_MESSAGE_FROM_SYSTEM) !== 0

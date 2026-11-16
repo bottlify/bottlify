@@ -15,11 +15,12 @@
  * program sets them and change nothing drawn.
  */
 
+import { processAwareness, setProcessAwareness } from '../user32/dpi.js';
+
 const S_OK = 0;
 
 const E_INVALIDARG = 0x80070057 | 0;
 const E_ACCESSDENIED = 0x80070005 | 0;
-const DWM_E_COMPOSITIONDISABLED = 0x80263001 | 0;
 
 /** PROCESS_DPI_AWARENESS: unaware, system aware, per-monitor aware. */
 const PROCESS_PER_MONITOR_DPI_AWARE = 2;
@@ -28,6 +29,14 @@ const STANDARD_DPI = 96;
 const DWMWA_EXTENDED_FRAME_BOUNDS = 9;
 const DWMWA_CLOAKED = 14;
 const DWMWA_LAST = 38;
+/**
+ * DWM_TIMING_INFO, packed to a byte: its size, and where the fields answered
+ * are - rateRefresh, qpcRefreshPeriod, rateCompose, qpcVBlank, cRefresh,
+ * qpcCompose, cFrame.
+ */
+const DWM_TIMING_INFO_SIZE = 292;
+const TIMING = { RATE_REFRESH: 4, REFRESH_PERIOD: 12, RATE_COMPOSE: 20, VBLANK: 28,
+    REFRESH: 36, COMPOSE: 48, FRAME: 56 };
 
 /** WTS_INFO_CLASS's classes answered, and WTS_CONNECTSTATE_CLASS's WTSActive. */
 const WTS_SESSION_ID = 4;
@@ -54,6 +63,10 @@ const ERROR_INVALID_PARAMETER = 87;
  * @property {(address: number) => void} free
  * @property {string} userName
  * @property {string} computerName
+ * @property {import('../user32/dpi.js').DpiState} dpi  the process's awareness, user32's too
+ * @property {number} refresh  the display's rate, Hz
+ * @property {() => number} now  QueryPerformanceCounter's clock, milliseconds
+ * @property {number} performanceFrequency  QueryPerformanceFrequency's answer
  */
 
 /** @param {number} value */
@@ -65,8 +78,6 @@ const dword = value=>{
 
 /** @param {DisplayHost} host */
 export function createShcoreFunctions(host){
-    /** The awareness the process set, once; null until it does. @type {number | null} */
-    let awareness = null;
     return {
         /** HRESULT SetProcessDpiAwareness(PROCESS_DPI_AWARENESS value): once a process. */
         SetProcessDpiAwareness: {
@@ -77,12 +88,7 @@ export function createShcoreFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                if (awareness !== null)
-                {
-                    return E_ACCESSDENIED;
-                }
-                awareness = value >>> 0;
-                return S_OK;
+                return setProcessAwareness(host.dpi, value >>> 0) ? S_OK : E_ACCESSDENIED;
             },
         },
 
@@ -95,7 +101,7 @@ export function createShcoreFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                host.writeMemory(out >>> 0, dword(awareness ?? 0));
+                host.writeMemory(out >>> 0, dword(processAwareness(host.dpi)));
                 return S_OK;
             },
         },
@@ -226,13 +232,45 @@ export function createDwmapiFunctions(host){
         },
 
         /**
-         * HRESULT DwmGetCompositionTimingInfo(HWND, DWM_TIMING_INFO *): the
-         * window manager's timing is not kept here; a program falls back to
-         * its own clock.
+         * HRESULT DwmGetCompositionTimingInfo(HWND hwnd, DWM_TIMING_INFO *info)
+         *
+         * The composition's refresh, as a renderer that paces itself on it
+         * (WPF) reads it: the display's rate, the period and the last vertical
+         * blank on QueryPerformanceCounter's clock, and the refreshes so far.
+         * The window manager composes every refresh, so the frame counts are
+         * the refresh counts; what it does not keep (pixels, late frames) is 0.
+         * hwnd must be NULL, as from Windows 8.1.
          */
         DwmGetCompositionTimingInfo: {
             argBytes: 8,
-            handler: ()=>DWM_E_COMPOSITIONDISABLED,
+            /** @param {number[]} args */
+            handler: ([hwnd, info])=>{
+                if ((hwnd >>> 0) !== 0 || (info >>> 0) === 0
+                    || new DataView(host.readMemory(info >>> 0, 4).slice().buffer)
+                        .getUint32(0, true) !== DWM_TIMING_INFO_SIZE)
+                {
+                    return E_INVALIDARG;
+                }
+                const ticks = BigInt(Math.round(host.now() * host.performanceFrequency / 1000));
+                const period = BigInt(Math.round(host.performanceFrequency / host.refresh));
+                const refreshes = ticks / period;
+                const vblank = refreshes * period;
+                const bytes = new Uint8Array(DWM_TIMING_INFO_SIZE);
+                const view = new DataView(bytes.buffer);
+                view.setUint32(0, DWM_TIMING_INFO_SIZE, true);
+                for (const at of [TIMING.RATE_REFRESH, TIMING.RATE_COMPOSE])
+                {
+                    view.setUint32(at, host.refresh, true);
+                    view.setUint32(at + 4, 1, true);
+                }
+                view.setBigUint64(TIMING.REFRESH_PERIOD, period, true);
+                view.setBigUint64(TIMING.VBLANK, vblank, true);
+                view.setBigUint64(TIMING.REFRESH, refreshes, true);
+                view.setBigUint64(TIMING.COMPOSE, vblank, true);
+                view.setBigUint64(TIMING.FRAME, refreshes, true);
+                host.writeMemory(info >>> 0, bytes);
+                return S_OK;
+            },
         },
 
         /** HRESULT DwmFlush(void) */

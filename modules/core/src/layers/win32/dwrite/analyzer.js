@@ -21,6 +21,7 @@
  */
 
 import { createComObject } from '../ole32/objects.js';
+import { outlinesOf, rasterize } from './outline.js';
 import {
     JUSTIFY, SCRIPT, bidiLevels, codePoints, itemize, justification, lineBreakpoints, mirrored,
 } from './text.js';
@@ -483,6 +484,37 @@ export function createAnalysis(a){
         : face.glyphs.box(glyph));
 
     /**
+     * A face loaded from a file draws its own outlines: each glyph drawn once
+     * a size, kept with the face for as long as it stands.
+     *
+     * @type {WeakMap<object, { outline: (glyph: number) => any[],
+     *     drawn: Map<string, ReturnType<typeof rasterize>> }>}
+     */
+    const drawnFaces = new WeakMap();
+    /**
+     * A glyph of a face from a file at `pixels` to the em, as `rasterize` draws it.
+     *
+     * @param {import('./fonts.js').Face} face @param {number} glyph @param {number} pixels
+     */
+    const fileGlyph = (face, glyph, pixels)=>{
+        let held = drawnFaces.get(face);
+        if (!held)
+        {
+            held = { outline: outlinesOf(face.tables), drawn: new Map() };
+            drawnFaces.set(face, held);
+        }
+        const key = `${glyph}@${pixels}`;
+        let image = held.drawn.get(key);
+        if (!image)
+        {
+            image = rasterize(held.outline(glyph),
+                pixels / Math.max(1, face.metrics.designUnitsPerEm));
+            held.drawn.set(key, image);
+        }
+        return image;
+    };
+
+    /**
      * The run's coverage over a rectangle, a byte a pixel: each pixel's centre
      * taken back through the transform into the run and read from the glyph
      * the engine drew there.
@@ -501,9 +533,7 @@ export function createAnalysis(a){
         const system = face.system;
         if (!system)
         {
-            say('IDWriteGlyphRunAnalysis::CreateAlphaTexture', 'a face loaded from a file is'
-                + ' not drawn: there is no rasteriser for its outlines', 'loss');
-            return out;
+            return fileCoverage(state, rect, out);
         }
         const pixels = state.emSize * ppd;
         const request = { ...system.request, height: -Math.max(1, Math.round(pixels)) };
@@ -537,6 +567,51 @@ export function createAnalysis(a){
                     }
                     const gx = Math.floor((rx - x) / fit - image.left);
                     const gy = Math.floor((ry - y) / fit + metrics.ascent - image.top);
+                    if (gx >= 0 && gy >= 0 && gx < image.width && gy < image.height)
+                    {
+                        value = Math.max(value, image.coverage[gy * image.width + gx]);
+                    }
+                }
+                out[row * width + column] = state.mode === RENDERING.ALIASED
+                    ? (value >= 128 ? 255 : 0) : value;
+            }
+        }
+        return out;
+    };
+
+    /**
+     * `coverage` for a face loaded from a file: its glyphs drawn from their
+     * outlines ('glyf'). A face of PostScript outlines ('CFF ') is not drawn, said.
+     *
+     * @param {any} state @param {{ left: number, top: number, right: number, bottom: number }} rect
+     * @param {Uint8Array} out
+     */
+    const fileCoverage = (state, rect, out)=>{
+        const { face, matrix, ppd, origin, placed } = state;
+        const width = rect.right - rect.left;
+        const det = matrix[0] * matrix[3] - matrix[1] * matrix[2];
+        if (!face.tables.has('glyf') || det === 0)
+        {
+            say('IDWriteGlyphRunAnalysis::CreateAlphaTexture', 'a face of PostScript (CFF)'
+                + ' outlines loaded from a file is not drawn', 'loss');
+            return out;
+        }
+        const pixels = state.emSize * ppd;
+        const drawn = placed.map((/** @type {{ glyph: number, x: number, y: number }} */
+            { glyph, x, y })=>({ x, y, image: fileGlyph(face, glyph, pixels) }));
+        for (let row = 0; row < rect.bottom - rect.top; row++)
+        {
+            for (let column = 0; column < width; column++)
+            {
+                const tx = rect.left + column + 0.5 - origin.x - matrix[4] * ppd;
+                const ty = rect.top + row + 0.5 - origin.y - matrix[5] * ppd;
+                const rx = (tx * matrix[3] - ty * matrix[2]) / det;
+                const ry = (ty * matrix[0] - tx * matrix[1]) / det;
+                let value = 0;
+                for (const { x, y, image } of drawn)
+                {
+                    const gx = Math.floor(rx - x - image.left);
+                    const gy = Math.floor(ry - y - image.top);
                     if (gx >= 0 && gy >= 0 && gx < image.width && gy < image.height)
                     {
                         value = Math.max(value, image.coverage[gy * image.width + gx]);

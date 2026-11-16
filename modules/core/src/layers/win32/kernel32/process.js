@@ -94,7 +94,7 @@ const LONG_POINTER_AS_IS = [0x48, 0x89, 0xc8, 0xc3];
  * ahead by more than a read's worth. It stays exact in a double for about a
  * hundred days of a process's life.
  */
-const PERFORMANCE_FREQUENCY = 1_000_000_000n;
+export const PERFORMANCE_FREQUENCY = 1_000_000_000n;
 
 /**
  * Byte offsets within the block the clock routines read.

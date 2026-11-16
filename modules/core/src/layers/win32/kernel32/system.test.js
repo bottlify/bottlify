@@ -955,6 +955,28 @@ test('FormatMessageA formats a caller\'s own string, not only the system table',
     assert.equal(String.fromCharCode(...host.bytes.slice(0x300, 0x307)), 'Forward');
 });
 
+test('FormatMessage reads a module own message table, then the system table', ()=>{
+    // An installer logs through its image's RT_MESSAGETABLE: a NULL source
+    // is the process's own image. Without the table every line it logs is lost.
+    const host = fakeHost();
+    /** @type {number[][]} */
+    const asked = [];
+    const fns = createSystemFunctions({ ...host, findMessage: (module, language, id)=>{
+        asked.push([module, language, id]);
+        return id === 101 ? 'Detect begin, %1!u! packages' : null;
+    } });
+    host.view.setUint32(0x260, 3, true);
+    // FROM_HMODULE | ARGUMENT_ARRAY
+    assert.equal(fns.FormatMessageW.handler([0x2800, 0, 101, 0, 0x300, 0x80, 0x260]), 24);
+    assert.equal(String.fromCharCode(...new Uint16Array(host.bytes.slice(0x300, 0x300 + 48).buffer)),
+        'Detect begin, 3 packages');
+    assert.deepEqual(asked, [[0, 0, 101]]);
+    assert.equal(fns.FormatMessageW.handler([0x2800, 0, 102, 0, 0x300, 0x80, 0x260]), 0,
+        'an id the table has not');
+    // FROM_HMODULE | FROM_SYSTEM: the module has no such message, the system has.
+    assert.equal(fns.FormatMessageW.handler([0x1a00, 0x400000, 2, 0, 0x300, 0x80, 0]) > 0, true);
+});
+
 test('FormatMessageA expands inserts from the arguments it is handed', ()=>{
     const host = fakeHost();
     const fns = createSystemFunctions(host);
