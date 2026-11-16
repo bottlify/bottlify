@@ -66,7 +66,8 @@ import {
     DRAWABLE_MIRRORS, RENDER_STATE_MIRROR, TRANSFORM_MIRROR, VIEWPORT_GUARD_8, VIEWPORT_MIRROR,
     commandCode, compiledAt, createShadow, settledAfter, depthStencilMirror, renderTargetMirror,
     COPY_GUARD_8,
-    getRenderStateCode, getSurfaceDescCode, getSurfaceLevelCode, getTextureStageStateCode,
+    getLevelDescCode, getRenderStateCode, getSurfaceDescCode, getSurfaceLevelCode,
+    getTextureStageStateCode,
     getTransformCode,
     getViewportCode, lockCode, moveCopyCode, stageStateMirror, unlockCode, HOST_MIRRORS,
     appendCommand,
@@ -638,6 +639,7 @@ export function createDirect3D8Seam(
     /** @type {Record<string, (builder: { trap: number }) => number>} */
     const textureGuests = guestsBut(levelGroup, allocate
         ? { GetSurfaceLevel: ({ trap })=>placeCode(at=>getSurfaceLevelCode(at, trap)),
+            GetLevelDesc: ({ trap })=>placeCode(at=>getLevelDescCode(at, trap)),
             ...levelGuests('texture') }
         : {});
 
@@ -985,9 +987,16 @@ export function createDirect3D8Seam(
             return answer;
         },
 
+        // The level is published on the way, so the next call is the guest's.
         /** @param {any} texture @param {number[]} args */
-        GetLevelDesc: (texture, [level, out])=>writeLevelDesc(
-            held=>texture.GetSurfaceLevel(level >>> 0, held), out),
+        GetLevelDesc: (texture, [level, out])=>writeLevelDesc(held=>{
+            const hr = texture.GetSurfaceLevel(level >>> 0, held);
+            if (hr === D3D_OK && held.surface)
+            {
+                noteLevel(texture, level >>> 0, held.surface);
+            }
+            return hr;
+        }, out),
 
         // Locking a level through the texture and through the level's own
         // surface are one lock, which is what makes taking both an error.

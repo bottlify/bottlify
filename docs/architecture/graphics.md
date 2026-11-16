@@ -42,7 +42,9 @@ flowchart TB
   `Lock` and `Unlock`, and the getters of render states, transforms, texture stage states and
   the viewport (and Direct3D 9's sampler states) run in the guest: a setter or a draw writes a
   record into a ring in the device's block in guest memory, a getter reads the value its setter
-  wrote there. The host makes the ring's calls, in order, through the device's own methods on
+  wrote there. A texture's `GetSurfaceLevel` and `GetLevelDesc` and a surface's `GetDesc` read
+  the pointer and the description the host published once in the texture's and the surface's
+  own blocks. The host makes the ring's calls, in order, through the device's own methods on
   its way into any method of its own (`graphics/seam/shadow.js`, `d3d8/commands.js`).
   With several executors the routine and the host may run on different cores, and a host that
   reorders stores (arm64) may show one core's stores to another out of order. So a routine
