@@ -35,7 +35,7 @@ import { CallStack, Exit, Local, STATE_PARAMS, keepsFlags } from './region.js';
 import {
     checkAccess, emitStaleExit, looseStackStore, noteStore, operandValues, readsOnly, stackAccess,
     windowAddress,
-    wrapsRead, wrapMask, ramAlways, ram, ramAt,
+    wrapsRead, wrapMask, ramAlways, ram, ramAt, registersChanged,
 } from './memory.js';
 import { CALL_STRIDE, Mechanism, Tables, pageFlagsAt } from '../runtime/layout.js';
 import { PageFlag, STORE_FLAGS } from '../runtime/pages.js';
@@ -4686,6 +4686,132 @@ function bulkTurn(e, size){
     };
 }
 
+/** The most bytes a `rep` of a count the block set is copied or filled in place (`shortString`). */
+const SHORT_STRING_BYTES = 256;
+
+/**
+ * The count a `rep` being emitted finds in ecx where its block set it by a
+ * `mov ecx, imm` with nothing written to ecx since, or -1.
+ *
+ * @param {E} e @param {Instruction} instruction
+ */
+function countSet(e, instruction){
+    const block = e.region.blocks[e.blockIndex];
+    if (block === undefined || block.instructions[e.at] !== instruction)
+    {
+        return -1;
+    }
+    for (let at = e.at - 1; at >= 0; at--)
+    {
+        const before = block.instructions[at];
+        const [dst, src] = before.operands;
+        if (before.op === 'mov' && dst?.kind === 'reg' && dst.reg === 1 && dst.size === 4
+            && src?.kind === 'imm')
+        {
+            return /** @type {number} */ (src.value) >>> 0;
+        }
+        if ((registersChanged([before]) & 1 << 1) !== 0)
+        {
+            return -1;
+        }
+    }
+    return -1;
+}
+
+/**
+ * A `rep movs` or `rep stos` of a count its block set (`mov ecx, 18; rep
+ * movsd`: a compiler's copy of a structure, its clearing of one) and of few
+ * bytes, made in place where the bulk path would take it whole in one turn:
+ * DF clear, the budget for it, each run on one page with no flag the bulk
+ * path tests, and the destination not just ahead of the source. Loads and
+ * stores going up, eight bytes at a time, then the registers, the count and
+ * the budget as the bulk path leaves them. The bulk path's turn for a run of
+ * 72 bytes was a call of the memory's copy and the reckoning of a turn about
+ * it: a sound mixer's filter that copies its state for every sample spent
+ * four parts in ten of its time there.
+ *
+ * @param {E} e @param {Instruction} instruction
+ */
+function shortString(e, instruction){
+    const count = countSet(e, instruction);
+    const { op, size } = instruction;
+    const bytes = count * size;
+    if (count <= 0 || bytes > SHORT_STRING_BYTES)
+    {
+        return;
+    }
+    const { b } = e;
+    const ramBase = e.layout.ramBase;
+    const table = pageFlagsAt(e.layout);
+    const ecx = registerLocal(e, 1);
+    const esi = registerLocal(e, 6);
+    const edi = registerLocal(e, 7);
+    const movs = op === 'movs';
+    const units = (bytes + (1 << BULK_UNIT_SHIFT) - 1) >> BULK_UNIT_SHIFT;
+    /** Whether the run from a pointer lies on its page, with none of `bits`.
+     * @param {number} pointer @param {number} bits */
+    const clean = (pointer, bits)=>{
+        b.localGet(pointer).i32const(4095).op(I32.and).i32const(4096 - bytes).op(I32.leU);
+        b.localGet(pointer).i32const(12).op(I32.shrU)
+            .load('i32_8u', { offset: table }).i32const(bits).op(I32.and).op(I32.eqz);
+        b.op(I32.and);
+    };
+    // The count still whole: a turn of the bulk path, or a slice's end, leaves less.
+    b.localGet(ecx).i32const(count | 0).op(I32.eq);
+    b.localGet(Local.t2).i32const(size).op(I32.eq).op(I32.and);
+    b.localGet(Local.budget).i32const(units).op(I32.geS).op(I32.and);
+    clean(edi, PageFlag.INACCESSIBLE | STORE_FLAGS);
+    b.op(I32.and);
+    if (movs)
+    {
+        clean(esi, PageFlag.INACCESSIBLE);
+        b.op(I32.and);
+        // Not 0 < the destination's lead on the source < the run's bytes.
+        b.localGet(edi).localGet(esi).op(I32.sub).i32const(1).op(I32.sub)
+            .i32const(bytes - 1).op(I32.geU).op(I32.and);
+    }
+    else
+    {
+        // The element repeated through a quadword.
+        const lanes = size === 1 ? 0x0101010101010101n : size === 2 ? 0x0001000100010001n
+            : 0x0000000100000001n;
+        b.localGet(registerLocal(e, 0));
+        mask(e, size);
+        b.op(I64.extendU).i64const(lanes).op(I64.mul).localSet(Local.t64);
+    }
+    e.openIf('short', EMPTY);
+    let at = 0;
+    for (const [width, kind] of /** @type {const} */ ([[8, 'i64'], [4, 'i64_32'], [2, 'i64_16'],
+        [1, 'i64_8']]))
+    {
+        for (; at + width <= bytes; at += width)
+        {
+            b.localGet(edi);
+            if (movs)
+            {
+                b.localGet(esi).load(width === 8 ? 'i64' : `${kind}u`, { offset: ramBase + at });
+            }
+            else
+            {
+                b.localGet(Local.t64);
+            }
+            b.store(kind, { offset: ramBase + at });
+        }
+    }
+    for (const pointer of movs ? [edi, esi] : [edi])
+    {
+        b.localGet(pointer).i32const(bytes).op(I32.add).localSet(pointer);
+    }
+    b.i32const(0).localSet(ecx);
+    b.localGet(Local.budget).i32const(units).op(I32.sub).localTee(Local.budget)
+        .i32const(0).op(I32.leS);
+    e.openGuard('shortSpent', EMPTY);
+    e.exitAt(instruction.eip, Exit.BUDGET);
+    e.close();
+    b.br(e.depthOf('again'));
+    e.close();
+}
+
 /**
  * A `rep movs` or `rep stos` takes, per turn of its loop, every element that
  * lies wholly on the current page of each pointer the way DF goes (as far as
@@ -4955,6 +5081,7 @@ function stringInstruction(e, instruction){
         }
         else if ((op === 'movs' || op === 'stos') && e.context.undo === undefined && !fsSource)
         {
+            shortString(e, instruction);
             bulkString(e, instruction);
         }
         if (!long && compare && !fsSource)
