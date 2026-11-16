@@ -1033,6 +1033,13 @@ export function createDirectInput(
             {
                 return DI_NOEFFECT;
             }
+            // A device with no data format is not taken (Wine's dinput
+            // test_acquire): the program then sets one, and its buffer size,
+            // on a device that is not held - taken, it could set neither.
+            if (!formats.has(device))
+            {
+                return DIERR_INVALIDPARAM;
+            }
             // A device that reads only in the foreground is not the
             // program's while another window is (Wine's device8.c
             // test_sys_mouse).
