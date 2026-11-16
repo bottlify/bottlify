@@ -40,6 +40,7 @@ const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
 const ERROR_ACCESS_DENIED = 5;
 const ERROR_INVALID_HANDLE = 6;
+const ERROR_GEN_FAILURE = 31;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_INSUFFICIENT_BUFFER = 122;
 const ERROR_INVALID_NAME = 123;
@@ -792,6 +793,18 @@ export function createServiceFunctions(host){
             if (host.fileExists && image !== '' && !host.fileExists(image))
             {
                 return fail(ERROR_FILE_NOT_FOUND);
+            }
+            // No code runs in a kernel here: a driver fails as one whose
+            // DriverEntry answered STATUS_UNSUCCESSFUL, and the program goes
+            // on without it as it does where its driver will not load
+            // (decisions.md); started as a process, its image ran as a program.
+            const base = numberOf(key, 'Type', SERVICE_WIN32_OWN_PROCESS)
+                & ~SERVICE_INTERACTIVE_PROCESS;
+            if (base === SERVICE_KERNEL_DRIVER || base === SERVICE_FILE_SYSTEM_DRIVER)
+            {
+                host.divergence?.(wide ? 'StartServiceW' : 'StartServiceA',
+                    `${name}: a kernel driver does not load here`);
+                return fail(ERROR_GEN_FAILURE);
             }
             const started = host.startService?.(name, textOf(key, 'ImagePath') ?? '') ?? null;
             if (started === 'running')

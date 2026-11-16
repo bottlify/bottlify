@@ -2350,3 +2350,10 @@ from 0 and refuses past 5). The assembly registers its classes under versioned n
 default, redirects, and reports the plain name. A window of version 6's class answers as version 6
 (`controlsVersion`): one control implementation, branching where the versions differ, not two
 copies. *2026-11-15.*
+
+**A258. A kernel driver does not load: StartService of one fails with ERROR_GEN_FAILURE, as a
+driver whose DriverEntry answered STATUS_UNSUCCESSFUL.** No code runs in a kernel here, so a
+driver a program installs (a hardware monitor's, a scanner's) cannot do what it is for; started
+as a process, its image ran as a program and the program believed its driver was there. Its
+service key is still created and kept, and the program goes on as it does on a machine where its
+driver will not load. The refusal is said as a divergence. *2026-11-16.*
