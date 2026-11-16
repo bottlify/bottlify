@@ -41,7 +41,8 @@ export function createPublish(state){
     const { EVICT_HOLD, GRANULES, WATCH_REGIONS, barrenAdd, batchInstances, byPage, checkedAt,
         closedIn, closedPages, compiledBytes, countExtents, counts, cover, coverKeys, crtFormed,
         dropped, emitCache, emitOptions, evictedKeys, freeTable, freeTranslator, heldStarts,
-        inFlight, instantiate, joinHeld, joinModule, keepBatch, leaveModule, noteWay, placedOf,
+        inFlight, instantiate, joinHeld, joinModule, keepBatch, leaveModule, noteWay, ownKeys,
+        placedOf,
         precisionFlags, precisionJob, precisionOf, recordAt, recordOf, refused, refusedWhy,
         regions, relaxedFlagReads, roundedKeys, shapeOf, share, sourcesChanged, stackCodeSeen,
         stackPages, stamp, storeKey, storeModule, storeTrace, storeVersionFor, throughStack, trace,
@@ -86,7 +87,8 @@ export function createPublish(state){
      * answer and an inline emission take the same path.
      *
      * @param {{ region: import('../region.js').Region, entryTop: number, stamp: string,
-     *     wide?: boolean, narrow?: boolean, floats?: boolean, checked?: boolean, copies?: boolean,
+     *     wide?: boolean, narrow?: boolean, floats?: boolean, checked?: boolean,
+     *     ownWindows?: boolean, copies?: boolean,
      *     loose?: boolean, wrapped?: boolean, anyTop?: boolean, byHash?: boolean,
      *     replaces?: RegionRecord, targets?: [number, number[]][], copying?: boolean,
      *     sites?: number[], waited?: boolean }} one
@@ -127,7 +129,8 @@ export function createPublish(state){
             || (one.floats === true && roundedKeys.has(keyOf(region.entry, one.entryTop)))
             || (one.loose && !rt.loose)
             || (one.wrapped && rt.readsChecked)
-            || (one.checked !== true && checkedAt(region, one.entryTop)))
+            || (one.checked !== true && checkedAt(region, one.entryTop))
+            || (one.ownWindows !== true && ownKeys.has(keyOf(region.entry, one.entryTop))))
         {
             // A page of it was written while the batch was built.
             counts.publishMs += clock() - publishAt;
@@ -150,7 +153,7 @@ export function createPublish(state){
             // Every block leaves at once (an instruction the other executor's
             // first): nothing to enter, nothing to keep.
             counts.publishMs += clock() - publishAt;
-            barrenAdd(eip, top);
+            barrenAdd(eip, top, 'every block cut');
             return 0;
         }
         /** @type {Map<number, [number, number]>} */
@@ -197,7 +200,7 @@ export function createPublish(state){
             linked: built.linked === true, wide: one.wide === true, loose: one.loose === true,
             wrapped: one.wrapped === true,
             narrow: one.narrow === true, floats: one.floats === true,
-            checked: one.checked === true,
+            checked: one.checked === true, ownWindows: one.ownWindows === true,
             copies: one.copies === true, closed, blocks: built.labels.length,
             anyTop: one.anyTop ?? !usesX87(region),
             ...((one.byHash ?? one.replaces?.byHash) === true ? { byHash: true } : {}),
@@ -425,7 +428,7 @@ export function createPublish(state){
                 // and failed again, and translated code left for it all the while.
                 // Barren until its page is written, which forms it again.
                 inFlight.delete(keyOf(metas[i].region.entry, metas[i].entryTop));
-                barrenAdd(metas[i].region.entry, metas[i].entryTop);
+                barrenAdd(metas[i].region.entry, metas[i].entryTop, `emit: ${result.message}`);
                 counts.emitFailures++;
             }
         }
@@ -603,7 +606,8 @@ export function createPublish(state){
             const one = { region: { entry: record.entry, hash: record.hash },
                 entryTop: record.entryTop, wide: record.wide, narrow: record.narrow,
                 floats: record.floats, checked: record.checked, copies: record.copies,
-                loose: record.loose, wrapped: record.wrapped, targets: record.targets,
+                ownWindows: record.ownWindows, loose: record.loose,
+                wrapped: record.wrapped, targets: record.targets,
                 anyTop: record.anyTop, byHash: record.byHash, summary: record.summary };
             store.put(storeKey(one), packRegion({ ...region,
                 module: new Uint8Array(0), moduleKey: key, linked: true, shape: shapeOf(one) },

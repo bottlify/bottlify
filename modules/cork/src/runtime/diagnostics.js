@@ -171,6 +171,9 @@ export function createDiagnostics(state){
         // Calls that found a batch whole and every translator busy (`holdMs`).
         formedWaiting: 0,
         shapeMisses: 0, shapeChecked: 0, x87RelaxedReads: 0, floatMisses: 0, floatsRounded: 0,
+        windowsOwn: 0,
+        // Stores into pages of code the runtime was told of (`storedInto`).
+        codeStores: 0,
         // The milliseconds of translating, by the part of a batch they are:
         // `translateMs` is their sum, so a frame's own figure and the split
         // always agree.
@@ -226,7 +229,8 @@ export function createDiagnostics(state){
     // precision it was not formed for (PRECISION), a stack shape it was not
     // checked for (SHAPE). One count read alone mixes them, and the held ones
     // land on addresses that are translated, which reads as a link not made.
-    const untranslatedBy = { bare: 0, held: 0, precision: 0, shape: 0, range: 0, other: 0 };
+    const untranslatedBy = { bare: 0, held: 0, precision: 0, shape: 0, range: 0, made: 0,
+        other: 0 };
     /** @type {Record<string, number>} */
     const refused = {};
     /** @type {Record<string, number>} why an instruction was left out, with its block */
@@ -271,9 +275,10 @@ export function createDiagnostics(state){
         {
             return 'inaccessible';
         }
-        if (rt.barrenAt(address))
+        const barren = rt.barrenAt(address);
+        if (barren !== null)
         {
-            return 'barren';
+            return `barren (${barren})`;
         }
         for (const eip of rt.queue.values())
         {
@@ -602,6 +607,9 @@ export function createDiagnostics(state){
             // leaving and went back to rounding from doubles (`floatSingles`).
             floatMisses: counts.floatMisses,
             floatsRounded: counts.floatsRounded,
+            // Regions translated again with each block testing its own windows after
+            // they kept leaving held (`heldMissed`).
+            windowsOwn: counts.windowsOwn,
             // Translated x87 status-word reads that may see what `precise`
             // alone keeps: where a strange result is worth a run with it.
             x87RelaxedReads: counts.x87RelaxedReads,
@@ -656,6 +664,10 @@ export function createDiagnostics(state){
             exitsByTarget: [...rt.exitTargets].sort((a, b)=>b[1].count - a[1].count).slice(0, 32)
                 .map(([address, { count, held, first, last, way }])=>({ address, count, held,
                     first, last, way, reason: held === count ? 'held' : missReason(address) })),
+            // The entries that met another x87 stack than theirs, busiest first:
+            // `unowned` ones are counted against no region and stay interpreted.
+            shapeMissesByTarget: [...rt.shapeTargets].sort((a, b)=>b[1].count - a[1].count)
+                .slice(0, 32).map(([address, one])=>({ address, ...one })),
             refused: { ...refused },
             refusedWhy: { ...refusedWhy },
             // Where a program reads what `precise: false` leaves: a title that

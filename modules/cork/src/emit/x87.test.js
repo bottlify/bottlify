@@ -98,6 +98,31 @@ test('the tracker: pushes, pops and the exchange as a permutation', ()=>{
         'ST0 (register 7) and ST2 (register 1) swap locals');
 });
 
+test('the code after a call through a register or a slot is compiled for the float the callee'
+    + ' returns, whatever chain of calls guessed its block', ()=>{
+    // 1000: call esi            a call out: its return address is guessed
+    // 1002: call [0x4000]       and so is this one's, in the same pass
+    // 1008: fstp dword [esp-8]  reads ST0 first: the callee returned a float
+    // 100c: ret
+    const m = createTestMachine();
+    m.write(CODE, [0xff, 0xd6, 0xff, 0x15, 0x00, 0x40, 0x00, 0x00, 0xd9, 0x5c, 0x24, 0xf8, 0xc3]);
+    const region = formRegion(a=>new Uint8Array(m.memory.buffer)[m.layout.ramBase + a], CODE);
+    const second = region.blocks.findIndex(block=>block.start === 0x1002);
+    const after = region.blocks.findIndex(block=>block.start === 0x1008);
+    assert.ok(second >= 0 && after >= 0);
+    // Without the calls as edges every return address is guessed; with them the
+    // edge carries the top. Either way the block that pops the float starts one
+    // below the call's top - the top the test after the call asks of the callee.
+    for (const callReturn of [false, true])
+    {
+        const { states } = trackRegion(region, 0, callReturn);
+        assert.equal(states[second]?.top, 0, 'nothing reads a register after the first call');
+        assert.equal(states[after]?.top, 7, `callReturn ${callReturn}: the float is in register 7`);
+    }
+    const from5 = trackRegion(region, 5, false);
+    assert.equal(from5.states[after]?.top, 4, 'from the top the region was entered with');
+});
+
 test('the tracker compiles a block met with two tops for one of them, and cuts it only when'
     + ' told not to guess', ()=>{
     // 1000: fld1            top 7

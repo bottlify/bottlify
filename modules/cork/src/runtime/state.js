@@ -274,6 +274,8 @@ export function baseState({ memory, ram, layout, sharedLayout = undefined, confi
  * @property {number} [crossed]  crossings into it read since the last reading
  * @property {boolean} [movedAlone]  a merge took it alone into the module calling it
  * @property {number} [merged]  the merges that built it again (`MERGES_A_REGION`)
+ * @property {boolean} [ownWindows]  each block tests its own windows (`heldMissed`)
+ * @property {number} [heldMisses]  the times it left held
  * @property {number} [floatMisses]  its float results that were not the processor's
  * @property {number} [shapeMisses]  its entries' tests that failed
  * @property {[number, number[]][]} [targets]  by indirect call, the callees formed into it

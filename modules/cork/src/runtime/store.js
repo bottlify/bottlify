@@ -119,6 +119,7 @@ export function createStore(state){
      * @param {{ region: { entry: number, hash: string }, entryTop: number,
      *     targets?: [number, number[]][],
      *     wide?: boolean, narrow?: boolean, floats?: boolean, checked?: boolean,
+     *     ownWindows?: boolean,
      *     copies?: boolean, summary?: import('./summary.js').RegionSummary }} one
      * @returns {import('./cache.js').RegionShape}
      */
@@ -129,6 +130,7 @@ export function createStore(state){
         ...(one.narrow === true ? { narrow: true } : {}),
         ...(one.floats === true ? { floats: true } : {}),
         ...(one.checked === true ? { checked: true } : {}),
+        ...(one.ownWindows === true ? { ownWindows: true } : {}),
         ...(one.copies === true ? { copies: true } : {}),
         ...summed(one) });
     /** A region's summary as its record's shape holds it: the formed region's, or
@@ -358,6 +360,7 @@ export function createStore(state){
             || flags.narrow !== (shape.narrow === true);
         const otherFloats = shape.floats === true && !flags.floats;
         if (otherPrecision || otherFloats
+            || (shape.ownWindows !== true && flags.ownWindows)
             || (shape.checked !== true && checkedAt(region, one.entryTop)))
         {
             counts.missChanged++;
@@ -376,6 +379,7 @@ export function createStore(state){
         one.narrow = shape.narrow === true;
         one.floats = shape.floats === true;
         one.checked = shape.checked === true;
+        one.ownWindows = shape.ownWindows === true;
         one.copies = shape.copies === true;
         if (shape.targets !== undefined)
         {
@@ -596,17 +600,27 @@ export function createStore(state){
      * they are formed, in one wait, at both keys each (`recordBefore`).
      *
      * @param {Forming} step @param {any} store
+     * @param {number} [from]  the first candidate asked for: the callees a region just
+     *     formed added to the batch are asked for together as it is formed, one wait a
+     *     region - formed first and looked up after, a process started again formed two
+     *     regions of three it then took from the store
      */
-    const prefetch = (step, store)=>{
+    const prefetch = (step, store, from = step.next)=>{
         /** @type {string[]} */
         const keys = [];
-        for (let at = step.next; at < step.batch.length; at++)
+        for (let at = from; at < step.batch.length; at++)
         {
             const [key, eip] = step.batch[at];
             const owner = storedOwner(eip, key % 16);
             const entry = owner >= 0 ? Math.floor(owner / 16) : eip;
             const top = owner >= 0 ? owner % 16 : key % 16;
-            keys.push(candidateKey(entry, top, false), candidateKey(entry, top, true));
+            for (const one of [candidateKey(entry, top, false), candidateKey(entry, top, true)])
+            {
+                if (step.known?.has(one) !== true)
+                {
+                    keys.push(one);
+                }
+            }
         }
         try
         {
@@ -632,8 +646,8 @@ export function createStore(state){
      * formed first as this run's regions and callees had it and then again
      * as the record says: on eight executors, each forming what it reaches
      * beside regions of its own, two of three hits were formed twice. A store
-     * across a link was asked as the batch began (`prefetch`); a candidate
-     * added since, a callee, is formed first and looked up after, as before.
+     * across a link was asked as the batch began, and for a region's callees
+     * as they joined it (`prefetch`).
      *
      * @param {Forming} step @param {any} store @param {number} eip @param {number} entryTop
      * @returns {{ key: string, shape: import('./cache.js').RegionShape } | null}

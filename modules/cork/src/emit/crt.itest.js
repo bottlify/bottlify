@@ -439,6 +439,38 @@ for (const name of /** @type {(keyof typeof FUNCTIONS)[]} */ (
     });
 }
 
+test('a region that begins at a call made as the operation has an entry there: the call left'
+    + ' to be made as it was goes to the host, not through the hash to its own block', ()=>{
+    // Code a call returns to that begins with a call of the runtime's: no entry,
+    // and it ran interpreted on every return.
+    const helpers = [entryOf('strlen')];
+    const text = [...new TextEncoder().encode('seventeen letters'), 0];
+    const m = createTestMachine({ ramSize: RAM });
+    m.write(FUNCTION, FUNCTIONS.strlen);
+    m.write(PROGRAM, [0xe8, ...rel(PROGRAM, FUNCTION), 0xf4]);          // call strlen; hlt
+    m.write(DATA, text);
+    m.write(STACK, u32(DATA));
+    m.setReg('esp', STACK);
+    const unit = m.translate(PROGRAM, { helpers });
+    const label = /** @type {number} */ (unit.translation.labels.get(PROGRAM));
+    assert.equal(unit.translation.cut.has(label), false, 'the block is an entry');
+    const exit = m.runProgram(PROGRAM, { helpers });
+    assert.equal(exit.kind, 3, 'ran to its hlt');
+    assert.equal(m.reg('eax'), 17);
+    // And where the operation cannot be made (the string's page closed), it leaves
+    // before the call for the host, with nothing run.
+    const closed = createTestMachine({ ramSize: RAM });
+    closed.write(FUNCTION, FUNCTIONS.strlen);
+    closed.write(PROGRAM, [0xe8, ...rel(PROGRAM, FUNCTION), 0xf4]);
+    closed.write(STACK, u32(DATA));
+    closed.pages.markRange(DATA, 0x1000, PageFlag.INACCESSIBLE);
+    closed.setReg('esp', STACK);
+    const left = closed.runProgram(PROGRAM, { helpers, maxRegions: 1 });
+    assert.equal(left.eip, PROGRAM, 'before the call');
+    assert.equal(left.retired, 0);
+    assert.equal(left.kind, -2, 'nothing run: the host makes the call');
+});
+
 test('a call to a function that is not the dictionary\'s, by a byte, is made as it is', ()=>{
     const helpers = [entryOf('memmove')];
     for (const [bytes, formed] of /** @type {[number[], boolean][]} */ ([[MEMMOVE, true],

@@ -28,7 +28,7 @@
 
 import { TIER_SLOT, enterRegion } from '../emit/region.js';
 import { RANGE, SHAPE } from '../emit/x87.js';
-import { HELD, PRECISION } from '../emit/memory.js';
+import { HELD, MADE, PRECISION } from '../emit/memory.js';
 import { openTranslationWorker } from './translator.js';
 import { keyOf } from './entries.js';
 import { PageFlag } from './pages.js';
@@ -84,14 +84,15 @@ export function createCorkRuntime(env){
     join(rt, { get corkRetired(){ return corkRetired; } });
     // The parts, each made over what the base and the parts before it hold (a part reads
     // what a later one makes through the state, when it runs).
-    const { noteStall, exits, untranslatedBy, interpretedAt, forcedStep, counters, diagnostics
+    const { noteStall, exits, untranslatedBy, interpretedAt, forcedStep, counters, counts,
+        diagnostics
     } = join(rt, createDiagnostics(rt));
     const { queue, buckets, heatOf, bucketOf, enqueue, barrenHas, misses, exitTargets, bornAt,
         EXIT_TARGETS_CAP, variantHeat, MISSES_CAP, decayMisses, inFlight, overdue
     } = join(rt, createQueue(rt));
     join(rt, createModules(rt));
     const { heldOnEntry, closedIn, copiesWanted } = join(rt, createRegions(rt));
-    const { readsFaulted, precisionMissed, floatMissed, shapeMissed
+    const { readsFaulted, precisionMissed, floatMissed, heldMissed, shapeMissed
     } = join(rt, createVariants(rt));
     const { liftVolatile, invalidatePage, storedInto, translatable, stored, codeWritten,
         takeWrites, markWritten, takeCodeWrites, noteStack } = join(rt, createCodeWrites(rt));
@@ -120,10 +121,13 @@ export function createCorkRuntime(env){
     // and when the block profile starts over.
     /** @type {(() => number) | null} */
     let tierEntered = null;
+    // Where the last run left held, -1 for none, and the stores into code told of by then.
+    let heldAt = -1;
+    let heldStores = 0;
     let missesInserted = 0;
     /** @type {Record<number, keyof typeof untranslatedBy>} */
     const VECTOR_NAMES = { 0: 'bare', [HELD]: 'held', [PRECISION]: 'precision', [SHAPE]: 'shape',
-        [RANGE]: 'range' };
+        [RANGE]: 'range', [MADE]: 'made' };
     /** @type {import('../../../core/src/layers/cpu/engine.js').ExitRecord} */
     const exit = { retired: 0, kind: 'untranslated', vector: 0 };
     let profileResetAt = import.meta.BOTTLIFY_DIAGNOSTICS !== false && profiling
@@ -184,12 +188,27 @@ export function createCorkRuntime(env){
             // collector's share of the cost.
             const before = counterWord();
             const tierBefore = tierEntered === null ? 0 : tierEntered();
+            // A region left held before this run, and what was run since stored into
+            // no code: the window it left for was one it did not reach (`heldMissed`),
+            // unless this run ends in the fault it was left for.
+            const leftHeld = heldAt >= 0 && counts.codeStores === heldStores ? heldAt : -1;
+            heldAt = -1;
             const code = enterRegion(fn, label, budget, view(), layout) >>> 0;
             const retired = (counterWord() - before) >>> 0;
             corkRetired += tierEntered === null ? retired
                 : retired - ((tierEntered() - tierBefore) >>> 0);
             const kind = KINDS[code & 0xff] ?? 'untranslated';
             exits[kind]++;
+            if (leftHeld >= 0 && retired === 0 && kind === 'untranslated')
+            {
+                // Nothing run yet: the host's own interpreter takes the instruction.
+                heldAt = leftHeld;
+            }
+            else if (leftHeld >= 0 && kind !== 'fault' && kind !== 'stale'
+                && pages.staleSize() === 0)
+            {
+                heldMissed(leftHeld);
+            }
             if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && kind === 'untranslated')
             {
                 untranslatedBy[VECTOR_NAMES[code >>> 8] ?? 'other']++;
@@ -217,6 +236,11 @@ export function createCorkRuntime(env){
                 if (code >>> 8 === HELD && retired === 0)
                 {
                     heldOnEntry(entry, one);
+                }
+                if (code >>> 8 === HELD)
+                {
+                    heldAt = view().getUint32(layout.eip, true);
+                    heldStores = counts.codeStores;
                 }
                 this.missAt(view().getUint32(layout.eip, true), view().getUint8(layout.x87Top),
                     code >>> 8 === HELD);

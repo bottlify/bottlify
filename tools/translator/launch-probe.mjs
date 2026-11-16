@@ -879,6 +879,13 @@ async function main(){
             .map((/** @type {any} */ { address, count, reason })=>
                 `${(address >>> 0).toString(16)} x${count} ${reason}`).join(', ')}`);
     }
+    if (cork?.shapeMissesByTarget?.length)
+    {
+        console.log(`  x87 shape misses by target: ${cork.shapeMissesByTarget.slice(0, 16)
+            .map((/** @type {any} */ { address, count, tops, unowned, checked })=>
+                `${(address >>> 0).toString(16)} x${count} tops ${tops.toString(2)}`
+                + ` unowned ${unowned} checked ${checked}`).join(', ')}`);
+    }
     if (cork?.mechanisms)
     {
         console.log(`  mechanisms: ${Object.entries(cork.mechanisms).filter(([, n])=>n > 0)
