@@ -507,6 +507,8 @@ export function engineContractProblem(engineModule, url){
  *     here otherwise (beside other regions, or before its callees were known).
  * @property {number} [formedAsRecorded]  Hits formed once, as their record says: the store
  *     answered before the region was formed.
+ * @property {number} [takenUnformed]  Hits taken by their records' summaries, the region not
+ *     formed (`summaries`).
  * @property {number} [formedShared]  Regions taken as a runtime sharing the store formed them
  *     (`sharedFormed`): every byte and page forming read answered as it did.
  * @property {{ held: number, hits: number, added: number, dropped: number } | null}

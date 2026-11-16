@@ -379,6 +379,7 @@ export function createForming(state){
             // calls dozens, each of which the interpreter otherwise ran
             // and whose loop, hot first, became a region of its own
             // headed there rather than at the function's start.
+            const asked = batch.length;
             for (const [callee, top] of callsOf(region, entryTop,
                 settings.summaries === false ? null : summaryOf(region, entryTop)))
             {
@@ -388,6 +389,10 @@ export function createForming(state){
                 {
                     batch.push([keyOf(callee, top), callee]);
                 }
+            }
+            if (batch.length > asked && store !== null && typeof store.getManyNow === 'function')
+            {
+                prefetch(step, store, asked);
             }
             for (const [opcode, times] of region.refused)
             {

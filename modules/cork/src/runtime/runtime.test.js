@@ -1212,6 +1212,49 @@ test('a region the store answers for at once is formed once, as its record says'
     }
 });
 
+test('the callees a region adds to its batch are asked of a store across a link before they'
+    + ' are formed, a wait a region: a run started again forms none of them', async()=>{
+    const settle = ()=>new Promise(resolve=>setTimeout(resolve, 0));
+    const F1 = CODE + 0x40;
+    const F2 = CODE + 0x80;
+    /** @param {number} at @param {number} target */
+    const call = (at, target)=>[0xe8, ...le32(target - (at + 5))];
+    /** @type {Map<string, Uint8Array>} */
+    const records = new Map();
+    let waits = 0;
+    const store = {
+        get: async(/** @type {string} */ key)=>records.get(key) ?? null,
+        put: async(/** @type {string} */ key, /** @type {Uint8Array} */ bytes)=>{
+            records.set(key, bytes);
+        },
+        getManyNow: (/** @type {string[]} */ keys)=>{
+            waits++;
+            return keys.map(key=>records.get(key) ?? null);
+        },
+    };
+    const run = async()=>{
+        // Callees that are no leaves here, so each is a region of its own.
+        const m = machine({ store, bundleId: 'test', leafCalls: false });
+        m.write(CODE, [...call(CODE, F1), ...call(CODE + 5, F2), 0xf4]);
+        m.write(F1, [0xb8, 1, 0, 0, 0, 0xc3]);                  // mov eax, 1; ret
+        m.write(F2, [0xbb, 2, 0, 0, 0, 0xc3]);                  // mov ebx, 2; ret
+        m.setReg(4, 0x80000);
+        m.runtime.noteHot(CODE);
+        await m.runtime.translatePending();
+        await settle();
+        assert.equal(m.runtime.run(m.runtime.entryOf(CODE), 1000).kind, 'halt');
+        assert.deepEqual([m.reg(0), m.reg(3)], [1, 2]);
+        return m.runtime.diagnostics();
+    };
+    const first = await run();
+    assert.equal(first.cacheMisses, 3, 'the caller and its two callees, a batch');
+    waits = 0;
+    const second = await run();
+    assert.deepEqual([second.cacheHits, second.cacheMisses], [3, 0]);
+    assert.equal(second.takenUnformed, 3, 'the callees taken by their records, as the caller');
+    assert.equal(waits, 2, 'a wait for the batch, a wait for the callees the caller added');
+});
+
 test('an entry formed before and after a store into a stub it reaches is a hit in both versions',
     async()=>{
         // A region that jumps to a stub a page on, which the program patches as it runs -
