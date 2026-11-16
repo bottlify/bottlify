@@ -189,7 +189,14 @@ export function createCorkRuntime(env){
             const retired = (counterWord() - before) >>> 0;
             corkRetired += tierEntered === null ? retired
                 : retired - ((tierEntered() - tierBefore) >>> 0);
-            const kind = KINDS[code & 0xff] ?? 'untranslated';
+            const left = KINDS[code & 0xff] ?? 'untranslated';
+            // A call the spent budget kept from being made leaves as a call out of
+            // translated code does, at its target (`callAndReturn`): the slice's
+            // end, not a target with nothing translated. It was counted as that,
+            // and a hot function met at every slice's end led the list of misses.
+            const kind = left === 'untranslated' && code >>> 8 === 0 && retired >= budget
+                && retired > 0 && entries.entryOf(view().getUint32(layout.eip, true),
+                view().getUint8(layout.x87Top)) >= 0 ? 'budget' : left;
             exits[kind]++;
             if (leftHeld >= 0 && retired === 0 && kind === 'untranslated')
             {
