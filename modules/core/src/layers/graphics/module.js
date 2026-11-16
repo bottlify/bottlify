@@ -1038,6 +1038,7 @@ export function createGraphicsModule(){
                             device: device.device,
                             queue: device.queue,
                             presentTo: device.presentTo,
+                            gpuTimes: config?.gpuTimes === true,
                         });
                     }
                     return state.backend;

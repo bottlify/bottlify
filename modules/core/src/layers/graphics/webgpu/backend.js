@@ -111,9 +111,11 @@ export function createBackend(options){
     // A measurement nothing draws by, left out of a production bundle.
     const profiler = import.meta.BOTTLIFY_DIAGNOSTICS !== false
         ? createProfiler({ now, frameHistory: options.frameHistory }) : ABSENT_PROFILER;
-    // The GPU's own time per pass, where the device can stamp it.
+    // The GPU's own time per pass, where the device can stamp it and the run
+    // asked: a driver may not survive the stamps (a GPU process that crashed
+    // under a run's loading with them, and ran it through without).
     const gpuTimer = createGpuTimer({ device,
-        enabled: import.meta.BOTTLIFY_DIAGNOSTICS !== false });
+        enabled: options.gpuTimes === true && import.meta.BOTTLIFY_DIAGNOSTICS !== false });
     const shaders = createShaderCache({ device });
     /** @type {Map<string, Promise<any>>} what `depthPipelines` built, by format */
     const depthPipelines = new Map();

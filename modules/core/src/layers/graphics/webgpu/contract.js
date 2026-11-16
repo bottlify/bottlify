@@ -147,6 +147,8 @@
  * @property {(frame: PresentedFrame)=>void} presentTo
  * @property {()=>number} [now]            clock for the frame profiler
  * @property {number} [frameHistory]       how many frame records to keep
+ * @property {boolean} [gpuTimes]          each pass timed by timestamp queries
+ *     (`internal/gputime.js`), in a diagnostics build, where asked
  */
 
 // Intentionally no runtime exports: types are used through JSDoc-import.
