@@ -351,6 +351,9 @@ export const SETTINGS = {
     // module of cold ones held them all.
     relinkCold: { kind: 'test', value: 128,
         doc: 'Regions in each module a relink builds of those no entry reached lately.' },
+    summaries: { kind: 'test', value: true,
+        doc: 'A stored region is taken by its record\'s summary, without forming it'
+            + ' (`summary.js`); false: formed as its record says, then compared.' },
     // A relink's cost against the direct tail calls it buys; never without a
     // worker.
     mergeAfter: { kind: 'test', value: 1 << 16,

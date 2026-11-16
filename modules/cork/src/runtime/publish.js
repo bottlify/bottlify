@@ -16,12 +16,13 @@
  * modules compiled off the thread first (`compileOn`).
  */
 
-import { codeSpans, emptyCode, hashRegion } from '../region.js';
+import { hashRegion } from '../region.js';
 import { emitBatch } from './emit-built.js';
 import { ANY_TOP, keyOf } from './entries.js';
 import { PageFlag } from './pages.js';
 import { Tables } from './layout.js';
 import { packRegion } from './cache.js';
+import { codeSpansOf, crtOf, emptiesOf, spansOf, summaryOf } from './summary.js';
 import { usesX87 } from './variants.js';
 
 /** @typedef {import('./state.js').RegionRecord} RegionRecord */
@@ -154,7 +155,7 @@ export function createPublish(state){
         }
         /** @type {Map<number, [number, number]>} */
         const extents = new Map();
-        const code = codeSpans(region);
+        const code = codeSpansOf(region);
         for (const [start, end] of code)
         {
             if (end <= start)
@@ -183,11 +184,15 @@ export function createPublish(state){
                 }
             }
         }
+        // Kept for the record a relink stores this region under again.
+        const summary = settings.summaries === false ? null
+            : summaryOf(region, one.entryTop);
         /** @type {RegionRecord} */
         const record = {
             entry: region.entry, pages: region.pages, reads: region.reads,
             formable: region.formable, slots: [], table: -1,
-            spans: region.blocks.map(block=>[block.start, block.end]), extents,
+            spans: summary?.plan.spans ?? spansOf(region), extents,
+            ...(summary === null ? {} : { summary }),
             entryTop: one.entryTop, hash: region.hash, labels: JSON.stringify(built.labels),
             linked: built.linked === true, wide: one.wide === true, loose: one.loose === true,
             wrapped: one.wrapped === true,
@@ -245,7 +250,7 @@ export function createPublish(state){
         {
             joinModule(record, placed);
         }
-        const blockAt = new Map(region.blocks.map(block=>[block.start, block]));
+        const empties = settings.emptyCalls !== false ? emptiesOf(region) : null;
         for (const [start, label] of starts)
         {
             // A block that left held when entered at its start (`heldOnEntry`) is
@@ -262,8 +267,7 @@ export function createPublish(state){
             // a copy of a block inside a loop (a label past twice its blocks,
             // `emitCopies`) and here it is not: a run entered there goes on in
             // this region's loops rather than in a flat dispatch.
-            const empty = settings.emptyCalls !== false
-                ? emptyCode(at=>blockAt.get(at), start) : 0;
+            const empty = empties?.get(start) ?? 0;
             noteWay(start, 'published');
             let slot = entries.add(start, fn, label, top, record.table, empty);
             const held = entries.at(slot);
@@ -336,15 +340,9 @@ export function createPublish(state){
         }
         countExtents(record, 1);
         regions.add(record);
-        for (const block of region.blocks)
+        for (const [name, times] of crtOf(region))
         {
-            for (const instruction of block.instructions)
-            {
-                if (instruction.crt !== undefined)
-                {
-                    crtFormed[instruction.crt] = (crtFormed[instruction.crt] ?? 0) + 1;
-                }
-            }
+            crtFormed[name] = (crtFormed[name] ?? 0) + times;
         }
         if (record.loose && !rt.loose && throughStack(region))
         {
@@ -606,7 +604,7 @@ export function createPublish(state){
                 entryTop: record.entryTop, wide: record.wide, narrow: record.narrow,
                 floats: record.floats, checked: record.checked, copies: record.copies,
                 loose: record.loose, wrapped: record.wrapped, targets: record.targets,
-                anyTop: record.anyTop, byHash: record.byHash };
+                anyTop: record.anyTop, byHash: record.byHash, summary: record.summary };
             store.put(storeKey(one), packRegion({ ...region,
                 module: new Uint8Array(0), moduleKey: key, linked: true, shape: shapeOf(one) },
             cacheVersion), key === undefined ? undefined : { needs: key }).catch(()=>{});

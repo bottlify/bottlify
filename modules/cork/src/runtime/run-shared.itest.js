@@ -163,6 +163,8 @@ async function run(code, config){
             },
             shared: d.sharedModules ?? 0,
             formed: d.formedShared ?? 0,
+            unformed: d.takenUnformed ?? 0,
+            regions: d.regions ?? 0,
             keeps: { forms: d.sharedForms !== null, modules: d.sharedHeld !== null },
             hits: d.cacheHits ?? 0,
             misses: d.cacheMisses ?? 0,
@@ -227,18 +229,61 @@ test('a store made for one runtime keeps nothing beside the first runtime handed
     const { first, second } = program(7);
     /** @type {string[]} */
     const held = [];
+    // Formed as their records say (`summaries` off): a record's summary takes a
+    // stored region with no formed one, kept or made.
     const store = Object.assign(storeOf(true), { alone: true,
         hold: (/** @type {string} */ key)=>held.push(key) });
-    const alone = await run(first, { store });
+    const alone = await run(first, { store, summaries: false });
     assert.deepEqual(alone.keeps, { forms: false, modules: false }, 'the first keeps nothing');
     assert.ok(alone.hits + alone.misses > 0 && held.length > 0,
         `its modules still go to the store's thread (${held.length})`);
-    const beside = await run(second, { store });
+    const beside = await run(second, { store, summaries: false });
     assert.deepEqual(beside.keeps, { forms: true, modules: true }, 'the second keeps');
-    const after = await run(second, { store });
+    const after = await run(second, { store, summaries: false });
     assert.ok(after.formed > 0 && after.shared > 0,
         `the third takes what the second kept (${after.formed}, ${after.shared})`);
     const shared = await run(first, { store: storeOf(true) });
     assert.deepEqual(shared.keeps, { forms: true, modules: true },
         'a store not made for one keeps from the first');
+});
+
+test('a process started again observes the same whether it takes the stored regions by '
+    + 'their records\' summaries or forms them', async()=>{
+    // Each program run once into a store, then its second process - the same code, or
+    // one function of it changed - on that store with the regions taken by their
+    // summaries (`summary.js`) and with each formed as its record says: what the
+    // program observes, and the regions the runtime ends with, are the same and the
+    // interpreter's. A summary that passed for bytes it was not made of would run
+    // the changed function's old translation.
+    const interpreted = { translate: false };
+    let unformed = 0;
+    let hits = 0;
+    for (let seed = 1; seed <= PROGRAMS; seed++)
+    {
+        const { first, second } = program(seed);
+        const expected = (await run(second, interpreted)).seen;
+        /** @type {Record<string, any>} */
+        const seen = {};
+        for (const summaries of [false, true])
+        {
+            const store = storeOf(true);
+            await run(first, { store, summaries });
+            const again = await run(second, { store, summaries });
+            seen[String(summaries)] = { seen: again.seen, regions: again.regions };
+            if (summaries)
+            {
+                unformed += again.unformed;
+                hits += again.hits;
+            }
+            else
+            {
+                assert.equal(again.unformed, 0, 'none taken unformed with summaries off');
+            }
+        }
+        assert.deepEqual(seen.true, seen.false, `seed ${seed}: by summaries as formed`);
+        assert.deepEqual(seen.true.seen, expected, `seed ${seed}: as interpreted`);
+    }
+    // The gate runs the path it is for.
+    assert.ok(unformed > PROGRAMS && unformed <= hits + PROGRAMS,
+        `regions taken unformed (${unformed} of ${hits} hits)`);
 });

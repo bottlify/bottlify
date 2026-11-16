@@ -17,9 +17,8 @@
  */
 
 import { formShared, hashRegion } from '../region.js';
-import { trackRegion } from '../emit/x87.js';
 import { keyOf } from './entries.js';
-import { usesX87 } from './variants.js';
+import { callsOf, summaryOf } from './summary.js';
 
 /**
  * The share of the engine thread's time over a while the translator's work may
@@ -42,6 +41,7 @@ export function createForming(state){
         copiesWanted, counts, coverKeys, coveredIn, coveredOut, dropKey, finishBatch, formAt,
         freeTranslator, giveUp, inFlight, lookUpLater, lookUpOn, noteWay, overdue, precisionFlags,
         prefetch, profileAt, publishOn, queue, readModules, recordBefore, reformStep, refused,
+        regionOfRecord,
         relinkStep, sampleCalls, sourcesChanged, stamp, storeHere, storedOwner, toPublish,
         translatable, translatorLoading, translatorReady, translators, unqueue, waitedFor,
         workerUrl } = rt;
@@ -367,7 +367,8 @@ export function createForming(state){
             }
             // One the store holds is formed as its record says (`recordBefore`).
             const record = recordBefore(step, store, eip, entryTop);
-            const region = formAt(eip, record?.shape.targets, shared);
+            const region = regionOfRecord(record, eip)
+                ?? formAt(eip, record?.shape.targets, shared);
             // What the region calls directly lands in the same batch, so
             // the call and the return transfer without a miss -- each
             // callee at the top the call site has, which the tracker
@@ -378,17 +379,9 @@ export function createForming(state){
             // calls dozens, each of which the interpreter otherwise ran
             // and whose loop, hot first, became a region of its own
             // headed there rather than at the function's start.
-            const tracked = usesX87(region) ? trackRegion(region, entryTop) : null;
-            for (let at = 0; at < region.blocks.length; at++)
+            for (const [callee, top] of callsOf(region, entryTop,
+                settings.summaries === false ? null : summaryOf(region, entryTop)))
             {
-                const block = region.blocks[at];
-                if (block.exit.kind !== 'call')
-                {
-                    continue;
-                }
-                const [callee] = block.exit.targets;
-                const end = tracked === null ? null : tracked.ends[at];
-                const top = end === null ? entryTop : end.top;
                 if (batch.length < ceiling
                     && entries.entryOf(callee, top) < 0 && translatable(callee)
                     && !batch.some(([queued])=>queued === keyOf(callee, top)))
@@ -403,8 +396,11 @@ export function createForming(state){
             // The entry's own block decides whether nothing was formed:
             // the first in address order is another block wherever the
             // region reaches code below the entry.
-            const entryBlock = region.blocks.find(block=>block.start === eip);
-            if (entryBlock === undefined || entryBlock.instructions.length === 0)
+            // One a record stands for was stored with an entry that runs.
+            const entryBlock = /** @type {import('./summary.js').SummedRegion} */ (region)
+                .summary !== undefined ? null : region.blocks.find(block=>block.start === eip);
+            if (entryBlock !== null
+                && (entryBlock === undefined || entryBlock.instructions.length === 0))
             {
                 // Barren, and not in flight: nothing will publish it, and the
                 // address may be asked for again once its page is written.

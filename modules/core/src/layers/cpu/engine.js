@@ -274,6 +274,8 @@ export function engineContractProblem(engineModule, url){
  *     gathered into one on the translation worker (0: never). Default 2^16.
  * @property {number} [relinkCold]  Regions in each module a relink builds of those no entry
  *     or crossing reached lately: a module is held or let go whole. Default 128.
+ * @property {boolean} [summaries]  A stored region is taken by its record's summary, without
+ *     forming it; false: formed as its record says, then compared.
  * @property {boolean} [dispatch]  Each module placed in a range of the table, a transfer inside
  *     it a direct tail call. Default false.
  * @property {boolean} [leafCalls]  A small leaf callee formed into its caller. Default true.

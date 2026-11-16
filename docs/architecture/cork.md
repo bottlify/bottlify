@@ -77,8 +77,13 @@ everyone's. The page flags are `INACCESSIBLE`, `HAS_CODE`, `VOLATILE`, `CLOSED`,
   layout, the bundle id, the entry address, the x87 stack top (any top for a region with no x87 in
   it) and the run's modes. Its record says what forming made of it: a 64-bit FNV hash of the
   region's bytes, the blocks it left to other regions, the callees formed into it, its x87
-  precision. A run that forms the region otherwise (before its callees were known, or beside other
-  regions) forms it again as the record says and takes it when the bytes hash the same. The store
+  precision, and a summary of the formed region
+  ([`summary.js`](../../modules/cork/src/runtime/summary.js)): the spans of bytes the hash is
+  taken over, the pages it read and was formed on, the calls it makes, the entries that do
+  nothing. A run that meets a stored region's entry takes it by that summary without forming
+  it: the bytes are hashed as the record names them, and the region is formed only when
+  something asks for an instruction of it, or when the record is refused. A record with no
+  summary is formed as the record says and taken when the bytes hash the same. The store
   also keeps a map of where its regions have entries: a run that meets a block of a stored region
   before the region's entry forms that region rather than a new one
   ([cork's README](../cork/how-it-works.md)). Every process of a run adds its
