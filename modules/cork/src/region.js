@@ -645,9 +645,16 @@ function switchTable(read, block, blocks, most = SWITCH_ENTRIES){
  * made, once for all of them: a loading phase's regions call the same small
  * functions, and each region decoded every callee again to test it.
  *
+ * A leaf test's answer is kept with what the test read and where it asked
+ * `translatable` (`reads`, `asked`): a region that takes the answer read and
+ * asked the same, and says so -- its bytes read are what a worker forms it
+ * again from and what tells whether it would be formed the same later
+ * (`sources`), its pages asked what a worker answers alike.
+ *
  * @typedef {{ decoded: Map<number, import('./decode/decoder.js').Instruction
  *     | import('./decode/decoder.js').Refusal>,
- *     leaves: Map<number, { leaf: Apart | number[], far: [number, number][] }> }} FormShared
+ *     leaves: Map<number, { leaf: Apart | number[], far: [number, number][],
+ *         reads: [number, number][], asked: number[] }> }} FormShared
  */
 
 /** @returns {FormShared} */
@@ -739,7 +746,12 @@ export function formRegion(read, entry,
     /** @type {Set<number>} */
     const granted = new Set();
     const asked = translatable;
+    /** What the leaf test being made reads and asks, for the regions that take its
+     * answer from `shared`; null outside one.
+     * @type {{ reads: [number, number][], asked: number[] } | null} */
+    let noting = null;
     translatable = address=>{
+        noting?.asked.push(address);
         const yes = (!wide || address >= 0 && address < 2 ** 32) && asked(address);
         if (yes)
         {
@@ -750,15 +762,23 @@ export function formRegion(read, entry,
     const source = read;
     /** The bytes read, as `[start, end)` spans in the order met. @type {[number, number][]} */
     const spans = [];
-    /** @param {number} address @param {number} length */
-    const noteRead = (address, length)=>{
-        const last = spans[spans.length - 1];
+    /** @param {[number, number][]} into @param {number} address @param {number} length */
+    const extend = (into, address, length)=>{
+        const last = into[into.length - 1];
         if (last !== undefined && address >= last[0] && address <= last[1])
         {
             last[1] = Math.max(last[1], address + length);
             return;
         }
-        spans.push([address, address + length]);
+        into.push([address, address + length]);
+    };
+    /** @param {number} address @param {number} length */
+    const noteRead = (address, length)=>{
+        extend(spans, address, length);
+        if (noting !== null)
+        {
+            extend(noting.reads, address, length);
+        }
     };
     read = address=>{
         const page = address >>> 12;
@@ -843,9 +863,31 @@ export function formRegion(read, entry,
         {
             /** @type {[number, number][]} */
             const far = [];
-            found = { leaf: isLeaf(decodeAt, target, translatable, calls, leafLimits, translates,
-                wide, coldReach, undefined, far), far };
+            const outer = noting;
+            const noted = { reads: /** @type {[number, number][]} */ ([]),
+                asked: /** @type {number[]} */ ([]) };
+            noting = noted;
+            const leaf = isLeaf(decodeAt, target, translatable, calls, leafLimits, translates,
+                wide, coldReach, undefined, far);
+            noting = outer;
+            found = { leaf, far, ...noted };
             leaves.set(key, found);
+        }
+        else if (shared !== undefined)
+        {
+            // Tested for another region: read and asked here all the same.
+            for (const [start, end] of found.reads)
+            {
+                noteRead(start, end - start);
+                for (let page = start >>> 12; page <= (end - 1) >>> 12; page++)
+                {
+                    touched.add(page);
+                }
+            }
+            for (const address of found.asked)
+            {
+                translatable(address);
+            }
         }
         if (!found.far.some(([eip, to])=>hot(eip, to)))
         {

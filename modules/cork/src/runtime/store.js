@@ -172,10 +172,10 @@ export function createStore(state){
     /**
      * A region formed at `eip` with these callees formed in (`callTargets`), or
      * the one a runtime sharing the store formed so where it forms the same
-     * (`formsAsBefore`). One formed to be kept is formed alone, without what
-     * other regions of the call decoded (`shared`): forming reads and asks
-     * about only what it did not find there, and the region's own reads must
-     * be all of them.
+     * (`formsAsBefore`). One formed to be kept shares what the other regions of
+     * the call decoded as any does (`shared`): what it takes from there it reads
+     * and asks about as the one that found it did, so its own reads are all of
+     * them.
      *
      * @param {number} eip @param {[number, number[]][] | undefined} targets
      * @param {import('../region.js').FormShared} [shared]
@@ -201,7 +201,7 @@ export function createStore(state){
         }
         /** @type {Map<number, boolean>} */
         const answers = new Map();
-        const region = formRegion(read, eip, { ...formHere, ...called,
+        const region = formRegion(read, eip, { ...formHere, ...called, shared: sharing,
             translatable: address=>{
                 const page = Math.floor(address / 4096);
                 let yes = answers.get(page);
