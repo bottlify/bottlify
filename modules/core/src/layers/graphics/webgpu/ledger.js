@@ -45,8 +45,10 @@ const FORMAT_BYTES = Object.freeze({
  * @typedef {{ count: number, bytes: number }} Weight
  */
 
-/** How many of the last things made are kept. */
-const RECENT = 16;
+/** How many of the last things made are kept, of each kind. */
+const RECENT = 12;
+/** The bytes an allocation is noted from. */
+const LARGE = 1 << 20;
 
 /**
  * The texture's bytes, every level and layer.
@@ -93,14 +95,24 @@ export function trackDevice(device){
     const textures = new Map();
     const dropped = { buffers: 0, bufferBytes: 0, textures: 0, textureBytes: 0 };
     const made = { buffers: 0, textures: 0, unweighed: 0 };
-    /** The last things made, oldest first. @type {string[]} */
-    const recent = [];
-    /** @param {string} what @param {any} descriptor @param {string} detail */
-    const note = (what, descriptor, detail)=>{
-        recent.push(`${what} ${descriptor?.label ?? ''}${detail ? ` (${detail})` : ''}`);
-        if (recent.length > RECENT)
+    /**
+     * The last things made, oldest first, in two rings: shaders and pipelines,
+     * and allocations of a megabyte or more. A frame's own small buffers come
+     * and go every frame and would push both out.
+     *
+     * @type {{ compiled: string[], allocated: string[] }}
+     */
+    const recent = { compiled: [], allocated: [] };
+    /**
+     * @param {'compiled' | 'allocated'} ring @param {string} what @param {any} descriptor
+     * @param {string} detail
+     */
+    const note = (ring, what, descriptor, detail)=>{
+        const into = recent[ring];
+        into.push(`${what} ${descriptor?.label ?? ''}${detail ? ` (${detail})` : ''}`);
+        if (into.length > RECENT)
         {
-            recent.shift();
+            into.shift();
         }
     };
 
@@ -158,7 +170,10 @@ export function trackDevice(device){
     const createBuffer = device.createBuffer.bind(device);
     device.createBuffer = (/** @type {any} */ descriptor)=>{
         made.buffers++;
-        note('buffer', descriptor, `${Number(descriptor?.size) || 0} bytes`);
+        if ((Number(descriptor?.size) || 0) >= LARGE)
+        {
+            note('allocated', 'buffer', descriptor, `${Number(descriptor?.size) || 0} bytes`);
+        }
         return follow(createBuffer(descriptor), { kind: 'buffer',
             label: String(descriptor?.label || `usage 0x${(descriptor?.usage ?? 0).toString(16)}`),
             bytes: Number(descriptor?.size) || 0, gone: false });
@@ -171,7 +186,10 @@ export function trackDevice(device){
         {
             made.unweighed++;
         }
-        note('texture', descriptor, `${descriptor?.format} ${bytes} bytes`);
+        if (bytes >= LARGE)
+        {
+            note('allocated', 'texture', descriptor, `${descriptor?.format} ${bytes} bytes`);
+        }
         return follow(createTexture(descriptor), { kind: 'texture',
             label: String(descriptor?.label || descriptor?.format || 'texture'), bytes,
             gone: false });
@@ -187,8 +205,8 @@ export function trackDevice(device){
         if (original)
         {
             device[name] = (/** @type {any} */ descriptor)=>{
-                note(name.replace(/^create/, ''), descriptor, typeof descriptor?.code === 'string'
-                    ? `${descriptor.code.length} chars` : '');
+                note('compiled', name.replace(/^create/, ''), descriptor,
+                    typeof descriptor?.code === 'string' ? `${descriptor.code.length} chars` : '');
                 return original(descriptor);
             };
         }
@@ -223,8 +241,11 @@ export function trackDevice(device){
 
     return {
         device,
-        /** The last things the device was asked to make, oldest first. */
-        recent: ()=>recent.slice(),
+        /**
+         * The last shaders and pipelines the device was asked to make, then its
+         * last large allocations, oldest first in each.
+         */
+        recent: ()=>[...recent.compiled, ...recent.allocated],
         /**
          * Live buffers and textures by count and bytes, the heaviest labels and
          * kinds, and what was dropped.

@@ -83,13 +83,18 @@ test('the ledger keeps the last things the device was asked to make, shaders amo
     const ledger = trackDevice(device);
     device.createShaderModule({ label: 'd3d10:gs#7', code: 'x'.repeat(1234) });
     device.createComputePipelineAsync({ label: 'gs#7' });
-    device.createTexture({ label: 'target', size: [4, 4], format: 'rgba8unorm' });
-    assert.deepEqual(ledger.recent(), ['ShaderModule d3d10:gs#7 (1234 chars)',
-        'ComputePipelineAsync gs#7', 'texture target (rgba8unorm 64 bytes)']);
+    device.createTexture({ label: 'target', size: [1024, 1024], format: 'rgba8unorm' });
     for (let i = 0; i < 20; i++)
     {
-        device.createBuffer({ label: `b${i}`, size: 4 });
+        device.createBuffer({ label: `frame-small#${i}`, size: 64 });
     }
-    assert.equal(ledger.recent().length, 16, 'the last sixteen');
-    assert.equal(ledger.recent().at(-1), 'buffer b19 (4 bytes)');
+    assert.deepEqual(ledger.recent(), ['ShaderModule d3d10:gs#7 (1234 chars)',
+        'ComputePipelineAsync gs#7', 'texture target (rgba8unorm 4194304 bytes)'],
+    'a frame\'s small buffers do not push them out');
+    for (let i = 0; i < 20; i++)
+    {
+        device.createShaderModule({ label: `s${i}`, code: '' });
+    }
+    assert.equal(ledger.recent().filter(made=>made.startsWith('ShaderModule')).length, 12,
+        'the last twelve of each kind');
 });
