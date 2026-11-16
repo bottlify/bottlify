@@ -1402,6 +1402,31 @@ test('a region with no x87 in it is taken from the store at another top, one wit
         assert.equal(await hits(other, 0), 1);
     });
 
+test('a region with no x87 and a block that is no entry is taken from the store at the top asked',
+    async()=>{
+        // test eax, eax; jz T; ret; T: out 0x10, al; ret - the block at T leaves at its first
+        // instruction and is no entry, so the region's entries are keyed by a top though its
+        // code is the same at every one.
+        // Taken from the store under the top it was stored at, the top asked for had no
+        // entry still, and the exit there came again for as long as the program ran.
+        const { memoryTranslationStore } = await import('./cache.js');
+        const settle = ()=>new Promise(resolve=>setTimeout(resolve, 0));
+        const store = memoryTranslationStore();
+        const code = [0x85, 0xc0, 0x74, 0x01, 0xc3, 0xe6, 0x10, 0xc3];
+        /** @param {number} top */
+        const hits = async top=>{
+            const m = machine({ store, bundleId: 'test' });
+            m.write(CODE, code);
+            m.runtime.noteHot(CODE, top);
+            await m.runtime.translatePending();
+            await settle();
+            assert.ok(m.runtime.entryOf(CODE, top) >= 0, `an entry at top ${top}`);
+            return m.runtime.diagnostics().cacheHits;
+        };
+        assert.equal(await hits(0), 0);
+        assert.equal(await hits(3), 1, 'the stored code, entered at the top asked');
+    });
+
 test('a block of a stored region met first takes that region from the store', async()=>{
     const { memoryTranslationStore } = await import('./cache.js');
     const settle = ()=>new Promise(resolve=>setTimeout(resolve, 0));
