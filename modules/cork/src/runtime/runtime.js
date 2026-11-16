@@ -28,7 +28,7 @@
 
 import { TIER_SLOT, enterRegion } from '../emit/region.js';
 import { RANGE, SHAPE } from '../emit/x87.js';
-import { HELD, PRECISION } from '../emit/memory.js';
+import { HELD, MADE, PRECISION } from '../emit/memory.js';
 import { openTranslationWorker } from './translator.js';
 import { keyOf } from './entries.js';
 import { PageFlag } from './pages.js';
@@ -127,7 +127,7 @@ export function createCorkRuntime(env){
     let missesInserted = 0;
     /** @type {Record<number, keyof typeof untranslatedBy>} */
     const VECTOR_NAMES = { 0: 'bare', [HELD]: 'held', [PRECISION]: 'precision', [SHAPE]: 'shape',
-        [RANGE]: 'range' };
+        [RANGE]: 'range', [MADE]: 'made' };
     /** @type {import('../../../core/src/layers/cpu/engine.js').ExitRecord} */
     const exit = { retired: 0, kind: 'untranslated', vector: 0 };
     let profileResetAt = import.meta.BOTTLIFY_DIAGNOSTICS !== false && profiling

@@ -69,6 +69,29 @@ test('a translated read past the RAM held wraps by the word, and reads the addre
         await m.dispose();
     });
 
+test('a loop reading a page a turn is translated over a memory that grows: its turns reach'
+    + ' no further than the RAM always held', async()=>{
+    const m = growing();
+    // L: add eax, [ebx]; add ebx, 0x1000; dec ecx; jnz L; hlt - a probe of pages, whose
+    // turns in one test of the window were counted by the whole RAM: a window of
+    // sixteen megabytes over the eight held, which the emitter refused, and the loop
+    // ran interpreted for good.
+    m.load(LOOP, [0x03, 0x03, 0x81, 0xc3, 0x00, 0x10, 0x00, 0x00, 0x49, 0x75, 0xf5, 0xf4]);
+    for (let page = 0; page < 64; page++)
+    {
+        m.load(0x100000 + page * 0x1000, u32(page + 1));
+    }
+    let stop = await readLoop(m, 0x100000, 64);
+    for (let round = 0; round < 2000 && stop.translated === 0; round++)
+    {
+        stop = await readLoop(m, 0x100000, 64);
+    }
+    assert.equal(stop.reason, 'halt');
+    assert.ok(stop.translated > 0, 'the loop was translated');
+    assert.equal(m.reg('eax'), 64 * 65 / 2);
+    await m.dispose();
+});
+
 test('reads tested as one window fault past the RAM held, and read the address once grown',
     async()=>{
         const m = growing();

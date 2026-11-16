@@ -56,7 +56,7 @@ import { emitInstruction, profileCall } from './integer.js';
 import { copyLoopOf, emitCopyAtOnce, emitIndexedCopyAtOnce, indexedCopyOf } from './copy-loop.js';
 import {
     addUndoHelper, copyPlan, emitGroupChecks, emitStaleExit, emitStreamWindow, planBlock,
-    planLoop, planRegion, readsWrapped, registersChanged, HOST_OPS,
+    planLoop, planRegion, ramAlways, readsWrapped, registersChanged, HOST_OPS, MADE,
 } from './memory.js';
 import { importHelpers } from './helpers.js';
 import { LONG_SCRATCH, WIDTH_32, widthOf } from './width.js';
@@ -4594,8 +4594,10 @@ export class RegionEmitter {
         // string instruction's is tested by its pages' flags, for the turns a
         // page's reach allows.
         const ranged = streams.streams.every(stream=>stream.tested !== true);
+        // Within the RAM always held: a window past a growing memory's floor is one
+        // its test cannot answer for.
         const many = ranged ? Math.max(streams.turns, Math.min(1 << 16, Math.floor(
-            (this.layout.ramSize / 4 - reach) / Math.max(1, widest)))) : streams.turns;
+            (ramAlways(this.layout) / 4 - reach) / Math.max(1, widest)))) : streams.turns;
         this.loops++;
         this.open(`selfDone${index}`, EMPTY);
         this.open(`toChecked${index}`, EMPTY);
@@ -5492,7 +5494,8 @@ export class RegionEmitter {
      * @param {number} eip @param {number} kind @param {number} [vector]
      */
     exitBefore(eip, kind, vector = 0){
-        if (kind === Exit.UNTRANSLATED && this.blockRetired - this.blockCarried === 1)
+        if (kind === Exit.UNTRANSLATED && vector !== MADE
+            && this.blockRetired - this.blockCarried === 1)
         {
             // The block's first instruction is the other executor's: the
             // block retires nothing, so it must not be an entry (see
@@ -5501,7 +5504,8 @@ export class RegionEmitter {
             // `out`, the block would leave through the hash for its own
             // start and tail-call itself forever. A fault's exit is not
             // counted here: a block that may fault first still runs when it
-            // does not.
+            // does not. Nor a call left to be made as it was (`MADE`), which goes
+            // to the host and not through the hash: the host runs the call.
             this.leaving.add(this.blockIndex);
         }
         this.blockRetired--;

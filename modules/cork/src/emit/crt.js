@@ -31,6 +31,7 @@
 import { EMPTY } from '../wasm/encoder.js';
 import { I32, I64 } from './flags.js';
 import { Exit, LIBM, Local } from './region.js';
+import { MADE } from './memory.js';
 import { registerLocal } from './width.js';
 import { pageFlagsAt } from '../runtime/layout.js';
 import { atState } from './bases.js';
@@ -1127,7 +1128,7 @@ function leaveIf(e, instruction){
     // of it ran when the call is left to run.
     const lead = instruction.crtLead ?? 0;
     e.blockRetired -= lead;
-    e.exitBefore(instruction.eip, Exit.UNTRANSLATED);
+    e.exitBefore(instruction.eip, Exit.UNTRANSLATED, MADE);
     e.blockRetired += lead;
     e.close();
 }

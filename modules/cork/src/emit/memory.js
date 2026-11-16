@@ -47,6 +47,16 @@ export const HELD = 1;
 export const PRECISION = 2;
 
 /**
+ * The vector of an untranslated exit before a call the region would have made
+ * as the operation it is (`crt.js`) and leaves to be made as it was: back to
+ * the host, which runs the call. Through the hash it would find the call's own
+ * block, were that an entry, and leave again for ever - so a block beginning at
+ * such a call had no entry, and code a call returns to that begins `call
+ * _ftol2_sse` (a float's result made an integer) ran interpreted on every return.
+ */
+export const MADE = 5;
+
+/**
  * Whether an instruction that only reads is left untested, its address wrapped
  * into RAM (`wrapIntoRam`): not under `precise`, nor `checkReads`, where a page
  * the program cannot read faults.
