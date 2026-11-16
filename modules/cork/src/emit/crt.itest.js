@@ -198,9 +198,12 @@ function programOf(name, args){
  * on with the call made.
  *
  * @param {Case} c @param {false | import('../helpers.js').RuntimeHelper[]} helpers
+ * @param {boolean} [whole]  over a RAM of the whole 4 GiB, the memory holding 8 MiB of it
  */
-function run(c, helpers){
-    const m = createTestMachine({ ramSize: RAM });
+function run(c, helpers, whole = false){
+    const m = createTestMachine(whole
+        ? { ramSize: 2 ** 32, growing: { floor: 8 << 20, tablesAt: 4 << 20 } }
+        : { ramSize: RAM });
     m.write(FUNCTION, FUNCTIONS[c.name]);
     m.write(PROGRAM, programOf(c.name, c.args));
     m.write(DATA, c.data);
@@ -411,6 +414,28 @@ for (const name of /** @type {(keyof typeof FUNCTIONS)[]} */ (
         assert.ok(made > 0, `${made} calls made as they were`);
         assert.ok(watched > 0 || !['memmove', 'memcpy', 'memset'].includes(name),
             `${watched} stores beside code or a watch formed`);
+    });
+}
+// RAM's end is no 32-bit number there: tested against it as a 32-bit constant,
+// which is 0, every pointer was past RAM and every call left for the function.
+for (const name of /** @type {(keyof typeof FUNCTIONS)[]} */ (
+    ['memmove', 'memset', 'strlen', 'memcmp', 'memchr']))
+{
+    test(`${name}: over a RAM of the whole 4 GiB calls are formed as the operation, as over`
+        + ' any other', ()=>{
+        const helpers = [entryOf(name)];
+        let formed = 0;
+        for (let seed = 1; seed <= 40; seed++)
+        {
+            const c = caseOf(name, seed);
+            const { leftBefore: bodyLeft, ...body } = run(c, false, true);
+            assert.equal(bodyLeft, false);
+            const { leftBefore, ...seen } = run(c, helpers, true);
+            assert.deepEqual(seen, body,
+                `seed ${seed}: ${JSON.stringify({ args: c.args, flags: c.flags })}`);
+            formed += leftBefore ? 0 : 1;
+        }
+        assert.ok(formed > 20, `${formed} of 40 calls formed as the operation`);
     });
 }
 

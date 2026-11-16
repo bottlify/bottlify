@@ -593,3 +593,45 @@ test('a region\'s sources copied a span at once are the bytes read one at a time
     }
     assert.equal(regions, 160);
 });
+
+test('a region formed beside others is the one formed alone, what it read and asked too', ()=>{
+    // Every cork-bench image, a region at each direct call's target, formed after all the
+    // others with what they found (`formShared`) and alone: the same in every field - its
+    // blocks, the bytes it read (`sources`, `reads`) and the pages it was granted
+    // (`formable`). A leaf test answered for another region read the callee and asked about
+    // its pages; taken from there unsaid, the region's sources lacked the callee, and one
+    // kept for other runtimes passed for unchanged after the callee was written over.
+    // `translatable` refuses every third page, so the tests ask and are refused too.
+    const images = new URL('../bench/micro/images/', import.meta.url);
+    const translatable = (/** @type {number} */ address)=>(address >>> 12) % 3 !== 2;
+    let regions = 0;
+    let shared = 0;
+    for (const name of readdirSync(images).filter(file=>file.endsWith('.bin')))
+    {
+        const image = readFileSync(new URL(name, images));
+        const read = (/** @type {number} */ address)=>image[address - 0x401000] ?? 0;
+        /** @type {Set<number>} */
+        const targets = new Set([0x401000]);
+        for (let at = 0; at + 5 <= image.length && targets.size < 48; at++)
+        {
+            const to = at + 5 + new DataView(image.buffer, image.byteOffset).getInt32(at + 1, true);
+            if (image[at] === 0xe8 && to >= 0 && to < image.length)
+            {
+                targets.add(0x401000 + to);
+            }
+        }
+        const found = formShared();
+        for (const entry of targets)
+        {
+            formRegion(read, entry, { translatable, shared: found });
+        }
+        shared += found.leaves.size;
+        for (const entry of targets)
+        {
+            assert.deepEqual(formRegion(read, entry, { translatable, shared: found }),
+                formRegion(read, entry, { translatable }), `${name} at ${entry.toString(16)}`);
+            regions++;
+        }
+    }
+    assert.ok(regions > 100 && shared > 50, `${regions} regions, ${shared} leaf tests shared`);
+});

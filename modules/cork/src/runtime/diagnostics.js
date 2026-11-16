@@ -155,7 +155,8 @@ export function createDiagnostics(state){
         // precision, floats, the stack shape's tests).
         cacheHits: 0, cacheMisses: 0, missNoRecord: 0, missNoModule: 0, missChanged: 0,
         missBytes: 0, missFormedOther: 0, missModes: 0, missPrecision: 0, missFloats: 0,
-        hitsFormedAgain: 0, formedAsRecorded: 0, sharedModules: 0, formedShared: 0,
+        hitsFormedAgain: 0, formedAsRecorded: 0,
+        takenUnformed: 0, sharedModules: 0, formedShared: 0,
         toStoredRegion: 0, precisionSwitches: 0,
         readSwitches: 0,
         stackCode: 0,
@@ -556,6 +557,7 @@ export function createDiagnostics(state){
             missFloats: counts.missFloats,
             hitsFormedAgain: counts.hitsFormedAgain,
             formedAsRecorded: counts.formedAsRecorded,
+            takenUnformed: counts.takenUnformed,
             toStoredRegion: counts.toStoredRegion,
             missNoModule: counts.missNoModule,
             // Store hits whose batch module a runtime sharing the store had

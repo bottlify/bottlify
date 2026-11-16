@@ -108,6 +108,7 @@ default is the product's.
 | `relinkAfter` | 16 | Batch modules published before the running regions are gathered into large ones (0: never). |
 | `relinkRegions` | 512 | Regions in each gathered module. |
 | `relinkCold` | 128 | Regions in each module a relink builds of those no entry reached lately. |
+| `summaries` | `true` | A stored region is taken by its record's summary, without forming it (`summary.js`); false: formed as its record says, then compared. |
 | `mergeAfter` | 2^16 | Transfers between two modules before they are merged on the translation worker (0: never). |
 | `checkedAfter` | 4 | Failed x87 shape tests before a region is formed again without one. |
 | `hashSlots` | 2^20 | Slots of the entry hash (12 bytes each). |

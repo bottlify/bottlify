@@ -18,14 +18,12 @@
 
 import { keyOf } from './entries.js';
 import { SharedSwitch } from './shared-code.js';
-import { isX87 } from '../emit/x87.js';
+import { throughStack, usesX87 } from './summary.js';
 
 /** @typedef {import('../emit/region.js').X87Precision} X87Precision */
 /** @typedef {import('./state.js').RegionRecord} RegionRecord */
 
-/** Whether a region holds x87 code: what makes it a variant of its entry's top.
- * @param {import('../region.js').Region} region */
-export const usesX87 = region=>region.blocks.some(block=>block.instructions.some(isX87));
+export { usesX87 };
 
 /**
  * @param {object} state  the runtime's state (`state.js`), typed inside: its type is
@@ -128,17 +126,6 @@ export function createVariants(state){
     /** key(entry, top) of the x87 regions whose shape test kept failing: formed checked. */
     const checkedKeys = new Set();
 
-    /**
-     * Whether a region's code reaches memory through esp alone (a push, a call,
-     * an operand off esp with no index): the accesses a loose region leaves
-     * untested.
-     *
-     * @param {import('../region.js').Region} region
-     */
-    const throughStack = region=>region.blocks.some(block=>block.instructions.some(
-        ({ op, operands })=>op.startsWith('push') || op === 'call' || op === 'enter'
-            || operands.some(operand=>operand.kind === 'mem' && operand.base === 4
-                && (operand.index ?? -1) < 0)));
 
     /**
      * Code is translated on a page of a thread's stack: the regions that store

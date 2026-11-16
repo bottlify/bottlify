@@ -100,6 +100,11 @@ export function emitCrt(e, instruction){
             spans(e, operation, dst, src);
             leaveUnless(e, instruction);
             charge(e);
+            // No bytes, no operation: a memory's fill or copy of none still traps on
+            // a pointer past the memory's end, which a pointer inside RAM is where
+            // the memory holds only what the guest has been given.
+            b.localGet(Local.t2);
+            b.if(EMPTY);
             guestAddress(e, dst);
             if (operation === 'memset')
             {
@@ -120,6 +125,7 @@ export function emitCrt(e, instruction){
                 size(e);
                 b.op(0xfc, [0x0a, ram, ram]); // memory.copy
             }
+            b.end();
             result(e, dst);
             return true;
         }
@@ -413,8 +419,8 @@ function closedAt(e, local){
     const { b } = e;
     const ops = isWide(e) ? I64 : I32;
     b.localGet(local);
-    constant(e, e.layout.ramSize);
-    b.op(ops.geU).localGet(local);
+    pastRam(e, 'geU');
+    b.localGet(local);
     constant(e, 12);
     b.op(ops.shrU);
     if (isWide(e))
@@ -763,8 +769,7 @@ function spans(e, operation, dst, src){
 /**
  * `[pointer, pointer + t2)`'s pages tested for `bits`, unless `Local.addr` is
  * already -1, which it is set to when one has any or the span leaves RAM. A
- * span of no bytes tests no page, but leaves RAM like any other: a memory's
- * fill or copy of no bytes still traps on a pointer past its end. With
+ * span of no bytes is plain: nothing is done with it. With
  * `collect`, every page's flags are or'd into `Local.pflags`. The pointer is
  * i64 in a wide window (`pointers`).
  *
@@ -792,22 +797,22 @@ function span(e, pointer, bits, collect = false){
             b.op(I64.wrap);
         }
     };
-    b.localGet(Local.addr).i32const(-1).op(I32.ne);
+    b.localGet(Local.addr).i32const(-1).op(I32.ne)
+        .localGet(Local.t2).i32const(0).op(I32.ne).op(I32.and);
     b.if(EMPTY);
-    // In RAM: pointer <=u ramSize and t2 <=u ramSize - pointer -- an empty
-    // span too, whose pointer the memory's operation bounds as it would a byte.
+    // In RAM: pointer <=u ramSize and t2 <=u ramSize - pointer.
     b.localGet(pointer);
-    constant(e, ramSize);
-    b.op(ops.gtU);
+    pastRam(e, 'gtU');
     size(e);
+    // Over the whole 4 GiB the constant is 0 and the difference the bytes left
+    // above the pointer, as any other RAM's - but for a pointer of 0, whose
+    // span of any length is then taken for one past RAM and left to the function.
     constant(e, ramSize);
     b.localGet(pointer).op(ops.sub).op(ops.gtU)
         .op(I32.or);
     b.if(EMPTY);
     b.i32const(-1).localSet(Local.addr);
     b.else();
-    b.localGet(Local.t2).i32const(0).op(I32.ne);
-    b.if(EMPTY);
     page(false);
     b.localSet(Local.addr);
     b.block(EMPTY);
@@ -832,7 +837,6 @@ function span(e, pointer, bits, collect = false){
     b.end();
     b.end();
     b.end();
-    b.end();
 }
 
 /**
@@ -846,7 +850,7 @@ function span(e, pointer, bits, collect = false){
 function length(e, string){
     const { b } = e;
     const table = pageFlagsAt(e.layout);
-    const { ramBase, ramSize } = e.layout;
+    const { ramBase } = e.layout;
     const wide = isWide(e);
     const ops = wide ? I64 : I32;
     const at = wide ? Local.t64 : Local.t2;
@@ -872,9 +876,8 @@ function length(e, string){
     b.i32const(0xfff).op(I32.and).i32const(0).op(I32.eq).op(I32.or);
     b.if(EMPTY);
     b.localGet(at);
-    constant(e, ramSize);
-    b.op(ops.geU)
-        .localGet(Local.t1).i32const(CRT_LIMIT).op(I32.geU).op(I32.or)
+    pastRam(e, 'geU');
+    b.localGet(Local.t1).i32const(CRT_LIMIT).op(I32.geU).op(I32.or)
         .localGet(at);
     constant(e, 12);
     b.op(ops.shrU);
@@ -1143,6 +1146,29 @@ function guestAddress(e, local){
 }
 
 /** A constant as the pointers are: i64 in a wide window. @param {E} e @param {number} value */
+/**
+ * Whether the guest address on the stack is past RAM's end (`gtU`) or at it and
+ * past (`geU`). A 32-bit address is never either over a RAM of the whole 4 GiB,
+ * whose end is no 32-bit number: compared with it as a constant - 0 - every
+ * address was past RAM, and each call the dictionary knew left for the function.
+ *
+ * @param {E} e @param {'geU' | 'gtU'} op
+ */
+function pastRam(e, op){
+    const wide = isWide(e);
+    if (!wide && e.layout.ramSize >= 2 ** 32)
+    {
+        e.b.drop().i32const(0);
+        return;
+    }
+    constant(e, e.layout.ramSize);
+    e.b.op((wide ? I64 : I32)[op]);
+}
+
+/**
+ * A constant of the address's width.
+ * @param {E} e @param {number} value
+ */
 function constant(e, value){
     if (isWide(e))
     {

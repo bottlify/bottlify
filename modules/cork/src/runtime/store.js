@@ -23,6 +23,7 @@ import { CallStack } from '../emit/region.js';
 import { ANY_TOP, keyOf } from './entries.js';
 import { sharedFormsOf } from './shared-forms.js';
 import { cacheKey, moduleKey, packRegion, unpackRegion } from './cache.js';
+import { regionOfSummary, summaryOf } from './summary.js';
 import { usesX87 } from './variants.js';
 
 /** @typedef {import('./state.js').Lookup} Lookup */
@@ -41,7 +42,7 @@ const MAP_SHARE = 64;
 export function createStore(state){
     const rt = /** @type {import('./state.js').State} */ (state);
     const { cacheVersion, emitLayout, entries, formHere, formOptions, found, leaveOut, profiling,
-        read, readBytes, settings, sharedMemory, sharesStore
+        guestBytes, read, readBytes, settings, sharedMemory, sharesStore
     } = /** @type {import('./state.js').Base} */ (state);
     const { batchInstances, checkedAt, counts, formableFrom, inFlight, precisionAt, precisionFlags,
         precisionOf, regions, sharedModule, stamp, storeTrace, stubPage, trace,
@@ -82,8 +83,8 @@ export function createStore(state){
      * @param {{ region: { entry: number, blocks?: import('../region.js').Block[] },
      *     entryTop: number, loose?: boolean, wrapped?: boolean, anyTop?: boolean }} one */
     const regionKey = one=>{
-        const { blocks } = one.region;
-        one.anyTop ??= blocks !== undefined
+        // A candidate not formed yet is named by its entry alone, and asked at both.
+        one.anyTop ??= ('summary' in one.region || one.region.blocks !== undefined)
             && !usesX87(/** @type {import('../region.js').Region} */ (one.region));
         return cacheKey({
             version: cacheVersion, features: found, variant, layoutId: emitLayout.id,
@@ -115,10 +116,10 @@ export function createStore(state){
         && cached.shape.hash !== one.region.hash ? `${key}/${one.region.hash}` : null);
     /**
      * What forming made of a region and what it is compiled as, for its record.
-     * @param {{ region: { entry: number, hash: string },
+     * @param {{ region: { entry: number, hash: string }, entryTop: number,
      *     targets?: [number, number[]][],
      *     wide?: boolean, narrow?: boolean, floats?: boolean, checked?: boolean,
-     *     copies?: boolean }} one
+     *     copies?: boolean, summary?: import('./summary.js').RegionSummary }} one
      * @returns {import('./cache.js').RegionShape}
      */
     const shapeOf = one=>({ hash: one.region.hash,
@@ -128,7 +129,17 @@ export function createStore(state){
         ...(one.narrow === true ? { narrow: true } : {}),
         ...(one.floats === true ? { floats: true } : {}),
         ...(one.checked === true ? { checked: true } : {}),
-        ...(one.copies === true ? { copies: true } : {}) });
+        ...(one.copies === true ? { copies: true } : {}),
+        ...summed(one) });
+    /** A region's summary as its record's shape holds it: the formed region's, or
+     * the one a running region's record kept (`RegionRecord.summary`).
+     * @param {{ region: any, entryTop: number,
+     *     summary?: import('./summary.js').RegionSummary }} one */
+    const summed = one=>{
+        const summary = settings.summaries === false ? null
+            : one.summary ?? summaryOf(one.region, one.entryTop);
+        return summary === null ? {} : { summary };
+    };
     /**
      * The formed regions of the runtimes sharing the store and forming as this
      * one does (`sharedFormed`), by entry and the callees formed in. None for a
@@ -172,10 +183,10 @@ export function createStore(state){
     /**
      * A region formed at `eip` with these callees formed in (`callTargets`), or
      * the one a runtime sharing the store formed so where it forms the same
-     * (`formsAsBefore`). One formed to be kept is formed alone, without what
-     * other regions of the call decoded (`shared`): forming reads and asks
-     * about only what it did not find there, and the region's own reads must
-     * be all of them.
+     * (`formsAsBefore`). One formed to be kept shares what the other regions of
+     * the call decoded as any does (`shared`): what it takes from there it reads
+     * and asks about as the one that found it did, so its own reads are all of
+     * them.
      *
      * @param {number} eip @param {[number, number[]][] | undefined} targets
      * @param {import('../region.js').FormShared} [shared]
@@ -201,7 +212,7 @@ export function createStore(state){
         }
         /** @type {Map<number, boolean>} */
         const answers = new Map();
-        const region = formRegion(read, eip, { ...formHere, ...called,
+        const region = formRegion(read, eip, { ...formHere, ...called, shared: sharing,
             translatable: address=>{
                 const page = Math.floor(address / 4096);
                 let yes = answers.get(page);
@@ -237,6 +248,68 @@ export function createStore(state){
      * @returns {import('./cache.js').CachedRegion | null}
      */
     const accepted = (one, cached, beside = null)=>{
+        const stood = one.region.summary === undefined ? null : one.region;
+        const before = stood === null ? null : REFUSALS.map(name=>counts[name]);
+        const taken = acceptedAs(one, cached, beside);
+        if (taken !== null || stood === null)
+        {
+            return taken;
+        }
+        // Refused as its record stands for it: the region is formed, and translated
+        // as one formed in the first place.
+        const region = formAt(stood.entry, one.targets);
+        if (one.formedRegion === stood)
+        {
+            one.formedRegion = region;
+        }
+        one.region = region;
+        one.stamp = stamp(region.pages);
+        Object.assign(one, precisionFlags(region, one.entryTop),
+            { checked: checkedAt(region, one.entryTop) });
+        if (region.hash === stood.hash)
+        {
+            // The same region: what refused the one that stood for it refuses it.
+            return null;
+        }
+        // Formed otherwise than its record says: judged again, and counted once.
+        REFUSALS.forEach((name, at)=>{
+            counts[name] = /** @type {number[]} */ (before)[at];
+        });
+        return acceptedAs(one, cached, beside);
+    };
+    /** What `acceptedAs` counts a refusal under. */
+    const REFUSALS = /** @type {const} */ (['missChanged', 'missBytes', 'missFormedOther',
+        'missModes', 'missPrecision', 'missFloats', 'hitsFormedAgain']);
+    /**
+     * The region a candidate's record stands for, taken without forming it where
+     * the record says what publishing asks (`summary.js`) and the bytes are as it
+     * hashed them; null for a record with no summary, or of other bytes.
+     *
+     * @param {{ key: string, shape: import('./cache.js').RegionShape } | null} record
+     * @param {number} eip
+     * @returns {import('./summary.js').SummedRegion | null}
+     */
+    const regionOfRecord = (record, eip)=>{
+        const summary = settings.summaries === false ? undefined : record?.shape.summary;
+        if (record === null || summary === undefined)
+        {
+            return null;
+        }
+        const region = regionOfSummary(eip, record.shape.hash, summary, {
+            read,
+            bytesOf: (start, end)=>guestBytes(start, end)
+                ?? Uint8Array.from({ length: end - start }, (_, at)=>read(start + at)),
+            formable: formableFrom(eip),
+            form: ()=>formAt(eip, record.shape.targets),
+        });
+        if (region !== null)
+        {
+            counts.takenUnformed++;
+        }
+        return region;
+    };
+    /** @type {typeof accepted} */
+    const acceptedAs = (one, cached, beside = null)=>{
         let shape = cached?.shape;
         if (cached === null || shape === undefined)
         {
@@ -832,6 +905,7 @@ export function createStore(state){
         waitedFor,
         prefetch,
         recordBefore,
+        regionOfRecord,
         lookUpOn,
         lookUpLater,
         flushStore,

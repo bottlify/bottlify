@@ -243,6 +243,8 @@ export function baseState({ memory, ram, layout, sharedLayout = undefined, confi
  * @property {number[]} slots   entry indices
  * @property {number} table     the function's index in the table, or -1
  * @property {[number, number][]} spans   the blocks' [start, end)
+ * @property {import('./summary.js').RegionSummary} [summary]  what its record in the store
+ *     says of the formed region, for the record a relink stores it under again
  * @property {{ start: number, bytes: Uint8Array }[]} [sources]  every byte forming read,
  *     as it read them, kept where a store into code reached one of its pages before: a
  *     later store there drops it only when it changes one of them (`storedInto`)

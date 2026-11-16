@@ -20,6 +20,7 @@ import { CallStack } from '../emit/region.js';
 import { arenaEmitCache, createEmitCache } from './emit-built.js';
 import { createArena } from './arena.js';
 import { ANY_TOP, keyOf } from './entries.js';
+import { spansOf } from './summary.js';
 import { usesX87 } from './variants.js';
 
 /** @typedef {import('./state.js').Pending} Pending */
@@ -109,7 +110,7 @@ export function createTranslators(state){
      */
     const coverKeys = one=>{
         const top = usesX87(one.region) ? one.entryTop : ANY_TOP;
-        return one.region.blocks.map(block=>keyOf(block.start, top));
+        return spansOf(one.region).map(([start])=>keyOf(start, top));
     };
     /** @param {number[]} keys @returns {number[]} the keys */
     const cover = keys=>{
