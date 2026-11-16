@@ -45,6 +45,9 @@ const FORMAT_BYTES = Object.freeze({
  * @typedef {{ count: number, bytes: number }} Weight
  */
 
+/** How many of the last things made are kept. */
+const RECENT = 16;
+
 /**
  * The texture's bytes, every level and layer.
  *
@@ -90,6 +93,16 @@ export function trackDevice(device){
     const textures = new Map();
     const dropped = { buffers: 0, bufferBytes: 0, textures: 0, textureBytes: 0 };
     const made = { buffers: 0, textures: 0, unweighed: 0 };
+    /** The last things made, oldest first. @type {string[]} */
+    const recent = [];
+    /** @param {string} what @param {any} descriptor @param {string} detail */
+    const note = (what, descriptor, detail)=>{
+        recent.push(`${what} ${descriptor?.label ?? ''}${detail ? ` (${detail})` : ''}`);
+        if (recent.length > RECENT)
+        {
+            recent.shift();
+        }
+    };
 
     /** @param {Map<string, Weight>} into @param {string} label @param {number} bytes @param {number} sign */
     const weigh = (into, label, bytes, sign)=>{
@@ -145,6 +158,7 @@ export function trackDevice(device){
     const createBuffer = device.createBuffer.bind(device);
     device.createBuffer = (/** @type {any} */ descriptor)=>{
         made.buffers++;
+        note('buffer', descriptor, `${Number(descriptor?.size) || 0} bytes`);
         return follow(createBuffer(descriptor), { kind: 'buffer',
             label: String(descriptor?.label || `usage 0x${(descriptor?.usage ?? 0).toString(16)}`),
             bytes: Number(descriptor?.size) || 0, gone: false });
@@ -157,10 +171,28 @@ export function trackDevice(device){
         {
             made.unweighed++;
         }
+        note('texture', descriptor, `${descriptor?.format} ${bytes} bytes`);
         return follow(createTexture(descriptor), { kind: 'texture',
             label: String(descriptor?.label || descriptor?.format || 'texture'), bytes,
             gone: false });
     };
+
+    // What the device was last asked to make, shaders and pipelines among
+    // them: a GPU process that crashes takes the device with it and says
+    // nothing of why, and what it was compiling or allocating then is the lead.
+    for (const name of ['createShaderModule', 'createRenderPipeline', 'createRenderPipelineAsync',
+        'createComputePipeline', 'createComputePipelineAsync'])
+    {
+        const original = device[name]?.bind(device);
+        if (original)
+        {
+            device[name] = (/** @type {any} */ descriptor)=>{
+                note(name.replace(/^create/, ''), descriptor, typeof descriptor?.code === 'string'
+                    ? `${descriptor.code.length} chars` : '');
+                return original(descriptor);
+            };
+        }
+    }
 
     /** @param {Map<string, Weight>} from */
     const total = from=>[...from.values()].reduce((sum, held)=>({
@@ -191,6 +223,8 @@ export function trackDevice(device){
 
     return {
         device,
+        /** The last things the device was asked to make, oldest first. */
+        recent: ()=>recent.slice(),
         /**
          * Live buffers and textures by count and bytes, the heaviest labels and
          * kinds, and what was dropped.

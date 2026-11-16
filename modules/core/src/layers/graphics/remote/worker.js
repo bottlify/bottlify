@@ -133,7 +133,7 @@ export function serveGraphics(scope, deps){
      * @type {ReturnType<typeof createCapture> | null}
      */
     let capture = null;
-    /** What told them, for a client that comes after. @type {{ type: 'lost', reason: string, message: string } | null} */
+    /** What told them, for a client that comes after. @type {{ type: 'lost', reason: string, message: string, recent: string[] } | null} */
     let lostWith = null;
     /** What the device holds, weighed (`ledger.js`). @type {ReturnType<typeof trackDevice> | null} */
     let ledger = null;
@@ -447,7 +447,7 @@ export function serveGraphics(scope, deps){
             }
             losers.clear();
             lostWith = { type: 'lost', reason: info?.reason ?? 'unknown',
-                message: String(info?.message ?? '') };
+                message: String(info?.message ?? ''), recent: ledger?.recent() ?? [] };
             scope.postMessage(lostWith);
             for (const client of clients)
             {
