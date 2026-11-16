@@ -40,6 +40,7 @@ import {
 import { CALL_STRIDE, Mechanism, Tables, pageFlagsAt } from '../runtime/layout.js';
 import { PageFlag, STORE_FLAGS } from '../runtime/pages.js';
 import { emitSimd } from './simd.js';
+import { SIMD } from '../wasm/simd.js';
 import { atState, atTables, intoState, intoTables } from './bases.js';
 import { ANY_TOP, slotOf } from '../runtime/entries.js';
 import { emitLocked, isLocked } from './locked.js';
@@ -4724,8 +4725,11 @@ function countSet(e, instruction){
  * bytes, made in place where the bulk path would take it whole in one turn:
  * DF clear, the budget for it, each run on one page with no flag the bulk
  * path tests, and the destination not just ahead of the source. Loads and
- * stores going up, eight bytes at a time, then the registers, the count and
- * the budget as the bulk path leaves them. The bulk path's turn for a run of
+ * stores going up, sixteen bytes at a time where the engine has vectors and
+ * eight where not, then the registers, the count and the budget as the bulk
+ * path leaves them. It stands ahead of the instruction's loop: there the
+ * count is the block's own, and each condition is a branch to the loop. The
+ * bulk path's turn for a run of
  * 72 bytes was a call of the memory's copy and the reckoning of a turn about
  * it: a sound mixer's filter that copies its state for every sample spent
  * four parts in ten of its time there.
@@ -4748,39 +4752,61 @@ function shortString(e, instruction){
     const edi = registerLocal(e, 7);
     const movs = op === 'movs';
     const units = (bytes + (1 << BULK_UNIT_SHIFT) - 1) >> BULK_UNIT_SHIFT;
-    /** Whether the run from a pointer lies on its page, with none of `bits`.
-     * @param {number} pointer @param {number} bits */
+    const simd = e.context.features.simd;
+    // Each condition a branch to the bulk path of its own: one value of them
+    // all was a flag made of every test, each time.
+    e.open('bulk', EMPTY);
+    const bulk = ()=>b.brIf(e.depthOf('bulk'));
+    /** Leaves for the bulk path unless the run from a pointer lies on its page, with
+     * none of `bits`. @param {number} pointer @param {number} bits */
     const clean = (pointer, bits)=>{
-        b.localGet(pointer).i32const(4095).op(I32.and).i32const(4096 - bytes).op(I32.leU);
+        b.localGet(pointer).i32const(4095).op(I32.and).i32const(4096 - bytes).op(I32.gtU);
+        bulk();
         b.localGet(pointer).i32const(12).op(I32.shrU)
-            .load('i32_8u', { offset: table }).i32const(bits).op(I32.and).op(I32.eqz);
-        b.op(I32.and);
+            .load('i32_8u', { offset: table }).i32const(bits).op(I32.and);
+        bulk();
     };
-    // The count still whole: a turn of the bulk path, or a slice's end, leaves less.
-    b.localGet(ecx).i32const(count | 0).op(I32.eq);
-    b.localGet(Local.t2).i32const(size).op(I32.eq).op(I32.and);
-    b.localGet(Local.budget).i32const(units).op(I32.geS).op(I32.and);
+    b.localGet(Local.flags).i32const(DF).op(I32.and);
+    bulk();
+    b.localGet(Local.budget).i32const(units).op(I32.ltS);
+    bulk();
     clean(edi, PageFlag.INACCESSIBLE | STORE_FLAGS);
-    b.op(I32.and);
     if (movs)
     {
         clean(esi, PageFlag.INACCESSIBLE);
-        b.op(I32.and);
-        // Not 0 < the destination's lead on the source < the run's bytes.
+        // 0 < the destination's lead on the source < the run's bytes.
         b.localGet(edi).localGet(esi).op(I32.sub).i32const(1).op(I32.sub)
-            .i32const(bytes - 1).op(I32.geU).op(I32.and);
+            .i32const(bytes - 1).op(I32.ltU);
+        bulk();
     }
     else
     {
-        // The element repeated through a quadword.
+        // The element repeated through a quadword, and through sixteen bytes.
         const lanes = size === 1 ? 0x0101010101010101n : size === 2 ? 0x0001000100010001n
             : 0x0000000100000001n;
         b.localGet(registerLocal(e, 0));
         mask(e, size);
         b.op(I64.extendU).i64const(lanes).op(I64.mul).localSet(Local.t64);
+        if (simd && bytes >= 16)
+        {
+            b.localGet(Local.t64).simd(SIMD.i64x2Splat).localSet(e.vecTempLocal(0));
+        }
     }
-    e.openIf('short', EMPTY);
     let at = 0;
+    const vectors = simd ? bytes - bytes % 16 : 0;
+    for (; at < vectors; at += 16)
+    {
+        b.localGet(edi);
+        if (movs)
+        {
+            b.localGet(esi).simdMem(SIMD.load, { offset: ramBase + at, align: 0 });
+        }
+        else
+        {
+            b.localGet(e.vecTempLocal(0));
+        }
+        b.simdMem(SIMD.store, { offset: ramBase + at, align: 0 });
+    }
     for (const [width, kind] of /** @type {const} */ ([[8, 'i64'], [4, 'i64_32'], [2, 'i64_16'],
         [1, 'i64_8']]))
     {
@@ -4808,7 +4834,7 @@ function shortString(e, instruction){
     e.openGuard('shortSpent', EMPTY);
     e.exitAt(instruction.eip, Exit.BUDGET);
     e.close();
-    b.br(e.depthOf('again'));
+    b.br(e.depthOf('done'));
     e.close();
 }
 
@@ -5071,17 +5097,20 @@ function stringInstruction(e, instruction){
         {
             e.blockRetired--;
         }
+        const bulky = !long && (op === 'movs' || op === 'stos')
+            && e.context.undo === undefined && !fsSource;
         e.open('done', EMPTY);
+        if (bulky)
+        {
+            // Ahead of the loop, where the count is the one the block set: a
+            // turn of the bulk path leaves less.
+            shortString(e, instruction);
+        }
         e.openLoop('again');
         b.localGet(ecx).op(pointerOps.eqz);
         b.brIf(e.depthOf('done'));
-        if (long)
+        if (bulky)
         {
-            // Element by element.
-        }
-        else if ((op === 'movs' || op === 'stos') && e.context.undo === undefined && !fsSource)
-        {
-            shortString(e, instruction);
             bulkString(e, instruction);
         }
         if (!long && compare && !fsSource)
