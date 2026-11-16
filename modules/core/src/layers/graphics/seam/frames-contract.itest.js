@@ -97,6 +97,7 @@ const D3DQUERYTYPE_EVENT = 8;
 const D3DISSUE_END = 1;
 const D3DGETDATA_FLUSH = 1;
 const D3DTEXF_NONE = 0;
+const D3DTEXF_LINEAR = 2;
 const ONE = 0x3f800000;
 /** Where the program keeps the indices it draws from its own memory. */
 const USER_INDICES = 0x20400;
@@ -502,6 +503,8 @@ const bytesFor = (indices, length, fill)=>(indices
  *     | { kind: 'indexedUser' }
  *     | { kind: 'target', on: boolean }
  *     | { kind: 'stretch', from: 'plain' | 'back' | 'target', fill: number }
+ *     | { kind: 'current', from: 'back' | 'target', source: number[] | null,
+ *         target: number[] | null, filter: number }
  *     | { kind: 'query', issue: boolean, flush: boolean }
  *     | { kind: 'sampler', state: number, value: number } | { kind: 'stage', op: number }
  *     | { kind: 'scissor', rect: number[], on: boolean }
@@ -514,6 +517,12 @@ const bytesFor = (indices, length, fill)=>(indices
  *     | { kind: 'write', on: string, offset: number, size: number, fill: number }
  *     | { kind: 'release', on: string }
  *     | { kind: 'refused', on: string, offset: number, size: number, flags: number }} Step
+ *
+ * A current is the copy a program makes onto whatever it draws into: the
+ * render target asked for, Direct3D 9's StretchRect onto it from the back
+ * buffer or the target's level between rectangles, each within its surface or
+ * not, or none, and the reference given back. Direct3D 8's copy out of a
+ * target waits for pixels this machine does not draw, so it only asks.
  *
  * A hold is a lock left held, written through by the writes after it; a write
  * goes through what the buffer's last lock handed back, held or let go of; a
@@ -722,6 +731,17 @@ function generate(seed, steps, upUnbinds, nine){
             // device in a graphics worker draws, which this machine cannot.
             program.push({ kind: 'stretch', from: pick(nine ? ['plain', 'back', 'target']
                 : ['plain', 'back']), fill: below(256) });
+            // A rectangle mostly within the target's level, which the back
+            // buffer holds too; past it, empty, turned round or negative now
+            // and then.
+            const rect = ()=>{
+                const left = below(TEXELS);
+                const top = below(TEXELS);
+                return below(4) === 0 ? null : [below(16) === 0 ? 0xffffffff : left, top,
+                    left + below(TEXELS + 2), top + below(TEXELS + 2) - (below(16) === 0 ? 4 : 0)];
+            };
+            program.push({ kind: 'current', from: pick(['back', 'target']), source: rect(),
+                target: rect(), filter: pick([D3DTEXF_NONE, D3DTEXF_LINEAR]) });
         }
         else if (roll < 55 && nine)
         {
@@ -1311,8 +1331,8 @@ export async function play(version, guestCode, steps, worker = false){
     let stream = 0;
     for (const step of steps)
     {
-        if (heldAhead.size > 0 && ['texels', 'copy', 'query', 'stretch', 'target', 'present']
-            .includes(step.kind))
+        if (heldAhead.size > 0 && ['texels', 'copy', 'query', 'stretch', 'current', 'target',
+            'present'].includes(step.kind))
         {
             heldAcross++;
         }
@@ -1466,6 +1486,23 @@ export async function play(version, guestCode, steps, worker = false){
         {
             stretch(step.from, step.fill);
         }
+        else if (step.kind === 'current')
+        {
+            const current = run(calls.device('GetRenderTarget', version.getRenderTarget));
+            answers.push(`current ${current.out}`);
+            if (current.eax === 0 && typeof current.out === 'string')
+            {
+                const from = step.from === 'back' ? back : targetLevel;
+                /** @param {number[] | null} rect */
+                const words = rect=>(rect ? { words: rect } : 0);
+                if (calls.nine)
+                {
+                    run(calls.device('StretchRect', [from, words(step.source), current.out,
+                        words(step.target), step.filter]));
+                }
+                run({ on: current.out, kind: 'level', method: 'Release', args: [] });
+            }
+        }
         else if (step.kind === 'query')
         {
             query(step.issue, step.flush);
@@ -1565,7 +1602,7 @@ const COVERED = ['Lock', 'Unlock', 'GetSurfaceLevel', 'AddRef', 'Release', 'SetT
     'SetStreamSource', 'SetIndices', 'DrawPrimitive', 'DrawIndexedPrimitive', 'DrawPrimitiveUP',
     'SetTransform', 'GetTransform', 'SetRenderState', 'GetRenderState', 'Clear', 'SetViewport',
     'GetViewport', 'SetTextureStageState', 'GetTextureStageState', 'SetMaterial', 'SetLight',
-    'LightEnable', 'SetClipPlane'];
+    'LightEnable', 'SetClipPlane', 'GetRenderTarget'];
 /**
  * And those only Direct3D 9's guest code takes: a state block's own Capture
  * and Apply, the sampler states, the scissor and a stream's divider.
@@ -1587,14 +1624,18 @@ const DONE_9 = ['StretchRect', 'Issue', 'GetData'];
  * drawing itself -- with every call a trap and with the guest code, so that
  * the recording is seen under both.
  *
+ * `covered9` is what Direct3D 9's guest code takes in that gate alone: a
+ * StretchRect only for a device that records for one drawing elsewhere.
+ *
  * @type {Record<'guest' | 'worker', { arms: [string, boolean, boolean][],
- *     pairs: [string, string][], subject: string }>}
+ *     pairs: [string, string][], subject: string, covered9: string[] }>}
  */
 const GATES = {
     guest: {
         arms: [['every call a trap', false, false], ['the guest code', true, false]],
         pairs: [['every call a trap', 'the guest code']],
         subject: 'with every call a trap',
+        covered9: [],
     },
     worker: {
         arms: [['the device drawing itself', false, false],
@@ -1603,6 +1644,7 @@ const GATES = {
         pairs: [['the device drawing itself', 'the device recording'],
             ['the device recording', 'the guest code recorded']],
         subject: 'with the device drawing on the program\'s thread',
+        covered9: ['StretchRect'],
     },
 };
 
@@ -1690,7 +1732,7 @@ export function frameGate(version, which){
             }
         }
         assert.deepEqual(wrong, []);
-        const covered = [...COVERED, ...nine ? COVERED_9 : []];
+        const covered = [...COVERED, ...nine ? [...COVERED_9, ...gate.covered9] : []];
         assert.deepEqual(covered.filter(method=>!((taken.get(method) ?? 0) > 20)), [],
             `each part of the guest code took calls: ${JSON.stringify([...taken])}`);
         const done = [...DONE, ...nine ? DONE_9 : DONE_8];

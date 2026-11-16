@@ -156,8 +156,8 @@ go of), `ring-take` (calls the program left in the command ring) and, inside tha
 (buffers still locked that those calls may read). The graphics worker's thread has no phase
 table: `graphics.worker.phases` holds its totals since it started, `batch-read` (each batch of
 calls read and played; its `selfMs` excludes the sweep) and `batch-sweep` (the once-a-frame look
-at objects whose count reached zero). It is `null` until the worker has answered a diagnostics
-request, and in a build that times nothing. `graphics.worker.latency` is the bound on the frames
+at objects whose count reached zero). The worker sends them with every frame it presents; they are
+`null` before its first present, and in a build that times nothing. `graphics.worker.latency` is the bound on the frames
 the worker's GPU may still be drawing (`graphics.maxFrameLatency`), summed over the devices drawn
 there: `held` and `heldMs` count the presents that waited for the GPU to finish a frame, and
 `peak` is the most frames it was behind. A wait on a present in `graphics.worker.waits` that
@@ -205,7 +205,8 @@ counts the frames that went so.
 | `report()` | Everything the engine can say about the run in one answer: every layer's diagnostics, the phase profile and recent frames, `trace()`, the threads, guest time by module, and the guest code around its most-sampled addresses (`hotCode`, 4 KiB pages as base64). The app layer's table lists the divergences reported so far (`divergences`, the first 128) and every loss with its count (`losses`), so an error the journal has let go of is still there. Devices drawing in the graphics worker are asked for their counters and awaited for up to a second, so the graphics table includes them. A request, not for polling. |
 | `translationPool()` | The run's pool of translation workers as it stands: how many workers it holds and how many are idle, how many work for each process, how many it opened and lent, the joins and leaves its driver decided, and a journal of the last decisions (`start`, `join`, `leave`, `exit`, each with the process, the time and the workers it had after). `null` where the run has none. |
 | `trace()`, `traffic()` | The last host calls as text; messages counted by kind. |
-| `log.*` | The journal and counters: `recent`, `drain`, `setLevel`, `setDefaultLevel`, `areas`, `profile`, `frames`, `drops` (the frame rate, the slowest 1% and 0.1% as rates, and each frame over twice the median and longer than a 60 Hz refresh named by what grew in it), `counters`, `table`, `threads`, `guestByModule`, `stats`, `memory`. |
+| `log.*` | The journal and counters: `recent`, `drain`, `setLevel`, `setDefaultLevel`, `areas`, `profile`, `frames`, `drops` (the frame rate, the slowest 1% and 0.1% as rates, and each frame over twice the median and longer than a 60 Hz refresh named by what grew in it), `counters`, `table`, `threads`, `guestByModule`, `stats`, `memory`, `live`. |
+| `log.live()` | What a view that follows the run reads, typically once a second: `instructions` retired, every profiler phase (`phases`, name, kind, count, `selfMs`), the guest's `threads` (id, name, instructions, state), the memory layer's `regions` (name, base, size), the cpu sampler's 64 heaviest 64-byte buckets (`samples`, address and instructions), the sidecar `hooks` (name, calls, ms) and `graphics`: canvas copies (`shown`, `shownBy` by surface), the device that draws (`device`: `draws`, `gpuFrames`, `gpuMs`; `null` where it keeps none: Direct3D 7, OpenGL, no GPU), its `lastFrame` (draws, of them offscreen and into how many targets, clears, `clearColor` or -1, the viewport and the target's size) and the graphics worker's thread (`worker`: `batches`, `readSelfMs`, `sweepMs`; `null` without one). Every figure is cumulative since the start: take two and subtract. Answered by the log keeper from the tables the layers fill as a frame closes, never by the engine's thread; `null` where the page shares no memory with the engine. |
 | `guestProfile.*` | Where the guest ran, by address (`available`, `start`, `read`, `stop`). |
 
 ## Events

@@ -20,7 +20,11 @@
  *                                                      a batch, as `wire.js` writes it: the
  *                                                      first `length` bytes of the buffer
  * Receiver to sender:  { type: 'answer', serial, answer, outs, counts? }
- *                      { type: 'presented', count }
+ *                      { type: 'presented', count, times?, phases?, figures? }
+ *                                                      a present played: the frames' times
+ *                                                      (`WorkerFrameTimes`), where the thread's
+ *                                                      time went (`WorkerPhases`) and the
+ *                                                      played device's figures (`figures.js`)
  *                      { type: 'counts', counts }      occlusion counts the GPU has just
  *                                                      given, sent unasked
  *                      { type: 'diagnostics', diagnostics, phases?, latency? }
@@ -210,6 +214,9 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
     /** The played side's frame times as of its last present (`WorkerFrameTimes`). */
     /** @type {WorkerFrameTimes | null} */
     let frameTimes = null;
+    /** The played device's figures as of its last present (`figures.js`). */
+    /** @type {import('../figures.js').FrameFigures | null} */
+    let deviceFigures = null;
     let failure = /** @type {string | null} */ (null);
     /** The diagnostics asked for, and those the played side has answered. */
     let asked = 0;
@@ -447,6 +454,8 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
                 case 'presented':
                     presented = message.count;
                     frameTimes = message.times ?? frameTimes;
+                    phases = message.phases ?? phases;
+                    deviceFigures = message.figures ?? deviceFigures;
                     while (held.length > 0 && held[0].count <= presented)
                     {
                         /** @type {{ release: () => void }} */ (held.shift()).release();
@@ -598,8 +607,11 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
          */
         answers: ()=>`${told}/${asked}`,
 
-        /** Where the played side's time went, as it said with its last diagnostics; null before. */
+        /** Where the played side's time went, as it said with its last present or diagnostics; null before. */
         phases: ()=>phases,
+
+        /** The played device's figures as of its last present (`figures.js`), or null. */
+        figures: ()=>deviceFigures,
 
         /**
          * How far the played side's GPU ran behind its presents, as it said
@@ -634,7 +646,8 @@ export { shared as sharedNow };
  * The played side.
  *
  * @param {Object} options
- * @param {ReturnType<typeof import('./direct3d.js').playedDirect3D>} options.played
+ * @param {ReturnType<typeof import('./direct3d.js').playedDirect3D>
+ *     & { figures?: () => import('../figures.js').FrameFigures | null }} options.played
  * @param {(message: any, transfer?: Transferable[]) => void} options.post
  * @param {() => FrameLatencyState} [options.latency]  the bound the played device's
  *     presents wait on, where it has one
@@ -685,9 +698,12 @@ export function createReceiver({ played, post, latency, gpuMemory, times }){
         const done = held instanceof Promise ? held : Promise.resolve();
         presents = presents.then(()=>done).then(()=>{
             presented++;
+            // The few numbers a live view reads ride on the message every
+            // present sends anyway, so nobody has to ask the worker for them.
             post({ type: 'presented', count: presented,
                 times: import.meta.BOTTLIFY_DIAGNOSTICS !== false && times
-                    ? { ...times(), replayMs: phases['batch-read'].ms } : undefined });
+                    ? { ...times(), replayMs: phases['batch-read'].ms } : undefined,
+                phases: phasesNow(), figures: played.figures?.() ?? undefined });
         }, fail);
     };
 

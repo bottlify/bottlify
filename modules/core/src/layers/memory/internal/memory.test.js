@@ -758,3 +758,35 @@ test('with a reader the dword reads are its own: over a boundary word by word, r
     assert.throws(()=>accessors.readU32sInto(0x9000, 1, [0]), /Unmapped read/);
     assert.throws(()=>accessors.readU32(0x9000), /Unmapped read/);
 });
+
+test('an address above 2 GiB handed over signed names the same guest bytes', ()=>{
+    // A large-address-aware program's heap lies above 0x80000000. Arguments
+    // cross the bridge signed, and a page rounded with `&` comes out signed:
+    // (0x8067b001 + 0xfff) & ~0xfff is -0x7f984000, the page 0x8067c000.
+    const HIGH = 0x8067c000;
+    const bytes = new Uint8Array(0x2000);
+    const raw = {
+        /** @param {number} address @param {number} length */
+        readPhysical: (address, length)=>bytes.slice(address - HIGH, address - HIGH + length),
+        /** @param {number} address @param {Uint8Array} data */
+        writePhysical: (address, data)=>bytes.set(data, address - HIGH),
+    };
+    const regions = createRegionMap();
+    regions.register({ name: 'heap', base: HIGH, size: 0x2000,
+        kind: RegionKind.THUNK_DATA, access: Access.READ_WRITE });
+    const accessors = createAccessors({ raw, regions });
+    const signed = HIGH | 0;
+    assert.equal(signed < 0, true);
+
+    accessors.writeU32(signed, 0xcafebabe);
+    assert.equal(accessors.readU32(HIGH), 0xcafebabe, 'written at the unsigned address');
+    assert.equal(accessors.readU32(signed), 0xcafebabe);
+    accessors.writeBytes(signed + 4, Uint8Array.of(0x41, 0, 0x42, 0, 0, 0));
+    assert.equal(accessors.readWideString(signed + 4), 'AB');
+    assert.equal(accessors.readCString(signed + 4), 'A');
+    accessors.fillBytes(signed, 0, 4);
+    assert.deepEqual([...accessors.readBytes(signed, 4)], [0, 0, 0, 0]);
+    const words = [0];
+    accessors.readU32sInto(signed + 4, 1, words);
+    assert.equal(words[0], 0x420041);
+});

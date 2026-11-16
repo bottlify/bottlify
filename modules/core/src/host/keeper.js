@@ -214,6 +214,8 @@ export function serveKeeper(port, options = {}){
                 return reader ? reader.threads() : [];
             case 'guestByModule':
                 return reader ? reader.guestByModule() : {};
+            case 'live':
+                return reader ? reader.live() : null;
             default:
                 throw new Error(`no such read: ${name}`);
         }

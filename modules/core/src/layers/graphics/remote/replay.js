@@ -1108,11 +1108,16 @@ export function createRecording(options){
         let copy = null;
         for (const key in result)
         {
-            if (isDeviceObject(result[key]))
+            const member = result[key];
+            // A list of objects too, as `ringState`'s targets are.
+            const listed = Array.isArray(member) && member.some(isDeviceObject);
+            if (listed || isDeviceObject(member))
             {
                 /** @type {Record<string, any>} */
                 const held = copy ?? { ...result };
-                held[key] = proxyOf(result[key]);
+                held[key] = listed
+                    ? member.map(each=>(isDeviceObject(each) ? proxyOf(each) : each))
+                    : proxyOf(member);
                 copy = held;
             }
         }
@@ -1402,7 +1407,13 @@ export function createRecording(options){
                 {
                     applied = unwrapInto(applied, args, index);
                 }
-                return method.apply(target, applied);
+                const result = method.apply(target, applied);
+                // A pure getter's answer leaves for the caller as any answer
+                // does: `ringState` names the targets, which the caller knows
+                // by their proxies. Given the device's own, the seam finds no
+                // pointer for them, and the guest's GetRenderTarget and
+                // GetDepthStencilSurface go to the host on every call.
+                return depth > 0 ? result : answerOf(result);
             }
             // A poll of an occlusion count already asked is answered here and
             // recorded nowhere: the played side has nothing to do with it, and

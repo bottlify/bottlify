@@ -16,7 +16,9 @@ import { describeFault, hostFault } from './internal/faults.js';
 import {
     clearGeneralRegisters, freshThreadFpu, setContextEflags, setContextLong, setThreadBase,
 } from './internal/context.js';
-import { createSampleTable, creditSample, takeDue, topSamples } from './internal/samples.js';
+import {
+    BUCKET_CAP, SAMPLE_COLUMNS, createSampleTable, creditSample, takeDue, topSamples,
+} from './internal/samples.js';
 import { fileNameOf } from './internal/translation-store.js';
 
 /**
@@ -403,6 +405,10 @@ export function createCpuModule(){
             if (typeof log?.metrics?.counters === 'function')
             {
                 const counters = log.metrics.counters('cpu', CPU_COUNTERS);
+                // Where the guest ran, by bucket, as the sampler credits it:
+                // the keeper ranks them, so a live view costs this thread nothing.
+                state.samples = createSampleTable(log.metrics.table('cpu', 'samples',
+                    { rows: BUCKET_CAP, columns: SAMPLE_COLUMNS }));
                 log.metrics.onFrame(()=>{
                     if (!state.host)
                     {

@@ -116,6 +116,8 @@ const first = (kind, length)=>{
  * @property {{ type: number, fvf: number, count: number, most: number }} [fvfVertices]
  * @property {{ type: number, count: number, stride: number, most: number }} [vertices]
  *     or the vertices a draw's primitives span, `stride` bytes each (`commandCode`)
+ * @property {readonly number[]} [rects]  or arguments each pointing at a RECT or null,
+ *     sixteen bytes a place in order (`commandCode`)
  * @property {boolean} [kept]  its copy is read in place (`view`, `copy`), not through the scratch
  * @property {boolean} [self]  the first argument is the object the method is of, not the device
  * @property {'rect' | 'box'} [dirty]  a texture's dirty rectangle or box (`dirtyPrologue`)

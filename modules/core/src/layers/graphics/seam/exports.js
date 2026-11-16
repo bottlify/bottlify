@@ -229,6 +229,7 @@ const DXGI_LIBRARIES = ['D3D10.dll', 'D3D10_1.dll', 'D3D11.dll', 'DXGI.dll',
  *                       swapBuffers: (hdc: number) => boolean | Promise<boolean>,
  *                       entry: (name: string) => ((args: number[]) => number) | null },
  *             diagnostics: () => any,
+ *             figures: () => import('../figures.js').FrameFigures | null,
  *             shadow: () => any, screenHeld: () => number,
  *             presentedWindow: () => { window: number, fullscreen: boolean } | null }}
  */
@@ -939,6 +940,14 @@ export function createGraphicsLibraries(
              */
             entry: name=>openglRuntime().entry(name),
         } : NO_OPENGL,
+
+        /**
+         * What a live view reads once a frame of the Direct3D 8 or 9 device that
+         * draws on this thread (`figures.js`); null for any other.
+         *
+         * @returns {import('../figures.js').FrameFigures | null}
+         */
+        figures: ()=>d3d8?.figures() ?? d3d9?.figures() ?? null,
 
         diagnostics: ()=>({
             created: [...created],

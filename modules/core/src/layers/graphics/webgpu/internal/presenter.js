@@ -1335,6 +1335,14 @@ export function createPresenter(options = {}){
          */
         presented: ()=>({ count: counters.shown, history: history.slice() }),
 
+        /**
+         * Canvas copies so far, in all and by what was shown (`shownBy`), as
+         * they stand: the counts a live view reads once a frame, not copied.
+         *
+         * @returns {{ count: number, by: Readonly<Record<string, number>> }}
+         */
+        shown: ()=>({ count: counters.shown, by: shownBy }),
+
         diagnostics(){
             return {
                 ...counters,

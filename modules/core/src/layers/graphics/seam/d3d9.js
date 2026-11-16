@@ -3971,6 +3971,14 @@ export function createDirect3D9Seam(
         diagnostics: ()=>lastDevice?.diagnostics?.() ?? null,
 
         /**
+         * What a live view reads of the device this program draws through
+         * (`figures.js`), where it draws on this thread; null otherwise.
+         *
+         * @returns {import('../figures.js').FrameFigures | null}
+         */
+        figures: ()=>lastDevice?.figures?.() ?? null,
+
+        /**
          * How Presents were paced (`createPresentQueue`): the interval and the
          * rate they were held to, and the mode the device asked for.
          */

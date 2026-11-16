@@ -1458,6 +1458,18 @@ test('diagnostics report what a run actually did', ()=>{
     assert.equal('device' in report, false);
 });
 
+test('the contents a report reads are the playing buffers\' alone', ()=>{
+    // Every loaded sound copied out and scanned was most of a diagnostics
+    // answer's time; what is heard is what the report has to say about.
+    const f = createRoot();
+    const playing = createBuffer(f, { bytes: 4096 });
+    createBuffer(f, { bytes: 8192, descriptor: 0x2200 });
+    f.bridge.call(playing, 'Play', [0, 0, DSBPLAY_LOOPING]);
+    const report = f.dsound.diagnostics();
+    assert.equal(report.buffers, 2);
+    assert.deepEqual(report.contents.map((/** @type {any} */ one)=>one.bytes), [4096]);
+});
+
 test('DSCAPS is the ninety-six bytes a program declares, not a hundred', ()=>{
     // The literal, not the symbol: the test that used the symbol on both sides
     // agreed with a wrong number, and every correctly-filled structure was

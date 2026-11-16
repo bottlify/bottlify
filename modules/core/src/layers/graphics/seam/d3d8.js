@@ -3311,6 +3311,14 @@ export function createDirect3D8Seam(
         /** What the device this program is drawing through has counted. */
         diagnostics: ()=>lastDevice?.diagnostics?.() ?? null,
 
+        /**
+         * What a live view reads of the device this program draws through
+         * (`figures.js`), where it draws on this thread; null otherwise.
+         *
+         * @returns {import('../figures.js').FrameFigures | null}
+         */
+        figures: ()=>lastDevice?.figures?.() ?? null,
+
         /** How Presents were paced, as Direct3D 9's seam says it. */
         presentPacing: ()=>({ ...presents.diagnostics(),
             windowed: pacing ? pacing.windowed : null, askedHz: pacing ? pacing.rate : null }),

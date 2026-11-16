@@ -166,6 +166,35 @@ test('the played side counts its batches\' time and says it with its diagnostics
     assert.deepEqual(s.made.phases(), told.phases);
 });
 
+test('every present carries what the played device and its thread did, unasked', async()=>{
+    // A live view reads these once a second through the log; nobody asks the
+    // worker for them, so they ride on the message a present sends anyway.
+    /** @type {any[]} */
+    const said = [];
+    const figures = { draws: 30, gpuFrames: 1, gpuMs: 4, last: null };
+    const played = {
+        /** @param {ArrayBuffer} buffer @param {(call: any) => void} each */
+        read: (buffer, each)=>{
+            each({ m: 'Present', wait: WAIT.PACED });
+            return undefined;
+        },
+        play: ()=>undefined,
+        figures: ()=>figures,
+    };
+    createReceiver({ played: /** @type {any} */ (played), post: message=>said.push(message) })
+        .receive({ type: 'calls', buffer: new ArrayBuffer(4) });
+    await new Promise(resolve=>setImmediate(resolve));
+    const presented = said.find(message=>message.type === 'presented');
+    assert.deepEqual(presented.figures, figures);
+    assert.equal(presented.phases['batch-read'].count, 1);
+
+    const s = sender(0);
+    assert.equal(s.made.figures(), null, 'nothing presented yet: not measured, never zero');
+    s.made.receive(presented);
+    assert.deepEqual(s.made.figures(), figures);
+    assert.deepEqual(s.made.phases(), presented.phases);
+});
+
 test('the played side says how far its GPU ran behind with its diagnostics', ()=>{
     // A present that queued a frame past the bound waited for the GPU, which
     // the program's side sees as a wait on the worker like any other: the

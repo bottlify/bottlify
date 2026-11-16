@@ -37,6 +37,8 @@ function hostWith(){
             heap: ()=>({ allocate: ()=>0 }),
         },
         bridge: { callGuest: ()=>Promise.resolve(0) },
+        // A log with nowhere to publish: the layer's figures are another test's.
+        log: {},
     };
     return /** @type {any} */ ({ requireApi: (/** @type {string} */ name)=>apis[name] });
 }
