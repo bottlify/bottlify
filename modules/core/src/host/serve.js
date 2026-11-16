@@ -659,6 +659,19 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
             const posted = inbound ? { buffer: new SharedArrayBuffer(4), index: 0 } : null;
             const pacing = pacingFor(inbound);
             const doorbell = posted && inboundReader ? { posted, bell: inboundReader.bell } : null;
+            /**
+             * A layer read as the bundle is, its preload told as its own: the
+             * bundle's (`bundle.layers`) and a run's with no bundle (`layers`).
+             *
+             * @param {any} layer
+             */
+            const readLayer = layer=>({
+                ...layer,
+                fetch: layer.file ? blobFetcher(layer.file)
+                    : rangeFetcher(/** @type {string} */ (layer.url)),
+                progress: (/** @type {object} */ state)=>emit('bundle-preload',
+                    { ...state, layer: layer.id }),
+            });
             app = await createApp({
                 ...rest,
                 audio: rest.audio ? soundOptions : undefined,
@@ -673,15 +686,9 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
                     // A preload happens inside the start, before the page has
                     // an app to subscribe through: told as an event at once.
                     progress: (/** @type {unknown} */ state)=>emit('bundle-preload', state),
-                    // Each layer read as the bundle is, its preload told as its own.
-                    layers: bundle.layers?.map(layer=>({
-                        ...layer,
-                        fetch: layer.file ? blobFetcher(layer.file)
-                            : rangeFetcher(/** @type {string} */ (layer.url)),
-                        progress: (/** @type {object} */ state)=>emit('bundle-preload',
-                            { ...state, layer: layer.id }),
-                    })),
+                    layers: bundle.layers?.map(readLayer),
                 } : undefined,
+                layers: rest.layers?.map(readLayer),
                 storage: storage && typeof storage === 'object'
                     ? { load: async()=>storage.files }
                     : storage,
