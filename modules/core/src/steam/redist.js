@@ -403,11 +403,38 @@ export function applyPackage(db, cabinetFilesByKey, machine){
             && directory === folders.SystemFolder ? folders.System64Folder : directory);
     }
 
+    // A global Win32 assembly (an MsiAssembly row of Attributes 1 and no
+    // File_Application) is not copied where its Directory says: Windows
+    // Installer hands it to the side-by-side store, laid out as the activation
+    // context reads it (`actctx.js`) - its files under WinSxS\<key>\ and its
+    // manifest also as WinSxS\Manifests\<key>.manifest; a publisher policy's
+    // under WinSxS\Policies\<key>\. The key is the folder the package names
+    // for the component, the store's own name for the assembly.
+    const fileRows = rowsOf(db, 'File');
+    /** @type {Map<string, { key: string, manifest: string, policy: boolean }>} */
+    const assemblies = new Map();
+    for (const row of rowsOf(db, 'MsiAssembly'))
+    {
+        const directory = installed.get(row.Component_);
+        if (Number(row.Attributes ?? 0) !== 1 || row.File_Application || !directory)
+        {
+            continue;
+        }
+        const manifest = String(row.File_Manifest ?? '');
+        const named = longName(fileRows.find(file=>file.File === manifest)?.FileName ?? '');
+        assemblies.set(row.Component_, { key: directory.split('\\').pop() ?? '', manifest,
+            policy: /\.policy$/i.test(named) });
+    }
+    const STORE = `${folders.WindowsFolder}\\WinSxS`;
+
     /** @type {{ path: string, bytes: Uint8Array }[]} */
     const files = [];
-    for (const file of rowsOf(db, 'File'))
+    for (const file of fileRows)
     {
-        const directory = installed.get(file.Component_);
+        const assembly = assemblies.get(file.Component_);
+        const directory = assembly
+            ? `${STORE}${assembly.policy ? '\\Policies' : ''}\\${assembly.key}`
+            : installed.get(file.Component_);
         if (directory === undefined)
         {
             continue;
@@ -425,6 +452,10 @@ export function applyPackage(db, cabinetFilesByKey, machine){
             continue;
         }
         files.push({ path: `${directory}\\${longName(file.FileName)}`, bytes });
+        if (assembly && !assembly.policy && file.File === assembly.manifest)
+        {
+            files.push({ path: `${STORE}\\Manifests\\${assembly.key}.manifest`, bytes });
+        }
     }
 
     const roots = [HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, HKEY_USERS];
