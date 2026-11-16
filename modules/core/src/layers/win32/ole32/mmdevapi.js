@@ -25,6 +25,7 @@
 import { createComObject } from './objects.js';
 import { IID_IAUDIO_CLIENT, IID_IAUDIO_SESSION_MANAGER, createAudioClients, guidAt }
     from './audio-client.js';
+import { SOUND_DEVICE_GUID } from '../devices.js';
 
 export const CLSID_MMDEVICE_ENUMERATOR = '{BCDE0395-E52F-467C-8E3D-C4579291692E}';
 export const IID_IMMDEVICE_ENUMERATOR = '{A95664D2-9614-4F35-A746-DE8DB63617E6}';
@@ -69,8 +70,10 @@ const SPEAKERS = Object.freeze({
 /**
  * The properties a program reads of an endpoint, by PROPERTYKEY (`{fmtid} pid`):
  * the friendly name and description, the adapter's name, the form factor
- * (Speakers, 1) and the format the engine mixes in, a WAVEFORMATEXTENSIBLE of
- * 32-bit float at the endpoint's rate and channels.
+ * (Speakers, 1), the format the engine mixes in, a WAVEFORMATEXTENSIBLE of
+ * 32-bit float at the endpoint's rate and channels, and the GUID DirectSound
+ * knows the same device by, which its enumeration lists first after the
+ * primary driver (Wine's dsound8 test_first_device).
  */
 const KEYS = Object.freeze({
     FRIENDLY_NAME: '{A45C254E-DF1C-4EFD-8020-67D146A850E0} 14',
@@ -78,6 +81,7 @@ const KEYS = Object.freeze({
     INTERFACE_FRIENDLY_NAME: '{026E516E-B814-414B-83CD-856D6FEF4822} 2',
     FORM_FACTOR: '{1DA5D803-D492-4EDD-8C23-E0C0FFEE7F0E} 0',
     DEVICE_FORMAT: '{F19F064D-082C-4E27-BC73-6882A1BB8E4C} 0',
+    AUDIO_ENDPOINT_GUID: '{1DA5D803-D492-4EDD-8C23-E0C0FFEE7F0E} 4',
 });
 
 /** KSDATAFORMAT_SUBTYPE_IEEE_FLOAT's bytes. */
@@ -213,7 +217,8 @@ export function registerMmDevApiClasses(host){
         const view = new DataView(variant.buffer);
         const text = key === KEYS.FRIENDLY_NAME ? `${SPEAKERS.name} (${SPEAKERS.adapter})`
             : key === KEYS.DEVICE_DESC ? SPEAKERS.name
-                : key === KEYS.INTERFACE_FRIENDLY_NAME ? SPEAKERS.adapter : null;
+                : key === KEYS.INTERFACE_FRIENDLY_NAME ? SPEAKERS.adapter
+                    : key === KEYS.AUDIO_ENDPOINT_GUID ? SOUND_DEVICE_GUID : null;
         if (text !== null)
         {
             const at = taskString(text);

@@ -27,6 +27,7 @@
 - Dwarf Fortress
 - Empire Earth II (demo)
 - Enclave
+- Fable: The Lost Chapters
 - Fallout (demo)
 - Far Cry (demo) (+shader model 2)
 - FIFA 08 (demo)

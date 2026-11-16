@@ -2273,3 +2273,15 @@ test('CoCreateInstance reaches DirectInput 8 through its class object, which wai
         0x80040111 | 0, 'DirectInput 7 is dinput.dll\'s class, not this library\'s');
     assert.equal(f.memory.u32(AT.out), 0);
 });
+
+test('a device with no data format is not acquired, so its format can still be set', ()=>{
+    // A program that acquires its keyboard before it sets the format: Windows
+    // refuses the Acquire (Wine's test_acquire), and the format set after it
+    // and the reads after that work. Taken anyway, the format was refused as
+    // DIERR_ACQUIRED and every GetDeviceState answered E_INVALIDARG.
+    const f = fixture();
+    const device = createDevice(f, GUID_SysKeyboard);
+    assert.equal(f.bridge.call(device, 'Acquire', []), DIERR_INVALIDPARAM);
+    assert.equal(f.bridge.call(device, 'SetDataFormat', [dataFormat(f.memory, 256)]), DI_OK);
+    assert.equal(f.bridge.call(device, 'Acquire', []), DI_OK);
+});

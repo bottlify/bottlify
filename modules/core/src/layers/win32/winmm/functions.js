@@ -36,7 +36,7 @@
 
 import { parseWave } from './wave.js';
 import { MAX_PERIOD } from './timers.js';
-import { SOUND_ADAPTER_NAME } from '../devices.js';
+import { SOUND_ADAPTER_NAME, SOUND_DEVICE_INTERFACE } from '../devices.js';
 import { createMciVideo } from './mci-video.js';
 import { charactersOf, readToTerminator } from '../common/scan-windows.js';
 
@@ -399,12 +399,6 @@ const NEVER_MAPPED = 0x10000;
 
 /** What the one wave-out device calls itself. */
 const WAVE_OUT_NAME = SOUND_ADAPTER_NAME;
-
-/**
- * The device's interface name, which DRV_QUERYDEVICEINTERFACE answers: a
- * program keys its saved settings on it, and it names nothing it could open.
- */
-const DEVICE_INTERFACE = '\\\\?\\bottlify#wave#out';
 
 /** The driver messages a program sends through waveOutMessage and waveInMessage. */
 const DRV_QUERYMAPPABLE = 0x0805;
@@ -1149,14 +1143,14 @@ export function createWinmmFunctions(host){
                 {
                     return MMSYSERR_INVALPARAM;
                 }
-                host.writeMemory(first, dword((DEVICE_INTERFACE.length + 1) * 2));
+                host.writeMemory(first, dword((SOUND_DEVICE_INTERFACE.length + 1) * 2));
                 return MMSYSERR_NOERROR;
             case DRV_QUERYDEVICEINTERFACE:
-                if (first === 0 || second < (DEVICE_INTERFACE.length + 1) * 2)
+                if (first === 0 || second < (SOUND_DEVICE_INTERFACE.length + 1) * 2)
                 {
                     return MMSYSERR_INVALPARAM;
                 }
-                host.writeMemory(first, utf16(`${DEVICE_INTERFACE}\0`));
+                host.writeMemory(first, utf16(`${SOUND_DEVICE_INTERFACE}\0`));
                 return MMSYSERR_NOERROR;
             case DRVM_MAPPER_PREFERRED_GET:
             case DRVM_MAPPER_CONSOLEVOICECOM_GET:

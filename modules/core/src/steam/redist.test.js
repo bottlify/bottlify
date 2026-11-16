@@ -372,3 +372,41 @@ test('a DirectX INF\'s folder below a directory id may be quoted', ()=>{
     assert.deepEqual(redist.directxFiles([packed], 'x86').files.map(file=>file.path),
         ['C:\\WINDOWS\\Driver Cache\\i386\\a.dll']);
 });
+
+test('a package\'s Win32 assemblies go into the side-by-side store, read as the activation '
+    + 'context reads it', ()=>{
+    /** @param {string[]} columns @param {any[][]} rows */
+    const table = (columns, rows)=>({ columns: columns.map(name=>({ name })), rows });
+    const CRT = 'x86_microsoft.vc90.crt_1fc8b3b9a1e18e3b_9.0.30729.1_none_e163563597edeada';
+    const POLICY = 'x86_policy.9.0.microsoft.vc90.crt_1fc8b3b9a1e18e3b_9.0.30729.1_none_'
+        + '8550c6b5d18a9128';
+    const tables = new Map([
+        ['Directory', table(['Directory', 'Directory_Parent', 'DefaultDir'], [
+            ['TARGETDIR', null, 'SourceDir'], ['WindowsFolder', 'TARGETDIR', '.'],
+            ['WinSxS', 'WindowsFolder', 'winsxs'], ['crt', 'WinSxS', CRT],
+            ['policy', 'WinSxS', POLICY]])],
+        ['Component', table(['Component', 'Directory_', 'Attributes', 'Condition'], [
+            ['Crt', 'crt', 0, null], ['Policy', 'policy', 0, null],
+            ['Plain', 'WindowsFolder', 0, null]])],
+        ['File', table(['File', 'Component_', 'FileName', 'FileSize'], [
+            ['msvcr90', 'Crt', 'msvcr90.dll', 3],
+            ['crtManifest', 'Crt', 'x86_Microsoft.VC90.CRT_x-ww.manifest', 2],
+            ['policyFile', 'Policy', '9.0.30729.1.policy', 1],
+            ['plain', 'Plain', 'readme.txt', 1]])],
+        ['MsiAssembly', table(['Component_', 'Feature_', 'File_Manifest', 'File_Application',
+            'Attributes'], [['Crt', 'F', 'crtManifest', null, 1],
+            ['Policy', 'F', 'policyFile', null, 1]])],
+    ]);
+    const db = { table: (/** @type {string} */ name)=>tables.get(name) ?? null };
+    const files = new Map([['msvcr90', [Uint8Array.of(1, 2, 3)]],
+        ['crtmanifest', [Uint8Array.of(4, 5)]], ['policyfile', [Uint8Array.of(6)]],
+        ['plain', [Uint8Array.of(7)]]]);
+    const paths = applyPackage(db, files, 'x86').files.map(file=>file.path).sort();
+    assert.deepEqual(paths, [
+        `C:\\WINDOWS\\WinSxS\\Manifests\\${CRT}.manifest`,
+        `C:\\WINDOWS\\WinSxS\\Policies\\${POLICY}\\9.0.30729.1.policy`,
+        `C:\\WINDOWS\\WinSxS\\${CRT}\\msvcr90.dll`,
+        `C:\\WINDOWS\\WinSxS\\${CRT}\\x86_Microsoft.VC90.CRT_x-ww.manifest`,
+        'C:\\WINDOWS\\readme.txt',
+    ].sort());
+});

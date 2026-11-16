@@ -11,6 +11,7 @@ import {
     CLSID_MMDEVICE_ENUMERATOR, E_NOTFOUND, IID_IMMDEVICE, IID_IMMDEVICE_COLLECTION,
     IID_IMMDEVICE_ENUMERATOR, IID_IPROPERTY_STORE, registerMmDevApiClasses,
 } from './mmdevapi.js';
+import { SOUND_DEVICE_GUID } from '../devices.js';
 
 const S_OK = 0;
 const E_INVALIDARG = 0x80070057 | 0;
@@ -158,6 +159,19 @@ test('the property store names the speakers and the engine\'s float mix format',
 
     assert.equal(s.call(store, 'GetValue', [s.key([1, 2, 3, 4], 5), VARIANT]), S_OK);
     assert.equal(s.view.getUint16(VARIANT, true), 0, 'a key not kept is VT_EMPTY');
+});
+
+test('the endpoint names the GUID DirectSound knows the same device by', ()=>{
+    // Wine's dsound8 test_first_device: PKEY_AudioEndpoint_GUID of the default
+    // render endpoint is the first device DirectSoundEnumerate lists.
+    const s = setup();
+    s.enumerator('GetDefaultAudioEndpoint', [0, 0, OUT]);
+    s.call(s.view.getUint32(OUT, true), 'OpenPropertyStore', [0, OUT]);
+    const store = s.view.getUint32(OUT, true);
+    const AUDIO_ENDPOINT = [0x1da5d803, 0x4eddd492, 0xc0e0238c, 0x0e7feeff];
+    assert.equal(s.call(store, 'GetValue', [s.key(AUDIO_ENDPOINT, 4), VARIANT]), S_OK);
+    assert.equal(s.view.getUint16(VARIANT, true), 31, 'VT_LPWSTR');
+    assert.equal(s.wideAt(s.view.getUint32(VARIANT + 8, true)), SOUND_DEVICE_GUID);
 });
 
 test('in a 64-bit process the pointers are quadwords, a BLOB\'s pointer on its boundary', ()=>{
