@@ -420,3 +420,19 @@ test('a PE32+ descriptor\'s thunks are quadwords, bound eight bytes wide', ()=>{
     assert.deepEqual([0, 1, 2].map(index=>view.getBigUint64(slot(index), true)),
         [0x7000_1000n, 0x7000_2000n, 0x7000_3000n]);
 });
+
+test('a directory in the part of a section its file does not fill reads as the image maps it:'
+    + ' zero, listing nothing', ()=>{
+    // A packed library: its one section is mostly what its unpacker fills at
+    // run time, and its delay-load directory points there. Whatever follows
+    // the section in the file is not that memory.
+    const raw = fixture(new Uint8Array(0x1000),
+        { 13: { address: SECTION_RVA + 0x2000, size: 64 } });
+    const bytes = new Uint8Array(raw.length + 0x4000).fill(0xff);
+    bytes.set(raw);
+    const view = new DataView(bytes.buffer);
+    const header = 0x80 + 24 + 0xe0;
+    view.setUint32(header + 8, 0x4000, true); // virtualSize past the file's data
+    view.setUint32(0x80 + 24 + 56, SECTION_RVA + 0x4000, true); // sizeOfImage
+    assert.deepEqual(readDelayImports(bytes, parsePe(bytes)), []);
+});

@@ -583,6 +583,31 @@ export function relocateImage(mapped, image, base){
 }
 
 /**
+ * `length` bytes at an RVA as the image maps them, read from the raw file:
+ * a section's tail past its file data is zero, as the loader fills it. A
+ * packer's section is mostly that tail, and a directory pointing into it
+ * holds what the unpacker writes there at run time; read through the file
+ * offset, it was the next section's bytes or past the end of the file.
+ *
+ * @param {Uint8Array} bytes  The raw file.
+ * @param {PeImage} image @param {number} rva @param {number} length
+ * @returns {Uint8Array}
+ */
+export function readMapped(bytes, image, rva, length){
+    const out = new Uint8Array(length);
+    const section = image.sections.find(each=>rva >= each.virtualAddress
+        && rva < each.virtualAddress + Math.max(each.virtualSize, each.rawSize));
+    const at = rvaToFileOffset(image, rva);
+    const end = Math.min(bytes.length,
+        section ? section.rawOffset + section.rawSize : bytes.length);
+    if (at < end)
+    {
+        out.set(bytes.subarray(at, Math.min(end, at + length)));
+    }
+    return out;
+}
+
+/**
  * Translates an RVA to an offset in the raw file.
  *
  * @param {PeImage} image
