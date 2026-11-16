@@ -4758,6 +4758,16 @@ export function createWin32Module(){
                     trustedRoots: ()=>config?.trustedRoots,
                     now: ()=>kernel.clock.wallClock(),
                     divergence: config?.divergence,
+                    crypt32: (name, args)=>libraries['CRYPT32.dll'][name].handler(args) >>> 0,
+                    allocate: bytes=>{
+                        const at = heap.allocate(bytes);
+                        if (at !== 0)
+                        {
+                            writeMemory(at, new Uint8Array(bytes));
+                        }
+                        return at;
+                    },
+                    free: address=>heap.free(address),
                 }),
 
                 // The maths half of the Direct3D helper: pure vector and matrix
