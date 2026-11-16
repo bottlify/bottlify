@@ -26,7 +26,7 @@
 - Dungeon Siege (demo)
 - Dwarf Fortress
 - Empire Earth II (demo)
-- Enclave (demo)
+- Enclave
 - Fallout (demo)
 - Far Cry (demo) (+shader model 2)
 - FIFA 08 (demo)
