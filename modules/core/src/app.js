@@ -535,6 +535,10 @@ const hashText = (hash, text)=>{
  *           `.bottlify\drive_c` mounted at C:\, `.bottlify\system32` in
  *           system32, `.bottlify\registry.json` laid under the bottle's hive;
  *           anything else in it is not mounted (`layer-files-unmounted`).
+ * @property {BundleLayer[]} [layers]  The same, for a run with no bundle of its
+ *           own: an installer writing its whole volume, whose wizard needs the
+ *           runtime a layer carries while it installs. Ignored beside a bundle,
+ *           which names its own (`bundle.layers`).
  * @property {Object} [sidecarHooks]
  *           A bundle's sidecar, next to `manifest.json` and never inside the
  *           bundle itself: replaces one or more guest functions, or one loop
@@ -3252,13 +3256,17 @@ function expectIndex(expected){
  * @returns {Promise<MountedBundle | null>}
  */
 async function mountBundle({ options, events, translationStore }){
-    if (!options.bundle?.fetch)
+    // A run with no bundle of its own - an installer writing its whole
+    // volume - may still stand on layers (`layers`): a setup whose wizard is
+    // a managed program needs the Framework while it installs.
+    const hasOwn = typeof options.bundle?.fetch === 'function';
+    /** @type {any[]} */
+    const layers = (hasOwn ? options.bundle?.layers : options.layers) ?? [];
+    if (!hasOwn && layers.length === 0)
     {
         return null;
     }
-    const id = options.bundle.id ?? options.id ?? 'bundle';
-    /** @type {any[]} */
-    const layers = options.bundle.layers ?? [];
+    const id = options.bundle?.id ?? options.id ?? 'bundle';
     for (const layer of layers)
     {
         if (typeof layer?.id !== 'string' || typeof layer.fetch !== 'function')
@@ -3266,7 +3274,7 @@ async function mountBundle({ options, events, translationStore }){
             throw new TypeError('bundle.layers: each layer needs an id and a fetch');
         }
     }
-    const specs = [{ spec: options.bundle, id, layer: false },
+    const specs = [...hasOwn ? [{ spec: options.bundle, id, layer: false }] : [],
         ...layers.map(layer=>({ spec: layer, id: layer.id, layer: true }))];
 
     // Every cache of the run named before any opens: the origin is kept under
@@ -3289,8 +3297,8 @@ async function mountBundle({ options, events, translationStore }){
         if (held.length === specs.length)
         {
             // Absent means local; `store: null` is no cache, so not `??`.
-            if ([undefined, 'local'].includes(options.bundle.store)
-                && options.bundle.evictOthers !== false)
+            if ([undefined, 'local'].includes(options.bundle?.store)
+                && options.bundle?.evictOthers !== false)
             {
                 // The origin's caches kept under its budget, the oldest let
                 // go: in the background, as nothing of this run's own is touched.
@@ -3325,11 +3333,13 @@ async function mountBundle({ options, events, translationStore }){
         }
         throw failed.reason;
     }
-    const mounted = outcomes.map(one=>/** @type {PromiseFulfilledResult<MountedBundle>} */ (one).value);
-    if (mounted.length === 1)
+    const layered = outcomes.map(one=>/** @type {PromiseFulfilledResult<MountedBundle>} */ (one).value);
+    if (hasOwn && layered.length === 1)
     {
-        return mounted[0];
+        return layered[0];
     }
+    // With no bundle of its own, the bottle's place over the layers is empty.
+    const mounted = hasOwn ? layered : [NO_BOTTLE, ...layered];
 
     /** @param {(one: MountedBundle) => Record<string, number | string>} get */
     const added = get=>{
@@ -3369,6 +3379,30 @@ async function mountBundle({ options, events, translationStore }){
         },
     };
 }
+
+/**
+ * The bottle's place over its layers in a run that has no bundle: nothing
+ * there, nothing to fetch, no hive.
+ *
+ * @type {MountedBundle}
+ */
+const NO_BOTTLE = Object.freeze({
+    source: Object.freeze({
+        list: ()=>[],
+        stat: ()=>null,
+        read: ()=>{
+            throw new Error('the run has no bundle of its own to read from');
+        },
+    }),
+    fetch: ()=>Promise.resolve(),
+    stop: ()=>{},
+    ahead: ()=>0,
+    refetched: ()=>({ blocks: 0, bytes: 0 }),
+    ranges: ()=>({ requests: 0, bytes: 0 }),
+    decoded: ()=>({ blocks: 0, bytes: 0, ms: 0 }),
+    held: ()=>({}),
+    registry: Promise.resolve(null),
+});
 
 /**
  * A layer's source whose misses say whose blocks they want: each block tagged

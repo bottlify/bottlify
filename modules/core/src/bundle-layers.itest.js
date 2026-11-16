@@ -493,3 +493,24 @@ function memoryStore(){
         },
     };
 }
+
+test('a run with no bundle of its own stands on the layers it is given, as an installer does',
+    { timeout: 120_000 }, async t=>{
+        // A setup writes its whole volume; its wizard, a managed program, needs
+        // the Framework a layer carries while it installs.
+        const layer = await pack(LAYER_FILES, LAYER_HIVE);
+        t.after(()=>layer.cleanup());
+        const app = await createApp({
+            executable: probeProgram(),
+            layers: [{ id: 'netfx48', fetch: layer.fetch, store: null }],
+            storage: { load: async()=>({ files: [] }) },
+        });
+        t.after(()=>app.dispose());
+        assert.equal(await app.run({ timeoutMs: 60_000 }), 0);
+        const observed = app.files.read('C:\\observed.bin');
+        const [clr] = LAYOUT.files;
+        assert.equal(word(observed, clr.at), CLR.length, 'the layer\'s file is there');
+        assert.deepEqual([...observed.subarray(clr.at + 12, clr.at + 12 + CLR.length)], [...CLR]);
+        const [release] = LAYOUT.values;
+        assert.equal(word(observed, release.at + 16), 528040, 'and its keys');
+    });
