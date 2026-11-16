@@ -1843,6 +1843,9 @@ export function createCpuModule(){
                             heldBytes: figures.heldBytes ?? null,
                             evictions: figures.evictions ?? null,
                             broughtBack: figures.broughtBack ?? null,
+                            // Its translator's whole account, as the process's own
+                            // `cork` above: what it formed, took from the store and left.
+                            cork: figures,
                             said,
                         } : { index: remote.index, instructions, said, answer: 'not answered yet' };
                     }),

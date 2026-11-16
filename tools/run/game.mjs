@@ -1175,18 +1175,11 @@ function describe(result, context, calls, symbols){
             {
                 say(`      interpreted from: ${from.join(', ')}`);
             }
-            const exits = (one.exitsByTarget ?? []).slice(0, 12).map((/** @type {any} */ at)=>
-                `0x${(at.address >>> 0).toString(16)} x${at.count} ${at.reason}`);
-            if (exits.length > 0)
+            // Its own translator, as the process's below: the process's figures say
+            // nothing of what another executor's runtime formed, took or left.
+            if (one.cork)
             {
-                say(`      untranslated exits by target: ${exits.join(', ')}`);
-            }
-            const refusals = [...Object.entries(one.refused ?? {}),
-                ...Object.entries(one.refusedWhy ?? {})];
-            if (refusals.length > 0)
-            {
-                say(`      refused: ${refusals.map(([what, count])=>`${what} x${count}`)
-                    .join('; ')}`);
+                describeCork(one.cork, (/** @type {string} */ line)=>say(`    ${line}`));
             }
             // Who woke whom: a notify is a lock every thread shares and a sleeping
             // side's wake tens of microseconds, so the share asleep is the cost.
