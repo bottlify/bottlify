@@ -12250,6 +12250,10 @@ export async function createApp(options){
         facade.input = routedInput(speaking.input);
         if (speaking.debug)
         {
+            // The first process by its id is the page's own line's, not the
+            // facade's: that speaks for the child started last, and a run whose
+            // program waits on its children read the child's tables twice.
+            const firstProcess = ()=>(rootAcross ? speaking : mainLine.current);
             facade.debug = { ...speaking.debug,
                 windows: ()=>runWindows() ?? speaking.debug.windows(),
                 desktop: ()=>runDesktop(()=>speaking.debug.desktop()),
@@ -12266,7 +12270,7 @@ export async function createApp(options){
                 diagnosticsOf: id=>{
                     if (id === (options.processId ?? FIRST_PROCESS_ID))
                     {
-                        return facade.diagnostics();
+                        return firstProcess().diagnostics();
                     }
                     const child = [...standingAcross, ...standingBeside].find(each=>each.id === id);
                     return child ? child.diagnostics()
@@ -12282,7 +12286,7 @@ export async function createApp(options){
                 readOf: (id, address, length)=>{
                     if (id === (options.processId ?? FIRST_PROCESS_ID))
                     {
-                        return speaking.debug.read(address, length);
+                        return firstProcess().debug.read(address, length);
                     }
                     const child = [...standingBeside].find(each=>each.id === id);
                     if (!child)
@@ -12301,7 +12305,7 @@ export async function createApp(options){
                 hookOf: (id, address, how)=>{
                     if (id === (options.processId ?? FIRST_PROCESS_ID))
                     {
-                        return speaking.debug.hook(address, how);
+                        return firstProcess().debug.hook(address, how);
                     }
                     const child = [...standingBeside].find(each=>each.id === id);
                     if (!child)

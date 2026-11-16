@@ -1417,6 +1417,36 @@ test('GetNumberFormat groups by a NUMBERFMT\'s number or the locale\'s SGROUPING
     }
 });
 
+test('a neutral name answers as itself: a culture\'s parents end at the invariant locale', ()=>{
+    // .NET walks a culture's parents by LOCALE_SPARENT until the invariant
+    // locale; "en" answered as en-US named "en" its own parent, and a program's
+    // resources fell back from "en" to "en" for ever.
+    const host = fakeHost();
+    const fns = /** @type {any} */ (createLocaleFunctions(host));
+    /** @param {string} name @param {number} type */
+    const info = (name, type)=>{
+        host.plantWide(0x200, name);
+        const length = fns.GetLocaleInfoEx.handler([0x200, type, 0x300, 64]);
+        return length === 0 ? null : host.readWide(0x300, length - 1);
+    };
+    const [SNAME, SPARENT, INEUTRAL, ILANGUAGE] = [0x5c, 0x6d, 0x71, 0x1];
+    for (const [name, parent] of [['en-US', 'en'], ['en', ''], ['ru-RU', 'ru'], ['ru', '']])
+    {
+        assert.equal(info(name, SNAME), name, `${name}: LOCALE_SNAME`);
+        assert.equal(info(name, SPARENT), parent, `${name}: LOCALE_SPARENT`);
+        assert.equal(info(name, INEUTRAL), name.includes('-') ? '0' : '1', `${name}: neutral`);
+    }
+    assert.equal(info('en', ILANGUAGE), '0009', 'the neutral LCID');
+    // The walk ends: from en-US through its parents to the invariant locale.
+    const walked = [];
+    for (let name = 'en-US'; name !== ''; name = /** @type {string} */ (info(name, SPARENT)))
+    {
+        walked.push(name);
+        assert.ok(walked.length < 4, walked.join(' > '));
+    }
+    assert.deepEqual(walked, ['en-US', 'en']);
+});
+
 test('the name-based forms answer as the LCID forms for the locale the name names', async()=>{
     const host = fakeHost();
     const fns = /** @type {any} */ (createLocaleFunctions(host));

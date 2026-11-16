@@ -610,3 +610,22 @@ test('steps mixing calls answered in place with calls into the guest enter the g
     assert.equal(machine.regs.eax, 50);
     assert.equal(machine.regs.eip, 0x00401000);
 });
+
+test('a host call that fails is named in the failure, with where it was thrown', async()=>{
+    const machine = await bridge();
+    machine.api.register('TEST.dll!Broken', {
+        argBytes: 0,
+        handler: async()=>{
+            await settle();
+            new DataView(new ArrayBuffer(4)).getUint32(8);
+            return 0;
+        },
+    });
+    machine.trap(machine.lastTrap(), machine.main, MAIN.top - 0x100);
+    await settle();
+    await settle();
+    const failure = machine.api.failure();
+    assert.ok(failure, 'the run is told');
+    assert.match(failure.message, /^TEST\.dll!Broken: Offset is outside the bounds of the DataView/);
+    assert.match(failure.message, /\(at .*module\.test\.js:\d+:\d+\)+$/, 'and where in our code');
+});

@@ -3177,12 +3177,22 @@ export function createLocaleFunctions(host){
                 table.LCIDToLocaleName.handler([LCID_EN_US, buffer, room, 0]),
         },
 
-        /** int GetLocaleInfoEx(LPCWSTR lpLocaleName, LCTYPE, LPWSTR lpLCData, int cchData) */
+        /**
+         * int GetLocaleInfoEx(LPCWSTR lpLocaleName, LCTYPE, LPWSTR lpLCData, int cchData)
+         *
+         * A neutral name answers as itself, not as its language's default
+         * locale the LCID calls stand it for: "en" is named "en", its parent
+         * the invariant locale. Answered as en-US, its parent was "en" again,
+         * and .NET's resources fell back from "en" to "en" for ever.
+         */
         GetLocaleInfoEx: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([name, type, buffer, count])=>byName(name, lcid=>
-                table.GetLocaleInfoW.handler([lcid, type, buffer, count])),
+            handler: ([name, type, buffer, count])=>{
+                const record = localeOfName(name >>> 0);
+                return record === null ? refuse(ERROR_INVALID_PARAMETER)
+                    : answerInfo(record, type >>> 0, buffer >>> 0, count | 0, true);
+            },
         },
 
         /**

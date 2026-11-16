@@ -247,3 +247,11 @@ test('an AES key imported from a BCRYPT_KEY_DATA_BLOB enciphers as one generated
     assert.equal(fns.BCryptGenerateKeyPair.handler(),
         STATUS_INVALID_HANDLE, 'no key pair: no such algorithm opens');
 });
+
+test('BCryptGetFipsAlgorithmMode answers FIPS mode off', ()=>{
+    const { memory, fns } = machine();
+    memory[0x40] = 0xff;
+    assert.equal(fns.BCryptGetFipsAlgorithmMode.handler([0x40]), 0);
+    assert.equal(memory[0x40], 0);
+    assert.equal(fns.BCryptGetFipsAlgorithmMode.handler([0]), STATUS_INVALID_PARAMETER);
+});

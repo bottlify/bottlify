@@ -236,6 +236,26 @@ export function createBcryptFunctions(host){
 
     return {
         /**
+         * NTSTATUS BCryptGetFipsAlgorithmMode(BOOLEAN *pfEnabled)
+         *
+         * FIPS mode is off, as on a machine whose policy does not set it. The
+         * .NET runtime asks it before its first cryptographic type, and a
+         * configuration that names one fails whole without it.
+         */
+        BCryptGetFipsAlgorithmMode: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([enabled])=>{
+                if ((enabled >>> 0) === 0)
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+                host.writeMemory(enabled >>> 0, new Uint8Array(1));
+                return STATUS_SUCCESS;
+            },
+        },
+
+        /**
          * NTSTATUS BCryptOpenAlgorithmProvider(BCRYPT_ALG_HANDLE *phAlgorithm,
          *   LPCWSTR pszAlgId, LPCWSTR pszImplementation, ULONG dwFlags)
          *

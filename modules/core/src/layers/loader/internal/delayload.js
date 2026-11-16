@@ -31,7 +31,7 @@
  * program that cannot find a function at all.
  */
 
-import { rvaToFileOffset } from './pe.js';
+import { readMapped } from './pe.js';
 
 export const DIR_DELAY_IMPORT = 13;
 
@@ -40,6 +40,9 @@ const DELAY_ATTR_RVA_BASED = 1;
 
 /** Eight dwords, ending in an all-zero one. */
 const DESCRIPTOR_SIZE = 32;
+
+/** The longest name read: a library's or an import's. */
+const MAX_NAME = 512;
 
 /**
  * @typedef {Object} DelayLoadedDll
@@ -63,18 +66,26 @@ export function readDelayImports(bytes, image){
         return [];
     }
 
-    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    const fileOffset = (/** @type {number} */ rva)=>rvaToFileOffset(image, rva);
+    // Read as the image maps it: a packed library's directory is in the part
+    // of a section its unpacker fills, zero until then, so it lists nothing.
+    /** @param {number} rva */
+    const u32 = rva=>new DataView(readMapped(bytes, image, rva, 4).buffer).getUint32(0, true);
+    /** @param {number} rva */
+    const cString = rva=>{
+        const text = readMapped(bytes, image, rva, MAX_NAME);
+        const end = text.indexOf(0);
+        return new TextDecoder().decode(text.subarray(0, end < 0 ? MAX_NAME : end));
+    };
 
     /** @type {DelayLoadedDll[]} */
     const result = [];
-    for (let at = fileOffset(directory.address); ; at += DESCRIPTOR_SIZE)
+    for (let at = directory.address; ; at += DESCRIPTOR_SIZE)
     {
-        const attributes = view.getUint32(at, true);
-        const nameField = view.getUint32(at + 4, true);
-        const moduleField = view.getUint32(at + 8, true);
-        const iatField = view.getUint32(at + 12, true);
-        const intField = view.getUint32(at + 16, true);
+        const attributes = u32(at);
+        const nameField = u32(at + 4);
+        const moduleField = u32(at + 8);
+        const iatField = u32(at + 12);
+        const intField = u32(at + 16);
         if (attributes === 0 && nameField === 0 && iatField === 0 && intField === 0)
         {
             break;
@@ -93,11 +104,11 @@ export function readDelayImports(bytes, image){
         // entirely through its bound table, which nothing here reads.
         const entries = nameTableRva === 0
             ? []
-            : readNameTable({ bytes, view, fileOffset, toRva, nameTableRva, iatRva,
+            : readNameTable({ u32, cString, toRva, nameTableRva, iatRva,
                 width: image.bits === 64 ? 8 : 4 });
 
         result.push({
-            dll: readCString(bytes, fileOffset(toRva(nameField))),
+            dll: cString(toRva(nameField)),
             rvaBased,
             moduleHandleRva: toRva(moduleField),
             entries,
@@ -178,9 +189,8 @@ export function bindDelayImports({ bytes, file, image }, resolveImport, missing)
  * Walks one descriptor's name table into the shape `readImports` reports.
  *
  * @param {Object} options
- * @param {Uint8Array} options.bytes
- * @param {DataView} options.view
- * @param {(rva: number) => number} options.fileOffset
+ * @param {(rva: number) => number} options.u32
+ * @param {(rva: number) => string} options.cString
  * @param {(address: number) => number} options.toRva
  * @param {number} options.nameTableRva
  * @param {number} options.iatRva
@@ -188,14 +198,14 @@ export function bindDelayImports({ bytes, file, image }, resolveImport, missing)
  *        ordinal flag the top bit of the quadword.
  * @returns {import('./pe.js').ImportEntry[]}
  */
-function readNameTable({ bytes, view, fileOffset, toRva, nameTableRva, iatRva, width }){
+function readNameTable({ u32, cString, toRva, nameTableRva, iatRva, width }){
     /** @type {import('./pe.js').ImportEntry[]} */
     const entries = [];
     for (let index = 0; ; index++)
     {
-        const at = fileOffset(nameTableRva + index * width);
-        const thunk = view.getUint32(at, true);
-        const high = width === 8 ? view.getUint32(at + 4, true) : thunk;
+        const at = nameTableRva + index * width;
+        const thunk = u32(at);
+        const high = width === 8 ? u32(at + 4) : thunk;
         if (thunk === 0 && high === 0)
         {
             break;
@@ -208,21 +218,10 @@ function readNameTable({ bytes, view, fileOffset, toRva, nameTableRva, iatRva, w
         // IMAGE_IMPORT_BY_NAME, reached the same way an ordinary import is: a
         // hint word, then a zero-terminated name.
         entries.push({
-            name: readCString(bytes, fileOffset(toRva(thunk)) + 2),
+            name: cString(toRva(thunk) + 2),
             ordinal: null,
             iatRva: iatRva + index * width,
         });
     }
     return entries;
-}
-
-/**
- * @param {Uint8Array} bytes
- * @param {number} offset
- * @returns {string}
- */
-function readCString(bytes, offset){
-    let end = offset;
-    while (end < bytes.length && bytes[end] !== 0) end++;
-    return new TextDecoder().decode(bytes.subarray(offset, end));
 }

@@ -132,6 +132,7 @@ import { createHttpapiFunctions } from './httpapi/functions.js';
 import { createLoadperfFunctions } from './loadperf/functions.js';
 import { createUrlmonFunctions } from './urlmon/functions.js';
 import { createUrlMonikers } from './urlmon/monikers.js';
+import { createSecurityManager } from './urlmon/security.js';
 import { createIeframe } from './ieframe/functions.js';
 import { createHidFunctions } from './hid/functions.js';
 import { ODBC32_ORDINALS, createOdbcFunctions } from './odbc32/functions.js';
@@ -4351,6 +4352,10 @@ export function createWin32Module(){
                         },
                         divergence: config?.divergence,
                     }),
+                    // The zone a URL is in: the .NET runtime asks it of each assembly.
+                    ...createSecurityManager({ readMemory, writeMemory, readWideString,
+                        vtables: comVtables, makeObject: createComObject,
+                        divergence: config?.divergence }),
                 },
                 'HID.DLL': createHidFunctions({ writeMemory, setLastError: setError }),
 
