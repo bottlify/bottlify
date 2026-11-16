@@ -330,6 +330,46 @@ test('calls and returns run as interpreted, every call a wasm call or the leaves
     }
 }));
 
+/**
+ * Programs whose flags cross a call, a `ret` or a jump between regions, each
+ * side reading what the other left: the flag record crosses in the state
+ * block, and a side that neither stored it on its way nor found it there
+ * reads another program's flags.
+ */
+const FLAGS_ACROSS = Object.freeze({
+    // Each ends in `hlt; pushfq`: the halt's way out hands the flags on only where
+    // the code after it reads them before it writes them.
+    // cmp eax, ebx; call f; hlt; pushfq; f: setc cl; ret
+    'the callee reads the carry': '39d8e802000000f49c0f92c1c3',
+    // call f; setz cl; adc eax, 0; hlt; pushfq; f: cmp eax, ebx; ret
+    'the caller reads what the callee left': 'e8080000000f94c183d000f49c39d8c3',
+    // stc; call f; hlt; pushfq; f: inc ecx; adc eax, 0; ret
+    'an inc in the callee keeps the caller\'s carry': 'f9e802000000f49cffc183d000c3',
+    // cmp eax, ebx; call f; hlt; pushfq; f: pushfq; pop rdx; ret
+    'the callee pushes the flags': '39d8e802000000f49c9c5ac3',
+    // cmp eax, ebx; lea rax, [rip+2]; jmp rax; setc cl; hlt; pushfq
+    'a region jumped to reads the carry': '39d8488d0502000000ffe00f92c1f49c',
+    // cmp eax, ebx; call f; setc cl; hlt; pushfq; f: mov ecx, eax; ret
+    'the caller reads its own past a callee that wrote none': '39d8e8050000000f92c1f49c89c1c3',
+    // sub eax, ebx; call f; adc eax, 0; hlt; pushfq; f: call g; ret; g: setz dl; ret
+    'two calls deep': '29d8e80500000083d000f49ce801000000c30f94c2c3',
+});
+
+test('flags across calls, returns and jumps between regions run as interpreted', ifRoom(()=>{
+    const cases = Object.entries(FLAGS_ACROSS).flatMap(([name, code])=>CORPUS.cases.slice(0, 4)
+        .map((/** @type {any} */ one, /** @type {number} */ i)=>({ ...one,
+            text: `${name} ${i}`, code })));
+    for (const budget of [7, 100000])
+    {
+        for (const leafCalls of [false, true])
+        {
+            const { failures, stats } = compare(cases, { budget, config: { leafCalls } });
+            assert.deepEqual(failures.slice(0, 20), [], `budget ${budget}, leafCalls ${leafCalls}`);
+            assert.ok(stats.translated > stats.interpreted, JSON.stringify(stats));
+        }
+    }
+}));
+
 test('a store beside code on its page stays in the region; one into the code still'
     + ' leaves', ifRoom(()=>{
     //         mov edi, 0x20001000; mov byte [rdi + 0xf00], 0xc3   f: ret, a page on
