@@ -587,6 +587,8 @@ export function engineContractProblem(engineModule, url){
  * @property {number} [queueEvictions] Candidates evicted cold when the queue was full.
  * @property {Record<ExitKind, number>} exits
  * @property {{ address: number, count: number, reason: string }[]} exitsByTarget
+ * @property {{ address: number, count: number, tops: number, unowned: number, checked: number }[]} [shapeMissesByTarget]
+ *     The entries that met another x87 stack than their block was made for, busiest first.
  *     The top untranslated-exit targets and why each has no entry.
  * @property {Record<string, number>} refused  Opcode ("0f 2e", "f3 0f 10") → times met.
  * @property {Record<string, number>} [relaxedFlagReads]  Opcode → translated instructions that

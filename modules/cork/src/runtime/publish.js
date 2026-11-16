@@ -153,7 +153,7 @@ export function createPublish(state){
             // Every block leaves at once (an instruction the other executor's
             // first): nothing to enter, nothing to keep.
             counts.publishMs += clock() - publishAt;
-            barrenAdd(eip, top);
+            barrenAdd(eip, top, 'every block cut');
             return 0;
         }
         /** @type {Map<number, [number, number]>} */
@@ -428,7 +428,7 @@ export function createPublish(state){
                 // and failed again, and translated code left for it all the while.
                 // Barren until its page is written, which forms it again.
                 inFlight.delete(keyOf(metas[i].region.entry, metas[i].entryTop));
-                barrenAdd(metas[i].region.entry, metas[i].entryTop);
+                barrenAdd(metas[i].region.entry, metas[i].entryTop, `emit: ${result.message}`);
                 counts.emitFailures++;
             }
         }

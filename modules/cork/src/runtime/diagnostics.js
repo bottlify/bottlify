@@ -275,9 +275,10 @@ export function createDiagnostics(state){
         {
             return 'inaccessible';
         }
-        if (rt.barrenAt(address))
+        const barren = rt.barrenAt(address);
+        if (barren !== null)
         {
-            return 'barren';
+            return `barren (${barren})`;
         }
         for (const eip of rt.queue.values())
         {
@@ -663,6 +664,10 @@ export function createDiagnostics(state){
             exitsByTarget: [...rt.exitTargets].sort((a, b)=>b[1].count - a[1].count).slice(0, 32)
                 .map(([address, { count, held, first, last, way }])=>({ address, count, held,
                     first, last, way, reason: held === count ? 'held' : missReason(address) })),
+            // The entries that met another x87 stack than theirs, busiest first:
+            // `unowned` ones are counted against no region and stay interpreted.
+            shapeMissesByTarget: [...rt.shapeTargets].sort((a, b)=>b[1].count - a[1].count)
+                .slice(0, 32).map(([address, one])=>({ address, ...one })),
             refused: { ...refused },
             refusedWhy: { ...refusedWhy },
             // Where a program reads what `precise: false` leaves: a title that

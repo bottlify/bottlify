@@ -409,7 +409,7 @@ export function createForming(state){
             {
                 // Barren, and not in flight: nothing will publish it, and the
                 // address may be asked for again once its page is written.
-                barrenAdd(eip, entryTop);
+                barrenAdd(eip, entryTop, 'formed nothing');
                 inFlight.delete(key);
                 continue;
             }

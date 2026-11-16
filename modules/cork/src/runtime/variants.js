@@ -273,6 +273,13 @@ export function createVariants(state){
             unpublish(going);
         }
     };
+    /** The shape misses by the address left at, for the diagnostics: how many, at which
+     * tops, how many found no region's record at that address and top (`unowned`: the
+     * miss is counted against no region, so none is ever formed again checked) and how
+     * many a region already checked.
+     * @type {Map<number, { count: number, tops: number, unowned: number, checked: number }>} */
+    const shapeTargets = new Map();
+    const SHAPE_TARGETS_CAP = 4096;
     /**
      * An entry found the machine's x87 stack in another shape than its block
      * was compiled for, and the host's interpreter runs the block. A region
@@ -286,6 +293,27 @@ export function createVariants(state){
     const shapeMissed = (eip, top)=>{
         counts.shapeMisses++;
         const record = recordOf.get(entries.entryOf(eip, top));
+        let target = shapeTargets.get(eip);
+        if (target === undefined)
+        {
+            if (shapeTargets.size >= SHAPE_TARGETS_CAP)
+            {
+                // The ones met once make room: a histogram of the hot ones.
+                for (const [address, one] of shapeTargets)
+                {
+                    if (one.count === 1)
+                    {
+                        shapeTargets.delete(address);
+                    }
+                }
+            }
+            target = { count: 0, tops: 0, unowned: 0, checked: 0 };
+            shapeTargets.set(eip, target);
+        }
+        target.count++;
+        target.tops |= 1 << (top & 7);
+        target.unowned += record === undefined ? 1 : 0;
+        target.checked += record?.checked ? 1 : 0;
         if (record === undefined || record.checked)
         {
             return null;
@@ -323,6 +351,7 @@ export function createVariants(state){
         heldMissed,
         ownKeys,
         shapeMissed,
+        shapeTargets,
         checkedAt,
     };
 }

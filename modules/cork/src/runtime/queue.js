@@ -144,8 +144,11 @@ export function createQueue(state){
     /** Whether a candidate at this address is barren for this top.
      * @param {number} eip @param {number} top */
     const barrenHas = (eip, top)=>barren.has(keyOf(eip, top & 7));
-    /** @param {number} eip @param {number} top */
-    const barrenAdd = (eip, top)=>{
+    /** Why each barren key is: read by the diagnostics alone.
+     * @type {Map<number, string>} */
+    const barrenWhy = new Map();
+    /** @param {number} eip @param {number} top @param {string} why */
+    const barrenAdd = (eip, top, why)=>{
         if (top === ANY_TOP)
         {
             // A region indifferent to the stack is empty for every top.
@@ -153,25 +156,27 @@ export function createQueue(state){
             {
                 const key = keyOf(eip, t);
                 barren.set(key, eip);
+                barrenWhy.set(key, why);
                 noteKey(key);
             }
             return;
         }
         const key = keyOf(eip, top & 7);
         barren.set(key, eip);
+        barrenWhy.set(key, why);
         noteKey(key);
     };
-    /** Whether any top at this address is barren, for the diagnostics.
-     * @param {number} eip */
+    /** Why a top at this address is barren, or null where none is: for the
+     * diagnostics. @param {number} eip */
     const barrenAt = eip=>{
         for (let top = 0; top < 8; top++)
         {
             if (barren.has(keyOf(eip, top)))
             {
-                return true;
+                return barrenWhy.get(keyOf(eip, top)) ?? 'not said';
             }
         }
-        return false;
+        return null;
     };
     /** @type {Map<number, number>} untranslated exits by target and top: a
      * count per key(eip, top), so misses at one top never stand in for
