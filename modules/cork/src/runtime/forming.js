@@ -41,6 +41,7 @@ export function createForming(state){
         copiesWanted, counts, coverKeys, coveredIn, coveredOut, dropKey, finishBatch, formAt,
         freeTranslator, giveUp, inFlight, lookUpLater, lookUpOn, noteWay, overdue, precisionFlags,
         prefetch, profileAt, publishOn, queue, readModules, recordBefore, reformStep, refused,
+        refusedWhy,
         regionOfRecord,
         relinkStep, sampleCalls, sourcesChanged, stamp, storeHere, storedOwner, toPublish,
         translatable, translatorLoading, translatorReady, translators, unqueue, waitedFor,
@@ -205,6 +206,16 @@ export function createForming(state){
             if (translator.pending !== null && overdue(translator.pending.at))
             {
                 refused['worker: no answer'] = (refused['worker: no answer'] ?? 0) + 1;
+                // Which batch: a region the emitter never comes back from is found
+                // by its address, and the worker keeps every later batch waiting.
+                const { metas, relink } = translator.pending;
+                const entriesOf = (/** @type {{ entry: number }[]} */ list)=>
+                    `${list.length} at ${list.slice(0, 48).map(one=>(one.entry >>> 0).toString(16))
+                        .join(' ')}`;
+                const what = `worker: no answer to ${relink
+                    ? `a relink of ${entriesOf(relink)}`
+                    : `a batch of ${entriesOf((metas ?? []).map(one=>one.region))}`}`;
+                refusedWhy[what] = (refusedWhy[what] ?? 0) + 1;
                 giveUp(translator);
             }
         }
