@@ -83,9 +83,10 @@ const u32 = value=>[
 const floats = values=>[...new Uint32Array(new Float32Array(values).buffer)];
 
 /**
- * One call: its arguments -- a string names an object the setup made, 'data'
- * the address of `data` -- the dwords the pointer argument points at, and the
- * device state it is made in.
+ * One call: its arguments - a string names an object the setup made, 'data'
+ * the address of `data` and 'data+16' sixteen bytes on, for a second
+ * rectangle - the dwords the pointer arguments point at, and the device
+ * state it is made in.
  *
  * @typedef {{ label: string,
  *     args: (number | string | ((made: Record<string, any>) => number))[], data?: number[],
@@ -337,7 +338,8 @@ function gate(api, table){
             /** @param {number | string | ((made: Record<string, any>) => number)} arg */
             const value = arg=>(typeof arg === 'number' ? arg >>> 0
                 : typeof arg === 'function' ? arg(made) >>> 0
-                    : arg === 'data' ? DATA : OBJECTS + names.indexOf(arg) * 16);
+                    : arg === 'data' ? DATA : arg === 'data+16' ? DATA + 16
+                        : OBJECTS + names.indexOf(arg) * 16);
             host.writePhysical(DATA, new Uint8Array(new Uint32Array(data).buffer));
             const values = args.map(value);
             const state = device.ringState();
@@ -727,8 +729,30 @@ test('Direct3D 9: every call the command ring answers for in the guest is one th
                     caps: ELSEWHERE, setup: targets },
                 { label: 'a device drawing itself', args: ['big', 0, 'small', 0, 2],
                     setup: targets },
+                // Each rectangle within its surface and not empty, or none.
                 { label: 'a rectangle', args: ['big', 'data', 'small', 0, 2], data: [0, 0, 8, 8],
                     caps: ELSEWHERE, setup: targets },
+                { label: 'a rectangle each', args: ['big', 'data', 'small', 'data+16', 2],
+                    data: [0, 0, 32, 32, 4, 4, 12, 12], caps: ELSEWHERE, setup: targets },
+                { label: 'a target rectangle', args: ['small', 0, 'big', 'data', 0],
+                    data: [16, 16, 32, 32], caps: ELSEWHERE, setup: targets },
+                { label: 'a rectangle past the right edge', args: ['small', 'data', 'big', 0, 2],
+                    data: [0, 0, 17, 16], caps: ELSEWHERE, setup: targets },
+                { label: 'a target rectangle past the bottom',
+                    args: ['big', 0, 'small', 'data', 2], data: [0, 0, 16, 17], caps: ELSEWHERE,
+                    setup: targets },
+                { label: 'an empty rectangle', args: ['big', 'data', 'small', 0, 2],
+                    data: [4, 4, 4, 8], caps: ELSEWHERE, setup: targets },
+                { label: 'a rectangle turned round', args: ['big', 0, 'small', 'data', 2],
+                    data: [4, 9, 8, 2], caps: ELSEWHERE, setup: targets },
+                { label: 'a negative edge', args: ['big', 'data', 'small', 0, 2],
+                    data: [-1, 0, 4, 4], caps: ELSEWHERE, setup: targets },
+                { label: 'a good rectangle and a bad one',
+                    args: ['big', 'data', 'small', 'data+16', 2],
+                    data: [0, 0, 8, 8, 0, 0, 16, 32], caps: ELSEWHERE, setup: targets },
+                { label: 'rectangles on a device drawing itself',
+                    args: ['big', 'data', 'small', 'data+16', 2],
+                    data: [0, 0, 8, 8, 0, 0, 8, 8], setup: targets },
                 { label: 'a filter past anisotropic', args: ['big', 0, 'small', 0, 4],
                     caps: ELSEWHERE, setup: targets },
                 { label: 'the same surface', args: ['big', 0, 'big', 0, 2], caps: ELSEWHERE,

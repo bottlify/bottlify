@@ -1181,3 +1181,26 @@ test('the gate, the ring kept as traps and with no room for one', ()=>{
     }
     assert.deepEqual(wrong, []);
 });
+
+test('a device recorded for a graphics worker hands out its targets in the guest', ()=>{
+    // What a program does about every copy it makes onto whatever it draws
+    // into: the target asked for and given back, the back buffer held all
+    // along; and the depth surface, held after its first. The recording
+    // device's own state names the targets it holds, and the pointers the
+    // program was handed for them are the guest's to hand out again.
+    for (const version of [D3D9, D3D8])
+    {
+        /** @param {string} surface @returns {Step[]} */
+        const again = surface=>Array.from({ length: 6 }, ()=>[...acquire(version, surface),
+            step(`${surface}.Release`, m=>m.release(surface))]).flat();
+        const { found, divergences: refused, guest } = differences(version,
+            { guestCode: true, recorded: true },
+            [...setup(version), ...again('current'), ...acquire(version, 'depth'),
+                ...again('depth')]);
+        assert.deepEqual([...found, ...refused], [], version.dll);
+        /** @param {string} name */
+        const host = name=>guest.fellBack.get(`${version.iids.device}::${name}`) ?? 0;
+        assert.deepEqual([host('GetRenderTarget'), host('GetDepthStencilSurface')], [0, 1],
+            `${version.dll}: to the host only for the depth surface's first reference`);
+    }
+});

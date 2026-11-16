@@ -2660,6 +2660,9 @@ function commandChecks(shape, at){
     return parts;
 }
 
+/** A RECT's bytes, as a record copies one (`rects`). */
+const RECT_BYTES = 16;
+
 /**
  * A method a command routine takes: what the record holds, how much of what
  * the method reads through a pointer is copied with it, and what else the
@@ -2735,6 +2738,10 @@ function commandChecks(shape, at){
  *     the block is the calling thread's (`threadPrologue`)
  * @property {'rect' | 'box'} [dirty]  a texture's AddDirtyRect or AddDirtyBox, its
  *     object's block a texture's (`dirtyPrologue`)
+ * @property {readonly number[]} [rects]  arguments each pointing at a RECT or null: each
+ *     copied after the arguments in order, sixteen bytes a place whether or not it is
+ *     null, and the argument made to point at its copy - a null one stays null. Not
+ *     with `pointer`; what a rectangle must be is the mirror's to check
  */
 
 /**
@@ -2771,6 +2778,7 @@ function commandChecks(shape, at){
  *     (each argument into [edi+ARGS+4*i]; the pointer as the copy's address)
  *     [mov esi, source; lea edi, [edi+ARGS+4*args]; mov ecx, edx; shr ecx, 2;
  *      rep movsd; mov edi, eax; lea esi, [edx + ARGS + 4*args]]
+ *     [each rectangle not null: its four words into its place]
  *     mov [edi+BYTES], esi        ; whole
  *     [mov dword [ebx+DRAWS_PENDING], 1]
  *     mov dword [ebx+HELD], 0
@@ -2788,7 +2796,11 @@ function commandChecks(shape, at){
 export function commandCode(at, trap, shape){
     const { slot, args, pointer = -1, bytes = 0, count, choose, vertices, mirror = [],
         draws = false, thread = false, self = false, stale = false, staleDraws = false,
-        nullable = false, fresh = false } = shape;
+        nullable = false, fresh = false, rects = [] } = shape;
+    if (rects.length > 0 && (pointer >= 0 || self || thread))
+    {
+        throw new Error('shadow: a record copies rectangles or what one pointer points at');
+    }
     if (nullable && !count)
     {
         throw new Error('shadow: a pointer that may be null is counted by an argument');
@@ -2972,7 +2984,8 @@ export function commandCode(at, trap, shape){
     }
     else
     {
-        parts.push([0xba, ...dword(pointer >= 0 ? bytes : 0)]);  // mov edx, bytes
+        parts.push([0xba, ...dword(pointer >= 0 ? bytes          // mov edx, bytes
+            : RECT_BYTES * rects.length)]);
     }
     if (nullable === 'empty' && count)
     {
@@ -3021,7 +3034,18 @@ export function commandCode(at, trap, shape){
         [0xc7, 0x07, ...dword(slot)]);                           // mov dword [edi], slot
     for (let arg = 0; arg < args; arg++)
     {
-        if (arg === pointer && nullable)
+        const rect = rects.indexOf(arg);
+        if (rect >= 0)
+        {
+            // Its copy's address, or none for none.
+            parts.push(
+                [0x8b, 0x44, 0x24, pushed + 4 * arg],            // mov eax, [esp+pushed+4r]
+                [0x85, 0xc0],                                    // test eax, eax
+                { jcc: 0x74, to: `noRect${rect}` },              // jz noRect: it stays 0
+                [0x8d, 0x87, ...dword(header + RECT_BYTES * rect)], // lea eax, [edi+copy]
+                { label: `noRect${rect}` });
+        }
+        else if (arg === pointer && nullable)
         {
             parts.push(
                 [0x8b, 0x44, 0x24, pushed + 4 * (arg - shift)],  // mov eax, [esp+pushed+4p]
@@ -3055,6 +3079,17 @@ export function commandCode(at, trap, shape){
             [0x89, 0xc7],                                        // mov edi, eax
             ...recordLength);
     }
+    rects.forEach((arg, rect)=>{
+        parts.push(
+            [0x8b, 0x44, 0x24, pushed + 4 * arg],                // mov eax, [esp+pushed+4r]
+            [0x85, 0xc0],                                        // test eax, eax
+            { jcc: 0x74, to: `copied${rect}` },                  // jz copied
+            ...[0, 4, 8, 12].flatMap(offset=>[
+                [0x8b, 0x50, offset],                            // mov edx, [eax+o]
+                [0x89, 0x57, header + RECT_BYTES * rect + offset], // mov [edi+copy+o], edx
+            ]),
+            { label: `copied${rect}` });
+    });
     // The length last, with `xchg`: an atomic store on several executors, so a
     // host that reads it with an atomic load finds the record's words, and the
     // bytes the program wrote before the call, there with it.
@@ -3243,18 +3278,16 @@ const markDrawable = bits=>[0x83, 0x89, ...dword(SHADOW.DRAWABLE), bits];
 const unmarkDrawable = bits=>[0x83, 0xa1, ...dword(SHADOW.DRAWABLE), ~bits & 0xff];
 
 /**
- * What Direct3D 9's StretchRect has to be for the guest to take it: no
- * rectangles, so each is its surface whole; two surfaces with blocks, not the
- * same one and not levels of one texture, both render targets in the default
- * pool; and a device that records for one drawing elsewhere (`ELSEWHERE`),
- * which copies or stretches between two such surfaces on the GPU, whatever
- * their sizes and formats. The filter is the routine's `within`.
+ * What Direct3D 9's StretchRect has to be for the guest to take it: two
+ * surfaces with blocks, not the same one and not levels of one texture, both
+ * render targets in the default pool; each rectangle none - its surface
+ * whole - or within its surface and not empty (`rectWithin`); and a device
+ * that records for one drawing elsewhere (`ELSEWHERE`), which copies or
+ * stretches between two such surfaces on the GPU, whatever their sizes and
+ * formats. The filter is the routine's `within`; the rectangles travel in the
+ * record (`rects`).
  */
-export const STRETCH_GUARD = Object.freeze([
-    [0x83, 0x7c, 0x24, 0x0c, 0x00],                              // cmp dword [esp+12], 0
-    { jcc: 0x75, to: 'out', near: true },                        // jne out: a source rectangle
-    [0x83, 0x7c, 0x24, 0x14, 0x00],                              // cmp dword [esp+20], 0
-    { jcc: 0x75, to: 'out', near: true },                        // jne out: a target rectangle
+const STRETCH_SURFACES = Object.freeze([
     [0x83, 0xb9, ...dword(SHADOW.ELSEWHERE), 0x00],              // cmp dword [ecx+disp], 0
     { jcc: 0x74, to: 'out', near: true },                        // je out
     [0x8b, 0x44, 0x24, 0x08],                                    // mov eax, [esp+8]: the source
@@ -3287,11 +3320,68 @@ export const STRETCH_GUARD = Object.freeze([
     { label: 'stretchApart' },
 ]);
 
-/** Where `STRETCH_GUARD` loads the target, and where it reads the source's texture. */
-const STRETCH_TARGET = STRETCH_GUARD.findIndex(part=>Array.isArray(part) && part[0] === 0x8b
+/**
+ * A rectangle argument at `[esp+rect]` checked against the surface at
+ * `[esp+surface]`, as the device checks one: none is the whole surface; one
+ * is taken only within it and not empty: left below right, right not past
+ * the width, top below bottom, bottom not past the height, compared unsigned
+ * as the host reads the words, so a negative edge is past every surface.
+ *
+ *     mov edx, [esp+rect]
+ *     test edx, edx
+ *     jz whole
+ *     mov eax, [edx+8]            ; right
+ *     cmp [edx], eax              ; left
+ *     jae out
+ *     mov eax, [edx+12]           ; bottom
+ *     cmp [edx+4], eax            ; top
+ *     jae out
+ *     mov eax, [esp+surface]
+ *     mov eax, [eax+4]            ; its block
+ *     mov eax, [eax+Width]
+ *     cmp [edx+8], eax
+ *     ja out
+ *     mov eax, [esp+surface]
+ *     mov eax, [eax+4]
+ *     mov eax, [eax+Height]
+ *     cmp [edx+12], eax
+ *     ja out
+ *   whole:
+ *
+ * @param {number} rect @param {number} surface  stack offsets on entry
+ * @param {string} whole  the label it ends at
+ */
+const rectWithin = (rect, surface, whole)=>[
+    [0x8b, 0x54, 0x24, rect],                                    // mov edx, [esp+rect]
+    [0x85, 0xd2],                                                // test edx, edx
+    { jcc: 0x74, to: whole, near: true },                        // jz whole
+    [0x8b, 0x42, 0x08],                                          // mov eax, [edx+8]
+    [0x39, 0x02],                                                // cmp [edx], eax
+    { jcc: 0x73, to: 'out', near: true },                        // jae out
+    [0x8b, 0x42, 0x0c],                                          // mov eax, [edx+12]
+    [0x39, 0x42, 0x04],                                          // cmp [edx+4], eax
+    { jcc: 0x73, to: 'out', near: true },                        // jae out
+    ...[[0x08, 24], [0x0c, 28]].flatMap(([edge, size])=>[
+        [0x8b, 0x44, 0x24, surface],                             // mov eax, [esp+surface]
+        [0x8b, 0x40, 0x04],                                      // mov eax, [eax+4]: its block
+        [0x8b, 0x40, SURFACE.DESC + size],                       // mov eax, [eax+Width/Height]
+        [0x39, 0x42, edge],                                      // cmp [edx+right/bottom], eax
+        { jcc: 0x77, to: 'out', near: true },                    // ja out
+    ]),
+    { label: whole },
+];
+
+export const STRETCH_GUARD = Object.freeze([
+    ...STRETCH_SURFACES,
+    ...rectWithin(0x0c, 0x08, 'sourceWhole'),
+    ...rectWithin(0x14, 0x10, 'targetWhole'),
+]);
+
+/** Where `STRETCH_SURFACES` loads the target, and where it reads the source's texture. */
+const STRETCH_TARGET = STRETCH_SURFACES.findIndex(part=>Array.isArray(part) && part[0] === 0x8b
     && part[1] === 0x54);
-const STRETCH_CONTAINER = STRETCH_GUARD.findIndex(part=>Array.isArray(part) && part[0] === 0x8b
-    && part[1] === 0x40 && part[2] === SURFACE.CONTAINER);
+const STRETCH_CONTAINER = STRETCH_SURFACES.findIndex(part=>Array.isArray(part)
+    && part[0] === 0x8b && part[1] === 0x40 && part[2] === SURFACE.CONTAINER);
 
 /**
  * What Direct3D 8's CopyRects has to be for the guest to take it, as Direct3D
@@ -3304,9 +3394,9 @@ const STRETCH_CONTAINER = STRETCH_GUARD.findIndex(part=>Array.isArray(part) && p
 export const COPY_GUARD_8 = Object.freeze([
     [0x83, 0x7c, 0x24, 0x0c, 0x00],                              // cmp dword [esp+12], 0
     { jcc: 0x75, to: 'out', near: true },                        // jne out: rectangles
-    ...STRETCH_GUARD.slice(4, STRETCH_TARGET),                    // ELSEWHERE, the source
+    ...STRETCH_SURFACES.slice(0, STRETCH_TARGET),                 // ELSEWHERE, the source
     [0x8b, 0x54, 0x24, 0x14],                                    // mov edx, [esp+20]: the target
-    ...STRETCH_GUARD.slice(STRETCH_TARGET + 1, STRETCH_CONTAINER), // its block, pools, usages
+    ...STRETCH_SURFACES.slice(STRETCH_TARGET + 1, STRETCH_CONTAINER), // its block, pools, usages
     // One format and one size, a word at a time: the source's block again in EAX.
     ...[0, 24, 28].flatMap(offset=>[
         [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
@@ -5457,6 +5547,24 @@ const drawable = (m, block, clear, set)=>m.setU32(block + SHADOW.DRAWABLE,
     ((m.u32(block + SHADOW.DRAWABLE) & ~clear) | set) >>> 0);
 
 /**
+ * `rectWithin` as the host checks it: no rectangle, or one within the
+ * surface whose block is `owner` and not empty, its words unsigned.
+ *
+ * @param {GuestWords} m @param {number} rect @param {number} owner
+ */
+const hostRectWithin = (m, rect, owner)=>{
+    if (rect === 0)
+    {
+        return true;
+    }
+    const right = m.u32(rect + 8);
+    const bottom = m.u32(rect + 12);
+    return m.u32(rect) < right && m.u32(rect + 4) < bottom
+        && right <= m.u32(owner + SURFACE.DESC + 24)
+        && bottom <= m.u32(owner + SURFACE.DESC + 28);
+};
+
+/**
  * The mirrors of `RENDER_STATE_MIRROR` and its kin, in JavaScript: what the
  * host does in place of a command routine (`appendCommand`) keeps the block
  * as the routine would, which the gate holds them to, input by input.
@@ -5531,8 +5639,7 @@ export const HOST_MIRRORS = Object.freeze({
     },
     /** @type {HostMirror} */
     stretch: (m, block, [source, sourceRect, target, targetRect])=>{
-        if (sourceRect !== 0 || targetRect !== 0 || m.u32(block + SHADOW.ELSEWHERE) === 0
-            || source === 0 || target === 0)
+        if (m.u32(block + SHADOW.ELSEWHERE) === 0 || source === 0 || target === 0)
         {
             return false;
         }
@@ -5546,7 +5653,8 @@ export const HOST_MIRRORS = Object.freeze({
             return false;
         }
         const container = m.u32(from + SURFACE.CONTAINER);
-        return container === 0 || container !== m.u32(to + SURFACE.CONTAINER);
+        return (container === 0 || container !== m.u32(to + SURFACE.CONTAINER))
+            && hostRectWithin(m, sourceRect, from) && hostRectWithin(m, targetRect, to);
     },
     /** @type {HostMirror} */
     depthStencil: (m, block, [surface])=>{
@@ -5981,15 +6089,24 @@ function recordCommand(m, shape, mirror, block, a){
     m.setU32(block + SHADOW.COMMAND_HEAD, head + length);
     const record = (m.u32(block + SHADOW.COMMANDS) + head) >>> 0;
     m.setU32(record + COMMAND.SLOT, slot);
+    const rects = shape.rects ?? [];
     for (let arg = 0; arg < args; arg++)
     {
-        m.setU32(record + COMMAND.ARGS + 4 * arg, arg === pointer
-            ? (a[arg] === 0 ? 0 : record + header) : a[arg]);
+        const rect = rects.indexOf(arg);
+        const copy = rect >= 0 ? record + header + RECT_BYTES * rect : record + header;
+        m.setU32(record + COMMAND.ARGS + 4 * arg, arg === pointer || rect >= 0
+            ? (a[arg] === 0 ? 0 : copy) : a[arg]);
     }
     if (pointer >= 0 && size > 0)
     {
         m.write(record + header, m.read(a[pointer], size).slice());
     }
+    rects.forEach((arg, rect)=>{
+        if (a[arg] !== 0)
+        {
+            m.write(record + header + RECT_BYTES * rect, m.read(a[arg], RECT_BYTES).slice());
+        }
+    });
     m.setU32(record + COMMAND.BYTES, length);
     if (draws)
     {
@@ -6059,5 +6176,5 @@ function copiedBytes(shape, a, pointer, bytes){
         const n = a[count.arg];
         return n === 0 || n > count.most ? null : (n << count.shift) >>> 0;
     }
-    return pointer >= 0 ? bytes : 0;
+    return pointer >= 0 ? bytes : RECT_BYTES * (shape.rects?.length ?? 0);
 }

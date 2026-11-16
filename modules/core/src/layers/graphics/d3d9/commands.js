@@ -37,6 +37,16 @@ const constants = (name, kind, width, most)=>({
 });
 
 /**
+ * A rectangle a record carries (`rects`): the one copied at word `from`, or
+ * null where the argument was.
+ *
+ * @param {import('../d3d8/commands.js').CommandArgs} c @param {number} arg
+ * @param {number} from
+ */
+const rectIn = (c, arg, from)=>(c.arg(arg) === 0 ? null : { left: c.words[from],
+    top: c.words[from + 1], right: c.words[from + 2], bottom: c.words[from + 3] });
+
+/**
  * A state block's own methods, which the device's ring carries with the
  * block beside the record: numbered past the device's own, so a record
  * names them as it names the device's.
@@ -77,10 +87,13 @@ const set = commandSet([...IDIRECT3DDEVICE9_SLOTS, ...STATE_BLOCK_SLOTS, ...TEXT
     SetDepthStencilSurface: { args: 1, objects: [0],
         surfaceUsage: { arg: 0, mask: D3DUSAGE_DEPTHSTENCIL, nullable: true },
         make: (d, c)=>d.SetDepthStencilSurface(c.object()) },
-    // Between two render targets of a device that draws elsewhere, with no
-    // rectangles (`STRETCH_GUARD`): a copy or a stretch the GPU makes.
+    // Between two render targets of a device that draws elsewhere, each
+    // rectangle within its surface or none (`STRETCH_GUARD`): a copy or a
+    // stretch the GPU makes.
     StretchRect: { args: 5, objects: [0, 2], within: [{ arg: 4, ranges: [[0, 3]] }],
-        make: (d, c)=>d.StretchRect(c.object(), null, c.object(), null, c.arg(4)) },
+        rects: [1, 3],
+        make: (d, c)=>d.StretchRect(c.object(), rectIn(c, 1, 0), c.object(), rectIn(c, 3, 4),
+            c.arg(4)) },
     SetVertexDeclaration: { args: 1, objects: [0],
         make: (d, c)=>d.SetVertexDeclaration(c.object()) },
     SetVertexShader: { args: 1, objects: [0], make: (d, c)=>d.SetVertexShader(c.object()) },
