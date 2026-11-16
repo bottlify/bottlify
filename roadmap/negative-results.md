@@ -99,6 +99,9 @@ plus at most five lines below its table of conditions the line cannot carry.
 | 2026-11-15 | an xmm register a region uses as a scalar alone (92 % of a game's hot SSE uses by the operand forms, 14 % once `rsqrtss`, packed copies and bitwise masks refuse it) kept as a scalar through the whole region, its other lanes in a vector local, or in the state block under a zeroed mask; and a scalar load writing the vector on arm64 too | machine instructions an executed guest instruction over Crysis's 30 hottest regions: x64 2.735 -> 2.755 (vector) / 2.800 (mask); arm64 2.476 -> 2.486 / 2.526; loads not owed on arm64 2.514 | holds | the lanes' traffic (8.7 % arm64, 6.8 % x64) cut without a second value live across the region: V8 spilled it, and a guest call made it whole each time |
 | 2026-11-15 | a float compare's carry kept in the flags word beside its lazy record (`Kind.FCMP`), so an `inc` after it needs no test | entities x87 7.75 -> 7.56 machine instructions a guest one (the record alone: 7.26), Crysis 30 regions 2.696 -> 2.700 | holds: the record alone was taken (048848df) | never: the carry costs some ten instructions a compare |
 | 2026-11-15 | the region's own entry (label 0, which every call takes) tested before its entry `br_table`: a test and a branch for the table's bounds check and jump through memory | exact machine instructions a guest one: entities SSE 6.862 -> 6.908, spread x87 4.289 -> 4.559 | holds | the entry dispatch is redone (V8 lays the entry block as a join and moves more) |
+| 2026-11-16 | disputed - every PE-benchmark count taken as the difference of two runs on the machine's clock (the 2026-11-15 entry above, entities and spread figures before `tools/translator/pe-count.mjs`) | one tree: spread 3.906 and 4.313 | disputed: inside that stand's own spread | measured again on the closed stand |
+| 2026-11-16 | the flag record left in the state block in every function, a store of it tested by its kind where a way may not have written it | pe-count, x64: spread 4.1934 -> 4.2411, entities 4.2458 -> 4.2770 (V8 made up and moved each field at every join: +10 moves an entry); run-count calls512 0.960 | holds | a store's ways are known to have written the record without a test |
+| 2026-11-16 | a way out's stores of the record narrowed to the fields its block wrote | run-count warm 400, x64: crc 0.970, game 0.965, sort 0.987, vcall 1.031; arm64 (mac model): those three 1.000, vcall 1.013, lua 1.004 | holds | the ways out no longer share sets of stores |
 
 The two 2026-11-14 lines on regions of a module as one, conditions: cork 3f877946, a cloud machine (Intel Xeon @ 2.10GHz, 4 cores,
 power plan not recorded), Chromium 153.0.8010.12 / V8 15.3.76.4 headless (`browser/suite.mjs --scale 10
@@ -128,6 +131,15 @@ stand (1 executor, block profile from 450 s, 281 G guest instructions), `tools/t
 --atomic` on the 30 regions that ran most (173 G, 62 %), V8 14.6: node 26.13.1 x64, and its arm64 build under qemu-aarch64
 8.2.2 with `--no-wasm-bounds-checks` (macOS's model). A static weighing by the profile: one tool version, arms compared,
 not absolutes; no exact run was taken, the static weighing already said no.
+
+The 2026-11-16 lines, conditions: cork 657107ac with the change, node 26.13.1 (V8 14.6), every machine instruction
+counted under QEMU 8.2.2: `tools/translator/pe-count.mjs` (entities SSE between 2800 and 2900 million guest
+instructions, spread x87 between 1200 and 1300 million, one run an arm, a tree twice the same to the fourth
+decimal), `tools/translator/run-count.mjs --warm 400` (32-bit), and the same count on node's arm64 build under
+qemu-aarch64 8.2.2 with `--no-wasm-bounds-checks` (macOS's model). What was kept of the change: the record left
+in the block only in a function no store of whose record may follow a way that did not write it, and the stores
+narrowed at a call and at a `ret` only (spread 4.1934 -> 4.1451, entities 4.2458 -> 4.2444, calls512 0.96, lua 0.977,
+vcall 0.9995).
 
 ## Executors and scheduler
 

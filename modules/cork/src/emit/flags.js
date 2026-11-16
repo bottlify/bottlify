@@ -51,6 +51,16 @@ export const Kind = Object.freeze({
     FCMP: 10,  // a float compare's operands, as bits (`floatOperands`): comiss, fcomi
 });
 
+/**
+ * The kind a region's record local holds while the record itself is still in
+ * the state block, not taken into the locals (`RegionEmitter.recordHere`): the
+ * code after the last real kind's (`FCMP * 4 + 3`), so as an unfolded kind it
+ * is the one past FCMP - a read that sorts kinds by where their carry is finds
+ * it, with FCMP, among those the helper folds, by the one compare it made for
+ * FCMP alone.
+ */
+export const RECORD_ABSENT = 44;
+
 /** @param {number} size */
 export const widthCode = size=>(size === 1 ? 0 : size === 2 ? 1 : size === 4 ? 2 : 3);
 

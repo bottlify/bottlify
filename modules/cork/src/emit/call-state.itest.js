@@ -6,10 +6,15 @@
 
 /**
  * The flag record and the flags word across guest calls made as wasm calls,
- * transfers and exits beside the interpreter. A region loads a record field or
- * the flags word only where its code reads it and stores one only where its
- * code writes it (`fillDeferred` in region.js), and a call tests its target's
- * slot for an entry compiled for any top first (`linkedCall` in integer.js):
+ * transfers and exits beside the interpreter. A region loads the flags word
+ * only where its code reads it and stores a record field or the word only where
+ * its code writes it (`fillDeferred` in region.js); the record it leaves in the
+ * state block, taking its fields at a read that needs them (`recordHere`),
+ * where no store of the record follows a way that did not write it, and loads
+ * the fields its code reads otherwise; a store after the block's own code wrote
+ * the record takes the fields that code wrote (`recordOf`); and a call tests
+ * its target's slot for an entry compiled for any top first (`linkedCall` in
+ * integer.js):
  * seeded programs of functions that write the flags, read the ones their
  * caller left (`adc`, `setc`, `pushfd`, a branch), touch none at all, set and
  * clear the direction flag, call one another directly and through a register,

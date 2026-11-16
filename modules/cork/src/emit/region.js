@@ -49,8 +49,8 @@ import { CF, DF, PF, ZF, ARITH_FLAGS } from '../decode/table.js';
 import { Body, EMPTY, ValType } from '../wasm/encoder.js';
 import { LocalSet } from '../wasm/local-set.js';
 import {
-    ARITH, CARRY_IN_WORD, I32, I64, Kind, MASKS, eagerFlagsOf, emitCondition, emitFlag, kindOf,
-    recordOffsets, widthCode,
+    ARITH, CARRY_IN_WORD, I32, I64, Kind, MASKS, RECORD_ABSENT, eagerFlagsOf, emitCondition,
+    emitFlag, kindOf, recordOffsets, widthCode,
 } from './flags.js';
 import { emitInstruction, profileCall } from './integer.js';
 import { copyLoopOf, emitCopyAtOnce, emitIndexedCopyAtOnce, indexedCopyOf } from './copy-loop.js';
@@ -1246,6 +1246,26 @@ export class RegionEmitter {
          */
         this.pathStores = context.callReturn === true && context.hash === true
             && this.width.bits === 32 && this.callReturn;
+        /**
+         * Whether the record may stay in the state block until something reads
+         * it (`recordHere`): where a region would load its fields - at its
+         * start, after a call's return or a trap's - its kind local is set to
+         * `RECORD_ABSENT` instead, and a read of a record not known here takes
+         * the fields from the block when it finds that kind. Five loads at every
+         * entry, for a record the code nearly always writes before it reads.
+         * Only in a function every store of whose record comes after the code
+         * of its own block wrote the record on every way (`recordMixed`, which
+         * `planPaths` works out): there no store reads a field a way left in
+         * the block. Where one does, the fields are loaded as before and the
+         * function's code is what it was - a test of the kind before such a
+         * store had V8 make each field up, and move it, at every join of a way
+         * that had the record with one that had not: ten moves a call in the PE
+         * benchmark's spread, more than the loads.
+         */
+        this.absentRecord = this.pathStores;
+        /** Whether some store of the record may follow a way that did not write
+         * it (`planPaths`): then its fields are loaded, not left in the block. */
+        this.recordMixed = false;
         /** Every call site's record, each copy of a block its own. @type {CallSite[]} */
         this.sites = [];
         /** The ways out and the other stores `planPaths` decides. @type {StorePoint[]} */
@@ -1550,8 +1570,10 @@ export class RegionEmitter {
          * also a way out's branch into the epilogue (`exit`, `depth` its branch to
          * `$out`), the blocks its stores are entered by (`open`) and those stores
          * (`kinds`); a `point`'s stores are what it decides, and `chained` ones
-         * leave out what the kinds stored.
-         * @type {{ at: number, kind: 'load' | 'store' | 'exit' | 'open' | 'kinds',
+         * leave out what the kinds stored. And a read's taking of a record left
+         * in the state block (`record`, `recordHere`).
+         * @type {{ at: number,
+         *     kind: 'load' | 'store' | 'exit' | 'open' | 'kinds' | 'record',
          *     regs: 'all' | 'uncarried' | 'none', x87: boolean, site?: CallSite,
          *     record?: true, depth?: number, point?: StorePoint,
          *     chained?: boolean }[]}
@@ -1915,9 +1937,10 @@ export class RegionEmitter {
     loadState(fromParams = false, site = undefined){
         const { b, layout, context } = this;
         // The record the last region left, as it left it: its kind is not
-        // known here, and a read folds it only when it must. Like the
-        // registers, each field and the flags word only where the body
-        // reads it (`fillDeferred`).
+        // known here, and a read folds it only when it must. Left in the
+        // state block where that is safe (`absentRecord`), else, like the
+        // registers, each field loaded only where the body reads it; the
+        // flags word so in both (`fillDeferred`).
         this.deferred.push({ at: b.length, kind: 'load', regs: 'none', x87: false,
             record: true, site });
         this.pending = null;
@@ -2063,6 +2086,43 @@ export class RegionEmitter {
         const { b } = this;
         this.deferred.push({ at: b.length, kind: 'store', regs: 'uncarried', x87: false, site,
             record: true, chained });
+    }
+
+    /** Whether a local is one of the record's fields. @param {number} local */
+    isRecordField(local){
+        return this.recordFields.some(field=>field.local === local);
+    }
+
+    /**
+     * Which of the locals a store of the record takes, where the code of the
+     * store's own block wrote the record's kind on every way to it (`must`):
+     * the fields that code wrote (`written`). The kind's last write there wrote
+     * every field its kind reads, so one the block did not write is an older
+     * record's, which nothing reads again. Every local where the kind was not
+     * so written, or with no account of the block (no `must`).
+     *
+     * @param {LocalSet | undefined} must @param {LocalSet} written
+     * @returns {(local: number) => boolean}
+     */
+    recordOf(must, written){
+        return must?.has(Local.kind) === true
+            ? local=>!this.isRecordField(local) || written.has(local) : ()=>true;
+    }
+
+    /**
+     * Before a read of a record whose kind is not known here: where the record
+     * is still in the state block (`absentRecord`), its fields taken from there.
+     * Not counted as written: the block holds what the locals now do. Written
+     * once the function is known to leave its record there (`fillDeferred`): one
+     * that loads it has nothing here, and its code is what it was.
+     */
+    recordHere(){
+        if (!this.absentRecord)
+        {
+            return;
+        }
+        this.b.touch(Local.kind, 1);
+        this.deferred.push({ at: this.b.length, kind: 'record', regs: 'none', x87: false });
     }
 
     /**
@@ -2217,6 +2277,23 @@ export class RegionEmitter {
                 pieces.push({ at, body: b });
                 continue;
             }
+            if (kind === 'record')
+            {
+                if (!this.recordMixed)
+                {
+                    b.localGet(Local.kind).i32const(RECORD_ABSENT).op(I32.eq);
+                    b.unlikely();
+                    b.if(EMPTY);
+                    for (const { local, offset, wide } of this.recordFields)
+                    {
+                        atState(this.context, b).load(wide ? 'i64' : 'i32',
+                            { offset: this.flagRecord + offset }).localSet(local);
+                    }
+                    b.end();
+                }
+                pieces.push({ at, body: b });
+                continue;
+            }
             if (kind === 'open' || kind === 'kinds')
             {
                 // Raw: the blocks open before `$out`, a tail's and one a kind of
@@ -2316,7 +2393,19 @@ export class RegionEmitter {
                 // value on entry, or a callee's after a wasm call -- and one it never
                 // names is not loaded (`uses` counts writes too: a path that leaves
                 // before the write stores the value it came in with).
-                if (kind === 'load')
+                if (kind === 'load' && this.absentRecord && !this.recordMixed)
+                {
+                    // Not loaded: marked as still in the block, where a read that
+                    // needs it finds it (`recordHere`). Wherever any field would
+                    // have been loaded - a read of it follows on some way - so
+                    // the kind is never a stale one there.
+                    if (record === true && this.recordFields.some(({ local })=>
+                        main.uses(local) && reloaded(local)))
+                    {
+                        b.i32const(RECORD_ABSENT).localSet(Local.kind);
+                    }
+                }
+                else if (kind === 'load')
                 {
                     for (const { local, offset, wide } of this.recordFields)
                     {
@@ -2327,6 +2416,9 @@ export class RegionEmitter {
                                 .localSet(local);
                         }
                     }
+                }
+                if (kind === 'load')
+                {
                     if (main.uses(Local.flags) && reloaded(Local.flags))
                     {
                         atState(this.context, b).load('i32', { offset: layout.eflags })
@@ -2335,8 +2427,12 @@ export class RegionEmitter {
                 }
                 else
                 {
+                    // Of a record the block's own code wrote on every way here,
+                    // the fields that code wrote (`recordOf`).
+                    const mine = stores !== undefined || site === undefined ? ()=>true
+                        : this.recordOf(site.must, site.written);
                     this.storeRecord(b, local=>record === true && main.writes(local)
-                        && due(local));
+                        && due(local) && mine(local));
                     if (main.writes(Local.flags) && due(Local.flags))
                     {
                         atState(this.context, b).localGet(Local.flags)
@@ -2409,7 +2505,14 @@ export class RegionEmitter {
         /** @param {StorePoint} point */
         const dirty = point=>(point.segment === null || point.segment.after !== null ? stored
             : stored.filter(local=>point.written.has(local)
-                || onEntry[/** @type {Segment} */ (point.segment).block].has(local)));
+                || onEntry[/** @type {Segment} */ (point.segment).block].has(local)))
+            // A way out's fields are not narrowed to its block's own: the ways
+            // out share a few sets of stores (`kinds`), and narrower sets
+            // reshuffled which set each took - on a loop of calls formed in
+            // (cork-bench vcall) V8 then moved seven registers at the back edge,
+            // +3 % on x64 and +1.3 % on arm64, for stores no round of it runs.
+            .filter(point.kind === 'exit' ? ()=>true
+                : this.recordOf(point.must, point.written));
         const exits = this.points.filter(point=>point.kind === 'exit');
         const needs = exits.map(point=>dirty(point));
         // The sets most ways out need, besides all of them, by how many need each.
@@ -2453,6 +2556,9 @@ export class RegionEmitter {
         const read = (segment, locals, must)=>{
             for (const local of locals)
             {
+                // A store of the record on a way that may not have written it:
+                // its fields are loaded then, not left in the block.
+                this.recordMixed ||= this.isRecordField(local) && !must.has(Local.kind);
                 if (!must.has(local))
                 {
                     segment?.exposed.add(local);
@@ -2467,7 +2573,8 @@ export class RegionEmitter {
         {
             const entered = onEntry[site.block];
             read(site.segment, stored.filter(local=>site.written.has(local)
-                || entered.has(local)), /** @type {LocalSet} */ (site.must));
+                || entered.has(local)).filter(this.recordOf(site.must, site.written)),
+            /** @type {LocalSet} */ (site.must));
         }
         // What is read before written from the start of each block on, the way a
         // call's return goes on into its block after the call, its reloads.
@@ -2754,6 +2861,7 @@ export class RegionEmitter {
         {
             b.localGet(Local.kind);
             this.openIf('lazyFlags');
+            this.recordHere();
         }
         b.localGet(Local.kind).localGet(Local.res).localGet(Local.op1).localGet(Local.op2)
             .localGet(Local.cin).localGet(Local.flags);
@@ -2826,8 +2934,11 @@ export class RegionEmitter {
         this.openIf('carry', EMPTY);
         // A float compare's carry is a compare of floats: the helper makes
         // it with the rest of the word, and the record is then the word's.
-        b.localGet(k).i32const(Kind.FCMP).op(I32.eq);
+        // A record still in the state block (`RECORD_ABSENT`, the kind past
+        // FCMP) is taken from there and folded the same way, whatever it is.
+        b.localGet(k).i32const(Kind.FCMP).op(this.absentRecord ? I32.geU : I32.eq);
         this.openIf('floatCarry', EMPTY);
+        this.recordHere();
         b.localGet(Local.kind).localGet(Local.res).localGet(Local.op1).localGet(Local.op2)
             .localGet(Local.cin).localGet(Local.flags);
         b.call(this.context.materialise);
@@ -3030,6 +3141,7 @@ export class RegionEmitter {
             this.openIf('flagHint', ValType.i32);
             read(hint.kind, hint.width);
             b.else();
+            this.recordHere();
             b.localGet(Local.kind).localGet(Local.res).localGet(Local.op1).localGet(Local.op2)
                 .localGet(Local.cin).localGet(Local.flags);
             b.call(this.context.materialise);
@@ -3242,6 +3354,10 @@ export class RegionEmitter {
      */
     payBitTest(){
         const { b } = this;
+        if (this.pending === null)
+        {
+            this.recordHere();
+        }
         b.localGet(Local.kind).localGet(Local.res).localGet(Local.op1).localGet(Local.op2)
             .localGet(Local.cin).localGet(Local.flags);
         b.call(this.context.materialise);
