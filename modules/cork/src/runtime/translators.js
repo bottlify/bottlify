@@ -21,6 +21,7 @@ import { arenaEmitCache, createEmitCache } from './emit-built.js';
 import { createArena } from './arena.js';
 import { ANY_TOP, keyOf } from './entries.js';
 import { spansOf } from './summary.js';
+import { openTranslationWorker } from './translator.js';
 import { usesX87 } from './variants.js';
 
 /** @typedef {import('./state.js').Pending} Pending */
@@ -298,6 +299,17 @@ export function createTranslators(state){
                 rt.sendNext();
                 return;
             }
+            if (typeof data?.alive === 'number')
+            {
+                // Its sign of life, and the job it is on (`overdue`'s clock).
+                const { pending } = translator;
+                if (pending !== null && data.id === pending.id)
+                {
+                    pending.heard = performance.now();
+                    pending.doing = data.alive;
+                }
+                return;
+            }
             onWorkerResults(translator, data);
             // A translator free beside others still out takes the next batch
             // now rather than at the host's next ask.
@@ -318,6 +330,20 @@ export function createTranslators(state){
         adapter.post({ ready: true, doorbell: settings.doorbell ?? null, arena }, []);
     };
 
+    /** One of the runtime's own workers opened: at the start, and in place of one that
+     * went silent on a batch (`translateStep`). Nothing where the host's pool lends them. */
+    const openTranslator = ()=>{
+        if (workerUrl === null || settings.translators === 0)
+        {
+            return;
+        }
+        openTranslationWorker(workerUrl).then(adapter=>{
+            if (adapter !== null)
+            {
+                attachTranslator(adapter);
+            }
+        }, ()=>{});
+    };
     /**
      * A translator asked to go: it takes no batch from now on, and goes as
      * soon as the one it holds is back.
@@ -365,6 +391,7 @@ export function createTranslators(state){
         giveUp,
         dropTranslator,
         attachTranslator,
+        openTranslator,
         detachTranslator,
         closeTranslators,
     };

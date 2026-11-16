@@ -29,7 +29,6 @@
 import { TIER_SLOT, enterRegion } from '../emit/region.js';
 import { RANGE, SHAPE } from '../emit/x87.js';
 import { HELD, MADE, PRECISION } from '../emit/memory.js';
-import { openTranslationWorker } from './translator.js';
 import { keyOf } from './entries.js';
 import { PageFlag } from './pages.js';
 import { resetBlockCounts } from './block-profile.js';
@@ -96,22 +95,15 @@ export function createCorkRuntime(env){
     } = join(rt, createVariants(rt));
     const { liftVolatile, invalidatePage, storedInto, translatable, stored, codeWritten,
         takeWrites, markWritten, takeCodeWrites, noteStack } = join(rt, createCodeWrites(rt));
-    const { workerUrl, coveredOut, coveredIn, attachTranslator, detachTranslator, closeTranslators
+    const { openTranslator, coveredOut, coveredIn, attachTranslator, detachTranslator,
+        closeTranslators
     } = join(rt, createTranslators(rt));
     const { flushStore } = join(rt, createStore(rt));
     join(rt, createPublish(rt));
     join(rt, createRelink(rt));
-    if (workerUrl !== null)
+    for (let n = 0; n < settings.translators; n++)
     {
-        for (let n = 0; n < settings.translators; n++)
-        {
-            openTranslationWorker(workerUrl).then(adapter=>{
-                if (adapter !== null)
-                {
-                    attachTranslator(adapter);
-                }
-            }, ()=>{});
-        }
+        openTranslator();
     }
     const { translateNow } = join(rt, createForming(rt));
 

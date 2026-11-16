@@ -1833,6 +1833,12 @@ export function createCpuModule(){
                             translateMs: figures.translateMs,
                             workerBusyMs: figures.workerBusyMs,
                             interpretedFrom: figures.interpretedFrom ?? null,
+                            // Why its own translator left code to its interpreter: the
+                            // process's figures say nothing of another executor's runtime.
+                            exitsByTarget: (figures.exitsByTarget ?? []).slice(0, 16),
+                            untranslatedBy: figures.untranslatedBy ?? null,
+                            refused: figures.refused ?? null,
+                            refusedWhy: figures.refusedWhy ?? null,
                             spent: figures.spent,
                             heldBytes: figures.heldBytes ?? null,
                             evictions: figures.evictions ?? null,
