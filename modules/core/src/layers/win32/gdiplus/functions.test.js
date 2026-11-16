@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createGdiplusFunctions } from './functions.js';
+import { encodePng } from '../user32/png.fixture.js';
 
 const Ok = 0;
 const InvalidParameter = 2;
@@ -17,8 +18,8 @@ const PixelFormat32bppARGB = 0x26200a;
 const PixelFormat24bppRGB = 0x21808;
 const PixelFormat8bppIndexed = 0x30803;
 
-/** @param {4 | 8} [pointerSize] */
-function machine(pointerSize = 4){
+/** @param {4 | 8} [pointerSize] @param {Record<string, any>} [more] */
+function machine(pointerSize = 4, more = {}){
     const memory = new Uint8Array(0x20000);
     const view = new DataView(memory.buffer);
     let heap = 0x10000;
@@ -37,22 +38,46 @@ function machine(pointerSize = 4){
         free: address=>freed.push(address),
         pointerSize,
         divergence: api=>said.push(api),
+        ...more,
     });
     return { memory, view, fns, said, freed };
 }
 
-test('GdiplusStartup takes versions 1 to 3 and hands a token', ()=>{
+test('GdiplusStartup takes versions 1 to 3 and hands a token', async()=>{
     // Wine's gdiplus test_startup: version 0 (and 42) is UnsupportedGdiplusVersion.
     const { view, fns } = machine();
     view.setUint32(0x100, 1, true);
-    assert.equal(fns.GdiplusStartup.handler([0x200, 0x100, 0]), Ok);
+    assert.equal(await fns.GdiplusStartup.handler([0x200, 0x100, 0]), Ok);
     assert.notEqual(view.getUint32(0x200, true), 0, 'a token');
     view.setUint32(0x100, 0, true);
-    assert.equal(fns.GdiplusStartup.handler([0x200, 0x100, 0]), UnsupportedGdiplusVersion);
+    assert.equal(await fns.GdiplusStartup.handler([0x200, 0x100, 0]), UnsupportedGdiplusVersion);
     view.setUint32(0x100, 42, true);
-    assert.equal(fns.GdiplusStartup.handler([0x200, 0x100, 0]), UnsupportedGdiplusVersion);
-    assert.equal(fns.GdiplusStartup.handler([0, 0x100, 0]), InvalidParameter);
+    assert.equal(await fns.GdiplusStartup.handler([0x200, 0x100, 0]), UnsupportedGdiplusVersion);
+    assert.equal(await fns.GdiplusStartup.handler([0, 0x100, 0]), InvalidParameter);
 });
+
+test('a caller that suppressed the background thread is handed the hook and unhook to call',
+    async()=>{
+        /** @type {Record<string, number>} */
+        const exports = { GdiplusNotificationHook: 0x7000, GdiplusNotificationUnhook: 0x7010 };
+        const { view, fns } = machine(4, { procAddress: (/** @type {string} */ name)=>
+            exports[name] ?? 0 });
+        // GdiplusStartupInput: version 1, no debug callback, SuppressBackgroundThread.
+        view.setUint32(0x100, 1, true);
+        view.setUint32(0x104, 0, true);
+        view.setUint32(0x108, 1, true);
+        assert.equal(await fns.GdiplusStartup.handler([0x200, 0x100, 0x300]), Ok);
+        assert.deepEqual([view.getUint32(0x300, true), view.getUint32(0x304, true)],
+            [0x7000, 0x7010]);
+        assert.equal(fns.GdiplusNotificationHook.handler([0x400]), Ok);
+        assert.notEqual(view.getUint32(0x400, true), 0, 'a token for the unhook');
+
+        // Not suppressed: the background thread does the work, and there is nothing to call.
+        view.setUint32(0x108, 0, true);
+        view.setUint32(0x300, 0xffffffff, true);
+        assert.equal(await fns.GdiplusStartup.handler([0x200, 0x100, 0x300]), Ok);
+        assert.equal(view.getUint32(0x300, true), 0);
+    });
 
 test('a bitmap of its own pixels: its size and format, its pixels locked in place', ()=>{
     const { memory, view, fns } = machine();
@@ -152,4 +177,71 @@ test('drawing and decoding answer NotImplemented, said once each', ()=>{
     assert.equal(fns.GdipCreateBitmapFromStream.handler(), NotImplemented);
     assert.deepEqual(said, ['GdipDrawImageI', 'GdipCreateBitmapFromStream']);
     assert.equal(fns.GdipDeleteGraphics.handler([graphics]), Ok);
+});
+
+test('GdipCreateBitmapFromFile decodes the file\'s image into 32bpp ARGB; a file not there or'
+    + ' not an image is said so', async()=>{
+    const png = encodePng({ width: 2, height: 1, read: x=>(x === 0 ? 0xff0000 : 0x0000ff) });
+    /** @type {Record<string, Uint8Array>} */
+    const files = { 'C:\\logo.png': png, 'C:\\text.txt': new TextEncoder().encode('no image') };
+    const { memory, view, fns } = machine(4, {
+        readWideString: (/** @type {number} */ at)=>{
+            let text = '';
+            for (let i = at; view.getUint16(i, true) !== 0; i += 2)
+            {
+                text += String.fromCharCode(view.getUint16(i, true));
+            }
+            return text;
+        },
+        readFile: (/** @type {string} */ path)=>files[path] ?? null,
+    });
+    /** @param {string} text */
+    const put = text=>{
+        [...text].forEach((c, i)=>view.setUint16(0x100 + i * 2, c.charCodeAt(0), true));
+        view.setUint16(0x100 + text.length * 2, 0, true);
+        return 0x100;
+    };
+    assert.equal(await fns.GdipCreateBitmapFromFile.handler([put('C:\\logo.png'), 0x300]), Ok);
+    const bitmap = view.getUint32(0x300, true);
+    assert.equal(fns.GdipGetImagePixelFormat.handler([bitmap, 0x304]), Ok);
+    assert.equal(view.getUint32(0x304, true), PixelFormat32bppARGB);
+    assert.equal(fns.GdipGetImageWidth.handler([bitmap, 0x308]), Ok);
+    assert.equal(view.getUint32(0x308, true), 2);
+    // Locked for reading: B, G, R, A of red, then of blue.
+    view.setUint32(0x400, 0, true);
+    view.setUint32(0x404, 0, true);
+    view.setUint32(0x408, 2, true);
+    view.setUint32(0x40c, 1, true);
+    assert.equal(fns.GdipBitmapLockBits.handler([bitmap, 0x400, 1, PixelFormat32bppARGB, 0x500]),
+        Ok);
+    const scan0 = view.getUint32(0x510, true);
+    assert.deepEqual([...memory.subarray(scan0, scan0 + 8)], [0, 0, 255, 255, 255, 0, 0, 255]);
+
+    assert.equal(await fns.GdipCreateBitmapFromFile.handler([put('C:\\gone.png'), 0x300]),
+        10, 'FileNotFound');
+    assert.equal(await fns.GdipCreateBitmapFromFile.handler([put('C:\\text.txt'), 0x300]),
+        13, 'UnknownImageFormat');
+});
+
+test('GdipCreateHBITMAPFromBitmap hands GDI a top-down 32-bit section, each pixel laid over the'
+    + ' background by its alpha', ()=>{
+    /** @type {{ name: string, height: number, bits: number }[]} */
+    const made = [];
+    const { memory, view, fns } = machine(4, {
+        gdi32: (/** @type {string} */ name, /** @type {number[]} */ [, info, , bitsOut])=>{
+            made.push({ name, height: view.getInt32(info + 8, true), bits: 0x8000 });
+            view.setUint32(bitsOut, 0x8000, true);
+            return 0x1234;
+        },
+    });
+    assert.equal(fns.GdipCreateBitmapFromScan0.handler([2, 1, 8, PixelFormat32bppARGB, 0x600,
+        0x300]), Ok);
+    // Opaque green, then half-transparent red.
+    memory.set([0, 255, 0, 255, 0, 0, 255, 128], 0x600);
+    const bitmap = view.getUint32(0x300, true);
+    // Over white (ARGB 0xffffffff).
+    assert.equal(fns.GdipCreateHBITMAPFromBitmap.handler([bitmap, 0x310, 0xffffffff]), Ok);
+    assert.equal(view.getUint32(0x310, true), 0x1234);
+    assert.deepEqual(made, [{ name: 'CreateDIBSection', height: -1, bits: 0x8000 }], 'top-down');
+    assert.deepEqual([...memory.subarray(0x8000, 0x8008)], [0, 255, 0, 255, 127, 127, 255, 255]);
 });
