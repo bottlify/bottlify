@@ -715,14 +715,16 @@ async function mapBeside(files, executable, space){
         drives: { C: { source: createMemoryStore(Object.fromEntries(
             Object.entries(files).map(([name, bytes])=>[`App\\${name}`, bytes]))) } },
     });
-    /** @type {{ name: string, base: number, size: number }[]} */
+    /** @type {{ name: string, region: string, base: number, size: number }[]} */
     const placed = [];
     /** @type {any[]} */
     const emitted = [];
     const loader = {
         /** @param {Uint8Array} file @param {{ base: number, name: string }} where */
         map: (file, { base, name })=>{
-            placed.push({ name, base, size: parsePe(file, { wide: true }).sizeOfImage });
+            // The region is named by the file; the library by its file name.
+            placed.push({ name: name.slice(name.lastIndexOf('\\') + 1), region: name, base,
+                size: parsePe(file, { wide: true }).sizeOfImage });
             return { record: { entryPoint: 0 } };
         },
     };
@@ -762,6 +764,8 @@ test('a library of the other machine is refused with its reason, as Windows refu
                 && payload.names.includes('other.dll') && said.test(payload.reason)));
             const taken = await mapBeside({ 'other.dll': build(bits) }, program(bits), space);
             assert.deepEqual(taken.placed.map(one=>one.name), ['other.dll']);
+            assert.deepEqual(taken.placed.map(one=>one.region), ['C:\\App\\other.dll'],
+                'its region named by its file, apart from a table of the same name');
         }
     });
 

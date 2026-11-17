@@ -107,6 +107,16 @@ test('a layout that overlaps is refused when it is registered', ()=>{
     assert.deepEqual(regions.list().map(r=>r.name), ['code', 'data', 'stack']);
 });
 
+test('a name is registered once: unregistering by it cannot take another owner\'s region', ()=>{
+    const regions = mapWithCode();
+    assert.throws(
+        ()=>regions.register({
+            name: 'code', base: 0x8000, size: 0x1000,
+            kind: RegionKind.IMAGE, access: Access.READ_EXECUTE,
+        }),
+        /"code" is already registered/);
+});
+
 test('a region given back is gone from every answer, and its span can be registered again', ()=>{
     // A thread's stack outlives nothing but its thread: once it is given
     // back, a read there is a read of nothing, and the next stack goes there.

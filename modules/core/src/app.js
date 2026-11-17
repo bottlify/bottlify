@@ -3182,7 +3182,10 @@ export async function mapShippedLibraries(options){
             continue;
         }
         const base = place.base;
-        const record = loader.map(file, { base, name, bits });
+        // Named by the file, as a library loaded later is: the table of the
+        // same name has its own region.
+        const region = placeOf(name);
+        const record = loader.map(file, { base, name: region, bits });
         const { exports } = readExports(file, image);
 
         const addresses = new Map(exports
@@ -3196,6 +3199,7 @@ export async function mapShippedLibraries(options){
             name,
             base,
             size: image.sizeOfImage,
+            region,
             /** @param {string} exported */
             addressOf: exported=>addresses.get(exported) ?? null,
             /** @param {number} ordinal */
@@ -6779,8 +6783,9 @@ async function buildApp(options){
      * A table of ours made a module in guest memory, after the ones before it.
      *
      * @param {string} name @param {Record<string, any>} table
+     * @param {string} [region]  Its region's name, for one beside a library of the same name.
      */
-    const synthesiseLibrary = (name, table)=>{
+    const synthesiseLibrary = (name, table, region = name)=>{
         // A library imported by number has to be synthesised with the numbers
         // the program compiled against; one we assigned ourselves would bind to
         // a different function, silently.
@@ -6862,7 +6867,7 @@ async function buildApp(options){
         }
         const placed = loader.synthesise({
             name, base, exports, entryPoint: 'DllMain' in table ? 'DllMain' : undefined, long,
-            headers: installed ? installedHeaders(installed, base) ?? undefined : undefined,
+            region, headers: installed ? installedHeaders(installed, base) ?? undefined : undefined,
         });
         const end = base + Math.ceil(placed.size / LIBRARY_ALIGN) * LIBRARY_ALIGN;
         if (base === systemModulesEnd)
@@ -6934,7 +6939,8 @@ async function buildApp(options){
     for (const [name, table] of Object.entries(
         /** @type {any} */ (win32).faces?.() ?? {}))
     {
-        const record = synthesiseLibrary(name, table);
+        // Beside system32's library of the same name, so its region is its own.
+        const record = synthesiseLibrary(name, table, `${name} (assembly)`);
         byBase.set(record.base, record);
         faces.set(moduleKeyOf(name), record);
     }
@@ -7225,7 +7231,7 @@ async function buildApp(options){
             {
                 byBase.delete(held.base);
                 forgetName(held);
-                memory.unregister(held.name);
+                memory.unregister(held.region);
                 librarySpace.giveBack(held.base);
                 // Room given back: a library refused for want of it may fit now.
                 absentLibraries.clear();
@@ -7463,10 +7469,14 @@ async function buildApp(options){
                     }
 
                     const base = place.base;
+                    // Its region is named by the file, not by the name asked
+                    // for: a table of the same name (the D3DX helpers) has its
+                    // own region from the start, and a name has one owner.
+                    const region = wanted;
                     let mapped;
                     try
                     {
-                        mapped = loader.map(file, { base, name, bits: processBits });
+                        mapped = loader.map(file, { base, name: region, bits: processBits });
                     }
                     catch (e){
                         if (/** @type {any} */ (e)?.code !== 'MACHINE_MEMORY')
@@ -7506,7 +7516,7 @@ async function buildApp(options){
                             resourceOfImage(file, RT_MANIFEST, ISOLATIONAWARE_MANIFEST), path);
                     if (own && 'refused' in own)
                     {
-                        memory.unregister(name);
+                        memory.unregister(region);
                         librarySpace.giveBack(base);
                         events.emit('libraries-missing', { names: [name], reason: own.refused });
                         return 0;
@@ -7516,7 +7526,7 @@ async function buildApp(options){
                         activation.bindModule(base, own.handle);
                     }
                     const held = {
-                        name, base, size: image.sizeOfImage,
+                        name, base, size: image.sizeOfImage, region,
                         /** @param {string} exported */
                         addressOf: exported=>addresses.get(exported) ?? null,
                         /** @param {number} ordinal */
@@ -7600,7 +7610,7 @@ async function buildApp(options){
                             threadBlocks?.removeModule(base);
                             byBase.delete(base);
                             forgetName(held);
-                            memory.unregister(name);
+                            memory.unregister(region);
                             librarySpace.giveBack(base);
                             for (const other of brought)
                             {
