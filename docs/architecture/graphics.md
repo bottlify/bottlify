@@ -142,7 +142,9 @@ flowchart TB
   or closed paints nothing; the screen is composed again. A full-screen picture a GPU drew (an
   OpenGL context, a Direct3D device) has no bytes for the desktop to be composed onto, so the
   windows over it - the message box a program ends with - are laid over each of its frames by the
-  presenter from the desktop the process composed (`overlay`), until they go. Whether a
+  presenter from the desktop the process composed (`overlay`), until they go. A full-screen
+  device whose window is hidden holds nothing: the desktop is the screen, and a box shown before
+  that window first appears is seen. Whether a
   Direct3D 8 or 9 present is shown depends on the window it goes into, decided at each present
   (`graphics/seam/present-window.js`): Present's override, else the swap chain's own window
   (the device's for its own chain). A shown window shows the picture and a hidden one shows
