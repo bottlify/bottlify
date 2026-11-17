@@ -5073,7 +5073,7 @@ export function createWin32Module(){
                         libraries['KERNEL32.dll'])?.[ENVIRONMENT_NOW]?.() ?? {})
                         .find(([variable])=>variable.toUpperCase() === name.toUpperCase())?.[1]
                         ?? null,
-                    files: steamFilesOf(filesystem),
+                    files: steamFilesOf(filesystem, volume),
                     divergence: config?.divergence, log: text=>trace(`steamclient: ${text}`) }),
                 // Chromium's embedding API, answered by the host's own browser
                 // rather than by the framework a program ships (libcef/).

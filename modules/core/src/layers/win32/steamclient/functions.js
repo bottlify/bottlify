@@ -61,7 +61,8 @@ import { createSteamObjects } from './objects.js';
 
 /**
  * @typedef {Object} SteamFiles
- * @property {(path: string) => Uint8Array | null} read  Null for no such file.
+ * @property {(path: string) => Uint8Array | Promise<Uint8Array> | null} read  Null for no
+ *     such file; a promise while its bytes are fetched (a session's file is read lazily).
  * @property {(path: string, bytes: Uint8Array) => boolean} write  The folders made on the way.
  * @property {(path: string) => boolean} remove
  * @property {(folder: string) => { name: string, size: number, modified: number }[]} list
@@ -477,14 +478,22 @@ export function createSteamclientFunctions(host){
                 ? 1 : 0;
         },
         FileRead: ([name, data, size])=>{
-            const bytes = host.files?.read(remotePath(name));
-            if (!bytes || (data >>> 0) === 0 || (size | 0) <= 0)
+            if ((data >>> 0) === 0 || (size | 0) <= 0)
             {
                 return 0;
             }
-            const read = bytes.subarray(0, Math.min(bytes.length, size | 0));
-            host.writeMemory(data >>> 0, read);
-            return read.length;
+            /** @param {Uint8Array | null | undefined} bytes */
+            const copy = bytes=>{
+                if (!bytes)
+                {
+                    return 0;
+                }
+                const read = bytes.subarray(0, Math.min(bytes.length, size | 0));
+                host.writeMemory(data >>> 0, read);
+                return read.length;
+            };
+            const bytes = host.files?.read(remotePath(name));
+            return bytes instanceof Promise ? bytes.then(copy) : copy(bytes);
         },
         FileExists: ([name])=>(remoteEntry(name) ? 1 : 0),
         FilePersisted: ([name])=>(remoteEntry(name) ? 1 : 0),
@@ -633,12 +642,14 @@ export function createSteamclientFunctions(host){
 
 /**
  * The guest's files as the client's cloud reaches them, through the
- * filesystem layer's own calls.
+ * filesystem layer's own calls; reads through the volume every file call
+ * reads, which fetches what a lazily read session has not read yet.
  *
  * @param {any} filesystem  The filesystem layer's API.
+ * @param {any} volume  kernel32's volume over it (`createVolume`).
  * @returns {SteamFiles}
  */
-export function steamFilesOf(filesystem){
+export function steamFilesOf(filesystem, volume){
     /** @param {string} path */
     const folderOf = path=>path.slice(0, path.lastIndexOf('\\'));
     /** @param {string} folder */
@@ -663,19 +674,28 @@ export function steamFilesOf(filesystem){
             : [{ name: `${prefix}${entry.name}`, size: entry.size, modified: entry.modified }]));
     return {
         read: path=>{
-            if (!filesystem.stat(path) || filesystem.stat(path).directory)
+            const entry = volume.stat(path);
+            const node = entry && !entry.isDirectory ? volume.open(path, { read: true }) : null;
+            if (!node)
             {
                 return null;
             }
-            const handle = filesystem.open(path);
+            /** @type {Uint8Array | Promise<Uint8Array>} */
+            let bytes;
             try
             {
-                return filesystem.read(handle, filesystem.size(handle));
+                bytes = volume.read(node, 0, entry.size);
             }
-            finally
+            catch (e){
+                volume.close(node);
+                throw e;
+            }
+            if (bytes instanceof Promise)
             {
-                filesystem.close(handle);
+                return bytes.finally(()=>volume.close(node));
             }
+            volume.close(node);
+            return bytes;
         },
         write: (path, bytes)=>{
             try
