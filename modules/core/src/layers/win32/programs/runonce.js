@@ -24,7 +24,8 @@
  */
 
 import { SYSTEM_PROGRAMS } from './table.js';
-import { splitArguments } from './command-line.js';
+import { argumentsOf, splitArguments } from './command-line.js';
+import { parseRegsvr32 } from './regsvr32.js';
 
 /** The key, below either root. */
 export const RUN_ONCE_KEY = 'Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce';
@@ -106,13 +107,25 @@ export async function runOnceAtLogon(context, contextFor, divergence){
         values.sort((a, b)=>a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
         for (const { name: value, command } of values)
         {
+            const program = programOf(command);
+            // Windows' 64-bit regsvr32 starts the 32-bit one for a 32-bit
+            // library; here the command runs in this process, which loads only
+            // its own width. The value stays for a session whose first process
+            // has the library's: one never run is not lost.
+            const library = program?.routine === 'regsvr32'
+                ? parseRegsvr32(argumentsOf(command)).libraries[0] : undefined;
+            if (library !== undefined && await otherWidth(context, library))
+            {
+                divergence('RunOnce', `${command}: a library of the other width, kept for a`
+                    + ' session of its width');
+                continue;
+            }
             const later = value.startsWith('!');
             const remove = ()=>advapi32('RegDeleteValueW', [key, context.wide(value)]);
             if (!later)
             {
                 await remove();
             }
-            const program = programOf(command);
             if (!program)
             {
                 divergence('RunOnce', `${command}: not a program this engine runs at logon;`
@@ -133,6 +146,46 @@ export async function runOnceAtLogon(context, contextFor, divergence){
         await advapi32('RegCloseKey', [key]);
     }
     return ran;
+}
+
+/** IMAGE_FILE_HEADER.Machine of a PE image's headers, or 0. @param {Uint8Array} head */
+function machineOf(head){
+    const view = new DataView(head.buffer, head.byteOffset, head.byteLength);
+    if (head.length < 0x40 || view.getUint16(0, true) !== 0x5a4d)
+    {
+        return 0;
+    }
+    const at = view.getUint32(0x3c, true);
+    return at + 6 <= head.length && view.getUint32(at, true) === 0x4550
+        ? view.getUint16(at + 4, true) : 0;
+}
+
+/**
+ * Whether a library's image is of the other width than this process's: its
+ * file's machine read through the process's own calls, and the program's
+ * image's in memory. A file that cannot be read is not of the other width,
+ * and the command runs and says why it failed.
+ *
+ * @param {import('./msiexec.js').ProgramContext} context
+ * @param {string} path
+ */
+async function otherWidth(context, path){
+    /** @param {string} name @param {number[]} args */
+    const kernel32 = (name, args)=>context.call('KERNEL32.dll', name, args);
+    const HEAD = 0x400;
+    const file = await kernel32('CreateFileW', [context.wide(path), 0x80000000, 1, 0, 3, 0, 0]);
+    if ((file >>> 0) === 0xffffffff || file === 0)
+    {
+        return false;
+    }
+    const buffer = context.block(HEAD);
+    const read = context.block(4);
+    await kernel32('ReadFile', [file, buffer, HEAD, read, 0]);
+    await kernel32('CloseHandle', [file]);
+    const library = machineOf(context.read(buffer, HEAD));
+    const image = await kernel32('GetModuleHandleW', [0]);
+    const own = image ? machineOf(context.read(image, HEAD)) : 0;
+    return library !== 0 && own !== 0 && library !== own;
 }
 
 /**

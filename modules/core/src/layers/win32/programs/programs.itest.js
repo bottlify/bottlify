@@ -208,7 +208,11 @@ test('a session\'s first process runs RunOnce before its program, as a logon doe
         const app = await createApp({
             executable: waitingParent('rundll32 C:\\App\\reg.dll,Entry child'),
             imagePath: 'C:\\App\\setup.exe',
-            files: [{ path: 'C:\\App\\reg.dll', bytes: registeringLibrary() }],
+            files: [{ path: 'C:\\App\\reg.dll', bytes: registeringLibrary() },
+                // A library of the other width than this 32-bit process.
+                { path: 'C:\\App\\wide.dll',
+                    bytes: buildExe({ bits: 64, dll: true, imports: {}, codeSize: 0x10,
+                        code: ()=>[0xc3] }) }],
             unattended: true,
         });
         t.after(()=>app.dispose());
@@ -220,6 +224,8 @@ test('a session\'s first process runs RunOnce before its program, as a logon doe
         // Kept: its name says so until it succeeds, and DllUnregisterServer fails.
         put('!b', 'regsvr32 /s /u C:\\App\\reg.dll');
         put('c', 'C:\\App\\elsewhere.exe /x');
+        // Not run here and not lost: kept for a session of its width.
+        put('d', 'regsvr32 /s C:\\App\\wide.dll');
         /** @type {string[]} */
         const said = [];
         app.on('divergence', (/** @type {any} */ event)=>{
@@ -234,10 +240,13 @@ test('a session\'s first process runs RunOnce before its program, as a logon doe
         assert.equal(registryText(app.registry(), HKEY_CURRENT_USER, 'Software\\Bottlify\\Run',
             ''), 'child', 'and the program itself');
         const left = hive.open(hive.root(HKEY_LOCAL_MACHINE), RUN_ONCE_KEY);
-        assert.deepEqual(hive.values(left).map((/** @type {any} */ value)=>value.name), ['!b'],
-            'each value deleted before it runs, a "!" one only after it succeeds');
-        assert.deepEqual(said.map(line=>line.split(':')[0]), ['regsvr32 /s /u C',
-            'C'], 'the failure, and the command no program here runs, said');
+        assert.deepEqual(hive.values(left).map((/** @type {any} */ value)=>value.name),
+            ['!b', 'd'], 'each value deleted before it runs, a "!" one only after it succeeds,'
+            + ' one for a library of the other width not run');
+        assert.deepEqual(said.map(line=>line.split(':')[0]), ['regsvr32 /s /u C', 'C',
+            'regsvr32 /s C'], 'the failure, the command no program here runs, the library of'
+            + ' the other width, said');
+        assert.match(said[2], /other width/);
     });
 
 test('rundll32 calls the entry with the rest of the line, its W spelling first, and exits 0',
