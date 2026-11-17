@@ -2402,3 +2402,11 @@ instruction. A command naming any other program is not run, said. It is where an
 runs no guest code leaves a COM server's registration (A67, and DirectX's setup): the library's
 own DllRegisterServer writes what it writes. Revisit when a setup is found that leaves another
 program in RunOnce, or a registration that must run in a process of its own. *2026-11-17.*
+
+**A262. GDI+ encodes BMP and PNG only, a PNG's data in stored deflate blocks.**
+GDI+ lists BMP, JPEG, GIF, TIFF and PNG encoders. This engine has no encoder of its own for JPEG,
+GIF or TIFF, so GdipGetImageEncoders lists BMP and PNG, the two `gdiplus/codecs.js` writes; a save
+asked of another encoder is UnknownImageFormat, as for an encoder GDI+ does not have. A PNG's IDAT
+is stored, not compressed: a valid file every reader opens, larger than Windows' own. BMP keeps an
+indexed, 24 or 32-bit image's depth and writes the rest as 32 bits. Revisit when a program is found
+saving JPEG or reading back the size of what it saved. *2026-11-17.*

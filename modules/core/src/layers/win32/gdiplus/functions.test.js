@@ -144,21 +144,31 @@ test('over the caller\'s pixels, a clone of its own, a dispose that frees only i
     assert.equal(fns.GdipDisposeImage.handler([clone]), InvalidParameter, 'disposed already');
 });
 
-test('the bitmaps refused, and the palette of one without', ()=>{
+test('the bitmaps refused, and the palettes GDI+ starts a bitmap with', ()=>{
+    // Wine's image.c test_Scan0 and test_palette record these answers.
     const { view, fns } = machine();
     assert.equal(fns.GdipCreateBitmapFromScan0.handler([0, 1, 0, PixelFormat32bppARGB, 0,
         0x300]), InvalidParameter, 'no width');
     assert.equal(fns.GdipCreateBitmapFromScan0.handler([1, 1, 0, PixelFormat32bppARGB, 0x800,
         0x300]), InvalidParameter, 'pixels with no stride');
-    assert.equal(fns.GdipCreateBitmapFromScan0.handler([1, 1, 0, PixelFormat8bppIndexed, 0,
-        0x300]), InvalidParameter, 'an indexed format is not kept');
+    assert.equal(fns.GdipCreateBitmapFromScan0.handler([1, 1, 10, PixelFormat24bppRGB, 0x800,
+        0x300]), InvalidParameter, 'a stride not a multiple of four');
     fns.GdipCreateBitmapFromScan0.handler([1, 1, 0, PixelFormat32bppARGB, 0, 0x300]);
     const bitmap = view.getUint32(0x300, true);
     assert.equal(fns.GdipGetImagePaletteSize.handler([bitmap, 0x310]), Ok);
-    assert.equal(view.getUint32(0x310, true), 8, 'the header, no entries');
-    view.setUint32(0x320, 0xffffffff, true);
-    assert.equal(fns.GdipGetImagePalette.handler([bitmap, 0x320, 8]), Ok);
+    assert.equal(view.getUint32(0x310, true), 12, 'the header and room for one entry');
+    assert.equal(fns.GdipGetImagePalette.handler([bitmap, 0x320, 12]), Ok);
     assert.equal(view.getUint32(0x324, true), 0, 'no colours');
+    assert.equal(fns.GdipCreateBitmapFromScan0.handler([2, 2, 0, PixelFormat8bppIndexed, 0,
+        0x300]), Ok);
+    const indexed = view.getUint32(0x300, true);
+    assert.equal(fns.GdipGetImagePalette.handler([indexed, 0x400, 8 + 256 * 4]), Ok);
+    assert.deepEqual([view.getUint32(0x400, true), view.getUint32(0x404, true),
+        view.getUint32(0x408 + 8 * 4, true), view.getUint32(0x408 + 40 * 4, true)],
+    [4, 256, 0xffc0c0c0, 0xff000000], 'the halftone palette');
+    assert.equal(fns.GdipBitmapSetPixel.handler([indexed, 0, 1, 0xffcccccc]), Ok);
+    assert.equal(fns.GdipBitmapGetPixel.handler([indexed, 0, 1, 0x500]), Ok);
+    assert.equal(view.getUint32(0x500, true), 0xffcccccc, 'the palette\'s own colour');
 });
 
 test('a 64-bit process\'s handles and Scan0 are pointers', ()=>{
@@ -171,20 +181,16 @@ test('a 64-bit process\'s handles and Scan0 are pointers', ()=>{
     assert.notEqual(view.getUint32(0x410, true), 0, 'Scan0 at 16');
 });
 
-test('drawing and decoding answer NotImplemented, said once each', ()=>{
-    const { view, fns, said } = machine();
-    assert.equal(fns.GdipCreateFromHDC.handler([0x1234, 0x300]), Ok);
-    const graphics = view.getUint32(0x300, true);
-    assert.equal(fns.GdipSetInterpolationMode.handler([graphics, 7]), Ok);
-    assert.equal(fns.GdipSetInterpolationMode.handler([graphics, 8]), InvalidParameter);
-    assert.equal(fns.GdipDrawImageI.handler(), NotImplemented);
-    assert.equal(fns.GdipDrawImageI.handler(), NotImplemented);
-    assert.equal(fns.GdipCreateBitmapFromStream.handler(), NotImplemented);
-    assert.deepEqual(said, ['GdipDrawImageI', 'GdipCreateBitmapFromStream']);
-    assert.equal(fns.GdipDeleteGraphics.handler([graphics]), Ok);
+test('an export not done answers NotImplemented, said once with why', ()=>{
+    const { fns, said } = machine();
+    const record = /** @type {Record<string, { handler: (args: number[]) => number }>} */ (
+        /** @type {unknown} */ (fns)).GdipRecordMetafile;
+    assert.equal(record.handler([]), NotImplemented);
+    assert.equal(record.handler([]), NotImplemented);
+    assert.deepEqual(said, ['GdipRecordMetafile']);
 });
 
-test('GdipCreateBitmapFromFile decodes the file\'s image into 32bpp ARGB; a file not there or'
+test('GdipCreateBitmapFromFile decodes the file\'s image; a file not there or'
     + ' not an image is said so', async()=>{
     const png = encodePng({ width: 2, height: 1, read: x=>(x === 0 ? 0xff0000 : 0x0000ff) });
     /** @type {Record<string, Uint8Array>} */
@@ -209,7 +215,7 @@ test('GdipCreateBitmapFromFile decodes the file\'s image into 32bpp ARGB; a file
     assert.equal(await fns.GdipCreateBitmapFromFile.handler([put('C:\\logo.png'), 0x300]), Ok);
     const bitmap = view.getUint32(0x300, true);
     assert.equal(fns.GdipGetImagePixelFormat.handler([bitmap, 0x304]), Ok);
-    assert.equal(view.getUint32(0x304, true), PixelFormat32bppARGB);
+    assert.equal(view.getUint32(0x304, true), PixelFormat24bppRGB, 'its own depth');
     assert.equal(fns.GdipGetImageWidth.handler([bitmap, 0x308]), Ok);
     assert.equal(view.getUint32(0x308, true), 2);
     // Locked for reading: B, G, R, A of red, then of blue.
@@ -223,7 +229,9 @@ test('GdipCreateBitmapFromFile decodes the file\'s image into 32bpp ARGB; a file
     assert.deepEqual([...memory.subarray(scan0, scan0 + 8)], [0, 0, 255, 255, 255, 0, 0, 255]);
 
     assert.equal(await fns.GdipCreateBitmapFromFile.handler([put('C:\\gone.png'), 0x300]),
-        10, 'FileNotFound');
+        InvalidParameter, 'a file not there');
+    assert.equal(await fns.GdipLoadImageFromFile.handler([put('C:\\gone.png'), 0x300]),
+        3, 'OutOfMemory, as GDI+ answers a load');
     assert.equal(await fns.GdipCreateBitmapFromFile.handler([put('C:\\text.txt'), 0x300]),
         13, 'UnknownImageFormat');
 });
@@ -236,13 +244,18 @@ test('a window\'s graphics, and GDI\'s halftone palette, as WinForms paints a co
             asked.push(name);
             return 0x4c0;
         },
+        user32: (/** @type {string} */ name)=>{
+            asked.push(name);
+            return 0x88;
+        },
     });
     assert.equal(fns.GdipCreateFromHWND.handler([0x1000, 0x300]), Ok);
     assert.equal(fns.GdipCreateFromHWND.handler([0, 0x304]), Ok, 'NULL is the screen');
     assert.equal(fns.GdipCreateFromHWND.handler([0x1000, 0]), InvalidParameter);
     assert.equal(fns.GdipDeleteGraphics.handler([view.getUint32(0x300, true)]), Ok);
     assert.equal(fns.GdipCreateHalftonePalette.handler(), 0x4c0);
-    assert.deepEqual(asked, ['CreateHalftonePalette']);
+    assert.deepEqual(asked, ['GetDC', 'GetDC', 'ReleaseDC', 'CreateHalftonePalette'],
+        'the window\'s DC taken and given back');
 });
 
 test('GdipCreateHBITMAPFromBitmap hands GDI a top-down 32-bit section, each pixel laid over the'

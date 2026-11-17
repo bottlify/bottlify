@@ -394,7 +394,7 @@ const wellFormed = types=>{
 };
 
 /** DashStyle's patterns, in pen widths (gdiplusenums.h's DashStyle). */
-const DASHES = [[], [3, 1], [1, 1], [3, 1, 1, 1], [3, 1, 1, 1, 1, 1]];
+export const DASHES = [[], [3, 1], [1, 1], [3, 1, 1, 1], [3, 1, 1, 1, 1, 1]];
 const DashStyleCustom = 5;
 
 /**
@@ -404,7 +404,7 @@ const DashStyleCustom = 5;
  * @param {[number, number][]} line @param {number[]} pattern @param {number} width
  * @returns {[number, number][][]}
  */
-const dashed = (line, pattern, width)=>{
+export const dashed = (line, pattern, width)=>{
     const lengths = pattern.map(value=>value * width);
     if (lengths.length === 0 || lengths.every(value=>!(value > 0)))
     {

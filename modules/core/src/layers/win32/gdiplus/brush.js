@@ -208,6 +208,40 @@ export function createBrushFunctions(kit, { matrices, paths, images }){
             transform: [...IDENTITY], rect: part ?? [0, 0, size.width, size.height] }, out);
     };
 
+    /**
+     * A bell rising to `scale` at `focus`: the normal curve's cumulative
+     * share sampled either side of it, as a gradient's blend.
+     *
+     * @param {Brush} brush @param {number} focus @param {number} scale
+     */
+    const sigmaBlend = (brush, focus, scale)=>{
+        const at = Math.max(0, Math.min(1, focus));
+        const peak = scale;
+        const steps = 16;
+        /** The normal curve's cumulative share at x, by its error function. @param {number} x */
+        const cumulative = x=>{
+            const t = 1 / (1 + 0.3275911 * Math.abs(x));
+            const erf = 1 - ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t
+                - 0.284496736) * t + 0.254829592) * t * Math.exp(-x * x);
+            return 0.5 * (1 + Math.sign(x) * erf);
+        };
+        /** @type {number[]} */
+        const positions = [];
+        /** @type {number[]} */
+        const factors = [];
+        for (let i = 0; i <= steps; i++)
+        {
+            const position = i / steps;
+            const side = position <= at ? (at === 0 ? 1 : position / at)
+                : (at === 1 ? 1 : (1 - position) / (1 - at));
+            positions.push(position);
+            factors.push(peak * cumulative((side - 0.5) * 6));
+        }
+        brush.factors = factors;
+        brush.positions = positions;
+        return Ok;
+    };
+
     const functions = {
         /** Status GdipCreateSolidFill(ARGB color, GpSolidFill **brush) */
         GdipCreateSolidFill: fn(8, ([color, out])=>
@@ -537,33 +571,8 @@ export function createBrushFunctions(kit, { matrices, paths, images }){
          * A bell rising to `scale` at `focus`: the normal curve's cumulative
          * share sampled either side of it.
          */
-        GdipSetLineSigmaBlend: fn(12, onBrush(LINE, (brush, [focus, scale])=>{
-            const at = Math.max(0, Math.min(1, kit.real(focus)));
-            const peak = kit.real(scale);
-            const steps = 16;
-            /** The normal curve's cumulative share at x, by its error function. @param {number} x */
-            const cumulative = x=>{
-                const t = 1 / (1 + 0.3275911 * Math.abs(x));
-                const erf = 1 - ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t
-                    - 0.284496736) * t + 0.254829592) * t * Math.exp(-x * x);
-                return 0.5 * (1 + Math.sign(x) * erf);
-            };
-            /** @type {number[]} */
-            const positions = [];
-            /** @type {number[]} */
-            const factors = [];
-            for (let i = 0; i <= steps; i++)
-            {
-                const position = i / steps;
-                const side = position <= at ? (at === 0 ? 1 : position / at)
-                    : (at === 1 ? 1 : (1 - position) / (1 - at));
-                positions.push(position);
-                factors.push(peak * cumulative((side - 0.5) * 6));
-            }
-            brush.factors = factors;
-            brush.positions = positions;
-            return Ok;
-        })),
+        GdipSetLineSigmaBlend: fn(12, onBrush(LINE, (brush, [focus, scale])=>
+            sigmaBlend(brush, kit.real(focus), kit.real(scale)))),
         /** Status GdipGetLinePresetBlendCount(GpLineGradient *brush, INT *count) */
         GdipGetLinePresetBlendCount: fn(8, onBrush(LINE, (brush, [out])=>{
             if ((out >>> 0) === 0)
@@ -882,6 +891,9 @@ export function createBrushFunctions(kit, { matrices, paths, images }){
                 : at === 1 ? [[0, peak], [0, 1]] : [[0, peak, 0], [0, at, 1]];
             return Ok;
         })),
+        /** Status GdipSetPathGradientSigmaBlend(GpPathGradient *brush, REAL focus, REAL scale) */
+        GdipSetPathGradientSigmaBlend: fn(12, onBrush(PATH, (brush, [focus, scale])=>
+            sigmaBlend(brush, kit.real(focus), kit.real(scale)))),
         /** Status GdipGetPathGradientPresetBlendCount(GpPathGradient *brush, INT *count) */
         GdipGetPathGradientPresetBlendCount: fn(8, onBrush(PATH, (brush, [out])=>{
             if ((out >>> 0) === 0)

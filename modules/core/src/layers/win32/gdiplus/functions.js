@@ -5,22 +5,22 @@
  */
 
 /**
- * gdiplus -- GDI+'s flat API, the part a program reaches for to hold pixels:
- * starting it, its allocator, bitmaps over a buffer (the program's or its own),
- * locking their pixels, their size, format and palette, and cloning them.
- * A bitmap's pixels lie in guest memory, where LockBits hands them out.
+ * gdiplus - GDI+'s flat API: starting it, its allocator, and its families,
+ * each a model of its objects behind the handles a program holds -
+ * matrices, paths and their iterators, brushes, pens and caps, regions,
+ * images and their attributes, graphics, fonts, string formats and text.
+ * One table of handles serves them all (`kit.js`), so a handle names one
+ * object of one family, and one family reaches another's objects only
+ * through what that family hands it here.
  *
- * An image file is decoded by the codecs Windows' imaging component has
- * (`windowscodecs/frames.js`), into 32bpp ARGB as GDI+ holds a decoded image,
- * and a bitmap is handed to GDI as a DIB section. Decoding from a stream, a
- * bitmap from a GDI one, and drawing are not here: they answer
- * NotImplemented, said once as a divergence, as from a GDI+ whose codec or
- * renderer failed - a program checks each Status. Its fonts are `fonts.js`'s.
+ * Drawing is GDI+'s own rasteriser over a bitmap's pixels or a DC's
+ * (`graphics.js`, `raster.js`); images decode through Windows' imaging
+ * component's codecs (`image.js`); a face is gdi32's (`fonts.js`,
+ * `text.js`). What this build does not do - metafiles, effects, a path of
+ * a string's outlines - answers NotImplemented, said once as a divergence.
  */
 
 import { pointerWidth } from '../common/pointers.js';
-import { CodecError, sniff } from '../windowscodecs/frames.js';
-import { convertRow, formatOf, rowBytes as wicRowBytes } from '../windowscodecs/formats.js';
 import { createFontFunctions } from './fonts.js';
 import { createKit } from './kit.js';
 import { createMatrixFunctions } from './matrix.js';
@@ -28,41 +28,19 @@ import { createPathFunctions } from './path.js';
 import { createBrushFunctions } from './brush.js';
 import { createPenFunctions } from './pen.js';
 import { createPathIteratorFunctions } from './pathiterator.js';
+import { createImageFunctions } from './image.js';
+import { createRegionFunctions } from './region.js';
+import { createGraphicsFunctions } from './graphics.js';
+import { createStringFormatFunctions } from './stringformat.js';
+import { createTextFunctions } from './text.js';
+import { createImageAttributesFunctions } from './imageattributes.js';
+import { createGuestStreams } from './stream.js';
+import { createUnsupportedFunctions } from './unsupported.js';
 
 /** GpStatus (gdiplustypes.h). */
 const Ok = 0;
 const InvalidParameter = 2;
-const OutOfMemory = 3;
-const NotImplemented = 6;
-const GenericError = 1;
-const FileNotFound = 10;
-const UnknownImageFormat = 13;
-
-/** PixelFormat32bppARGB: what a decoded image of colour is held as. */
-const PIXEL_FORMAT_32BPP_ARGB = 0x26200a;
-/** GUID_WICPixelFormat32bppBGRA: the same bytes, B, G, R, A. */
-const WIC_32BPP_BGRA = '{6FDDC324-4E03-4BFE-B185-3D77768DC90F}';
-const WrongState = 8;
 const UnsupportedGdiplusVersion = 17;
-
-/** ImageLockMode's flag: the caller hands its own buffer (UserInputBuf), not taken here. */
-const IMAGE_LOCK_USER_INPUT_BUF = 0x4;
-
-/** ColorPalette's header: Flags and Count, before its entries. */
-const PALETTE_HEADER = 8;
-
-
-/**
- * A pixel format's bits per pixel, from its value (gdipluspixelformats.h: bits 8-15),
- * for the formats with whole bytes per pixel and no palette; zero for any other.
- *
- * @param {number} format
- */
-const bytesPerPixel = format=>{
-    const bits = format >>> 8 & 0xff;
-    const indexed = (format & 0x10000) !== 0;
-    return indexed || bits % 8 !== 0 ? 0 : bits / 8;
-};
 
 /**
  * @typedef {Object} GdiplusHost
@@ -75,7 +53,12 @@ const bytesPerPixel = format=>{
  * @property {(address: number) => string} [readWideString]
  * @property {(path: string) => Promise<Uint8Array | null> | Uint8Array | null} [readFile]
  *     a file of the volume, whole; null for none
+ * @property {(path: string, bytes: Uint8Array) => boolean} [writeFile]  a file of the
+ *     volume made or replaced whole; false where it could not be
  * @property {(name: string, args: number[]) => number} [gdi32]  a GDI32 export, called
+ * @property {(name: string, args: number[]) => number} [user32]  a USER32 export, called
+ * @property {(entry: number, args: number[]) => Promise<number>} [callGuest]  guest code
+ *     called on the calling thread: a program's IStream
  * @property {(name: string) => Promise<number> | number} [procAddress]  where an export of
  *     this library is, for a pointer to it handed out
  */
@@ -83,127 +66,43 @@ const bytesPerPixel = format=>{
 /** @param {GdiplusHost} host */
 export function createGdiplusFunctions(host){
     const pointer = pointerWidth(host.pointerSize ?? 4);
-    /** BitmapData: Width, Height, Stride, PixelFormat, then Scan0 and Reserved, pointers. */
-    const BITMAP_DATA_SCAN0 = 16;
-    /**
-     * Each bitmap: its size, format and pixels' place; whether that memory is its own
-     * to free; the rectangle locked now, if one is.
-     *
-     * @type {Map<number, { width: number, height: number, stride: number, format: number,
-     *     scan0: number, owned: boolean, locked: boolean }>}
-     */
-    const bitmaps = new Map();
-    /** @type {Map<number, { interpolation: number }>} */
-    const graphics = new Map();
-    /** The divergences said: each once. @type {Set<string>} */
-    const said = new Set();
-    // One table of handles for every family: a handle names one object.
     const kit = createKit(host);
     const handle = kit.handle;
+    const putPointer = kit.putPointer;
+    const callGuest = host.callGuest;
+    const streams = callGuest ? createGuestStreams({ ...host, callGuest }) : undefined;
+    const images = createImageFunctions(kit, { ...host, streams });
     const matrices = createMatrixFunctions(kit);
     const paths = createPathFunctions(kit, matrices);
-    /** A copy of a bitmap in memory of its own, its handle; 0 for none. @param {number} image */
-    const cloneImage = image=>{
-        const held = bitmaps.get(image >>> 0);
-        if (!held)
-        {
-            return 0;
-        }
-        const scratch = host.allocate(pointer.size);
-        if (scratch === 0)
-        {
-            return 0;
-        }
-        try
-        {
-            const { made } = makeBitmap(held.width, held.height, 0, held.format, 0, scratch);
-            const copy = made === undefined ? undefined : bitmaps.get(made);
-            if (!copy || made === undefined)
-            {
-                return 0;
-            }
-            const row = held.width * bytesPerPixel(held.format);
-            for (let y = 0; y < held.height; y++)
-            {
-                host.writeMemory(copy.scan0 + y * copy.stride,
-                    host.readMemory(held.scan0 + y * held.stride, row).slice());
-            }
-            return made;
-        }
-        finally
-        {
-            host.free(scratch);
-        }
-    };
-    const images = {
-        clone: cloneImage,
-        /** @param {number} image */
-        size: image=>{
-            const held = bitmaps.get(image >>> 0);
-            return held ? { width: held.width, height: held.height } : null;
-        },
-    };
     const brushes = createBrushFunctions(kit, { matrices, paths, images });
     const pens = createPenFunctions(kit, { matrices, paths, brushes });
-    /** @param {number} address @param {number} value */
-    const putU32 = (address, value)=>host.writeMemory(address >>> 0,
-        new Uint8Array(Uint32Array.of(value >>> 0).buffer));
-    /** @param {number} address @param {number} value */
-    const putPointer = (address, value)=>host.writeMemory(address >>> 0, pointer.bytes(value));
-    /** @param {string} api @param {string} detail */
-    const notImplemented = (api, detail)=>{
-        if (!said.has(api))
-        {
-            said.add(api);
-            host.divergence?.(api, detail);
-        }
-        return NotImplemented;
-    };
-    /**
-     * A bitmap of `format`, its pixels over `scan0` or in memory of its own; its
-     * handle written to `out`. The status, and the bitmap when it was made.
-     *
-     * @param {number} width @param {number} height @param {number} stride
-     * @param {number} format @param {number} scan0 @param {number} out
-     * @returns {{ status: number, made?: number }}
-     */
-    const makeBitmap = (width, height, stride, format, scan0, out)=>{
-        const size = bytesPerPixel(format);
-        if ((out >>> 0) === 0 || width <= 0 || height <= 0 || size === 0)
-        {
-            return { status: InvalidParameter };
-        }
-        let place = scan0 >>> 0;
-        let rowBytes = stride | 0;
-        if (place === 0)
-        {
-            rowBytes = Math.ceil(width * size / 4) * 4;
-            place = host.allocate(rowBytes * height);
-            if (place === 0)
-            {
-                return { status: OutOfMemory };
-            }
-            host.writeMemory(place, new Uint8Array(rowBytes * height));
-        }
-        else if (rowBytes === 0 || Math.abs(rowBytes) < width * size)
-        {
-            return { status: InvalidParameter };
-        }
-        const made = handle();
-        bitmaps.set(made, { width, height, stride: rowBytes, format, scan0: place,
-            owned: (scan0 >>> 0) === 0, locked: false });
-        putPointer(out, made);
-        return { status: Ok, made };
-    };
+    /** @type {{ isGraphics: (at: number) => boolean }} */
+    const late = { isGraphics: ()=>false };
+    const regions = createRegionFunctions(kit, { matrices, paths,
+        isGraphics: at=>late.isGraphics(at), gdi32: host.gdi32, allocate: host.allocate,
+        free: host.free });
+    const attributes = createImageAttributesFunctions(kit);
+    const graphics = createGraphicsFunctions(kit, { host, matrices, paths, brushes, pens,
+        regions, images, attributes: at=>attributes.forImages(at) });
+    late.isGraphics = graphics.isGraphics;
+    const fonts = createFontFunctions({ host, handle, putPointer,
+        isGraphics: graphics.isGraphics });
+    const formats = createStringFormatFunctions(kit);
+    const text = createTextFunctions(kit, { host, fonts, graphics, brushes, formats, regions });
 
-    return {
+    const families = {
         ...matrices.functions,
         ...paths.functions,
         ...brushes.functions,
         ...pens.functions,
         ...createPathIteratorFunctions(kit, paths).functions,
-        ...createFontFunctions({ host, handle, putPointer,
-            isGraphics: target=>graphics.has(target) }),
+        ...images.functions,
+        ...regions.functions,
+        ...attributes.functions,
+        ...graphics.functions,
+        ...fonts.functions,
+        ...formats.functions,
+        ...text.functions,
 
         /**
          * Status GdiplusStartup(ULONG_PTR *token, const GdiplusStartupInput *input,
@@ -299,396 +198,6 @@ export function createGdiplusFunctions(host){
         },
 
         /**
-         * Status GdipCreateBitmapFromScan0(INT width, INT height, INT stride,
-         *   PixelFormat format, BYTE *scan0, GpBitmap **bitmap)
-         *
-         * Over the caller's pixels, which the bitmap keeps using, or over pixels of
-         * its own (zeroed, rows a multiple of four bytes) when there are none.
-         */
-        GdipCreateBitmapFromScan0: {
-            argBytes: 24,
-            /** @param {number[]} args */
-            handler: ([width, height, stride, format, scan0, out])=>
-                makeBitmap(width | 0, height | 0, stride, format >>> 0, scan0, out).status,
-        },
-
-        /**
-         * Status GdipCreateBitmapFromFile(const WCHAR *filename, GpBitmap **bitmap)
-         *
-         * The file's first image, decoded by the codec its first bytes name,
-         * as a bitmap of 32bpp ARGB in memory of its own. A file not there is
-         * FileNotFound; one no codec reads, UnknownImageFormat.
-         */
-        GdipCreateBitmapFromFile: {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: async([name, out])=>{
-                if ((name >>> 0) === 0 || (out >>> 0) === 0 || !host.readWideString
-                    || !host.readFile)
-                {
-                    return InvalidParameter;
-                }
-                const bytes = await host.readFile(host.readWideString(name >>> 0));
-                if (!bytes)
-                {
-                    return FileNotFound;
-                }
-                const decode = sniff(bytes)?.decode;
-                /** @type {import('../windowscodecs/frames.js').DecodedFrame | undefined} */
-                let frame;
-                try
-                {
-                    frame = decode?.(bytes).frames[0];
-                }
-                catch (e){
-                    if (!(e instanceof CodecError))
-                    {
-                        throw e;
-                    }
-                }
-                if (!frame)
-                {
-                    return UnknownImageFormat;
-                }
-                const argb = /** @type {import('../windowscodecs/formats.js').PixelFormat} */ (
-                    formatOf(WIC_32BPP_BGRA));
-                const { status, made } = makeBitmap(frame.width, frame.height, 0,
-                    PIXEL_FORMAT_32BPP_ARGB, 0, out);
-                const held = made === undefined ? undefined : bitmaps.get(made);
-                if (!held)
-                {
-                    return status;
-                }
-                const from = wicRowBytes(frame.format, frame.width);
-                for (let y = 0; y < frame.height; y++)
-                {
-                    host.writeMemory(held.scan0 + y * held.stride, convertRow(frame.format, argb,
-                        frame.pixels.subarray(y * from, (y + 1) * from), frame.width,
-                        frame.palette, null));
-                }
-                return Ok;
-            },
-        },
-
-        /**
-         * Status GdipCreateHBITMAPFromBitmap(GpBitmap *bitmap, HBITMAP *hbm, ARGB background)
-         *
-         * A 32-bit DIB section of the bitmap's pixels, each laid over the
-         * background colour by its alpha, as GDI+ hands one to GDI. A bitmap of
-         * a format other than 32bpp ARGB is refused, said once.
-         */
-        GdipCreateHBITMAPFromBitmap: {
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([image, out, background])=>{
-                const held = bitmaps.get(image >>> 0);
-                if (!held || (out >>> 0) === 0 || !host.gdi32)
-                {
-                    return InvalidParameter;
-                }
-                if (held.format !== PIXEL_FORMAT_32BPP_ARGB)
-                {
-                    return notImplemented('GdipCreateHBITMAPFromBitmap',
-                        'only a bitmap of 32bpp ARGB is handed to GDI');
-                }
-                const { width, height } = held;
-                // BITMAPINFOHEADER, top-down, then the slot the bits' address lands in.
-                const info = host.allocate(44);
-                if (info === 0)
-                {
-                    return OutOfMemory;
-                }
-                try
-                {
-                    const header = new DataView(new ArrayBuffer(40));
-                    header.setUint32(0, 40, true);
-                    header.setInt32(4, width, true);
-                    header.setInt32(8, -height, true);
-                    header.setUint16(12, 1, true);
-                    header.setUint16(14, 32, true);
-                    host.writeMemory(info, new Uint8Array(header.buffer));
-                    const section = host.gdi32('CreateDIBSection', [0, info, 0, info + 40, 0, 0])
-                        >>> 0;
-                    if (section === 0)
-                    {
-                        return GenericError;
-                    }
-                    const bits = new DataView(host.readMemory(info + 40, 4).slice().buffer)
-                        .getUint32(0, true);
-                    const back = [background & 0xff, background >>> 8 & 0xff,
-                        background >>> 16 & 0xff];
-                    for (let y = 0; y < height; y++)
-                    {
-                        const row = host.readMemory(held.scan0 + y * held.stride, width * 4)
-                            .slice();
-                        for (let x = 0; x < width * 4; x += 4)
-                        {
-                            const alpha = row[x + 3];
-                            for (let c = 0; c < 3; c++)
-                            {
-                                row[x + c] = Math.round((row[x + c] * alpha
-                                    + back[c] * (255 - alpha)) / 255);
-                            }
-                            row[x + 3] = 255;
-                        }
-                        host.writeMemory(bits + y * width * 4, row);
-                    }
-                    putU32(out, section);
-                    return Ok;
-                }
-                finally
-                {
-                    host.free(info);
-                }
-            },
-        },
-
-        /** Status GdipCreateBitmapFromHBITMAP(HBITMAP hbm, HPALETTE hpal, GpBitmap **bitmap) */
-        GdipCreateBitmapFromHBITMAP: {
-            argBytes: 12,
-            handler: ()=>notImplemented('GdipCreateBitmapFromHBITMAP',
-                'a bitmap from a GDI bitmap is not made'),
-        },
-
-        /** Status GdipCreateBitmapFromStream(IStream *stream, GpBitmap **bitmap) */
-        GdipCreateBitmapFromStream: {
-            argBytes: 8,
-            handler: ()=>notImplemented('GdipCreateBitmapFromStream',
-                'no codec decodes an image from a stream'),
-        },
-
-        /** Status GdipCloneImage(GpImage *image, GpImage **clone): its pixels in its own memory. */
-        GdipCloneImage: {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([image, out])=>{
-                const held = bitmaps.get(image >>> 0);
-                if (!held || (out >>> 0) === 0)
-                {
-                    return InvalidParameter;
-                }
-                const { status, made } = makeBitmap(held.width, held.height, 0, held.format, 0,
-                    out);
-                const copy = made === undefined ? undefined : bitmaps.get(made);
-                if (!copy)
-                {
-                    return status;
-                }
-                const row = held.width * bytesPerPixel(held.format);
-                for (let y = 0; y < held.height; y++)
-                {
-                    host.writeMemory(copy.scan0 + y * copy.stride,
-                        host.readMemory(held.scan0 + y * held.stride, row).slice());
-                }
-                return Ok;
-            },
-        },
-
-        /** Status GdipDisposeImage(GpImage *image) */
-        GdipDisposeImage: {
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([image])=>{
-                const held = bitmaps.get(image >>> 0);
-                if (!held)
-                {
-                    return InvalidParameter;
-                }
-                if (held.owned)
-                {
-                    host.free(held.scan0);
-                }
-                bitmaps.delete(image >>> 0);
-                return Ok;
-            },
-        },
-
-        /** Status GdipGetImageWidth(GpImage *image, UINT *width) */
-        GdipGetImageWidth: {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([image, out])=>{
-                const held = bitmaps.get(image >>> 0);
-                if (!held || (out >>> 0) === 0)
-                {
-                    return InvalidParameter;
-                }
-                putU32(out, held.width);
-                return Ok;
-            },
-        },
-
-        /** Status GdipGetImageHeight(GpImage *image, UINT *height) */
-        GdipGetImageHeight: {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([image, out])=>{
-                const held = bitmaps.get(image >>> 0);
-                if (!held || (out >>> 0) === 0)
-                {
-                    return InvalidParameter;
-                }
-                putU32(out, held.height);
-                return Ok;
-            },
-        },
-
-        /** Status GdipGetImagePixelFormat(GpImage *image, PixelFormat *format) */
-        GdipGetImagePixelFormat: {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([image, out])=>{
-                const held = bitmaps.get(image >>> 0);
-                if (!held || (out >>> 0) === 0)
-                {
-                    return InvalidParameter;
-                }
-                putU32(out, held.format);
-                return Ok;
-            },
-        },
-
-        /**
-         * Status GdipGetImagePaletteSize(GpImage *image, INT *size)
-         *
-         * A ColorPalette's bytes: these formats have no palette, so its header alone.
-         */
-        GdipGetImagePaletteSize: {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([image, out])=>{
-                if (!bitmaps.has(image >>> 0) || (out >>> 0) === 0)
-                {
-                    return InvalidParameter;
-                }
-                putU32(out, PALETTE_HEADER);
-                return Ok;
-            },
-        },
-
-        /** Status GdipGetImagePalette(GpImage *image, ColorPalette *palette, INT size) */
-        GdipGetImagePalette: {
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([image, palette, size])=>{
-                if (!bitmaps.has(image >>> 0) || (palette >>> 0) === 0
-                    || (size | 0) < PALETTE_HEADER)
-                {
-                    return InvalidParameter;
-                }
-                host.writeMemory(palette >>> 0, new Uint8Array(PALETTE_HEADER));
-                return Ok;
-            },
-        },
-
-        /**
-         * Status GdipBitmapLockBits(GpBitmap *bitmap, const GpRect *rect, UINT flags,
-         *   PixelFormat format, BitmapData *data)
-         *
-         * The bitmap's own pixels, in place: a rectangle inside it (all of it with
-         * none), in its own format. Another format, or the caller's buffer, is
-         * NotImplemented; a bitmap already locked is WrongState.
-         */
-        GdipBitmapLockBits: {
-            argBytes: 20,
-            /** @param {number[]} args */
-            handler: ([bitmap, rect, flags, format, data])=>{
-                const held = bitmaps.get(bitmap >>> 0);
-                if (!held || (data >>> 0) === 0)
-                {
-                    return InvalidParameter;
-                }
-                if (held.locked)
-                {
-                    return WrongState;
-                }
-                let [x, y, width, height] = [0, 0, held.width, held.height];
-                if ((rect >>> 0) !== 0)
-                {
-                    const view = new DataView(host.readMemory(rect >>> 0, 16).slice().buffer);
-                    [x, y, width, height] = [0, 4, 8, 12].map(at=>view.getInt32(at, true));
-                }
-                if (x < 0 || y < 0 || width <= 0 || height <= 0 || x + width > held.width
-                    || y + height > held.height)
-                {
-                    return InvalidParameter;
-                }
-                if ((format >>> 0) !== held.format || (flags & IMAGE_LOCK_USER_INPUT_BUF) !== 0)
-                {
-                    return notImplemented('GdipBitmapLockBits',
-                        'a lock in another pixel format, or into the caller\'s buffer');
-                }
-                const record = new Uint8Array(BITMAP_DATA_SCAN0 + pointer.size * 2);
-                const view = new DataView(record.buffer);
-                view.setUint32(0, width, true);
-                view.setUint32(4, height, true);
-                view.setInt32(8, held.stride, true);
-                view.setUint32(12, held.format, true);
-                pointer.set(view, BITMAP_DATA_SCAN0,
-                    held.scan0 + y * held.stride + x * bytesPerPixel(held.format));
-                host.writeMemory(data >>> 0, record);
-                held.locked = true;
-                return Ok;
-            },
-        },
-
-        /** Status GdipBitmapUnlockBits(GpBitmap *bitmap, BitmapData *data) */
-        GdipBitmapUnlockBits: {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([bitmap, data])=>{
-                const held = bitmaps.get(bitmap >>> 0);
-                if (!held || (data >>> 0) === 0)
-                {
-                    return InvalidParameter;
-                }
-                if (!held.locked)
-                {
-                    return WrongState;
-                }
-                held.locked = false;
-                return Ok;
-            },
-        },
-
-        /** Status GdipCreateFromHDC(HDC hdc, GpGraphics **graphics) */
-        GdipCreateFromHDC: {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([hdc, out])=>{
-                if ((hdc >>> 0) === 0 || (out >>> 0) === 0)
-                {
-                    return OutOfMemory;
-                }
-                const made = handle();
-                graphics.set(made, { interpolation: 0 });
-                putPointer(out, made);
-                return Ok;
-            },
-        },
-
-        /**
-         * Status GdipCreateFromHWND(HWND hwnd, GpGraphics **graphics)
-         *
-         * A window's graphics, as a DC's are: what WinForms makes for a
-         * control (Control.CreateGraphics), NULL being the screen's.
-         */
-        GdipCreateFromHWND: {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([, out])=>{
-                if ((out >>> 0) === 0)
-                {
-                    return InvalidParameter;
-                }
-                const made = handle();
-                graphics.set(made, { interpolation: 0 });
-                putPointer(out, made);
-                return Ok;
-            },
-        },
-
-        /**
          * HPALETTE GdipCreateHalftonePalette(void)
          *
          * GDI's halftone palette, which WinForms selects into a DC at every
@@ -698,59 +207,6 @@ export function createGdiplusFunctions(host){
             argBytes: 0,
             handler: ()=>(host.gdi32 ? host.gdi32('CreateHalftonePalette', [0]) >>> 0 : 0),
         },
-
-        /** Status GdipGetImageGraphicsContext(GpImage *image, GpGraphics **graphics) */
-        GdipGetImageGraphicsContext: {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([image, out])=>{
-                if (!bitmaps.has(image >>> 0) || (out >>> 0) === 0)
-                {
-                    return InvalidParameter;
-                }
-                const made = handle();
-                graphics.set(made, { interpolation: 0 });
-                putPointer(out, made);
-                return Ok;
-            },
-        },
-
-        /** Status GdipDeleteGraphics(GpGraphics *graphics) */
-        GdipDeleteGraphics: {
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([target])=>(graphics.delete(target >>> 0) ? Ok : InvalidParameter),
-        },
-
-        /** Status GdipSetInterpolationMode(GpGraphics *graphics, InterpolationMode mode) */
-        GdipSetInterpolationMode: {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([target, mode])=>{
-                const held = graphics.get(target >>> 0);
-                // InterpolationModeInvalid (-1) and anything past HighQualityBicubic (7).
-                if (!held || (mode | 0) < 0 || (mode | 0) > 7)
-                {
-                    return InvalidParameter;
-                }
-                held.interpolation = mode | 0;
-                return Ok;
-            },
-        },
-
-        /** Status GdipDrawImageI(GpGraphics *graphics, GpImage *image, INT x, INT y) */
-        GdipDrawImageI: {
-            argBytes: 16,
-            handler: ()=>notImplemented('GdipDrawImageI', 'nothing is drawn through GDI+'),
-        },
-
-        /**
-         * Status GdipDrawImageRectI(GpGraphics *graphics, GpImage *image, INT x, INT y,
-         *   INT width, INT height)
-         */
-        GdipDrawImageRectI: {
-            argBytes: 24,
-            handler: ()=>notImplemented('GdipDrawImageRectI', 'nothing is drawn through GDI+'),
-        },
     };
+    return { ...createUnsupportedFunctions(host, families), ...families };
 }

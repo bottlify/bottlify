@@ -4348,7 +4348,27 @@ export function createWin32Module(){
                     free: address=>allocator.free(address),
                     readWideString: address=>readWideString(address, 0x8000),
                     readFile: readVolumeFile,
+                    writeFile: (path, bytes)=>{
+                        const node = volume.open(path,
+                            { read: false, write: true, create: true, truncate: true });
+                        if (!node)
+                        {
+                            return false;
+                        }
+                        try
+                        {
+                            return volume.write(node, 0, bytes) === bytes.length;
+                        }
+                        finally
+                        {
+                            volume.close(node);
+                        }
+                    },
                     gdi32: (name, args)=>libraries['GDI32.dll'][name].handler(args) >>> 0,
+                    user32: (name, args)=>libraries['USER32.dll'][name].handler(args) >>> 0,
+                    // A program's IStream, called on the thread that called GDI+.
+                    callGuest: (entry, args)=>bridge.callGuest({ entry, args,
+                        thread: kernel.currentThread() }),
                     procAddress: async name=>{
                         const at = heap.allocate(64);
                         try
