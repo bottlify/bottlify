@@ -65,6 +65,7 @@ import { charactersOf, readToTerminator } from '../common/scan-windows.js';
 /** GetSystemMetrics indices this build has a real answer for. */
 /** How many argument slots a `va_list` is read for, since it carries no count. */
 const VA_LIST_SLOTS = 64;
+const ERROR_INSUFFICIENT_BUFFER = 122;
 
 /** The list box message GetListBoxInfo is. */
 const LB_GETLISTBOXINFO = 0x01b2;
@@ -3727,15 +3728,27 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         return names.registeredName(format);
     };
 
-    /** GetClassName in either width. @param {number[]} args @param {boolean} wide */
-    const writeClassName = ([hwnd, out, maxCount], wide)=>{
+    /**
+     * GetClassName in either width, or RealGetWindowClass's (`real`): the
+     * class a built-in procedure marked the window with, else its own; no
+     * room is ERROR_INSUFFICIENT_BUFFER there.
+     *
+     * @param {number[]} args @param {boolean} wide @param {boolean} [real]
+     */
+    const writeClassName = ([hwnd, out, maxCount], wide, real = false)=>{
         const record = live(hwnd) ?? elsewhere(hwnd);
         const room = maxCount | 0;
+        if (real && record && room <= 0)
+        {
+            host.setLastError?.(ERROR_INSUFFICIENT_BUFFER);
+            return 0;
+        }
         if (!record || (out >>> 0) === 0 || room <= 0)
         {
             return 0;
         }
-        return (wide ? writeWideString : writeString)(out >>> 0, record.className, room);
+        return (wide ? writeWideString : writeString)(out >>> 0,
+            real ? record.realClass ?? record.className : record.className, room);
     };
 
     /** A power notification's handle let go. @param {number} handle */
@@ -7075,19 +7088,20 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         /**
          * UINT RealGetWindowClassA/W(HWND, LPSTR/LPWSTR, UINT)
          *
-         * The class a window was made with: a superclass of a system class
-         * would answer the system class it is built on, and no window here is
-         * made on one, so it is the class name.
+         * The built-in class a window's messages were handled by - a
+         * superclass of Button answers Button once Button's procedure has seen
+         * the message that marks it (windows.js `REAL_CLASSES`) - else the
+         * class it was made of.
          */
         RealGetWindowClassA: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: args=>writeClassName(args, false),
+            handler: args=>writeClassName(args, false, true),
         },
         RealGetWindowClassW: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: args=>writeClassName(args, true),
+            handler: args=>writeClassName(args, true, true),
         },
 
         /**

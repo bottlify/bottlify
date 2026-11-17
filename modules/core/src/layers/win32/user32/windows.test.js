@@ -620,6 +620,33 @@ test('under a context holding Common Controls 6 a class name makes version 6\'s 
     assert.equal(make('SysLink'), 0);
 });
 
+test('RealGetWindowClass names the built-in class whose procedure made the window', ()=>{
+    // Wine's class test (test_RealGetWindowClass): a program's class built
+    // on Button's procedure reports Button once that procedure has seen
+    // WM_NCCREATE; its own class otherwise, and no room is refused.
+    let stubs = 0x7f000000;
+    const { memory, fns, errors } = setup({ registerProcedure: ()=>(stubs += 16) });
+    memory.putString(CLASS_NAME, 'Button');
+    assert.equal(fns.GetClassInfoA.handler([0, CLASS_NAME, TEXT_BUFFER]), 1);
+    const button = memory.u32(TEXT_BUFFER + 4);
+    putClass(memory, { name: 'WineTest Class', wndProc: button });
+    assert.notEqual(fns.RegisterClassA.handler([CLASS_STRUCT]), 0);
+    const hwnd = createWindow(fns, memory, { className: CLASS_NAME });
+    assert.notEqual(hwnd, 0);
+    assert.equal(fns.RealGetWindowClassA.handler([hwnd, TEXT_BUFFER, 64]), 6);
+    assert.equal(memory.readCString(TEXT_BUFFER, 64), 'Button');
+    assert.equal(fns.GetClassNameA.handler([hwnd, TEXT_BUFFER, 64]), 14);
+    assert.equal(memory.readCString(TEXT_BUFFER, 64), 'WineTest Class');
+    assert.equal(fns.RealGetWindowClassA.handler([hwnd, TEXT_BUFFER, 0]), 0);
+    assert.equal(errors.at(-1), 122, 'ERROR_INSUFFICIENT_BUFFER');
+
+    putClass(memory, { name: 'Own' });
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const own = createWindow(fns, memory, { className: CLASS_NAME });
+    assert.equal(fns.RealGetWindowClassA.handler([own, TEXT_BUFFER, 64]), 3);
+    assert.equal(memory.readCString(TEXT_BUFFER, 64), 'Own');
+});
+
 test('a program\'s class registered by a versioned name is found by it', ()=>{
     // Wine's user32 class test (test_actctx_classes): a manifest's own
     // window class, registered by its versioned name outside the context.

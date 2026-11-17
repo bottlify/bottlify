@@ -194,6 +194,28 @@ const SYSTEM_CLASSES = Object.freeze([
 ]);
 
 /**
+ * The class RealGetWindowClass names for a window whose messages one of
+ * these built-in procedures handled, and the messages that set it: a
+ * superclass of Button reports Button once Button's procedure has seen its
+ * WM_NCCREATE (Wine's class test, test_RealGetWindowClass). ComboLBox is a
+ * list box; the message-only window's class sets none.
+ *
+ * @type {Readonly<Record<string, { real: string, on: number[] }>>}
+ */
+const REAL_CLASSES = Object.freeze({
+    Button: { real: 'Button', on: [0x0081] },
+    Edit: { real: 'Edit', on: [0x0081] },
+    ComboBox: { real: 'ComboBox', on: [0x0001, 0x0081] },
+    ListBox: { real: 'ListBox', on: [0x0001, 0x0081] },
+    ComboLBox: { real: 'ListBox', on: [0x0001, 0x0081] },
+    ScrollBar: { real: 'ScrollBar', on: [0x0001] },
+    Static: { real: 'Static', on: [0x0000, 0x0001, 0x0081] },
+    MDIClient: { real: 'MDIClient', on: [0x0000, 0x0001, 0x0081] },
+    '#32768': { real: '#32768', on: [0x0081] },
+    '#32770': { real: '#32770', on: [0x0000, 0x0001, 0x0081] },
+});
+
+/**
  * The classes comctl32 registers on Windows, by the names it gives them:
  * those this build has a control for are registered by it, and the others
  * stand in as windows that answer as DefWindowProc does.
@@ -1113,6 +1135,7 @@ export function createWindowFunctions(host){
                     message=>callProcedure(system.wndProc, message, host.callerThread?.()))
                 : HOST_PROCEDURE_BASE + system.atom * 16;
             procedures.set(system.wndProc, controlProcedures[system.name]);
+            procedureClasses.set(system.wndProc, system.name);
         }
         return system ?? null;
     };
@@ -1195,6 +1218,21 @@ export function createWindowFunctions(host){
      *     thread?: unknown) => number | Promise<number>>}
      */
     const controlProcedures = {};
+    /** The system class a procedure on this side is, by its address. @type {Map<number, string>} */
+    const procedureClasses = new Map();
+    /**
+     * A built-in procedure handling the message that makes a window of its
+     * kind marks it so, whatever class the window was made of.
+     *
+     * @param {any} record @param {number} address @param {number} message
+     */
+    const markReal = (record, address, message)=>{
+        const real = REAL_CLASSES[procedureClasses.get(address >>> 0) ?? ''];
+        if (record && real?.on.includes(message))
+        {
+            record.realClass = real.real;
+        }
+    };
 
     /**
      * Runs a window procedure by address: a host one directly, a guest one
@@ -1213,6 +1251,7 @@ export function createWindowFunctions(host){
         const record = windows.get(message.hwnd >>> 0);
         if (procedure)
         {
+            markReal(record, address, message.message);
             // Named now, while the call that brought us here still holds the
             // processor: a procedure on this side that sends to guest code
             // and goes on afterwards is past an await by then.
@@ -4197,9 +4236,15 @@ export function createWindowFunctions(host){
         // is on the record.
         /** EVENT_OBJECT_CREATE, then the parents told of the child. */
         const told = ()=>andThen(made(), ()=>parentNotify(record, WM_CREATE, thread));
-        const onThisSide = ()=>(record.wndProc === 0
-            ? andThen(minMaxed(), ()=>andThen(told(), activated))
-            : andThen(callProcedure(record.wndProc, {
+        // A window made on this side is not sent WM_NCCREATE; its procedure
+        // marks it as that message would have.
+        const onThisSide = ()=>{
+            if (record.wndProc === 0)
+            {
+                return andThen(minMaxed(), ()=>andThen(told(), activated));
+            }
+            markReal(record, record.wndProc, WM_NCCREATE);
+            return andThen(callProcedure(record.wndProc, {
                 hwnd: record.hwnd, message: WM_CREATE, wParam: 0, lParam: 0,
             }, thread), created=>{
                 if ((created | 0) === -1)
@@ -4207,7 +4252,8 @@ export function createWindowFunctions(host){
                     return andThen(destroyWindow(record.hwnd, undefined, 'ncdestroy'), ()=>0);
                 }
                 return andThen(minMaxed(), ()=>andThen(told(), activated));
-            }));
+            });
+        };
         /** Whether the window's procedure is still one this side runs. */
         const systemProcedure = ()=>record.wndProc === 0 || procedures.has(record.wndProc);
         // A CBT hook hears of every window, a system class's too: a framework
