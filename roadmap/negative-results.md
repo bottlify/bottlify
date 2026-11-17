@@ -12,7 +12,7 @@ plus at most five lines below its table of conditions the line cannot carry.
 
 | Date | Idea | Result | Status | Revisit when |
 | --- | --- | --- | --- | --- |
-| 2026-10-08 | a loop with a call out stays a loop under `callReturn` | 5.58 vs 3.98 ns an iteration, node, 3 pairs | disputed: a game ran beside it | paired + callgrind, current tree |
+| 2026-10-08 | a loop with a call out stays a loop under `callReturn` | 5.58 vs 3.98 ns an iteration, node, 3 pairs | invalidated 2026-11-14: a game ran beside it; counted exactly the idea pays (game -1.5 %, tree -0.3 % in wasm an iteration, seven others equal) and it landed | - |
 | 2026-10-11 | a store into code drops only the regions whose bytes it changed | Far Cry ~2 fps, 1 run | stale: re-landed as e7ae7813b | - |
 | 2026-10-11 | patched code sites formed apart; store-dropped regions formed again with copies | 39.0 / 39.2 vs 38.6 s, synthetic mixer | stale: compiling moved to workers | a patched loop runs interpreted again |
 | 2026-10-12 | callees formed two and three levels deep (`formDepth`) | geomean 1.00x, cork-bench Chromium, noise 13 % | holds | callees stop being copied per caller |
