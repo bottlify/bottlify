@@ -29,7 +29,7 @@
  * them is seen by all.
  *
  * What differs from D3DX, and is said where it happens:
- * - A compiled effect (fx_2_0 bytecode) is read by `effect-binary.js`, less the
+ * - A compiled effect (fx_2_0 bytecode) is read by `effect-binary.js`, with the
  *   expressions fxc left to evaluate (a state's FXLC, a shader's preshader). The
  *   effect compiler reads only source, and its CompileEffect hands back this
  *   layer's own container -- the source, its macros and the files it included --
@@ -352,6 +352,8 @@ const COLOR_SCALE = 255;
  * @property {boolean} ok
  * @property {number} tokensAt   A copy of the bytecode, for GetPassDesc.
  * @property {{ constant: Constant, param: Param }[]} bindings
+ * @property {import('./preshader.js').Preshader | null} preshader  Its constants
+ *     computed from parameters, set after the bindings.
  */
 
 /**
@@ -2228,6 +2230,79 @@ export function createEffects(host, helpers, options = {}){
             const result = yield* storeConstant(effect, shader, constant, param, thread);
             answer = result !== D3D_OK ? result : answer;
         }
+        const result = yield* applyPreshader(effect, pass, shader, all, thread);
+        return result !== D3D_OK ? result : answer;
+    };
+
+    /**
+     * The constants a shader's preshader computes from the parameters it
+     * reads, run when one of them changed: each register it wrote set, in runs
+     * of neighbours, after the constants set from parameters directly. An
+     * output register is the shader's constant register of that number, as
+     * Wine's d3dx9 sets them (its preshader evaluation informed this; nothing
+     * of it is copied).
+     *
+     * @param {EffectState} effect @param {Pass | null} pass @param {Shader} shader
+     * @param {boolean} all @param {any} thread
+     * @returns {Steps}
+     */
+    const applyPreshader = function*(effect, pass, shader, all, thread){
+        const program = shader.preshader;
+        if (!program || !(all || !pass || program.inputs.some(constant=>{
+            const p = effect.byName.get(constant.name);
+            return !!p && versionOf(p.store) > appliedOf(pass);
+        })))
+        {
+            return D3D_OK;
+        }
+        const out = program.outputs(constant=>{
+            const p = effect.byName.get(constant.name);
+            return p ? numbersOf(p) : null;
+        });
+        let answer = D3D_OK;
+        // D3DXREGISTER_SET: bool 0, int 1, float 2; a bool register one unit, the others four.
+        for (const [registerSet, table] of /** @type {[number, number[]][]} */ ([[2, out.float],
+            [1, out.int], [0, out.bool]]))
+        {
+            const per = registerSet === 0 ? 1 : 4;
+            /** @param {number} r */
+            const written = r=>{
+                for (let c = 0; c < per; c++)
+                {
+                    if (table[r * per + c] !== undefined)
+                    {
+                        return true;
+                    }
+                }
+                return false;
+            };
+            const registers = Math.ceil(table.length / per);
+            for (let r = 0; r < registers;)
+            {
+                if (!written(r))
+                {
+                    r++;
+                    continue;
+                }
+                let end = r;
+                while (end < registers && written(end))
+                {
+                    end++;
+                }
+                const units = new Uint32Array((end - r) * per);
+                for (let i = 0; i < units.length; i++)
+                {
+                    const x = table[r * per + i] ?? 0;
+                    units[i] = registerSet === 2 ? floatBits(x) : x | 0;
+                }
+                const setter = CONSTANT_SETTERS[registerSet][shader.pixel ? 1 : 0];
+                const first = r;
+                const result = yield* withBytesStep(new Uint8Array(units.buffer), at=>set(effect,
+                    thread, setter, [first, at, end - first]));
+                answer = result !== D3D_OK ? result : answer;
+                r = end;
+            }
+        }
         return answer;
     };
 
@@ -2558,7 +2633,7 @@ export function createEffects(host, helpers, options = {}){
      * set, entry by entry in its order, for the entries the guest's walk can
      * say -- constants copied or made bools, states from an int's or a bool's
      * word, states an expression copies from a scalar -- or 0 for a pass with
-     * any other: a shader a parameter names, a structure's constants, a
+     * any other: a shader a parameter names or one with a preshader, a structure's constants, a
      * conversion through a float, a light or a material, an expression of more.
      *
      * @param {EffectState} effect @param {Pass} pass
@@ -2882,6 +2957,12 @@ export function createEffects(host, helpers, options = {}){
                 {
                     continue;
                 }
+                if (shader.preshader)
+                {
+                    // ponytail: the preshader runs on the host; its commits cross. A guest
+                    // run of it (the state expressions' interpreter here) when one is hot.
+                    return `${state.name}: a shader with a preshader`;
+                }
                 for (const { constant, param } of shader.bindings)
                 {
                     if (effect.skip.has(param.model.name))
@@ -3002,8 +3083,10 @@ export function createEffects(host, helpers, options = {}){
             }
             const shader = state.kind === 'vs' || state.kind === 'ps' ? shaderFor(effect, state)
                 : null;
-            return !!shader && shader.bindings.some(b=>b.param === root || (isSampler(
-                b.param.model.type) && b.param.model.samplers.some(list=>list && inStates(list))));
+            return !!shader && (shader.bindings.some(b=>b.param === root || (isSampler(
+                b.param.model.type) && b.param.model.samplers.some(list=>list && inStates(list))))
+                || (shader.preshader?.inputs.some(c=>effect.byName.get(c.name) === root)
+                    ?? false));
         });
         return t.passes.some(pass=>inStates(pass.model.states));
     };
@@ -3869,7 +3952,8 @@ export function createEffects(host, helpers, options = {}){
      */
     const makeShader = async(effect, model, thread)=>{
         /** @type {Shader} */
-        const shader = { pointer: 0, pixel: model.pixel, ok: false, tokensAt: 0, bindings: [] };
+        const shader = { pointer: 0, pixel: model.pixel, ok: false, tokensAt: 0, bindings: [],
+            preshader: model.preshader ?? null };
         if (!model.tokens)
         {
             // Said with the compiler's own first error: a technique left

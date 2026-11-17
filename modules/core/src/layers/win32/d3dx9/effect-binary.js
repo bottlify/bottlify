@@ -18,10 +18,11 @@
  *
  * A state whose value is an expression fxc left to evaluate (FXLC) keeps the
  * expression, `preshader.js` evaluating it each time the state is applied.
- * What is not read, and said in the messages: a state choosing an element of
- * an array by an expression, an expression of an instruction D3DX does not
- * know; and a shader's preshader, the constants fxc computes on the CPU from
- * the parameters -- the shader is made without them.
+ * A shader's preshader (its PRES comment), the constants fxc computes on the
+ * CPU from the parameters, is kept with the shader and run as its constants
+ * are set. What is not read, and said in the messages: a state choosing an
+ * element of an array by an expression, an expression or a preshader of an
+ * instruction D3DX does not know.
  */
 
 import { PC, PT, STATES } from './effect-model.js';
@@ -574,6 +575,8 @@ function shaderOf(data, label, messages){
     const profile = `${pixel ? 'ps' : 'vs'}_${(version >>> 8) & 0xff}_${version & 0xff}`;
     /** @type {Uint8Array | null} */
     let constantTable = null;
+    /** @type {import('./preshader.js').Preshader | null} */
+    let preshader = null;
     for (let i = 1; i < tokens.length && (tokens[i] & 0xffff) === 0xfffe;)
     {
         const length = (tokens[i] >>> 16) & 0x7fff;
@@ -583,10 +586,20 @@ function shaderOf(data, label, messages){
         }
         else if (tokens[i + 1] === PRES)
         {
-            messages.push(`warning: ${label}: the shader's preshader is not run; the constants `
-                + 'it computes are not set');
+            try
+            {
+                preshader = readPreshader(tokens.slice(i + 2, i + 1 + length));
+            }
+            catch (e){
+                if (!(e instanceof PreshaderError))
+                {
+                    throw e;
+                }
+                messages.push(`warning: ${label}: the shader's preshader is not run (${e.message});`
+                    + ' the constants it computes are not set');
+            }
         }
         i += 1 + length;
     }
-    return { profile, entry: '', pixel, tokens, constantTable, messages: '' };
+    return { profile, entry: '', pixel, tokens, constantTable, preshader, messages: '' };
 }
