@@ -236,7 +236,7 @@ test('a window\'s graphics, and GDI\'s halftone palette, as WinForms paints a co
     assert.equal(fns.GdipCreateFromHWND.handler([0, 0x304]), Ok, 'NULL is the screen');
     assert.equal(fns.GdipCreateFromHWND.handler([0x1000, 0]), InvalidParameter);
     assert.equal(fns.GdipDeleteGraphics.handler([view.getUint32(0x300, true)]), Ok);
-    assert.equal(fns.GdipCreateHalftonePalette.handler([]), 0x4c0);
+    assert.equal(fns.GdipCreateHalftonePalette.handler(), 0x4c0);
     assert.deepEqual(asked, ['CreateHalftonePalette']);
 });
 
