@@ -115,6 +115,10 @@ test('the keys every machine carries are there before any program writes', ()=>{
         '"C:\\WINDOWS\\system32\\msiexec.exe" /i "%1" %*');
     assert.equal(classDefault('Msi.Patch\\shell\\Open\\command'),
         '"C:\\WINDOWS\\system32\\msiexec.exe" /p "%1" %*');
+    // OLE Automation's picture and font by name: shlwapi's clsid test asks
+    // CLSIDFromProgIDWrap for StdPicture.
+    assert.equal(classDefault('StdPicture\\CLSID'), '{0BE35204-8F91-11CE-9DE3-00AA004BB851}');
+    assert.equal(classDefault('StdFont\\CLSID'), '{0BE35203-8F91-11CE-9DE3-00AA004BB851}');
 
     // A restore keeps what a program wrote and puts back what it deleted.
     hive.remove(local, 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\SharedDLLs');
