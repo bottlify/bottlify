@@ -22,8 +22,11 @@ const E_FAIL = 0x80004005 | 0;
 const E_INVALIDARG = 0x80070057 | 0;
 const ERROR_KEY_HAS_CHILDREN = 1020;
 const KEY_ALL_ACCESS = 0xf003f;
-/** IQueryAssociations is not made: AssocCreate's class is not available. */
+/** AssocCreate asked for a class other than the one it makes. */
 const CLASS_E_CLASSNOTAVAILABLE = 0x80040111 | 0;
+const E_NOTIMPL = 0x80004001 | 0;
+/** CLSID_QueryAssociations {a07034fd-6caa-4954-ac3f-97a27216f98a}, as the four words it is passed in. */
+const CLSID_QUERY_ASSOCIATIONS = [0xa07034fd, 0x49546caa, 0xa2973fac, 0x8af91672];
 /**
  * The file types AssocIsDangerous calls dangerous: programs, scripts and the
  * shortcuts and installers that run them.
@@ -708,23 +711,32 @@ export function createRegistryHelpers(host){
         /**
          * HRESULT AssocCreate(CLSID clsid, REFIID riid, void **ppv)
          *
-         * There is no IQueryAssociations object to make: the class is not
-         * available, NULL is written, and that is said once.
+         * The class is passed by value, four words. Nowhere to put an object
+         * is E_INVALIDARG and another class CLASS_E_CLASSNOTAVAILABLE, as
+         * Windows answers; the IQueryAssociations object itself is not made,
+         * so CLSID_QueryAssociations is E_NOTIMPL, the answer Windows gave
+         * where it had none, NULL is written, and that is said once.
          */
         AssocCreate: {
             argBytes: 24,
             /** @param {number[]} args */
-            handler: ([, , , , , out])=>{
-                if ((out >>> 0) !== 0)
+            handler: args=>{
+                const out = args[5] >>> 0;
+                if (out === 0)
                 {
-                    host.writeMemory(out >>> 0, dword(0));
+                    return E_INVALIDARG;
+                }
+                host.writeMemory(out, dword(0));
+                if (CLSID_QUERY_ASSOCIATIONS.some((word, at)=>(args[at] >>> 0) !== word))
+                {
+                    return CLASS_E_CLASSNOTAVAILABLE;
                 }
                 if (!noQueryAssociations)
                 {
                     noQueryAssociations = true;
                     host.divergence?.('AssocCreate', 'no IQueryAssociations object is made');
                 }
-                return CLASS_E_CLASSNOTAVAILABLE;
+                return E_NOTIMPL;
             },
         },
 

@@ -861,7 +861,12 @@ test('ColorAdjustLuma moves the luminance; the small answers of the misc exports
     assert.equal(m.fns.AssocIsDangerous.handler([m.put('VBS', true)]), 1, 'without its dot');
     assert.equal(m.fns.AssocIsDangerous.handler([m.put('.txt', true)]), 0);
     const out = m.count(0x1234);
+    // Wine's assoc test: no out pointer, another class, and the one it would make.
+    const queryAssociations = [0xa07034fd, 0x49546caa, 0xa2973fac, 0x8af91672];
+    assert.equal(m.fns.AssocCreate.handler([...queryAssociations, 0, 0]) >>> 0, 0x80070057);
     assert.equal(m.fns.AssocCreate.handler([0, 0, 0, 0, 0, out]) >>> 0, 0x80040111);
+    assert.equal(m.dwordAt(out), 0);
+    assert.equal(m.fns.AssocCreate.handler([...queryAssociations, 0, out]) >>> 0, 0x80004001);
     assert.equal(m.dwordAt(out), 0);
     assert.equal(m.fns.AssocQueryKeyW.argBytes, 20);
 });
