@@ -523,6 +523,10 @@ export function createBridgeModule(){
                  *     The float and double arguments by their first dword,
                  *     which an x86-64 caller passes among its first four in
                  *     XMM registers.
+                 * @param {Record<number, number>} [fn.structs]
+                 *     The structures wider than eight bytes passed by value, by
+                 *     their first dword and their size in dwords, which an
+                 *     x86-64 caller passes by a pointer to a copy.
                  * @returns {number} the guest address that calls it, or 0 once
                  *     this instance is disposed -- there is no guest left to place
                  *     one in.
@@ -531,7 +535,7 @@ export function createBridgeModule(){
                     name,
                     {
                         convention = Convention.STDCALL, argBytes, handler,
-                        preserveResult = false, lastError = true, quadwords, floats,
+                        preserveResult = false, lastError = true, quadwords, floats, structs,
                     })
                 {
                     if (convention === Convention.FASTCALL)
@@ -551,7 +555,8 @@ export function createBridgeModule(){
                     const { id, address } = cpu.registerTrap(
                         name, calleeCleanup(convention, argBytes), { preserveResult });
                     state.dispatcher.register(id, { name, convention, argBytes, handler, lastError,
-                        ...quadwords ? { quadwords } : {}, ...floats ? { floats } : {} });
+                        ...quadwords ? { quadwords } : {}, ...floats ? { floats } : {},
+                        ...structs ? { structs } : {} });
                     state.dispatcher.placed(address, name);
                     return address;
                 },

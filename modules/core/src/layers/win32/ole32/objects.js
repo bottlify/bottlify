@@ -47,6 +47,12 @@ export const IID_IUNKNOWN = '{00000000-0000-0000-C000-000000000046}';
  *           A promise is a legitimate answer: the bridge parks the calling
  *           thread until it settles, which is what a method that has to read a
  *           file before it can answer needs.
+ * @property {number[]} [quadwords]
+ * @property {Record<number, 'f32' | 'f64'>} [floats]
+ * @property {Record<number, number>} [structs]
+ *           How a 64-bit caller passes the arguments the 32-bit layout has as
+ *           two dwords, a float, or a structure wider than eight bytes, by
+ *           their first dword counting `this` (the vtable layer's).
  */
 
 /**

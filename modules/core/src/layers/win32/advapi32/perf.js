@@ -148,6 +148,8 @@ export function createPerfFunctions(host){
      */
     const setValue = large=>({
         argBytes: large ? 20 : 16,
+        // A ULONGLONG value is one slot to a 64-bit caller.
+        ...large ? { quadwords: [3] } : {},
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ [provider, instance, id, low, high])=>{
             const found = counterOf(provider, instance, id);

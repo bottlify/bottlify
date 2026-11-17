@@ -1045,6 +1045,7 @@ export function createNtdllFunctions(host){
         /** VOID RtlFillMemoryUlonglong(PVOID Destination, SIZE_T Length, ULONGLONG Pattern) */
         RtlFillMemoryUlonglong: {
             argBytes: 16,
+            quadwords: [2],
             /** @param {number[]} args */
             handler: ([destination, length, low, high])=>{
                 const words = (length >>> 0) >>> 3;

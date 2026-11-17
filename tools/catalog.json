@@ -625,6 +625,17 @@
    ]
   },
   {
+   "path": "tools/checks/check-wide-arguments.mjs",
+   "category": "checks",
+   "kind": "check",
+   "browser": false,
+   "question": "A host function or COM method taking a 64-bit, floating or wide structure argument by value says so to the bridge, for an x86-64 caller",
+   "command": "npm run check:boundaries",
+   "tests": [
+    "tools/checks/check-wide-arguments.test.js"
+   ]
+  },
+  {
    "path": "tools/checks/check-decision-numbers.mjs",
    "category": "checks",
    "kind": "check",

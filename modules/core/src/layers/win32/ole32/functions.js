@@ -3294,6 +3294,7 @@ export function createOleFunctions(host){
          */
         CoRevokeInitializeSpy: {
             argBytes: 8,
+            quadwords: [0],
             /** @param {number[]} args */
             handler: ([slot, owner])=>{
                 const thread = host.currentThread();

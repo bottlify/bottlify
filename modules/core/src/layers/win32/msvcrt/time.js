@@ -1162,6 +1162,7 @@ export function createTimeFunctions(host){
         ? {
             convention: 'cdecl',
             argBytes: 16,
+            quadwords: [0, 2],
             /** @param {number[]} args */
             handler: (/** @type {number[]} */ [laterLow, laterHigh, earlierLow, earlierHigh])=>{
                 host.fpu?.setResult(((laterHigh | 0) - (earlierHigh | 0)) * 0x100000000

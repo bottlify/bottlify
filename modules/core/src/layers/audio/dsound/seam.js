@@ -485,6 +485,9 @@ function methodsFor(descriptor){
                 name: method.name,
                 argBytes: method.argBytes,
                 ...method.floats ? { floats: method.floats } : {},
+                ...method.quadwords ? { quadwords: method.quadwords } : {},
+
+                ...method.structs ? { structs: method.structs } : {},
                 invoke: method.invoke
                     ? (/** @type {any} */ adapter, /** @type {number[]} */ args)=>
                         method.invoke(adapter.api, args) ?? 0

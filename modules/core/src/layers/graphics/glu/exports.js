@@ -66,6 +66,33 @@ export const GLU_ARGUMENT_BYTES = Object.freeze({
     gluTessVertex: 12, gluUnProject: 48, gluUnProject4: 76,
 });
 
+/** @param {...number} words @returns {Record<number, 'f64'>} */
+const doubles = (...words)=>Object.fromEntries(words.map(word=>[word, /** @type {'f64'} */ ('f64')]));
+
+/**
+ * The GLdouble and GLfloat arguments of the exports that take any by value, by
+ * their first dword: an x86-64 caller passes each in one slot, and among its
+ * first four in an XMM register (the bridge's `floats`). An export bound by
+ * `guestEntry` declares its own.
+ *
+ * @type {Readonly<Record<string, Record<number, 'f32' | 'f64'>>>}
+ */
+export const GLU_FLOATS = Object.freeze({
+    gluPerspective: doubles(0, 2, 4, 6),
+    gluOrtho2D: doubles(0, 2, 4, 6),
+    gluLookAt: doubles(0, 2, 4, 6, 8, 10, 12, 14, 16),
+    gluPickMatrix: doubles(0, 2, 4, 6),
+    gluUnProject: doubles(0, 2, 4),
+    gluUnProject4: doubles(0, 2, 4, 6, 11, 13),
+    gluCylinder: doubles(1, 3, 5),
+    gluSphere: doubles(1),
+    gluDisk: doubles(1, 3),
+    gluPartialDisk: doubles(1, 3, 7, 9),
+    gluTessNormal: doubles(1, 3, 5),
+    gluTessProperty: doubles(2),
+    gluNurbsProperty: { 2: /** @type {'f32'} */ ('f32') },
+});
+
 /** What gluErrorString answers, by code. */
 const ERROR_STRINGS = new Map([
     [GL.NO_ERROR, 'no error'],
@@ -944,6 +971,10 @@ export function createGlu(deps){
         if (!table[name] || table[name].argBytes !== bytes)
         {
             throw new Error(`glu: ${name} is not bound with ${bytes} bytes of arguments`);
+        }
+        if (GLU_FLOATS[name] && !table[name].floats)
+        {
+            table[name] = { ...table[name], floats: GLU_FLOATS[name] };
         }
     }
     return table;

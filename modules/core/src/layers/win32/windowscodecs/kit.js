@@ -58,7 +58,7 @@ export const E_INVALIDARG = 0x80070057 | 0;
  * chain of interfaces from the first base on.
  *
  * @param {string} name
- * @returns {{ chain: string[], methods: [string, number][] }}
+ * @returns {{ chain: string[], methods: import('./layout.js').InterfaceLayout['methods'] }}
  */
 export function flatten(name){
     /** @type {string[]} */
@@ -140,9 +140,9 @@ export function createKit(host){
                 {
                     return;
                 }
-                const methods = flatten(chain[i]).methods.map(([method, argBytes])=>{
+                const methods = flatten(chain[i]).methods.map(([method, argBytes, marshal])=>{
                     const own = impl[method];
-                    return { name: method, argBytes, invoke: own ? guarded(own)
+                    return { name: method, argBytes, ...marshal, invoke: own ? guarded(own)
                         : ()=>{
                             diverge(`${link}::${method}`, 'not provided');
                             return E_NOTIMPL;

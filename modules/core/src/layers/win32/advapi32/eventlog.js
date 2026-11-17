@@ -717,6 +717,7 @@ export function createEventLogFunctions(host){
     /** @param {boolean} wide */
     const controlTrace = wide=>({
         argBytes: 20,
+        quadwords: [0],
         /** @param {number[]} args */
         handler: ([low, , nameAddress, properties, control])=>{
             if ((properties >>> 0) === 0)
@@ -747,6 +748,7 @@ export function createEventLogFunctions(host){
      */
     const controlAs = (wide, control)=>({
         argBytes: 16,
+        quadwords: [0],
         /** @param {number[]} args */
         handler: ([low, high, nameAddress, properties])=>
             controlTrace(wide).handler([low, high, nameAddress, properties, control]),
@@ -759,9 +761,12 @@ export function createEventLogFunctions(host){
      *
      * @param {number} handleArg Where the TRACEHANDLE's low half is.
      * @param {number} argBytes
+     * @param {{ quadwords: number[] }} marshal  The TRACEHANDLE and any ULONGLONG: one
+     *     slot each to an x86-64 caller.
      */
-    const enableTrace = (handleArg, argBytes)=>({
+    const enableTrace = (handleArg, argBytes, marshal)=>({
         argBytes,
+        ...marshal,
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ args)=>{
             const low = args[handleArg] >>> 0;
@@ -842,20 +847,20 @@ export function createEventLogFunctions(host){
         UpdateTraceA: controlAs(false, EVENT_TRACE_CONTROL_UPDATE),
         UpdateTraceW: controlAs(true, EVENT_TRACE_CONTROL_UPDATE),
         /** ULONG EnableTrace(ULONG Enable, ULONG EnableFlag, ULONG EnableLevel, LPCGUID, TRACEHANDLE) */
-        EnableTrace: enableTrace(4, 24),
+        EnableTrace: enableTrace(4, 24, { quadwords: [4] }),
         /**
          * ULONG EnableTraceEx2(TRACEHANDLE, LPCGUID, ULONG ControlCode, UCHAR Level,
          *     ULONGLONG MatchAnyKeyword, ULONGLONG MatchAllKeyword, ULONG Timeout,
          *     PENABLE_TRACE_PARAMETERS)
          */
-        EnableTraceEx2: enableTrace(0, 44),
+        EnableTraceEx2: enableTrace(0, 44, { quadwords: [0, 5, 7] }),
         /** TRACEHANDLE OpenTrace(PEVENT_TRACE_LOGFILE Logfile) */
         OpenTraceA: openTrace,
         OpenTraceW: openTrace,
         /** ULONG ProcessTrace(PTRACEHANDLE, ULONG HandleCount, LPFILETIME, LPFILETIME) */
         ProcessTrace: { argBytes: 16, handler: ()=>ERROR_INVALID_HANDLE },
         /** ULONG CloseTrace(TRACEHANDLE) */
-        CloseTrace: { argBytes: 8, handler: ()=>ERROR_INVALID_HANDLE },
+        CloseTrace: { argBytes: 8, quadwords: [0], handler: ()=>ERROR_INVALID_HANDLE },
 
         /**
          * ULONG RegisterTraceGuids(WMIDPREQUEST RequestAddress, PVOID RequestContext,
@@ -867,6 +872,7 @@ export function createEventLogFunctions(host){
         /** ULONG UnregisterTraceGuids(TRACEHANDLE RegistrationHandle) */
         UnregisterTraceGuids: {
             argBytes: 8,
+            quadwords: [0],
             /** @param {number[]} args */
             handler: ([low, high])=>((high >>> 0) === 0 && traceRegistrations.delete(low >>> 0)
                 ? ERROR_SUCCESS : ERROR_INVALID_PARAMETER),
@@ -888,6 +894,7 @@ export function createEventLogFunctions(host){
         /** UCHAR GetTraceEnableLevel(TRACEHANDLE), ULONG GetTraceEnableFlags(TRACEHANDLE) */
         GetTraceEnableLevel: {
             argBytes: 8,
+            quadwords: [0],
             handler: ()=>{
                 host.setLastError(ERROR_INVALID_HANDLE);
                 return 0;
@@ -895,6 +902,7 @@ export function createEventLogFunctions(host){
         },
         GetTraceEnableFlags: {
             argBytes: 8,
+            quadwords: [0],
             handler: ()=>{
                 host.setLastError(ERROR_INVALID_HANDLE);
                 return 0;
@@ -908,6 +916,7 @@ export function createEventLogFunctions(host){
          */
         TraceEvent: {
             argBytes: 12,
+            quadwords: [0],
             /** @param {number[]} args */
             handler: ([, , header])=>((header >>> 0) === 0
                 ? ERROR_INVALID_PARAMETER : ERROR_INVALID_HANDLE),
@@ -928,6 +937,7 @@ export function createEventLogFunctions(host){
          */
         EventWrite: {
             argBytes: 20,
+            quadwords: [0],
             /** @param {number[]} args */
             handler: ([low, high, descriptor, count, data])=>{
                 if (!registered(low, high))
@@ -944,6 +954,7 @@ export function createEventLogFunctions(host){
          */
         EventWriteTransfer: {
             argBytes: 28,
+            quadwords: [0],
             /** @param {number[]} args */
             handler: ([low, high, descriptor, , , count, data])=>{
                 if (!registered(low, high))
@@ -962,6 +973,7 @@ export function createEventLogFunctions(host){
          */
         EventSetInformation: {
             argBytes: 20,
+            quadwords: [0],
             /** @param {number[]} args */
             handler: ([low, high])=>(registered(low, high)
                 ? ERROR_SUCCESS : ERROR_INVALID_HANDLE),
@@ -1194,6 +1206,7 @@ export function createEventLogFunctions(host){
         /** ULONG EventUnregister(REGHANDLE RegHandle) */
         EventUnregister: {
             argBytes: 8,
+            quadwords: [0],
             /** @param {number[]} args */
             handler: ([low, high])=>((high >>> 0) === 0 && providers.delete(low >>> 0)
                 ? ERROR_SUCCESS : ERROR_INVALID_HANDLE),
@@ -1207,6 +1220,7 @@ export function createEventLogFunctions(host){
          */
         EventWriteString: {
             argBytes: 24,
+            quadwords: [0, 3],
             /** @param {number[]} args */
             handler: (/** @type {number[]} */ [low, high, , , , text])=>{
                 if ((high >>> 0) !== 0 || !providers.has(low >>> 0))

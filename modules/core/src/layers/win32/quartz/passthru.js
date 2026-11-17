@@ -50,7 +50,7 @@ export function createPassThru(base, host){
     /**
      * Methods of one interface that ask the upstream pin's.
      *
-     * @param {string} iid @param {[string, number][]} slots
+     * @param {string} iid @param {import('./describe.js').Slot[]} slots
      * @param {(state: any) => number | Promise<number>} upstream  The output pin
      *     to ask, 0 where there is none.
      * @param {number} unconnected  The answer where there is none.

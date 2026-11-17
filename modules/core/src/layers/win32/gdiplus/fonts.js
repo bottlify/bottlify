@@ -356,6 +356,7 @@ export function createFontFunctions({ host, handle, putPointer, isGraphics }){
          */
         GdipCreateFont: {
             argBytes: 20,
+            floats: { 1: 'f32' },
             /** @param {number[]} args */
             handler: ([family, size, style, unit, out])=>{
                 const face = families.get(family >>> 0);
@@ -511,6 +512,7 @@ export function createFontFunctions({ host, handle, putPointer, isGraphics }){
          */
         GdipGetFontHeightGivenDPI: {
             argBytes: 12,
+            floats: { 1: 'f32' },
             /** @param {number[]} args */
             handler: ([font, dpi, out])=>{
                 const held = fonts.get(font >>> 0);

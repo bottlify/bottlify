@@ -13,7 +13,15 @@
  */
 
 /**
- * @typedef {{ iid: string, base: string, methods: [string, number][] }} InterfaceLayout
+ * How a 64-bit caller passes a method's wide arguments, by their first dword
+ * counting `this`: a ULARGE_INTEGER in one slot, a double in an XMM register
+ * among the first four (the bridge's `quadwords` and `floats`).
+ *
+ * @typedef {{ quadwords?: number[], floats?: Record<number, 'f64'> }} Marshal
+ */
+
+/**
+ * @typedef {{ iid: string, base: string, methods: [string, number, Marshal?][] }} InterfaceLayout
  */
 
 /** @type {Record<string, InterfaceLayout>} */
@@ -21,9 +29,10 @@ export const INTERFACES = {
     IStream: {
         iid: '{0000000C-0000-0000-C000-000000000046}', base: 'IUnknown',
         methods: [
-            ['Read', 16], ['Write', 16], ['Seek', 20], ['SetSize', 12], ['CopyTo', 24],
-            ['Commit', 8], ['Revert', 4], ['LockRegion', 24], ['UnlockRegion', 24], ['Stat', 12],
-            ['Clone', 8]
+            ['Read', 16], ['Write', 16], ['Seek', 20, { quadwords: [1] }],
+            ['SetSize', 12, { quadwords: [1] }], ['CopyTo', 24, { quadwords: [2] }],
+            ['Commit', 8], ['Revert', 4], ['LockRegion', 24, { quadwords: [1, 3] }],
+            ['UnlockRegion', 24, { quadwords: [1, 3] }], ['Stat', 12], ['Clone', 8]
         ] },
     IWICColorContext: {
         iid: '{3C613A02-34B2-44EA-9A7C-45AEA9C6FD6D}', base: 'IUnknown',
@@ -51,7 +60,8 @@ export const INTERFACES = {
     IWICBitmap: {
         iid: '{00000121-A8F2-4877-BA0A-FD2B6645FB94}', base: 'IWICBitmapSource',
         methods: [
-            ['Lock', 16], ['SetPalette', 8], ['SetResolution', 20]
+            ['Lock', 16], ['SetPalette', 8],
+            ['SetResolution', 20, { floats: { 1: 'f64', 3: 'f64' } }]
         ] },
     IWICPalette: {
         iid: '{00000040-A8F2-4877-BA0A-FD2B6645FB94}', base: 'IUnknown',
@@ -113,7 +123,8 @@ export const INTERFACES = {
     IWICBitmapFrameEncode: {
         iid: '{00000105-A8F2-4877-BA0A-FD2B6645FB94}', base: 'IUnknown',
         methods: [
-            ['Initialize', 8], ['SetSize', 12], ['SetResolution', 20], ['SetPixelFormat', 8],
+            ['Initialize', 8], ['SetSize', 12],
+            ['SetResolution', 20, { floats: { 1: 'f64', 3: 'f64' } }], ['SetPixelFormat', 8],
             ['SetColorContexts', 12], ['SetPalette', 8], ['SetThumbnail', 8], ['WritePixels', 20],
             ['WriteSource', 12], ['Commit', 4], ['GetMetadataQueryWriter', 8]
         ] },
@@ -132,7 +143,7 @@ export const INTERFACES = {
     IWICFormatConverter: {
         iid: '{00000301-A8F2-4877-BA0A-FD2B6645FB94}', base: 'IWICBitmapSource',
         methods: [
-            ['Initialize', 32], ['CanConvert', 16]
+            ['Initialize', 32, { floats: { 5: 'f64' } }], ['CanConvert', 16]
         ] },
     IWICFormatConverterInfo: {
         iid: '{9F34FB65-13F4-4F15-BC57-3726B5E53D9F}', base: 'IWICComponentInfo',
@@ -143,7 +154,8 @@ export const INTERFACES = {
         iid: '{135FF860-22B7-4DDF-B0F6-218F4F299A43}', base: 'IStream',
         methods: [
             ['InitializeFromIStream', 8], ['InitializeFromFilename', 12],
-            ['InitializeFromMemory', 12], ['InitializeFromIStreamRegion', 24]
+            ['InitializeFromMemory', 12],
+            ['InitializeFromIStreamRegion', 24, { quadwords: [2, 4] }]
         ] },
     IWICBitmapScaler: {
         iid: '{00000302-A8F2-4877-BA0A-FD2B6645FB94}', base: 'IWICBitmapSource',

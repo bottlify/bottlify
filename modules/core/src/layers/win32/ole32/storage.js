@@ -661,7 +661,7 @@ export function createStorageFunctions(host){
             }
             return S_OK;
         } },
-        { name: 'Seek', argBytes: 20, invoke: (object, [low, high, origin, out])=>{
+        { name: 'Seek', argBytes: 20, quadwords: [1], invoke: (object, [low, high, origin, out])=>{
             /** @type {StreamState} */
             const state = object.state;
             if (state.backing.handle)
@@ -696,7 +696,7 @@ export function createStorageFunctions(host){
             }
             return S_OK;
         } },
-        { name: 'SetSize', argBytes: 12, invoke: (object, [low, high])=>{
+        { name: 'SetSize', argBytes: 12, quadwords: [1], invoke: (object, [low, high])=>{
             /** @type {StreamState} */
             const state = object.state;
             if (!writable(state.mode))
@@ -711,50 +711,52 @@ export function createStorageFunctions(host){
             }
             return state.backing.resize(low >>> 0) ? S_OK : E_OUTOFMEMORY;
         } },
-        { name: 'CopyTo', argBytes: 24, invoke: (object, [pstm, low, high, pcbRead, pcbWritten])=>{
+        { name: 'CopyTo', argBytes: 24, quadwords: [2],
+            invoke: (object, [pstm, low, high, pcbRead, pcbWritten])=>{
             /** @type {StreamState} */
-            const state = object.state;
-            const target = pstm >>> 0;
-            for (const slot of [pcbRead >>> 0, pcbWritten >>> 0])
-            {
-                if (slot !== 0)
+                const state = object.state;
+                const target = pstm >>> 0;
+                for (const slot of [pcbRead >>> 0, pcbWritten >>> 0])
                 {
-                    writeU64(slot, 0n);
+                    if (slot !== 0)
+                    {
+                        writeU64(slot, 0n);
+                    }
                 }
-            }
-            if (target === 0)
-            {
-                return STG_E_INVALIDPOINTER;
-            }
-            const wanted = (high >>> 0) !== 0
-                ? Number.MAX_SAFE_INTEGER
-                : low >>> 0;
-            const available = Math.max(0, state.backing.size() - state.position);
-            const bytes = state.backing.read(state.position, Math.min(wanted, available));
-            state.position += bytes.length;
-            /** @param {number} written */
-            const report = written=>{
-                if ((pcbRead >>> 0) !== 0)
+                if (target === 0)
                 {
-                    writeU64(pcbRead >>> 0, BigInt(bytes.length));
+                    return STG_E_INVALIDPOINTER;
                 }
-                if ((pcbWritten >>> 0) !== 0)
-                {
-                    writeU64(pcbWritten >>> 0, BigInt(written));
-                }
-                return S_OK;
-            };
-            const written = writeToStream(target, bytes);
-            return typeof written === 'number' ? report(written) : written.then(report);
-        } },
+                const wanted = (high >>> 0) !== 0
+                    ? Number.MAX_SAFE_INTEGER
+                    : low >>> 0;
+                const available = Math.max(0, state.backing.size() - state.position);
+                const bytes = state.backing.read(state.position, Math.min(wanted, available));
+                state.position += bytes.length;
+                /** @param {number} written */
+                const report = written=>{
+                    if ((pcbRead >>> 0) !== 0)
+                    {
+                        writeU64(pcbRead >>> 0, BigInt(bytes.length));
+                    }
+                    if ((pcbWritten >>> 0) !== 0)
+                    {
+                        writeU64(pcbWritten >>> 0, BigInt(written));
+                    }
+                    return S_OK;
+                };
+                const written = writeToStream(target, bytes);
+                return typeof written === 'number' ? report(written) : written.then(report);
+            } },
         // Direct mode: a write is already in the tree, so there is nothing
         // to commit and nothing to take back.
         { name: 'Commit', argBytes: 8, invoke: ()=>S_OK },
         { name: 'Revert', argBytes: 4, invoke: ()=>S_OK },
         // Range locks are what the documentation says a docfile stream does
         // not support.
-        { name: 'LockRegion', argBytes: 24, invoke: ()=>STG_E_INVALIDFUNCTION },
-        { name: 'UnlockRegion', argBytes: 24, invoke: ()=>STG_E_INVALIDFUNCTION },
+        { name: 'LockRegion', argBytes: 24, quadwords: [1, 3], invoke: ()=>STG_E_INVALIDFUNCTION },
+        { name: 'UnlockRegion', argBytes: 24, quadwords: [1, 3],
+            invoke: ()=>STG_E_INVALIDFUNCTION },
         { name: 'Stat', argBytes: 12, invoke: (object, [pstatstg, flags])=>{
             /** @type {StreamState} */
             const state = object.state;
@@ -1605,52 +1607,55 @@ export function createStorageFunctions(host){
      * @returns {import('./objects.js').ComMethod[]}
      */
     const lockBytesMethods = ()=>[
-        { name: 'ReadAt', argBytes: 24, invoke: (object, [low, high, pv, cb, pcbRead])=>{
+        { name: 'ReadAt', argBytes: 24, quadwords: [1],
+            invoke: (object, [low, high, pv, cb, pcbRead])=>{
             /** @type {StreamBacking} */
-            const backing = object.state.backing;
-            if ((pv >>> 0) === 0)
-            {
-                return STG_E_INVALIDPOINTER;
-            }
-            const offset = (high >>> 0) === 0 ? low >>> 0 : Infinity;
-            const bytes = offset >= backing.size() ? new Uint8Array(0)
-                : backing.read(offset, Math.min(cb >>> 0, backing.size() - offset));
-            if (bytes.length > 0)
-            {
-                host.writeMemory(pv >>> 0, bytes);
-            }
-            if ((pcbRead >>> 0) !== 0)
-            {
-                writeU32(pcbRead >>> 0, bytes.length);
-            }
-            return S_OK;
-        } },
-        { name: 'WriteAt', argBytes: 24, invoke: (object, [low, high, pv, cb, pcbWritten])=>{
+                const backing = object.state.backing;
+                if ((pv >>> 0) === 0)
+                {
+                    return STG_E_INVALIDPOINTER;
+                }
+                const offset = (high >>> 0) === 0 ? low >>> 0 : Infinity;
+                const bytes = offset >= backing.size() ? new Uint8Array(0)
+                    : backing.read(offset, Math.min(cb >>> 0, backing.size() - offset));
+                if (bytes.length > 0)
+                {
+                    host.writeMemory(pv >>> 0, bytes);
+                }
+                if ((pcbRead >>> 0) !== 0)
+                {
+                    writeU32(pcbRead >>> 0, bytes.length);
+                }
+                return S_OK;
+            } },
+        { name: 'WriteAt', argBytes: 24, quadwords: [1],
+            invoke: (object, [low, high, pv, cb, pcbWritten])=>{
             /** @type {StreamBacking} */
-            const backing = object.state.backing;
-            if ((pv >>> 0) === 0)
-            {
-                return STG_E_INVALIDPOINTER;
-            }
-            const count = cb >>> 0;
-            if ((high >>> 0) !== 0
+                const backing = object.state.backing;
+                if ((pv >>> 0) === 0)
+                {
+                    return STG_E_INVALIDPOINTER;
+                }
+                const count = cb >>> 0;
+                if ((high >>> 0) !== 0
                 || (count > 0 && !backing.write(low >>> 0, host.readMemory(pv >>> 0, count))))
-            {
-                return STG_E_MEDIUMFULL;
-            }
-            if ((pcbWritten >>> 0) !== 0)
-            {
-                writeU32(pcbWritten >>> 0, count);
-            }
-            return S_OK;
-        } },
+                {
+                    return STG_E_MEDIUMFULL;
+                }
+                if ((pcbWritten >>> 0) !== 0)
+                {
+                    writeU32(pcbWritten >>> 0, count);
+                }
+                return S_OK;
+            } },
         { name: 'Flush', argBytes: 4, invoke: ()=>S_OK },
-        { name: 'SetSize', argBytes: 12, invoke: (object, [low, high])=>
+        { name: 'SetSize', argBytes: 12, quadwords: [1], invoke: (object, [low, high])=>
             ((high >>> 0) === 0 && object.state.backing.resize(low >>> 0)
                 ? S_OK : STG_E_MEDIUMFULL) },
         // A block of memory has no regions to lock, as Windows' says.
-        { name: 'LockRegion', argBytes: 24, invoke: ()=>STG_E_INVALIDFUNCTION },
-        { name: 'UnlockRegion', argBytes: 24, invoke: ()=>STG_E_INVALIDFUNCTION },
+        { name: 'LockRegion', argBytes: 24, quadwords: [1, 3], invoke: ()=>STG_E_INVALIDFUNCTION },
+        { name: 'UnlockRegion', argBytes: 24, quadwords: [1, 3],
+            invoke: ()=>STG_E_INVALIDFUNCTION },
         { name: 'Stat', argBytes: 12, invoke: (object, [pstatstg, flags])=>{
             if ((pstatstg >>> 0) === 0)
             {

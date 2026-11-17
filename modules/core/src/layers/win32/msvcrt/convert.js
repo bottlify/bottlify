@@ -712,6 +712,8 @@ export function createConversionFunctions(host){
     const secureCvt = fixed=>({
         convention: 'cdecl',
         argBytes: 28,
+        // The double after the buffer and its size.
+        floats: { 2: /** @type {'f64'} */ ('f64') },
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ [buffer, size, low, high, count, point, sign])=>{
             if ((buffer >>> 0) === 0 || (size >>> 0) === 0 || (point >>> 0) === 0
@@ -749,6 +751,8 @@ export function createConversionFunctions(host){
         '$I10_OUTPUT': {
             convention: 'cdecl',
             argBytes: 24,
+            // The ten-byte extended by value: a pointer to a copy to a 64-bit caller.
+            structs: { 0: 3 },
             /** @param {number[]} args */
             handler: ([low, high, top, precision, flags, out])=>{
                 const value = new Uint8Array(10);
@@ -979,6 +983,7 @@ export function createConversionFunctions(host){
         _gcvt_s: {
             convention: 'cdecl',
             argBytes: 20,
+            floats: { 2: 'f64' },
             /** @param {number[]} args */
             handler: ([buffer, size, low, high, digits])=>{
                 if ((buffer >>> 0) === 0 || (size >>> 0) === 0 || (digits | 0) < 0)

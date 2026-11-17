@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { formatGuid, parseGuid } from './guid.js';
 import { createComRegistry } from './objects.js';
 import { createGlobalMemory } from '../kernel32/moveable.js';
+import { callLong } from '../../bridge/internal/long-machine.fixture.js';
 import { parseCompoundFile, serializeCompoundFile, createRoot } from './cfb.js';
 import {
     IID_IENUMSTATSTG, IID_ISEQUENTIALSTREAM, IID_ISTORAGE, IID_ISTREAM, STGM,
@@ -245,6 +246,17 @@ function setup(){
             assert.ok(method, `${name} is not in the table`);
             return method.invoke(record.object, args);
         },
+        /**
+         * Calls a method as a 64-bit program does, through the bridge's x64 path.
+         *
+         * @param {number} pointer @param {string} name
+         * @param {Parameters<typeof callLong>[2]} machine
+         */
+        callLong_(pointer, name, machine){
+            const record = records.get(pointer);
+            const method = record.methods.find((/** @type {any} */ m)=>m.name === name);
+            return callLong(method, record.object, machine);
+        },
         /** @param {number} pointer */
         release(pointer){
             const record = records.get(pointer);
@@ -381,6 +393,21 @@ test('streams and storages written through the objects come back through the fil
     assert.deepEqual(read(host.u32(OUT3), 100), Uint8Array.of(1, 2, 3, 4));
     assert.equal(call(reopened, 'Stat', [STAT, STATFLAG_NONAME]), S_OK);
     assert.equal(formatGuid(host.bytes.subarray(STAT + 48, STAT + 64)), CLSID_A);
+});
+
+test('a 64-bit program seeks a stream: the LARGE_INTEGER one slot, the origin after it', ()=>{
+    // IStream::Seek(LARGE_INTEGER move, DWORD origin, ULARGE_INTEGER *position):
+    // this in RCX, the move whole in RDX, the origin in R8, the pointer in R9.
+    const { host, fns, write } = setup();
+    assert.equal(fns.CreateStreamOnHGlobal.handler([0, 1, OUT]), S_OK);
+    const stream = host.u32(OUT);
+    write(stream, Uint8Array.of(1, 2, 3, 4, 5));
+    const answer = host.callLong_(stream, 'Seek', {
+        registers: { rcx: BigInt(stream), r11: 0xfffffffffffffffen, r8: 2n, r9: BigInt(OUT2) },
+    });
+    assert.equal(answer, S_OK, 'END - 2, its origin read from R8');
+    assert.equal(host.u32(OUT2), 3);
+    assert.equal(host.u32(OUT2 + 4), 0);
 });
 
 test('a stream reads short at its end, seeks from three origins, grows and shrinks', ()=>{

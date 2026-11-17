@@ -300,7 +300,7 @@ export function createStreams(host){
      */
     const published = new Map();
 
-    /** @type {readonly { name: string, argBytes: number, builtin?: string,
+    /** @type {readonly { name: string, argBytes: number, builtin?: string, quadwords?: number[],
      *     invoke?: (object: any, args: number[]) => number | Promise<number> }[]} */
     const methods = Object.freeze([
         ...IUNKNOWN_METHODS,
@@ -351,26 +351,27 @@ export function createStreams(host){
             return S_OK;
         } },
         /** HRESULT Seek(LARGE_INTEGER dlibMove, DWORD dwOrigin, ULARGE_INTEGER *plibNewPosition) */
-        { name: 'Seek', argBytes: 20, invoke: async(object, [low, high, origin, positionOut])=>{
-            const state = stateOf(object);
-            if ((origin >>> 0) > 2)
-            {
-                return E_INVALIDARG;
-            }
-            const base = origin === 0 ? 0 : origin === 1 ? state.position
-                : await state.backing.size();
-            const next = state.backing.narrow ? (base + (low >>> 0)) % 0x100000000
-                : base + quad(low, high);
-            if (next < 0)
-            {
-                return STG_E_INVALIDFUNCTION;
-            }
-            state.position = next;
-            writeQuad(positionOut, next);
-            return S_OK;
-        } },
+        { name: 'Seek', argBytes: 20, quadwords: [1],
+            invoke: async(object, [low, high, origin, positionOut])=>{
+                const state = stateOf(object);
+                if ((origin >>> 0) > 2)
+                {
+                    return E_INVALIDARG;
+                }
+                const base = origin === 0 ? 0 : origin === 1 ? state.position
+                    : await state.backing.size();
+                const next = state.backing.narrow ? (base + (low >>> 0)) % 0x100000000
+                    : base + quad(low, high);
+                if (next < 0)
+                {
+                    return STG_E_INVALIDFUNCTION;
+                }
+                state.position = next;
+                writeQuad(positionOut, next);
+                return S_OK;
+            } },
         /** HRESULT SetSize(ULARGE_INTEGER libNewSize) */
-        { name: 'SetSize', argBytes: 12, invoke: async(object, [low, high])=>{
+        { name: 'SetSize', argBytes: 12, quadwords: [1], invoke: async(object, [low, high])=>{
             const state = stateOf(object);
             if ((state.mode & STGM_ACCESS) === STGM_READ)
             {
@@ -386,7 +387,7 @@ export function createStreams(host){
          * to copy, copies nothing and succeeds (Wine's
          * test_IStream_invalid_operations).
          */
-        { name: 'CopyTo', argBytes: 24, invoke: async(object, words)=>{
+        { name: 'CopyTo', argBytes: 24, quadwords: [2], invoke: async(object, words)=>{
             const [destination, low, high, readOut, writtenOut] = words;
             const state = stateOf(object);
             let left = quad(low, high >>> 0);
@@ -439,13 +440,13 @@ export function createStreams(host){
          * Kept as a record the unlock is checked against: one unlock for
          * each lock, the next one STG_E_LOCKVIOLATION.
          */
-        { name: 'LockRegion', argBytes: 24, invoke: (object, words)=>{
+        { name: 'LockRegion', argBytes: 24, quadwords: [1, 3], invoke: (object, words)=>{
             const [offsetLow, offsetHigh, lengthLow, lengthHigh] = words;
             stateOf(object).locks.push({ offset: quad(offsetLow, offsetHigh >>> 0),
                 length: quad(lengthLow, lengthHigh >>> 0) });
             return S_OK;
         } },
-        { name: 'UnlockRegion', argBytes: 24, invoke: (object, words)=>{
+        { name: 'UnlockRegion', argBytes: 24, quadwords: [1, 3], invoke: (object, words)=>{
             const [offsetLow, offsetHigh, lengthLow, lengthHigh] = words;
             const { locks } = stateOf(object);
             const offset = quad(offsetLow, offsetHigh >>> 0);

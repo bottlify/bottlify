@@ -42,6 +42,13 @@
 const FLOAT_ARGUMENTS = Object.freeze({
     // IDirect3DDevice9::SetNPatchMode(float nSegments)
     SetNPatchMode: Object.freeze({ 1: /** @type {'f32'} */ ('f32') }),
+    // ID3D10Device and ID3D11DeviceContext::ClearDepthStencilView(view, UINT flags,
+    // FLOAT depth, UINT8 stencil): the depth in the fourth slot.
+    ClearDepthStencilView: Object.freeze({ 3: /** @type {'f32'} */ ('f32') }),
+    // ID3D11DeviceContext::SetResourceMinLOD(ID3D11Resource *, FLOAT MinLOD)
+    SetResourceMinLOD: Object.freeze({ 2: /** @type {'f32'} */ ('f32') }),
+    // ID3D10EffectScalarVariable::SetFloat(FLOAT value)
+    SetFloat: Object.freeze({ 1: /** @type {'f32'} */ ('f32') }),
 });
 
 /**
