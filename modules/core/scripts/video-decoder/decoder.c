@@ -353,7 +353,21 @@ static int32_t allocateClip(void){
     return MEDIA_ERR_LIMIT;
 }
 
-int32_t media_open(uint8_t *data, int32_t size){
+/* Which of a container's streams a clip keeps (media_open_streams). */
+#define MEDIA_KEEP_ALL   0
+#define MEDIA_KEEP_VIDEO 1
+#define MEDIA_KEEP_AUDIO 2
+
+/**
+ * Opens a container keeping only some of its streams: the rest are discarded
+ * by the demuxer (AVDISCARD_ALL), never handed out or decoded. A player reads
+ * a file twice over, once for its picture and once for its sound, so that the
+ * sound can be read ahead of the picture by however far the muxer laid it out
+ * behind it -- seconds, in some films -- at the cost of skipping packets, not
+ * of decoding frames nobody is showing yet. A clip that keeps a kind the file
+ * does not have is MEDIA_ERR_STREAM.
+ */
+int32_t media_open_streams(uint8_t *data, int32_t size, int32_t keep){
     initialize();
     if (!data || size <= 0)
     {
@@ -417,10 +431,25 @@ int32_t media_open(uint8_t *data, int32_t size){
         clip->format, AVMEDIA_TYPE_VIDEO, -1, -1, NULL, 0);
     clip->audioStream = av_find_best_stream(
         clip->format, AVMEDIA_TYPE_AUDIO, -1, clip->videoStream, NULL, 0);
+    if (keep == MEDIA_KEEP_VIDEO)
+    {
+        clip->audioStream = -1;
+    }
+    else if (keep == MEDIA_KEEP_AUDIO)
+    {
+        clip->videoStream = -1;
+    }
     if (clip->videoStream < 0 && clip->audioStream < 0)
     {
         media_close(id);
         return MEDIA_ERR_STREAM;
+    }
+    for (unsigned i = 0; i < clip->format->nb_streams; i++)
+    {
+        if ((int)i != clip->videoStream && (int)i != clip->audioStream)
+        {
+            clip->format->streams[i]->discard = AVDISCARD_ALL;
+        }
     }
 
     if (clip->videoStream >= 0)
@@ -507,6 +536,11 @@ int32_t media_open(uint8_t *data, int32_t size){
     }
 
     return id;
+}
+
+/** Opens a container with every stream it has (media_open_streams). */
+int32_t media_open(uint8_t *data, int32_t size){
+    return media_open_streams(data, size, MEDIA_KEEP_ALL);
 }
 
 /**

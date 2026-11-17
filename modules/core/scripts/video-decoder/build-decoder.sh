@@ -147,7 +147,7 @@ link_decoder() {
         -sALLOW_MEMORY_GROWTH=1 \
         -sINITIAL_MEMORY=33554432 \
         -sERROR_ON_UNDEFINED_SYMBOLS=0 \
-        -sEXPORTED_FUNCTIONS='["_media_alloc","_media_free","_media_open","_media_info","_media_codec_name","_media_decode","_media_frame","_media_audio_pending","_media_audio_read","_media_close","_media_open_audio","_media_feed_audio","_media_flush_audio"]' \
+        -sEXPORTED_FUNCTIONS='["_media_alloc","_media_free","_media_open","_media_open_streams","_media_info","_media_codec_name","_media_decode","_media_frame","_media_audio_pending","_media_audio_read","_media_close","_media_open_audio","_media_feed_audio","_media_flush_audio"]' \
         -o "${OUT}/video-decoder.wasm"
 
     cd "${OUT}"

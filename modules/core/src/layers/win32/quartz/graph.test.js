@@ -45,7 +45,7 @@ const CLIP_CHANNELS = 2;
  */
 function fakeClip({ frameCount = 3, fps = 10, width = 800, height = 368 } = {}){
     let given = 0;
-    let owedSound = true;
+    let heard = 0;
     // Whether there is PCM to hand over, as a real decoder tracks: reading when
     // it is holding nothing answers with nothing rather than with a block.
     let pending = false;
@@ -54,20 +54,23 @@ function fakeClip({ frameCount = 3, fps = 10, width = 800, height = 368 } = {}){
         width, height, fps, frameCount, hasVideo: true, hasAudio: true,
         sampleRate: CLIP_RATE, channels: CLIP_CHANNELS,
         closed: false,
+        // The picture and the sound read apart, a frame's worth of sound a step.
         decode(){
-            if (owedSound)
-            {
-                owedSound = false;
-                pending = true;
-                return 'audio';
-            }
             if (given >= frameCount)
             {
                 return 'end';
             }
             given++;
-            owedSound = true;
             return 'frame';
+        },
+        decodeAudio(){
+            if (heard >= frameCount)
+            {
+                return 'end';
+            }
+            heard++;
+            pending = true;
+            return 'audio';
         },
         frame: ()=>Uint8Array.of(given, 0, 0, 0xff),
         readAudio(){
@@ -636,15 +639,18 @@ test('Run with a clip plays it instead of completing at once', ()=>{
     assert.equal(call(object, IID_IMEDIA_EVENT_EX, 'GetEvent', [OUT, OUT + 4, OUT + 8, 0]),
         E_ABORT, 'a film that has not been shown is not over');
 
-    // The clock starts at the first tick, so this one is where time zero is.
-    assert.equal(tick(1000), null, 'nothing is owed yet at the moment it starts');
+    // The clock starts at the first tick, so this one is where time zero is:
+    // no picture is due yet, and the sound is handed over a lead ahead of it.
+    const first = tick(1000);
+    assert.equal(first?.bgra, null, 'no picture at the moment it starts');
+    assert.equal(Math.round(soundMs(first?.audio ?? [])), 200, 'the sound a lead ahead');
     const shown = tick(1100);
     assert.ok(shown, 'a tenth of a second later, one frame');
     assert.equal(shown.hwnd, 0x40b4, 'addressed to the window the program owns it with');
     assert.deepEqual([shown.width, shown.height], [800, 368]);
     assert.ok(shown.bgra, 'and carries the picture');
     assert.equal(Math.round(soundMs(shown.audio)), 100,
-        'with the sound that belongs to it: one frame of film, one frame of sound');
+        'and the sound kept a lead ahead of it: one frame of film, one frame of sound');
 
     assert.equal(call(object, IID_IMEDIA_POSITION, 'get_CurrentPosition', [OUT]), S_OK);
     assert.equal(host.f64(OUT), 0.1, 'the position is what has been shown');
@@ -681,6 +687,53 @@ test('the picture is shown where the sound has got to, not where the clock has',
     const drift = position() - played;
     assert.ok(drift >= 0 && drift <= 250,
         `the picture stood ${drift}ms ahead of the sound a person heard`);
+});
+
+test('a film\'s sound is read on its own, ahead of a picture decoded only as it is due', ()=>{
+    // A file's muxer may put the sound seconds after the picture it belongs to
+    // (an MPEG intro, measured: up to 5 s). Read in the file's order, the sound
+    // was reached only by decoding the picture that far ahead; it ran out,
+    // stalled, and the film went over to the host clock and back - in jerks.
+    const fps = 10;
+    let decodedFrames = 0;
+    const base = fakeClip({ frameCount: 1000, fps });
+    const clip = {
+        ...base,
+        decode(){
+            decodedFrames++;
+            return base.decode();
+        },
+    };
+    const { object, host, tick } = createObject(CLSID_FILTER_GRAPH, { clip });
+    host.putWide(PATH, MOVIE);
+    call(object, IID_IGRAPH_BUILDER, 'RenderFile', [PATH, 0]);
+    call(object, IID_IMEDIA_CONTROL, 'Run');
+
+    // A device playing in real time whatever it has been handed.
+    let handed = 0;
+    let played = 0;
+    /** @type {number[]} */
+    const shownAt = [];
+    for (let at = 0; at <= 5000; at += 20)
+    {
+        played = Math.min(handed, played + 20);
+        const shown = tick(at, handed - played);
+        handed += soundMs(shown?.audio ?? []);
+        if (shown?.bgra)
+        {
+            shownAt.push(at);
+        }
+    }
+    assert.ok(!host.reported.some(line=>line.includes('host clock alone')),
+        'the sound never stopped moving');
+    assert.ok(played >= 4500, `the sound played on in real time: ${played} ms of 5000`);
+    assert.equal(call(object, IID_IMEDIA_POSITION, 'get_CurrentPosition', [OUT]), S_OK);
+    const drift = Math.round(host.f64(OUT) * 1000) - played;
+    assert.ok(drift >= 0 && drift <= 250, `the picture stood ${drift} ms ahead of the sound`);
+    const gaps = shownAt.slice(1).map((at, index)=>at - shownAt[index]);
+    assert.ok(Math.max(...gaps) <= 200, `no frame waited ${Math.max(...gaps)} ms for the next`);
+    assert.ok(decodedFrames <= Math.ceil((played + 250) * fps / 1000),
+        `the picture decoded no further than it was due: ${decodedFrames} frames`);
 });
 
 test('a film with no sound to follow runs on the host clock, and says so', ()=>{

@@ -85,7 +85,6 @@ const TICKS_PER_SECOND = 10_000_000;
 
 /** The same catch-up budget the window path keeps; see graph.js. */
 const FRAMES_PER_TICK = 4;
-const STEPS_PER_TICK = 16;
 
 /**
  * @typedef {import('./clip.js').VideoClip} VideoClip
@@ -334,31 +333,24 @@ export function createStreaming(host){
         const want = Math.floor((nowMs - source.startedAt) * clip.fps / 1000) + 1;
         let packed = false;
         let decoded = 0;
-        let steps = 0;
-        while (source.shown < want && decoded < FRAMES_PER_TICK && steps++ < STEPS_PER_TICK)
+        // The picture alone: its sound is a reading of its own, and nothing
+        // connected here hears it.
+        while (source.shown < want && decoded < FRAMES_PER_TICK)
         {
-            const what = clip.decode();
-            if (what === 'frame')
+            if (clip.decode() !== 'frame')
             {
-                source.shown++;
-                decoded++;
-                const frame = clip.frame();
-                if (frame)
-                {
-                    packBottomUpRgb24(frame, source.pixels, source.width, source.height,
-                        source.stride);
-                    packed = true;
-                }
-                continue;
+                source.ended = true;
+                break;
             }
-            if (what === 'audio')
+            source.shown++;
+            decoded++;
+            const frame = clip.frame();
+            if (frame)
             {
-                // Nothing is connected to hear it.
-                clip.readAudio?.();
-                continue;
+                packBottomUpRgb24(frame, source.pixels, source.width, source.height,
+                    source.stride);
+                packed = true;
             }
-            source.ended = true;
-            break;
         }
         if (source.shown < want && !source.ended)
         {

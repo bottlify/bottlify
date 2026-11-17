@@ -32,7 +32,9 @@ function silentClip({ frameCount = 4, fps = 10, width = 640, height = 100 } = {}
             given++;
             return /** @type {const} */ ('frame');
         },
+        decodeAudio: ()=>/** @type {const} */ ('end'),
         frame: ()=>Uint8Array.of(given, 0, 0, 0xff),
+        readAudio: ()=>null,
         close(){
             this.closed = true;
         },
