@@ -12,8 +12,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { synthesiseModule, synthesiseProgram } from './synth.js';
+import { imagePlacementOf, installedHeaders, synthesiseModule, synthesiseProgram }
+    from './synth.js';
 import { parsePe, readExports, readImports, rvaToFileOffset } from './pe.js';
+import { buildExe } from '../../../../../../tools/fixtures/make-pe.mjs';
 
 const BASE = 0x70000000;
 
@@ -568,4 +570,31 @@ test('a module for a 64-bit process opens each trampoline with a no-op that is o
         'xchg ax, ax, then the jump');
     const displacement = new DataView(module.bytes.buffer).getInt32(rva + 3, true);
     assert.equal(BASE + rva + 7 + displacement, STUBS.ExitProcess);
+});
+
+test('a file says where its image belongs: its ImageBase and the span of its sections', ()=>{
+    // A 32-bit DLL and a 64-bit one: Windows loads either at the base it names
+    // when that base is free, and a wrapper comparing the file with the module
+    // it loaded reads the same field.
+    for (const [bits, imageBase] of /** @type {[32 | 64, number][]} */ ([[32, 0x38000000],
+        [64, 0x180000000]]))
+    {
+        const file = buildExe({ bits, dll: true, imageBase, imports: {}, code: ()=>[0xc3] });
+        const place = imagePlacementOf(file);
+        assert.ok(place, `${bits}-bit`);
+        assert.equal(place.base, imageBase);
+        const nt = new DataView(file.buffer, file.byteOffset).getUint32(0x3c, true);
+        assert.equal(place.span,
+            new DataView(file.buffer, file.byteOffset).getUint32(nt + 0x50, true),
+            'SizeOfImage, the span the loader reserves');
+        assert.deepEqual([...file.subarray(0, 2)], [0x4d, 0x5a]);
+        assert.ok(installedHeaders(file, imageBase));
+        // Linked for ASLR, it names no place: Windows puts it anywhere.
+        const view = new DataView(file.buffer, file.byteOffset);
+        view.setUint16(nt + 0x18 + 0x46, view.getUint16(nt + 0x18 + 0x46, true) | 0x40, true);
+        assert.equal(parsePe(file, { wide: true }).dynamicBase, true,
+            `${bits}-bit: the flag as the loader reads it`);
+        assert.equal(imagePlacementOf(file), null, `${bits}-bit, DYNAMIC_BASE: no place`);
+    }
+    assert.equal(imagePlacementOf(new Uint8Array(0x100)), null, 'not an image: no place');
 });

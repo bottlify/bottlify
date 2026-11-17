@@ -39,7 +39,7 @@ import { readMappedTls, readTls } from './layers/loader/internal/tls.js';
 import { jumpBytes, relocatablePrefix } from './layers/loader/internal/hooks.js';
 import { mangledCall } from './layers/loader/internal/mangling.js';
 import { mapImage } from './layers/loader/internal/image.js';
-import { installedHeaders } from './layers/loader/internal/synth.js';
+import { imagePlacementOf, installedHeaders } from './layers/loader/internal/synth.js';
 import { createProcessBlocks, TEB, TEB64 } from './layers/win32/kernel32/teb.js';
 import { KUSER, KUSER_REGION, SHARED_USER_DATA, createSharedUserData, sharedPageAt }
     from './layers/win32/kernel32/shared-data.js';
@@ -6637,6 +6637,95 @@ async function buildApp(options){
     // megabyte apart, sixty of them left a third of the window to those.
     let systemModulesEnd = MODULE_BASE;
     /**
+     * The spans `claim` took from the heap's arena, by base, with the region
+     * each was cut from: what `giveBack` puts back.
+     *
+     * @type {Map<number, { size: number, kind: string, access: string }>}
+     */
+    const claimedSpans = new Map();
+    // Where a library may go: above the program's own image, which is not in
+    // the map yet, and below the stack pool; and nowhere anything is mapped.
+    const librarySpace = {
+        floor: imageInHeap ? MODULE_BASE : mainImage.imageBase + mainImage.sizeOfImage,
+        limit: LIBRARIES_END,
+        /** @param {number} base @param {number} size */
+        holder: (base, size)=>memory.list().find((/** @type {any} */ region)=>
+            base < region.base + region.size && region.base < base + size) ?? null,
+        /**
+         * A span of the heap's arena that nothing has been given -- at a base
+         * for a library that can only live there, anywhere for one the
+         * modules' space has no room for: the heap gives it up and its region
+         * is cut around it, the part above it a region of its own.
+         *
+         * @param {number | null} wanted @param {number} size
+         */
+        claim: (wanted, size)=>{
+            const heap = core.api('win32').heap();
+            const base = wanted === null
+                ? heap.allocate(size, { alignment: LIBRARY_ALIGN, owner: 'image' })
+                : heap.allocateAt(wanted, size, { owner: 'image' }) ? wanted : 0;
+            const region = base === 0 ? undefined : memory.find(base);
+            if (!region || !region.name.startsWith('heap')
+                || base + size > region.base + region.size)
+            {
+                return 0;
+            }
+            const end = base + size;
+            const regionEnd = region.base + region.size;
+            memory.unregister(region.name);
+            const { kind, access } = region;
+            if (base > region.base)
+            {
+                memory.register({ name: region.name, base: region.base,
+                    size: base - region.base, kind, access });
+            }
+            if (regionEnd > end)
+            {
+                memory.register({ name: `heap@${end.toString(16)}`, base: end,
+                    size: regionEnd - end, kind, access });
+            }
+            claimedSpans.set(base, { size, kind, access });
+            return base;
+        },
+        /**
+         * Puts back a span `claim` took, once what was mapped on it is gone,
+         * and nothing for one it did not take: the heap has it to hand out
+         * again -- a library that can only live there is loaded there again --
+         * and its region is the heap's once more, joined with the parts on
+         * either side, since a block the heap later hands out across where a
+         * cut was is one buffer and an access spanning two regions is refused.
+         *
+         * @param {number} base
+         */
+        giveBack: base=>{
+            const span = claimedSpans.get(base);
+            if (!span)
+            {
+                return;
+            }
+            claimedSpans.delete(base);
+            core.api('win32').heap().free(base);
+            const end = base + span.size;
+            const heapPart = (/** @type {any} */ region)=>
+                (region?.name.startsWith('heap') ? region : null);
+            const below = heapPart(memory.find(base - 1));
+            const above = heapPart(memory.find(end));
+            for (const part of [below, above])
+            {
+                if (part)
+                {
+                    memory.unregister(part.name);
+                }
+            }
+            const from = below?.base ?? base;
+            memory.register({
+                name: below?.name ?? `heap@${base.toString(16)}`, base: from,
+                size: (above ? above.base + above.size : end) - from,
+                kind: span.kind, access: span.access,
+            });
+        },
+    };
+    /**
      * The exports a 64-bit process's modules leave out: i386 alone -- guest
      * code with neither x86-64 (`long`) nor a host handler to trap into, as
      * `_chkesp` and the __fastcall entries are. Bound, its i386 would run as
@@ -6700,19 +6789,52 @@ async function buildApp(options){
                 },
         }));
 
-        const base = systemModulesEnd;
         // A table with a DllMain is a module with an entry point, run when a
         // program first loads it -- which is how a library the program did not
         // import announces itself to the one that asked for it.
         // The Steam client's own file, where the embedder fetched Valve's: the
         // module carries its headers, as the file stands in Steam's folder
-        // (the win32 layer's volume).
+        // (the win32 layer's volume), and sits where the file says it belongs.
+        // Windows loads a DLL not linked for ASLR at its preferred base when
+        // that base is free, and a DRM wrapper reads the file and compares its
+        // headers with the module's: placed elsewhere, the module answers with
+        // the loader's base where the file names Valve's, and the wrapper
+        // refuses it (Proton keeps Valve's own client DLL where it says it
+        // belongs for the same reason). It is placed as a library that can only
+        // live at its base is: in the window when free there, else cut from
+        // the heap.
         const installed = options.win32?.steam?.clientFiles?.[name];
+        const wanted = installed ? imagePlacementOf(installed) : null;
+        let base = systemModulesEnd;
+        if (wanted)
+        {
+            const place = placeLibrary({ relocatable: false, imageBase: wanted.base,
+                sizeOfImage: wanted.span }, { next: systemModulesEnd, ...librarySpace });
+            if ('base' in place)
+            {
+                base = place.base;
+            }
+            else
+            {
+                reportDivergence('image', `${name} is placed away from the image base `
+                    + `0x${wanted.base.toString(16)} its file names, which is not free`);
+            }
+        }
         const placed = loader.synthesise({
             name, base, exports, entryPoint: 'DllMain' in table ? 'DllMain' : undefined, long,
             headers: installed ? installedHeaders(installed, base) ?? undefined : undefined,
         });
-        systemModulesEnd = base + Math.ceil(placed.size / LIBRARY_ALIGN) * LIBRARY_ALIGN;
+        const end = base + Math.ceil(placed.size / LIBRARY_ALIGN) * LIBRARY_ALIGN;
+        if (base === systemModulesEnd)
+        {
+            systemModulesEnd = end;
+        }
+        else if (base < LIBRARIES_END)
+        {
+            // A module given its own base inside the window keeps that span from
+            // the ones laid out after it.
+            systemModulesEnd = Math.max(systemModulesEnd, end);
+        }
 
 
         // An export's address is its trampoline inside the module, and that is
@@ -7691,95 +7813,6 @@ async function buildApp(options){
         })();
     };
 
-    /**
-     * The spans `claim` took from the heap's arena, by base, with the region
-     * each was cut from: what `giveBack` puts back.
-     *
-     * @type {Map<number, { size: number, kind: string, access: string }>}
-     */
-    const claimedSpans = new Map();
-    // Where a library may go: above the program's own image, which is not in
-    // the map yet, and below the stack pool; and nowhere anything is mapped.
-    const librarySpace = {
-        floor: imageInHeap ? MODULE_BASE : mainImage.imageBase + mainImage.sizeOfImage,
-        limit: LIBRARIES_END,
-        /** @param {number} base @param {number} size */
-        holder: (base, size)=>memory.list().find((/** @type {any} */ region)=>
-            base < region.base + region.size && region.base < base + size) ?? null,
-        /**
-         * A span of the heap's arena that nothing has been given -- at a base
-         * for a library that can only live there, anywhere for one the
-         * modules' space has no room for: the heap gives it up and its region
-         * is cut around it, the part above it a region of its own.
-         *
-         * @param {number | null} wanted @param {number} size
-         */
-        claim: (wanted, size)=>{
-            const heap = core.api('win32').heap();
-            const base = wanted === null
-                ? heap.allocate(size, { alignment: LIBRARY_ALIGN, owner: 'image' })
-                : heap.allocateAt(wanted, size, { owner: 'image' }) ? wanted : 0;
-            const region = base === 0 ? undefined : memory.find(base);
-            if (!region || !region.name.startsWith('heap')
-                || base + size > region.base + region.size)
-            {
-                return 0;
-            }
-            const end = base + size;
-            const regionEnd = region.base + region.size;
-            memory.unregister(region.name);
-            const { kind, access } = region;
-            if (base > region.base)
-            {
-                memory.register({ name: region.name, base: region.base,
-                    size: base - region.base, kind, access });
-            }
-            if (regionEnd > end)
-            {
-                memory.register({ name: `heap@${end.toString(16)}`, base: end,
-                    size: regionEnd - end, kind, access });
-            }
-            claimedSpans.set(base, { size, kind, access });
-            return base;
-        },
-        /**
-         * Puts back a span `claim` took, once what was mapped on it is gone,
-         * and nothing for one it did not take: the heap has it to hand out
-         * again -- a library that can only live there is loaded there again --
-         * and its region is the heap's once more, joined with the parts on
-         * either side, since a block the heap later hands out across where a
-         * cut was is one buffer and an access spanning two regions is refused.
-         *
-         * @param {number} base
-         */
-        giveBack: base=>{
-            const span = claimedSpans.get(base);
-            if (!span)
-            {
-                return;
-            }
-            claimedSpans.delete(base);
-            core.api('win32').heap().free(base);
-            const end = base + span.size;
-            const heapPart = (/** @type {any} */ region)=>
-                (region?.name.startsWith('heap') ? region : null);
-            const below = heapPart(memory.find(base - 1));
-            const above = heapPart(memory.find(end));
-            for (const part of [below, above])
-            {
-                if (part)
-                {
-                    memory.unregister(part.name);
-                }
-            }
-            const from = below?.base ?? base;
-            memory.register({
-                name: below?.name ?? `heap@${base.toString(16)}`, base: from,
-                size: (above ? above.base + above.size : end) - from,
-                kind: span.kind, access: span.access,
-            });
-        },
-    };
 
     // An image in the heap's span takes its place there before anything else
     // can: the heap has handed nothing that high out yet, and a library placed

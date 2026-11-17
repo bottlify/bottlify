@@ -2357,3 +2357,14 @@ driver a program installs (a hardware monitor's, a scanner's) cannot do what it 
 as a process, its image ran as a program and the program believed its driver was there. Its
 service key is still created and kept, and the program goes on as it does on a machine where its
 driver will not load. The refusal is said as a divergence. *2026-11-16.*
+
+**A259. The Steam client is this build's own, standing as Valve's file stands: its headers, and
+its image base when the file is not linked for ASLR.** A program's calls into `steamclient.dll`
+are answered by this build's implementation, from the person's own Steam sign-in alone: an app is
+owned, subscribed or installed only when the account's licences grant it, and an ownership ticket
+is the one Steam signed. A DRM wrapper around a Steam game reads the client's file in Steam's
+folder and compares it with the module it loaded; the module carries that file's headers and is
+placed at the base the file names, as Windows loads a DLL not linked for ASLR when the base is
+free (and as Proton keeps Valve's own client where it belongs). The wrapper itself runs as it is:
+nothing of it is patched, and nothing is answered that the account does not hold. A base that is
+not free is said as a divergence and the module goes where the others are. *2026-11-17.*
