@@ -877,6 +877,13 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         : null;
 
     /**
+     * Render targets read back off the GPU for a lock, the back buffers apart,
+     * and the milliseconds the lock waited for each: a program that reads its
+     * back buffer every frame waits on the GPU every frame.
+     */
+    const readBacks = { backBuffer: 0, backBufferMs: 0, other: 0, otherMs: 0 };
+
+    /**
      * How a lockable render target reaches its pixels: read back off the GPU
      * before the lock, uploaded after the unlock. Absent when the renderer
      * cannot do either, and the lock then says so as a divergence.
@@ -890,13 +897,19 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             return undefined;
         }
         return {
-            readBack: surface=>renderer.readSurface(surface).then(
-                (/** @type {{ data: Uint8Array } | null} */ pixels)=>{
-                    if (pixels)
-                    {
-                        writePixels(surface, pixels.data, write);
-                    }
-                }),
+            readBack: surface=>{
+                const at = performance.now();
+                const back = backBuffers.includes(surface);
+                readBacks[back ? 'backBuffer' : 'other']++;
+                return renderer.readSurface(surface).then(
+                    (/** @type {{ data: Uint8Array } | null} */ pixels)=>{
+                        if (pixels)
+                        {
+                            writePixels(surface, pixels.data, write);
+                        }
+                        readBacks[back ? 'backBufferMs' : 'otherMs'] += performance.now() - at;
+                    });
+            },
             written: surface=>renderer.markDirty(surface),
         };
     };
@@ -1939,8 +1952,17 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             // Reported whether or not this build draws: a program setting the
             // same matrix over and over is doing it for its own reasons, and
             // that is worth knowing before anyone builds a stub to spare it.
-            return Object.defineProperty({ ...drawn, redundantTransforms }, 'lastFrame',
-                { value: drawn?.lastFrame });
+            const { swapEffect, backBufferCount, windowed, backBufferWidth, backBufferHeight,
+                backBufferFormat, flags } = presentParameters;
+            return Object.defineProperty({
+                ...drawn, redundantTransforms,
+                // How the program asked to present: what a back buffer holds
+                // after Present follows from it.
+                present: { swapEffect, backBufferCount, windowed, backBufferWidth,
+                    backBufferHeight, backBufferFormat, flags },
+                readBacks: { ...readBacks, backBufferMs: Math.round(readBacks.backBufferMs),
+                    otherMs: Math.round(readBacks.otherMs) },
+            }, 'lastFrame', { value: drawn?.lastFrame });
         },
 
         BeginScene(){
