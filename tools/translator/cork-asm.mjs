@@ -108,7 +108,10 @@ function mapImage(file, base){
     const pe = view.getUint32(0x3c, true);
     const sections = view.getUint16(pe + 6, true);
     const optional = pe + 24;
-    const imageBase = view.getUint32(optional + 28, true);
+    // A PE32+ image's base is a quadword four bytes earlier; one past 4 GiB is
+    // given with --base, as the process that ran it mapped it.
+    const imageBase = view.getUint16(optional, true) === 0x20b
+        ? view.getUint32(optional + 24, true) : view.getUint32(optional + 28, true);
     const size = view.getUint32(optional + 56, true);
     const table = optional + view.getUint16(pe + 20, true);
     const image = new Uint8Array(size);
