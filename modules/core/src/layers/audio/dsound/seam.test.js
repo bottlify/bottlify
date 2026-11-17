@@ -1657,6 +1657,11 @@ test('GetDeviceID answers the device a default names, and a device as itself', a
         assert.equal(ask(alias(which)), DS_OK, `DSDEVID playback default ${which}`);
         assert.deepEqual(answered(), enumerated);
     }
+    // Neither half is zero, as in a real device's random GUID: a program that
+    // compared the second half with the zeroes it started from took a GUID with
+    // a zero half for no change of device and never turned its sound on.
+    assert.ok(enumerated.slice(0, 8).some(byte=>byte !== 0)
+        && enumerated.slice(8).some(byte=>byte !== 0), 'every byte of the GUID in play');
     // As Wine's dsound test expects DirectSoundCreate to answer for a capture
     // default: the default names a device that is not there.
     for (const which of [1, 3])
@@ -1963,7 +1968,7 @@ const ENUMERATE_A = 7;
 const ENUMERATE_W = 8;
 const E_PROP_ID_UNSUPPORTED = 0x80070490;
 /** What DirectSoundEnumerate names the one device by. */
-const DEVICE_GUID = [.../** @type {Uint8Array} */ (parseGuid('{00000001-0000-0000-0000-000000000000}'))];
+const DEVICE_GUID = [.../** @type {Uint8Array} */ (parseGuid('{BD6DD71B-3DEB-4BF1-B3A6-2F5C9A8E7D41}'))];
 const DEVICE_NAME = 'Bottlify Sound Adapter';
 const PRIVATE_CLSID = 0x1e00;
 const PRIVATE_IID = 0x1e20;
