@@ -42,6 +42,33 @@ export const SHLWAPI_NAMED_ORDINALS = Object.freeze([
     [514, 'IUnknown_ProfferService'], [491, 'SHGetShellKey'], [516, 'SKGetValueW'],
     [517, 'SKSetValueW'], [518, 'SKDeleteValueW'],
     [519, 'SKAllocValueW'],
+    [29, 'IsCharSpaceW'], [30, 'IsCharBlankW'], [31, 'IsCharPunctW'], [32, 'IsCharCntrlW'],
+    [33, 'IsCharDigitW'], [34, 'IsCharXDigitW'], [35, 'GetStringType3ExW'],
+    [151, 'StrCmpNCA'], [152, 'StrCmpNCW'], [153, 'StrCmpNICA'], [154, 'StrCmpNICW'],
+    [155, 'StrCmpCA'], [156, 'StrCmpCW'], [157, 'StrCmpICA'], [158, 'StrCmpICW'],
+    [162, 'SHTruncateString'], [203, 'SHStripMneumonicA'], [225, 'SHStripMneumonicW'],
+    [205, 'SHGetValueGoodBootA'], [206, 'SHGetValueGoodBootW'], [216, 'SHAnsiToUnicodeCP'],
+    [218, 'SHUnicodeToAnsiCP'], [270, 'GUIDFromStringW'], [280, 'SHRegGetIntW'],
+    [343, 'SHRegGetCLSIDKeyA'], [344, 'SHRegGetCLSIDKeyW'], [364, 'DoesStringRoundTripA'],
+    [365, 'DoesStringRoundTripW'],
+    [3, 'PathFileExistsDefExtA'], [4, 'PathFileExistsDefExtW'], [5, 'PathFindOnPathExA'],
+    [6, 'PathFindOnPathExW'], [170, 'PathSkipLeadingSlashesA'],
+    [445, 'PathFileExistsAndAttributesA'], [446, 'PathFileExistsAndAttributesW'],
+    [448, 'FixSlashesAndColonW'], [462, 'UrlFixupW'],
+    [177, 'SHLoadMenuPopup'], [178, 'SHPropagateMessage'], [179, 'SHMenuIndexFromID'],
+    [180, 'SHRemoveAllSubMenus'], [181, 'SHEnableMenuItem'], [182, 'SHCheckMenuItem'],
+    [183, 'SHRegisterClassA'], [192, 'SHGetMenuFromID'], [193, 'SHGetCurColorRes'],
+    [197, 'SHFillRectClr'], [204, 'SHIsChildOrSelf'], [222, 'SHGlobalCounterCreate'],
+    [223, 'SHGlobalCounterGetValue'], [224, 'SHGlobalCounterIncrement'],
+    [237, 'SHRegisterClassW'], [238, 'SHUnregisterClassesA'], [239, 'SHUnregisterClassesW'],
+    [240, 'SHDefWindowProc'], [250, 'GetPerfTime'], [276, 'WhichPlatform'],
+    [342, 'SHInterlockedCompareExchange'], [377, 'MLLoadLibraryA'], [378, 'MLLoadLibraryW'],
+    [405, 'MLBuildResURLA'], [406, 'MLBuildResURLW'], [413, 'SHGetMachineInfo'],
+    [418, 'MLFreeLibrary'], [422, 'SHGlobalCounterCreateNamedA'],
+    [423, 'SHGlobalCounterCreateNamedW'], [424, 'SHGlobalCounterDecrement'],
+    [429, 'MLIsMLHInstance'], [432, 'SHSendMessageBroadcastA'],
+    [433, 'SHSendMessageBroadcastW'], [437, 'IsOS'], [461, 'SHGetAppCompatFlags'],
+    [542, 'GetUIVersion'], [549, 'SHCoCreateInstanceAC'],
 ]);
 
 const S_OK = 0;
@@ -1149,6 +1176,22 @@ export function createOrdinalFunctions(host){
             handler: ([text, guid])=>{
                 const bytes = (text >>> 0) === 0 ? null
                     : parseGuid(host.readCString(text >>> 0, 64));
+                if (bytes === null || (guid >>> 0) === 0)
+                {
+                    return 0;
+                }
+                host.writeMemory(guid >>> 0, bytes);
+                return 1;
+            },
+        },
+
+        /** BOOL GUIDFromStringW(LPCWSTR idstr, CLSID *id) */
+        GUIDFromStringW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([text, guid])=>{
+                const bytes = (text >>> 0) === 0 || !host.readWideString ? null
+                    : parseGuid(host.readWideString(text >>> 0, 64 * 2));
                 if (bytes === null || (guid >>> 0) === 0)
                 {
                     return 0;

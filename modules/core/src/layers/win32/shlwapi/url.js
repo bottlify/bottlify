@@ -900,6 +900,8 @@ export function createUrlFunctions(host, { A, W }){
 
     /** Said once, the first time a URL is asked a question not answered here. */
     let unanswered = false;
+    /** Said once: UrlFixupW mends no scheme. */
+    let unmended = false;
 
     return {
         /**
@@ -1163,5 +1165,62 @@ export function createUrlFunctions(host, { A, W }){
             }
             return result ? 1 : 0;
         }),
+
+        /** BOOL UrlIsOpaqueA(LPCSTR pszUrl): UrlIs's URLIS_OPAQUE. */
+        ...both('UrlIsOpaque', 4, (width, [pointer])=>{
+            const url = width.read(pointer);
+            return url !== null && urlIs(url, URLIS_OPAQUE) ? 1 : 0;
+        }),
+
+        /** BOOL UrlIsNoHistoryA(LPCSTR pszUrl): UrlIs's URLIS_NOHISTORY. */
+        ...both('UrlIsNoHistory', 4, (width, [pointer])=>{
+            const url = width.read(pointer);
+            return url !== null && urlIs(url, URLIS_NOHISTORY) ? 1 : 0;
+        }),
+
+        /**
+         * int UrlCompareA(LPCSTR psz1, LPCSTR psz2, BOOL fIgnoreSlash)
+         *
+         * The two compared character by character, case kept; with
+         * fIgnoreSlash a single trailing slash on either does not count.
+         */
+        ...both('UrlCompare', 12, (width, [first, second, ignoreSlash])=>{
+            const trim = (/** @type {string | null} */ url)=>(url !== null && (ignoreSlash | 0) !== 0
+                && url.endsWith('/') ? url.slice(0, -1) : url);
+            const a = trim(width.read(first));
+            const b = trim(width.read(second));
+            if (a === null || b === null)
+            {
+                return a === b ? 0 : a === null ? -1 : 1;
+            }
+            return a < b ? -1 : a > b ? 1 : 0;
+        }),
+
+        /**
+         * HRESULT UrlFixupW(LPCWSTR url, LPWSTR translatedUrl, DWORD maxChars)
+         *
+         * Windows mends a mistyped scheme here ("htp:" for "http:"); no
+         * scheme is mended, the URL is copied as it is and S_FALSE answered,
+         * which says nothing was changed, and that is said once.
+         */
+        UrlFixupW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([pointer, out, room])=>{
+                const url = W.read(pointer);
+                if (url === null || (out >>> 0) === 0 || (room >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                if (!unmended)
+                {
+                    unmended = true;
+                    host.divergence?.('UrlFixupW', 'a mistyped scheme is not mended: the URL is'
+                        + ' copied as it is');
+                }
+                host.writeMemory(out >>> 0, W.sz(url.slice(0, (room >>> 0) - 1)));
+                return url.length < (room >>> 0) ? S_FALSE : E_POINTER;
+            },
+        },
     };
 }
