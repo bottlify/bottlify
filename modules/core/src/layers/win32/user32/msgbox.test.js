@@ -310,3 +310,27 @@ test('MessageBoxIndirect puts up the box its MSGBOXPARAMS describes, strings by 
         assert.equal(asked[1].title, 'Error', 'no caption is "Error", as for MessageBox');
         assert.equal(fns.MessageBoxIndirectA.argBytes, 4);
     });
+
+test('a system-modal box is topmost without the modal frame; MB_TASKMODAL overrides it', async()=>{
+    // Wine's dialog test (test_MessageBox): the extended styles a box has by
+    // its modality, as Windows makes them.
+    const WS_EX_DLGMODALFRAME = 0x1, WS_EX_TOPMOST = 0x8;
+    const MB_SYSTEMMODAL = 0x1000, MB_TASKMODAL = 0x2000, MB_TOPMOST = 0x40000;
+    const GWL_EXSTYLE = -20;
+    const { fns, put, boxNamed, press } = setup();
+    put(TEXT, 'Text');
+    const cases = [[MB_OKCANCEL, WS_EX_DLGMODALFRAME],
+        [MB_OKCANCEL | MB_SYSTEMMODAL, WS_EX_TOPMOST],
+        [MB_OKCANCEL | MB_TASKMODAL | MB_SYSTEMMODAL, WS_EX_DLGMODALFRAME],
+        [MB_OKCANCEL | MB_TOPMOST, WS_EX_DLGMODALFRAME | WS_EX_TOPMOST]];
+    for (const [index, [type, expected]] of cases.entries())
+    {
+        put(CAPTION, `Box ${index}`);
+        const answer = fns.MessageBoxA.handler([0, TEXT, CAPTION, type]);
+        const box = await boxNamed(`Box ${index}`);
+        assert.equal(fns.GetWindowLongA.handler([box, GWL_EXSTYLE]) & (WS_EX_DLGMODALFRAME
+            | WS_EX_TOPMOST), expected, `type ${type.toString(16)}`);
+        press(box, VK_ESCAPE);
+        await answer;
+    }
+});

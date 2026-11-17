@@ -38,6 +38,7 @@ const WS_GROUP = 0x00020000;
 const WS_TABSTOP = 0x00010000;
 const WS_EX_TOPMOST = 0x00000008;
 const DS_MODALFRAME = 0x0080;
+const DS_SYSMODAL = 0x0002;
 const DS_SETFONT = 0x0040;
 const DS_NOIDLEMSG = 0x0100;
 const BS_PUSHBUTTON = 0;
@@ -52,6 +53,7 @@ const MB_TYPEMASK = 0x000f;
 const MB_DEFMASK = 0x0300;
 const MB_HELP = 0x4000;
 const MB_SYSTEMMODAL = 0x1000;
+const MB_TASKMODAL = 0x2000;
 const MB_TOPMOST = 0x40000;
 const MB_RIGHT = 0x80000;
 
@@ -332,8 +334,13 @@ export function createMessageBoxFunctions({ host, call, procedure, measure, fram
                 bytes.push(0);
             }
         };
-        const topmost = (type & (MB_TOPMOST | MB_SYSTEMMODAL)) !== 0;
-        u32(WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME | DS_SETFONT | DS_NOIDLEMSG);
+        // A system-modal box - MB_SYSTEMMODAL without MB_TASKMODAL, which
+        // overrides it - is a DS_SYSMODAL dialog: topmost, and without the
+        // modal frame's WS_EX_DLGMODALFRAME every other box has.
+        const systemModal = (type & (MB_SYSTEMMODAL | MB_TASKMODAL)) === MB_SYSTEMMODAL;
+        const topmost = systemModal || (type & MB_TOPMOST) !== 0;
+        u32(WS_POPUP | WS_CAPTION | WS_SYSMENU | (systemModal ? DS_SYSMODAL : DS_MODALFRAME)
+            | DS_SETFONT | DS_NOIDLEMSG);
         u32(topmost ? WS_EX_TOPMOST : 0);
         u16(1 + buttons.length);
         for (let index = 0; index < 4; index++)
