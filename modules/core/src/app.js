@@ -4598,10 +4598,38 @@ const UNJOURNALLED = new Set(['unimplemented', 'cursor-moved', 'bundle-fetching'
  *     ...args: any[]) => any }} into
  */
 export function journalEvents(events, into, { shaders = false } = {}){
+    // A program's console output is journalled a line at a time: a C runtime
+    // writes unbuffered output a character per call, a line of the journal each.
+    /** @type {Map<number, string>} */
+    const unfinished = new Map();
+    /** @param {number} handle @param {string} text */
+    const outputLine = (handle, text)=>into.write('info', 'output', '{0}',
+        describeEvent({ handle, text }));
     events.onAny((/** @type {string} */ name, /** @type {any} */ payload)=>{
         if (UNJOURNALLED.has(name))
         {
             return;
+        }
+        if (name === 'output')
+        {
+            const lines = ((unfinished.get(payload.handle) ?? '') + payload.text).split(/\r?\n/);
+            unfinished.set(payload.handle, /** @type {string} */ (lines.pop()));
+            for (const line of lines)
+            {
+                outputLine(payload.handle, line);
+            }
+            return;
+        }
+        if (name === 'exit')
+        {
+            for (const [handle, text] of unfinished)
+            {
+                if (text)
+                {
+                    outputLine(handle, text);
+                }
+            }
+            unfinished.clear();
         }
         if (name === 'shader-compiled')
         {

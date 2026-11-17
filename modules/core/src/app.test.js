@@ -2228,6 +2228,25 @@ test('a shader that compiled is a journal line only when asked, one that failed 
     assert.doesNotMatch(asked[0][2], /float4/, 'no source for one that compiled');
 });
 
+test('console output written a character at a time is journalled a line at a time', ()=>{
+    /** @type {any} */
+    let watcher = null;
+    /** @type {string[]} */
+    const written = [];
+    journalEvents({ onAny: (/** @type {any} */ w)=>{ watcher = w; } },
+        { write: (_level, category, _template, text)=>written.push(`${category} ${text}`) });
+    for (const ch of 'one\r\ntwo\n')
+    {
+        watcher('output', { handle: 3, text: ch });
+    }
+    watcher('output', { handle: 7, text: 'other' });
+    watcher('output', { handle: 3, text: 'tail' });
+    assert.deepEqual(written, ['output handle=3 text=one', 'output handle=3 text=two']);
+    watcher('exit', { code: 0 });
+    assert.deepEqual(written.slice(2), ['output handle=3 text=tail', 'output handle=7 text=other',
+        'exit code=0'], 'an unfinished line is said when the process ends');
+});
+
 test('a yield answers the other executors each time their bell rings while it lasts', async()=>{
     let rung = 0;
     /** @type {(() => void)[]} */
