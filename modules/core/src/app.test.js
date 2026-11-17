@@ -1340,21 +1340,43 @@ test('a near jump is encoded relative to the instruction after it', ()=>{
         'backwards wraps');
 });
 
-test('a film\'s refused sound is a gap passed when the playing reaches it', ()=>{
-    // A track that takes a quarter of a second of film at 22050: the rest is
-    // refused, a gap after the part it took.
-    const track = { write: (/** @type {Uint8Array} */ bytes)=>Math.floor(bytes.length / 4 / 2) };
-    const ledger = { taken: 0, gaps: /** @type {{ at: number, frames: number }[]} */ ([]) };
-    const fed = feedFilmSound(track, [new Int16Array(22050 * 2)], 2, 22050, 44100, ledger);
-    assert.deepEqual(fed, { offered: 44100, refused: 44100 - 11025 },
-        'a second of film at 22050 is a second of device frames, taken or not');
-    assert.deepEqual(ledger, { taken: 11025, gaps: [{ at: 11025, frames: 44100 - 11025 }] });
-    assert.equal(filmSoundOwed(ledger, 0), 44100,
-        'nothing played: the whole second is still ahead, the gap too (not heard at once)');
-    assert.equal(filmSoundOwed(ledger, 5000), 44100 - 5000, 'part of what it took played');
-    assert.equal(filmSoundOwed(ledger, 11025), 0,
-        'the playing reached the gap: it has passed, not owed for ever');
-    assert.deepEqual(ledger.gaps, [], 'and is dropped');
+test('a film\'s sound a track has no room for is held and goes in as it drains', ()=>{
+    // A track with room for 5500 frames of film (22050 Hz, stereo, 16-bit) at
+    // the device's 44100: a second handed over at once, as a decoder reaching
+    // sound that lay behind the picture in the file does.
+    const ROOM = 5500 * 4;
+    let filled = 0;
+    /** @type {number[]} */
+    const written = [];
+    const track = {
+        room: ()=>ROOM - filled,
+        write: (/** @type {Uint8Array} */ bytes)=>{
+            filled += bytes.length;
+            written.push(bytes.length);
+            return bytes.length / 4 * 2;
+        },
+    };
+    const ledger = { taken: 0, held: /** @type {Uint8Array[]} */ ([]), heldBytes: 0,
+        framesPerByte: 44100 / 22050 / 4 };
+    feedFilmSound(track, [new Int16Array(22050 * 2)], 2, ledger);
+    assert.equal(ledger.taken, 11000, 'what it has room for');
+    assert.equal(ledger.heldBytes, 22050 * 4 - ROOM, 'the rest held, not dropped');
+    assert.equal(filmSoundOwed(ledger, 0), 44100, 'the whole second is owed: none of it heard');
+    assert.equal(filmSoundOwed(ledger, 11000), 44100 - 11000,
+        'what the track played is heard; the held part is still to come');
+
+    filled = 0;
+    feedFilmSound(track, [], 2, ledger);
+    assert.equal(ledger.taken, 22000, 'with no new sound, what is held goes in as there is room');
+    for (let turn = 0; turn < 3; turn++)
+    {
+        filled = 0;
+        feedFilmSound(track, [], 2, ledger);
+    }
+    assert.equal(ledger.heldBytes, 0);
+    assert.equal(written.reduce((sum, bytes)=>sum + bytes, 0), 22050 * 4, 'every byte, once');
+    assert.ok(written.every(bytes=>bytes % 4 === 0), 'and in whole frames');
+    assert.equal(filmSoundOwed(ledger, 44100), 0);
 });
 
 test('the guest clock is credited with all the wall time between credits, capped', ()=>{

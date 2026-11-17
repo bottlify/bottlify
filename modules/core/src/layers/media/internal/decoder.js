@@ -30,6 +30,11 @@ const Info = {
 };
 const INFO_FIELDS = 12;
 
+/** Which of a container's streams a clip keeps (media_open_streams in decoder.c). */
+const Keep = { VIDEO: 1, AUDIO: 2 };
+/** media_open's refusal of a file with no stream of the kind asked for. */
+const NO_STREAM = -5;
+
 /** What media_decode() answers with, by its status code. */
 const Status = /** @type {const} */ (['frame', 'end', 'audio']);
 
@@ -52,6 +57,7 @@ const Failure = new Map([
  * @property {(bytes: number) => number} media_alloc
  * @property {(block: number) => void} media_free
  * @property {(data: number, size: number) => number} media_open
+ * @property {(data: number, size: number, keep: number) => number} media_open_streams
  * @property {(id: number, out: number) => number} media_info
  * @property {(id: number) => number} media_codec_name
  * @property {(id: number) => number} media_decode
@@ -185,30 +191,173 @@ export async function createDecoder(wasmBytes){
         };
     };
 
+    /**
+     * One of a file's two readings: its picture or its sound, the other kind
+     * discarded by the demuxer. Null when the file has none of that kind.
+     *
+     * @param {Uint8Array} bytes @param {number} keep  a `Keep`
+     * @returns {any}
+     */
+    const openKept = (bytes, keep)=>{
+        const size = bytes.byteLength;
+        const block = wasm.media_alloc(size);
+        if (!block)
+        {
+            throw new Error(`media: no room for ${size} bytes in the decoder`);
+        }
+        view(block, size).set(bytes);
+        // The decoder owns the block from here, whether or not it succeeds.
+        const id = wasm.media_open_streams(block, size, keep);
+        if (id === NO_STREAM)
+        {
+            return null;
+        }
+        if (id < 0)
+        {
+            throw new Error(`media: ${Failure.get(id) ?? `unknown failure ${id}`}`);
+        }
+
+        const info = infoOf(id);
+        let closed = false;
+        /** @param {string} what */
+        const alive = what=>{
+            if (closed)
+            {
+                throw new Error(`media: ${what} on a closed clip`);
+            }
+        };
+
+        const clip = {
+            ...info,
+
+            /**
+             * Advances the clip by one video frame, or until the audio it
+             * is holding has to be taken away from it.
+             *
+             * @returns {"frame" | "audio" | "end"}
+             */
+            decode(){
+                alive('decode');
+                const status = wasm.media_decode(id);
+                if (status < 0)
+                {
+                    throw new Error(`media: decode failed (${status})`);
+                }
+                if (status === 0)
+                {
+                    counters.frames++;
+                    // A stream that only settles its size once a frame
+                    // exists is the reason this is read back rather than
+                    // trusted from the header.
+                    const now = infoOf(id);
+                    clip.width = now.width;
+                    clip.height = now.height;
+                }
+                return Status[status];
+            },
+
+            /**
+             * The current frame as BGRA, which is the byte order a Windows
+             * 32-bit surface is in, so a caller blits rather than converts.
+             *
+             * A view into the decoder's memory, valid until the next call
+             * into it. Copy anything that has to outlive that.
+             *
+             * @returns {Uint8Array | null}
+             */
+            frame(){
+                alive('frame');
+                const pointer = wasm.media_frame(id);
+                if (!pointer || clip.width <= 0 || clip.height <= 0)
+                {
+                    return null;
+                }
+                return view(pointer, clip.width * clip.height * 4);
+            },
+
+            /** Bytes of interleaved 16-bit PCM waiting to be read. */
+            audioPending(){
+                alive('audioPending');
+                return wasm.media_audio_pending(id);
+            },
+
+            /**
+             * Takes the decoded PCM, interleaved and signed 16-bit at the
+             * clip's own sample rate. A copy, not a view: what consumes it
+             * outlives the next call into the decoder.
+             *
+             * @returns {Int16Array | null}
+             */
+            readAudio(){
+                alive('readAudio');
+                const pending = wasm.media_audio_pending(id);
+                if (pending <= 0)
+                {
+                    return null;
+                }
+                const scratch = wasm.media_alloc(pending);
+                if (!scratch)
+                {
+                    return null;
+                }
+                const count = wasm.media_audio_read(id, scratch, pending);
+                const pcm = new Int16Array(
+                    view(scratch, count).slice().buffer, 0, count >> 1);
+                wasm.media_free(scratch);
+                counters.audioBytes += count;
+                return pcm;
+            },
+
+            close(){
+                if (closed)
+                {
+                    return;
+                }
+                closed = true;
+                open.delete(clip);
+                wasm.media_close(id);
+            },
+        };
+        open.add(clip);
+        return clip;
+    };
+
     const decoder = {
         /**
-         * Opens a container held in host memory.
+         * Opens a container held in host memory, read twice over: once for its
+         * picture and once for its sound, each with the other discarded.
+         *
+         * A file lays its sound out wherever its muxer chose, and an MPEG
+         * intro was measured with it up to 5 s behind the picture it belongs
+         * to. Read once, in the file's order, the sound could only be reached
+         * by decoding the picture that far ahead; read on its own it is taken
+         * as far ahead as the device needs (`decodeAudio`) while the picture is
+         * decoded only as it is due.
+         *
+         * ponytail: the file is copied into the decoder once per reading, a
+         * second copy while a film plays; one shared block needs the C side
+         * to stop owning what it is given.
          *
          * @param {Uint8Array} bytes The whole file.
          * @returns {any} the clip
          */
         open(bytes){
-            const size = bytes.byteLength;
-            const block = wasm.media_alloc(size);
-            if (!block)
+            const picture = openKept(bytes, Keep.VIDEO);
+            let sound = null;
+            try
             {
-                throw new Error(`media: no room for ${size} bytes in the decoder`);
+                sound = openKept(bytes, Keep.AUDIO);
             }
-            view(block, size).set(bytes);
-            // The decoder owns the block from here, whether or not it succeeds.
-            const id = wasm.media_open(block, size);
-            if (id < 0)
+            catch (e){
+                picture?.close();
+                throw e;
+            }
+            if (!picture && !sound)
             {
-                throw new Error(`media: ${Failure.get(id) ?? `unknown failure ${id}`}`);
+                throw new Error(`media: ${Failure.get(NO_STREAM)}`);
             }
             counters.opened++;
-
-            const info = infoOf(id);
+            const shape = picture ?? sound;
             let closed = false;
             /** @param {string} what */
             const alive = what=>{
@@ -217,99 +366,45 @@ export async function createDecoder(wasmBytes){
                     throw new Error(`media: ${what} on a closed clip`);
                 }
             };
-
             const clip = {
-                ...info,
-
+                ...shape,
+                sampleRate: sound?.sampleRate ?? 0,
+                channels: sound?.channels ?? 0,
+                hasVideo: Boolean(picture),
+                hasAudio: Boolean(sound),
                 /**
-                 * Advances the clip by one video frame, or until the audio it
-                 * is holding has to be taken away from it.
-                 *
-                 * @returns {"frame" | "audio" | "end"}
+                 * Advances the picture by one frame.
+                 * @returns {"frame" | "end"}
                  */
                 decode(){
                     alive('decode');
-                    const status = wasm.media_decode(id);
-                    if (status < 0)
+                    if (!picture)
                     {
-                        throw new Error(`media: decode failed (${status})`);
+                        return 'end';
                     }
-                    if (status === 0)
-                    {
-                        counters.frames++;
-                        // A stream that only settles its size once a frame
-                        // exists is the reason this is read back rather than
-                        // trusted from the header.
-                        const now = infoOf(id);
-                        clip.width = now.width;
-                        clip.height = now.height;
-                    }
-                    return Status[status];
+                    const status = picture.decode();
+                    clip.width = picture.width;
+                    clip.height = picture.height;
+                    return status === 'frame' ? 'frame' : 'end';
                 },
-
                 /**
-                 * The current frame as BGRA, which is the byte order a Windows
-                 * 32-bit surface is in, so a caller blits rather than converts.
-                 *
-                 * A view into the decoder's memory, valid until the next call
-                 * into it. Copy anything that has to outlive that.
-                 *
-                 * @returns {Uint8Array | null}
+                 * Advances the sound alone, by as much as the decoder holds:
+                 * take it with `readAudio`.
+                 * @returns {"audio" | "end"}
                  */
-                frame(){
-                    alive('frame');
-                    const pointer = wasm.media_frame(id);
-                    if (!pointer || clip.width <= 0 || clip.height <= 0)
-                    {
-                        return null;
-                    }
-                    return view(pointer, clip.width * clip.height * 4);
+                decodeAudio(){
+                    alive('decodeAudio');
+                    return sound && sound.decode() === 'audio' ? 'audio' : 'end';
                 },
-
-                /** Bytes of interleaved 16-bit PCM waiting to be read. */
-                audioPending(){
-                    alive('audioPending');
-                    return wasm.media_audio_pending(id);
-                },
-
-                /**
-                 * Takes the decoded PCM, interleaved and signed 16-bit at the
-                 * clip's own sample rate. A copy, not a view: what consumes it
-                 * outlives the next call into the decoder.
-                 *
-                 * @returns {Int16Array | null}
-                 */
-                readAudio(){
-                    alive('readAudio');
-                    const pending = wasm.media_audio_pending(id);
-                    if (pending <= 0)
-                    {
-                        return null;
-                    }
-                    const scratch = wasm.media_alloc(pending);
-                    if (!scratch)
-                    {
-                        return null;
-                    }
-                    const count = wasm.media_audio_read(id, scratch, pending);
-                    const pcm = new Int16Array(
-                        view(scratch, count).slice().buffer, 0, count >> 1);
-                    wasm.media_free(scratch);
-                    counters.audioBytes += count;
-                    return pcm;
-                },
-
+                frame: ()=>picture?.frame() ?? null,
+                audioPending: ()=>sound?.audioPending() ?? 0,
+                readAudio: ()=>sound?.readAudio() ?? null,
                 close(){
-                    if (closed)
-                    {
-                        return;
-                    }
                     closed = true;
-                    open.delete(clip);
-                    wasm.media_close(id);
+                    picture?.close();
+                    sound?.close();
                 },
             };
-            open.add(clip);
             return clip;
         },
 

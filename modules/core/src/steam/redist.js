@@ -56,6 +56,7 @@ import { cabinetFiles, directxFiles, DIRECTX_CABINET, imageMachine, latin1, pars
 import { openCompound, bytesSource } from '../layers/win32/msi/compound.js';
 import { openDatabase } from '../layers/win32/msi/database.js';
 import { evaluateCondition, MSICONDITION } from '../layers/win32/msi/condition.js';
+import { managedImageOf } from '../layers/win32/mscoree/need.js';
 
 export { directxFiles, imageMachine, parseInf };
 
@@ -129,6 +130,11 @@ const dword = value=>{
     return bytes;
 };
 
+/** Windows Installer's program, by its name in a path. */
+const MSIEXEC = /(?:^|\\)msiexec(?:\.exe)?$/i;
+/** The package msiexec's arguments name: after /package or /i, quoted or not. */
+const MSIEXEC_PACKAGE = /(?:^|\s)[/-](?:package|i)\s+(?:"([^"]+)"|(\S+))/i;
+
 /**
  * A Steam install script: the registry values it writes and the programs it
  * runs, `%INSTALLDIR%` already the bottle's directory.
@@ -171,8 +177,14 @@ export function parseInstallScript(text, installDirectory = INSTALL_DIRECTORY){
         const programs = [];
         for (let n = 1; field(entry, `Process ${n}`) !== undefined; n++)
         {
-            programs.push({ path: expand(field(entry, `Process ${n}`)),
-                arguments: expand(field(entry, `Command ${n}`)) });
+            const path = expand(field(entry, `Process ${n}`));
+            const args = expand(field(entry, `Command ${n}`));
+            // Windows Installer run on a package the app carries: the program
+            // is the package its /package or /i names, not msiexec, which is
+            // Windows' own and never in the app (XNA Framework 4.0's).
+            const msi = MSIEXEC.test(path) ? MSIEXEC_PACKAGE.exec(args) : null;
+            programs.push(msi ? { path: msi[1] ?? msi[2], arguments: args }
+                : { path, arguments: args });
         }
         const requirement = field(entry, 'Requirement_OS');
         return { name, programs, requires64: String(field(requirement, 'Is64BitWindows')) === '1' };
@@ -330,6 +342,15 @@ export function applyPackage(db, cabinetFilesByKey, machine){
         WindowsFolder: 'C:\\WINDOWS',
         SystemFolder: wide ? 'C:\\WINDOWS\\SysWOW64' : 'C:\\WINDOWS\\system32',
         ...wide ? { System64Folder: 'C:\\WINDOWS\\system32' } : {},
+        // Where a runtime keeps what is not Windows' own: XNA's native
+        // library, which its assemblies load from the path its registry names.
+        // A package a script names puts files here; one the app only carries
+        // is still taken only when everything goes into Windows (`inWindows`).
+        ProgramFilesFolder: wide ? 'C:\\Program Files (x86)' : 'C:\\Program Files',
+        CommonFilesFolder: wide ? 'C:\\Program Files (x86)\\Common Files'
+            : 'C:\\Program Files\\Common Files',
+        ...wide ? { ProgramFiles64Folder: 'C:\\Program Files',
+            CommonFiles64Folder: 'C:\\Program Files\\Common Files' } : {},
     };
     /** @param {string} text */
     const format = text=>text.replace(/\[([A-Za-z_][\w.]*)\]/g,
@@ -382,10 +403,13 @@ export function applyPackage(db, cabinetFilesByKey, machine){
     };
 
     const installed = new Map();
+    /** Each component's key file, which names a global assembly's runtime. */
+    const keyFiles = new Map();
     /** @type {string[]} */
     const skipped = [];
     for (const component of rowsOf(db, 'Component'))
     {
+        keyFiles.set(component.Component, String(component.KeyPath ?? ''));
         const attributes = Number(component.Attributes ?? 0);
         if ((attributes & COMPONENT_64BIT) && !wide)
         {
@@ -427,6 +451,61 @@ export function applyPackage(db, cabinetFilesByKey, machine){
     }
     const STORE = `${folders.WindowsFolder}\\WinSxS`;
 
+    // A global .NET assembly (Attributes 0, no File_Application) goes to the
+    // global assembly cache, not to its Directory: the folder its name,
+    // version, culture and public key token make, under the cache of the
+    // runtime its metadata was built against - CLR 4's under Microsoft.NET
+    // (v4.0_ folders), CLR 2's under assembly - and of its architecture.
+    // Copied where its Directory says, a runtime looking it up by its name
+    // never found it, and a program built on it stopped at its first use
+    // (XNA Framework 4.0's ten assemblies).
+    /** @type {Map<string, Record<string, string>>} */
+    const cached = new Map();
+    for (const row of rowsOf(db, 'MsiAssembly'))
+    {
+        // Its own Directory does not matter: an installed component is enough.
+        if (Number(row.Attributes ?? 0) === 0 && !row.File_Application
+            && installed.has(row.Component_))
+        {
+            cached.set(row.Component_, Object.fromEntries(rowsOf(db, 'MsiAssemblyName')
+                .filter(name=>name.Component_ === row.Component_)
+                .map(name=>[String(name.Name).toLowerCase(), String(name.Value ?? '')])));
+        }
+    }
+    /** @param {string} key @returns {Uint8Array | undefined} a file's bytes, by its key */
+    const packed = key=>{
+        const row = fileRows.find(file=>file.File === key);
+        return row ? cabinetFilesByKey.get(String(key).toLowerCase())
+            ?.find(one=>one.length === Number(row.FileSize)) : undefined;
+    };
+    /** @type {Map<string, string | null>} */
+    const cacheFolders = new Map();
+    /** @param {string} component @returns {string | null} */
+    const cacheFolder = component=>{
+        if (!cacheFolders.has(component))
+        {
+            const name = /** @type {Record<string, string>} */ (cached.get(component));
+            const key = packed(keyFiles.get(component) ?? '');
+            const runtime = key ? managedImageOf(key)?.runtime ?? null : null;
+            const architecture = (name.processorarchitecture ?? '').toLowerCase();
+            const which = architecture === 'x86' ? 'GAC_32'
+                : architecture === 'amd64' ? 'GAC_64' : 'GAC_MSIL';
+            const version = (name.version ?? '').split('.').map(part=>String(Number(part)))
+                .join('.');
+            const culture = (name.culture ?? '').toLowerCase() === 'neutral' ? ''
+                : name.culture ?? '';
+            const token = (name.publickeytoken ?? '').toLowerCase();
+            const windows = folders.WindowsFolder;
+            cacheFolders.set(component, !name.name || !runtime ? null
+                : runtime.startsWith('v4')
+                    ? `${windows}\\Microsoft.NET\\assembly\\${which}\\${name.name}`
+                        + `\\v4.0_${version}_${culture}_${token}`
+                    : `${windows}\\assembly\\${which}\\${name.name}`
+                        + `\\${version}_${culture}_${token}`);
+        }
+        return cacheFolders.get(component) ?? null;
+    };
+
     /** @type {{ path: string, bytes: Uint8Array }[]} */
     const files = [];
     for (const file of fileRows)
@@ -434,7 +513,8 @@ export function applyPackage(db, cabinetFilesByKey, machine){
         const assembly = assemblies.get(file.Component_);
         const directory = assembly
             ? `${STORE}${assembly.policy ? '\\Policies' : ''}\\${assembly.key}`
-            : installed.get(file.Component_);
+            : cached.has(file.Component_) ? cacheFolder(file.Component_)
+                : installed.get(file.Component_);
         if (directory === undefined)
         {
             continue;
@@ -773,6 +853,30 @@ export async function installRedistributables(tree, scripts, machine, programs =
             said.push(`${inside}: ${applied.length} package(s), `
                 + `${applied.reduce((sum, one)=>sum + one.files.length, 0)} file(s)`
                 + `${named ? '' : ', the app\'s own'}`);
+            // A package that lays DirectX's setup down with its optional
+            // components' cabinets runs it from there, a custom action this
+            // does not run: its cabinets go in by their INFs, as the DirectX
+            // step's do (XNA Framework 4.0's X3DAudio, XAudio2 and XACT, which
+            // its assemblies import and the engine does not answer).
+            for (const one of applied)
+            {
+                const setups = new Set(one.files.filter(file=>/\\dxsetup\.exe$/i.test(file.path))
+                    .map(file=>file.path.slice(0, file.path.lastIndexOf('\\')).toLowerCase()));
+                const cabinets = one.files.filter(file=>{
+                    const at = file.path.lastIndexOf('\\');
+                    return setups.has(file.path.slice(0, at).toLowerCase())
+                        && DIRECTX_CABINET.test(file.path.slice(at + 1));
+                });
+                if (cabinets.length === 0)
+                {
+                    continue;
+                }
+                const directx = directxFiles(cabinets.map(file=>file.bytes), machine);
+                chosen.push({ version: one.version, files: directx.files, registry: [] });
+                said.push(`${inside}: DirectX's setup it lays down, ${directx.files.length} `
+                    + `file(s) by its cabinets' INFs${directx.unregistered.length > 0
+                        ? `, not registered: ${directx.unregistered.join(', ')}` : ''}`);
+            }
         }
     }
 

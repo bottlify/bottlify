@@ -72,7 +72,7 @@ test('the volume is read from outside while it runs: a file saved by an earlier 
         .find((/** @type {any} */ e)=>e.path === path);
     assert.deepEqual(entry && { name: entry.name, directory: entry.directory, size: entry.size },
         { name: 'slot1.sav', directory: false, size: 3 });
-    assert.deepEqual(app.files.read(path), Uint8Array.of(7, 8, 9));
+    assert.deepEqual(await app.files.read(path), Uint8Array.of(7, 8, 9));
     assert.ok(app.files.list('C:\\App')
         .some((/** @type {any} */ e)=>e.name === 'save' && e.directory));
 });

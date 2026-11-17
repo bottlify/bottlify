@@ -5,8 +5,8 @@ Full license texts are kept alongside the corresponding component.
 
 ## FFmpeg: video and audio decoding
 
-- Source: upstream https://github.com/FFmpeg/FFmpeg at release tag `n6.1`, commit
-  `d4ff0020b40b524a490cf62eccbd3a318f4c0e58`, unmodified
+- Source: upstream https://github.com/FFmpeg/FFmpeg at release tag `n9.0.2`, commit
+  `946fcce07b6dcd0331c8cc609192aeff5e1924f8`, unmodified
 - Build definition: `modules/core/scripts/Dockerfile.video-decoder`,
   `modules/core/scripts/video-decoder/build-decoder.sh` and `build-video-decoder.mjs` in this
   repository; the workflow `.github/workflows/vendor.yml` runs it and publishes the result as a

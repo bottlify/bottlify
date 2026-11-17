@@ -408,7 +408,8 @@ test('what a bottle\'s installation left in system32 is found there, and loaded 
         });
         t.after(()=>app.dispose());
 
-        assert.deepEqual([...app.files.read('C:\\WINDOWS\\system32\\runtime.dll')], [...library],
+        assert.deepEqual([...await app.files.read('C:\\WINDOWS\\system32\\runtime.dll') ?? []],
+            [...library],
             'the library is where Windows keeps it');
         const placed = app.files.list('C:\\Games\\Game')
             .map((/** @type {any} */ entry)=>entry.name);

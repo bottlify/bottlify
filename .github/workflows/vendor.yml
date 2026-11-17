@@ -61,7 +61,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="video-decoder-$(git rev-parse --short=7 HEAD)"
-          NOTES="FFmpeg n6.1 (LGPL-2.1-or-later) compiled to WebAssembly and linked with modules/core/scripts/video-decoder/decoder.c, from $(git rev-parse HEAD)."
+          FFMPEG="$(sed -n 's/^ARG FFMPEG_TAG=//p' modules/core/scripts/Dockerfile.video-decoder)"
+          NOTES="FFmpeg ${FFMPEG} (LGPL-2.1-or-later) compiled to WebAssembly and linked with modules/core/scripts/video-decoder/decoder.c, from $(git rev-parse HEAD)."
           cd modules/core/dist/vendor
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber \

@@ -107,7 +107,7 @@ test('a clip reports what it holds, and hands back every sample of it', async t=
     let status = '';
     for (let guard = 0; guard < 64 && status !== 'end'; guard++)
     {
-        status = clip.decode();
+        status = clip.decodeAudio();
         const pcm = clip.readAudio();
         if (pcm)
         {
@@ -123,9 +123,11 @@ test('a clip reports what it holds, and hands back every sample of it', async t=
 
     assert.equal(status, 'end');
     assert.deepEqual(decoded, [...samples]);
+    assert.equal(clip.decode(), 'end', 'a file with no picture has no frame to give');
 
     clip.close();
     assert.throws(()=>clip.decode(), /closed clip/);
+    assert.throws(()=>clip.decodeAudio(), /closed clip/);
 });
 
 test('a decoded clip is counted, and closeAll lets go of it', async t=>{
@@ -136,7 +138,7 @@ test('a decoded clip is counted, and closeAll lets go of it', async t=>{
     }
     const clip = decoder.open(wav(new Int16Array(64), 22050));
     assert.equal(decoder.diagnostics().clips, 1);
-    clip.decode();
+    clip.decodeAudio();
     assert.ok(clip.audioPending() > 0, 'the samples are waiting to be taken');
 
     decoder.closeAll();
@@ -151,7 +153,7 @@ test('clips belong to the machine, the instance to the run', async t=>{
     }
     const first = decoderSession(instance);
     const clip = first.open(wav(new Int16Array(64), 22050));
-    clip.decode();
+    clip.decodeAudio();
     assert.ok(clip.audioPending() > 0, 'the first machine decoded it');
     assert.equal(instance.diagnostics().opened, 1, 'the instance counted the clip');
     assert.equal(instance.diagnostics().clips, 1);

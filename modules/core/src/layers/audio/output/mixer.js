@@ -1180,6 +1180,15 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory, bes
             },
 
             /**
+             * Bytes the next `write` takes whole: a caller that must lose
+             * nothing (a film's sound) offers that much and keeps the rest.
+             */
+            room(){
+                return Math.max(0, SLOT_BYTES
+                    - ((Atomics.load(header, WRITTEN) - Atomics.load(header, READ)) | 0));
+            },
+
+            /**
              * Tells the reader the rate to resample from. It applies to what
              * is still unread in the slot as well, a turn's worth at most,
              * because the slot has one rate and no marker in its bytes.

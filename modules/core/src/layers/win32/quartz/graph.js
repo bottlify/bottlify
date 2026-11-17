@@ -133,8 +133,8 @@ const AM_SEEKING_POSITIONING_MASK = 0x03;
 const AM_SEEKING_ABSOLUTE = 0x01;
 
 /**
- * How many frames one tick may decode, and how many decoder steps it may take
- * to find them.
+ * How many frames one tick may decode, and how many times it may advance the
+ * sound.
  *
  * ponytail: a fixed catch-up budget rather than dropping frames to keep the
  * clock. A run that stalls for a second falls behind and the film plays slower
@@ -148,10 +148,10 @@ const STEPS_PER_TICK = 16;
  * How far the picture may be decoded past the sound that has been heard.
  *
  * A frame is shown the moment it is decoded, so this is also how far the
- * picture leads the sound. It is a lead rather than nothing because the sound
- * decoded with those frames is what keeps a device fed through a turn that took
- * a while, and a device left with nothing is heard at once where a frame a
- * fifth of a second early is not.
+ * picture leads the sound; the sound is read this far past the picture. It is a
+ * lead rather than nothing because sound handed over ahead is what keeps a
+ * device fed through a turn that took a while, and a device left with nothing
+ * is heard at once where a frame a fifth of a second early is not.
  */
 const SOUND_LEAD_MS = 200;
 
@@ -211,7 +211,9 @@ const AUDIO_PROPERTIES = ['Volume', 'Balance'];
  * @property {VideoClip | null} clip   What RenderFile opened, when it opened one.
  * @property {number} film             Which clip this is, so that whoever plays
  *                                     the sound can tell one from the next.
- * @property {number} shown            Frames decoded and handed over so far.
+ * @property {number} shown            Frames handed over so far: the film's position.
+ * @property {boolean} pictureDone     Whether the picture has said `end`.
+ * @property {boolean} soundDone       Whether the sound has said `end`.
  * @property {number} soundMs
  *           Milliseconds of this film's own sound handed over so far, which is
  *           where the sound has reached in the film -- as against where it has
@@ -332,6 +334,8 @@ function newGraphState(){
         clip: null,
         film: 0,
         shown: 0,
+        pictureDone: false,
+        soundDone: false,
         soundMs: 0,
         heardMs: 0,
         soundMovedAt: null,
@@ -660,6 +664,8 @@ export function createQuartz(host){
         graph.clip = null;
         graph.film = ++films;
         graph.shown = 0;
+        graph.pictureDone = false;
+        graph.soundDone = false;
         graph.soundMs = 0;
         graph.heardMs = 0;
         graph.soundMovedAt = null;
@@ -824,42 +830,43 @@ export function createQuartz(host){
             const audio = [];
             /** @type {Uint8Array | null} */
             let frame = null;
-            let decoded = 0;
+            // The sound first, on its own reading of the file: as far past
+            // where the picture is going as the lead, whatever the picture has
+            // reached in the file. A muxer may lay the sound seconds behind
+            // its picture, and read in the file's order it was reached only by
+            // decoding the picture that far ahead; the sound ran out, stalled,
+            // and the film went over to the host clock and back - in jerks.
+            const soundTo = want * 1000 / clip.fps + SOUND_LEAD_MS;
             let steps = 0;
-            while (graph.shown < want && decoded < FRAMES_PER_TICK && steps++ < STEPS_PER_TICK)
+            while (clip.hasAudio && !graph.soundDone && graph.soundMs < soundTo
+                && steps++ < STEPS_PER_TICK)
             {
-                const what = clip.decode();
-                if (what === 'frame')
+                const what = clip.decodeAudio();
+                const block = clip.readAudio();
+                if (block)
+                {
+                    audio.push(block);
+                    graph.soundMs += block.length / clip.channels * 1000 / clip.sampleRate;
+                }
+                graph.soundDone = what === 'end';
+            }
+            // Then the picture, decoded only as it is due. Last, because a frame
+            // is a view into the decoder good until the next call into it.
+            let decoded = 0;
+            while (!graph.pictureDone && graph.shown < want && decoded < FRAMES_PER_TICK)
+            {
+                if (clip.decode() === 'frame')
                 {
                     graph.shown++;
                     decoded++;
                     frame = clip.frame();
                     continue;
                 }
-                if (what === 'audio')
-                {
-                    const block = clip.readAudio?.() ?? null;
-                    if (block)
-                    {
-                        audio.push(block);
-                    }
-                    continue;
-                }
+                graph.pictureDone = true;
+            }
+            if (graph.pictureDone && (graph.soundDone || !clip.hasAudio))
+            {
                 complete(graph);
-                break;
-            }
-            // Whatever sound the decoder is still holding goes now, rather than
-            // waiting for a tick that wants another frame: it belongs with
-            // pictures already shown, and every tick it waits inside is a tick
-            // it is heard late by.
-            const residue = clip.readAudio?.();
-            if (residue)
-            {
-                audio.push(residue);
-            }
-            for (const block of audio)
-            {
-                graph.soundMs += block.length / clip.channels * 1000 / clip.sampleRate;
             }
             // Whatever the budget could not reach is time the film does not get
             // to have: the clock is moved up to what was actually shown, so a

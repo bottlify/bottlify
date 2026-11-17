@@ -17,13 +17,14 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { bootstrapper, cabinet, gameSetup } from './redist.fixture.js';
+import { bootstrapper, cabinet, gameSetup, runtimeWithDirectX } from './redist.fixture.js';
 import * as redist from './redist.js';
 import {
     applyPackage, compareVersions, imageMachine, parseInstallScript, registryValue,
     unpackRedistributable, writeRegistry,
 } from './redist.js';
 import { directoryTree } from './install-directory.js';
+import { managedExe } from '../../../../tools/fixtures/managed-exe.mjs';
 
 /** redist.js's install over a directory on this disk, as a host install runs it. */
 const installRedistributables = (/** @type {string} */ directory,
@@ -72,6 +73,29 @@ test('an install script: its registry values and the programs it runs', ()=>{
         { path: 'C:\\App\\redist\\vc_redist.x86.exe', arguments: '/q' },
         { path: 'C:\\App\\redist\\vc_redist.x64.exe', arguments: '' },
     ] }]);
+});
+
+test('an install script running Windows Installer runs the package msiexec is given', ()=>{
+    // XNA Framework 4.0's step in a game's script: msiexec is Windows' own and
+    // never in the app; the program the step installs is the package.
+    const script = parseInstallScript(String.raw`"installscript"
+{
+    "run process"
+    {
+        "installed"
+        {
+            "process 1" "%windir%\\system32\\msiexec.exe"
+            "command 1" "/package \"%INSTALLDIR%\\xnafx40_redist.msi\" /passive"
+        }
+        "other"
+        {
+            "process 1" "msiexec"
+            "command 1" "/qn /i %INSTALLDIR%\\redist\\runtime.msi"
+        }
+    }
+}`);
+    assert.deepEqual(script.runs.map(run=>run.programs.map(program=>program.path)),
+        [['C:\\App\\xnafx40_redist.msi'], ['C:\\App\\redist\\runtime.msi']]);
 });
 
 test('a Registry table\'s values are typed by their prefixes; versions compare by field', ()=>{
@@ -290,6 +314,34 @@ test('Steam\'s DirectX step installs what its setup\'s cabinets hold, in a direc
     }
 });
 
+test('a package that lays DirectX\'s setup down has its cabinets installed, as its action does',
+    async()=>{
+        // XNA Framework 4.0's package carries DirectX's setup and X3DAudio's
+        // cabinet for a custom action to run; its assemblies import X3DAudio.
+        const app = await mkdtemp(join(tmpdir(), 'redist-'));
+        try
+        {
+            const [x86] = directxCabinets();
+            await writeFile(join(app, 'runtime.msi'),
+                await runtimeWithDirectX(peImage(0x14c), x86));
+            await writeFile(join(app, 'installscript.vdf'), String.raw`"installscript"
+{ "run process" { "runtime" {
+    "process 1" "%windir%\\system32\\msiexec.exe"
+    "command 1" "/package \"%INSTALLDIR%\\runtime.msi\" /passive" } } }`);
+            const said = await installRedistributables(app, ['installscript.vdf'], 'x86');
+            assert.ok(said.some(line=>/runtime\.msi: DirectX's setup it lays down, 1 file/.test(line)),
+                said.join('\n'));
+            assert.ok(existsSync(join(app, '.bottlify', 'drive_c', 'WINDOWS', 'system32',
+                'X3DAudio1_7.dll')), 'the cabinet\'s library is in the system folder');
+            assert.ok(existsSync(join(app, '.bottlify', 'drive_c', 'Program Files', 'DX Redist',
+                'DXSETUP.exe')), 'and the package\'s own files where it put them');
+        }
+        finally
+        {
+            await rm(app, { recursive: true, force: true });
+        }
+    });
+
 test('the DirectX step runs over a bottle a browser writes in place: the tree alone', async()=>{
     const [x86, x64] = directxCabinets();
     /** @type {Map<string, Uint8Array>} */
@@ -409,4 +461,50 @@ test('a package\'s Win32 assemblies go into the side-by-side store, read as the 
         `C:\\WINDOWS\\WinSxS\\${CRT}\\x86_Microsoft.VC90.CRT_x-ww.manifest`,
         'C:\\WINDOWS\\readme.txt',
     ].sort());
+});
+
+test('a package\'s .NET assemblies go into the global assembly cache of their runtime', ()=>{
+    // XNA Framework 4.0's: global assemblies (Attributes 0), their components'
+    // Directory a folder of Program Files nobody looks an assembly up in.
+    /** @param {string[]} columns @param {any[][]} rows */
+    const table = (columns, rows)=>({ columns: columns.map(name=>({ name })), rows });
+    /** @param {string} component @param {Record<string, string>} values */
+    const named = (component, values)=>Object.entries(values)
+        .map(([name, value])=>[component, name, value]);
+    const four = managedExe({ runtime: 'v4.0.30319' });
+    const two = managedExe({ runtime: 'v2.0.50727' });
+    const tables = new Map([
+        ['Directory', table(['Directory', 'Directory_Parent', 'DefaultDir'], [
+            ['TARGETDIR', null, 'SourceDir'], ['ProgramFilesFolder', 'TARGETDIR', '.'],
+            ['Xna', 'ProgramFilesFolder', 'kxz928nt|Microsoft XNA']])],
+        ['Component', table(['Component', 'Directory_', 'Attributes', 'Condition', 'KeyPath'], [
+            ['Game', 'Xna', 0, null, 'gameDll'], ['Storage', 'Xna', 0, null, 'storageDll'],
+            ['Old', 'Xna', 0, null, 'oldDll']])],
+        ['File', table(['File', 'Component_', 'FileName', 'FileSize'], [
+            ['gameDll', 'Game', 'Microsoft.Xna.Framework.Game.dll', four.length],
+            ['storageDll', 'Storage', 'Microsoft.Xna.Framework.Storage.dll', four.length],
+            ['oldDll', 'Old', 'Old.dll', two.length]])],
+        ['MsiAssembly', table(['Component_', 'Feature_', 'File_Manifest', 'File_Application',
+            'Attributes'], [['Game', 'F', null, null, 0], ['Storage', 'F', null, null, 0],
+            ['Old', 'F', null, null, 0]])],
+        ['MsiAssemblyName', table(['Component_', 'Name', 'Value'], [
+            ...named('Game', { name: 'Microsoft.Xna.Framework.Game', version: '4.0.0.00000',
+                culture: 'neutral', publicKeyToken: '842CF8BE1DE50553',
+                processorArchitecture: 'x86' }),
+            ...named('Storage', { name: 'Microsoft.Xna.Framework.Storage', version: '4.0.0.0',
+                culture: 'neutral', publicKeyToken: '842CF8BE1DE50553',
+                processorArchitecture: 'MSIL' }),
+            ...named('Old', { name: 'Old', version: '1.2.3.4', culture: 'en-US',
+                publicKeyToken: 'ABCDEF0123456789' })])],
+    ]);
+    const db = { table: (/** @type {string} */ name)=>tables.get(name) ?? null };
+    const files = new Map([['gamedll', [four]], ['storagedll', [four]], ['olddll', [two]]]);
+    const paths = applyPackage(db, files, 'x86').files.map(file=>file.path).sort();
+    assert.deepEqual(paths, [
+        'C:\\WINDOWS\\Microsoft.NET\\assembly\\GAC_32\\Microsoft.Xna.Framework.Game'
+            + '\\v4.0_4.0.0.0__842cf8be1de50553\\Microsoft.Xna.Framework.Game.dll',
+        'C:\\WINDOWS\\Microsoft.NET\\assembly\\GAC_MSIL\\Microsoft.Xna.Framework.Storage'
+            + '\\v4.0_4.0.0.0__842cf8be1de50553\\Microsoft.Xna.Framework.Storage.dll',
+        'C:\\WINDOWS\\assembly\\GAC_MSIL\\Old\\1.2.3.4_en-US_abcdef0123456789\\Old.dll',
+    ].sort(), 'CLR 4\'s cache for a v4 assembly, CLR 2\'s for a v2 one, by architecture');
 });

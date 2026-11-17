@@ -36,6 +36,7 @@
 - FlatOut (demo)
 - FlatOut 2 (demo)
 - Grand Theft Auto: San Andreas
+- Grand Theft Auto: Vice City
 - Half-Life
 - Half-Life 2 (demo)
 - Heroes of Might and Magic III (demo)

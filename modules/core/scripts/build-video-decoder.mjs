@@ -45,8 +45,8 @@ const ARTIFACT = 'video-decoder.wasm';
 const RELEASE_REPO = 'bottlify/bottlify';
 const FFMPEG = {
     repo: 'https://github.com/FFmpeg/FFmpeg',
-    tag: 'n6.1',
-    commit: 'd4ff0020b40b524a490cf62eccbd3a318f4c0e58',
+    tag: 'n9.0.2',
+    commit: '946fcce07b6dcd0331c8cc609192aeff5e1924f8',
     license: 'LGPL-2.1-or-later',
 };
 

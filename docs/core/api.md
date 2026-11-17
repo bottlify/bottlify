@@ -198,7 +198,7 @@ counts the frames that went so.
 | `adapter` | `{ vendor, architecture, description }` of the GPU the engine opened. |
 | `canvas`, `host` | The viewport and where the engine runs. |
 | `frames()`, `presented()` | Frames shown so far; the history of presents. |
-| `files.list(path)`, `files.read(path)` | The volume as the program sees it. |
+| `files.list(path)`, `files.read(path)` | The volume as the program sees it; `read` is a promise of the whole file (a lazily read bundle's blocks fetched first), null for no file. |
 | `session.export()`, `registry().toJSON()` | After the exit: the files the program wrote (with `collectOnExit`) and its registry. A file with more than one name (a hard link) is in the list under each of its names, with the same bytes. A file of an `opfs` session the program did not write is `{ path, size, read(offset?, length?) }`, its bytes read when asked. |
 | `attachLog(sink)`, `detachLog(sink)` | What the program writes to its standard handles, as `(handle, text)`. |
 | `diagnostics(layer?)` | Every layer's diagnostics, or one layer's; a request to the engine thread, not for polling. Besides the layers' tables, a `windows` table lists the run's windows as every process reports them: every process's top-level windows, topmost first, each with its process, title, class, visibility and rectangle, and the run's foreground and captured windows. |

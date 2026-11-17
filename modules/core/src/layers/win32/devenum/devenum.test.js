@@ -304,7 +304,7 @@ test('the devices devenum lists itself are @device:cm: monikers with what their 
         assert.equal(m.store.find(AUDIO_RENDERERS, 'Default WaveOut Device')
             ?.properties.get('WaveOutId'), -1);
         assert.equal(m.store.find(AUDIO_RENDERERS, 'DirectSound: Bottlify Sound Adapter')
-            ?.properties.get('DSGuid'), '{00000001-0000-0000-0000-000000000000}');
+            ?.properties.get('DSGuid'), '{BD6DD71B-3DEB-4BF1-B3A6-2F5C9A8E7D41}');
         // Parsed by its name, as a program finds a codec it knows.
         m.putWide(`@device:cm:${VIDEO_COMPRESSORS}\\cvid`, 0x500);
         const parser = createComObject(CLSID_DEVICE_MONIKER, m.devices.deviceMoniker());

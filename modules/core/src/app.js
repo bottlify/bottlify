@@ -1825,69 +1825,66 @@ export function heapSizeFor(memorySize, asked, base = 0x0c000000){
 }
 
 /**
- * What a film's track was handed, in the device's frames: what it took, and
- * each part it refused as a gap at the place in what it took where the part
- * would have played.
+ * A film's sound on its way to its track: what the track took, in the device's
+ * frames, and what it had no room for yet, kept whole and offered again.
  *
- * @typedef {{ taken: number, gaps: { at: number, frames: number }[] }} FilmSoundLedger
+ * @typedef {{ taken: number, held: Uint8Array[], heldBytes: number,
+ *     framesPerByte: number }} FilmSoundLedger
  */
 
 /**
- * Hands a film's sound to its track, noting in `ledger` what it took and where
- * a part it refused (full, or a queue the device is behind on) falls.
+ * Hands a film's sound to its track as far as the track has room
+ * (`track.room()`), keeping the rest in `ledger` for the next tick; with no
+ * blocks it only offers what is held.
  *
- * A refused part is a gap in the film's timeline, not sound still to come
- * (`filmSoundOwed`).
+ * Nothing is dropped. A film's file may hold its sound well behind its picture
+ * (`graph.js`'s AHEAD_MS), so a decoder that reaches it hands seconds over at
+ * once, past what a track holds: refused, that was heard as gaps, and a gap
+ * owed until played was owed for ever and held the picture back behind it.
  *
- * @param {{ write: (bytes: Uint8Array) => number }} track
+ * @param {{ write: (bytes: Uint8Array) => number, room?: () => number }} track
  * @param {Int16Array[]} blocks
  * @param {number} channels     the film's
- * @param {number} rate         the film's sample rate
- * @param {number} deviceRate   the rate the track counts `played()` in
  * @param {FilmSoundLedger} ledger
- * @returns {{ offered: number, refused: number }} device frames
  */
-export function feedFilmSound(track, blocks, channels, rate, deviceRate, ledger){
-    let offered = 0;
-    let refused = 0;
+export function feedFilmSound(track, blocks, channels, ledger){
     for (const block of blocks)
     {
-        const frames = Math.round(block.length / channels * deviceRate / rate);
-        const taken = Math.min(frames,
-            track.write(new Uint8Array(block.buffer, block.byteOffset, block.byteLength)));
-        offered += frames;
-        ledger.taken += taken;
-        if (frames > taken)
-        {
-            refused += frames - taken;
-            ledger.gaps.push({ at: ledger.taken, frames: frames - taken });
-        }
+        ledger.held.push(new Uint8Array(block.buffer, block.byteOffset, block.byteLength));
+        ledger.heldBytes += block.byteLength;
     }
-    return { offered, refused };
+    const stride = channels * 2;
+    while (ledger.held.length > 0)
+    {
+        const first = ledger.held[0];
+        const room = track.room?.() ?? Infinity;
+        const length = Math.min(first.length, room - room % stride);
+        if (length <= 0)
+        {
+            return;
+        }
+        ledger.taken += track.write(first.subarray(0, length));
+        ledger.heldBytes -= length;
+        if (length < first.length)
+        {
+            ledger.held[0] = first.subarray(length);
+            return;
+        }
+        ledger.held.shift();
+    }
 }
 
 /**
- * Device frames of a film's timeline handed over and not passed yet: what its
- * track holds unplayed, and the refused parts the playing has not reached.
+ * Device frames of a film's sound handed over and not heard yet: what its track
+ * holds unplayed, and what is held for want of room in it.
  *
  * The picture is decoded to just ahead of the sound heard, and heard is what
- * was handed over less this. A refused part passes when the playing reaches
- * where it was cut out: counted as passed at once, it was heard the moment it
- * was offered and the picture raced ahead to meet it, more being refused - a
- * film run through on a sound mostly dropped; counted as owed until played,
- * it was owed for ever (the track never plays it), and the picture waited on
- * it until the sound stalled, ran on the host clock, waited again - a film in
- * jerks. Gaps passed are dropped from the ledger.
+ * was handed over less this.
  *
  * @param {FilmSoundLedger} ledger @param {number} played  the track's `played()`
  */
 export function filmSoundOwed(ledger, played){
-    while (ledger.gaps.length > 0 && ledger.gaps[0].at <= played)
-    {
-        ledger.gaps.shift();
-    }
-    const ahead = ledger.gaps.reduce((sum, gap)=>sum + gap.frames, 0);
-    return Math.max(0, ledger.taken - played) + ahead;
+    return Math.max(0, ledger.taken - played) + Math.round(ledger.heldBytes * ledger.framesPerByte);
 }
 
 /**
@@ -8561,8 +8558,8 @@ async function buildApp(options){
         // film's own timeline. A film has one timeline and two ways to advance
         // along it, and nothing else in a report says whether they agree.
         driftMs: 0, worstDriftMs: 0, soundMs: 0, queuedMs: 0,
-        // The film's sound its track would not take: heard as a gap.
-        refusedMs: 0,
+        // The film's sound waiting for room in its track, now and at most.
+        heldMs: 0, worstHeldMs: 0,
     };
 
     /** @param {{ hwnd: number, width: number, height: number, bgra: Uint8Array | null,
@@ -8572,6 +8569,12 @@ async function buildApp(options){
      *            positionMs: number, film: number } | null} shown */
     /** @param {any} shown  What a filter graph handed back for this tick. */
     const showVideoFrame = shown=>{
+        // Sound held for want of room goes in as the track drains, tick by
+        // tick, whether or not this one brought anything.
+        if (filmTrack && sound)
+        {
+            feedFilmSound(filmTrack.track, [], filmTrack.channels, filmTrack.ledger);
+        }
         if (!shown)
         {
             return;
@@ -8603,15 +8606,17 @@ async function buildApp(options){
                     }),
                     sampleRate: shown.sampleRate,
                     channels: shown.channels,
-                    ledger: { taken: 0, gaps: [] },
+                    ledger: { taken: 0, held: [], heldBytes: 0,
+                        framesPerByte: sound.sampleRate / shown.sampleRate / (shown.channels * 2) },
                 };
             }
-            const fed = feedFilmSound(filmTrack.track, shown.audio, shown.channels,
-                shown.sampleRate, sound.sampleRate, filmTrack.ledger);
-            film.refusedMs += Math.round(fed.refused * 1000 / sound.sampleRate);
+            feedFilmSound(filmTrack.track, shown.audio, shown.channels, filmTrack.ledger);
         }
         if (filmTrack && sound)
         {
+            film.heldMs = Math.round(filmTrack.ledger.heldBytes * filmTrack.ledger.framesPerByte
+                * 1000 / sound.sampleRate);
+            film.worstHeldMs = Math.max(film.worstHeldMs, film.heldMs);
             film.soundMs = Math.round(filmTrack.track.played() * 1000 / sound.sampleRate);
             film.queuedMs = Math.round(filmSoundOwedMs() ?? 0);
             film.driftMs = Math.round(shown.positionMs) - film.soundMs;
@@ -9829,24 +9834,14 @@ async function buildApp(options){
                 name: entry.name, path: entry.path, directory: entry.directory === true,
                 size: entry.size ?? 0, modified: entry.modified ?? 0 })),
             /**
-             * The whole file. Bytes of the bundle not fetched yet read as what
-             * the bundle's reader answers for them.
+             * The whole file, the bundle's blocks not fetched yet fetched first
+             * (`readWholeFile`): read directly, a file of a lazily read bundle
+             * threw on its first missing block. Null for no file.
              *
              * @param {string} path
-             * @returns {Uint8Array}
+             * @returns {Promise<Uint8Array | null>}
              */
-            read: path=>{
-                const handle = filesystem.open(path,
-                    { read: true, shareRead: true, shareWrite: true });
-                try
-                {
-                    return filesystem.read(handle, filesystem.size(handle));
-                }
-                finally
-                {
-                    filesystem.close(handle);
-                }
-            },
+            read: path=>readWholeFile(filesystem, blocks, path),
             /**
              * A directory made from outside, as a person makes one in Explorer
              * beside the running program: what an installer expects to find
@@ -10627,18 +10622,7 @@ async function buildSystemHost(deps){
                 name: entry.name, path: entry.path, directory: entry.directory === true,
                 size: entry.size ?? 0, modified: entry.modified ?? 0 })),
             /** @param {string} path */
-            read: path=>{
-                const handle = filesystem.open(path,
-                    { read: true, shareRead: true, shareWrite: true });
-                try
-                {
-                    return filesystem.read(handle, filesystem.size(handle));
-                }
-                finally
-                {
-                    filesystem.close(handle);
-                }
-            },
+            read: path=>readWholeFile(filesystem, blocks, path),
         },
         /** @param {string} path */
         readImage: path=>readProgramImage(filesystem, blocks, path),
