@@ -13,7 +13,7 @@ import { shlwapiMachine } from './memory.fixture.js';
  * what they are asked: a menu of three items (10, a submenu 0x50 at 1, 30),
  * windows 1 > 2 > 3 with 4 beside 2, a semaphore of a count, Windows 6.1.
  */
-function machine(){
+function machine(version = 0x1db10106){
     /** @type {string[]} */
     const asked = [];
     /** @type {any} */
@@ -67,7 +67,7 @@ function machine(){
     };
     const gdi32 = { GetDeviceCaps: fn('GetDeviceCaps', ([, index])=>(index === 12 ? 32 : 1)) };
     const kernel32 = {
-        GetVersion: fn('GetVersion', ()=>0x1db10106),
+        GetVersion: fn('GetVersion', ()=>version),
         CreateSemaphoreW: fn('CreateSemaphoreW', ([, initial])=>{
             count = initial;
             return 0x77;
@@ -131,11 +131,18 @@ test('the window helpers walk and answer as Windows does', ()=>{
 });
 
 test('IsOS answers an NT workstation of the machine\'s version', ()=>{
+    // learn.microsoft.com's IsOS: OS_NT always TRUE; OS_NT4ORGREATER,
+    // OS_XPORGREATER and OS_HOME always FALSE today; 2000 and later and
+    // Professional by the machine (A262: XP still answers the first two).
     const { m } = machine();
     const is = (/** @type {number} */ feature)=>m.fns.IsOS.handler([feature]);
-    assert.deepEqual([1, 3, 7, 18, 20].map(is), [1, 1, 1, 1, 1], 'NT, 4+, 2000+, XP+, pro');
+    assert.deepEqual([1, 7, 8, 20].map(is), [1, 1, 1, 1], 'NT, 2000+, pro: Windows 7');
+    assert.deepEqual([3, 18, 19].map(is), [0, 0, 0], 'NT 4+ and XP+ always FALSE, Home');
     assert.deepEqual([0, 2, 5, 23, 29, 30].map(is), [0, 0, 0, 0, 0, 0],
         '9x, servers and WOW64 are not');
+    const xp = machine(0x0a280105).m;
+    assert.deepEqual([1, 3, 7, 18, 20].map(feature=>xp.fns.IsOS.handler([feature])),
+        [1, 1, 1, 1, 1], 'XP: NT 4+ and XP+ too');
     assert.equal(m.fns.WhichPlatform.handler([]), 3);
     assert.equal(m.fns.GetUIVersion.handler([]), 6);
 });

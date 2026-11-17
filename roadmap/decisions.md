@@ -2402,3 +2402,9 @@ instruction. A command naming any other program is not run, said. It is where an
 runs no guest code leaves a COM server's registration (A67, and DirectX's setup): the library's
 own DllRegisterServer writes what it writes. Revisit when a setup is found that leaves another
 program in RunOnce, or a registration that must run in a process of its own. *2026-11-17.*
+
+**A262. IsOS answers OS_NT4ORGREATER and OS_XPORGREATER yes on Windows XP and no from Vista on.**
+The documentation today has both "Always returns FALSE"; it does not say from which Windows, and
+XP's own documentation of the time described them as the versions they name. Wine's tests do not
+ask. OS_HOME is always no, OS_WIN2000PRO answers as OS_PROFESSIONAL, which the documentation
+sends it to. *2026-11-17.*
