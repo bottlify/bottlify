@@ -436,3 +436,26 @@ test('UrlCombine keeps a file URL\'s # in its path but after .html, and an mk: s
         assert.equal(combineUrl(base, relative, 0, char), want, `${base} + ${relative}`);
     }
 });
+
+test('UrlIsOpaque, UrlIsNoHistory, UrlCompare and UrlFixupW', ()=>{
+    // Wine's url test: mailto: is opaque, http: is not; javascript: keeps no history.
+    const m = shlwapiMachine();
+    for (const [suffix, wide] of /** @type {const} */ ([['A', false], ['W', true]]))
+    {
+        const one = (/** @type {string} */ name, /** @type {string} */ url)=>
+            m.fns[`${name}${suffix}`].handler([m.put(url, wide)]);
+        assert.equal(one('UrlIsOpaque', 'mailto:someone@example.com'), 1);
+        assert.equal(one('UrlIsOpaque', 'http://example.com/'), 0);
+        assert.equal(one('UrlIsNoHistory', 'javascript:alert(1)'), 1);
+        assert.equal(one('UrlIsNoHistory', 'http://example.com/'), 0);
+        const compare = (/** @type {string} */ a, /** @type {string} */ b, /** @type {number} */ slash)=>
+            m.fns[`UrlCompare${suffix}`].handler([m.put(a, wide), m.put(b, wide), slash]);
+        assert.equal(compare('http://a/b', 'http://a/b/', 1), 0, 'a trailing slash ignored');
+        assert.equal(compare('http://a/b', 'http://a/b/', 0), -1);
+        assert.equal(compare('http://A/', 'http://a/', 0), -1, 'case kept');
+    }
+    const out = m.put('', true, 64);
+    assert.equal(m.fns.UrlFixupW.handler([m.put('http://x/', true), out, 32]), 1, 'S_FALSE');
+    assert.equal(m.read(out, true), 'http://x/');
+    assert.equal(m.divergences.length, 1);
+});

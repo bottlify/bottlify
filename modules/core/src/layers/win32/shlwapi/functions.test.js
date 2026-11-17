@@ -519,7 +519,7 @@ function registryMachine(){
         const data = str('x');
         assert.equal(registry.RegSetValueExA.handler([key, str(name), 0, 1, data, 2]), 0);
     };
-    return { fns, registry, str, wide, create, exists, setValue };
+    return { fns, registry, str, wide, create, exists, setValue, memory, view };
 }
 
 const HKEY_CURRENT_USER = 0x80000001;
@@ -827,4 +827,51 @@ test('SHCopyKey, SHRegGetValue and SHRegDuplicateHKey are the registry\'s own ca
     assert.equal(await m.fns.SHRegDuplicateHKey.handler([0x1234]), 0, 'no key, no handle');
     assert.deepEqual([m.fns.SHCopyKeyA.argBytes, m.fns.SHRegGetValueA.argBytes,
         m.fns.SHRegGetPathA.argBytes], [16, 28, 20]);
+});
+
+test('SHRegSetPath writes the path as REG_EXPAND_SZ, SHRegGetPath reads it back', async()=>{
+    const m = registryMachine();
+    assert.equal(m.fns.SHRegSetPathA.handler([HKEY_CURRENT_USER, m.str('Software\\Paths'),
+        m.str('Where'), m.str('C:\\Games\\Here'), 0]), 0);
+    const type = 0x20000;
+    const size = 0x20010;
+    const out = 0x20100;
+    m.view.setUint32(size, 0x100, true);
+    assert.equal(m.registry.RegGetValueA.handler([HKEY_CURRENT_USER, m.str('Software\\Paths'),
+        m.str('Where'), 0xffff | 0x10000000, type, out, size]), 0);
+    assert.equal(m.view.getUint32(type, true), 2, 'REG_EXPAND_SZ');
+    assert.equal(decodeAnsi(m.memory.subarray(out, out + 13)), 'C:\\Games\\Here');
+});
+
+test('ColorAdjustLuma moves the luminance; the small answers of the misc exports', ()=>{
+    const m = shlwapiMachine();
+    const grey = 0x808080;
+    assert.equal(m.fns.ColorAdjustLuma.handler([grey, 0, 0]), grey, 'no change asked');
+    const lighter = m.fns.ColorAdjustLuma.handler([grey, 250, 0]) >>> 0;
+    assert.ok((lighter & 0xff) > 0x80 && lighter === (lighter & 0xff) * 0x010101,
+        `lighter and still grey: ${lighter.toString(16)}`);
+    assert.equal(m.fns.ColorAdjustLuma.handler([grey, -2000, 0]) >>> 0, 0, 'held at black');
+    const doubled = m.fns.ColorAdjustLuma.handler([0x404040, 1000, 1]) & 0xff;
+    assert.ok(Math.abs(doubled - 0x80) <= 1, `by its own luminance: doubled, ${doubled}`);
+    assert.equal(m.fns.IsInternetESCEnabled.handler([]), 0);
+    assert.equal(m.fns.SHIsLowMemoryMachine.handler([0]), 0);
+    assert.equal(m.fns.SHRegisterValidateTemplate.handler([0, 0]), 0);
+    assert.equal(m.divergences.length, 1, 'said once');
+    assert.equal(m.fns.AssocIsDangerous.handler([m.put('.exe', true)]), 1);
+    assert.equal(m.fns.AssocIsDangerous.handler([m.put('VBS', true)]), 1, 'without its dot');
+    assert.equal(m.fns.AssocIsDangerous.handler([m.put('.txt', true)]), 0);
+    const out = m.count(0x1234);
+    assert.equal(m.fns.AssocCreate.handler([0, 0, 0, 0, 0, out]) >>> 0, 0x80040111);
+    assert.equal(m.dwordAt(out), 0);
+    assert.equal(m.fns.AssocQueryKeyW.argBytes, 20);
+});
+
+test('GetMenuPosFromID walks the menu through user32', ()=>{
+    const ids = [10, 20, 30];
+    const m = shlwapiMachine({ library: (/** @type {string} */ name)=>(name === 'USER32.dll' ? {
+        GetMenuItemCount: { handler: ()=>ids.length },
+        GetMenuItemID: { handler: (/** @type {number[]} */ [, at])=>ids[at] },
+    } : undefined) });
+    assert.equal(m.fns.GetMenuPosFromID.handler([0x77, 20]), 1);
+    assert.equal(m.fns.GetMenuPosFromID.handler([0x77, 99]), -1);
 });

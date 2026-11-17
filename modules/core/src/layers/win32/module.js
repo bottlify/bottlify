@@ -4230,6 +4230,9 @@ export function createWin32Module(){
                     callerThread: ()=>bridge.callerThread(),
                     // SHCreateThreadRef's object is the engine's own.
                     publish: (object, iid)=>bridge.publishInterface(object, iid),
+                    // SHCreateThread's thread is kernel32's CreateThread's.
+                    library: name=>libraries[name],
+                    divergence: config?.divergence,
                 }) },
 
                 'ADVPACK.dll': createAdvpackFunctions({

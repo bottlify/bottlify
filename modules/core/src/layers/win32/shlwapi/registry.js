@@ -22,6 +22,17 @@ const E_FAIL = 0x80004005 | 0;
 const E_INVALIDARG = 0x80070057 | 0;
 const ERROR_KEY_HAS_CHILDREN = 1020;
 const KEY_ALL_ACCESS = 0xf003f;
+/** IQueryAssociations is not made: AssocCreate's class is not available. */
+const CLASS_E_CLASSNOTAVAILABLE = 0x80040111 | 0;
+/**
+ * The file types AssocIsDangerous calls dangerous: programs, scripts and the
+ * shortcuts and installers that run them.
+ */
+const DANGEROUS_EXTENSIONS = new Set(['.ade', '.adp', '.app', '.bas', '.bat', '.chm', '.cmd',
+    '.com', '.cpl', '.crt', '.exe', '.hlp', '.hta', '.inf', '.ins', '.isp', '.js', '.jse',
+    '.lnk', '.mda', '.mdb', '.mde', '.mdt', '.mdz', '.msc', '.msi', '.msp', '.mst', '.pcd',
+    '.pif', '.reg', '.scf', '.scr', '.sct', '.shb', '.shs', '.url', '.vb', '.vbe', '.vbs',
+    '.ws', '.wsc', '.wsf', '.wsh']);
 /** Where SHRegGetCLSIDKey keeps a class's shell settings, under either root. */
 const CLSID_SETTINGS = 'Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\CLSID\\';
 const ERROR_FILE_NOT_FOUND = 2;
@@ -637,6 +648,9 @@ export function createRegistryHelpers(host){
         },
     });
 
+    /** Said once: AssocCreate makes no object. */
+    let noQueryAssociations = false;
+
     /** @param {string} name */
     const noAssociation = name=>({
         argBytes: 24,
@@ -677,6 +691,65 @@ export function createRegistryHelpers(host){
          * asks it which program opens a link), and said once.
          */
         AssocQueryStringA: noAssociation('AssocQueryStringA'),
+
+        /**
+         * HRESULT AssocQueryKeyA(ASSOCF cfFlags, ASSOCKEY assockey, LPCSTR pszAssoc,
+         *     LPCSTR pszExtra, HKEY *phkeyOut)
+         * HRESULT AssocQueryStringByKeyA(ASSOCF cfFlags, ASSOCSTR str, HKEY hkAssoc,
+         *     LPCSTR pszExtra, LPSTR pszOut, DWORD *pcchOut)
+         *
+         * As AssocQueryString: nothing is associated.
+         */
+        AssocQueryKeyA: { ...noAssociation('AssocQueryKeyA'), argBytes: 20 },
+        AssocQueryKeyW: { ...noAssociation('AssocQueryKeyW'), argBytes: 20 },
+        AssocQueryStringByKeyA: noAssociation('AssocQueryStringByKeyA'),
+        AssocQueryStringByKeyW: noAssociation('AssocQueryStringByKeyW'),
+
+        /**
+         * HRESULT AssocCreate(CLSID clsid, REFIID riid, void **ppv)
+         *
+         * There is no IQueryAssociations object to make: the class is not
+         * available, NULL is written, and that is said once.
+         */
+        AssocCreate: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([, , , , , out])=>{
+                if ((out >>> 0) !== 0)
+                {
+                    host.writeMemory(out >>> 0, dword(0));
+                }
+                if (!noQueryAssociations)
+                {
+                    noQueryAssociations = true;
+                    host.divergence?.('AssocCreate', 'no IQueryAssociations object is made');
+                }
+                return CLASS_E_CLASSNOTAVAILABLE;
+            },
+        },
+
+        /**
+         * BOOL AssocIsDangerous(LPCWSTR pszAssoc)
+         *
+         * Whether opening a file of the type may run code: one of the kinds
+         * that run as programs or scripts (decisions.md A260: the list is
+         * chosen, the per-type EditFlags are not read).
+         */
+        AssocIsDangerous: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([pointer])=>{
+                const text = (pointer >>> 0) === 0 ? null
+                    : host.readWideString?.(pointer >>> 0, 0x200) ?? null;
+                if (text === null || text === '')
+                {
+                    return 0;
+                }
+                const extension = text.startsWith('.') ? text.toLowerCase()
+                    : `.${text.toLowerCase()}`;
+                return DANGEROUS_EXTENSIONS.has(extension) ? 1 : 0;
+            },
+        },
         AssocQueryStringW: noAssociation('AssocQueryStringW'),
 
         /**

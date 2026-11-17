@@ -39,6 +39,7 @@ const FILE_ATTRIBUTE_DIRECTORY = 0x10;
 const ERROR_SUCCESS = 0;
 const ERROR_NOT_ENOUGH_MEMORY = 8;
 const ERROR_CALL_NOT_IMPLEMENTED = 120;
+const REG_EXPAND_SZ = 2;
 const MAXIMUM_ALLOWED = 0x02000000;
 /** RegGetValue's restriction to a string, an expandable one expanded. */
 const RRF_RT_REG_SZ = 0x2;
@@ -756,8 +757,12 @@ export function createShlwapiFunctions(host){
     const widths = createWidths(host);
     const unattached = createRefusals(host)('SHAutoComplete', { argBytes: 8, answer: S_OK,
         why: 'no autocompletion: the edit control is left as it is' });
+    const unregisteredTemplate = createRefusals(host)('SHRegisterValidateTemplate', {
+        argBytes: 8, answer: S_OK,
+        why: 'no folder web view template is registered: there are no folder views' });
 
-    return {
+    /** @type {Record<string, { argBytes: number, handler: (args: number[]) => any }>} */
+    const table = {
         ...(host.library ? createForwards(host.library, host.divergence) : {}),
         ...createPathFunctions(host, widths),
         ...createStringFunctions(host, widths),
@@ -1055,6 +1060,162 @@ export function createShlwapiFunctions(host){
                 return (channel(hue + HLSMAX / 3) | channel(hue) << 8
                     | channel(hue - HLSMAX / 3) << 16) >>> 0;
             },
+        },
+    };
+
+    /**
+     * One of user32's or gdi32's own calls, or null without the library.
+     *
+     * @param {string} library @param {string} name @param {number[]} args
+     */
+    const call = (library, name, args)=>{
+        const entry = host.library?.(library)?.[name];
+        return entry ? /** @type {number} */ (entry.handler(args)) : null;
+    };
+
+    /**
+     * SHRegSetPath for either width: the path written as REG_EXPAND_SZ with
+     * the start PathUnExpandEnvStrings puts a variable back for, or as it is.
+     *
+     * @param {import('./text.js').Width} width
+     */
+    const registrySetPath = width=>({
+        argBytes: 20,
+        /** @param {number[]} args */
+        handler: ([key, subKey, value, path])=>{
+            const suffix = width.wide ? 'W' : 'A';
+            const text = width.read(path);
+            const scratch = host.allocate?.(MAX_PATH * width.unit) ?? 0;
+            if (text === null || !scratch)
+            {
+                return ERROR_CALL_NOT_IMPLEMENTED;
+            }
+            try
+            {
+                const unexpanded = table[`PathUnExpandEnvStrings${suffix}`].handler([path, scratch,
+                    MAX_PATH]) ? width.read(scratch) ?? text : text;
+                host.writeMemory(scratch, width.sz(unexpanded));
+                return table[`SHSetValue${suffix}`].handler([key, subKey, value, REG_EXPAND_SZ,
+                    scratch, (unexpanded.length + 1) * width.unit]);
+            }
+            finally
+            {
+                host.free?.(scratch);
+            }
+        },
+    });
+
+    return {
+        ...table,
+
+        /**
+         * LSTATUS SHRegSetPathA(HKEY hKey, LPCSTR pcszSubKey, LPCSTR pcszValue,
+         *     LPCSTR pcszPath, DWORD dwFlags)
+         */
+        SHRegSetPathA: registrySetPath(widths.A),
+        SHRegSetPathW: registrySetPath(widths.W),
+
+        /**
+         * COLORREF ColorAdjustLuma(COLORREF clrRGB, int n, BOOL fScale)
+         *
+         * The luminance moved by n tenths of a percent: of the luminance the
+         * colour has with fScale, of the whole range without, held in range;
+         * hue and saturation kept.
+         */
+        ColorAdjustLuma: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([rgb, amount, scale])=>{
+                const scratch = (amount | 0) === 0 ? 0 : host.allocate?.(8) ?? 0;
+                if (!scratch || !host.readMemory)
+                {
+                    return rgb >>> 0;
+                }
+                try
+                {
+                    table.ColorRGBToHLS.handler([rgb, scratch, scratch + 2, scratch + 4]);
+                    const words = host.readMemory(scratch, 6);
+                    const hue = words[0] | words[1] << 8;
+                    const luminance = words[2] | words[3] << 8;
+                    const saturation = words[4] | words[5] << 8;
+                    const base = (scale | 0) !== 0 ? luminance : HLSMAX;
+                    const moved = Math.max(0, Math.min(HLSMAX,
+                        luminance + Math.trunc(base * (amount | 0) / 1000)));
+                    return table.ColorHLSToRGB.handler([hue, moved, saturation]);
+                }
+                finally
+                {
+                    host.free?.(scratch);
+                }
+            },
+        },
+
+        /**
+         * INT GetMenuPosFromID(HMENU hMenu, UINT wID)
+         *
+         * The position of the item with that command id, or -1.
+         */
+        GetMenuPosFromID: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([menu, id])=>{
+                const count = call('USER32.dll', 'GetMenuItemCount', [menu]) ?? -1;
+                for (let at = 0; at < count; at++)
+                {
+                    if ((call('USER32.dll', 'GetMenuItemID', [menu, at]) ?? -1) >>> 0
+                        === (id >>> 0))
+                    {
+                        return at;
+                    }
+                }
+                return -1;
+            },
+        },
+
+        /**
+         * HPALETTE SHCreateShellPalette(HDC hdc)
+         *
+         * The halftone palette of the context, gdi32's own.
+         */
+        SHCreateShellPalette: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([hdc])=>call('GDI32.dll', 'CreateHalftonePalette', [hdc]) ?? 0,
+        },
+
+        /**
+         * BOOL IsInternetESCEnabled(void)
+         *
+         * Internet Explorer's Enhanced Security Configuration is a server's
+         * alone: off.
+         */
+        IsInternetESCEnabled: { argBytes: 0, handler: ()=>0 },
+
+        /**
+         * BOOL SHIsLowMemoryMachine(DWORD dwType)
+         *
+         * Whether the machine has too little memory for Internet Explorer 4's
+         * features, the only question it is asked: never, here.
+         */
+        SHIsLowMemoryMachine: { argBytes: 4, handler: ()=>0 },
+
+        /**
+         * HRESULT SHRegisterValidateTemplate(LPCWSTR filename, BOOL unknown)
+         *
+         * Registers a web view template as trusted for Explorer's folder views,
+         * which this machine does not show: S_OK, and said once.
+         */
+        SHRegisterValidateTemplate: unregisteredTemplate,
+
+        /**
+         * FARPROC DelayLoadFailureHook(LPCSTR pszDllName, LPCSTR pszProcName)
+         *
+         * kernel32's own.
+         */
+        DelayLoadFailureHook: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: args=>call('KERNEL32.dll', 'DelayLoadFailureHook', args) ?? 0,
         },
     };
 }

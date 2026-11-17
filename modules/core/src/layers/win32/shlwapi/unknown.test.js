@@ -200,3 +200,143 @@ test('IUnknown_AtomicRelease clears the slot before the release; IUnknown_Set sw
     assert.deepEqual([UNKNOWN_ORDINALS[169], UNKNOWN_ORDINALS[199]],
         ['IUnknown_AtomicRelease', 'IUnknown_Set']);
 });
+
+/**
+ * A guest object of 16 method slots that answers QueryInterface for the
+ * interfaces whose first DWORD is in `knows` with itself, and records every
+ * method called by its slot; method 3 writes 0x4444 through its first
+ * argument when that is a pointer.
+ *
+ * @param {number[]} knows  the first DWORD of each IID it has
+ */
+function comObject(knows){
+    const memory = new Uint8Array(0x4000);
+    const view = new DataView(memory.buffer);
+    const OBJECT = 0x100;
+    const VTABLE = 0x140;
+    view.setUint32(OBJECT, VTABLE, true);
+    for (let slot = 0; slot < 16; slot++)
+    {
+        view.setUint32(VTABLE + slot * 4, 0xc00 + slot, true);
+    }
+    /** @type {string[]} */
+    const calls = [];
+    /** @type {string[]} */
+    const said = [];
+    let next = 0x2000;
+    const fns = createUnknownFunctions({
+        readMemory: (address, length)=>memory.subarray(address, address + length),
+        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        allocate: bytes=>{
+            const at = next;
+            next += bytes + 15 & ~15;
+            return at;
+        },
+        free: ()=>{},
+        callerThread: ()=>'main',
+        divergence: (api, detail)=>said.push(`${api}: ${detail}`),
+        library: name=>(name === 'KERNEL32.dll' ? {
+            CreateThread: { handler: (/** @type {number[]} */ args)=>{
+                calls.push(`CreateThread ${args[2].toString(16)} ${args[3].toString(16)}`);
+                return 0x77;
+            } },
+            CloseHandle: { handler: ()=>1 },
+        } : undefined),
+        call: (entry, args)=>{
+            const slot = entry - 0xc00;
+            if (entry < 0xc00)
+            {
+                calls.push(`guest ${entry.toString(16)}(${args.join(',')})`);
+                return 0;
+            }
+            if (slot === 0)
+            {
+                const first = view.getUint32(args[1], true);
+                calls.push(`QI ${first.toString(16)}`);
+                if (!knows.includes(first))
+                {
+                    view.setUint32(args[2], 0, true);
+                    return E_NOINTERFACE;
+                }
+                view.setUint32(args[2], OBJECT, true);
+                return 0;
+            }
+            calls.push(`${slot}(${args.slice(1).join(',')})`);
+            if (slot === 3 && args[1] >= 0x2000)
+            {
+                view.setUint32(args[1], 0x4444, true);
+            }
+            return 0;
+        },
+    });
+    return { memory, view, fns, calls, said, OBJECT };
+}
+
+test('the IUnknown_ helpers ask for their interface, call its method and let it go', async()=>{
+    // Wine's ordinal tests: IUnknown_SetSite through IObjectWithSite, and
+    // through IInternetSecurityManager where there is none; E_FAIL for no object.
+    const OBJECT_WITH_SITE = 0xfc4801a3;
+    const SECURITY_MANAGER = 0x79eac9ee;
+    const site = comObject([OBJECT_WITH_SITE]);
+    assert.equal(await site.fns.IUnknown_SetSite.handler([site.OBJECT, 0x900]), 0);
+    assert.deepEqual(site.calls, [`QI ${OBJECT_WITH_SITE.toString(16)}`, '3(2304)', '2()']);
+    const security = comObject([SECURITY_MANAGER]);
+    await security.fns.IUnknown_SetSite.handler([security.OBJECT, 0x900]);
+    assert.deepEqual(security.calls, [`QI ${OBJECT_WITH_SITE.toString(16)}`,
+        `QI ${SECURITY_MANAGER.toString(16)}`, '3(2304)', '2()']);
+    assert.equal(await site.fns.IUnknown_SetSite.handler([0, 0x900]), E_FAIL);
+    const none = comObject([]);
+    assert.equal(await none.fns.IUnknown_SetSite.handler([none.OBJECT, 0x900]), E_FAIL);
+
+    const window = comObject([0x114]);
+    const out = 0x3000;
+    window.view.setUint32(out, 0xdead, true);
+    assert.equal(await window.fns.IUnknown_GetWindow.handler([window.OBJECT, out]), 0);
+    assert.deepEqual(window.calls.slice(1), [`3(${out})`, '2()']);
+
+    const command = comObject([0xb722bccb]);
+    await command.fns.IUnknown_Exec.handler([command.OBJECT, 1, 2, 3, 4, 5]);
+    assert.deepEqual(command.calls.slice(1), ['4(1,2,3,4,5)', '2()']);
+    await command.fns.MayExecForward.handler([command.OBJECT, 9, 1, 2, 3, 4, 5]);
+    assert.deepEqual(command.calls.slice(4), ['4(1,2,3,4,5)', '2()'], 'the reserved word dropped');
+    const input = comObject([0x68284faa]);
+    await input.fns.IUnknown_HasFocusIO.handler([input.OBJECT]);
+    assert.deepEqual(input.calls.slice(1), ['4()', '2()']);
+});
+
+test('QISearch finds the interface in the program\'s table, IUnknown as its first entry', async()=>{
+    const m = comObject([]);
+    const iidA = 0x3100;
+    const iidB = 0x3120;
+    m.view.setUint32(iidA, 0x11111111, true);
+    m.view.setUint32(iidB, 0x22222222, true);
+    const table = 0x3200;
+    [iidA, 0x0, iidB, 0x8, 0, 0].forEach((value, index)=>m.view.setUint32(table + index * 4,
+        value, true));
+    const out = 0x3300;
+    const base = m.OBJECT;
+    assert.equal(await m.fns.QISearch.handler([base, table, iidB, out]), 0);
+    assert.equal(m.view.getUint32(out, true), base + 8);
+    const unknown = 0x3140;
+    m.memory.set([0, 0, 0, 0, 0, 0, 0, 0, 0xc0, 0, 0, 0, 0, 0, 0, 0x46], unknown);
+    assert.equal(await m.fns.QISearch.handler([base, table, unknown, out]), 0);
+    assert.equal(m.view.getUint32(out, true), base, 'IUnknown: the first entry');
+    const other = 0x3160;
+    m.view.setUint32(other, 0x33333333, true);
+    assert.equal(await m.fns.QISearch.handler([base, table, other, out]), E_NOINTERFACE);
+    assert.equal(m.view.getUint32(out, true), 0);
+});
+
+test('SHIsSameObject compares identities; SHCreateThread starts the routine on a thread', async()=>{
+    const m = comObject([0]);
+    assert.equal(await m.fns.SHIsSameObject.handler([m.OBJECT, m.OBJECT]), 1);
+    assert.equal(await m.fns.SHIsSameObject.handler([m.OBJECT, 0]), 0);
+    assert.equal(await m.fns.SHCreateThread.handler([0x500, 0x600, 0, 0]), 1);
+    assert.ok(m.calls.includes('CreateThread 500 600'));
+    assert.equal(m.said.length, 0, 'nothing short of Windows');
+    await m.fns.SHCreateThread.handler([0x500, 0x600, 0, 0x510]);
+    assert.ok(m.calls.includes('guest 510(1536)'), 'the callback, with the data');
+    assert.equal(m.said.length, 1);
+    assert.equal(UNKNOWN_ORDINALS[16], 'SHCreateThread');
+    assert.equal(UNKNOWN_ORDINALS[219], 'QISearch');
+});

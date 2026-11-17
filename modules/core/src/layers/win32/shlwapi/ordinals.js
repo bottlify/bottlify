@@ -54,7 +54,7 @@ export const SHLWAPI_NAMED_ORDINALS = Object.freeze([
     [3, 'PathFileExistsDefExtA'], [4, 'PathFileExistsDefExtW'], [5, 'PathFindOnPathExA'],
     [6, 'PathFindOnPathExW'], [170, 'PathSkipLeadingSlashesA'],
     [445, 'PathFileExistsAndAttributesA'], [446, 'PathFileExistsAndAttributesW'],
-    [448, 'FixSlashesAndColonW'],
+    [448, 'FixSlashesAndColonW'], [462, 'UrlFixupW'],
 ]);
 
 const S_OK = 0;
