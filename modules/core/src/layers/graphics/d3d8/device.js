@@ -1633,8 +1633,8 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
 
     /**
      * An additional swap chain's back buffer presented: onto the display
-     * when it goes into the window the display shows, and otherwise drawn and
-     * kept, which is reported once.
+     * when the window it goes into shows it, and otherwise drawn and kept, as
+     * a present into a hidden window is.
      *
      * @param {any} backBuffer @param {boolean} shown
      * @returns {number | Promise<number>}
@@ -1644,19 +1644,15 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         {
             return D3DERR_DEVICELOST;
         }
-        if (shown)
+        const own = backBuffer === backBuffers[0];
+        const submitted = !shown ? renderer?.submit()
+            : renderer?.present(own ? model
+                : Object.create(model, { backBuffer: { get: ()=>backBuffer } }));
+        if (own)
         {
-            const submitted = renderer?.present(
-                Object.create(model, { backBuffer: { get: ()=>backBuffer } }));
-            if (backBuffer === backBuffers[0])
-            {
-                flip();
-            }
-            return presented(submitted);
+            flip();
         }
-        reportOnce('chain-window', 'a swap chain presented into a window the display does'
-            + ' not show: its frame is drawn and its picture is not shown');
-        return presented(renderer?.submit());
+        return presented(submitted);
     };
 
     const device = {
@@ -1833,16 +1829,11 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          * differ, and a program that resets on the strength of Present alone
          * never learns that the device came back.
          *
+         * @param {boolean} [shown]  Whether the window it presents into shows the picture.
          * @returns {number | Promise<number>}
          */
-        Present(){
-            if (deviceState !== DEVICE_STATE.OK)
-            {
-                return D3DERR_DEVICELOST;
-            }
-            const submitted = renderer?.present(model);
-            flip();
-            return presented(submitted);
+        Present(shown = true){
+            return presentChain(backBuffers[0], shown);
         },
 
         /**

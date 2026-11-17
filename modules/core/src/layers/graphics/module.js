@@ -1399,6 +1399,10 @@ export function createGraphicsModule(){
                 // asked for as zero by zero takes. Only the layer that owns the
                 // windows can measure one, and only here is it asked for.
                 windowClientSize: config?.windowClientSize,
+                // Whether a window shows what is presented into it. A build
+                // with no windows behind it shows every present.
+                windowShown: win32.windowShown
+                    ? (/** @type {number} */ hwnd)=>Boolean(win32.windowShown(hwnd)) : undefined,
                 // A window's client area on the screen, which a DirectDraw
                 // clipper given the window clips to; null for no such window.
                 windowClient: (/** @type {number} */ hwnd)=>(win32.windows?.() ?? [])

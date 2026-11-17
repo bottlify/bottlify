@@ -8,8 +8,10 @@
  * The getters that answer in the guest, as a gate: GetRenderState,
  * GetTransform, GetTextureStageState, GetViewport, GetSamplerState and
  * Direct3D 8's GetVertexShader and GetPixelShader read the device's block,
- * and a Direct3D 9 surface's GetDesc reads the surface's, where the setters'
- * command routines and the host's own changes keep what the device holds. A
+ * a Direct3D 9 surface's GetDesc reads the surface's, and a texture's
+ * GetLevelDesc the block of the level's surface the texture's block names,
+ * where the setters' command routines and the host's own changes keep what
+ * the device holds. A
  * program reads back what it set and goes on by the answer, so a getter in
  * the guest must answer what the device's own getter answers at that point of
  * the program, the calls the ring holds made up to there -- the HRESULT, and
@@ -21,7 +23,8 @@
  * mirroring is the seam's own, and one with every call a trap -- what the
  * program gets with the guest code off. The programs are random sequences of
  * setters through the guest routines and through the host, resets, state
- * blocks captured and applied through both, render targets set and getters,
+ * blocks captured and applied through both, render targets set, textures of
+ * several formats, pools and usages made, locked and let go, and getters,
  * with arguments in range and at its edges; every answer the two processes
  * give is compared, and so is the whole of each getter's domain at the end.
  */
@@ -33,7 +36,7 @@ import * as cork from '../../../../../cork/src/index.js';
 import { createVtables } from '../../bridge/internal/vtable.js';
 import { createGraphicsLibraries } from './exports.js';
 import { COMMAND_RING_BYTES } from './shadow.js';
-import { IID_IDirect3DDevice8 } from './iids.js';
+import { IID_IDirect3DDevice8, IID_IDirect3DTexture8 } from './iids.js';
 import {
     IDIRECT3D8_SLOTS, IDIRECT3D9_SLOTS, IDIRECT3DDEVICE8_SLOTS, IDIRECT3DSURFACE8_SLOTS,
     IDIRECT3DTEXTURE8_SLOTS,
@@ -41,7 +44,7 @@ import {
 import {
     IDIRECT3DDEVICE9_SLOTS, IDIRECT3DSTATEBLOCK9_SLOTS, IDIRECT3DSURFACE9_SLOTS,
     IDIRECT3DTEXTURE9_SLOTS, IID_IDirect3DDevice9, IID_IDirect3DStateBlock9,
-    IID_IDirect3DSurface9,
+    IID_IDirect3DSurface9, IID_IDirect3DTexture9,
 } from '../d3d9/interfaces.js';
 import { createDirect3D8 } from '../d3d8/device.js';
 import { createDirect3D9 } from '../d3d9/device.js';
@@ -67,9 +70,15 @@ const UNWRITTEN = 0xcd;
 const D3D_OK = 0;
 const D3DFMT_A8R8G8B8 = 21;
 const D3DFMT_X8R8G8B8 = 22;
+const D3DFMT_R5G6B5 = 23;
+const D3DFMT_DXT1 = 0x31545844;
 const D3DFMT_D24S8 = 75;
 const D3DFMT_D24X8 = 77;
+const D3DPOOL_DEFAULT = 0;
 const D3DPOOL_MANAGED = 1;
+const D3DPOOL_SYSTEMMEM = 2;
+const D3DUSAGE_RENDERTARGET = 1;
+const D3DUSAGE_DYNAMIC = 0x200;
 const D3DCREATE_HARDWARE_VERTEXPROCESSING = 0x40;
 const D3DDEVTYPE_HAL = 1;
 
@@ -109,7 +118,7 @@ const D3D9 = {
     },
     iids: {
         device: IID_IDirect3DDevice9, surface: IID_IDirect3DSurface9,
-        block: IID_IDirect3DStateBlock9,
+        block: IID_IDirect3DStateBlock9, texture: IID_IDirect3DTexture9,
     },
     present: (width, height)=>[width, height, D3DFMT_X8R8G8B8, 1, 0, 0, 1, HWND, 1, 1,
         D3DFMT_D24S8, 0, 0, 0],
@@ -125,7 +134,7 @@ const D3D8 = {
         root: IDIRECT3D8_SLOTS, device: IDIRECT3DDEVICE8_SLOTS, surface: IDIRECT3DSURFACE8_SLOTS,
         texture: IDIRECT3DTEXTURE8_SLOTS,
     },
-    iids: { device: IID_IDirect3DDevice8 },
+    iids: { device: IID_IDirect3DDevice8, texture: IID_IDirect3DTexture8 },
     present: (width, height)=>[width, height, D3DFMT_X8R8G8B8, 1, 0, 1, HWND, 1, 1,
         D3DFMT_D24S8, 0, 0, 0],
     nine: false,
@@ -548,10 +557,45 @@ const getters = version=>({
         label: `${surface}.GetDesc(${none ? 'NULL' : ''})`,
         run: m=>m.call(surface, 'GetDesc', [none ? 0 : OUT], { out: 32 }),
     }),
+    /** @param {string} texture @param {number} level @param {boolean} [none] */
+    levelDesc: (texture, level, none)=>/** @type {Step} */ ({
+        label: `${texture}.GetLevelDesc(${hex(level)}${none ? ', NULL' : ''})`,
+        run: m=>m.call(texture, 'GetLevelDesc', [level, none ? 0 : OUT], { out: 32 }),
+    }),
 });
 
 /** The surfaces a program may hold, by the name the steps give them. */
 const SURFACES = ['back', 'current', 'depth', 'target', 'zbuffer', 'level'];
+
+/**
+ * The textures a program may hold, by the name the steps give them: width,
+ * height, levels (0 for the whole chain), usage, format and pool. Those in
+ * the default pool are let go before a Reset that is to go ahead.
+ *
+ * @type {Record<string, number[]>}
+ */
+const TEXTURES = {
+    texture: [16, 16, 0, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED],
+    packed: [32, 8, 3, 0, D3DFMT_DXT1, D3DPOOL_MANAGED],
+    plain: [8, 4, 0, 0, D3DFMT_R5G6B5, D3DPOOL_SYSTEMMEM],
+    dynamic: [8, 8, 1, D3DUSAGE_DYNAMIC, D3DFMT_X8R8G8B8, D3DPOOL_DEFAULT],
+    drawn: [32, 16, 1, D3DUSAGE_RENDERTARGET, D3DFMT_X8R8G8B8, D3DPOOL_DEFAULT],
+};
+const TEXTURE_NAMES = Object.keys(TEXTURES);
+/** Levels past any of them, and past the table a texture's block holds. */
+const EDGE_LEVELS = [5, 6, 15, 16, 17, 0xffffffff];
+
+/**
+ * The call that makes a texture, by the name the steps give it.
+ *
+ * @param {Version} version @param {string} name
+ * @returns {Step}
+ */
+const createTexture = (version, name)=>({
+    label: `CreateTexture as ${name}`,
+    run: m=>m.call('device', 'CreateTexture', [...TEXTURES[name], KEPT, ...version.nine ? [0] : []],
+        { keep: name, kind: 'texture' }),
+});
 
 /**
  * Every getter over the whole of its domain, edges included: what the
@@ -577,6 +621,9 @@ const sweep = (version, states)=>{
             : []),
         ...(version.nine ? SURFACES.map(surface=>get.desc(surface))
             : [get.shader('GetVertexShader'), get.shader('GetPixelShader')]),
+        ...TEXTURE_NAMES.flatMap(texture=>[...Array.from({ length: 6 }, (unused, level)=>level),
+            ...EDGE_LEVELS].map(level=>get.levelDesc(texture, level))),
+        ...TEXTURE_NAMES.map(texture=>get.levelDesc(texture, 0, true)),
     ];
     return {
         label: 'every getter',
@@ -586,7 +633,7 @@ const sweep = (version, states)=>{
 
 /**
  * What a program does before it plays: a device, a render target and a
- * depth surface of its own, a texture and one of its levels, the back
+ * depth surface of its own, textures and a level of one, the back
  * buffer, and a state block of everything.
  *
  * @param {Version} version
@@ -601,10 +648,7 @@ const setup = version=>[
     ...acquire(version, 'target'),
     ...acquire(version, 'zbuffer'),
     ...acquire(version, 'back'),
-    { label: 'CreateTexture', run: m=>m.call('device', 'CreateTexture', version.nine
-        ? [16, 16, 0, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, KEPT, 0]
-        : [16, 16, 0, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, KEPT],
-    { keep: 'texture', kind: 'texture' }) },
+    ...TEXTURE_NAMES.map(name=>createTexture(version, name)),
     ...acquire(version, 'level'),
     stateBlock(version, 'all', 1),
 ];
@@ -745,6 +789,25 @@ function randomStep(version, states, rng, skip){
         }],
         ['GetViewport', 6, ()=>get.viewport(none())],
         ['GetDesc', version.nine ? 4 : 0, ()=>get.desc(rng.pick(SURFACES), none())],
+        ['GetLevelDesc', 5, ()=>get.levelDesc(rng.pick(TEXTURE_NAMES),
+            rng.chance(0.85) ? rng.int(5) : rng.pick(EDGE_LEVELS), none())],
+        ['CreateTexture', 1, ()=>createTexture(version, rng.pick(TEXTURE_NAMES))],
+        ['release texture', 1, ()=>{
+            const texture = rng.pick(TEXTURE_NAMES);
+            return { label: `${texture}.Release`, run: m=>m.release(texture) };
+        }],
+        ['LockRect', 2, ()=>{
+            const texture = rng.pick(TEXTURE_NAMES);
+            const level = rng.chance(0.9) ? rng.int(4) : rng.pick(EDGE_LEVELS);
+            const how = through('LockRect');
+            const unlock = rng.chance(0.7);
+            // The address handed back is where each process's heap put the
+            // level, so only the answers are compared.
+            return { label: `${texture}.LockRect(${hex(level)})${unlock ? ', UnlockRect' : ''}`
+                + `${how.host ? ' host' : ''}`,
+            run: m=>[m.call(texture, 'LockRect', [level, OUT, 0, 0], how),
+                ...unlock ? [m.call(texture, 'UnlockRect', [level], how)] : []] };
+        }],
         ['acquire', 3, ()=>acquire(version, rng.pick(SURFACES))[0]],
         ['release', 2, ()=>{
             const surface = rng.pick(SURFACES);
@@ -773,6 +836,13 @@ function randomStep(version, states, rng, skip){
                     }
                     if (bare)
                     {
+                        for (const texture of ['dynamic', 'drawn'])
+                        {
+                            while (m.held.has(texture))
+                            {
+                                answers.push(m.release(texture));
+                            }
+                        }
                         for (const surface of SURFACES)
                         {
                             while (m.held.has(surface))
@@ -1014,13 +1084,17 @@ function passed(version, { wrong, split }){
         const { guest, host } = split('device', name);
         assert.ok(guest > 50 && host > 0, `${name}: ${guest} in the guest, ${host} on the host`);
     }
+    const described = split('texture', 'GetLevelDesc');
+    assert.ok(described.guest > 50 && described.host > 0,
+        `GetLevelDesc: ${described.guest} in the guest, ${described.host} on the host`);
     if (version.nine)
     {
         const { guest } = split('surface', 'GetDesc');
         assert.ok(guest > 10, `GetDesc: ${guest} in the guest`);
         for (const name of ['Capture', 'Apply'])
         {
-            assert.ok(split('block', name).guest > 10, `${name} taken in the ring`);
+            assert.ok(split('block', name).guest > 10,
+                `${name} taken in the ring: ${split('block', name).guest}`);
         }
     }
     const setters = ['SetRenderState', 'SetTransform', 'SetTextureStageState', 'SetViewport',
@@ -1039,13 +1113,31 @@ test('Direct3D 8: a getter answered in the guest answers what the device answers
     passed(D3D8, gate(D3D8, { guestCode: true }, SEEDS, LENGTH, KNOWN));
 });
 
+test('a level only ever described is described in the guest from the second call on', ()=>{
+    // A program that reads a level's description without taking the level
+    // still crosses only once: the host's answer publishes the level.
+    for (const version of [D3D9, D3D8])
+    {
+        const m = machine(version, { guestCode: true });
+        for (const step of setup(version))
+        {
+            step.run(m);
+        }
+        const named = `${version.iids.texture}::GetLevelDesc`;
+        const first = m.call('plain', 'GetLevelDesc', [2, OUT], { out: 32 });
+        assert.equal(m.fellBack.get(named), 1, `${version.dll}: the first call is the host's`);
+        assert.equal(m.call('plain', 'GetLevelDesc', [2, OUT], { out: 32 }), first);
+        assert.equal(m.fellBack.get(named), 1, `${version.dll}: the second is the guest's`);
+    }
+});
+
 test('a device recorded for a graphics worker answers its getters as the device does', ()=>{
     // The recorded device answers plain getters on the program's side and the
     // shadow mirrors through it: what it answers must be what a device the
     // program held itself would.
     for (const version of [D3D9, D3D8])
     {
-        passed(version, gate(version, { guestCode: true, recorded: true }, SEEDS.slice(0, 6),
+        passed(version, gate(version, { guestCode: true, recorded: true }, SEEDS.slice(0, 8),
             LENGTH, KNOWN));
     }
 });

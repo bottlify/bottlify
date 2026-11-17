@@ -635,6 +635,8 @@ const MAX_WINDOW_TEXT = 1 << 16;
  *           The top-level window whose surface a window draws on, and where it is.
  * @property {() => { hwnd: number, rect: Rect, shown: boolean, shape: Rect[] }[]} surfaces
  *           The top-level windows bottom to top, for the screen to be composed of.
+ * @property {(hwnd: number) => boolean} shownWindow
+ *           Whether a window and every ancestor of it is shown; false for no window.
  * @property {(hwnd: number, x: number, y: number, width: number, height: number,
  *     how?: { announce?: boolean }) => boolean} place
  * @property {(hwnd: number) => void} cover
@@ -6945,6 +6947,10 @@ export function createWindowFunctions(host){
                 }
             }
             return out;
+        },
+        shownWindow: hwnd=>{
+            const record = live(hwnd);
+            return record ? shown(record) : false;
         },
         list: ()=>[...windows.values()]
             .filter(record=>!record.destroyed)

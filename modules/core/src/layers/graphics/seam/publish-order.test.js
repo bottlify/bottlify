@@ -23,7 +23,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    COMMAND, SHADOW, commandCode, createCommandReader, getRenderStateCode, getSamplerStateCode,
+    COMMAND, SHADOW, commandCode, createCommandReader, getLevelDescCode, getRenderStateCode,
+    getSamplerStateCode,
     getShaderCode, getSurfaceDescCode, getSurfaceLevelCode, getTargetCode, getTextureStageStateCode,
     getTransformCode, getViewportCode, lock7Code, lockCode, lockLevelCode, moveCopyCode,
     unlockCode, unlockLevelCode,
@@ -133,6 +134,7 @@ test('every routine lets the device\'s lock go with a locked store', ()=>{
         ['GetSurfaceDesc', getSurfaceDescCode(AT, TRAP)],
         ['GetSamplerState', getSamplerStateCode(AT, TRAP)],
         ['GetSurfaceLevel', getSurfaceLevelCode(AT, TRAP)],
+        ['GetLevelDesc', getLevelDescCode(AT, TRAP)],
         ...commandRoutines(),
     ];
     let released = 0;

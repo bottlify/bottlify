@@ -844,6 +844,17 @@ test('the service measures a client area where it is on the screen, as ClientToS
     assert.equal(service.clientRect(0x9999), null);
 });
 
+test('the service says a window is shown only when it and every ancestor is', ()=>{
+    // What decides whether a Direct3D present into the window is shown.
+    const { fns, memory, hwnd, service } = withWindow({ style: WS_VISIBLE });
+    const child = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE, parent: hwnd });
+    assert.deepEqual([service.shownWindow(hwnd), service.shownWindow(child)], [true, true]);
+    fns.ShowWindow.handler([hwnd, SW_HIDE]);
+    assert.deepEqual([service.shownWindow(hwnd), service.shownWindow(child)], [false, false],
+        'a shown child of a hidden window is not seen');
+    assert.equal(service.shownWindow(0x9999), false, 'nor is a window that is not there');
+});
+
 test('MoveWindow changes both rectangles', ()=>{
     const { fns, memory, hwnd } = withWindow({ style: 0x80000000 });
 

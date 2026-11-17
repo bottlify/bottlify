@@ -1539,7 +1539,7 @@ test('a render-target texture starts out as the GPU makes it, and goes up only o
         texture.release();
     });
 
-test('recorded: an additional swap chain shows its own back buffer in the device\'s window',
+test('recorded: an additional swap chain shown presents its own back buffer, and hidden keeps it',
     async()=>{
         const h = harness();
         const { device } = h;
@@ -1564,12 +1564,22 @@ test('recorded: an additional swap chain shows its own back buffer in the device
         assert.deepEqual([h.presented[0].surface.width, h.presented[0].surface.height], [8, 6],
             'the chain\'s back buffer, not the device\'s');
 
-        // Into a window the display does not show: drawn, submitted, not shown.
+        // Into a hidden window: drawn, submitted, not shown.
         draw();
         assert.equal(chain.Present(false), D3D_OK);
         await device.idle();
         assert.equal(h.presented.length, 1, 'nothing more reached the display');
         assert.ok(h.gpu.of('submit').length >= 2, 'the frame was drawn all the same');
+
+        // The device's own chain likewise, into its window hidden and shown.
+        assert.equal(device.Present(false), D3D_OK);
+        await device.idle();
+        assert.equal(h.presented.length, 1, 'a hidden device window shows nothing');
+        assert.equal(device.Present(), D3D_OK);
+        await device.idle();
+        assert.equal(h.presented.length, 2);
+        assert.notDeepEqual([h.presented[1].surface.width, h.presented[1].surface.height],
+            [8, 6], 'the device\'s own back buffer, not the chain\'s');
 
         // A reset waits for the chain, a default-pool resource, to go.
         back.surface.release();

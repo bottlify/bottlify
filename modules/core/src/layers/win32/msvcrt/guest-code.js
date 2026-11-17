@@ -655,6 +655,54 @@ export function variadicEntry(fixed, form, own){
             joined(longHead, long, builder) } : {} };
 }
 
+/**
+ * A 32-bit runtime's SSE2 entry (`__libm_sse2_sin`), argument and answer in
+ * XMM0, as code in the guest: a cdecl function of one double that answers in
+ * ST0 -- the x87 form's code -- called by a few instructions before it.
+ *
+ *     sub esp, 8
+ *     movsd [esp], xmm0      ; the argument, where a cdecl callee reads it
+ *     call form
+ *     fstp qword [esp]       ; the answer off the x87 stack
+ *     movsd xmm0, [esp]
+ *     add esp, 8
+ *     ret
+ *   form:                    ; the cdecl function's code
+ *
+ * Only for a function whose x87 instructions answer the same at every
+ * precision the program may have set: `fsin` and `fcos` round as they are,
+ * where an `fmul` would round to the 24 bits a Direct3D program sets and the
+ * SSE2 entry computes in a double's 53. A call the form hands over reaches
+ * its handler with a frame of its own, as `variadicEntry`'s does. `own` is
+ * the entry's handler as it was: the trap where no code is placed, and the
+ * reference the code is held to. A 64-bit runtime has no such entry.
+ *
+ * @param {{ code: (builder?: CodeBuilder) => Uint8Array }} form
+ * @param {{ convention: string, argBytes: number, handler: (args: number[]) => number }} own
+ */
+export function xmmEntry(form, own){
+    const head = [
+        0x83, 0xec, 0x08,                   // sub esp, 8
+        0xf2, 0x0f, 0x11, 0x04, 0x24,       // movsd [esp], xmm0
+        0xe8, 12, 0, 0, 0,                  // call form: past the twelve bytes below
+        0xdd, 0x1c, 0x24,                   // fstp qword [esp]
+        0xf2, 0x0f, 0x10, 0x04, 0x24,       // movsd xmm0, [esp]
+        0x83, 0xc4, 0x08,                   // add esp, 8
+        0xc3,                               // ret
+    ];
+    return { ...own,
+        code: (/** @type {CodeBuilder | undefined} */ builder)=>{
+            const shifted = builder && { register: builder.register,
+                jump: (/** @type {number} */ at, /** @type {number} */ target)=>
+                    builder.jump(at + head.length, target) };
+            const body = form.code(shifted);
+            const bytes = new Uint8Array(head.length + body.length);
+            bytes.set(head);
+            bytes.set(body, head.length);
+            return bytes;
+        } };
+}
+
 /** `mov eax, imm32`: a hand-over that jumps through EAX to the trap's address. */
 const MOV_EAX = 0xb8;
 

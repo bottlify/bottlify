@@ -2484,6 +2484,76 @@ export function getSurfaceLevelCode(at, trap){
 }
 
 /**
+ * HRESULT GetLevelDesc(this, UINT level, D3DSURFACE_DESC *out), as guest
+ * code for a texture: a level's description is its surface's, so it is read
+ * out of the block of the surface the texture's table holds for that level
+ * (`SURFACE.DESC`, one owner of it) rather than kept twice. A level the
+ * texture has not got is refused here; one not published yet, a surface
+ * without a block and a null pointer go to the host.
+ *
+ *     (prologue)
+ *     mov eax, [esp+8]            ; level
+ *     cmp eax, [ecx+LEVEL_COUNT]
+ *     jae invalid
+ *     cmp eax, LEVEL_SLOTS
+ *     jae slow
+ *     mov edx, [ecx + eax*4 + LEVELS]
+ *     test edx, edx
+ *     jz slow                     ; not published yet
+ *     mov edx, [edx+4]            ; the surface's block
+ *     test edx, edx
+ *     jz slow
+ *     test dword [edx], 1
+ *     jnz slow
+ *     mov eax, [esp+12]           ; out
+ *     test eax, eax
+ *     jz slow
+ *     push esi
+ *     push edi
+ *     lea esi, [edx + DESC]
+ *     mov edi, eax
+ *     mov ecx, 8
+ *     rep movsd
+ *     pop edi
+ *     pop esi
+ *     xor eax, eax                ; D3D_OK
+ *     ret 12
+ *
+ * @param {number} at @param {number} trap
+ * @returns {Uint8Array}
+ */
+export function getLevelDescCode(at, trap){
+    return routine(at, trap, [
+        ...prologue(),
+        [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
+        [0x3b, 0x41, TEXTURE.LEVEL_COUNT],                       // cmp eax, [ecx+4]
+        { jcc: 0x73, to: 'invalid' },                            // jae invalid
+        [0x3d, ...dword(TEXTURE.LEVEL_SLOTS)],                   // cmp eax, 16
+        { jcc: 0x73, to: 'slow' },                               // jae slow
+        [0x8b, 0x94, 0x81, ...dword(TEXTURE.LEVELS)],            // mov edx, [ecx+eax*4+disp]
+        [0x85, 0xd2],                                            // test edx, edx
+        { jcc: 0x74, to: 'slow' },                               // jz slow
+        [0x8b, 0x52, 0x04],                                      // mov edx, [edx+4]
+        [0x85, 0xd2],                                            // test edx, edx
+        { jcc: 0x74, to: 'slow' },                               // jz slow
+        [0xf7, 0x02, ...dword(FLAG_SLOW_PATH)],                  // test dword [edx], 1
+        { jcc: 0x75, to: 'slow' },                               // jnz slow
+        [0x8b, 0x44, 0x24, 0x0c],                                // mov eax, [esp+12]
+        [0x85, 0xc0],                                            // test eax, eax
+        { jcc: 0x74, to: 'slow' },                               // jz slow
+        [0x56, 0x57],                                            // push esi; push edi
+        [0x8d, 0x72, SURFACE.DESC],                              // lea esi, [edx+4]
+        [0x89, 0xc7],                                            // mov edi, eax
+        [0xb9, ...dword(SURFACE.DESC_WORDS)],                    // mov ecx, 8
+        [0xf3, 0xa5],                                            // rep movsd
+        [0x5f, 0x5e],                                            // pop edi; pop esi
+        [0x31, 0xc0],                                            // xor eax, eax
+        [0xc2, 0x0c, 0x00],                                      // ret 12
+        ...invalidTail(12),
+    ]);
+}
+
+/**
  * A shape's surface arguments and the usage each must have (`surfaceUsage`).
  *
  * @param {CommandShape} shape

@@ -155,6 +155,8 @@ const DXGI_LIBRARIES = ['D3D10.dll', 'D3D10_1.dll', 'D3D11.dll', 'DXGI.dll',
  *     [deps.windowClientSize]
  *        A window's client area, which is the size a back buffer asked for as
  *        zero by zero takes.
+ * @param {(window: number) => boolean} [deps.windowShown]  Whether a window and its
+ *     ancestors are shown, which decides whether a Direct3D 8 or 9 present into it is.
  * @param {(hwnd: number) => { left: number, top: number, right: number, bottom: number }
  *     | null} [deps.windowClient]  and where it lies on the screen, which a DirectDraw
  *     clipper given the window clips to
@@ -239,7 +241,7 @@ export function createGraphicsLibraries(
         free, exportAddress, moduleExportAddress, processHeapAllocate,
         currentThread,
         scratch, render, allocate, allocateCode, divergence, cursor, placeCursor, cursorAt,
-        resolution, windowClientSize,
+        resolution, windowClientSize, windowShown,
         windowClient, gamma, deactivated, deactivations, now = ()=>performance.now(), waitUntil,
         presented,
         refresh = ()=>refreshOf(screen()), guestCode: guestCodeAsked = true, phases, ringBytes,
@@ -396,12 +398,13 @@ export function createGraphicsLibraries(
         publisher, memory, screen, allocate: guestAllocate, allocateCode: guestAllocateCode,
         traps: new Set(guestTraps), divergence, cursor, placeCursor, cursorAt, resolution,
         ringBytes,
-        windowClientSize, now, waitUntil, presented, refresh, phases, focus, callGuest,
+        windowClientSize, windowShown, now, waitUntil, presented, refresh, phases, focus,
+        callGuest,
         currentThread, identity: ()=>graphics.adapter?.() ?? null,
     }));
     const d3d9 = built('D3D9.dll', ()=>createDirect3D9Seam({
         publisher, memory, screen, divergence, cursor, placeCursor, cursorAt, resolution,
-        windowClientSize, gdi, now, devicePublished: pointer=>vtableDecoy(pointer),
+        windowClientSize, windowShown, gdi, now, devicePublished: pointer=>vtableDecoy(pointer),
         focus, callGuest, currentThread,
         waitUntil, presented, refresh, phases, allocate: guestAllocate,
         allocateCode: guestAllocateCode,

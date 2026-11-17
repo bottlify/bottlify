@@ -9,6 +9,10 @@
   DXGI swap chain's window that is full screen, or windowed with its client area over the whole
   screen and no window over it, keeps the swap chain's frames on the screen when GDI paints the
   desktop; a smaller windowed swap chain's frames are replaced by the desktop at each paint.
+- A process shows one GPU picture at a time. A Direct3D 8 or 9 present into a shown window
+  (Present's override, else its swap chain's window) is shown, whichever window the device was
+  made on; pictures presented into two shown windows take the screen in turn, each whole, and
+  this is reported once.
 - No Direct3D 12. Direct3D 11 makes devices at feature levels 11.0, 10.1 and 10.0; a program
   that asks only for 11.1 or the 9.x levels is refused. Its deferred contexts record calls that
   the immediate context plays (`DriverCommandLists` is false). A context state

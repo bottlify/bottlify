@@ -1447,7 +1447,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             return D3D_OK;
         },
 
-        Present: ()=>device.Present(),
+        Present: (/** @type {boolean | undefined} */ shown)=>device.Present(shown),
 
         get presentCount(){
             return presents;
@@ -2386,9 +2386,10 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
     };
 
     /**
-     * A swap chain's back buffer presented: onto the display when it goes
-     * into the window the display shows, and otherwise drawn and kept, which
-     * is reported once.
+     * A swap chain's back buffer presented: onto the display when the window
+     * it goes into shows it, and otherwise drawn and kept, as a present into
+     * a hidden window is. Which it is is the caller's to say, since only the
+     * caller knows the windows.
      *
      * @param {any} backBuffer @param {boolean} shown
      * @returns {number | Promise<number>}
@@ -2398,19 +2399,15 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         {
             return lostAnswer();
         }
-        if (shown)
+        const own = backBuffer === backBuffers[0];
+        const submitted = !shown ? renderer?.submit()
+            : renderer?.present(own ? model
+                : Object.create(model, { backBuffer: { get: ()=>backBuffer } }));
+        if (own)
         {
-            const submitted = renderer?.present(
-                Object.create(model, { backBuffer: { get: ()=>backBuffer } }));
-            if (backBuffer === backBuffers[0])
-            {
-                flip();
-            }
-            return presented(submitted);
+            flip();
         }
-        report('chain-window', 'a swap chain presented into a window the display does not'
-            + ' show: its frame is drawn and its picture is not shown');
-        return presented(renderer?.submit());
+        return presented(submitted);
     };
 
     /** The state a plain device's reset puts back to what a new device has. */
@@ -2578,16 +2575,17 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
          * differ, and a program that resets on the strength of Present alone
          * never learns that the device came back.
          */
-        /** @returns {number | Promise<number>} */
-        Present(){
+        /**
+         * @param {boolean} [shown]  Whether the window it presents into shows the picture.
+         * @returns {number | Promise<number>}
+         */
+        Present(shown = true){
             if (deviceState !== DEVICE_STATE.OK)
             {
                 return lostAnswer();
             }
-            const submitted = renderer?.present(model);
-            flip();
             presents++;
-            return presented(submitted);
+            return presentChain(backBuffers[0], shown);
         },
 
         /** Made through IDirect3D9Ex. */

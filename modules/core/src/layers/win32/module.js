@@ -92,7 +92,7 @@ import { HOSTNAME, createWinsockFunctions } from './wsock32/functions.js';
 import { createLibcefFunctions } from './libcef/functions.js';
 import { createSteamStart } from './steamclient/steam-start.js';
 import { STEAM_PATH, announceSteamClient, createSteamclientFunctions, steamClientDll,
-    steamFilesOf } from './steamclient/functions.js';
+    steamFilesOf, steamLaunchEnvironment } from './steamclient/functions.js';
 import { createSocketRegistry } from './wsock32/sockets.js';
 import { createLoopbackAdapter } from './wsock32/loopback.js';
 import { createWinmmFunctions, WINMM_ORDINALS } from './winmm/functions.js';
@@ -622,11 +622,14 @@ export function createWin32Module(){
              * registry's environment keys hold over them.
              */
             const ownWidth = { long: pointerSize === 8, wow64: machine64 && pointerSize === 4 };
+            // A Steam game is started as the client starts one, its launch in
+            // the environment (`steamLaunchEnvironment`).
             const startingEnvironment = ()=>(config?.environment === undefined
-                ? sessionEnvironment(
+                ? { ...sessionEnvironment(
                     defaultEnvironment(windows, folders, processors.count(), ownWidth),
                     environmentValues(HKEY_LOCAL_MACHINE, MACHINE_ENVIRONMENT),
-                    environmentValues(HKEY_CURRENT_USER, 'Environment'))
+                    environmentValues(HKEY_CURRENT_USER, 'Environment')),
+                ...config?.steam?.appId ? steamLaunchEnvironment(config.steam.appId) : {} }
                 : machine64 ? machineArchitecture(config.environment, ownWidth)
                     : config.environment);
 
@@ -652,7 +655,8 @@ export function createWin32Module(){
             // SteamStart lock and section), made when a process first opens
             // one, as the client made them before the game ran.
             const steamStart = config?.steam ? createSteamStart({ kernel,
-                owns: app=>(config.steam?.apps ?? []).includes(app >>> 0) }) : null;
+                owns: app=>(config.steam?.apps ?? []).includes(app >>> 0),
+                say: text=>config?.onTrace?.(text) }) : null;
             const namedObjects = steamStart ? {
                 ...runObjects,
                 /** @param {string | null} name @param {string} kind */
@@ -788,7 +792,7 @@ export function createWin32Module(){
              *     surfaceOf?: (hwnd: number) => { hwnd: number, rect: any } | null,
              *     modalPump?: (thread: unknown) => number | Promise<number>,
              *     surfaces?: () => { hwnd: number, rect: any, shown: boolean,
-             *         shape: any[] }[] }} */
+             *         shape: any[] }[], shownWindow?: (hwnd: number) => boolean }} */
             let windowService = {
                 list: ()=>[], clientRect: ()=>null, place: ()=>false, cover: ()=>{}, active: ()=>0,
                 deactivated: ()=>false, deactivations: ()=>0, rawInput: ()=>{},
@@ -3463,6 +3467,7 @@ export function createWin32Module(){
                     }),
                     ...createMappingFunctions({
                         readMemory,
+                        pointerSize,
                         pipes,
                         divergence: config?.divergence,
                         writeMemory,
@@ -3711,6 +3716,7 @@ export function createWin32Module(){
                         imagePath: ()=>modules.imagePath(),
                         libraryHome,
                         list: ()=>modules.list?.() ?? [],
+                        nativePath: nativePathOf,
                         // Reading a library off the volume belongs to whoever
                         // assembled the process, so it is passed straight through.
                         // Without it LoadLibrary can only answer for what is
@@ -4260,12 +4266,13 @@ export function createWin32Module(){
                     }])),
                     ...Object.fromEntries(['EnumProcessModules', 'GetModuleFileNameExA',
                         'GetModuleFileNameExW', 'GetModuleBaseNameA', 'GetModuleBaseNameW',
-                        'GetModuleInformation'].map(name=>[name, {
-                        // Four arguments, each of them.
-                        argBytes: 16,
-                        handler: (/** @type {number[]} */ args)=>
-                            libraries['KERNEL32.dll'][`K32${name}`].handler(args),
-                    }])),
+                        'GetModuleInformation', 'GetMappedFileNameA', 'GetMappedFileNameW']
+                        .map(name=>[name, {
+                            // Four arguments, each of them.
+                            argBytes: 16,
+                            handler: (/** @type {number[]} */ args)=>
+                                libraries['KERNEL32.dll'][`K32${name}`].handler(args),
+                        }])),
                 },
 
                 // The debug help library with no symbol files: what a crash
@@ -6635,6 +6642,13 @@ export function createWin32Module(){
                 windowSurfaceOf: hwnd=>windowService.surfaceOf?.(hwnd) ?? null,
                 /** The top-level windows bottom to top, for the screen to be composed of. */
                 windowSurfaces: ()=>windowService.surfaces?.() ?? [],
+                /**
+                 * Whether a window and every ancestor of it is shown, as the
+                 * desktop shows what is presented into it; false for no window.
+                 *
+                 * @param {number} hwnd
+                 */
+                windowShown: hwnd=>windowService.shownWindow?.(hwnd) ?? false,
                 /** The window the program is active through, as GetForegroundWindow answers. */
                 activeWindow: ()=>windowService.active(),
 
