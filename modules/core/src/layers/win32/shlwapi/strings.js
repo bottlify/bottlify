@@ -110,6 +110,59 @@ export function timeInterval(milliseconds, digits){
 const SIZE_UNITS = Object.freeze(['KB', 'MB', 'GB', 'TB', 'PB', 'EB']);
 
 /**
+ * StrCmpLogicalW's order: runs of digits compared as numbers, the rest
+ * character by character with case ignored, a digit before any other
+ * character; of two equal numbers the one with fewer leading zeros first.
+ *
+ * @param {string} a @param {string} b @returns {-1 | 0 | 1}
+ */
+export function logicalOrder(a, b){
+    /** @param {string} text @param {number} at */
+    const run = (text, at)=>{
+        let end = at;
+        while (end < text.length && /\d/.test(text[end]))
+        {
+            end++;
+        }
+        return text.slice(at, end);
+    };
+    let i = 0;
+    let j = 0;
+    while (i < a.length && j < b.length)
+    {
+        const x = /\d/.test(a[i]);
+        const y = /\d/.test(b[j]);
+        if (x && y)
+        {
+            const left = run(a, i);
+            const right = run(b, j);
+            const p = left.replace(/^0+/, '');
+            const q = right.replace(/^0+/, '');
+            if (p !== q)
+            {
+                return p.length !== q.length ? p.length < q.length ? -1 : 1 : p < q ? -1 : 1;
+            }
+            if (left.length !== right.length)
+            {
+                return left.length < right.length ? -1 : 1;
+            }
+            i += left.length;
+            j += right.length;
+            continue;
+        }
+        const left = a[i].toUpperCase();
+        const right = b[j].toUpperCase();
+        if (left !== right)
+        {
+            return x ? -1 : y ? 1 : left < right ? -1 : 1;
+        }
+        i++;
+        j++;
+    }
+    return i < a.length ? 1 : j < b.length ? -1 : 0;
+}
+
+/**
  * A number with its thousands grouped, as the user's locale -- en-US's
  * comma -- groups them.
  *
@@ -760,7 +813,208 @@ export function createStringFunctions(host, { A, W }){
          */
         wvnsprintfA: listPrinter(A),
         wvnsprintfW: listPrinter(W),
+
+        /**
+         * int StrCmpCA(LPCSTR pszStr1, LPCSTR pszStr2)
+         * int StrCmpNCA(LPCSTR pszStr1, LPCSTR pszStr2, int nChar)
+         *
+         * The C-locale comparisons: character by character by code, with no
+         * locale's ordering; the I spellings fold case first.
+         */
+        ...both('StrCmpC', 8, (width, [first, second])=>ordinal(width, first, second, false, null)),
+        ...both('StrCmpIC', 8, (width, [first, second])=>ordinal(width, first, second, true, null)),
+        ...both('StrCmpNC', 12, (width, [first, second, count])=>
+            ordinal(width, first, second, false, count | 0)),
+        ...both('StrCmpNIC', 12, (width, [first, second, count])=>
+            ordinal(width, first, second, true, count | 0)),
+
+        /**
+         * int StrCmpLogicalW(PCWSTR psz1, PCWSTR psz2)
+         *
+         * Explorer's ordering of names: case ignored, and a run of digits
+         * compared as the number it spells, so "File2" comes before "File10".
+         */
+        StrCmpLogicalW: one(W, 8, (width, [first, second])=>{
+            const a = width.read(first);
+            const b = width.read(second);
+            if (a === null || b === null)
+            {
+                return a === b ? 0 : a === null ? -1 : 1;
+            }
+            return logicalOrder(a, b);
+        }),
+
+        /**
+         * LPSTR StrNCatA(LPSTR pszFront, LPCSTR pszBack, int cchMax)
+         *
+         * At most cchMax - 1 characters of the back added to the front, and
+         * the terminator after them; the front is the answer.
+         */
+        ...both('StrNCat', 12, (width, [front, back, count])=>{
+            const head = width.read(front);
+            const tail = width.read(back);
+            if (head === null || tail === null || (count | 0) <= 0)
+            {
+                return front >>> 0;
+            }
+            host.writeMemory((front >>> 0) + head.length * width.unit,
+                width.sz(tail.slice(0, (count | 0) - 1)));
+            return front >>> 0;
+        }),
+
+        /**
+         * LPSTR StrRChrIA(LPCSTR pszStart, LPCSTR pszEnd, WORD wMatch)
+         *
+         * StrRChr with case ignored.
+         */
+        ...both('StrRChrI', 12, (width, [start, end, code])=>{
+            const text = width.read(start);
+            if (text === null)
+            {
+                return 0;
+            }
+            const wanted = width.char(code).toUpperCase();
+            const stop = (end >>> 0) === 0 ? text.length
+                : Math.min(text.length, Math.floor(((end >>> 0) - (start >>> 0)) / width.unit));
+            for (let at = stop - 1; at >= 0; at--)
+            {
+                if (text[at].toUpperCase() === wanted)
+                {
+                    return (start >>> 0) + at * width.unit;
+                }
+            }
+            return 0;
+        }),
+
+        /**
+         * int StrSpnA(LPCSTR psz, LPCSTR pszSet)
+         *
+         * How many characters lead the string that are all of the set.
+         */
+        ...both('StrSpn', 8, (width, [text, set])=>{
+            const string = width.read(text);
+            const allowed = width.read(set);
+            if (string === null || allowed === null)
+            {
+                return 0;
+            }
+            let at = 0;
+            while (at < string.length && allowed.includes(string[at]))
+            {
+                at++;
+            }
+            return at;
+        }),
+
+        /**
+         * BOOL StrTrimA(LPSTR psz, LPCSTR pszTrimChars)
+         *
+         * The characters of the set taken off both ends, in place; TRUE when
+         * any was.
+         */
+        ...both('StrTrim', 8, (width, [text, set])=>{
+            const string = width.read(text);
+            const trimmed = width.read(set);
+            if (string === null || trimmed === null)
+            {
+                return 0;
+            }
+            let from = 0;
+            let to = string.length;
+            while (from < to && trimmed.includes(string[from]))
+            {
+                from++;
+            }
+            while (to > from && trimmed.includes(string[to - 1]))
+            {
+                to--;
+            }
+            if (from === 0 && to === string.length)
+            {
+                return 0;
+            }
+            host.writeMemory(text >>> 0, width.sz(string.slice(from, to)));
+            return 1;
+        }),
+
+        /**
+         * HRESULT StrRetToStrA(STRRET *pstr, PCUITEMID_CHILD pidl, LPSTR *ppsz)
+         *
+         * StrRetToBuf's text in a block of the COM allocator's, which the
+         * caller frees with CoTaskMemFree; NULL and the failure for a STRRET
+         * with no text.
+         */
+        ...both('StrRetToStr', 12, (width, [strret, item, out])=>{
+            if ((out >>> 0) === 0 || !host.allocate || !host.readMemory)
+            {
+                return E_INVALIDARG;
+            }
+            host.writeMemory(out >>> 0, Uint8Array.of(0, 0, 0, 0));
+            const scratch = host.allocate(0x2000);
+            if (!scratch)
+            {
+                return E_OUTOFMEMORY;
+            }
+            try
+            {
+                const hr = strRetToBuf(width, [strret, item, scratch, 0x1000]);
+                if (hr !== S_OK)
+                {
+                    return hr;
+                }
+                const text = width.read(scratch) ?? '';
+                const ole32 = host.library?.('OLE32.dll') ?? host.library?.('ole32.dll');
+                const size = (text.length + 1) * width.unit;
+                const block = ole32?.CoTaskMemAlloc
+                    ? /** @type {number} */ (ole32.CoTaskMemAlloc.handler([size])) >>> 0 : 0;
+                if (block === 0)
+                {
+                    return E_OUTOFMEMORY;
+                }
+                host.writeMemory(block, width.sz(text));
+                host.writeMemory(out >>> 0, Uint8Array.of(block & 0xff, block >>> 8 & 0xff,
+                    block >>> 16 & 0xff, block >>> 24 & 0xff));
+                return S_OK;
+            }
+            finally
+            {
+                host.free?.(scratch);
+            }
+        }),
     };
+
+    /**
+     * The C-locale comparison: by character code, case folded first for
+     * the I spellings, at most `limit` characters of each when one is given.
+     *
+     * @param {import('./text.js').Width} width @param {number} first @param {number} second
+     * @param {boolean} ignoreCase @param {number | null} limit
+     */
+    function ordinal(width, first, second, ignoreCase, limit){
+        const a = width.read(first);
+        const b = width.read(second);
+        if (a === null || b === null)
+        {
+            return a === b ? 0 : a === null ? -1 : 1;
+        }
+        const end = limit === null ? Math.max(a.length, b.length) : limit;
+        for (let at = 0; at < end; at++)
+        {
+            const x = at < a.length ? a[at] : '';
+            const y = at < b.length ? b[at] : '';
+            const left = ignoreCase ? x.toUpperCase() : x;
+            const right = ignoreCase ? y.toUpperCase() : y;
+            if (left !== right)
+            {
+                return (left.charCodeAt(0) || 0) - (right.charCodeAt(0) || 0) < 0 ? -1 : 1;
+            }
+            if (x === '')
+            {
+                return 0;
+            }
+        }
+        return 0;
+    }
 
     /**
      * The `va_list` variant: up to 32 argument words from the list.

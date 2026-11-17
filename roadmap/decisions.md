@@ -2371,3 +2371,11 @@ move a DLL but does not ask it to; placed at the next free base like any other i
 the one image kept at its base regardless. The wrapper itself runs as it is:
 nothing of it is patched, and nothing is answered that the account does not hold. A base that is
 not free is said as a divergence and the module goes where the others are. *2026-11-17.*
+
+**A260. AssocIsDangerous answers from a fixed list of file types, not from each type's EditFlags.**
+Windows calls a type dangerous when its HKEY_CLASSES_ROOT entry carries FTA_AlwaysUnsafe or it is one
+of the kinds shlwapi itself counts unsafe. A bottle's classes are rarely registered as an installed
+Windows has them, so the per-type flags would answer "safe" for what is not; the engine answers TRUE
+for the programs, scripts, shortcuts and installers (exe, com, bat, cmd, pif, scr, js, vbs, wsf, hta,
+msi, lnk, reg and the like - `shlwapi/registry.js` lists them) and FALSE for every other type.
+*2026-11-17.*

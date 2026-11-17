@@ -19,6 +19,25 @@ import { dword, u32 } from './text.js';
 /** What a path may be, terminator included. */
 export const MAX_PATH = 260;
 const FILE_ATTRIBUTE_DIRECTORY = 0x10;
+const FILE_ATTRIBUTE_READONLY = 0x1;
+const FILE_ATTRIBUTE_SYSTEM = 0x4;
+const INVALID_FILE_ATTRIBUTES = 0xffffffff;
+const HKEY_CLASSES_ROOT = 0x80000000;
+const RRF_RT_REG_SZ = 0x2;
+/** PathGetCharType's flags. */
+const GCT_INVALID = 0x0;
+const GCT_LFNCHAR = 0x1;
+const GCT_SHORTCHAR = 0x2;
+const GCT_WILD = 0x4;
+const GCT_SEPARATOR = 0x8;
+/**
+ * The extensions PathFileExistsDefExt tries, by the bit of dwWhich that asks
+ * for each, in the order Windows tries them.
+ *
+ * @type {readonly (readonly [number, string])[]}
+ */
+const DEFAULT_EXTENSIONS = Object.freeze([[0x1, '.pif'], [0x2, '.com'], [0x4, '.exe'],
+    [0x8, '.bat'], [0x10, '.lnk'], [0x20, '.cmd']]);
 
 const S_OK = 0;
 const E_POINTER = 0x80004003;
@@ -351,6 +370,10 @@ const strippedRoot = path=>{
  * @property {(code: number) => void} [setLastError]
  * @property {(library: string) => Record<string, { handler: (args: number[]) => any }> | undefined}
  *     [library]  kernel32, for the search PathSearchAndQualify makes.
+ * @property {(bytes: number) => number} [allocate]
+ * @property {(address: number) => void} [free]
+ * @property {(hdc: number, text: string) => number} [textWidth]
+ *           A text's width in a context's font, for a path shortened to fit.
  */
 
 /**
@@ -1102,5 +1125,486 @@ export function createPathFunctions(host, { A, W }){
             const past = path === null ? null : skipRoot(path);
             return past === null ? 0 : (pointer >>> 0) + past * width.unit;
         }),
+
+        /**
+         * BOOL PathFileExistsDefExtA(LPSTR lpszPath, DWORD dwWhich)
+         *
+         * A path with an extension is there or not; one without is tried with
+         * each extension dwWhich names, in Windows' order, and the first that
+         * is there is added to the caller's buffer.
+         */
+        ...both('PathFileExistsDefExt', 8, (width, [pointer, which])=>{
+            const path = width.read(pointer);
+            return path === null ? 0 : withDefaultExtension(width, pointer, path, which >>> 0)
+                ? 1 : 0;
+        }),
+
+        /**
+         * BOOL PathFindOnPathExA(LPSTR lpszFile, LPCSTR *lppszOtherDirs, DWORD dwWhich)
+         * BOOL PathFindOnPathA(LPSTR lpszFile, LPCSTR *lppszOtherDirs)
+         *
+         * The file looked for in the directories the caller lists, then the
+         * system's own and those PATH names; the first full path that is
+         * there, with the extension dwWhich found, is the caller's buffer.
+         */
+        ...both('PathFindOnPathEx', 12, (width, [pointer, others, which])=>
+            findOnPath(width, pointer, others, which >>> 0)),
+        ...both('PathFindOnPath', 8, (width, [pointer, others])=>
+            findOnPath(width, pointer, others, 0)),
+
+        /**
+         * BOOL PathFileExistsAndAttributesA(LPCSTR lpszPath, DWORD *dwAttr)
+         *
+         * Whether it is there, and its attributes as GetFileAttributes gives
+         * them - INVALID_FILE_ATTRIBUTES for nothing there.
+         */
+        ...both('PathFileExistsAndAttributes', 8, (width, [pointer, out])=>{
+            const attributes = width.read(pointer) === null ? null
+                : kernel32(`GetFileAttributes${width.wide ? 'W' : 'A'}`, [pointer]);
+            const answer = attributes ?? INVALID_FILE_ATTRIBUTES;
+            if ((out >>> 0) !== 0)
+            {
+                host.writeMemory(out >>> 0, dword(answer));
+            }
+            return answer === INVALID_FILE_ATTRIBUTES ? 0 : 1;
+        }),
+
+        /** LPSTR PathSkipLeadingSlashesA(LPCSTR lpszSrc): past a URL's leading "//". */
+        PathSkipLeadingSlashesA: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([pointer])=>{
+                const path = A.read(pointer);
+                return path !== null && path.startsWith('//') ? (pointer >>> 0) + 2
+                    : pointer >>> 0;
+            },
+        },
+
+        /**
+         * VOID FixSlashesAndColonW(LPWSTR lpwstr)
+         *
+         * A file URL's path made a Windows one in place: forward slashes
+         * become backslashes and a colon the bar URLs spell a drive with.
+         */
+        FixSlashesAndColonW: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([pointer])=>{
+                const path = W.read(pointer);
+                if (path !== null)
+                {
+                    write(pointer, W, path.replace(/\//g, '\\').replace(/:/g, '|'));
+                }
+                return 0;
+            },
+        },
+
+        /**
+         * LPSTR PathFindNextComponentA(LPCSTR lpszPath)
+         *
+         * Past the first backslash, or the terminator when there is none;
+         * NULL for no path or an empty one.
+         */
+        ...both('PathFindNextComponent', 4, (width, [pointer])=>{
+            const path = width.read(pointer);
+            if (path === null || path === '')
+            {
+                return 0;
+            }
+            const cut = path.indexOf('\\');
+            return (pointer >>> 0) + (cut < 0 ? path.length : cut + 1) * width.unit;
+        }),
+
+        /**
+         * LPCSTR PathFindSuffixArrayA(LPCSTR lpszSuffix, LPCSTR *lppszArray, int dwCount)
+         *
+         * The first suffix of the caller's list the path ends with, case
+         * ignored - the list's own string - or NULL.
+         */
+        ...both('PathFindSuffixArray', 12, (width, [pointer, list, count])=>{
+            const path = width.read(pointer);
+            if (path === null || (list >>> 0) === 0 || !host.readMemory)
+            {
+                return 0;
+            }
+            for (let at = 0; at < (count | 0); at++)
+            {
+                const entry = u32(host.readMemory((list >>> 0) + at * 4, 4));
+                const suffix = width.read(entry);
+                if (suffix !== null && path.length >= suffix.length
+                    && path.slice(path.length - suffix.length).toLowerCase()
+                        === suffix.toLowerCase())
+                {
+                    return entry;
+                }
+            }
+            return 0;
+        }),
+
+        /**
+         * UINT PathGetCharTypeA(UCHAR ch)
+         *
+         * GCT_INVALID, GCT_WILD, GCT_SEPARATOR, or GCT_LFNCHAR with
+         * GCT_SHORTCHAR unless the character is one a short name has none of.
+         */
+        PathGetCharTypeA: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([code])=>charType(A.char(code & 0xff)),
+        },
+        PathGetCharTypeW: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([code])=>charType(String.fromCharCode(code & 0xffff)),
+        },
+
+        /**
+         * BOOL PathIsContentTypeA(LPCSTR lpszPath, LPCSTR lpszContentType)
+         *
+         * The "Content Type" HKEY_CLASSES_ROOT gives the path's extension,
+         * compared without regard to case.
+         */
+        ...both('PathIsContentType', 8, (width, [pointer, wanted])=>{
+            const path = width.read(pointer);
+            const type = width.read(wanted);
+            if (path === null || type === null)
+            {
+                return 0;
+            }
+            const extension = path.slice(extensionIndex(path));
+            const found = extension ? classesValue(extension, 'Content Type') : null;
+            return found !== null && found.toLowerCase() === type.toLowerCase() ? 1 : 0;
+        }),
+
+        /** BOOL PathIsFileSpecA(LPCSTR lpszPath): no backslash and no colon in it. */
+        ...both('PathIsFileSpec', 4, (width, [pointer])=>{
+            const path = width.read(pointer);
+            return path !== null && !/[\\:]/.test(path) ? 1 : 0;
+        }),
+
+        /**
+         * BOOL PathIsLFNFileSpecA(LPCSTR lpszPath)
+         *
+         * A name that is not 8.3: a space, a second dot, more than eight
+         * characters before its dot or three after.
+         */
+        ...both('PathIsLFNFileSpec', 4, (width, [pointer])=>{
+            const path = width.read(pointer);
+            if (path === null)
+            {
+                return 0;
+            }
+            if (path.includes(' '))
+            {
+                return 1;
+            }
+            const parts = path.split('.');
+            return parts.length > 2 || parts[0].length > 8 || (parts[1]?.length ?? 0) > 3
+                ? 1 : 0;
+        }),
+
+        /**
+         * BOOL PathIsNetworkPathA(LPCSTR lpszPath)
+         *
+         * A UNC path. A drive letter here is never a network drive.
+         */
+        ...both('PathIsNetworkPath', 4, (width, [pointer])=>{
+            const path = width.read(pointer);
+            return path !== null && path.startsWith('\\\\') ? 1 : 0;
+        }),
+
+        /**
+         * BOOL PathIsPrefixA(LPCSTR lpszPrefix, LPCSTR lpszPath)
+         *
+         * The whole of the prefix is the components the two paths share.
+         */
+        ...both('PathIsPrefix', 8, (width, [prefix, pointer])=>{
+            const head = width.read(prefix);
+            const path = width.read(pointer);
+            return head !== null && path !== null
+                && commonPrefixLength(head, path) === head.length ? 1 : 0;
+        }),
+
+        /**
+         * BOOL PathIsSystemFolderA(LPCSTR lpszPath, DWORD dwAttrib)
+         *
+         * A directory that is read-only or system: the path's attributes, or
+         * those the caller passes when it names no path.
+         */
+        ...both('PathIsSystemFolder', 8, (width, [pointer, given])=>{
+            const path = width.read(pointer);
+            const attributes = path ? kernel32(`GetFileAttributes${width.wide ? 'W' : 'A'}`,
+                [pointer]) ?? INVALID_FILE_ATTRIBUTES : given >>> 0;
+            return attributes !== INVALID_FILE_ATTRIBUTES
+                && (attributes & FILE_ATTRIBUTE_DIRECTORY) !== 0
+                && (attributes & (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_SYSTEM)) !== 0 ? 1 : 0;
+        }),
+
+        /** BOOL PathMakeSystemFolderA(LPCSTR lpszPath): a directory given the system attribute. */
+        ...both('PathMakeSystemFolder', 4, (width, [pointer])=>
+            systemFolder(width, pointer, attributes=>attributes | FILE_ATTRIBUTE_SYSTEM)),
+
+        /**
+         * BOOL PathUnmakeSystemFolderA(LPCSTR lpszPath)
+         *
+         * The attributes that make a directory a system folder taken off.
+         */
+        ...both('PathUnmakeSystemFolder', 4, (width, [pointer])=>systemFolder(width, pointer,
+            attributes=>attributes & ~(FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_READONLY))),
+
+        /** BOOL PathIsUNCServerA(LPCSTR lpszPath): "\\server" and nothing after. */
+        ...both('PathIsUNCServer', 4, (width, [pointer])=>{
+            const path = width.read(pointer);
+            return path !== null && /^\\\\[^\\]*$/.test(path) ? 1 : 0;
+        }),
+
+        /** BOOL PathIsUNCServerShareA(LPCSTR lpszPath): "\\server\share" and nothing after. */
+        ...both('PathIsUNCServerShare', 4, (width, [pointer])=>{
+            const path = width.read(pointer);
+            return path !== null && /^\\\\[^\\]+\\[^\\]+$/.test(path) ? 1 : 0;
+        }),
+
+        /**
+         * int PathParseIconLocationA(LPSTR pszIconFile)
+         *
+         * "file,index" split in place: the index answered, the file left with
+         * its quotes and surrounding blanks taken off.
+         */
+        ...both('PathParseIconLocation', 4, (width, [pointer])=>{
+            const path = width.read(pointer);
+            if (path === null)
+            {
+                return 0;
+            }
+            const comma = path.indexOf(',');
+            const file = comma < 0 ? path : path.slice(0, comma);
+            const index = comma < 0 ? 0 : Number.parseInt(path.slice(comma + 1).trim(), 10) || 0;
+            const unquoted = file.trim().replace(/^"(.*)"$/, '$1').trim();
+            write(pointer, width, unquoted);
+            return index | 0;
+        }),
+
+        /**
+         * void PathSetDlgItemPathA(HWND hDlg, int id, LPCSTR pszPath)
+         *
+         * The dialog item's text set to the path, shortened with an ellipsis
+         * to the item's width as PathCompactPath shortens one.
+         */
+        ...both('PathSetDlgItemPath', 12, (width, [dialog, id, pointer])=>{
+            setItemPath(width, dialog, id, pointer);
+            return 0;
+        }),
     };
+
+    /**
+     * PathFileExistsDefExt's body: true when the path, or the path with one
+     * of the extensions `which` names, is there; the extension then added to
+     * the caller's buffer.
+     *
+     * @param {import('./text.js').Width} width @param {number} buffer
+     * @param {string} path @param {number} which
+     */
+    function withDefaultExtension(width, buffer, path, which){
+        if (extensionIndex(path) < path.length || which === 0)
+        {
+            return Boolean(stat(path)?.exists);
+        }
+        for (const [bit, extension] of DEFAULT_EXTENSIONS)
+        {
+            if ((which & bit) !== 0 && path.length + extension.length < MAX_PATH
+                && stat(path + extension)?.exists)
+            {
+                host.writeMemory((buffer >>> 0) + path.length * width.unit, width.sz(extension));
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * PathFindOnPath's search: the caller's directories, then the system
+     * directory, the Windows directory's System and the Windows directory,
+     * then each PATH names.
+     *
+     * @param {import('./text.js').Width} width @param {number} buffer
+     * @param {number} others @param {number} which
+     */
+    function findOnPath(width, buffer, others, which){
+        const file = width.read(buffer);
+        if (file === null || !host.readMemory)
+        {
+            return 0;
+        }
+        /** @type {string[]} */
+        const directories = [];
+        for (let at = others >>> 0; at !== 0 && directories.length < 0x400; at += 4)
+        {
+            const entry = u32(host.readMemory(at, 4));
+            const directory = entry === 0 ? null : width.read(entry);
+            if (directory === null)
+            {
+                break;
+            }
+            directories.push(directory);
+        }
+        const windows = systemPath('GetWindowsDirectoryW');
+        const system = systemPath('GetSystemDirectoryW');
+        directories.push(...[system, windows === null ? null : `${windows}\\System`, windows]
+            .filter(/** @returns {directory is string} */ directory=>directory !== null));
+        directories.push(...(environment()?.get('PATH') ?? '').split(';')
+            .filter(directory=>directory !== ''));
+        for (const directory of directories)
+        {
+            const candidate = `${directory.replace(/[\\/]+$/, '')}\\${file}`;
+            if (candidate.length >= MAX_PATH)
+            {
+                continue;
+            }
+            const scratch = host.allocate?.(MAX_PATH * width.unit) ?? 0;
+            if (!scratch)
+            {
+                return 0;
+            }
+            try
+            {
+                host.writeMemory(scratch, width.sz(candidate));
+                if (withDefaultExtension(width, scratch, candidate, which))
+                {
+                    write(buffer, width, width.read(scratch) ?? candidate);
+                    return 1;
+                }
+            }
+            finally
+            {
+                host.free?.(scratch);
+            }
+        }
+        return 0;
+    }
+
+    /**
+     * A directory kernel32 answers into a buffer of its own, or null.
+     *
+     * @param {'GetWindowsDirectoryW' | 'GetSystemDirectoryW'} name
+     */
+    function systemPath(name){
+        const scratch = host.allocate?.(MAX_PATH * 2) ?? 0;
+        if (!scratch)
+        {
+            return null;
+        }
+        try
+        {
+            const length = kernel32(name, [scratch, MAX_PATH]);
+            return length !== null && length > 0 && length < MAX_PATH ? W.read(scratch) : null;
+        }
+        finally
+        {
+            host.free?.(scratch);
+        }
+    }
+
+    /**
+     * A string value of a key under HKEY_CLASSES_ROOT, or null.
+     *
+     * @param {string} key @param {string} value
+     */
+    function classesValue(key, value){
+        const get = host.library?.('ADVAPI32.dll')?.RegGetValueW;
+        const scratch = get && host.readMemory ? host.allocate?.(0x400) ?? 0 : 0;
+        if (!get || !scratch || !host.readMemory)
+        {
+            return null;
+        }
+        try
+        {
+            host.writeMemory(scratch, W.sz(key));
+            host.writeMemory(scratch + 0x80, W.sz(value));
+            host.writeMemory(scratch + 0x100, dword(0x200));
+            const status = /** @type {number} */ (get.handler([HKEY_CLASSES_ROOT, scratch,
+                scratch + 0x80, RRF_RT_REG_SZ, 0, scratch + 0x104, scratch + 0x100])) >>> 0;
+            return status === 0 ? W.read(scratch + 0x104) : null;
+        }
+        finally
+        {
+            host.free?.(scratch);
+        }
+    }
+
+    /**
+     * PathMakeSystemFolder and PathUnmakeSystemFolder: a directory's
+     * attributes changed as `change` says; FALSE for one that is not there
+     * or is no directory.
+     *
+     * @param {import('./text.js').Width} width @param {number} pointer
+     * @param {(attributes: number) => number} change
+     */
+    function systemFolder(width, pointer, change){
+        const suffix = width.wide ? 'W' : 'A';
+        const attributes = width.read(pointer) === null ? null
+            : kernel32(`GetFileAttributes${suffix}`, [pointer]);
+        if (attributes === null || attributes === INVALID_FILE_ATTRIBUTES
+            || (attributes & FILE_ATTRIBUTE_DIRECTORY) === 0)
+        {
+            return 0;
+        }
+        return kernel32(`SetFileAttributes${suffix}`, [pointer, change(attributes) >>> 0]) ? 1 : 0;
+    }
+
+    /**
+     * PathSetDlgItemPath's body: the item's client width, the path compacted
+     * to it in the screen's font, and the item's text set through user32.
+     *
+     * @param {import('./text.js').Width} width @param {number} dialog
+     * @param {number} id @param {number} pointer
+     */
+    function setItemPath(width, dialog, id, pointer){
+        const user32 = host.library?.('USER32.dll');
+        const path = width.read(pointer) ?? '';
+        const item = user32?.GetDlgItem ? /** @type {number} */ (user32.GetDlgItem.handler([dialog,
+            id])) >>> 0 : 0;
+        if (!user32 || item === 0 || !host.allocate || !host.readMemory)
+        {
+            return;
+        }
+        const rect = host.allocate(16 + (MAX_PATH + 1) * width.unit);
+        try
+        {
+            host.writeMemory(rect, new Uint8Array(16));
+            user32.GetClientRect?.handler([item, rect]);
+            const room = u32(host.readMemory(rect + 8, 4)) - u32(host.readMemory(rect, 4));
+            const measure = host.textWidth;
+            const text = measure && room > 0
+                ? compactPath(path, room, piece=>measure(0, piece)) : path;
+            host.writeMemory(rect + 16, width.sz(text));
+            user32[`SetWindowText${width.wide ? 'W' : 'A'}`]?.handler([item, rect + 16]);
+        }
+        finally
+        {
+            host.free?.(rect);
+        }
+    }
 }
+
+/**
+ * PathGetCharType's flags for one character: a short name (8.3) takes every
+ * long-name character but a space, a comma and a semicolon.
+ *
+ * @param {string} char
+ */
+export const charType = char=>{
+    const code = char.charCodeAt(0);
+    if (code < 0x20 || '<>"|/'.includes(char))
+    {
+        return GCT_INVALID;
+    }
+    if (char === '*' || char === '?')
+    {
+        return GCT_WILD;
+    }
+    if (char === '\\' || char === ':')
+    {
+        return GCT_SEPARATOR;
+    }
+    return GCT_LFNCHAR | (' ,;'.includes(char) ? 0 : GCT_SHORTCHAR);
+};

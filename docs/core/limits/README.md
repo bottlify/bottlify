@@ -45,6 +45,11 @@ event, an error. Neither stops the program.
   without .NET. A 64-bit managed program has no shim of the engine's yet.
 - With less RAM than 2 GiB the system's shared page (`0x7FFE0000`) is there all the same, kept in
   RAM's last 128 KiB, and the heap ends below it.
+- shlwapi looks up no file association: AssocQueryString, AssocQueryKey and AssocQueryStringByKey
+  answer that nothing is associated, AssocCreate makes no IQueryAssociations object, and
+  AssocIsDangerous answers from a fixed list of types (`roadmap/decisions.md` A260). UrlFixupW
+  mends no mistyped scheme. SHCreateThread runs its callback on the caller's thread and gives the
+  new thread no reference or COM apartment of the caller's. Each is said once.
 - The WebBrowser control (ieframe, shdocvw) is there without an HTML engine
   (`roadmap/decisions.md` A240): a program embeds it, navigates and hears its events, but the
   page is not drawn and has no document; each address not drawn is said once as a loss. The
