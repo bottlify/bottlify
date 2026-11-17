@@ -97,7 +97,9 @@ export function createDeviceRing(deps){
     /** @param {number} bytes */
     const pages = bytes=>{
         const span = deps.allocate(bytes + PAGE);
-        return span === 0 ? 0 : (span + PAGE - 1) & ~(PAGE - 1);
+        // Unsigned, as the guest reads it back: past 2 GB the alignment's
+        // signed result is another number for the same page.
+        return span === 0 ? 0 : ((span + PAGE - 1) & ~(PAGE - 1)) >>> 0;
     };
     const block = pages(SHADOW.SIZE);
     const ring = block === 0 ? 0 : pages(ringBytes);
