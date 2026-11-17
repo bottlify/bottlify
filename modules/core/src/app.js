@@ -6795,9 +6795,10 @@ async function buildApp(options){
         // The Steam client's own file, where the embedder fetched Valve's: the
         // module carries its headers, as the file stands in Steam's folder
         // (the win32 layer's volume), and sits where the file says it belongs.
-        // Windows loads a DLL not linked for ASLR at its preferred base when
-        // that base is free, and a DRM wrapper reads the file and compares its
-        // headers with the module's: placed elsewhere, the module answers with
+        // Windows loads a DLL at its preferred base when that base is free -
+        // Valve's files are linked for ASLR, which allows a move and does not
+        // ask for one (decision A259) - and a DRM wrapper reads the file and
+        // compares its headers with the module's: placed elsewhere, the module answers with
         // the loader's base where the file names Valve's, and the wrapper
         // refuses it (Proton keeps Valve's own client DLL where it says it
         // belongs for the same reason). It is placed as a library that can only

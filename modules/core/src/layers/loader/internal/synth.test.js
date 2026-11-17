@@ -589,12 +589,16 @@ test('a file says where its image belongs: its ImageBase and the span of its sec
             'SizeOfImage, the span the loader reserves');
         assert.deepEqual([...file.subarray(0, 2)], [0x4d, 0x5a]);
         assert.ok(installedHeaders(file, imageBase));
-        // Linked for ASLR, it names no place: Windows puts it anywhere.
+        // Linked for ASLR, it still names where it belongs: DYNAMIC_BASE allows
+        // a relocation, it does not ask for one. Valve's client DLL carries it,
+        // and a wrapper compares the file's ImageBase with the module's.
         const view = new DataView(file.buffer, file.byteOffset);
         view.setUint16(nt + 0x18 + 0x46, view.getUint16(nt + 0x18 + 0x46, true) | 0x40, true);
         assert.equal(parsePe(file, { wide: true }).dynamicBase, true,
             `${bits}-bit: the flag as the loader reads it`);
-        assert.equal(imagePlacementOf(file), null, `${bits}-bit, DYNAMIC_BASE: no place`);
+        const aslr = imagePlacementOf(file);
+        assert.ok(aslr, `${bits}-bit, DYNAMIC_BASE: still a place`);
+        assert.equal(aslr.base, imageBase);
     }
     assert.equal(imagePlacementOf(new Uint8Array(0x100)), null, 'not an image: no place');
 });

@@ -2359,12 +2359,15 @@ service key is still created and kept, and the program goes on as it does on a m
 driver will not load. The refusal is said as a divergence. *2026-11-16.*
 
 **A259. The Steam client is this build's own, standing as Valve's file stands: its headers, and
-its image base when the file is not linked for ASLR.** A program's calls into `steamclient.dll`
+its image base, linked for ASLR as it is.** A program's calls into `steamclient.dll`
 are answered by this build's implementation, from the person's own Steam sign-in alone: an app is
 owned, subscribed or installed only when the account's licences grant it, and an ownership ticket
 is the one Steam signed. A DRM wrapper around a Steam game reads the client's file in Steam's
 folder and compares it with the module it loaded; the module carries that file's headers and is
-placed at the base the file names, as Windows loads a DLL not linked for ASLR when the base is
-free (and as Proton keeps Valve's own client where it belongs). The wrapper itself runs as it is:
+placed at the base the file names, as Proton keeps Valve's own client where it belongs. Both of
+Valve's client files are linked for ASLR (DllCharacteristics 0x140 and 0x160), which lets Windows
+move a DLL but does not ask it to; placed at the next free base like any other image linked so
+(the mapping layer's rule), the module was refused by the wrapper with status 3, so the client is
+the one image kept at its base regardless. The wrapper itself runs as it is:
 nothing of it is patched, and nothing is answered that the account does not hold. A base that is
 not free is said as a divergence and the module goes where the others are. *2026-11-17.*
