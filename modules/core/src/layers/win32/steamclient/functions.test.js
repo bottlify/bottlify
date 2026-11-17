@@ -156,6 +156,9 @@ test('RequestCurrentStats leaves a UserStatsReceived_t for the game to pump', ()
     const data = view.getUint32(out + 8, true);
     assert.equal(view.getBigUint64(data, true), 620n, 'the game');
     assert.equal(view.getUint32(data + 8, true), 1, 'k_EResultOK');
+    // CSteamID is packed to one byte: the user right after the result, where
+    // a game compares it with GetSteamID's answer.
+    assert.equal(view.getBigUint64(data + 12, true), BigInt(ACCOUNT.steamId), 'the user at 12');
     assert.equal(fns.Steam_BGetCallback.handler([1, out, 0]), 0, 'and nothing more');
 });
 
