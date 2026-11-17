@@ -616,6 +616,38 @@ export function createGdiplusFunctions(host){
             },
         },
 
+        /**
+         * Status GdipCreateFromHWND(HWND hwnd, GpGraphics **graphics)
+         *
+         * A window's graphics, as a DC's are: what WinForms makes for a
+         * control (Control.CreateGraphics), NULL being the screen's.
+         */
+        GdipCreateFromHWND: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([, out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return InvalidParameter;
+                }
+                const made = handle();
+                graphics.set(made, { interpolation: 0 });
+                putPointer(out, made);
+                return Ok;
+            },
+        },
+
+        /**
+         * HPALETTE GdipCreateHalftonePalette(void)
+         *
+         * GDI's halftone palette, which WinForms selects into a DC at every
+         * WM_PAINT of a control (Control.SetUpPalette); the caller owns it.
+         */
+        GdipCreateHalftonePalette: {
+            argBytes: 0,
+            handler: ()=>(host.gdi32 ? host.gdi32('CreateHalftonePalette', [0]) >>> 0 : 0),
+        },
+
         /** Status GdipGetImageGraphicsContext(GpImage *image, GpGraphics **graphics) */
         GdipGetImageGraphicsContext: {
             argBytes: 8,
