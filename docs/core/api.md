@@ -216,6 +216,7 @@ counts the frames that went so.
 | `frame` | `{ width, height, presented }` | A frame reached the canvas, the first or after a resize. Always sent. |
 | `exit` | `{ code }` | The program ended. |
 | `message-box` | `{ id, text, caption, type, buttons, defaultButton, icon }` | The program shows a message box; answer it with `answerMessageBox`. |
+| `program-error` | `{ text, caption, type, trace }` | The program shows a box that reports it is going down: one after it handed an exception to error reporting (`ReportFault`), or one with the stop icon modal to the whole task or system, as the system's and the C runtime's fatal boxes are. The box is still drawn on its desktop; this is for the page to put in front of the person. `trace` is the engine's last account of the run, the exception's among it. |
 | `output` | `{ handle, text }` | The program wrote to a standard handle. |
 | `cursor` | `{ width, height, hotSpot, bgra, shown }` | The program's cursor changed. |
 | `cursor-moved` | `{ x, y }` | The cursor moved, by the pointer or by the program: its position as a fraction of the viewport each way. A locked pointer has no browser cursor, so the page draws the program's here. |

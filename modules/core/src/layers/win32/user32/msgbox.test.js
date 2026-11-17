@@ -36,9 +36,10 @@ const WS_POPUP = 0x80000000, WS_VISIBLE = 0x10000000;
  * is made in, and a queue a test posts keys to as a person would press them.
  *
  * @param {{ unattended?: boolean, answer?: (dialog: any) => number,
- *     loadString?: (instance: number, id: number) => string | null }} [options]
+ *     loadString?: (instance: number, id: number) => string | null,
+ *     faultReported?: () => boolean, fatal?: (notice: any) => void }} [options]
  */
-function setup({ unattended, answer, loadString } = {}){
+function setup({ unattended, answer, loadString, faultReported, fatal } = {}){
     const bytes = new Uint8Array(0x20000);
     let next = HEAP;
     /** @type {string[]} */
@@ -91,6 +92,8 @@ function setup({ unattended, answer, loadString } = {}){
             }) : undefined,
             say: (/** @type {string} */ text)=>said.push(text),
             loadString,
+            faultReported,
+            fatal,
             callerThread: ()=>'the caller',
             park: ()=>({ parked: true }),
             idle: ()=>new Promise(resolve=>setImmediate(resolve)),
@@ -245,6 +248,23 @@ test('unattended, the box is put to the answerer and no window is made', ()=>{
     assert.equal(fns.MessageBoxA.handler([0, TEXT, CAPTION, MB_YESNO]), IDNO);
     assert.deepEqual(asked.map(dialog=>[dialog.title, dialog.text]), [['Copy', 'Overwrite?']]);
     assert.equal(fns.FindWindowA.handler([0, CAPTION]), 0);
+});
+
+test('a box shown as the program goes down is told before it is shown; others are not', ()=>{
+    /** @type {any[]} */
+    const told = [];
+    let reported = false;
+    const { fns, put } = setup({ unattended: true, answer: ()=>1,
+        faultReported: ()=>reported, fatal: notice=>told.push(notice) });
+    put(TEXT, 'Application has generated an exception that could not be handled.');
+    put(CAPTION, 'Game.exe - Application Error');
+    // The .NET runtime's box: OKCANCEL, ICONEXCLAMATION, TASKMODAL, DEFAULT_DESKTOP_ONLY.
+    fns.MessageBoxA.handler([0, TEXT, CAPTION, 0x22031]);
+    assert.deepEqual(told, [], 'with no fault reported it is an ordinary box');
+    reported = true;
+    fns.MessageBoxA.handler([0, TEXT, CAPTION, 0x22031]);
+    assert.deepEqual(told, [{ text: 'Application has generated an exception that could not be '
+        + 'handled.', caption: 'Game.exe - Application Error', type: 0x22031 }]);
 });
 
 test('a box answers with buttons it shows, the default walking the set', ()=>{

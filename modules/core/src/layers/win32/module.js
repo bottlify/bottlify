@@ -805,6 +805,13 @@ export function createWin32Module(){
             const trace = config?.onTrace ?? (()=>{});
 
             /**
+             * Whether the process has handed an exception to error reporting
+             * (ReportFault): the box its crash handler shows next says why it
+             * is going down (`user32/fatal.js`).
+             */
+            let faultReported = false;
+
+            /**
              * A modal dialog or message box put to an unattended run: the
              * embedder's answerer chooses, and without one the default button
              * is pressed, as Enter would press it. Either way the log says
@@ -4386,7 +4393,9 @@ export function createWin32Module(){
                 'msasn1.dll': {},
 
                 'SFC.dll': createSfcFunctions({ writeMemory, readCString, files: volume }),
-                'faultrep.dll': createFaultrepFunctions(),
+                'faultrep.dll': createFaultrepFunctions({ reported: ()=>{
+                    faultReported = true;
+                } }),
                 // What Internet Explorer calls itself, for a module that
                 // embeds a browser or fetches with the system's identity.
                 'urlmon.dll': {
@@ -5439,6 +5448,12 @@ export function createWin32Module(){
                         : null),
                     unattended: config?.unattended === true,
                     answer: answerUnattended,
+                    faultReported: ()=>faultReported,
+                    // A box that reports the program is going down goes to
+                    // the page too: drawn in the guest, it may never reach the
+                    // screen, and it is the one thing the person must read.
+                    /** @param {any} notice */
+                    fatal: notice=>config?.onProgramError?.(notice),
                     /** @param {string} text */
                     clipboard: text=>config?.onClipboard?.(text),
                     pasteboard,

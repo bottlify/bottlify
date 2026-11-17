@@ -4599,6 +4599,8 @@ const SEVERITY = /** @type {Record<string, string>} */ ({
     // The program's own words about why it is stopping. It is not our
     // failure, but it is never good news.
     'message-box': 'warn',
+    // The program's own account of why it is going down.
+    'program-error': 'error',
     'bundle-retry': 'warn',
     'bundle-prefetch-failed': 'warn',
     'bundle-unbacked': 'warn',
@@ -6093,6 +6095,13 @@ async function buildApp(options){
             // layer from the next start on: a Framework setup asked for it.
             /** @param {string} layer */
             onLayerNeeded: layer=>events.emit('layer-needed', { layer }),
+            // A box the program shows as it goes down (`user32/fatal.js`), for
+            // the page to put in front of the person: drawn in the guest it may
+            // never reach the screen. The layers' last traces carry the
+            // exception's account.
+            /** @param {{ text: string, caption: string, type: number }} notice */
+            onProgramError: notice=>events.emit('program-error', {
+                ...notice, trace: layerTraces.slice(-40).join('\n') }),
             // An address the program asked the shell to open -- a setup's
             // "visit our site", a readme's link -- for the page to open, as
             // XP's browser would. Taken whether or not anyone opens it: the

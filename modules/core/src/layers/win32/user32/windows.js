@@ -777,6 +777,10 @@ const MAX_WINDOW_TEXT = 1 << 16;
  *           answered by `answer`, or with its default button.
  * @property {(dialog: import('./dialogs.js').UnattendedDialog)
  *     => number | Promise<number>} [answer]
+ * @property {() => boolean} [faultReported]
+ *           Whether the process has reported a fault (`fatal.js`).
+ * @property {(notice: { text: string, caption: string, type: number }) => void} [fatal]
+ *           Told of a box that reports the program is going down.
  * @property {(id: number) => boolean} [threadExists]
  *           Whether a thread identifier names a thread of this process, which
  *           is the whole of what PostThreadMessage validates. Absent in a build
