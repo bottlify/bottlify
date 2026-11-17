@@ -198,6 +198,8 @@ const pageRound = bytes=>Math.ceil(bytes / PAGE_SIZE) * PAGE_SIZE;
  * @property {(address: number, bytes: number) => boolean} [allocateAt]
  *           Guest memory at exactly that address, when all of it is free.
  * @property {(address: number) => void} release
+ * @property {4 | 8} [pointerSize]  The process's width, which a watched section's
+ *           owner reads its fields by.
  * @property {{ open: (type: string, object: any) => number,
  *              resolve: (handle: number, type?: string) => any,
  *              close: (handle: number) => any }} handles
@@ -847,6 +849,7 @@ export function createMappingFunctions(host){
                         event: (/** @type {number} */ held)=>object(held, 'event'),
                         every: (/** @type {number} */ ms, /** @type {() => void} */ tick)=>
                             host.every?.(ms, tick) ?? (()=>{}),
+                        pointerSize: host.pointerSize ?? 4,
                     }) ?? null;
                     views.set(address, view);
                     host.viewRegions?.set(address, { length: wanted, writable,

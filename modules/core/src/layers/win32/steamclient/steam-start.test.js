@@ -90,3 +90,19 @@ test('a request for an app the account does not own is not answered', ()=>{
     assert.equal(view.getUint32(STEAM_START.REQUEST, true), 0);
     assert.equal(start.requests()[0].answered, false);
 });
+
+test('a 32-bit wrapper\'s request is read at its own offsets, the event a dword', ()=>{
+    // The words a 32-bit wrapper posted (from READY on): process 0x1790,
+    // event 0x7c, app 12110, then its header word and its code.
+    const { start, set, bytes, served, requester, tick } = setup([12110]);
+    const section = start.provide(STEAM_START_FILE, 'mapping');
+    start.provide(STEAM_START_LOCK, 'event');
+    section.watch({ ...served, pointerSize: 4 });
+    const words = [2, 2, 0x1790, 0x7c, 12110, 0xdaf5fd8c, 0x33];
+    words.forEach((word, i)=>new DataView(bytes.buffer).setUint32(STEAM_START.READY + i * 4,
+        word, true));
+    tick();
+    assert.ok(set.includes(requester), 'answered on the wrapper\'s event');
+    assert.deepEqual(start.requests().at(-1), { app: 12110, process: 0x1790, code: 0x33,
+        answered: true });
+});

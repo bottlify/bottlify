@@ -717,6 +717,21 @@ const REG_DWORD = 4;
 export const STEAM_PATH = 'C:\\Program Files (x86)\\Steam';
 
 /**
+ * What Steam puts in the environment of a game it starts: the app, the game
+ * (the same id for a game that is no mod), that the client started it, and
+ * where the client is. A DRM wrapper reads it to tell a launch by Steam from
+ * one by hand, which it hands back to the client to start (`steam-start.js`).
+ *
+ * @param {number} appId
+ * @returns {Record<string, string>}
+ */
+export function steamLaunchEnvironment(appId){
+    const id = String(appId >>> 0);
+    return { SteamAppId: id, SteamGameId: id, SteamOverlayGameId: id,
+        SteamClientLaunch: '1', SteamEnv: '1', SteamPath: STEAM_PATH };
+}
+
+/**
  * The client library a process of this width loads, as `ActiveProcess` names it.
  *
  * @param {number} pointerSize
