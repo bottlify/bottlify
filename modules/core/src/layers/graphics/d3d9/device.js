@@ -2111,12 +2111,14 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
     };
 
     /**
-     * Two surfaces the GPU holds in one texture, which it cannot draw from one
-     * into the other.
+     * One surface on both sides, which the GPU cannot draw from into itself.
+     * Two levels or faces of one texture are two subresources, which a pass
+     * reads one of and draws into the other: XNA resolves a target with a
+     * chain by stretching each level into the next.
      *
      * @param {any} a @param {any} b
      */
-    const oneTexture = (a, b)=>a === b || (Boolean(a.container) && a.container === b.container);
+    const oneTexture = (a, b)=>a === b;
 
     /**
      * A surface that lives on the GPU: what was drawn into it is not in the

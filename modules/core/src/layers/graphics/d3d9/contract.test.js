@@ -1484,6 +1484,38 @@ test('StretchRect between targets drawn elsewhere, or not at all, moves no guest
     assert.deepEqual(copied({ drawsNothing: true }), { between: 0, intoTarget: 0, intoPlain: 7 });
 });
 
+test('StretchRect stretches a target texture\'s level into its next, not a level into itself',
+    ()=>{
+        // XNA resolves a render target with a chain this way, level by level.
+        const { device } = make({ services: { renderedElsewhere: true,
+            allocate: (()=>{
+                let next = 0x1000;
+                return (/** @type {number} */ bytes)=>{
+                    const at = next;
+                    next += (bytes + 15) & ~15;
+                    return at;
+                };
+            })() } });
+        /** @type {{ texture?: any }} */
+        const made = {};
+        assert.equal(device.CreateTexture(8, 8, 2, D3DUSAGE.RENDERTARGET, D3DFMT.A8R8G8B8,
+            D3DPOOL.DEFAULT, made), D3D_OK);
+        /** @type {{ surface?: any }} */
+        const top = {};
+        /** @type {{ surface?: any }} */
+        const below = {};
+        assert.equal(made.texture.GetSurfaceLevel(0, top), D3D_OK);
+        assert.equal(made.texture.GetSurfaceLevel(1, below), D3D_OK);
+        assert.equal(device.StretchRect(top.surface, null, below.surface, null, 2), D3D_OK);
+        assert.equal(device.StretchRect(top.surface, null,
+            top.surface, { left: 4, top: 4, right: 8, bottom: 8 }, 2), D3DERR_INVALIDCALL,
+        'a stretch of one surface into itself');
+        top.surface.release();
+        below.surface.release();
+        made.texture.release();
+        device.release();
+    });
+
 test('StretchRect scales a plain surface into a target drawn elsewhere', ()=>{
     // The played device takes the plain surface's bytes up for the stretch
     // (Wine's stretchrect_test: offscreenplain into a target, scaling).
