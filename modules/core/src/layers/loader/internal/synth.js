@@ -653,16 +653,16 @@ export function installedHeaders(file, base){
 /**
  * Where the image a file holds says it belongs: its ImageBase and the span its
  * sections occupy, as Windows loads a DLL at its preferred base when that base
- * is free - one not linked for ASLR (DYNAMIC_BASE), which Windows places
- * wherever it likes, and so does the loader here. A program that reads the
- * file and compares it with the module it loaded finds the ImageBase the file
- * names -- a module placed elsewhere has
- * its own there, which is what a DRM wrapper refuses (Proton keeps Valve's own
- * client DLL where it says it belongs for the same reason).
+ * is free. A relocatable image is placed there too: DYNAMIC_BASE allows a
+ * relocation, it does not ask for one, and a program that reads the file and
+ * compares it with the module it loaded finds the ImageBase the file names --
+ * a module placed elsewhere has its own there, which is what a DRM wrapper
+ * refuses (Proton keeps Valve's own client DLL where it says it belongs for
+ * the same reason).
  *
  * @param {Uint8Array} file
  * @returns {{ base: number, span: number } | null}  Null for a file too short to
- *     be an image, one that is not a PE, and one linked for ASLR.
+ *     be an image, or one that is not a PE.
  */
 export function imagePlacementOf(file){
     if (file.length < 0x40)
@@ -679,8 +679,7 @@ export function imagePlacementOf(file){
     const base = magic === 0x20b ? Number(view.getBigUint64(nt + 0x30, true))
         : magic === 0x10b ? view.getUint32(nt + 0x34, true) : 0;
     // SizeOfImage: the optional header's, 0x38 into it, after the signature and
-    // the file header; DllCharacteristics 0x46 into it, in either width.
+    // the file header.
     const span = view.getUint32(nt + 0x50, true);
-    const dynamicBase = (view.getUint16(nt + 0x18 + 0x46, true) & 0x40) !== 0;
-    return base !== 0 && span !== 0 && !dynamicBase ? { base, span } : null;
+    return base !== 0 && span !== 0 ? { base, span } : null;
 }

@@ -20,7 +20,7 @@ import {
     PAGE_YIELD_MS,
     PENDING_YIELD_MS,
     retryingFetch,
-    moduleKeyOf, relocatablePrefix, jumpBytes, clockCredit, feedFilmSound,
+    moduleKeyOf, relocatablePrefix, jumpBytes, clockCredit, feedFilmSound, filmSoundOwed,
     heapSizeFor,
     spaceAbove, engineAreaFor, ENGINE_CUT_AT,
     placeMainStack,
@@ -1340,14 +1340,21 @@ test('a near jump is encoded relative to the instruction after it', ()=>{
         'backwards wraps');
 });
 
-test('a film\'s sound counts whole on its timeline, even the part its track refused', ()=>{
-    // Counted as taken only, the refused part was heard the moment it was
-    // offered and the picture raced ahead of a sound that was mostly dropped.
+test('a film\'s refused sound is a gap passed when the playing reaches it', ()=>{
+    // A track that takes a quarter of a second of film at 22050: the rest is
+    // refused, a gap after the part it took.
     const track = { write: (/** @type {Uint8Array} */ bytes)=>Math.floor(bytes.length / 4 / 2) };
-    const block = new Int16Array(22050 * 2);
-    const fed = feedFilmSound(track, [block], 2, 22050, 44100);
+    const ledger = { taken: 0, gaps: /** @type {{ at: number, frames: number }[]} */ ([]) };
+    const fed = feedFilmSound(track, [new Int16Array(22050 * 2)], 2, 22050, 44100, ledger);
     assert.deepEqual(fed, { offered: 44100, refused: 44100 - 11025 },
         'a second of film at 22050 is a second of device frames, taken or not');
+    assert.deepEqual(ledger, { taken: 11025, gaps: [{ at: 11025, frames: 44100 - 11025 }] });
+    assert.equal(filmSoundOwed(ledger, 0), 44100,
+        'nothing played: the whole second is still ahead, the gap too (not heard at once)');
+    assert.equal(filmSoundOwed(ledger, 5000), 44100 - 5000, 'part of what it took played');
+    assert.equal(filmSoundOwed(ledger, 11025), 0,
+        'the playing reached the gap: it has passed, not owed for ever');
+    assert.deepEqual(ledger.gaps, [], 'and is dropped');
 });
 
 test('the guest clock is credited with all the wall time between credits, capped', ()=>{

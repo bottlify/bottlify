@@ -1825,36 +1825,69 @@ export function heapSizeFor(memorySize, asked, base = 0x0c000000){
 }
 
 /**
- * Hands a film's sound to its track and says how much of the film's timeline
- * that was, in the device's frames -- all of it, whether the track took it or
- * not.
+ * What a film's track was handed, in the device's frames: what it took, and
+ * each part it refused as a gap at the place in what it took where the part
+ * would have played.
  *
- * The picture is decoded to just ahead of the sound heard, and heard is what
- * was handed over less what is still owed. A track that refuses part of a
- * block (full, or a queue the device is behind on) still moves the film on by
- * the whole block: counted as taken only, the refused part would be heard the
- * moment it was offered, the picture would race ahead to meet it and more would
- * be refused -- a film run through in a fraction of its length on a sound
- * mostly dropped.
+ * @typedef {{ taken: number, gaps: { at: number, frames: number }[] }} FilmSoundLedger
+ */
+
+/**
+ * Hands a film's sound to its track, noting in `ledger` what it took and where
+ * a part it refused (full, or a queue the device is behind on) falls.
+ *
+ * A refused part is a gap in the film's timeline, not sound still to come
+ * (`filmSoundOwed`).
  *
  * @param {{ write: (bytes: Uint8Array) => number }} track
  * @param {Int16Array[]} blocks
  * @param {number} channels     the film's
  * @param {number} rate         the film's sample rate
  * @param {number} deviceRate   the rate the track counts `played()` in
+ * @param {FilmSoundLedger} ledger
  * @returns {{ offered: number, refused: number }} device frames
  */
-export function feedFilmSound(track, blocks, channels, rate, deviceRate){
+export function feedFilmSound(track, blocks, channels, rate, deviceRate, ledger){
     let offered = 0;
     let refused = 0;
     for (const block of blocks)
     {
         const frames = Math.round(block.length / channels * deviceRate / rate);
-        const taken = track.write(new Uint8Array(block.buffer, block.byteOffset, block.byteLength));
+        const taken = Math.min(frames,
+            track.write(new Uint8Array(block.buffer, block.byteOffset, block.byteLength)));
         offered += frames;
-        refused += Math.max(0, frames - taken);
+        ledger.taken += taken;
+        if (frames > taken)
+        {
+            refused += frames - taken;
+            ledger.gaps.push({ at: ledger.taken, frames: frames - taken });
+        }
     }
     return { offered, refused };
+}
+
+/**
+ * Device frames of a film's timeline handed over and not passed yet: what its
+ * track holds unplayed, and the refused parts the playing has not reached.
+ *
+ * The picture is decoded to just ahead of the sound heard, and heard is what
+ * was handed over less this. A refused part passes when the playing reaches
+ * where it was cut out: counted as passed at once, it was heard the moment it
+ * was offered and the picture raced ahead to meet it, more being refused - a
+ * film run through on a sound mostly dropped; counted as owed until played,
+ * it was owed for ever (the track never plays it), and the picture waited on
+ * it until the sound stalled, ran on the host clock, waited again - a film in
+ * jerks. Gaps passed are dropped from the ledger.
+ *
+ * @param {FilmSoundLedger} ledger @param {number} played  the track's `played()`
+ */
+export function filmSoundOwed(ledger, played){
+    while (ledger.gaps.length > 0 && ledger.gaps[0].at <= played)
+    {
+        ledger.gaps.shift();
+    }
+    const ahead = ledger.gaps.reduce((sum, gap)=>sum + gap.frames, 0);
+    return Math.max(0, ledger.taken - played) + ahead;
 }
 
 /**
@@ -6795,9 +6828,10 @@ async function buildApp(options){
         // The Steam client's own file, where the embedder fetched Valve's: the
         // module carries its headers, as the file stands in Steam's folder
         // (the win32 layer's volume), and sits where the file says it belongs.
-        // Windows loads a DLL not linked for ASLR at its preferred base when
-        // that base is free, and a DRM wrapper reads the file and compares its
-        // headers with the module's: placed elsewhere, the module answers with
+        // Windows loads a DLL at its preferred base when that base is free -
+        // Valve's files are linked for ASLR, which allows a move and does not
+        // ask for one (decision A259) - and a DRM wrapper reads the file and
+        // compares its headers with the module's: placed elsewhere, the module answers with
         // the loader's base where the file names Valve's, and the wrapper
         // refuses it (Proton keeps Valve's own client DLL where it says it
         // belongs for the same reason). It is placed as a library that can only
@@ -8490,7 +8524,7 @@ async function buildApp(options){
      * much sound the picture is ahead of.
      */
     /** @type {{ track: any, sampleRate: number, channels: number,
-     *           written: number } | null} */
+     *           ledger: FilmSoundLedger } | null} */
     let filmTrack = null;
 
     /** Which film that track is playing, so that the next one gets a fresh one. */
@@ -8510,8 +8544,7 @@ async function buildApp(options){
      * @returns {number | null}
      */
     const filmSoundOwedMs = ()=>(sound && filmTrack && soundIsHeard
-        ? Math.max(0, filmTrack.written - filmTrack.track.played())
-            * 1000 / sound.sampleRate
+        ? filmSoundOwed(filmTrack.ledger, filmTrack.track.played()) * 1000 / sound.sampleRate
         : null);
 
     /**
@@ -8570,12 +8603,11 @@ async function buildApp(options){
                     }),
                     sampleRate: shown.sampleRate,
                     channels: shown.channels,
-                    written: 0,
+                    ledger: { taken: 0, gaps: [] },
                 };
             }
             const fed = feedFilmSound(filmTrack.track, shown.audio, shown.channels,
-                shown.sampleRate, sound.sampleRate);
-            filmTrack.written += fed.offered;
+                shown.sampleRate, sound.sampleRate, filmTrack.ledger);
             film.refusedMs += Math.round(fed.refused * 1000 / sound.sampleRate);
         }
         if (filmTrack && sound)
