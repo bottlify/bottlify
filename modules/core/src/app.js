@@ -9813,24 +9813,14 @@ async function buildApp(options){
                 name: entry.name, path: entry.path, directory: entry.directory === true,
                 size: entry.size ?? 0, modified: entry.modified ?? 0 })),
             /**
-             * The whole file. Bytes of the bundle not fetched yet read as what
-             * the bundle's reader answers for them.
+             * The whole file, the bundle's blocks not fetched yet fetched first
+             * (`readWholeFile`): read directly, a file of a lazily read bundle
+             * threw on its first missing block. Null for no file.
              *
              * @param {string} path
-             * @returns {Uint8Array}
+             * @returns {Promise<Uint8Array | null>}
              */
-            read: path=>{
-                const handle = filesystem.open(path,
-                    { read: true, shareRead: true, shareWrite: true });
-                try
-                {
-                    return filesystem.read(handle, filesystem.size(handle));
-                }
-                finally
-                {
-                    filesystem.close(handle);
-                }
-            },
+            read: path=>readWholeFile(filesystem, blocks, path),
             /**
              * A directory made from outside, as a person makes one in Explorer
              * beside the running program: what an installer expects to find
@@ -10610,18 +10600,7 @@ async function buildSystemHost(deps){
                 name: entry.name, path: entry.path, directory: entry.directory === true,
                 size: entry.size ?? 0, modified: entry.modified ?? 0 })),
             /** @param {string} path */
-            read: path=>{
-                const handle = filesystem.open(path,
-                    { read: true, shareRead: true, shareWrite: true });
-                try
-                {
-                    return filesystem.read(handle, filesystem.size(handle));
-                }
-                finally
-                {
-                    filesystem.close(handle);
-                }
-            },
+            read: path=>readWholeFile(filesystem, blocks, path),
         },
         /** @param {string} path */
         readImage: path=>readProgramImage(filesystem, blocks, path),

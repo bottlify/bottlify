@@ -303,7 +303,7 @@ async function observe(bundle){
     try
     {
         assert.equal(await app.run({ timeoutMs: 60_000 }), 0);
-        return { observed: app.files.read('C:\\observed.bin'), unmounted };
+        return { observed: await app.files.read('C:\\observed.bin'), unmounted };
     }
     finally
     {
@@ -507,7 +507,7 @@ test('a run with no bundle of its own stands on the layers it is given, as an in
         });
         t.after(()=>app.dispose());
         assert.equal(await app.run({ timeoutMs: 60_000 }), 0);
-        const observed = app.files.read('C:\\observed.bin');
+        const observed = await app.files.read('C:\\observed.bin');
         const [clr] = LAYOUT.files;
         assert.equal(word(observed, clr.at), CLR.length, 'the layer\'s file is there');
         assert.deepEqual([...observed.subarray(clr.at + 12, clr.at + 12 + CLR.length)], [...CLR]);
