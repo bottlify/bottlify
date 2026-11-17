@@ -356,7 +356,7 @@ export function baseState({ memory, ram, layout, sharedLayout = undefined, confi
  * @typedef {{ batch: [number, number][], next: number, formed: any[],
  *     covered: Set<number>, ceiling: number, takenAt: number,
  *     forTranslator: boolean, lookup?: Lookup | null,
- *     known?: Map<string, Uint8Array | null>,
+ *     known?: Map<string, Uint8Array | null>, asking?: boolean,
  *     unpacked?: Map<string, import('./cache.js').CachedRegion | null> }} Forming
  */
 

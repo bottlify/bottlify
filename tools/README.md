@@ -232,7 +232,7 @@ From `emit-count.mjs --qemu <qemu 8.2.2 built with plugins> --root <1851609d> --
 
 ### What does translated code cost to run, to the instruction an iteration and for each of the guest's own instructions, workload by workload and arm against arm?
 
-[`translator/run-count.mjs`](translator/run-count.mjs): `node tools/translator/run-count.mjs --qemu DIR [--root DIR]... [--bits 32|64|both] [--warm N] [--iters N] [workload...]`
+[`translator/run-count.mjs`](translator/run-count.mjs): `node tools/translator/run-count.mjs --qemu DIR [--root DIR]... [--bits 32|64|both] [--warm N] [--iters N] [--arm64 NODE [--sysroot DIR] [--lib DIR] [--node-flags FLAGS]] [workload...]`
 
 ```
 instructions an iteration (100 warm, 20 counted), in square brackets a guest instruction's cost in them, arms: <657107ac>, <657107ac>
@@ -243,11 +243,11 @@ instructions an iteration (100 warm, 20 counted), in square brackets a guest ins
 dearest first (the last arm): vcall-32 4.41, str-32 2.55, switch-32 2.21
 ```
 
-From `run-count.mjs --bits 32 str switch vcall under qemu 8.2.2 with tools/lib/qemu-count.c, node 26.13.1, one tree (cork 657107ac, 2026-11-15) as both arms of one run. Two runs started together agree to the instruction; separate runs of a tree agree to a few hundredths of a per cent on these and differ by a few per cent on load (V8's optimising compiles land when the machine has them done)`. Each cell is the instructions an iteration of the counted ones took, the whole process but V8's optimising compiles; the square bracket is that count over the guest's own instructions in the iteration - a processor running the image takes 1 - and the round bracket the arm's count against the first. A tree counts the same in every run, so a ratio off 1.0000 is the change's - except on a workload that keeps translating (load), which varies by a few per cent between separate runs: read it over several. The geomean is over the workloads shown; the last line orders them by a guest instruction's cost, the dearest first.
+From `run-count.mjs --bits 32 str switch vcall under qemu 8.2.2 with tools/lib/qemu-count.c, node 26.13.1, one tree (cork 657107ac, 2026-11-15) as both arms of one run. Two runs started together agree to the instruction; separate runs of a tree agree to a few hundredths of a per cent on these and differ by a few per cent on load (V8's optimising compiles land when the machine has them done). The calls512 and calls4096 workloads call each callee 64 times an iteration, and V8 leaves a callee in its baseline code for some nine thousand calls: at the default --warm 100 their count is of baseline callees (calls512 on arm64 28.5 a guest instruction at warm 400, 9.4 at warm 2000) - give them --warm 2000. An arm64 host is counted with --arm64 (an arm64 node 26.13.1 under qemu-aarch64 8.2.2, --node-flags --no-wasm-bounds-checks for V8 as on macOS, --warm 400): str-32 2.270, switch-32 2.343, vcall-32 3.735 a guest instruction on cork 14eff061 (2026-11-17)`. Each cell is the instructions an iteration of the counted ones took, the whole process but V8's optimising compiles; the square bracket is that count over the guest's own instructions in the iteration - a processor running the image takes 1 - and the round bracket the arm's count against the first. A tree counts the same in every run, so a ratio off 1.0000 is the change's - except on a workload that keeps translating (load), which varies by a few per cent between separate runs: read it over several. The geomean is over the workloads shown; the last line orders them by a guest instruction's cost, the dearest first.
 
 ### What does one of a program's own instructions cost once its code has settled, with the whole app around it and the machine's time taken out, arm against arm?
 
-[`translator/pe-count.mjs`](translator/pe-count.mjs): `node tools/translator/pe-count.mjs --qemu DIR [--root DIR]... [--variant x87|sse|x64] [--from MILLIONS] [--to MILLIONS] [--cork JSON] workload...`
+[`translator/pe-count.mjs`](translator/pe-count.mjs): `node tools/translator/pe-count.mjs --qemu DIR [--root DIR]... [--variant x87|sse|x64] [--from MILLIONS] [--to MILLIONS] [--cork JSON] [--arm64 NODE [--sysroot DIR] [--lib DIR] [--node-flags FLAGS]] workload...`
 
 ```
 machine instructions a guest instruction between 150 and 250 million of the guest's (in V8's code, then the whole process but V8's optimising compiles), arms: <657107ac>, <657107ac>

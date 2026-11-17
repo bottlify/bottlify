@@ -454,20 +454,42 @@ export function createStore(state){
         }
     })();
     /**
+     * The candidates sent on to the stored region holding them (`storedOwner`), by
+     * key: once each. A region the store names that this run cannot publish - its
+     * entry formed nothing over the bytes now there, its record refused - gives the
+     * block no entry, and sent to it at every batch the block was never translated
+     * though left for all run long.
+     * @type {Set<number>}
+     */
+    const sentToOwner = new Set();
+    const SENT_CAP = 1 << 16;
+    /**
      * The region a candidate is a block of in the store, where that region is
      * neither published nor on its way: its entry and top as `keyOf` packs them, or
-     * -1.
-     * @param {number} eip @param {number} top
+     * -1. `taking` notes the candidate as sent there: asked again, it is its own.
+     * @param {number} eip @param {number} top @param {boolean} [taking]
      */
-    const storedOwner = (eip, top)=>{
+    const storedOwner = (eip, top, taking = false)=>{
         const owner = storedBlocks?.get(keyOf(eip, top)) ?? storedBlocks?.get(keyOf(eip, ANY_TOP));
         if (owner === undefined || Math.floor(owner / 16) === eip)
         {
             return -1;
         }
         const at = Math.floor(owner / 16);
-        return entries.entryOf(at, owner % 16) >= 0 || inFlight.has(owner) || !translatable(at)
-            ? -1 : owner;
+        if (entries.entryOf(at, owner % 16) >= 0 || inFlight.has(owner) || !translatable(at)
+            || sentToOwner.has(keyOf(eip, top)))
+        {
+            return -1;
+        }
+        if (taking)
+        {
+            if (sentToOwner.size >= SENT_CAP)
+            {
+                sentToOwner.clear();
+            }
+            sentToOwner.add(keyOf(eip, top));
+        }
+        return owner;
     };
 
     /** What asks a translator to digest and pack the module it answers with, where it is to be
@@ -596,16 +618,12 @@ export function createStore(state){
     const candidateKey = (eip, entryTop, anyTop)=>regionKey({ region: { entry: eip }, entryTop,
         loose: rt.loose, wrapped: !rt.readsChecked, anyTop });
     /**
-     * The batch's candidates' records asked of a store across a link before
-     * they are formed, in one wait, at both keys each (`recordBefore`).
+     * The keys of the batch's candidates from `from` on, both of each (its top's and
+     * any top's), that the step has no answer for yet.
      *
-     * @param {Forming} step @param {any} store
-     * @param {number} [from]  the first candidate asked for: the callees a region just
-     *     formed added to the batch are asked for together as it is formed, one wait a
-     *     region - formed first and looked up after, a process started again formed two
-     *     regions of three it then took from the store
+     * @param {Forming} step @param {number} from
      */
-    const prefetch = (step, store, from = step.next)=>{
+    const keysFrom = (step, from)=>{
         /** @type {string[]} */
         const keys = [];
         for (let at = from; at < step.batch.length; at++)
@@ -622,6 +640,51 @@ export function createStore(state){
                 }
             }
         }
+        return keys;
+    };
+    /**
+     * As `prefetch`, of a store that answers only a turn later (another executor's,
+     * reached through its process): the records are asked, the step waits
+     * (`asking`), and `answered` is called once they are all back - a key with no
+     * record known as that. Without it such a runtime formed every region its
+     * store held before it learned the store held it: an executor of a process
+     * started warm formed some twenty thousand regions a run it then took whole.
+     * Answers whether anything was asked.
+     *
+     * @param {Forming} step @param {any} store @param {number} from
+     * @param {() => void} answered
+     */
+    const askBefore = (step, store, from, answered)=>{
+        const keys = keysFrom(step, from);
+        if (keys.length === 0)
+        {
+            return false;
+        }
+        step.asking = true;
+        counts.askedBefore++;
+        Promise.all(keys.map(key=>Promise.resolve().then(()=>store.get(key)).catch(()=>null)))
+            .then(answers=>{
+                for (let at = 0; at < keys.length; at++)
+                {
+                    step.known?.set(keys[at], answers[at] ?? null);
+                }
+                step.asking = false;
+                answered();
+            });
+        return true;
+    };
+    /**
+     * The batch's candidates' records asked of a store across a link before
+     * they are formed, in one wait, at both keys each (`recordBefore`).
+     *
+     * @param {Forming} step @param {any} store
+     * @param {number} [from]  the first candidate asked for: the callees a region just
+     *     formed added to the batch are asked for together as it is formed, one wait a
+     *     region - formed first and looked up after, a process started again formed two
+     *     regions of three it then took from the store
+     */
+    const prefetch = (step, store, from = step.next)=>{
+        const keys = keysFrom(step, from);
         try
         {
             /** @type {(Uint8Array | null | undefined)[] | undefined} */
@@ -866,8 +929,9 @@ export function createStore(state){
      * region is settled - between frames, as instantiation already is.
      *
      * @param {any[]} formed @param {any} store @param {() => void} answered
+     * @param {Map<string, Uint8Array | null>} [known]  the records the step asked for
      */
-    const lookUpLater = (formed, store, answered)=>{
+    const lookUpLater = (formed, store, answered, known)=>{
         // A batch module's bytes are read once for every record naming it.
         /** @type {Map<string, Promise<Uint8Array | WebAssembly.Module | null>>} */
         const modules = new Map();
@@ -887,10 +951,13 @@ export function createStore(state){
             try
             {
                 const key = regionKey(one);
-                const bytes = await store.get(key);
+                // Asked before it was formed (`askBefore`): not asked again.
+                const got = (/** @type {string} */ name)=>(known?.has(name) === true
+                    ? known.get(name) ?? null : store.get(name));
+                const bytes = await got(key);
                 const record = bytes === null ? null : unpackRegion(bytes, cacheVersion);
                 const other = besideKey(one, key, record);
-                const besideBytes = other === null ? null : await store.get(other);
+                const besideBytes = other === null ? null : await got(other);
                 const cached = accepted(one, record, besideBytes === null ? null
                     : unpackRegion(besideBytes, cacheVersion));
                 const batchKey = moduleWanted(cached);
@@ -918,6 +985,7 @@ export function createStore(state){
         settle,
         waitedFor,
         prefetch,
+        askBefore,
         recordBefore,
         regionOfRecord,
         lookUpOn,

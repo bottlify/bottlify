@@ -164,6 +164,8 @@ export function createDiagnostics(state){
         heldEntries: 0,
         // Batches the store answered in the call that formed them, and a turn later.
         lookedUpNow: 0, lookedUpLater: 0, lookedUpInPart: 0,
+        // Asks of a store that answers a turn later for records not yet formed (`askBefore`).
+        askedBefore: 0,
         // Calls that formed part of a batch and left the rest to a later one
         // (`holdMs`), that published part of a batch's store hits, and asks
         // the spent credit put off; the hits' modules compiled off this thread.
@@ -578,6 +580,7 @@ export function createDiagnostics(state){
             lookedUpNow: counts.lookedUpNow,
             lookedUpLater: counts.lookedUpLater,
             lookedUpInPart: counts.lookedUpInPart,
+            askedBefore: counts.askedBefore,
             formedInPart: counts.formedInPart,
             // Forming or a lookup cut short for another executor's ask (`awaited`).
             answeredFirst: counts.answeredFirst,
@@ -651,6 +654,13 @@ export function createDiagnostics(state){
                 callees: Math.max(0, ...[...rt.regions].flatMap(record=>
                     (record.targets ?? []).map(([site, callees])=>callees.filter(callee=>
                         record.unformed?.get(site)?.includes(callee) !== true).length))),
+                // Each call with callees formed in, by region: the callees in the
+                // order the call compares its target with them.
+                formed: [...rt.regions].flatMap(record=>(record.targets ?? [])
+                    .filter(([, callees])=>callees.length > 0)
+                    .map(([site, callees])=>({ entry: record.entry, site, callees: callees
+                        .filter(callee=>record.unformed?.get(site)?.includes(callee) !== true) })))
+                    .sort((a, b)=>a.site - b.site || a.entry - b.entry).slice(0, 4096),
                 sites: [...siteLog].sort((a, b)=>b[1].samples - a[1].samples).slice(0, 4096)
                     .map(([site, one])=>({ site, ...one })),
                 reforms: counts.reforms },

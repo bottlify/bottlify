@@ -34,15 +34,22 @@
  *
  *     node tools/translator/run-count.mjs --qemu DIR [--root DIR]... [--bits 32|64|both]
  *         [--warm N] [--iters N] [--jobs N] [workload...]
+ *         [--arm64 NODE [--sysroot DIR] [--lib DIR] [--node-flags 'FLAG...']]
  *
  * Workloads are the micro images' names (`str`, `tree`, `calls512-order`, ...), all of
  * them by default; 32-bit runs the x87 builds, 64-bit the x64 twins. DIR as emit-count's.
+ *
+ * `--arm64 NODE` counts an arm64 host instead: NODE, an arm64 build of node, runs under
+ * DIR's `qemu-aarch64` (built with plugins as the other), its loader and libc from
+ * `--sysroot` (`/usr/aarch64-linux-gnu`), further libraries from `--lib`. The module cork
+ * emits is the arm64 host's, and the count V8's arm64 code. `--node-flags
+ * --no-wasm-bounds-checks` is V8 as it is on macOS arm64.
  */
 
 import { readFileSync, readdirSync } from 'node:fs';
 import { availableParallelism } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { between, mark, runCounted, work } from '../lib/qemu-count.mjs';
+import { between, mark, runCounted, takeTarget, work } from '../lib/qemu-count.mjs';
 
 const IMAGE_BASE = 0x401000;
 const ENTRY_VECTOR = 0x7000;
@@ -51,7 +58,8 @@ const ENTRY_VECTOR = 0x7000;
 const optionsOf = argv=>{
     const options = { roots: /** @type {string[]} */ ([]), bits: 'both', warm: 100, iters: 20,
         jobs: Math.max(1, availableParallelism() - 1), qemu: process.env.QEMU_PLUGIN_DIR ?? '',
-        inner: false, names: /** @type {string[]} */ ([]) };
+        inner: false, names: /** @type {string[]} */ ([]),
+        target: /** @type {import('../lib/qemu-count.mjs').Target} */ ({}) };
     for (let i = 0; i < argv.length; i++)
     {
         const name = argv[i];
@@ -70,6 +78,10 @@ const optionsOf = argv=>{
         else if (name === '--warm' || name === '--iters' || name === '--jobs')
         {
             options[/** @type {'warm' | 'iters' | 'jobs'} */ (name.slice(2))] = Number(argv[++i]);
+        }
+        else if (takeTarget(options.target, argv, i) > 0)
+        {
+            i++;
         }
         else if (name.startsWith('--'))
         {
@@ -165,7 +177,7 @@ else
             const { root, name, bits } = jobs[next++];
             const { marks, out } = await runCounted(options.qemu, [fileURLToPath(import.meta.url),
                 '--inner', '--root', root, '--warm', String(options.warm), '--iters',
-                String(options.iters), name, String(bits)]);
+                String(options.iters), name, String(bits)], {}, options.target);
             if (marks.length !== 2)
             {
                 throw new Error(`run-count: ${name}-${bits} on ${root} gave ${marks.length} marks`);

@@ -16,7 +16,8 @@
  * its target's slot for an entry compiled for any top first (`linkedCall` in
  * integer.js):
  * seeded programs of functions that write the flags, read the ones their
- * caller left (`adc`, `setc`, `pushfd`, a branch), touch none at all, set and
+ * caller left (`adc`, `setc`, `pushfd`, a branch), touch none at all, write
+ * them on one way and not on another, write them before a loop that does not, set and
  * clear the direction flag, call one another directly and through a register,
  * run each with a budget that spends inside the callees and with one that does
  * not, translated and interpreted -- the two must leave the same memory,
@@ -84,16 +85,21 @@ function generate(seed){
     /** @param {(() => number[])[]} kinds */
     const one = kinds=>kinds[pick(kinds.length)]();
 
-    /** @type {{ at: number, code: number[], calls: { at: number, to: number }[] }[]} */
+    /** @type {{ at: number, code: number[], calls: { at: number, to: number }[],
+     *     loopAt: number }[]} */
     const fns = [];
     let next = FUNCTIONS;
     for (let k = 3 + pick(5); k > 0; k--)
     {
         // What the function's body is made of: flags left alone, written only,
         // read before written, or anything.
-        const shape = pick(4);
+        // Or a branch that reads no flag around a write of them (`jecxz`), or a
+        // loop that writes none after one (`loop`): the record written on some
+        // ways to the `ret` and not on others, and written in a block before
+        // the one a slice's end comes back into.
+        const shape = pick(6);
         const kinds = [[quiet], [quiet, writers], [readers, quiet],
-            [quiet, writers, readers]][shape];
+            [quiet, writers, readers], [quiet], [quiet]][shape];
         /** @type {number[]} */
         const code = [];
         /** @type {{ at: number, to: number }[]} */
@@ -106,6 +112,24 @@ function generate(seed){
         if (pick(5) === 0)
         {
             code.push(pick(2) ? 0xfd : 0xfc); // std / cld, left so for the caller
+        }
+        // mov ecx, 0 or 1; jecxz past; a write of the flags; past:
+        const skipped = ()=>{
+            const written = one(writers);
+            code.push(0xb9, ...le(pick(2)), 0xe3, written.length, ...written);
+        };
+        const late = shape === 4 && pick(2) === 0;
+        if (shape === 4 && !late)
+        {
+            skipped();
+        }
+        let loopAt = -1;
+        if (shape === 5)
+        {
+            // a write of the flags; mov ecx, n; L: lea eax, [eax+ebx+1]; loop L
+            code.push(...one(writers), 0xb9, ...le(1 + pick(6)));
+            loopAt = code.length;
+            code.push(0x8d, 0x44, 0x18, 0x01, 0xe2, 0xfa);
         }
         for (let part = 1 + pick(6); part > 0; part--)
         {
@@ -120,8 +144,18 @@ function generate(seed){
                 calls.push({ at: code.length - 4, to: pick(fns.length) });
             }
         }
+        if (late)
+        {
+            // After a call, whose return leaves the callee's flags in the state block.
+            if (fns.length > 0)
+            {
+                code.push(0xe8, 0, 0, 0, 0);
+                calls.push({ at: code.length - 4, to: pick(fns.length) });
+            }
+            skipped();
+        }
         code.push(0xc3);
-        fns.push({ at: next, code, calls });
+        fns.push({ at: next, code, calls, loopAt });
         next += (code.length + 15) & ~15;
     }
     // mov eax..edi, imm32; mov ebp, n; L: calls, each with the flags read after it;
@@ -138,7 +172,16 @@ function generate(seed){
             main.push(...one(writers));
         }
         const to = pick(fns.length);
-        if (pick(4) === 0)
+        if (fns[to].loopAt >= 0 && pick(2) === 0)
+        {
+            // Into the middle of the function, at its loop, by a jump through a
+            // register: push the address after; mov ecx, n; mov edx, L; jmp edx.
+            // The region is entered at a block other than its entry, after the
+            // flags this wrote and the function's own write did not.
+            main.push(0x68, ...le(CODE + main.length + 17), 0xb9, ...le(1 + pick(6)),
+                0xba, ...le(fns[to].at + fns[to].loopAt), 0xff, 0xe2);
+        }
+        else if (pick(4) === 0)
         {
             // push the address; pop edx; call edx
             main.push(0x68, ...le(fns[to].at), 0x5a, 0xff, 0xd2);

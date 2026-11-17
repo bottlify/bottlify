@@ -272,6 +272,8 @@ export function engineContractProblem(engineModule, url){
  *     left to the interpreter. Default none.
  * @property {number} [relinkAfter]  Batch modules published before the running regions are
  *     gathered into large ones (0: never). Default 16.
+ * @property {number} [relinkQuiet]  Instructions of translated code since the last batch
+ *     module before the running regions are gathered. Default 2^30.
  * @property {number} [relinkRegions]  Regions in each gathered module. Default 512.
  * @property {number} [mergeAfter]  Transfers between two modules' regions before the two are
  *     gathered into one on the translation worker (0: never). Default 2^16.
@@ -480,11 +482,12 @@ export function engineContractProblem(engineModule, url){
  *     calls were sampled going to (`callTargets`).
  * @property {{ due: number, noShare: number, reformsOut: number, notFormed: number,
  *     noRegion: number, held: number, quiet: number, reforms: number,
- *     sites: object[] }} [prediction]  With `callTargets`: the indirect calls whose samples came
+ *     sites: object[], formed: { entry: number, site: number, callees: number[] }[]
+ *     }} [prediction]  With `callTargets`: the indirect calls whose samples came
  *     due, and why each was left as it was -- no callee took a share of them, its regions formed
  *     again as often as they may be, its callees not formed in, no region holding it, or every
  *     region having its callees -- the calls a region was formed again without sampling
- *     (`quiet`), and the most sampled calls.
+ *     (`quiet`), the most sampled calls, and by region each call's callees formed in.
  * @property {number} [copied]        Regions formed again with copies of the blocks inside
  *     their loops, which the machine kept coming back into there (`structure`).
  * @property {number} [crossings]      Transfers out of a running module into another,

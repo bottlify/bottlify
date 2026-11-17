@@ -915,6 +915,22 @@ export function formRegion(read, entry,
      * @type {Set<number>} */
     const promised = new Set();
     let bytes = 0;
+    /** Of the blocks and the bytes, those of the callees the runtime predicted: they are
+     * counted against their own room, so that a region formed again with them keeps the
+     * callees it had - counted with the rest they took the room of the callees decoded
+     * after them, and the region came back without a callee its hot loop calls. */
+    let predictedBlocks = 0;
+    let predictedBytes = 0;
+    /** The starts of those blocks, decoded or promised. @type {Set<number>} */
+    const predictedHeld = new Set();
+    /** @param {number} length  of an instruction taken into the block being decoded */
+    const took = length=>{
+        bytes += length;
+        if (inPredicted)
+        {
+            predictedBytes += length;
+        }
+    };
 
     /** The block starts in address order, for `containing`'s search. @type {number[]} */
     const sorted = [];
@@ -990,6 +1006,11 @@ export function formRegion(read, entry,
         block.exit = { kind: 'fallthrough', targets: [at], next: at, backEdge: false };
         blocks.set(at, tail);
         addStart(at);
+        if (predictedHeld.has(block.start))
+        {
+            predictedHeld.add(at);
+            predictedBlocks++;
+        }
         return true;
     };
 
@@ -1013,7 +1034,10 @@ export function formRegion(read, entry,
         // The entry's own function is decoded first (`pendingAt`): it may take its room
         // past the caps, and the callees after it stop at them.
         const room = inPredicted ? predictedRoom : depth === 0 ? ownRoom : NO_ROOM;
-        if (blocks.size >= maxBlocks + room.blocks || !translatable(start))
+        // What counts against the caps and the room: a predicted callee's blocks all
+        // of the region, the others' those that are not a predicted callee's.
+        const blocksNow = ()=>(inPredicted ? blocks.size : blocks.size - predictedBlocks);
+        if (blocksNow() >= maxBlocks + room.blocks || !translatable(start))
         {
             // Not followed: whoever jumps here exits to the runtime.
             continue;
@@ -1030,16 +1054,21 @@ export function formRegion(read, entry,
                 let owed = 0;
                 for (const at of promised)
                 {
-                    owed += blocks.has(at) ? 0 : 1;
+                    // A predicted callee's promise is on its own room, as its blocks are.
+                    owed += blocks.has(at) || (!inPredicted && predictedHeld.has(at)) ? 0 : 1;
                 }
                 const more = found.filter(at=>!blocks.has(at) && !promised.has(at)).length;
-                if (blocks.size + owed + more > maxBlocks + room.blocks)
+                if (blocksNow() + owed + more > maxBlocks + room.blocks)
                 {
                     continue;
                 }
                 for (const at of found)
                 {
                     promised.add(at);
+                    if (inPredicted)
+                    {
+                        predictedHeld.add(at);
+                    }
                 }
             }
         }
@@ -1050,6 +1079,11 @@ export function formRegion(read, entry,
         };
         blocks.set(start, block);
         addStart(start);
+        if (inPredicted)
+        {
+            predictedHeld.add(start);
+            predictedBlocks++;
+        }
         let eip = start;
         for (;;)
         {
@@ -1060,7 +1094,7 @@ export function formRegion(read, entry,
                 follow(eip, depth);
                 break;
             }
-            if (bytes >= maxBytes + room.bytes)
+            if ((inPredicted ? bytes : bytes - predictedBytes) >= maxBytes + room.bytes)
             {
                 block.exit = { kind: 'cut', targets: [], next: eip, backEdge: false };
                 break;
@@ -1105,7 +1139,7 @@ export function formRegion(read, entry,
                 block.instructions.push(...helperInstructions(through, decoded, slotted, read)
                     .map(one=>(one.op === 'crt' ? { ...one, crtSlot: slot, crtTarget: slotted,
                         ...stub ? { stub } : {} } : one)));
-                bytes += decoded.length;
+                took(decoded.length);
                 eip = wide ? eip + decoded.length : (eip + decoded.length) >>> 0;
                 block.end = eip;
                 continue;
@@ -1115,7 +1149,7 @@ export function formRegion(read, entry,
                 // A compiler's runtime helper: its call is formed as the
                 // instructions it amounts to, and the block goes on (helpers.js).
                 block.instructions.push(...helperInstructions(helper, decoded, called, read));
-                bytes += decoded.length;
+                took(decoded.length);
                 eip = wide ? eip + decoded.length : (eip + decoded.length) >>> 0;
                 block.end = eip;
                 continue;
@@ -1164,7 +1198,7 @@ export function formRegion(read, entry,
                 decoded = thunkCall(decodeAt, translatable, decoded) ?? decoded;
             }
             block.instructions.push(decoded);
-            bytes += decoded.length;
+            took(decoded.length);
             // A block that starts inside this instruction's bytes shares them.
             const after = place(decoded.eip + 1);
             if (after < sorted.length && sorted[after] < decoded.eip + decoded.length)

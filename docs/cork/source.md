@@ -55,6 +55,12 @@ node tools/bench/serve.mjs                  # the same stand as a page, for any 
   spread. A workload whose counts its run's timing decides is listed there with the cause and
   skipped. A change that moves shapes on purpose records them again
   (`CORK_SHAPES_WRITE=5 node --test modules/cork/src/region-shapes.itest.js`).
+- **Predicted callees** ([`src/prediction-order.itest.js`](../../modules/cork/src/prediction-order.itest.js)):
+  the callees an indirect call has formed into its region come from samples of where it went,
+  and which samples a reading holds is the run's timing. The gate runs the micro workloads with
+  such calls in slices of several lengths and holds each call to the same callees, named in the
+  same order: the call finds its target among them by address, so the same callees are the same
+  code.
 - **The guest's own clock** (`clock: 'virtual'`, [settings](settings.md)): a run on it
   translates the same code however busy the machine is, which
   [`virtual-clock.test.js`](../../modules/core/src/layers/cpu/internal/virtual-clock.test.js)
@@ -84,6 +90,7 @@ time, each arm a checkout of its own (a worktree or a copy, never the tree being
 | What does a whole program's code cost once it has settled? | [`tools/translator/pe-count.mjs`](../../tools/translator/pe-count.mjs) `--qemu DIR --root BASE --root NEW --variant x87 entities spread` | Exact, and closed from the machine's time: machine instructions for each of the guest's own in a window of one run of a PE benchmark workload as the app runs it, so what the runtime does over a long run (callees formed in by their samples) is in it. One tree twice gives the same figures. |
 | What does translating cost? | [`tools/translator/emit-count.mjs`](../../tools/translator/emit-count.mjs) `--qemu DIR --root BASE --root NEW` | Exact. Judge by the work, V8's own compiles apart; the price list says where the cost moved. Same wasm bytes unless the change meant otherwise. |
 | What machine code does a form become? | [`tools/translator/cork-asm.mjs`](../../tools/translator/cork-asm.mjs) | With `--runner` a node whose V8 is the browsers' (node 22's is older and spills where they do not); arm64 through an arm64 node under `qemu-aarch64`. Its static weighing is a model: compare arms, never absolutes. |
+| What does it cost on an arm64 host? | `run-count.mjs` or `pe-count.mjs` with `--arm64 NODE` | Exact as on x86-64: an arm64 build of node under `qemu-aarch64` (built with plugins), its count V8's arm64 code. `--node-flags --no-wasm-bounds-checks` is V8 as it is on macOS, where a store past the memory is left to the fault. Judge arm64 by this, not by cork-asm's model. |
 | What does a module hold in memory? | [`tools/translator/module-memory.mjs`](../../tools/translator/module-memory.mjs) | `node --expose-gc`, with each of the three flag sets its comment names. |
 | Is it faster on this machine? | `node tools/bench/stand.mjs --roots BASE,NEW` | Ten runs on a quiet machine, alternated; one run's rounds vary by a fifth. Only to confirm what the counts said. |
 | Is it faster on a person's device? | `node tools/bench/build.mjs --arm base=REV --arm new=.`, then the page (`serve.mjs --dir OUT`) | Five runs on the device; `--check` with `CDP_TEST_CHROME` holds the page's work to the record first. |

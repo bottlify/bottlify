@@ -64,9 +64,10 @@ const MAX_CHAIN = 16;
  * @property {number} now            Milliseconds since 1970: the machine's time.
  * @property {boolean} [hashOnly]    WTD_HASH_ONLY_FLAG: the file's digest alone.
  * @property {boolean} [lifetime]    WTD_LIFETIME_SIGNING_FLAG: judged now, timestamp or not.
- * @property {(chain: Uint8Array[]) => void} [signerChain]  Told the signer's chain, its
- *     certificates as encoded from the signer's own to the root, once the signature holds:
- *     what a verification's provider data lays out for the caller.
+ * @property {(chain: Uint8Array[], time: number) => void} [signerChain]  Told the signer's
+ *     chain, its certificates as encoded from the signer's own to the root, and the time it
+ *     is judged at, once the signature holds: what a verification's provider data lays out
+ *     for the caller.
  */
 
 /**
@@ -311,7 +312,7 @@ export function verifyAuthenticode(bytes, options, subject = readSubject(bytes))
         }
     }
     options.signerChain?.(buildChain(certificate, signed.certificates, options.roots).chain
-        .map(one=>one.encoded));
+        .map(one=>one.encoded), time);
     return judgeChain(certificate, signed.certificates, options.roots, time, USAGE.CODE_SIGNING);
 }
 

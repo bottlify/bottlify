@@ -401,6 +401,24 @@ test('a predicted callee is formed into a region its own function fills, within 
     assert.equal(regionOf(image, 0x1000, { maxBlocks: 6 }).blocks.length, 12);
 });
 
+test('a region formed again with a predicted callee keeps the callees it had: the predicted'
+    + ' one is counted against its own room', ()=>{
+    // 1000: call ebx   1002: call F   1007: ret -- three blocks of its own;
+    // G = 1100: three of inc eax; jz +0, then ret -- four blocks; F = 1200: inc eax; ret.
+    const pad = (/** @type {number[]} */ bytes, /** @type {number} */ to)=>
+        [...bytes, ...Array.from({ length: to - bytes.length }, ()=>0xcc)];
+    const image = [
+        ...pad([0xff, 0xd3, 0xe8, 0xf9, 0x01, 0x00, 0x00, 0xc3], 0x100),
+        ...pad([...Array.from({ length: 3 }, ()=>[0x40, 0x74, 0x00]).flat(), 0xc3], 0x100),
+        0x40, 0xc3];
+    const starts = (/** @type {object} */ options)=>regionOf(image, 0x1000,
+        { maxBlocks: 4, ...options }).blocks.map(block=>block.start);
+    assert.ok(starts({}).includes(0x1200), 'F fits under the cap beside the function');
+    const again = starts({ callTargets: new Map([[0x1000, [0x1100]]]) });
+    assert.ok(again.includes(0x1100), 'G in, in the room past the cap');
+    assert.ok(again.includes(0x1200), 'and F still in: G took none of its room');
+});
+
 test('a call through a fixed slot predicts the leaf the slot holds', ()=>{
     // 1000: call [0x3000]; ret; F = 1007: inc eax; ret; G = 1009: call F; ret
     const code = [0xff, 0x15, 0x00, 0x30, 0, 0, 0xc3, 0x40, 0xc3,

@@ -22,11 +22,36 @@ const total = counts=>counts.reduce((sum, times)=>sum + times, 0);
 const worth = (counts, most = 32, doubt = 1)=>
     calleesWorth(sampled(counts), total(counts), most, doubt).length;
 
-test('a call that goes to one callee, or to a few, has them all formed in, the most sampled'
-    + ' first', ()=>{
+test('a call that goes to one callee, or to a few, has them all formed in', ()=>{
     assert.deepEqual(calleesWorth(sampled([48]), 48, 32), [0x1000]);
-    assert.deepEqual(calleesWorth(sampled([21, 24, 3]), 48, 32), [0x1004, 0x1000, 0x1008]);
+    assert.deepEqual(calleesWorth(sampled([21, 24, 3]), 48, 32), [0x1000, 0x1004, 0x1008]);
     assert.equal(worth(Array.from({ length: 8 }, ()=>6)), 8, 'eight, a sample in eight each');
+});
+
+test('callees are given by address, whichever had more samples', ()=>{
+    // The same three methods a third of the calls each, as readings saw them, and two of
+    // which one is called twice as often.
+    for (const counts of [[21, 24, 19], [24, 19, 21], [19, 21, 24], [30, 16, 18], [13, 3, 0]])
+    {
+        const taken = calleesWorth(sampled(counts), total(counts), 32);
+        assert.deepEqual(taken, [...taken].sort((a, b)=>a - b), `${counts}`);
+    }
+    assert.deepEqual(calleesWorth(sampled([16, 32]), 48, 32), [0x1000, 0x1004]);
+    assert.deepEqual(calleesWorth(sampled([78, 6, 7, 5]), 96, 32),
+        [0x1000, 0x1004, 0x1008, 0x100c]);
+    // Evenly over twenty-four, every reading's samples a different draw: one order.
+    let seed = 12345;
+    const next = ()=>(seed = seed * 1103515245 + 12345 >>> 0) / 2 ** 32;
+    for (let draw = 0; draw < 200; draw++)
+    {
+        const counts = Array.from({ length: 24 }, ()=>0);
+        for (let i = 0; i < 24 * 8; i++)
+        {
+            counts[Math.floor(next() * 24)]++;
+        }
+        const taken = calleesWorth(sampled(counts), 24 * 8, 32);
+        assert.deepEqual(taken, [...taken].sort((a, b)=>a - b), `draw ${draw}: ${counts}`);
+    }
 });
 
 test('a call spread evenly over two dozen callees, or over as many as may be formed in, has'
