@@ -1015,7 +1015,6 @@ const SW_SHOWNA = 8;
  * @param {any} options.host
  * @param {(hwnd: number) => any | null} options.live
  * @param {Map<number, any>} options.windows
- * @param {Map<string, any>} options.classes  Registered classes, by name.
  * @param {(hwnd: number) => ({ processId: number, threadId: number, className: string,
  *     title: string, parent?: number, owner?: number, style?: number } | null)}
  *     [options.elsewhere]
@@ -1023,7 +1022,7 @@ const SW_SHOWNA = 8;
  * @param {{ register: (name: string) => number, registeredName: (id: number) => string | null }}
  *     [options.names]  The run's registered messages and clipboard formats.
  */
-export function createSystemFunctions({ host, live, windows, classes, elsewhere = ()=>null,
+export function createSystemFunctions({ host, live, windows, elsewhere = ()=>null,
     names = createWindowDirectory() })
 {
     /** The structures at the process's width (`structs.js`). */
@@ -1808,10 +1807,26 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             : decodeAnsi(new Uint8Array([code & 0xff]))) ? 1 : 0),
     });
 
+    /**
+     * Whether a class long setter is asked for the atom, which is the
+     * class's name and is not set: ERROR_INVALID_PARAMETER, and nothing
+     * answered.
+     *
+     * @param {number} index
+     */
+    const atomRefused = index=>{
+        if ((index | 0) !== GCW_ATOM)
+        {
+            return false;
+        }
+        host.setLastError?.(ERROR_INVALID_PARAMETER);
+        return true;
+    };
+
     /** @param {number} hwnd @returns {any | null} the class a window was made from */
     const classOfWindow = hwnd=>{
         const record = live(hwnd);
-        return record ? classes.get(record.className) ?? null : null;
+        return record?.cls ?? null;
     };
 
     /**
@@ -1881,7 +1896,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
      */
     const setClassLongPtr = (hwnd, index, low, high, unicode)=>{
         const cls = classOfWindow(hwnd);
-        if (!cls)
+        if (!cls || atomRefused(index))
         {
             return 0n;
         }
@@ -6990,7 +7005,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             /** @param {number[]} args */
             handler: ([hwnd, index, value])=>{
                 const cls = classOfWindow(hwnd);
-                if (!cls)
+                if (!cls || atomRefused(index))
                 {
                     return 0;
                 }
@@ -7061,7 +7076,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             /** @param {number[]} args */
             handler: ([hwnd, index, value])=>{
                 const cls = classOfWindow(hwnd);
-                if (!cls)
+                if (!cls || atomRefused(index))
                 {
                     return 0;
                 }

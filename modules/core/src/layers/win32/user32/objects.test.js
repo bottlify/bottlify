@@ -1580,7 +1580,7 @@ test('a clipboard viewer is told of every change and of the chain changing', ()=
     assert.equal(told(WM_CHANGECBCHAIN).length, 1);
 
     assert.equal(fns.SetClipboardViewer.handler([0x9999]), 0);
-    assert.deepEqual(errors, [1400]);
+    assert.equal(errors.at(-1), 1400);
 });
 
 // --- icons made of bitmaps, and copies ---

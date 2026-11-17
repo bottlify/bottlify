@@ -722,8 +722,7 @@ test('the adapter lists its modes per format, bounded by the display and not the
     // The monitor is the one user32 names for every window, so the handle
     // goes straight into GetMonitorInfo (Wine's d3d9 device.c requires
     // !!monitor); an adapter that does not exist has none.
-    const user32 = createSystemFunctions({ host: {}, live: ()=>null, windows: new Map(),
-        classes: new Map() });
+    const user32 = createSystemFunctions({ host: {}, live: ()=>null, windows: new Map() });
     assert.equal(ask('GetAdapterMonitor', [0]), user32.MonitorFromWindow.handler([0, 1]));
     assert.notEqual(ask('GetAdapterMonitor', [0]), 0);
     assert.equal(ask('GetAdapterMonitor', [1]), 0);

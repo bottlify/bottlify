@@ -33,7 +33,8 @@ export const REGISTRY = ['root', 'open', 'create', 'remove', 'subkeys', 'classOf
 
 /** What a process asks of the window directory. */
 const WINDOWS = ['open', 'close', 'ownerOf', 'describe', 'find', 'register', 'registeredName',
-    'hold', 'send', 'answer', 'withdraw', 'post', 'detach', 'publish', 'raise', 'lower',
+    'holdClass', 'releaseClass', 'hold', 'send', 'answer', 'withdraw', 'post', 'detach',
+    'publish', 'raise', 'lower',
     'insertAfter', 'stateOf', 'topLevel', 'fromPoint', 'foreground', 'setForeground',
     'foregroundElsewhere', 'noteCapture', 'noteFocus', 'focus'];
 

@@ -67,8 +67,10 @@ event, an error. Neither stops the program.
   command-link note) and answers BCM_GETIDEALSIZE by its own layout - the text in its font, the
   image where the style puts it, its frame - which holds the content but is not Windows' pixel
   for pixel. No button draws the image BM_SETIMAGE gives it, and version 6's draws neither the
-  split part, the image list nor the note. A program's own class
-  that its manifest versions is not registered by the versioned name.
+  split part, the image list nor the note.
+- The common controls' window classes are there without comctl32 being loaded: a program that
+  makes one, or asks GetClassInfo for it, does not load comctl32, where Windows' user32 loads it
+  to register the class, so GetModuleHandle("comctl32") stays 0 until the program loads it.
 - An import nothing implements returns 0 when its argument size is known (a decorated name, a cdecl
   library, a library the program brought). Otherwise the program stops with `unimplemented import`
   and the function's name.

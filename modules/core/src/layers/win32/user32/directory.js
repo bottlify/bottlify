@@ -123,6 +123,33 @@ export function createWindowDirectory({ cells = windowCells() } = {}){
     const registered = new Map();
     /** Each registered number's name as it was first spelled. @type {Map<number, string>} */
     const spelled = new Map();
+    /**
+     * How many window classes hold each number, for a number only classes
+     * hold: the last one unregistered frees it, where a registered message
+     * or clipboard format keeps its number for the run.
+     *
+     * @type {Map<number, number>}
+     */
+    const classHolds = new Map();
+    /** The next number to give out: one freed is not given again. */
+    let nextRegistered = REGISTERED_FIRST;
+
+    /**
+     * A name's number, the same in any case, given the first time it is asked.
+     *
+     * @param {string} name
+     */
+    const numberOf = name=>{
+        const key = name.toLowerCase();
+        let id = registered.get(key);
+        if (id === undefined)
+        {
+            id = nextRegistered++;
+            registered.set(key, id);
+            spelled.set(id, name);
+        }
+        return id;
+    };
 
     /** @param {number} hwnd */
     const endpointOf = hwnd=>{
@@ -375,15 +402,47 @@ export function createWindowDirectory({ cells = windowCells() } = {}){
          * @param {string} name @returns {number}
          */
         register(name){
-            const key = name.toLowerCase();
-            let id = registered.get(key);
-            if (id === undefined)
+            const id = numberOf(name);
+            classHolds.delete(id);
+            return id;
+        },
+
+        /**
+         * A window class's number in the same table: the name's, held until
+         * the class is unregistered (`releaseClass`).
+         *
+         * @param {string} name @returns {number}
+         */
+        holdClass(name){
+            const known = registered.get(name.toLowerCase());
+            const id = numberOf(name);
+            if (known === undefined || classHolds.has(id))
             {
-                id = REGISTERED_FIRST + registered.size;
-                registered.set(key, id);
-                spelled.set(id, name);
+                classHolds.set(id, (classHolds.get(id) ?? 0) + 1);
             }
             return id;
+        },
+
+        /**
+         * A class let go of its number: the last class to hold one only
+         * classes held frees it, and GetClipboardFormatName finds no name.
+         *
+         * @param {number} id
+         */
+        releaseClass(id){
+            const holds = classHolds.get(id >>> 0);
+            if (holds === undefined)
+            {
+                return;
+            }
+            if (holds > 1)
+            {
+                classHolds.set(id >>> 0, holds - 1);
+                return;
+            }
+            classHolds.delete(id >>> 0);
+            registered.delete(String(spelled.get(id >>> 0)).toLowerCase());
+            spelled.delete(id >>> 0);
         },
 
         /**

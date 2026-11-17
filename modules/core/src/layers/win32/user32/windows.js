@@ -63,6 +63,7 @@ import {
 import { convertCharacter, readText, translated, writeText } from './unicode.js';
 import { charactersOf, readToTerminator } from '../common/scan-windows.js';
 import { DESKTOP_WINDOW, HWND_BROADCAST, createWindowDirectory } from './directory.js';
+import { createClassRegistry } from './classes.js';
 import { boundsOf, subtractFromArea } from '../gdi32/rects.js';
 import { areaOf } from '../gdi32/regions.js';
 
@@ -550,6 +551,9 @@ const HWND_THREAD_MESSAGES = 0xffffffff;
 /** What PostThreadMessage reports for an identifier that names no thread. */
 const ERROR_INVALID_THREAD_ID = 1444;
 const ERROR_INVALID_PARAMETER = 87;
+const ERROR_CLASS_DOES_NOT_EXIST = 1411;
+const ERROR_CANNOT_FIND_WND_CLASS = 1407;
+const ERROR_CLASS_HAS_WINDOWS = 1412;
 const ERROR_INVALID_HANDLE = 6;
 /** GetScrollBarInfo's objects: a window's own bars, and a scroll bar control's client area. */
 const OBJID_HSCROLL = -6;
@@ -611,9 +615,20 @@ const HOVER_KEY = 'TrackMouseEvent';
 const MOUSE_KEYS = Object.freeze([[0x01, 0x0001], [0x02, 0x0002], [0x10, 0x0004],
     [0x11, 0x0008], [0x04, 0x0010], [0x05, 0x0020], [0x06, 0x0040]]);
 
-/** Class atoms come from the range Windows reserves for dynamic atoms. */
-const FIRST_ATOM = 0xc000;
 const LAST_ATOM = 0xffff;
+/** Atoms below are integral: "#<number>" names the atom that number is. */
+const FIRST_STRING_ATOM = 0xc000;
+
+/**
+ * The integral atom a name spells, "#1234" being 1234, or null.
+ *
+ * @param {string} name
+ */
+const integralAtom = name=>{
+    const spelled = /^#(\d+)$/.exec(name);
+    const value = spelled ? Number(spelled[1]) : 0;
+    return value > 0 && value < FIRST_STRING_ATOM ? value : null;
+};
 
 /** Windows caps a class name here, and a name is the only thing we scan for. */
 const MAX_CLASS_NAME = 256;
@@ -739,6 +754,9 @@ const MAX_WINDOW_TEXT = 1 << 16;
  *           name. Absent in a build with no common controls, and then a
  *           program that makes one gets no window for it.
  * @property {(name: string) => ({ versioned: string, major: number } | null)} [windowClass]
+ * @property {(name: string | null) => number} [moduleHandle]
+ *           A loaded module's handle by name, the program's own for null:
+ *           what a class's module is told apart by. Absent, every handle is 0.
  * @property {(himl: number) => ({ cx: number, cy: number } | null)} [imageListSize]
  *           An image list's image size, comctl32's, for a version 6 button.
  *           The class a window class name is under the running thread's
@@ -993,8 +1011,15 @@ export function createWindowFunctions(host){
      * parameters eight bytes wide (`structs.js`).
      */
     const L = userLayouts(host.pointerSize);
-    /** @type {Map<string, any>} */
-    const classes = new Map();
+    /**
+     * The classes the process registered, by module and name, as Windows
+     * looks them up (`classes.js`).
+     */
+    const classes = createClassRegistry({
+        main: ()=>host.moduleHandle?.(null) ?? 0,
+        user32: ()=>host.moduleHandle?.('user32.dll') ?? 0,
+        isSystem: name=>systemClasses.has(name.toLowerCase()),
+    });
     /** @type {Map<number, string>} */
     const atoms = new Map();
     /**
@@ -1023,7 +1048,6 @@ export function createWindowFunctions(host){
             return /** @type {any} */ (plain)(...args);
         });
     }
-    let nextAtom = FIRST_ATOM;
     const processId = host.processId ?? 0x1000;
     const directory = host.directory ?? createWindowDirectory();
 
@@ -1034,9 +1058,11 @@ export function createWindowFunctions(host){
      *
      * @param {number} pointer
      * @param {boolean} [unicode]  whether the name is a wide string
+     * @param {number} [instance]  the module the call names, for a local class
+     * @param {import('./classes.js').Asking} [asking]  what the call is
      * @returns {any | null}
      */
-    const classOf = (pointer, unicode = false)=>{
+    const classOf = (pointer, unicode = false, instance = 0, asking = 'create')=>{
         const value = pointer >>> 0;
         if (value === 0)
         {
@@ -1044,10 +1070,12 @@ export function createWindowFunctions(host){
         }
         if (value <= LAST_ATOM)
         {
+            // An atom names its class as its name would, through the
+            // context too.
             const name = atoms.get(value);
-            return name === undefined ? null : classNamed(name);
+            return name === undefined ? null : classByName(name, instance, asking);
         }
-        return classByName(readText(host, value, unicode, MAX_CLASS_NAME));
+        return classByName(readText(host, value, unicode, MAX_CLASS_NAME), instance, asking);
     };
 
     /**
@@ -1055,23 +1083,26 @@ export function createWindowFunctions(host){
      * the name, the class of the assembly's version - Common Controls 6's
      * Button, not user32's - and otherwise the name's own.
      *
-     * @param {string} name
+     * @param {string} name @param {number} [instance]
+     * @param {import('./classes.js').Asking} [asking]
      * @returns {any | null}
      */
-    const classByName = name=>{
-        // Only a system class is redirected: a program's own registered by
-        // a versioned name is not yet registered under it (decisions.md A257).
+    const classByName = (name, instance = 0, asking = 'create')=>{
         const redirected = host.windowClass?.(name);
         if (redirected)
         {
-            return versionedClass(redirected.versioned, redirected.major) ?? classNamed(name);
+            // The context's name only: a class registered by the base name
+            // while no context held it is out of reach while one does.
+            return classes.find(redirected.versioned, instance, asking)
+                ?? versionedClass(redirected.versioned, redirected.major, instance, asking);
         }
         // A versioned name asked for by itself, as a program that read it
         // from its context's class section does: a class registered by that
         // name, else the system class of that version.
         const version = /^(\d+)\.\d+\.\d+\.\d+!/.exec(name);
-        return version ? classNamed(name) ?? versionedClass(name, Number(version[1]))
-            : classNamed(name);
+        return version ? classNamed(name, instance, asking)
+            ?? versionedClass(name, Number(version[1]), instance, asking)
+            : classNamed(name, instance, asking);
     };
 
     /**
@@ -1081,10 +1112,11 @@ export function createWindowFunctions(host){
      * time the name is wanted from the system class it is a version of.
      * Null for a name with no system class behind it.
      *
-     * @param {string} versioned @param {number} major
+     * @param {string} versioned @param {number} major @param {number} [instance]
+     * @param {import('./classes.js').Asking} [asking]
      * @returns {any | null}
      */
-    const versionedClass = (versioned, major)=>{
+    const versionedClass = (versioned, major, instance = 0, asking = 'create')=>{
         const key = versioned.toLowerCase();
         if (!systemClasses.has(key))
         {
@@ -1093,10 +1125,11 @@ export function createWindowFunctions(host){
             {
                 return null;
             }
+            // A version's classes are its library's: Common Controls 6's.
             systemClasses.set(key, { ...base, wndProc: 0, version: major,
-                label: versioned, since: undefined });
+                label: versioned, since: undefined, library: true });
         }
-        return classNamed(versioned);
+        return classNamed(versioned, instance, asking);
     };
 
     /**
@@ -1104,23 +1137,17 @@ export function createWindowFunctions(host){
      * compare without regard to case, and a system class also answers to
      * its atom spelled out -- `#128` is Button in a dialog template.
      *
-     * @param {string} name
+     * @param {string} name @param {number} [instance]
+     * @param {import('./classes.js').Asking} [asking]
      * @returns {any | null}
      */
-    const classNamed = name=>{
-        const own = classes.get(name);
+    const classNamed = (name, instance = 0, asking = 'create')=>{
+        const own = classes.find(name, instance, asking);
         if (own)
         {
             return own;
         }
         const folded = name.toLowerCase();
-        for (const cls of classes.values())
-        {
-            if (cls.name.toLowerCase() === folded)
-            {
-                return cls;
-            }
-        }
         const found = systemClasses.get(folded);
         // A class of a later version only by its versioned name.
         const system = found?.since !== undefined && found.label === undefined ? null : found;
@@ -1130,14 +1157,36 @@ export function createWindowFunctions(host){
             // when the tables are built: a stub the bridge hands out needs
             // the machine to be up, and a build that never makes a control
             // never needs one.
-            system.wndProc = host.registerProcedure
+            // The stub calls its own address, not the class's procedure: a
+            // program may set the class's procedure to its own and call this
+            // one from it, as superclassing does.
+            /** @type {number} */
+            const address = host.registerProcedure
                 ? host.registerProcedure(`<${system.label ?? system.name}>`,
-                    message=>callProcedure(system.wndProc, message, host.callerThread?.()))
+                    message=>callProcedure(address, message, host.callerThread?.()))
                 : HOST_PROCEDURE_BASE + system.atom * 16;
-            procedures.set(system.wndProc, controlProcedures[system.name]);
-            procedureClasses.set(system.wndProc, system.name);
+            system.wndProc = address;
+            procedures.set(address, controlProcedures[system.name]);
+            if (system.label === undefined)
+            {
+                // Only user32's own procedures mark a window's real class;
+                // a version's, comctl32's, does not.
+                procedureClasses.set(address, system.name);
+            }
         }
-        return system ?? null;
+        // Asked for by a call that would use it, a library's class is
+        // registered again; one being unregistered is not.
+        if (system?.unregistered && system.library && asking !== 'unregister')
+        {
+            system.unregistered = false;
+        }
+        if (system && system.instance === 0)
+        {
+            // A system class is user32's: GetClassLongPtr(GCLP_HMODULE) of
+            // one of its windows answers that module.
+            system.instance = host.moduleHandle?.('user32.dll') ?? 0;
+        }
+        return system && !system.unregistered ? system : null;
     };
 
     /**
@@ -3013,24 +3062,65 @@ export function createWindowFunctions(host){
      * @returns {number} the atom, or zero if the class cannot be registered
      */
     const register = (fields, unicode = false)=>{
-        // A class is named by a string here: an atom is what registration
-        // produces, never something it can be handed.
-        if ((fields.className >>> 0) <= LAST_ATOM)
+        // A name, or an integral atom, which is the class "#<number>"; a
+        // string atom names the class its name does.
+        const given = fields.className >>> 0;
+        const asked = given > LAST_ATOM ? readText(host, given, unicode, MAX_CLASS_NAME)
+            : given !== 0 && given < FIRST_STRING_ATOM ? `#${given}`
+                : directory.registeredName(given) ?? '';
+        if (asked.length === 0 || (fields.classExtra | 0) < 0 || (fields.windowExtra | 0) < 0)
         {
+            host.setLastError?.(ERROR_INVALID_PARAMETER);
             return 0;
         }
-        const name = readText(host, fields.className, unicode, MAX_CLASS_NAME);
-        if (name.length === 0 || classes.has(name) || nextAtom > LAST_ATOM)
-        {
-            return 0;
-        }
-        const atom = nextAtom++;
+        // Under a context whose manifest names the class, it is registered by
+        // its versioned name, which only that context's base name and the
+        // versioned name itself then find (`classByName`); it is still known
+        // by the name it was registered by (GetClassName).
+        const name = host.windowClass?.(asked)?.versioned ?? asked;
         // A handle registers the procedure behind it, reading what it reads.
         const behind = procBehind(fields.wndProc);
-        classes.set(name, { ...fields, name, atom, unicode,
-            ...behind ? { wndProc: behind.address, unicode: behind.unicode } : {} });
-        atoms.set(atom, name);
-        return atom;
+        const cls = { ...fields, name, baseName: asked, atom: 0, unicode,
+            ...behind ? { wndProc: behind.address, unicode: behind.unicode } : {} };
+        const refused = classes.add(cls);
+        if (refused !== 0)
+        {
+            host.setLastError?.(refused);
+            return 0;
+        }
+        // The atom is the name's in the table registered messages and
+        // clipboard formats share, as Windows' is: two classes of one name
+        // have one, and GetClipboardFormatName reads the name back - the
+        // name it was registered by, a versioned class's too.
+        cls.atom = integralAtom(asked) ?? directory.holdClass(asked);
+        atoms.set(cls.atom, asked);
+        return cls.atom;
+    };
+
+    /**
+     * GetClassInfo(Ex) in either width: the class the module's call finds,
+     * its instance as Windows reports it (`classes.reportedInstance`), the
+     * name the caller asked by, and its atom for an answer.
+     *
+     * @param {number} instance @param {number} className @param {number} out
+     * @param {boolean} wide @param {boolean} extended
+     */
+    const classInfo = (instance, className, out, wide, extended)=>{
+        const cls = classOf(className, wide, instance >>> 0, 'info');
+        if (!cls)
+        {
+            host.setLastError?.(ERROR_CLASS_DOES_NOT_EXIST);
+            return 0;
+        }
+        if ((out >>> 0) === 0)
+        {
+            return 0;
+        }
+        // lpszClassName is what the caller asked by, a name or an atom.
+        const reported = { ...procRead(cls, wide),
+            instance: classes.reportedInstance(cls, instance >>> 0), className: className >>> 0 };
+        writeWindowClass(host, out >>> 0, reported, L, extended ? L.WNDCLASSEXA : undefined);
+        return cls.atom || 1;
     };
 
     /**
@@ -3046,22 +3136,39 @@ export function createWindowFunctions(host){
      *
      * @param {number} className  A name or an atom.
      * @param {boolean} unicode   Whether the name is a wide string.
+     * @param {number} instance  The module whose local class it is; none, the program's.
      */
-    const unregister = (className, unicode)=>{
-        const cls = classOf(className, unicode);
-        if (!cls || !classes.has(cls.name))
+    const unregister = (className, unicode, instance)=>{
+        const cls = classOf(className, unicode, instance, 'unregister');
+        if (!cls)
         {
+            host.setLastError?.(ERROR_CLASS_DOES_NOT_EXIST);
             return 0;
         }
         for (const record of windows.values())
         {
-            if (record.className === cls.name && !record.destroyed)
+            if (record.cls === cls && !record.destroyed)
             {
+                host.setLastError?.(ERROR_CLASS_HAS_WINDOWS);
                 return 0;
             }
         }
-        classes.delete(cls.name);
-        atoms.delete(cls.atom);
+        if (!classes.has(cls))
+        {
+            // A system class may be unregistered too, and is then gone for
+            // the process.
+            cls.unregistered = true;
+            return 1;
+        }
+        classes.remove(cls);
+        directory.releaseClass(cls.atom);
+        const named = cls.atom < FIRST_STRING_ATOM
+            ? classes.all().some(other=>other.atom === cls.atom)
+            : directory.registeredName(cls.atom) !== null;
+        if (!named)
+        {
+            atoms.delete(cls.atom);
+        }
         return 1;
     };
 
@@ -4044,9 +4151,10 @@ export function createWindowFunctions(host){
     const makeWindowFor = (args, unicode = false, caller = undefined)=>{
         const [exStyle, className, windowName, style, x, y, width, height, parent, menu, instance]
             = args;
-        const cls = classOf(className, unicode);
+        const cls = classOf(className, unicode, instance >>> 0, 'create');
         if (!cls)
         {
+            host.setLastError?.(ERROR_CANNOT_FIND_WND_CLASS);
             return 0;
         }
         // A child needs something to be inside.
@@ -4066,7 +4174,11 @@ export function createWindowFunctions(host){
             return 0;
         }
         const record = makeWindow({
-            className: cls.name,
+            className: cls.baseName ?? cls.name,
+            // The class it was made of, which its class longs read and
+            // UnregisterClass looks for: a name is not enough where two
+            // modules each have a class of it.
+            cls,
             // The version of the common controls the window answers as: 6
             // for a class of Common Controls 6, reached by its versioned name.
             controlsVersion: cls.version ?? 5,
@@ -4156,6 +4268,14 @@ export function createWindowFunctions(host){
             parent, menu, instance, params] = /** @type {number[]} */ (args);
         const givenName = args[2];
         const nameBytes = typeof givenName === 'string' ? nameIn(givenName, unicode) : null;
+        // The class the procedure is told it was made of: the name it was
+        // registered by where the caller named it by another - a versioned
+        // class asked for by its base name under a context, or the reverse;
+        // an atom, or the name itself, as the caller passed it.
+        const registeredName = record.cls?.baseName;
+        const classBytes = (className >>> 0) > LAST_ATOM && registeredName !== undefined
+            && readText(host, className >>> 0, unicode, MAX_CLASS_NAME).toLowerCase()
+                !== registeredName.toLowerCase() ? nameIn(registeredName, unicode) : null;
         // Named once, before anything is awaited: a call made after the hook
         // has answered is answering a call the bridge has already let go of.
         const thread = caller ?? host.callerThread?.();
@@ -4276,7 +4396,8 @@ export function createWindowFunctions(host){
         // that point at it.
         const { CREATESTRUCTA, CBT_CREATEWNDA } = L;
         const nameAt = CREATESTRUCTA.SIZE + CBT_CREATEWNDA.SIZE;
-        const create = host.allocate(nameAt + (nameBytes?.length ?? 0));
+        const classAt = nameAt + (nameBytes?.length ?? 0);
+        const create = host.allocate(classAt + (classBytes?.length ?? 0));
         if (create === 0)
         {
             settle();
@@ -4295,7 +4416,7 @@ export function createWindowFunctions(host){
             x: record.x,
             style,
             lpszName: nameBytes === null ? Number(givenName) : create + nameAt,
-            lpszClass: className,
+            lpszClass: classBytes === null ? className : create + classAt,
             dwExStyle: asked,
         });
         putFields(view, CREATESTRUCTA.SIZE, L, CBT_CREATEWNDA,
@@ -4304,6 +4425,10 @@ export function createWindowFunctions(host){
         if (nameBytes !== null)
         {
             host.writeMemory(create + nameAt, nameBytes);
+        }
+        if (classBytes !== null)
+        {
+            host.writeMemory(create + classAt, classBytes);
         }
         void width;
         void height;
@@ -6467,7 +6592,7 @@ export function createWindowFunctions(host){
         desktop: ()=>desktopWindow().hwnd,
         covering: coveringOf,
         layoutRevision: ()=>layoutRevision,
-        classOf: (/** @type {any} */ record)=>classes.get(record.className) ?? null,
+        classOf: (/** @type {any} */ record)=>record.cls ?? classNamed(record.className),
         isWindow: (/** @type {number} */ hwnd)=>Boolean(live(hwnd)
             || directory.describe(hwnd, processId)),
         caret,
@@ -6644,7 +6769,7 @@ export function createWindowFunctions(host){
      * `#number`, so it is not registered as a spelling of the name.
      *
      * @param {{ name: string, procedure: any, atom?: number, windowExtra?: number,
-     *     background?: number }} definition
+     *     background?: number, library?: boolean }} definition
      */
     const registerSystemClass = definition=>{
         systemClasses.set(definition.name.toLowerCase(), {
@@ -6662,12 +6787,22 @@ export function createWindowFunctions(host){
             menuName: 0,
             className: 0,
             iconSm: 0,
+            ...definition.library ? { library: true } : {},
         });
         controlProcedures[definition.name] = definition.procedure;
     };
+    /**
+     * A class another library registers - comctl32's, riched's - rather than
+     * user32 itself: one unregistered is registered again the next time it is
+     * asked for, as user32 asks its library to (RegisterClassNameW).
+     *
+     * @param {{ name: string, procedure: any, atom?: number, windowExtra?: number,
+     *     background?: number }} definition
+     */
+    const registerLibraryClass = definition=>registerSystemClass({ ...definition, library: true });
     // The list a dropdown combo box drops, a popup of a class of its own.
     registerSystemClass({ name: 'ComboLBox', procedure: controls.procedures.ComboLBox });
-    host.registerControls?.(controlHost, controls.toolkit, registerSystemClass);
+    host.registerControls?.(controlHost, controls.toolkit, registerLibraryClass);
     // The rest of the classes Windows' own libraries register, which this build
     // has no control for: each is there all the same -- GetClassInfoEx finds
     // it, a window of it is made and can be subclassed -- answering as
@@ -6690,7 +6825,7 @@ export function createWindowFunctions(host){
     {
         if (!systemClasses.has(name.toLowerCase()))
         {
-            registerSystemClass({ name, procedure: inertProcedure(name) });
+            registerLibraryClass({ name, procedure: inertProcedure(name) });
         }
     }
 
@@ -7989,7 +8124,7 @@ export function createWindowFunctions(host){
                     return live(record.lastActivePopup ?? 0)?.hwnd ?? record.hwnd;
                 },
             }),
-            live, windows, classes,
+            live, windows,
             elsewhere: (/** @type {number} */ hwnd)=>directory.describe(hwnd, processId),
             names: directory,
         }),
@@ -8075,9 +8210,7 @@ export function createWindowFunctions(host){
             }),
             live, windows, makeWindow, destroyWindow, deliver, announce,
             // A class the program registered, by the name a template spells it.
-            classNamed: name=>(classes.has(name) || [...classes.values()].some(
-                cls=>cls.name.toLowerCase() === name.toLowerCase())
-                ? classNamed(name) : null),
+            classNamed: name=>(classes.find(name, 0, 'create') ? classNamed(name) : null),
             classKnown: name=>classNamed(/^#\d+$/.test(name)
                 ? atoms.get(Number(name.slice(1))) ?? name : name) !== null,
             modalLoop: run=>{
@@ -8138,29 +8271,26 @@ export function createWindowFunctions(host){
         UnregisterClassA: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([className])=>unregister(className, false),
+            handler: ([className, instance])=>unregister(className, false, instance >>> 0),
         },
 
         /** BOOL UnregisterClassW(LPCWSTR lpClassName, HINSTANCE hInstance) */
         UnregisterClassW: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([className])=>unregister(className, true),
+            handler: ([className, instance])=>unregister(className, true, instance >>> 0),
         },
 
-        /** BOOL GetClassInfoA(HINSTANCE, LPCSTR lpClassName, LPWNDCLASSA lpWndClass) */
+        /**
+         * BOOL GetClassInfoA(HINSTANCE, LPCSTR lpClassName, LPWNDCLASSA lpWndClass)
+         *
+         * The class's atom, which is what Windows answers for the BOOL.
+         */
         GetClassInfoA: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([, className, out])=>{
-                const cls = classOf(className);
-                if (!cls)
-                {
-                    return 0;
-                }
-                writeWindowClass(host, out, procRead(cls, false), L);
-                return 1;
-            },
+            handler: ([instance, className, out])=>classInfo(instance, className, out, false,
+                false),
         },
 
         /**
@@ -8173,33 +8303,16 @@ export function createWindowFunctions(host){
         GetClassInfoW: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([, className, out])=>{
-                const cls = classOf(className, true);
-                if (!cls)
-                {
-                    return 0;
-                }
-                writeWindowClass(host, out,
-                    { ...procRead(cls, true), className: className >>> 0 }, L);
-                return 1;
-            },
+            handler: ([instance, className, out])=>classInfo(instance, className, out, true,
+                false),
         },
 
         /** BOOL GetClassInfoExW(HINSTANCE, LPCWSTR lpClassName, LPWNDCLASSEXW) */
         GetClassInfoExW: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([, className, out])=>{
-                const cls = classOf(className, true);
-                if (!cls || (out >>> 0) === 0)
-                {
-                    return 0;
-                }
-                writeWindowClass(host, out >>> 0,
-                    { ...procRead(cls, true), className: className >>> 0 }, L,
-                    L.WNDCLASSEXA);
-                return 1;
-            },
+            handler: ([instance, className, out])=>classInfo(instance, className, out, true,
+                true),
         },
 
         /**
@@ -8212,15 +8325,8 @@ export function createWindowFunctions(host){
         GetClassInfoExA: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([, className, out])=>{
-                const cls = classOf(className);
-                if (!cls || (out >>> 0) === 0)
-                {
-                    return 0;
-                }
-                writeWindowClass(host, out >>> 0, procRead(cls, false), L, L.WNDCLASSEXA);
-                return 1;
-            },
+            handler: ([instance, className, out])=>classInfo(instance, className, out, false,
+                true),
         },
 
         /**

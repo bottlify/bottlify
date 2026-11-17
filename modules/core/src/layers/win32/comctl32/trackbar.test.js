@@ -74,7 +74,7 @@ test('a toolkit that superclasses the trackbar finds it by name with GetClassInf
         context.memory.putString(TEXT, name);
         context.memory.bytes.fill(0, OUT, OUT + WNDCLASSEX_SIZE);
         context.memory.put32s(OUT, [WNDCLASSEX_SIZE]);
-        assert.equal(context.fns.GetClassInfoExA.handler([0, TEXT, OUT]), 1, name);
+        assert.notEqual(context.fns.GetClassInfoExA.handler([0, TEXT, OUT]), 0, name);
         assert.notEqual(context.memory.u32(OUT + WNDCLASSEX_WNDPROC), 0,
             'with a procedure a superclass can call');
     }
