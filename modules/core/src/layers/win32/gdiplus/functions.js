@@ -15,12 +15,13 @@
  * and a bitmap is handed to GDI as a DIB section. Decoding from a stream, a
  * bitmap from a GDI one, and drawing are not here: they answer
  * NotImplemented, said once as a divergence, as from a GDI+ whose codec or
- * renderer failed - a program checks each Status.
+ * renderer failed - a program checks each Status. Its fonts are `fonts.js`'s.
  */
 
 import { pointerWidth } from '../common/pointers.js';
 import { CodecError, sniff } from '../windowscodecs/frames.js';
 import { convertRow, formatOf, rowBytes as wicRowBytes } from '../windowscodecs/formats.js';
+import { createFontFunctions } from './fonts.js';
 
 /** GpStatus (gdiplustypes.h). */
 const Ok = 0;
@@ -151,6 +152,9 @@ export function createGdiplusFunctions(host){
     };
 
     return {
+        ...createFontFunctions({ host, handle, putPointer,
+            isGraphics: target=>graphics.has(target) }),
+
         /**
          * Status GdiplusStartup(ULONG_PTR *token, const GdiplusStartupInput *input,
          *   GdiplusStartupOutput *output)
