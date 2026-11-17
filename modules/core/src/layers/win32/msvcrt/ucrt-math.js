@@ -19,7 +19,7 @@
  */
 
 import { guestException } from '../common/raise.js';
-import { guestEntry } from './guest-code.js';
+import { guestEntry, guestExport, xmmEntry } from './guest-code.js';
 import * as inGuestFloat from './inguest-float.js';
 import * as inGuestMath from './inguest-math.js';
 import { COMPILED as MATH_CODE } from './inguest-math.x86.js';
@@ -409,6 +409,19 @@ export function createUcrtMathFunctions(host){
             const x = xmmDouble(0);
             return answerDouble(answer([x], Math.sqrt(x)));
         });
+        // sin and cos in the guest: the x87 form's code behind a head that
+        // takes XMM0 to it and its answer back (`xmmEntry`); a call it hands
+        // over is answered as the cdecl function answers it, errno and all.
+        for (const name of /** @type {const} */ (['sin', 'cos']))
+        {
+            const compute = SSE2_UNARY[name];
+            const cdecl = returningDouble(fpu, 8, args=>{
+                const x = readDouble(args, 0);
+                return answer([x], compute(x));
+            }, ONE_DOUBLE);
+            table[`__libm_sse2_${name}`] = xmmEntry(guestExport(MATH_CODE[name], cdecl),
+                table[`__libm_sse2_${name}`]);
+        }
         for (const name of SSE2_PRECISE)
         {
             table[`_libm_sse2_${name}_precise`] = table[`__libm_sse2_${name}`];
