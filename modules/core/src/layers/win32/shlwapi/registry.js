@@ -14,8 +14,16 @@
  */
 
 import { dword, u32 } from './text.js';
+import { formatGuid } from '../ole32/guid.js';
 
 const ERROR_SUCCESS = 0;
+const S_OK = 0;
+const E_FAIL = 0x80004005 | 0;
+const E_INVALIDARG = 0x80070057 | 0;
+const ERROR_KEY_HAS_CHILDREN = 1020;
+const KEY_ALL_ACCESS = 0xf003f;
+/** Where SHRegGetCLSIDKey keeps a class's shell settings, under either root. */
+const CLSID_SETTINGS = 'Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\CLSID\\';
 const ERROR_FILE_NOT_FOUND = 2;
 const KEY_READ = 0x20019;
 const HKEY_CURRENT_USER = 0x80000001;
@@ -50,6 +58,8 @@ const BOOL_VALUE_LIMIT = 0x100;
  * @property {(library: string) => Record<string, { handler: (args: number[]) => any }> | undefined}
  *     [library]  ole32, whose stream over a block of memory is the stream handed out.
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {(address: number, maxLength: number) => string} [readCString]
+ * @property {(address: number, maxLength: number) => string} [readWideString]
  */
 
 /**
@@ -460,6 +470,173 @@ export function createRegistryHelpers(host){
         },
     });
 
+    /**
+     * An advapi32 call with the caller's own arguments, picked as the
+     * shell's call lays its own out.
+     *
+     * @param {string} name @param {number} argBytes @param {(args: number[]) => number[]} pick
+     */
+    const passed = (name, argBytes, pick)=>({
+        argBytes,
+        /** @param {number[]} args */
+        handler: args=>(host.advapi32 ? registry(name, pick(args)) : ERROR_CALL_NOT_IMPLEMENTED),
+    });
+
+    /**
+     * A key opened or created under a root by a path the engine spells,
+     * through the wide call; 0 when it cannot be had.
+     *
+     * @param {number} root @param {string} path @param {boolean} create
+     */
+    const keyAt = (root, path, create)=>{
+        if (!host.advapi32 || !host.allocate || !host.readMemory)
+        {
+            return 0;
+        }
+        const units = [...path, '\0'];
+        const name = host.allocate(units.length * 2 + 4);
+        const out = name + units.length * 2;
+        host.writeMemory(name, Uint8Array.from(units.flatMap(unit=>[unit.charCodeAt(0) & 0xff,
+            unit.charCodeAt(0) >>> 8])));
+        host.writeMemory(out, dword(0));
+        try
+        {
+            const status = create
+                ? registry('RegCreateKeyExW', [root, name, 0, 0, 0, KEY_ALL_ACCESS, 0, out, 0])
+                : registry('RegOpenKeyExW', [root, name, 0, KEY_ALL_ACCESS, out]);
+            return status === ERROR_SUCCESS ? u32(host.readMemory(out, 4)) : 0;
+        }
+        finally
+        {
+            host.free?.(name);
+        }
+    };
+
+    /**
+     * SHDeleteOrphanKey for either spelling: the subkey goes when it has no
+     * subkey of its own and no default value - named values do not keep it.
+     *
+     * @param {'A' | 'W'} width
+     */
+    const deleteOrphan = width=>({
+        argBytes: 8,
+        /** @param {number[]} args */
+        handler: ([key, subKey])=>{
+            if (!host.advapi32 || !host.allocate || !host.readMemory)
+            {
+                return ERROR_CALL_NOT_IMPLEMENTED;
+            }
+            const out = host.allocate(8);
+            try
+            {
+                host.writeMemory(out, dword(0));
+                const status = registry(`RegOpenKeyEx${width}`, [key, subKey, 0, KEY_READ, out]);
+                if (status !== ERROR_SUCCESS)
+                {
+                    return status;
+                }
+                const child = u32(host.readMemory(out, 4));
+                host.writeMemory(out + 4, dword(0));
+                registry('RegQueryInfoKeyW', [child, 0, 0, 0, out + 4, 0, 0, 0, 0, 0, 0, 0]);
+                const subKeys = u32(host.readMemory(out + 4, 4));
+                const hasDefault = registry(`RegQueryValueEx${width}`, [child, 0, 0, 0, 0, 0])
+                    === ERROR_SUCCESS;
+                registry('RegCloseKey', [child]);
+                return subKeys !== 0 || hasDefault ? ERROR_KEY_HAS_CHILDREN
+                    : registry(`RegDeleteKey${width}`, [key, subKey]);
+            }
+            finally
+            {
+                host.free?.(out);
+            }
+        },
+    });
+
+    /**
+     * SHRegGetCLSIDKey for either spelling: the class's settings key, or one
+     * of its subkeys, under the user's root or the machine's, created when
+     * the caller asks; the handle is the caller's to close.
+     *
+     * @param {'A' | 'W'} width
+     */
+    const clsidKey = width=>({
+        argBytes: 20,
+        /** @param {number[]} args */
+        handler: ([guid, value, user, create, out])=>{
+            if ((guid >>> 0) === 0 || (out >>> 0) === 0 || !host.readMemory)
+            {
+                return E_INVALIDARG;
+            }
+            const read = width === 'W' ? host.readWideString : host.readCString;
+            const sub = (value >>> 0) !== 0 && read ? read(value >>> 0, 0x1000) : '';
+            const path = `${CLSID_SETTINGS}${formatGuid(host.readMemory(guid >>> 0, 16).slice())}`
+                + (sub ? `\\${sub}` : '');
+            const key = keyAt((user | 0) !== 0 ? HKEY_CURRENT_USER : HKEY_LOCAL_MACHINE, path,
+                (create | 0) !== 0);
+            host.writeMemory(out >>> 0, dword(key));
+            return key === 0 ? E_FAIL : S_OK;
+        },
+    });
+
+    /**
+     * SHRegGetIntW: a string value read as a decimal number, the default
+     * for a value that is not there or not a string.
+     */
+    const getInt = {
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: ([key, value, fallback])=>{
+            const read = readValue('W', key, 0, value, 0x200);
+            if (!read?.found || (read.type !== REG_SZ && read.type !== REG_EXPAND_SZ))
+            {
+                return fallback | 0;
+            }
+            let text = '';
+            for (let at = 0; at + 1 < read.data.length; at += 2)
+            {
+                const code = read.data[at] | read.data[at + 1] << 8;
+                if (code === 0)
+                {
+                    break;
+                }
+                text += String.fromCharCode(code);
+            }
+            const number = /^\s*([-+]?\d+)/.exec(text);
+            return number ? Number.parseInt(number[1], 10) | 0 : fallback | 0;
+        },
+    };
+
+    /**
+     * SHOpenRegStream: SHOpenRegStream2's stream, or where that has none a
+     * stream over nothing, which the caller reads as empty and need not
+     * check for NULL - the documented difference between the two.
+     *
+     * @param {'A' | 'W'} width
+     */
+    const openStreamOrEmpty = width=>({
+        argBytes: 16,
+        /** @param {number[]} args */
+        handler: args=>{
+            const stream = openStream(width).handler(args);
+            if (stream !== 0)
+            {
+                return stream;
+            }
+            const create = (host.library?.('ole32.dll') ?? host.library?.('OLE32.dll'))
+                ?.CreateStreamOnHGlobal;
+            const out = host.allocate?.(4) ?? 0;
+            if (!create || !out || !host.readMemory)
+            {
+                return 0;
+            }
+            host.writeMemory(out, dword(0));
+            const status = /** @type {number} */ (create.handler([0, 1, out])) | 0;
+            const empty = status < 0 ? 0 : u32(host.readMemory(out, 4));
+            host.free?.(out);
+            return empty;
+        },
+    });
+
     /** @param {string} name */
     const noAssociation = name=>({
         argBytes: 24,
@@ -523,5 +700,69 @@ export function createRegistryHelpers(host){
          */
         SHOpenRegStream2A: openStream('A'),
         SHOpenRegStream2W: openStream('W'),
+
+        /**
+         * IStream *SHOpenRegStreamA(HKEY hkey, LPCSTR pszSubkey, LPCSTR pszValue,
+         *                           DWORD grfMode)
+         */
+        SHOpenRegStreamA: openStreamOrEmpty('A'),
+        SHOpenRegStreamW: openStreamOrEmpty('W'),
+
+        /**
+         * DWORD SHSetValueA(HKEY hkey, LPCSTR pszSubKey, LPCSTR pszValue, DWORD dwType,
+         *                   LPCVOID pvData, DWORD cbData)
+         *
+         * The subkey made when it is not there and the value written in it:
+         * RegSetKeyValue's work.
+         */
+        SHSetValueA: passed('RegSetKeyValueA', 24, args=>args),
+        SHSetValueW: passed('RegSetKeyValueW', 24, args=>args),
+
+        /** LONG SHEnumKeyExA(HKEY hkey, DWORD dwIndex, LPSTR pszName, LPDWORD pcchName) */
+        SHEnumKeyExA: passed('RegEnumKeyExA', 16, ([key, index, name, size])=>
+            [key, index, name, size, 0, 0, 0, 0]),
+        SHEnumKeyExW: passed('RegEnumKeyExW', 16, ([key, index, name, size])=>
+            [key, index, name, size, 0, 0, 0, 0]),
+
+        /**
+         * LONG SHEnumValueA(HKEY hkey, DWORD dwIndex, LPSTR pszValueName,
+         *     LPDWORD pcchValueName, LPDWORD pdwType, LPVOID pvData, LPDWORD pcbData)
+         */
+        SHEnumValueA: passed('RegEnumValueA', 28, ([key, index, name, size, type, data, length])=>
+            [key, index, name, size, 0, type, data, length]),
+        SHEnumValueW: passed('RegEnumValueW', 28, ([key, index, name, size, type, data, length])=>
+            [key, index, name, size, 0, type, data, length]),
+
+        /**
+         * LONG SHQueryInfoKeyA(HKEY hkey, LPDWORD pcSubKeys, LPDWORD pcchMaxSubKeyLen,
+         *     LPDWORD pcValues, LPDWORD pcchMaxValueNameLen)
+         */
+        SHQueryInfoKeyA: passed('RegQueryInfoKeyA', 20, ([key, subKeys, subKeyLength, values,
+            valueLength])=>[key, 0, 0, 0, subKeys, subKeyLength, 0, values, valueLength, 0, 0, 0]),
+        SHQueryInfoKeyW: passed('RegQueryInfoKeyW', 20, ([key, subKeys, subKeyLength, values,
+            valueLength])=>[key, 0, 0, 0, subKeys, subKeyLength, 0, values, valueLength, 0, 0, 0]),
+
+        /** DWORD SHDeleteOrphanKeyA(HKEY hkey, LPCSTR pszSubKey) */
+        SHDeleteOrphanKeyA: deleteOrphan('A'),
+        SHDeleteOrphanKeyW: deleteOrphan('W'),
+
+        /**
+         * DWORD SHGetValueGoodBootA(HKEY hkey, LPCSTR pszSubKey, LPCSTR pszValue,
+         *     DWORD *pdwType, void *pvData, DWORD *pcbData)
+         *
+         * SHGetValue, refused only in a safe-mode boot, which this machine never is.
+         */
+        SHGetValueGoodBootA: getValue('A'),
+        SHGetValueGoodBootW: getValue('W'),
+
+        /** int SHRegGetIntW(HKEY hk, LPCWSTR pwzKey, int iDefault) */
+        SHRegGetIntW: getInt,
+
+        /**
+         * HRESULT SHRegGetCLSIDKeyA(REFGUID guid, LPCSTR lpszValue, BOOL bUseHKCU,
+         *     BOOL bCreate, PHKEY phKey)
+         */
+        SHRegGetCLSIDKeyA: clsidKey('A'),
+        SHRegGetCLSIDKeyW: clsidKey('W'),
     };
 }

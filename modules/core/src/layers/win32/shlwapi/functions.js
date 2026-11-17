@@ -23,6 +23,7 @@ import { MAX_PATH, canonical, compactPath, createPathFunctions, extensionIndex, 
 import { createDataBlockFunctions } from './datablocks.js';
 import { createOrdinalFunctions } from './ordinals.js';
 import { createRegistryHelpers } from './registry.js';
+import { createUsKeyFunctions } from './uskey.js';
 import { createStreams } from './stream.js';
 import { createStringFunctions } from './strings.js';
 import { createWidths } from './text.js';
@@ -733,6 +734,7 @@ export function createShlwapiFunctions(host){
         ...createStringFunctions(host, widths),
         ...createUrlFunctions(host, widths),
         ...createRegistryHelpers(host),
+        ...createUsKeyFunctions(host),
         ...createOrdinalFunctions(host),
         ...createStreams(host),
         ...createDataBlockFunctions(host),
