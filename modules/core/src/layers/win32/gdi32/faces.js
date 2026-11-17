@@ -191,6 +191,42 @@ const OUTLINE_CELLS = new Map([
 ]);
 
 /**
+ * Font metrics with no font engine behind them, shares of the em: an estimate
+ * GetTextMetrics answers for a face whose cell is not known, chosen so the
+ * numbers a program divides by add up (see gdi32's metricsOf). GDI+ estimates
+ * a family's design metrics from the same shares.
+ */
+export const DEFAULT_EM_HEIGHT = 13;
+export const INTERNAL_LEADING_RATIO = 0.2;
+export const DESCENT_RATIO = 0.25;
+
+/**
+ * An outline face's design metrics, as GDI+ answers a family's: its em, its
+ * cell's ascent and descent, in font units; the estimate's shares of a 2048
+ * em for a face whose cell is not known. Null for a bitmap face, which GDI+
+ * does not take.
+ *
+ * @param {string} faceName
+ * @returns {{ unitsPerEm: number, ascent: number, descent: number } | null}
+ */
+export function designCell(faceName){
+    if (rasterFace(faceName))
+    {
+        return null;
+    }
+    const named = faceNamed(faceName ?? '');
+    const known = OUTLINE_CELLS.get((named?.substitute ?? named?.name ?? '').toLowerCase());
+    if (known)
+    {
+        return { unitsPerEm: known.unitsPerEm, ascent: known.ascent, descent: known.descent };
+    }
+    const em = 2048;
+    const descent = Math.round(em * DESCENT_RATIO);
+    return { unitsPerEm: em, ascent: Math.round(em * (1 + INTERNAL_LEADING_RATIO)) - descent,
+        descent };
+}
+
+/**
  * What GetTextMetrics measures vertically for an outline face whose cell is
  * known, as Windows scales a TrueType face: a negative height is the em, the
  * ascent and descent each its share of it rounded; a positive one is the

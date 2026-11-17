@@ -104,6 +104,21 @@ function windowTree(windows){
 }
 
 /**
+ * Whether a window is listed and shown, it and every window it is inside: a
+ * picture whose window is hidden holds no place on the screen, as under the
+ * desktop window manager, and the desktop is shown instead - the message box
+ * a program puts up before its device's window ever shows.
+ *
+ * @param {ListedWindow[]} windows
+ * @param {number} handle
+ */
+export function windowShown(windows, handle){
+    const tree = windowTree(windows);
+    const window = tree.byHandle.get(`0x${(handle >>> 0).toString(16)}`);
+    return Boolean(window && tree.shown(window));
+}
+
+/**
  * Whether a window is shown and no shown top-level window over its own
  * reaches into its client area on the screen (a minimised one lies off it):
  * what is seen there is then that window's client area and nothing else, so
@@ -1638,12 +1653,13 @@ export function createGraphicsModule(){
                     // composed over it put the device window's own surface,
                     // black, between its frames -- a loading screen flickering
                     // at every paint. While it holds the screen its last frame
-                    // stays, with the windows over it laid over it.
+                    // stays, with the windows over it laid over it. Its window
+                    // hidden, it shows nothing and the desktop is the screen: a
+                    // box put up before that window first showed was laid over a
+                    // frame never drawn, and the screen stayed black.
                     const covering = state.seam?.screenHeld?.() ?? 0;
-                    const covered = covering && `0x${(covering >>> 0).toString(16)}`;
-                    if (covered && !win32.applicationDeactivated?.()
-                        && (win32.windows?.() ?? []).some(
-                            (/** @type {ListedWindow} */ listed)=>listed.hwnd === covered))
+                    if (covering && !win32.applicationDeactivated?.()
+                        && windowShown(win32.windows?.() ?? [], covering))
                     {
                         veilOver(covering);
                         return;

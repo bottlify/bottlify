@@ -10623,7 +10623,13 @@ export function createRenderer(options){
                 return false;
             }
             const into = surfaceFor(destination);
-            if (from.texture === into.texture || !from.view)
+            // One subresource on both sides is refused; two levels or faces of
+            // one texture are each their own view, read from one, drawn into
+            // the other.
+            const same = from.texture === into.texture
+                && (from.mipLevel ?? 0) === (into.mipLevel ?? 0)
+                && (from.layer ?? 0) === (into.layer ?? 0);
+            if (same || !from.view)
             {
                 return false;
             }

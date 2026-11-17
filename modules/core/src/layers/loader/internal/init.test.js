@@ -47,6 +47,21 @@ test('the last thing it does is enter the program', ()=>{
     assert.deepEqual([...bytes.subarray(5, 7)], [0xff, 0xe0]);
 });
 
+test('a prelude is called first, before any library, in either width', ()=>{
+    const narrow = synthesiseProcessInit({ libraries: [], entryPoint: 0x00401234,
+        prelude: 0x7ff01000 }).bytes;
+    // mov eax, prelude / call eax, then the entry.
+    assert.deepEqual([narrow[0], u32At(narrow, 1), narrow[5], narrow[6]],
+        [0xb8, 0x7ff01000, 0xff, 0xd0]);
+    assert.equal(u32At(narrow, 8), 0x00401234);
+    const wide = synthesiseProcessInit({ libraries: [], entryPoint: 0x00401234,
+        prelude: 0x7ff01000, long: true }).bytes;
+    // sub rsp, 40 / mov rax, prelude / call rax.
+    assert.deepEqual([...wide.subarray(4, 6)], [0x48, 0xb8]);
+    assert.equal(u32At(wide, 6), 0x7ff01000);
+    assert.deepEqual([...wide.subarray(14, 16)], [0xff, 0xd0]);
+});
+
 test('a library with no entry point is skipped, not called at zero', ()=>{
     // A library without DllMain is ordinary. Calling its base, or address zero,
     // would fault before the program ever started and blame the loader.

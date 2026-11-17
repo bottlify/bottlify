@@ -12,7 +12,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { clientDrawable, clientUncovered, graphicsModule, uncoveredRegion, windowsAbove }
+import { clientDrawable, clientUncovered, graphicsModule, uncoveredRegion, windowShown,
+    windowsAbove }
     from './module.js';
 import { createPresenter } from './webgpu/internal/presenter.js';
 import { createFakeDevice } from './webgpu/internal/fake-device.js';
@@ -1288,6 +1289,20 @@ test('OpenGL draws on a window\'s client area, whichever of its DCs names it', (
     assert.equal(clientDrawable(stranger, windows), stranger, 'a window not listed too');
     assert.equal(clientDrawable(null, windows), null);
 });
+
+test('a device\'s window holds the screen only while it is shown, it and what it is inside',
+    ()=>{
+        // A WinForms title's device is made on its form before the form shows;
+        // the box it then put up was laid over a frame never drawn.
+        const whole = { left: 0, top: 0, right: 640, bottom: 480 };
+        const form = { hwnd: '0x40', rect: whole, client: whole, visible: false, parent: null };
+        const panel = { hwnd: '0x44', rect: whole, client: whole, visible: true, child: true,
+            parent: '0x40' };
+        assert.equal(windowShown([form, panel], 0x40), false, 'a hidden form');
+        assert.equal(windowShown([form, panel], 0x44), false, 'a shown child of a hidden form');
+        assert.equal(windowShown([{ ...form, visible: true }, panel], 0x44), true);
+        assert.equal(windowShown([form], 0x99), false, 'no such window');
+    });
 
 test('a device\'s window is the picture while nothing over it reaches its client', ()=>{
     // 3DMark 11's demo presents a windowed swap chain into a window the size

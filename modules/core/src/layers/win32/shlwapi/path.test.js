@@ -633,3 +633,213 @@ test('PathIsSameRoot is whether the second path begins with the first one\'s roo
         assert.equal(call('relative', 'relative'), 0);
     }
 });
+
+/** A machine over a small volume; kernel32's attributes and directories faked from it. */
+function onVolume(/** @type {Record<string, number>} */ volume){
+    /** @type {any} */
+    let m = null;
+    const kernel32 = {
+        GetFileAttributesA: { handler: (/** @type {number[]} */ [at])=>
+            volume[m.read(at)] ?? 0xffffffff },
+        GetFileAttributesW: { handler: (/** @type {number[]} */ [at])=>
+            volume[m.read(at, true)] ?? 0xffffffff },
+        SetFileAttributesW: { handler: (/** @type {number[]} */ [at, value])=>{
+            volume[m.read(at, true)] = value;
+            return 1;
+        } },
+        GetSystemDirectoryW: { handler: (/** @type {number[]} */ [at])=>{
+            m.memory.set(new Uint8Array([...'C:\\Windows\\system32\0']
+                .flatMap(unit=>[unit.charCodeAt(0), 0])), at);
+            return 19;
+        } },
+        GetWindowsDirectoryW: { handler: (/** @type {number[]} */ [at])=>{
+            m.memory.set(new Uint8Array([...'C:\\Windows\0'].flatMap(unit=>[unit.charCodeAt(0),
+                0])), at);
+            return 10;
+        } },
+    };
+    m = shlwapiMachine({
+        files: { stat: (/** @type {string} */ path)=>(path in volume
+            ? { exists: true, isDirectory: (volume[path] & 0x10) !== 0 } : null) },
+        fullPath: (/** @type {string} */ path)=>(/^[A-Za-z]:/.test(path) ? path
+            : `C:\\App\\${path}`),
+        library: (/** @type {string} */ name)=>(name === 'KERNEL32.dll' ? kernel32 : undefined),
+    });
+    return m;
+}
+
+test('PathFileExistsDefExt adds the first extension asked for that is there', ()=>{
+    // Wine's path test: .pif .com .exe .bat .lnk .cmd, by the bits of dwWhich.
+    const m = onVolume({ 'C:\\App\\tool.exe': 0x20, 'C:\\App\\tool.bat': 0x20,
+        'C:\\App\\plain': 0x20 });
+    for (const [suffix, wide] of WIDTHS)
+    {
+        const call = (/** @type {string} */ path, /** @type {number} */ which)=>{
+            const at = m.put(path, wide, 0x400);
+            return [m.fns[`PathFileExistsDefExt${suffix}`].handler([at, which]), m.read(at, wide)];
+        };
+        assert.deepEqual(call('C:\\App\\tool', 0xc), [1, 'C:\\App\\tool.exe'], '.exe before .bat');
+        assert.deepEqual(call('C:\\App\\tool', 0x8), [1, 'C:\\App\\tool.bat']);
+        assert.deepEqual(call('C:\\App\\tool', 0x1), [0, 'C:\\App\\tool']);
+        assert.deepEqual(call('C:\\App\\plain', 0), [1, 'C:\\App\\plain'], 'no bits: as it is');
+        assert.deepEqual(call('C:\\App\\tool.txt', 0x4), [0, 'C:\\App\\tool.txt'],
+            'an extension of its own is not added to');
+    }
+});
+
+test('PathFindOnPath looks in the caller\'s directories, then the system\'s', ()=>{
+    const m = onVolume({ 'C:\\Extra\\one.exe': 0x20, 'C:\\Windows\\system32\\two.exe': 0x20,
+        'C:\\Windows\\three.exe': 0x20, 'C:\\Windows\\system32\\four.exe': 0x20 });
+    const list = m.put('', false, 16);
+    m.view.setUint32(list, m.put('C:\\Extra', true), true);
+    m.view.setUint32(list + 4, 0, true);
+    for (const [name, found] of [['one.exe', 'C:\\Extra\\one.exe'],
+        ['two.exe', 'C:\\Windows\\system32\\two.exe'], ['three.exe', 'C:\\Windows\\three.exe']])
+    {
+        const at = m.put(name, true, 0x400);
+        assert.equal(m.fns.PathFindOnPathW.handler([at, list]), 1, name);
+        assert.equal(m.read(at, true), found);
+    }
+    const bare = m.put('four', true, 0x400);
+    assert.equal(m.fns.PathFindOnPathExW.handler([bare, 0, 0x4]), 1, 'with .exe added');
+    assert.equal(m.read(bare, true), 'C:\\Windows\\system32\\four.exe');
+    assert.equal(m.fns.PathFindOnPathW.handler([m.put('none.exe', true, 0x400), list]), 0);
+});
+
+test('the path predicates answer as Wine\'s path test has Windows answer them', ()=>{
+    const m = shlwapiMachine();
+    for (const [suffix, wide] of WIDTHS)
+    {
+        /** @param {string} name @param {string[]} texts */
+        const call = (name, ...texts)=>m.fns[`${name}${suffix}`].handler(texts.map(text=>
+            m.put(text, wide)));
+        assert.equal(call('PathIsFileSpec', 'file.txt'), 1);
+        assert.equal(call('PathIsFileSpec', 'dir\\file.txt'), 0);
+        assert.equal(call('PathIsFileSpec', 'c:file'), 0);
+        assert.equal(call('PathIsLFNFileSpec', 'FILE.TXT'), 0);
+        assert.equal(call('PathIsLFNFileSpec', 'longername.txt'), 1);
+        assert.equal(call('PathIsLFNFileSpec', 'a.b.c'), 1);
+        assert.equal(call('PathIsLFNFileSpec', 'a b'), 1);
+        assert.equal(call('PathIsLFNFileSpec', 'name.html'), 1);
+        assert.equal(call('PathIsNetworkPath', '\\\\server\\share'), 1);
+        assert.equal(call('PathIsNetworkPath', 'C:\\local'), 0);
+        assert.equal(call('PathIsPrefix', 'C:\\dir', 'C:\\dir\\file'), 1);
+        assert.equal(call('PathIsPrefix', 'C:\\di', 'C:\\dir\\file'), 0);
+        assert.equal(call('PathIsUNCServer', '\\\\server'), 1);
+        assert.equal(call('PathIsUNCServer', '\\\\server\\share'), 0);
+        assert.equal(call('PathIsUNCServerShare', '\\\\server\\share'), 1);
+        assert.equal(call('PathIsUNCServerShare', '\\\\server\\share\\dir'), 0);
+        const next = m.put('c:\\foo\\bar', wide);
+        assert.equal(m.fns[`PathFindNextComponent${suffix}`].handler([next]),
+            next + 3 * (wide ? 2 : 1));
+        const single = m.put('foo', wide);
+        assert.equal(m.fns[`PathFindNextComponent${suffix}`].handler([single]),
+            single + 3 * (wide ? 2 : 1), 'the terminator');
+        assert.equal(m.fns[`PathFindNextComponent${suffix}`].handler([m.put('', wide)]), 0);
+    }
+});
+
+test('PathGetCharType classes each character; PathParseIconLocation splits off the index', ()=>{
+    const m = shlwapiMachine();
+    const type = (/** @type {string} */ char)=>m.fns.PathGetCharTypeW.handler([
+        char.charCodeAt(0)]);
+    assert.equal(type('a'), 3, 'long and short');
+    assert.equal(type(' '), 1, 'long only');
+    assert.equal(type(';'), 1);
+    assert.equal(type('*'), 4);
+    assert.equal(type('\\'), 8);
+    assert.equal(type('|'), 0);
+    assert.equal(m.fns.PathGetCharTypeA.handler([0x3a]), 8);
+    for (const [suffix, wide] of WIDTHS)
+    {
+        const at = m.put(' "C:\\a b\\x.dll" ,3', wide);
+        assert.equal(m.fns[`PathParseIconLocation${suffix}`].handler([at]), 3);
+        assert.equal(m.read(at, wide), 'C:\\a b\\x.dll');
+        const plain = m.put('icon.ico', wide);
+        assert.equal(m.fns[`PathParseIconLocation${suffix}`].handler([plain]), 0);
+        assert.equal(m.read(plain, wide), 'icon.ico');
+    }
+});
+
+test('PathFindSuffixArray, PathMatchSpecEx and the URL slash helpers', ()=>{
+    const m = shlwapiMachine();
+    const list = m.put('', false, 16);
+    const suffix = m.put('.TXT');
+    m.view.setUint32(list, m.put('.doc'), true);
+    m.view.setUint32(list + 4, suffix, true);
+    assert.equal(m.fns.PathFindSuffixArrayA.handler([m.put('notes.txt'), list, 2]), suffix);
+    assert.equal(m.fns.PathFindSuffixArrayA.handler([m.put('notes.bin'), list, 2]), 0);
+    assert.equal(m.fns.PathMatchSpecExA.handler([m.put('a.txt'), m.put('*.doc; *.txt'), 1]), 0,
+        'S_OK in a list');
+    assert.equal(m.fns.PathMatchSpecExA.handler([m.put('a.txt'), m.put('*.doc; *.txt'), 0]), 1,
+        'S_FALSE: one mask, the semicolon its own');
+    assert.equal(m.fns.PathMatchSpecExW.handler([m.put('a.txt', true), m.put('*.doc; *.txt', true),
+        0x10001]), 1, 'the space kept');
+    const url = m.put('//server/x');
+    assert.equal(m.fns.PathSkipLeadingSlashesA.handler([url]), url + 2);
+    const fixed = m.put('c:/dir/file', true);
+    m.fns.FixSlashesAndColonW.handler([fixed]);
+    assert.equal(m.read(fixed, true), 'c|\\dir\\file');
+});
+
+test('PathIsContentType reads the extension\'s type; PathSetDlgItemPath sets the item', ()=>{
+    /** @type {any} */
+    let m = null;
+    /** @type {any[]} */
+    const asked = [];
+    /** @type {string[]} */
+    const set = [];
+    const advapi32 = {
+        RegGetValueW: { handler: (/** @type {number[]} */ [root, key, value, , , data])=>{
+            asked.push([root >>> 0, m.read(key, true), m.read(value, true)]);
+            if (m.read(key, true) !== '.txt')
+            {
+                return 2;
+            }
+            m.memory.set(new Uint8Array([...'text/plain\0'].flatMap(unit=>[unit.charCodeAt(0),
+                0])), data);
+            return 0;
+        } },
+    };
+    const user32 = {
+        GetDlgItem: { handler: ()=>0x5000 },
+        GetClientRect: { handler: (/** @type {number[]} */ [, rect])=>{
+            m.view.setUint32(rect + 8, 40, true);
+            return 1;
+        } },
+        SetWindowTextW: { handler: (/** @type {number[]} */ [, text])=>{
+            set.push(m.read(text, true));
+            return 1;
+        } },
+    };
+    m = shlwapiMachine({
+        library: (/** @type {string} */ name)=>(name === 'ADVAPI32.dll' ? advapi32
+            : name === 'USER32.dll' ? user32 : undefined),
+        textWidth: (/** @type {number} */ hdc, /** @type {string} */ text)=>text.length * 4,
+    });
+    assert.equal(m.fns.PathIsContentTypeW.handler([m.put('a.txt', true),
+        m.put('TEXT/PLAIN', true)]), 1);
+    assert.deepEqual(asked[0], [0x80000000, '.txt', 'Content Type']);
+    assert.equal(m.fns.PathIsContentTypeA.handler([m.put('a.bin'), m.put('text/plain')]), 0);
+    m.fns.PathSetDlgItemPathW.handler([0x4000, 7, m.put('C:\\Program Files\\Game\\setup.exe',
+        true)]);
+    assert.equal(set.length, 1);
+    assert.ok(set[0].length * 4 <= 40 && set[0].includes('...'), `shortened: ${set[0]}`);
+});
+
+test('PathFileExistsAndAttributes and the system folder calls go by the attributes', ()=>{
+    const m = onVolume({ 'C:\\Dir': 0x10, 'C:\\File': 0x20 });
+    const out = m.count(0);
+    assert.equal(m.fns.PathFileExistsAndAttributesW.handler([m.put('C:\\Dir', true), out]), 1);
+    assert.equal(m.dwordAt(out), 0x10);
+    assert.equal(m.fns.PathFileExistsAndAttributesA.handler([m.put('C:\\None'), out]), 0);
+    assert.equal(m.dwordAt(out), 0xffffffff);
+    assert.equal(m.fns.PathIsSystemFolderW.handler([m.put('C:\\Dir', true), 0]), 0);
+    assert.equal(m.fns.PathMakeSystemFolderW.handler([m.put('C:\\Dir', true)]), 1);
+    assert.equal(m.fns.PathIsSystemFolderW.handler([m.put('C:\\Dir', true), 0]), 1);
+    assert.equal(m.fns.PathUnmakeSystemFolderW.handler([m.put('C:\\Dir', true)]), 1);
+    assert.equal(m.fns.PathIsSystemFolderW.handler([m.put('C:\\Dir', true), 0]), 0);
+    assert.equal(m.fns.PathMakeSystemFolderW.handler([m.put('C:\\File', true)]), 0,
+        'a file is no folder');
+    assert.equal(m.fns.PathIsSystemFolderA.handler([0, 0x14]), 1, 'the attributes given');
+});

@@ -90,8 +90,12 @@ const D3DPRASTERCAPS_DEPTHBIAS = 0x04000000;
 /** NEVER, LESS, EQUAL, LESSEQUAL, GREATER, NOTEQUAL, GREATEREQUAL, ALWAYS. */
 const ALL_COMPARE_CAPS = 0x000000ff;
 
-/** Every blend factor up to and including BOTHINVSRCALPHA; not the constant factor. */
-const BLEND_CAPS = 0x00001fff;
+/**
+ * Every blend factor up to BOTHINVSRCALPHA, and D3DPBLENDCAPS_BLENDFACTOR:
+ * D3DRS_BLENDFACTOR is the pass's blend constant. XNA's Reach profile
+ * requires it and refuses a device without it.
+ */
+const BLEND_CAPS = 0x00003fff;
 
 const D3DPSHADECAPS_COLORGOURAUDRGB = 0x00000008;
 const D3DPSHADECAPS_SPECULARGOURAUDRGB = 0x00000200;

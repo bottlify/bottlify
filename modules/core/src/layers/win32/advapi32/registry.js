@@ -520,6 +520,16 @@ const SCRIPT_ENGINES = Object.freeze([
 ]);
 
 /**
+ * OLE Automation's picture and font, by the names oleaut32's setup registers
+ * for them: CLSIDFromProgID("StdPicture") is how a program, or shlwapi's
+ * CLSIDFromProgIDWrap, finds the class.
+ */
+const AUTOMATION_OBJECTS = Object.freeze([
+    { clsid: '{0BE35204-8F91-11CE-9DE3-00AA004BB851}', progIds: ['StdPicture'] },
+    { clsid: '{0BE35203-8F91-11CE-9DE3-00AA004BB851}', progIds: ['StdFont'] },
+]);
+
+/**
  * devenum's device moniker, by the name MkParseDisplayName reads off
  * "@device:..." to find the class that parses the rest.
  */
@@ -568,11 +578,11 @@ const machineKeys = (windows, directx, processors)=>{
             path: `${MACHINE_CLASSES}\\CLSID\\${clsid}\\InprocServer32`,
             values: { '': library, ThreadingModel: 'Both' },
         })),
-        // The script engines' names and MSXML's documents', which
-        // CLSIDFromProgID reads for a host that asks for "JScript" or
-        // "Msxml2.DOMDocument" by name; the classes themselves are served by
-        // the engine.
-        ...[...SCRIPT_ENGINES, ...DOCUMENT_CLASSES, ...DEVICE_MONIKER]
+        // The script engines' names, MSXML's documents' and OLE Automation's
+        // picture and font, which CLSIDFromProgID reads for a host that asks
+        // for "JScript", "Msxml2.DOMDocument" or "StdPicture" by name; the
+        // classes themselves are served by the engine.
+        ...[...SCRIPT_ENGINES, ...DOCUMENT_CLASSES, ...DEVICE_MONIKER, ...AUTOMATION_OBJECTS]
             .flatMap(({ clsid, progIds })=>[
                 { root: HKEY_LOCAL_MACHINE, path: `${MACHINE_CLASSES}\\CLSID\\${clsid}\\ProgID`,
                     values: { '': progIds[0] } },

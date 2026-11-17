@@ -223,6 +223,23 @@ test('GdipCreateBitmapFromFile decodes the file\'s image into 32bpp ARGB; a file
         13, 'UnknownImageFormat');
 });
 
+test('a window\'s graphics, and GDI\'s halftone palette, as WinForms paints a control', ()=>{
+    /** @type {string[]} */
+    const asked = [];
+    const { view, fns } = machine(4, {
+        gdi32: (/** @type {string} */ name)=>{
+            asked.push(name);
+            return 0x4c0;
+        },
+    });
+    assert.equal(fns.GdipCreateFromHWND.handler([0x1000, 0x300]), Ok);
+    assert.equal(fns.GdipCreateFromHWND.handler([0, 0x304]), Ok, 'NULL is the screen');
+    assert.equal(fns.GdipCreateFromHWND.handler([0x1000, 0]), InvalidParameter);
+    assert.equal(fns.GdipDeleteGraphics.handler([view.getUint32(0x300, true)]), Ok);
+    assert.equal(fns.GdipCreateHalftonePalette.handler(), 0x4c0);
+    assert.deepEqual(asked, ['CreateHalftonePalette']);
+});
+
 test('GdipCreateHBITMAPFromBitmap hands GDI a top-down 32-bit section, each pixel laid over the'
     + ' background by its alpha', ()=>{
     /** @type {{ name: string, height: number, bits: number }[]} */

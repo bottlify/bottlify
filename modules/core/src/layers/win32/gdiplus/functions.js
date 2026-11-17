@@ -15,12 +15,13 @@
  * and a bitmap is handed to GDI as a DIB section. Decoding from a stream, a
  * bitmap from a GDI one, and drawing are not here: they answer
  * NotImplemented, said once as a divergence, as from a GDI+ whose codec or
- * renderer failed - a program checks each Status.
+ * renderer failed - a program checks each Status. Its fonts are `fonts.js`'s.
  */
 
 import { pointerWidth } from '../common/pointers.js';
 import { CodecError, sniff } from '../windowscodecs/frames.js';
 import { convertRow, formatOf, rowBytes as wicRowBytes } from '../windowscodecs/formats.js';
+import { createFontFunctions } from './fonts.js';
 
 /** GpStatus (gdiplustypes.h). */
 const Ok = 0;
@@ -151,6 +152,9 @@ export function createGdiplusFunctions(host){
     };
 
     return {
+        ...createFontFunctions({ host, handle, putPointer,
+            isGraphics: target=>graphics.has(target) }),
+
         /**
          * Status GdiplusStartup(ULONG_PTR *token, const GdiplusStartupInput *input,
          *   GdiplusStartupOutput *output)
@@ -610,6 +614,38 @@ export function createGdiplusFunctions(host){
                 putPointer(out, made);
                 return Ok;
             },
+        },
+
+        /**
+         * Status GdipCreateFromHWND(HWND hwnd, GpGraphics **graphics)
+         *
+         * A window's graphics, as a DC's are: what WinForms makes for a
+         * control (Control.CreateGraphics), NULL being the screen's.
+         */
+        GdipCreateFromHWND: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([, out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return InvalidParameter;
+                }
+                const made = handle();
+                graphics.set(made, { interpolation: 0 });
+                putPointer(out, made);
+                return Ok;
+            },
+        },
+
+        /**
+         * HPALETTE GdipCreateHalftonePalette(void)
+         *
+         * GDI's halftone palette, which WinForms selects into a DC at every
+         * WM_PAINT of a control (Control.SetUpPalette); the caller owns it.
+         */
+        GdipCreateHalftonePalette: {
+            argBytes: 0,
+            handler: ()=>(host.gdi32 ? host.gdi32('CreateHalftonePalette', [0]) >>> 0 : 0),
         },
 
         /** Status GdipGetImageGraphicsContext(GpImage *image, GpGraphics **graphics) */

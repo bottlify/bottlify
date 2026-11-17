@@ -57,10 +57,15 @@ const PREFIXES = {
     ISteamUnifiedMessages: 'STEAMUNIFIEDMESSAGES_INTERFACE_VERSION',
     ISteamGameSearch: 'SteamMatchGameSearch', ISteamParties: 'SteamParties',
     ISteamRemotePlay: 'STEAMREMOTEPLAY_INTERFACE_VERSION',
+    ISteamNetworkingUtils: 'SteamNetworkingUtils',
+    ISteamNetworkingSockets: 'SteamNetworkingSockets',
+    ISteamNetworkingMessages: 'SteamNetworkingMessages',
+    ISteamTimeline: 'STEAMTIMELINE_INTERFACE_V',
+    ISteamAppTicket: 'STEAMAPPTICKET_INTERFACE_VERSION',
 };
 
 /** Types eight bytes wide on an x86 stack. */
-const WIDE = /^(u?int64(_t)?|CSteamID|CGameID|SteamAPICall_t|UGCHandle_t|PublishedFileId_t|UGCQueryHandle_t|UGCUpdateHandle_t|SteamLeaderboard_t|SteamLeaderboardEntries_t|double|PublishedFileUpdateHandle_t|UGCFileWriteStreamHandle_t|SteamItemInstanceID_t|SteamInventoryUpdateHandle_t|ControllerHandle_t|InputHandle_t|ControllerActionSetHandle_t|ControllerDigitalActionHandle_t|ControllerAnalogActionHandle_t|InputActionSetHandle_t|InputDigitalActionHandle_t|InputAnalogActionHandle_t|ClientUnifiedMessageHandle|PartyBeaconID_t|ManifestId_t|UGCHandle|SteamItemDef_t64)$/;
+const WIDE = /^(u?int64(_t)?|CSteamID|CGameID|SteamAPICall_t|UGCHandle_t|PublishedFileId_t|UGCQueryHandle_t|UGCUpdateHandle_t|SteamLeaderboard_t|SteamLeaderboardEntries_t|double|PublishedFileUpdateHandle_t|UGCFileWriteStreamHandle_t|SteamItemInstanceID_t|SteamInventoryUpdateHandle_t|ControllerHandle_t|InputHandle_t|ControllerActionSetHandle_t|ControllerDigitalActionHandle_t|ControllerAnalogActionHandle_t|InputActionSetHandle_t|InputDigitalActionHandle_t|InputAnalogActionHandle_t|ClientUnifiedMessageHandle|PartyBeaconID_t|ManifestId_t|UGCHandle|SteamItemDef_t64|SteamNetworkingMicroseconds|TimelineEventHandle_t)$/;
 /** Classes returned through a hidden pointer, and their size. */
 const BY_POINTER = { CSteamID: 8, CGameID: 8, SteamIPAddress_t: 20, InputAnalogActionData_t: 13,
     InputDigitalActionData_t: 2, InputMotionData_t: 40, ControllerAnalogActionData_t: 13,

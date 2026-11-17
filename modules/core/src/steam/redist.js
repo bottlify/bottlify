@@ -31,8 +31,10 @@
  * installs it by, and those INFs are applied instead -- their files copied
  * where their DestinationDirs say (`directxFiles`); a library the engine also
  * answers stays the engine's while its table covers what a program imports
- * (the loader's rule for a system copy). The COM servers among them are not
- * registered: that is their own code's to do. Any other program with no
+ * (the loader's rule for a system copy). The COM servers among them, and the
+ * libraries a package's SelfReg table names, register themselves at the
+ * bottle's next start: each is left a RunOnce value, regsvr32 on its path,
+ * since registering is their own code's to do and none runs here. Any other program with no
  * package inside is left to the engine.
  * The other programs the app carries are read the same way, and a package of
  * theirs that installs only into the Windows folder is applied too: the
@@ -85,6 +87,32 @@ const REG_EXPAND_SZ = 2;
 const REG_BINARY = 3;
 const REG_DWORD = 4;
 const REG_MULTI_SZ = 7;
+
+/** Where a logon finds what to run once (`programs/runonce.js`), below HKEY_LOCAL_MACHINE. */
+const RUN_ONCE_KEY = 'Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce';
+
+/**
+ * A library an installer registers as a COM server (an INF's
+ * [DllRegisterServer], a package's SelfReg row), left for the bottle's next
+ * logon to register: the install runs no guest code, and regsvr32 run from
+ * RunOnce calls the library's own DllRegisterServer, as the setup would have.
+ *
+ * @param {string} path
+ * @returns {RegistryWrite}
+ */
+const registerAtLogon = path=>({ root: HKEY_LOCAL_MACHINE, key: RUN_ONCE_KEY, name: path,
+    type: REG_SZ, data: sz(`regsvr32.exe /s "${path}"`) });
+
+/**
+ * The RunOnce values for the COM servers a DirectX INF registers, each where
+ * its file was put.
+ *
+ * @param {{ files: { path: string }[], unregistered: string[] }} directx
+ */
+const directxRegistrations = directx=>directx.files
+    .filter(file=>directx.unregistered.some(name=>file.path.toLowerCase()
+        .endsWith(`\\${name.toLowerCase()}`)))
+    .map(file=>registerAtLogon(file.path));
 
 /** msidbComponentAttributes64bit: a component of the 64-bit view. */
 const COMPONENT_64BIT = 0x100;
@@ -352,9 +380,20 @@ export function applyPackage(db, cabinetFilesByKey, machine){
         ...wide ? { ProgramFiles64Folder: 'C:\\Program Files',
             CommonFiles64Folder: 'C:\\Program Files\\Common Files' } : {},
     };
+    /**
+     * A directory's path by its Directory key, once the table is read: a
+     * Formatted [key] naming one is its path with the trailing backslash
+     * Windows Installer gives it (XNA's NativeLibraryPath is "[CommonV2Dir]",
+     * and its assemblies load XnaNative.dll from what it says).
+     *
+     * @type {(id: string) => string | null}
+     */
+    let directoryPath = ()=>null;
     /** @param {string} text */
-    const format = text=>text.replace(/\[([A-Za-z_][\w.]*)\]/g,
-        (_, name)=>folders[name] ?? properties.get(name) ?? '');
+    const format = text=>text.replace(/\[([A-Za-z_][\w.]*)\]/g, (_, name)=>{
+        const directory = folders[name] ?? directoryPath(name);
+        return directory ? `${directory}\\` : properties.get(name) ?? '';
+    });
     // A merge module's folders are its own names, set to the system's by the
     // package's custom actions that set a directory or a property (types 35
     // and 51) -- run here as the execute sequence would, the others not at all.
@@ -401,6 +440,7 @@ export function applyPackage(db, cabinetFilesByKey, machine){
         resolved.set(id, path);
         return path;
     };
+    directoryPath = id=>(directories.has(id) ? resolve(id) : null);
 
     const installed = new Map();
     /** Each component's key file, which names a global assembly's runtime. */
@@ -508,6 +548,8 @@ export function applyPackage(db, cabinetFilesByKey, machine){
 
     /** @type {{ path: string, bytes: Uint8Array }[]} */
     const files = [];
+    /** Where each file the package lays down went, by its File key. @type {Map<string, string>} */
+    const placed = new Map();
     for (const file of fileRows)
     {
         const assembly = assemblies.get(file.Component_);
@@ -532,6 +574,7 @@ export function applyPackage(db, cabinetFilesByKey, machine){
             continue;
         }
         files.push({ path: `${directory}\\${longName(file.FileName)}`, bytes });
+        placed.set(file.File, `${directory}\\${longName(file.FileName)}`);
         if (assembly && !assembly.policy && file.File === assembly.manifest)
         {
             files.push({ path: `${STORE}\\Manifests\\${assembly.key}.manifest`, bytes });
@@ -557,6 +600,16 @@ export function applyPackage(db, cabinetFilesByKey, machine){
         }
         registry.push({ root, key: format(String(row.Key)), name: format(name),
             ...registryValue(format(String(row.Value))) });
+    }
+    // SelfRegModules: each library the SelfReg table names registers itself
+    // once it is installed - here at the bottle's next logon.
+    for (const row of rowsOf(db, 'SelfReg'))
+    {
+        const path = placed.get(String(row.File_));
+        if (path)
+        {
+            registry.push(registerAtLogon(path));
+        }
     }
     return { files, registry, skipped };
 }
@@ -834,10 +887,11 @@ export async function installRedistributables(tree, scripts, machine, programs =
                 said.push(`${inside}: no installer package inside; left to the engine`);
                 continue;
             }
-            chosen.push({ version: '0', files: directx.files, registry: [] });
+            chosen.push({ version: '0', files: directx.files,
+                registry: directxRegistrations(directx) });
             said.push(`${inside}: ${directx.files.length} file(s) by its cabinets' INFs`
                 + `${directx.unregistered.length > 0
-                    ? `, not registered: ${directx.unregistered.join(', ')}` : ''}`);
+                    ? `, registered at the next start: ${directx.unregistered.join(', ')}` : ''}`);
             continue;
         }
         const applied = packages.map(db=>({
@@ -872,10 +926,12 @@ export async function installRedistributables(tree, scripts, machine, programs =
                     continue;
                 }
                 const directx = directxFiles(cabinets.map(file=>file.bytes), machine);
-                chosen.push({ version: one.version, files: directx.files, registry: [] });
+                chosen.push({ version: one.version, files: directx.files,
+                    registry: directxRegistrations(directx) });
                 said.push(`${inside}: DirectX's setup it lays down, ${directx.files.length} `
                     + `file(s) by its cabinets' INFs${directx.unregistered.length > 0
-                        ? `, not registered: ${directx.unregistered.join(', ')}` : ''}`);
+                        ? `, registered at the next start: ${directx.unregistered.join(', ')}`
+                        : ''}`);
             }
         }
     }

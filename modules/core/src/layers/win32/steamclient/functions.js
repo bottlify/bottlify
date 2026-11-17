@@ -71,9 +71,14 @@ import { createSteamObjects } from './objects.js';
 
 /** k_EUniversePublic. */
 const UNIVERSE_PUBLIC = 1;
-/** UserStatsReceived_t's callback id and size: game id, result, user. */
+/**
+ * UserStatsReceived_t's callback id and size: game id, result, user. CSteamID
+ * is declared under pack(1), so the user follows the result at 12, and only
+ * the 64-bit game id rounds the size up to 24.
+ */
 const USER_STATS_RECEIVED = 1101;
 const USER_STATS_RECEIVED_SIZE = 24;
+const USER_STATS_RECEIVED_USER = 12;
 /**
  * CallbackMsg_t: user, callback id, its data, its size -- the data's pointer
  * eight bytes wide, and the size after it, in a 64-bit process.
@@ -88,11 +93,12 @@ const AUTH_TICKET_SIZE = 240;
 const BEGIN_AUTH_OK = 0;
 const AUTH_SESSION_OK = 0;
 /**
- * ValidateAuthTicketResponse_t: the client, the response, the owner -- the
- * IDs on eight-byte boundaries, as callbacks are packed on Windows.
+ * ValidateAuthTicketResponse_t: the client, the response, the owner. CSteamID
+ * is declared under pack(1): the owner follows the response at 12, and
+ * nothing in it is aligned past four bytes.
  */
 const VALIDATE_AUTH_TICKET = 143;
-const VALIDATE_AUTH_TICKET_SIZE = 24;
+const VALIDATE_AUTH_TICKET_SIZE = 20;
 /** GSClientApprove_t: the client and its owner. */
 const CLIENT_APPROVE = 201;
 const CLIENT_APPROVE_SIZE = 16;
@@ -332,8 +338,8 @@ export function createSteamclientFunctions(host){
                 view.setUint32(0, low, true);
                 view.setUint32(4, high, true);
                 view.setUint32(8, AUTH_SESSION_OK, true);
-                view.setUint32(16, low, true);
-                view.setUint32(20, high, true);
+                view.setUint32(12, low, true);
+                view.setUint32(16, high, true);
                 post(serverPipe, VALIDATE_AUTH_TICKET, response);
             }
             return BEGIN_AUTH_OK;
@@ -448,7 +454,7 @@ export function createSteamclientFunctions(host){
             const view = new DataView(data.buffer);
             view.setBigUint64(0, BigInt(appId()), true);
             view.setUint32(8, 1, true);
-            view.setBigUint64(16, steamId, true);
+            view.setBigUint64(USER_STATS_RECEIVED_USER, steamId, true);
             post(1, USER_STATS_RECEIVED, data);
             return 1;
         },
@@ -599,6 +605,7 @@ export function createSteamclientFunctions(host){
             {
                 return 0;
             }
+            host.log?.(`callback ${next.id} (${next.data.length} bytes) to pipe ${pipe}`);
             message = host.allocate(next.data.length) >>> 0;
             host.writeMemory(message, next.data);
             const layout = callbackMsg(pointerSize);

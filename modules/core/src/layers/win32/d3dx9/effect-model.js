@@ -148,6 +148,8 @@ export const isShader = type=>type === PT.PIXELSHADER || type === PT.VERTEXSHADE
  * @property {boolean} pixel
  * @property {Uint32Array | null} tokens
  * @property {Uint8Array | null} constantTable
+ * @property {import('./preshader.js').Preshader | null} [preshader]  The constants fxc
+ *     left to compute on the CPU from parameters (its PRES comment), set with the rest.
  * @property {string} messages
  */
 

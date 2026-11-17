@@ -23,6 +23,7 @@
 
 import { readText } from './unicode.js';
 import { after } from './controls.js';
+import { isFatalBox } from './fatal.js';
 
 const WM_INITDIALOG = 0x0110;
 const WM_COMMAND = 0x0111;
@@ -139,6 +140,10 @@ const TEXT_SHARE = 5 / 8;
  * @property {(instance: number, id: number) => string | null} [loadString]
  *           A string out of a module's table: MessageBoxIndirect's text and
  *           caption may be named by id.
+ * @property {() => boolean} [faultReported]
+ *           Whether the process has reported a fault (`fatal.js`).
+ * @property {(notice: { text: string, caption: string, type: number }) => void} [fatal]
+ *           Told of a box that reports the program is going down, before it is shown.
  */
 
 /**
@@ -375,6 +380,10 @@ export function createMessageBoxFunctions({ host, call, procedure, measure, fram
     const messageBox = (owner, text, title, type, wide)=>{
         const buttons = messageBoxButtons(type);
         host.say?.(title.length > 0 ? `${title}: ${text}` : text);
+        if (isFatalBox(type, host.faultReported?.() === true))
+        {
+            host.fatal?.({ text, caption: title, type });
+        }
         if ((type & MB_HELP) !== 0)
         {
             host.divergence?.('MessageBox', 'MB_HELP: the Help button is not shown');

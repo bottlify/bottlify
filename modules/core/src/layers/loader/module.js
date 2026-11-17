@@ -312,13 +312,15 @@ export function createLoaderModule(){
                  * @param {import('./internal/synth.js').SynthExport[]} options.exports
                  * @param {string} [options.entryPoint]  The export that is its DllMain.
                  * @param {boolean} [options.long]  For an x86-64 process.
+                 * @param {string} [options.region]  Its region's name, where a
+                 *        second library of the same name is synthesised beside it.
                  * @param {Uint8Array} [options.headers]  The real library's own headers
                  *        (`installedHeaders`), laid over the synthesised ones.
                  * @returns {{ base: number, size: number, entryPoint: number,
                  *   addressOf: (name: string) => number | null,
                  *   ordinalOf: (name: string) => number | null }}
                  */
-                synthesise({ name, base, exports, entryPoint, long, headers }){
+                synthesise({ name, base, exports, entryPoint, long, headers, region = name }){
                     const module = synthesiseModule({ name, base, exports, entryPoint, long });
                     const codeSize = module.dataRva || module.size;
                     // The real library's own headers, where its file is
@@ -329,7 +331,7 @@ export function createLoaderModule(){
                     }
 
                     memory.register({
-                        name,
+                        name: region,
                         base,
                         size: codeSize,
                         kind: memory.RegionKind.IMAGE,
@@ -338,13 +340,13 @@ export function createLoaderModule(){
                         access: memory.Access.READ_WRITE_EXECUTE,
                     });
                     memory.writeBytes(base, module.bytes.subarray(0, codeSize));
-                    memory.protect(name, memory.Access.READ_EXECUTE);
+                    memory.protect(region, memory.Access.READ_EXECUTE);
                     if (module.dataRva !== 0)
                     {
                         // The variables are written by the program and by the
                         // library's own functions alike, as a real `.data` is.
                         memory.register({
-                            name: `${name} .data`,
+                            name: `${region} .data`,
                             base: base + module.dataRva,
                             size: module.size - module.dataRva,
                             kind: memory.RegionKind.IMAGE,

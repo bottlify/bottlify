@@ -26,7 +26,8 @@ import { copyPath, pathMoved } from './paths.js';
 import { createMetafileFunctions } from './metafiles.js';
 import { createFontResources } from './font-resources.js';
 import {
-    FACES, FF_MODERN, FF_ROMAN, FF_SWISS, FIXED_PITCH, VARIABLE_PITCH, faceNamed, fontFamilies,
+    DEFAULT_EM_HEIGHT, DESCENT_RATIO, FACES, FF_MODERN, FF_ROMAN, FF_SWISS, FIXED_PITCH,
+    INTERNAL_LEADING_RATIO, VARIABLE_PITCH, faceNamed, fontFamilies,
     outlineCell, rasterFace, rasterRealization, windowsMetrics,
 } from './faces.js';
 import { ANSI_PAGE, OEM_PAGE, decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
@@ -451,11 +452,9 @@ const colorTableSize = (/** @type {number} */ bitCount)=>1 << bitCount;
  * its length times the average width -- because a layout that adds up is what
  * code depends on, far more than the exact numbers. Every face is treated as
  * fixed-pitch for the same reason. With an engine, its measurements overlay
- * these field for field, and a string is as wide as the engine draws it.
+ * these field for field, and a string is as wide as the engine draws it. The
+ * vertical shares are faces.js's, which GDI+ estimates a family's metrics by.
  */
-const DEFAULT_EM_HEIGHT = 13;
-const INTERNAL_LEADING_RATIO = 0.2;
-const DESCENT_RATIO = 0.25;
 const WIDTH_RATIO = 0.5;
 
 /** FW_NORMAL, which a LOGFONT weight of zero means. */

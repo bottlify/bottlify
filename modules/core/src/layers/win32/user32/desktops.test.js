@@ -127,6 +127,10 @@ test('GetUserObjectInformation says the kind, the flags, and when the buffer is 
     assert.equal(text(OUT), 'WinSta0');
     fns.GetUserObjectInformationA.handler([desktop, UOI_FLAGS, OUT, 12, NEEDED]);
     assert.equal(u32(OUT), 1, 'opened inheritable');
+    // The interactive station is visible: .NET's UserInteractive reads this,
+    // and WinForms refuses to show a box from a station that is not.
+    fns.GetUserObjectInformationW.handler([station, UOI_FLAGS, OUT, 12, NEEDED]);
+    assert.equal(u32(OUT + 8), 1, 'WinSta0 has WSF_VISIBLE');
 
     assert.equal(fns.GetUserObjectInformationW.handler([desktop, UOI_NAME, OUT, 4, NEEDED]), 0);
     assert.equal(errors.at(-1), ERROR_INSUFFICIENT_BUFFER);

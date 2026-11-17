@@ -74,7 +74,9 @@ import { createMemoryBudget, guestByLength, openMemoryBudget, RUN_HOLDER }
 import { eventFrom } from './system/events-across.js';
 import { defaultModules } from './layers/index.js';
 import { createRunRegistry } from './layers/win32/module.js';
-import { WINDOWS_DIRECTORY, programInPlaceOf, systemProgramImage } from './layers/win32/programs/table.js';
+import { PROGRAMS_LIBRARY, WINDOWS_DIRECTORY, programInPlaceOf, systemProgramImage }
+    from './layers/win32/programs/table.js';
+import { RUN_ONCE_ROUTINE } from './layers/win32/programs/functions.js';
 import { frameworkNeeded } from './layers/win32/mscoree/need.js';
 import { createWindowDirectory } from './layers/win32/user32/directory.js';
 import { shareTransport } from './layers/win32/wsock32/transport.js';
@@ -3182,7 +3184,10 @@ export async function mapShippedLibraries(options){
             continue;
         }
         const base = place.base;
-        const record = loader.map(file, { base, name, bits });
+        // Named by the file, as a library loaded later is: the table of the
+        // same name has its own region.
+        const region = placeOf(name);
+        const record = loader.map(file, { base, name: region, bits });
         const { exports } = readExports(file, image);
 
         const addresses = new Map(exports
@@ -3196,6 +3201,7 @@ export async function mapShippedLibraries(options){
             name,
             base,
             size: image.sizeOfImage,
+            region,
             /** @param {string} exported */
             addressOf: exported=>addresses.get(exported) ?? null,
             /** @param {number} ordinal */
@@ -4599,6 +4605,8 @@ const SEVERITY = /** @type {Record<string, string>} */ ({
     // The program's own words about why it is stopping. It is not our
     // failure, but it is never good news.
     'message-box': 'warn',
+    // The program's own account of why it is going down.
+    'program-error': 'error',
     'bundle-retry': 'warn',
     'bundle-prefetch-failed': 'warn',
     'bundle-unbacked': 'warn',
@@ -6093,6 +6101,13 @@ async function buildApp(options){
             // layer from the next start on: a Framework setup asked for it.
             /** @param {string} layer */
             onLayerNeeded: layer=>events.emit('layer-needed', { layer }),
+            // A box the program shows as it goes down (`user32/fatal.js`), for
+            // the page to put in front of the person: drawn in the guest it may
+            // never reach the screen. The layers' last traces carry the
+            // exception's account.
+            /** @param {{ text: string, caption: string, type: number }} notice */
+            onProgramError: notice=>events.emit('program-error', {
+                ...notice, trace: layerTraces.slice(-40).join('\n') }),
             // An address the program asked the shell to open -- a setup's
             // "visit our site", a readme's link -- for the page to open, as
             // XP's browser would. Taken whether or not anyone opens it: the
@@ -6770,8 +6785,9 @@ async function buildApp(options){
      * A table of ours made a module in guest memory, after the ones before it.
      *
      * @param {string} name @param {Record<string, any>} table
+     * @param {string} [region]  Its region's name, for one beside a library of the same name.
      */
-    const synthesiseLibrary = (name, table)=>{
+    const synthesiseLibrary = (name, table, region = name)=>{
         // A library imported by number has to be synthesised with the numbers
         // the program compiled against; one we assigned ourselves would bind to
         // a different function, silently.
@@ -6853,7 +6869,7 @@ async function buildApp(options){
         }
         const placed = loader.synthesise({
             name, base, exports, entryPoint: 'DllMain' in table ? 'DllMain' : undefined, long,
-            headers: installed ? installedHeaders(installed, base) ?? undefined : undefined,
+            region, headers: installed ? installedHeaders(installed, base) ?? undefined : undefined,
         });
         const end = base + Math.ceil(placed.size / LIBRARY_ALIGN) * LIBRARY_ALIGN;
         if (base === systemModulesEnd)
@@ -6925,7 +6941,8 @@ async function buildApp(options){
     for (const [name, table] of Object.entries(
         /** @type {any} */ (win32).faces?.() ?? {}))
     {
-        const record = synthesiseLibrary(name, table);
+        // Beside system32's library of the same name, so its region is its own.
+        const record = synthesiseLibrary(name, table, `${name} (assembly)`);
         byBase.set(record.base, record);
         faces.set(moduleKeyOf(name), record);
     }
@@ -7216,7 +7233,7 @@ async function buildApp(options){
             {
                 byBase.delete(held.base);
                 forgetName(held);
-                memory.unregister(held.name);
+                memory.unregister(held.region);
                 librarySpace.giveBack(held.base);
                 // Room given back: a library refused for want of it may fit now.
                 absentLibraries.clear();
@@ -7454,10 +7471,14 @@ async function buildApp(options){
                     }
 
                     const base = place.base;
+                    // Its region is named by the file, not by the name asked
+                    // for: a table of the same name (the D3DX helpers) has its
+                    // own region from the start, and a name has one owner.
+                    const region = wanted;
                     let mapped;
                     try
                     {
-                        mapped = loader.map(file, { base, name, bits: processBits });
+                        mapped = loader.map(file, { base, name: region, bits: processBits });
                     }
                     catch (e){
                         if (/** @type {any} */ (e)?.code !== 'MACHINE_MEMORY')
@@ -7497,7 +7518,7 @@ async function buildApp(options){
                             resourceOfImage(file, RT_MANIFEST, ISOLATIONAWARE_MANIFEST), path);
                     if (own && 'refused' in own)
                     {
-                        memory.unregister(name);
+                        memory.unregister(region);
                         librarySpace.giveBack(base);
                         events.emit('libraries-missing', { names: [name], reason: own.refused });
                         return 0;
@@ -7507,7 +7528,7 @@ async function buildApp(options){
                         activation.bindModule(base, own.handle);
                     }
                     const held = {
-                        name, base, size: image.sizeOfImage,
+                        name, base, size: image.sizeOfImage, region,
                         /** @param {string} exported */
                         addressOf: exported=>addresses.get(exported) ?? null,
                         /** @param {number} ordinal */
@@ -7591,7 +7612,7 @@ async function buildApp(options){
                             threadBlocks?.removeModule(base);
                             byBase.delete(base);
                             forgetName(held);
-                            memory.unregister(name);
+                            memory.unregister(region);
                             librarySpace.giveBack(base);
                             for (const other of brought)
                             {
@@ -8295,11 +8316,17 @@ async function buildApp(options){
     memory.writeU32(loaderLock + pointerSize, 0xffffffff);
     const enter = kernel32?.addressOf('EnterCriticalSection') ?? 0;
     const leave = kernel32?.addressOf('LeaveCriticalSection') ?? 0;
+    // A session is a logon: its first process runs the RunOnce pass before
+    // anything of its own, as Explorer does before the desktop is the user's
+    // (an installation leaves a library's registration there for it).
+    const prelude = options.parentProcessId
+        ? 0 : findModule(PROGRAMS_LIBRARY)?.addressOf(RUN_ONCE_ROUTINE) ?? 0;
     const startup = synthesiseProcessInit({
         libraries: withTls.filter(held=>held !== mainModule || held.tls),
         entryPoint: image.entryPoint,
         ...enter !== 0 && leave !== 0 ? { loaderLock: { address: loaderLock, enter, leave } } : {},
         long,
+        prelude,
     });
     startupImages = [mainModule, ...shipped];
     for (const name of startup.attached)
@@ -8325,7 +8352,7 @@ async function buildApp(options){
         memory.writeBytes(start, refusal);
         attachOrder.length = 0;
     }
-    else if (startup.attached.length > 0 || startup.tlsImages > 0)
+    else if (startup.attached.length > 0 || startup.tlsImages > 0 || prelude !== 0)
     {
         start = allocateFromHeap(startup.bytes.length);
         memory.writeBytes(start, startup.bytes);

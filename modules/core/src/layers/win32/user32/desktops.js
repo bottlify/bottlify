@@ -31,6 +31,9 @@ const ERROR_INSUFFICIENT_BUFFER = 122;
 const ERROR_BUSY = 170;
 const ERROR_FILE_NOT_FOUND = 2;
 
+/** USEROBJECTFLAGS.dwFlags of a window station that has visible surfaces. */
+const WSF_VISIBLE = 1;
+
 /** GetUserObjectInformation's indices. */
 const UOI_FLAGS = 1;
 const UOI_NAME = 2;
@@ -86,8 +89,14 @@ const MAX_NAME = 256;
  *        Puts a top-level window at the bottom of the stacking.
  */
 export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
-    /** @type {UserObject} */
-    const station = { kind: 'station', name: 'WinSta0', flags: 0 };
+    /**
+     * The interactive station, visible (WSF_VISIBLE), as the logged-on user's
+     * WinSta0 is: .NET's UserInteractive reads this flag, and without it
+     * WinForms refused every message box as shown from a service.
+     *
+     * @type {UserObject}
+     */
+    const station = { kind: 'station', name: 'WinSta0', flags: WSF_VISIBLE };
     /** @type {UserObject} */
     const standard = { kind: 'desktop', name: 'Default', flags: 0 };
     /** The desktops of the station, by name without regard to case. @type {UserObject[]} */

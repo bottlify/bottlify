@@ -17,9 +17,16 @@
 /** EFaultRepRetVal's frrvErrNoDW: the reporting client could not be launched. */
 export const FRRV_ERR_NO_DW = 4;
 
-export function createFaultrepFunctions(){
+/**
+ * @param {{ reported?: () => void }} [host]  Told of a report: the process is
+ *     going down, and the box its handler shows next says why.
+ */
+export function createFaultrepFunctions(host = {}){
     return {
         /** EFaultRepRetVal ReportFault(LPEXCEPTION_POINTERS pep, DWORD dwMode) */
-        ReportFault: { argBytes: 8, handler: ()=>FRRV_ERR_NO_DW },
+        ReportFault: { argBytes: 8, handler: ()=>{
+            host.reported?.();
+            return FRRV_ERR_NO_DW;
+        } },
     };
 }

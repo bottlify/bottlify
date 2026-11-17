@@ -116,6 +116,12 @@ export function createRegionMap(){
             {
                 throw new Error(`Region "${region.name}" has unknown access "${region.access}"`);
             }
+            // A name has one owner: `unregister` takes the first by name, and
+            // two regions of one name let one owner's release unmap the other's.
+            if (regions.some(candidate=>candidate.name === region.name))
+            {
+                throw new Error(`Region "${region.name}" is already registered`);
+            }
             const clash = overlapping(region.base, region.size);
             if (clash)
             {

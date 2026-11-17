@@ -38,8 +38,9 @@ test('every program\'s image calls its own routine, and every routine is in the 
             entries: [{ name: routine, ordinal: null, iatRva: imports[0].entries[0].iatRva }] });
         assert.ok(routines.includes(routine), `${PROGRAMS_LIBRARY} exports ${routine}`);
     }
-    assert.equal(routines.length, SYSTEM_PROGRAMS.size + PROGRAMS_IN_PLACE.length,
-        'and nothing else');
+    assert.equal(routines.length, SYSTEM_PROGRAMS.size + PROGRAMS_IN_PLACE.length + 1,
+        'and nothing else but the logon\'s RunOnce pass');
+    assert.ok(routines.includes('runonce'));
     assert.equal(systemProgramImage('C:\\App\\msiexec.exe'), null);
 });
 
