@@ -50,6 +50,8 @@ const EVENTLOG_SEQUENTIAL_READ = 0x1;
 const EVENTLOG_SEEK_READ = 0x2;
 const EVENTLOG_FORWARDS_READ = 0x4;
 const EVENTLOG_BACKWARDS_READ = 0x8;
+/** ReportEvent's wType of an error. */
+const EVENTLOG_ERROR_TYPE = 0x1;
 const EVENTLOG_INFORMATION_TYPE = 0x4;
 /** GetEventLogInformation's one level, and the record it answers. */
 const EVENTLOG_FULL_INFO = 0;
@@ -114,6 +116,9 @@ const MAX_NAME = 0x8000;
  *              close: (handle: number) => any }} handles
  * @property {(address: number, length: number) => Uint8Array} [readMemory]
  * @property {(address: number, bytes: Uint8Array) => void} [writeMemory]
+ * @property {(source: string, id: number, strings: string[]) => void} [reportError]
+ *           An error a program reported, told to whoever looks at the run as
+ *           Event Viewer shows it: a runtime's account of why it is stopping.
  * @property {ReturnType<typeof import('./registry-service.js').createRegistryService>} [hive]
  *           Where the logs and their sources are named. Without it there
  *           are the standard three, and every source writes to Application.
@@ -382,6 +387,10 @@ export function createEventLogFunctions(host){
             }
             const sidBytes = (sid >>> 0) === 0 || !host.readMemory ? null
                 : host.readMemory(sid >>> 0, 8 + 4 * host.readMemory(sid >>> 0, 2)[1]).slice();
+            if ((type & 0xffff) === EVENTLOG_ERROR_TYPE)
+            {
+                host.reportError?.(object.source, id >>> 0, texts);
+            }
             append(object.log, {
                 id: id >>> 0, type: type & 0xffff, category: category & 0xffff,
                 source: object.source, sid: sidBytes, strings: texts,

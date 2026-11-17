@@ -5526,6 +5526,10 @@ export function createWin32Module(){
                         handles,
                         readMemory,
                         writeMemory,
+                        // A program's error event in the run's journal, as Event
+                        // Viewer would show it: a runtime says there why it stops.
+                        reportError: (source, id, strings)=>journal.write('error', 'eventlog',
+                            '{0} event {1}: {2}', source, id, strings.join(' | ')),
                         // The logs and their sources are named in the registry,
                         // and a backup is a file of the volume.
                         hive,
