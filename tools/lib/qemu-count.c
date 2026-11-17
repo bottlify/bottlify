@@ -89,11 +89,15 @@ static void say(const char *what)
         (unsigned long long)now[OTHER]);
 }
 
-/* fdatasync (75 on x86-64): nothing in node calls it, so the measured program does to mark. */
+/* fdatasync: nothing in node calls it, so the measured program does to mark. Its number is the
+ * counted machine's - 75 on x86-64 unless the build names another (83 on arm64). */
+#ifndef MARK_SYSCALL
+#define MARK_SYSCALL 75
+#endif
 static void on_syscall(qemu_plugin_id_t id, unsigned int cpu, int64_t number, uint64_t a1, uint64_t a2,
     uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6, uint64_t a7, uint64_t a8)
 {
-    if (number == 75)
+    if (number == MARK_SYSCALL)
     {
         say("Mark");
     }

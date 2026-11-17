@@ -24,22 +24,25 @@
  *
  *     node tools/translator/pe-count.mjs --qemu DIR [--root DIR]... [--variant x87|sse|x64]
  *         [--from MILLIONS] [--to MILLIONS] [--cork JSON] [--jobs N] workload...
+ *         [--arm64 NODE [--sysroot DIR] [--lib DIR] [--node-flags 'FLAG...']]
  *
  * Workloads are the benchmark's (`vm`, `entities`, `math`, `path`, `lz`, `containers`,
  * `spread`, `api`); DIR as emit-count's. `--cork` is merged into cork's settings.
+ * `--arm64` and what follows it count an arm64 host, as run-count's.
  */
 
 import { readFileSync } from 'node:fs';
 import { availableParallelism } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { between, mark, runCounted, work } from '../lib/qemu-count.mjs';
+import { between, mark, runCounted, takeTarget, work } from '../lib/qemu-count.mjs';
 
 /** @param {string[]} argv */
 const optionsOf = argv=>{
     const options = { roots: /** @type {string[]} */ ([]), variant: 'x87', from: 1200, to: 1300,
         cork: '{}', jobs: Math.max(1, availableParallelism() - 1),
         qemu: process.env.QEMU_PLUGIN_DIR ?? '', inner: false,
-        names: /** @type {string[]} */ ([]) };
+        names: /** @type {string[]} */ ([]),
+        target: /** @type {import('../lib/qemu-count.mjs').Target} */ ({}) };
     for (let i = 0; i < argv.length; i++)
     {
         const name = argv[i];
@@ -58,6 +61,10 @@ const optionsOf = argv=>{
         else if (name === '--from' || name === '--to' || name === '--jobs')
         {
             options[/** @type {'from' | 'to' | 'jobs'} */ (name.slice(2))] = Number(argv[++i]);
+        }
+        else if (takeTarget(options.target, argv, i) > 0)
+        {
+            i++;
         }
         else if (name.startsWith('--'))
         {
@@ -141,7 +148,8 @@ else
             const { root, name } = jobs[next++];
             const { marks, out } = await runCounted(options.qemu, [fileURLToPath(import.meta.url),
                 '--inner', '--variant', options.variant, '--from', String(options.from),
-                '--to', String(options.to), '--cork', options.cork, root, name]);
+                '--to', String(options.to), '--cork', options.cork, root, name], {},
+            options.target);
             if (marks.length !== 2)
             {
                 throw new Error(`pe-count: ${name} on ${root} gave ${marks.length} marks`);
