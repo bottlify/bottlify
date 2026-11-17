@@ -649,3 +649,38 @@ export function installedHeaders(file, base){
     }
     return headers;
 }
+
+/**
+ * Where the image a file holds says it belongs: its ImageBase and the span its
+ * sections occupy, as Windows loads a DLL at its preferred base when that base
+ * is free - one not linked for ASLR (DYNAMIC_BASE), which Windows places
+ * wherever it likes, and so does the loader here. A program that reads the
+ * file and compares it with the module it loaded finds the ImageBase the file
+ * names -- a module placed elsewhere has
+ * its own there, which is what a DRM wrapper refuses (Proton keeps Valve's own
+ * client DLL where it says it belongs for the same reason).
+ *
+ * @param {Uint8Array} file
+ * @returns {{ base: number, span: number } | null}  Null for a file too short to
+ *     be an image, one that is not a PE, and one linked for ASLR.
+ */
+export function imagePlacementOf(file){
+    if (file.length < 0x40)
+    {
+        return null;
+    }
+    const view = new DataView(file.buffer, file.byteOffset, file.byteLength);
+    const nt = view.getUint32(0x3c, true);
+    if (nt + 0x40 > file.length || view.getUint32(nt, true) !== 0x00004550)
+    {
+        return null;
+    }
+    const magic = view.getUint16(nt + 0x18, true);
+    const base = magic === 0x20b ? Number(view.getBigUint64(nt + 0x30, true))
+        : magic === 0x10b ? view.getUint32(nt + 0x34, true) : 0;
+    // SizeOfImage: the optional header's, 0x38 into it, after the signature and
+    // the file header; DllCharacteristics 0x46 into it, in either width.
+    const span = view.getUint32(nt + 0x50, true);
+    const dynamicBase = (view.getUint16(nt + 0x18 + 0x46, true) & 0x40) !== 0;
+    return base !== 0 && span !== 0 && !dynamicBase ? { base, span } : null;
+}

@@ -153,6 +153,7 @@ test('with the client\'s own file installed, the file is that file and the modul
     assert.ok(headers.length > 0x130);
     assert.deepEqual([...app.debug.read(base, headers.length)], [...headers],
         'and the module its headers');
+    assert.equal(base, 0x38000000, 'at the image base the file names, as Windows loads it');
     const nt = new DataView(installed.buffer, installed.byteOffset).getUint32(0x3c, true);
     assert.equal(new DataView(headers.buffer).getBigUint64(nt + 0x30, true), BigInt(base),
         'ImageBase where it was placed');
