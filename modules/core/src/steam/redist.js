@@ -853,6 +853,30 @@ export async function installRedistributables(tree, scripts, machine, programs =
             said.push(`${inside}: ${applied.length} package(s), `
                 + `${applied.reduce((sum, one)=>sum + one.files.length, 0)} file(s)`
                 + `${named ? '' : ', the app\'s own'}`);
+            // A package that lays DirectX's setup down with its optional
+            // components' cabinets runs it from there, a custom action this
+            // does not run: its cabinets go in by their INFs, as the DirectX
+            // step's do (XNA Framework 4.0's X3DAudio, XAudio2 and XACT, which
+            // its assemblies import and the engine does not answer).
+            for (const one of applied)
+            {
+                const setups = new Set(one.files.filter(file=>/\\dxsetup\.exe$/i.test(file.path))
+                    .map(file=>file.path.slice(0, file.path.lastIndexOf('\\')).toLowerCase()));
+                const cabinets = one.files.filter(file=>{
+                    const at = file.path.lastIndexOf('\\');
+                    return setups.has(file.path.slice(0, at).toLowerCase())
+                        && DIRECTX_CABINET.test(file.path.slice(at + 1));
+                });
+                if (cabinets.length === 0)
+                {
+                    continue;
+                }
+                const directx = directxFiles(cabinets.map(file=>file.bytes), machine);
+                chosen.push({ version: one.version, files: directx.files, registry: [] });
+                said.push(`${inside}: DirectX's setup it lays down, ${directx.files.length} `
+                    + `file(s) by its cabinets' INFs${directx.unregistered.length > 0
+                        ? `, not registered: ${directx.unregistered.join(', ')}` : ''}`);
+            }
         }
     }
 

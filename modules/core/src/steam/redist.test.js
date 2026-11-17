@@ -17,7 +17,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { bootstrapper, cabinet, gameSetup } from './redist.fixture.js';
+import { bootstrapper, cabinet, gameSetup, runtimeWithDirectX } from './redist.fixture.js';
 import * as redist from './redist.js';
 import {
     applyPackage, compareVersions, imageMachine, parseInstallScript, registryValue,
@@ -313,6 +313,34 @@ test('Steam\'s DirectX step installs what its setup\'s cabinets hold, in a direc
         await rm(app, { recursive: true, force: true });
     }
 });
+
+test('a package that lays DirectX\'s setup down has its cabinets installed, as its action does',
+    async()=>{
+        // XNA Framework 4.0's package carries DirectX's setup and X3DAudio's
+        // cabinet for a custom action to run; its assemblies import X3DAudio.
+        const app = await mkdtemp(join(tmpdir(), 'redist-'));
+        try
+        {
+            const [x86] = directxCabinets();
+            await writeFile(join(app, 'runtime.msi'),
+                await runtimeWithDirectX(peImage(0x14c), x86));
+            await writeFile(join(app, 'installscript.vdf'), String.raw`"installscript"
+{ "run process" { "runtime" {
+    "process 1" "%windir%\\system32\\msiexec.exe"
+    "command 1" "/package \"%INSTALLDIR%\\runtime.msi\" /passive" } } }`);
+            const said = await installRedistributables(app, ['installscript.vdf'], 'x86');
+            assert.ok(said.some(line=>/runtime\.msi: DirectX's setup it lays down, 1 file/.test(line)),
+                said.join('\n'));
+            assert.ok(existsSync(join(app, '.bottlify', 'drive_c', 'WINDOWS', 'system32',
+                'X3DAudio1_7.dll')), 'the cabinet\'s library is in the system folder');
+            assert.ok(existsSync(join(app, '.bottlify', 'drive_c', 'Program Files', 'DX Redist',
+                'DXSETUP.exe')), 'and the package\'s own files where it put them');
+        }
+        finally
+        {
+            await rm(app, { recursive: true, force: true });
+        }
+    });
 
 test('the DirectX step runs over a bottle a browser writes in place: the tree alone', async()=>{
     const [x86, x64] = directxCabinets();

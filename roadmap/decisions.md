@@ -1938,6 +1938,10 @@ in a title's setup's place now installs the optional components' cabinets beside
 already did (A67); the system's own DirectX cabinets are still left alone, and still no restart
 is asked. A library whose imports the engine's table covers stays the engine's (the loader's rule
 for a system copy). *2026-11-07.*
+A runtime's package that lays DirectX's setup down with its cabinets for a custom action to run
+(XNA Framework 4.0's: X3DAudio, XAudio2, XACT, which its assemblies import) has the cabinets
+installed the same way when the package is applied; the action itself is not run. The COM
+servers among them (XAudio2, XACT) are left unregistered, said. *2026-11-17.*
 
 **The screen is composed as Windows 7's desktop window manager composes it, not drawn into as XP's
 is.** On XP every window draws straight onto one screen, clipped by the windows over it, and a

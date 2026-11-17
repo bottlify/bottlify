@@ -111,6 +111,28 @@ export async function bootstrapper(shape){
 }
 
 /**
+ * A runtime's package that lays DirectX's setup down in a folder of its own,
+ * one optional component's cabinet beside it, for a custom action to run (XNA
+ * Framework 4.0's).
+ *
+ * @param {Uint8Array} setup  DXSETUP.exe's bytes
+ * @param {Uint8Array} cab  the component's cabinet, `Feb2010_X3DAudio_x86.cab`
+ */
+export async function runtimeWithDirectX(setup, cab){
+    const db = packageDatabase({
+        Directory: [['Directory', 'Directory_Parent', 'DefaultDir'], [
+            ['TARGETDIR', null, 'SourceDir'], ['ProgramFilesFolder', 'TARGETDIR', '.'],
+            ['Dx', 'ProgramFilesFolder', 'DX Redist']]],
+        Component: [['Component', 'Directory_', 'Attributes', 'Condition'],
+            [['C', 'Dx', 0, null]]],
+        File: [['File', 'Component_', 'FileName', 'FileSize'], [
+            ['setup', 'C', 'DXSETUP.exe', setup.length],
+            ['cab', 'C', 'Feb2010_X3DAudio_x86.cab', cab.length]]],
+    });
+    return cabinet({ 'p.msi': await databaseBytes(typed(db)), setup, cab });
+}
+
+/**
  * A program whose package installs outside the Windows folder: a game's own setup.
  */
 export async function gameSetup(){
