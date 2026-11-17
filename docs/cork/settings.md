@@ -106,6 +106,7 @@ default is the product's.
 | `predictAfter` | 48 | Samples of an indirect call before its callees are looked at. |
 | `callWindow` | 1024 | The readings an indirect call's samples are kept for. |
 | `relinkAfter` | 16 | Batch modules published before the running regions are gathered into large ones (0: never). |
+| `relinkQuiet` | 2^30 | Instructions of translated code since the last batch module before the running regions are gathered. |
 | `relinkRegions` | 512 | Regions in each gathered module. |
 | `relinkCold` | 128 | Regions in each module a relink builds of those no entry reached lately. |
 | `summaries` | `true` | A stored region is taken by its record's summary, without forming it (`summary.js`); false: formed as its record says, then compared. |

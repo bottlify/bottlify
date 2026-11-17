@@ -139,7 +139,8 @@ export function createRelink(state){
 
     /**
      * One step of a relink, when the translator is otherwise idle: once enough
-     * batch modules have gathered, the running regions go in chunks of
+     * batch modules have gathered and none has come for `relinkQuiet` instructions
+     * of translated code, the running regions go in chunks of
      * `relinkRegions` to be formed again from a copy of their pages and
      * emitted into one module each -- on the worker if there is one.
      *
@@ -154,6 +155,14 @@ export function createRelink(state){
                 return true;
             }
             if (settings.relinkAfter <= 0 || rt.modulesSinceRelink < settings.relinkAfter)
+            {
+                return false;
+            }
+            // Not while the program is still reaching new code: every region is
+            // emitted and compiled a second time, and runs in the engine's baseline
+            // code again until that is done - a process that ends soon after pays
+            // it and gets nothing back.
+            if (rt.corkRetired - rt.modulePublishedAt < settings.relinkQuiet)
             {
                 return false;
             }

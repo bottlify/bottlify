@@ -140,7 +140,7 @@ test('a relink puts the regions entered lately in one module and the rest in sma
         const F = 0x3000;
         const m = machine({ leafCalls: false, dispatch: true, worker: true, callReturn: false,
             crossTailCalls: false, batchRegions: 2, maxBatchRegions: 2, relinkRegions: 8,
-            relinkCold: 2, relinkAfter: 4, mergeAfter: 0 });
+            relinkCold: 2, relinkAfter: 4, mergeAfter: 0, relinkQuiet: 0 });
         try
         {
             m.write(LOOP, [0xb9, ...le32(1000), ...call(LOOP + 5, F), 0x49, 0x75, 0xf8, 0xf4]);

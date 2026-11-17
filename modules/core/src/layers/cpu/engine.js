@@ -272,6 +272,8 @@ export function engineContractProblem(engineModule, url){
  *     left to the interpreter. Default none.
  * @property {number} [relinkAfter]  Batch modules published before the running regions are
  *     gathered into large ones (0: never). Default 16.
+ * @property {number} [relinkQuiet]  Instructions of translated code since the last batch
+ *     module before the running regions are gathered. Default 2^30.
  * @property {number} [relinkRegions]  Regions in each gathered module. Default 512.
  * @property {number} [mergeAfter]  Transfers between two modules' regions before the two are
  *     gathered into one on the translation worker (0: never). Default 2^16.

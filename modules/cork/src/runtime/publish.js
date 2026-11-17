@@ -79,6 +79,9 @@ export function createPublish(state){
     };
     /** Batch modules instantiated since the last relink began. */
     let modulesSinceRelink = 0;
+    // What the translated code had retired when the last of them was published: a
+    // relink waits until none has come for a while (`relinkQuiet`).
+    let modulePublishedAt = 0;
 
     /**
      * Stamps a built or stored region and publishes every block start as an
@@ -458,6 +461,7 @@ export function createPublish(state){
         }
         const instance = instantiate(compiled ?? batch.module, batch.module.length, key);
         modulesSinceRelink++;
+        modulePublishedAt = rt.corkRetired;
         if (key !== undefined && instance !== null)
         {
             keepBatch(key, instance);
@@ -762,6 +766,7 @@ export function createPublish(state){
             {
                 keepBatch(source, made);
                 modulesSinceRelink++;
+                modulePublishedAt = rt.corkRetired;
             }
         }
         return made;
@@ -871,6 +876,7 @@ export function createPublish(state){
                 {
                     keepBatch(key, instance);
                     modulesSinceRelink++;
+                    modulePublishedAt = rt.corkRetired;
                 }
             }
             if (instance !== undefined)
@@ -953,6 +959,7 @@ export function createPublish(state){
         set workerRequest(value){ workerRequest = value; },
         get modulesSinceRelink(){ return modulesSinceRelink; },
         set modulesSinceRelink(value){ modulesSinceRelink = value; },
+        get modulePublishedAt(){ return modulePublishedAt; },
         publishBatch,
         applyRelink,
         compileOn,

@@ -346,6 +346,12 @@ export const SETTINGS = {
     relinkAfter: { kind: 'test', value: 16,
         doc: 'Batch modules published before the running regions are gathered into large'
             + ' ones (0: never).' },
+    // Gathering emits and compiles every region again: 71 % more work over the first
+    // 215 million instructions of a program of 453 regions, for the same cost of an
+    // instruction once settled. So only once the program has stopped reaching new code.
+    relinkQuiet: { kind: 'test', value: 2 ** 30, shown: '2^30',
+        doc: 'Instructions of translated code since the last batch module before the running'
+            + ' regions are gathered.' },
     relinkRegions: { kind: 'test', value: 512, doc: 'Regions in each gathered module.' },
     // A module is held or let go whole (`cacheBytes`), and one hot region in a
     // module of cold ones held them all.

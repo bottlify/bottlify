@@ -141,7 +141,7 @@ for (const seed of [41, 42])
     test(`regions a relink moves a region a call run as moved at once (seed ${seed})`,
         async()=>{
             const config = { worker: true, translators: 1, batchRegions: 2, maxBatchRegions: 2,
-                relinkAfter: 2, relinkRegions: 4 };
+                relinkAfter: 2, relinkRegions: 4, relinkQuiet: 0 };
             const whole = await observe(seed, { ...config, holdMs: 0 });
             const parts = await observe(seed, { ...config, ...ONE_A_CALL });
             assert.ok(!whole.runs.includes('untranslated'), 'every start translated');

@@ -2184,7 +2184,8 @@ test('with a store, a relinked region runs through collections, its batches held
         setFlagsFromString('--expose-gc');
         const gc = /** @type {() => void} */ (runInNewContext('gc'));
         const settle = ()=>new Promise(resolve=>setTimeout(resolve, 0));
-        const m = machine({ relinkAfter: 1, store: memoryTranslationStore(), bundleId: 'test' });
+        const m = machine({ relinkAfter: 1, relinkQuiet: 0, store: memoryTranslationStore(),
+            bundleId: 'test' });
         m.write(CODE + 0x100, [0x43, 0xeb, 0x01, 0x90, 0x49, 0xf4]);
         m.runtime.noteHot(CODE + 0x104);
         m.runtime.noteHot(CODE + 0x104);
@@ -2230,7 +2231,7 @@ test('a stored region names the module its code is in, the relinked one once rel
         };
         // The store answers through a turn: each batch is published after one.
         const settle = ()=>new Promise(resolve=>setTimeout(resolve, 0));
-        const m = machine({ relinkAfter: 1, store, bundleId: 'test' });
+        const m = machine({ relinkAfter: 1, relinkQuiet: 0, store, bundleId: 'test' });
         m.write(CODE + 0x100, [0x43, 0xeb, 0x01, 0x90, 0x49, 0xf4]);
         m.runtime.noteHot(CODE + 0x104);
         m.runtime.noteHot(CODE + 0x104);
@@ -2269,7 +2270,7 @@ test('a relink gathers the running regions into one module; an entry another reg
     + ' holds keeps running that region\'s code', async()=>{
     // B at CODE+0x104: dec ecx; hlt. A at CODE+0x100: inc ebx; jmp CODE+0x104 -- A holds a
     // block at B's address, whose entry is B's (label 0 in B, label 1 in A).
-    const m = machine({ relinkAfter: 1 });
+    const m = machine({ relinkAfter: 1, relinkQuiet: 0 });
     m.write(CODE + 0x100, [0x43, 0xeb, 0x01, 0x90, 0x49, 0xf4]);
     m.runtime.noteHot(CODE + 0x104);
     m.runtime.noteHot(CODE + 0x104);
@@ -2293,6 +2294,26 @@ test('a relink gathers the running regions into one module; an entry another reg
     assert.equal(m.reg(3), 1);
     assert.equal(m.reg(1), 3);
 });
+
+test('a relink waits until the program has run its code for a while with no new module',
+    async()=>{
+        const m = machine({ relinkAfter: 1, relinkQuiet: 5000 });
+        m.write(CODE, COUNTDOWN);
+        m.setReg(4, 0x80000);
+        m.runtime.noteHot(CODE);
+        await m.runtime.translatePending();
+        await m.runtime.translatePending();
+        assert.equal(m.runtime.diagnostics().relinks ?? 0, 0, 'the module is new: not yet');
+        // The countdown's 2002 instructions, three times: past the quiet stretch.
+        for (let run = 0; run < 3; run++)
+        {
+            m.setReg(1, 1000);
+            m.runtime.run(m.runtime.entryOf(CODE + 5), 1_000_000);
+            await m.runtime.translatePending();
+            assert.equal(m.runtime.diagnostics().relinks ?? 0, run < 2 ? 0 : 1,
+                `after ${run + 1} runs`);
+        }
+    });
 
 test('exits to a flood of distinct addresses stay cheap and a hot one keeps its count', ()=>{
     // A loading phase leaves for hundreds of thousands of addresses: the count of
