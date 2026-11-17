@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createWintrustFunctions } from './functions.js';
-import { certificates, NOW, signedCabinet } from './fixtures.test.js';
+import { certificates, NOW, SIGNED, signedCabinet } from './fixtures.test.js';
 
 const TRUST_E_NOSIGNATURE = 0x800b0100;
 const TRUST_E_SUBJECT_FORM_UNKNOWN = 0x800b0003;
@@ -276,6 +276,7 @@ test('a verification that keeps its state lays out the provider data a setup che
     const called = [];
     /** @type {any} */
     let m = null;
+    let builtAt = 0;
     const crypt32 = (/** @type {string} */ name, /** @type {number[]} */ args)=>{
         called.push(name);
         switch (name)
@@ -285,6 +286,7 @@ test('a verification that keeps its state lays out the provider data a setup che
                 m.view.setUint32(args[5], 0x7100 + called.filter(one=>one === name).length, true);
                 return 1;
             case 'CertGetCertificateChain':
+                builtAt = Number(m.view.getBigUint64(args[2], true) / 10000n - 11644473600000n);
                 m.view.setUint32(args[7], 0x7200, true);
                 return 1;
             default: return 1;
@@ -299,6 +301,8 @@ test('a verification that keeps its state lays out the provider data a setup che
     const signer = m.fns.WTHelperGetProvSignerFromChain.handler([provider, 0, 0, 0]);
     assert.notEqual(signer, 0);
     assert.equal(m.view.getUint32(signer + 40, true), 0x7200, 'pChainContext');
+    // The publisher's certificate ran out a year after it signed, long before now.
+    assert.equal(builtAt, SIGNED, 'the chain built at the timestamp\'s time, as the verdict is');
     const count = m.view.getUint32(signer + 12, true);
     assert.ok(count >= 2, 'from the signer\'s certificate to the root');
     assert.equal(m.view.getUint32(m.fns.WTHelperGetProvCertFromChain.handler([signer, 0]) + 4,

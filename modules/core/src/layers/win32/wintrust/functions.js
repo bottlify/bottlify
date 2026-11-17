@@ -153,10 +153,15 @@ export function createWintrustFunctions(host){
      * none it fails as a signature it could not read. Null where there is no
      * chain or no way to lay one out (a 64-bit process's layout is not here).
      *
-     * @param {Uint8Array[]} chain @param {number} data @param {number} code
+     * The chain is built at the time the signature was judged at - its
+     * timestamp's, when it has one - as the verdict was: a signer's certificate
+     * that has run out since is still the one that signed in its time.
+     *
+     * @param {Uint8Array[]} chain @param {number} time  milliseconds since 1970
+     * @param {number} data @param {number} code
      * @returns {{ address: number, release: () => void } | null}
      */
-    const layProvider = (chain, data, code)=>{
+    const layProvider = (chain, time, data, code)=>{
         const crypt32 = host.crypt32;
         const allocate = host.allocate;
         const free = host.free;
@@ -169,7 +174,8 @@ export function createWintrustFunctions(host){
         {
             return null;
         }
-        const scratch = allocate(CHAIN_PARA_SIZE + 4 + Math.max(...chain.map(one=>one.length)));
+        const scratch = allocate(CHAIN_PARA_SIZE + 4 + 8
+            + Math.max(...chain.map(one=>one.length)));
         /** @type {number[]} */
         const contexts = [];
         let chainContext = 0;
@@ -195,7 +201,8 @@ export function createWintrustFunctions(host){
                 return null;
             }
             const out = scratch + CHAIN_PARA_SIZE;
-            const encoded = out + 4;
+            const when = out + 4;
+            const encoded = when + 8;
             for (const certificate of chain)
             {
                 host.writeMemory(encoded, certificate);
@@ -212,7 +219,11 @@ export function createWintrustFunctions(host){
             host.writeMemory(scratch, new Uint8Array(CHAIN_PARA_SIZE));
             writeU32(scratch, CHAIN_PARA_SIZE);
             writeU32(out, 0);
-            crypt32('CertGetCertificateChain', [0, contexts[0], 0, store, scratch, 0, 0, out]);
+            // A FILETIME: 100 ns since 1601.
+            const ticks = (BigInt(Math.round(time)) + 11644473600000n) * 10000n;
+            writeU32(when, Number(ticks & 0xffffffffn));
+            writeU32(when + 4, Number(ticks >> 32n));
+            crypt32('CertGetCertificateChain', [0, contexts[0], when, store, scratch, 0, 0, out]);
             chainContext = readU32(out);
         }
         finally
@@ -365,18 +376,20 @@ export function createWintrustFunctions(host){
         const verdict = (bytes, subject)=>{
             /** @type {Uint8Array[]} */
             let chain = [];
+            let judgedAt = host.now();
             const code = bytes ? verifyAuthenticode(bytes, {
                 roots: roots(),
                 now: host.now(),
                 hashOnly: (flags & WTD_HASH_ONLY_FLAG) !== 0,
                 lifetime: (flags & WTD_LIFETIME_SIGNING_FLAG) !== 0,
-                signerChain: found=>{
+                signerChain: (found, time)=>{
                     chain = found;
+                    judgedAt = time;
                 },
             }, subject) : CRYPT_E_FILE_ERROR;
             if (state === WTD_STATEACTION_VERIFY)
             {
-                const provider = layProvider(chain, data >>> 0, code);
+                const provider = layProvider(chain, judgedAt, data >>> 0, code);
                 writeU32(data + WTD.STATE_DATA, host.handles.open('wintrust-state',
                     { code, provider }));
             }
