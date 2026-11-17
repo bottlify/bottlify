@@ -508,3 +508,27 @@ test('a package\'s .NET assemblies go into the global assembly cache of their ru
         'C:\\WINDOWS\\assembly\\GAC_MSIL\\Old\\1.2.3.4_en-US_abcdef0123456789\\Old.dll',
     ].sort(), 'CLR 4\'s cache for a v4 assembly, CLR 2\'s for a v2 one, by architecture');
 });
+
+test('a Registry value naming a directory is its path and a backslash, as Installer formats it',
+    ()=>{
+        // XNA Framework 4.0's NativeLibraryPath: "[CommonV2Dir]", a Directory key.
+        /** @param {string[]} columns @param {any[][]} rows */
+        const table = (columns, rows)=>({ columns: columns.map(name=>({ name })), rows });
+        const tables = new Map([
+            ['Directory', table(['Directory', 'Directory_Parent', 'DefaultDir'], [
+                ['TARGETDIR', null, 'SourceDir'], ['CommonFilesFolder', 'TARGETDIR', '.'],
+                ['CommonV2Dir', 'CommonFilesFolder', 'xna|XNA']])],
+            ['Component', table(['Component', 'Directory_', 'Attributes', 'Condition'],
+                [['Path', 'CommonV2Dir', 0, null]])],
+            ['Registry', table(['Registry', 'Root', 'Key', 'Name', 'Value', 'Component_'], [
+                ['r1', 2, 'Software\\XNA', 'NativeLibraryPath', '[CommonV2Dir]', 'Path'],
+                ['r2', 2, 'Software\\XNA', 'System', '[SystemFolder]x.dll', 'Path']])],
+        ]);
+        const db = { table: (/** @type {string} */ name)=>tables.get(name) ?? null };
+        const { registry } = applyPackage(db, new Map(), 'x86');
+        const text = (/** @type {Uint8Array} */ data)=>String.fromCharCode(...data).replace(/\0+$/, '');
+        assert.deepEqual(registry.map(({ name, data })=>[name, text(data)]), [
+            ['NativeLibraryPath', 'C:\\Program Files\\Common Files\\XNA\\'],
+            ['System', 'C:\\WINDOWS\\system32\\x.dll'],
+        ]);
+    });

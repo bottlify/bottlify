@@ -352,9 +352,20 @@ export function applyPackage(db, cabinetFilesByKey, machine){
         ...wide ? { ProgramFiles64Folder: 'C:\\Program Files',
             CommonFiles64Folder: 'C:\\Program Files\\Common Files' } : {},
     };
+    /**
+     * A directory's path by its Directory key, once the table is read: a
+     * Formatted [key] naming one is its path with the trailing backslash
+     * Windows Installer gives it (XNA's NativeLibraryPath is "[CommonV2Dir]",
+     * and its assemblies load XnaNative.dll from what it says).
+     *
+     * @type {(id: string) => string | null}
+     */
+    let directoryPath = ()=>null;
     /** @param {string} text */
-    const format = text=>text.replace(/\[([A-Za-z_][\w.]*)\]/g,
-        (_, name)=>folders[name] ?? properties.get(name) ?? '');
+    const format = text=>text.replace(/\[([A-Za-z_][\w.]*)\]/g, (_, name)=>{
+        const directory = folders[name] ?? directoryPath(name);
+        return directory ? `${directory}\\` : properties.get(name) ?? '';
+    });
     // A merge module's folders are its own names, set to the system's by the
     // package's custom actions that set a directory or a property (types 35
     // and 51) -- run here as the execute sequence would, the others not at all.
@@ -401,6 +412,7 @@ export function applyPackage(db, cabinetFilesByKey, machine){
         resolved.set(id, path);
         return path;
     };
+    directoryPath = id=>(directories.has(id) ? resolve(id) : null);
 
     const installed = new Map();
     /** Each component's key file, which names a global assembly's runtime. */
