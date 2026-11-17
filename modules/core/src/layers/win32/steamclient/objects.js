@@ -19,7 +19,7 @@ import { pointerWidth } from '../common/pointers.js';
 /**
  * @typedef {Object} SteamObjectsHost
  * @property {(name: string, fn: { convention: 'thiscall', argBytes: number,
- *     handler: (args: number[]) => number, quadwords?: number[],
+ *     handler: (args: number[]) => number | Promise<number>, quadwords?: number[],
  *     floats?: Record<number, 'f32' | 'f64'> }) => number} register
  * @property {(bytes: number) => number} allocate
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
@@ -31,9 +31,11 @@ import { pointerWidth } from '../common/pointers.js';
 
 /**
  * What a method answers: a number for EAX, a bigint for eight bytes (EDX:EAX
- * or the class a hidden pointer receives), or undefined for zero.
+ * or the class a hidden pointer receives), or undefined for zero; a promise of
+ * the number where the answer waits for bytes being fetched, the caller parked.
  *
- * @typedef {(args: number[], version: string) => number | bigint | undefined} Behaviour
+ * @typedef {(args: number[], version: string) => number | Promise<number> | bigint
+ *     | undefined} Behaviour
  */
 
 /**
@@ -97,7 +99,9 @@ export function createSteamObjects(host, behaviours){
                 }
                 if (kind === 'q')
                 {
-                    const value = BigInt.asUintN(64, BigInt(answer ?? 0));
+                    // Only a dword's answer waits on a fetch (FileRead).
+                    const value = BigInt.asUintN(64, BigInt(
+                        /** @type {number | bigint | undefined} */ (answer) ?? 0));
                     host.answerHigh(Number(value >> 32n));
                     return Number(value & 0xffffffffn);
                 }

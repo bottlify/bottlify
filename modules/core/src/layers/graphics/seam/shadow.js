@@ -3980,7 +3980,9 @@ export function createShadow(deps){
         // Two pages, so that a whole page is ours whichever boundary the
         // allocation straddles.
         const span = deps.allocate(bytes + PAGE);
-        return span === 0 ? 0 : (span + PAGE - 1) & ~(PAGE - 1);
+        // Unsigned: a block above 2 GB is a key of the host's maps, and the
+        // guest hands it back as the unsigned word it reads.
+        return span === 0 ? 0 : ((span + PAGE - 1) & ~(PAGE - 1)) >>> 0;
     };
     /** @param {number} bytes @returns {number} a span out of the resource pages, or 0 */
     const carve = bytes=>{
@@ -4479,6 +4481,25 @@ export function createShadow(deps){
         }
     };
 
+    /** Ranges the guest unlocked, as `settle` met them: sent, or why not. */
+    const settled = { sent: 0, unknown: 0, released: 0, unattached: 0 };
+    /**
+     * A range the guest unlocked that reaches no buffer of the device: said
+     * as a loss, since a draw from it reads bytes never sent.
+     *
+     * @param {number} block @param {'unknown' | 'released'} why
+     */
+    const unsent = (block, why)=>{
+        if (readWord(block + BUFFER.TO) <= readWord(block + BUFFER.FROM))
+        {
+            return;
+        }
+        settled[why]++;
+        deps.divergence?.('IDirect3DVertexBuffer::Unlock', why === 'unknown'
+            ? 'a range unlocked in the guest is of a block this device does not know'
+            : 'a range unlocked in the guest is of a buffer its program released', 'loss');
+    };
+
     /**
      * Replays what the guest did to one buffer against the real one. The
      * block says whether a lock is held and what range was locked since the
@@ -4491,11 +4512,13 @@ export function createShadow(deps){
         const entry = blocks.get(block);
         if (!entry)
         {
+            unsent(block, 'unknown');
             return;
         }
         if (entry.buffer.refCount <= 0)
         {
             // Released by the program with an unlock still on the ring.
+            unsent(block, 'released');
             blocks.delete(block);
             return;
         }
@@ -4549,6 +4572,7 @@ export function createShadow(deps){
             }
             deps.writeMemory(block + BUFFER.FROM, new Uint8Array(12));
             markLent(block);
+            settled.sent++;
         }
         if (entry.hostLocked && !locked)
         {
@@ -5419,6 +5443,10 @@ export function createShadow(deps){
             {
                 holding(()=>settle(block));
             }
+            else
+            {
+                settled.unattached++;
+            }
         },
 
         /**
@@ -5511,6 +5539,8 @@ export function createShadow(deps){
             heldWaitMs: Math.round(heldWaits.ms),
             heldBroken: heldWaits.broken,
             hostLocks: { ...hostLocks },
+            // Ranges unlocked in the guest: sent to the device, or lost and why.
+            settled: { ...settled },
             // And the bytes those moves copied in the guest (`moveCopyCode`).
             moved: { ...moved, copied: address === 0 ? 0
                 : readWord(address + SHADOW.MOVE_COPIED)

@@ -100,12 +100,17 @@ function fakeDevice(){
 /**
  * @param {{ readU32?: boolean, commands?: boolean,
  *     phases?: import('./shadow.js').ShadowPhases,
- *     exchange?: (address: number) => void }} [options]  exchange: a
+ *     exchange?: (address: number) => void, base?: number }} [options]  exchange: a
  *     compare-and-swap of the memory's, as with threads on other executors,
- *     told of each swap first
+ *     told of each swap first; base: where its memory starts
  */
 function machine(options = {}){
     const memory = new Uint8Array(0x240000);
+    // Where the machine's memory starts in the guest's space: above 2 GB, an
+    // address is a word past what a signed 32-bit number holds.
+    const base = options.base ?? 0;
+    /** @param {number} address */
+    const offset = address=>(address >>> 0) - base;
     /**
      * How often guest memory was copied out, which regions of it relative to
      * the block, and which words were read in place.
@@ -125,29 +130,29 @@ function machine(options = {}){
     const order = [];
     const shadow = createShadow({
         allocate: bytes=>{
-            const at = free;
+            const made = free;
             free += bytes;
-            return at;
+            return made + base;
         },
         readMemory: (address, length)=>{
             reads.memory++;
             reads.regions.push([address - shadow.address(), length]);
-            return memory.slice(address, address + length);
+            return memory.slice(offset(address), offset(address) + length);
         },
         readU32: options.readU32
             ? address=>{
                 reads.words.push(address - shadow.address());
-                return view.getUint32(address, true);
+                return view.getUint32(offset(address), true);
             }
             : undefined,
-        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        writeMemory: (address, bytes)=>memory.set(bytes, offset(address)),
         compareExchangeU32: options.exchange
             ? (address, expected, value)=>{
                 options.exchange?.(address);
-                const held = view.getUint32(address, true);
+                const held = view.getUint32(offset(address), true);
                 if (held === expected >>> 0)
                 {
-                    view.setUint32(address, value >>> 0, true);
+                    view.setUint32(offset(address), value >>> 0, true);
                 }
                 return held;
             }
@@ -175,10 +180,10 @@ function machine(options = {}){
     return {
         reads, taken, order,
         memory, device, shadow, divergences,
-        /** @param {number} at */
-        u32: at=>view.getUint32(at, true),
-        /** @param {number} at @param {number} value */
-        put32: (at, value)=>view.setUint32(at, value >>> 0, true),
+        /** @param {number} address */
+        u32: address=>view.getUint32(offset(address), true),
+        /** @param {number} address @param {number} value */
+        put32: (address, value)=>view.setUint32(offset(address), value >>> 0, true),
     };
 }
 
@@ -500,6 +505,26 @@ test('a buffer gets a block on its own page, naming its bytes and its device', (
     assert.equal(m.u32(block + BUFFER.DEVICE), m.shadow.address());
     assert.equal(m.shadow.attachBuffer(ib), block + BUFFER.SIZE, 'the next carved from the page');
     assert.equal(m.shadow.diagnostics().buffers, 2);
+});
+
+test('a block above 2 GB is the one the guest hands back: its unlock reaches the device', ()=>{
+    // The page a block was carved from came back as a signed number past
+    // 2 GB, and the host's map of blocks was keyed by it; the guest puts the
+    // unsigned word on the ring, so no unlock was ever found, and a menu's
+    // text drew from vertex buffers never sent.
+    const m = machine({ base: 0x80000000 });
+    const at = m.shadow.address();
+    const vb = fakeBuffer(0x8000, 0x100);
+    const block = m.shadow.attachBuffer(vb);
+    assert.ok(at >= 0x80000000 && block >= 0x80000000, 'both unsigned, above 2 GB');
+    m.put32(block + BUFFER.FROM, 0);
+    m.put32(block + BUFFER.TO, 0x40);
+    m.put32(at + SHADOW.RING, block);
+    m.put32(at + SHADOW.RING_HEAD, 1);
+    m.shadow.sync();
+    assert.deepEqual(vb.calls, ['lock 0+64 0x0', 'unlock']);
+    assert.deepEqual(m.shadow.diagnostics().settled,
+        { sent: 1, unknown: 0, released: 0, unattached: 0 });
 });
 
 test('a lock and unlock taken in the guest are replayed before the host goes on', ()=>{
