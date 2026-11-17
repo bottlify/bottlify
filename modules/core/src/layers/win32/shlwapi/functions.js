@@ -25,6 +25,7 @@ import { createOrdinalFunctions } from './ordinals.js';
 import { createRegistryHelpers } from './registry.js';
 import { createUsKeyFunctions } from './uskey.js';
 import { createCharacterFunctions } from './characters.js';
+import { createUiFunctions } from './ui.js';
 import { createStreams } from './stream.js';
 import { createStringFunctions } from './strings.js';
 import { createWidths } from './text.js';
@@ -770,6 +771,7 @@ export function createShlwapiFunctions(host){
         ...createRegistryHelpers(host),
         ...createUsKeyFunctions(host),
         ...createCharacterFunctions(host, widths),
+        ...createUiFunctions(host, widths),
         ...createOrdinalFunctions(host),
         ...createStreams(host),
         ...createDataBlockFunctions(host),
@@ -1147,28 +1149,6 @@ export function createShlwapiFunctions(host){
                 {
                     host.free?.(scratch);
                 }
-            },
-        },
-
-        /**
-         * INT GetMenuPosFromID(HMENU hMenu, UINT wID)
-         *
-         * The position of the item with that command id, or -1.
-         */
-        GetMenuPosFromID: {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([menu, id])=>{
-                const count = call('USER32.dll', 'GetMenuItemCount', [menu]) ?? -1;
-                for (let at = 0; at < count; at++)
-                {
-                    if ((call('USER32.dll', 'GetMenuItemID', [menu, at]) ?? -1) >>> 0
-                        === (id >>> 0))
-                    {
-                        return at;
-                    }
-                }
-                return -1;
             },
         },
 

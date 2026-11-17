@@ -740,7 +740,7 @@ export function createRegistryHelpers(host){
             /** @param {number[]} args */
             handler: ([pointer])=>{
                 const text = (pointer >>> 0) === 0 ? null
-                    : host.readWideString?.(pointer >>> 0, 0x200) ?? null;
+                    : host.readWideString?.(pointer >>> 0, 0x100 * 2) ?? null;
                 if (text === null || text === '')
                 {
                     return 0;
