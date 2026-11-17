@@ -22,6 +22,7 @@
 - Deus Ex: Human Revolution
 - Diablo (demo)
 - Diablo II (demo)
+- Don't Starve
 - Doom 3 (demo)
 - Dungeon Siege (demo)
 - Dwarf Fortress
