@@ -89,8 +89,20 @@ const outlineFace = name=>{
 };
 
 /**
+ * What the fonts need of GDI+'s host: guest memory, and GDI's own exports.
+ *
+ * @typedef {Object} FontHost
+ * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {(address: number, length: number) => Uint8Array} readMemory
+ * @property {(bytes: number) => number} allocate  zero when none is left
+ * @property {(address: number) => void} free
+ * @property {(address: number) => string} [readWideString]
+ * @property {(name: string, args: number[]) => number} [gdi32]
+ */
+
+/**
  * @param {Object} options
- * @param {import('./functions.js').GdiplusHost} options.host
+ * @param {FontHost} options.host
  * @param {() => number} options.handle  A new GDI+ object's handle.
  * @param {(address: number, value: number) => void} options.putPointer
  * @param {(handle: number) => boolean} options.isGraphics
