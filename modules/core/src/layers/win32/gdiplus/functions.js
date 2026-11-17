@@ -22,6 +22,12 @@ import { pointerWidth } from '../common/pointers.js';
 import { CodecError, sniff } from '../windowscodecs/frames.js';
 import { convertRow, formatOf, rowBytes as wicRowBytes } from '../windowscodecs/formats.js';
 import { createFontFunctions } from './fonts.js';
+import { createKit } from './kit.js';
+import { createMatrixFunctions } from './matrix.js';
+import { createPathFunctions } from './path.js';
+import { createBrushFunctions } from './brush.js';
+import { createPenFunctions } from './pen.js';
+import { createPathIteratorFunctions } from './pathiterator.js';
 
 /** GpStatus (gdiplustypes.h). */
 const Ok = 0;
@@ -45,9 +51,6 @@ const IMAGE_LOCK_USER_INPUT_BUF = 0x4;
 /** ColorPalette's header: Flags and Count, before its entries. */
 const PALETTE_HEADER = 8;
 
-/** Handles of their own, as pointers would be: never zero, never a guest address used. */
-const HANDLE_BASE = 0x5e000000;
-const HANDLE_STRIDE = 16;
 
 /**
  * A pixel format's bits per pixel, from its value (gdipluspixelformats.h: bits 8-15),
@@ -94,12 +97,54 @@ export function createGdiplusFunctions(host){
     const graphics = new Map();
     /** The divergences said: each once. @type {Set<string>} */
     const said = new Set();
-    let next = HANDLE_BASE;
-    const handle = ()=>{
-        const made = next;
-        next += HANDLE_STRIDE;
-        return made;
+    // One table of handles for every family: a handle names one object.
+    const kit = createKit(host);
+    const handle = kit.handle;
+    const matrices = createMatrixFunctions(kit);
+    const paths = createPathFunctions(kit, matrices);
+    /** A copy of a bitmap in memory of its own, its handle; 0 for none. @param {number} image */
+    const cloneImage = image=>{
+        const held = bitmaps.get(image >>> 0);
+        if (!held)
+        {
+            return 0;
+        }
+        const scratch = host.allocate(pointer.size);
+        if (scratch === 0)
+        {
+            return 0;
+        }
+        try
+        {
+            const { made } = makeBitmap(held.width, held.height, 0, held.format, 0, scratch);
+            const copy = made === undefined ? undefined : bitmaps.get(made);
+            if (!copy || made === undefined)
+            {
+                return 0;
+            }
+            const row = held.width * bytesPerPixel(held.format);
+            for (let y = 0; y < held.height; y++)
+            {
+                host.writeMemory(copy.scan0 + y * copy.stride,
+                    host.readMemory(held.scan0 + y * held.stride, row).slice());
+            }
+            return made;
+        }
+        finally
+        {
+            host.free(scratch);
+        }
     };
+    const images = {
+        clone: cloneImage,
+        /** @param {number} image */
+        size: image=>{
+            const held = bitmaps.get(image >>> 0);
+            return held ? { width: held.width, height: held.height } : null;
+        },
+    };
+    const brushes = createBrushFunctions(kit, { matrices, paths, images });
+    const pens = createPenFunctions(kit, { matrices, paths, brushes });
     /** @param {number} address @param {number} value */
     const putU32 = (address, value)=>host.writeMemory(address >>> 0,
         new Uint8Array(Uint32Array.of(value >>> 0).buffer));
@@ -152,6 +197,11 @@ export function createGdiplusFunctions(host){
     };
 
     return {
+        ...matrices.functions,
+        ...paths.functions,
+        ...brushes.functions,
+        ...pens.functions,
+        ...createPathIteratorFunctions(kit, paths).functions,
         ...createFontFunctions({ host, handle, putPointer,
             isGraphics: target=>graphics.has(target) }),
 
@@ -159,11 +209,12 @@ export function createGdiplusFunctions(host){
          * Status GdiplusStartup(ULONG_PTR *token, const GdiplusStartupInput *input,
          *   GdiplusStartupOutput *output)
          *
-         * Versions 1 to 3 start; another is UnsupportedGdiplusVersion. A caller
-         * that suppressed the background thread is handed the hook and unhook
-         * it must call itself in the output, as GDI+ hands them - the library's
-         * own GdiplusNotificationHook and GdiplusNotificationUnhook - and must
-         * call: left null, its first call went to address zero.
+         * Versions 1 and 2 start (GDI+ 1.0 and 1.1); another is
+         * UnsupportedGdiplusVersion. A caller that suppressed the background
+         * thread is handed the hook and unhook it must call itself in the
+         * output, as GDI+ hands them - the library's own GdiplusNotificationHook
+         * and GdiplusNotificationUnhook - and must call: left null, its first
+         * call went to address zero.
          */
         GdiplusStartup: {
             argBytes: 12,
@@ -178,7 +229,7 @@ export function createGdiplusFunctions(host){
                 const fields = new DataView(host.readMemory(input >>> 0, pointer.size * 2 + 4)
                     .slice().buffer);
                 const version = fields.getUint32(0, true);
-                if (version < 1 || version > 3)
+                if (version < 1 || version > 2)
                 {
                     return UnsupportedGdiplusVersion;
                 }

@@ -43,12 +43,17 @@ function machine(pointerSize = 4, more = {}){
     return { memory, view, fns, said, freed };
 }
 
-test('GdiplusStartup takes versions 1 to 3 and hands a token', async()=>{
-    // Wine's gdiplus test_startup: version 0 (and 42) is UnsupportedGdiplusVersion.
+test('GdiplusStartup takes versions 1 and 2 and hands a token', async()=>{
+    // Wine's gdiplus test_startup (pen.c): the versions start from 1, and the
+    // first one refused is past 2 - GDI+ 1.1 is version 2.
     const { view, fns } = machine();
     view.setUint32(0x100, 1, true);
     assert.equal(await fns.GdiplusStartup.handler([0x200, 0x100, 0]), Ok);
     assert.notEqual(view.getUint32(0x200, true), 0, 'a token');
+    view.setUint32(0x100, 2, true);
+    assert.equal(await fns.GdiplusStartup.handler([0x200, 0x100, 0]), Ok);
+    view.setUint32(0x100, 3, true);
+    assert.equal(await fns.GdiplusStartup.handler([0x200, 0x100, 0]), UnsupportedGdiplusVersion);
     view.setUint32(0x100, 0, true);
     assert.equal(await fns.GdiplusStartup.handler([0x200, 0x100, 0]), UnsupportedGdiplusVersion);
     view.setUint32(0x100, 42, true);
