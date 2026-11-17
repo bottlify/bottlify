@@ -603,10 +603,20 @@ function returnToCall(e, taken){
     e.close();
 }
 
+/** The callees an indirect call compares its target with one after another
+ * (`predictCall`): more are halved first. Eight, since up to there a chain
+ * costs what halving does (calls8 of the micro workloads, counted exactly:
+ * halved to chains of three 0 to 1.2 % more, 32 and 64 bits), and two dozen
+ * methods halved to chains of six cost 3.5 % less of the whole loop than the
+ * chain of them (the PE bench's entities, 4.242 -> 4.094 machine instructions
+ * a guest one). */
+const PREDICT_CHAIN = 8;
+
 /**
  * An indirect call whose callees the runtime predicted, with the ones formed
- * into the region: the target compared with each, a match a jump to the
- * callee's block -- the return address is pushed, and the callee's `ret`
+ * into the region: the target compared with each (`PREDICT_CHAIN` of them
+ * at most, found among more by halving), a match a jump to the callee's
+ * block -- the return address is pushed, and the callee's `ret`
  * comes back to the block after the call as a direct call's does
  * (`inlineReturns`). Anything else leaves as before. Charged once here, at
  * the block's depth, for every way out below; a push into a code page leaves
@@ -630,21 +640,50 @@ function predictCall(e){
         b.localGet(Local.stale).op(I32.eqz);
         e.openIf('clean');
     }
-    for (const callee of callees)
-    {
-        if (whole)
+    // By address, whatever order the runtime named them in: the code is the
+    // same for the same callees. More than `PREDICT_CHAIN` are halved until
+    // that many are left - two dozen methods take two halvings and three
+    // compares where a chain took twelve. A chain goes from the highest
+    // address down: from the lowest up, the same eight callees cost 3 to 4 %
+    // more of the loop in V8's code, for no reason found in what is emitted.
+    const sorted = [...callees].sort((one, two)=>one - two);
+    /** @param {number} from @param {number} to */
+    const compare = (from, to)=>{
+        if (to - from > PREDICT_CHAIN)
         {
-            b.localGet(LONG_WIDE).i64const(codeAddress(e, callee)).op(I64.eq);
+            const middle = from + to >> 1;
+            if (whole)
+            {
+                b.localGet(LONG_WIDE).i64const(codeAddress(e, sorted[middle])).op(I64.ltU);
+            }
+            else
+            {
+                b.localGet(Local.count).i32const(sorted[middle] | 0).op(I32.ltU);
+            }
+            e.openIf('below');
+            compare(from, middle);
+            b.else();
+            compare(middle, to);
+            e.close();
+            return;
         }
-        else
+        for (const callee of sorted.slice(from, to).reverse())
         {
-            b.localGet(Local.count).i32const(callee | 0).op(I32.eq);
+            if (whole)
+            {
+                b.localGet(LONG_WIDE).i64const(codeAddress(e, callee)).op(I64.eq);
+            }
+            else
+            {
+                b.localGet(Local.count).i32const(callee | 0).op(I32.eq);
+            }
+            e.openIf('predicted');
+            e.countMechanism(Mechanism.CALL_PREDICTED);
+            e.jumpTo(callee);
+            e.close();
         }
-        e.openIf('predicted');
-        e.countMechanism(Mechanism.CALL_PREDICTED);
-        e.jumpTo(callee);
-        e.close();
-    }
+    };
+    compare(0, sorted.length);
     if (e.staleCheck)
     {
         e.close();

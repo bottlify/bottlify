@@ -51,10 +51,19 @@ const WORTH_SHARE = 8;
  * under an eighth of the samples (`WORTH_SHARE`) are left: a few such, a little
  * above the rest by chance, would have the region formed again for nothing.
  *
+ * They are given by address, not by their samples: which of two methods had
+ * more is when the samples were read - a reading holds the last calls of a
+ * slice, so of two methods one called twice as often as the other, the rarer
+ * was five deviations above it in one run's samples and below it in
+ * another's. The order decides which are formed in when not all fit, and the
+ * same callees named two ways were two records of one region; the call
+ * itself finds its target among them by address (`predictCall`), so its code
+ * is the same however they were sampled (`prediction-order.itest.js`).
+ *
  * @param {Map<number, number>} targets @param {number} total
  * @param {number} most  how many a call may have formed in
  * @param {number} [doubt]
- * @returns {number[]}  the callees, the most sampled first
+ * @returns {number[]}  the callees, by address
  */
 export function calleesWorth(targets, total, most, doubt = 1){
     const ranked = [...targets].sort((a, b)=>b[1] - a[1]);
@@ -81,7 +90,11 @@ export function calleesWorth(targets, total, most, doubt = 1){
             taken = covered;
         }
     }
-    return taken * WORTH_SHARE >= 1 ? ranked.slice(0, best).map(([target])=>target) : [];
+    if (taken * WORTH_SHARE < 1)
+    {
+        return [];
+    }
+    return ranked.slice(0, best).map(([target])=>target).sort((a, b)=>a - b);
 }
 
 /**
@@ -598,7 +611,9 @@ export function createRelink(state){
                 }
                 else
                 {
-                    one.targets.set(site, [...had, ...added]);
+                    // By address with the ones the region has, as `calleesWorth`
+                    // gives them: which were sampled first is the readings'.
+                    one.targets.set(site, [...had, ...added].sort((a, b)=>a - b));
                     one.added.set(site, added);
                 }
                 wanted.set(record, one);

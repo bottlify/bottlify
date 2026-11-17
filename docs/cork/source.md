@@ -55,6 +55,12 @@ node tools/bench/serve.mjs                  # the same stand as a page, for any 
   spread. A workload whose counts its run's timing decides is listed there with the cause and
   skipped. A change that moves shapes on purpose records them again
   (`CORK_SHAPES_WRITE=5 node --test modules/cork/src/region-shapes.itest.js`).
+- **Predicted callees** ([`src/prediction-order.itest.js`](../../modules/cork/src/prediction-order.itest.js)):
+  the callees an indirect call has formed into its region come from samples of where it went,
+  and which samples a reading holds is the run's timing. The gate runs the micro workloads with
+  such calls in slices of several lengths and holds each call to the same callees, named in the
+  same order: the call finds its target among them by address, so the same callees are the same
+  code.
 - **The guest's own clock** (`clock: 'virtual'`, [settings](settings.md)): a run on it
   translates the same code however busy the machine is, which
   [`virtual-clock.test.js`](../../modules/core/src/layers/cpu/internal/virtual-clock.test.js)

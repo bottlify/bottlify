@@ -3580,6 +3580,73 @@ test('an indirect call whose callees are spread is sampled until it comes due, t
     assert.equal(m.runtime.diagnostics().reforms, 1, 'and never formed again for it');
 });
 
+/**
+ * The loop of `dispatchLoop` over sixteen callees, one a slot (`and eax, 15`): H_k at
+ * CODE + 0x200 + 8k turns edx left by one and adds k + 1 to it, so what the loop leaves
+ * says which callee each call went to, in order.
+ * @param {number} n
+ */
+const turningLoop = n=>{
+    const { code, table } = dispatchLoop(n);
+    const callees = Array.from({ length: 16 }, (_, k)=>CODE + 0x200 + k * 8);
+    let sum = 0;
+    for (let ecx = n; ecx > 0; ecx--)
+    {
+        sum = ((sum << 1 | sum >>> 31) + (ecx & 15) + 1) >>> 0;
+    }
+    return { code: [...code.slice(0, 21), ...Array.from({ length: 0x200 - 21 }, ()=>0xcc),
+        ...callees.flatMap((_, k)=>[0xd1, 0xc2, 0x83, 0xc2, k + 1, 0xc3, 0xcc, 0xcc])],
+    table, slots: callees, sum };
+};
+
+for (const formed of [1, 2, 3, 4, 5, 7, 8, 12, 16])
+{
+    test(`an indirect call with ${formed} of its sixteen callees formed in goes to each of them,`
+        + ' and to the others as before', async t=>{
+        if (!probeFeatures().tailCalls)
+        {
+            t.skip(NO_TAIL_CALLS);
+            return;
+        }
+        const loop = turningLoop(1600);
+        const { m, run } = await profiledLoop({ blockProfile: true }, loop, loop.sum);
+        // The samples by hand: the callees to form in, scattered over the sixteen, as
+        // often as one another.
+        const taken = Array.from({ length: formed }, (_, k)=>loop.slots[k * 11 % 16]);
+        const at = /** @type {number} */ (m.layout.callProfile);
+        const words = new DataView(m.memory.buffer);
+        for (let reading = 0; reading < 64 && m.runtime.diagnostics().reforms === 0; reading++)
+        {
+            if (words.getUint32(at, true) === 0)
+            {
+                await m.runtime.translatePending();
+            }
+            for (let i = 0; i < 16; i++)
+            {
+                words.setUint32(at + 8 + i * 8, CODE + 10, true);
+                words.setUint32(at + 12 + i * 8, taken[(reading * 16 + i) % formed], true);
+            }
+            for (let i = 0; i < 5; i++)
+            {
+                await m.runtime.translatePending();
+            }
+        }
+        const { prediction } = m.runtime.diagnostics();
+        assert.deepEqual(prediction?.formed.find(one=>one.site === CODE + 10)?.callees,
+            [...taken].sort((a, b)=>a - b), 'the callees sampled, by address');
+        // A call that misses a callee formed in still arrives, through the entry hash:
+        // that each is found is in the count of the calls that took the jump.
+        const found = ()=>Number(m.runtime.diagnostics().mechanisms?.CALL_PREDICTED ?? 0);
+        for (let i = 0; i < 4; i++)
+        {
+            const before = found();
+            run();
+            assert.equal(found() - before, 100 * formed, 'a hundred calls to each formed in');
+            await m.runtime.translatePending();
+        }
+    });
+}
+
 test('an indirect call whose callees cannot be formed in is quiet once it comes due again',
     async t=>{
         if (!probeFeatures().tailCalls)

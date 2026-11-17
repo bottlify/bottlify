@@ -654,6 +654,13 @@ export function createDiagnostics(state){
                 callees: Math.max(0, ...[...rt.regions].flatMap(record=>
                     (record.targets ?? []).map(([site, callees])=>callees.filter(callee=>
                         record.unformed?.get(site)?.includes(callee) !== true).length))),
+                // Each call with callees formed in, by region: the callees in the
+                // order the call compares its target with them.
+                formed: [...rt.regions].flatMap(record=>(record.targets ?? [])
+                    .filter(([, callees])=>callees.length > 0)
+                    .map(([site, callees])=>({ entry: record.entry, site, callees: callees
+                        .filter(callee=>record.unformed?.get(site)?.includes(callee) !== true) })))
+                    .sort((a, b)=>a.site - b.site || a.entry - b.entry).slice(0, 4096),
                 sites: [...siteLog].sort((a, b)=>b[1].samples - a[1].samples).slice(0, 4096)
                     .map(([site, one])=>({ site, ...one })),
                 reforms: counts.reforms },
