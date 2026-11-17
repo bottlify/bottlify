@@ -93,15 +93,21 @@ const u64 = value=>[...u32(value >>> 0), ...u32(Math.floor(value / 2 ** 32))];
  *        initialization is done for the process".
  * @param {boolean} [options.long]  The process is an x86-64 one: the same
  *        calls in x86-64 code and the x64 convention (`longProcessInit`).
+ * @param {number} [options.prelude]  A routine of no arguments called first,
+ *        before any library is attached: the logon's RunOnce pass, in a
+ *        session's first process.
  * @returns {{ bytes: Uint8Array, attached: string[], tlsImages: number }}
  */
-export function synthesiseProcessInit({ libraries, entryPoint, loaderLock, long = false }){
+export function synthesiseProcessInit(options){
+    const { libraries, entryPoint, loaderLock, long = false, prelude = 0 } = options;
     if (long)
     {
-        return longProcessInit({ libraries, entryPoint, loaderLock });
+        return longProcessInit({ libraries, entryPoint, loaderLock, prelude });
     }
     /** @type {number[]} */
-    const code = [];
+    const code = prelude
+        ? [0xb8, ...u32(prelude), 0xff, 0xd0] // mov eax, prelude; call eax
+        : [];
     /** @type {string[]} */
     const attached = [];
     let tlsImages = 0;
@@ -185,9 +191,10 @@ export function synthesiseProcessInit({ libraries, entryPoint, loaderLock, long 
  *        options.libraries
  * @param {number} options.entryPoint
  * @param {{ address: number, enter: number, leave: number }} [options.loaderLock]
+ * @param {number} [options.prelude]
  * @returns {{ bytes: Uint8Array, attached: string[], tlsImages: number }}
  */
-function longProcessInit({ libraries, entryPoint, loaderLock }){
+function longProcessInit({ libraries, entryPoint, loaderLock, prelude = 0 }){
     /** @type {number[]} */
     const code = [0x48, 0x83, 0xec, 0x28]; //  sub rsp, 40
     /** @type {string[]} */
@@ -210,6 +217,10 @@ function longProcessInit({ libraries, entryPoint, loaderLock }){
     const locked = routine=>(loaderLock
         ? [0xb9, ...u32(loaderLock.address), ...call(routine)] // mov ecx, lock
         : []);
+    if (prelude)
+    {
+        code.push(...call(prelude));
+    }
     code.push(...locked(loaderLock?.enter ?? 0));
 
     for (const library of libraries)

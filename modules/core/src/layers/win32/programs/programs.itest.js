@@ -17,7 +17,9 @@ import assert from 'node:assert/strict';
 import { createApp } from '../../../app.js';
 import { buildExe } from '../../../../../../tools/fixtures/make-pe.mjs';
 import { waitingParent } from '../../../../../../tools/fixtures/spawn-program.mjs';
-import { HKEY_CURRENT_USER } from '../advapi32/registry.js';
+import { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE } from '../advapi32/registry.js';
+import { encodeAnsi } from '../kernel32/locale.js';
+import { RUN_ONCE_KEY } from './runonce.js';
 import { databaseBytes } from '../msi/database-writer.js';
 import { EXECUTE_SEQUENCE, packageDatabase, registryText } from '../msi/install.fixture.js';
 
@@ -199,6 +201,43 @@ test('regsvr32 /s registers a library and exits 0; its failures exit 3, 4 and 5'
             'an entry that answered E_FAIL');
         assert.equal((await startedBy(t, 'regsvr32 /s /n C:\\App\\reg.dll')).code, 1,
             '/n without /i');
+    });
+
+test('a session\'s first process runs RunOnce before its program, as a logon does',
+    { timeout: 120000 }, async t=>{
+        const app = await createApp({
+            executable: waitingParent('rundll32 C:\\App\\reg.dll,Entry child'),
+            imagePath: 'C:\\App\\setup.exe',
+            files: [{ path: 'C:\\App\\reg.dll', bytes: registeringLibrary() }],
+            unattended: true,
+        });
+        t.after(()=>app.dispose());
+        const hive = app.registry();
+        const { key } = hive.create(hive.root(HKEY_LOCAL_MACHINE), RUN_ONCE_KEY);
+        /** @param {string} name @param {string} command */
+        const put = (name, command)=>hive.setValue(key, name, 1, encodeAnsi(command));
+        put('a', 'regsvr32.exe /s "C:\\App\\reg.dll"');
+        // Kept: its name says so until it succeeds, and DllUnregisterServer fails.
+        put('!b', 'regsvr32 /s /u C:\\App\\reg.dll');
+        put('c', 'C:\\App\\elsewhere.exe /x');
+        /** @type {string[]} */
+        const said = [];
+        app.on('divergence', (/** @type {any} */ event)=>{
+            if (event.api === 'RunOnce')
+            {
+                said.push(event.detail);
+            }
+        });
+        assert.equal(await app.run({ timeoutMs: 60000 }), 0, 'the program ran after it');
+        assert.equal(registryText(app.registry(), HKEY_CURRENT_USER,
+            'Software\\Bottlify\\Registered', ''), 'yes', 'DllRegisterServer ran');
+        assert.equal(registryText(app.registry(), HKEY_CURRENT_USER, 'Software\\Bottlify\\Run',
+            ''), 'child', 'and the program itself');
+        const left = hive.open(hive.root(HKEY_LOCAL_MACHINE), RUN_ONCE_KEY);
+        assert.deepEqual(hive.values(left).map((/** @type {any} */ value)=>value.name), ['!b'],
+            'each value deleted before it runs, a "!" one only after it succeeds');
+        assert.deepEqual(said.map(line=>line.split(':')[0]), ['regsvr32 /s /u C',
+            'C'], 'the failure, and the command no program here runs, said');
     });
 
 test('rundll32 calls the entry with the rest of the line, its W spelling first, and exits 0',

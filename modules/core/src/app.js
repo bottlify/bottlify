@@ -74,7 +74,9 @@ import { createMemoryBudget, guestByLength, openMemoryBudget, RUN_HOLDER }
 import { eventFrom } from './system/events-across.js';
 import { defaultModules } from './layers/index.js';
 import { createRunRegistry } from './layers/win32/module.js';
-import { WINDOWS_DIRECTORY, programInPlaceOf, systemProgramImage } from './layers/win32/programs/table.js';
+import { PROGRAMS_LIBRARY, WINDOWS_DIRECTORY, programInPlaceOf, systemProgramImage }
+    from './layers/win32/programs/table.js';
+import { RUN_ONCE_ROUTINE } from './layers/win32/programs/functions.js';
 import { frameworkNeeded } from './layers/win32/mscoree/need.js';
 import { createWindowDirectory } from './layers/win32/user32/directory.js';
 import { shareTransport } from './layers/win32/wsock32/transport.js';
@@ -8314,11 +8316,17 @@ async function buildApp(options){
     memory.writeU32(loaderLock + pointerSize, 0xffffffff);
     const enter = kernel32?.addressOf('EnterCriticalSection') ?? 0;
     const leave = kernel32?.addressOf('LeaveCriticalSection') ?? 0;
+    // A session is a logon: its first process runs the RunOnce pass before
+    // anything of its own, as Explorer does before the desktop is the user's
+    // (an installation leaves a library's registration there for it).
+    const prelude = options.parentProcessId
+        ? 0 : findModule(PROGRAMS_LIBRARY)?.addressOf(RUN_ONCE_ROUTINE) ?? 0;
     const startup = synthesiseProcessInit({
         libraries: withTls.filter(held=>held !== mainModule || held.tls),
         entryPoint: image.entryPoint,
         ...enter !== 0 && leave !== 0 ? { loaderLock: { address: loaderLock, enter, leave } } : {},
         long,
+        prelude,
     });
     startupImages = [mainModule, ...shipped];
     for (const name of startup.attached)
@@ -8344,7 +8352,7 @@ async function buildApp(options){
         memory.writeBytes(start, refusal);
         attachOrder.length = 0;
     }
-    else if (startup.attached.length > 0 || startup.tlsImages > 0)
+    else if (startup.attached.length > 0 || startup.tlsImages > 0 || prelude !== 0)
     {
         start = allocateFromHeap(startup.bytes.length);
         memory.writeBytes(start, startup.bytes);

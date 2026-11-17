@@ -314,6 +314,41 @@ test('Steam\'s DirectX step installs what its setup\'s cabinets hold, in a direc
     }
 });
 
+test('a COM server DirectX\'s INF registers is left to RunOnce, regsvr32 at the next start',
+    async()=>{
+        const app = await mkdtemp(join(tmpdir(), 'redist-'));
+        try
+        {
+            const dx = join(app, '_CommonRedist', 'DirectX', 'Jun2010');
+            await mkdir(dx, { recursive: true });
+            await writeFile(join(dx, 'DXSETUP.exe'), peImage(0x14c));
+            const [x86, x64] = directxCabinets();
+            await writeFile(join(dx, 'Feb2010_X3DAudio_x86.cab'), x86);
+            await writeFile(join(dx, 'Jun2010_XAudio_x64.cab'), x64);
+            await writeFile(join(dx, 'installscript.vdf'), DIRECTX_SCRIPT);
+            const said = await installRedistributables(app,
+                ['_CommonRedist\\DirectX\\Jun2010\\installscript.vdf'], 'amd64');
+            assert.deepEqual(said.at(-1), 'redistributables: 2 file(s), 1 registry value(s)');
+            assert.ok(said.some(line=>/registered at the next start: XAudio2_7\.dll/.test(line)),
+                said.join('\n'));
+            const hive = JSON.parse(await readFile(join(app, '.bottlify', 'registry.json'),
+                'utf8'));
+            /** @type {any} */
+            let key = hive.roots.find((/** @type {any} */ root)=>root.id === 0x80000002).key;
+            for (const part of ['Software', 'Microsoft', 'Windows', 'CurrentVersion', 'RunOnce'])
+            {
+                key = key.keys.find((/** @type {any} */ one)=>one.name === part);
+            }
+            assert.deepEqual(key.values.map((/** @type {any} */ value)=>[value.name, value.type,
+                String.fromCharCode(...value.data)]), [['C:\\WINDOWS\\system32\\XAudio2_7.dll', 1,
+                'regsvr32.exe /s "C:\\WINDOWS\\system32\\XAudio2_7.dll"\0']]);
+        }
+        finally
+        {
+            await rm(app, { recursive: true, force: true });
+        }
+    });
+
 test('a package that lays DirectX\'s setup down has its cabinets installed, as its action does',
     async()=>{
         // XNA Framework 4.0's package carries DirectX's setup and X3DAudio's
@@ -363,10 +398,11 @@ test('the DirectX step runs over a bottle a browser writes in place: the tree al
     const said = await redist.installRedistributables(tree,
         ['_CommonRedist\\DirectX\\Jun2010\\installscript.vdf'], 'amd64');
     assert.equal(said[0], '_CommonRedist\\DirectX\\Jun2010\\DXSETUP.exe: 2 file(s) by its '
-        + 'cabinets\' INFs, not registered: XAudio2_7.dll');
+        + 'cabinets\' INFs, registered at the next start: XAudio2_7.dll');
     assert.deepEqual([...files.keys()].filter(path=>path.startsWith('.bottlify')).sort(), [
         '.bottlify\\drive_c\\WINDOWS\\SysWOW64\\X3DAudio1_7.dll',
         '.bottlify\\drive_c\\WINDOWS\\system32\\XAudio2_7.dll',
+        '.bottlify\\registry.json',
     ]);
 });
 

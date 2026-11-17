@@ -62,6 +62,12 @@ The order matters in three places.
   (`kernel32/dllentry.js`). A static import of a library found nowhere and carried by no Windows
   puts the loader's refusal in that stub's place: ExitProcess with STATUS_DLL_NOT_FOUND, nothing
   attached and nothing of the program run (`roadmap/decisions.md` A256).
+- **A session is a logon.** Its first process's stub first calls the engine's RunOnce pass
+  (`programs/runonce.js`): each command under `HKLM` and then `HKCU`
+  `Software\Microsoft\Windows\CurrentVersion\RunOnce`, by name, run by the system program it names
+  (regsvr32 above all) on that thread and waited for, its value deleted first, or after it
+  succeeds for a name starting with `!`. A process the session starts later skips it. An install
+  that registers no COM server itself leaves `regsvr32 /s` there (`roadmap/decisions.md` A261).
 
 With processes at once (`concurrency` 2 or 4), the engine thread builds the run's system instead:
 it mounts the bundle, lays the session and the page's files on the volume, makes the registry and

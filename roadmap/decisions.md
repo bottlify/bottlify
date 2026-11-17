@@ -671,7 +671,7 @@ libraries copied where the INF puts them for the bottle's machine, since the eng
 DSETUP and D3DX 9 but not X3DAudio, XAPOFX, XAudio2, XACT, D3DCompiler or D3DX 10 and 11, which a
 program imports and otherwise finds missing. A library the engine also answers stays the
 engine's while its table covers what a program imports from it, and the COM servers are copied
-but not registered. Beyond what Steam declares, every other program the app carries is read the same way, and a
+and left to the bottle's first start to register, through RunOnce (A261). Beyond what Steam declares, every other program the app carries is read the same way, and a
 package whose files all go into the Windows folder is applied too: an engine's prerequisite
 installer (Unreal's `UE4PrereqSetup_x64.exe`), whose newer runtime the program's launcher checks
 for and on Windows offers to install on the person's say-so; without it the bottle asks a
@@ -1942,6 +1942,11 @@ A runtime's package that lays DirectX's setup down with its cabinets for a custo
 (XNA Framework 4.0's: X3DAudio, XAudio2, XACT, which its assemblies import) has the cabinets
 installed the same way when the package is applied; the action itself is not run. The COM
 servers among them (XAudio2, XACT) are left unregistered, said. *2026-11-17.*
+Reconsidered: unregistered, XNA's XAudio2 was refused by CoCreateInstance and a title had no
+sound. Each library an INF registers ([DllRegisterServer]), and each a package's SelfReg table
+names, is now left for the bottle's next start as a RunOnce value, `regsvr32.exe /s "<path>"`,
+which the session's logon runs (A261): the library's own DllRegisterServer, as the setup calls
+it. *2026-11-17.*
 
 **The screen is composed as Windows 7's desktop window manager composes it, not drawn into as XP's
 is.** On XP every window draws straight onto one screen, clipped by the windows over it, and a
@@ -2383,3 +2388,17 @@ Windows has them, so the per-type flags would answer "safe" for what is not; the
 for the programs, scripts, shortcuts and installers (exe, com, bat, cmd, pif, scr, js, vbs, wsf, hta,
 msi, lnk, reg and the like - `shlwapi/registry.js` lists them) and FALSE for every other type.
 *2026-11-17.*
+
+**A261. A session is a logon: its first process runs RunOnce before the program, in itself.**
+Explorer runs `Software\Microsoft\Windows\CurrentVersion\RunOnce` under HKEY_LOCAL_MACHINE and
+then HKEY_CURRENT_USER at a logon, each command its own process, waited for, by the values' names,
+a value deleted before its command runs, or after it succeeds for a name starting with `!`. Here
+a session is the logon, and its first process's start calls the pass before any library is
+attached (`programs/runonce.js`); a process the session starts later does not. The commands are
+run by the system programs this engine provides, in the first process and on its thread, each
+with its own command line, rather than as processes of their own: what they do is what their
+exports do there, and regsvr32's library is loaded and freed before the program's first
+instruction. A command naming any other program is not run, said. It is where an install that
+runs no guest code leaves a COM server's registration (A67, and DirectX's setup): the library's
+own DllRegisterServer writes what it writes. Revisit when a setup is found that leaves another
+program in RunOnce, or a registration that must run in a process of its own. *2026-11-17.*

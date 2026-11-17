@@ -5912,6 +5912,7 @@ export function createWin32Module(){
                 readMemory,
                 /** @param {string} layer */
                 need: layer=>config?.onLayerNeeded?.(layer),
+                divergence: config?.divergence,
             });
 
             // The Windows Runtime's library came with Windows 8: on 7 and XP
