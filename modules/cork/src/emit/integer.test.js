@@ -11,6 +11,7 @@ import { decode } from '../decode/decoder.js';
 import { createState, evaluate } from '../ir.js';
 import { CF, OF, PF, SF, ZF } from '../decode/table.js';
 import { BRAND } from '../cpuid.js';
+import { apicWord } from '../runtime/layout.js';
 
 const CODE = 0x1000;
 const STACK = 0x80000;
@@ -614,6 +615,36 @@ test('cpuid describes the executors as processors: their count, the asking one\'
         'leaf 4: three more cores in the package, no cache shared');
     assert.deepEqual(ask(4, 2, 4, 1), [0x0c000122, 0x00c0003f, 0x7f, 0]);
     assert.deepEqual(ask(4, 1, 0), ask(1, 0, 0), 'the vendor leaf does not move');
+});
+
+test('cpuid translated for every executor at once names the executor it runs on', ()=>{
+    // mov eax, leaf; xor ecx, ecx; cpuid; hlt
+    const code = (/** @type {number} */ leaf)=>[0xb8, leaf, 0, 0, 0, 0x31, 0xc9, 0x0f, 0xa2, 0xf4];
+    for (const executor of [0, 1, 3])
+    {
+        const [shared, own] = [true, false].map(yes=>{
+            const m = createTestMachine({ processors: 4, executor, shared: yes });
+            return (/** @type {number} */ leaf)=>{
+                m.write(CODE, code(leaf));
+                const exit = m.runProgram(CODE);
+                assert.equal(exit.kind, 3);
+                assert.equal(exit.unsupported.size, 0, 'cpuid is translated');
+                return ['eax', 'ebx', 'ecx', 'edx'].map(name=>m.reg(name) >>> 0);
+            };
+        });
+        for (const leaf of [0, 1, 2, 4])
+        {
+            assert.deepEqual(shared(leaf), own(leaf), `executor ${executor}, leaf ${leaf}`);
+        }
+        assert.equal(shared(1)[1] >>> 24, executor);
+    }
+    // The host trades processors: the word is what the code answers from then on.
+    const m = createTestMachine({ processors: 4, executor: 1, shared: true });
+    m.write(CODE, code(1));
+    new DataView(m.memory.buffer).setUint32(/** @type {number} */ (m.layout.apic),
+        apicWord(2), true);
+    assert.equal(m.runProgram(CODE).unsupported.size, 0);
+    assert.equal(m.reg('ebx') >>> 0, 0x02040800);
 });
 
 test('int3 and int n are left to the other executor, before the instruction', ()=>{

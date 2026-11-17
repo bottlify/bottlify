@@ -39,8 +39,10 @@ export function createForming(state){
     } = /** @type {import('./state.js').Base} */ (state);
     const { HOT_BUCKET, barrenAdd, batchesOut, buckets, checkedAt, closedIn, compileOn, copiesStep,
         copiesWanted, counts, coverKeys, coveredIn, coveredOut, dropKey, finishBatch, formAt,
-        freeTranslator, giveUp, inFlight, lookUpLater, lookUpOn, noteWay, overdue, precisionFlags,
+        dropTranslator, freeTranslator, giveUp, inFlight, lookUpLater, lookUpOn, noteWay, overdue,
+        precisionFlags,
         prefetch, profileAt, publishOn, queue, readModules, recordBefore, reformStep, refused,
+        refusedWhy,
         regionOfRecord,
         relinkStep, sampleCalls, sourcesChanged, stamp, storeHere, storedOwner, toPublish,
         translatable, translatorLoading, translatorReady, translators, unqueue, waitedFor,
@@ -200,12 +202,40 @@ export function createForming(state){
         // A batch the worker has held past the in-flight limit is given
         // up: its answer, should it come, no longer matches, and the
         // candidates it held are free to be taken again.
-        for (const translator of translators)
+        for (const translator of [...translators])
         {
-            if (translator.pending !== null && overdue(translator.pending.at))
+            const { pending } = translator;
+            // By its last word, not by when the batch went: a worker short of a
+            // processor answers late, and a batch given up by the clock alone had
+            // its work thrown away while the next waited behind it - past its own
+            // limit by the time the worker reached it, and so on with every batch
+            // after: nothing published again, the program left to the interpreter.
+            if (pending !== null && overdue(pending.heard ?? pending.at))
             {
                 refused['worker: no answer'] = (refused['worker: no answer'] ?? 0) + 1;
+                // Which batch, and the region the worker never came back from: that
+                // one is not asked for again, and the worker, which answers no
+                // more, goes - its other regions are free to be taken.
+                const { metas, relink, doing } = pending;
+                const entriesOf = (/** @type {{ entry: number }[]} */ list)=>
+                    `${list.length} at ${list.slice(0, 48).map(one=>(one.entry >>> 0).toString(16))
+                        .join(' ')}`;
+                const at = doing === undefined || doing < 0 ? undefined
+                    : relink ? relink[doing]?.entry : metas?.[doing]?.region.entry;
+                const stuck = relink || doing === undefined ? undefined : metas?.[doing];
+                const what = `worker: no answer to ${relink
+                    ? `a relink of ${entriesOf(relink)}`
+                    : `a batch of ${entriesOf((metas ?? []).map(one=>one.region))}`}${
+                    at === undefined ? '' : `, silent at ${(at >>> 0).toString(16)}`}`;
+                refusedWhy[what] = (refusedWhy[what] ?? 0) + 1;
                 giveUp(translator);
+                if (stuck !== undefined)
+                {
+                    barrenAdd(stuck.region.entry, stuck.entryTop,
+                        'emit: the worker never answered');
+                }
+                dropTranslator(translator);
+                rt.openTranslator();
             }
         }
         if (toPublish[0]?.ready === true)

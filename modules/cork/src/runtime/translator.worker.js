@@ -101,11 +101,15 @@ function connection(send){
         {
             Atomics.store(busyCell.cells, busyCell.at + 2, sinceEpoch(busyCell.epoch));
         }
+        // A word before each region: the runtime gives up a batch only when its
+        // worker has said nothing for long, and knows the region it stopped at.
+        const telling = { ...options, progress: (/** @type {number} */ index)=>
+            send({ id, alive: index }, []) };
         try
         {
             const batch = relink
-                ? relinkBatch(relink, layout, features, options, cache)
-                : emitBatch(jobs ?? [], layout, features, options, cache);
+                ? relinkBatch(relink, layout, features, telling, cache)
+                : emitBatch(jobs ?? [], layout, features, telling, cache);
             // Compiled here too: a WebAssembly.Module travels in the message
             // (structured clone shares the compiled code), so the engine thread
             // only instantiates -- the compile was most of its cost on a loading

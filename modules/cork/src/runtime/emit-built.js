@@ -310,8 +310,11 @@ function sameShape(kept, shape){
  *     callReturn?: boolean, linkedCalls?: boolean, crossTailCalls?: boolean,
  *     callDepth?: number, looseStacks?: boolean, checkReads?: boolean, zeroPage?: boolean,
  *     memory?: { shared?: boolean, maxPages?: number },
- *     expansion?: import('../emit/region.js').ExpansionNote | null }}
+ *     expansion?: import('../emit/region.js').ExpansionNote | null,
+ *     progress?: (index: number) => void }}
  *     [options]
+ *     progress: told the index of each job as its emitting begins (and, of a relink's, its
+ *     forming before that): a worker's sign of life to its runtime, and the job it is on;
  *     timings: `emitMs` and `encodeMs` are measured (the runtime's `timings`), else 0;
  *     precise: nothing relaxed (the runtime's `precise`); place: job i's function goes at
  *     the module's range of the table plus i, a transfer into the range a direct tail call
@@ -357,6 +360,7 @@ export function emitBatch(jobs, layout, features, options = {}, cache = undefine
     const functions = jobs.map(()=>null);
     /** @type {BuiltBatch['results']} */
     const results = jobs.map((job, index)=>{
+        options.progress?.(index);
         const { region, entryTop, checked, copies, precision, floats, ownWindows } = job;
         try
         {
@@ -489,7 +493,8 @@ export function relinkBatch({ jobs, pages, form, formable }, layout, features, o
     // looked at for one is the same callee for the other only where both may form on it.
     /** @type {Map<string, ReturnType<typeof formShared>>} */
     const sharedBy = new Map();
-    const formed = jobs.map(job=>{
+    const formed = jobs.map((job, index)=>{
+        options.progress?.(index);
         const formablePages = job.formable === undefined ? batchFormable : new Set(job.formable);
         const key = job.formable === undefined ? '' : [...job.formable].sort((a, b)=>a - b).join();
         let shared = sharedBy.get(key);
@@ -510,8 +515,12 @@ export function relinkBatch({ jobs, pages, form, formable }, layout, features, o
                 ...(job.floats === true ? { floats: true } : {}),
                 ...(job.ownWindows === true ? { ownWindows: true } : {}) } : null;
     });
+    // The job being emitted by its place among the jobs asked for, not among the formed.
+    const asked = formed.flatMap((one, index)=>(one === null ? [] : [index]));
     const batch = emitBatch(/** @type {{ region: any, entryTop: number }[]} */ (
-        formed.filter(one=>one !== null)), layout, features, options, cache);
+        formed.filter(one=>one !== null)), layout, features,
+    options.progress === undefined ? options
+        : { ...options, progress: at=>options.progress?.(asked[at]) }, cache);
     let next = 0;
     const results = formed.map(one=>(one === null
         ? { ok: /** @type {const} */ (false), message: 'changed' }

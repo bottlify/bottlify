@@ -19,8 +19,8 @@ import {
 } from '../emit/region.js';
 import { buildHelpersModule } from '../emit/helpers.js';
 import {
-    PAGE, Tables, basesOf, executorBytes, executorLayout, ownLayout, pagesFor, sharedLayout,
-    tablesSize,
+    PAGE, Tables, apicWord, basesOf, executorBytes, executorLayout, ownLayout, pagesFor,
+    sharedLayout, tablesSize,
 } from '../runtime/layout.js';
 import { PageFlag, createPageTable } from '../runtime/pages.js';
 import { ANY_TOP, createEntries } from '../runtime/entries.js';
@@ -86,6 +86,10 @@ export function createTestMachine(given = {}){
     new DataView(memory.buffer).setUint8(layout.x87Empty, 0xff);
     new DataView(memory.buffer).setUint16(layout.x87Control, 0x37f, true);
     new DataView(memory.buffer).setUint32(layout.mxcsr, 0x1f80, true);
+    if (layout.apic !== undefined)
+    {
+        new DataView(memory.buffer).setUint32(layout.apic, apicWord(layout.processor ?? 0), true);
+    }
     const view = ()=>new DataView(memory.buffer);
     const bytes = ()=>new Uint8Array(memory.buffer);
     const found = { ...features(), ...given.features };

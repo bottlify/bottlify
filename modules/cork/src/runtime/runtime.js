@@ -29,7 +29,6 @@
 import { TIER_SLOT, enterRegion } from '../emit/region.js';
 import { RANGE, SHAPE } from '../emit/x87.js';
 import { HELD, MADE, PRECISION } from '../emit/memory.js';
-import { openTranslationWorker } from './translator.js';
 import { keyOf } from './entries.js';
 import { PageFlag } from './pages.js';
 import { resetBlockCounts } from './block-profile.js';
@@ -96,22 +95,15 @@ export function createCorkRuntime(env){
     } = join(rt, createVariants(rt));
     const { liftVolatile, invalidatePage, storedInto, translatable, stored, codeWritten,
         takeWrites, markWritten, takeCodeWrites, noteStack } = join(rt, createCodeWrites(rt));
-    const { workerUrl, coveredOut, coveredIn, attachTranslator, detachTranslator, closeTranslators
+    const { openTranslator, coveredOut, coveredIn, attachTranslator, detachTranslator,
+        closeTranslators
     } = join(rt, createTranslators(rt));
     const { flushStore } = join(rt, createStore(rt));
     join(rt, createPublish(rt));
     join(rt, createRelink(rt));
-    if (workerUrl !== null)
+    for (let n = 0; n < settings.translators; n++)
     {
-        for (let n = 0; n < settings.translators; n++)
-        {
-            openTranslationWorker(workerUrl).then(adapter=>{
-                if (adapter !== null)
-                {
-                    attachTranslator(adapter);
-                }
-            }, ()=>{});
-        }
+        openTranslator();
     }
     const { translateNow } = join(rt, createForming(rt));
 
@@ -197,7 +189,14 @@ export function createCorkRuntime(env){
             const retired = (counterWord() - before) >>> 0;
             corkRetired += tierEntered === null ? retired
                 : retired - ((tierEntered() - tierBefore) >>> 0);
-            const kind = KINDS[code & 0xff] ?? 'untranslated';
+            const left = KINDS[code & 0xff] ?? 'untranslated';
+            // A call the spent budget kept from being made leaves as a call out of
+            // translated code does, at its target (`callAndReturn`): the slice's
+            // end, not a target with nothing translated. It was counted as that,
+            // and a hot function met at every slice's end led the list of misses.
+            const kind = left === 'untranslated' && code >>> 8 === 0 && retired >= budget
+                && retired > 0 && entries.entryOf(view().getUint32(layout.eip, true),
+                view().getUint8(layout.x87Top)) >= 0 ? 'budget' : left;
             exits[kind]++;
             if (leftHeld >= 0 && retired === 0 && kind === 'untranslated')
             {

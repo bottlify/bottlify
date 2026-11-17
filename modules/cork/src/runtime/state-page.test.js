@@ -30,6 +30,7 @@ test('the state page\'s occupants lie apart, the wrap word past the deepest call
         ['state block', 0, STATE_BLOCK_SIZE],
         ['NaN record', /** @type {number} */ (layout.nanFirst) - state, NanRecord.SIZE],
         ['interrupt word', /** @type {number} */ (layout.interrupt) - state, 4],
+        ['processor word', /** @type {number} */ (layout.apic) - state, 4],
         ['call stack', CallStack.DEPTH, CallStack.STACK + CallStack.LIMIT * 4 - CallStack.DEPTH],
         ['wrap word', WRAP_WORD, 4],
     ];

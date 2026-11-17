@@ -292,8 +292,9 @@ export function baseState({ memory, ram, layout, sharedLayout = undefined, confi
  * copies -- each takes over regions that are running, and a batch
  * publishing beside it could publish one of them).
  * @typedef {{ id: number, metas?: any[], relink?: RegionRecord[], store: any,
- *     at: number, alone: boolean, covers?: number[] }} Pending
- *     covers: what its regions cover until they are published (`coveredOut`)
+ *     at: number, alone: boolean, covers?: number[], heard?: number, doing?: number }} Pending
+ *     covers: what its regions cover until they are published (`coveredOut`); heard: when
+ *     its worker last said it goes on, and `doing` the job it was then beginning
  */
 
 /**

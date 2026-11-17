@@ -1175,6 +1175,12 @@ function describe(result, context, calls, symbols){
             {
                 say(`      interpreted from: ${from.join(', ')}`);
             }
+            // Its own translator, as the process's below: the process's figures say
+            // nothing of what another executor's runtime formed, took or left.
+            if (one.cork)
+            {
+                describeCork(one.cork, (/** @type {string} */ line)=>say(`    ${line}`));
+            }
             // Who woke whom: a notify is a lock every thread shares and a sleeping
             // side's wake tens of microseconds, so the share asleep is the cost.
             const theirs = spent.waits;

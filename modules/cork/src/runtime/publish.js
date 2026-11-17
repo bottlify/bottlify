@@ -145,8 +145,14 @@ export function createPublish(state){
         // Entries for every block start but the cut ones; a region with x87
         // in it is keyed by the top it was compiled for. A block closed in a
         // loop is no x87 matter.
-        const top = built.labels.some(([start, label])=>cut.has(label) && !closedSet.has(start))
-            || usesX87(region) ? built.entryTop : ANY_TOP;
+        // One with none is the same code at every top: where a block that is no
+        // entry keys it by one all the same, that is the top it was asked at, not
+        // the one its record was stored under - a store's hit entered at the
+        // stored top left the asked one with no entry, and the exit came again.
+        const withX87 = usesX87(region);
+        const top = withX87 ? built.entryTop
+            : built.labels.some(([start, label])=>cut.has(label) && !closedSet.has(start))
+                ? one.entryTop : ANY_TOP;
         const starts = built.labels.filter(([, label])=>!cut.has(label));
         if (starts.length === 0)
         {

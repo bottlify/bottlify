@@ -2176,7 +2176,10 @@ export function createHarness(canvas, how = {}){
                 ? JSON.parse(metrics('kernel').sharedTime) : metrics('kernel').sharedTime ?? null,
             remotes: (metrics('cpu').executors ?? []).map((/** @type {any} */ one)=>({
                 index: one.index, retired: one.retired ?? null, spent: one.spent ?? null,
-                said: one.said ?? null, interpretedFrom: one.interpretedFrom ?? null })),
+                said: one.said ?? null, interpretedFrom: one.interpretedFrom ?? null,
+                // Its own translator's account, less the lists a profile run fills.
+                cork: one.cork ? { ...one.cork, blockCounts: undefined, storeTrace: undefined }
+                    : null })),
         };
         result.threads = {
             byState: metrics('kernel').byState ?? {},

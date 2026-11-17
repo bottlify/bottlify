@@ -21,7 +21,8 @@
 
 import { blockState, interpret } from './interp.js';
 import { Fault, Unsupported } from './ir.js';
-import { PAGE, Tables, WRAP_SLACK, ownLayout, pagesFor, tablesSize } from './runtime/layout.js';
+import { PAGE, Tables, WRAP_SLACK, apicWord, ownLayout, pagesFor, tablesSize }
+    from './runtime/layout.js';
 import { PageFlag } from './runtime/pages.js';
 import { createCorkRuntime } from './runtime/runtime.js';
 import { eflagsOf, setEflags } from './emit/flags.js';
@@ -90,6 +91,10 @@ export function createMachine({ ramSize = 16 << 20, config = {}, trapPort, featu
     view().setUint8(layout.x87Empty, 0xff);
     view().setUint16(layout.x87Control, 0x37f, true);
     view().setUint32(layout.mxcsr, 0x1f80, true);
+    if (layout.apic !== undefined)
+    {
+        view().setUint32(layout.apic, apicWord(layout.processor ?? 0), true);
+    }
     setEflags(view(), layout, 0x2);
     // A growing memory's RAM is its floor's until it grows: the wrap's mask says so.
     let ramNow = growing?.floor ?? ramSize;
