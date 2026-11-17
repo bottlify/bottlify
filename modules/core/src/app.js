@@ -8754,6 +8754,12 @@ async function buildApp(options){
      * @returns {any}
      */
     const fail = (reason, error)=>{
+        if (disposed)
+        {
+            // Whatever a turn under way met once its machine was gone is the
+            // disposal, not a failure of the program: no trace, no event.
+            return gone();
+        }
         // The exception frame, when there is one. Without it the report names
         // the ROM stub the processor is standing in rather than the instruction
         // that faulted, and every register it prints is read from a machine
@@ -8768,6 +8774,17 @@ async function buildApp(options){
 
     /** This process's memory, once it has gone (`spareMemory`). @type {SpareMemory | null} */
     let spare = null;
+    /**
+     * Set by `dispose`: the machine under a run still turning is gone. A process
+     * standing beside the program runs on a clock of its own, so the program's
+     * end is not its loop's, and a loop left turning takes the thread from
+     * whatever the page runs next.
+     */
+    let disposed = false;
+    const wasDisposed = ()=>disposed;
+    /** What a run ends with then. No trace: there is no machine left to read one from. */
+    const gone = ()=>Object.assign(new Error('the machine was disposed while its program ran'),
+        { reason: 'disposed' });
 
     return {
         /** Where the program was mapped and where it starts. */
@@ -8817,7 +8834,7 @@ async function buildApp(options){
             let othersRung = null;
             /** When the sound was last pumped (`SOUND_PUMP_MS`). */
             let pumpedAt = -Infinity;
-            while (worked < maxTurns && !expired())
+            while (worked < maxTurns && !expired() && !wasDisposed())
             {
                 if (paused)
                 {
@@ -9249,6 +9266,10 @@ async function buildApp(options){
                     }
                     journal.end('turn');
                 }
+            }
+            if (disposed)
+            {
+                throw gone();
             }
             throw fail('runaway', new Error(worked < maxTurns
                 ? `program did not finish within ${timeoutMs} ms`
@@ -10130,6 +10151,7 @@ async function buildApp(options){
          */
         spareMemory: ()=>spare,
         dispose(){
+            disposed = true;
             // Read while the machine stands: the arena's mark is the last
             // thing that says where the guest wrote.
             const memoryLeft = cpu.wasmMemory?.() ?? null;
@@ -12121,7 +12143,11 @@ export async function createApp(options){
             code = await runProcesses(runOptionsNow, line, true);
         }
         catch (e){
-            events.emit('error', { reason: 'server', error: e });
+            // A run the page ended under it is no failure of the server.
+            if (/** @type {any} */ (e)?.reason !== 'disposed')
+            {
+                events.emit('error', { reason: 'server', error: e });
+            }
         }
         standingBeside.delete(listed);
         await retire(line.current);
@@ -13209,7 +13235,11 @@ export async function createApp(options){
                 code = await runProcesses(runOptionsNow, line, true);
             }
             catch (e){
-                events.emit('error', { reason: 'process', error: e });
+                // A run the page ended under it is no failure of the child.
+                if (/** @type {any} */ (e)?.reason !== 'disposed')
+                {
+                    events.emit('error', { reason: 'process', error: e });
+                }
             }
             finally
             {
@@ -13478,7 +13508,12 @@ export async function createApp(options){
          * earlier, because the process that takes this one's place still needs
          * them.
          */
-        dispose: ()=>Promise.all([...serving].map(line=>line.current.dispose()))
+        dispose: ()=>Promise.all(
+            // Every machine of the run on this thread, not only the servers: a child
+            // beside its parent turns on a loop of its own, which ends when its
+            // machine is disposed and not when the program's does.
+            [...new Set([...[...serving].map(line=>line.current), ...standing])]
+                .filter(one=>one !== current).map(one=>one.dispose()))
             .then(()=>current.dispose())
             .then(()=>{
                 // A process in a worker of its own keeps its memories for the

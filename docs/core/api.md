@@ -185,9 +185,9 @@ counts the frames that went so.
 
 | Member | What it does |
 | --- | --- |
-| `run({ maxTurns? })` | Runs the program; resolves with its exit code. |
+| `run({ maxTurns? })` | Runs the program; resolves with its exit code. Rejects with an error whose `reason` is `disposed` when the run is disposed under it. |
 | `pause()`, `resume()`, `stop()` | Hold, continue, or end the run. |
-| `dispose()` | Ends the run and frees the engine; the worker stays with the canvas. |
+| `dispose()` | Ends the run - the program and every process it started - and frees the engine; the worker stays with the canvas. |
 | `on(name, handler)` | Subscribes to an event (below); returns the function that unsubscribes. |
 | `answerMessageBox(id, button)` | Answers a `message-box` event with the id of the button pressed. |
 | `input.attach(canvas, { pointerLock? })`, `input.detach()` | Capture keyboard, mouse and gamepads from the canvas, or stop. |
