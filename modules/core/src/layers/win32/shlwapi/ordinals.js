@@ -51,6 +51,10 @@ export const SHLWAPI_NAMED_ORDINALS = Object.freeze([
     [218, 'SHUnicodeToAnsiCP'], [270, 'GUIDFromStringW'], [280, 'SHRegGetIntW'],
     [343, 'SHRegGetCLSIDKeyA'], [344, 'SHRegGetCLSIDKeyW'], [364, 'DoesStringRoundTripA'],
     [365, 'DoesStringRoundTripW'],
+    [3, 'PathFileExistsDefExtA'], [4, 'PathFileExistsDefExtW'], [5, 'PathFindOnPathExA'],
+    [6, 'PathFindOnPathExW'], [170, 'PathSkipLeadingSlashesA'],
+    [445, 'PathFileExistsAndAttributesA'], [446, 'PathFileExistsAndAttributesW'],
+    [448, 'FixSlashesAndColonW'],
 ]);
 
 const S_OK = 0;

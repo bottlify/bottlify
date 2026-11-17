@@ -46,7 +46,11 @@ const ERROR_KEY_HAS_CHILDREN = 1020;
 const KEY_READ = 0x20019;
 
 const S_OK = 0;
+const S_FALSE = 1;
 const E_INVALIDARG = 0x80070057;
+/** PathMatchSpecEx's flags. */
+const PMSF_MULTIPLE = 0x1;
+const PMSF_DONT_STRIP_SPACES = 0x10000;
 
 /**
  * Hue, luminance and saturation each run from 0 to 240 here, against 255 for
@@ -490,6 +494,30 @@ export function createShlwapiFunctions(host){
             const path = read(file);
             const masks = read(spec);
             return path !== null && masks !== null && matchesSpec(path, masks) ? 1 : 0;
+        },
+    });
+
+    /**
+     * PathMatchSpecEx for either width.
+     *
+     * @param {(address: number) => string | null} read
+     */
+    const pathMatchSpecEx = read=>({
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: ([file, spec, flags])=>{
+            const path = read(file);
+            const masks = read(spec);
+            if (path === null || masks === null)
+            {
+                return E_INVALIDARG;
+            }
+            const items = (flags & PMSF_MULTIPLE) !== 0 ? masks.split(';') : [masks];
+            const strip = (flags & PMSF_DONT_STRIP_SPACES) === 0;
+            return items.some(item=>{
+                const mask = strip ? item.replace(/^ +/, '') : item;
+                return mask === '*.*' || wildcard(path, mask);
+            }) ? S_OK : S_FALSE;
         },
     });
 
@@ -949,6 +977,16 @@ export function createShlwapiFunctions(host){
          */
         PathMatchSpecA: pathMatchSpec(pathAt),
         PathMatchSpecW: pathMatchSpec(widePathAt),
+
+        /**
+         * HRESULT PathMatchSpecExA(LPCSTR pszFile, LPCSTR pszSpec, DWORD dwFlags)
+         *
+         * S_OK for a match and S_FALSE for none. PMSF_NORMAL takes the spec
+         * as one mask; PMSF_MULTIPLE as a `;` list, each mask's leading
+         * spaces skipped unless PMSF_DONT_STRIP_SPACES says not to.
+         */
+        PathMatchSpecExA: pathMatchSpecEx(pathAt),
+        PathMatchSpecExW: pathMatchSpecEx(widePathAt),
 
         /**
          * void ColorRGBToHLS(COLORREF clrRGB, WORD *pwHue, WORD *pwLuminance,
