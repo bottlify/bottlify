@@ -790,9 +790,20 @@ export function createRecording(options){
      * begin, and what each waits on: the texture, for a level's bytes as for
      * its own, or the surface. Sent with the next call that may read them, or
      * that is made on what they belong to.
+     *
+     * Kept by what they wait on, so a call finds the bytes it may read by the
+     * objects it names: a texture unlocked and never drawn again waits for
+     * good, and a search through every one at each draw and each run of the
+     * ring was half of one title's engine thread.
      */
-    const pending = { addresses: /** @type {Map<number, number | null>} */ (new Map()),
-        owners: /** @type {Map<number, object>} */ (new Map()) };
+    const pending = {
+        /** Each waiting object's ranges, by where they begin. @type {Map<object, Map<number, number | null>>} */
+        byOwner: new Map(),
+        /** The object each range waits on. @type {Map<number, object>} */
+        owners: new Map(),
+        /** The surfaces among the objects: every call that may read reads them. @type {Set<object>} */
+        surfaces: new Set(),
+    };
 
     /** What an object's unlocked bytes wait on. @param {object} object */
     const keyOf = object=>containerOf.get(object) ?? object;
@@ -809,10 +820,37 @@ export function createRecording(options){
 
     /** @param {object} key @returns {(locked: Locked) => void} */
     const pendFor = key=>({ address, length })=>{
-        const held = pending.addresses.get(address);
-        pending.addresses.set(address, held === undefined ? length
+        const was = pending.owners.get(address);
+        const held = was === undefined ? undefined : pending.byOwner.get(was)?.get(address);
+        if (was !== undefined && was !== key)
+        {
+            unpend(was, address);
+        }
+        let ranges = pending.byOwner.get(key);
+        if (!ranges)
+        {
+            ranges = new Map();
+            pending.byOwner.set(key, ranges);
+            if (!isTexture(key))
+            {
+                pending.surfaces.add(key);
+            }
+        }
+        ranges.set(address, held === undefined ? length
             : held === null || length === null ? null : Math.max(held, length));
         pending.owners.set(address, key);
+    };
+
+    /** @param {object} key @param {number} address */
+    const unpend = (key, address)=>{
+        pending.owners.delete(address);
+        const ranges = pending.byOwner.get(key);
+        ranges?.delete(address);
+        if (ranges?.size === 0)
+        {
+            pending.byOwner.delete(key);
+            pending.surfaces.delete(key);
+        }
     };
 
     /**
@@ -824,7 +862,8 @@ export function createRecording(options){
      * the run does not name.
      *
      * @param {any} target @param {string} name @param {any[]} args
-     * @returns {(key: object) => boolean}
+     * @returns {Set<object> | null}  the textures it may read beside the
+     *     surfaces, or null for every one
      */
     const readBy = (target, name, args)=>{
         /** @type {Set<object>} */
@@ -856,15 +895,18 @@ export function createRecording(options){
             && args[0] instanceof Uint8Array && target.appliesStateBlocks(args[0]) === true;
         if (!run && !name.startsWith('Draw'))
         {
-            return key=>!isTexture(key) || named.has(key);
+            return named;
         }
         const bound = target.boundTextures;
         if (!bound || (run && applies))
         {
-            return ()=>true;
+            return null;
         }
-        const sampled = new Set(bound);
-        return key=>!isTexture(key) || named.has(key) || sampled.has(key);
+        for (const texture of bound)
+        {
+            named.add(texture);
+        }
+        return named;
     };
 
     /**
@@ -894,20 +936,31 @@ export function createRecording(options){
      * it: copied into the batch now, out of the guest's memory in place,
      * before the call can write over them. The rest wait on.
      *
-     * @param {(key: object) => boolean} [which]
+     * @param {Set<object> | null} [textures]  those read beside the surfaces;
+     *     null, every one
+     * @param {object | null} [except]  one whose bytes the call does not read
      */
-    const shipPending = (which = ()=>true)=>{
+    const shipPending = (textures = null, except = null)=>{
         /** @type {{ address: number, length: number, slot: number }[]} */
         const lent = [];
         /** @type {{ address: number, bytes: Uint8Array }[]} */
         const taken = [];
-        for (const [address, length] of pending.addresses)
+        const owners = textures === null ? [...pending.byOwner.keys()]
+            : [...pending.surfaces, ...textures];
+        /** @type {[number, number | null][]} */
+        const ranges = [];
+        for (const owner of owners)
         {
-            if (!which(/** @type {object} */ (pending.owners.get(address))))
+            const held = owner === except ? undefined : pending.byOwner.get(owner);
+            if (held)
             {
-                continue;
+                ranges.push(...held);
+                pending.byOwner.delete(owner);
+                pending.surfaces.delete(owner);
             }
-            pending.addresses.delete(address);
+        }
+        for (const [address, length] of ranges)
+        {
             pending.owners.delete(address);
             const extent = extentOf(address, length);
             const slot = extent > 0 && lendable(address) ? /** @type {any} */ (lender)
@@ -1461,14 +1514,13 @@ export function createRecording(options){
                 !== 'function' && args[0] !== null && typeof args[0] === 'object'
                 ? keyOf(raws.get(args[0]) ?? args[0]) : null;
             const source = raw && inSystemMemory(raw) ? raw : null;
-            if (pending.addresses.size > 0 && !quiet)
+            if (pending.byOwner.size > 0 && !quiet)
             {
-                const readable = readBy(target, name, args);
-                shipPending(source ? key=>key !== source && readable(key) : readable);
+                shipPending(readBy(target, name, args), source);
             }
-            else if (pending.addresses.size > 0 && !unlocking && !name.startsWith('AddDirty')
+            else if (pending.byOwner.size > 0 && !unlocking && !name.startsWith('AddDirty')
                 && !(locking && inSystemMemory(keyOf(target)))
-                && [...pending.owners.values()].includes(keyOf(target)))
+                && pending.byOwner.has(keyOf(target)))
             {
                 // A lock of a resource the played side reads -- a texture its
                 // draws sample, a target its renderer answers for -- has what
