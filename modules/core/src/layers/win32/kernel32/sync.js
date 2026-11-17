@@ -482,16 +482,26 @@ export function createSyncFunctions(host){
 
     /**
      * A long-mode thread's sixteen general registers whole, its XMM registers
-     * and MXCSR, from the state block its context saved.
+     * and MXCSR, from the state block its context saved. The first eight's low
+     * dwords are the context's dword view, as a restore writes them over the
+     * block: a thread made and not yet run has its stack pointer there alone,
+     * and read from the block it had none (a context set from it sent the
+     * thread off with RSP 0).
      *
      * @param {any} context
      */
     const savedLong = context=>{
         const { block, layout } = context;
         const view = new DataView(block.buffer, block.byteOffset, block.byteLength);
+        /** @param {number} index */
+        const whole = index=>{
+            const value = view.getBigUint64(layout.regs + index * 8, true);
+            return index < 8
+                ? (value & 0xffffffff00000000n) | BigInt(context.reg32[index] >>> 0)
+                : value;
+        };
         return {
-            gpr: Array.from({ length: 16 }, (_, index)=>
-                view.getBigUint64(layout.regs + index * 8, true)),
+            gpr: Array.from({ length: 16 }, (_, index)=>whole(index)),
             xmm: block.slice(layout.xmm, layout.xmm + 256),
             mxcsr: view.getUint32(layout.mxcsr, true),
         };

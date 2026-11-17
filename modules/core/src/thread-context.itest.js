@@ -23,6 +23,25 @@ import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
 const u32 = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
 
 /**
+ * Waits, a millisecond at a time, until the dword at `address` is not zero: a
+ * thread is in its loop once it has counted, however long its executor took to
+ * open - a fixed sleep was no promise of that on a loaded machine, where the
+ * thread was still in its own start when it was suspended.
+ *
+ * @param {number} address @param {(fn: string) => number[]} call
+ */
+const untilCounted = (address, call)=>[0x83, 0x3d, ...u32(address), 0x00, 0x75, 10,
+    0x6a, 0x01, ...call('Sleep'), 0xeb, 0xed]; // cmp [address], 0; jne out; Sleep(1); jmp back
+
+/**
+ * Waits the same way until the dword at `address` is no longer EDI.
+ *
+ * @param {number} address @param {(fn: string) => number[]} call
+ */
+const untilMoved = (address, call)=>[0x3b, 0x3d, ...u32(address), 0x75, 10,
+    0x6a, 0x01, ...call('Sleep'), 0xeb, 0xee]; // cmp edi, [address]; jne out; Sleep(1); jmp back
+
+/**
  * Exit code bits: SetThreadContext answered TRUE (1), GetThreadContext then
  * read the new instruction pointer (2), and the thread ran there with the
  * register it was given (4).
@@ -63,7 +82,7 @@ function program32(){
                 0x68, ...u32(ctx), 0x56, ...call('GetThreadContext'),
                 0x81, 0x3d, ...u32(ctx + 0xb8), ...u32(landing), 0x75, 6, ...flag(2),
                 0x56, ...call('ResumeThread'),
-                0x68, ...u32(5000), 0x56, ...call('WaitForSingleObject'),
+                0x6a, 0xff, 0x56, ...call('WaitForSingleObject'), // INFINITE
                 0x81, 0x3d, ...u32(at('hit')), ...u32(MARK), 0x75, 6, ...flag(4),
                 0x53, ...call('ExitProcess'),
             ];
@@ -78,7 +97,11 @@ function program32(){
     });
 }
 
-function program64(){
+/**
+ * @param {boolean} [fresh]  the thread made CREATE_SUSPENDED: never run when its
+ *     context is read and set, and resumed twice
+ */
+function program64(fresh = false){
     return buildExe({
         bits: 64,
         imports: { 'KERNEL32.dll': IMPORTS },
@@ -113,7 +136,7 @@ function program64(){
             emit(0x31, 0xc9, 0x31, 0xd2); //                     xor ecx, ecx; xor edx, edx
             toLabel([0x4c, 0x8d, 0x05], 'spin'); //              lea r8, [spin]
             emit(0x45, 0x31, 0xc9); //                           xor r9d, r9d
-            emit(0x48, 0xc7, 0x44, 0x24, 0x20, 0, 0, 0, 0); //   flags
+            emit(0x48, 0xc7, 0x44, 0x24, 0x20, fresh ? 4 : 0, 0, 0, 0); // flags
             emit(0x48, 0xc7, 0x44, 0x24, 0x28, 0, 0, 0, 0); //   id
             call('CreateThread');
             emit(0x48, 0x89, 0xc6); //                           mov rsi, rax
@@ -141,7 +164,12 @@ function program64(){
             flag(2);
             emit(0x48, 0x89, 0xf1);
             call('ResumeThread');
-            emit(0x48, 0x89, 0xf1, 0xba, ...u32(5000));
+            if (fresh)
+            {
+                emit(0x48, 0x89, 0xf1);
+                call('ResumeThread');
+            }
+            emit(0x48, 0x89, 0xf1, 0xba, ...u32(0xffffffff)); // INFINITE
             call('WaitForSingleObject');
             toData([0x48, 0x8d, 0x05], 'hit');
             emit(0x81, 0x38, ...u32(MARK), 0x75, 3); //          cmp dword [rax], MARK
@@ -192,7 +220,7 @@ function stoppedProgram(){
                 0x6a, 0x00, 0x6a, 0x00, 0x6a, 0x00, 0x68, ...u32(spinner), 0x6a, 0x00, 0x6a, 0x00,
                 ...call('CreateThread'),
                 0x89, 0xc6,
-                0x6a, 30, ...call('Sleep'),
+                ...untilCounted(at('count'), call),
                 0x56, ...call('SuspendThread'),
                 0xc7, 0x05, ...u32(ctx), ...u32(0x10007),
                 0x68, ...u32(ctx), 0x56, ...call('GetThreadContext'),
@@ -205,8 +233,7 @@ function stoppedProgram(){
                 0x6a, 30, ...call('Sleep'),
                 0x3b, 0x3d, ...u32(at('count')), 0x75, 6, ...flag(4),
                 0x56, ...call('ResumeThread'),
-                0x6a, 30, ...call('Sleep'),
-                0x3b, 0x3d, ...u32(at('count')), 0x74, 6, ...flag(8),
+                ...untilMoved(at('count'), call), ...flag(8),
                 0x6a, 0x00, 0x56, ...call('TerminateThread'),
                 0x53, ...call('ExitProcess'),
             ];
@@ -229,7 +256,7 @@ function stoppedProgram(){
 function flagsProgram(){
     return buildExe({
         imports: { 'KERNEL32.dll': [...IMPORTS, 'TerminateThread'] },
-        data: { ctx: new Array(0x2cc).fill(0) },
+        data: { ctx: new Array(0x2cc).fill(0), count: [0, 0, 0, 0] },
         codeSize: 0x100,
         code: ({ iat, at, code })=>{
             /** @param {string} fn */
@@ -241,7 +268,7 @@ function flagsProgram(){
                 0x6a, 0x00, 0x6a, 0x00, 0x6a, 0x00, 0x68, ...u32(spinner), 0x6a, 0x00, 0x6a, 0x00,
                 ...call('CreateThread'),
                 0x89, 0xc6,
-                0x68, ...u32(400), ...call('Sleep'),
+                ...untilCounted(at('count'), call),
                 0x56, ...call('SuspendThread'),
                 0xc7, 0x05, ...u32(ctx), ...u32(0x10001),
                 0x68, ...u32(ctx), 0x56, ...call('GetThreadContext'),
@@ -250,8 +277,11 @@ function flagsProgram(){
                 0x6a, 0x00, 0x56, ...call('TerminateThread'),
                 0x53, ...call('ExitProcess'),
             ];
-            // mov eax, -1; add eax, 1; jmp back: a loop a translated region runs whole.
-            const spin = [0xb8, ...u32(0xffffffff), 0x83, 0xc0, 0x01, 0xeb, 0xf6];
+            // mov eax, -1; add eax, 1; then count the turn touching no flag (mov, lea,
+            // mov) and go round: once it has counted, the last flags set are the add's.
+            const spin = [0xb8, ...u32(0xffffffff), 0x83, 0xc0, 0x01,
+                0x8b, 0x0d, ...u32(at('count')), 0x8d, 0x49, 0x01, 0x89, 0x0d, ...u32(at('count')),
+                0xeb, 0xe7];
             return [...main(code(main(0).length)), ...spin];
         },
     });
@@ -291,3 +321,13 @@ for (const [bits, build] of /** @type {const} */ ([[32, program32], [64, program
         });
     }
 }
+
+test('SetThreadContext sends a 64-bit thread made suspended, never run, off on its own stack',
+    { timeout: 60000 }, async t=>{
+        // Its stack pointer is in its context's dword view alone until it first
+        // runs: a context read from the block alone sent it off with RSP 0.
+        const app = await createApp({ executable: program64(true) });
+        t.after(()=>app.dispose());
+        const code = await app.run({ timeoutMs: 40000 });
+        assert.equal(code, ALL, `missing bits 0x${(ALL & ~code).toString(16)}`);
+    });
