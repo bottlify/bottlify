@@ -27,6 +27,7 @@ import { LONG_WIDE, registerLocal } from './width.js';
 
 export { translatesLong } from './long-ops.js';
 import { AF, CF, DF, OF, PF, SF, ZF } from '../decode/table.js';
+import { guestOf } from '../region.js';
 import { SYSTEM_TABLES, cpuidLeaves, topologyOf } from '../cpuid.js';
 import { EMPTY, ValType } from '../wasm/encoder.js';
 import { LocalSet } from '../wasm/local-set.js';
@@ -321,7 +322,7 @@ function callAndReturn(e, next, target, mechanism){
     // the budget when it returns.
     // The top the return address's block was compiled for, where the plan has
     // one: the test after the call and that block's code are of one mind.
-    const after = /** @type {number} */ (e.labels.get(next));
+    const after = /** @type {number} */ (e.labels.get(e.wayAt(next)));
     const top = e.x87.states[after]?.top
         ?? topAfterCall(e.region.blocks[after], e.x87.current?.top ?? 0);
     if (e.x87.active)
@@ -1366,7 +1367,8 @@ export function emitInstruction(e, instruction, flagsLive){
                 // `call $+5`: the push, and the block goes on (`exitOf`).
                 return true;
             }
-            if (dst.kind === 'rel' && e.labels.has(/** @type {number} */ (dst.target)))
+            if (dst.kind === 'rel'
+                && e.labels.has(e.wayAt(/** @type {number} */ (dst.target))))
             {
                 // The callee is a block of this region: the block's exit jumps
                 // there. A push into code leaves first, at the callee.
@@ -1378,7 +1380,7 @@ export function emitInstruction(e, instruction, flagsLive){
                 }
                 return true;
             }
-            if (e.callReturn && e.labels.has(next)
+            if (e.callReturn && e.labels.has(e.wayAt(next))
                 && !(dst.kind !== 'rel' && e.region.blocks[e.blockIndex].exit.predicted)
                 && (!e.x87.active || e.x87.current !== null))
             {
@@ -1446,7 +1448,7 @@ export function emitInstruction(e, instruction, flagsLive){
             }
             for (const at of e.returns.get(e.region.blocks[e.blockIndex].start) ?? [])
             {
-                b.localGet(Local.eip).i32const(at).op(I32.eq);
+                b.localGet(Local.eip).i32const(guestOf(at)).op(I32.eq);
                 e.openIf('return');
                 e.countMechanism(Mechanism.RET_FORMED);
                 e.jumpTo(at);
@@ -1887,7 +1889,7 @@ function returnLong(e, instruction){
     }
     for (const at of e.returns.get(e.region.blocks[e.blockIndex].start) ?? [])
     {
-        b.localGet(Local.t64b).i64const(codeAddress(e, at)).op(I64.eq);
+        b.localGet(Local.t64b).i64const(codeAddress(e, guestOf(at))).op(I64.eq);
         e.openIf('return');
         addStack(e, popped);
         // Charged here for the jump, which charges what is left again.

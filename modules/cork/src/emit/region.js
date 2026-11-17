@@ -76,7 +76,7 @@ const I64_NE = 0x52;
 const I64_SHR_U = 0x88;
 const I32_REINTERPRET_F32 = 0xbc;
 const I64_REINTERPRET_F64 = 0xbd;
-import { callsOut, inlineReturns } from '../region.js';
+import { SITE, callsOut, guestOf, inlineReturns, sited } from '../region.js';
 import {
     analyseX87, floatCondition, isX87, prepareX87, sameState, x87BlockEnd, x87BlockStart,
     x87Edge, x87EntryCheck, x87Epilogue, x87LoadRegisters, x87Normalise,
@@ -1072,7 +1072,8 @@ export function emitRegion(context, region, options = {}){
  * @typedef {Object} RegionPlanning
  * @property {Map<number, number[]>} returns  by ret block, the return addresses it jumps to
  * @property {ReturnType<typeof planStructure>} structure
- * @property {import('../region.js').Region} region  in its emitting order
+ * @property {import('../region.js').Region} sited  the region with its callees' copies (`sited`)
+ * @property {import('../region.js').Region} region  the same in its emitting order
  * @property {import('./x87.js').X87Analysis} x87
  * @property {number[]} flagsOut  the flags live at each block's end
  * @property {import('./memory.js').RegionPlan | null} memoryPlan  the access groups
@@ -1091,7 +1092,7 @@ export function emitRegion(context, region, options = {}){
 export class RegionEmitter {
     /**
      * @param {ModuleContext} context
-     * @param {import('../region.js').Region} region
+     * @param {import('../region.js').Region} formed  the region as formed
      * @param {{ entryTop?: number, checked?: boolean, ownWindows?: boolean, copies?: boolean,
      *     precision?: X87Precision, floats?: boolean, copyFunction?: boolean,
      *     planned?: RegionPlanning | null, rejoin?: number, copied?: number[] }} [options]
@@ -1102,7 +1103,7 @@ export class RegionEmitter {
      *     loop's head (`rejoinAt`) -- -1, they go back through the entry hash; copied: the
      *     blocks the region's own function chose to copy, which the copies' function emits
      */
-    constructor(context, region,
+    constructor(context, formed,
         { entryTop = 0, checked = false, copies = true, copyFunction = false,
             planned = null, precision = context.wide === true ? 'wide'
                 : context.narrow === true ? 'narrow' : 'mixed', floats = false,
@@ -1110,7 +1111,12 @@ export class RegionEmitter {
     {
         this.context = context;
         /** The region as formed, and the options, for the function of its copies. */
-        this.formed = region;
+        this.formed = formed;
+        /** The region its functions are made of: a callee formed in copied for each call of
+         * it past the first (`sited`). The blocks' starts are keys from here on: a guest
+         * address only through `guestOf`. */
+        const region = planned?.sited ?? sited(formed);
+        this.sited = region;
         this.options = { entryTop, checked, precision, floats, ownWindows };
         /** Each block tests its own windows: none is taken from the block before. */
         this.ownWindows = ownWindows;
@@ -1185,7 +1191,8 @@ export class RegionEmitter {
         this.successors = null;
         /** By block start, its index in the region as formed, for a diagnostic build's marks. */
         this.formedIndex = import.meta.BOTTLIFY_DIAGNOSTICS !== false && context.markBlocks
-            ? new Map(region.blocks.map((block, index)=>[block.start, index])) : null;
+            ? new Map(region.blocks.map(block=>[block.start,
+                formed.blocks.findIndex(one=>one.start === guestOf(block.start))])) : null;
         /** @type {string[]} the open control labels, innermost last */
         this.controls = [];
         /** @type {Map<string, number[]>} by label, where in `controls` it is open */
@@ -1832,12 +1839,15 @@ export class RegionEmitter {
             { hints: b.hints, ...this.selfIndex >= 0 ? { at: this.selfIndex } : {} });
         return {
             functionIndex, copiesIndex: this.copiesIndex,
-            labels: new Map([...this.labels].map(([start, at])=>[start, this.entryLabel(at)])),
+            // A callee's copy has no entry: its blocks are no labels of the region's.
+            labels: new Map([...this.labels].filter(([start])=>start < SITE)
+                .map(([start, at])=>[start, this.entryLabel(at)])),
             unsupported: this.unsupported, refusals: this.refusals, relaxedReads: this.relaxedReads,
             instructions: this.instructions,
             cut: new Set([...this.x87.cut, ...this.unknownBlocks(), ...this.leaving,
                 ...this.shapedBlocks(), ...this.closed].map(at=>this.entryLabel(at))),
-            closed: new Set(this.closed.map(at=>this.region.blocks[at].start)),
+            closed: new Set(this.closed.map(at=>this.region.blocks[at].start)
+                .filter(start=>start < SITE)),
             entryTop: this.entryTop, loops: this.loops, x87Guards: this.x87.guards,
             x87RelaxedReads: this.x87.relaxedReads, fusedCompares: this.fusedCompares,
             folds: this.folds,
@@ -3805,7 +3815,7 @@ export class RegionEmitter {
     emitCopies(flagsOut, memoryPlan){
         const copies = new RegionEmitter(this.context, this.formed, { ...this.options,
             copyFunction: true, copied: this.copies,
-            planned: { returns: this.returns, structure: this.structure,
+            planned: { returns: this.returns, structure: this.structure, sited: this.sited,
                 region: this.region, x87: this.x87Plan, flagsOut,
                 memoryPlan: memoryPlan === null ? null : copyPlan(memoryPlan) },
             rejoin: this.selfIndex });
@@ -4719,11 +4729,12 @@ export class RegionEmitter {
      * One more execution of the block at `start` in its profile slot: the count,
      * and the address when the slot is another block's (then marked shared).
      *
-     * @param {number} start
+     * @param {number} key  the block's
      * @param {number} [times]  a local holding how many executions, one unless given
      */
-    countBlock(start, times = -1){
+    countBlock(key, times = -1){
         const { b } = this;
+        const start = guestOf(key);
         const at = this.layout.tables + blockProfileAt(this.layout)
             + blockSlot(start) * Tables.BLOCK_SLOT;
         const { context } = this;
@@ -5441,8 +5452,34 @@ export class RegionEmitter {
      */
     exitAt(eip, kind, vector = 0){
         this.charge();
-        this.b.i32const(eip).localSet(Local.eip);
+        this.b.i32const(guestOf(eip)).localSet(Local.eip);
         this.exitWithKind(kind, vector, this.flagsLiveAt(eip));
+    }
+
+    /**
+     * An address as the block being emitted goes there: the key of its own
+     * start, of a way on of its exit or of a return of its `ret` that is a
+     * copy of the block at that address (`sited`), else the address.
+     *
+     * @param {number} address
+     */
+    wayAt(address){
+        const block = this.sited === this.formed || address >= SITE ? undefined
+            : this.region.blocks[this.blockIndex];
+        if (block === undefined)
+        {
+            return address;
+        }
+        const { exit } = block;
+        for (const key of [block.start, exit.next, ...exit.targets,
+            ...this.returns.get(block.start) ?? []])
+        {
+            if (key >= SITE && key % SITE === address)
+            {
+                return key;
+            }
+        }
+        return address;
     }
 
     /**
@@ -5454,7 +5491,11 @@ export class RegionEmitter {
      */
     flagsLiveAt(eip){
         const at = this.labels.get(eip);
-        if (at !== undefined && this.flagsIn.length > at)
+        // From a callee's copy an address that is no way of the block's is another
+        // copy's block, whose ways on are not this one's.
+        const mine = eip >= SITE || this.wayAt(eip) !== eip
+            || !(this.region.blocks[this.blockIndex]?.start >= SITE);
+        if (mine && at !== undefined && this.flagsIn.length > at)
         {
             return this.flagsIn[at];
         }
@@ -5732,13 +5773,20 @@ export function planStructure(region, returns, callReturn = false){
                 out.push(at);
             }
         }
-        const back = comesBackTo(block, index, callReturn);
+        // A callee's copy has no entry (`sited`): what leaves it comes back at the address,
+        // into the callee's own blocks, whose `ret` then leaves for the return address of
+        // the call the copy was made for -- from outside, like a call that went elsewhere.
+        const copied = block.exit.targets.some(target=>target >= SITE)
+            && block.exit.kind !== 'jcc' && block.exit.kind !== 'jump'
+            && block.exit.kind !== 'fallthrough' && block.exit.kind !== 'loop';
+        const back = block.start >= SITE ? undefined : comesBackTo(block, index, callReturn);
         if (back !== undefined && !roots.includes(back))
         {
             roots.push(back);
         }
-        const again = comesBackAt(block, index, callReturn);
-        if (again !== undefined)
+        const again = copied ? index.get(guestOf(block.exit.next))
+            : block.start >= SITE ? undefined : comesBackAt(block, index, callReturn);
+        if (again !== undefined && !reentered.includes(again))
         {
             reentered.push(again);
         }
