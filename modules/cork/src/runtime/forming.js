@@ -387,7 +387,7 @@ export function createForming(state){
             dropKey(key);
             // A block of a region the store holds: that region is formed, which the
             // store answers, and has an entry here once published.
-            const owner = storedOwner(eip, key % 16);
+            const owner = storedOwner(eip, key % 16, true);
             if (owner >= 0)
             {
                 unqueue(owner);

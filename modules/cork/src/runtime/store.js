@@ -454,20 +454,42 @@ export function createStore(state){
         }
     })();
     /**
+     * The candidates sent on to the stored region holding them (`storedOwner`), by
+     * key: once each. A region the store names that this run cannot publish - its
+     * entry formed nothing over the bytes now there, its record refused - gives the
+     * block no entry, and sent to it at every batch the block was never translated
+     * though left for all run long.
+     * @type {Set<number>}
+     */
+    const sentToOwner = new Set();
+    const SENT_CAP = 1 << 16;
+    /**
      * The region a candidate is a block of in the store, where that region is
      * neither published nor on its way: its entry and top as `keyOf` packs them, or
-     * -1.
-     * @param {number} eip @param {number} top
+     * -1. `taking` notes the candidate as sent there: asked again, it is its own.
+     * @param {number} eip @param {number} top @param {boolean} [taking]
      */
-    const storedOwner = (eip, top)=>{
+    const storedOwner = (eip, top, taking = false)=>{
         const owner = storedBlocks?.get(keyOf(eip, top)) ?? storedBlocks?.get(keyOf(eip, ANY_TOP));
         if (owner === undefined || Math.floor(owner / 16) === eip)
         {
             return -1;
         }
         const at = Math.floor(owner / 16);
-        return entries.entryOf(at, owner % 16) >= 0 || inFlight.has(owner) || !translatable(at)
-            ? -1 : owner;
+        if (entries.entryOf(at, owner % 16) >= 0 || inFlight.has(owner) || !translatable(at)
+            || sentToOwner.has(keyOf(eip, top)))
+        {
+            return -1;
+        }
+        if (taking)
+        {
+            if (sentToOwner.size >= SENT_CAP)
+            {
+                sentToOwner.clear();
+            }
+            sentToOwner.add(keyOf(eip, top));
+        }
+        return owner;
     };
 
     /** What asks a translator to digest and pack the module it answers with, where it is to be

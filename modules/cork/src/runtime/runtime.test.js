@@ -1506,6 +1506,39 @@ test('a block of a stored region met first takes that region from the store', as
     assert.equal(second.reg(1), 0);
 });
 
+test('a block of a stored region that can no longer be published is translated as its own',
+    async()=>{
+        const { memoryTranslationStore } = await import('./cache.js');
+        const settle = ()=>new Promise(resolve=>setTimeout(resolve, 0));
+        const store = memoryTranslationStore();
+        const LOOP = CODE + 5;
+        const first = machine({ store, bundleId: 'test' });
+        first.write(CODE, COUNTDOWN);
+        await settle();
+        first.runtime.noteHot(CODE);
+        await first.runtime.translatePending();
+        await settle();
+        assert.ok(first.runtime.entryOf(LOOP) >= 0);
+        await first.runtime.flush();
+        // The region's entry is an instruction no region begins with now (iret); the
+        // loop's head, a block of it in the store's map, is met again and again.
+        const second = machine({ store, bundleId: 'test' });
+        second.write(CODE, [0xcf, ...COUNTDOWN.slice(1)]);
+        second.setReg(4, 0x80000);
+        await settle();
+        for (let turn = 0; turn < 6 && second.runtime.entryOf(LOOP) < 0; turn++)
+        {
+            second.runtime.noteHot(LOOP);
+            await second.runtime.translatePending();
+            await settle();
+        }
+        assert.ok(second.runtime.entryOf(LOOP) >= 0, 'the loop has an entry of its own');
+        assert.equal(second.runtime.entryOf(CODE), -1);
+        second.setReg(1, 1000);
+        assert.equal(second.runtime.run(second.runtime.entryOf(LOOP), 1_000_000).kind, 'halt');
+        assert.equal(second.reg(1), 0);
+    });
+
 test('every runtime of a run adds its blocks to the store\'s map, and one that adds none puts '
     + 'no map', async()=>{
     const { memoryTranslationStore } = await import('./cache.js');
