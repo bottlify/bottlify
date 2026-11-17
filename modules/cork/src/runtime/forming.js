@@ -41,7 +41,8 @@ export function createForming(state){
         copiesWanted, counts, coverKeys, coveredIn, coveredOut, dropKey, finishBatch, formAt,
         dropTranslator, freeTranslator, giveUp, inFlight, lookUpLater, lookUpOn, noteWay, overdue,
         precisionFlags,
-        prefetch, profileAt, publishOn, queue, readModules, recordBefore, reformStep, refused,
+        askBefore, prefetch, profileAt, publishOn, queue, readModules, recordBefore, reformStep,
+        refused,
         refusedWhy,
         regionOfRecord,
         relinkStep, sampleCalls, sourcesChanged, stamp, storeHere, storedOwner, toPublish,
@@ -349,6 +350,16 @@ export function createForming(state){
         // A diagnostic run with classes left out, or with an undo log the
         // stored modules were built without, keeps no translations.
         const store = storeHere();
+        // A store that answers a turn later is asked for the candidates' records
+        // before they are formed, and the step goes on when they are back.
+        const asks = store !== null && settings.summaries !== false
+            && typeof store.getManyNow !== 'function' && typeof store.getNow !== 'function';
+        // Read anew at each look: a region formed below may ask for its callees.
+        const asking = ()=>step.asking === true;
+        if (asking())
+        {
+            return 0;
+        }
         if (step.known === undefined)
         {
             step.known = new Map();
@@ -357,13 +368,17 @@ export function createForming(state){
                 prefetch(step, store);
             }
         }
+        if (asks && askBefore(step, store, step.next, sendNext))
+        {
+            return 0;
+        }
         // Nothing runs while this call forms, so its regions share what
         // decoding finds; the guest runs between two calls, which may write
         // the code over.
         const shared = formShared();
         for (; step.next < batch.length; step.next++)
         {
-            if (step.next > first && (performance.now() >= until || waitedFor()))
+            if (step.next > first && (performance.now() >= until || waitedFor()) || asking())
             {
                 break;
             }
@@ -423,6 +438,11 @@ export function createForming(state){
             if (batch.length > asked && store !== null && typeof store.getManyNow === 'function')
             {
                 prefetch(step, store, asked);
+            }
+            else if (batch.length > asked && asks)
+            {
+                // The callees it added are asked for; the step waits at the next.
+                askBefore(step, store, asked, sendNext);
             }
             for (const [opcode, times] of region.refused)
             {
@@ -561,7 +581,7 @@ export function createForming(state){
             }
             finishBatch(formed, store);
             sendNext();
-        });
+        }, step.known);
         counts.lookupMs += clock() - lookupAt;
         return 0;
     };

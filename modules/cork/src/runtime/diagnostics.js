@@ -164,6 +164,8 @@ export function createDiagnostics(state){
         heldEntries: 0,
         // Batches the store answered in the call that formed them, and a turn later.
         lookedUpNow: 0, lookedUpLater: 0, lookedUpInPart: 0,
+        // Asks of a store that answers a turn later for records not yet formed (`askBefore`).
+        askedBefore: 0,
         // Calls that formed part of a batch and left the rest to a later one
         // (`holdMs`), that published part of a batch's store hits, and asks
         // the spent credit put off; the hits' modules compiled off this thread.
@@ -578,6 +580,7 @@ export function createDiagnostics(state){
             lookedUpNow: counts.lookedUpNow,
             lookedUpLater: counts.lookedUpLater,
             lookedUpInPart: counts.lookedUpInPart,
+            askedBefore: counts.askedBefore,
             formedInPart: counts.formedInPart,
             // Forming or a lookup cut short for another executor's ask (`awaited`).
             answeredFirst: counts.answeredFirst,

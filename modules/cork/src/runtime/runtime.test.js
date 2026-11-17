@@ -1320,6 +1320,52 @@ test('the callees a region adds to its batch are asked of a store across a link 
     assert.equal(waits, 2, 'a wait for the batch, a wait for the callees the caller added');
 });
 
+test('a store that answers a turn later is asked for a batch\'s records before they are formed,'
+    + ' and for the callees a region adds: a run started again forms none of them', async()=>{
+    const settle = ()=>new Promise(resolve=>setTimeout(resolve, 0));
+    const F1 = CODE + 0x40;
+    const F2 = CODE + 0x80;
+    /** @param {number} at @param {number} target */
+    const call = (at, target)=>[0xe8, ...le32(target - (at + 5))];
+    /** @type {Map<string, Uint8Array>} */
+    const records = new Map();
+    let asks = 0;
+    const store = {
+        get: async(/** @type {string} */ key)=>{
+            asks++;
+            return records.get(key) ?? null;
+        },
+        put: async(/** @type {string} */ key, /** @type {Uint8Array} */ bytes)=>{
+            records.set(key, bytes);
+        },
+    };
+    const run = async()=>{
+        const m = machine({ store, bundleId: 'test', leafCalls: false });
+        m.write(CODE, [...call(CODE, F1), ...call(CODE + 5, F2), 0xf4]);
+        m.write(F1, [0xb8, 1, 0, 0, 0, 0xc3]);                  // mov eax, 1; ret
+        m.write(F2, [0xbb, 2, 0, 0, 0, 0xc3]);                  // mov ebx, 2; ret
+        m.setReg(4, 0x80000);
+        m.runtime.noteHot(CODE);
+        for (let turn = 0; turn < 8 && m.runtime.entryOf(CODE) < 0; turn++)
+        {
+            await m.runtime.translatePending();
+            await settle();
+        }
+        assert.equal(m.runtime.run(m.runtime.entryOf(CODE), 1000).kind, 'halt');
+        assert.deepEqual([m.reg(0), m.reg(3)], [1, 2]);
+        return /** @type {any} */ (m.runtime.diagnostics());
+    };
+    const first = await run();
+    assert.equal(first.cacheMisses, 3, 'the caller and its two callees, a batch');
+    asks = 0;
+    const second = await run();
+    assert.deepEqual([second.cacheHits, second.cacheMisses], [3, 0]);
+    assert.equal(second.takenUnformed, 3, 'all three taken by their records');
+    assert.equal(second.askedBefore, 2, 'an ask for the batch, an ask for the callees it added');
+    // Two keys a region (its top's and any top's), and the batch's module: no record twice.
+    assert.ok(asks <= 7, `${asks} asks of the store`);
+});
+
 test('an entry formed before and after a store into a stub it reaches is a hit in both versions',
     async()=>{
         // A region that jumps to a stub a page on, which the program patches as it runs -
@@ -1847,7 +1893,9 @@ test('a region whose code is written while its lookups are out is not published 
          * @param {number[]} before @param {number[]} after
          */
         const formedThenWritten = async(before, after)=>{
-            const m = machine({ store, bundleId: 'test' });
+            // Formed and then looked up (`summaries` off): the lookups are out while the
+            // test goes on, as a hit's module is with them on.
+            const m = machine({ store, bundleId: 'test', summaries: false });
             m.write(CODE, before);
             m.setReg(4, 0x80000);
             m.runtime.noteHot(CODE);
@@ -1880,7 +1928,9 @@ test('a host write into a page no region spans and no candidate is filed under m
     const program = (/** @type {number} */ value)=>[0xb8, value, 0, 0, 0, 0xf4];
     /** @param {number[]} before @param {number[]} after */
     const formedThenWritten = async(before, after)=>{
-        const m = machine({ store, bundleId: 'test' });
+        // Formed and then looked up (`summaries` off): the lookups are out while the
+        // test goes on, as a hit's module is with them on.
+        const m = machine({ store, bundleId: 'test', summaries: false });
         m.write(CODE, before);
         m.setReg(4, 0x80000);
         m.runtime.noteHot(CODE);
@@ -2235,7 +2285,9 @@ test('exits to a flood of distinct addresses stay cheap and a hot one keeps its 
 
 test('a candidate whose batch is still out is not queued again when it is met again', async()=>{
     const { memoryTranslationStore } = await import('./cache.js');
-    const m = machine({ store: memoryTranslationStore(), bundleId: 'test' });
+    // Formed and then looked up (`summaries` off): the lookups are out while the
+    // test goes on, as a hit's module is with them on.
+    const m = machine({ store: memoryTranslationStore(), bundleId: 'test', summaries: false });
     m.write(CODE, COUNTDOWN);
     m.runtime.noteHot(CODE, 0, 2);
     assert.equal(await m.runtime.translatePending(), 0, 'the batch waits on the store');
@@ -2249,7 +2301,10 @@ test('a candidate whose batch is still out is not queued again when it is met ag
 
 test('a callee its caller took into a batch still out is not queued again when met', async()=>{
     const { memoryTranslationStore } = await import('./cache.js');
-    const m = machine({ store: memoryTranslationStore(), bundleId: 'test', leafCalls: false });
+    // Formed and then looked up (`summaries` off): the lookups are out while the
+    // test goes on, as a hit's module is with them on.
+    const m = machine({ store: memoryTranslationStore(), bundleId: 'test', summaries: false,
+        leafCalls: false });
     // call F; hlt; F: inc edx; ret
     m.write(CODE, [0xe8, 0x01, 0, 0, 0, 0xf4, 0x42, 0xc3]);
     const F = CODE + 6;
