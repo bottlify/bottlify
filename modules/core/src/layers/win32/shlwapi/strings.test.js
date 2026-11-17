@@ -463,3 +463,74 @@ test('wvnsprintf formats as wnsprintf does, its arguments read from the list it 
     assert.equal(m.fns.wvnsprintfW.handler([wide, 0x20, m.put('%d %s', true), list]), 4);
     assert.equal(m.read(wide, true), '42 y');
 });
+
+test('the C-locale comparisons order by character code, the I ones with case folded', ()=>{
+    // Wine's string test (test_StrCmpC...): 'a' after 'B' by code, equal folded.
+    const m = shlwapiMachine();
+    for (const [suffix, wide] of WIDTHS)
+    {
+        const cmp = (/** @type {string} */ name, /** @type {string} */ a, /** @type {string} */ b,
+            /** @type {number[]} */ ...rest)=>Math.sign(m.fns[`${name}${suffix}`].handler([
+            m.put(a, wide), m.put(b, wide), ...rest]) | 0);
+        assert.equal(cmp('StrCmpC', 'abc', 'abc'), 0);
+        assert.equal(cmp('StrCmpC', 'a', 'B'), 1, 'by code, not by alphabet');
+        assert.equal(cmp('StrCmpIC', 'a', 'B'), -1);
+        assert.equal(cmp('StrCmpIC', 'ABC', 'abc'), 0);
+        assert.equal(cmp('StrCmpNC', 'abcX', 'abcY', 3), 0);
+        assert.equal(cmp('StrCmpNC', 'ab', 'abc', 3), -1, 'the shorter first');
+        assert.equal(cmp('StrCmpNIC', 'ABCx', 'abcy', 3), 0);
+    }
+});
+
+test('StrCmpLogicalW compares numbers by value and the rest without case', ()=>{
+    const m = shlwapiMachine();
+    const cmp = (/** @type {string} */ a, /** @type {string} */ b)=>
+        m.fns.StrCmpLogicalW.handler([m.put(a, true), m.put(b, true)]);
+    assert.equal(cmp('File2', 'File10'), -1);
+    assert.equal(cmp('file10', 'FILE10'), 0);
+    assert.equal(cmp('a', 'b'), -1);
+    assert.equal(cmp('2', 'a'), -1, 'a number before a letter');
+    assert.equal(cmp('x01', 'x1'), 1, 'leading zeros after');
+    assert.equal(cmp('abc', 'ab'), 1);
+});
+
+test('StrNCat, StrRChrI, StrSpn and StrTrim work in place as documented', ()=>{
+    const m = shlwapiMachine();
+    for (const [suffix, wide] of WIDTHS)
+    {
+        const front = m.put('ab', wide, 64);
+        assert.equal(m.fns[`StrNCat${suffix}`].handler([front, m.put('cdef', wide), 3]), front);
+        assert.equal(m.read(front, wide), 'abcd', 'cchMax - 1 characters');
+        const text = m.put('aXbxc', wide);
+        assert.equal(m.fns[`StrRChrI${suffix}`].handler([text, 0, 0x78]),
+            text + 3 * (wide ? 2 : 1), 'the last x of either case');
+        assert.equal(m.fns[`StrRChrI${suffix}`].handler([text, 0, 0x71]), 0);
+        assert.equal(m.fns[`StrSpn${suffix}`].handler([m.put('aabxa', wide), m.put('ab', wide)]),
+            3);
+        const padded = m.put('  word \t', wide);
+        assert.equal(m.fns[`StrTrim${suffix}`].handler([padded, m.put(' \t', wide)]), 1);
+        assert.equal(m.read(padded, wide), 'word');
+        assert.equal(m.fns[`StrTrim${suffix}`].handler([padded, m.put(' ', wide)]), 0,
+            'nothing to take');
+    }
+});
+
+test('StrRetToStr hands the text out in a block of the COM allocator', ()=>{
+    /** @type {number[]} */
+    const allocated = [];
+    const m = shlwapiMachine({ library: (/** @type {string} */ name)=>(name === 'OLE32.dll' ? {
+        CoTaskMemAlloc: { handler: (/** @type {number[]} */ [size])=>{
+            allocated.push(size);
+            return 0x60000;
+        } },
+    } : undefined) });
+    const strret = m.put('', false, 0x120);
+    m.view.setUint32(strret, 2, true);
+    m.memory.set(new TextEncoder().encode('name\0'), strret + 4);
+    const out = m.count(0);
+    assert.equal(m.fns.StrRetToStrW.handler([strret, 0, out]), S_OK);
+    assert.equal(m.dwordAt(out), 0x60000);
+    assert.equal(m.read(0x60000, true), 'name');
+    assert.deepEqual(allocated, [10]);
+    assert.equal(m.fns.StrRetToStrA.handler([strret, 0, 0]) >>> 0, 0x80070057);
+});

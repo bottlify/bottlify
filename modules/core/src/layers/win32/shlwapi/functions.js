@@ -24,6 +24,7 @@ import { createDataBlockFunctions } from './datablocks.js';
 import { createOrdinalFunctions } from './ordinals.js';
 import { createRegistryHelpers } from './registry.js';
 import { createUsKeyFunctions } from './uskey.js';
+import { createCharacterFunctions } from './characters.js';
 import { createStreams } from './stream.js';
 import { createStringFunctions } from './strings.js';
 import { createWidths } from './text.js';
@@ -735,6 +736,7 @@ export function createShlwapiFunctions(host){
         ...createUrlFunctions(host, widths),
         ...createRegistryHelpers(host),
         ...createUsKeyFunctions(host),
+        ...createCharacterFunctions(host, widths),
         ...createOrdinalFunctions(host),
         ...createStreams(host),
         ...createDataBlockFunctions(host),

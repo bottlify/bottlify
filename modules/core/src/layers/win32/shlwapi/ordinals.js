@@ -42,6 +42,15 @@ export const SHLWAPI_NAMED_ORDINALS = Object.freeze([
     [514, 'IUnknown_ProfferService'], [491, 'SHGetShellKey'], [516, 'SKGetValueW'],
     [517, 'SKSetValueW'], [518, 'SKDeleteValueW'],
     [519, 'SKAllocValueW'],
+    [29, 'IsCharSpaceW'], [30, 'IsCharBlankW'], [31, 'IsCharPunctW'], [32, 'IsCharCntrlW'],
+    [33, 'IsCharDigitW'], [34, 'IsCharXDigitW'], [35, 'GetStringType3ExW'],
+    [151, 'StrCmpNCA'], [152, 'StrCmpNCW'], [153, 'StrCmpNICA'], [154, 'StrCmpNICW'],
+    [155, 'StrCmpCA'], [156, 'StrCmpCW'], [157, 'StrCmpICA'], [158, 'StrCmpICW'],
+    [162, 'SHTruncateString'], [203, 'SHStripMneumonicA'], [225, 'SHStripMneumonicW'],
+    [205, 'SHGetValueGoodBootA'], [206, 'SHGetValueGoodBootW'], [216, 'SHAnsiToUnicodeCP'],
+    [218, 'SHUnicodeToAnsiCP'], [270, 'GUIDFromStringW'], [280, 'SHRegGetIntW'],
+    [343, 'SHRegGetCLSIDKeyA'], [344, 'SHRegGetCLSIDKeyW'], [364, 'DoesStringRoundTripA'],
+    [365, 'DoesStringRoundTripW'],
 ]);
 
 const S_OK = 0;
@@ -1149,6 +1158,22 @@ export function createOrdinalFunctions(host){
             handler: ([text, guid])=>{
                 const bytes = (text >>> 0) === 0 ? null
                     : parseGuid(host.readCString(text >>> 0, 64));
+                if (bytes === null || (guid >>> 0) === 0)
+                {
+                    return 0;
+                }
+                host.writeMemory(guid >>> 0, bytes);
+                return 1;
+            },
+        },
+
+        /** BOOL GUIDFromStringW(LPCWSTR idstr, CLSID *id) */
+        GUIDFromStringW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([text, guid])=>{
+                const bytes = (text >>> 0) === 0 || !host.readWideString ? null
+                    : parseGuid(host.readWideString(text >>> 0, 128));
                 if (bytes === null || (guid >>> 0) === 0)
                 {
                     return 0;
