@@ -17,6 +17,7 @@
 - Call of Duty 4: Modern Warfare (demo) (+shader model 2, +multithreading)
 - Colin McRae Rally 2 (demo)
 - Crysis (demo) (+shader model 3)
+- Dead Space
 - Delta Force: Xtreme (demo)
 - Desperados (demo)
 - Deus Ex: Human Revolution
