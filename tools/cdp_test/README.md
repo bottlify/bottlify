@@ -244,6 +244,14 @@ lists (Wine's spec files, fetched once into DIR by `--fetch-specs DIR` and not
 kept in the repository): a function a program looks up by name that this
 build does not export is a NULL it may call.
 
+[`tools/win32-listen/listen.mjs`](../win32-listen/README.md) `<program.exe>` is the run that
+follows the audit: it runs a program in Node, headless and unattended, and writes down every
+request it makes of the engine's Windows (each host call with its call site, its arguments as text
+where they are text, the answer and the last error), sorted by question in `summary.txt`
+(registry, files, modules, processes, named objects, debugging) and with the faults and message
+boxes that ended the run. It only listens; a run is slower for it, so it is for a bring-up, not a
+measurement.
+
 `tools/arg-bytes-audit.mjs <spec directory>` checks the bytes every stdcall
 entry of the win32 layer pops against Wine's export spec files kept locally:
 one argument too many moves the caller's stack a call at a time, and the

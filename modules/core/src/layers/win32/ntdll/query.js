@@ -194,6 +194,17 @@ const ALL_ACCESS = 0x001fffff;
 const CURRENT_PROCESS = 0xffffffff;
 const CURRENT_THREAD = 0xfffffffe;
 
+/** THREADINFOCLASS: ThreadHideFromDebugger, the one a protection sets. */
+const THREAD_HIDE_FROM_DEBUGGER = 17;
+
+/**
+ * The other classes NtSetInformationThread sets: priority, base priority,
+ * affinity, impersonation token, alignment fixup, Win32 start address, TLS
+ * cell zeroing, ideal processor, priority boost, TLS array address, break on
+ * termination.
+ */
+const THREAD_SETTABLE_CLASSES = new Set([2, 3, 4, 5, 7, 9, 10, 13, 14, 15, 18]);
+
 /** Facts about the machine this engine presents, not preferences. */
 const PAGE_SIZE = 0x1000;
 const ALLOCATION_GRANULARITY = 0x10000;
@@ -697,6 +708,52 @@ export function createQueryFunctions(host){
             handler: ()=>{
                 host.divergence?.('NtQueryInformationThread', 'refused');
                 return STATUS.NOT_IMPLEMENTED;
+            },
+        },
+        /**
+         * NTSTATUS NtSetInformationThread(HANDLE ThreadHandle,
+         *                                 THREADINFOCLASS ThreadInformationClass,
+         *                                 PVOID ThreadInformation,
+         *                                 ULONG ThreadInformationLength)
+         *
+         * Hiding a thread from the debugger takes no data: any length but zero
+         * is a mismatch and the buffer is never read, as Wine's conformance
+         * tests find on Windows. No debugger is ever attached here, so hiding
+         * from one is already true and succeeds without anything kept. The
+         * other settable classes are taken and kept nowhere, and say so; any
+         * other class is refused.
+         */
+        NtSetInformationThread: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([handle, infoClass, , length])=>{
+                const named = handle >>> 0;
+                if (named !== CURRENT_THREAD)
+                {
+                    const type = host.handleType?.(named) ?? null;
+                    if (type === null)
+                    {
+                        return STATUS.INVALID_HANDLE;
+                    }
+                    if (type !== 'thread')
+                    {
+                        return STATUS.OBJECT_TYPE_MISMATCH;
+                    }
+                }
+                const wanted = infoClass >>> 0;
+                if (wanted === THREAD_HIDE_FROM_DEBUGGER)
+                {
+                    return (length >>> 0) === 0 ? STATUS.SUCCESS : STATUS.INFO_LENGTH_MISMATCH;
+                }
+                if (!THREAD_SETTABLE_CLASSES.has(wanted))
+                {
+                    host.divergence?.('NtSetInformationThread',
+                        `information class ${wanted} is refused`);
+                    return STATUS.INVALID_INFO_CLASS;
+                }
+                host.divergence?.('NtSetInformationThread',
+                    `information class ${wanted} is taken and ignored`);
+                return STATUS.SUCCESS;
             },
         },
         RtlCreateQueryDebugBuffer: {

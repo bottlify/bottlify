@@ -371,6 +371,33 @@ test('NtQueryObject answers the basic class for a handle that names something', 
     assert.ok(said.some(line=>line.includes('class 2')), 'a refused class is reported');
 });
 
+test('NtSetInformationThread hides from the debugger with no data, as Windows does', ()=>{
+    // Wine's conformance tests: ThreadHideFromDebugger succeeds with a zero
+    // length whatever the buffer pointer, a nonzero length is a mismatch, and a
+    // handle that names nothing is invalid.
+    /** @type {string[]} */
+    const said = [];
+    const fns = /** @type {Record<string, any>} */ (createQueryFunctions({ ...fakeHost(),
+        handleType: handle=>({ 0x44: 'event', 0x48: 'thread' })[handle] ?? null,
+        divergence: (api, why)=>said.push(`${api}: ${why}`) }));
+    const set = fns.NtSetInformationThread;
+    assert.equal(set.argBytes, 16);
+    assert.equal(set.handler([0xfffffffe, 17, 0, 0]), STATUS.SUCCESS);
+    assert.equal(set.handler([0xfffffffe, 17, 0xdeadbeef, 0]), STATUS.SUCCESS,
+        'the buffer is not read');
+    assert.equal(set.handler([0xfffffffe, 17, BUFFER, 4]), STATUS.INFO_LENGTH_MISMATCH);
+    assert.equal(set.handler([0x48, 17, 0, 0]), STATUS.SUCCESS, 'a thread handle');
+    assert.equal(set.handler([0xdeadbeef, 17, 0, 0]), STATUS.INVALID_HANDLE);
+    assert.equal(set.handler([0x44, 17, 0, 0]), STATUS.OBJECT_TYPE_MISMATCH);
+    assert.equal(said.length, 0, 'hiding from no debugger diverges from nothing');
+
+    assert.equal(set.handler([0xfffffffe, 2, BUFFER, 4]), STATUS.SUCCESS);
+    assert.ok(said.some(line=>line.includes('class 2 is taken and ignored')));
+    assert.equal(set.handler([0xfffffffe, 0, BUFFER, 4]), STATUS.INVALID_INFO_CLASS,
+        'basic information is queried, not set');
+    assert.ok(said.some(line=>line.includes('class 0 is refused')));
+});
+
 test('the debug-help queries are refused as unsupported and say so', ()=>{
     /** @type {string[]} */
     const said = [];
