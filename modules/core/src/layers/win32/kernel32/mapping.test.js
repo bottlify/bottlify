@@ -6,7 +6,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createMappingFunctions } from './mapping.js';
+import { createMappingFunctions, imageRefusal } from './mapping.js';
+import { imageKind } from '../../loader/internal/pe.js';
 import { protectionRights, sectionRights, viewProtection } from './view-rights.js';
 import { createNamedObjects } from './named-objects.js';
 import { buildExe } from '../../../../../../tools/fixtures/make-pe.mjs';
@@ -622,6 +623,74 @@ test('a read-write mapping that names its commit is still written back to its fi
     bytes[view + 2] = 0x77;
     assert.equal(fns.UnmapViewOfFile.handler([view]), 1);
     assert.equal(file.data[2], 0x77);
+});
+
+test('a SEC_IMAGE section refuses each kind of file as Windows answers it', ()=>{
+    // Wine's kernel32:loader NtCreateSection cases, by what the headers say.
+    const image = imageAt(0x10000000);
+    const lfanew = dword(image, 0x3c);
+    /** @param {(view: DataView) => void} edit */
+    const kind = edit=>{
+        const copy = image.slice();
+        edit(new DataView(copy.buffer));
+        return imageRefusal(imageKind(copy), false);
+    };
+    assert.equal(kind(()=>{}), null, 'a 32-bit PE image is taken');
+    assert.equal(kind(view=>view.setUint16(0, 0, true)), 0xc000012f, 'no MZ: NOT_MZ');
+    assert.equal(kind(view=>view.setUint32(0x3c, 0x98760000, true)), 0xc0000130,
+        'a new header past the file: PROTECT');
+    assert.equal(kind(view=>view.setUint32(lfanew, 0xdeadbeef, true)), 0xc0000130,
+        'a signature of no kind: PROTECT');
+    /** @param {number} system */
+    const ne = system=>kind(view=>{
+        view.setUint16(lfanew, 0x454e, true);
+        view.setUint8(lfanew + 0x36, system);
+    });
+    assert.deepEqual([0, 1, 2, 3, 4, 5, 6].map(ne), [0xc000011b, 0xc000011b, 0xc0000131,
+        0xc000011b, 0xc000011b, 0xc0000130, 0xc000011b], 'NE: Windows 16-bit, a VxD, the rest');
+    assert.equal(kind(view=>view.setUint16(lfanew + 24, 0xdead, true)), 0xc000007b,
+        'an optional header of no magic: FORMAT');
+    assert.equal(kind(view=>view.setUint16(lfanew + 4, 0x8664, true)), 0xc000007b,
+        'a PE32 of the other machine: FORMAT');
+    /** @param {boolean} machine64 */
+    const pe64 = machine64=>{
+        const copy = image.slice();
+        const view = new DataView(copy.buffer);
+        view.setUint16(lfanew + 24, 0x20b, true);
+        view.setUint16(lfanew + 4, 0x8664, true);
+        return imageRefusal(imageKind(copy), machine64);
+    };
+    assert.equal(pe64(false), 0xc000035a, 'PE32+ on a 32-bit Windows: WIN_64');
+    assert.equal(pe64(true), null, 'and taken where x86-64 runs');
+});
+
+test('an image section answers its image information and keeps the size it was made with', ()=>{
+    const at = setup();
+    const { fns, bytes, file, fileHandle, errors } = at;
+    file.data = imageAt(0x10000000, true, true);
+    const mapping = fns.CreateFileMappingA.handler(
+        [fileHandle, 0, PAGE_READONLY | SEC_IMAGE, 0, 0, 0]);
+    const query = fns.CreateFileMappingW.natives.NtQuerySection.handler;
+    assert.equal(query([mapping, 1, 0x300, 48, 0]), 0);
+    const lfanew = dword(file.data, 0x3c);
+    const optional = lfanew + 24;
+    assert.equal(dword(bytes, 0x300), 0x10000000 + dword(file.data, optional + 16),
+        'TransferAddress: the base and the entry point');
+    assert.equal(dword(bytes, 0x308), dword(file.data, optional + 72), 'MaximumStackSize');
+    assert.equal(dword(bytes, 0x310) & 0xffff, file.data[optional + 68], 'SubSystemType');
+    assert.equal(bytes[0x300 + 32] | bytes[0x300 + 33] << 8, 0x14c, 'Machine');
+    assert.equal(bytes[0x300 + 34], 1, 'ImageContainsCode');
+    assert.equal(bytes[0x300 + 35] & 0x0c, 0x04, 'dynamically relocated, not flat');
+    assert.equal(dword(bytes, 0x300 + 40), file.data.length, 'ImageFileSize');
+
+    // A maximum size up to the image's is the section's; past it, refused.
+    const size = basicInformation(at, mapping).size;
+    const small = fns.CreateFileMappingA.handler(
+        [fileHandle, 0, PAGE_READONLY | SEC_IMAGE, 0, 1, 0]);
+    assert.equal(basicInformation(at, small).size, 1);
+    assert.equal(fns.CreateFileMappingA.handler(
+        [fileHandle, 0, PAGE_READONLY | SEC_IMAGE, 0, size + 1, 0]), 0);
+    assert.equal(errors.at(-1), 8, 'STATUS_SECTION_TOO_BIG, ERROR_NOT_ENOUGH_MEMORY');
 });
 
 test('NtQuerySection refuses a short buffer, a plain section\'s image class, a non-section', ()=>{

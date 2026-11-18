@@ -8,7 +8,7 @@ import { TAKEN } from './named-objects.js';
 import { nameToWalk, readObjectAttributes } from './object-attributes.js';
 import { STATUS, toDosError } from '../ntdll/status.js';
 import { mapImage } from '../../loader/internal/image.js';
-import { relocateImage } from '../../loader/internal/pe.js';
+import { imageKind, relocateImage } from '../../loader/internal/pe.js';
 import { sectionRights, viewProtection, viewRights } from './view-rights.js';
 
 /**
@@ -123,10 +123,13 @@ const accessFor = page=>{
  * view of it can be written back, its size, and its SEC_* attributes.
  *
  * @typedef {{ node: any, writable: boolean, size: number, attributes: number,
- *     writesFile?: boolean, protect?: number,
- *     image?: { bytes: Uint8Array, image: import('../../loader/internal/pe.js').PeImage } }}
+ *     writesFile?: boolean, protect?: number, maximum?: number,
+ *     image?: { bytes: Uint8Array, file: Uint8Array,
+ *         image: import('../../loader/internal/pe.js').PeImage } }}
  *     Section
  *     `writesFile`: its views' writes reach the file, as a copy-on-write one's do not.
+ *     `maximum`: an image section's size as it was made, which NtQuerySection answers;
+ *     its views are the whole image.
  *     `image`: a SEC_IMAGE section's file laid out as its image at its own base, and its
  *     headers: what every view shows, moved to where the view is.
  */
@@ -229,6 +232,8 @@ const pageRound = bytes=>Math.ceil(bytes / PAGE_SIZE) * PAGE_SIZE;
  * @property {(address: number, bytes: number) => boolean} [allocateAt]
  *           Guest memory at exactly that address, when all of it is free.
  * @property {(address: number) => void} release
+ * @property {boolean} [machine64]  The machine runs x86-64 images: an image section
+ *           of one is taken, where a 32-bit Windows refuses it.
  * @property {4 | 8} [pointerSize]  The process's width, which a watched section's
  *           owner reads its fields by.
  * @property {{ open: (type: string, object: any) => number,
@@ -250,6 +255,112 @@ const pageRound = bytes=>Math.ceil(bytes / PAGE_SIZE) * PAGE_SIZE;
  *           section over a file holds a node of its own where `section` gives
  *           one: the file held on the section's terms, not its handle's.
  */
+
+/** SECTION_IMAGE_INFORMATION's ImageFlags. */
+const IMAGE_FLAGS = { comPlusNativeReady: 0x1, comPlusIlOnly: 0x2, dynamicallyRelocated: 0x4,
+    mappedFlat: 0x8, comPlusPrefer32bit: 0x20 };
+/** The .NET header's flags this reads. */
+const COMIMAGE_FLAGS = { ilOnly: 0x1, required32: 0x2, preferred32: 0x20000 };
+/** The COM descriptor's data directory: a .NET image's header. */
+const COM_DESCRIPTOR = 14;
+
+/**
+ * SECTION_IMAGE_INFORMATION of an image section, as NtQuerySection answers
+ * it (32-bit layout): what the loader and a process's creator read of the
+ * image before mapping it - its entry, stack, subsystem, versions,
+ * characteristics, machine, whether it holds code and how it is mapped -
+ * from the file's own headers.
+ *
+ * @param {{ bytes: Uint8Array, file: Uint8Array,
+ *     image: import('../../loader/internal/pe.js').PeImage }} laid
+ * @returns {Uint8Array}
+ */
+export function sectionImageInformation(laid){
+    const { file, image, bytes } = laid;
+    const header = new DataView(file.buffer, file.byteOffset, file.byteLength);
+    const coff = header.getUint32(0x3c, true) + 4;
+    const optional = coff + 20;
+    const u16 = (/** @type {number} */ at)=>(at + 2 <= file.length ? header.getUint16(at, true) : 0);
+    const u32 = (/** @type {number} */ at)=>(at + 4 <= file.length ? header.getUint32(at, true) : 0);
+    const wide = image.bits === 64;
+    const sizeOfCode = u32(optional + 4);
+    const flat = image.sectionAlignment % PAGE_SIZE !== 0;
+    const dllCharacteristics = u16(optional + 70);
+    // Truncated short of its directories, an optional header has no .NET one.
+    const com = image.directories[COM_DESCRIPTOR];
+    const cor = com && com.address !== 0 && com.size !== 0 ? com : null;
+    const corAt = cor && cor.size >= 72 && cor.address + 72 <= bytes.length ? cor.address : -1;
+    const corView = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const corFlags = corAt >= 0 ? corView.getUint32(corAt + 16, true) : 0;
+    const runtime = corAt >= 0
+        ? corView.getUint16(corAt + 4, true) * 0x10000 + corView.getUint16(corAt + 6, true) : 0;
+    const ilOnly = (corFlags & COMIMAGE_FLAGS.ilOnly) !== 0 && runtime >= 0x20005;
+    const code = sizeOfCode !== 0 || image.entryPointRva !== 0 || flat
+        || (image.sections.length === 1 && image.sections[0].executable);
+    const flags = (ilOnly && !wide && (corFlags & COMIMAGE_FLAGS.required32) === 0
+        ? IMAGE_FLAGS.comPlusNativeReady : 0)
+        | (ilOnly ? IMAGE_FLAGS.comPlusIlOnly : 0)
+        | (ilOnly && !wide && (corFlags & COMIMAGE_FLAGS.preferred32) !== 0
+            ? IMAGE_FLAGS.comPlusPrefer32bit : 0)
+        | ((dllCharacteristics & 0x40) !== 0 && code && !flat && !cor
+            ? IMAGE_FLAGS.dynamicallyRelocated : 0)
+        | (flat ? IMAGE_FLAGS.mappedFlat : 0);
+    const info = new Uint8Array(48);
+    const out = new DataView(info.buffer);
+    out.setUint32(0, (image.imageBase + image.entryPointRva) >>> 0, true);
+    out.setUint32(8, image.stackReserve >>> 0, true);
+    out.setUint32(12, image.stackCommit >>> 0, true);
+    out.setUint32(16, image.subsystem, true);
+    out.setUint16(20, u16(optional + 50), true); // MinorSubsystemVersion
+    out.setUint16(22, u16(optional + 48), true); // MajorSubsystemVersion
+    out.setUint16(24, u16(optional + 40), true); // MajorOperatingSystemVersion
+    out.setUint16(26, u16(optional + 42), true); // MinorOperatingSystemVersion
+    out.setUint16(28, u16(coff + 18), true); // ImageCharacteristics
+    out.setUint16(30, dllCharacteristics, true);
+    out.setUint16(32, u16(coff), true); // Machine
+    out.setUint8(34, code ? 1 : 0);
+    out.setUint8(35, flags);
+    out.setUint32(36, cor ? 1 : 0, true); // LoaderFlags
+    out.setUint32(40, file.length, true);
+    out.setUint32(44, u32(optional + 64), true); // CheckSum
+    return info;
+}
+
+/** The image machines a section takes, by the width of the image. */
+const IMAGE_MACHINES = { 32: 0x014c, 64: 0x8664 };
+
+/**
+ * What NtCreateSection(SEC_IMAGE) refuses a file with, by what its headers say
+ * it is (`imageKind`), as Windows answers each kind; null for a PE image of a
+ * machine this one runs, which the loader then lays out.
+ *
+ * @param {ReturnType<typeof imageKind>} kind
+ * @param {boolean} machine64  the machine runs x86-64 images
+ * @returns {number | null}
+ */
+export function imageRefusal(kind, machine64){
+    switch (kind.kind)
+    {
+        case 'not-mz':
+            return STATUS.INVALID_IMAGE_NOT_MZ;
+        case 'unreadable':
+            return STATUS.INVALID_IMAGE_PROTECT;
+        case 'ne':
+            // The NE header's target system: Windows 16-bit, and "Windows 386"
+            // (a VxD), are told apart from the rest.
+            return kind.system === 2 ? STATUS.INVALID_IMAGE_WIN_16
+                : kind.system === 5 ? STATUS.INVALID_IMAGE_PROTECT : STATUS.INVALID_IMAGE_NE_FORMAT;
+        default:
+            // A PE32+ one on a 32-bit Windows is refused for its width before
+            // its machine is read.
+            if (kind.bits === 64 && !machine64)
+            {
+                return STATUS.INVALID_IMAGE_WIN_64;
+            }
+            return kind.bits === null || kind.machine !== IMAGE_MACHINES[kind.bits]
+                ? STATUS.INVALID_IMAGE_FORMAT : null;
+    }
+}
 
 /**
  * @param {MappingHost} host
@@ -370,13 +481,14 @@ export function createMappingFunctions(host){
                 return { status: STATUS.INVALID_FILE_FOR_SECTION };
             }
             return settle(host.files.read(node, 0, length), file=>{
-                if (file[0] !== 0x4d || file[1] !== 0x5a)
+                const refused = imageRefusal(imageKind(file), host.machine64 === true);
+                if (refused !== null)
                 {
-                    return { status: STATUS.INVALID_IMAGE_NOT_MZ };
+                    return { status: refused };
                 }
                 // Laid out by the loader, at the image's own base: each view
                 // is moved to where it lands (`imageViewAt`).
-                /** @type {{ bytes: Uint8Array, image: any }} */
+                /** @type {{ bytes: Uint8Array, file: Uint8Array, image: any }} */
                 let laid;
                 try
                 {
@@ -385,7 +497,14 @@ export function createMappingFunctions(host){
                 catch {
                     return { status: STATUS.INVALID_IMAGE_FORMAT };
                 }
+                // A maximum size is the section's own, its views still the
+                // whole image; one past the image is refused.
+                if (asked > laid.bytes.length)
+                {
+                    return { status: STATUS.SECTION_TOO_BIG };
+                }
                 return { node, writable: false, size: laid.bytes.length,
+                    ...asked !== 0 ? { maximum: asked } : {},
                     attributes: SEC_FILE | SEC_IMAGE, image: laid, protect: page };
             });
         }
@@ -702,11 +821,11 @@ export function createMappingFunctions(host){
                     // BaseAddress, which only a based section has, Attributes, Size.
                     const fields = new DataView(info.buffer);
                     fields.setUint32(4, section.attributes >>> 0, true);
-                    fields.setUint32(8, section.size, true);
+                    fields.setUint32(8, section.maximum ?? section.size, true);
                 }
-                else
+                else if (section.image)
                 {
-                    host.divergence?.('NtQuerySection', 'image information is answered as zeros');
+                    info.set(sectionImageInformation(section.image));
                 }
                 host.writeMemory(buffer >>> 0, info);
                 writeDwordIf(returned >>> 0, size);

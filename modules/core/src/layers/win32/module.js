@@ -3717,6 +3717,7 @@ export function createWin32Module(){
                     ...createMappingFunctions({
                         readMemory,
                         pointerSize,
+                        machine64,
                         pipes,
                         divergence: config?.divergence,
                         writeMemory,

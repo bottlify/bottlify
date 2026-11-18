@@ -192,7 +192,10 @@ flowchart TD
 - **A file that is no image** (no optional header, a `SizeOfImage` of zero, a file alignment
   coarser than its section alignment, a section or relocation past the image's end) fails
   `LoadLibrary` and `NtCreateSection(SEC_IMAGE)` alike with `ERROR_BAD_EXE_FORMAT`
-  (`loader/internal/image.js`). An image is mapped in whole pages, one aligned below a page flat
+  (`loader/internal/image.js`); `NtCreateSection(SEC_IMAGE)` first tells the other kinds apart as
+  Windows does - no MZ, an unreadable or unknown new header, a 16-bit NE file, a PE32+ image on a
+  32-bit Windows (`kernel32/mapping.js` `imageRefusal`) - and answers `SectionImageInformation`
+  from the headers. An image is mapped in whole pages, one aligned below a page flat
   (the file as it lies), and an optional header cut short has no data directory past its end.
   A `DllMain` (or TLS callback) that raises on `DLL_PROCESS_ATTACH` is ended by the loader's
   own frame, and one that answers FALSE is told `DLL_PROCESS_DETACH`: either way the library is

@@ -79,6 +79,47 @@ const SECTION_MEM_WRITE = 0x80000000;
  * @property {{ address: number, size: number }[]} directories
  */
 
+/** The signature of a 16-bit "new executable" header, 'NE'. */
+const NE_SIGNATURE = 0x454e;
+/** NE's target operating system byte, in its header. */
+const NE_EXETYPE = 0x36;
+
+/**
+ * What kind of file an MZ file's headers say it is, before it is read as a PE:
+ * 'not-mz' for none at all, 'unreadable' for a new header that is not in the
+ * file or carries no signature it knows, 'ne' (with its target system) for a
+ * 16-bit one, 'pe' for a PE image - with `bits` from its optional header's
+ * magic, null when the magic is neither. What a section refuses an image with
+ * follows from it (kernel32/mapping.js).
+ *
+ * @param {Uint8Array} bytes
+ * @returns {{ kind: 'not-mz' | 'unreadable' } | { kind: 'ne', system: number }
+ *     | { kind: 'pe', bits: 32 | 64 | null, machine: number }}
+ */
+export function imageKind(bytes){
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    if (bytes.length < 2 || view.getUint16(0, true) !== DOS_MAGIC)
+    {
+        return { kind: 'not-mz' };
+    }
+    const at = bytes.length >= 0x40 ? view.getUint32(0x3c, true) : -1;
+    if (at < 0 || at + 4 > bytes.length)
+    {
+        return { kind: 'unreadable' };
+    }
+    if (view.getUint16(at, true) === NE_SIGNATURE)
+    {
+        return { kind: 'ne', system: at + NE_EXETYPE < bytes.length ? bytes[at + NE_EXETYPE] : 0 };
+    }
+    if (view.getUint32(at, true) !== PE_SIGNATURE || at + 26 > bytes.length)
+    {
+        return { kind: 'unreadable' };
+    }
+    const magic = view.getUint16(at + 24, true);
+    return { kind: 'pe', machine: view.getUint16(at + 4, true),
+        bits: magic === PE32_MAGIC ? 32 : magic === PE32_PLUS_MAGIC ? 64 : null };
+}
+
 /**
  * Parses the headers of a PE image: a 32-bit one, or with `wide` a 64-bit
  * (PE32+, x86-64) one too. Without it a 64-bit image is refused as before, so

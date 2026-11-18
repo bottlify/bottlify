@@ -77,6 +77,13 @@ export const STATUS = Object.freeze({
     INVALID_IMAGE_NOT_MZ: 0xc000012f,
     /** An MZ file whose headers describe no image. */
     INVALID_IMAGE_FORMAT: 0xc000007b,
+    /** An MZ file of the other kinds: a 16-bit NE one, a Windows 16-bit one, one
+     *  whose new header cannot be read or is no kind at all. */
+    INVALID_IMAGE_NE_FORMAT: 0xc000011b,
+    INVALID_IMAGE_PROTECT: 0xc0000130,
+    INVALID_IMAGE_WIN_16: 0xc0000131,
+    /** An x86-64 image on a machine that runs none. */
+    INVALID_IMAGE_WIN_64: 0xc000035a,
     /** A client id that names no process or thread. */
     INVALID_CID: 0xc000000b,
     /** Two ways of naming one object given together, or neither given. */
@@ -207,6 +214,10 @@ const TO_DOS_ERROR = new Map([
     [STATUS.MAPPED_FILE_SIZE_ZERO, ERROR.FILE_INVALID],
     [STATUS.INVALID_IMAGE_NOT_MZ, ERROR.BAD_EXE_FORMAT],
     [STATUS.INVALID_IMAGE_FORMAT, ERROR.BAD_EXE_FORMAT],
+    [STATUS.INVALID_IMAGE_NE_FORMAT, ERROR.BAD_EXE_FORMAT],
+    [STATUS.INVALID_IMAGE_PROTECT, ERROR.BAD_EXE_FORMAT],
+    [STATUS.INVALID_IMAGE_WIN_16, ERROR.BAD_EXE_FORMAT],
+    [STATUS.INVALID_IMAGE_WIN_64, ERROR.BAD_EXE_FORMAT],
     [STATUS.INVALID_CID, ERROR.INVALID_PARAMETER],
     [STATUS.INVALID_PARAMETER_MIX, ERROR.INVALID_PARAMETER],
     [STATUS.RESOURCE_DATA_NOT_FOUND, ERROR.RESOURCE_DATA_NOT_FOUND],
