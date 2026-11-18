@@ -2485,3 +2485,12 @@ by their characters, half width for ASCII and the half-width forms, full width f
 forms, kana and CJK; C3_VOWELMARK and C3_LEXICAL are never set. CT_CTYPE1 follows the category as
 Windows' table does, with the departures the conformance tests pin written as exceptions. Revisit
 when a program is found switching on a CT_CTYPE2 or CT_CTYPE3 bit this answers otherwise. *2026-11-18.*
+
+**A270. The volume is 33.5 GiB with 25.5 GiB free, each size chosen to survive a 32-bit product.**
+Nothing behind drive C: has a size of its own, so the engine names one. GetDiskFreeSpace answers the
+whole volume, as Windows NT does (its product is never less than GetDiskFreeSpaceEx's total), and a
+program of the Windows 9x era multiplies its four figures in 32 bits: a size that is a whole number
+of 4 GiB wraps to zero and reads as a full disk, one 2 GiB past it to a negative number. Each size is
+therefore 1.5 GiB past a multiple of 4 GiB (`kernel32/drives.js`), so the wrapped product, signed or
+not, is still room to install in. Revisit when a bottle carries a quota of its own to report.
+*2026-11-18.*

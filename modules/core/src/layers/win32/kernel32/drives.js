@@ -109,7 +109,7 @@ const FIRST_VOLUME_FIND = 0x7f3e0000;
  * product past 2^32 wraps: a size that is a whole number of 4 GiB wraps to
  * zero, which reads as a full disk, and one past 2 GiB beyond it to a negative
  * number. So each size is one and a half gigabytes past a multiple of four:
- * wrapped, signed or not, it is still room to install in.
+ * wrapped, signed or not, it is still room to install in (decisions.md A270).
  */
 const BYTES_PER_SECTOR = 512;
 const SECTORS_PER_CLUSTER = 8;
