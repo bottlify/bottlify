@@ -22,6 +22,8 @@ import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
 import { assemble } from './layers/win32/msvcrt/guest-code.js';
 
 /** @param {number} value */
+const u16 = value=>[value & 0xff, value >>> 8 & 0xff];
+/** @param {number} value */
 const u32 = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
 
 const JNE = [0x0f, 0x85];
@@ -30,6 +32,8 @@ const JB = [0x0f, 0x82];
 const JMP = [0xe9];
 
 const HEAP_ZERO_MEMORY = 0x8;
+const PROCESS_HEAP_REGION = 0x1;
+const PROCESS_HEAP_ENTRY_BUSY = 0x4;
 const SMALL_CALLS = 10000;
 
 /**
@@ -65,7 +69,7 @@ const toolkit = ({ iat, at })=>({
  * no longer valid; HEAP_ZERO_MEMORY over a recycled cell; a heap of the
  * program's own that HeapSummary adds up and HeapDestroy takes whole; the C
  * runtime's family; and ten thousand pairs of HeapAlloc and HeapFree. HeapWalk
- * ends its walk at once, as it does over the host's blocks.
+ * finds the heap's region and each of the blocks the guest handed out.
  */
 function buildCallsExe(){
     return buildExe({
@@ -136,10 +140,23 @@ function buildCallsExe(){
                 check(10), push('summary'), pushValue(0), pushFrom('own'), call('HeapSummary'),
                 is(1), { jump: JNE, to: 'fail' },
                 compare('summary', 200 * 24, 4), { jump: JNE, to: 'fail' },
-                // HeapWalk hands out the guest's blocks as it does the host's: none.
+                // HeapWalk sees the guest's blocks as it sees the host's: the
+                // heap as a region first, then each busy block, then no more.
                 check(17), push('entry'), pushFrom('own'), call('HeapWalk'),
-                is(0), { jump: JNE, to: 'fail' },
+                is(1), { jump: JNE, to: 'fail' },
+                [0x66, 0xf7, 0x05, ...u32(at('entry') + 10), ...u16(PROCESS_HEAP_REGION)],
+                { jump: JE, to: 'fail' },
+                [0x31, 0xf6],                                           // xor esi, esi
+                'walk',
+                push('entry'), pushFrom('own'), call('HeapWalk'),
+                [0x85, 0xc0], { jump: JE, to: 'walked' },
+                [0x66, 0xf7, 0x05, ...u32(at('entry') + 10), ...u16(PROCESS_HEAP_ENTRY_BUSY)],
+                { jump: JE, to: 'fail' },
+                compare('entry', 24, 4), { jump: JNE, to: 'fail' },
+                [0x46], { jump: JMP, to: 'walk' },                      // inc esi
+                'walked',
                 call('GetLastError'), is(259), { jump: JNE, to: 'fail' },
+                [0x81, 0xfe, ...u32(200)], { jump: JNE, to: 'fail' },   // cmp esi, 200
                 check(11), pushFrom('own'), call('HeapDestroy'), is(1), { jump: JNE, to: 'fail' },
                 pushValue(0), pushValue(0), pushFrom('own'), call('HeapValidate'),
                 is(0), { jump: JNE, to: 'fail' },
