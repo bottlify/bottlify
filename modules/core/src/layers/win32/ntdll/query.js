@@ -206,6 +206,7 @@ export const SHARED_RESOURCE_HANDLE = 'dxgk-shared-resource';
  */
 const KERNEL_TYPE_OF = Object.freeze({
     event: 'Event', mutex: 'Mutant', semaphore: 'Semaphore', timer: 'Timer',
+    keyedevent: 'KeyedEvent',
     file: 'File', pipe: 'File', 'pipe-read': 'File', 'pipe-write': 'File', mailslot: 'File',
     'mailslot-client': 'File', device: 'File', directory: 'File', socket: 'File',
     mapping: 'Section', process: 'Process', thread: 'Thread', 'process-thread': 'Thread',

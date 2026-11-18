@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createProcessPolicyFunctions } from './process-policy.js';
 import { createHandleTable } from '../../kernel/internal/handles.js';
+import { createNamedObjects } from './named-objects.js';
 
 const ERROR_ACCESS_DENIED = 5;
 const ERROR_INVALID_HANDLE = 6;
@@ -26,10 +27,12 @@ const CURRENT_THREAD = 0xfffffffe;
  *     setRegisters?: (values: Record<string, number>) => void,
  *     divergence?: (api: string, detail: string) => void,
  *     flushProcessWrites?: () => true | Promise<true>,
- *     processors?: { count: () => number, systemMask: () => number } }} [given]
+ *     processors?: { count: () => number, systemMask: () => number },
+ *     namedObjects?: any }} [given]
  */
 function machine(given = {}){
-    const { registers = {}, setRegisters, divergence, flushProcessWrites, processors } = given;
+    const { registers = {}, setRegisters, divergence, flushProcessWrites, processors,
+        namedObjects } = given;
     const bytes = new Uint8Array(0x10000);
     const view = new DataView(bytes.buffer);
     /** @type {number[]} */
@@ -69,6 +72,7 @@ function machine(given = {}){
                 }
             },
             processId: 0x100,
+            namedObjects,
             setRegisters,
             divergence,
             processors,
@@ -334,4 +338,38 @@ test('FlushProcessWriteBuffers returns once the other executors have passed a ba
     assert.equal(returned, 0);
     assert.equal(machine({ flushProcessWrites: ()=>true }).call('FlushProcessWriteBuffers'), 0,
         'nothing running elsewhere: returned at once');
+});
+
+test('a job made by name is the one OpenJobObject and NtOpenJobObject find', ()=>{
+    const namedObjects = createNamedObjects();
+    const { view, call, errors, fns, handles } = machine({ namedObjects });
+    /** @param {number} at @param {string} text */
+    const wide = (at, text)=>{
+        [...text, '\0'].forEach((c, i)=>view.setUint16(at + i * 2, c.charCodeAt(0), true));
+        return at;
+    };
+    const job = call('CreateJobObjectW', 0, wide(0x3000, 'jobs'));
+    assert.notEqual(job, 0);
+    assert.equal(errors.at(-1), 0);
+    assert.equal(handles.resolve(call('CreateJobObjectW', 0, 0x3000)), handles.resolve(job),
+        'the same name opens the same job');
+    assert.equal(errors.at(-1), 183, 'ERROR_ALREADY_EXISTS');
+    assert.equal(handles.resolve(call('OpenJobObjectW', 0x1f001f, 0, 0x3000)), handles.resolve(job));
+    assert.equal(call('OpenJobObjectW', 0x1f001f, 0, wide(0x3100, 'none')), 0);
+    assert.equal(errors.at(-1), 2, 'ERROR_FILE_NOT_FOUND');
+
+    const natives = /** @type {any} */ (fns.CreateJobObjectW).natives;
+    const path = '\\Sessions\\1\\BaseNamedObjects\\jobs';
+    view.setUint32(0x3200, 24, true);
+    view.setUint32(0x3208, 0x3220, true);
+    view.setUint16(0x3220, path.length * 2, true);
+    view.setUint32(0x3224, 0x3240, true);
+    [...path].forEach((c, i)=>view.setUint16(0x3240 + i * 2, c.charCodeAt(0), true));
+    assert.equal(natives.NtOpenJobObject.handler([0x3400, 0x1f001f, 0x3200]), 0);
+    assert.equal(handles.resolve(view.getUint32(0x3400, true)), handles.resolve(job));
+    assert.equal(natives.NtCreateJobObject.handler([0x3400, 0x1f001f, 0x3200]) >>> 0, 0xc0000035,
+        'STATUS_OBJECT_NAME_COLLISION');
+    view.setUint32(0x320c, 0x80, true);
+    assert.equal(natives.NtCreateJobObject.handler([0x3400, 0x1f001f, 0x3200]) >>> 0, 0x40000000,
+        'OBJ_OPENIF: STATUS_OBJECT_NAME_EXISTS');
 });

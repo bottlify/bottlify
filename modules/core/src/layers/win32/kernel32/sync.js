@@ -136,6 +136,8 @@ const FILETIME_EPOCH_MS = 11644473600000;
 
 /**
  * @typedef {Object} SyncHost
+ * @property {ReturnType<typeof import('./named-objects.js').createNamedObjects>} [namedObjects]
+ *           the run's one namespace, where a job made by name is found again
  * @property {any} kernel                        The kernel layer's API.
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
@@ -814,6 +816,7 @@ export function createSyncFunctions(host){
             divergence: host.divergence,
             pointerSize: host.pointerSize,
             processId: host.processId,
+            namedObjects: host.namedObjects,
             threadOf,
             objectOf: object,
             processors,

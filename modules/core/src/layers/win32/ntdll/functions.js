@@ -177,7 +177,8 @@ const KERNEL32_ALIASES = Object.freeze({
  */
 
 /** The handle types a Win32 name can stand for, whose names the named table keeps. */
-const NAMED_KINDS = new Set(['event', 'mutex', 'semaphore', 'timer', 'mapping']);
+const NAMED_KINDS = new Set(['event', 'mutex', 'semaphore', 'timer', 'mapping', 'keyedevent', 'job',
+    'iocp']);
 
 /**
  * @typedef {Object} NtdllHost

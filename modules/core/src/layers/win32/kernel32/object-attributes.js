@@ -20,6 +20,7 @@
 
 /** Attributes the native creates read. */
 export const OBJ_INHERIT = 0x2;
+export const OBJ_CASE_INSENSITIVE = 0x40;
 export const OBJ_OPENIF = 0x80;
 
 /**
@@ -78,7 +79,9 @@ export function readObjectAttributes(readMemory, pointer, pointerSize = 4){
  * The Win32 name a native path names: the object directory Win32 names live in
  * (\BaseNamedObjects, or a session's) taken off. A name relative to a
  * directory handle is that name, the directory a program opens for it. A path
- * elsewhere in the namespace is no Win32 name: undefined.
+ * elsewhere in the namespace is no Win32 name: undefined. The object manager
+ * compares names as they are spelt unless OBJ_CASE_INSENSITIVE asks
+ * otherwise, so \BASENamedObjects is that directory only then.
  *
  * @param {ObjectAttributes} given
  * @returns {string | undefined}
@@ -92,7 +95,10 @@ export function win32NameOf(given){
     {
         return given.name;
     }
-    return /^\\(?:sessions\\\d+\\)?basenamedobjects\\(.+)$/i.exec(given.name)?.[1];
+    const directory = (given.attributes & OBJ_CASE_INSENSITIVE) !== 0
+        ? /^\\(?:sessions\\\d+\\)?basenamedobjects\\(.+)$/is
+        : /^\\(?:Sessions\\\d+\\)?BaseNamedObjects\\(.+)$/s;
+    return directory.exec(given.name)?.[1];
 }
 
 /**
