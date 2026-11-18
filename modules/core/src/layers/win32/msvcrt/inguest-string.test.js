@@ -191,3 +191,79 @@ test('assignment, appending and comparison read their text before they grow', ()
     put(0x500, 'twelve charstwelve chars');
     assert.equal(equals.handler([0x100, 0x500]), 1);
 });
+
+test('a 64-bit process\'s string: forty bytes, the text after the iterator list, the length'
+    + ' and the capacity quadwords', ()=>{
+    // _Container_base's _Myfirstiter at 0, _Bx at 8, _Mysize at 24, _Myres at 32.
+    const memory = new Uint8Array(0x10000);
+    const view = new DataView(memory.buffer);
+    let next = 0x8000;
+    /** @type {number[]} */
+    const freed = [];
+    const crt = {
+        '??2@YAPAXI@Z': { handler: (/** @type {number[]} */ [bytes])=>{
+            const block = next;
+            next += (bytes + 15) & ~15;
+            return block;
+        } },
+        '??3@YAXPAX@Z': { handler: (/** @type {number[]} */ [block])=>freed.push(block) },
+    };
+    /** @type {number[]} */
+    const singles = [];
+    const table = createMsvcp80Functions(crt, {
+        readMemory: (address, length)=>memory.subarray(address, address + length),
+        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        pointerSize: 8,
+        fpu: /** @type {any} */ ({ setResult: ()=>{},
+            setSingleResult: (/** @type {number} */ value)=>singles.push(value) }),
+    });
+    const STRING = '?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@';
+    assert.equal(table[`??0${STRING}QAE@XZ`], undefined, 'the 32-bit names are not there');
+    const self = 0x100;
+    memory.fill(0xcc, self, self + 48);
+    const text = (/** @type {number} */ of = self)=>{
+        const at = table[`?c_str@${STRING}QEBAPEBDXZ`].handler([of]);
+        let out = '';
+        for (let i = at; memory[i] !== 0; i++)
+        {
+            out += String.fromCharCode(memory[i]);
+        }
+        return out;
+    };
+    /** @param {number} at */
+    const quad = at=>[view.getUint32(at, true), view.getUint32(at + 4, true)];
+
+    memory.set([...'short'].map(c=>c.charCodeAt(0)).concat(0), 0x400);
+    assert.equal(table[`??0${STRING}QEAA@PEBD@Z`].handler([self, 0x400]), self);
+    assert.equal(text(), 'short');
+    assert.deepEqual([quad(self), quad(self + 24), quad(self + 32)], [[0, 0], [5, 0], [15, 0]]);
+    assert.equal(String.fromCharCode(...memory.subarray(self + 8, self + 13)), 'short',
+        'inline, after the iterator list');
+    assert.equal(view.getUint32(self + 40, true), 0xcccccccc, 'and no byte past forty');
+    assert.equal(table[`?size@${STRING}QEBA_KXZ`].handler([self]), 5);
+
+    memory.set([...' and then nineteen more'].map(c=>c.charCodeAt(0)).concat(0), 0x440);
+    table[`??Y${STRING}QEAAAEAV01@PEBD@Z`].handler([self, 0x440]);
+    assert.equal(text(), 'short and then nineteen more');
+    assert.deepEqual([quad(self + 8), quad(self + 24), quad(self + 32)],
+        [[0x8000, 0], [28, 0], [31, 0]], 'on the heap, its pointer whole');
+
+    const other = 0x200;
+    table[`??0${STRING}QEAA@AEBV01@@Z`].handler([other, self]);
+    assert.equal(text(other), 'short and then nineteen more');
+    table[`?resize@${STRING}QEAAX_K@Z`].handler([other, 3]);
+    assert.equal(text(other), 'sho');
+    table[`??1${STRING}QEAA@XZ`].handler([self]);
+    assert.deepEqual([freed, quad(self + 24), quad(self + 32)], [[0x8000], [0, 0], [15, 0]]);
+
+    // complex<float> through the caller's result, and a float where a 64-bit caller reads it.
+    new Float32Array(memory.buffer, 0x500, 4).set([1, 2, 3, 4]);
+    const multiply = '??$?DM@std@@YA?AV?$complex@M@0@AEBV10@0@Z';
+    assert.equal(table[multiply].handler([0x520, 0x500, 0x508]), 0x520);
+    assert.deepEqual([...new Float32Array(memory.buffer, 0x520, 2)], [-5, 10]);
+    table['?max@?$numeric_limits@M@std@@SAMXZ'].handler([]);
+    assert.deepEqual(singles, [3.4028234663852886e38]);
+    const before = next;
+    assert.equal(table['?allocate@?$allocator@D@std@@QEAAPEAD_K@Z'].handler([0, 40]), before,
+        'operator new\'s block');
+});

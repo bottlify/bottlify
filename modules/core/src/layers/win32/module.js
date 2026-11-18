@@ -6122,7 +6122,8 @@ export function createWin32Module(){
                     currentThread: ()=>kernel.currentThread() });
             // And its C++ library, over that runtime's operator new and delete.
             libraries['MSVCP80.dll'] = createMsvcp80Functions(libraries['MSVCR80.dll'],
-                { readMemory, writeMemory, fillMemory });
+                { readMemory, writeMemory, fillMemory, pointerSize,
+                    ...floatResults ? { fpu: floatResults } : {} });
             // Visual C++ 2003's: msvcrt's functions and the filter its DLLs
             // start under, and the C++ library's strings, laid out as 2005's.
             // The universal runtime of Visual C++ 2015 on, over 2005's: the same

@@ -39,13 +39,25 @@ const STRING_ARG = '$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@';
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, value: number, length: number) => void} [fillMemory]
+ * @property {4 | 8} [pointerSize]  8 in a 64-bit process, whose string is 40 bytes.
+ * @property {import('./float.js').FloatHost} [fpu]  Where a float is answered.
  */
 
 /**
  * @param {Record<string, any>} crt  MSVCR80's table, for operator new and delete.
  * @param {Msvcp80Host} host
+ * @returns {Record<string, any>}  The members under the names of the process's width.
  */
 export function createMsvcp80Functions(crt, host){
+    /**
+     * The string as the caller's compiler lays it out: the container's iterator
+     * list, sixteen bytes of text or the pointer to it, the length and the
+     * capacity, the three words a pointer wide.
+     */
+    const POINTER = host.pointerSize === 8 ? 8 : 4;
+    const BUFFER = POINTER === 8 ? 8 : STRING_BUFFER;
+    const SIZE = POINTER === 8 ? 24 : STRING_SIZE;
+    const RESERVED = POINTER === 8 ? 32 : STRING_RESERVED;
     /** @param {number} address */
     const u32 = address=>new DataView(host.readMemory(address >>> 0, 4).slice().buffer)
         .getUint32(0, true);
@@ -55,9 +67,17 @@ export function createMsvcp80Functions(crt, host){
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
         host.writeMemory(address >>> 0, bytes);
     };
+    /** A length, a capacity or a pointer: a word of the pointer's width. */
+    const setWord = (/** @type {number} */ address, /** @type {number} */ value)=>{
+        setU32(address, value);
+        if (POINTER === 8)
+        {
+            setU32(address + 4, 0);
+        }
+    };
     /** @param {number} self */
-    const textOf = self=>(u32(self + STRING_RESERVED) > STRING_INLINE
-        ? u32(self + STRING_BUFFER) : self + STRING_BUFFER);
+    const textOf = self=>(u32(self + RESERVED) > STRING_INLINE
+        ? u32(self + BUFFER) : self + BUFFER);
     /** @param {number} address */
     const lengthOf = address=>{
         let length = 0;
@@ -70,17 +90,17 @@ export function createMsvcp80Functions(crt, host){
 
     /** The length set and the terminator after it. @param {number} self @param {number} length */
     const endAt = (self, length)=>{
-        setU32(self + STRING_SIZE, length);
+        setWord(self + SIZE, length);
         host.writeMemory(textOf(self) + length, Uint8Array.of(0));
     };
 
     /** Empty and inline, the heap text freed. @param {number} self */
     const tidy = self=>{
-        if (u32(self + STRING_RESERVED) > STRING_INLINE)
+        if (u32(self + RESERVED) > STRING_INLINE)
         {
-            crt['??3@YAXPAX@Z'].handler([u32(self + STRING_BUFFER)]);
+            crt['??3@YAXPAX@Z'].handler([u32(self + BUFFER)]);
         }
-        setU32(self + STRING_RESERVED, STRING_INLINE);
+        setWord(self + RESERVED, STRING_INLINE);
         endAt(self, 0);
     };
 
@@ -91,7 +111,7 @@ export function createMsvcp80Functions(crt, host){
      * @param {number} self @param {number} wanted @param {number} kept
      */
     const regrow = (self, wanted, kept)=>{
-        const before = u32(self + STRING_RESERVED);
+        const before = u32(self + RESERVED);
         let reserved = (wanted | STRING_INLINE) >>> 0;
         if (reserved > MAX_SIZE)
         {
@@ -112,8 +132,8 @@ export function createMsvcp80Functions(crt, host){
             host.writeMemory(block, host.readMemory(textOf(self), kept).slice());
         }
         tidy(self);
-        setU32(self + STRING_BUFFER, block);
-        setU32(self + STRING_RESERVED, reserved);
+        setWord(self + BUFFER, block);
+        setWord(self + RESERVED, reserved);
         endAt(self, kept);
         return true;
     };
@@ -125,8 +145,8 @@ export function createMsvcp80Functions(crt, host){
      * @param {number} self @param {number} wanted @param {boolean} trim
      */
     const grow = (self, wanted, trim)=>{
-        const reserved = u32(self + STRING_RESERVED);
-        const length = u32(self + STRING_SIZE);
+        const reserved = u32(self + RESERVED);
+        const length = u32(self + SIZE);
         if (reserved < wanted)
         {
             return regrow(self, wanted, Math.min(length, wanted));
@@ -134,11 +154,11 @@ export function createMsvcp80Functions(crt, host){
         if (trim && wanted <= STRING_INLINE && reserved > STRING_INLINE)
         {
             const kept = Math.min(wanted, length);
-            const heap = u32(self + STRING_BUFFER);
+            const heap = u32(self + BUFFER);
             const text = host.readMemory(heap, kept).slice();
             crt['??3@YAXPAX@Z'].handler([heap]);
-            setU32(self + STRING_RESERVED, STRING_INLINE);
-            host.writeMemory(self + STRING_BUFFER, text);
+            setWord(self + RESERVED, STRING_INLINE);
+            host.writeMemory(self + BUFFER, text);
             endAt(self, kept);
             return false;
         }
@@ -152,7 +172,7 @@ export function createMsvcp80Functions(crt, host){
      */
     const assign = (self, from, length)=>{
         const text = host.readMemory(from, length).slice();
-        setU32(self + STRING_RESERVED, STRING_INLINE);
+        setWord(self + RESERVED, STRING_INLINE);
         endAt(self, 0);
         if (length > STRING_INLINE)
         {
@@ -179,8 +199,8 @@ export function createMsvcp80Functions(crt, host){
      * @param {number} self @param {Uint8Array} bytes
      */
     const assignBytes = (self, bytes)=>{
-        if (bytes.length > u32(self + STRING_RESERVED)
-            && !regrow(self, bytes.length, u32(self + STRING_SIZE)))
+        if (bytes.length > u32(self + RESERVED)
+            && !regrow(self, bytes.length, u32(self + SIZE)))
         {
             return self;
         }
@@ -191,8 +211,8 @@ export function createMsvcp80Functions(crt, host){
 
     /** @param {number} self @param {Uint8Array} bytes */
     const appendBytes = (self, bytes)=>{
-        const length = u32(self + STRING_SIZE);
-        if (length + bytes.length > u32(self + STRING_RESERVED)
+        const length = u32(self + SIZE);
+        if (length + bytes.length > u32(self + RESERVED)
             && !grow(self, length + bytes.length, false))
         {
             return self;
@@ -203,7 +223,7 @@ export function createMsvcp80Functions(crt, host){
     };
 
     /** A string's text, copied out. @param {number} self */
-    const bytesOf = self=>host.readMemory(textOf(self), u32(self + STRING_SIZE)).slice();
+    const bytesOf = self=>host.readMemory(textOf(self), u32(self + SIZE)).slice();
     /** A C string's bytes, copied out. @param {number} at */
     const bytesAt = at=>host.readMemory(at >>> 0, lengthOf(at >>> 0)).slice();
     /** @param {Uint8Array} a @param {Uint8Array} b */
@@ -213,6 +233,141 @@ export function createMsvcp80Functions(crt, host){
     const thiscall = (argBytes, handler)=>({ convention: 'thiscall', argBytes, handler });
     /** @param {number} argBytes @param {(args: number[]) => number} handler */
     const cdecl = (argBytes, handler)=>({ convention: 'cdecl', argBytes, handler });
+
+    /**
+     * A 64-bit process's members, under the names its compiler gives them
+     * (`QEAA` for a member, `PEBD` for a `const char *`, `_K` for a size):
+     * each answered here whole, the object in the 64-bit layout.
+     */
+    function longMembers(){
+        const ALLOCATOR = '?$allocator@D@std@@';
+        const COMPLEX = 'V?$complex@M@0@';
+        /** @param {number} at */
+        const f32 = at=>new DataView(host.readMemory(at >>> 0, 4).slice().buffer)
+            .getFloat32(0, true);
+        /** A complex<float> written to the caller's result. @param {number} out */
+        const complex = (out, /** @type {number} */ re, /** @type {number} */ im)=>{
+            host.writeMemory(out >>> 0, new Uint8Array(Float32Array.of(re, im).buffer));
+            return out;
+        };
+        /** An empty string: no iterators, inline, no text. @param {number} self */
+        const fresh = self=>{
+            setWord(self, 0);
+            return self;
+        };
+        /** @param {number} self @param {number} count */
+        const resize = (self, count)=>{
+            const length = u32(self + SIZE);
+            const wanted = count >>> 0;
+            if (wanted > u32(self + RESERVED) && !grow(self, wanted, false))
+            {
+                return 0;
+            }
+            if (wanted > length)
+            {
+                host.writeMemory(textOf(self) + length, new Uint8Array(wanted - length));
+            }
+            endAt(self, wanted);
+            return 0;
+        };
+        /** @type {import('./float.js').FloatHost | undefined} */
+        const fpu = host.fpu;
+        return {
+            /** basic_string::basic_string() */
+            [`??0${STRING}QEAA@XZ`]: cdecl(4, ([self])=>assign(fresh(self), 0, 0)),
+            /** basic_string::basic_string(const char *) */
+            [`??0${STRING}QEAA@PEBD@Z`]: cdecl(8, ([self, from])=>
+                assign(fresh(self), from, lengthOf(from))),
+            /** basic_string::basic_string(const basic_string &) */
+            [`??0${STRING}QEAA@AEBV01@@Z`]: cdecl(8, ([self, other])=>
+                assign(fresh(self), textOf(other), u32(other + SIZE))),
+            /** basic_string::~basic_string() */
+            [`??1${STRING}QEAA@XZ`]: cdecl(4, ([self])=>{
+                tidy(self);
+                return 0;
+            }),
+            /** char &basic_string::operator[](_Size_type_nosscl) */
+            [`??A${STRING}QEAAAEADU_Size_type_nosscl@01@@Z`]: cdecl(8, ([self, index])=>
+                (textOf(self) + index) >>> 0),
+            /** const char &basic_string::operator[](_Size_type_nosscl) const */
+            [`??A${STRING}QEBAAEBDU_Size_type_nosscl@01@@Z`]: cdecl(8, ([self, index])=>
+                (textOf(self) + index) >>> 0),
+            /** basic_string &basic_string::operator+=(const char *) */
+            [`??Y${STRING}QEAAAEAV01@PEBD@Z`]: cdecl(8, ([self, from])=>
+                appendBytes(self, bytesAt(from))),
+            /** basic_string &basic_string::operator+=(const basic_string &) */
+            [`??Y${STRING}QEAAAEAV01@AEBV01@@Z`]: cdecl(8, ([self, other])=>
+                appendBytes(self, bytesOf(other))),
+            /** basic_string &basic_string::operator=(const basic_string &) */
+            [`??4${STRING}QEAAAEAV01@AEBV01@@Z`]: cdecl(8, ([self, other])=>
+                (self === other ? self : assignBytes(self, bytesOf(other)))),
+            /** const char *basic_string::c_str() const */
+            [`?c_str@${STRING}QEBAPEBDXZ`]: cdecl(4, ([self])=>textOf(self)),
+            /** void basic_string::resize(size_type) -- padded with zeros */
+            [`?resize@${STRING}QEAAX_K@Z`]: cdecl(8, ([self, count])=>resize(self, count)),
+            /** size_type basic_string::size() const */
+            [`?size@${STRING}QEBA_KXZ`]: cdecl(4, ([self])=>u32(self + SIZE)),
+            /** static const size_type basic_string::npos */
+            [`?npos@${STRING}2_KB`]: { data: ()=>new Uint8Array(8).fill(0xff) },
+
+            /** allocator<char>::allocator(), and from another: nothing to build. */
+            [`??0${ALLOCATOR}QEAA@XZ`]: cdecl(4, ([self])=>self),
+            [`??0${ALLOCATOR}QEAA@AEBV01@@Z`]: cdecl(8, ([self])=>self),
+            /** char *allocator<char>::allocate(size_type): operator new's. */
+            [`?allocate@${ALLOCATOR}QEAAPEAD_K@Z`]: cdecl(8, ([, count])=>
+                crt['??2@YAPAXI@Z'].handler([count >>> 0]) >>> 0),
+            /** void allocator<char>::deallocate(char *, size_type) */
+            [`?deallocate@${ALLOCATOR}QEAAXPEAD_K@Z`]: cdecl(12, ([, block])=>{
+                crt['??3@YAXPAX@Z'].handler([block >>> 0]);
+                return 0;
+            }),
+            /** void allocator<char>::construct(char *, const char &) */
+            [`?construct@${ALLOCATOR}QEAAXPEADAEBD@Z`]: cdecl(12, ([, at, from])=>{
+                host.writeMemory(at >>> 0, host.readMemory(from >>> 0, 1).slice());
+                return 0;
+            }),
+            /** void allocator<char>::destroy(char *): a char has nothing to destroy. */
+            [`?destroy@${ALLOCATOR}QEAAXPEAD@Z`]: cdecl(8, ()=>0),
+            /** size_type allocator<char>::max_size() const: every size_t, sign-extended. */
+            [`?max_size@${ALLOCATOR}QEBA_KXZ`]: cdecl(4, ()=>0xffffffff),
+
+            /** numeric_limits<unsigned char>::max(), <short>, <float> and <double>. */
+            '?max@?$numeric_limits@E@std@@SAEXZ': cdecl(0, ()=>0xff),
+            '?max@?$numeric_limits@F@std@@SAFXZ': cdecl(0, ()=>0x7fff),
+            ...fpu?.setSingleResult ? {
+                '?max@?$numeric_limits@M@std@@SAMXZ': cdecl(0, ()=>{
+                    /** @type {any} */ (fpu).setSingleResult(3.4028234663852886e38);
+                    return 0;
+                }),
+                '?max@?$numeric_limits@N@std@@SANXZ': cdecl(0, ()=>{
+                    fpu.setResult(Number.MAX_VALUE);
+                    return 0;
+                }),
+            } : {},
+
+            // complex<float>'s operators: the result is a class, returned through
+            // the pointer the caller passes first.
+            /** complex<float> operator*(const complex<float> &, const complex<float> &) */
+            [`??$?DM@std@@YA?A${COMPLEX}AEBV10@0@Z`]: cdecl(12, ([out, left, right])=>{
+                const [a, b, c, d] = [f32(left), f32(left + 4), f32(right), f32(right + 4)];
+                return complex(out, Math.fround(Math.fround(a * c) - Math.fround(b * d)),
+                    Math.fround(Math.fround(a * d) + Math.fround(b * c)));
+            }),
+            /** complex<float> operator+(const complex<float> &, const complex<float> &) */
+            [`??$?HM@std@@YA?A${COMPLEX}AEBV10@0@Z`]: cdecl(12, ([out, left, right])=>
+                complex(out, f32(left) + f32(right), f32(left + 4) + f32(right + 4))),
+            /** complex<float> conj(const complex<float> &) */
+            [`??$conj@M@std@@YA?A${COMPLEX}AEBV10@@Z`]: cdecl(8, ([out, of])=>
+                complex(out, f32(of), -f32(of + 4))),
+
+            '?_Nomemory@std@@YAXXZ': cdecl(0, ()=>crt.abort.handler([])),
+        };
+    }
+
+    if (POINTER === 8)
+    {
+        return longMembers();
+    }
 
     const text = member('stringText', ([self])=>textOf(self));
     const at = member('stringAt', ([self, index])=>(textOf(self) + index) >>> 0);
@@ -227,7 +382,7 @@ export function createMsvcp80Functions(crt, host){
 
         /** basic_string::basic_string(const basic_string &) */
         [`??0${STRING}QAE@ABV01@@Z`]: member('stringCopy', ([self, other])=>
-            assign(self, textOf(other), u32(other + STRING_SIZE))),
+            assign(self, textOf(other), u32(other + SIZE))),
 
         /** basic_string::~basic_string() */
         [`??1${STRING}QAE@XZ`]: member('stringDestroy', ([self])=>{
@@ -242,8 +397,8 @@ export function createMsvcp80Functions(crt, host){
 
         /** basic_string &basic_string::operator+=(char) */
         [`??Y${STRING}QAEAAV01@D@Z`]: member('stringAppendChar', ([self, c])=>{
-            const length = u32(self + STRING_SIZE);
-            if (length >= u32(self + STRING_RESERVED) && !grow(self, length + 1, false))
+            const length = u32(self + SIZE);
+            if (length >= u32(self + RESERVED) && !grow(self, length + 1, false))
             {
                 return self;
             }
@@ -260,8 +415,8 @@ export function createMsvcp80Functions(crt, host){
 
         /** void basic_string::reserve(size_type) */
         [`?reserve@${STRING}QAEXI@Z`]: member('stringReserve', ([self, count])=>{
-            const length = u32(self + STRING_SIZE);
-            if (length <= (count >>> 0) && u32(self + STRING_RESERVED) !== (count >>> 0)
+            const length = u32(self + SIZE);
+            if (length <= (count >>> 0) && u32(self + RESERVED) !== (count >>> 0)
                 && grow(self, count >>> 0, true))
             {
                 endAt(self, length);
@@ -271,9 +426,9 @@ export function createMsvcp80Functions(crt, host){
 
         /** void basic_string::resize(size_type) -- padded with zeros */
         [`?resize@${STRING}QAEXI@Z`]: member('stringResize', ([self, count])=>{
-            const length = u32(self + STRING_SIZE);
+            const length = u32(self + SIZE);
             const wanted = count >>> 0;
-            if (wanted > u32(self + STRING_RESERVED) && !grow(self, wanted, false))
+            if (wanted > u32(self + RESERVED) && !grow(self, wanted, false))
             {
                 return 0;
             }
@@ -317,6 +472,6 @@ export function createMsvcp80Functions(crt, host){
         '?_Nomemory@std@@YAXXZ': cdecl(0, ()=>crt.abort.handler([])),
 
         /** size_type basic_string::size() const */
-        [`?size@${STRING}QBEIXZ`]: member('stringSize', ([self])=>u32(self + STRING_SIZE)),
+        [`?size@${STRING}QBEIXZ`]: member('stringSize', ([self])=>u32(self + SIZE)),
     };
 }

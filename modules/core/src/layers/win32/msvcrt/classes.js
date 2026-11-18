@@ -22,14 +22,36 @@
 
 import { undecorateName, undecorateType } from './undname.js';
 
-/** Where an exception keeps its message, and whether it owns it. */
-const NAME = 4;
-const DO_FREE = 8;
-const EXCEPTION_SIZE = 12;
+/**
+ * A class's fields by the pointer's width. An exception: its vtable, where it
+ * keeps its message, and whether it owns it. type_info: the vtable, the
+ * undecorated name once asked for, the decorated one.
+ *
+ * @param {number} pointer
+ */
+const layoutOf = pointer=>({ NAME: pointer, DO_FREE: 2 * pointer,
+    EXCEPTION_SIZE: pointer === 8 ? 24 : 12, UNDECORATED: pointer, DECORATED: 2 * pointer });
 
-/** type_info: the vtable, the undecorated name once asked for, the decorated one. */
-const UNDECORATED = 4;
-const DECORATED = 8;
+/**
+ * A member's name as a 64-bit compiler decorates it: the member's access and
+ * `this` (`QAE` to `QEAA`, `QBE` to `QEBA`, and the virtual and private ones
+ * alike), then every pointer and reference after it with the `E` of `__ptr64`.
+ * Only this file's own names go through it; `classes.test.js` holds the ones a
+ * 64-bit program was seen to import.
+ *
+ * @param {string} name
+ */
+export function longName(name){
+    const member = /@@([QUA])([AB])E/.exec(name);
+    if (!member)
+    {
+        return name;
+    }
+    const rest = name.slice(member.index + member[0].length)
+        .replace(/P([AB])Q([AB])/g, 'PE$1QE$2').replace(/A([AB])Q([AB])/g, 'AE$1QE$2')
+        .replace(/(?<!E)([PA])([AB])([DXV])/g, '$1E$2$3');
+    return `${name.slice(0, member.index)}@@${member[1]}E${member[2]}A${rest}`;
+}
 
 /** A deleting destructor's flags: free the storage; it is an array, its count before it. */
 const DELETE = 1;
@@ -57,7 +79,8 @@ const HIERARCHY = {
  * @returns {Record<string, { data: () => Uint8Array, pointers: { at: number, to: string }[],
  *     entry?: number }>}
  */
-function rttiOf(name){
+function rttiOf(name, pointer = 4){
+    const { DECORATED } = layoutOf(pointer);
     const bases = [name, ...HIERARCHY[name]];
     const decorated = `.?AV${name}@@`;
     /** @param {string} of */
@@ -74,7 +97,7 @@ function rttiOf(name){
         }
         return bytes;
     };
-    return {
+    const typeDescriptor = {
         // The type descriptor: type_info's vtable, a spare word, the name.
         [descriptor(name)]: {
             data: ()=>{
@@ -84,6 +107,29 @@ function rttiOf(name){
             },
             pointers: [{ at: 0, to: '??_7type_info@@6B@' }],
         },
+    };
+    if (pointer === 8)
+    {
+        // A 64-bit image's locator, hierarchy and base descriptors name each
+        // other by offsets from their image's base, which a library made of
+        // handlers has none of: the vtable's slots are quadwords and the word
+        // before them is null, so `typeid` and `dynamic_cast` of one of the
+        // runtime's own objects find no type. A program's own classes are its own.
+        return {
+            ...typeDescriptor,
+            [`??_7${name}@@6B@`]: {
+                data: ()=>new Uint8Array(name === 'type_info' ? 16 : 24),
+                entry: 8,
+                pointers: [
+                    { at: 8, to: longName(`??_E${name}@@UAEPAXI@Z`) },
+                    ...name === 'type_info' ? []
+                        : [{ at: 16, to: longName('?what@exception@@UBEPBDXZ') }],
+                ],
+            },
+        };
+    }
+    return {
+        ...typeDescriptor,
         // As a base of itself and of whatever derives from it: at offset 0,
         // not a virtual base (pdisp -1), with its own bases counted.
         [baseDescriptor(name)]: {
@@ -148,6 +194,7 @@ const FNV64 = Object.freeze({ BASIS: 14695981039346656037n, PRIME: 1099511628211
 export function createClassFunctions(host){
     /** A pointer's bytes, and where the second field of a two-pointer record is. */
     const pointer = host.pointerSize ?? 4;
+    const { NAME, DO_FREE, EXCEPTION_SIZE, UNDECORATED, DECORATED } = layoutOf(pointer);
     /** @param {number} address */
     const readU32 = address=>new DataView(host.readMemory(address, 4).slice().buffer)
         .getUint32(0, true);
@@ -156,6 +203,14 @@ export function createClassFunctions(host){
         const bytes = new Uint8Array(4);
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
         host.writeMemory(address, bytes);
+    };
+    /** A pointer written whole. @param {number} address @param {number} value */
+    const writePointer = (address, value)=>{
+        writeU32(address, value);
+        if (pointer === 8)
+        {
+            writeU32(address + 4, 0);
+        }
     };
 
     /** A copy of a C string on the runtime's heap, or 0. @param {string} text */
@@ -186,9 +241,9 @@ export function createClassFunctions(host){
      * @param {number} self @param {number} message @param {string} name
      */
     const construct = (self, message, name)=>{
-        writeU32(self, vtable(name));
+        writePointer(self, vtable(name));
         const copy = message === 0 ? 0 : copyString(readString(message));
-        writeU32(self + NAME, copy);
+        writePointer(self + NAME, copy);
         writeU32(self + DO_FREE, copy === 0 ? 0 : 1);
         return self;
     };
@@ -204,12 +259,12 @@ export function createClassFunctions(host){
         if (readU32(other + DO_FREE) !== 0 && message !== 0)
         {
             const copy = copyString(readString(message));
-            writeU32(self + NAME, copy);
+            writePointer(self + NAME, copy);
             writeU32(self + DO_FREE, copy === 0 ? 0 : 1);
         }
         else
         {
-            writeU32(self + NAME, message);
+            writePointer(self + NAME, message);
             writeU32(self + DO_FREE, 0);
         }
     };
@@ -238,14 +293,15 @@ export function createClassFunctions(host){
     const deleting = (self, flags, size, each)=>{
         if ((flags & ARRAY) !== 0)
         {
-            const count = readU32(self - 4);
+            // The count new[] kept before the first object, a size_t.
+            const count = readU32(self - pointer);
             for (let index = count - 1; index >= 0; index--)
             {
                 each(self + index * size);
             }
             if ((flags & DELETE) !== 0)
             {
-                host.free(self - 4);
+                host.free(self - pointer);
             }
             return self;
         }
@@ -273,7 +329,7 @@ export function createClassFunctions(host){
      */
     const members = name=>{
         table[`??0${name}@@QAE@ABV0@@Z`] = thiscall(8, ([self, other])=>{
-            writeU32(self, vtable(name));
+            writePointer(self, vtable(name));
             copyFields(self, other);
             return self;
         });
@@ -291,7 +347,7 @@ export function createClassFunctions(host){
             deleting(self, flags, EXCEPTION_SIZE, destroy));
         table[`??_G${name}@@UAEPAXI@Z`] = thiscall(8, ([self, flags])=>
             deleting(self, flags & DELETE, EXCEPTION_SIZE, destroy));
-        Object.assign(table, rttiOf(name));
+        Object.assign(table, rttiOf(name, pointer));
     };
 
     members('exception');
@@ -306,8 +362,8 @@ export function createClassFunctions(host){
 
         /** exception::exception(const char * const &message, int) -- the message only pointed at */
         '??0exception@@QAE@ABQBDH@Z': thiscall(12, ([self, message])=>{
-            writeU32(self, vtable('exception'));
-            writeU32(self + NAME, readU32(message));
+            writePointer(self, vtable('exception'));
+            writePointer(self + NAME, readU32(message));
             writeU32(self + DO_FREE, 0);
             return self;
         }),
@@ -334,7 +390,7 @@ export function createClassFunctions(host){
         '??_Fbad_typeid@@QAEXXZ': thiscall(4, ([self])=>{
             construct(self, 0, 'bad_typeid');
             const copy = copyString('bad typeid');
-            writeU32(self + NAME, copy);
+            writePointer(self + NAME, copy);
             writeU32(self + DO_FREE, copy === 0 ? 0 : 1);
             return self;
         }),
@@ -355,7 +411,7 @@ export function createClassFunctions(host){
         '??_Fbad_cast@@QAEXXZ': thiscall(4, ([self])=>{
             construct(self, 0, 'bad_cast');
             const copy = copyString('bad cast');
-            writeU32(self + NAME, copy);
+            writePointer(self + NAME, copy);
             writeU32(self + DO_FREE, copy === 0 ? 0 : 1);
             return self;
         }),
@@ -370,7 +426,7 @@ export function createClassFunctions(host){
             if (undecorated !== 0)
             {
                 host.free(undecorated);
-                writeU32(self + UNDECORATED, 0);
+                writePointer(self + UNDECORATED, 0);
             }
             return 0;
         }),
@@ -399,7 +455,7 @@ export function createClassFunctions(host){
             }
             const decorated = readString(self + DECORATED);
             const made = copyString(undecorateType(decorated.slice(1)) ?? decorated);
-            writeU32(self + UNDECORATED, made);
+            writePointer(self + UNDECORATED, made);
             return made;
         }),
 
@@ -467,7 +523,7 @@ export function createClassFunctions(host){
             },
         },
     });
-    Object.assign(table, rttiOf('type_info'));
+    Object.assign(table, rttiOf('type_info', pointer));
 
     /**
      * The list `__std_type_info_name` keeps what it makes on: an SLIST_HEADER,
@@ -638,5 +694,18 @@ export function createClassFunctions(host){
             },
         },
     };
+    if (pointer === 8)
+    {
+        // The members again under the names a 64-bit program imports; the
+        // 32-bit ones stay, for the tables built over this one by name.
+        for (const [name, entry] of Object.entries(table))
+        {
+            const long = longName(name);
+            if (long !== name)
+            {
+                table[long] = entry;
+            }
+        }
+    }
     return table;
 }

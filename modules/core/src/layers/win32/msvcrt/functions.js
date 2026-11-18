@@ -1077,6 +1077,9 @@ export function createMsvcrtFunctions(host){
     // whichever function fails and read through the address `_errno` hands out.
     const globals = createGlobals({
         allocate, readMemory: host.readMemory, writeMemory: host.writeMemory,
+        // The two a start-up reads and writes by the name it imported.
+        placed: name=>(name === 'fmode' || name === 'commode'
+            ? host.addressOf?.(`_${name}`) ?? 0 : 0),
     });
 
     /**
