@@ -110,6 +110,10 @@ export const stackOf = context=>Number(BigInt.asUintN(32, context.gpr[RSP]));
  *     table: { address: number, size: number } | null } | null} imageOf
  *     The image an address lies in and its exception directory, an RVA and a
  *     size; null outside every image.
+ * @property {(entry: number, args: number[]) => Promise<number | bigint>} [callGuest]
+ *     Calls a routine of the program's and answers RAX: how a range a program
+ *     described with RtlInstallFunctionTableCallback is asked for its entry.
+ *     Absent, such a range has none.
  */
 
 /**
@@ -155,6 +159,21 @@ export function createUnwinder(host){
      * @type {{ table: number, count: number, base: number }[]}
      */
     const dynamic = [];
+
+    /**
+     * Ranges a program describes by a routine it is asked at each lookup
+     * (RtlInstallFunctionTableCallback) - how a JIT names the code it
+     * makes - and tables it may grow in place (RtlAddGrowableFunctionTable),
+     * each entry relative to the range's base.
+     *
+     * @type {{ id: number, base: number, end: number, callback: number,
+     *     context: number }[]}
+     */
+    const callbacks = [];
+    /** @type {Map<number, { table: number, count: number, max: number, base: number,
+     *     end: number }>} */
+    const growable = new Map();
+    let nextGrowable = 0x7f0000;
 
     /**
      * The entry of a table of `count` sorted RUNTIME_FUNCTIONs at `table`
@@ -229,7 +248,39 @@ export function createUnwinder(host){
                 return entryAt(base, found);
             }
         }
+        for (const { table, count, base, end } of growable.values())
+        {
+            const found = at >= base && at < end ? search(table, count, at - base >>> 0) : 0;
+            if (found !== 0)
+            {
+                return entryAt(base, found);
+            }
+        }
         return null;
+    };
+
+    /** The callback range holding `pc`, or undefined. @param {number} pc */
+    const callbackFor = pc=>callbacks.find(range=>pc >>> 0 >= range.base && pc >>> 0 < range.end);
+
+    /**
+     * The lookup a dispatch makes: the tables, then the routine of the
+     * callback range holding `pc`, which answers a RUNTIME_FUNCTION relative
+     * to the range's base or NULL.
+     *
+     * @param {number} pc
+     * @returns {Promise<FunctionEntry | null>}
+     */
+    const resolve = async pc=>{
+        const found = lookup(pc);
+        const range = found ? undefined : callbackFor(pc);
+        if (!range || !host.callGuest)
+        {
+            return found;
+        }
+        // RAX, which a 64-bit call answers as a BigInt.
+        const answered = await host.callGuest(range.callback, [pc >>> 0, range.context]);
+        const entry = Number(BigInt.asUintN(32, BigInt(answered)));
+        return entry === 0 ? null : entryAt(range.base, entry);
     };
 
     /**
@@ -239,7 +290,8 @@ export function createUnwinder(host){
      *
      * @param {number} pc
      */
-    const known = pc=>host.imageOf(pc >>> 0) !== null || lookup(pc) !== null;
+    const known = pc=>host.imageOf(pc >>> 0) !== null || lookup(pc) !== null
+        || callbackFor(pc) !== undefined;
 
     /** @param {UnwindContext} context @param {number} index */
     const low = (context, index)=>Number(BigInt.asUintN(32, context.gpr[index]));
@@ -487,6 +539,13 @@ export function createUnwinder(host){
 
     return {
         lookup,
+        resolve,
+        /**
+         * Whether a lookup of `pc` waits on a program's callback.
+         *
+         * @param {number} pc
+         */
+        asksCallback: pc=>callbackFor(pc) !== undefined,
         /**
          * The base of the image an address lies in, zero outside every image.
          *
@@ -519,15 +578,72 @@ export function createUnwinder(host){
             return true;
         },
 
-        /** RtlDeleteFunctionTable. @param {number} table */
+        /**
+         * RtlDeleteFunctionTable: a table RtlAddFunctionTable added, or a
+         * callback range by its identifier.
+         *
+         * @param {number} table
+         */
         remove(table){
             const at = dynamic.findIndex(added=>added.table === table >>> 0);
-            if (at < 0)
+            if (at >= 0)
+            {
+                dynamic.splice(at, 1);
+                return true;
+            }
+            const range = callbacks.findIndex(added=>added.id === table >>> 0);
+            if (range >= 0)
+            {
+                callbacks.splice(range, 1);
+                return true;
+            }
+            return false;
+        },
+
+        /**
+         * RtlInstallFunctionTableCallback: the identifier's low two bits must
+         * both be set - which keeps it apart from a table's address - and the
+         * range must hold something.
+         *
+         * @param {number} id @param {number} base @param {number} length
+         * @param {number} callback @param {number} context
+         */
+        install(id, base, length, callback, context){
+            if ((id & 3) !== 3 || length === 0 || callback === 0
+                || callbacks.some(added=>added.id === id >>> 0))
             {
                 return false;
             }
-            dynamic.splice(at, 1);
+            callbacks.push({ id: id >>> 0, base: base >>> 0, end: base + length >>> 0,
+                callback: callback >>> 0, context: context >>> 0 });
             return true;
         },
+
+        /**
+         * RtlAddGrowableFunctionTable: `count` of the `max` entries at `table`
+         * are in use, for the code from `base` to `end`; answers its handle.
+         *
+         * @param {number} table @param {number} count @param {number} max
+         * @param {number} base @param {number} end
+         */
+        addGrowable(table, count, max, base, end){
+            const handle = nextGrowable;
+            nextGrowable += 0x10;
+            growable.set(handle, { table: table >>> 0, count: Math.min(count, max) >>> 0,
+                max: max >>> 0, base: base >>> 0, end: end >>> 0 });
+            return handle;
+        },
+
+        /** RtlGrowFunctionTable. @param {number} handle @param {number} count */
+        grow(handle, count){
+            const held = growable.get(handle >>> 0);
+            if (held && count >>> 0 >= held.count && count >>> 0 <= held.max)
+            {
+                held.count = count >>> 0;
+            }
+        },
+
+        /** RtlDeleteGrowableFunctionTable. @param {number} handle */
+        deleteGrowable: handle=>void growable.delete(handle >>> 0),
     };
 }
