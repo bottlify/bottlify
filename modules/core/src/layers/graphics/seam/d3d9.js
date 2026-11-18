@@ -830,9 +830,9 @@ export function createDirect3D9Seam(
             [unlock]: builtWide((/** @type {{ trap: number }} */ { trap })=>
                 placeCode(at=>unlockLevelCode(at, trap, { find }, routineWidth))),
             ...(find === 'texture'
-                ? { [box ? 'AddDirtyBox' : 'AddDirtyRect']: (/** @type {{ trap: number }} */
-                    { trap })=>placeCode(at=>commandCode(at, trap,
-                    { ...COMMANDS[dirty], slot: commandSlot(dirty) })) }
+                ? { [box ? 'AddDirtyBox' : 'AddDirtyRect']: builtWide(
+                    (/** @type {{ trap: number }} */ { trap })=>placeCode(at=>commandCode(at, trap,
+                        { ...COMMANDS[dirty], slot: commandSlot(dirty) }, routineWidth))) }
                 : {}),
         };
     };

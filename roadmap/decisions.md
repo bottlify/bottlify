@@ -2464,3 +2464,15 @@ SetWindowPos's flags: the child is then placed at once, inside the message that 
 *Removed 2026-11-18:* `ControlHost.place` is SetWindowPos with its flags and the caller's thread;
 the pager recalculates its frame with SWP_FRAMECHANGED and places its child at once, which hears
 WM_CHILDACTIVATE, inside the message that asked. No PGM_PLACECHILD is posted.
+
+**A268. Temporary: a device's guest routines built for x86-64 have no unwind data.** A 64-bit
+program's frames are unwound by the function table of the image they run in (RUNTIME_FUNCTION and
+its UNWIND_INFO); code with no entry is taken for a leaf, its return address at RSP. Direct3D 9's
+routines in a 64-bit process (`seam/routines`, `Width`) put RCX, RDX, R8 and R9 into their home
+slots without moving RSP, but the lock and level-lock routines push RBX, RSI or RDI, and the
+command ring's longer ones too; a fault inside one, through a pointer of the program's, is unwound
+from the wrong RSP, and the program's handler is not found. No routine registers a function table
+for the pages the routines are placed on (RtlAddFunctionTable / a growable table). Removed when the
+code arena gives the routines an unwind entry each - a push of a register saved is UWOP_PUSH_NONVOL
+- or the routines keep their values in RAX, R10 and R11 at 64 bits and push nothing.
+*2026-11-18.*
