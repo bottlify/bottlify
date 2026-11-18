@@ -20,6 +20,8 @@
  *                     modules/cork/bench/micro: `--at 0x401000`, its block profile from
  *                     `run.mjs --blocks`)
  *   --bits 64         the code long mode's, formed and emitted as the long-mode runtime has it
+ *   --window GIB      with --bits 64, a wide window of 8 or 16 GiB (the RAM a memory64
+ *                     memory of its own) in place of the 4 GiB layout
  *   --pe PATH         a PE image, its sections mapped at --base (default its own image base)
  *   --image PATH@BASE an image at the base a process mapped it at; repeated, the images
  *                     lie in one span, so a region's calls into another DLL are formed
@@ -278,6 +280,8 @@ const formDepth = value('--form-depth') === null ? null : Number(value('--form-d
 // (`ownLayout`'s `ramBase` 0), unless `--ram-base` says one page in.
 const ramBase = Number(value('--ram-base') ?? 0);
 const bits = value('--bits') === '64' ? 64 : 32;
+const wideWindow = value('--window') === null ? {}
+    : { window: Number(value('--window')) * 2 ** 30 };
 /** Where a block's mark is stored: in the state page, short of `nanFirst`. */
 const markOffset = ownLayout({ ramSize, ramBase, ...bits === 64 ? { bits: 64 } : {} }).regs + 1020;
 
@@ -538,12 +542,13 @@ if (args.includes('--wat'))
             atomic: args.includes('--atomic'),
             checked: false, wide: true, looseStacks: true, hostFeatures, processors,
             precise: args.includes('--precise'),
-            form: formDepth === null ? {} : { formDepth }, bits });
+            form: formDepth === null ? {} : { formDepth }, bits, ...wideWindow });
         // What cork's modules use beyond the first release: tail calls into other
         // regions, SIMD, shared memory and its atomics, bulk memory.
         const module = tools.readWasm(made.wasm, { readDebugNames: true, tail_call: true,
             simd: true, threads: true, bulk_memory: true, sign_extension: true,
-            sat_float_to_int: true, multi_value: true, mutable_globals: true });
+            sat_float_to_int: true, multi_value: true, mutable_globals: true,
+            memory64: true, multi_memory: true });
         module.generateNames();
         module.applyNames();
         const text = module.toText({ foldExprs: false, inlineExport: true });
@@ -585,7 +590,7 @@ for (const entry of entries)
         atomic: args.includes('--atomic'), checked: false,
         wide: true, looseStacks: true, hostFeatures,
         processors, markBlocks: profile !== null,
-        form: formDepth === null ? {} : { formDepth }, bits });
+        form: formDepth === null ? {} : { formDepth }, bits, ...wideWindow });
     const x86 = made.blocks.reduce((sum, block)=>sum + block.instructions, 0);
     const lines = machineCode(made.wasm, exportedIndex(made.wasm, 'region'));
     const { code: byBlock, marks } = profile === null ? { code: new Map(), marks: new Set() }

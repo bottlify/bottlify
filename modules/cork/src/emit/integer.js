@@ -2400,8 +2400,8 @@ function windowed(e, operand, store){
         b.i32const(disp | 0).localSet(Local.addr);
         if (e.guest !== null)
         {
-            // A wide window's: the constant's high half, past 4 GiB for an image there.
-            b.i64const(BigInt(disp) & -(2n ** 32n)).localSet(e.guest.high);
+            // A wide window's: the constant whole, past 4 GiB for an image there.
+            b.i64const(BigInt(disp)).localSet(e.guest.whole);
         }
         return false;
     }
@@ -2416,12 +2416,11 @@ function windowed(e, operand, store){
     if (e.guest !== null && wrapsRead(e, store))
     {
         // A wide window's read left untested: its whole address, the quadword sum
-        // wrapped into the window as a 4 GiB one's 32-bit sum is into RAM, the low
-        // half the access's and the high half its own (`Body.guest`).
+        // wrapped into the window as a 4 GiB one's 32-bit sum is into RAM
+        // (`Body.guest`).
         emitAddress64(e, operand);
         b.i64const(BigInt(/** @type {number} */ (e.layout.window) - 1)).op(I64.and)
-            .localTee(Local.t64).op(I64.wrap).localSet(Local.addr);
-        b.localGet(Local.t64).i64const(-(2n ** 32n)).op(I64.and).localSet(e.guest.high);
+            .localTee(e.guest.whole).op(I64.wrap).localSet(Local.addr);
         return false;
     }
     if (wrapsRead(e, store) || e.memPlan?.access != null)

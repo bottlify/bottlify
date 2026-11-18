@@ -246,8 +246,8 @@ export function checkAccess(e, size, { counted = true, store = false, window = f
             if (window)
             {
                 b.localGet(Local.t64).i64const(BigInt(/** @type {number} */ (e.layout.window) - 1))
-                    .op(I64.and).localTee(Local.t64).op(I64.wrap).localSet(Local.addr);
-                b.localGet(Local.t64).i64const(-(2n ** 32n)).op(I64.and).localSet(e.guest.high);
+                    .op(I64.and).localTee(Local.t64).localTee(e.guest.whole).op(I64.wrap)
+                    .localSet(Local.addr);
             }
             return;
         }
@@ -2015,14 +2015,18 @@ export function emitGroupChecks(e, checks, at = -1){
             groupSum(e, group, start, true);
             if (e.guest !== null)
             {
-                // A wide window's: the sum's high half where its pages' flags are
-                // (`pageIndex`), and past the window rather than past 4 GiB.
-                b.localTee(Local.t64).i64const(-(2n ** 32n)).op(I64.and).localSet(e.guest.high);
-                b.localGet(Local.t64);
+                // A wide window's: the whole sum where its pages' flags are
+                // (`pageIndex`), its low half that sum's own, and past the window
+                // rather than past 4 GiB.
+                b.localTee(e.guest.whole).op(I64.wrap).localSet(Local.addr);
+                b.localGet(e.guest.whole);
             }
             b.i64const(BigInt(windowBits(e.layout))).op(I64.shrU).localSet(Local.t64);
-            groupSum(e, group, start, false);
-            b.localSet(Local.addr);
+            if (e.guest === null)
+            {
+                groupSum(e, group, start, false);
+                b.localSet(Local.addr);
+            }
             b.localGet(Local.t64).op(I64.wrap);
         }
         else
@@ -2378,7 +2382,7 @@ export function emitStreamWindow(e, streams, turns, forward = false, ranges = []
             if (e.guest !== null)
             {
                 // A wide window's pages are found by the whole address (`pageIndex`).
-                b.localGet(Local.t64).i64const(-(2n ** 32n)).op(I64.and).localSet(e.guest.high);
+                b.localGet(Local.t64).localSet(e.guest.whole);
             }
         }
         else
@@ -2533,29 +2537,35 @@ export function stackAccess(e, size){
 
 /**
  * Long mode's untested stack address, rsp less `below`, into `addr` as its low
- * half - and, over a wide window, rsp's high half into the one every guest
+ * half - and, over a wide window, the whole of it into the address every guest
  * access takes (`Body.guest`): the last access before it may have left another
- * there (a store through a pointer past 4 GiB, then a `ret` reading below it).
+ * there (a store through a pointer past 4 GiB, then a `ret` reading below it),
+ * and a push below a 4 GiB line of the window borrows from the high half.
  *
  * @param {E} e @param {number} below
  */
 export function stackLow(e, below){
     const rsp = registerLocal(e, 4);
+    if (e.guest !== null)
+    {
+        // The whole of it, inside the window as 4 GiB's low half is inside its 4 GiB:
+        // an rsp a program moved past the window reads and writes there, untested,
+        // rather than leaving wasm's bounds.
+        e.b.localGet(rsp);
+        if (below !== 0)
+        {
+            e.b.i64const(BigInt(below)).op(I64.sub);
+        }
+        e.b.i64const(BigInt(/** @type {number} */ (e.layout.window) - 1)).op(I64.and)
+            .localTee(e.guest.whole).op(I64.wrap).localSet(Local.addr);
+        return;
+    }
     e.b.localGet(rsp).op(I64.wrap);
     if (below !== 0)
     {
         e.b.i32const(below).op(I32.sub);
     }
     e.b.localSet(Local.addr);
-    if (e.guest !== null)
-    {
-        // Inside the window, as the low half is inside its 4 GiB: an rsp a program moved
-        // past the window reads and writes there, untested, rather than leaving wasm's
-        // bounds.
-        e.b.localGet(rsp)
-            .i64const(BigInt(/** @type {number} */ (e.layout.window) - 1) & -(2n ** 32n))
-            .op(I64.and).localSet(e.guest.high);
-    }
 }
 
 /**
@@ -2568,11 +2578,12 @@ export function stackLow(e, below){
  */
 export function windowAddress(e, pushAddress){
     pushAddress();
-    e.b.localTee(Local.t64).op(I64.wrap).localSet(Local.addr);
+    e.b.localTee(Local.t64);
     if (e.guest !== null)
     {
-        e.b.localGet(Local.t64).i64const(-(2n ** 32n)).op(I64.and).localSet(e.guest.high);
+        e.b.localTee(e.guest.whole);
     }
+    e.b.op(I64.wrap).localSet(Local.addr);
 }
 
 /**
@@ -2587,8 +2598,8 @@ function beyond(e){
 
 /**
  * Pushes the index of the page holding `addr` + `delta`, its byte in the page
- * flags. A wide window's counts the pages below the address's high half
- * (`Body.guest`): one index for the window, as its flags are one table.
+ * flags. A wide window's is the whole address's page (`Body.guest`): one index
+ * for the window, as its flags are one table.
  * ponytail: an access across a 4 GiB line of a wide window finds its last byte's
  * page in the block below the line; an i64 sum of the whole address when a program
  * keeps data across one.
@@ -2602,14 +2613,18 @@ export function pageIndex(e, delta = 0){
     {
         b.i32const(delta).op(I32.add);
     }
-    b.i32const(12).op(I32.shrU);
     if (e.guest !== null)
     {
-        // Inside the table whatever the address: one past the window faults on its own
-        // test, after its flags are read.
-        b.localGet(e.guest.high).i64const(12n).op(I64.shrU).op(I64.wrap)
-            .i32const(windowPagesMask(e.layout)).op(I32.and).op(I32.or);
+        // The whole address's page (`Body.guest`) with the pages `addr` lies from
+        // its low half - none where it is that half, and the engine sees so
+        // (`Body.widenGuest`). Inside the table whatever the address: one past the
+        // window faults on its own test, after its flags are read.
+        b.localGet(e.guest.whole).op(I64.wrap).op(I32.xor).i32const(12).op(I32.shrU)
+            .localGet(e.guest.whole).i64const(12n).op(I64.shrU).op(I64.wrap)
+            .i32const(windowPagesMask(e.layout)).op(I32.and).op(I32.xor);
+        return;
     }
+    b.i32const(12).op(I32.shrU);
 }
 
 /**

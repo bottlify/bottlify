@@ -1177,8 +1177,8 @@ export class RegionEmitter {
         const emitter = this;
         this.guest = this.layout.ramMemory === undefined ? null : {
             memory: this.layout.ramMemory,
-            get high(){
-                return emitter.wideLocal(ValType.i64, 'high');
+            get whole(){
+                return emitter.wideLocal(ValType.i64, 'whole');
             },
             /** @param {number} type */
             scratch: type=>emitter.wideLocal(type, 'scratch'),
@@ -1657,11 +1657,11 @@ export class RegionEmitter {
     }
 
     /**
-     * A wide window's local of `type` for `use` (`guest`): the i64 high half of
+     * A wide window's local of `type` for `use` (`guest`): the i64 whole of
      * the access's address, or the value a store holds while its address is
      * widened. Made at its first use, as the region's other lazy locals.
      *
-     * @param {number} type @param {'high' | 'scratch'} use
+     * @param {number} type @param {'whole' | 'scratch'} use
      */
     wideLocal(type, use){
         const key = `${use}${type}`;
