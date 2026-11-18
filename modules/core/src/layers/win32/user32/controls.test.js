@@ -1491,6 +1491,62 @@ test('a list box keeps its items and a click selects one with LBN_SELCHANGE', as
         [[400, LBN_SELCHANGE, list]]);
 });
 
+test('a list box\'s selection: one item or a set, its caret and anchor, fixed when made', async()=>{
+    // Wine's listbox test: the four styles' tables and
+    // test_changing_selection_styles.
+    const context = setup();
+    const dialog = await openDialog(context);
+    const send = (/** @type {number} */ list, /** @type {number} */ message, wParam = 0,
+        lParam = 0)=>context.fns.SendMessageA.handler([list, message, wParam, lParam]);
+    const LB_SELITEMRANGE = 0x019b;
+    const LB_GETANCHORINDEX = 0x019d;
+    const LB_GETCARETINDEX = 0x019f;
+    const LB_GETSELCOUNT = 0x0190;
+    const LB_SETSEL = 0x0185;
+    const GWL_STYLE = -16;
+    /** @param {number} style */
+    const make = style=>{
+        context.memory.putString(TEXT, 'ListBox');
+        const list = context.fns.CreateWindowExA.handler([0, TEXT, 0,
+            WS_CHILD | WS_VISIBLE | style, 8, 60, 100, 60, dialog, 400, HINSTANCE, 0]);
+        for (const item of ['a', 'b', 'c', 'd'])
+        {
+            context.memory.putString(TEXT, item);
+            send(list, LB_ADDSTRING, 0, TEXT);
+        }
+        return list;
+    };
+    /** @param {number} list */
+    const query = list=>[LB_GETCURSEL, LB_GETANCHORINDEX, LB_GETCARETINDEX, LB_GETSELCOUNT]
+        .map(message=>send(list, message));
+
+    const single = make(0);
+    assert.deepEqual(query(single), [-1, -1, 0, -1], 'none selected, no anchor, caret on 0');
+    assert.equal(send(single, LB_SELITEMRANGE, 1, 1 | 2 << 16), -1, 'no range in a single list');
+    assert.equal(send(single, LB_SETSEL, 1, 1), -1);
+    assert.equal(send(single, LB_SETCURSEL, 2), 2);
+    assert.deepEqual(query(single), [2, 2, 2, -1]);
+
+    const multiple = make(0x0008);
+    assert.deepEqual(query(multiple), [0, -1, 0, 0], 'LB_GETCURSEL is the caret');
+    assert.equal(send(multiple, LB_SETCURSEL, 2), -1, 'LB_SETCURSEL is a single list\'s');
+    assert.equal(send(multiple, LB_SELITEMRANGE, 1, 1 | 2 << 16), 0);
+    assert.deepEqual(query(multiple), [0, -1, 0, 2], 'a range moves neither caret nor anchor');
+    assert.equal(send(multiple, LB_SETSEL, 0, 1), 0);
+    assert.deepEqual(query(multiple), [1, 1, 1, 1], 'LB_SETSEL moves both, either way');
+
+    // LBS_NOSEL makes a multiple-selection list answer as a single one.
+    assert.deepEqual(query(make(0x0008 | 0x4000)), [-1, -1, 0, -1]);
+
+    // A style changed after the list is made changes nothing.
+    context.fns.SetWindowLongA.handler([multiple, GWL_STYLE,
+        context.fns.GetWindowLongA.handler([multiple, GWL_STYLE]) & ~0x0008]);
+    assert.equal(send(multiple, LB_GETSELCOUNT), 1);
+    context.fns.SetWindowLongA.handler([single, GWL_STYLE,
+        context.fns.GetWindowLongA.handler([single, GWL_STYLE]) | 0x0008]);
+    assert.equal(send(single, LB_GETSELCOUNT), -1);
+});
+
 test('GetListBoxInfo is how many items a column of the list box holds', async()=>{
     const context = setup();
     const dialog = await openDialog(context);
