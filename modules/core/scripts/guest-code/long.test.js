@@ -391,6 +391,15 @@ const HELD_ELSEWHERE = Object.freeze({
     // Floats a program's matrices hold: random bytes are NaNs, whose payload
     // SSE2 keeps and JavaScript does not, so the source is no judge of them.
     'layers/win32/d3dx9/inguest.js': 'matrices without NaN: d3dx9/inguest.test.js',
+    // A table's block and handle records the binding lays out.
+    'layers/win32/d3dx9/constants-setters.js': 'a constant table laid out: '
+        + 'd3dx9/constants-setters.test.js',
+    // A device's ring and its blocks laid out at both widths.
+    'layers/graphics/seam/d3d10-inguest.js': 'a ring and its blocks: '
+        + 'graphics/seam/d3d10-inguest.test.js',
+    // A handle's word read through a table its binding places (HANDLE_WORDS).
+    'layers/win32/kernel32/semaphore-guest.js': 'the handle table laid out: '
+        + 'kernel32/semaphore-guest.test.js',
     'layers/win32/d3dx9/inguest-matrix.js': 'matrices without NaN: d3dx9/inguest-matrix.test.js',
     'layers/win32/d3dx9/inguest-vector.js': 'vectors without NaN: d3dx9/inguest-vector.test.js',
     'layers/win32/d3dx9/inguest-quaternion.js': 'quaternions without NaN: '

@@ -16,6 +16,7 @@ import { overlappedLayout } from '../common/overlapped.js';
 import { EVENT_SLOTS, EVENT_WORD_SLOTS, MUTEX_SLOTS, SEMAPHORE_SLOTS, eventStateCode,
     releaseMutexCode, waitOneCode } from './wait-one.js';
 import { COMPILED as SEMAPHORE_CODE } from './semaphore-guest.x86.js';
+import { COMPILED as SEMAPHORE_LONG } from './semaphore-guest.x64.js';
 
 /**
  * The kernel32 surface a threaded program calls.
@@ -974,7 +975,7 @@ export function createThreadingFunctions(host){
      * A compiled routine (`semaphore-guest.js`) as it runs at `at`: its
      * hand-over jumping to the trap, its HANDLE_WORDS the table.
      *
-     * @param {typeof SEMAPHORE_CODE[keyof typeof SEMAPHORE_CODE]} compiled
+     * @param {{ code: Uint8Array, host: number, tables: { HANDLE_WORDS: number } }} compiled
      * @param {number} at @param {number} trap @param {number} words
      */
     const boundRoutine = (compiled, at, trap, words)=>{
@@ -1349,7 +1350,13 @@ export function createThreadingFunctions(host){
             argBytes: 12,
             /** @param {PollBuilder} builder */
             guest: builder=>placedRoutine(builder, 'ReleaseSemaphore',
-                (at, trap, words)=>boundRoutine(SEMAPHORE_CODE.ReleaseSemaphore, at, trap, words)),
+                (at, trap, words)=>boundRoutine(host.pointerSize === 8
+                    ? SEMAPHORE_LONG.ReleaseSemaphore : SEMAPHORE_CODE.ReleaseSemaphore,
+                at, trap, words)),
+            // Its x86-64 in a 64-bit process (`semaphore-guest.js` compiled for
+            // it), placed the same way: the hand-over and the table where the
+            // build left their places.
+            guestLong: true,
             /** @param {number[]} args */
             handler: ([handle, count, previous])=>{
                 const semaphore = object(handle >>> 0, 'semaphore');

@@ -22,8 +22,10 @@
  * boolean registers, an element not yet asked for -- is handed to the host's
  * method unchanged (`return host()`), nothing written before it goes.
  *
- * The interface's state word (`[this + 4]`) is the table's block: whether
- * its shader is a pixel shader, then the scratch the registers go out in.
+ * The interface's state word (`[this + 4]`, `[this + 8]` in a 64-bit process:
+ * `pointerBytes`) is the table's block: whether its shader is a pixel shader,
+ * then the scratch the registers go out in. The device's setters are a
+ * pointer apart in its method table, eight bytes in a 64-bit process.
  */
 
 /** @typedef {import('../msvcrt/guest-code.js').Guest} Guest */
@@ -84,8 +86,8 @@ const SET_PS_F = 109;
  * @param {Guest} guest @param {u32} self @param {u32} device @param {u32} h @param {u32} m
  * @returns {u32}
  */
-export function SetMatrix({ u32, setU32, callStd, host }, self, device, h, m){
-    const block = u32(self + 4);
+export function SetMatrix({ u32, setU32, callStd, host, pointerBytes }, self, device, h, m){
+    const block = u32(self + pointerBytes);
     if (block === 0 || device === 0 || m === 0 || h === 0 || u32(h + HANDLE_TAG) !== block
         || u32(h + HANDLE_CHECK) !== (~block >>> 0))
     {
@@ -129,7 +131,8 @@ export function SetMatrix({ u32, setU32, callStd, host }, self, device, h, m){
         }
     }
     const slot = u32(block + BLOCK_PIXEL) !== 0 ? SET_PS_F : SET_VS_F;
-    return callStd(u32(u32(device) + slot * 4), device, u32(h + INDEX), out, count) >>> 0;
+    return callStd(u32(u32(device) + slot * pointerBytes), device, u32(h + INDEX), out,
+        count) >>> 0;
 }
 
 /**
@@ -140,8 +143,10 @@ export function SetMatrix({ u32, setU32, callStd, host }, self, device, h, m){
  * @param {Guest} guest @param {u32} self @param {u32} device @param {u32} h @param {u32} m
  * @returns {u32}
  */
-export function SetMatrixTranspose({ u32, setU32, callStd, host }, self, device, h, m){
-    const block = u32(self + 4);
+export function SetMatrixTranspose({ u32, setU32, callStd, host, pointerBytes }, self, device, h,
+    m)
+{
+    const block = u32(self + pointerBytes);
     if (block === 0 || device === 0 || m === 0 || h === 0 || u32(h + HANDLE_TAG) !== block
         || u32(h + HANDLE_CHECK) !== (~block >>> 0))
     {
@@ -185,7 +190,8 @@ export function SetMatrixTranspose({ u32, setU32, callStd, host }, self, device,
         }
     }
     const slot = u32(block + BLOCK_PIXEL) !== 0 ? SET_PS_F : SET_VS_F;
-    return callStd(u32(u32(device) + slot * 4), device, u32(h + INDEX), out, count) >>> 0;
+    return callStd(u32(u32(device) + slot * pointerBytes), device, u32(h + INDEX), out,
+        count) >>> 0;
 }
 
 /**
@@ -196,8 +202,8 @@ export function SetMatrixTranspose({ u32, setU32, callStd, host }, self, device,
  * @param {Guest} guest @param {u32} self @param {u32} device @param {u32} h @param {u32} v
  * @returns {u32}
  */
-export function SetVector({ u32, setU32, callStd, host }, self, device, h, v){
-    const block = u32(self + 4);
+export function SetVector({ u32, setU32, callStd, host, pointerBytes }, self, device, h, v){
+    const block = u32(self + pointerBytes);
     if (block === 0 || device === 0 || v === 0 || h === 0 || u32(h + HANDLE_TAG) !== block
         || u32(h + HANDLE_CHECK) !== (~block >>> 0))
     {
@@ -227,7 +233,7 @@ export function SetVector({ u32, setU32, callStd, host }, self, device, h, v){
         }
     }
     const slot = u32(block + BLOCK_PIXEL) !== 0 ? SET_PS_F : SET_VS_F;
-    return callStd(u32(u32(device) + slot * 4), device, u32(h + INDEX), out, 1) >>> 0;
+    return callStd(u32(u32(device) + slot * pointerBytes), device, u32(h + INDEX), out, 1) >>> 0;
 }
 
 /**
@@ -238,8 +244,8 @@ export function SetVector({ u32, setU32, callStd, host }, self, device, h, v){
  * @param {Guest} guest @param {u32} self @param {u32} device @param {u32} h @param {u32} f
  * @returns {u32}
  */
-export function SetFloat({ u32, setU32, callStd, host }, self, device, h, f){
-    const block = u32(self + 4);
+export function SetFloat({ u32, setU32, callStd, host, pointerBytes }, self, device, h, f){
+    const block = u32(self + pointerBytes);
     if (block === 0 || device === 0 || h === 0 || u32(h + HANDLE_TAG) !== block
         || u32(h + HANDLE_CHECK) !== (~block >>> 0))
     {
@@ -263,7 +269,7 @@ export function SetFloat({ u32, setU32, callStd, host }, self, device, h, f){
     }
     setU32(out, f);
     const slot = u32(block + BLOCK_PIXEL) !== 0 ? SET_PS_F : SET_VS_F;
-    return callStd(u32(u32(device) + slot * 4), device, u32(h + INDEX), out, 1) >>> 0;
+    return callStd(u32(u32(device) + slot * pointerBytes), device, u32(h + INDEX), out, 1) >>> 0;
 }
 
 /**
@@ -275,8 +281,8 @@ export function SetFloat({ u32, setU32, callStd, host }, self, device, h, f){
  * @param {Guest} guest @param {u32} self @param {u32} device
  * @returns {u32}
  */
-export function SetDefaults({ u32, callStd, host }, self, device){
-    const block = u32(self + 4);
+export function SetDefaults({ u32, callStd, host, pointerBytes }, self, device){
+    const block = u32(self + pointerBytes);
     if (block === 0 || device === 0)
     {
         return host();
@@ -297,7 +303,8 @@ export function SetDefaults({ u32, callStd, host }, self, device){
             }
             else
             {
-                answer = callStd(u32(u32(device) + (slot & 0xffff) * 4), device, u32(entry + 4),
+                answer = callStd(u32(u32(device) + (slot & 0xffff) * pointerBytes), device,
+                    u32(entry + 4),
                     data, u32(entry + 12)) | 0;
             }
         }
@@ -313,8 +320,8 @@ export function SetDefaults({ u32, callStd, host }, self, device){
  * @param {Guest} guest @param {u32} self @param {u32} h @param {u32} out @param {u32} countAt
  * @returns {u32}
  */
-export function GetConstantDesc({ u32, setU32, host }, self, h, out, countAt){
-    const block = u32(self + 4);
+export function GetConstantDesc({ u32, setU32, host, pointerBytes }, self, h, out, countAt){
+    const block = u32(self + pointerBytes);
     if (block === 0 || h === 0 || u32(h + HANDLE_TAG) !== block
         || u32(h + HANDLE_CHECK) !== (~block >>> 0))
     {
@@ -342,8 +349,8 @@ export function GetConstantDesc({ u32, setU32, host }, self, h, out, countAt){
  * @param {Guest} guest @param {u32} self @param {u32} h @param {u32} index
  * @returns {u32}
  */
-export function GetConstantElement({ u32, host }, self, h, index){
-    const block = u32(self + 4);
+export function GetConstantElement({ u32, host, pointerBytes }, self, h, index){
+    const block = u32(self + pointerBytes);
     if (block === 0 || h === 0 || u32(h + HANDLE_TAG) !== block
         || u32(h + HANDLE_CHECK) !== (~block >>> 0))
     {

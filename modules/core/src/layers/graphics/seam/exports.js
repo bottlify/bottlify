@@ -253,10 +253,12 @@ export function createGraphicsLibraries(
         } },
 )
 {
-    // A 64-bit process runs no i386: of the guest code here only Direct3D 9's
+    // A 64-bit process runs no i386: of the guest code here Direct3D 9's
     // routines are built for its width, routine by routine
-    // (`routines/assemble.js`, `Width`), and the counts (`createVtables`'s
-    // x86-64 AddRef and Release); every other routine is a trap there.
+    // (`routines/assemble.js`, `Width`), Direct3D 10 and 11's ring from one
+    // source compiled for both (`d3d10-inguest.js`), and the counts
+    // (`createVtables`'s x86-64 AddRef and Release); every other routine is a
+    // trap there.
     const guestCode = guestCodeAsked && pointerSize === 4;
     const guestCode9 = guestCodeAsked;
     const publisher = shared ?? createPublisher({
@@ -419,10 +421,10 @@ export function createGraphicsLibraries(
     // Direct3D 10 and 11 are one seam over one device, and DXGI is theirs.
     const d3d10 = built(DXGI_LIBRARIES, ()=>createDirect3D10Seam({
         publisher, memory, allocate, free, screen, resolution, gdi, callGuest, currentThread,
-        // The device's command ring, with guest code: none in a 64-bit
-        // process, whose calls all trap.
-        ringAllocate: guestAllocate,
-        allocateCode: guestAllocateCode, traps: new Set(guestTraps), ringBytes, floatResult,
+        // The device's command ring, with guest code of the process's width.
+        ringAllocate: guestCode9 ? allocate : undefined,
+        allocateCode: guestCode9 ? allocateCode : undefined, traps: new Set(guestTraps), ringBytes,
+        floatResult,
         pointerSize,
         identity: ()=>graphics.adapter?.() ?? null,
         videoMemory: ()=>graphics.videoMemory?.() ?? null,

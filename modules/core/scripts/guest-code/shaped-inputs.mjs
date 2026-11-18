@@ -38,8 +38,65 @@ const graph = classGraph(DATA, { bits: 64, long: true });
 const holders = [[graph.subobject(0), 0], [graph.subobject(8), 0], [graph.complete + 4, 4]];
 const types = Object.values(graph.types);
 
+/** The pages a conversion takes in the guest, and once in a while one it does not. */
+const PAGES = [0, 1252, 65001];
+/** A page the conversion is called with. @param {() => number} next */
+const pageOf = next=>(next() % 8 === 0 ? 932 + next() % 4 : PAGES[next() % PAGES.length]);
+/**
+ * A text of `units` units of `size` bytes, ASCII but for one unit past 0x7f now
+ * and then, and a NUL after it.
+ *
+ * @param {() => number} next @param {number} units @param {1 | 2} size
+ */
+const textOf = (next, units, size)=>{
+    const bytes = new Uint8Array((units + 1) * size);
+    for (let i = 0; i < units; i++)
+    {
+        bytes[i * size] = 0x20 + next() % 0x5f;
+    }
+    if (units > 0 && next() % 6 === 0)
+    {
+        bytes[(next() % units) * size] = 0x80 + next() % 0x7f;
+    }
+    return bytes;
+};
+/**
+ * A conversion's lengths and buffers: the source a count of units, -1 (to its
+ * NUL) or zero; the destination none (a size asked), room for all, or short.
+ *
+ * @param {() => number} next @param {1 | 2} from @param {1 | 2} to
+ */
+const conversion = (next, from, to)=>{
+    const units = next() % 40;
+    const source = textOf(next, units, from);
+    const length = [units, units, -1, 0][next() % 4];
+    const needed = length === -1 ? units + 1 : length;
+    const room = [0, needed + next() % 4, Math.max(0, needed - 1 - next() % 3)][next() % 3];
+    const at = DATA + ((source.length + 15) & -16);
+    const destination = room === 0 && next() % 2 === 0 ? 0 : at;
+    const end = at + room * to + 16;
+    const memory = new Uint8Array(end - DATA);
+    memory.set(source);
+    return { length: length >>> 0, destination, room, memory, end };
+};
+
 /** @type {Record<string, Record<string, ShapedInput>>} */
 export const SHAPED_INPUTS = {
+    'layers/win32/kernel32/inguest.js': {
+        MultiByteToWideChar: next=>{
+            const c = conversion(next, 1, 2);
+            const flags = next() % 6 === 0 ? 0x10 : [0, 1, 8][next() % 3];
+            return { stack: [pageOf(next), flags, DATA, c.length, c.destination, c.room],
+                memory: [[DATA, c.memory]], bounds: [DATA, c.end] };
+        },
+        WideCharToMultiByte: next=>{
+            const c = conversion(next, 2, 1);
+            const flags = next() % 6 === 0 ? 0x200 : 0;
+            const used = next() % 3 === 0 ? c.end - 8 : 0;
+            return { stack: [pageOf(next), flags, DATA, c.length, c.destination, c.room, 0, used],
+                memory: [[DATA, c.memory]], bounds: [DATA, c.end] };
+        },
+    },
     'layers/win32/msvcrt/inguest-rtti.js': {
         __RTDynamicCast: next=>{
             const [object, delta] = next() % 16 === 0 ? [0, 0]
