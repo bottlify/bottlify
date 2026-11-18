@@ -198,6 +198,8 @@ export const DIDEVICEOBJECTDATA = Object.freeze({
     dwSequence: 0x0c,
     uAppData: 0x10,
     SIZE: 0x10,
+    /** DirectX 8's in a 64-bit process, where uAppData is a quadword. */
+    SIZE_DX8_LONG: 0x18,
     SIZE_DX8: 0x14,
 });
 
@@ -405,6 +407,9 @@ const DIDATAFORMAT = Object.freeze({
     dwSize: 0x00, dwObjSize: 0x04, dwDataSize: 0x0c, dwNumObjs: 0x10, rgodf: 0x14, SIZE: 24,
 });
 const DIOBJECTDATAFORMAT = Object.freeze({ pguid: 0x0, dwOfs: 0x4, dwType: 0x8, SIZE: 16 });
+/** The two in a 64-bit process: each holds a pointer, a quadword at its own alignment. */
+const DIDATAFORMAT_LONG = Object.freeze({ ...DIDATAFORMAT, rgodf: 0x18, SIZE: 32 });
+const DIOBJECTDATAFORMAT_LONG = Object.freeze({ pguid: 0x0, dwOfs: 0x8, dwType: 0xc, SIZE: 24 });
 const DIDFT_AXIS = 0x03;
 const DIDFT_POV = 0x10;
 /**
@@ -462,22 +467,25 @@ const DIDFT_OPTIONAL = 0x80000000;
  * @param {number} format
  * @param {readonly import('./devices.js').DeviceObject[]} objects
  * @param {(why: string) => void} [refused]  Told what refused the format.
+ * @param {4 | 8} [pointer]  8 for a 64-bit process's layouts.
  * @returns {{ dataSize: number, places: Map<number, number>, centred: number[] } | null}
  *     `centred` is where an optional point-of-view entry no object answered
  *     sits: the state reads it as a POV at rest, all ones.
  */
-export function readFormat(readU32, guidAt, format, objects, refused = ()=>{}){
-    const dataSize = readU32(format + DIDATAFORMAT.dwDataSize);
-    if (readU32(format + DIDATAFORMAT.dwSize) !== DIDATAFORMAT.SIZE
-        || readU32(format + DIDATAFORMAT.dwObjSize) !== DIOBJECTDATAFORMAT.SIZE
+export function readFormat(readU32, guidAt, format, objects, refused = ()=>{}, pointer = 4){
+    const HEADER = pointer === 8 ? DIDATAFORMAT_LONG : DIDATAFORMAT;
+    const ENTRY = pointer === 8 ? DIOBJECTDATAFORMAT_LONG : DIOBJECTDATAFORMAT;
+    const dataSize = readU32(format + HEADER.dwDataSize);
+    if (readU32(format + HEADER.dwSize) !== HEADER.SIZE
+        || readU32(format + HEADER.dwObjSize) !== ENTRY.SIZE
         || dataSize % 4 !== 0)
     {
-        refused(`a header of ${readU32(format + DIDATAFORMAT.dwSize)} bytes, objects of`
-            + ` ${readU32(format + DIDATAFORMAT.dwObjSize)} and data of ${dataSize}`);
+        refused(`a header of ${readU32(format + HEADER.dwSize)} bytes, objects of`
+            + ` ${readU32(format + HEADER.dwObjSize)} and data of ${dataSize}`);
         return null;
     }
-    const count = readU32(format + DIDATAFORMAT.dwNumObjs);
-    const array = readU32(format + DIDATAFORMAT.rgodf);
+    const count = readU32(format + HEADER.dwNumObjs);
+    const array = readU32(format + HEADER.rgodf);
     /** @type {Map<number, number>} */
     const places = new Map();
     /** @type {number[]} */
@@ -485,10 +493,10 @@ export function readFormat(readU32, guidAt, format, objects, refused = ()=>{}){
     const taken = new Set();
     for (let index = 0; index < count; index++)
     {
-        const at = array + index * DIOBJECTDATAFORMAT.SIZE;
-        const guid = readU32(at + DIOBJECTDATAFORMAT.pguid);
-        const offset = readU32(at + DIOBJECTDATAFORMAT.dwOfs);
-        const type = readU32(at + DIOBJECTDATAFORMAT.dwType);
+        const at = array + index * ENTRY.SIZE;
+        const guid = readU32(at + ENTRY.pguid);
+        const offset = readU32(at + ENTRY.dwOfs);
+        const type = readU32(at + ENTRY.dwType);
         const instance = (type >>> 8) & 0xffff;
         const named = guid === 0 ? null : guidAt(guid);
         const object = objects.find(candidate=>!taken.has(candidate)
@@ -783,6 +791,8 @@ export function createPublisher({ publishInterface }){
  *        so the loop names it once, before that first await, rather than
  *        asking the bridge to guess a second time.
  * @param {(api: string, detail: string) => void} [deps.divergence]
+ * @param {4 | 8} [deps.pointerSize]  8 for a 64-bit process: its data format, buffered
+ *     events and out pointers hold quadword pointers.
  *        Where a refusal the program may not expect is said.
  * @param {(hwnd: number) => 'top' | 'child' | null | undefined} [deps.windowKind]
  * @param {() => number | undefined} [deps.foreground]
@@ -800,7 +810,7 @@ export function createPublisher({ publishInterface }){
 export function createDirectInput(
     { memory, now, publishInterface, signal, allocate, callGuest, callerThread, windowKind,
         foreground, mouseHeld, cursor,
-        divergence },
+        divergence, pointerSize = 4 },
 )
 {
     const publisher = createPublisher({ publishInterface });
@@ -914,6 +924,14 @@ export function createDirectInput(
         memory.writeMemory(address >>> 0, new Uint8Array([
             value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff,
         ]));
+    };
+    /** An interface or any other pointer written out, whole. */
+    const writePointer = (/** @type {number} */ address, /** @type {number} */ value)=>{
+        writeU32(address, value);
+        if (pointerSize === 8 && (address >>> 0) !== 0)
+        {
+            writeU32((address >>> 0) + 4, 0);
+        }
     };
 
     /** @type {Map<string, any>} */
@@ -1095,7 +1113,7 @@ export function createDirectInput(
             }
             const read = readFormat(readU32, guidAt, format >>> 0, objectsOf(device.kind),
                 why=>divergence?.('DirectInput', `SetDataFormat on the ${device.kind} was`
-                    + ` refused: ${why}`));
+                    + ` refused: ${why}`), pointerSize);
             if (!read)
             {
                 return DIERR_INVALIDPARAM;
@@ -1410,8 +1428,9 @@ export function createDirectInput(
                 return notHeld(device);
             }
             const entrySize = size >>> 0;
-            if (entrySize !== DIDEVICEOBJECTDATA.SIZE
-                && entrySize !== DIDEVICEOBJECTDATA.SIZE_DX8)
+            const withAppData = pointerSize === 8 ? DIDEVICEOBJECTDATA.SIZE_DX8_LONG
+                : DIDEVICEOBJECTDATA.SIZE_DX8;
+            if (entrySize !== DIDEVICEOBJECTDATA.SIZE && entrySize !== withAppData)
             {
                 return DIERR_INVALIDPARAM;
             }
@@ -1447,7 +1466,7 @@ export function createDirectInput(
                     view.setInt32(at + DIDEVICEOBJECTDATA.dwData, event.data, true);
                     view.setUint32(at + DIDEVICEOBJECTDATA.dwTimeStamp, event.time >>> 0, true);
                     view.setUint32(at + DIDEVICEOBJECTDATA.dwSequence, event.sequence, true);
-                    if (entrySize === DIDEVICEOBJECTDATA.SIZE_DX8)
+                    if (entrySize === withAppData)
                     {
                         view.setUint32(at + DIDEVICEOBJECTDATA.uAppData,
                             appData?.get(event.offset) ?? 0, true);
@@ -1935,13 +1954,13 @@ export function createDirectInput(
             }
             if ((guid >>> 0) === 0)
             {
-                writeU32(out, 0);
+                writePointer(out, 0);
                 return E_POINTER;
             }
             const device = deviceFor(guidAt(guid));
             if (!device)
             {
-                writeU32(out, 0);
+                writePointer(out, 0);
                 return DIERR_DEVICENOTREG;
             }
             const wide = descriptor?.wide === true;
@@ -1949,7 +1968,7 @@ export function createDirectInput(
                 ? (wide ? IID_IDirectInputDevice8W : IID_IDirectInputDevice8A)
                 : (wide ? IID_IDirectInputDeviceW : IID_IDirectInputDeviceA);
             device.setVersion(root.version);
-            writeU32(out, publisher.publish(device, deviceInterfaces(), id));
+            writePointer(out, publisher.publish(device, deviceInterfaces(), id));
             return DI_OK;
         },
 
@@ -1968,7 +1987,7 @@ export function createDirectInput(
             const device = deviceFor(guidAt(guid));
             if (!device)
             {
-                writeU32(out, 0);
+                writePointer(out, 0);
                 return DIERR_DEVICENOTREG;
             }
             const wanted = guidAt(iid);
@@ -1976,10 +1995,10 @@ export function createDirectInput(
             const pointer = publisher.publish(device, deviceInterfaces(), wanted);
             if (pointer === 0)
             {
-                writeU32(out, 0);
+                writePointer(out, 0);
                 return 0x80004002 | 0; // E_NOINTERFACE
             }
-            writeU32(out, pointer);
+            writePointer(out, pointer);
             return DI_OK;
         },
 
@@ -2174,20 +2193,20 @@ export function createDirectInput(
         }
         if (!isRootOf(id, eight))
         {
-            writeU32(out, 0);
+            writePointer(out, 0);
             return DIERR_NOINTERFACE;
         }
         // Asked to be part of another object, Windows makes nothing and
         // says so only through the pointer it leaves null.
         if ((outer >>> 0) !== 0)
         {
-            writeU32(out, 0);
+            writePointer(out, 0);
             return DI_OK;
         }
         const refused = initialized ? versionRefusal(instance, version, eight) : DI_OK;
         if (refused !== DI_OK)
         {
-            writeU32(out, 0);
+            writePointer(out, 0);
             return refused;
         }
         let references = 1;
@@ -2202,7 +2221,7 @@ export function createDirectInput(
         };
         const pointer = publisher.publish(root,
             eight ? [...rootInterfaces8, joyConfigInterface] : legacyRootInterfaces, id);
-        writeU32(out, pointer);
+        writePointer(out, pointer);
         return pointer === 0 ? DIERR_NOINTERFACE : DI_OK;
     };
 
@@ -2218,7 +2237,7 @@ export function createDirectInput(
             {
                 return E_POINTER;
             }
-            writeU32(out, 0);
+            writePointer(out, 0);
             if ((outer >>> 0) !== 0)
             {
                 return CLASS_E_NOAGGREGATION;
@@ -2249,7 +2268,7 @@ export function createDirectInput(
             {
                 return E_POINTER;
             }
-            writeU32(out, 0);
+            writePointer(out, 0);
             if ((clsid >>> 0) === 0 || guidAt(clsid) !== served)
             {
                 return CLASS_E_CLASSNOTAVAILABLE;
@@ -2268,7 +2287,7 @@ export function createDirectInput(
                     return references === 0;
                 },
             };
-            writeU32(out, publisher.publish(factory, factoryInterfaces,
+            writePointer(out, publisher.publish(factory, factoryInterfaces,
                 wanted === IID_IUNKNOWN ? IID_IClassFactory : wanted));
             return DI_OK;
         },

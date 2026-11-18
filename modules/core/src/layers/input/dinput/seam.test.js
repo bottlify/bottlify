@@ -157,8 +157,8 @@ function clock(){
  *     seam is told nothing and takes any handle as a window.
  */
 /** @param {{ windows?: Record<number, 'top' | 'child'>, foreground?: () => number,
- *     mouseHeld?: (held: boolean) => void }} [options] */
-function fixture({ windows, foreground, mouseHeld } = {}){
+ *     mouseHeld?: (held: boolean) => void, pointerSize?: 4 | 8 }} [options] */
+function fixture({ windows, foreground, mouseHeld, pointerSize } = {}){
     const memory = guestMemory();
     const bridge = fakeBridge();
     const time = clock();
@@ -201,6 +201,7 @@ function fixture({ windows, foreground, mouseHeld } = {}){
         windowKind: windows && (hwnd=>windows[hwnd] ?? null),
         foreground,
         mouseHeld,
+        ...pointerSize ? { pointerSize } : {},
     });
     const root = (()=>{
         const result = dinput.libraries['DINPUT.dll']
@@ -2284,4 +2285,54 @@ test('a device with no data format is not acquired, so its format can still be s
     assert.equal(f.bridge.call(device, 'Acquire', []), DIERR_INVALIDPARAM);
     assert.equal(f.bridge.call(device, 'SetDataFormat', [dataFormat(f.memory, 256)]), DI_OK);
     assert.equal(f.bridge.call(device, 'Acquire', []), DI_OK);
+});
+
+test('a 64-bit process: the format\'s pointers are quadwords, a buffered entry is 24 bytes,'
+    + ' an interface comes out whole', ()=>{
+    // DIDATAFORMAT: 32 bytes, rgodf at 24. DIOBJECTDATAFORMAT: pguid 0, dwOfs 8,
+    // dwType 12, dwFlags 16: 24 bytes. DIDEVICEOBJECTDATA: uAppData a UINT_PTR at 16.
+    const f = fixture({ pointerSize: 8 });
+    f.memory.bytes.fill(0xcc, AT.out, AT.out + 16);
+    writeGuid(f.memory, AT.guid, GUID_SysMouse);
+    assert.equal(f.bridge.call(f.root, 'CreateDevice', [AT.guid, AT.out, 0]), DI_OK);
+    const device = f.memory.u32(AT.out);
+    assert.deepEqual([f.memory.u32(AT.out + 4), f.memory.u32(AT.out + 8)], [0, 0xcccccccc],
+        'the device\'s pointer, whole');
+
+    assert.equal(f.bridge.call(device, 'SetDataFormat', [dataFormat(f.memory, 16)]),
+        DIERR_INVALIDPARAM, 'the 32-bit layout is not a 64-bit process\'s');
+    const entries = [
+        { guid: GUID_YAxis, offset: 0, type: ANY_AXIS },
+        { guid: GUID_XAxis, offset: 4, type: ANY_AXIS },
+        { guid: null, offset: 8, type: ANY_BUTTON },
+    ];
+    writeGuid(f.memory, 0xd0000, GUID_YAxis);
+    writeGuid(f.memory, 0xd0010, GUID_XAxis);
+    entries.forEach((one, index)=>{
+        const at = 0xc0000 + index * 24;
+        f.memory.setU32(at, one.guid === GUID_YAxis ? 0xd0000 : one.guid ? 0xd0010 : 0);
+        f.memory.setU32(at + 4, 0);
+        f.memory.setU32(at + 8, one.offset);
+        f.memory.setU32(at + 12, one.type);
+        f.memory.setU32(at + 16, 0);
+    });
+    [32, 24, 2, 12, entries.length, 0, 0xc0000, 0].forEach((word, index)=>
+        f.memory.setU32(AT.format + index * 4, word));
+    assert.equal(f.bridge.call(device, 'SetDataFormat', [AT.format]), DI_OK);
+    setBufferSize(f, device, 8);
+    f.dinput.post({ kind: 'mouseMove', x: 3, y: -2 });
+    f.dinput.post({ kind: 'mouseButton', code: 0, down: true });
+    assert.equal(f.bridge.call(device, 'GetDeviceState', [12, AT.state]), DI_OK);
+    const view = new DataView(f.memory.bytes.buffer);
+    assert.deepEqual([view.getInt32(AT.state, true), view.getInt32(AT.state + 4, true),
+        f.memory.bytes[AT.state + 8]], [-2, 3, 0x80]);
+
+    f.memory.setU32(AT.count, 10);
+    assert.equal(f.bridge.call(device, 'GetDeviceData',
+        [DIDEVICEOBJECTDATA.SIZE_DX8, AT.data, AT.count, 0]), DIERR_INVALIDPARAM,
+    'twenty bytes is a 32-bit process\'s entry');
+    assert.equal(f.bridge.call(device, 'GetDeviceData', [24, AT.data, AT.count, 0]), DI_OK);
+    assert.equal(f.memory.u32(AT.count), 3);
+    assert.deepEqual([0, 1, 2].map(index=>f.memory.u32(AT.data + index * 24)), [4, 0, 8],
+        'X, Y and the button at the format\'s offsets, 24 bytes apart');
 });

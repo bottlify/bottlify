@@ -2097,6 +2097,7 @@ export function createWin32Module(){
             // Multimedia timers fire on a thread of their own, like the notices
             // above, but the kernel's clock is what wakes it.
             const mmTimers = createTimerService({
+                long: pointerSize === 8,
                 /** @param {number} bytes */
                 allocate: bytes=>heap.allocate(bytes),
                 writeMemory,
