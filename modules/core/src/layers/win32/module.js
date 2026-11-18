@@ -7,6 +7,7 @@
 import { createConsoleFunctions, HANDLE_STDOUT, HANDLE_STDERR } from './kernel32/console.js';
 import { createThreadingFunctions } from './kernel32/threading.js';
 import { createFiberFunctions } from './kernel32/fibers.js';
+import { createFiberLocalStorage } from './kernel32/fls.js';
 import { createNamedObjects, createRemoteNamedObjects } from './kernel32/named-objects.js';
 import { createRegistryService } from './advapi32/registry-service.js';
 import { createDebugFunctions } from './kernel32/debug.js';
@@ -599,6 +600,8 @@ export function createWin32Module(){
             const threadMade = thread=>{
                 processors.adopt(thread);
                 config?.threadBlock?.(thread);
+                // Its block made, the creator's active context goes on it.
+                activation.loaderApi.inherit(thread?.tebAddress ?? 0);
             };
             /**
              * The string values of an environment key in the registry: the
@@ -1166,6 +1169,24 @@ export function createWin32Module(){
             const endThread = (thread, code)=>{
                 const others = kernel.threads().some((/** @type {any} */ other)=>
                     other !== thread && other.state !== 'terminated');
+                // Its running fiber's fibre-local values are called back
+                // first, on the thread, as a C runtime frees a thread's data in
+                // that callback (`kernel32/fls.js`); not for the process's end.
+                const fibreLocal = others ? fiberStorage.current() : 0;
+                if (fibreLocal !== 0)
+                {
+                    return Promise.resolve().then(()=>fiberStorage.release(fibreLocal))
+                        .then(()=>tellAndEnd(thread, code, others) ?? 0);
+                }
+                return tellAndEnd(thread, code, others);
+            };
+            /**
+             * endThread's rest, once the fibre-local values are called back.
+             *
+             * @param {any} thread @param {number} code @param {boolean} others
+             * @returns {Promise<number> | null}
+             */
+            const tellAndEnd = (thread, code, others)=>{
                 if (!others && exitCode === null)
                 {
                     // On this thread, which goes on standing while they are told.
@@ -3008,6 +3029,37 @@ export function createWin32Module(){
                 return answered;
             };
 
+            // Fibre-local storage: each fiber's values, called back as a
+            // fiber or a thread ends (`kernel32/fls.js`).
+            const fiberStorage = createFiberLocalStorage({
+                pointerSize,
+                readPointer: address=>(pointerSize === 8
+                    ? memory.readU32(address) + memory.readU32(address + 4) * 2 ** 32
+                    : memory.readU32(address)),
+                writePointer: (address, value)=>{
+                    memory.writeU32(address, value % 2 ** 32 >>> 0);
+                    if (pointerSize === 8)
+                    {
+                        memory.writeU32(address + 4, Math.floor(value / 2 ** 32));
+                    }
+                },
+                teb: ()=>kernel.currentThread()?.tebAddress ?? 0,
+                allocate: bytes=>{
+                    const at = heap.allocate(bytes);
+                    if (at !== 0)
+                    {
+                        writeMemory(at, new Uint8Array(bytes));
+                    }
+                    return at;
+                },
+                free: address=>heap.free(address),
+                call: (entry, args)=>bridge.callGuest({ entry, args,
+                    thread: bridge.callerThread() }),
+                setLastError: setError,
+                allocateCode: bytes=>heap.allocateCode(bytes),
+                writeMemory,
+            });
+
             // Activation contexts: built from manifests on the volume and in
             // the modules, answered from guest memory (`actctx.js`).
             const activation = createActivationContexts({
@@ -3259,7 +3311,9 @@ export function createWin32Module(){
                         threadReturn: ()=>threadReturnAddress(),
                         exitThread: code=>libraries['KERNEL32.dll'].ExitThread.handler([code]),
                         setLastError: setError,
+                        storage: fiberStorage,
                     }),
+                    ...fiberStorage.table,
                     ...apcs.table,
                     ...createThreadPool({
                         kernel,

@@ -2310,6 +2310,20 @@ export function createActivationContexts(host){
         activate: (handle, teb)=>(handle === 0 || !contextOf(handle) ? 0 : activate(handle, teb)),
         /** @param {number} cookie @param {number} teb */
         deactivate: (cookie, teb)=>cookie !== 0 && deactivate(cookie, teb) === 'done',
+        /**
+         * A new thread starts with the context its creator has active, as
+         * CreateThread gives it on Windows (Wine's fiber test, a thread made
+         * from a fiber).
+         *
+         * @param {number} teb  the new thread's block
+         */
+        inherit(teb){
+            const active = activeContext();
+            if (active && teb !== 0)
+            {
+                activate(active.handle, teb);
+            }
+        },
         /** Whether there is a process default, for a report. */
         hasProcessDefault: ()=>processDefault !== null,
     };
