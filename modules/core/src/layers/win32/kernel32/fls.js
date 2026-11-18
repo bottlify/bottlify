@@ -10,7 +10,8 @@
  * Each fiber has its own values, and a thread that runs no fiber is one for
  * this purpose: the running one's values are the block the thread block's
  * FlsSlots points at, made the first time a value is set, and SwitchToFiber
- * points it at the next fiber's (fibers.js). A block is a LIST_ENTRY and then
+ * points it at the next fiber's (fibers.js); FlsAlloc makes its caller's
+ * too. A block is a LIST_ENTRY and then
  * a pointer for each of the 128 indexes; index 0 is no index, 1 to 127 are
  * handed out, lowest first.
  *
@@ -203,6 +204,27 @@ export function createFiberLocalStorage(host){
         host.free(block);
     };
 
+    /**
+     * The running fiber's block, made when it has none: by the first value
+     * set, and by FlsAlloc, which gives its caller one as Windows does (a
+     * thread that allocated an index reads it as NULL at once; one that
+     * did not, and set nothing, is refused). 0 when there is no memory.
+     */
+    const ownBlock = ()=>{
+        const block = current();
+        if (block !== 0)
+        {
+            return block;
+        }
+        const made = host.allocate(slot(FLS_SLOTS)) >>> 0;
+        if (made !== 0)
+        {
+            blocks.add(made);
+            host.writePointer(host.teb() + slotsAt, made);
+        }
+        return made;
+    };
+
     const table = {
         /** DWORD FlsAlloc(PFLS_CALLBACK_FUNCTION lpCallback) */
         FlsAlloc: {
@@ -213,6 +235,11 @@ export function createFiberLocalStorage(host){
                 {
                     if (!allocated.has(index))
                     {
+                        if (ownBlock() === 0)
+                        {
+                            host.setLastError(ERROR_NOT_ENOUGH_MEMORY);
+                            return FLS_OUT_OF_INDEXES;
+                        }
                         allocated.set(index, callback >>> 0);
                         // A new index reads as nothing in every fiber, whatever
                         // was left at it.
@@ -278,17 +305,11 @@ export function createFiberLocalStorage(host){
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                let block = current();
+                const block = ownBlock();
                 if (block === 0)
                 {
-                    block = host.allocate(slot(FLS_SLOTS)) >>> 0;
-                    if (block === 0)
-                    {
-                        host.setLastError(ERROR_NOT_ENOUGH_MEMORY);
-                        return 0;
-                    }
-                    blocks.add(block);
-                    host.writePointer(host.teb() + slotsAt, block);
+                    host.setLastError(ERROR_NOT_ENOUGH_MEMORY);
+                    return 0;
                 }
                 host.writePointer(block + slot(at), value >>> 0);
                 return 1;

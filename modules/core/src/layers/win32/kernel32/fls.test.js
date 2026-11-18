@@ -59,6 +59,8 @@ test('index 0 is none, 1 to 127 are handed out lowest first, 128 is refused', ()
     const { fns, errors } = setup();
     assert.equal(fns.FlsAlloc.handler([0]), 1);
     assert.equal(fns.FlsAlloc.handler([0]), 2);
+    assert.equal(fns.FlsGetValue.handler([2]), 0, 'its caller has a block, the value NULL');
+    assert.deepEqual(errors.splice(0), [0], 'and the read succeeds');
     assert.equal(fns.FlsGetValue.handler([0]), 0);
     assert.equal(fns.FlsSetValue.handler([0, 5]), 0);
     assert.equal(fns.FlsFree.handler([0]), 0);
