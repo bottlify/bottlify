@@ -2706,6 +2706,12 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
         screen.height = height;
         screen.bitsPerPixel = bits;
         workArea = null;
+        // A resolution change resets the cursor's clip (Wine's monitor.c
+        // test_ChangeDisplaySettingsEx): one a program set for the mode it
+        // ran in and never lifted would otherwise stay the space the pointer
+        // is scaled into, and every click after the mode came back missed.
+        clip = null;
+        host.clipCursor?.(null);
         return andThen(sendMessage(HWND_BROADCAST, WM_DISPLAYCHANGE, screen.bitsPerPixel,
             ((height & 0xffff) << 16 | (width & 0xffff)) >>> 0, false, DISPLAY_CHANGE_WAIT_MS),
         ()=>DISP_CHANGE_SUCCESSFUL);
