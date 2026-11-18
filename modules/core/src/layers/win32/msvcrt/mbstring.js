@@ -176,7 +176,7 @@ export function createWideFunctions(host){
 
     const wide = {
         /** size_t wcslen(const wchar_t *) -- in the guest */
-        wcslen: { ...guestEntry(inGuest.wcslen, COMPILED.wcslen, host), returns: 'pointer' },
+        wcslen: { ...guestEntry(inGuest.wcslen, COMPILED.wcslen, host) },
 
         /** wchar_t *wcscpy(wchar_t *dest, const wchar_t *src) -- in the guest */
         wcscpy: { ...guestEntry(inGuest.wcscpy, COMPILED.wcscpy, host), returns: 'pointer' },
@@ -206,7 +206,6 @@ export function createWideFunctions(host){
          * is INT_MAX and EINVAL.
          */
         wcsxfrm: {
-            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 12,
             /** @param {number[]} args */
@@ -349,10 +348,10 @@ export function createWideFunctions(host){
         },
 
         /** size_t wcsspn(const wchar_t *text, const wchar_t *accept) -- in the guest */
-        wcsspn: { ...guestEntry(inGuest.wcsspn, COMPILED.wcsspn, host), returns: 'pointer' },
+        wcsspn: { ...guestEntry(inGuest.wcsspn, COMPILED.wcsspn, host) },
 
         /** size_t wcscspn(const wchar_t *text, const wchar_t *reject) -- in the guest */
-        wcscspn: { ...guestEntry(inGuest.wcscspn, COMPILED.wcscspn, host), returns: 'pointer' },
+        wcscspn: { ...guestEntry(inGuest.wcscspn, COMPILED.wcscspn, host) },
 
         /** wchar_t *wcspbrk(const wchar_t *text, const wchar_t *accept) -- in the guest */
         wcspbrk: { ...guestEntry(inGuest.wcspbrk, COMPILED.wcspbrk, host), returns: 'pointer' },
@@ -368,7 +367,6 @@ export function createWideFunctions(host){
          * source is -1 and EINVAL.
          */
         mbstowcs: {
-            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 12,
             /** @param {number[]} args */
@@ -401,7 +399,6 @@ export function createWideFunctions(host){
          * locale, as wctomb refuses it.
          */
         wcstombs: {
-            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 12,
             /** @param {number[]} args */
@@ -459,7 +456,6 @@ export function createWideFunctions(host){
          * the state, and answers 0.
          */
         mbrtowc: {
-            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 16,
             /** @param {number[]} args */
@@ -483,7 +479,6 @@ export function createWideFunctions(host){
 
         /** size_t mbrlen(const char *src, size_t count, mbstate_t *state) */
         mbrlen: {
-            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 12,
             /** @param {number[]} args */
@@ -508,7 +503,6 @@ export function createWideFunctions(host){
          * the terminator's one byte.
          */
         wcrtomb: {
-            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 12,
             /** @param {number[]} args */
@@ -536,7 +530,6 @@ export function createWideFunctions(host){
          * No destination counts the whole string and moves nothing.
          */
         mbsrtowcs: {
-            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 16,
             /** @param {number[]} args */
@@ -565,7 +558,6 @@ export function createWideFunctions(host){
          * at it.
          */
         wcsrtombs: {
-            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 16,
             /** @param {number[]} args */

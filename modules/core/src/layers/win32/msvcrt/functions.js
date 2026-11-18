@@ -717,7 +717,7 @@ export function createMsvcrtFunctions(host){
         },
 
         /** size_t strlen(const char *str) -- in the guest */
-        strlen: { ...guestEntry(inGuest.strlen, COMPILED.strlen, host), returns: 'pointer' },
+        strlen: { ...guestEntry(inGuest.strlen, COMPILED.strlen, host) },
 
         /** int strcmp(const char *left, const char *right) -- in the guest */
         strcmp: guestEntry(inGuest.strcmp, COMPILED.strcmp, host),

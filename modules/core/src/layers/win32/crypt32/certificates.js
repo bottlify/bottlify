@@ -1619,6 +1619,7 @@ export function createCertificateFunctions(host){
 
         /** PCCERT_CHAIN_CONTEXT CertDuplicateCertificateChain(PCCERT_CHAIN_CONTEXT) */
         CertDuplicateCertificateChain: {
+            returns: 'pointer',
             argBytes: 4,
             handler: (/** @type {number[]} */ [address])=>{
                 const chain = chains.get(address >>> 0);
@@ -1966,6 +1967,7 @@ export function createCertificateFunctions(host){
          *     CERT_EXTENSION rgExtensions[])
          */
         CertFindExtension: {
+            returns: 'pointer',
             argBytes: 12,
             handler: (/** @type {number[]} */ [oid, count, list])=>{
                 if ((oid >>> 0) === 0)
@@ -2066,6 +2068,7 @@ export function createCertificateFunctions(host){
          * certificate here has one.
          */
         CertFindChainInStore: {
+            returns: 'pointer',
             argBytes: 24,
             handler: (/** @type {number[]} */ [, , , , , previous])=>{
                 if ((previous >>> 0) !== 0)

@@ -3158,6 +3158,7 @@ export function createWinsockFunctions(host){
         },
 
         getprotobynumber: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([number])=>{

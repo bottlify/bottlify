@@ -977,6 +977,7 @@ export function createQueryFunctions(host){
             },
         },
         RtlCreateQueryDebugBuffer: {
+            returns: 'pointer',
             argBytes: 8,
             handler: ()=>{
                 host.divergence?.('RtlCreateQueryDebugBuffer', 'no debug buffer; NULL answered');

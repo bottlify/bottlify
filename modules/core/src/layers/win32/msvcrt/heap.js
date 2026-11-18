@@ -448,7 +448,6 @@ export function createHeapFunctions(host){
 
         /** size_t _msize(void *block) */
         _msize: {
-            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 4,
             ...routine('msize'),
@@ -491,6 +490,7 @@ export function createHeapFunctions(host){
             handler: ([size, alignment])=>alignedAllocate(size >>> 0, alignment >>> 0, 0),
         },
         _aligned_offset_malloc: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 12,
             /** @param {number[]} args */
@@ -518,6 +518,7 @@ export function createHeapFunctions(host){
                 alignedResize(block >>> 0, size >>> 0, alignment >>> 0, 0),
         },
         _aligned_offset_realloc: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 16,
             /** @param {number[]} args */
@@ -545,6 +546,7 @@ export function createHeapFunctions(host){
                     alignedRecalloc(block >>> 0, count >>> 0, size >>> 0, alignment >>> 0, 0),
             },
             _aligned_offset_recalloc: {
+                returns: 'pointer',
                 convention: 'cdecl',
                 argBytes: 20,
                 /** @param {number[]} args */
@@ -559,7 +561,6 @@ export function createHeapFunctions(host){
              * the size's -1.
              */
             _aligned_msize: {
-                returns: 'pointer',
                 convention: 'cdecl',
                 argBytes: 12,
                 /** @param {number[]} args */
@@ -642,6 +643,7 @@ export function createHeapFunctions(host){
         ...host.heapHandle ? {
             /** intptr_t _get_heap_handle(void) -- the runtime's own heap, not the process's. */
             _get_heap_handle: {
+                returns: 'pointer',
                 convention: 'cdecl',
                 argBytes: 0,
                 handler: ()=>/** @type {() => number} */ (host.heapHandle)(),

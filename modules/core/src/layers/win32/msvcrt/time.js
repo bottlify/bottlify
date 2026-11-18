@@ -1345,7 +1345,7 @@ export function createTimeFunctions(host){
          * cannot tell an overflow from an empty format, which is a defect in
          * the interface rather than here.
          */
-        strftime: { ...strftimeEntry(false), returns: 'pointer' },
+        strftime: { ...strftimeEntry(false) },
 
         /**
          * size_t wcsftime(wchar_t *dest, size_t max, const wchar_t *format,
@@ -1354,7 +1354,7 @@ export function createTimeFunctions(host){
          * strftime's text in UTF-16, `max` in characters, and an empty string
          * when it does not fit.
          */
-        wcsftime: { ...wcsftimeEntry(false), returns: 'pointer' },
+        wcsftime: { ...wcsftimeEntry(false) },
 
         /**
          * size_t _Strftime(char *dest, size_t max, const char *format,
@@ -1364,7 +1364,7 @@ export function createTimeFunctions(host){
          * made, say -- in place of the current locale's; null is the current
          * locale's.
          */
-        _Strftime: { ...namedStrftimeEntry(false), returns: 'pointer' },
+        _Strftime: { ...namedStrftimeEntry(false) },
 
         // The universal runtime's, which knows C99's conversions too.
         [STANDARD_TIME_FORMATS]: {

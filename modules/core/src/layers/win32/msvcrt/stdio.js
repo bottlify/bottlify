@@ -1036,7 +1036,7 @@ export function createStdioFunctions(host){
                 }
                 return Math.floor(bytes.length / (size >>> 0));
             });
-        }), returns: 'pointer' },
+        }) },
 
         /**
          * size_t fwrite(const void *buffer, size_t size, size_t count, FILE *stream)
@@ -1063,7 +1063,7 @@ export function createStdioFunctions(host){
             }
             const stored = emit(stream, host.readMemory(buffer >>> 0, wanted).slice());
             return Math.floor(stored / (size >>> 0));
-        }), returns: 'pointer' },
+        }) },
 
         /** int fseek(FILE *stream, long offset, int origin) -- zero on success. */
         fseek: cdecl(12, ([pointer, offset, origin])=>seek(pointer, offset | 0, origin)),

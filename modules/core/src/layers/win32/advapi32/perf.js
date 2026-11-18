@@ -256,6 +256,7 @@ export function createPerfFunctions(host){
          * whole rounded to eight. A success leaves the last error alone.
          */
         PerfCreateInstance: {
+            returns: 'pointer',
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([provider, guid, namePointer, id])=>{

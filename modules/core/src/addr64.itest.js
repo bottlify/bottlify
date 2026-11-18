@@ -29,16 +29,9 @@ const FIXTURE = new URL('../test/fixtures/addr64.exe', import.meta.url);
  * @type {Map<string, string>}
  */
 const FAILING = new Map([
-    ['a reservation past 2 GiB', 'a 64-bit process\'s memory is cut to 2 GiB (app.js memorySize,'
-        + ' engineAreaFor answers nothing for long)'],
     ['a thread\'s parameter past 4 GiB', 'the bridge hands a handler an argument\'s low dword'
         + ' and the thread starts with it (callback.js, dispatch.js readLongCall)'],
-    ['lpCreateParams past 2 GiB', 'CREATESTRUCT\'s pointers are written signed'
-        + ' (user32/structs.js WIDE)'],
     ['lpCreateParams past 4 GiB', 'the bridge hands CreateWindowEx the parameter\'s low dword'],
-    ['GWLP_USERDATA past 2 GiB', 'a window\'s pointer-sized long is kept as one dword, read'
-        + ' back signed (user32/windows.js readLongPtr)'],
-    ['GWLP_USERDATA past 4 GiB', 'a window\'s pointer-sized long is kept as one dword'],
 ]);
 
 test('a 64-bit program\'s addresses past 2 GiB and values past 4 GiB come back whole',

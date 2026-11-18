@@ -159,6 +159,7 @@ export function createImageFunctions(host){
          * holds, where the walk stops.
          */
         LdrProcessRelocationBlock: {
+            returns: 'pointer',
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([page, count, entries, delta])=>{

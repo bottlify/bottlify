@@ -407,10 +407,63 @@ const NOT_TYPE = new RegExp(String.raw`\b(WINAPI|CALLBACK|APIENTRY|__stdcall|__c
     + String.raw`NTSYSAPI|WINBASEAPI|WINUSERAPI)\b`, 'g');
 
 /**
- * Whether a signature's return type, as its comment writes it before the
- * name, is an address the bridge widens with zeros.
+ * A size result is sign-extended (decision A270): handlers answer
+ * `(size_t)-1`, `(size_t)-2` (mbrtowc's INCOMPLETE) as dwords, which only a
+ * sign-extension makes the quadword a 64-bit caller compares against.
+ */
+const SIZE_RESULTS = new Set(['size_t', 'SIZE_T']);
+
+/**
+ * Pointer-sized integers whose meaning decides: GetClassLongPtr's value may
+ * be an address, SetTimer's id may be either. A spec may declare
+ * `returns: 'pointer'` or not.
+ */
+const EITHER_RESULTS = new Set(['ULONG_PTR', 'UINT_PTR', 'DWORD_PTR', 'uintptr_t', 'WPARAM']);
+
+/**
+ * What a signature's return type, as its comment writes it before the name,
+ * is to the bridge: an address it widens with zeros, a value it sign-extends,
+ * or a pointer-sized integer the spec decides by meaning.
  *
- * @param {string} written  e.g. `LPVOID`, `void *`, `const char *`, `HANDLE`
+ * @param {string} written  e.g. `LPVOID`, `void *`, `size_t`, `HANDLE`
+ * @returns {'address' | 'value' | 'either'}
+ */
+export function resultOf(written){
+    const type = written.replace(NOT_TYPE, ' ').trim().split(/\s+/).pop() ?? '';
+    if (!written.includes('*') && SIZE_RESULTS.has(type))
+    {
+        return 'value';
+    }
+    if (!written.includes('*') && EITHER_RESULTS.has(type))
+    {
+        return 'either';
+    }
+    return returnsPointer(written) ? 'address' : 'value';
+}
+
+/**
+ * What is wrong with a spec's `returns` for its result: an address must be
+ * declared `'pointer'`, a value must not, a pointer-sized integer may be either.
+ *
+ * @param {string} written  The return type as the comment writes it.
+ * @param {string} name @param {string | undefined} declared
+ * @returns {{ pointer: boolean, problem: string | null }}
+ */
+function resultProblem(written, name, declared){
+    const kind = ADDRESS_HANDLES.has(name) ? 'address' : resultOf(written);
+    const pointer = kind === 'address' || (kind === 'either' && declared === 'pointer');
+    const problem = kind === 'address' && declared !== 'pointer'
+        ? `returns ${written.trim()}, an address, without returns: 'pointer'`
+        : kind === 'value' && declared !== undefined
+            ? `returns: '${declared}' over ${written.trim()}, which is no address` : null;
+    return { pointer, problem };
+}
+
+/**
+ * Whether a type, as a comment writes it, is an address-sized word the
+ * bridge widens with zeros (a parameter's pointer places count these too).
+ *
+ * @param {string} written
  */
 export function returnsPointer(written){
     if (written.includes('*'))
@@ -418,8 +471,34 @@ export function returnsPointer(written){
         return true;
     }
     const type = written.replace(NOT_TYPE, ' ').trim().split(/\s+/).pop() ?? '';
-    return POINTER_RESULTS.has(type) || /^LP[A-Z]/.test(type);
+    return POINTER_RESULTS.has(type) || (/^LP[A-Z]/.test(type) && !NOT_POINTERS.has(type))
+        || (/^P[A-Z]/.test(type) && !NOT_POINTERS.has(type));
 }
+
+/**
+ * The `P...` typedefs that are no pointer: a `P` names a pointer type in the
+ * Windows headers (PDWORD, PSID_IDENTIFIER_AUTHORITY, PTP_POOL) but for these.
+ */
+const NOT_POINTERS = new Set(['POINT', 'POINTL', 'POINTS', 'PROPVARIANT', 'PROPID', 'PROPERTYKEY',
+    'POWER_PLATFORM_ROLE', 'PDH_STATUS', 'LPARAM']);
+
+/**
+ * Results typed as a handle that are, in Windows as here, the address of what
+ * they name in the process's memory, by function name: a heap's handle is its
+ * base, a DPA's or DSA's its structure (a `struct _DPA *`), a timer queue's its
+ * block. Zero-extended like any address (`returns: 'pointer'`); every other
+ * handle the host makes up is sign-extended, INVALID_HANDLE_VALUE -1 whole.
+ */
+export const ADDRESS_HANDLES = new Map([
+    ['GetProcessHeap', 'a heap\'s handle is its base'],
+    ['HeapCreate', 'a heap\'s handle is its base'],
+    ['_get_heap_handle', 'the CRT heap\'s handle, its base'],
+    ['DPA_Create', 'an HDPA is a struct _DPA *'],
+    ['DPA_CreateEx', 'an HDPA is a struct _DPA *'],
+    ['DPA_Clone', 'an HDPA is a struct _DPA *'],
+    ['DSA_Create', 'an HDSA is a struct _DSA *'],
+    ['CreateTimerQueue', 'a timer queue is a block in the process\'s memory'],
+]);
 
 /**
  * The dwords of a signature's parameters, in the 32-bit layout, that hold an
@@ -430,7 +509,11 @@ export function returnsPointer(written){
  * @param {string} list  The text between the parentheses.
  * @returns {number[]}
  */
-export function pointersOf(list){
+/** Pointer-sized types that are a size or a number, not an address: wide, but no pointer. */
+const SIZES = new Set(['size_t', 'SIZE_T', 'ULONG_PTR', 'UINT_PTR', 'DWORD_PTR', 'uintptr_t',
+    'WPARAM']);
+
+export function pointersOf(list, { addresses = false } = {}){
     const params = list.split(',').map(each=>each.trim()).filter(Boolean);
     if (params.length === 1 && /^void$/i.test(params[0]))
     {
@@ -447,7 +530,8 @@ export function pointersOf(list){
         }
         const type = param.replace(/\b(IN|OUT|OPTIONAL)\b|_In\w*_|_Out\w*_/g, ' ').trim();
         const named = type.replace(NOT_TYPE, ' ').trim().split(/\s+/)[0] ?? '';
-        if (type.includes('*') || type.includes('[') || returnsPointer(named))
+        if (type.includes('*') || type.includes('[')
+            || (returnsPointer(named) && !(addresses && SIZES.has(named))))
         {
             found.push(word);
         }
@@ -471,15 +555,53 @@ export function pointersOf(list){
  * body, { returns: 'pointer' })`).
  *
  * @param {string} text
- * @returns {{ name: string, line: number, pointer: boolean, problem: string | null }[]}
+ * @returns {{ name: string, key?: string, line: number, pointer: boolean,
+ *     problem: string | null, params?: string | null }[]}
  */
 export function checkReturns(text){
     const found = [];
     const comment = /\/\*\*\s*(?:\r?\n\s*\*)?\s*((?:[A-Za-z_]\w*\s*\**\s+)+?\**)\s*(\w+)\s*\(/g;
-    for (const match of text.matchAll(comment))
+    // A signature on a later line of its comment, after the prose that says why:
+    // taken only where the spec under the comment has its name.
+    const block = /\/\*\*((?:(?!\*\/)[^])*)\*\/\s*['"]?([\w$]+)['"]?\s*:/g;
+    const sigLine = /^\s*\*\s*((?:[A-Za-z_]\w*\s*\**\s+)+?\**)\s*(\w+)\s*\(/;
+    /** @type {Map<number | undefined, RegExpMatchArray>} */
+    const blocks = new Map([...text.matchAll(block)].map(b=>[b.index, b]));
+    /** @param {RegExpMatchArray} b */
+    const signed = b=>{
+        for (const one of b[1].split('\n').slice(1))
+        {
+            const sig = sigLine.exec(one);
+            if (sig && sig[2] === b[2])
+            {
+                return Object.assign([sig[0], sig[1], sig[2]], { index: b.index, later: true });
+            }
+        }
+        return null;
+    };
+    /** @type {RegExpMatchArray[]} */
+    const matches = [];
+    const starts = new Set();
+    for (const m of text.matchAll(comment))
     {
-        const end = text.indexOf('*/', match.index ?? 0);
-        if (end < 0 || end < (match.index ?? 0) + match[0].length)
+        starts.add(m.index);
+        const b = blocks.get(m.index);
+        // The first line read as a signature where it is prose: the spec's own
+        // name on a later line wins.
+        matches.push((b && b[2] !== m[2] && signed(b)) || m);
+    }
+    for (const [index, b] of blocks)
+    {
+        const sig = starts.has(index) ? null : signed(b);
+        if (sig)
+        {
+            matches.push(sig);
+        }
+    }
+    for (const match of matches)
+    {
+        const end = text.indexOf('*/', (match.index ?? 0) + 3);
+        if (end < 0 || (!('later' in match) && end < (match.index ?? 0) + match[0].length))
         {
             continue;
         }
@@ -491,24 +613,83 @@ export function checkReturns(text){
         const named = /^\s*\w+\s*:\s*([A-Za-z_]\w*)\s*,/.exec(spec)?.[1];
         const defined = named
             ? new RegExp(String.raw`const\s+${named}\s*=\s*(?=\{)`).exec(text) : null;
-        const object = defined ? balanced(text, defined.index + defined[0].length) ?? '' : spec;
+        // The spec itself, not what follows it up to the next comment: a spec
+        // without a comment of its own sits after this one.
+        const brace = /^\s*(?:'[^'\n]+'|"[^"\n]+"|[\w$.]+)\s*:\s*(?=\{)/.exec(spec);
+        const object = defined ? balanced(text, defined.index + defined[0].length) ?? ''
+            : brace ? (balanced(spec, brace[0].length) ?? spec) : spec;
         // Only a spec right under its comment: an object with what a host
         // function is made of, or the line a helper makes one with.
-        const made = /^\s*(?:['"]?[\w$.]+['"]?\s*:\s*)?\{(?:\s*\.\.\.\w+\(|[^]*?\b(argBytes|invoke|handler)\s*:)/;
+        const made = /^\s*(?:(?:'[^'\n]+'|"[^"\n]+"|[\w$.]+)\s*:\s*)?\{(?:\s*\.\.\.\w+\(|[^]*?\b(argBytes|invoke|handler)\s*:)/;
         if (!made.test(object) && !helper)
         {
             continue;
         }
-        const pointer = returnsPointer(match[1]);
         const own = /\breturns\s*:\s*['"](\w+)['"]/.exec(object)?.[1];
         const line = text.slice(0, match.index).split('\n').length;
-        const problem = pointer && own !== 'pointer'
-            ? `returns ${match[1].trim()}, an address, without returns: 'pointer'`
-            : !pointer && own !== undefined
-                ? `returns: '${own}' over ${match[1].trim()}, which is no address` : null;
-        found.push({ name: match[2], line, pointer, problem });
+        const { pointer, problem } = resultProblem(match[1], match[2], own);
+        // The key the spec is exported by, where it is not the C name (`'#71'`
+        // for Alloc, a C++ name): the gate meets a handler by its key.
+        const key = /^\s*['"]([^'"\n]+)['"]\s*:/.exec(spec)?.[1];
+        found.push({ name: match[2], key: key !== match[2] ? key : undefined, line, pointer,
+            problem, params: paramsAfter(text, match) });
+        // The comment's other signatures, one per spec written after it
+        // (`GetSidSubAuthority` under GetSidIdentifierAuthority's): each read
+        // in its own object, found by its name before the next signature comment.
+        const own0 = text.slice(match.index ?? 0, end);
+        const nextSigned = text.slice(end).search(/\/\*\*\s*(?:\r?\n\s*\*)?\s*[A-Za-z_]\w*[\s*]+\w+\s*\(/);
+        const reach = text.slice(end, nextSigned < 0 ? text.length : end + nextSigned);
+        for (const one of own0.split('\n').slice(1))
+        {
+            const sig = sigLine.exec(one);
+            if (!sig || sig[2] === match[2])
+            {
+                continue;
+            }
+            const at = new RegExp(String.raw`\n\s*['"]?${sig[2]}['"]?\s*:\s*(?=\{)`).exec(reach);
+            const body = at ? balanced(reach, (at.index ?? 0) + at[0].length) ?? '' : '';
+            if (!/\b(argBytes|invoke|handler)\s*:/.test(body))
+            {
+                continue;
+            }
+            const declared = /\breturns\s*:\s*['"](\w+)['"]/.exec(body)?.[1];
+            found.push({ name: sig[2], line: line0(text, match.index) + 1,
+                params: paramsAfter(text,
+                    Object.assign([own0, sig[1], sig[2]], { index: match.index })),
+                ...resultProblem(sig[1], sig[2], declared) });
+        }
     }
     return found;
+}
+
+/** @param {string} text @param {number | undefined} at */
+const line0 = (text, at)=>text.slice(0, at).split('\n').length - 1;
+
+/**
+ * A signature's parameter list, as its comment writes it - across lines, the
+ * comment's leading stars taken out - or null where it does not close.
+ *
+ * @param {string} text @param {RegExpMatchArray} match  the signature's name in match[2]
+ * @returns {string | null}
+ */
+function paramsAfter(text, match){
+    const end = text.indexOf('*/', (match.index ?? 0) + 3);
+    const head = new RegExp(String.raw`\b${match[2]}\s*\(`).exec(text.slice(match.index, end));
+    if (!head)
+    {
+        return null;
+    }
+    const open = (match.index ?? 0) + head.index + head[0].length;
+    let depth = 1;
+    for (let i = open; i < end; i++)
+    {
+        depth += text[i] === '(' ? 1 : text[i] === ')' ? -1 : 0;
+        if (depth === 0)
+        {
+            return text.slice(open, i).replace(/\n\s*\*/g, ' ').replace(/\s+/g, ' ').trim();
+        }
+    }
+    return null;
 }
 
 /** @param {string} dir @returns {string[]} */

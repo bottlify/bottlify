@@ -126,10 +126,10 @@ export function createStringFunctions(host){
         strpbrk: { ...guestEntry(inGuest.strpbrk, COMPILED.strpbrk, host), returns: 'pointer' },
 
         /** size_t strspn(const char *str, const char *accept) -- in the guest */
-        strspn: { ...guestEntry(inGuest.strspn, COMPILED.strspn, host), returns: 'pointer' },
+        strspn: { ...guestEntry(inGuest.strspn, COMPILED.strspn, host) },
 
         /** size_t strcspn(const char *str, const char *reject) -- in the guest */
-        strcspn: { ...guestEntry(inGuest.strcspn, COMPILED.strcspn, host), returns: 'pointer' },
+        strcspn: { ...guestEntry(inGuest.strcspn, COMPILED.strcspn, host) },
 
         /** char *strncat(char *dest, const char *src, size_t count) -- in the guest */
         strncat: { ...guestEntry(inGuest.strncat, COMPILED.strncat, host), returns: 'pointer' },
@@ -305,7 +305,6 @@ export function createStringFunctions(host){
          * INT_MAX and EINVAL.
          */
         strxfrm: {
-            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 12,
             /** @param {number[]} args */

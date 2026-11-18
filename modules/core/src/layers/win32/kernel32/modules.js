@@ -522,6 +522,7 @@ export function createModuleFunctions(host){
             },
         },
         LoadLibraryExW: {
+            returns: 'pointer',
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([name, file, flags])=>{

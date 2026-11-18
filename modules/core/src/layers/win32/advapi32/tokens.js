@@ -3399,6 +3399,7 @@ export function createTokenFunctions(host){
          * success, which is how a caller tells the pointer is good.
          */
         GetSidIdentifierAuthority: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([sid])=>{
@@ -3407,6 +3408,7 @@ export function createTokenFunctions(host){
             },
         },
         GetSidSubAuthority: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([sid, index])=>{
@@ -3415,6 +3417,7 @@ export function createTokenFunctions(host){
             },
         },
         GetSidSubAuthorityCount: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([sid])=>{

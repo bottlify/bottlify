@@ -1666,6 +1666,7 @@ export function createShellFunctions(host){
             handler: ()=>0,
         },
         SHBrowseForFolderW: {
+            returns: 'pointer',
             argBytes: 4,
             handler: ()=>0,
         },
@@ -1901,6 +1902,7 @@ export function createShellFunctions(host){
             handler: ()=>0,
         },
         SHGetFileInfoW: {
+            returns: 'pointer',
             argBytes: 20,
             handler: ()=>0,
         },

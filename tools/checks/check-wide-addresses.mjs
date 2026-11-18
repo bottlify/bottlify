@@ -40,19 +40,22 @@
  * green while saying what is open: a new difference fails, and so does a
  * known one that no longer differs - the list only shrinks.
  *
- *     node tools/checks/check-wide-addresses.mjs [--list] [--high 0x90000000]
+ *     node tools/checks/check-wide-addresses.mjs [--list] [--high 0x90000000] [--only RE]
  *
  * `--list` prints every difference, known or not; `--high` moves the second
  * window (past 4 GiB once a 64-bit process's addresses reach there: the
- * memory accessors here take any number below 2^53).
+ * memory accessors here take any number below 2^53); `--only` calls just the
+ * functions whose `library!function` matches the expression, and checks the
+ * known list for those alone.
  */
 
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { join } from 'node:path';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { isMain } from '../lib/common.mjs';
 import { ORIGINAL_EXPORT } from '../../modules/core/src/layers/win32/msvcrt/invalid-parameter.js';
 import { standIn } from './check-guest-pointers.mjs';
+import { checkReturns, pointersOf } from './check-wide-arguments.mjs';
 import { longAnswer, zeroExtendsOf } from '../../modules/core/src/layers/bridge/internal/dispatch.js';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
@@ -105,13 +108,15 @@ function argumentBytes(){
 }
 
 /**
- * A win32 layer of a 64-bit process over one window at `base`.
+ * A win32 layer of a 64-bit process over one window at `base`; `generation`
+ * builds it again, fresh, once the two have parted.
  *
- * @param {number} base
+ * @param {number} base @param {number} [generation]
  */
-async function layerAt(base){
+async function layerAt(base, generation = 0){
+    const query = `?at=${base}${generation > 0 ? `&generation=${generation}` : ''}`;
     /** @param {string} path */
-    const load = path=>import(`${pathToFileURL(join(LAYERS, path)).href}?at=${base}`);
+    const load = path=>import(`${pathToFileURL(join(LAYERS, path)).href}${query}`);
     const { createMemoryModule } = await load('memory/module.js');
     const { createFilesystemModule } = await load('filesystem/module.js');
     const { win32Module } = await load('win32/module.js');
@@ -227,13 +232,137 @@ export function raxOf(answer, spec = {}){
 }
 
 /**
- * Whether two answers are the same call's at two bases: equal, or each
- * pointing at the same offset of its own window.
+ * The functions whose signature comment types their result as no address
+ * (`checkReturns` over the layers' sources), by name: an `int` or a `DWORD`
+ * the bridge sign-extends by its type, whose value may be anything a call
+ * makes of an address it was handed. A name typed both ways somewhere is left
+ * out, and so is one with no comment the check can read.
+ *
+ * @returns {Set<string>}
+ */
+export function valueResults(){
+    return signatures().values;
+}
+
+/**
+ * What the layers' signature comments say of each function, by name: the
+ * results typed as no address (`valueResults`), and the dwords of its
+ * parameters that hold an address (`pointersOf`), where every comment of that
+ * name agrees.
+ *
+ * @returns {{ values: Set<string>, pointers: Map<string, number[]> }}
+ */
+export function signatures(){
+    /** @type {Map<string, boolean>} */
+    const typed = new Map();
+    /** @type {Map<string, string | null>} */
+    const places = new Map();
+    /** @param {string} dir */
+    const walk = dir=>{
+        for (const name of readdirSync(dir))
+        {
+            const path = join(dir, name);
+            if (statSync(path).isDirectory())
+            {
+                walk(path);
+            }
+            else if (name.endsWith('.js') && !/\.(i?test|fixture|x86|x64)\.js$/.test(name))
+            {
+                for (const one of checkReturns(readFileSync(path, 'utf8')))
+                {
+                    const list = one.params == null ? null
+                        : pointersOf(one.params, { addresses: true }).join(',');
+                    for (const each of one.key ? [one.name, one.key] : [one.name])
+                    {
+                        typed.set(each, (typed.get(each) ?? false) || one.pointer);
+                        places.set(each, places.has(each) && places.get(each) !== list
+                            ? null : list);
+                    }
+                }
+            }
+        }
+    };
+    walk(join(ROOT, 'modules', 'core', 'src', 'layers'));
+    return {
+        values: new Set([...typed].filter(([, pointer])=>!pointer).map(([name])=>name)),
+        pointers: new Map([...places].filter(([, list])=>list !== null)
+            .map(([name, list])=>[name, list ? String(list).split(',').map(Number) : []])),
+    };
+}
+
+/** MSVC's codes of a type that is a number: `I` unsigned int, `_K` unsigned __int64. */
+const MANGLED_NUMBERS = /^(?:[CDEFGHIJKMNO]|_[JKN])/;
+
+/**
+ * The address places of a global function by its MSVC name
+ * (`??2@YAPAXI@Z`, operator new(unsigned int)): such a name carries no
+ * comment the gate can read, but its parameter types are in it. A pointer
+ * or reference (`P`, `Q`, `A`, `E` for __ptr64, a qualifier, the type it
+ * points at) is an address; a number is none. Null for a name read otherwise
+ * (a class, a back reference, a member): every place is then tried.
+ *
+ * @param {string} name
+ * @returns {number[] | null}
+ */
+export function mangledPointers(name){
+    const head = /^\?[^@]*@Y[A-Z]/.exec(name);
+    if (!head)
+    {
+        return null;
+    }
+    let at = head[0].length;
+    /** @returns {boolean | null} whether the type at `at` is an address; null for one not read */
+    const type = ()=>{
+        const number = MANGLED_NUMBERS.exec(name.slice(at));
+        if (number)
+        {
+            at += number[0].length;
+            return false;
+        }
+        if (name[at] === 'X')
+        {
+            at += 1;
+            return false;
+        }
+        if (/[PQA]/.test(name[at] ?? ''))
+        {
+            at += name[at + 1] === 'E' ? 3 : 2;
+            return type() === null ? null : true;
+        }
+        return null;
+    };
+    if (type() === null)
+    {
+        return null;
+    }
+    const places = [];
+    for (let place = 0; name.slice(at) !== '@Z' && name.slice(at) !== 'Z'; place += 1)
+    {
+        const pointer = type();
+        if (pointer === null)
+        {
+            return null;
+        }
+        if (pointer)
+        {
+            places.push(place);
+        }
+    }
+    return places;
+}
+
+/**
+ * Whether two answers are the same call's at two bases. Either equal, or each
+ * pointing at the same offset of its own window; and by the result's type:
+ * an address (`'address'`, zero-extended) is right wherever it points in its
+ * own window - the two layers' arenas part once a call took a pointer for a
+ * size - and a value (`'value'`, an `int` sign-extended by its type) is
+ * compared in its low dword alone, the high half its sign as the type has it.
  *
  * @param {bigint | null} low @param {bigint | null} high @param {number} lowBase
- * @param {number} highBase
+ * @param {number} highBase @param {'address' | 'value'} [kind]
  */
-export function sameAnswer(low, high, lowBase, highBase){
+export function sameAnswer(low, high, lowBase, highBase, kind){
     if (low === high)
     {
         return true;
@@ -243,6 +372,18 @@ export function sameAnswer(low, high, lowBase, highBase){
         return false;
     }
     const inLow = low >= BigInt(lowBase) && low < BigInt(lowBase + WINDOW);
+    const inHigh = high >= BigInt(highBase) && high < BigInt(highBase + WINDOW);
+    if (kind === 'address')
+    {
+        return inLow && inHigh;
+    }
+    if (kind === 'value')
+    {
+        const l = BigInt.asUintN(32, low);
+        const h = BigInt.asUintN(32, high);
+        return l === h
+            || BigInt.asUintN(32, h - l) === BigInt.asUintN(32, BigInt(highBase - lowBase));
+    }
     return inLow && high - low === BigInt(highBase - lowBase);
 }
 
@@ -328,15 +469,54 @@ function argumentsAt(shape, base){
  * @property {string} detail
  */
 
+/** @typedef {Awaited<ReturnType<typeof layerAt>>} Layer */
+
+/**
+ * Where the next 16 bytes of a layer's process heap lie, from its base: the
+ * same on both layers while their arenas keep step. A block is taken and
+ * given back; null where the heap answers nothing.
+ *
+ * @param {Layer} layer
+ * @returns {number | null}
+ */
+function nextBlock(layer){
+    const kernel = layer.libraries['KERNEL32.dll'];
+    try
+    {
+        const at = kernel?.LocalAlloc?.handler?.([0, 16]);
+        if (typeof at !== 'number' || at === 0)
+        {
+            return null;
+        }
+        kernel?.LocalFree?.handler?.([at]);
+        return (at >>> 0) - layer.base;
+    }
+    catch {
+        return null;
+    }
+}
+
 /**
  * Calls every handler on both layers in the same order and keeps what differs.
+ * A call that sized an allocation by an address it was handed for a count
+ * parts the two arenas: every block after it lies elsewhere in its window, and
+ * the dwords later calls write would differ by that alone. So before each call
+ * the next block of both heaps is compared, and where they parted `rebuild`
+ * makes both layers again.
  *
- * @param {Awaited<ReturnType<typeof layerAt>>} low
- * @param {Awaited<ReturnType<typeof layerAt>>} high
+ * @param {Layer} low @param {Layer} high
+ * @param {RegExp | null} [only]  the `library!function` names to call, all where null
+ * @param {((low: Layer, high: Layer) => Promise<{ low: Layer, high: Layer }>) | null} [rebuild]
  * @returns {Promise<{ handlers: number, calls: number, differences: Difference[],
- *     unmeasured: Set<string> }>}
+ *     unmeasured: Set<string>, parted: string[], low: Layer, high: Layer }>}
  */
-export async function compare(low, high){
+export async function compare(low, high, only = null, rebuild = null){
+    // The layers called, made again where they parted; the order and the
+    // handlers already called are the first layers'.
+    let [lo, hi] = [low, high];
+    /** @type {string[]} the calls after which the arenas were found parted */
+    const parted = [];
+    let last = '';
     /** @type {Difference[]} */
     const differences = [];
     /** @type {Set<Function>} */
@@ -345,7 +525,8 @@ export async function compare(low, high){
     const unmeasured = new Set();
     let handlers = 0;
     let calls = 0;
-    const pristine = Uint8Array.from(low.window);
+    let pristine = Uint8Array.from(low.window);
+    const { values, pointers } = signatures();
     for (const [library, table] of Object.entries(low.libraries))
     {
         for (const [name, entry] of Object.entries(table ?? {}))
@@ -354,29 +535,46 @@ export async function compare(low, high){
             const twin = high.libraries[library]?.[name];
             const other = (twin?.[ORIGINAL_EXPORT] ?? twin)?.handler;
             if (typeof handler !== 'function' || typeof other !== 'function'
-                || seen.has(handler) || ENDS.test(name))
+                || seen.has(handler) || ENDS.test(name)
+                || (only && !only.test(`${library}!${name}`)))
             {
                 continue;
             }
             seen.add(handler);
             handlers++;
             const count = Math.max(1, (entry.argBytes ?? 16) >>> 2);
-            // One argument a pointer at a time, every other a small count: a
-            // pointer read as a size or a flag would itself differ by the base.
+            // One argument a pointer at a time, every other a small count. Where
+            // the signature says which are pointers only those are: a count or a
+            // flag handed an address differs by the base as its own value, a
+            // length of 0x90100000 is negative as an int - no width's doing.
+            const typed = (pointers.get(name) ?? mangledPointers(name))
+                ?.filter(place=>place < count);
+            const places = typed ?? Array.from({ length: Math.min(count, MOST_PLACES) }, (_, i)=>i);
             /** @type {[string, (number | 'p')[]][]} */
-            const shapes = Array.from({ length: Math.min(count, MOST_PLACES) }, (_, place)=>[
+            const shapes = places.map(place=>[
                 `argument ${place + 1} a pointer`,
                 Array.from({ length: count }, (__, i)=>(i === place ? 'p' : SMALL))]);
             for (const [label, shape] of shapes)
             {
                 calls++;
+                if (rebuild && nextBlock(lo) !== nextBlock(hi))
+                {
+                    ({ low: lo, high: hi } = await rebuild(lo, hi));
+                    pristine = Uint8Array.from(lo.window);
+                    parted.push(last);
+                }
+                last = `${library}!${name} with ${label}`;
                 // Each window as it was: a handler writes through what it is handed.
-                low.window.set(pristine.subarray(0, ARENA.offset));
-                high.window.set(pristine.subarray(0, ARENA.offset));
-                const lowBefore = Uint8Array.from(low.window);
-                const highBefore = Uint8Array.from(high.window);
-                const a = await outcome(handler, argumentsAt(shape, low.base));
-                const b = await outcome(other, argumentsAt(shape, high.base));
+                lo.window.set(pristine.subarray(0, ARENA.offset));
+                hi.window.set(pristine.subarray(0, ARENA.offset));
+                const lowBefore = Uint8Array.from(lo.window);
+                const highBefore = Uint8Array.from(hi.window);
+                const mine = lo.libraries[library]?.[name];
+                const theirs = hi.libraries[library]?.[name];
+                const a = await outcome((mine?.[ORIGINAL_EXPORT] ?? mine).handler,
+                    argumentsAt(shape, lo.base));
+                const b = await outcome((theirs?.[ORIGINAL_EXPORT] ?? theirs).handler,
+                    argumentsAt(shape, hi.base));
                 const key = `${library}!${name}`;
                 if (a.threw === STAND_IN || b.threw === STAND_IN)
                 {
@@ -393,14 +591,16 @@ export async function compare(low, high){
                 const spec = entry?.[ORIGINAL_EXPORT] ?? entry;
                 const lowRax = raxOf(a.answer, spec);
                 const highRax = raxOf(b.answer, spec);
-                if (!sameAnswer(lowRax, highRax, low.base, high.base))
+                const kind = zeroExtendsOf(spec) ? 'address'
+                    : values.has(name) ? 'value' : undefined;
+                if (!sameAnswer(lowRax, highRax, lo.base, hi.base, kind))
                 {
                     differences.push({ key, label, detail: `RAX 0x${lowRax?.toString(16)} low,`
                         + ` 0x${highRax?.toString(16)} high` });
                     continue;
                 }
-                const at = writeDifferences(lowBefore, low.window, highBefore, high.window,
-                    low.base, high.base);
+                const at = writeDifferences(lowBefore, lo.window, highBefore, hi.window,
+                    lo.base, hi.base);
                 if (at.length > 0)
                 {
                     differences.push({ key, label, detail: 'memory differs at window offset '
@@ -409,17 +609,26 @@ export async function compare(low, high){
             }
         }
     }
-    return { handlers, calls, differences, unmeasured };
+    return { handlers, calls, differences, unmeasured, parted, low: lo, high: hi };
 }
 
 async function main(){
     const at = process.argv.indexOf('--high');
     const highBase = at > 0 ? Number(process.argv[at + 1]) : HIGH;
-    const low = await layerAt(LOW);
-    const high = await layerAt(highBase);
-    const { handlers, calls, differences, unmeasured } = await compare(low, high);
-    await low.dispose();
-    await high.dispose();
+    const onlyAt = process.argv.indexOf('--only');
+    const only = onlyAt > 0 ? new RegExp(process.argv[onlyAt + 1]) : null;
+    let generation = 0;
+    const result = await compare(await layerAt(LOW), await layerAt(highBase), only,
+        async(low, high)=>{
+            await low.dispose();
+            await high.dispose();
+            generation++;
+            return { low: await layerAt(LOW, generation),
+                high: await layerAt(highBase, generation) };
+        });
+    const { handlers, calls, differences, unmeasured, parted } = result;
+    await result.low.dispose();
+    await result.high.dispose();
     const list = known();
     const differing = new Set(differences.map(d=>d.key));
     if (process.argv.includes('--list'))
@@ -430,7 +639,7 @@ async function main(){
         }
     }
     const fresh = differences.filter(d=>!list.has(d.key));
-    const stale = [...list].filter(key=>!differing.has(key));
+    const stale = [...list].filter(key=>!differing.has(key) && (!only || only.test(key)));
     for (const d of fresh)
     {
         console.error(`${d.key} with ${d.label}: ${d.detail}`);
@@ -442,7 +651,9 @@ async function main(){
     console.log(`wide addresses: ${handlers} handlers, ${calls} calls at 0x${LOW.toString(16)} and`
         + ` 0x${highBase.toString(16)}, ${new Set(fresh.map(d=>d.key)).size} new differences,`
         + ` ${differing.size - new Set(fresh.map(d=>d.key)).size} known,`
-        + ` ${unmeasured.size} not measured (a stand-in reached)`);
+        + ` ${unmeasured.size} not measured (a stand-in reached),`
+        + ` both layers made again ${parted.length} times where a call parted their arenas`
+        + (parted.length > 0 ? ` (after ${parted.join('; ')})` : ''));
     process.exitCode = fresh.length > 0 || stale.length > 0 ? 1 : 0;
 }
 
