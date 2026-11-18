@@ -234,6 +234,8 @@ const PROPERTY_SIZE = new Map([
     [DIPROP.USERNAME, 536], [DIPROP.TYPENAME, 536],
 ]);
 const DIPROPHEADER_SIZE = 16;
+/** The uAppData of an event whose object has none. */
+const NO_APP_DATA = 0xffffffff;
 const DIPROPRANGE_NOMIN = 0x80000000 | 0;
 const DIPROPRANGE_NOMAX = 0x7fffffff;
 const DIPROPAXISMODE_ABS = 0;
@@ -820,13 +822,67 @@ export function createDirectInput(
      */
     const formats = new WeakMap();
     /**
-     * Whose each device is, once a SetActionMap gave it to a user.
+     * Whose each device is, once a SetActionMap gave it to a user: the
+     * device itself, by its instance GUID, whichever object of it the map
+     * was set through.
      *
-     * @type {WeakMap<object, string | symbol>}
+     * @type {Map<string, string | symbol>}
      */
-    const owners = new WeakMap();
+    const owners = new Map();
     /** @type {WeakMap<object, { window: number, background: boolean }>} */
     const cooperation = new WeakMap();
+    /** The mice DIPROP_AXISMODE has been set on. @type {WeakSet<object>} */
+    const axisModeSet = new WeakSet();
+
+    /**
+     * DIPROP_APPDATA: the value an object's events carry in uAppData, kept
+     * with the data format, which a new SetDataFormat starts afresh. Only an
+     * object can have one - the whole device is DIERR_INVALIDPARAM, a usage
+     * DIERR_UNSUPPORTED - named by its offset in the program's format or by
+     * its id (Wine's device8.c test_appdata_property).
+     *
+     * @param {any} device @param {number} header
+     */
+    const setAppData = (device, header)=>{
+        if (readU32(header) !== PROPERTY_SIZE.get(DIPROP.APPDATA)
+            || readU32(header + 4) !== DIPROPHEADER_SIZE)
+        {
+            return DIERR_INVALIDPARAM;
+        }
+        const which = readU32(header + 8);
+        const how = readU32(header + 12);
+        if (how === DIPH_DEVICE)
+        {
+            return DIERR_INVALIDPARAM;
+        }
+        if (how === DIPH_BYUSAGE)
+        {
+            return DIERR_UNSUPPORTED;
+        }
+        const format = formats.get(device);
+        if (!format || (how !== DIPH_BYOFFSET && how !== DIPH_BYID))
+        {
+            return how === DIPH_BYOFFSET || how === DIPH_BYID ? DIERR_NOTFOUND
+                : DIERR_INVALIDPARAM;
+        }
+        let place;
+        if (how === DIPH_BYOFFSET)
+        {
+            place = [...format.places.values()].includes(which) ? which : undefined;
+        }
+        else
+        {
+            const named = objectNamed(device, which, DIPH_BYID);
+            place = typeof named === 'number' ? undefined : format.places.get(named.offset);
+        }
+        if (place === undefined)
+        {
+            return DIERR_NOTFOUND;
+        }
+        format.appData ??= new Map();
+        format.appData.set(place, readU32(header + DIPROPDWORD_DATA));
+        return DI_OK;
+    };
     /** Each device's last Acquire answer, for the diagnostics. @type {WeakMap<object, number>} */
     const acquireAnswers = new WeakMap();
     /**
@@ -916,8 +972,25 @@ export function createDirectInput(
         ]));
     };
 
-    /** @type {Map<string, any>} */
+    /**
+     * The device objects a program holds, by the instance GUID each was made
+     * as: every CreateDevice makes an object of its own, with its own data
+     * format, cooperative level and buffer, and each hears the device's input.
+     *
+     * @type {Map<string, any[]>}
+     */
     const devices = new Map();
+
+    /**
+     * The live objects of one device; those released to nothing are let go.
+     *
+     * @param {string} guid
+     */
+    const liveOf = guid=>{
+        const live = (devices.get(guid) ?? []).filter(device=>!device.destroyed);
+        devices.set(guid, live);
+        return live;
+    };
 
     /**
      * Fills a structure the caller sized, in one of the two sizes its width
@@ -1188,6 +1261,7 @@ export function createDirectInput(
             {
                 device.setAbsolute(
                     readU32((header >>> 0) + DIPROPDWORD_DATA) === DIPROPAXISMODE_ABS);
+                axisModeSet.add(device);
                 return DI_OK;
             }
             if (property === DIPROP.FFGAIN)
@@ -1199,6 +1273,10 @@ export function createDirectInput(
                 }
                 gains.set(device, gain);
                 return DI_OK;
+            }
+            if (property === DIPROP.APPDATA)
+            {
+                return setAppData(device, header >>> 0);
             }
             // Ranges and dead zones: accepted and ignored. The device is
             // already unscaled, which is what every one of them would ask for.
@@ -1243,8 +1321,12 @@ export function createDirectInput(
                     case DIPROP_BUFFERSIZE:
                         writeU32(at + DIPROPDWORD_DATA, device.bufferSize);
                         return DI_OK;
+                    // The mode the data format set, or DIPROP_AXISMODE after
+                    // it; absolute before either, as Windows answers a mouse
+                    // with no format yet (Wine's device8.c test_sys_mouse).
                     case DIPROP_AXISMODE:
                         writeU32(at + DIPROPDWORD_DATA, device.kind === MOUSE
+                            && (formats.has(device) || axisModeSet.has(device))
                             ? (device.absolute ? DIPROPAXISMODE_ABS : DIPROPAXISMODE_REL)
                             : formats.get(device)?.relative === true
                                 ? DIPROPAXISMODE_REL : DIPROPAXISMODE_ABS);
@@ -1449,8 +1531,10 @@ export function createDirectInput(
                     view.setUint32(at + DIDEVICEOBJECTDATA.dwSequence, event.sequence, true);
                     if (entrySize === DIDEVICEOBJECTDATA.SIZE_DX8)
                     {
+                        // -1 for an object no DIPROP_APPDATA or action
+                        // named, as Windows reports it (Wine's device8.c).
                         view.setUint32(at + DIDEVICEOBJECTDATA.uAppData,
-                            appData?.get(event.offset) ?? 0, true);
+                            appData?.get(event.offset) ?? NO_APP_DATA, true);
                     }
                 });
                 if (bytes.length > 0)
@@ -1571,7 +1655,8 @@ export function createDirectInput(
             formats.set(device, { dataSize, places, appData });
             // The device is the user's from now on, as EnumDevicesBySemantics
             // tells a program asking whose it is.
-            owners.set(device, readName(user, descriptor?.wide === true) || LOGGED_ON_USER);
+            owners.set(/** @type {string} */ (instanceGuids.get(device)),
+                readName(user, descriptor?.wide === true) || LOGGED_ON_USER);
             device.setDataSize(dataSize);
             if (actions.bufferSize > 0)
             {
@@ -1782,29 +1867,25 @@ export function createDirectInput(
     /** The GUID each device was made or initialized as. @type {WeakMap<object, string>} */
     const instanceGuids = new WeakMap();
 
-    /** @param {string} guid */
+    /**
+     * A new object of the device the GUID names, holding the one reference
+     * its caller hands out, or null for a GUID that names none.
+     *
+     * @param {string} guid
+     */
     const deviceFor = guid=>{
         if (!isDevice(guid))
         {
             return null;
         }
-        let device = devices.get(guid);
-        // A device released to nothing is over, and a new CreateDevice makes
-        // a new one rather than handing back a pointer the bridge has let go.
-        // One still held is handed out again with a reference for this caller.
-        if (device && !device.destroyed)
-        {
-            device.addRef();
-            return device;
-        }
-        device = createInputDevice({
+        const device = /** @type {any} */ (createInputDevice({
             kind: KEYBOARD_GUIDS.has(guid) ? KEYBOARD : MOUSE,
             now,
             cursor,
-        });
+        }));
         device.offers = generationOf(device);
         instanceGuids.set(device, guid);
-        devices.set(guid, device);
+        devices.set(guid, [...liveOf(guid), device]);
         return device;
     };
 
@@ -1839,12 +1920,17 @@ export function createDirectInput(
      *
      * @param {number} type @param {number} callback @param {number} context
      * @param {number} flags @param {boolean} wide @param {boolean} legacy
+     * @param {boolean} [initialized]  false for a root Initialize has not given a version
      * @returns {number | Promise<number>}
      */
-    const enumerate = (type, callback, context, flags, wide, legacy)=>{
+    const enumerate = (type, callback, context, flags, wide, legacy, initialized = true)=>{
         if ((callback >>> 0) === 0 || (flags & ~DIEDFL_KNOWN) !== 0 || !isDeviceKind(type))
         {
             return DIERR_INVALIDPARAM;
+        }
+        if (!initialized)
+        {
+            return DIERR_NOTINITIALIZED;
         }
         const run = callGuest;
         if (!run || allocate === undefined)
@@ -1938,6 +2024,11 @@ export function createDirectInput(
                 writeU32(out, 0);
                 return E_POINTER;
             }
+            if (!root.initialized)
+            {
+                writeU32(out, 0);
+                return DIERR_NOTINITIALIZED;
+            }
             const device = deviceFor(guidAt(guid));
             if (!device)
             {
@@ -1964,6 +2055,11 @@ export function createDirectInput(
             if ((out >>> 0) === 0 || (guid >>> 0) === 0 || (iid >>> 0) === 0)
             {
                 return DIERR_INVALIDPARAM;
+            }
+            if (!root.initialized)
+            {
+                writeU32(out, 0);
+                return DIERR_NOTINITIALIZED;
             }
             const device = deviceFor(guidAt(guid));
             if (!device)
@@ -2000,7 +2096,7 @@ export function createDirectInput(
             const [type, callback, context, flags] = args;
             return enumerate(
                 type >>> 0, callback, context, flags >>> 0,
-                descriptor?.wide === true, descriptor?.legacy === true);
+                descriptor?.wide === true, descriptor?.legacy === true, root.initialized);
         },
 
         /**
@@ -2036,25 +2132,25 @@ export function createDirectInput(
             // SetActionMap gave that user -- any user's, when none is named --
             // and the available ones those nobody has.
             const asked = readName(user, wide);
-            const mine = (/** @type {any} */ device)=>{
-                const owner = owners.get(device);
+            const mine = (/** @type {string} */ guid)=>{
+                const owner = owners.get(guid);
                 return owner !== undefined && (asked === '' || owner === asked);
             };
-            const free = (/** @type {any} */ device)=>!owners.has(device);
-            const wanted = (/** @type {any} */ device)=>{
+            const free = (/** @type {string} */ guid)=>!owners.has(guid);
+            const wanted = (/** @type {string} */ guid)=>{
                 switch (flags & (DIEDBSFL_THISUSER | DIEDBSFL_AVAILABLEDEVICES))
                 {
-                    case DIEDBSFL_THISUSER: return mine(device);
-                    case DIEDBSFL_AVAILABLEDEVICES: return free(device);
+                    case DIEDBSFL_THISUSER: return mine(guid);
+                    case DIEDBSFL_AVAILABLEDEVICES: return free(guid);
                     case DIEDBSFL_THISUSER | DIEDBSFL_AVAILABLEDEVICES:
-                        return mine(device) || free(device);
+                        return mine(guid) || free(guid);
                     default: return true;
                 }
             };
             const offers = /** @type {const} */ ([
                 { guid: GUID_SysKeyboard, kind: KEYBOARD, name: 'Keyboard' },
                 { guid: GUID_SysMouse, kind: MOUSE, name: 'Mouse' },
-            ]).filter(offer=>wanted(deviceFor(offer.guid)));
+            ]).filter(offer=>wanted(offer.guid));
             enumerations++;
             const thread = callerThread?.();
             return (async()=>{
@@ -2086,6 +2182,10 @@ export function createDirectInput(
             {
                 return E_POINTER;
             }
+            if (!root.initialized)
+            {
+                return DIERR_NOTINITIALIZED;
+            }
             return isDevice(guidAt(guid)) ? DI_OK : DIERR_DEVICENOTREG;
         },
 
@@ -2099,7 +2199,11 @@ export function createDirectInput(
             {
                 return E_HANDLE;
             }
-            return (flags >>> 0) !== 0 ? DIERR_INVALIDPARAM : DI_OK;
+            if ((flags >>> 0) !== 0)
+            {
+                return DIERR_INVALIDPARAM;
+            }
+            return root.initialized ? DI_OK : DIERR_NOTINITIALIZED;
         },
         /**
          * HRESULT Initialize(HINSTANCE, DWORD version)
@@ -2114,6 +2218,7 @@ export function createDirectInput(
                 return refused;
             }
             root.version = version >>> 0;
+            root.initialized = true;
             return DI_OK;
         },
         /** HRESULT FindDevice(REFGUID, LPCSTR, LPGUID) */
@@ -2193,6 +2298,9 @@ export function createDirectInput(
         let references = 1;
         const root = {
             version: version >>> 0,
+            // One a class factory made answers DIERR_NOTINITIALIZED until
+            // Initialize gives it a version (Wine's dinput.c test_CoCreateInstance).
+            initialized,
             eight,
             addRef: ()=>++references,
             release: ()=>(references = Math.max(0, references - 1)),
@@ -2293,9 +2401,8 @@ export function createDirectInput(
             // or the mouse, each taking it as its own state allows.
             const guids = event.kind === 'key' ? KEYBOARD_GUIDS : MOUSE_GUIDS;
             let taken = false;
-            for (const guid of guids)
+            for (const device of [...guids].flatMap(liveOf))
             {
-                const device = devices.get(guid);
                 const keyed = event.scanned !== undefined && device?.version >= 0x0800
                     ? { ...event, code: event.scanned } : event;
                 if (keyed.kind === 'key' && keyed.code === 0)
@@ -2320,8 +2427,13 @@ export function createDirectInput(
             return taken;
         },
 
-        /** @param {string} guid */
-        device: guid=>devices.get(guid) ?? null,
+        /**
+         * The newest live object of a device, for a caller outside the
+         * program that reads its state.
+         *
+         * @param {string} guid
+         */
+        device: guid=>liveOf(guid).at(-1) ?? null,
 
         /**
          * Whether a program holds this device exclusively right now: acquired
@@ -2333,8 +2445,8 @@ export function createDirectInput(
          * @param {'keyboard' | 'mouse'} kind
          */
         exclusive(kind){
-            const device = devices.get(kind === KEYBOARD ? GUID_SysKeyboard : GUID_SysMouse);
-            return device !== undefined && device.exclusive && stillHeld(device);
+            return liveOf(kind === KEYBOARD ? GUID_SysKeyboard : GUID_SysMouse)
+                .some(device=>device.exclusive && stillHeld(device));
         },
 
         libraries: {
@@ -2397,16 +2509,16 @@ export function createDirectInput(
         },
 
         diagnostics: ()=>({
-            devices: [...devices.keys()].map(guid=>({
+            devices: [...devices.keys()].flatMap(guid=>liveOf(guid).map(device=>({
                 guid,
-                kind: devices.get(guid).kind,
-                acquired: devices.get(guid).acquired,
-                buffered: devices.get(guid).bufferSize,
-                queued: devices.get(guid).queued,
-            })),
+                kind: device.kind,
+                acquired: device.acquired,
+                buffered: device.bufferSize,
+                queued: device.queued,
+            }))),
             // The same, flat, where a report drops the list: each device's
             // kind, whether the program holds it, and what waits in its buffer.
-            held: [...devices.values()].map(device=>{
+            held: [...devices.keys()].flatMap(liveOf).map(device=>{
                 const level = cooperation.get(device);
                 const answer = acquireAnswers.get(device);
                 return `${device.kind}:${device.acquired ? 'acquired' : 'not acquired'}`
