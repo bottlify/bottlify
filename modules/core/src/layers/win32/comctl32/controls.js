@@ -30,6 +30,7 @@ import { TOOLTIPS_CLASS, TOOLTIPS_ATOM, createTooltipProcedure } from './tooltip
 import { HEADER_CLASS, HEADER_ATOM, createHeaderProcedure } from './header.js';
 import { LISTVIEW_CLASS, LISTVIEW_ATOM, createListViewProcedure } from './listview.js';
 import { REBAR_CLASS, REBAR_ATOM, createRebarProcedure } from './rebar.js';
+import { PAGER_CLASS, PAGER_ATOM, createPagerProcedure } from './pager.js';
 
 /** The face colour's brush, as a class's background names it: the index plus one. */
 const FACE_BACKGROUND = 15 + 1;
@@ -109,6 +110,11 @@ export function createCommonControls(host, toolkit, images, resources){
             name: REBAR_CLASS,
             atom: REBAR_ATOM,
             procedure: createRebarProcedure(host, toolkit, images),
+        },
+        {
+            name: PAGER_CLASS,
+            atom: PAGER_ATOM,
+            procedure: createPagerProcedure(host, toolkit),
         },
     ];
 }
