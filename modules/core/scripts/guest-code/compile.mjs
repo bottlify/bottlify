@@ -1928,6 +1928,13 @@ class FunctionCompiler {
                     default: return undefined;
                 }
             }
+            case 'ConditionalExpression':
+            {
+                // `pointerBytes === 8 ? a : b`: the constant of the way it takes.
+                const known = this.foldTest(node.test);
+                return known === undefined ? undefined
+                    : this.fold(known ? node.consequent : node.alternate, seen);
+            }
             case 'BinaryExpression':
             {
                 const left = this.fold(node.left, seen);

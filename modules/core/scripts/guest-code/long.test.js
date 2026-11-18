@@ -284,9 +284,26 @@ test('every function of the 64-bit modules is x86-64 code or refused with a reas
     }
 });
 
+/**
+ * The modules whose functions take a structure the areas cannot make - a
+ * length and a capacity at their offsets, a buffer's pointer - so that random
+ * inputs run out of bounds or never take one way: each with the test that
+ * holds every function to its JavaScript at 64 bits on structures it lays out.
+ *
+ * @type {Readonly<Record<string, string>>}
+ */
+const HELD_ELSEWHERE = Object.freeze({
+    'layers/win32/msvcrt/inguest-string.js': 'a std::string of forty bytes: '
+        + 'msvcrt/inguest-string.test.js',
+});
+
 test('each function\'s x86-64 answers as its JavaScript, on inputs of every shape', async()=>{
     for (const { path, sources, i386, long } of await modules())
     {
+        if (Object.hasOwn(HELD_ELSEWHERE, path))
+        {
+            continue;
+        }
         const { sameAt64 } = equivalence(i386, sources, undefined, long);
         Object.keys(long).forEach((name, index)=>{
             const fn = long[name];

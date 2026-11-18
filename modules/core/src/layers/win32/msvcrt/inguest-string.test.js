@@ -16,11 +16,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { COMPILED } from './inguest-string.x86.js';
+import { COMPILED as LONG } from './inguest-string.x64.js';
 import * as sources from './inguest-string.js';
 import { DATA, equivalence, random } from '../../../../scripts/guest-code/equivalence.mjs';
 import { createMsvcp80Functions } from './msvcp80.js';
 
-const { same } = equivalence(COMPILED, sources);
+const { same, sameAt64 } = equivalence(COMPILED, sources, undefined, LONG);
 
 const SELF = DATA;
 const OTHER = DATA + 0x40;
@@ -87,6 +88,78 @@ test('each guest member answers as its source, inline, on the heap and at the ca
             HANDED);
         same('stringReserve', { stack: [SELF, Math.floor(next() * 32)], memory: string },
             HANDED);
+    }
+});
+
+/**
+ * The same string in a 64-bit program's forty bytes: eight the library
+ * zeroes, the inline buffer or the text's pointer at 8, the length at 24 and
+ * the capacity at 32, each a quadword.
+ *
+ * @param {number} self @param {string} text @param {number} reserved
+ * @returns {[number, number[]][]}
+ */
+const longStringAt = (/** @type {number} */ self, text, reserved = 15)=>{
+    const bytes = new Uint8Array(40).fill(0xee);
+    const view = new DataView(bytes.buffer);
+    const heap = reserved > 15;
+    if (heap)
+    {
+        view.setBigUint64(8, BigInt(HEAP), true);
+    }
+    else
+    {
+        bytes.set([...text].map(c=>c.charCodeAt(0)).concat(0), 8);
+    }
+    view.setBigUint64(24, BigInt(text.length), true);
+    view.setBigUint64(32, BigInt(reserved), true);
+    /** @type {[number, number[]][]} */
+    const memory = [[self, [...bytes]]];
+    if (heap)
+    {
+        memory.push([HEAP, [...text].map(c=>c.charCodeAt(0)).concat(0)]);
+    }
+    return memory;
+};
+
+test('at 64 bits each member answers as its source in the forty-byte layout, both ways', ()=>{
+    const words = random(81);
+    const next = ()=>words() / 2 ** 32;
+    /** @type {Map<string, Set<boolean>>} How each member went: answered, handed over. */
+    const ways = new Map();
+    /** @param {string} name @param {any} input @param {any} [double] */
+    const run = (name, input, double)=>{
+        const js = sameAt64(name, input, double);
+        ways.set(name, (ways.get(name) ?? new Set()).add(js.handedOver));
+    };
+    for (let round = 0; round < 60; round++)
+    {
+        const length = Math.floor(next() * 24);
+        const reserved = length > 15 || next() < 0.3
+            ? Math.max(length, 15) + Math.floor(next() * 4) + 1 : 15;
+        const text = randomText(next, length);
+        const string = longStringAt(SELF, text, reserved);
+        run('stringConstruct', { stack: [SELF], memory: [[SELF, new Array(40).fill(0xee)]] });
+        run('stringFromText', { stack: [SELF, TEXT],
+            memory: [[SELF, new Array(40).fill(0xee)],
+                [TEXT, [...text].map(c=>c.charCodeAt(0)).concat(0)]] }, HANDED);
+        run('stringCopy', { stack: [SELF, OTHER], memory: [[SELF, new Array(40).fill(0xee)],
+            ...longStringAt(OTHER, text, reserved)] }, HANDED);
+        run('stringDestroy', { stack: [SELF], memory: string }, HANDED);
+        run('stringText', { stack: [SELF], memory: string });
+        run('stringAt', { stack: [SELF, Math.floor(next() * 16)], memory: string });
+        run('stringSize', { stack: [SELF], memory: string });
+        run('stringAppendChar', { stack: [SELF, 0x41 + round], memory: string }, HANDED);
+        run('stringResize', { stack: [SELF, Math.floor(next() * 32)], memory: string },
+            HANDED);
+        run('stringReserve', { stack: [SELF, Math.floor(next() * 32)], memory: string },
+            HANDED);
+    }
+    for (const [name, fn] of Object.entries(LONG))
+    {
+        assert.deepEqual([...ways.get(name) ?? []].sort(),
+            /** @type {readonly string[]} */ (fn.uses).includes('host') ? [false, true] : [false],
+            `${name}: the ways taken`);
     }
 });
 
@@ -219,6 +292,15 @@ test('a 64-bit process\'s string: forty bytes, the text after the iterator list,
     });
     const STRING = '?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@';
     assert.equal(table[`??0${STRING}QAE@XZ`], undefined, 'the 32-bit names are not there');
+    for (const name of [`??0${STRING}QEAA@XZ`, `??0${STRING}QEAA@PEBD@Z`,
+        `??0${STRING}QEAA@AEBV01@@Z`, `??1${STRING}QEAA@XZ`, `?c_str@${STRING}QEBAPEBDXZ`,
+        `?size@${STRING}QEBA_KXZ`, `?resize@${STRING}QEAAX_K@Z`,
+        `??A${STRING}QEAAAEADU_Size_type_nosscl@01@@Z`])
+    {
+        // Its x86-64 code from the same source, which a 64-bit process places;
+        // the handler below runs that source over this process's layout.
+        assert.equal(typeof table[name].long, 'function', `${name}: guest code at 64 bits`);
+    }
     const self = 0x100;
     memory.fill(0xcc, self, self + 48);
     const text = (/** @type {number} */ of = self)=>{

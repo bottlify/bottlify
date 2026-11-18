@@ -23,7 +23,10 @@
 import { guestEntry } from './guest-code.js';
 import { COMPILED } from './inguest-string.x86.js';
 import * as inGuest from './inguest-string.js';
-import { STRING_BUFFER, STRING_INLINE, STRING_RESERVED, STRING_SIZE } from './inguest-string.js';
+import {
+    LONG_STRING_BUFFER, LONG_STRING_RESERVED, LONG_STRING_SIZE, STRING_BUFFER, STRING_INLINE,
+    STRING_RESERVED, STRING_SIZE,
+} from './inguest-string.js';
 
 /** basic_string<char>::max_size(): the allocator's count less one. */
 const MAX_SIZE = 0xfffffffe;
@@ -55,9 +58,9 @@ export function createMsvcp80Functions(crt, host){
      * capacity, the three words a pointer wide.
      */
     const POINTER = host.pointerSize === 8 ? 8 : 4;
-    const BUFFER = POINTER === 8 ? 8 : STRING_BUFFER;
-    const SIZE = POINTER === 8 ? 24 : STRING_SIZE;
-    const RESERVED = POINTER === 8 ? 32 : STRING_RESERVED;
+    const BUFFER = POINTER === 8 ? LONG_STRING_BUFFER : STRING_BUFFER;
+    const SIZE = POINTER === 8 ? LONG_STRING_SIZE : STRING_SIZE;
+    const RESERVED = POINTER === 8 ? LONG_STRING_RESERVED : STRING_RESERVED;
     /** @param {number} address */
     const u32 = address=>new DataView(host.readMemory(address >>> 0, 4).slice().buffer)
         .getUint32(0, true);
@@ -274,24 +277,23 @@ export function createMsvcp80Functions(crt, host){
         const fpu = host.fpu;
         return {
             /** basic_string::basic_string() */
-            [`??0${STRING}QEAA@XZ`]: cdecl(4, ([self])=>assign(fresh(self), 0, 0)),
+            [`??0${STRING}QEAA@XZ`]: member('stringConstruct', ([self])=>
+                assign(fresh(self), 0, 0)),
             /** basic_string::basic_string(const char *) */
-            [`??0${STRING}QEAA@PEBD@Z`]: cdecl(8, ([self, from])=>
+            [`??0${STRING}QEAA@PEBD@Z`]: member('stringFromText', ([self, from])=>
                 assign(fresh(self), from, lengthOf(from))),
             /** basic_string::basic_string(const basic_string &) */
-            [`??0${STRING}QEAA@AEBV01@@Z`]: cdecl(8, ([self, other])=>
+            [`??0${STRING}QEAA@AEBV01@@Z`]: member('stringCopy', ([self, other])=>
                 assign(fresh(self), textOf(other), u32(other + SIZE))),
             /** basic_string::~basic_string() */
-            [`??1${STRING}QEAA@XZ`]: cdecl(4, ([self])=>{
+            [`??1${STRING}QEAA@XZ`]: member('stringDestroy', ([self])=>{
                 tidy(self);
                 return 0;
             }),
             /** char &basic_string::operator[](_Size_type_nosscl) */
-            [`??A${STRING}QEAAAEADU_Size_type_nosscl@01@@Z`]: cdecl(8, ([self, index])=>
-                (textOf(self) + index) >>> 0),
+            [`??A${STRING}QEAAAEADU_Size_type_nosscl@01@@Z`]: at,
             /** const char &basic_string::operator[](_Size_type_nosscl) const */
-            [`??A${STRING}QEBAAEBDU_Size_type_nosscl@01@@Z`]: cdecl(8, ([self, index])=>
-                (textOf(self) + index) >>> 0),
+            [`??A${STRING}QEBAAEBDU_Size_type_nosscl@01@@Z`]: at,
             /** basic_string &basic_string::operator+=(const char *) */
             [`??Y${STRING}QEAAAEAV01@PEBD@Z`]: cdecl(8, ([self, from])=>
                 appendBytes(self, bytesAt(from))),
@@ -302,11 +304,12 @@ export function createMsvcp80Functions(crt, host){
             [`??4${STRING}QEAAAEAV01@AEBV01@@Z`]: cdecl(8, ([self, other])=>
                 (self === other ? self : assignBytes(self, bytesOf(other)))),
             /** const char *basic_string::c_str() const */
-            [`?c_str@${STRING}QEBAPEBDXZ`]: cdecl(4, ([self])=>textOf(self)),
+            [`?c_str@${STRING}QEBAPEBDXZ`]: text,
             /** void basic_string::resize(size_type) -- padded with zeros */
-            [`?resize@${STRING}QEAAX_K@Z`]: cdecl(8, ([self, count])=>resize(self, count)),
+            [`?resize@${STRING}QEAAX_K@Z`]: member('stringResize', ([self, count])=>
+                resize(self, count)),
             /** size_type basic_string::size() const */
-            [`?size@${STRING}QEBA_KXZ`]: cdecl(4, ([self])=>u32(self + SIZE)),
+            [`?size@${STRING}QEBA_KXZ`]: member('stringSize', ([self])=>u32(self + SIZE)),
             /** static const size_type basic_string::npos */
             [`?npos@${STRING}2_KB`]: { data: ()=>new Uint8Array(8).fill(0xff) },
 
@@ -364,13 +367,13 @@ export function createMsvcp80Functions(crt, host){
         };
     }
 
+    const text = member('stringText', ([self])=>textOf(self));
+    const at = member('stringAt', ([self, index])=>(textOf(self) + index) >>> 0);
+
     if (POINTER === 8)
     {
         return longMembers();
     }
-
-    const text = member('stringText', ([self])=>textOf(self));
-    const at = member('stringAt', ([self, index])=>(textOf(self) + index) >>> 0);
 
     return {
         /** basic_string::basic_string() */
