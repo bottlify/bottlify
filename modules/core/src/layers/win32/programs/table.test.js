@@ -167,5 +167,6 @@ test('winver is the shell\'s about box with the system\'s name, and exits with 0
             /** @type {number[]} */ args)=>(calls.push([library, name, args]), 1),
     });
     assert.equal(await runWinver(context), 0);
-    assert.deepEqual(calls, [['wide', 'Windows'], ['SHELL32.dll', 'ShellAboutW', [0, 0x5000, 0, 0]]]);
+    assert.deepEqual(calls,
+        [['wide', 'Windows'], ['SHELL32.dll', 'ShellAboutW', [0, 0x5000, 0, 0]]]);
 });

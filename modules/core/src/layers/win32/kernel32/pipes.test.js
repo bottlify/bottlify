@@ -676,7 +676,8 @@ function calling(answers){
             errors.set(thread, code),
         currentThread: ()=>'caller',
         call: async(/** @type {string} */ name, /** @type {number[]} */ args,
-            /** @type {any} */ thread)=>{
+            /** @type {any} */ thread)=>
+        {
             assert.equal(thread, 'caller', 'every step on the caller\'s thread');
             steps.push([name, args]);
             return answers[name]?.shift() ?? 1;
