@@ -80,6 +80,7 @@
     "src/layers/win32/cabinet/inflate.js",
     "src/layers/win32/cabinet/lzx.js",
     "src/layers/win32/common/compound-writer.js",
+    "src/layers/win32/common/pointers.js",
     "src/layers/win32/common/refusal.js",
     "src/layers/win32/crypto/digest.js",
     "src/layers/win32/dsetup/functions.js",
