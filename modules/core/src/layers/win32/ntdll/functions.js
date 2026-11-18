@@ -28,9 +28,11 @@
 
 import { createCountedStringFunctions } from './strings.js';
 import { HEAP_USER_INFO } from '../kernel32/heap.js';
-import { createQueryFunctions } from './query.js';
+import { createQueryFunctions, loadOrder } from './query.js';
+import { createDebugBufferFunctions } from './debug-buffer.js';
 import { createImageFunctions } from './image.js';
 import { createIntegerFunctions } from './integer.js';
+import { createByteSwapFunctions } from './byte-swap.js';
 import { createBitmapFunctions } from './bitmap.js';
 import { createWaitFunctions } from './waits.js';
 import { createPathFunctions } from './paths.js';
@@ -54,7 +56,7 @@ import { createProcessFunctions } from './process.js';
 import { STATUS, toDosError } from './status.js';
 import { probed } from './probe.js';
 import { nativeNameOf } from '../kernel32/object-attributes.js';
-import { INTERACTIVE_SESSION } from '../kernel32/teb.js';
+import { blockLayouts, INTERACTIVE_SESSION } from '../kernel32/teb.js';
 import { REGISTRY_NATIVES, UNLOAD_KEY } from '../advapi32/functions.js';
 import { TOKEN_NATIVES, USER_SID_TEXT } from '../advapi32/tokens.js';
 import { PROCESSOR_NAME } from '../kernel32/processor.js';
@@ -558,6 +560,47 @@ export function createNtdllFunctions(host){
                 writeMemory: host.writeMemory, kernel32, allocate, free })
             : {}),
 
+        ...(host.processId !== undefined && kernel32.GetProcessHeaps
+            ? createDebugBufferFunctions({
+                readMemory: host.readMemory,
+                writeMemory: host.writeMemory,
+                allocate,
+                free,
+                processId: host.processId,
+                otherProcess: id=>(host.processes?.() ?? []).some(process=>process.id === id),
+                modules: ()=>{
+                    const layout = blockLayouts(host.pointerSize);
+                    const word = (/** @type {number} */ at)=>readU32(host.readMemory(at, 4));
+                    const teb = host.teb() >>> 0;
+                    const peb = teb === 0 ? 0 : word(teb + layout.teb.PEB);
+                    return [...loadOrder(word, peb, layout)].map(entry=>{
+                        const name = entry + layout.entry.FULL_DLL_NAME;
+                        const length = word(name) & 0xffff;
+                        return {
+                            base: word(entry + layout.entry.DLL_BASE),
+                            size: word(entry + layout.entry.SIZE_OF_IMAGE),
+                            path: length === 0 ? ''
+                                : host.readWideString(word(name + 4), length / 2),
+                        };
+                    });
+                },
+                heaps: ()=>{
+                    const count = kernel32.GetProcessHeaps.handler([0, 0]) >>> 0;
+                    const list = allocate(count * 4);
+                    if (list === 0)
+                    {
+                        return [];
+                    }
+                    kernel32.GetProcessHeaps.handler([count, list]);
+                    const bytes = host.readMemory(list, count * 4);
+                    free(list);
+                    return Array.from({ length: count }, (_, at)=>readU32(bytes.subarray(at * 4)));
+                },
+                pointerSize: host.pointerSize,
+                divergence: host.divergence,
+            })
+            : {}),
+
         ...createQueryFunctions({
             readMemory: host.readMemory,
             writeMemory: host.writeMemory,
@@ -635,6 +678,11 @@ export function createNtdllFunctions(host){
 
         ...(host.setRegisters
             ? createIntegerFunctions({ setRegisters: host.setRegisters })
+            : {}),
+
+        // A 64-bit ntdll has no byte swaps to export: its compiler inlines them.
+        ...(host.setRegisters && host.pointerSize !== 8
+            ? createByteSwapFunctions({ setRegisters: host.setRegisters })
             : {}),
 
         ...(['WaitForSingleObjectEx', 'WaitForMultipleObjectsEx', 'SleepEx', 'GetLastError',
