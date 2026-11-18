@@ -715,23 +715,103 @@ export function createTextureLoader(host){
             }
             const bytes = bgra ? encodeTexels(to.format, bgra, to.width, to.height) : packed;
             const locked = scratch + SURFACE_DESC_BYTES;
+            const write = layoutOf(to.format, to.width, to.height);
+            /** The rows into a surface locked at `locked`. */
+            const fill = ()=>{
+                for (let row = 0, { pitch, bits } = lockedRect(locked); row < write.rows; row++)
+                {
+                    host.writeMemory(bits + row * pitch,
+                        bytes.subarray(row * write.rowBytes, (row + 1) * write.rowBytes));
+                }
+            };
             const answer = await method(dest, SURFACE.LockRect, [locked, destRect, 0]);
-            if (answer !== D3D_OK)
+            if (answer === D3D_OK)
             {
-                host.divergence?.(api, `the destination would not lock (0x${answer.toString(16)})`);
+                fill();
+                await method(dest, SURFACE.UnlockRect, []);
+                return D3D_OK;
+            }
+            // A destination that will not lock - a render target's surface -
+            // is written as D3DX writes one: into a system-memory surface of
+            // its format, which the device then copies onto it (UpdateSurface).
+            // A program that sets a render target's texels goes this way (XNA's
+            // Texture2D.SetData on a RenderTarget2D, a game's map).
+            const through = await throughCopy(method, dest, destRect, to, locked, fill);
+            if (through !== D3D_OK)
+            {
+                host.divergence?.(api, `the destination would not lock`
+                    + ` (0x${answer.toString(16)}) nor take a copy (0x${through.toString(16)})`);
                 return answer;
             }
-            const write = layoutOf(to.format, to.width, to.height);
-            for (let row = 0, { pitch, bits } = lockedRect(locked); row < write.rows; row++)
-            {
-                host.writeMemory(bits + row * pitch,
-                    bytes.subarray(row * write.rowBytes, (row + 1) * write.rowBytes));
-            }
-            await method(dest, SURFACE.UnlockRect, []);
             return D3D_OK;
         }
         finally
         {
+            heap.free(scratch);
+        }
+    };
+
+    /**
+     * Writes an area of a surface that will not lock through a system-memory
+     * surface of its own: made on the surface's device, filled, copied onto
+     * the area's corner by UpdateSurface.
+     *
+     * @param {GuestMethod} method @param {number} dest @param {number} destRect
+     * @param {{ format: number, width: number, height: number }} to
+     * @param {number} locked  Room for a D3DLOCKED_RECT.
+     * @param {() => void} fill  Writes the rows into what is locked there.
+     * @returns {Promise<number>}
+     */
+    const throughCopy = async(method, dest, destRect, to, locked, fill)=>{
+        const heap = /** @type {NonNullable<TextureHost['heap']>} */ (host.heap);
+        // The device's pointer, the surface's, and the corner as a POINT.
+        const scratch = heap.allocate(2 * POINTER_BYTES + 8);
+        if (scratch === 0)
+        {
+            return E_OUTOFMEMORY;
+        }
+        const made = scratch + POINTER_BYTES;
+        const corner = made + POINTER_BYTES;
+        let device = 0;
+        let copy = 0;
+        try
+        {
+            putPointer(scratch, 0);
+            let answer = await method(dest, SURFACE.GetDevice, [scratch]);
+            device = answer === D3D_OK ? u32(scratch) : 0;
+            if (device === 0)
+            {
+                return answer === D3D_OK ? D3DERR_INVALIDCALL : answer;
+            }
+            putPointer(made, 0);
+            answer = await method(device, DEVICE.CreateOffscreenPlainSurface,
+                [to.width, to.height, to.format, D3DPOOL_SYSTEMMEM, made, 0]);
+            copy = answer === D3D_OK ? u32(made) : 0;
+            if (copy === 0)
+            {
+                return answer === D3D_OK ? D3DERR_INVALIDCALL : answer;
+            }
+            answer = await method(copy, SURFACE.LockRect, [locked, 0, 0]);
+            if (answer !== D3D_OK)
+            {
+                return answer;
+            }
+            fill();
+            await method(copy, SURFACE.UnlockRect, []);
+            host.writeMemory(corner, new Uint8Array(new Int32Array(destRect === 0
+                ? [0, 0] : [u32(destRect) | 0, u32(destRect + 4) | 0]).buffer));
+            return await method(device, DEVICE.UpdateSurface, [copy, 0, dest, corner]);
+        }
+        finally
+        {
+            if (copy !== 0)
+            {
+                await method(copy, UNKNOWN_RELEASE, []);
+            }
+            if (device !== 0)
+            {
+                await method(device, UNKNOWN_RELEASE, []);
+            }
             heap.free(scratch);
         }
     };

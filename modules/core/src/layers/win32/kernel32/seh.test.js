@@ -10,6 +10,7 @@ import {
     createSeh, RECORD, CONTEXT, Disposition, EFLAGS_AC, EFLAGS_DF, EFLAGS_TF, END_OF_CHAIN,
     EH_UNWINDING, SELECTORS, STATUS,
 } from './seh.js';
+import { floatImages, restoreFloatImages } from '../../cpu/internal/fpu-image.js';
 
 const TEB = 0x8000;
 const STACK = 0x40000;
@@ -221,6 +222,78 @@ test('a context a handler changed is what execution continues with', async()=>{
     assert.equal(result.registers?.esp, 0x3f000, 'the stack pointer too, not only the address');
     assert.equal(result.registers?.eax, 0xabc);
 });
+
+test("a handler's context carries the thread's x87 and SSE state, and continuing puts it back",
+    async()=>{
+        // A .NET runtime resumes a thread it redirected for a collection by
+        // raising an exception whose handler lays the thread's saved context
+        // over the record and continues. The state was not in the record and
+        // not put back: a thread stopped between a call that left its result
+        // in ST(0) and the multiply that takes it went on with whatever the
+        // runtime's own code had left there, and a world generator drew the
+        // same random number for ever.
+        const layout = { x87: 64, x87Top: 192, x87Empty: 193, x87Control: 194, x87Status: 196,
+            x87Exact: 198, xmm: 208, mxcsr: 336 };
+        const block = new Uint8Array(512);
+        const state = new DataView(block.buffer);
+        /** @param {number} top @param {number} value @param {number} lane */
+        const load = (top, value, lane)=>{
+            block.fill(0);
+            block[layout.x87Top] = top;
+            block[layout.x87Empty] = 0xff & ~(1 << top);
+            state.setUint16(layout.x87Control, 0x27f, true);
+            state.setFloat64(layout.x87 + top * 16, value, true);
+            block.fill(lane, layout.xmm, layout.xmm + 16);
+            state.setUint32(layout.mxcsr, 0x1f80, true);
+        };
+        const m = machine({ answer: ()=>Disposition.CONTINUE_EXECUTION });
+        // The processor's images, the running thread's with no context given.
+        /** @type {any} */ (m.host).float = {
+            images: (/** @type {any} */ context)=>floatImages(context ?? { block, layout }),
+            restore: (/** @type {any} */ context, /** @type {any} */ images)=>
+                restoreFloatImages(context ?? { block, layout }, images),
+        };
+        // What the thread's resume does with the registers a continuation
+        // names (`resumeContextAt`): the floating-point images among them.
+        /** @param {any} result */
+        const resume = result=>restoreFloatImages({ block, layout }, result.registers.float);
+        m.registerFrames([0x51000]);
+        const original = m.host.callGuest;
+
+        // The handler's own code leaves the registers changed; the record wins.
+        load(7, 0.25, 0x11);
+        let flags = 0;
+        m.host.callGuest = async call=>{
+            flags = m.get(call.args[2] + CONTEXT.FLAGS);
+            load(3, 99, 0x77);
+            return original(call);
+        };
+        const first = await m.seh.dispatch({ code: 1, address: 0x401000 });
+        assert.equal(flags, 0x1002f, 'CONTEXT_FULL with the floating-point and extended groups');
+        assert.equal(block[layout.x87Top], 3, 'not written where the handler returned:'
+            + ' another thread may be on the processor by then');
+        resume(first);
+        assert.deepEqual([block[layout.x87Top], block[layout.x87Empty],
+            state.getFloat64(layout.x87 + 7 * 16, true), block[layout.xmm]],
+        [7, 0x7f, 0.25, 0x11], 'as it was at the exception');
+
+        // A context laid over the record is what the thread goes on with.
+        load(6, 1.5, 0x22);
+        const saved = new Uint8Array(CONTEXT.SIZE);
+        m.host.callGuest = async call=>{
+            saved.set(m.host.readMemory(call.args[2], CONTEXT.SIZE));
+            return Disposition.CONTINUE_SEARCH;
+        };
+        await m.seh.dispatch({ code: 1, address: 0x401000 });
+        load(0, -3, 0x55);
+        m.host.callGuest = async call=>{
+            m.host.writeMemory(call.args[2], saved);
+            return original(call);
+        };
+        resume(await m.seh.dispatch({ code: 1, address: 0x401000 }));
+        assert.deepEqual([block[layout.x87Top], state.getFloat64(layout.x87 + 6 * 16, true),
+            block[layout.xmm]], [6, 1.5, 0x22], "the saved thread's state");
+    });
 
 test('a frame whose handler is not there is passed over, not refused', async()=>{
     // The check is a bounds test. Demanding execute permission rejects the
@@ -494,6 +567,53 @@ test('RaiseException dispatches instead of throwing', async()=>{
     assert.equal(m.get(record + RECORD.INFORMATION), 0xaa);
     assert.equal(m.get(record + RECORD.INFORMATION + 4), 0xbb);
 });
+
+test('RaiseException continues where the handler\'s context says, not back in its caller',
+    async()=>{
+        // Windows continues from the context whole (NtContinue). A .NET runtime
+        // resumes a thread it redirected for a collection by raising an
+        // exception whose handler lays the thread's saved context over the
+        // record: returned to RaiseException's caller with only the other
+        // registers taken, the thread went on in the runtime's stub with the
+        // frame pointer of the code it was redirected from, the stub's epilogue
+        // wrote that frame's locals into the handler chain and returned out of
+        // the function the thread had been stopped in.
+        const m = machine({ answer: ()=>Disposition.CONTINUE_EXECUTION });
+        /** @type {Record<string, number>[]} */
+        const continued = [];
+        /** @type {any} */ (m.host).continueAt = (/** @type {Record<string, number>} */ registers)=>{
+            continued.push(registers);
+            return 'continued';
+        };
+        m.registerFrames([0x51000]);
+        // The call: its return address at the stack pointer, four arguments above.
+        m.put(STACK, 0x402222);
+        const original = m.host.callGuest;
+
+        // Left as it was, the context is the caller's once the call has returned.
+        let shown = { eip: 0, esp: 0 };
+        m.host.callGuest = async call=>{
+            shown = { eip: m.get(call.args[2] + CONTEXT.EIP),
+                esp: m.get(call.args[2] + CONTEXT.ESP) };
+            return original(call);
+        };
+        assert.equal(await m.seh.table.RaiseException.handler([0xe0000001, 0, 0, 0]), 'continued');
+        assert.deepEqual(shown, { eip: 0x402222, esp: STACK + 20 },
+            'the return address, and the stack past it and the four arguments');
+        assert.deepEqual([continued[0].eip, continued[0].esp], [0x402222, STACK + 20]);
+
+        // Laid over with another context, that one is where the thread goes.
+        m.host.callGuest = async call=>{
+            m.put(call.args[2] + CONTEXT.EIP, 0x77000);
+            m.put(call.args[2] + CONTEXT.ESP, 0x3f000);
+            m.put(call.args[2] + CONTEXT.EBP, 0x3f100);
+            m.put(call.args[2] + CONTEXT.EAX, 0xabc);
+            return original(call);
+        };
+        await m.seh.table.RaiseException.handler([0xe0434f4e, 0, 0, 0]);
+        assert.deepEqual([continued[1].eip, continued[1].esp, continued[1].ebp, continued[1].eax],
+            [0x77000, 0x3f000, 0x3f100, 0xabc]);
+    });
 
 test('an exception nothing handles ends the process with its code, and never returns', async()=>{
     /** @type {any[]} */
