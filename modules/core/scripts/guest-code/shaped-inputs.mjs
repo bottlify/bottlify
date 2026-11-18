@@ -18,6 +18,10 @@
  * subobjects with the delta that reaches it, to one of the hierarchy's types
  * or to a name that is none, or from null.
  *
+ * `_atoi64` hands the host only a value past 64 bits, which random bytes
+ * never spell: a decimal text after white space and a sign, as long as 22
+ * digits, so the value passes 2^63 about one time in three.
+ *
  * For the tests: no part of the product.
  */
 
@@ -46,6 +50,14 @@ export const SHAPED_INPUTS = {
                 : types[next() % types.length];
             return { stack: [object, delta, types[next() % types.length], to, 0],
                 memory: [[DATA, graph.image]], bounds: [DATA, DATA + graph.image.length] };
+        },
+    },
+    'layers/win32/msvcrt/inguest-int64.js': {
+        _atoi64: next=>{
+            const digits = Array.from({ length: next() % 23 }, ()=>0x30 + next() % 10);
+            const space = [[], [0x20], [0x20, 0x09]][next() % 3];
+            const text = Uint8Array.of(...space, ...[[], [0x2d], [0x2b]][next() % 3], ...digits, 0);
+            return { stack: [DATA], memory: [[DATA, text]], bounds: [DATA, DATA + text.length] };
         },
     },
 };

@@ -36,10 +36,11 @@
  *   f32       a float: one stack slot; ST0 as a result, a value a float holds
  *   x87       a double the caller left on the x87 stack (the last such
  *             parameter in ST0), which the function pops, as `_ftol` does
- *   i64       a result in EDX:EAX (RAX at 64 bits): a double truncated
- *             toward zero (NaN and out of range the integer indefinite, as
- *             `fisttp` and `cvttsd2si` answer), or an integer extended by
- *             its sign
+ *   i64       a parameter of two stack slots (one argument at 64 bits),
+ *             read only by `low64` and `high64`; a result in EDX:EAX (RAX at
+ *             64 bits): a double truncated toward zero (NaN and out of range
+ *             the integer indefinite, as `fisttp` and `cvttsd2si` answer), an
+ *             integer extended by its sign, or `int64(low, high)`
  *   void      no result
  *
  * A function that touches guest memory or calls a guest function takes the
@@ -225,7 +226,7 @@ import {
  *   float holds exactly
  */
 
-/** @typedef {'i32' | 'u32' | 'f64' | 'f32' | 'x87'} ParamType */
+/** @typedef {'i32' | 'u32' | 'f64' | 'f32' | 'x87' | 'i64'} ParamType */
 /** @typedef {'i32' | 'u32' | 'ptr' | 'f64' | 'f32' | 'i64' | 'void'} ReturnType */
 
 /**
@@ -253,7 +254,7 @@ import {
 /**
  * @typedef {Object} Variable
  * @property {string} name
- * @property {'i32' | 'u32' | 'nat' | 'f64' | 'f32'} type
+ * @property {'i32' | 'u32' | 'nat' | 'f64' | 'f32' | 'i64'} type
  * @property {number} disp     From EBP, for one in the frame.
  * @property {number} [reg]    The register it lives in instead.
  * @property {boolean} mutable
@@ -359,6 +360,16 @@ const X87_WORDS = new Set(['controlWord', 'statusWord', 'setControlWord', 'clear
 const FLOAT_BITS = ['floatBits', 'floatOfBits', 'doubleLow', 'doubleHigh'];
 
 /**
+ * A 64-bit integer's halves: `low64(x)` and `high64(x)` read an `i64`
+ * parameter's two dwords where it lies (the i386's two slots, the home slot
+ * the x86-64 entry wrote it whole into), and `int64(low, high)` is an `i64`
+ * function's result made of two 32-bit integers: EDX:EAX, or RAX. Arithmetic
+ * on the value is the source's, on its halves, in the 32-bit subset - a carry
+ * an unsigned compare, a product of halves split into 16-bit parts.
+ */
+const INT64_PARTS = ['low64', 'high64', 'int64'];
+
+/**
  * `pointerBytes`, the size of a pointer: 4 in the i386 and 8 in the x86-64,
  * a constant of each; what a source lays out a pointer it writes, or a slot
  * of a `va_list`, by.
@@ -367,14 +378,14 @@ const POINTER_BYTES = 'pointerBytes';
 
 const HELPERS = new Set([...Object.keys(LOADS), ...Object.keys(STORES),
     'call', 'callStd', 'copyUp', 'copyDown', 'fill', 'host', 'compareExchange', ...X87_WORDS,
-    ...FLOAT_BITS, POINTER_BYTES]);
+    ...FLOAT_BITS, ...INT64_PARTS, POINTER_BYTES]);
 
 const TABLE_KINDS = /** @type {const} */ ([
     ['Uint8Array', 1, false], ['Int8Array', 1, true], ['Uint16Array', 2, false],
     ['Int16Array', 2, true], ['Uint32Array', 4, false], ['Int32Array', 4, true],
 ]);
 
-const PARAM_TYPES = new Set(['i32', 'u32', 'f64', 'f32', 'x87']);
+const PARAM_TYPES = new Set(['i32', 'u32', 'f64', 'f32', 'x87', 'i64']);
 const RETURN_TYPES = new Set(['i32', 'u32', 'ptr', 'f64', 'f32', 'i64', 'void']);
 
 /** Rounding control for Math.floor, Math.ceil and Math.trunc, in the control word's high byte. */
@@ -1105,7 +1116,8 @@ class FunctionCompiler {
             const type = declared.get(param.name);
             if (type === undefined || !PARAM_TYPES.has(type))
             {
-                this.fail(param, `@param {i32 | u32 | f64 | f32 | x87} ${param.name} is wanted`);
+                this.fail(param, `@param {i32 | u32 | f64 | f32 | x87 | i64} ${param.name} is `
+                    + 'wanted');
             }
             if (this.long && type === 'x87')
             {
@@ -1139,9 +1151,13 @@ class FunctionCompiler {
                 continue;
             }
             /** @type {Variable} */
-            const v = { name: param.name, type: /** @type {'i32' | 'u32' | 'f64' | 'f32'} */ (type),
-                disp: stack, mutable: true, key: param };
-            const reg = isFloat(type) ? undefined : this.planned?.registers.get(param);
+            const v = { name: param.name,
+                type: /** @type {'i32' | 'u32' | 'f64' | 'f32' | 'i64'} */ (type),
+                disp: stack, mutable: type !== 'i64', key: param };
+            // An i64 stays in its slots (two in the i386, a quadword at 64
+            // bits), read by its halves where it lies.
+            const reg = isFloat(type) || type === 'i64' ? undefined
+                : this.planned?.registers.get(param);
             if (reg !== undefined)
             {
                 v.reg = reg;
@@ -1163,7 +1179,7 @@ class FunctionCompiler {
             this.live.add(param);
             this.bind(param, v);
             // A quadword a slot at 64 bits, whatever the value in its low half.
-            stack += this.long || type === 'f64' ? 8 : 4;
+            stack += this.long || type === 'f64' || type === 'i64' ? 8 : 4;
         }
         if (x87.some(v=>v.onStack))
         {
@@ -2624,6 +2640,19 @@ class FunctionCompiler {
             {
                 this.fail(node, `the function returns an ${returns}`);
             }
+            const { callee } = node.argument;
+            if (returns === 'i64' && node.argument.type === 'CallExpression'
+                && callee.type === 'Identifier' && callee.name === 'int64'
+                && this.helpers.has('int64'))
+            {
+                this.int64Result(node.argument);
+                if (this.fpu !== 0)
+                {
+                    this.fail(node, 'the x87 stack is not empty at a return');
+                }
+                this.a.jump(-1, this.epilogue);
+                return;
+            }
             const value = this.expr(node.argument);
             if (returns === 'f32' && value.type !== 'f32')
             {
@@ -2689,6 +2718,39 @@ class FunctionCompiler {
             this.fail(node, 'the x87 stack is not empty at a return');
         }
         this.a.jump(-1, this.epilogue);
+    }
+
+    /**
+     * `return int64(low, high)`: the high half made first and held, the low
+     * half into EAX, then EDX:EAX - or at 64 bits the high half shifted into
+     * RAX's upper half, a 32-bit move having left it zero there.
+     *
+     * @param {any} node
+     */
+    int64Result(node){
+        this.arity(node, 2);
+        const [low, high] = node.arguments;
+        /** @param {Value} value @param {any} at */
+        const integer = (value, at)=>{
+            if (!isTyped(value.type) || isFloat(value.type))
+            {
+                this.fail(at, value.type === 'intish'
+                    ? 'a half of an i64 is brought back to 32 bits first'
+                    : `a half of an i64 is a 32-bit integer, not an ${value.type}`);
+            }
+            this.toEax(value, at);
+        };
+        integer(this.expr(high), high);
+        this.hold();                                                       // push eax
+        integer(this.expr(low), low);
+        if (this.long)
+        {
+            this.unhold(ECX);                                              // pop ecx: the high half
+            this.a.emit(0x48, 0xc1, 0xe1, 0x20);                           // shl rcx, 32
+            this.a.emit(0x48, 0x09, 0xc8);                                 // or rax, rcx
+            return;
+        }
+        this.unhold(EDX);                                                  // pop edx
     }
 
     // --- conditions ------------------------------------------------------
@@ -2965,7 +3027,7 @@ class FunctionCompiler {
         if (node.type === 'Identifier')
         {
             const v = this.lookupLocal(node.name);
-            if (v !== undefined && !('constant' in v) && !isFloat(v.type))
+            if (v !== undefined && !('constant' in v) && !isFloat(v.type) && v.type !== 'i64')
             {
                 return { where: 'var', type: v.type, v };
             }
@@ -3546,9 +3608,13 @@ class FunctionCompiler {
             case 'Identifier':
             {
                 const v = this.lookupLocal(node.name);
+                if (v !== undefined && !('constant' in v) && v.type === 'i64')
+                {
+                    return this.fail(node, `${node.name} is an i64, read by low64() and high64()`);
+                }
                 if (v !== undefined && !('constant' in v))
                 {
-                    return { where: 'var', type: v.type, v };
+                    return { where: 'var', type: /** @type {Type} */ (v.type), v };
                 }
                 return this.fail(node, `${node.name} is not a variable, a constant or a `
                     + 'parameter here');
@@ -4405,6 +4471,23 @@ class FunctionCompiler {
                 a.emit(0x58);                                              // pop eax
                 this.fpu--;
                 return { where: 'eax', type: 'u32' };
+            }
+            if (name === 'low64' || name === 'high64')
+            {
+                this.arity(node, 1);
+                const arg = node.arguments[0];
+                const v = arg.type === 'Identifier' ? this.lookupLocal(arg.name) : undefined;
+                if (v === undefined || 'constant' in v || v.type !== 'i64')
+                {
+                    this.fail(arg, `${name}: an i64 parameter, read where it lies`);
+                }
+                // mov eax, [x] or [x + 4]: a dword of the value's slots.
+                this.op(0x8b, ...this.frameAt(EAX, v.disp + (name === 'high64' ? 4 : 0)));
+                return { where: 'eax', type: 'u32' };
+            }
+            if (name === 'int64')
+            {
+                this.fail(node, 'int64(low, high) is an i64 function\'s result, returned');
             }
             if (name === 'doubleLow' || name === 'doubleHigh')
             {

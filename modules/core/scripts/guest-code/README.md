@@ -27,8 +27,15 @@ export function D3DXVec2Normalize({ f32, setF32 }, out, v){ ... }
 - **Convention**: the tag names `cdecl`, `stdcall` or `thiscall`. A thiscall function's first
   parameter is `this`, which arrives in ECX.
 - **Types**: `i32`/`u32` (a stack slot, EAX as a result), `f64`, `f32`, `x87` (a double the
-  caller left on the x87 stack), `i64` (EDX:EAX), `void`; and as a result `ptr`, a pointer: a
+  caller left on the x87 stack), `i64`, `void`; and as a result `ptr`, a pointer: a
   `u32` in the i386, the whole of RAX at 64 bits.
+- **A 64-bit integer**: an `i64` parameter is two stack slots in the i386 and one argument at
+  64 bits (a bigint in the JavaScript); `low64(x)` and `high64(x)` read its dwords where it
+  lies, and nothing else reads it. An `i64` result is EDX:EAX, or RAX: a double truncated, an
+  integer widened, or `return int64(low, high)` of two 32-bit integers. The arithmetic is the
+  source's own on the halves in the 32-bit subset: a carry or a borrow an unsigned compare, a
+  product of a half split into 16-bit parts (`msvcrt/inguest-int64.js`), the same code at both
+  widths.
 - **Guest memory**: through the helpers taken from the first parameter: the loads `u8` `i8`
   `u16` `i16` `u32` `i32` `f32` `f64`, the stores `setU8` `setU16` `setU32` `setF32` `setF64`,
   `copyUp`/`copyDown`/`fill`, `call(fn, ...)` for a cdecl function pointer, and

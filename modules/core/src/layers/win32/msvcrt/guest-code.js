@@ -39,6 +39,8 @@ import { COMPILED as STRING } from './inguest-string.x86.js';
 import { COMPILED as STRING_LONG } from './inguest-string.x64.js';
 import { COMPILED as RTTI } from './inguest-rtti.x86.js';
 import { COMPILED as RTTI_LONG } from './inguest-rtti.x64.js';
+import { COMPILED as INT64 } from './inguest-int64.x86.js';
+import { COMPILED as INT64_LONG } from './inguest-int64.x64.js';
 import { setSingle } from './float.js';
 
 /**
@@ -50,7 +52,7 @@ import { setSingle } from './float.js';
 const LONG_CODE = new Map();
 /** @type {[Record<string, CompiledGuestCode>, Record<string, CompiledGuestCode>][]} */
 const PAIRS = [[RUNTIME, RUNTIME_LONG], [MATH, MATH_LONG], [PRINT, PRINT_LONG],
-    [FLOAT, FLOAT_LONG], [STRING, STRING_LONG], [RTTI, RTTI_LONG]];
+    [FLOAT, FLOAT_LONG], [STRING, STRING_LONG], [RTTI, RTTI_LONG], [INT64, INT64_LONG]];
 /**
  * Pairs each function of a module's x86-64 with its i386 record, so that an
  * export bound with the i386 (`guestEntry`, `guestExport`) carries the x86-64
@@ -81,7 +83,8 @@ for (const [i386, long] of PAIRS)
 export const longCodeOf = compiled=>LONG_CODE.get(compiled);
 
 /** The helpers that take a float apart, which read no guest memory. */
-const FLOAT_BITS = ['floatBits', 'floatOfBits', 'doubleLow', 'doubleHigh'];
+const FLOAT_BITS = ['floatBits', 'floatOfBits', 'doubleLow', 'doubleHigh', 'low64', 'high64',
+    'int64'];
 const bitsView = new DataView(new ArrayBuffer(8));
 const FLOAT_BIT_HELPERS = {
     /** @param {number} value */
@@ -104,6 +107,12 @@ const FLOAT_BIT_HELPERS = {
         bitsView.setFloat64(0, value, true);
         return bitsView.getUint32(4, true);
     },
+    /** An i64 parameter's low dword (a bigint, as the handler reads it). @param {i64} value */
+    low64: value=>Number(BigInt.asUintN(32, BigInt(value))),
+    /** Its high dword. @param {i64} value */
+    high64: value=>Number(BigInt.asUintN(32, BigInt(value) >> 32n)),
+    /** An i64 result of two dwords. @param {number} low @param {number} high */
+    int64: (low, high)=>BigInt.asIntN(64, BigInt(high >>> 0) << 32n | BigInt(low >>> 0)),
 };
 
 /** @typedef {number} i32  A signed 32-bit stack slot, or EAX. */
@@ -112,14 +121,18 @@ const FLOAT_BIT_HELPERS = {
 /** @typedef {number} f64  A double: two stack slots, or ST0 as a result. */
 /** @typedef {number} f32  A float: one stack slot, or ST0 as a result. */
 /** @typedef {number} x87  A double the caller left on the x87 stack, which the callee pops. */
-/** @typedef {number} i64  A result in EDX:EAX. */
+/**
+ * @typedef {bigint | number} i64  A 64-bit integer: two stack slots or one
+ *     register at 64 bits as a parameter (a bigint here), EDX:EAX or RAX as a
+ *     result (a bigint, or a number truncated as `fisttp` truncates).
+ */
 
 /**
  * What the build made of a `@guestCode` function.
  *
  * @typedef {Object} CompiledGuestCode
  * @property {'cdecl' | 'stdcall' | 'thiscall'} convention
- * @property {readonly ('i32' | 'u32' | 'f64' | 'f32' | 'x87')[]} params
+ * @property {readonly ('i32' | 'u32' | 'f64' | 'f32' | 'x87' | 'i64')[]} params
  * @property {'i32' | 'u32' | 'ptr' | 'f64' | 'f32' | 'i64' | 'void'} returns
  * @property {readonly string[]} uses   The guest's helpers the source takes.
  * @property {Uint8Array} code
@@ -136,7 +149,8 @@ const FLOAT_BIT_HELPERS = {
  *
  * @typedef {Object} CodeBuilder
  * @property {(trap: { convention: string, argBytes: number, handler: Function,
- *     lastError?: boolean, floats?: Record<number, 'f32' | 'f64'> }) => number} register
+ *     lastError?: boolean, floats?: Record<number, 'f32' | 'f64'>, quadwords?: number[] })
+ *     => number} register
  *     Answers the trap's address.
  * @property {(at: number, target: number) => void} jump
  *     The four bytes at `at` in the code are a jump's displacement to `target`.
@@ -169,6 +183,9 @@ const FLOAT_BIT_HELPERS = {
  * @property {(bits: number) => number} floatOfBits  the float a dword is
  * @property {(value: number) => number} doubleLow  a double's low dword
  * @property {(value: number) => number} doubleHigh  a double's high dword
+ * @property {(value: i64) => number} low64  an i64 parameter's low dword
+ * @property {(value: i64) => number} high64  its high dword
+ * @property {(low: number, high: number) => bigint} int64  an i64 result of two dwords
  * @property {(address: number, value: number) => void} setU8
  * @property {(address: number, value: number) => void} setU16
  * @property {(address: number, value: number) => void} setU32
@@ -405,7 +422,7 @@ export function guestMemory(host){
 export function guestExport(compiled, fallback){
     const { convention } = compiled;
     const argBytes = compiled.params.reduce((sum, type)=>
-        sum + (type === 'f64' ? 8 : type === 'x87' ? 0 : 4), 0);
+        sum + (type === 'f64' || type === 'i64' ? 8 : type === 'x87' ? 0 : 4), 0);
     if (compiled.host !== undefined && !fallback)
     {
         throw new Error('guest code: a function that hands calls to the host wants its handler');
@@ -415,6 +432,8 @@ export function guestExport(compiled, fallback){
     // code hands a call over to.
     /** @type {Record<number, 'f32' | 'f64'>} */
     const floats = {};
+    /** @type {number[]} An i64's first slot: one argument whole to a 64-bit caller. */
+    const quadwords = [];
     let word = 0;
     for (const type of compiled.params)
     {
@@ -422,9 +441,14 @@ export function guestExport(compiled, fallback){
         {
             floats[word] = type;
         }
-        word += type === 'f64' ? 2 : type === 'x87' ? 0 : 1;
+        if (type === 'i64')
+        {
+            quadwords.push(word);
+        }
+        word += type === 'f64' || type === 'i64' ? 2 : type === 'x87' ? 0 : 1;
     }
-    const declared = Object.keys(floats).length > 0 ? { floats } : {};
+    const declared = { ...Object.keys(floats).length > 0 ? { floats } : {},
+        ...quadwords.length > 0 ? { quadwords } : {} };
     /**
      * The code with its jump to the trap filled in, where it has one.
      *
@@ -513,7 +537,7 @@ export function guestEntry(source, compiled, host, fallback){
     const onStack = params.filter(type=>type === 'x87').length;
     /** @param {number[]} args */
     const handler = args=>{
-        /** @type {number[]} */
+        /** @type {(number | bigint)[]} */
         const values = [];
         let slot = 0;
         let x87 = onStack;
@@ -535,6 +559,12 @@ export function guestEntry(source, compiled, host, fallback){
                 SCRATCH.setUint32(0, args[slot] >>> 0, true);
                 values.push(SCRATCH.getFloat32(0, true));
                 slot++;
+            }
+            else if (type === 'i64')
+            {
+                values.push(BigInt.asIntN(64, BigInt(args[slot + 1] >>> 0) << 32n
+                    | BigInt(args[slot] >>> 0)));
+                slot += 2;
             }
             else
             {
@@ -731,9 +761,13 @@ const SCRATCH = new DataView(new ArrayBuffer(8));
  * toward zero, and NaN or a double out of range the integer indefinite, which
  * `fisttp` stores.
  *
- * @param {number} value
+ * @param {number | bigint} value  a bigint (`int64`) as it is
  */
 export function toInt64(value){
+    if (typeof value === 'bigint')
+    {
+        return BigInt.asIntN(64, value);
+    }
     const truncated = Math.trunc(value);
     if (!Number.isFinite(truncated) || truncated >= 2 ** 63 || truncated < -(2 ** 63))
     {

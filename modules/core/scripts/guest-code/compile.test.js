@@ -1390,7 +1390,7 @@ test('everything outside the subset is refused where it is written', ()=>{
     refused(one(p, 'let s = a;\n    s = c;\n    return s;'), /s is i32, and this is u32/);
     refused(one('{ u9 }, a, c, x', 'return 0;'), /the guest's helpers are/);
     refused(one('a, c, x, y', 'return 0;'),
-        /@param \{i32 \| u32 \| f64 \| f32 \| x87\} y is wanted/);
+        /@param \{i32 \| u32 \| f64 \| f32 \| x87 \| i64\} y is wanted/);
     refused(one(p, 'return 0;').replace('@guestCode cdecl', '@guestCode'),
         /names its convention/);
     refused(one(p, 'return a;', '@param {i32} a @param {u32} c @param {f64} x\n * @returns {f16}'),
@@ -1551,4 +1551,97 @@ test('a result in RAX at 64 bits: an i32 by its sign, a u32 and a pointer by zer
     assert.deepEqual(compiled.pointerPast.code, compiled.unsignedPast.code,
         'a pointer result is a u32 in the i386');
     assert.equal(long.pointerPast.returns, 'ptr');
+});
+
+const WIDE = `
+/**
+ * The sum of two 64-bit integers, its carry an unsigned compare.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {i64} a @param {i64} b
+ * @returns {i64}
+ */
+export function add64({ low64, high64, int64 }, a, b){
+    const low = (low64(a) + low64(b)) >>> 0;
+    const carry = low < low64(a) ? 1 : 0;
+    return int64(low, (high64(a) + high64(b) + carry) >>> 0);
+}
+
+/**
+ * The difference, its borrow an unsigned compare.
+ *
+ * @guestCode stdcall
+ * @param {Guest} guest @param {i64} a @param {i64} b
+ * @returns {i64}
+ */
+export function sub64({ low64, high64, int64 }, a, b){
+    const borrow = low64(a) < low64(b) ? 1 : 0;
+    return int64((low64(a) - low64(b)) >>> 0, (high64(a) - high64(b) - borrow) >>> 0);
+}
+
+/**
+ * A 64-bit integer times a small factor and plus a digit: the low half's
+ * product in 16-bit parts, whose carries reach the high half.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} p1 @param {u32} p2 @param {u32} p3 @param {i64} value
+ * @param {u32} factor
+ * @returns {i64}
+ */
+export function scale64({ low64, high64, int64 }, p1, p2, p3, value, factor){
+    const low = low64(value);
+    const parts = (Math.imul(low & 0xffff, factor) + (p1 & 0xff)) >>> 0;
+    const upper = (Math.imul(low >>> 16, factor) + (parts >>> 16)) >>> 0;
+    const high = (Math.imul(high64(value), factor) + (upper >>> 16) + (p2 & p3 & 0)) >>> 0;
+    return int64(((upper << 16) | (parts & 0xffff)) >>> 0, high);
+}
+
+/**
+ * The high half of an i64 as an i32.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {i64} a
+ * @returns {i32}
+ */
+export function top({ high64 }, a){
+    return high64(a) | 0;
+}
+`;
+
+/** An i64's two stack words. @param {bigint} value */
+const i64Words = value=>[Number(BigInt.asUintN(32, value)),
+    Number(BigInt.asUintN(32, BigInt.asUintN(64, value) >> 32n))];
+
+test('i64 parameters read by their halves and an i64 result made of two, both widths', async()=>{
+    const { same, compiled, long } = await load(WIDE);
+    const values = [0n, 1n, -1n, 0xffffffffn, 0x100000000n, 0x7fffffffffffffffn,
+        -(2n ** 63n), 0x123456789abcdefn, -0x123456789abcdefn, 0xfffffffffn];
+    for (const a of values)
+    {
+        same('top', { stack: i64Words(a) });
+        for (const b of values)
+        {
+            same('add64', { stack: [...i64Words(a), ...i64Words(b)] });
+            same('sub64', { stack: [...i64Words(a), ...i64Words(b)] });
+        }
+        for (const factor of [0, 1, 10, 16, 36])
+        {
+            same('scale64', { stack: [7, 1, 2, ...i64Words(a), factor] });
+        }
+    }
+    assert.deepEqual(compiled.add64.params, ['i64', 'i64']);
+    assert.equal(compiled.sub64.code.at(-3), 0xc2, 'a stdcall i64 function pops its slots');
+    assert.equal(compiled.sub64.code.at(-2), 16, 'two slots for each i64');
+    assert.deepEqual(['add64', 'sub64', 'scale64', 'top'].filter(name=>!long[name]), [],
+        'every i64 function built at 64 bits, the fifth argument an i64 on the stack');
+});
+
+test('an i64 is read by its halves alone and int64 only returned', ()=>{
+    const head = '/**\n * @guestCode cdecl\n * @param {Guest} g @param {i64} a\n'
+        + ' * @returns {i64}\n */\nexport function f({ low64, int64 }, a){\n';
+    refused(`${head}    return a;\n}\n`, /a is an i64, read by low64\(\) and high64\(\)/);
+    refused(`${head}    const x = int64(1, 2);\n    return x;\n}\n`,
+        /int64\(low, high\) is an i64 function's result, returned/);
+    refused(`${head}    return int64(low64(a) + 1, 0);\n}\n`,
+        /a half of an i64 is brought back to 32 bits first/);
 });

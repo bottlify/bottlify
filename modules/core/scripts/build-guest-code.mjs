@@ -47,6 +47,7 @@ export const LONG = new Map([
     ['layers/graphics/seam/inguest.js', {}],
     ['layers/win32/msvcrt/inguest-string.js', {}],
     ['layers/win32/msvcrt/inguest-rtti.js', {}],
+    ['layers/win32/msvcrt/inguest-int64.js', {}],
     ['layers/win32/d3dx9/inguest.js', {}],
     ['layers/win32/d3dx9/inguest-matrix.js', {}],
     ['layers/win32/d3dx9/inguest-vector.js', {}],

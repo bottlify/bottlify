@@ -274,13 +274,16 @@ function doubleOf(next){
 
 /**
  * The stack's words of a function's arguments: two of a double's, one of a
- * float's, the integers' from `integers`.
+ * float's, two of an i64's, the integers' from `integers`.
  *
  * @param {() => number} next @param {string[]} params @param {number[]} integers
  */
 function wordsOf(next, params, integers){
     return params.flatMap((type, i)=>(type === 'f64' ? doubleWords(doubleOf(next))
-        : type === 'f32' ? [floatBits(doubleOf(next))] : [integers[i]]));
+        : type === 'f32' ? [floatBits(doubleOf(next))]
+            // An i64's two dwords: the integer low, a pattern or a sign high.
+            : type === 'i64' ? [integers[i], [0, 0xffffffff, next()][next() % 3] >>> 0]
+                : [integers[i]]));
 }
 
 /** A float's bits, the double rounded to it. @param {number} value */
