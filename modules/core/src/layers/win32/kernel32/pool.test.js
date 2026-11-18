@@ -20,8 +20,11 @@ const EVENT = 0x40;
  * A machine with a clock the test moves, kernel timers it fires, and pool
  * threads the test steps through their loop by hand: `ask` is the loop's call
  * to the trap, and a RUN answer means the record now names a callback.
+ *
+ * @param {{ processHeap?: { allocate: (bytes: number) => number,
+ *     free: (address: number) => void } }} [given]
  */
-function machine(){
+function machine(given = {}){
     const memory = new Uint8Array(0x10000);
     let free = 0x1000;
     let now = 0;
@@ -103,6 +106,7 @@ function machine(){
             return at;
         },
         free: address=>freed.push(address),
+        ...given.processHeap ? { processHeap: given.processHeap } : {},
         writeMemory: (address, bytes)=>memory.set(bytes, address),
         readMemory: (address, length)=>memory.slice(address, address + length),
         wallClock: ()=>1_000_000,
@@ -773,6 +777,35 @@ test('a thread pool work runs once a submission, and a wait for it waits for its
     assert.ok(m.freed.includes(pool));
 });
 
+test('the objects a program is handed are blocks of the process heap until they are let go',
+    ()=>{
+        // Wine's ntdll threadpool test_tp_io: HeapValidate(GetProcessHeap())
+        // knows an I/O object, and not once it is released.
+        /** @type {Set<number>} */
+        const live = new Set();
+        let next = 0xa000;
+        const m = machine({ processHeap: {
+            allocate: bytes=>{
+                const at = next;
+                next += Math.max(bytes, 16);
+                live.add(at);
+                return at;
+            },
+            free: address=>{
+                live.delete(address);
+            },
+        } });
+        const pool = m.fns.CreateThreadpool.handler([0]);
+        const group = m.fns.CreateThreadpoolCleanupGroup.handler([]);
+        const work = m.fns.CreateThreadpoolWork.handler([0x403000, 0, 0]);
+        assert.deepEqual([pool, group, work].map(each=>live.has(each)), [true, true, true]);
+        m.fns.CloseThreadpoolWork.handler([work]);
+        m.fns.CloseThreadpoolCleanupGroup.handler([group]);
+        m.fns.CloseThreadpool.handler([pool]);
+        assert.deepEqual([...live], [], 'each given back');
+        assert.deepEqual(m.freed, [], 'none to the engine\'s own memory');
+    });
+
 test('an environment\'s FinalizationCallback runs on the same thread after each callback', ()=>{
     // Wine's msvcp140_atomic_wait test, test_threadpool_work: the callback,
     // then the finalization, both with the work's instance and context; a
@@ -1102,7 +1135,15 @@ test('a thread pool I/O object hands each expected completion of its file to its
     m.ask(thread);
     assert.ok(m.freed.includes(args[3]), 'given back once the callback returned');
 
+    // Released with an operation started and not come back (its callback
+    // cancelled above): the object lasts until it comes, and is then gone.
     m.fns.CloseThreadpoolIo.handler([io]);
+    assert.equal(typeof m.sinks.get(0x70), 'function', 'still taking what was started');
+    assert.ok(!m.freed.includes(io));
+    const woken = m.woken.length;
+    m.sinks.get(0x70)({ transferred: 1, overlapped: 0x300, key: 0 });
+    assert.equal(m.woken.length, woken, 'not handed to the callback');
     assert.equal(m.sinks.get(0x70), null, 'the file let go');
+    assert.ok(m.freed.includes(io), 'and the object');
 });
 
