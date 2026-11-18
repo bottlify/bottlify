@@ -326,6 +326,22 @@ test('SystemTimeToTzSpecificLocalTime runs a southern zone\'s daylight across th
     assert.deepEqual(words(bytes, 0x120).slice(4, 6), [10, 0], 'June is not');
 });
 
+test('SystemTimeToTzSpecificLocalTimeEx reads 1 January by the year before\'s rules first', ()=>{
+    // Wine's time.c test_TzSpecificLocalTimeEx. Where the platform's zone data
+    // moves Alberta to a new offset for good in 2026, 2026's rules make the
+    // new offset standard and the old one daylight from 1 January; the first
+    // hours of 2026 in UTC are still 31 December there, read by 2025's rules.
+    const { fns, bytes } = setup();
+    const view = new DataView(bytes.buffer);
+    const DYNAMIC = 0x800;
+    bytes.fill(0, DYNAMIC, DYNAMIC + 432);
+    [...'Alberta Standard Time'].forEach((character, at)=>view.setUint16(DYNAMIC + 172 + at * 2,
+        character.charCodeAt(0), true));
+    putWords(bytes, 0x100, [2026, 1, 0, 1, 0, 15, 0, 0]);
+    assert.equal(fns.SystemTimeToTzSpecificLocalTimeEx.handler([DYNAMIC, 0x100, 0x120]), 1);
+    assert.deepEqual(words(bytes, 0x120), [2025, 12, 3, 31, 17, 15, 0, 0]);
+});
+
 test('SystemTimeToTzSpecificLocalTime refuses a time that names no moment', ()=>{
     const { fns, bytes, errors } = setup();
     putWords(bytes, 0x100, [2026, 2, 0, 30, 0, 0, 0, 0]);

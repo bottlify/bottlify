@@ -436,19 +436,19 @@ export function createFileTimeFunctions(host){
         : zoneForYear(key, year));
 
     /**
-     * The rules a DYNAMIC_TIME_ZONE_INFORMATION stands for at a moment: its
+     * The rules a DYNAMIC_TIME_ZONE_INFORMATION stands for in a year: its
      * zone's for that year, or the TIME_ZONE_INFORMATION it carries when its
      * year-by-year rules are off or its key is none Windows has.
      *
-     * @param {number} address @param {number} utc
+     * @param {number} address @param {number} year
      */
-    const dynamicRules = (address, utc)=>{
+    const dynamicRules = (address, year)=>{
         const carried = host.readMemory(address, DYNAMIC_TIME_ZONE.SIZE).slice();
         if (carried[DYNAMIC_TIME_ZONE.Disabled] !== 0)
         {
             return carried.subarray(0, TIME_ZONE_INFORMATION.SIZE);
         }
-        return zoneByKey(zoneKeyOf(address), new Date(utc).getUTCFullYear())
+        return zoneByKey(zoneKeyOf(address), year)
             ?? carried.subarray(0, TIME_ZONE_INFORMATION.SIZE);
     };
 
@@ -1034,9 +1034,22 @@ export function createFileTimeFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                const data = zone === 0 ? currentZone() : dynamicRules(zone >>> 0, utc);
-                const bias = biasAt(new DataView(data.buffer, data.byteOffset), utc);
-                host.writeMemory(local >>> 0, msToSystemTime(utc - bias * 60_000));
+                /** @param {number} year */
+                const localBy = year=>{
+                    const data = zone === 0 ? currentZone() : dynamicRules(zone >>> 0, year);
+                    return utc - biasAt(new DataView(data.buffer, data.byteOffset), utc) * 60_000;
+                };
+                // Windows reads a time by the rules of its own year, except
+                // that 1 January is read by the year before's first - its
+                // first hours may still be that year's on the local clock -
+                // and a time whose local year is not the one whose rules were
+                // read is read again by the next year's.
+                const moment = new Date(utc);
+                const year = moment.getUTCFullYear()
+                    - (moment.getUTCMonth() === 0 && moment.getUTCDate() === 1 ? 1 : 0);
+                const first = localBy(year);
+                const wall = new Date(first).getUTCFullYear() === year ? first : localBy(year + 1);
+                host.writeMemory(local >>> 0, msToSystemTime(wall));
                 return 1;
             },
         },
@@ -1058,7 +1071,8 @@ export function createFileTimeFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                const data = zone === 0 ? currentZone() : dynamicRules(zone >>> 0, wall);
+                const data = zone === 0 ? currentZone()
+                    : dynamicRules(zone >>> 0, new Date(wall).getUTCFullYear());
                 const bias = biasOnLocalClock(new DataView(data.buffer, data.byteOffset), wall);
                 host.writeMemory(universal >>> 0, msToSystemTime(wall + bias * 60_000));
                 return 1;
