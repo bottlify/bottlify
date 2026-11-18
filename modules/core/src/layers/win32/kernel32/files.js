@@ -189,6 +189,7 @@ const STATUS_UNSUCCESSFUL = 0xc0000001;
 const STATUS_ACCESS_VIOLATION = 0xc0000005;
 const STATUS_INVALID_HANDLE = 0xc0000008;
 const STATUS_INVALID_PARAMETER = 0xc000000d;
+const STATUS_INVALID_USER_BUFFER = 0xc00000e8;
 const STATUS_OBJECT_TYPE_MISMATCH = 0xc0000024;
 const STATUS_ACCESS_DENIED = 0xc0000022;
 const STATUS_OBJECT_NAME_INVALID = 0xc0000033;
@@ -2936,6 +2937,16 @@ export function createFileFunctions(host){
     };
 
     /**
+     * A set's answer: an error is refused before the request completes, and
+     * the status block is left as it was (the conformance tests find it
+     * untouched); success and a warning are written as `report` writes them.
+     *
+     * @param {number} block @param {number} status @param {number} information
+     */
+    const settled = (block, status, information)=>((status >>> 30) === 3 ? status
+        : report(block, status, information));
+
+    /**
      * One FILE_INFORMATION_CLASS record of an open file, as NtQueryInformationFile
      * lays it out; null for a class this keeps nothing for. The volume keeps
      * one time per file, the last write, and every time answers with it, as
@@ -3304,10 +3315,13 @@ export function createFileFunctions(host){
             }
             // The kernel probes the buffer before the transfer: none for a
             // count is refused whether or not anything would have moved (a
-            // read at the end of the file included), the status block untouched.
+            // read at the end of the file included), the status block and the
+            // event untouched - a read as the access violation it is, a write
+            // as STATUS_INVALID_USER_BUFFER, the answer the conformance tests
+            // find for a write from nowhere.
             if ((buffer >>> 0) === 0 && (length >>> 0) !== 0)
             {
-                return STATUS_ACCESS_VIOLATION;
+                return writing ? STATUS_INVALID_USER_BUFFER : STATUS_ACCESS_VIOLATION;
             }
             let at = file.position;
             if ((offset >>> 0) !== 0)
@@ -3697,7 +3711,7 @@ export function createFileFunctions(host){
                     from >>> 0, length >>> 0) ?? null;
                 if (slot !== null)
                 {
-                    return report(block >>> 0, slot, 0);
+                    return settled(block >>> 0, slot, 0);
                 }
                 // The completion modes are any handle's, kept with the pipes as
                 // SetFileCompletionNotificationModes keeps them.
@@ -3705,11 +3719,11 @@ export function createFileFunctions(host){
                 {
                     if ((length >>> 0) < 4)
                     {
-                        return report(block >>> 0, STATUS_INFO_LENGTH_MISMATCH, 0);
+                        return settled(block >>> 0, STATUS_INFO_LENGTH_MISMATCH, 0);
                     }
                     const error = host.pipes.completionModes.set(handle >>> 0,
                         readDword(from >>> 0));
-                    return report(block >>> 0, error === 0 ? STATUS_SUCCESS
+                    return settled(block >>> 0, error === 0 ? STATUS_SUCCESS
                         : error === ERROR_INVALID_PARAMETER ? STATUS_INVALID_PARAMETER
                             : STATUS_INVALID_HANDLE, 0);
                 }
@@ -3719,7 +3733,7 @@ export function createFileFunctions(host){
                 {
                     if ((length >>> 0) < 8)
                     {
-                        return report(block >>> 0, STATUS_INFO_LENGTH_MISMATCH, 0);
+                        return settled(block >>> 0, STATUS_INFO_LENGTH_MISMATCH, 0);
                     }
                     const held = host.handles.typeOf?.(handle >>> 0) ?? '';
                     const fileObject = held === 'pipe' || FILE_OBJECT_KINDS.has(held);
@@ -3728,12 +3742,12 @@ export function createFileFunctions(host){
                     // A handle no port takes is refused before any I/O: the
                     // status block is left as it was.
                     return bound === 'synchronous' ? STATUS_INVALID_PARAMETER
-                        : report(block >>> 0, bound ? STATUS_SUCCESS : STATUS_INVALID_HANDLE, 0);
+                        : settled(block >>> 0, bound ? STATUS_SUCCESS : STATUS_INVALID_HANDLE, 0);
                 }
                 const open = fileOrDirectory(handle);
                 if (!open)
                 {
-                    return report(block >>> 0, STATUS_INVALID_HANDLE, 0);
+                    return settled(block >>> 0, STATUS_INVALID_HANDLE, 0);
                 }
                 const type = NATIVE_SET_CLASSES.get(kind >>> 0);
                 const own = (kind >>> 0) === FILE_POSITION_SET || (kind >>> 0) === FILE_MODE_SET
@@ -3743,13 +3757,13 @@ export function createFileFunctions(host){
                 {
                     host.divergence?.('NtSetInformationFile',
                         `information class ${kind >>> 0} is not kept`);
-                    return report(block >>> 0, STATUS_INVALID_INFO_CLASS, 0);
+                    return settled(block >>> 0, STATUS_INVALID_INFO_CLASS, 0);
                 }
                 const size = type !== undefined ? /** @type {number} */ (FILE_INFO_SIZES.get(type))
                     : (kind >>> 0) === FILE_MODE_SET ? 4 : 8;
                 if ((length >>> 0) < size)
                 {
-                    return report(block >>> 0, STATUS_INFO_LENGTH_MISMATCH, 0);
+                    return settled(block >>> 0, STATUS_INFO_LENGTH_MISMATCH, 0);
                 }
                 if ((from >>> 0) === 0)
                 {
@@ -3764,10 +3778,10 @@ export function createFileFunctions(host){
                         const at = view.getBigInt64(0, true);
                         if (at < 0n)
                         {
-                            return report(block >>> 0, STATUS_INVALID_PARAMETER, 0);
+                            return settled(block >>> 0, STATUS_INVALID_PARAMETER, 0);
                         }
                         file.position = Number(at);
-                        return report(block >>> 0, STATUS_SUCCESS, 0);
+                        return settled(block >>> 0, STATUS_SUCCESS, 0);
                     }
                     case FILE_MODE_SET: {
                         // Only the write-through and sequential hints change;
@@ -3782,15 +3796,15 @@ export function createFileFunctions(host){
                                 | FILE_SYNCHRONOUS_IO_NONALERT)
                             || (synchronous !== 0) !== !file.overlapped)
                         {
-                            return report(block >>> 0, STATUS_INVALID_PARAMETER, 0);
+                            return settled(block >>> 0, STATUS_INVALID_PARAMETER, 0);
                         }
                         file.sequential = (mode & FILE_SEQUENTIAL_ONLY) !== 0;
-                        return report(block >>> 0, STATUS_SUCCESS, 0);
+                        return settled(block >>> 0, STATUS_SUCCESS, 0);
                     }
                     case FILE_VALID_DATA_LENGTH_INFORMATION:
                         // Every byte of a file here is data written: there is
                         // no tail of unwritten allocation to declare valid.
-                        return report(block >>> 0, what === 'file' && file.write
+                        return settled(block >>> 0, what === 'file' && file.write
                             ? STATUS_SUCCESS : STATUS_ACCESS_DENIED, 0);
                     default:
                         break;
@@ -3801,7 +3815,7 @@ export function createFileFunctions(host){
                         ? renameTarget(file.path, asked)
                         : resolveNative(view.getUint32(4, true), asked).path ?? null));
                 /** @param {number} code */
-                const answer = code=>report(block >>> 0, code === 0 ? STATUS_SUCCESS
+                const answer = code=>settled(block >>> 0, code === 0 ? STATUS_SUCCESS
                     : NATIVE_FAILURES[code] ?? STATUS_UNSUCCESSFUL, 0);
                 return typeof error === 'number' ? answer(error) : error.then(answer);
             },

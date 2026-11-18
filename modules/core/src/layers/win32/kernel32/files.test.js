@@ -3272,6 +3272,8 @@ test('NtReadFile refuses a negative offset and a missing buffer before it moves 
         0xc000000d, 'not the end of the file, not the pointer');
     assert.equal(natives.NtReadFile.handler([handle, 0, 0, 0, block, 0, 4, 0, 0]),
         0xc0000005, 'STATUS_ACCESS_VIOLATION');
+    assert.equal(natives.NtWriteFile.handler([handle, 0, 0, 0, block, 0, 4, 0, 0]),
+        0xc00000e8, 'a write from nowhere: STATUS_INVALID_USER_BUFFER');
     assert.equal(memory.dword(block), 0xdeadbeef, 'the status block untouched by each');
 });
 
@@ -3297,6 +3299,9 @@ test('NtSetInformationFile sets what SetFileInformationByHandle does, and its ow
     assert.equal(set(14, [0, 0x80000000]), 0xc000000d, 'a negative position');
     assert.equal(set(20, [0]), 0xc0000004, 'STATUS_INFO_LENGTH_MISMATCH');
     assert.equal(set(9, [0, 0]), 0xc0000003, 'a class nothing keeps');
+    memory.putDword(NT_STATUS, 0xdeadbeef);
+    assert.equal(set(14, [0, 0x80000000]), 0xc000000d);
+    assert.equal(memory.dword(NT_STATUS), 0xdeadbeef, 'a refused set leaves the status block');
 
     // FileRenameInformation: a bare name and no root stays in the folder.
     const name = 'NEW.DAT';
