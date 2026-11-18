@@ -396,9 +396,23 @@ test('every device slot is present, including the ones nothing implements', ()=>
     assert.equal(controlPanel.invoke, undefined);
 });
 
-test('CreateDevice hands back the same device for the same GUID', ()=>{
-    const f = fixture();
-    assert.equal(createDevice(f, GUID_SysKeyboard), createDevice(f, GUID_SysKeyboard));
+test('each CreateDevice makes an object of its own, and each hears the device', ()=>{
+    // Wine's dinput.c test_CreateDevice: the device CreateDevice answered is
+    // released to nothing by one Release, whatever was made before it.
+    const f = keyboard();
+    const second = createDevice(f, GUID_SysKeyboard);
+    assert.notEqual(second, f.device, 'a second object');
+    assert.equal(f.bridge.call(second, 'SetDataFormat', [dataFormat(f.memory, 256)]), DI_OK);
+    assert.equal(f.bridge.call(second, 'Acquire', []), DI_OK);
+    f.dinput.post({ kind: 'key', code: DIK_A, down: true });
+    for (const device of [f.device, second])
+    {
+        f.memory.bytes.fill(0, AT.state, AT.state + 256);
+        assert.equal(f.bridge.call(device, 'GetDeviceState', [256, AT.state]), DI_OK);
+        assert.equal(f.memory.bytes[AT.state + DIK_A], KEY_DOWN, 'each hears the key');
+    }
+    assert.equal(f.bridge.recordAt(second).object.release(), 0, 'one reference, its own');
+    assert.equal(f.bridge.recordAt(f.device).object.release(), 0);
     assert.notEqual(createDevice(f, GUID_SysMouse), createDevice(f, GUID_SysKeyboard));
 });
 
@@ -623,6 +637,25 @@ test('the axis mode is settled before the device is acquired', ()=>{
         DI_OK);
 });
 
+test('a device\'s axis mode is its data format\'s, and absolute before it has one', ()=>{
+    // Wine's device8.c test_sys_mouse and test_sys_keyboard: DIPROP_AXISMODE
+    // on the whole device answers absolute until SetDataFormat, then the
+    // format's own (c_dfDIMouse2 and c_dfDIKeyboard are DIDF_RELAXIS).
+    const f = fixture();
+    for (const guid of [GUID_SysMouse, GUID_SysKeyboard])
+    {
+        const device = createDevice(f, guid);
+        propertyHeader(f.memory, 20);
+        f.memory.setU32(AT.property + DIPROPDWORD_DATA, 7);
+        assert.equal(f.bridge.call(device, 'GetProperty', [DIPROP_AXISMODE, AT.property]), DI_OK);
+        assert.equal(f.memory.u32(AT.property + DIPROPDWORD_DATA), 0, `${guid}: absolute`);
+        assert.equal(f.bridge.call(device, 'SetDataFormat',
+            [dataFormat(f.memory, guid === GUID_SysMouse ? 16 : 256)]), DI_OK);
+        assert.equal(f.bridge.call(device, 'GetProperty', [DIPROP_AXISMODE, AT.property]), DI_OK);
+        assert.equal(f.memory.u32(AT.property + DIPROPDWORD_DATA), 1, `${guid}: the format's`);
+    }
+});
+
 test('a mouse set to absolute axes reports where it is, and says so', ()=>{
     // SetProperty(DIPROP_AXISMODE, DIPROPAXISMODE_ABS) on the whole device:
     // the state's axes are the position, which reading does not clear.
@@ -678,6 +711,46 @@ test('the DirectX 8 entry is twenty bytes and is laid out at that stride', ()=>{
     assert.equal(
         f.memory.u32(AT.data + DIDEVICEOBJECTDATA.SIZE_DX8 + DIDEVICEOBJECTDATA.dwOfs),
         DIK_S, 'at the sixteen-byte stride this would read the first entry\'s tail');
+});
+
+test('DIPROP_APPDATA names an object\'s uAppData, -1 without one, until the next format', ()=>{
+    // Wine's device8.c test_appdata_property: an object by offset or by id,
+    // never the whole device or a usage; SetDataFormat starts afresh.
+    const DIPROP_APPDATA = 22;
+    const [DIPH_DEVICE, DIPH_BYOFFSET, DIPH_BYID, DIPH_BYUSAGE] = [0, 1, 2, 3];
+    const f = keyboard();
+    setBufferSize(f, f.device, 32);
+    /** @param {number} how @param {number} which @param {number} value */
+    const setAppData = (how, which, value)=>{
+        propertyHeader(f.memory, 20);
+        f.memory.setU32(AT.property + 8, which);
+        f.memory.setU32(AT.property + 12, how);
+        f.memory.setU32(AT.property + DIPROPDWORD_DATA, value);
+        return f.bridge.call(f.device, 'SetProperty', [DIPROP_APPDATA, AT.property]);
+    };
+    /** @param {number} key */
+    const appDataOf = key=>{
+        f.dinput.post({ kind: 'key', code: key, down: true });
+        f.dinput.post({ kind: 'key', code: key, down: false });
+        f.memory.setU32(AT.count, 1);
+        assert.equal(f.bridge.call(f.device, 'GetDeviceData',
+            [DIDEVICEOBJECTDATA.SIZE_DX8, AT.data, AT.count, 0]), DI_OK);
+        const value = f.memory.u32(AT.data + DIDEVICEOBJECTDATA.uAppData);
+        f.memory.setU32(AT.count, 10);
+        f.bridge.call(f.device, 'GetDeviceData', [DIDEVICEOBJECTDATA.SIZE_DX8, 0, AT.count, 0]);
+        return value;
+    };
+    assert.equal(appDataOf(DIK_A), 0xffffffff, 'none set');
+    assert.equal(setAppData(DIPH_DEVICE, 0, 1), DIERR_INVALIDPARAM);
+    assert.equal(setAppData(DIPH_BYUSAGE, 2, 2), 0x80004001 | 0, 'DIERR_UNSUPPORTED');
+    assert.equal(setAppData(DIPH_BYID, (DIK_S << 8 | 0x0c) >>> 0, 3), DI_OK);
+    assert.equal(setAppData(DIPH_BYOFFSET, DIK_A, 4), DI_OK);
+    assert.equal(appDataOf(DIK_A), 4);
+    assert.equal(appDataOf(DIK_S), 3);
+    assert.equal(f.bridge.call(f.device, 'Unacquire', []), DI_OK);
+    assert.equal(f.bridge.call(f.device, 'SetDataFormat', [dataFormat(f.memory, 256)]), DI_OK);
+    assert.equal(f.bridge.call(f.device, 'Acquire', []), DI_OK);
+    assert.equal(appDataOf(DIK_A), 0xffffffff, 'a new format, none again');
 });
 
 test('GetDeviceData refuses an entry size that is neither of the two', ()=>{
@@ -1969,7 +2042,7 @@ test('the root checks what it is handed before it looks for a device', ()=>{
     assert.equal(call('EnumDevices', [0, 0x7000, 0, 0xffffffff]), DIERR_INVALIDPARAM);
 });
 
-test('a device released to nothing is made anew by the next CreateDevice', async()=>{
+test('a device released to nothing is gone, and CreateDevice makes another', async()=>{
     // Wine's device8.c releases the device CreateDevice answered for one GUID
     // and creates it again for another naming the same device.
     const g = guestMachine();
@@ -1988,8 +2061,8 @@ test('a device released to nothing is made anew by the next CreateDevice', async
     assert.equal(g.call(second, slotOf(IDIRECTINPUTDEVICE_SLOTS, 'SetDataFormat'),
         [dataFormat(g.memory, 16)]), DI_OK, 'the new device answers');
     const third = create();
-    assert.equal(third, second, 'one still held is handed out again');
-    assert.equal(g.call(third, 2), 1, 'with a reference of its own');
+    assert.notEqual(third, second, 'one still held is not handed out again');
+    assert.equal(g.call(third, 2), 0, 'each with one reference');
     assert.equal(g.call(second, 2), 0);
 });
 
@@ -2263,7 +2336,24 @@ test('CoCreateInstance reaches DirectInput 8 through its class object, which wai
     assert.equal(f.bridge.call(factory, 'CreateInstance', [0, AT.iid, AT.out]), DI_OK);
     const root = f.memory.u32(AT.out);
     assert.equal(f.bridge.recordAt(root).id, IID_IDirectInput8A);
+    // Until Initialize, what it would do is refused (Wine's dinput.c
+    // test_CoCreateInstance); what is malformed is refused first.
+    const DIERR_NOTINITIALIZED = 0x80070015 | 0;
+    writeGuid(f.memory, AT.guid, GUID_SysMouse);
+    f.memory.setU32(AT.state, 0xdeadbeef);
+    assert.equal(f.bridge.call(root, 'CreateDevice', [AT.guid, AT.state, 0]),
+        DIERR_NOTINITIALIZED);
+    assert.equal(f.memory.u32(AT.state), 0, 'the pointer zeroed');
+    assert.equal(f.bridge.call(root, 'CreateDevice', [AT.guid, 0, 0]), 0x80004003 | 0);
+    assert.equal(f.bridge.call(root, 'EnumDevices', [0, 0x5000, 0, 0]), DIERR_NOTINITIALIZED);
+    assert.equal(f.bridge.call(root, 'EnumDevices', [0, 0x5000, 0, ~0 >>> 0]),
+        DIERR_INVALIDPARAM);
+    assert.equal(f.bridge.call(root, 'GetDeviceStatus', [AT.guid]), DIERR_NOTINITIALIZED);
+    assert.equal(f.bridge.call(root, 'GetDeviceStatus', [0]), 0x80004003 | 0);
+    assert.equal(f.bridge.call(root, 'RunControlPanel', [0, 0]), DIERR_NOTINITIALIZED);
+    assert.equal(f.bridge.call(root, 'RunControlPanel', [0, ~0 >>> 0]), DIERR_INVALIDPARAM);
     assert.equal(f.bridge.call(root, 'Initialize', [INSTANCE, 0x0800]), DI_OK);
+    assert.equal(f.bridge.call(root, 'GetDeviceStatus', [AT.guid]), DI_OK, 'and then answered');
 
     assert.equal(f.bridge.call(factory, 'CreateInstance', [0x1234, AT.iid, AT.out]),
         0x80040110 | 0, 'no aggregation');
