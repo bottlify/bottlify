@@ -6282,6 +6282,19 @@ export function createWin32Module(){
                 };
             }
 
+            // SleepEx(0, FALSE) is Sleep(0), and answered where Sleep's guest code
+            // answers it (`sleepCode`): the entry is the alertable waits', the word
+            // it reads the process functions'.
+            const sleep = libraries['KERNEL32.dll'].Sleep;
+            const sleepEx = libraries['KERNEL32.dll'].SleepEx;
+            if (sleep?.guestEx && sleepEx)
+            {
+                libraries['KERNEL32.dll'].SleepEx = {
+                    ...sleepEx,
+                    guest: (/** @type {any} */ builder)=>sleep.guestEx(builder, sleepEx),
+                };
+            }
+
             // The runtime before msvcrt, built from it: the same entries under the
             // same names, and its own few beside them.
             libraries['CRTDLL.dll'] = createCrtdllFunctions(libraries['msvcrt.dll']);
