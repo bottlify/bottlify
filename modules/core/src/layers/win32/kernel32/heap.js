@@ -2694,8 +2694,19 @@ export function createHeapFunctions(host){
                         tracked.delete(page >>> 12);
                     }
                 }
-                written.forEach((page, at)=>writeDword((addresses >>> 0) + at * 4, page));
-                writeDword(count >>> 0, written.length);
+                // PVOID and ULONG_PTR: eight bytes each in a 64-bit process, the upper half zero.
+                const wide = host.pointerSize === 8;
+                /** @param {number} at @param {number} value */
+                const writeWord = (at, value)=>{
+                    writeDword(at, value);
+                    if (wide)
+                    {
+                        writeDword(at + 4, 0);
+                    }
+                };
+                const stride = wide ? 8 : 4;
+                written.forEach((page, at)=>writeWord((addresses >>> 0) + at * stride, page));
+                writeWord(count >>> 0, written.length);
                 writeDword(granularity >>> 0, PAGE_SIZE);
                 return 0;
             },

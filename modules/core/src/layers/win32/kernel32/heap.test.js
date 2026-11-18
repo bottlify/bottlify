@@ -1660,6 +1660,28 @@ test('GetWriteWatch tells the pages written since the reset, and RESET starts th
     assert.equal(asked.length, 1);
 });
 
+test('GetWriteWatch in a 64-bit process writes its PVOID array and ULONG_PTR count whole', ()=>{
+    // lpAddresses is PVOID* and lpdwCount ULONG_PTR*: eight bytes each at 64 bits. Every byte of
+    // both starts as 0xAA, so a dword write leaves the upper halves as garbage a collector reads
+    // as addresses and as a count (the Boehm collector Unity's Mono builds on watches its heap).
+    const MEM_WRITE_WATCH = 0x200000;
+    const host = { ...fakeHost(RESERVING_ARENA), pointerSize: 8, setLastError: ()=>{},
+        watchWrites: ()=>({ take: (/** @type {number} */ address)=>[(address >>> 12) + 1] }) };
+    const fns = createHeapFunctions(host);
+    const view = new DataView(host.bytes.buffer);
+    const base = fns.VirtualAlloc.handler([0, 4 * PAGE_SIZE,
+        MEM_RESERVE | MEM_COMMIT | MEM_WRITE_WATCH, 0x04]);
+    host.bytes.fill(0xaa, 0x100, 0x300);
+    view.setUint32(0x100, 64, true);
+    assert.equal(fns.GetWriteWatch.handler([0, base, 4 * PAGE_SIZE, 0x200, 0x100, 0x180]), 0);
+    assert.equal(view.getBigUint64(0x100, true), 4n, 'the count, all eight bytes');
+    assert.deepEqual(Array.from({ length: 4 }, (_, at)=>view.getBigUint64(0x200 + 8 * at, true)),
+        [0, 1, 2, 3].map(page=>BigInt(base + page * PAGE_SIZE)), 'each address eight bytes apart');
+    assert.equal(view.getBigUint64(0x220, true), 0xaaaaaaaaaaaaaaaan, 'nothing past the answer');
+    assert.equal(view.getUint32(0x180, true), PAGE_SIZE, 'the granularity is a DWORD');
+    assert.equal(view.getUint32(0x184, true), 0xaaaaaaaa, 'and only a DWORD');
+});
+
 test('GetWriteWatch over the write clock: every page written since its last report or reset '
     + 'is told, against a model of Windows, in seeded runs', ()=>{
     // A collector's background marking (the .NET runtime's) rescans what
