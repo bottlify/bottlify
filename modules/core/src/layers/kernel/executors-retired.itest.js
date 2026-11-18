@@ -138,9 +138,10 @@ function program(){
  * thread's calls cross.
  *
  * @param {Uint8Array} executable @param {number} cores
+ * @param {{ executorWorker?: URL }} [cpu]  more of the processor's options
  */
-async function run(executable, cores){
-    const app = await createApp({ executable, cpu: { cores } });
+async function run(executable, cores, cpu = {}){
+    const app = await createApp({ executable, cpu: { cores, ...cpu } });
     try
     {
         const code = await app.run({ timeoutMs: 120_000, maxTurns: Number.MAX_SAFE_INTEGER });
@@ -148,7 +149,7 @@ async function run(executable, cores){
         /** @param {string} name */
         const layer = name=>(Array.isArray(tables) ? tables : []).find(table=>table.name === name);
         const kernel = layer('kernel')?.metrics ?? {};
-        const cpu = layer('cpu')?.metrics ?? {};
+        const metrics = layer('cpu')?.metrics ?? {};
         // "name instructions state ..." a thread, " | " between them.
         /** @type {Record<string, number>} */
         const threads = {};
@@ -157,9 +158,11 @@ async function run(executable, cores){
             const [name, instructions] = row.split(' ');
             threads[name] = Number(instructions);
         }
-        return { code, threads, total: cpu.instructions,
+        return { code, threads, total: metrics.instructions, lost: metrics.executorsLost ?? [],
+            losses: (Array.isArray(tables) ? tables : []).flatMap(table=>Object.keys(
+                table?.metrics?.losses ?? {})),
             crossings: JSON.parse(kernel.sharedTime ?? '{}').crossings ?? 0,
-            elsewhere: (cpu.executors ?? []).reduce((/** @type {number} */ sum,
+            elsewhere: (metrics.executors ?? []).reduce((/** @type {number} */ sum,
                 /** @type {any} */ one)=>sum + (one.instructions ?? 0), 0) };
     }
     finally
@@ -193,3 +196,18 @@ test('each thread retires as many instructions on two and three executors as on 
             `${cores} executors: its calls crossed back (${many.crossings})`);
     }
 });
+
+test('the program runs to its end when the worker of the executor its render thread is on goes',
+    { timeout: 300_000 }, async()=>{
+    // The executor's worker goes 150 ms after it is ready (`executor-lost.fixture.js`),
+    // as one a crash or the tab's memory takes. Its slice out ended with it, so the
+    // render thread hung on it and the main thread waited for good.
+        const executable = program();
+        const lost = await run(executable, 2,
+            { executorWorker: new URL('../cpu/internal/executor-lost.fixture.js', import.meta.url) });
+        assert.equal(lost.code, checksum(), 'the program ran to its end');
+        assert.equal(lost.lost.length, 1, `the executor said lost once: ${lost.lost}`);
+        assert.match(lost.lost[0], /executor 1: .*exited \(7\)/);
+        assert.ok(lost.losses.some(key=>/cpu: executor 1's worker went/.test(key)),
+            `a loss of the run's: ${lost.losses}`);
+    });

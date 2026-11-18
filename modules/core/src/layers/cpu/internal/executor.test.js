@@ -600,3 +600,55 @@ test('an executor whose worker is lost before it is ready fails its start, and d
         /executor 1: .*(broken at load|exited \(3\))/);
     }
 });
+
+test('an executor whose worker goes after it is ready ends the slice out on it, says so once, and'
+    + ' takes no other', { timeout: 60000 }, async t=>{
+    // A worker gone after its `ready` said nothing: the slice out on it never
+    // ended, and the process waited on the bell for good with its thread.
+    const process = createCorkHost({ ...CONFIG, engine, executors: 2 });
+    const remote = await createRemoteExecutor({ host: process, index: 1, engineUrl: ENGINE_URL,
+        config: { ...CONFIG, executors: 2 },
+        workerUrl: new URL('./executor-lost.fixture.js', import.meta.url) });
+    /** @type {string[]} */
+    const told = [];
+    remote.onGone(reason=>told.push(reason));
+    try
+    {
+        // A loop that never ends: mov ecx, -1; L: add eax, ecx; dec ecx; jnz L; hlt
+        begin(process, [0xb9, ...u32(0xffffffff), 0x01, 0xc8, 0x49, 0x0f, 0x85,
+            ...u32(-9), 0xf4], random(7));
+        remote.block().set(process.block());
+        /** @type {any} */
+        let ended = null;
+        let slices = 0;
+        while (ended?.lost === undefined && !t.signal.aborted)
+        {
+            assert.equal(ended?.halted ?? false, false, 'the loop never halts');
+            remote.start(100_000);
+            slices++;
+            ended = null;
+            // The test's timeout is the bound: a slice that never ends fails it.
+            while (ended === null && !t.signal.aborted)
+            {
+                await new Promise(resolve=>setTimeout(resolve, 1));
+                ended = remote.step();
+            }
+            assert.ok(ended !== null, 'the slice ended');
+        }
+        assert.match(ended.lost, /exited \(7\)/, 'the slice ends with why');
+        assert.equal(ended.fault, null);
+        assert.ok(slices >= 1);
+        assert.deepEqual(told, [ended.lost], 'told once, as its slice\'s end is taken');
+        assert.equal(remote.lost(), ended.lost);
+        assert.equal(remote.busy(), true, 'never free for another slice');
+        assert.throws(()=>remote.start(1000), /executor 1: .*exited \(7\)/,
+            'and no slice starts on it');
+        // One told after it went is told at once.
+        remote.onGone(reason=>told.push(reason));
+        assert.equal(told.length, 2);
+    }
+    finally
+    {
+        await remote.close();
+    }
+});
