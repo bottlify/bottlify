@@ -3272,6 +3272,8 @@ test('NtReadFile refuses a negative offset and a missing buffer before it moves 
         0xc000000d, 'not the end of the file, not the pointer');
     assert.equal(natives.NtReadFile.handler([handle, 0, 0, 0, block, 0, 4, 0, 0]),
         0xc0000005, 'STATUS_ACCESS_VIOLATION');
+    assert.equal(natives.NtWriteFile.handler([handle, 0, 0, 0, block, 0, 4, 0, 0]),
+        0xc00000e8, 'a write from nowhere: STATUS_INVALID_USER_BUFFER');
     assert.equal(memory.dword(block), 0xdeadbeef, 'the status block untouched by each');
 });
 
@@ -3297,6 +3299,9 @@ test('NtSetInformationFile sets what SetFileInformationByHandle does, and its ow
     assert.equal(set(14, [0, 0x80000000]), 0xc000000d, 'a negative position');
     assert.equal(set(20, [0]), 0xc0000004, 'STATUS_INFO_LENGTH_MISMATCH');
     assert.equal(set(9, [0, 0]), 0xc0000003, 'a class nothing keeps');
+    memory.putDword(NT_STATUS, 0xdeadbeef);
+    assert.equal(set(14, [0, 0x80000000]), 0xc000000d);
+    assert.equal(memory.dword(NT_STATUS), 0xdeadbeef, 'a refused set leaves the status block');
 
     // FileRenameInformation: a bare name and no root stays in the folder.
     const name = 'NEW.DAT';
@@ -3366,4 +3371,53 @@ test('NtQueryDirectoryFile lists a folder a call at a time, from where it left o
         0x100, 1, 0, 0, 1]), 0);
     const next = memory.dword(BUFFER);
     assert.ok(next > 0 && next % 8 === 0, `the next record at ${next}`);
+});
+
+test('NtQueryDirectoryFile matches its mask as a native expression, "." and ".." first', ()=>{
+    const { memory, files, fns } = setup();
+    const natives = /** @type {any} */ (fns.CreateFileW).natives;
+    files.mkdir('C:\\GAME\\DIR');
+    files.put('C:\\GAME\\DIR\\A.TXT', 'a');
+    files.put('C:\\GAME\\DIR\\README', 'r');
+    assert.equal(natives.NtCreateFile.handler([NT_HANDLE, GENERIC_READ,
+        objectAttributes(memory, '\\??\\C:\\GAME\\DIR'), NT_STATUS, 0, 0, 7, FILE_OPEN,
+        FILE_DIRECTORY_FILE, 0, 0]), 0);
+    const handle = memory.dword(NT_HANDLE);
+    /** A UNICODE_STRING mask at 0xe00, its characters at 0xe10. @param {string} text */
+    const mask = text=>{
+        memory.bytes.set([text.length * 2 & 0xff, text.length * 2 >> 8, 0, 0, 0x10, 0x0e, 0, 0],
+            0xe00);
+        [...text].forEach((c, i)=>memory.bytes.set([c.charCodeAt(0), 0], 0xe10 + i * 2));
+        return 0xe00;
+    };
+    /** Every name the mask lists, one a call. @param {string} text */
+    const names = text=>{
+        const found = [];
+        let restart = 1;
+        let first = mask(text);
+        for (;;)
+        {
+            const status = natives.NtQueryDirectoryFile.handler([handle, 0, 0, 0, NT_STATUS,
+                BUFFER, 0x100, 12, 1, first, restart]);
+            restart = 0;
+            first = 0;
+            if (status !== 0)
+            {
+                return { found, status: status >>> 0, block: memory.dword(NT_STATUS) };
+            }
+            const length = memory.dword(BUFFER + 8);
+            found.push(String.fromCharCode(...[...memory.bytes.subarray(BUFFER + 12,
+                BUFFER + 12 + length)].filter((_, at)=>at % 2 === 0)));
+        }
+    };
+    const all = names('*');
+    assert.deepEqual(all.found, ['.', '..', 'A.TXT', 'README']);
+    assert.equal(all.status, 0x80000006);
+    assert.equal(all.block, 0x80000006, 'a warning writes the status block');
+    assert.deepEqual(names('*.*').found, ['.', '..', 'A.TXT'], '*.* asks for a dot');
+    assert.deepEqual(names('<').found, ['.', '..', 'README'], 'DOS_STAR stops at the dot');
+    memory.bytes.set([0xef, 0xbe, 0xad, 0xde], NT_STATUS);
+    const none = names('nothing');
+    assert.equal(none.status, 0xc000000f, 'STATUS_NO_SUCH_FILE');
+    assert.equal(none.block, 0xdeadbeef, 'an error leaves the status block alone');
 });

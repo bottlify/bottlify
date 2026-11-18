@@ -32,6 +32,8 @@
 import { STATUS, toDosError } from '../ntdll/status.js';
 import { overlappedLayout, overlappedPosition, overlappedResult } from '../common/overlapped.js';
 import { dueInMs, readLargeInteger } from './due-time.js';
+import { readObjectAttributes, win32NameOf } from './object-attributes.js';
+import { TAKEN } from './named-objects.js';
 
 /** Codes this surface reports. */
 const ERROR_SUCCESS = 0;
@@ -126,6 +128,8 @@ const HANG_AFTER_MS = 10_000;
  * @property {(alertable: boolean, wait: () => any, answer?: () => number) => any} [alertably]
  *     a wait an APC may end, the routines queued run first (apc.js `waitWith`)
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {ReturnType<typeof import('./named-objects.js').createNamedObjects>} [namedObjects]
+ *     the run's one namespace, where a port made by name is found again
  * @property {(text: string) => void} [trace]
  * @property {() => number} [hostTime]
  *           Host milliseconds, for the hang report alone. The wall clock unless
@@ -660,6 +664,23 @@ export function createIoCompletionPorts(host){
     };
 
     /**
+     * The Win32 name an OBJECT_ATTRIBUTES gives a port, null for none, or the
+     * status a path outside the Win32 directory answers.
+     *
+     * @param {number} attributes
+     * @returns {string | null | number}
+     */
+    const portName = attributes=>{
+        const given = readObjectAttributes(host.readMemory, attributes,
+            host.pointerSize === 8 ? 8 : 4);
+        if (given === null || given.name === null || given.name === '')
+        {
+            return null;
+        }
+        return win32NameOf(given) ?? STATUS.OBJECT_PATH_NOT_FOUND;
+    };
+
+    /**
      * The native calls over the same ports, which ntdll publishes: a packet
      * one front door queues the other dequeues. A native packet's status is
      * the caller's own; a Win32 completion's is its operation's.
@@ -669,8 +690,8 @@ export function createIoCompletionPorts(host){
          * NTSTATUS NtCreateIoCompletion(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES,
          *                               ULONG NumberOfConcurrentThreads)
          *
-         * A port is unnamed here: one made by name is made without it, and
-         * NtOpenIoCompletion finds none.
+         * A port made by name is found again by NtOpenIoCompletion, in the
+         * namespace every named kernel object shares.
          */
         NtCreateIoCompletion: {
             argBytes: 16,
@@ -680,12 +701,23 @@ export function createIoCompletionPorts(host){
                 {
                     return STATUS.ACCESS_VIOLATION;
                 }
-                if ((attributes >>> 0) !== 0 && readDword((attributes >>> 0) + 8) !== 0)
+                const named = portName(attributes);
+                if (typeof named === 'number')
                 {
-                    host.divergence?.('NtCreateIoCompletion',
-                        'a named port is made without its name');
+                    return named;
                 }
-                writeDword(out >>> 0, makePort().handle);
+                const found = named === null ? null : host.namedObjects?.existing(named, 'iocp');
+                if (found === TAKEN)
+                {
+                    return STATUS.OBJECT_TYPE_MISMATCH;
+                }
+                if (found)
+                {
+                    return STATUS.OBJECT_NAME_COLLISION;
+                }
+                const port = makePort();
+                host.namedObjects?.remember(named, 'iocp', port, false, ()=>{});
+                writeDword(out >>> 0, port.handle);
                 return STATUS.SUCCESS;
             },
         },
@@ -693,8 +725,33 @@ export function createIoCompletionPorts(host){
         NtOpenIoCompletion: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([out])=>((out >>> 0) === 0 ? STATUS.ACCESS_VIOLATION
-                : STATUS.OBJECT_NAME_NOT_FOUND),
+            handler: ([out, , attributes])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return STATUS.ACCESS_VIOLATION;
+                }
+                const named = portName(attributes);
+                if (typeof named === 'number')
+                {
+                    return named;
+                }
+                if (named === null)
+                {
+                    return STATUS.OBJECT_NAME_INVALID;
+                }
+                const found = host.namedObjects?.existing(named, 'iocp');
+                if (found === TAKEN)
+                {
+                    return STATUS.OBJECT_TYPE_MISMATCH;
+                }
+                if (!found)
+                {
+                    return STATUS.OBJECT_NAME_NOT_FOUND;
+                }
+                host.namedObjects?.reference(found);
+                writeDword(out >>> 0, kernel.handles.open('iocp', found));
+                return STATUS.SUCCESS;
+            },
         },
         /**
          * NTSTATUS NtSetIoCompletion(HANDLE, PVOID KeyContext, PVOID ApcContext,

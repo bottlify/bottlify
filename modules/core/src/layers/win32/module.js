@@ -1328,6 +1328,7 @@ export function createWin32Module(){
             const ports = createIoCompletionPorts({
                 pointerSize,
                 kernel,
+                namedObjects,
                 divergence: config?.divergence,
                 readMemory,
                 writeMemory,
@@ -3560,6 +3561,7 @@ export function createWin32Module(){
                         pointerSize,
                         processId,
                         kernel,
+                        namedObjects,
                         float: floatStates,
                         processors,
                         // A child's first thread, reached where the child runs.

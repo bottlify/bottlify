@@ -23,3 +23,13 @@ test('the native path and the Win32 name are each other\'s way back', ()=>{
         assert.equal(win32NameOf({ root: 0, name: native, attributes: 0, security: 0 }), name);
     }
 });
+
+test('the object directory is found as it is spelt, or in any case with OBJ_CASE_INSENSITIVE', ()=>{
+    const given = (/** @type {string} */ name, attributes = 0)=>({ root: 0, name, attributes,
+        security: 0 });
+    assert.equal(win32NameOf(given('\\BaseNamedObjects\\Test')), 'Test');
+    assert.equal(win32NameOf(given('\\BASENamedObjects\\test')), undefined,
+        'no such directory, spelt so');
+    assert.equal(win32NameOf(given('\\BASENamedObjects\\test', 0x40)), 'test');
+    assert.equal(win32NameOf(given('\\sessions\\1\\basenamedobjects\\x', 0x40)), 'x');
+});
