@@ -772,7 +772,11 @@ test('a gone process on this thread gives its names back, and a name another pro
         gone.ended();
         await gone.module.dispose();
     })();
-    assert.deepEqual([...table.keys()].sort(), ['Local\\Lock', 'Local\\Ready'],
+    // The object namespace's own directories and links are the run's, not a process's.
+    const names = ()=>[...table]
+        .filter(([, held])=>held.kind !== 'objdir' && held.kind !== 'symlink')
+        .map(([name])=>name);
+    assert.deepEqual(names().sort(), ['Local\\Lock', 'Local\\Ready'],
         'a name only the gone process held is free again');
     assert.equal(waiter.waitResult, 0x80, 'the lock went to the waiter, abandoned');
     assert.ok(await letGo(memoryOfGone, gc), 'the gone machine\'s memory is nobody\'s');
@@ -780,7 +784,7 @@ test('a gone process on this thread gives its names back, and a name another pro
     staying.kernel.resetEvent(ready);
     assert.equal(staying.kernel.poll(ready, waiter), null, 'and works on as an object of the run');
     staying.ended();
-    assert.equal(table.size, 0, 'the last process gone, every name is free');
+    assert.deepEqual(names(), [], 'the last process gone, every name is free');
 });
 
 test('a process in a worker of its own finds a process of the run by id across the link: its'
