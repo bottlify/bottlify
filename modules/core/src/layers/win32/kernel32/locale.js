@@ -1896,7 +1896,10 @@ export function createLocaleFunctions(host){
             const folded = fold(wide ? readWide(source >>> 0, span.length)
                 : decodeSingleByte(host.readMemory(source >>> 0, span.length), ANSI_CODE_PAGE),
             asked);
-            const bytes = wide ? null : encodeSingleByte(folded, ANSI_CODE_PAGE).bytes;
+            // Back to the ANSI page as WideCharToMultiByte with no flags writes
+            // it: with best fit, so a decomposed accent is its spacing form.
+            const bytes = wide ? null
+                : encodeSingleByte(folded, ANSI_CODE_PAGE, DEFAULT_CHAR, true).bytes;
             const length = bytes ? bytes.length : folded.length;
             if ((room | 0) === 0)
             {

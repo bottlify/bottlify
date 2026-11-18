@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { codePage } from './codepages.js';
+import { bestFit, codePage } from './codepages.js';
 
 /** @param {number} id */
 const page = id=>{
@@ -53,6 +53,19 @@ test('a character the page lacks is its best fit, unless forbidden, else the def
     assert.deepEqual([...strict.bytes], [0x3f]);
     assert.equal(strict.usedDefault(1), true);
     assert.equal(page(1251).encode('ä', 0, null).usedDefault(1), false);
+});
+
+test('a lone accent is its spacing form, and mu the micro sign, where the page has them', ()=>{
+    // Wine's locale.c test_FoldStringA: MAP_COMPOSITE written back to page 1252.
+    const windows1252 = new TextDecoder('windows-1252');
+    const bytes = new Map(Array.from({ length: 256 },
+        (_, byte)=>[windows1252.decode(new Uint8Array([byte])).charCodeAt(0), byte]));
+    const fit = (/** @type {string} */ character)=>
+        bestFit(character, code=>bytes.get(code) ?? -1);
+    assert.deepEqual(['̀', '́', '̂', '̃', '̄', '̈', '̊',
+        '̧', '⁄', 'μ'].map(fit),
+    [0x60, 0xb4, 0x5e, 0x7e, 0xaf, 0xa8, 0xb0, 0xb8, 0x2f, 0xb5]);
+    assert.equal(fit('̌'), null, 'a caron the page has no spacing form of');
 });
 
 test('a default given by the caller may be two bytes, and no buffer takes half a character', ()=>{
