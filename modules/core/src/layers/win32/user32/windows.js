@@ -116,6 +116,8 @@ const WM_MOUSEACTIVATE = 0x0021;
 const WA_INACTIVE = 0;
 const WA_ACTIVE = 1;
 const WA_CLICKACTIVE = 2;
+const WM_CTLCOLOR = 0x0019;
+const WM_CTLCOLORMSGBOX = 0x0132;
 const WM_STYLECHANGING = 0x007c;
 const WM_STYLECHANGED = 0x007d;
 const WM_NCCALCSIZE = 0x0083;
@@ -2243,8 +2245,14 @@ export function createWindowFunctions(host){
         afterChange(watched);
     };
 
-    /** @param {any} record  Whether it is placed inside another window. */
-    const isChild = record=>(record.style & WS_CHILD) !== 0;
+    /**
+     * Whether it is placed inside another window: WS_CHILD of a window. A
+     * WS_CHILD window of the desktop is a top-level one, stacked, painted
+     * and found among them - a combo box's dropped list is one.
+     *
+     * @param {any} record
+     */
+    const isChild = record=>(record.style & WS_CHILD) !== 0 && record.parent !== 0;
 
     /**
      * Whether a window is somewhere under another, by parents.
@@ -6533,19 +6541,20 @@ export function createWindowFunctions(host){
             }
             case WM_GETTEXTLENGTH:
                 return record.title.length;
-            // The system's colours are set in the context as well as the
-            // brush answered: the window text, on the 3D face or on the
-            // window colour for an edit or a list box.
+            // The system's colours are set in the context and a brush of the
+            // background answered: the window text, on the window colour for
+            // an edit or a list box and on the 3D face for the rest (combo.c
+            // test_combo_ctlcolor: every kind answers a brush by default).
+            case WM_CTLCOLOR:
+            case WM_CTLCOLORMSGBOX:
             case WM_CTLCOLORSTATIC:
             case WM_CTLCOLORBTN:
             case WM_CTLCOLORDLG:
             case WM_CTLCOLORSCROLLBAR:
-                controls.helpers.defaultControlColors(message.message, message.wParam >>> 0);
-                return draw ? draw.solidBrush(sysColor(COLOR_3DFACE)) : 0;
             case WM_CTLCOLOREDIT:
             case WM_CTLCOLORLISTBOX:
-                controls.helpers.defaultControlColors(message.message, message.wParam >>> 0);
-                return 0;
+                return controls.helpers.defaultControlColors(message.message,
+                    message.wParam >>> 0);
             case WM_VSCROLL:
             case WM_HSCROLL:
                 return scrollWindowBar(record, message);
@@ -6908,8 +6917,10 @@ export function createWindowFunctions(host){
             }
             host.writeMemory(name, Uint8Array.from([...className].map(c=>c.charCodeAt(0))));
             host.writeMemory(name + className.length, new Uint8Array(1));
+            const parent = owner === 0 && (style & (WS_CHILD | WS_POPUP)) === WS_CHILD
+                ? desktopWindow().hwnd : owner;
             return andThen(createWindow([exStyle, name, 0, style, rect.x, rect.y, rect.width,
-                rect.height, owner, id, 0, 0], false, thread), hwnd=>{
+                rect.height, parent, id, 0, 0], false, thread), hwnd=>{
                 host.release?.(name);
                 return hwnd >>> 0;
             });

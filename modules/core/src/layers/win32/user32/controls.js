@@ -296,6 +296,7 @@ const EDIT_BUFFER_STEP = 64;
 const SIZE_RESTORED = 0;
 const SIZE_MAXIMIZED = 2;
 const WS_EX_CLIENTEDGE = 0x00000200;
+const WS_CLIPSIBLINGS = 0x04000000;
 /** SM_CYBORDER: a thin border's height, which an edit's WS_BORDER insets by and one. */
 const THIN_BORDER = 1;
 /** What a program that never set a limit may type: the documented default. */
@@ -413,6 +414,7 @@ const CBS_SORT = 0x0100;
 const CBS_OWNERDRAW = 0x0030;
 const CBS_OWNERDRAWFIXED = 0x0010;
 const CBS_HASSTRINGS = 0x0200;
+const CBS_NOINTEGRALHEIGHT = 0x0400;
 const CB_GETEDITSEL = 0x0140;
 const CB_LIMITTEXT = 0x0141;
 const CB_SETEDITSEL = 0x0142;
@@ -448,12 +450,12 @@ const CBN_DROPDOWN = 7;
 const CBN_CLOSEUP = 8;
 const CBN_SELENDOK = 9;
 const CBN_SELENDCANCEL = 10;
-/** The dropped list: a popup of its own over everything, never activated. */
-const WS_POPUP = 0x80000000;
+/** The dropped list: a child of the desktop over everything, never activated. */
 const WS_BORDER = 0x00800000;
-const WS_EX_TOPMOST = 0x00000008;
 const WS_EX_TOOLWINDOW = 0x00000080;
-const SW_SHOWNA = 8;
+const HWND_TOPMOST = -1;
+const SWP_NOACTIVATE = 0x0010;
+const SWP_SHOWWINDOW = 0x0040;
 const WM_DESTROY = 0x0002;
 const WM_MOUSEACTIVATE = 0x0021;
 const WM_SYSKEYDOWN = 0x0104;
@@ -481,6 +483,8 @@ const ES_LOWERCASE = 0x0010;
 const ES_NOHIDESEL = 0x0100;
 const ES_OEMCONVERT = 0x0400;
 const WM_CTLCOLORMSGBOX = 0x0132;
+/** What a 16-bit control asked its colour with, still passed on. */
+const WM_CTLCOLOR = 0x0019;
 /** A combo box's list: a list box that tells the combo box, not its parent. */
 const LBS_COMBOBOX = 0x8000;
 const LBS_NOINTEGRALHEIGHT = 0x0100;
@@ -699,7 +703,8 @@ export const imagePlace = (record, rect, shape)=>{
  *     thread?: unknown, id?: number) => number | Promise<number>} [popup]
  *           A window of a system class, made by name: a combo box's list,
  *           a popup on the screen or a child (WS_CHILD) in its parent with
- *           the control id `id`. Absent, a combo box has no list window.
+ *           the control id `id`, a child of the desktop for an owner of
+ *           zero. Absent, a combo box has no list window.
  * @property {(hwnd: number, command: number) => number | Promise<number>} [show]
  * @property {(hwnd: number) => number | Promise<number>} [destroy]
  * @property {(hwnd: number, address: number) => number} [comboBoxInfo]
@@ -845,7 +850,7 @@ export function thumbValue(rect, vertical, held, start){
  * @returns {{ procedures: Record<string, ControlProcedure>,
  *     helpers: { dialogProc: ControlProcedure,
  *         markDefault: (dialog: any, focused: number) => void,
- *         defaultControlColors: (message: number, hdc: number) => void,
+ *         defaultControlColors: (message: number, hdc: number) => number,
  *         paintScrollBar: (hdc: number, rect: Rect, vertical: boolean,
  *             held: ScrollBarState) => void,
  *         scrollHit: (rect: Rect, vertical: boolean, held: ScrollBarState,
@@ -1170,17 +1175,20 @@ export function createControlProcedures(host){
     const staticOpaque = hdc=>host.draw?.bkMode?.(hdc) === OPAQUE;
 
     /**
-     * The colours the default procedure gives the context a control asked
-     * WM_CTLCOLOR* about, as DefWindowProc sets them: the window text on the
-     * window colour for an edit or a list box, on the 3D face for the rest.
+     * What the default procedure answers a control that asked WM_CTLCOLOR*:
+     * the window text on the window colour for an edit or a list box, on
+     * the 3D face for the rest, set in the context, and a brush of that
+     * background (zero in a build that draws nothing).
      *
      * @param {number} message @param {number} hdc
+     * @returns {number}
      */
     const defaultControlColors = (message, hdc)=>{
         const face = message === WM_CTLCOLOREDIT || message === WM_CTLCOLORLISTBOX
             ? COLOR_WINDOW : COLOR_3DFACE;
         host.draw?.setTextColor?.(hdc, color(COLOR_WINDOWTEXT));
         host.draw?.setBkColor?.(hdc, color(face));
+        return host.draw ? host.draw.solidBrush(color(face)) : 0;
     };
 
     // --- Button -------------------------------------------------------------
@@ -3875,13 +3883,16 @@ export function createControlProcedures(host){
     const editNotice = (combo, edit, code, thread)=>{
         switch (code){
             case EN_SETFOCUS:
+                // Its text selected whole as the focus comes, and none of it
+                // as it goes, the caret at the start (combo.c
+                // test_editselection_focus: EM_SETSEL 0, INT_MAX and 0, 0).
                 host.invalidate(combo);
-                return after(host.send(edit.hwnd, EM_SETSEL, 0, -1, thread),
+                return after(host.send(edit.hwnd, EM_SETSEL, 0, 0x7fffffff, thread),
                     ()=>notify(combo, CBN_SETFOCUS, thread));
             case EN_KILLFOCUS:
                 host.invalidate(combo);
                 return after(closeList(combo, false, thread),
-                    ()=>after(host.send(edit.hwnd, EM_SETSEL, -1, 0, thread),
+                    ()=>after(host.send(edit.hwnd, EM_SETSEL, 0, 0, thread),
                         ()=>notify(combo, CBN_KILLFOCUS, thread)));
             case EN_UPDATE:
                 return stateOf(combo).quiet ? 0 : notify(combo, CBN_EDITUPDATE, thread);
@@ -3902,10 +3913,12 @@ export function createControlProcedures(host){
 
     /**
      * Makes a combo box's list window, which lives as long as the combo box:
-     * a simple combo box's is a child under its field, shown; a drop-down
-     * one's a popup over every window, hidden until it drops. Its style says
-     * what the combo box's says of its items, and LBS_COMBOBOX that it
-     * answers to the combo box. The combo box's items are kept in it.
+     * a simple combo box's is a child under its field, shown, in a sunken
+     * edge; a drop-down one's a child of the desktop with a border, hidden
+     * until it drops, and put over every window then. Its style says what
+     * the combo box's says of its items, LBS_COMBOBOX that it answers to the
+     * combo box, and LBS_NOTIFY (combo.c test_listbox_styles, which reads
+     * what Windows makes). The combo box's items are kept in it.
      *
      * @param {any} combo @param {unknown} [thread]
      */
@@ -3915,14 +3928,16 @@ export function createControlProcedures(host){
             return 0;
         }
         const simple = (combo.style & CBS_TYPEMASK) === CBS_SIMPLE;
-        const style = (LBS_COMBOBOX | LBS_NOINTEGRALHEIGHT
+        const strings = (combo.style & CBS_HASSTRINGS) !== 0 || (combo.style & CBS_OWNERDRAW) === 0;
+        const style = (WS_CHILD | WS_CLIPSIBLINGS | LBS_COMBOBOX | LBS_NOTIFY
+            | ((combo.style & CBS_NOINTEGRALHEIGHT) !== 0 ? LBS_NOINTEGRALHEIGHT : 0)
             | ((combo.style & CBS_SORT) !== 0 ? LBS_SORT : 0)
             | (combo.style & CBS_OWNERDRAW)
-            | ((combo.style & CBS_HASSTRINGS) !== 0 ? LBS_HASSTRINGS : 0)
-            | (simple ? WS_CHILD | WS_VISIBLE : WS_POPUP | WS_BORDER)) >>> 0;
+            | (strings ? LBS_HASSTRINGS : 0)
+            | (simple ? WS_VISIBLE : WS_BORDER)) >>> 0;
         const rect = { x: 0, y: 0, width: combo.width, height: 0 };
-        return after(host.popup('ComboLBox', rect, simple ? combo.hwnd : combo.parent || combo.hwnd,
-            simple ? 0 : WS_EX_TOPMOST | WS_EX_TOOLWINDOW, style, thread,
+        return after(host.popup('ComboLBox', rect, simple ? combo.hwnd : 0,
+            simple ? WS_EX_CLIENTEDGE : WS_EX_TOOLWINDOW, style, thread,
             simple ? COMBO_LIST_ID : 0), hwnd=>{
             const list = hwnd !== 0 ? host.live(hwnd) : null;
             if (list)
@@ -4116,7 +4131,8 @@ export function createControlProcedures(host){
     /**
      * The rows a combo box's dropped list shows, and how tall each is: the
      * height the combo box was made with is its field and its list together,
-     * and a list too short for one row still shows one.
+     * and a list too short for one row shows none, its client area empty
+     * (combo.c test_listbox_size).
      *
      * @param {any} combo
      */
@@ -4127,7 +4143,7 @@ export function createControlProcedures(host){
         host.endPaint(combo, hdc);
         const fit = Math.floor(((state.droppedHeight ?? 0) - host.clientSize(combo).height - 2)
             / row);
-        return { row, rows: Math.max(1, Math.min(Math.max(state.items.length, 1), fit)) };
+        return { row, rows: Math.max(0, Math.min(Math.max(state.items.length, 1), fit)) };
     };
 
     /**
@@ -4143,7 +4159,7 @@ export function createControlProcedures(host){
         const state = listState(combo);
         const list = listOf(combo);
         if ((state.dropped ?? 0) !== 0 || (combo.style & CBS_TYPEMASK) === CBS_SIMPLE
-            || !list || !host.move || !host.clientOrigin || disabled(combo))
+            || !list || !host.place || !host.clientOrigin || disabled(combo))
         {
             return 0;
         }
@@ -4155,12 +4171,14 @@ export function createControlProcedures(host){
             state.top = Math.max(0, Math.min(state.current, state.items.length - rows));
             state.dropped = list.hwnd;
             host.invalidate(combo);
-            return after(/** @type {any} */ (host.move)(list.hwnd, origin.x,
+            // Over every window, WS_EX_TOPMOST from then on (combo.c
+            // test_listbox_styles), shown without taking the activation.
+            return after(/** @type {any} */ (host.place)(list.hwnd, HWND_TOPMOST, origin.x,
                 origin.y + size.height, Math.max(size.width, state.droppedWidth ?? 0),
-                rows * row + 2), ()=>after(host.show?.(list.hwnd, SW_SHOWNA) ?? 0, ()=>{
+                rows * row + 2, SWP_NOACTIVATE | SWP_SHOWWINDOW, thread), ()=>{
                 host.setCapture(list.hwnd);
                 return 0;
-            }));
+            });
         });
     };
 
@@ -4250,7 +4268,7 @@ export function createControlProcedures(host){
 
     /**
      * The rows a simple combo box's list shows, how tall each is, and where
-     * they are in its list window: inside its sunken edge.
+     * they are in its list window: all of its client area, inside the frame.
      *
      * @param {any} combo
      */
@@ -4264,7 +4282,7 @@ export function createControlProcedures(host){
         const row = hdc !== 0 ? itemHeight(combo, hdc) : 16;
         host.endPaint(list, hdc);
         const size = host.clientSize(list);
-        const rows = shrink({ left: 0, top: 0, right: size.width, bottom: size.height }, 2);
+        const rows = { left: 0, top: 0, right: size.width, bottom: size.height };
         return { row, visible: Math.max(1, Math.floor((rows.bottom - rows.top) / row)), rows };
     };
 
@@ -4385,9 +4403,9 @@ export function createControlProcedures(host){
         {
             switch (message.message){
                 case WM_PAINT:
+                    // Its sunken edge is its frame (WS_EX_CLIENTEDGE).
                     return painting(record, (hdc, rect)=>{
-                        sunkenEdge(hdc, rect);
-                        paintDropped(combo, hdc, shrink(rect, 2), state.current);
+                        paintDropped(combo, hdc, rect, state.current);
                     });
                 case WM_ERASEBKGND:
                     return 1;
@@ -4509,12 +4527,19 @@ export function createControlProcedures(host){
             return after(showsItem ? showItem(record, state.current, thread) : 0,
                 ()=>answer ?? CB_ERR);
         }
-        if (message.message >= WM_CTLCOLORMSGBOX && message.message <= WM_CTLCOLORSTATIC)
+        if (message.message === WM_CTLCOLOR
+            || message.message >= WM_CTLCOLORMSGBOX && message.message <= WM_CTLCOLORSTATIC)
         {
             // Its edit and its list ask the combo box for their colours; the
-            // combo box asks its own parent, as Windows' does.
-            return record.parent ? host.send(record.parent, message.message, message.wParam,
-                message.lParam, thread) : common(record, message, thread);
+            // combo box asks its own parent, as Windows' does. One with no
+            // parent answers as DefWindowProc does, but Common Controls 6's
+            // answers none (user32's and comctl32's combo.c test_combo_ctlcolor).
+            if (record.parent)
+            {
+                return host.send(record.parent, message.message, message.wParam, message.lParam,
+                    thread);
+            }
+            return (record.controlsVersion ?? 5) >= 6 ? 0 : common(record, message, thread);
         }
         switch (message.message){
             case WM_CREATE:
@@ -4629,15 +4654,20 @@ export function createControlProcedures(host){
                 // The field of an editable combo box is its edit's; a click on
                 // the drop button, or anywhere on a dropdown list, drops the
                 // list, and a click on what is left of the field focuses it.
+                // Either way the click is answered TRUE, as Windows' combo
+                // box answers it (user32 combo.c test_selection, test_listbox_size).
                 const point = pointOf(message.lParam);
                 const { button } = comboParts(record);
                 if (edit && (simple || point.x < button.left))
                 {
-                    return after(host.setFocus(record.hwnd, thread), ()=>0);
+                    return after(host.setFocus(record.hwnd, thread), ()=>1);
                 }
-                return after(host.setFocus(record.hwnd, thread), ()=>((state.dropped ?? 0) !== 0
-                    ? closeList(record, false, thread) : dropList(record, thread)));
+                return after(host.setFocus(record.hwnd, thread), ()=>after((state.dropped ?? 0)
+                    !== 0 ? closeList(record, false, thread) : dropList(record, thread), ()=>1));
             }
+            case WM_LBUTTONUP:
+                // The dropped list holds the mouse and takes the release itself.
+                return 1;
             case WM_CHAR:
                 // Typing is the edit's; a dropdown list takes none.
                 return edit ? host.send(edit.hwnd, WM_CHAR, message.wParam, message.lParam, thread)
@@ -5181,18 +5211,15 @@ export function createControlProcedures(host){
                     return 1;
                 });
             }
+            // The dialog's face for its statics and buttons, the window
+            // colour for an edit and a list box, as DefWindowProc answers.
             case WM_CTLCOLORDLG:
             case WM_CTLCOLORSTATIC:
             case WM_CTLCOLORBTN:
             case WM_CTLCOLORSCROLLBAR:
-                // The dialog's face for its statics and buttons; an edit and a
-                // list box keep the window colour, which is their own default.
-                defaultControlColors(message.message, message.wParam >>> 0);
-                return host.draw ? host.draw.solidBrush(color(COLOR_3DFACE)) : 0;
             case WM_CTLCOLOREDIT:
             case WM_CTLCOLORLISTBOX:
-                defaultControlColors(message.message, message.wParam >>> 0);
-                return 0;
+                return defaultControlColors(message.message, message.wParam >>> 0);
             // The default id is the template's default push button's until a
             // program names another; the dialog manager keeps it on the
             // dialog's record, where making the dialog sets it.

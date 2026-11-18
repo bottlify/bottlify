@@ -1554,9 +1554,11 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             record.style = (record.style & ~WS_VISIBLE) >>> 0;
         }
         let restacked = false;
-        // HWND_TOPMOST and HWND_NOTOPMOST put a top-level window in the
-        // band above the others or out of it, which WS_EX_TOPMOST says.
-        const band = (record.style & WS_CHILD) !== 0 || (flags & SWP_NOZORDER) !== 0 ? null
+        // HWND_TOPMOST and HWND_NOTOPMOST put a top-level window - one on
+        // the desktop, WS_CHILD of it or not - in the band above the others
+        // or out of it, which WS_EX_TOPMOST says.
+        const inside = (record.style & WS_CHILD) !== 0 && record.parent !== 0;
+        const band = inside || (flags & SWP_NOZORDER) !== 0 ? null
             : (after >>> 0) === HWND_TOPMOST ? true : (after >>> 0) === HWND_NOTOPMOST ? false
                 : null;
         if (band !== null && ((record.exStyle & WS_EX_TOPMOST) !== 0) !== band)
@@ -1565,7 +1567,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
                 : record.exStyle & ~WS_EX_TOPMOST) >>> 0;
             restacked = true;
         }
-        if ((flags & SWP_NOZORDER) === 0 && (record.style & WS_CHILD) !== 0)
+        if ((flags & SWP_NOZORDER) === 0 && inside)
         {
             restacked = host.restack(record, after >>> 0, false) !== false;
         }
