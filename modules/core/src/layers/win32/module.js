@@ -12,7 +12,8 @@ import { createNamedObjects, createRemoteNamedObjects } from './kernel32/named-o
 import { createRegistryService } from './advapi32/registry-service.js';
 import { createDebugFunctions } from './kernel32/debug.js';
 import {
-    ALIGNMENT_64, GLOBAL_MEMORY, PAGE_STATE, TABLES, createHeapAllocator, createHeapFunctions,
+    ALIGNMENT_64, GLOBAL_MEMORY, GUARD_PAGES, PAGE_STATE, TABLES, createHeapAllocator,
+    createHeapFunctions,
 } from './kernel32/heap.js';
 import { createProcessFunctions, createThreadState, PERFORMANCE_FREQUENCY }
     from './kernel32/process.js';
@@ -2299,6 +2300,13 @@ export function createWin32Module(){
                 dispatcherHandler: ()=>(dispatcherFrameTrap ||= bridge.register(
                     '<exception dispatcher frame>', { argBytes: 0, handler: ()=>1 })),
                 currentThread: ()=>kernel.currentThread(),
+                // Read when a fault asks: kernel32's table is built after this.
+                guardPages: {
+                    touch: address=>Boolean(/** @type {any} */ (libraries['KERNEL32.dll'])?.[
+                        GUARD_PAGES]?.touch(address)),
+                    commitGuard: page=>Boolean(/** @type {any} */ (libraries['KERNEL32.dll'])?.[
+                        GUARD_PAGES]?.commitGuard(page)),
+                },
                 /** @param {string} text */
                 trace: text=>trace(text),
                 // What Windows does once nothing handled an exception and the

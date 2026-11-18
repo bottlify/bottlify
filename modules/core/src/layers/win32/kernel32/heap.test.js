@@ -9,7 +9,8 @@ import { createWriteClock } from '../../cpu/internal/write-clock.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    TABLES, arenaRegion, createAddressIndex, createHeapAllocator, createHeapFunctions,
+    GUARD_PAGES, TABLES, arenaRegion, createAddressIndex, createHeapAllocator,
+    createHeapFunctions,
 } from './heap.js';
 
 const HEAP_ZERO_MEMORY = 0x8;
@@ -1428,6 +1429,49 @@ function arenaQuery(){
     };
     return { fns, query, memory: { view } };
 }
+
+test('a guard page is closed to the processor until its first touch takes the guard away', ()=>{
+    // Wine's kernel32:virtual (test_guard_page): PAGE_GUARD reads back until
+    // the page is touched, a touch takes it away for good, VirtualLock over
+    // it fails once with STATUS_GUARD_PAGE_VIOLATION, and a stack commits
+    // its next guard page below the one it touched.
+    /** @type {[number, number, boolean][]} */
+    const access = [];
+    /** @type {number[]} */
+    const errors = [];
+    const host = {
+        ...fakeHost(RESERVING_ARENA),
+        setLastError: (/** @type {number} */ code)=>errors.push(code),
+        /** @param {number} address @param {number} length @param {boolean} open */
+        pageAccess: (address, length, open)=>{
+            if (length > 0)
+            {
+                access.push([address, length, open]);
+            }
+            return true;
+        },
+    };
+    const fns = createHeapFunctions(host);
+    const guard = /** @type {any} */ (fns)[GUARD_PAGES];
+    const base = fns.VirtualAlloc.handler([0, 0x4000, MEM_RESERVE, 4]);
+    assert.equal(fns.VirtualAlloc.handler([base + 0x3000, 0x1000, MEM_COMMIT, 0x104]),
+        base + 0x3000);
+    assert.deepEqual(access.at(-1), [base + 0x3000, 0x1000, false], 'closed, guarded');
+    assert.equal(guard.touch(base + 0x2000), false, 'a reserved page has no guard');
+    assert.equal(guard.touch(base + 0x3abc), true);
+    assert.deepEqual(access.at(-1), [base + 0x3000, 0x1000, true], 'opened by the touch');
+    assert.equal(guard.touch(base + 0x3abc), false, 'once');
+    const old = 0x100;
+    assert.equal(fns.VirtualProtect.handler([base + 0x3000, 0x1000, 4, old]), 1);
+    assert.equal(new DataView(host.bytes.buffer).getUint32(old, true), 4, 'the guard gone');
+
+    assert.equal(guard.commitGuard(base + 0x2000), true, 'the stack\'s next guard page');
+    assert.deepEqual(access.at(-1), [base + 0x2000, 0x1000, false]);
+    assert.equal(fns.VirtualLock.handler([base + 0x2000, 0x2000]), 0);
+    assert.equal(errors.at(-1), 0x80000001, 'STATUS_GUARD_PAGE_VIOLATION');
+    assert.equal(fns.VirtualLock.handler([base + 0x2000, 0x2000]), 1, 'the guard is gone');
+    assert.equal(guard.touch(base + 0x2000), false);
+});
 
 test('VirtualQuery inside a reservation answers the reservation, page by page as committed',
     ()=>{

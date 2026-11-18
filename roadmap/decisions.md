@@ -2245,7 +2245,8 @@ XP machine that got 4.x first keeps 4.x's `mscoree.dll` the same way. Without a 
 volume, XP has no shim of the engine's, and a Framework's own `mscoree.dll` is never stood in front
 of. *2026-11-14.*
 
-**A248. A page reads back the protection it was given; only PAGE_NOACCESS is enforced.**
+**A248. A page reads back the protection it was given; only PAGE_NOACCESS and PAGE_GUARD are
+enforced.**
 `VirtualQuery` answers each page of a `VirtualAlloc` reservation with the protection its last
 commit or `VirtualProtect` gave it, its run split where that changes, and `AllocationProtect` the
 reservation's own; `VirtualProtect` hands back the page's real old protection, and refuses a range
@@ -2259,9 +2260,11 @@ image's own headers; `VirtualProtect` of its pages is kept and handed back. A co
 still reads `PAGE_WRITECOPY` after it is written, where Windows turns it `PAGE_READWRITE`: no write
 is seen page by page. What a
 program can tell apart only by faulting is not reproduced: a closed page faults where the processor
-can close it, but a write to `PAGE_READONLY` memory, a jump into `PAGE_READWRITE` memory or a
-touch of a `PAGE_GUARD` page goes on, since the translator keeps no per-page write or execute
-permission and a check on every store would cost every program its speed. A program that relies on
+can close it, and so does a `PAGE_GUARD` page until its first touch, which takes the guard away
+and is a stack's growth inside the thread's stack reservation and `STATUS_GUARD_PAGE_VIOLATION`
+elsewhere; but a write to `PAGE_READONLY` memory or a jump into `PAGE_READWRITE` memory goes on,
+since the translator keeps no per-page write or execute permission and a check on every store
+would cost every program its speed. A program that relies on
 one of those faults is the case that reopens this.
 *2026-11-14.*
 
