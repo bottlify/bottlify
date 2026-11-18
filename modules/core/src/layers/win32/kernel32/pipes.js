@@ -49,6 +49,11 @@ const ERROR_IO_PENDING = 997;
 const ERROR_NOACCESS = 998;
 
 const INVALID_HANDLE_VALUE = 0xffffffff;
+const ERROR_INVALID_FUNCTION = 1;
+const ERROR_NOT_ENOUGH_MEMORY = 8;
+/** CallNamedPipe's steps: the open, and the zeroed fixed block its read mode is passed in. */
+const OPEN_EXISTING = 3;
+const LPTR = 0x40;
 
 /** The open mode: which way bytes go from the server, and the flags read here. */
 const PIPE_ACCESS_INBOUND = 0x1;
@@ -135,6 +140,8 @@ export const isPipeName = name=>PREFIXES.some(prefix=>
  * @property {(thread: any, code: number) => void} setLastErrorFor
  * @property {() => any} currentThread
  * @property {() => any} park
+ * @property {(name: string, args: number[], thread: any) => Promise<number>} [call]
+ *     a kernel32 export made on `thread`, its answer awaited: what CallNamedPipe is made of
  * @property {Map<string, any> | null} [table]  the run's named objects; absent, this
  *           process's own
  * @property {boolean} [remote]  a process in a worker of its own: no pipes
@@ -1342,6 +1349,69 @@ export function createNamedPipes(host){
         }
     };
 
+    /**
+     * CallNamedPipe in either width: the pipe opened, waited for while it is
+     * busy, set to read messages, one message written and the answer read,
+     * and closed - each step the call a program would make, so a server sees
+     * a client like any other. A step that fails ends it with that step's
+     * error, the handle closed without losing it.
+     *
+     * @param {boolean} wide
+     */
+    const callNamedPipe = wide=>({
+        argBytes: 28,
+        /** @param {number[]} args */
+        handler: async([name, input, inputSize, output, outputSize, count, timeout])=>{
+            const call = host.call;
+            if (!call)
+            {
+                host.divergence?.('CallNamedPipe', 'no way to make the calls it is made of');
+                return fail(ERROR_INVALID_FUNCTION);
+            }
+            const thread = host.currentThread();
+            /** @param {string} api @param {number[]} values */
+            const step = async(api, values)=>(await call(api, values, thread)) >>> 0;
+            const openPipe = ()=>step(wide ? 'CreateFileW' : 'CreateFileA', [name,
+                (GENERIC_READ | GENERIC_WRITE) >>> 0, 0, 0, OPEN_EXISTING, 0, 0]);
+            let handle = await openPipe();
+            if (handle === INVALID_HANDLE_VALUE)
+            {
+                if (await step('GetLastError', []) !== ERROR_PIPE_BUSY
+                    || await step(wide ? 'WaitNamedPipeW' : 'WaitNamedPipeA',
+                        [name, timeout >>> 0]) === 0)
+                {
+                    return 0;
+                }
+                handle = await openPipe();
+                if (handle === INVALID_HANDLE_VALUE)
+                {
+                    return 0;
+                }
+            }
+            const mode = await step('LocalAlloc', [LPTR, 4]);
+            if (mode !== 0)
+            {
+                writeDword(mode, PIPE_READMODE_MESSAGE);
+            }
+            const ok = mode !== 0
+                && await step('SetNamedPipeHandleState', [handle, mode, 0, 0]) !== 0
+                && await step('TransactNamedPipe',
+                    [handle, input, inputSize, output, outputSize, count, 0]) !== 0;
+            const error = ok ? 0 : await step('GetLastError', []);
+            if (mode !== 0)
+            {
+                await step('LocalFree', [mode]);
+            }
+            await step('CloseHandle', [handle]);
+            if (!ok)
+            {
+                host.setLastErrorFor(thread, mode === 0 ? ERROR_NOT_ENOUGH_MEMORY : error);
+                return 0;
+            }
+            return 1;
+        },
+    });
+
     /** @param {boolean} wide */
     const waitNamedPipe = wide=>({
         argBytes: 8,
@@ -1510,6 +1580,13 @@ export function createNamedPipes(host){
                 return 1;
             },
         },
+
+        /**
+         * BOOL CallNamedPipeA(LPCSTR lpNamedPipeName, LPVOID lpInBuffer, DWORD nInBufferSize,
+         *   LPVOID lpOutBuffer, DWORD nOutBufferSize, LPDWORD lpBytesRead, DWORD nTimeOut), and W
+         */
+        CallNamedPipeA: callNamedPipe(false),
+        CallNamedPipeW: callNamedPipe(true),
 
         /** BOOL WaitNamedPipeA(LPCSTR lpNamedPipeName, DWORD nTimeOut), and W */
         WaitNamedPipeA: waitNamedPipe(false),

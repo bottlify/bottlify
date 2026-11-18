@@ -653,3 +653,72 @@ test('a handle opened without FILE_FLAG_OVERLAPPED reads as a synchronous call, 
             'the status and the count in the OVERLAPPED');
         assert.equal(p.text(1), 'x');
     });
+
+/**
+ * CallNamedPipe over scripted steps: what each export it is made of answers.
+ *
+ * @param {Record<string, number[]>} answers  each step's answers, in turn
+ */
+function calling(answers){
+    const bytes = new Uint8Array(0x1000);
+    /** @type {[string, number[]][]} */
+    const steps = [];
+    /** @type {Map<any, number>} */
+    const errors = new Map();
+    const pipes = createNamedPipes(/** @type {any} */ ({
+        kernel: {}, handles: {},
+        readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
+            bytes.slice(at, at + length),
+        writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ data)=>
+            bytes.set(data, at),
+        setLastError: (/** @type {number} */ code)=>errors.set('caller', code),
+        setLastErrorFor: (/** @type {any} */ thread, /** @type {number} */ code)=>
+            errors.set(thread, code),
+        currentThread: ()=>'caller',
+        call: async(/** @type {string} */ name, /** @type {number[]} */ args,
+            /** @type {any} */ thread)=>{
+            assert.equal(thread, 'caller', 'every step on the caller\'s thread');
+            steps.push([name, args]);
+            return answers[name]?.shift() ?? 1;
+        },
+    }));
+    const fns = /** @type {Record<string, { handler: (args: number[]) => any }>} */ (
+        /** @type {unknown} */ (pipes.functions));
+    return { fns, steps, bytes, error: ()=>errors.get('caller') };
+}
+
+test('CallNamedPipe opens, sets message reads, transacts and closes, as a program would',
+    async()=>{
+        const { fns, steps, bytes } = calling({ CreateFileA: [0x44], LocalAlloc: [0x800] });
+        assert.equal(await fns.CallNamedPipeA.handler(
+            [NAME_AT, BUFFER, 4, BUFFER + 8, 4, COUNT, 500]), 1);
+        assert.deepEqual(steps.map(([name])=>name), ['CreateFileA', 'LocalAlloc',
+            'SetNamedPipeHandleState', 'TransactNamedPipe', 'LocalFree', 'CloseHandle']);
+        assert.deepEqual(steps[0][1], [NAME_AT, RW, 0, 0, 3, 0, 0]);
+        assert.deepEqual(steps[2][1], [0x44, 0x800, 0, 0]);
+        assert.equal(new DataView(bytes.buffer).getUint32(0x800, true), PIPE_READMODE_MESSAGE);
+        assert.deepEqual(steps[3][1], [0x44, BUFFER, 4, BUFFER + 8, 4, COUNT, 0],
+            'never overlapped');
+    });
+
+test('CallNamedPipe waits for a busy pipe, and a failed step ends it with that step\'s error',
+    async()=>{
+        const busy = calling({ CreateFileW: [0xffffffff, 0x48], GetLastError: [ERROR_PIPE_BUSY],
+            LocalAlloc: [0x800] });
+        assert.equal(await busy.fns.CallNamedPipeW.handler([NAME_AT, 0, 0, 0, 0, COUNT, 0]), 1);
+        assert.deepEqual(busy.steps.slice(0, 4).map(([name, args])=>[name, args[0]]), [
+            ['CreateFileW', NAME_AT], ['GetLastError', undefined], ['WaitNamedPipeW', NAME_AT],
+            ['CreateFileW', NAME_AT]]);
+
+        const gone = calling({ CreateFileA: [0xffffffff], GetLastError: [ERROR_FILE_NOT_FOUND] });
+        assert.equal(await gone.fns.CallNamedPipeA.handler([NAME_AT, 0, 0, 0, 0, COUNT, 0]), 0);
+        assert.deepEqual(gone.steps.map(([name])=>name), ['CreateFileA', 'GetLastError'],
+            'no pipe: nothing to wait for or close');
+
+        // An answer longer than the buffer: the transact's error, after the close.
+        const long = calling({ CreateFileA: [0x44], LocalAlloc: [0x800], TransactNamedPipe: [0],
+            GetLastError: [ERROR_MORE_DATA] });
+        assert.equal(await long.fns.CallNamedPipeA.handler([NAME_AT, 0, 0, 0, 0, COUNT, 0]), 0);
+        assert.deepEqual(long.steps.slice(-2).map(([name])=>name), ['LocalFree', 'CloseHandle']);
+        assert.equal(long.error(), ERROR_MORE_DATA);
+    });

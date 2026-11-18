@@ -1418,6 +1418,9 @@ export function createWin32Module(){
                     }
                 },
                 queueApc: (thread, routine, args)=>apcs.queue(thread, routine, args),
+                // CallNamedPipe's steps, each the export a program would call.
+                call: (name, args, thread)=>bridge.answering(thread,
+                    ()=>/** @type {any} */ (libraries['KERNEL32.dll'])[name].handler(args)),
                 divergence: config?.divergence,
             });
 
