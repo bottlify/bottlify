@@ -2474,3 +2474,14 @@ SetWindowPos's flags: the child is then placed at once, inside the message that 
 *Removed 2026-11-18:* `ControlHost.place` is SetWindowPos with its flags and the caller's thread;
 the pager recalculates its frame with SWP_FRAMECHANGED and places its child at once, which hears
 WM_CHILDACTIVATE, inside the message that asked. No PGM_PLACECHILD is posted.
+
+**A269. GetStringType's second and third types come from the Unicode properties the platform knows.**
+Windows answers CT_CTYPE2 (the bidirectional class) and CT_CTYPE3 (marks, symbols, kana, width,
+ideographs, kashida, surrogates) from a table of its own that its documentation does not list. A
+RegExp knows the categories, scripts, Diacritic, Ideographic and Alphabetic but not the Bidi_Class
+or the East Asian width, so `kernel32/string-types.js` derives them: right to left for the Hebrew,
+Arabic, Syriac, Thaana and N'Ko scripts, the numbers and separators of the bidirectional algorithm
+by their characters, half width for ASCII and the half-width forms, full width for the full-width
+forms, kana and CJK; C3_VOWELMARK and C3_LEXICAL are never set. CT_CTYPE1 follows the category as
+Windows' table does, with the departures the conformance tests pin written as exceptions. Revisit
+when a program is found switching on a CT_CTYPE2 or CT_CTYPE3 bit this answers otherwise. *2026-11-18.*

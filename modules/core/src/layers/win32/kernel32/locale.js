@@ -14,6 +14,7 @@ import { bestFit, codePage } from './codepages.js';
 import { ALTERNATE_SORTS, LOCALES, lcidOfName, localeByLcid, localeByName } from './locales.js';
 import { renderDate, renderTime } from './datetime-format.js';
 import { compareText, isSymbol, sortKey } from './collation.js';
+import { stringType } from './string-types.js';
 import { LCMAP_LINGUISTIC_CASING, LCMAP_SORTKEY, LCMAP_TITLECASE, mapText, validMapFlags }
     from './lcmap.js';
 import { DAYS, GENITIVE, HEX_TYPES, LCTYPE, MONTHS, isNumberType, localeValues }
@@ -101,18 +102,6 @@ const MB_ERR_INVALID_CHARS = 0x8;
 
 /** sizeof(CPINFO): MaxCharSize, DefaultChar[2], LeadByte[12]. */
 const CPINFO_SIZE = 18;
-
-/** What GetStringType reports. Only CT_CTYPE1 is answered. */
-const CT_CTYPE1 = 1;
-const C1_UPPER = 0x0001;
-const C1_LOWER = 0x0002;
-const C1_DIGIT = 0x0004;
-const C1_SPACE = 0x0008;
-const C1_PUNCT = 0x0010;
-const C1_CNTRL = 0x0020;
-const C1_BLANK = 0x0040;
-const C1_XDIGIT = 0x0080;
-const C1_ALPHA = 0x0100;
 
 /**
  * The sixteen positions where Windows-1252 is not Latin-1.
@@ -767,49 +756,6 @@ export const mapCaseAnsi = (bytes, upper)=>{
         mapped[at] = changed.length === 1 && !usedDefault ? encoded[0] : bytes[at];
     }
     return mapped;
-};
-
-/** @param {number} code */
-const characterType = code=>{
-    const character = String.fromCharCode(code);
-    let type = 0;
-    if (/\p{Lu}/u.test(character))
-    {
-        type |= C1_UPPER | C1_ALPHA;
-    }
-    if (/\p{Ll}/u.test(character))
-    {
-        type |= C1_LOWER | C1_ALPHA;
-    }
-    if (/\p{L}/u.test(character))
-    {
-        type |= C1_ALPHA;
-    }
-    if (code >= 0x30 && code <= 0x39)
-    {
-        type |= C1_DIGIT | C1_XDIGIT;
-    }
-    if (/[a-fA-F]/.test(character))
-    {
-        type |= C1_XDIGIT;
-    }
-    if (/\s/.test(character))
-    {
-        type |= C1_SPACE;
-    }
-    if (code === 0x20 || code === 0x09)
-    {
-        type |= C1_BLANK;
-    }
-    if (code < 0x20 || code === 0x7f)
-    {
-        type |= C1_CNTRL;
-    }
-    if (/[!-/:-@[-`{-~]/.test(character))
-    {
-        type |= C1_PUNCT;
-    }
-    return type;
 };
 
 /**
@@ -2919,7 +2865,8 @@ export function createLocaleFunctions(host){
             /** @param {number[]} args */
             handler: ([locale, infoType, source, count, types])=>{
                 void locale;
-                if ((infoType >>> 0) !== CT_CTYPE1 || (source >>> 0) === 0 || (types >>> 0) === 0)
+                if (stringType(infoType >>> 0, 0) === null || (source >>> 0) === 0
+                    || (types >>> 0) === 0)
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
@@ -2931,7 +2878,8 @@ export function createLocaleFunctions(host){
                 const view = new DataView(out.buffer);
                 for (let at = 0; at < text.length; at++)
                 {
-                    view.setUint16(at * 2, characterType(text.charCodeAt(at)), true);
+                    view.setUint16(at * 2, /** @type {number} */ (stringType(infoType >>> 0,
+                        text.charCodeAt(at))), true);
                 }
                 host.writeMemory(types >>> 0, out);
                 return 1;
@@ -2949,7 +2897,8 @@ export function createLocaleFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([infoType, source, count, types])=>{
-                if ((infoType >>> 0) !== CT_CTYPE1 || (source >>> 0) === 0 || (types >>> 0) === 0)
+                if (stringType(infoType >>> 0, 0) === null || (source >>> 0) === 0
+                    || (types >>> 0) === 0)
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
@@ -2960,7 +2909,8 @@ export function createLocaleFunctions(host){
                 const view = new DataView(out.buffer);
                 for (let at = 0; at < text.length; at++)
                 {
-                    view.setUint16(at * 2, characterType(text.charCodeAt(at)), true);
+                    view.setUint16(at * 2, /** @type {number} */ (stringType(infoType >>> 0,
+                        text.charCodeAt(at))), true);
                 }
                 host.writeMemory(types >>> 0, out);
                 return 1;
