@@ -814,7 +814,8 @@ export function createConstantTableObjects(host){
         id: IID_ID3DXCONSTANTTABLE,
         methods: inGuest([
             /** LPVOID GetBufferPointer() */
-            { name: 'GetBufferPointer', argBytes: 4, invoke: object=>tableOf(object).base },
+            { name: 'GetBufferPointer', returns: 'pointer', argBytes: 4,
+                invoke: object=>tableOf(object).base },
             /** DWORD GetBufferSize() */
             { name: 'GetBufferSize', argBytes: 4, invoke: object=>tableOf(object).size },
             /** HRESULT GetDesc(D3DXCONSTANTTABLE_DESC *pDesc) */

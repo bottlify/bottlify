@@ -859,7 +859,7 @@ export function createWin32Module(){
              */
             const nvapi = name=>({
                 /** void *nvapi_QueryInterface(unsigned int id) */
-                nvapi_QueryInterface: { argBytes: 4, convention: 'cdecl',
+                nvapi_QueryInterface: { returns: 'pointer', argBytes: 4, convention: 'cdecl',
                     /** @param {number[]} args */
                     handler: ([id])=>{
                         const found = NVAPI_INTERFACES.get(id >>> 0);

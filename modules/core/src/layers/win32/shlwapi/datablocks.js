@@ -316,6 +316,7 @@ export function createDataBlockFunctions(host){
          * one -- or NULL.
          */
         SHFindDataBlock: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([list, signature])=>{

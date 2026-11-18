@@ -346,10 +346,12 @@ export function createIjlLibrary({ readMemory, writeMemory, allocate, warn }){
         }
     };
 
-    /** @type {Record<string, { argBytes: number, handler: (args: number[]) => number }>} */
+    /** @type {Record<string, { argBytes: number, handler: (args: number[]) => number,
+        returns?: string }>} */
     const library = {
         /** IJLibVersion* ijlGetLibVersion(void) */
         ijlGetLibVersion: {
+            returns: 'pointer',
             argBytes: 0,
             handler: ()=>{
                 if (version === 0)
@@ -411,6 +413,7 @@ export function createIjlLibrary({ readMemory, writeMemory, allocate, warn }){
         },
         /** const char* ijlErrorStr(IJLERR code) */
         ijlErrorStr: {
+            returns: 'pointer',
             argBytes: 4,
             handler: ([code])=>stringAt(ERROR_TEXT[code | 0] ?? `IJL error ${code | 0}`),
         },

@@ -784,14 +784,14 @@ export function createRegistryHelpers(host){
          * IStream *SHOpenRegStream2A(HKEY hkey, LPCSTR pszSubkey, LPCSTR pszValue,
          *                            DWORD grfMode)
          */
-        SHOpenRegStream2A: openStream('A'),
+        SHOpenRegStream2A: { ...openStream('A'), returns: 'pointer' },
         SHOpenRegStream2W: openStream('W'),
 
         /**
          * IStream *SHOpenRegStreamA(HKEY hkey, LPCSTR pszSubkey, LPCSTR pszValue,
          *                           DWORD grfMode)
          */
-        SHOpenRegStreamA: openStreamOrEmpty('A'),
+        SHOpenRegStreamA: { ...openStreamOrEmpty('A'), returns: 'pointer' },
         SHOpenRegStreamW: openStreamOrEmpty('W'),
 
         /**

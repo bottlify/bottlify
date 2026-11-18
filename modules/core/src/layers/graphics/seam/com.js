@@ -113,6 +113,7 @@ function methodsFor(descriptor){
                 ...method.quadwords ? { quadwords: method.quadwords } : {},
 
                 ...method.structs ? { structs: method.structs } : {},
+                ...method.returns ? { returns: method.returns } : {},
                 guest: method.guest,
                 inPlace: method.inPlace,
                 ...descriptor.stranger === undefined ? {} : { stranger: descriptor.stranger },

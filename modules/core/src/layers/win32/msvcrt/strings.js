@@ -120,31 +120,31 @@ export function createStringFunctions(host){
     /** @type {Record<string, any>} */
     const table = {
         /** char *strrchr(const char *str, int ch) -- in the guest */
-        strrchr: guestEntry(inGuest.strrchr, COMPILED.strrchr, host),
+        strrchr: { ...guestEntry(inGuest.strrchr, COMPILED.strrchr, host), returns: 'pointer' },
 
         /** char *strpbrk(const char *str, const char *accept) -- in the guest */
-        strpbrk: guestEntry(inGuest.strpbrk, COMPILED.strpbrk, host),
+        strpbrk: { ...guestEntry(inGuest.strpbrk, COMPILED.strpbrk, host), returns: 'pointer' },
 
         /** size_t strspn(const char *str, const char *accept) -- in the guest */
-        strspn: guestEntry(inGuest.strspn, COMPILED.strspn, host),
+        strspn: { ...guestEntry(inGuest.strspn, COMPILED.strspn, host), returns: 'pointer' },
 
         /** size_t strcspn(const char *str, const char *reject) -- in the guest */
-        strcspn: guestEntry(inGuest.strcspn, COMPILED.strcspn, host),
+        strcspn: { ...guestEntry(inGuest.strcspn, COMPILED.strcspn, host), returns: 'pointer' },
 
         /** char *strncat(char *dest, const char *src, size_t count) -- in the guest */
-        strncat: guestEntry(inGuest.strncat, COMPILED.strncat, host),
+        strncat: { ...guestEntry(inGuest.strncat, COMPILED.strncat, host), returns: 'pointer' },
 
         /** int _strnicmp(const char *l, const char *r, size_t count) -- in the guest */
         _strnicmp: guestEntry(inGuest._strnicmp, COMPILED._strnicmp, host),
 
         /** char *_strupr(char *str) -- in the guest */
-        _strupr: guestEntry(inGuest._strupr, COMPILED._strupr, host),
+        _strupr: { ...guestEntry(inGuest._strupr, COMPILED._strupr, host), returns: 'pointer' },
 
         /** char *_strlwr(char *str) -- in the guest */
-        _strlwr: guestEntry(inGuest._strlwr, COMPILED._strlwr, host),
+        _strlwr: { ...guestEntry(inGuest._strlwr, COMPILED._strlwr, host), returns: 'pointer' },
 
         /** char *_strrev(char *str) */
-        _strrev: inPlace(text=>[...text].reverse().join('')),
+        _strrev: { ...inPlace(text=>[...text].reverse().join('')), returns: 'pointer' },
 
         /**
          * char *strtok(char *str, const char *delimiters)
@@ -154,6 +154,7 @@ export function createStringFunctions(host){
          * passes null on every call after the first to mean "carry on".
          */
         strtok: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 8,
             /** @param {number[]} args */
@@ -210,6 +211,7 @@ export function createStringFunctions(host){
          * duplicates to null, errno untouched, as msvcrt checks for it.
          */
         _strdup: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 4,
             /** @param {number[]} args */
@@ -303,6 +305,7 @@ export function createStringFunctions(host){
          * INT_MAX and EINVAL.
          */
         strxfrm: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 12,
             /** @param {number[]} args */
@@ -359,7 +362,7 @@ export function createStringFunctions(host){
         }),
 
         /** void *memchr(const void *buffer, int value, size_t count) -- in the guest */
-        memchr: guestEntry(inGuest.memchr, COMPILED.memchr, host),
+        memchr: { ...guestEntry(inGuest.memchr, COMPILED.memchr, host), returns: 'pointer' },
 
         // The classifiers, under the C locale, in the guest (`inguest.js`):
         // 1 for a byte of the class, 0 for anything else, EOF included.

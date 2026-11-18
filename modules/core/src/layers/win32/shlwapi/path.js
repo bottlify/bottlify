@@ -502,10 +502,13 @@ export function createPathFunctions(host, { A, W }){
      *
      * @param {string} name @param {number} argBytes
      * @param {(width: import('./text.js').Width, args: number[]) => number} body
+     * @param {{ returns?: string }} [marshal]  `returns: 'pointer'` for one answering an address
      */
-    const both = (name, argBytes, body)=>({
-        [`${name}A`]: { argBytes, handler: (/** @type {number[]} */ args)=>body(A, args) },
-        [`${name}W`]: { argBytes, handler: (/** @type {number[]} */ args)=>body(W, args) },
+    const both = (name, argBytes, body, marshal = {})=>({
+        [`${name}A`]: { argBytes, ...marshal,
+            handler: (/** @type {number[]} */ args)=>body(A, args) },
+        [`${name}W`]: { argBytes, ...marshal,
+            handler: (/** @type {number[]} */ args)=>body(W, args) },
     });
 
     /** @param {number} address @param {import('./text.js').Width} width @param {string} text */
@@ -654,7 +657,7 @@ export function createPathFunctions(host, { A, W }){
             }
             host.writeMemory(end, width.sz('\\'));
             return end + width.unit;
-        }),
+        }, { returns: 'pointer' }),
 
         /**
          * LPSTR PathRemoveBackslashA(LPSTR pszPath)
@@ -675,7 +678,7 @@ export function createPathFunctions(host, { A, W }){
                 host.writeMemory(last, width.sz(''));
             }
             return last;
-        }),
+        }, { returns: 'pointer' }),
 
         /**
          * BOOL PathCanonicalizeA(LPSTR pszBuf, LPCSTR pszPath)
@@ -832,7 +835,7 @@ export function createPathFunctions(host, { A, W }){
             const path = width.read(pointer);
             return path === null ? pointer >>> 0
                 : (pointer >>> 0) + argumentsAt(path) * width.unit;
-        }),
+        }, { returns: 'pointer' }),
 
         /**
          * void PathRemoveArgsA(LPSTR pszPath)
@@ -998,7 +1001,7 @@ export function createPathFunctions(host, { A, W }){
                 write(pointer, width, `${String.fromCharCode(0x41 + (drive | 0))}:\\`);
             }
             return pointer >>> 0;
-        }),
+        }, { returns: 'pointer' }),
 
         /**
          * BOOL PathRemoveFileSpecA(LPSTR pszPath)
@@ -1124,7 +1127,7 @@ export function createPathFunctions(host, { A, W }){
             const path = width.read(pointer);
             const past = path === null ? null : skipRoot(path);
             return past === null ? 0 : (pointer >>> 0) + past * width.unit;
-        }),
+        }, { returns: 'pointer' }),
 
         /**
          * BOOL PathFileExistsDefExtA(LPSTR lpszPath, DWORD dwWhich)
@@ -1171,6 +1174,7 @@ export function createPathFunctions(host, { A, W }){
 
         /** LPSTR PathSkipLeadingSlashesA(LPCSTR lpszSrc): past a URL's leading "//". */
         PathSkipLeadingSlashesA: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>{
@@ -1213,7 +1217,7 @@ export function createPathFunctions(host, { A, W }){
             }
             const cut = path.indexOf('\\');
             return (pointer >>> 0) + (cut < 0 ? path.length : cut + 1) * width.unit;
-        }),
+        }, { returns: 'pointer' }),
 
         /**
          * LPCSTR PathFindSuffixArrayA(LPCSTR lpszSuffix, LPCSTR *lppszArray, int dwCount)
@@ -1239,7 +1243,7 @@ export function createPathFunctions(host, { A, W }){
                 }
             }
             return 0;
-        }),
+        }, { returns: 'pointer' }),
 
         /**
          * UINT PathGetCharTypeA(UCHAR ch)

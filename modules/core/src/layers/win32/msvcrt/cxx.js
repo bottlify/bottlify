@@ -95,6 +95,7 @@ export function createCxxFunctions(host){
          * identity.
          */
         __RTCastToVoid: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 4,
             /** @param {number[]} args */
@@ -105,6 +106,7 @@ export function createCxxFunctions(host){
 
         /** void *__RTtypeid(void *object) */
         __RTtypeid: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 4,
             /** @param {number[]} args */

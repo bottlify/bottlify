@@ -351,6 +351,7 @@ export function createUcrtbaseFunctions(crt, host){
 
         /** FILE *__acrt_iob_func(unsigned index): stdin, stdout and stderr are 0, 1 and 2. */
         __acrt_iob_func: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 4,
             /** @param {number[]} args */
@@ -509,6 +510,7 @@ export function createUcrtbaseFunctions(crt, host){
 
         /** char **_get_initial_narrow_environment(void): the environment main is handed. */
         _get_initial_narrow_environment: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 0,
             handler: ()=>readU32(crt.__p__environ.handler([])),
@@ -516,6 +518,7 @@ export function createUcrtbaseFunctions(crt, host){
 
         /** wchar_t **_get_initial_wide_environment(void) */
         _get_initial_wide_environment: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 0,
             handler: ()=>readU32(crt.__p__wenviron.handler([])),
@@ -663,6 +666,7 @@ export function createUcrtbaseFunctions(crt, host){
          * the process ends (decisions.md A255).
          */
         _set_invalid_parameter_handler: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 4,
             /** @param {number[]} args */
@@ -671,6 +675,7 @@ export function createUcrtbaseFunctions(crt, host){
 
         /** _invalid_parameter_handler _get_invalid_parameter_handler(void) */
         _get_invalid_parameter_handler: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 0,
             handler: ()=>invalid.get(),
@@ -682,6 +687,7 @@ export function createUcrtbaseFunctions(crt, host){
          *     thread's own, asked before the process's.
          */
         _set_thread_local_invalid_parameter_handler: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 4,
             /** @param {number[]} args */
@@ -827,6 +833,7 @@ export function createUcrtbaseFunctions(crt, host){
          * the C locale, which a caller reads as "C".
          */
         ___lc_locale_name_func: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 0,
             handler: ()=>{
@@ -837,6 +844,7 @@ export function createUcrtbaseFunctions(crt, host){
 
         /** int *__sys_nerr(void): how many messages `_sys_errlist` holds. */
         __sys_nerr: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 0,
             handler: ()=>{
@@ -861,6 +869,7 @@ export function createUcrtbaseFunctions(crt, host){
         ...host.commandLine ? {
             /** char *_get_narrow_winmain_command_line(void): the line past the program's name. */
             _get_narrow_winmain_command_line: {
+                returns: 'pointer',
                 convention: 'cdecl',
                 argBytes: 0,
                 handler: ()=>pastProgramName(
@@ -869,6 +878,7 @@ export function createUcrtbaseFunctions(crt, host){
             },
             /** wchar_t *_get_wide_winmain_command_line(void) */
             _get_wide_winmain_command_line: {
+                returns: 'pointer',
                 convention: 'cdecl',
                 argBytes: 0,
                 handler: ()=>pastProgramName(
@@ -987,6 +997,7 @@ export function createUcrtbaseFunctions(crt, host){
          * holds.
          */
         fread_s: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 20,
             /** @param {number[]} args */
@@ -1015,7 +1026,7 @@ export function createUcrtbaseFunctions(crt, host){
          * wchar_t *_W_Getdays(void), wchar_t *_W_Getmonths(void): the day and
          * month names `_Getdays` and `_Getmonths` list, wide.
          */
-        _W_Getdays: widened(crt._Getdays),
+        _W_Getdays: { ...widened(crt._Getdays), returns: 'pointer' },
         _W_Getmonths: widened(crt._Getmonths),
 
         /** void *_W_Gettnames(void): `_Gettnames`'s table, handed back to `_Wcsftime`. */
@@ -1027,6 +1038,7 @@ export function createUcrtbaseFunctions(crt, host){
          *     locale's.
          */
         _Wcsftime: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 20,
             /** @param {number[]} args */

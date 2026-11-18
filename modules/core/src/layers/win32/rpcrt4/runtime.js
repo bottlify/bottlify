@@ -824,6 +824,7 @@ export function createRuntime(host){
          *     IRpcChannelBuffer *pRpcChannelBuffer)
          */
         NdrStubInitialize: {
+            returns: 'pointer',
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([rpc, message, descriptor, channel])=>{
@@ -869,6 +870,7 @@ export function createRuntime(host){
 
         /** void *NdrOleAllocate(size_t Size) and void NdrOleFree(void *NodeToFree): task memory. */
         NdrOleAllocate: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([size])=>host.allocate(size >>> 0),
@@ -1123,6 +1125,7 @@ export function createRuntime(host){
         },
         /** IRpcStubBuffer *CStdStubBuffer_IsIIDSupported(IRpcStubBuffer *This, REFIID riid) */
         CStdStubBuffer_IsIIDSupported: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([stub, riid])=>{

@@ -205,7 +205,8 @@ export function createD3dxFunctions(host, options = {}){
         id: IID_ID3DXBUFFER,
         methods: [
             /** LPVOID GetBufferPointer() */
-            { name: 'GetBufferPointer', argBytes: 4, invoke: object=>object.state.data },
+            { name: 'GetBufferPointer', returns: 'pointer', argBytes: 4,
+                invoke: object=>object.state.data },
             /** DWORD GetBufferSize() */
             { name: 'GetBufferSize', argBytes: 4, invoke: object=>object.state.size },
         ],

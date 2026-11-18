@@ -98,6 +98,8 @@ const LONG_WORD = 8;
  *           VARIANT -- by their first dword counting the interface pointer and
  *           their size in dwords: a 64-bit caller passes a pointer to a copy
  *           (the bridge's `structs`).
+ * @property {string} [returns]  The answer is an address: zero-extended into a
+ *           64-bit caller's RAX (`HostFunction.returns`).
  */
 
 /**
@@ -244,7 +246,8 @@ export function createVtables({ memory, register, heap, long = ()=>false, unimpl
         : `${interfaceId}|${table.map(method=>`${method.argBytes}:${method.builtin ?? ''}:${
             method.floats ? JSON.stringify(method.floats) : ''}:${
             method.quadwords ? method.quadwords.join('.') : ''}:${
-            method.structs ? JSON.stringify(method.structs) : ''}`).join(',')}`);
+            method.structs ? JSON.stringify(method.structs) : ''}:${
+            method.returns ?? ''}`).join(',')}`);
     /**
      * Which object an interface pointer belongs to, and that object's own
      * methods for it. A shared stub is called through many pointers, and the
@@ -341,6 +344,7 @@ export function createVtables({ memory, register, heap, long = ()=>false, unimpl
                     ...method.quadwords ? { quadwords: method.quadwords } : {},
 
                     ...method.structs ? { structs: method.structs } : {},
+                    ...method.returns ? { returns: method.returns } : {},
                     /** @param {number[]} args */
                     handler: args=>{
                         // The first argument is the interface pointer the guest

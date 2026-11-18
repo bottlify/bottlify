@@ -245,7 +245,7 @@ export function createSortFunctions(host){
          * A linear search, the key the comparator's first element: null with
          * EINVAL for no key, array, count, width or comparator.
          */
-        _lfind_s: cdecl(24, ([key, base, num, width, compare, context])=>{
+        _lfind_s: { ...cdecl(24, ([key, base, num, width, compare, context])=>{
             if ((key >>> 0) === 0 || (base >>> 0) === 0 || (num >>> 0) === 0
                 || (width >>> 0) === 0 || (compare >>> 0) === 0)
             {
@@ -255,13 +255,13 @@ export function createSortFunctions(host){
             const thread = host.currentThread?.();
             return find(key, base >>> 0, readU32(num), width >>> 0,
                 element=>ask(compare, [context, key >>> 0, element], thread));
-        }),
+        }), returns: 'pointer' },
 
         /**
          * void *_lfind(const void *key, const void *base, unsigned int *num,
          *              unsigned int width, int (*compare)(const void *, const void *))
          */
-        _lfind: cdecl(20, ([key, base, num, width, compare])=>{
+        _lfind: { ...cdecl(20, ([key, base, num, width, compare])=>{
             if ((num >>> 0) === 0 || (compare >>> 0) === 0)
             {
                 host.errno?.(EINVAL);
@@ -270,7 +270,7 @@ export function createSortFunctions(host){
             const thread = host.currentThread?.();
             return find(key, base >>> 0, readU32(num), width >>> 0,
                 element=>ask(compare, [key >>> 0, element], thread));
-        }),
+        }), returns: 'pointer' },
 
         /**
          * void *_lsearch(const void *key, void *base, unsigned int *num,
@@ -278,7 +278,7 @@ export function createSortFunctions(host){
          *
          * _lfind, and a key not found appended to the array, the count raised.
          */
-        _lsearch: cdecl(20, ([key, base, num, width, compare])=>{
+        _lsearch: { ...cdecl(20, ([key, base, num, width, compare])=>{
             if ((num >>> 0) === 0 || (compare >>> 0) === 0)
             {
                 host.errno?.(EINVAL);
@@ -297,6 +297,6 @@ export function createSortFunctions(host){
                 writeU32(num, count + 1);
                 return end;
             });
-        }),
+        }), returns: 'pointer' },
     };
 }

@@ -213,6 +213,7 @@ export function createDesktopFunctions(host){
          * UINT_PTR SHAppBarMessage(DWORD dwMessage, PAPPBARDATA pData)
          */
         SHAppBarMessage: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([message, data])=>appBarMessage(message >>> 0, data >>> 0),

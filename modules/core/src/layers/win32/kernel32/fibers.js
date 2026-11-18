@@ -194,6 +194,7 @@ export function createFiberFunctions(host){
     return {
         /** LPVOID ConvertThreadToFiber(LPVOID lpParameter) */
         ConvertThreadToFiber: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([parameter])=>convert(parameter),
@@ -201,6 +202,7 @@ export function createFiberFunctions(host){
 
         /** LPVOID ConvertThreadToFiberEx(LPVOID lpParameter, DWORD dwFlags) */
         ConvertThreadToFiberEx: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([parameter])=>convert(parameter),
@@ -229,6 +231,7 @@ export function createFiberFunctions(host){
 
         /** LPVOID CreateFiber(SIZE_T dwStackSize, LPFIBER_START_ROUTINE lpStartAddress, LPVOID lpParameter) */
         CreateFiber: {
+            returns: 'pointer',
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([size, start, parameter])=>create(size >>> 0, 0, start >>> 0, parameter),
@@ -243,6 +246,7 @@ export function createFiberFunctions(host){
          * thread's, switch them in SwitchToFiber when a program is seen to rely on it).
          */
         CreateFiberEx: {
+            returns: 'pointer',
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([commit, reserve, , start, parameter])=>

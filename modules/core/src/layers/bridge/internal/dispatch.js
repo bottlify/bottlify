@@ -41,6 +41,13 @@ import { isDriven } from './drive.js';
  *     one among its first four in the XMM register of its position, and
  *     `readLongCall` reads it from there into the dwords the 32-bit signature
  *     has it in -- a double's two, low first.
+ * @property {string} [returns]  The answer is an address or an unsigned
+ *     size (a pointer, an HMODULE, a SIZE_T): a 64-bit caller finds it in RAX
+ *     zero-extended. Every other dword answer is sign-extended there, as a
+ *     HANDLE of -1 is INVALID_HANDLE_VALUE whole; the callers of a function
+ *     that answers a dword read EAX alone, and its high half is no one's.
+ *     `tools/checks/check-wide-arguments.mjs` holds each spec to the return
+ *     type its signature comment writes.
  * @property {Record<number, number>} [structs]  The structures wider than eight
  *     bytes passed by value -- a GUID, a VARIANT -- by their first dword's index,
  *     and how many dwords each is: the 32-bit signature has them inline, an
@@ -119,6 +126,7 @@ import { isDriven } from './drive.js';
  *     `TRAP_SAMPLE` calls on average (`dispatch`).
  * @property {number} sampledCalls  How many of them were timed.
  * @property {number[] | null} quadwords  Of `fn`, checked; null for none.
+ * @property {boolean} zeroExtends  `fn.returns` is 'pointer': RAX takes the answer zero-extended.
  * @property {LongSlot[] | null} longSlots  Where each x64 slot's argument goes
  *     in `args`, for a function with quadwords or floating-point arguments;
  *     null when every slot is one dword.
@@ -1677,15 +1685,16 @@ class Dispatcher {
         }
         if (long)
         {
-            // Sign-extended, as a dword the host computes is meant: a handle
-            // of -1 is INVALID_HANDLE_VALUE whole, and every address below
-            // 2 GiB reads the same either way. A quadword answered the 32-bit
-            // way, its high half for EDX, is the two halves whole.
+            // As the function's type has it (`returns`): an address
+            // zero-extended, any other dword sign-extended - a handle of -1 is
+            // INVALID_HANDLE_VALUE whole. A quadword answered the 32-bit way,
+            // its high half for EDX, is the two halves whole.
             const high = this.wideHigh;
+            const low = /** @type {number} */ (result);
             this.cpu.writeReg64('rax', typeof result === 'bigint' ? BigInt.asUintN(64, result)
-                : high !== null
-                    ? BigInt(high) << 32n | BigInt(/** @type {number} */ (result) >>> 0)
-                    : BigInt.asUintN(64, BigInt(/** @type {number} */ (result) | 0)));
+                : high !== null ? BigInt(high) << 32n | BigInt(low >>> 0)
+                    : entry.zeroExtends ? BigInt(low >>> 0)
+                        : BigInt.asUintN(64, BigInt(low | 0)));
             return;
         }
         // Asked again rather than reusing `regs`: the handler may have
@@ -1783,6 +1792,7 @@ class Dispatcher {
                 ? { calls: 0, handled: 0, fellThrough: 0, mismatches: 0, ms: 0 } : null,
             readsError: this.errorReader && fn.lastError !== false,
             quadwords,
+            zeroExtends: fn.returns === 'pointer',
             longSlots: quadwords || floats || structs
                 ? longSlotsOf(words, quadwords, floats, structs) : null,
             args: argumentArray(site ? 8 : stackWords + registerArgs),

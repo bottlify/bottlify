@@ -323,7 +323,8 @@ const hueToChannel = (low, high, hue)=>{
 
 /**
  * @param {ShlwapiHost} host
- * @returns {Record<string, { argBytes: number, handler: (args: number[]) => any }>}
+ * @returns {Record<string, { argBytes: number, handler: (args: number[]) => any,
+ *     returns?: string }>}
  *     Every export by name: the table is built from parts whose names are made
  *     from a stem and a spelling, which no narrower type can list.
  */
@@ -762,7 +763,8 @@ export function createShlwapiFunctions(host){
         argBytes: 8, answer: S_OK,
         why: 'no folder web view template is registered: there are no folder views' });
 
-    /** @type {Record<string, { argBytes: number, handler: (args: number[]) => any }>} */
+    /** @type {Record<string, { argBytes: number, handler: (args: number[]) => any,
+        returns?: string }>} */
     const table = {
         ...(host.library ? createForwards(host.library, host.divergence) : {}),
         ...createPathFunctions(host, widths),
@@ -921,10 +923,10 @@ export function createShlwapiFunctions(host){
         SHDeleteValueW: through('RegDeleteKeyValueW', 12),
 
         /** LPSTR PathFindExtensionA(LPCSTR pszPath) */
-        PathFindExtensionA: pathFindExtension(pathAt, 1),
+        PathFindExtensionA: { ...pathFindExtension(pathAt, 1), returns: 'pointer' },
 
         /** LPWSTR PathFindExtensionW(LPCWSTR pszPath) */
-        PathFindExtensionW: pathFindExtension(widePathAt, 2),
+        PathFindExtensionW: { ...pathFindExtension(widePathAt, 2), returns: 'pointer' },
 
         /**
          * BOOL PathCompactPathA(HDC hDC, LPSTR pszPath, UINT dx)
@@ -938,10 +940,10 @@ export function createShlwapiFunctions(host){
         PathCompactPathW: pathCompactPath(widePathAt, wide),
 
         /** LPSTR PathFindFileNameA(LPCSTR pszPath) */
-        PathFindFileNameA: pathFindFileName(pathAt, 1),
+        PathFindFileNameA: { ...pathFindFileName(pathAt, 1), returns: 'pointer' },
 
         /** LPWSTR PathFindFileNameW(LPCWSTR pszPath) */
-        PathFindFileNameW: pathFindFileName(widePathAt, 2),
+        PathFindFileNameW: { ...pathFindFileName(widePathAt, 2), returns: 'pointer' },
 
         /**
          * BOOL PathIsDirectoryA(LPCSTR pszPath)
@@ -961,7 +963,7 @@ export function createShlwapiFunctions(host){
          * LPSTR PathCombineA(LPSTR pszDest, LPCSTR pszDir, LPCSTR pszFile)
          * LPWSTR PathCombineW(LPWSTR, LPCWSTR, LPCWSTR)
          */
-        PathCombineA: pathCombine(pathAt, narrow),
+        PathCombineA: { ...pathCombine(pathAt, narrow), returns: 'pointer' },
         PathCombineW: pathCombine(widePathAt, wide),
 
         /**
@@ -1193,6 +1195,7 @@ export function createShlwapiFunctions(host){
          * kernel32's own.
          */
         DelayLoadFailureHook: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: args=>call('KERNEL32.dll', 'DelayLoadFailureHook', args) ?? 0,

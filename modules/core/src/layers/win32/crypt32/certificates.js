@@ -1458,6 +1458,7 @@ export function createCertificateFunctions(host){
          *     const BYTE *pbCertEncoded, DWORD cbCertEncoded)
          */
         CertCreateCertificateContext: {
+            returns: 'pointer',
             argBytes: 12,
             handler: (/** @type {number[]} */ [encodingType, pointer, length])=>{
                 if ((pointer >>> 0) === 0)
@@ -1476,6 +1477,7 @@ export function createCertificateFunctions(host){
 
         /** PCCERT_CONTEXT CertDuplicateCertificateContext(PCCERT_CONTEXT pCertContext) */
         CertDuplicateCertificateContext: {
+            returns: 'pointer',
             argBytes: 4,
             handler: (/** @type {number[]} */ [address])=>duplicate(address >>> 0),
         },
@@ -1538,6 +1540,7 @@ export function createCertificateFunctions(host){
          * free, or to pass back.
          */
         CertEnumCertificatesInStore: {
+            returns: 'pointer',
             argBytes: 8,
             handler: (/** @type {number[]} */ [handle, previous])=>{
                 if (!storeOf(handle))
@@ -1744,6 +1747,7 @@ export function createCertificateFunctions(host){
          * The search goes on after the previous context, which is freed.
          */
         CertFindCertificateInStore: {
+            returns: 'pointer',
             argBytes: 24,
             handler: (/** @type {number[]} */ [handle, , flags, type, para, previous])=>{
                 if (!storeOf(handle))
@@ -2092,6 +2096,7 @@ export function createCertificateFunctions(host){
          * Making one needs a key pair this machine cannot generate.
          */
         CertCreateSelfSignCertificate: {
+            returns: 'pointer',
             argBytes: 32,
             handler: ()=>{
                 host.divergence?.('CertCreateSelfSignCertificate',

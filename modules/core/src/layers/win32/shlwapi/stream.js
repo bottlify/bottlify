@@ -618,6 +618,7 @@ export function createStreams(host){
          * A stream over a copy of the bytes, open to read and write.
          */
         SHCreateMemStream: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([initial, size])=>publishStream(memoryBacking((initial >>> 0) === 0

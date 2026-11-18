@@ -494,6 +494,7 @@ export function createModuleFunctions(host){
          * it to code that reads the PE header there.
          */
         LoadLibraryA: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([name])=>((name >>> 0) === 0 ? noName()
@@ -509,6 +510,7 @@ export function createModuleFunctions(host){
          * the loader acts on them. hFile is reserved and must be NULL.
          */
         LoadLibraryExA: {
+            returns: 'pointer',
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([name, file, flags])=>{
@@ -702,7 +704,7 @@ export function createModuleFunctions(host){
          * stand-in, and the helper raises its delay-load exception as it would
          * with no hook.
          */
-        DelayLoadFailureHook: { argBytes: 8, handler: ()=>0 },
+        DelayLoadFailureHook: { returns: 'pointer', argBytes: 8, handler: ()=>0 },
 
         /**
          * FARPROC GetProcAddress(HMODULE hModule, LPCSTR lpProcName)
@@ -712,6 +714,7 @@ export function createModuleFunctions(host){
          * compares the two finds them equal, as it does on Windows.
          */
         GetProcAddress: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([handle, name])=>{
@@ -741,6 +744,7 @@ export function createModuleFunctions(host){
 
         /** HMODULE LoadLibraryW(LPCWSTR lpLibFileName) */
         LoadLibraryW: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([name])=>((name >>> 0) === 0 ? noName()

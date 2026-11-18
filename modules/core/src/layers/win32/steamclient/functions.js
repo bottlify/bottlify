@@ -582,7 +582,7 @@ export function createSteamclientFunctions(host){
          *
          * The return code is 0 for an interface there is, 1 for none.
          */
-        CreateInterface: cdecl(8, ([name, code])=>{
+        CreateInterface: { ...cdecl(8, ([name, code])=>{
             const version = host.readCString(name >>> 0, 128);
             const object = account ? objects.objectFor(version) : 0;
             host.log?.(`CreateInterface ${version}: ${object === 0 ? 'none'
@@ -592,7 +592,7 @@ export function createSteamclientFunctions(host){
                 writeDword(code >>> 0, object === 0 ? 1 : 0);
             }
             return object;
-        }),
+        }), returns: 'pointer' },
 
         /**
          * bool Steam_BGetCallback(HSteamPipe, CallbackMsg_t*, HSteamCall*)

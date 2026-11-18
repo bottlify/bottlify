@@ -207,7 +207,7 @@ const word = value=>Uint8Array.of(value & 0xff, (value >>> 8) & 0xff);
 
 /**
  * @param {OrdinalHost} host
- * @returns {Record<string, { argBytes: number, convention?: 'cdecl',
+ * @returns {Record<string, { argBytes: number, convention?: 'cdecl', returns?: string,
  *     handler: (args: number[]) => any }>}
  */
 export function createOrdinalFunctions(host){
@@ -853,6 +853,7 @@ export function createOrdinalFunctions(host){
 
         /** PVOID SHLockShared(HANDLE hShared, DWORD dwProcId): a view of it here. */
         SHLockShared: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: async([shared, process])=>{

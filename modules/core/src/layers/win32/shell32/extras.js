@@ -502,6 +502,7 @@ export function createShellExtras(host, parts){
 
         /** PIDLIST_ABSOLUTE ILCreateFromPathA(PCSTR pszPath): NULL for a path not there. */
         ILCreateFromPathA: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([path])=>listForPath(narrow(path)),
@@ -519,6 +520,7 @@ export function createShellExtras(host, parts){
          * one not there.
          */
         SHSimpleIDListFromPath: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([path])=>listForPath(wide(path)),

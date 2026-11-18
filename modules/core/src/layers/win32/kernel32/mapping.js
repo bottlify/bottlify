@@ -764,6 +764,7 @@ export function createMappingFunctions(host){
          * whatever is left of it.
          */
         MapViewOfFile: {
+            returns: 'pointer',
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([handle, access, offsetHigh, offsetLow, length, base = 0])=>{
@@ -938,6 +939,7 @@ export function createMappingFunctions(host){
          * is anywhere.
          */
         MapViewOfFileEx: {
+            returns: 'pointer',
             argBytes: 24,
             /** @param {number[]} args */
             handler: args=>table.MapViewOfFile.handler(args),

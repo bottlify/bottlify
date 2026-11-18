@@ -179,6 +179,7 @@ export function createGdiplusFunctions(host){
 
         /** void *GdipAlloc(size_t size): memory GdipFree gives back, zero when none is left. */
         GdipAlloc: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([size])=>host.allocate(Math.max(1, size >>> 0)),

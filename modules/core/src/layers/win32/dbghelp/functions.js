@@ -84,7 +84,7 @@ const WALK_STARTED = 0x4b4c4157;
 
 /**
  * @param {DbghelpHost} host
- * @returns {Record<string, { argBytes: number, quadwords?: number[],
+ * @returns {Record<string, { argBytes: number, quadwords?: number[], returns?: string,
  *     handler: (args: number[]) => number }>}
  */
 export function createDbghelpFunctions(host){
@@ -453,7 +453,7 @@ export function createDbghelpFunctions(host){
          * PVOID SymFunctionTableAccess(HANDLE hProcess, DWORD AddrBase): an x86
          * image has no function tables, and no symbols means no frame data.
          */
-        SymFunctionTableAccess: { argBytes: 8, handler: ()=>0 },
+        SymFunctionTableAccess: { returns: 'pointer', argBytes: 8, handler: ()=>0 },
 
         /**
          * BOOL SymGetSymFromAddr(HANDLE hProcess, DWORD Address,
@@ -499,7 +499,8 @@ export function createDbghelpFunctions(host){
         },
 
         /** PVOID SymFunctionTableAccess64(HANDLE hProcess, DWORD64 AddrBase): none on x86. */
-        SymFunctionTableAccess64: { argBytes: 12, quadwords: [1], handler: ()=>0 },
+        SymFunctionTableAccess64: { returns: 'pointer', argBytes: 12, quadwords: [1],
+            handler: ()=>0 },
 
         /**
          * BOOL SymFromAddr(HANDLE hProcess, DWORD64 Address, PDWORD64 Displacement,
@@ -567,6 +568,7 @@ export function createDbghelpFunctions(host){
          * through.
          */
         ImageDirectoryEntryToData: {
+            returns: 'pointer',
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([base, mapped, entry, size])=>
@@ -578,6 +580,7 @@ export function createDbghelpFunctions(host){
          *     USHORT DirectoryEntry, PULONG Size, PIMAGE_SECTION_HEADER *FoundHeader)
          */
         ImageDirectoryEntryToDataEx: {
+            returns: 'pointer',
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([base, mapped, entry, size, found])=>

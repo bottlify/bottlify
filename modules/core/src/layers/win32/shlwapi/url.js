@@ -830,10 +830,13 @@ export const locationIndex = url=>{
  */
 export function createUrlFunctions(host, { A, W }){
     /** @param {string} name @param {number} argBytes
-     *  @param {(width: import('./text.js').Width, args: number[]) => number} body */
-    const both = (name, argBytes, body)=>({
-        [`${name}A`]: { argBytes, handler: (/** @type {number[]} */ args)=>body(A, args) },
-        [`${name}W`]: { argBytes, handler: (/** @type {number[]} */ args)=>body(W, args) },
+     *  @param {(width: import('./text.js').Width, args: number[]) => number} body
+     *  @param {{ returns?: string }} [marshal]  `returns: 'pointer'` for an address answered */
+    const both = (name, argBytes, body, marshal = {})=>({
+        [`${name}A`]: { argBytes, ...marshal,
+            handler: (/** @type {number[]} */ args)=>body(A, args) },
+        [`${name}W`]: { argBytes, ...marshal,
+            handler: (/** @type {number[]} */ args)=>body(W, args) },
     });
 
     /** @param {number} address */
@@ -998,7 +1001,7 @@ export function createUrlFunctions(host, { A, W }){
             const url = width.read(pointer);
             const at = url === null ? null : locationIndex(url);
             return at === null ? 0 : (pointer >>> 0) + at * width.unit;
-        }),
+        }, { returns: 'pointer' }),
 
         /**
          * HRESULT UrlApplySchemeA(LPCSTR pszIn, LPSTR pszOut, LPDWORD pcchOut, DWORD dwFlags)

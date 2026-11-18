@@ -129,7 +129,7 @@ export function createImmFunctions(host){
          * No input context is ever handed out (ImmGetContext), so none can be
          * locked: NULL, and FALSE for the unlock, as an invalid handle answers.
          */
-        ImmLockIMC: { argBytes: 4, handler: ()=>0 },
+        ImmLockIMC: { returns: 'pointer', argBytes: 4, handler: ()=>0 },
         ImmUnlockIMC: { argBytes: 4, handler: ()=>0 },
         ImmLockIMCC: { argBytes: 4, handler: ()=>0 },
         ImmUnlockIMCC: { argBytes: 4, handler: ()=>0 },

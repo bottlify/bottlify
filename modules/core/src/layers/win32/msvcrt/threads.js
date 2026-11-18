@@ -158,7 +158,7 @@ export function createThreadFunctions(seam){
          *
          * -1 when no thread could be made, which is what a caller tests for.
          */
-        _beginthread: cdecl(12, ([routine, stackSize, argument])=>{
+        _beginthread: { ...cdecl(12, ([routine, stackSize, argument])=>{
             const entry = startAddress();
             const block = entry === 0 || !runtime ? 0 : runtime.allocate(BLOCK.BYTES);
             if (block === 0 || !runtime)
@@ -186,7 +186,7 @@ export function createThreadFunctions(seam){
                 .getUint32(0, true);
             owned.set(id, { handle, block });
             return handle;
-        }),
+        }), returns: 'pointer' },
 
         /**
          * uintptr_t _beginthreadex(void *security, unsigned stackSize,
@@ -196,11 +196,11 @@ export function createThreadFunctions(seam){
          * Zero when no thread could be made. CREATE_SUSPENDED is CreateThread's:
          * the thread waits for ResumeThread.
          */
-        _beginthreadex: cdecl(24, ([, stackSize, routine, argument, flags, threadIdOut])=>
+        _beginthreadex: { ...cdecl(24, ([, stackSize, routine, argument, flags, threadIdOut])=>
             seam.start({
                 entry: routine >>> 0, stackSize: stackSize >>> 0,
                 parameter: argument >>> 0, threadIdOut: threadIdOut >>> 0, flags: flags >>> 0,
-            })),
+            })), returns: 'pointer' },
 
         /**
          * void _endthread(void)

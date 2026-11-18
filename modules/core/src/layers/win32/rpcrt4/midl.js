@@ -896,6 +896,7 @@ export function createMidl(host){
 
         /** unsigned char *NdrServerInitializeNew(PRPC_MESSAGE pRpcMsg, PMIDL_STUB_MESSAGE pStubMsg, PMIDL_STUB_DESC pStubDescriptor) */
         NdrServerInitializeNew: {
+            returns: 'pointer',
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([rpc, message, descriptor])=>{
@@ -993,6 +994,7 @@ export function createMidl(host){
          *     RPC_BINDING_HANDLE Handle)
          */
         NdrGetBuffer: {
+            returns: 'pointer',
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([message, length, handle])=>{
@@ -1016,6 +1018,7 @@ export function createMidl(host){
          * from after.
          */
         NdrSendReceive: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([message, end])=>{

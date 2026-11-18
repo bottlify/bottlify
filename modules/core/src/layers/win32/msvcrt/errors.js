@@ -115,6 +115,7 @@ export function createErrorFunctions(host){
 
         /** char *strerror(int errnum) */
         strerror: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 4,
             /** @param {number[]} args */

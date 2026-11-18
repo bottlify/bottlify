@@ -188,6 +188,7 @@ export function createLocaleFunctions(host){
          * empty, every number CHAR_MAX -- the same structure each call.
          */
         localeconv: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 0,
             handler: ()=>localeConventions(),

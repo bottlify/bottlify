@@ -204,7 +204,7 @@ export function createMsvfwFunctions(host){
          * LPVOID ICSeqCompressFrame(PCOMPVARS pc, UINT uiFlags, LPVOID lpBits, BOOL *pfKey, LONG
          *     *plSize)
          */
-        ICSeqCompressFrame: { argBytes: 20, handler: (/** @type {number[]} */ [pc, , bits, key,
+        ICSeqCompressFrame: { returns: 'pointer', argBytes: 20, handler: (/** @type {number[]} */ [pc, , bits, key,
             size])=>
             icm.seqFrame(pc, bits, key, size) },
 

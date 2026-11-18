@@ -842,10 +842,10 @@ export function createStdioFunctions(host){
         },
 
         /** FILE *__iob_func(void) -- the same array, for a runtime that asks by call. */
-        __iob_func: cdecl(0, ()=>host.iob?.() ?? 0),
+        __iob_func: { ...cdecl(0, ()=>host.iob?.() ?? 0), returns: 'pointer' },
 
         /** FILE *__p__iob(void) */
-        __p__iob: cdecl(0, ()=>host.iob?.() ?? 0),
+        __p__iob: { ...cdecl(0, ()=>host.iob?.() ?? 0), returns: 'pointer' },
 
         /**
          * FILE *fopen(const char *filename, const char *mode)
@@ -855,9 +855,9 @@ export function createStdioFunctions(host){
          * or empty name and a mode that is not one are EINVAL; the descriptor
          * says why a name could not be opened.
          */
-        fopen: cdecl(8, ([path, mode])=>openStream(
+        fopen: { ...cdecl(8, ([path, mode])=>openStream(
             (path >>> 0) === 0 ? '' : readString(path),
-            (mode >>> 0) === 0 ? null : readString(mode))),
+            (mode >>> 0) === 0 ? null : readString(mode))), returns: 'pointer' },
 
         /**
          * errno_t fopen_s(FILE **file, const char *filename, const char *mode)
@@ -872,18 +872,18 @@ export function createStdioFunctions(host){
             at=>wideStringAt(host.readMemory, at))),
 
         /** FILE *_wfopen(const wchar_t *filename, const wchar_t *mode) -- fopen, wide. */
-        _wfopen: cdecl(8, ([path, mode])=>openStream(
+        _wfopen: { ...cdecl(8, ([path, mode])=>openStream(
             (path >>> 0) === 0 ? '' : wideStringAt(host.readMemory, path),
-            (mode >>> 0) === 0 ? null : wideStringAt(host.readMemory, mode))),
+            (mode >>> 0) === 0 ? null : wideStringAt(host.readMemory, mode))), returns: 'pointer' },
 
         /**
          * FILE *_fsopen(const char *filename, const char *mode, int shflag)
          *
          * fopen with a sharing mode, which the volume has none of.
          */
-        _fsopen: cdecl(12, ([path, mode])=>openStream(
+        _fsopen: { ...cdecl(12, ([path, mode])=>openStream(
             (path >>> 0) === 0 ? '' : readString(path),
-            (mode >>> 0) === 0 ? null : readString(mode))),
+            (mode >>> 0) === 0 ? null : readString(mode))), returns: 'pointer' },
 
         /**
          * FILE *tmpfile(void)
@@ -893,7 +893,7 @@ export function createStdioFunctions(host){
          * removed when the stream closes or the process ends. NULL when it
          * cannot be made.
          */
-        tmpfile: cdecl(0, ()=>{
+        tmpfile: { ...cdecl(0, ()=>{
             const next = ()=>`\t${TEMPORARY_STEM}.${(temporaryCount++).toString(32)}`;
             let name = next();
             while (host.files.stat(name)?.exists === true)
@@ -901,12 +901,12 @@ export function createStdioFunctions(host){
                 name = next();
             }
             return openStream(name, 'w+bD');
-        }),
+        }), returns: 'pointer' },
 
         /** FILE *_wfsopen(const wchar_t *filename, const wchar_t *mode, int shflag) */
-        _wfsopen: cdecl(12, ([path, mode])=>openStream(
+        _wfsopen: { ...cdecl(12, ([path, mode])=>openStream(
             (path >>> 0) === 0 ? '' : wideStringAt(host.readMemory, path),
-            (mode >>> 0) === 0 ? null : wideStringAt(host.readMemory, mode))),
+            (mode >>> 0) === 0 ? null : wideStringAt(host.readMemory, mode))), returns: 'pointer' },
 
         /**
          * FILE *freopen(const char *filename, const char *mode, FILE *stream)
@@ -918,7 +918,7 @@ export function createStdioFunctions(host){
          * a null stream and a mode that is not one are EINVAL, and close
          * nothing.
          */
-        freopen: cdecl(12, ([path, mode, pointer])=>{
+        freopen: { ...cdecl(12, ([path, mode, pointer])=>{
             const stream = argument(pointer);
             const parsed = (mode >>> 0) === 0 ? null : parseMode(readString(mode));
             const text = (path >>> 0) === 0 ? '' : readString(path);
@@ -948,14 +948,17 @@ export function createStdioFunctions(host){
                 standOn(stream, kept, parsed.flags);
                 return stream.record;
             });
-        }),
+        }), returns: 'pointer' },
 
         /** FILE *_fdopen(int fd, const char *mode) (`openOn`) */
-        _fdopen: cdecl(8, ([fd, mode])=>openOn(fd, (mode >>> 0) === 0 ? null : readString(mode))),
+        _fdopen: {
+            ...cdecl(8, ([fd, mode])=>openOn(fd, (mode >>> 0) === 0 ? null : readString(mode))),
+            returns: 'pointer',
+        },
 
         /** FILE *_wfdopen(int fd, const wchar_t *mode) -- _fdopen, the mode wide. */
-        _wfdopen: cdecl(8, ([fd, mode])=>openOn(fd,
-            (mode >>> 0) === 0 ? null : wideStringAt(host.readMemory, mode))),
+        _wfdopen: { ...cdecl(8, ([fd, mode])=>openOn(fd,
+            (mode >>> 0) === 0 ? null : wideStringAt(host.readMemory, mode))), returns: 'pointer' },
 
         /**
          * int fclose(FILE *stream)
@@ -1010,7 +1013,7 @@ export function createStdioFunctions(host){
          * documented to advance by what was read. The bytes may be on their
          * way, in which case the caller parks on them.
          */
-        fread: cdecl(16, ([buffer, size, count, pointer])=>{
+        fread: { ...cdecl(16, ([buffer, size, count, pointer])=>{
             const stream = argument(pointer);
             const wanted = (size >>> 0) * (count >>> 0);
             if (!stream || wanted === 0)
@@ -1033,7 +1036,7 @@ export function createStdioFunctions(host){
                 }
                 return Math.floor(bytes.length / (size >>> 0));
             });
-        }),
+        }), returns: 'pointer' },
 
         /**
          * size_t fwrite(const void *buffer, size_t size, size_t count, FILE *stream)
@@ -1041,7 +1044,7 @@ export function createStdioFunctions(host){
          * In a Unicode translation the bytes are UTF-16, and an odd count of
          * them is EINVAL with nothing written.
          */
-        fwrite: cdecl(16, ([buffer, size, count, pointer])=>{
+        fwrite: { ...cdecl(16, ([buffer, size, count, pointer])=>{
             const stream = argument(pointer);
             const wanted = (size >>> 0) * (count >>> 0);
             if (!stream || wanted === 0)
@@ -1060,7 +1063,7 @@ export function createStdioFunctions(host){
             }
             const stored = emit(stream, host.readMemory(buffer >>> 0, wanted).slice());
             return Math.floor(stored / (size >>> 0));
-        }),
+        }), returns: 'pointer' },
 
         /** int fseek(FILE *stream, long offset, int origin) -- zero on success. */
         fseek: cdecl(12, ([pointer, offset, origin])=>seek(pointer, offset | 0, origin)),
@@ -1271,7 +1274,7 @@ export function createStdioFunctions(host){
          * the end partway is not a failure but is the end of the file, which
          * `feof` then reports.
          */
-        fgets: cdecl(12, ([buffer, count, pointer])=>{
+        fgets: { ...cdecl(12, ([buffer, count, pointer])=>{
             const stream = argument(pointer);
             if (stream && ((buffer >>> 0) === 0 || (count | 0) <= 0))
             {
@@ -1301,7 +1304,7 @@ export function createStdioFunctions(host){
                 host.writeMemory(buffer >>> 0, line);
                 return buffer >>> 0;
             });
-        }),
+        }), returns: 'pointer' },
 
         fputc,
         putc: fputc,
@@ -1399,7 +1402,7 @@ export function createStdioFunctions(host){
          * In binary mode CR LF is two characters, in the other modes one LF
          * (Wine's msvcrt test_fgetwc).
          */
-        fgetws: cdecl(12, ([buffer, count, pointer])=>{
+        fgetws: { ...cdecl(12, ([buffer, count, pointer])=>{
             const stream = argument(pointer);
             if (stream && ((buffer >>> 0) === 0 || (count | 0) <= 0))
             {
@@ -1429,7 +1432,7 @@ export function createStdioFunctions(host){
                 host.writeMemory(buffer >>> 0, bytesOfUnits([...units, 0]));
                 return buffer >>> 0;
             });
-        }),
+        }), returns: 'pointer' },
 
         /** int fputws(const wchar_t *str, FILE *stream) -- 0, or EOF on an error. */
         fputws: cdecl(8, ([string, pointer])=>{

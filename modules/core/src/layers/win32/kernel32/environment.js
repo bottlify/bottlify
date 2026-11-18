@@ -473,6 +473,7 @@ export function createEnvironmentFunctions(host){
 
         /** LPSTR GetCommandLineA(VOID) */
         GetCommandLineA: {
+            returns: 'pointer',
             argBytes: 0,
             handler: ()=>{
                 commandLineAddress ??= writeAnsi(host.commandLine());
@@ -488,6 +489,7 @@ export function createEnvironmentFunctions(host){
          * two must each stay put once handed out.
          */
         GetCommandLineW: {
+            returns: 'pointer',
             argBytes: 0,
             handler: ()=>{
                 commandLineWideAddress ??= writeWideString(host.commandLine());
@@ -499,11 +501,13 @@ export function createEnvironmentFunctions(host){
          * LPCH GetEnvironmentStrings(VOID), exported under both of its
          * names, as kernel32 exports it.
          */
-        GetEnvironmentStrings: { argBytes: 0, handler: ()=>environmentBlock(false) },
+        GetEnvironmentStrings: { returns: 'pointer', argBytes: 0,
+            handler: ()=>environmentBlock(false) },
         GetEnvironmentStringsA: { argBytes: 0, handler: ()=>environmentBlock(false) },
 
         /** LPWCH GetEnvironmentStringsW(VOID) */
-        GetEnvironmentStringsW: { argBytes: 0, handler: ()=>environmentBlock(true) },
+        GetEnvironmentStringsW: { returns: 'pointer', argBytes: 0,
+            handler: ()=>environmentBlock(true) },
 
         /**
          * BOOL FreeEnvironmentStringsA(LPCH penv)

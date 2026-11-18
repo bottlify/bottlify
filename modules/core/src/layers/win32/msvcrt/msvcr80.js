@@ -224,6 +224,7 @@ export function createMsvcr80Functions(crt, host){
 
         /** _purecall_handler _set_purecall_handler(_purecall_handler): the one before. */
         _set_purecall_handler: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 4,
             /** @param {number[]} args */
@@ -331,6 +332,7 @@ export function createMsvcr80Functions(crt, host){
          * documented failure (decisions.md A255).
          */
         _set_invalid_parameter_handler: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 4,
             /** @param {number[]} args */
@@ -339,6 +341,7 @@ export function createMsvcr80Functions(crt, host){
 
         /** _invalid_parameter_handler _get_invalid_parameter_handler(void) */
         _get_invalid_parameter_handler: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 0,
             handler: ()=>invalid.get(),
@@ -425,9 +428,9 @@ export function createMsvcr80Functions(crt, host){
         __CppXcptFilter: crt._XcptFilter,
 
         /** char *strtok_s(char *text, const char *delimiters, char **context) */
-        strtok_s: tokenize(1),
+        strtok_s: { ...tokenize(1), returns: 'pointer' },
         /** wchar_t *wcstok_s(wchar_t *text, const wchar_t *delimiters, wchar_t **context) */
-        wcstok_s: tokenize(2),
+        wcstok_s: { ...tokenize(2), returns: 'pointer' },
 
         /** errno_t _sopen_s(int *fd, const char *path, int flags, int share, int mode) */
         _sopen_s: openSecure('_sopen'),

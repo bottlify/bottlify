@@ -2240,7 +2240,7 @@ export function createRegistryFunctions(host){
          * Answers NULL, which is success -- the documented shape. The memory
          * itself stays with the process, as every small allocation here does.
          */
-        FreeSid: { argBytes: 4, handler: ()=>0 },
+        FreeSid: { returns: 'pointer', argBytes: 4, handler: ()=>0 },
 
         /**
          * LONG RegCloseKey(HKEY)

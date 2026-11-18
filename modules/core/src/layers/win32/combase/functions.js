@@ -234,6 +234,7 @@ export function createCombaseFunctions(host){
 
         /** PCWSTR WindowsGetStringRawBuffer(HSTRING string, UINT32 *length) */
         WindowsGetStringRawBuffer: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([string, length])=>{

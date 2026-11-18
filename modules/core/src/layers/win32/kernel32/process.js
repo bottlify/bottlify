@@ -1247,7 +1247,7 @@ export function createProcessFunctions(host){
     /**
      * @type {Record<string, { argBytes: number, handler: Function,
      *     guest?: (builder: import('./sync.js').GuestBuilder) => number,
-     *     code?: () => Uint8Array, quadwords?: number[] }>}
+     *     code?: () => Uint8Array, quadwords?: number[], returns?: string }>}
      */
     const table = {
         /** VOID SetLastError(DWORD dwErrCode) */
@@ -1344,6 +1344,7 @@ export function createProcessFunctions(host){
 
         /** HMODULE GetModuleHandleA(LPCSTR lpModuleName) */
         GetModuleHandleA: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>moduleHandleOf(pointer === 0
@@ -1353,6 +1354,7 @@ export function createProcessFunctions(host){
 
         /** HMODULE GetModuleHandleW(LPCWSTR lpModuleName) */
         GetModuleHandleW: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>moduleHandleOf(pointer === 0
@@ -1917,6 +1919,7 @@ export function createProcessFunctions(host){
 
         /** LPVOID TlsGetValue(DWORD dwTlsIndex) */
         TlsGetValue: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([index])=>{
@@ -1985,6 +1988,7 @@ export function createProcessFunctions(host){
          * run, so the identity is guest code, with no crossing.
          */
         EncodePointer: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>pointer >>> 0,

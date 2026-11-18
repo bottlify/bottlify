@@ -5053,11 +5053,13 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
         /** HRESULT D3D10StateBlockMaskUnion(mask*, mask*, mask*) */
         D3D10StateBlockMaskUnion: combineEntry(stateBlockMask.Union),
         /** const char* D3D10GetVertexShaderProfile(ID3D10Device*) */
-        D3D10GetVertexShaderProfile: profileEntry(SHADER_PROFILE.VERTEX),
+        D3D10GetVertexShaderProfile: { ...profileEntry(SHADER_PROFILE.VERTEX), returns: 'pointer' },
         /** const char* D3D10GetPixelShaderProfile(ID3D10Device*) */
-        D3D10GetPixelShaderProfile: profileEntry(SHADER_PROFILE.PIXEL),
+        D3D10GetPixelShaderProfile: { ...profileEntry(SHADER_PROFILE.PIXEL), returns: 'pointer' },
         /** const char* D3D10GetGeometryShaderProfile(ID3D10Device*) */
-        D3D10GetGeometryShaderProfile: profileEntry(SHADER_PROFILE.GEOMETRY),
+        D3D10GetGeometryShaderProfile: {
+            ...profileEntry(SHADER_PROFILE.GEOMETRY), returns: 'pointer',
+        },
         /**
          * HRESULT D3D10CompileShader(const char*, SIZE_T, const char*,
          *     const D3D10_SHADER_MACRO*, ID3D10Include*, const char*, const char*,

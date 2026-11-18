@@ -279,6 +279,7 @@ export function createFiberLocalStorage(host){
 
         /** PVOID FlsGetValue(DWORD dwFlsIndex) */
         FlsGetValue: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([index])=>{
@@ -325,7 +326,8 @@ export function createFiberLocalStorage(host){
      * @param {string} label @param {any} spec
      */
     const placed = (make, label, spec)=>(/** @type {any} */ builder)=>{
-        const trap = builder.register(label, { argBytes: spec.argBytes, handler: spec.handler });
+        const trap = builder.register(label, { argBytes: spec.argBytes, handler: spec.handler,
+            returns: spec.returns });
         const size = make(0, trap).length;
         const at = host.allocateCode?.(size) ?? 0;
         if (at !== 0)

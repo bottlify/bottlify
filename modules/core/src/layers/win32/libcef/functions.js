@@ -216,10 +216,11 @@ export function createLibcefFunctions(host){
         },
     });
 
-    /** @type {Record<string, { convention: 'cdecl', argBytes: number, handler: Function }>} */
+    /** @type {Record<string, { convention: 'cdecl', argBytes: number, handler: Function,
+        returns?: string }>} */
     const answered = {
         /** const char* cef_api_hash(int entry) */
-        cef_api_hash: { convention: 'cdecl', argBytes: 4,
+        cef_api_hash: { returns: 'pointer', convention: 'cdecl', argBytes: 4,
             handler: (/** @type {number[]} */ [entry])=>hashAt(entry | 0) },
 
         /**
@@ -247,11 +248,11 @@ export function createLibcefFunctions(host){
             } },
 
         /** cef_command_line_t* cef_command_line_create(void) */
-        cef_command_line_create: { convention: 'cdecl', argBytes: 0,
+        cef_command_line_create: { returns: 'pointer', convention: 'cdecl', argBytes: 0,
             handler: ()=>newLine(emptyCommandLine()) },
 
         /** cef_command_line_t* cef_command_line_get_global(void): the process's own. */
-        cef_command_line_get_global: { convention: 'cdecl', argBytes: 0,
+        cef_command_line_get_global: { returns: 'pointer', convention: 'cdecl', argBytes: 0,
             handler: ()=>{
                 if (globalLine === 0)
                 {
