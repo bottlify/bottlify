@@ -4690,8 +4690,10 @@ const BULK_UNIT_SHIFT = 4;
  * some flags.
  *
  * @param {E} e @param {number} size
+ * @param {() => void} [up]  pushes whether the step goes up: the 32-bit step in `t2` is
+ *     the element's size unless told otherwise
  */
-function bulkTurn(e, size){
+function bulkTurn(e, size, up = ()=>e.b.localGet(Local.t2).i32const(size).op(I32.eq)){
     const { b } = e;
     const elementShift = Math.log2(size);
     const table = pageFlagsAt(e.layout);
@@ -4720,9 +4722,11 @@ function bulkTurn(e, size){
             offset();
             b.i32const(4096 - size).op(I32.leU).select();
         }
-        b.localGet(Local.t2).i32const(size).op(I32.eq).select();
+        up();
+        b.select();
     };
     return {
+        room, minInto,
         /** @param {number[]} pointers */
         run(pointers){
             b.localGet(registerLocal(e, 1)).localSet(Local.t0);
@@ -5013,6 +5017,114 @@ function bulkString(e, instruction){
 }
 
 /**
+ * Long mode's `bulkString`: a `rep movs` or `rep stos` whose pointers lie
+ * below 4 GiB takes, per turn of its loop, every element wholly on each
+ * pointer's current page the way DF goes, as far as rcx goes, at once -- one
+ * flag test of those pages, then one `memory.copy` or fill -- with rcx and
+ * the pointers moved by the whole run. A pointer past 4 GiB, an element
+ * across a page, a flagged page, a copy whose destination lies just ahead of
+ * its source the way it goes, and a `stos` of a value that is not one byte
+ * repeated take the per-element path after it. No budget is looked at: long
+ * mode counts a `rep` as one instruction, run whole.
+ *
+ * @param {E} e @param {Instruction} instruction
+ * @param {number} step  the local holding the step, the element's size or its negative
+ */
+function bulkStringLong(e, instruction, step){
+    const { b } = e;
+    const { op, size } = instruction;
+    const elementShift = Math.log2(size);
+    const ramBase = e.layout.ramBase;
+    const rax = registerLocal(e, 0);
+    const rcx = registerLocal(e, 1);
+    const rsi = registerLocal(e, 6);
+    const rdi = registerLocal(e, 7);
+    const movs = op === 'movs';
+    // The pointers' low words, which are the pointers here: the destination's in
+    // `addr`, the source's in `pflags`, neither read again before an access sets it.
+    const low = new Map([[rdi, Local.addr], [rsi, Local.pflags]]);
+    const up = ()=>b.localGet(Local.t2);
+    const turn = bulkTurn(e, size, up);
+    b.localGet(rdi);
+    if (movs)
+    {
+        b.localGet(rsi).op(I64.or);
+    }
+    b.i64const(32n).op(I64.shrU).op(I64.eqz);
+    e.openIf('bulk', EMPTY);
+    for (const pointer of movs ? [rdi, rsi] : [rdi])
+    {
+        b.localGet(pointer).op(I64.wrap).localSet(/** @type {number} */ (low.get(pointer)));
+    }
+    b.localGet(step).i64const(BigInt(size)).op(I64.eq).localSet(Local.t2);
+    // As many elements as rcx counts, a page's worth at most.
+    b.localGet(rcx).i64const(4096n).localGet(rcx).i64const(4096n).op(I64.ltU).select()
+        .op(I64.wrap).localSet(Local.t0);
+    for (const pointer of movs ? [rdi, rsi] : [rdi])
+    {
+        turn.room(/** @type {number} */ (low.get(pointer)));
+        turn.minInto();
+    }
+    b.localGet(Local.t0).i32const(elementShift).op(I32.shl).localSet(Local.t1);
+    b.localGet(Local.t0).i32const(0).op(I32.ne);
+    turn.clear(Local.addr, PageFlag.INACCESSIBLE | STORE_FLAGS);
+    b.op(I32.and);
+    if (movs)
+    {
+        turn.clear(Local.pflags, PageFlag.INACCESSIBLE);
+        b.op(I32.and);
+        // Not 0 < the destination's lead on the source, the way the copy
+        // goes, < the run's bytes: (lead - 1) >=u (bytes - 1).
+        b.localGet(Local.addr).localGet(Local.pflags).op(I32.sub)
+            .localGet(Local.pflags).localGet(Local.addr).op(I32.sub);
+        up();
+        b.select().i32const(1).op(I32.sub)
+            .localGet(Local.t1).i32const(1).op(I32.sub).op(I32.geU).op(I32.and);
+    }
+    else
+    {
+        // A value of one byte repeated is a fill.
+        const lanes = (1n << BigInt(size * 8)) / 255n;
+        const width = size === 8 ? 0xffffffffffffffffn : (1n << BigInt(size * 8)) - 1n;
+        b.localGet(rax).i64const(0xffn).op(I64.and).i64const(BigInt.asIntN(64, lanes))
+            .op(I64.mul).localGet(rax).i64const(BigInt.asIntN(64, width)).op(I64.and)
+            .op(I64.eq).op(I32.and);
+    }
+    e.openIf('bulkPages', EMPTY);
+    /**
+     * The run's lowest byte in memory: the pointer going up, going down the
+     * pointer less the bytes before its own element.
+     * @param {number} pointer
+     */
+    const lowest = pointer=>{
+        b.localGet(pointer).localGet(pointer).i32const(size).op(I32.add).localGet(Local.t1)
+            .op(I32.sub);
+        up();
+        b.select().i32const(ramBase).op(I32.add);
+    };
+    lowest(Local.addr);
+    if (movs)
+    {
+        lowest(Local.pflags);
+        b.localGet(Local.t1).op(0xfc, [0x0a, 0x00, 0x00]); // memory.copy
+    }
+    else
+    {
+        b.localGet(rax).op(I64.wrap).localGet(Local.t1).op(0xfc, [0x0b, 0x00]); // memory.fill
+    }
+    // The pointers move by the elements times the step.
+    for (const pointer of movs ? [rdi, rsi] : [rdi])
+    {
+        b.localGet(pointer).localGet(Local.t0).op(I64.extendU).localGet(step).op(I64.mul)
+            .op(I64.add).localSet(pointer);
+    }
+    b.localGet(rcx).localGet(Local.t0).op(I64.extendU).op(I64.sub).localSet(rcx);
+    b.br(e.depthOf('again'));
+    e.close();
+    e.close();
+}
+
+/**
  * A `repe` or `repne` `cmps` or `scas` passes over, per turn of its loop, the
  * elements that do not stop it among those that lie wholly on the pointers'
  * current pages the way DF goes (as far as ecx and the budget go), all but
@@ -5158,6 +5270,10 @@ function stringInstruction(e, instruction){
         }
         const bulky = !long && (op === 'movs' || op === 'stos')
             && e.context.undo === undefined && !fsSource;
+        // Long mode's, where RAM is the 4 GiB memory itself: a wide window's pointers
+        // go through its own memory, an element at a time.
+        const bulkyLong = long && (op === 'movs' || op === 'stos')
+            && e.context.undo === undefined && e.guest === null;
         e.open('done', EMPTY);
         if (bulky)
         {
@@ -5171,6 +5287,10 @@ function stringInstruction(e, instruction){
         if (bulky)
         {
             bulkString(e, instruction);
+        }
+        if (bulkyLong)
+        {
+            bulkStringLong(e, instruction, step);
         }
         if (!long && compare && !fsSource)
         {
