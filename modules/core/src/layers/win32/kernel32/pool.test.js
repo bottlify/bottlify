@@ -53,6 +53,10 @@ function machine(){
                 return thread;
             },
             block: (/** @type {any} */ thread)=>blocked.push(thread),
+            alertably: (/** @type {any} */ thread, /** @type {() => any} */ wait)=>{
+                thread.alertableWaits = (thread.alertableWaits ?? 0) + 1;
+                return wait();
+            },
             wake: (/** @type {any} */ thread, /** @type {number} */ result)=>{
                 woken.push({ thread, result });
                 return true;
@@ -119,10 +123,10 @@ function machine(){
     };
 
     /** The loop asking for work on `thread`. @param {any} thread */
-    const ask = thread=>{
+    const ask = (thread, last = RAN)=>{
         const was = current;
         current = thread;
-        const answer = traps['<thread-pool>'].handler([recordOf(thread), RAN]);
+        const answer = traps['<thread-pool>'].handler([recordOf(thread), last]);
         current = was;
         return answer;
     };
@@ -484,6 +488,7 @@ function waitMachine({ divergence } = {}){
                 return thread;
             },
             block: ()=>{},
+            alertably: (/** @type {any} */ thread, /** @type {() => any} */ wait)=>wait(),
             wake: ()=>true,
             alert: (/** @type {any} */ thread, /** @type {number} */ result)=>{
                 alerted.push([thread.name, result]);
@@ -815,5 +820,39 @@ test('a thread pool timer fires after its relative due time, then on its period'
     m.ask(m.created[0]);
     m.fns.CloseThreadpoolTimer.handler([timer]);
     assert.ok(m.freed.includes(timer), 'given back with nothing owed');
+});
+
+test('an idle pool thread waits alertably; a callback handed over during an APC still runs', ()=>{
+    // Wine's ntdll test_RtlRegisterWait queues an APC to the pool thread its
+    // callback ran on and waits for it: an idle pool thread runs it, as
+    // Windows' do.
+    const m = machine();
+    m.fns.QueueUserWorkItem.handler([0x402000, 1, 0]);
+    const [thread] = m.created;
+    assert.equal(m.ask(thread), RUN);
+    assert.equal(m.ask(thread), PARKED, 'idle');
+    assert.equal(thread.alertableWaits, 1, 'and its wait alertable');
+
+    // The APC ran and the loop asks again with WAIT_IO_COMPLETION: still
+    // idle, once, not twice.
+    assert.equal(m.ask(thread, 0xc0), PARKED);
+    m.fns.QueueUserWorkItem.handler([0x402000, 2, 0]);
+    assert.equal(m.created.length, 1, 'the idle thread took it: no second one');
+    assert.equal(m.woken.at(-1)?.thread, thread);
+    assert.equal(m.fns.QueueUserWorkItem.handler([0x402000, 3, 0]), 1);
+    assert.equal(m.created.length, 2, 'it was in the idle list once');
+
+    // Handed a callback while it was running an APC (the wake found it
+    // running): back in the loop, it runs that callback rather than counting
+    // it done.
+    const n = machine();
+    n.fns.QueueUserWorkItem.handler([0x402000, 1, 0]);
+    const [other] = n.created;
+    assert.equal(n.ask(other), RUN);
+    assert.equal(n.ask(other), PARKED);
+    n.fns.QueueUserWorkItem.handler([0x402000, 7, 0]);
+    assert.equal(n.ask(other, 0xc0), RUN, 'the callback handed over, not yet run');
+    assert.equal(n.record(other).args[0], 7);
+    assert.equal(n.ask(other), PARKED, 'run once, and idle again');
 });
 

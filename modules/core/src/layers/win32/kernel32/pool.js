@@ -178,7 +178,7 @@ export function waitLoopCode(wait, after, at){
 
 /**
  * @typedef {Object} ThreadPoolHost
- * @property {any} kernel  `createThread`, `block`, `wake`, `currentThread`, the
+ * @property {any} kernel  `createThread`, `block`, `alertably`, `wake`, `currentThread`, the
  *           timers (`createTimer`, `armTimer`, `cancelTimer`), `setEvent`,
  *           `handles` and the guest clock.
  * @property {(name: string, fn: { argBytes: number, handler: Function }) => number} register
@@ -374,7 +374,7 @@ export function createThreadPool(host){
      *
      * @param {number[]} args
      */
-    const fetch = ([record])=>{
+    const fetch = ([record, last])=>{
         const thread = kernel.currentThread();
         let worker = workers.get(thread);
         if (!worker)
@@ -386,6 +386,17 @@ export function createThreadPool(host){
             lane.starting = Math.max(0, lane.starting - 1);
         }
         const { lane } = worker;
+        // Back from routines queued to it (an APC ended its idle wait): it is
+        // idle no longer, and a callback handed to it meanwhile has not run.
+        const idle = lane.idle.indexOf(worker);
+        if (idle >= 0)
+        {
+            lane.idle.splice(idle, 1);
+        }
+        if (worker.job && (last >>> 0) !== RAN)
+        {
+            return RUN;
+        }
         if (worker.job)
         {
             const done = worker.job;
@@ -409,9 +420,13 @@ export function createThreadPool(host){
             grow(lane);
             return RUN;
         }
+        // Idle, it waits alertably, as Windows' pool threads do: a routine
+        // queued to it runs there and then (`apc.js`), and the loop asks again.
         lane.idle.push(worker);
-        kernel.block(thread, 'a thread pool callback');
-        return host.park(thread);
+        return kernel.alertably(thread, ()=>{
+            kernel.block(thread, 'a thread pool callback');
+            return host.park(thread);
+        });
     };
 
     /** @param {Lane} lane */
