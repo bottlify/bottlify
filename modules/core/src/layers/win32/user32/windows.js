@@ -67,6 +67,7 @@ import { DESKTOP_WINDOW, HWND_BROADCAST, createWindowDirectory } from './directo
 import { createClassRegistry } from './classes.js';
 import { boundsOf, subtractFromArea } from '../gdi32/rects.js';
 import { areaOf } from '../gdi32/regions.js';
+import { afterWait } from './after-wait.js';
 
 /** @typedef {import('../gdi32/rects.js').Rect} Rect */
 
@@ -1992,10 +1993,7 @@ export function createWindowFunctions(host){
         return { replied: true, result: entry.sent.result, ...bytes ? { bytes } : {} };
     };
 
-    /** @param {any} value @param {(answer: any) => any} then */
-    const andThen = (value, then)=>(typeof value?.then === 'function'
-        ? value.then(then)
-        : then(value));
+    const andThen = afterWait(host);
 
     /**
      * Whether a step answered with a promise rather than at once.
