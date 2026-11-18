@@ -195,6 +195,15 @@ export function widenUnsigned(b){
 }
 
 /**
+ * @guestCode cdecl
+ * @param {f64} x
+ * @returns {i64}
+ */
+export function truncate(x){
+    return x * 2;
+}
+
+/**
  * @guestCode stdcall
  * @param {any} guest @param {u32} p @param {i32} k
  * @returns {i32}
@@ -593,6 +602,41 @@ export function deep(x, y){
 }
 
 /**
+ * Six doubles live at once, a negation's or a rounding's scratch above them:
+ * XMM6, then XMM7 too, taken at 64 bits, which the caller keeps.
+ *
+ * @guestCode cdecl
+ * @param {f64} x @param {f64} y
+ * @returns {f64}
+ */
+export function deeper(x, y){
+    const a = x * 3;
+    return x - (y * (a + (x / (y - -a))));
+}
+
+/**
+ * @guestCode cdecl
+ * @param {f64} x @param {f64} y
+ * @returns {f64}
+ */
+export function deepest(x, y){
+    const a = x * 3;
+    return x - (y * (a + (x / (y - Math.floor(a)))));
+}
+
+/**
+ * Seven: more than x86-64 code keeps in registers.
+ *
+ * @guestCode cdecl
+ * @param {f64} x @param {f64} y
+ * @returns {f64}
+ */
+export function tooDeep(x, y){
+    const a = x * 3;
+    return x - (y * (a + (x / (y - (a * x)))));
+}
+
+/**
  * Integers each read once, left in the frame: the x87's integer operands.
  *
  * @guestCode cdecl
@@ -785,7 +829,7 @@ test('doubles: loads, stores, comparisons, the roundings, and NaN', async()=>{
 });
 
 test('x87 arguments popped, and an i64 from a double and from each integer', async()=>{
-    const { same } = await load(SAMPLE);
+    const { same, long } = await load(SAMPLE);
     const values = [0, -0.5, 3.75, -3.75, 2 ** 40 + 0.5, -(2 ** 62), 2 ** 63, -(2 ** 63), 1e20,
         NaN, Infinity, -Infinity];
     for (const v of values)
@@ -804,6 +848,12 @@ test('x87 arguments popped, and an i64 from a double and from each integer', asy
         same('widen', { stack: [a] });
         same('widenUnsigned', { stack: [a] });
     }
+    for (const v of values)
+    {
+        same('truncate', { stack: doubleWords(v) });
+    }
+    assert.deepEqual(['widen', 'widenUnsigned', 'truncate'].filter(name=>!long[name]), [],
+        'an i64 result built at 64 bits too, whole in RAX');
 });
 
 test('copies up and down, over themselves, a fill, and calls through a pointer', async()=>{
@@ -995,8 +1045,24 @@ test('a double\'s arithmetic as JavaScript computes it, and as the x87 rounds it
             same('remainders', { stack: [...doubleWords(x), ...doubleWords(y), k >>> 0,
                 i % 3 === 0 ? 0 : next() % 1000 - 500 >>> 0], control });
             same('deep', { stack: [...doubleWords(x), ...doubleWords(y)], control });
+            same('deeper', { stack: [...doubleWords(x), ...doubleWords(y)], control });
+            same('deepest', { stack: [...doubleWords(x), ...doubleWords(y)], control });
         }
     }
+});
+
+test('at 64 bits, six doubles live at once and an operation\'s scratch take XMM6 and XMM7,'
+    + ' kept for the caller; seven are refused', async()=>{
+    const { long, refusedAt64 } = await load(FLOATS);
+    // movdqu [rsp+d], xmm6 / xmm7 at the entry, each put back at the exit.
+    const saves = (/** @type {Uint8Array} */ code, /** @type {number} */ reg)=>[...code.keys()]
+        .filter(i=>code[i] === 0xf3 && code[i + 1] === 0x0f && code[i + 2] === 0x7f
+            && (code[i + 3] >> 3 & 7) === reg).length;
+    assert.match(refusedAt64.deep, /more doubles at once/, 'eight deep, past what is kept');
+    assert.equal(saves(long.deeper.code, 6), 1);
+    assert.equal(saves(long.deeper.code, 7), 0);
+    assert.equal(saves(long.deepest.code, 7), 1);
+    assert.match(refusedAt64.tooDeep, /more doubles at once than x86-64 code keeps/);
 });
 
 test('integers in the frame as the x87\'s operands, and a negative zero\'s constant', async()=>{
@@ -1336,9 +1402,9 @@ test('everything outside the subset is refused where it is written', ()=>{
 });
 
 test('compareExchange: lock cmpxchg of a dword, answering what it held, the value stored only'
-    + ' where it held the expected one; a variable in EDX kept across it; refused at 64 bits',
+    + ' where it held the expected one; a variable in EDX kept across it; the same at 64 bits',
 async()=>{
-    const { same, compiled, refusedAt64 } = await load(`
+    const { same, compiled, long, refusedAt64 } = await load(`
 export const SLOT = Uint32Array.of(0);
 /**
  * @guestCode stdcall
@@ -1365,7 +1431,8 @@ export function exchange({ u32, compareExchange }, at, expected, value){
     assert.ok(stored > 50 && stored < 150, `${stored} of 200 stored: both outcomes taken`);
     assert.deepEqual(Object.keys(compiled.exchange.tables), ['SLOT'],
         'the table it reads, and where');
-    assert.match(refusedAt64.exchange, /compareExchange: .*refused at 64 bits/);
+    assert.equal(refusedAt64.exchange, undefined);
+    assert.ok(long.exchange, 'built at 64 bits, run beside the i386 by `same`');
 });
 
 test('pointerBytes: 4 in the i386 and 8 in the x86-64, a constant of each; an if on it keeps only'

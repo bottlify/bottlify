@@ -75,7 +75,8 @@ the i386 one: `inguest.js` into `inguest.x64.js` (and so `inguest-math.js`, `ing
   space where the entry wrote them, and a `jmp rel32` to the handler's trap.
 - **Doubles**: scalar SSE2, exact as JavaScript's doubles are. A double or float argument comes
   in the XMM register of its place, the result goes in XMM0, and an expression's doubles are
-  XMM0 to XMM3. `+ - * /`, unary `-`, `Math.sqrt`, `abs`, `fround`, `floor`, `ceil` and
+  XMM0 to XMM3, XMM4 and XMM5 an operation's scratch; up to six deep, XMM6 and XMM7, which the
+  caller keeps, are taken too and saved in the frame where the code writes them. `+ - * /`, unary `-`, `Math.sqrt`, `abs`, `fround`, `floor`, `ceil` and
   `trunc`, the comparisons, `| 0`, `>>> 0`, `f32`/`f64` loads and stores. `host()` in a function
   with a double or float argument reloads it into its XMM register from the home space, where
   the bridge's 64-bit trap reads it (the export declares `floats`).
@@ -97,11 +98,15 @@ the i386 one: `inguest.js` into `inguest.x64.js` (and so `inguest-math.js`, `ing
   writes, or a slot it steps by, is laid out by it, and an `if` or a `?:` comparing it keeps only
   the way it takes: a source may take the x87's words and use them only where
   `pointerBytes === 4`, which the x86-64 never compiles. An offset that differs by width is
-  arithmetic on it (`const atSize = pointerBytes + 16`), which folds into the displacement as
-  a literal does; a `?:` choosing between two constants is a value, kept in a slot and added,
-  so it makes the i386 dearer than it was.
-- **Refused at 64 bits**: x87 arguments, a use of the x87's control and status words, an `i64` result, more
-  than four doubles at once, and a function `LONG` names for a pointer its source lays out as four
+  arithmetic on it (`const atSize = pointerBytes + 16`) or a `?:` on it choosing between two
+  constants (`pointerBytes === 8 ? 24 : 20`): both fold into the displacement as a literal does,
+  so the i386 costs what it did.
+- **An `i64` result**: the whole quadword in RAX - a double truncated by `cvttsd2si` (NaN and
+  out of range the integer indefinite, as `fisttp` answers), an integer extended by its sign.
+- **`compareExchange`**: the i386's `lock cmpxchg` of a dword, the address zero-extended by the
+  32-bit operation that made it.
+- **Refused at 64 bits**: x87 arguments, a use of the x87's control and status words, more than
+  six doubles at once, and a function `LONG` names for a pointer its source lays out as four
   bytes. Each stays a trap into its handler there.
 
 `guestEntry` and `guestExport` carry the x86-64 as the export's `long`, bound as `code` is;

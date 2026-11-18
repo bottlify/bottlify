@@ -4129,5 +4129,5 @@ export const COMPILED = /** @type {const} */ ({
 /** The functions with no x86-64 code, their handlers' traps at 64 bits, and why. */
 export const REFUSED = /** @type {const} */ ({
     _ftol:
-        'an i64 is EDX:EAX at 32 bits, refused at 64 bits',
+        'value: an x87 argument is the 32-bit convention\'s, refused at 64 bits',
 });

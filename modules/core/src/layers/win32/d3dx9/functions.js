@@ -44,7 +44,7 @@ import { createEffects } from './effect.js';
 import { createTextureLoader } from './texture.js';
 import { createTextureTools } from './texture-tools.js';
 import { createTextureSaver } from './save-texture.js';
-import { guestEntry } from '../msvcrt/guest-code.js';
+import { guestEntry, withLongCode } from '../msvcrt/guest-code.js';
 import { createComObject } from '../ole32/objects.js';
 import { createConstantTableObjects } from './constants.js';
 import { createShaderSemantics } from './semantics.js';
@@ -65,6 +65,10 @@ import { COMPILED } from './inguest.x86.js';
 import { COMPILED as MATRIX } from './inguest-matrix.x86.js';
 import { COMPILED as VECTOR } from './inguest-vector.x86.js';
 import { COMPILED as QUATERNION } from './inguest-quaternion.x86.js';
+import { COMPILED as LONG } from './inguest.x64.js';
+import { COMPILED as MATRIX_LONG } from './inguest-matrix.x64.js';
+import { COMPILED as VECTOR_LONG } from './inguest-vector.x64.js';
+import { COMPILED as QUATERNION_LONG } from './inguest-quaternion.x64.js';
 
 const E_NOTIMPL = 0x80004001;
 const E_OUTOFMEMORY = 0x8007000e;
@@ -135,6 +139,11 @@ export function d3dxVersionFunctions(version){
  */
 const IN_GUEST = [[inGuest, COMPILED], [matrix, MATRIX], [vector, VECTOR],
     [quaternion, QUATERNION]];
+// Their x86-64, from the same sources: what a 64-bit process places.
+withLongCode(COMPILED, LONG);
+withLongCode(MATRIX, MATRIX_LONG);
+withLongCode(VECTOR, VECTOR_LONG);
+withLongCode(QUATERNION, QUATERNION_LONG);
 
 /**
  * @typedef {Object} D3dxHost

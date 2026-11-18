@@ -360,7 +360,8 @@ export function equivalence(compiled, sources, model, long){
      * Holds the x86-64 code to what the JavaScript answered for an input.
      *
      * @param {string} name @param {Case} input @param {Double} double
-     * @param {{ eax: number, st: number[], data: Uint8Array, handedOver: boolean }} js
+     * @param {{ eax: number, edx: number, st: number[], data: Uint8Array,
+     *     handedOver: boolean }} js
      *     The JavaScript's answer in doubles: the source's, whatever the control
      *     word, which SSE2's arithmetic has nothing of.
      * @param {string} what
@@ -391,6 +392,16 @@ export function equivalence(compiled, sources, model, long){
         {
             assert.ok(sameDouble(/** @type {number} */ (x64.xmm0), judge.st[0]),
                 `${at64}: XMM0 ${x64.xmm0} against ${judge.st[0]}`);
+        }
+        else if (fn.returns === 'i64')
+        {
+            // The whole quadword in RAX, which the i386 answers in EDX:EAX;
+            // what the host answers for it is the bridge's to lay out.
+            if (!x64.handedOver)
+            {
+                assert.equal(x64.rax, BigInt(judge.edx >>> 0) << 32n | BigInt(judge.eax >>> 0),
+                    `${at64}: RAX, the i386's EDX:EAX`);
+            }
         }
         else if (fn.returns !== 'void')
         {
