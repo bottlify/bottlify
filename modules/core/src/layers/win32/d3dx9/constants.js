@@ -31,6 +31,7 @@ import { BLOCK_BYTES, BLOCK_DEFAULTS, BLOCK_PIXEL, DEFAULT_BYTES,
     DEFAULT_TWIN, HANDLE_BYTES, HANDLE_DESC, HANDLE_ELEMENTS, HANDLE_TAG,
     HANDLE_TWIN } from './constants-setters.js';
 import { COMPILED } from './constants-setters.x86.js';
+import { COMPILED as COMPILED_LONG } from './constants-setters.x64.js';
 
 export const IID_ID3DXCONSTANTTABLE = '{AB3C758F-093E-4356-B762-4DB18F1B3A01}';
 
@@ -771,19 +772,24 @@ export function createConstantTableObjects(host){
     /**
      * The methods `constants-setters.js` has guest code for take it through
      * their `guest` slot: placed once for each trap, its `return host()`
-     * going to that trap.
+     * going to that trap. A 64-bit process places the x86-64 the build made
+     * from the same source (`wide`), and a method it made none for is a trap
+     * there (`REFUSED`).
      *
      * @param {import('../ole32/objects.js').ComMethod[]} methods
      * @returns {import('../ole32/objects.js').ComMethod[]}
      */
     function inGuest(methods){
+        const records = /** @type {Record<string, any>} */ (POINTER === 8 ? COMPILED_LONG
+            : COMPILED);
         return methods.map(method=>{
-            const compiled = /** @type {Record<string, any>} */ (COMPILED)[method.name];
+            const compiled = records[method.name];
             if (!compiled)
             {
                 return method;
             }
-            return /** @type {any} */ ({ ...method, guest: (/** @type {{ trap: number }} */ { trap })=>{
+            return /** @type {any} */ ({ ...method, guest: Object.assign((
+                /** @type {{ trap: number }} */ { trap })=>{
                 const known = placed.get(method.name)?.get(trap);
                 if (known !== undefined)
                 {
@@ -805,7 +811,7 @@ export function createConstantTableObjects(host){
                 host.writeMemory(at, bytes);
                 placed.set(method.name, (placed.get(method.name) ?? new Map()).set(trap, at));
                 return at;
-            } });
+            }, { wide: true }) });
         });
     }
 
