@@ -837,3 +837,32 @@ test('a flush of write buffers waits until each executor running guest code has 
             'no executor in guest code: done at once');
         assert.equal(flushWrites({}), true, 'one executor: nothing to wait for');
     });
+
+test('a 64-bit thread parked or held keeps a return past 4 GiB whole, and the park loop\'s',
+    async()=>{
+        // A 64-bit program's image at its own base past 4 GiB: the return address
+        // its stub would pop is that whole quadword, and the park loop written over
+        // it leaves no high dword of the caller's beside it.
+        const memory = fakeMemory();
+        const kernel = await kernelModule.create(
+            { stacks: { base: STACK_BASE, size: STACK_SIZE } },
+            /** @type {any} */ ({
+                /** @param {string} name */
+                requireApi: name=>(name === 'cpu'
+                    ? { ...fakeCpu(0x2ffed0), bits: ()=>64 } : memory),
+                provide: ()=>{},
+            }),
+        );
+        /** @type {any} */
+        const thread = { name: 'main' };
+        memory.words.set(0x2ffed0, 0x40001202);
+        memory.words.set(0x2ffed4, 1);
+        kernel.parkThread(thread, 0x2ffed8);
+        assert.equal(thread.parkedReturn, 0x140001202);
+        assert.equal(memory.words.get(0x2ffed0), PARK);
+        assert.equal(memory.words.get(0x2ffed4), 0, 'the park loop whole');
+        memory.words.set(0x2ffed0, 0x40001202);
+        memory.words.set(0x2ffed4, 1);
+        assert.equal(kernel.holdThread(), 0x140001202);
+        assert.equal(memory.words.get(0x2ffed4), 0);
+    });

@@ -213,3 +213,20 @@ test('a class written back at 64 bits reads the same way it was read', ()=>{
     writeWindowClass(memory, 0x40, fields, L, L.WNDCLASSEXA);
     assert.deepEqual(readWindowClass(memory, 0x40, L.WNDCLASSEXA), fields);
 });
+
+test('a 64-bit class keeps a procedure and a name past 4 GiB whole, both ways', ()=>{
+    // A 64-bit program's image at its own base past 4 GiB (a wide window):
+    // its window procedure is that address, not the low dword's alias.
+    const memory = fakeMemory();
+    const layouts = userLayouts(8);
+    const L = layouts.WNDCLASSEXA;
+    const view = new DataView(memory.bytes.buffer);
+    view.setBigUint64(0x10 + L.lpfnWndProc, 0x140001740n, true);
+    view.setBigUint64(0x10 + L.lpszClassName, 0x1400023ben, true);
+    const fields = readWindowClass(memory, 0x10, L);
+    assert.equal(fields.wndProc, 0x140001740);
+    assert.equal(fields.className, 0x1400023be);
+    writeWindowClass(memory, 0x100, fields, layouts, L);
+    assert.equal(view.getBigUint64(0x100 + L.lpfnWndProc, true), 0x140001740n);
+    assert.equal(view.getBigUint64(0x100 + L.lpszClassName, true), 0x1400023ben);
+});

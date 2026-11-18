@@ -57,8 +57,7 @@ export function createSwitcher({ cpu, memory = null }){
         const esp = context.reg32[4] >>> 0;
         const op = memory.readU8(at);
         const pops = op === 0xc3 ? 0 : op === 0xc2 ? memory.readU16(at + 1) : -1;
-        // A return address is a quadword in long mode, where every address
-        // lies below 4 GiB: its low dword is the address.
+        // A return address is a quadword in long mode.
         const slot = cpu.bits?.() === 64 ? 8 : 4;
         if (pops < 0 || memory.readU32(esp) !== cpu.parkAddress?.()
             || (resume.esp !== null && resume.esp !== undefined
@@ -66,7 +65,12 @@ export function createSwitcher({ cpu, memory = null }){
         {
             return resume;
         }
-        memory.writeU32(esp, resume.eip);
+        memory.writeU32(esp, resume.eip >>> 0);
+        if (slot === 8)
+        {
+            // Whole: where the thread goes on may be an image past 4 GiB.
+            memory.writeU32(esp + 4, resume.eip >= 2 ** 32 ? Math.floor(resume.eip / 2 ** 32) : 0);
+        }
         return { ...resume, eip: at, esp };
     };
 

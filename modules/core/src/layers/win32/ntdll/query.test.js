@@ -540,3 +540,19 @@ test('NtQueryObject names a file under its volume device, an unnamed object noth
     assert.deepEqual([host.view.getUint32(BUFFER, true), host.view.getUint32(BUFFER + 4, true)],
         [0, 0], 'no name: an empty string, no buffer');
 });
+
+test('a 64-bit process asks SystemBasicInformation at its own size, the addresses quadwords', ()=>{
+    // SYSTEM_BASIC_INFORMATION's user addresses and affinity mask are
+    // ULONG_PTR: 0x40 bytes in a 64-bit process, the addresses from 0x20.
+    const host = { ...fakeHost({ arenaSize: 2 ** 32 - 0x400000 }), pointerSize: 8 };
+    const fns = createQueryFunctions(host);
+    assert.equal(fns.NtQuerySystemInformation.handler([0, BUFFER, 0x2c, RETURN_LENGTH]),
+        STATUS.INFO_LENGTH_MISMATCH);
+    assert.equal(host.view.getUint32(RETURN_LENGTH, true), 0x40);
+    assert.equal(fns.NtQuerySystemInformation.handler([0, BUFFER, 0x40, RETURN_LENGTH]),
+        STATUS.SUCCESS);
+    assert.equal(host.view.getBigUint64(BUFFER + 0x20, true), 0x10000n, 'the lowest address');
+    assert.equal(host.view.getBigUint64(BUFFER + 0x28, true), 0xfffeffffn,
+        'the highest, below the end of the 4 GiB');
+    assert.equal(host.bytes[BUFFER + 0x38], 1, 'one processor');
+});

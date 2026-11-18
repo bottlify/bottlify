@@ -374,7 +374,9 @@ test('a callback in a 64-bit process enters its routine in the x64 convention', 
         memory.place(code, bytes);
         return code;
     });
-    const entry = 0x401230;
+    // Past 4 GiB, where a 64-bit program keeps its image at its own base: the
+    // routine reached whole, not its low dword (audit b6).
+    const entry = 0x140001230;
     const args = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66];
     // Not aligned, on purpose: the frame is.
     const resting = 0x2ff7f4;
@@ -385,13 +387,15 @@ test('a callback in a 64-bit process enters its routine in the x64 convention', 
 
     const { eip, esp, registers: given } = resumed[0];
     assert.equal(eip, code, 'the thread starts at the call code');
-    assert.deepEqual(given, { eax: entry }, 'with the routine in EAX');
+    assert.equal(given, undefined, 'and no register set through the context');
 
     const r = registers();
-    // The resume sets EAX's low dword alone; its upper half is whatever was there.
-    r[RAX] = 0xfeedface00000000n | BigInt(given.eax);
+    // Whatever RAX held before: the routine comes off the frame.
+    r[RAX] = 0xfeedface00001230n;
     r[RSP] = BigInt(esp);
-    step({ memory, rip: eip, r, routines: new Map(), stops: new Set([entry]) });
+    const reached = step({ memory, rip: eip, r, routines: new Map(), stops: new Set([entry]) });
+    assert.equal(reached, entry, 'the routine reached whole');
+    assert.equal(r[RAX], BigInt(entry));
     const seen = { rcx: Number(r[RCX]), rdx: Number(r[RDX]), r8: Number(r[R8]),
         r9: Number(r[R9]), rsp: Number(r[RSP]) };
     assert.deepEqual([seen.rcx, seen.rdx, seen.r8, seen.r9], [0x11, 0x22, 0x33, 0x44],
