@@ -74,6 +74,9 @@ event, an error. Neither stops the program.
 - The month calendar (`SysMonthCal32`) shows only its month view: a click on a title's month or
   year offers no menu or spinner, MCM_SETCURRENTVIEW takes only MCMV_MONTH, MCN_VIEWCHANGE is not
   sent, and "today" is the clock when the calendar was made, not moved on at midnight.
+- The extended combo box (`ComboBoxEx32`) keeps its items' images, indents and values, but its
+  combo box's list shows only their text, in the ANSI code page: user32's combo box draws an
+  owner-drawn item's string itself rather than asking its parent with WM_DRAWITEM.
 - The common controls' window classes are there without comctl32 being loaded: a program that
   makes one, or asks GetClassInfo for it, does not load comctl32, where Windows' user32 loads it
   to register the class, so GetModuleHandle("comctl32") stays 0 until the program loads it.

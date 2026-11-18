@@ -32,6 +32,7 @@ import { LISTVIEW_CLASS, LISTVIEW_ATOM, createListViewProcedure } from './listvi
 import { REBAR_CLASS, REBAR_ATOM, createRebarProcedure } from './rebar.js';
 import { PAGER_CLASS, PAGER_ATOM, createPagerProcedure } from './pager.js';
 import { MONTHCAL_CLASS, MONTHCAL_ATOM, createMonthCalProcedure } from './monthcal.js';
+import { COMBOBOXEX_CLASS, COMBOBOXEX_ATOM, createComboBoxExProcedure } from './comboex.js';
 
 /** The face colour's brush, as a class's background names it: the index plus one. */
 const FACE_BACKGROUND = 15 + 1;
@@ -123,6 +124,11 @@ export function createCommonControls(host, toolkit, images, resources){
             name: MONTHCAL_CLASS,
             atom: MONTHCAL_ATOM,
             procedure: createMonthCalProcedure(host, toolkit, resources),
+        },
+        {
+            name: COMBOBOXEX_CLASS,
+            atom: COMBOBOXEX_ATOM,
+            procedure: createComboBoxExProcedure(host, toolkit, images, resources?.subclassing),
         },
     ];
 }
