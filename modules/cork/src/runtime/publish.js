@@ -398,6 +398,45 @@ export function createPublish(state){
     };
 
     /**
+     * Where the store keeps a batch's module, the time it took counted as the
+     * store's (`storeMs`) whichever path publishes it.
+     *
+     * @param {any} store @param {import('./emit-built.js').BuiltBatch} batch
+     * @returns {string | undefined}
+     */
+    const moduleKey = (store, batch)=>{
+        if (store === null)
+        {
+            return undefined;
+        }
+        const storeAt = clock();
+        const key = storeModule(store, batch);
+        counts.storeMs += clock() - storeAt;
+        return key;
+    };
+
+    /**
+     * A module's instance made live, the one account of it for a fresh batch,
+     * a store hit and a relinked chunk: kept under its key, and, when it is
+     * new translation (`counted`), a step toward the next relink and the
+     * moment its quiet is measured from. A relinked chunk is neither.
+     *
+     * @param {WebAssembly.Instance | null} instance @param {string | undefined} key
+     * @param {boolean} counted
+     */
+    const moduleLive = (instance, key, counted)=>{
+        if (instance !== null && key !== undefined)
+        {
+            keepBatch(key, instance);
+        }
+        if (counted)
+        {
+            modulesSinceRelink++;
+            modulePublishedAt = rt.corkRetired;
+        }
+    };
+
+    /**
      * An emitted batch: its module instantiated once, kept under its own key
      * with a record per region naming it, and every region published from it.
      *
@@ -451,21 +490,9 @@ export function createPublish(state){
             return here;
         }
         counts.moduleBytes += batch.module.length;
-        /** @type {string | undefined} */
-        let key;
-        if (store !== null)
-        {
-            const storeAt = clock();
-            key = storeModule(store, batch);
-            counts.storeMs += clock() - storeAt;
-        }
+        const key = moduleKey(store, batch);
         const instance = instantiate(compiled ?? batch.module, batch.module.length, key);
-        modulesSinceRelink++;
-        modulePublishedAt = rt.corkRetired;
-        if (key !== undefined && instance !== null)
-        {
-            keepBatch(key, instance);
-        }
+        moduleLive(instance, key, true);
         let published = 0;
         /** @type {Waiting[] | null} */
         const waiting = later && instance !== null ? [] : null;
@@ -529,17 +556,13 @@ export function createPublish(state){
             return;
         }
         counts.moduleBytes += batch.module.length;
-        /** @type {string | undefined} */
-        const key = store === null ? undefined : storeModule(store, batch);
+        const key = moduleKey(store, batch);
         const instance = instantiate(compiled ?? batch.module, batch.module.length, key);
         if (instance === null)
         {
             return;
         }
-        if (key !== undefined)
-        {
-            keepBatch(key, instance);
-        }
+        moduleLive(instance, key, false);
         // A region left on its old module until it is moved runs the same
         // code there: each moves on its own.
         /** @type {Waiting[] | null} */
@@ -764,9 +787,7 @@ export function createPublish(state){
             batch.instances.set(source, made);
             if (made !== null && typeof source === 'string')
             {
-                keepBatch(source, made);
-                modulesSinceRelink++;
-                modulePublishedAt = rt.corkRetired;
+                moduleLive(made, source, true);
             }
         }
         return made;
@@ -874,9 +895,7 @@ export function createPublish(state){
                     undefined, key) ?? undefined;
                 if (instance !== undefined && key !== undefined)
                 {
-                    keepBatch(key, instance);
-                    modulesSinceRelink++;
-                    modulePublishedAt = rt.corkRetired;
+                    moduleLive(instance, key, true);
                 }
             }
             if (instance !== undefined)
