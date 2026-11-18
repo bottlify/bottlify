@@ -76,6 +76,22 @@ export const D3DSBT_ALL = 1;
 export const FVF_XYZ_DIFFUSE = 0x042;
 export const SOFTWARE_VERTEXPROCESSING = 0x20;
 
+/** The long-mode registers by number, as an instruction names them. */
+const LONG_REGISTERS = ['rax', 'rcx', 'rdx', 'rbx', 'rsp', 'rbp', 'rsi', 'rdi',
+    'r8', 'r9', 'r10', 'r11', 'r12', 'r13', 'r14', 'r15'];
+/** Where an x64 call's first four arguments are. */
+const LONG_ARGUMENTS = ['rcx', 'rdx', 'r8', 'r9'];
+/** What each register a 64-bit callee keeps for its caller holds at a call, checked after it. */
+const KEPT_LONG = Object.freeze({
+    rbx: 0x1111111111111111n, rbp: 0x4444444444444444n, rsi: 0x2222222222222222n,
+    rdi: 0x3333333333333333n, r12: 0xc2c2c2c2c2c2c2c2n, r13: 0xd3d3d3d3d3d3d3d3n,
+    r14: 0xe4e4e4e4e4e4e4e4n, r15: 0xf5f5f5f5f5f5f5f5n,
+});
+
+/** A quadword's eight bytes, low first. @param {bigint} value @returns {number[]} */
+const quad = value=>Array.from({ length: 8 },
+    (unused, i)=>Number((BigInt.asUintN(64, value) >> BigInt(8 * i)) & 0xffn));
+
 /** @param {number} value @returns {number[]} */
 export const u32 = value=>[
     value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff,
@@ -282,21 +298,29 @@ export const D3D8 = {
  * @param {Version} version
  * @param {boolean} guestCode
  * @param {{ onDevice?: (device: any) => void, gpu?: boolean, worker?: boolean,
- *     caps?: object, traps?: string[] }} [options]
+ *     caps?: object, traps?: string[], bits?: 32 | 64 }} [options]
  *     `onDevice` is told of each device made; `gpu` has the devices draw
  *     through a backend over a recording GPU, the machine's `gpu`; `worker`
  *     has them record what they are asked, as in a graphics worker, for a
  *     twin that plays each call at once to draw; `caps` is what the root is
  *     told its devices can do, past what every device of the version can;
- *     `traps` the parts of the guest code kept as traps (`guestTraps`)
+ *     `traps` the parts of the guest code kept as traps (`guestTraps`); `bits`
+ *     64 for a 64-bit process: long mode, method tables of eight-byte slots,
+ *     each call made as the x64 convention makes one and each trap read as
+ *     the bridge's 64-bit trap reads one (`readLongCall`), out-parameters a
+ *     pointer apart
  */
 export function machine(version, guestCode, options = {}){
     /** @type {(device: any) => void} */
     const onDevice = options.onDevice ?? (()=>{});
     const gpu = options.gpu ? createFakeDevice() : null;
+    const long = options.bits === 64;
+    /** A pointer's bytes: out-parameters and an interface's block word are that far apart. */
+    const word = long ? 8 : 4;
     const host = createCorkHost({
         memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
         initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
+        ...long ? { bits: /** @type {64} */ (64) } : {},
     });
     host.writePhysical(0x7000, new Uint8Array(u32(PROGRAM)));
     /** @param {number} at @param {number} length */
@@ -340,6 +364,7 @@ export function machine(version, guestCode, options = {}){
     const vtables = createVtables({
         memory,
         heap: { allocate, allocateCode },
+        long: ()=>long,
         register: (name, fn)=>{
             const at = nextTrap++;
             host.writePhysical(at, new Uint8Array([0xf4]));
@@ -427,6 +452,7 @@ export function machine(version, guestCode, options = {}){
         allocateCode,
         guestCode,
         guestTraps: options.traps ?? [],
+        pointerSize: word,
         // A ring of the size the gates fill many times over (`getters-contract`'s bursts).
         ringBytes: COMMAND_RING_BYTES,
         divergence: ()=>{},
@@ -445,6 +471,9 @@ export function machine(version, guestCode, options = {}){
     const pointerOf = new Map();
     /** @type {Map<string, any>} */
     const objectOf = new Map();
+    /** The kind each pointer was called as, for the table its slots are read in. */
+    /** @type {Map<string, string>} */
+    const kindOf = new Map();
     /** @param {number} pointer */
     const name = pointer=>{
         if (pointer === 0)
@@ -464,6 +493,106 @@ export function machine(version, guestCode, options = {}){
     };
 
     /**
+     * One call as an x86-64 caller makes it, run until it returns: `this` and
+     * the first three arguments in RCX, RDX, R8 and R9, the rest in the slots
+     * past 32 bytes of home space, RSP 8 past a multiple of 16 at the entry.
+     * A number argument's upper half is a pattern, as the convention leaves a
+     * dword's (a zero stays zero: the program's null pointer); a pointer's is
+     * zero. Every register the callee keeps is given a value of its own and
+     * checked after the return, and each trap is read as the bridge's 64-bit
+     * trap reads one (`readLongCall`): the arguments' low halves, the answer
+     * sign-extended into RAX.
+     *
+     * @param {Call} call @param {number} self @param {number[]} values @param {number} slot
+     * @returns {Answer}
+     */
+    const runLong = (call, self, values, slot)=>{
+        const quads = [BigInt(self), ...values.map((value, i)=>(typeof call.args[i] === 'number'
+            && value !== 0 ? BigInt(value) | BigInt(Math.imul(0x9e3779b9, i + 1) >>> 0) << 32n
+            : BigInt(value)))];
+        const stacked = quads.slice(4);
+        const frame = (32 + 8 * stacked.length + 15) & -16;
+        /** @type {number[]} */
+        const bytes = [0x48, 0x81, 0xec, ...u32(frame)]; //              sub rsp, frame
+        stacked.forEach((value, k)=>{
+            bytes.push(0x48, 0xb8, ...quad(value)); //                     mov rax, imm64
+            bytes.push(0x48, 0x89, 0x84, 0x24, ...u32(32 + 8 * k)); //     mov [rsp+d], rax
+        });
+        // mov rcx, rdx, r8, r9: imm64
+        [[0x48, 0xb9], [0x48, 0xba], [0x49, 0xb8], [0x49, 0xb9]].forEach(([rex, op], i)=>{
+            bytes.push(rex, op, ...quad(quads[i] ?? 0xc5c5c5c5c5c5c5c5n));
+        });
+        for (const [register, value] of Object.entries(KEPT_LONG))
+        {
+            const index = LONG_REGISTERS.indexOf(register);
+            bytes.push(0x48 | index >> 3, 0xb8 + (index & 7), ...quad(value));
+        }
+        bytes.push(0x48, 0xb8, ...quad(BigInt(self))); //                  mov rax, this
+        bytes.push(0x48, 0x8b, 0x00); //                                   mov rax, [rax]
+        bytes.push(0xff, 0x90, ...u32(slot * 8)); //                       call [rax + slot*8]
+        bytes.push(0x48, 0x81, 0xc4, ...u32(frame)); //                    add rsp, frame
+        bytes.push(0xf4);
+        const end = PROGRAM + bytes.length;
+        host.writePhysical(PROGRAM, new Uint8Array(bytes));
+        host.writeReg64('rip', BigInt(PROGRAM));
+        host.writeReg64('rsp', BigInt(STACK));
+        /** @type {string[]} */
+        const traps = [];
+        for (let slices = 0; ; slices++)
+        {
+            assert.ok(slices < 1000, `${call.method} returns`);
+            host.runSlice(1 << 16);
+            const rip = Number(host.readReg64('rip'));
+            if (!host.halted())
+            {
+                continue;
+            }
+            if (rip === end)
+            {
+                break;
+            }
+            const entry = handlers.get(rip - 1);
+            assert.ok(entry, `${call.method} stopped at 0x${rip.toString(16)}, no trap`);
+            const fn = entry.fn;
+            assert.ok(!fn.floats && !fn.quadwords && !fn.structs,
+                `${entry.name}: a slot this machine does not read as the bridge does`);
+            const rsp = Number(host.readReg64('rsp'));
+            assert.equal(rsp % 16, 8, `${entry.name} is reached with RSP as at a call`);
+            const args = Array.from({ length: fn.argBytes >>> 2 }, (unused, i)=>(i < 4
+                ? Number(BigInt.asUintN(32, host.readReg64(LONG_ARGUMENTS[i])))
+                : readU32(rsp + 8 + 32 + 8 * (i - 4))));
+            /** @type {any} */
+            let answer;
+            try
+            {
+                answer = fn.handler(args);
+            }
+            catch (e){
+                return { eax: 0xffffffff, out: `${entry.name} threw: ${/** @type {Error} */ (e)
+                    .message}`, out2: 0, out3: 0, traps: [...traps, entry.name] };
+            }
+            assert.ok(typeof answer?.then !== 'function', `${entry.name} answers at once`);
+            traps.push(entry.name.replace(/^.*::/, ''));
+            host.writeReg64('rax', BigInt.asUintN(64, BigInt((answer ?? 0) | 0)));
+            host.writeReg64('rsp', BigInt(rsp + 8));
+            host.writeReg64('rip', BigInt(readU32(rsp)));
+        }
+        assert.equal(Number(host.readReg64('rsp')), STACK, `${call.method} kept RSP`);
+        for (const [register, value] of Object.entries(KEPT_LONG))
+        {
+            assert.equal(host.readReg64(register), value, `${call.method} kept ${register}`);
+        }
+        const out = readU32(OUT);
+        return {
+            eax: Number(host.readReg64('rax') & 0xffffffffn),
+            out: out === UNTOUCHED ? 'untouched' : name(out),
+            out2: readU32(OUT + 8),
+            out3: readU32(OUT + 16),
+            traps,
+        };
+    };
+
+    /**
      * Runs one call from a fresh stack until it returns, answering each trap
      * it reaches with the handler the bridge registered for it.
      *
@@ -473,9 +602,11 @@ export function machine(version, guestCode, options = {}){
     const run = call=>{
         const self = pointerOf.get(call.on);
         assert.ok(self !== undefined, `${call.on} is a pointer this machine handed out`);
-        writeU32(OUT, UNTOUCHED);
-        writeU32(OUT + 4, UNTOUCHED);
-        writeU32(OUT + 8, UNTOUCHED);
+        kindOf.set(call.on, call.kind);
+        for (let i = 0; i < 3 * word; i += 4)
+        {
+            writeU32(OUT + i, UNTOUCHED);
+        }
         let guids = GUID;
         const values = call.args.map(arg=>{
             if (typeof arg === 'number')
@@ -493,7 +624,7 @@ export function machine(version, guestCode, options = {}){
             }
             if (arg === 'out' || arg === 'out2' || arg === 'out3')
             {
-                return OUT + 4 * ['out', 'out2', 'out3'].indexOf(arg);
+                return OUT + word * ['out', 'out2', 'out3'].indexOf(arg);
             }
             const pointer = pointerOf.get(arg);
             assert.ok(pointer !== undefined, `${arg} is a pointer this machine handed out`);
@@ -503,6 +634,10 @@ export function machine(version, guestCode, options = {}){
             : call.method === 'Release' ? 2
                 : slotIn(call.kind === 'root' ? version.rootSlots : version.slots[call.kind],
                     call.method);
+        if (long)
+        {
+            return runLong(call, self, values, slot);
+        }
         /** @type {number[]} */
         const bytes = [];
         for (const value of [...values].reverse())
@@ -574,7 +709,7 @@ export function machine(version, guestCode, options = {}){
      */
     const pending = ()=>{
         const device = pointerOf.get('#1');
-        const block = device === undefined ? 0 : readU32(device + 4);
+        const block = device === undefined ? 0 : readU32(device + word);
         const head = block === 0 ? 0 : readU32(block + SHADOW.COMMAND_HEAD);
         if (head < played)
         {
@@ -588,6 +723,35 @@ export function machine(version, guestCode, options = {}){
     name(root);
     return {
         run,
+        /** A pointer's bytes: where a structure's pointer field or the next out-parameter is. */
+        word,
+        /**
+         * Which methods are guest code in this machine: of the tables of the
+         * objects the program called, the slots that hold an address that is
+         * no trap.
+         */
+        guestSlots: ()=>{
+            /** @type {Set<string>} */
+            const found = new Set();
+            for (const [pointer, kind] of kindOf)
+            {
+                const self = pointerOf.get(pointer);
+                if (self === undefined || ended(objectOf.get(pointer)))
+                {
+                    continue;
+                }
+                const table = readU32(self);
+                ['QueryInterface', 'AddRef', 'Release',
+                    ...(kind === 'root' ? version.rootSlots : version.slots[kind]).map(([n])=>n)]
+                    .forEach((method, i)=>{
+                        if (!handlers.has(readU32(table + word * i)))
+                        {
+                            found.add(method);
+                        }
+                    });
+            }
+            return [...found];
+        },
         /** The machine's memory, for what a program writes through a pointer it was handed. */
         memory,
         /** The recording GPU the devices draw on, when asked for. */
