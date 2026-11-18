@@ -7,6 +7,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createThreadingFunctions } from './threading.js';
+import { COMPILED as SEMAPHORE_I386 } from './semaphore-guest.x86.js';
+import { COMPILED as SEMAPHORE_LONG } from './semaphore-guest.x64.js';
 import { createNamedObjects } from './named-objects.js';
 
 const ERROR_SUCCESS = 0;
@@ -1705,4 +1707,29 @@ test('CompareObjectHandles says whether two handles name one object', ()=>{
     assert.equal(fns.CompareObjectHandles.handler([event, copy]), 1);
     assert.equal(fns.CompareObjectHandles.handler([event, other]), 0);
     assert.equal(fns.CompareObjectHandles.handler([0x9999, 0x9999]), 0, 'no object at all');
+});
+
+test('ReleaseSemaphore places the code of the process\'s width: x86-64 in a 64-bit one', ()=>{
+    for (const [pointerSize, record] of /** @type {const} */ ([[4, SEMAPHORE_I386],
+        [8, SEMAPHORE_LONG]]))
+    {
+        const memory = new Uint8Array(1 << 20);
+        let free = 0x1000;
+        const fns = /** @type {any} */ (createThreadingFunctions(/** @type {any} */ ({
+            pointerSize, kernel: { mirrorEvents: ()=>{} }, namedObjects: createNamedObjects(),
+            allocate: (/** @type {number} */ bytes)=>{
+                const at = free;
+                free += (bytes + 15) & -16;
+                return at;
+            },
+            writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>{
+                memory.set(bytes, at);
+            },
+        })));
+        assert.equal(fns.ReleaseSemaphore.guestLong, true, 'placed in a 64-bit process too');
+        const at = fns.ReleaseSemaphore.guest({ register: ()=>0x7000_0000 });
+        const { code, host } = record.ReleaseSemaphore;
+        assert.deepEqual([...memory.subarray(at, at + host - 1)], [...code.subarray(0, host - 1)],
+            `${pointerSize * 8}-bit: the code its width builds`);
+    }
 });
