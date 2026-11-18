@@ -1783,3 +1783,27 @@ test('select lists a full socket as not writable, and waits for room', async()=>
     assert.equal(await waiting, 1);
     assert.equal(fx.dword(FDSET + 4), client);
 });
+
+test('a 64-bit process reads its hostent with quadword pointers: the name, the alias list'
+    + ' and the address list where its struct has them', ()=>{
+    // struct hostent at 64 bits: char *h_name at 0, char **h_aliases at 8,
+    // short h_addrtype at 16, short h_length at 18, char **h_addr_list at 24,
+    // the lists' entries quadwords. In the 32-bit layout a 64-bit program read
+    // h_aliases and the two shorts as one pointer and went through it.
+    const fx = fixture({ pointerSize: 8 });
+    fx.put(NAME, '10.0.0.7');
+    const hostent = fx.call('gethostbyname', [NAME]);
+    assert.notEqual(hostent, 0);
+    /** @param {number} at  a quadword pointer below 4 GiB */
+    const pointer = at=>{
+        assert.equal(fx.dword(at + 4), 0, 'its high half');
+        return fx.dword(at);
+    };
+    assert.equal(fx.host.readCString(pointer(hostent), 32), '10.0.0.7');
+    assert.equal(pointer(pointer(hostent + 8)), 0, 'no aliases');
+    assert.equal(new DataView(fx.bytes.buffer).getUint16(hostent + 16, true), 2, 'AF_INET');
+    assert.equal(new DataView(fx.bytes.buffer).getUint16(hostent + 18, true), 4);
+    const list = pointer(hostent + 24);
+    assert.deepEqual([...fx.bytes.subarray(pointer(list), pointer(list) + 4)], [10, 0, 0, 7]);
+    assert.equal(pointer(list + 8), 0, 'the list ends');
+});

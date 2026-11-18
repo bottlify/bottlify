@@ -4,7 +4,8 @@
  * See LICENSE for details
  */
 
-import { DEVICE, SURFACE, TEXTURE, UNKNOWN_RELEASE, createDeviceCalls } from './device.js';
+import { DEVICE, LOCKED_RECT_BYTES, POINTER_BYTES, SURFACE, TEXTURE, UNKNOWN_RELEASE,
+    createDeviceCalls } from './device.js';
 import { ImageError, bitmapFile, readImage } from './images.js';
 import {
     FMT, decodeTexels, encodeTexels, halve, isCompressed, isCopyable, isSupported, keptAsIs,
@@ -141,7 +142,7 @@ function formatFromFile(file){
  * @param {TextureHost} host
  */
 export function createTextureLoader(host){
-    const { u32, putU32s, method: call, string } = createDeviceCalls(host);
+    const { u32, putU32s, putPointer, lockedRect, method: call, string } = createDeviceCalls(host);
 
     /**
      * Writes D3DXIMAGE_INFO.
@@ -426,7 +427,7 @@ export function createTextureLoader(host){
         const { device, given, found, ask } = parse(args.map(a=>a >>> 0));
         if (ask.out !== 0)
         {
-            putU32s(ask.out, [0]);
+            putPointer(ask.out, 0);
         }
         if (device === 0 || !given || ask.out === 0 || !host.callGuest || !host.heap)
         {
@@ -460,7 +461,7 @@ export function createTextureLoader(host){
         const { device, given, found, ask } = parse(args.map(a=>a >>> 0));
         if (ask.out !== 0)
         {
-            putU32s(ask.out, [0]);
+            putPointer(ask.out, 0);
         }
         if (device === 0 || !given || ask.out === 0 || !host.callGuest || !host.heap)
         {
@@ -550,7 +551,10 @@ export function createTextureLoader(host){
         // and this one is in flight only once its handler has returned its promise.
         await null;
         const heap = /** @type {NonNullable<TextureHost['heap']>} */ (host.heap);
-        const scratch = heap.allocate(16);
+        // The texture's out pointer, then its lock: a rectangle, or a box, which is no
+        // longer than one.
+        const scratch = heap.allocate(POINTER_BYTES + LOCKED_RECT_BYTES);
+        const locked = scratch + POINTER_BYTES;
         if (scratch === 0)
         {
             return E_OUTOFMEMORY;
@@ -560,7 +564,7 @@ export function createTextureLoader(host){
         let failed = D3D_OK;
         /** @param {number} usage @param {number} pool @returns {Promise<number | null>} */
         const create = async(usage, pool)=>{
-            putU32s(scratch, [0]);
+            putPointer(scratch, 0);
             const answer = plan.cube
                 ? await method(device, DEVICE.CreateCubeTexture, [plan.w, plan.count, usage,
                     plan.target, pool, scratch, 0])
@@ -594,15 +598,16 @@ export function createTextureLoader(host){
                     // LockBox and UnlockBox stand where LockRect and UnlockRect
                     // do; the box has a slice pitch between the row pitch and the bits.
                     const answer = await method(filled, TEXTURE.LockRect, [...which, level,
-                        scratch + 4, 0, 0]);
+                        locked, 0, 0]);
                     if (answer !== D3D_OK)
                     {
                         await method(filled, UNKNOWN_RELEASE, []);
                         return answer;
                     }
-                    const pitch = u32(scratch + 4);
-                    const slicePitch = plan.depth ? u32(scratch + 8) : 0;
-                    const bits = u32(scratch + (plan.depth ? 12 : 8));
+                    // A box's pointer follows two pitches, at the same place at both widths.
+                    const pitch = u32(locked);
+                    const slicePitch = plan.depth ? u32(locked + 4) : 0;
+                    const bits = plan.depth ? u32(locked + 8) : lockedRect(locked).bits;
                     const { rowBytes, rows } = layoutOf(plan.target, Math.max(1, plan.w >> level),
                         Math.max(1, plan.h >> level));
                     const bytes = plan.faces[face][level];
@@ -621,7 +626,7 @@ export function createTextureLoader(host){
             }
             if (lockable)
             {
-                putU32s(plan.out, [filled]);
+                putPointer(plan.out, filled);
                 return D3D_OK;
             }
             const placed = await create(plan.usage, plan.pool);
@@ -637,7 +642,7 @@ export function createTextureLoader(host){
                 await method(placed, UNKNOWN_RELEASE, []);
                 return answer;
             }
-            putU32s(plan.out, [placed]);
+            putPointer(plan.out, placed);
             return D3D_OK;
         }
         finally
@@ -664,7 +669,7 @@ export function createTextureLoader(host){
         // As for `upload`: the call into the guest goes below this one once it is in flight.
         await null;
         const heap = /** @type {NonNullable<TextureHost['heap']>} */ (host.heap);
-        const scratch = heap.allocate(SURFACE_DESC_BYTES + 8);
+        const scratch = heap.allocate(SURFACE_DESC_BYTES + LOCKED_RECT_BYTES);
         if (scratch === 0)
         {
             return E_OUTOFMEMORY;
@@ -717,7 +722,7 @@ export function createTextureLoader(host){
                 return answer;
             }
             const write = layoutOf(to.format, to.width, to.height);
-            for (let row = 0, pitch = u32(locked), bits = u32(locked + 4); row < write.rows; row++)
+            for (let row = 0, { pitch, bits } = lockedRect(locked); row < write.rows; row++)
             {
                 host.writeMemory(bits + row * pitch,
                     bytes.subarray(row * write.rowBytes, (row + 1) * write.rowBytes));
@@ -799,7 +804,8 @@ export function createTextureLoader(host){
                     host.divergence?.(api, `the source would not lock (0x${answer.toString(16)})`);
                     return answer;
                 }
-                const packed = readRows(from, u32(locked + 4), u32(locked));
+                const { pitch, bits } = lockedRect(locked);
+                const packed = readRows(from, bits, pitch);
                 await method(source, SURFACE.UnlockRect, []);
                 return packed;
             });

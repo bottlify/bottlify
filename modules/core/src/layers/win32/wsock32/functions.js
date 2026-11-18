@@ -136,6 +136,8 @@ const TRANSMIT_CHUNK = 0x10000;
 /**
  * @typedef {Object} WinsockHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
+ * @property {number} [pointerSize]  8 in a 64-bit process, whose hostent and fd_set hold
+ *           quadword pointers and handles; absent, 4.
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readCString
  * @property {() => any} currentThread
@@ -586,8 +588,26 @@ export function createWinsockFunctions(host){
         return settle(outcome);
     };
 
+    /**
+     * A pointer's bytes in the caller's layout: 8 in a 64-bit process, whose
+     * hostent and fd_set hold quadword pointers and handles.
+     */
+    const POINTER = host.pointerSize === 8 ? 8 : 4;
+    /** struct hostent in the caller's layout: the 32-bit one, or with quadword pointers. */
+    const HOSTENT_HERE = POINTER === 8
+        ? { h_name: 0, h_aliases: 8, h_addrtype: 16, h_length: 18, h_addr_list: 24, SIZE: 32 }
+        : HOSTENT;
+    /** @param {number} at @param {number} value  a pointer or a handle, below 4 GiB */
+    const putPointer = (at, value)=>{
+        writeDword(at, value);
+        if (POINTER === 8)
+        {
+            writeDword(at + 4, 0);
+        }
+    };
+
     /** How many bytes writeHostentAt needs, past what the caller already has room for. */
-    const HOSTENT_BLOCK_SIZE = HOSTENT.SIZE + 64;
+    const HOSTENT_BLOCK_SIZE = HOSTENT_HERE.SIZE + 64;
 
     /**
      * Lays out a hostent at a given block and returns it back.
@@ -595,24 +615,24 @@ export function createWinsockFunctions(host){
      * @param {number} block @param {string} name @param {number} address host order
      */
     const writeHostentAt = (block, name, address)=>{
-        const nameAt = block + HOSTENT.SIZE;
+        const nameAt = block + HOSTENT_HERE.SIZE;
         const aliasesAt = nameAt + 32;
-        const listAt = aliasesAt + 8;
-        const addressAt = listAt + 8;
+        const listAt = aliasesAt + POINTER;
+        const addressAt = listAt + 2 * POINTER;
 
         host.writeMemory(nameAt, sz(name));
-        writeDword(aliasesAt, 0);
+        putPointer(aliasesAt, 0);
         writeDword(addressAt, swap32(address));
-        writeDword(listAt, addressAt);
-        writeDword(listAt + 4, 0);
+        putPointer(listAt, addressAt);
+        putPointer(listAt + POINTER, 0);
 
-        const record = new Uint8Array(HOSTENT.SIZE);
+        const record = new Uint8Array(HOSTENT_HERE.SIZE);
         const view = new DataView(record.buffer);
-        view.setUint32(HOSTENT.h_name, nameAt, true);
-        view.setUint32(HOSTENT.h_aliases, aliasesAt, true);
-        view.setUint16(HOSTENT.h_addrtype, AF_INET, true);
-        view.setUint16(HOSTENT.h_length, 4, true);
-        view.setUint32(HOSTENT.h_addr_list, listAt, true);
+        view.setUint32(HOSTENT_HERE.h_name, nameAt, true);
+        view.setUint32(HOSTENT_HERE.h_aliases, aliasesAt, true);
+        view.setUint16(HOSTENT_HERE.h_addrtype, AF_INET, true);
+        view.setUint16(HOSTENT_HERE.h_length, 4, true);
+        view.setUint32(HOSTENT_HERE.h_addr_list, listAt, true);
         host.writeMemory(block, record);
         return block >>> 0;
     };
@@ -626,7 +646,7 @@ export function createWinsockFunctions(host){
     const writeHostent = (name, address)=>
         writeHostentAt(staticBuffer('hostent', HOSTENT_BLOCK_SIZE), name, address);
 
-    /** fd_set is a count followed by that many handles. */
+    /** fd_set is a count followed by that many handles, each a pointer's width and aligned to it. */
     const readFdSet = (/** @type {number} */ pointer)=>{
         if (pointer === 0)
         {
@@ -636,7 +656,7 @@ export function createWinsockFunctions(host){
         const handles = [];
         for (let at = 0; at < total; at++)
         {
-            handles.push(readDword((pointer >>> 0) + 4 + at * 4));
+            handles.push(readDword((pointer >>> 0) + POINTER + at * POINTER));
         }
         return handles;
     };
@@ -660,7 +680,8 @@ export function createWinsockFunctions(host){
             return false;
         }
         writeDword(pointer, sockets.length);
-        sockets.forEach((socket, at)=>writeDword((pointer >>> 0) + 4 + at * 4, socket.handle));
+        sockets.forEach((socket, at)=>
+            putPointer((pointer >>> 0) + POINTER + at * POINTER, socket.handle));
         return true;
     };
 

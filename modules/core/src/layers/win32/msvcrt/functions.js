@@ -1675,6 +1675,7 @@ export function createMsvcrtFunctions(host){
                         writeMemory: host.writeMemory,
                         closeHandle: host.closeHandle,
                         currentThreadId: ()=>host.currentThread?.()?.id ?? 0,
+                        long: host.pointerSize === 8,
                     },
                 }
                 : {},

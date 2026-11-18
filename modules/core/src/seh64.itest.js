@@ -38,5 +38,9 @@ test('a 64-bit program dispatches exceptions through its unwind tables',
         assert.match(text, /^ok {3}a hundred faults in a row$/m, text);
         assert.match(text, /^ok {3}a __finally around the __except that took it runs once/m,
             text);
+        // A /GS frame: __GSHandlerCheck_SEH is its handler and calls the runtime's.
+        assert.match(text, /^ok {3}a frame whose handler hands on to the runtime's reaches/m,
+            text);
+        assert.match(text, /^ok {3}and its __finally runs on the way, once$/m, text);
         assert.equal(code, 0, text);
     });

@@ -1904,6 +1904,7 @@ export function createWin32Module(){
             };
             const winsock = createWinsockFunctions({
                 readMemory,
+                pointerSize,
                 // The WSA events are kernel32's events, and TransmitFile reads
                 // its file through ReadFile: kernel32's own exports, looked up
                 // when called, as the table is built below.
@@ -4849,7 +4850,7 @@ export function createWin32Module(){
                 // since d3dx9 exports them undecorated though they are stdcall.
                 ...(()=>{
                     /** @type {import('./d3dx9/functions.js').D3dxHost} */
-                    const d3dxHost = { readMemory, writeMemory,
+                    const d3dxHost = { readMemory, writeMemory, pointerSize,
                         // A word read and written in place: an effect's commit reads
                         // a version word for every constant of its pass.
                         readU32: (/** @type {number} */ at)=>memory.readU32(at),

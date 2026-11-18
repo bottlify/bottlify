@@ -202,7 +202,8 @@ const PROGRAMS = [
     { name: 'hello64', source: 'hello64.c', cxx: false, x64: true },
     { name: 'crt64', source: 'crt64.c', cxx: false, x64: true },
     { name: 'win64', source: 'win64.c', cxx: false, x64: true },
-    { name: 'seh64', source: 'seh64.c', cxx: false, x64: true },
+    { name: 'seh64', source: 'seh64.c', cxx: false, x64: true,
+        guestHandler: 'via_guest_handler' },
     { name: 'float64', source: 'float64.c', cxx: false, x64: true },
     { name: 'window64', source: 'window64.c', cxx: false, x64: true },
     { name: 'hook64', source: 'hook64.c', cxx: false, x64: true },
@@ -300,6 +301,14 @@ try
                     text = throughGuestHandler(text, guestHandler, 'guest_language_handler');
                 }
                 await writeFile(assembly, text);
+                run('clang', ['--target=x86_64-pc-windows-msvc', '-c', assembly, '-o', object]);
+            }
+            else if (guestHandler)
+            {
+                const assembly = join(work, `${name}.s`);
+                run('clang', [...flags, '-S', join(SOURCES, source), '-o', assembly]);
+                await writeFile(assembly, throughGuestHandler(await readFile(assembly, 'utf8'),
+                    guestHandler, 'guest_language_handler'));
                 run('clang', ['--target=x86_64-pc-windows-msvc', '-c', assembly, '-o', object]);
             }
             else

@@ -85,6 +85,45 @@ __declspec(noinline) static void through_finally(void)
     }
 }
 
+static int forwarded = 0;
+
+int __cdecl __C_specific_handler(void *record, void *frame, void *context, void *dispatch);
+
+/* A language handler of the program's own, which hands every frame on to the
+ * runtime's, as /GS's __GSHandlerCheck_SEH does after checking the cookie.
+ * The build names it for every frame of `via_guest_handler`. */
+int __cdecl guest_language_handler(void *record, void *frame, void *context, void *dispatch)
+{
+    forwarded++;
+    return __C_specific_handler(record, frame, context, dispatch);
+}
+
+static int guarded_finally = 0;
+
+/* Returns 10 when its own __except takes the exception, having run the
+ * __finally inside on the way. */
+__declspec(noinline) int via_guest_handler(void)
+{
+    volatile int r = 0;
+    __try
+    {
+        __try
+        {
+            raise_one();
+            r = 1;
+        }
+        __finally
+        {
+            guarded_finally++;
+        }
+    }
+    __except (remember(_exception_code(), 1))
+    {
+        r = 10;
+    }
+    return r;
+}
+
 int mainCRTStartup(void)
 {
     volatile int r = 0;
@@ -186,6 +225,12 @@ int mainCRTStartup(void)
     }
     check("a __finally around the __except that took it runs once, on leaving",
         r == 1 && finally_count == 1);
+
+    seen = 0;
+    r = via_guest_handler();
+    check("a frame whose handler hands on to the runtime's reaches its __except",
+        r == 10 && seen == 0xe0004321 && forwarded >= 2);
+    check("and its __finally runs on the way, once", guarded_finally == 1);
 
     ExitProcess(failures);
     return 0;

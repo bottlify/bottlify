@@ -4,8 +4,8 @@
  * See LICENSE for details
  */
 
-import { D3D9_CHECK_DEVICE_FORMAT, DEVICE, TEXTURE, UNKNOWN_RELEASE, VOLUME_TEXTURE,
-    createDeviceCalls } from './device.js';
+import { D3D9_CHECK_DEVICE_FORMAT, DEVICE, LOCKED_RECT_BYTES, POINTER_BYTES, TEXTURE,
+    UNKNOWN_RELEASE, VOLUME_TEXTURE, createDeviceCalls } from './device.js';
 import { D3DX_DEFAULT } from './texture.js';
 import { FMT, decodeTexels, encodeTexels, halve, isCompressed, isSupported, layoutOf, resample }
     from './pixels.js';
@@ -70,7 +70,8 @@ const D3DERR_NOTAVAILABLE = 0x8876086a;
 /** D3DUSAGE_WRITEONLY, DONOTCLIP, POINTS, RTPATCHES and NPATCHES: a buffer's, never a texture's. */
 const BUFFER_USAGES = 0x8 | 0x20 | 0x40 | 0x80 | 0x100;
 /** D3DDEVICE_CREATION_PARAMETERS and D3DDISPLAYMODE, and where the mode's Format is. */
-const CREATION_PARAMETERS_BYTES = 16;
+/** D3DDEVICE_CREATION_PARAMETERS with a quadword window handle, the longer of its two layouts. */
+const CREATION_PARAMETERS_BYTES = 24;
 const DISPLAY_MODE_BYTES = 16;
 const DISPLAY_MODE_FORMAT = 12;
 
@@ -308,7 +309,7 @@ export function textureRequirements(asked, caps){
  * @param {TextureToolsHost} host
  */
 export function createTextureTools(host){
-    const { u32, putU32s, method } = createDeviceCalls(host);
+    const { u32, putU32s, putPointer, lockedRect, method } = createDeviceCalls(host);
 
     /**
      * What a device's capabilities say about textures.
@@ -355,16 +356,16 @@ export function createTextureTools(host){
      */
     const supportedFormat = async(device, format, usage, type, thread)=>{
         const heap = /** @type {NonNullable<TextureToolsHost['heap']>} */ (host.heap);
-        const at = heap.allocate(4 + CREATION_PARAMETERS_BYTES + DISPLAY_MODE_BYTES);
+        const at = heap.allocate(POINTER_BYTES + CREATION_PARAMETERS_BYTES + DISPLAY_MODE_BYTES);
         if (at === 0)
         {
             return E_OUTOFMEMORY;
         }
-        const parameters = at + 4;
+        const parameters = at + POINTER_BYTES;
         const mode = parameters + CREATION_PARAMETERS_BYTES;
         try
         {
-            putU32s(at, [0]);
+            putPointer(at, 0);
             const found = await method(thread, device, DEVICE.GetDirect3D, [at]);
             if (found !== D3D_OK)
             {
@@ -625,13 +626,13 @@ export function createTextureTools(host){
             host.callGuest);
         // The level's description, its lock, then the out vector, the texel's
         // centre and the texel's size the function is handed.
-        const scratch = heap.allocate(D3DSURFACE_DESC_BYTES + 8 + 32);
+        const scratch = heap.allocate(D3DSURFACE_DESC_BYTES + LOCKED_RECT_BYTES + 32);
         if (scratch === 0)
         {
             return E_OUTOFMEMORY;
         }
         const locked = scratch + D3DSURFACE_DESC_BYTES;
-        const out = locked + 8;
+        const out = locked + LOCKED_RECT_BYTES;
         const coord = out + 16;
         const size = coord + 8;
         try
@@ -678,8 +679,7 @@ export function createTextureTools(host){
                 {
                     return answer;
                 }
-                const pitch = u32(locked);
-                const bits = u32(locked + 4);
+                const { pitch, bits } = lockedRect(locked);
                 const rows = FLOATS.has(format) ? height : layoutOf(format, width, height).rows;
                 const rowBytes = packed.length / rows;
                 for (let row = 0; row < rows; row++)
@@ -723,7 +723,7 @@ export function createTextureTools(host){
             return D3DERR_INVALIDCALL;
         }
         const heap = /** @type {NonNullable<TextureToolsHost['heap']>} */ (host.heap);
-        const scratch = heap.allocate(D3DSURFACE_DESC_BYTES + 8);
+        const scratch = heap.allocate(D3DSURFACE_DESC_BYTES + LOCKED_RECT_BYTES);
         if (scratch === 0)
         {
             return E_OUTOFMEMORY;
@@ -770,8 +770,7 @@ export function createTextureTools(host){
                     {
                         return answer;
                     }
-                    const pitch = u32(locked);
-                    const bits = u32(locked + 4);
+                    const { pitch, bits } = lockedRect(locked);
                     if (bgra === null)
                     {
                         const packed = new Uint8Array(rowBytes * rows);
@@ -938,7 +937,7 @@ export function createTextureTools(host){
             handler: ([device, width, height, levels, usage, format, pool, out])=>{
                 if ((out >>> 0) !== 0)
                 {
-                    putU32s(out, [0]);
+                    putPointer(out, 0);
                 }
                 if ((device >>> 0) === 0 || (out >>> 0) === 0 || !host.callGuest || !host.heap)
                 {
@@ -967,7 +966,7 @@ export function createTextureTools(host){
             handler: ([device, size, levels, usage, format, pool, out])=>{
                 if ((out >>> 0) !== 0)
                 {
-                    putU32s(out, [0]);
+                    putPointer(out, 0);
                 }
                 if ((device >>> 0) === 0 || (out >>> 0) === 0 || !host.callGuest || !host.heap)
                 {
@@ -994,7 +993,7 @@ export function createTextureTools(host){
             handler: ([device, width, height, depth, levels, usage, format, pool, out])=>{
                 if ((out >>> 0) !== 0)
                 {
-                    putU32s(out, [0]);
+                    putPointer(out, 0);
                 }
                 if ((device >>> 0) === 0 || (out >>> 0) === 0 || !host.callGuest || !host.heap)
                 {

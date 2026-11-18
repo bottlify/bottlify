@@ -63,12 +63,23 @@ export const SURFACE = Object.freeze({ GetDesc: 12, LockRect: 13, UnlockRect: 14
  * @property {{ allocate: (bytes: number) => number, free: (address: number) => any }} [heap]
  * @property {(call: { entry: number, args: number[], thread?: any }) => Promise<number>}
  *     [callGuest]
+ * @property {4 | 8} [pointerSize]  8 in a 64-bit process: a COM table's slots, an out
+ *     pointer and the pointer of a locked rectangle are quadwords there.
  */
+
+/**
+ * Room for a D3DLOCKED_RECT at either width (INT Pitch; void *pBits: 8 bytes, 16 with
+ * a quadword pointer) and for an out pointer.
+ */
+export const LOCKED_RECT_BYTES = 16;
+export const POINTER_BYTES = 8;
 
 /**
  * @param {DeviceHost} host
  */
 export function createDeviceCalls(host){
+    /** A pointer's bytes in the calling process. Every address lies below 4 GiB. */
+    const pointer = host.pointerSize === 8 ? 8 : 4;
     /**
      * Read from the bytes the host hands back, not a copy of them: an effect's
      * setters read a word at a time, and a buffer made for each word was most of
@@ -101,9 +112,22 @@ export function createDeviceCalls(host){
      */
     const method = (thread, object, slot, rest)=>
         /** @type {NonNullable<DeviceHost['callGuest']>} */ (host.callGuest)({
-            entry: u32(u32(object) + slot * 4), args: [object >>> 0, ...rest],
+            entry: u32(u32(object) + slot * pointer), args: [object >>> 0, ...rest],
             ...(thread === undefined ? {} : { thread }),
         }).then(answer=>answer >>> 0);
+    /**
+     * A pointer written whole: its high half zero in a 64-bit process, where the
+     * caller's slot holds whatever was there before.
+     *
+     * @param {number} at @param {number} value
+     */
+    const putPointer = (at, value)=>putU32s(at, pointer === 8 ? [value, 0] : [value]);
+    /**
+     * A D3DLOCKED_RECT read: the pointer follows the pitch at the pointer's own alignment.
+     *
+     * @param {number} at
+     */
+    const lockedRect = at=>({ pitch: u32(at), bits: u32(at + pointer) });
     /**
      * A NUL-ended string, narrow or wide, of at most `max` characters, read a
      * page at a time: a name near the end of its region -- one on the stack's
@@ -145,5 +169,5 @@ export function createDeviceCalls(host){
         }
         return String.fromCharCode(...units);
     };
-    return { u32, putU32s, method, string };
+    return { u32, putU32s, putPointer, lockedRect, method, string, pointer };
 }

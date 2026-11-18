@@ -4,7 +4,7 @@
  * See LICENSE for details
  */
 
-import { SURFACE, TEXTURE, createDeviceCalls } from './device.js';
+import { LOCKED_RECT_BYTES, SURFACE, TEXTURE, createDeviceCalls } from './device.js';
 import { IFF } from './images.js';
 import { FMT, decodeTexels, isCompressed, isSupported, layoutOf } from './pixels.js';
 import { charactersOf, readToTerminator } from '../common/scan-windows.js';
@@ -195,7 +195,7 @@ export function writeBmp(bgra, width, height, alpha, dib = false){
  * @param {{ giveBuffer: (out: number, bytes: Uint8Array) => number }} buffers
  */
 export function createTextureSaver(host, buffers){
-    const { u32, method } = createDeviceCalls(host);
+    const { u32, lockedRect, method } = createDeviceCalls(host);
 
     /**
      * A level's or a surface's area as an image file can keep it: its rows'
@@ -223,8 +223,7 @@ export function createTextureSaver(host, buffers){
      * @param {{ rowBytes: number, rows: number }} layout
      */
     const rowsAt = (locked, layout)=>{
-        const pitch = u32(locked);
-        const bits = u32(locked + 4);
+        const { pitch, bits } = lockedRect(locked);
         const bytes = new Uint8Array(layout.rowBytes * layout.rows);
         for (let row = 0; row < layout.rows; row++)
         {
@@ -253,7 +252,7 @@ export function createTextureSaver(host, buffers){
             return E_NOTIMPL;
         }
         const heap = /** @type {NonNullable<SaveHost['heap']>} */ (host.heap);
-        const scratch = heap.allocate(SURFACE_DESC_BYTES + 8);
+        const scratch = heap.allocate(SURFACE_DESC_BYTES + LOCKED_RECT_BYTES);
         if (scratch === 0)
         {
             return E_OUTOFMEMORY;

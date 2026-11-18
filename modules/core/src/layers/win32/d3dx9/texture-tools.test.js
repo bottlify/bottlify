@@ -355,3 +355,27 @@ test('the cube and volume checks correct the size, levels and format by their ow
         assert.equal(r.call(tools.D3DXCheckCubeTextureRequirements, [0, 0, 0, 0, 0, 1]),
             D3DERR_INVALIDCALL);
     });
+
+test('a 64-bit process: the texture comes out as a quadword pointer, made and filled through'
+    + ' quadword slots, its lock read where the pointer follows the pitch', async()=>{
+    const r = deviceRig({ pointerSize: 8 });
+    const tools = /** @type {any} */ (createTextureTools(r.host));
+    const out = r.heap.allocate(16);
+    r.memory.fill(0xcc, out, out + 16);
+    assert.equal(await r.call(tools.D3DXCreateTexture, [r.device, 4, 2, 1, 0, FMT.A8R8G8B8, 1,
+        out]), 0);
+    const texture = r.view.getUint32(out, true);
+    assert.equal(r.objects.get(texture)?.kind, 'texture');
+    assert.deepEqual([r.view.getUint32(out + 4, true), r.view.getUint32(out + 8, true)],
+        [0, 0xcccccccc], 'the pointer\'s high half, and nothing past it');
+    const fill = r.guestFunction(([texel, coord])=>{
+        const [u, v] = r.floats(coord, 2);
+        r.putFloats(texel, [u, v, 0.5, 1]);
+        return 0;
+    });
+    assert.equal(await r.call(tools.D3DXFillTexture, [texture, fill, 0]), 0);
+    const level0 = r.objects.get(r.objects.get(texture).surfaces[0]);
+    assert.deepEqual([...r.memory.subarray(level0.data + 20, level0.data + 24)],
+        [128, 191, 96, 255], 'the texel at (1, 1), where the lock said its bits are');
+    assert.equal(level0.locked, false);
+});

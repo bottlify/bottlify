@@ -64,13 +64,15 @@ const BYTES = new Map([[20, 3], [21, 4], [22, 4], [23, 2], [24, 2], [25, 2], [26
  * @param {{ caps?: Partial<Record<'textureCaps' | 'maxWidth' | 'maxHeight' | 'maxVolume'
  *     | 'vertexShader' | 'pixelShader',
  *     number>>,
- *     viewport?: number[], refused?: number[] }} [options]
+ *     viewport?: number[], refused?: number[], pointerSize?: 4 | 8 }} [options]
  *     `refused`: the formats CheckDeviceFormat refuses, R8G8B8 by default, as
- *     a card without 24-bit textures does
+ *     a card without 24-bit textures does; `pointerSize` 8: a 64-bit process's device,
+ *     its tables' slots, the pointers it writes out and its locked rectangle's quadwords
  */
 export function deviceRig(options = {}){
     const memory = new Uint8Array(1 << 22);
     const view = new DataView(memory.buffer);
+    const pointer = options.pointerSize ?? 4;
     let next = 0x1000;
     /** @type {Set<number>} */
     const live = new Set();
@@ -95,12 +97,12 @@ export function deviceRig(options = {}){
     const objects = new Map();
     /** @param {any} state */
     const object = state=>{
-        const at = heap.allocate(4);
-        const vtable = heap.allocate(128 * 4);
+        const at = heap.allocate(pointer);
+        const vtable = heap.allocate(128 * pointer);
         view.setUint32(at, vtable, true);
         for (let slot = 0; slot < 128; slot++)
         {
-            view.setUint32(vtable + slot * 4, 0xe0000 + slot, true);
+            view.setUint32(vtable + slot * pointer, 0xe0000 + slot, true);
         }
         objects.set(at, { refs: 1, ...state });
         return at;
@@ -179,6 +181,14 @@ export function deviceRig(options = {}){
 
     /** @param {number} at @param {number} value */
     const put = (at, value)=>view.setUint32(at, value >>> 0, true);
+    /** A pointer written out, whole. @param {number} at @param {number} value */
+    const putPointer = (at, value)=>{
+        put(at, value);
+        if (pointer === 8)
+        {
+            put(at + 4, 0);
+        }
+    };
     /** @param {number} at @param {number[]} values */
     const putAll = (at, values)=>values.forEach((v, i)=>put(at + i * 4, v));
     /** @param {number} at */
@@ -190,7 +200,7 @@ export function deviceRig(options = {}){
     const lock = (at, self)=>{
         self.locked = true;
         put(at, self.pitch);
-        put(at + 4, self.data);
+        putPointer(at + pointer, self.data);
         return 0;
     };
     /** @param {number} at @param {any} self */
@@ -248,7 +258,7 @@ export function deviceRig(options = {}){
             switch (slot)
             {
                 case 6:
-                    put(args[1], addRef(d3d));
+                    putPointer(args[1], addRef(d3d));
                     return 0;
                 case 8:
                     putAll(args[2], [640, 480, 60, 22]);
@@ -269,40 +279,41 @@ export function deviceRig(options = {}){
                 }
                 case 24: {
                     const [, width, height, slices, levels, usage, format, pool, out] = args;
-                    put(out, volumeTexture(width, height, slices, levels, usage, format, pool));
+                    putPointer(out,
+                        volumeTexture(width, height, slices, levels, usage, format, pool));
                     return 0;
                 }
                 case 23: {
                     const [, width, height, levels, usage, format, pool, out] = args;
-                    put(out, texture(width, height, levels, usage, format, pool));
+                    putPointer(out, texture(width, height, levels, usage, format, pool));
                     return 0;
                 }
                 case 25: {
                     const [, edge, levels, usage, format, pool, out] = args;
-                    put(out, cubeTexture(edge, levels, usage, format, pool));
+                    putPointer(out, cubeTexture(edge, levels, usage, format, pool));
                     return 0;
                 }
                 case 26: {
                     const [, length, usage, fvf, pool, out] = args;
-                    put(out, object({ kind: 'vertices', length, usage, fvf, pool,
+                    putPointer(out, object({ kind: 'vertices', length, usage, fvf, pool,
                         data: heap.allocate(length), pitch: 0 }));
                     return 0;
                 }
                 case 27: {
                     const [, length, usage, format, pool, out] = args;
-                    put(out, object({ kind: 'indices', length, usage, format, pool,
+                    putPointer(out, object({ kind: 'indices', length, usage, format, pool,
                         data: heap.allocate(length), pitch: 0 }));
                     return 0;
                 }
                 case 28: {
                     const [, width, height, format, , , lockable, out] = args;
-                    put(out, surface({ width, height, format, usage: D3DUSAGE_RENDERTARGET,
+                    putPointer(out, surface({ width, height, format, usage: D3DUSAGE_RENDERTARGET,
                         pool: D3DPOOL_DEFAULT, lockable }));
                     return 0;
                 }
                 case 29: {
                     const [, width, height, format, , , , out] = args;
-                    put(out, surface({ width, height, format, usage: D3DUSAGE_DEPTHSTENCIL,
+                    putPointer(out, surface({ width, height, format, usage: D3DUSAGE_DEPTHSTENCIL,
                         pool: D3DPOOL_DEFAULT }));
                     return 0;
                 }
@@ -312,13 +323,13 @@ export function deviceRig(options = {}){
                         0, 1];
                     return 0;
                 case 38:
-                    put(args[2], addRef(self.target));
+                    putPointer(args[2], addRef(self.target));
                     return 0;
                 case 39:
                     self.depth = args[1];
                     return 0;
                 case 40:
-                    put(args[1], self.depth === 0 ? 0 : addRef(self.depth));
+                    putPointer(args[1], self.depth === 0 ? 0 : addRef(self.depth));
                     return self.depth === 0 ? 0x8876086c : 0;
                 case 47: {
                     const words = new DataView(memory.buffer, args[1], 24);
@@ -333,10 +344,10 @@ export function deviceRig(options = {}){
                     return 0;
                 }
                 case 59:
-                    put(args[2], object({ kind: 'block' }));
+                    putPointer(args[2], object({ kind: 'block' }));
                     return 0;
                 case 86:
-                    put(args[2], object({ kind: 'declaration', at: args[1] }));
+                    putPointer(args[2], object({ kind: 'declaration', at: args[1] }));
                     return 0;
                 default:
                     return 0;
@@ -384,7 +395,7 @@ export function deviceRig(options = {}){
             switch (slot)
             {
                 case 3:
-                    put(args[1], addRef(device));
+                    putPointer(args[1], addRef(device));
                     return 0;
                 case 10:
                     return 3;
@@ -394,7 +405,7 @@ export function deviceRig(options = {}){
                     return args[1] >= self.surfaces.length ? 0x8876086c
                         : surfaceDesc(args[2], objects.get(self.surfaces[args[1]]));
                 case 18:
-                    put(args[2], addRef(self.surfaces[args[1]]));
+                    putPointer(args[2], addRef(self.surfaces[args[1]]));
                     return 0;
                 case 19:
                     return args[1] >= self.surfaces.length ? 0x8876086c
@@ -414,7 +425,7 @@ export function deviceRig(options = {}){
             switch (slot)
             {
                 case 3:
-                    put(args[1], addRef(device));
+                    putPointer(args[1], addRef(device));
                     return 0;
                 case 10:
                     return 5;
@@ -428,7 +439,7 @@ export function deviceRig(options = {}){
                     {
                         return 0x8876086c;
                     }
-                    put(args[3], addRef(at(face, level)));
+                    putPointer(args[3], addRef(at(face, level)));
                     return 0;
                 case 19:
                     return at(face, level) === 0 ? 0x8876086c
@@ -445,7 +456,7 @@ export function deviceRig(options = {}){
             switch (slot)
             {
                 case 3:
-                    put(args[1], addRef(device));
+                    putPointer(args[1], addRef(device));
                     return 0;
                 case 12:
                     return surfaceDesc(args[1], self);
@@ -462,7 +473,7 @@ export function deviceRig(options = {}){
         {
             if (slot === 11)
             {
-                put(args[3], self.data + args[1]);
+                putPointer(args[3], self.data + args[1]);
             }
             if (slot === 13)
             {
@@ -582,15 +593,15 @@ export function deviceRig(options = {}){
                     case 8: return spec.stride;
                     case 9: return spec.options ?? 0;
                     case 10:
-                        put(args[1], addRef(device));
+                        putPointer(args[1], addRef(device));
                         return 0;
                     case 15:
                         state.locks++;
-                        put(args[2], vertexData);
+                        putPointer(args[2], vertexData);
                         return 0;
                     case 17:
                         state.locks++;
-                        put(args[2], indexData);
+                        putPointer(args[2], indexData);
                         return 0;
                     case 16: case 18:
                         state.locks--;
@@ -627,7 +638,7 @@ export function deviceRig(options = {}){
             memory.subarray(at, at + length),
         writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>
             memory.set(bytes, at),
-        heap, callGuest,
+        heap, callGuest, ...options.pointerSize ? { pointerSize: options.pointerSize } : {},
         vtables: { publish: (/** @type {any} */ com, /** @type {string} */ id)=>
             publishAs(com, id) },
         currentThread: ()=>undefined,
@@ -685,7 +696,7 @@ export function deviceRig(options = {}){
         texture, cubeTexture, surface, mesh, object, putFloats, floats, live, guestFunction,
         published, method: (/** @type {number} */ at, /** @type {number} */ slot,
             /** @type {number[]} */ rest)=>callGuest({ entry: view.getUint32(view.getUint32(at,
-            true) + slot * 4, true), args: [at, ...rest] }),
+            true) + slot * pointer, true), args: [at, ...rest] }),
         get viewport(){
             return viewport;
         } };

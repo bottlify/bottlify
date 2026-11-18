@@ -141,6 +141,7 @@ const IN_GUEST = [[inGuest, COMPILED], [matrix, MATRIX], [vector, VECTOR],
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number) => number} [readU32]  A word read in place.
+ * @property {4 | 8} [pointerSize]  8 in a 64-bit process.
  * @property {(address: number, value: number) => void} [writeU32]  A word written in place.
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {{ publish: (object: any, interfaceId: string) => number }} [vtables]
@@ -228,6 +229,21 @@ export function createD3dxFunctions(host, options = {}){
     const putU32 = (at, value)=>host.writeMemory(at >>> 0, Uint8Array.of(value & 0xff,
         value >> 8 & 0xff, value >> 16 & 0xff, value >>> 24));
 
+    /** A pointer's bytes in the calling process. */
+    const POINTER = host.pointerSize === 8 ? 8 : 4;
+    /**
+     * A pointer written whole: its high half zero in a 64-bit process.
+     *
+     * @param {number} at @param {number} value
+     */
+    const putPointer = (at, value)=>{
+        putU32(at, value);
+        if (POINTER === 8)
+        {
+            putU32(at + 4, 0);
+        }
+    };
+
     /**
      * An ID3DXBuffer holding these bytes, its pointer written to `out`.
      *
@@ -252,7 +268,7 @@ export function createD3dxFunctions(host, options = {}){
             object.release();
             return E_OUTOFMEMORY;
         }
-        putU32(out, pointer);
+        putPointer(out, pointer);
         return 0;
     };
 
@@ -266,7 +282,7 @@ export function createD3dxFunctions(host, options = {}){
             face, out] = args;
         if ((out >>> 0) !== 0)
         {
-            putU32(out, 0);
+            putPointer(out, 0);
         }
         if ((device >>> 0) === 0 || (out >>> 0) === 0 || !host.vtables)
         {
@@ -318,9 +334,9 @@ export function createD3dxFunctions(host, options = {}){
         /** @type {[string, string][]} */
         const macros = [];
         for (let entry = at >>> 0; entry !== 0 && u32(entry) !== 0 && macros.length < 1024;
-            entry += 8)
+            entry += 2 * POINTER)
         {
-            const value = u32(entry + 4);
+            const value = u32(entry + POINTER);
             macros.push([latin1(cString(u32(entry))), value === 0 ? '' : latin1(cString(value))]);
         }
         return macros;
@@ -351,7 +367,8 @@ export function createD3dxFunctions(host, options = {}){
         {
             return null;
         }
-        const scratch = heap.allocate(name.length + 1 + 8);
+        // The name, then the data pointer and the byte count Open answers.
+        const scratch = heap.allocate(name.length + 1 + 16);
         if (scratch === 0)
         {
             return null;
@@ -360,18 +377,19 @@ export function createD3dxFunctions(host, options = {}){
         {
             host.writeMemory(scratch, encode(name));
             const dataOut = scratch + name.length + 1;
-            putU32(dataOut, 0);
-            putU32(dataOut + 4, 0);
+            const bytesOut = dataOut + 8;
+            putPointer(dataOut, 0);
+            putU32(bytesOut, 0);
             const vtable = u32(include);
             const answer = await callGuest({ entry: u32(vtable), args: [include, system ? 1 : 0,
-                scratch, 0, dataOut, dataOut + 4], thread });
+                scratch, 0, dataOut, bytesOut], thread });
             const data = u32(dataOut);
             if ((answer | 0) < 0 || data === 0)
             {
                 return null;
             }
-            const text = latin1(host.readMemory(data, u32(dataOut + 4)).slice());
-            await callGuest({ entry: u32(vtable + 4), args: [include, data], thread });
+            const text = latin1(host.readMemory(data, u32(bytesOut)).slice());
+            await callGuest({ entry: u32(vtable + POINTER), args: [include, data], thread });
             return text;
         }
         finally
@@ -813,7 +831,7 @@ export function createD3dxFunctions(host, options = {}){
             handler: ([device, out])=>{
                 if ((out >>> 0) !== 0)
                 {
-                    putU32(out, 0);
+                    putPointer(out, 0);
                 }
                 if ((device >>> 0) === 0 || (out >>> 0) === 0 || !host.vtables)
                 {
@@ -824,7 +842,7 @@ export function createD3dxFunctions(host, options = {}){
                 {
                     return E_OUTOFMEMORY;
                 }
-                putU32(out, pointer);
+                putPointer(out, pointer);
                 return 0;
             },
         },
