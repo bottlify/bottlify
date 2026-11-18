@@ -24,13 +24,31 @@ const PAGE = 0x1000;
 /** GetCurrentProcess()'s pseudo-handle, the one process whose write watches are kept. */
 const CURRENT_PROCESS = 0xffffffff;
 
-/** VirtualQuery's MEMORY_BASIC_INFORMATION, the one information class kept. */
+/** VirtualQuery's MEMORY_BASIC_INFORMATION. */
 const MEMORY_BASIC_INFORMATION = 0;
+/**
+ * MemoryMappedFilenameInformation: the file an image or a view was mapped
+ * from, a UNICODE_STRING whose characters follow it, terminated.
+ */
+const MEMORY_MAPPED_FILENAME_INFORMATION = 2;
+/** A 32-bit UNICODE_STRING: two USHORT lengths and a pointer. */
+const UNICODE_STRING_SIZE = 8;
+/** The longest name read back, in characters: a path past it is cut, and said. */
+const NAME_ROOM = 1024;
 
 /** The statuses these answer beyond the shared table's. */
 const STATUS_CONFLICTING_ADDRESSES = 0xc0000018;
 const STATUS_MEMORY_NOT_ALLOCATED = 0xc00000a0;
 const STATUS_PARTIAL_COPY = 0x8000000d;
+const STATUS_BUFFER_OVERFLOW = 0x80000005;
+const STATUS_FREE_VM_NOT_AT_BASE = 0xc000009f;
+const STATUS_UNABLE_TO_FREE_VM = 0xc000001a;
+/** VirtualFree's types: the release, and the placeholder flags that go with it. */
+const MEM_RELEASE = 0x8000;
+const PLACEHOLDER_FLAGS = 0x3;
+/** MEMORY_BASIC_INFORMATION's State of an address nothing holds. */
+const MEM_FREE = 0x10000;
+const STATUS_INVALID_ADDRESS = 0xc0000141;
 
 /** The last errors kernel32's calls set, and the status each stands for. */
 const FROM_LAST_ERROR = new Map([
@@ -59,6 +77,7 @@ const ERROR_INVALID_ADDRESS = 487;
  *           running.
  * @property {number} [pointerSize]  8 in a 64-bit process, whose PVOID and
  *           SIZE_T out-parameters and MEMORY_BASIC_INFORMATION are wider.
+ * @property {(api: string, detail: string) => void} [divergence]
  */
 
 /** The kernel32 entries these are built over. */
@@ -110,23 +129,117 @@ export function createMemoryFunctions(host){
         host.writeMemory(address >>> 0, bytes);
     };
 
+    /** Where a region's MEMORY_BASIC_INFORMATION is read into, once given. */
     let scratch = 0;
+
+    let nameScratch = 0;
     /**
-     * How far the region at an address runs, which a release of size zero
-     * reports it freed; one page when there is nothing to say.
+     * MemoryMappedFilenameInformation at an address: the name of the file
+     * K32GetMappedFileNameW gives, in a UNICODE_STRING whose characters follow
+     * it. A buffer it does not fit is left alone, the length it needs told
+     * (STATUS_BUFFER_OVERFLOW); memory no file backs has none
+     * (STATUS_INVALID_ADDRESS).
      *
-     * @param {number} process @param {number} base
-     * @returns {number | Promise<number>}
+     * @param {number} process @param {number} base @param {number} buffer
+     * @param {number} length @param {number} returned
      */
-    const regionSize = (process, base)=>{
+    const mappedFileName = (process, base, buffer, length, returned)=>{
+        nameScratch ||= host.allocate(NAME_ROOM * 2);
+        if (nameScratch === 0)
+        {
+            return STATUS.NO_MEMORY;
+        }
+        const at = nameScratch;
+        return settled(kernel32.K32GetMappedFileNameW.handler([process, base, at, NAME_ROOM]),
+            (count, error)=>{
+                if ((count >>> 0) === 0)
+                {
+                    return error() === 87 ? STATUS.INVALID_PARAMETER : STATUS_INVALID_ADDRESS;
+                }
+                if ((count >>> 0) >= NAME_ROOM - 1)
+                {
+                    host.divergence?.('NtQueryVirtualMemory', `a mapped file's name past ${
+                        NAME_ROOM - 1} characters is cut`);
+                }
+                const characters = host.readMemory(at, (count >>> 0) * 2);
+                const needed = UNICODE_STRING_SIZE + characters.length + 2;
+                if ((returned >>> 0) !== 0)
+                {
+                    write32(returned, needed);
+                }
+                if ((length >>> 0) < needed)
+                {
+                    return STATUS_BUFFER_OVERFLOW;
+                }
+                const answer = new Uint8Array(needed);
+                const view = new DataView(answer.buffer);
+                view.setUint16(0, characters.length, true);
+                view.setUint16(2, characters.length + 2, true);
+                view.setUint32(4, (buffer + UNICODE_STRING_SIZE) >>> 0, true);
+                answer.set(characters, UNICODE_STRING_SIZE);
+                host.writeMemory(buffer >>> 0, answer);
+                return STATUS.SUCCESS;
+            });
+    };
+
+    /**
+     * A value now or later, handed on when it is here.
+     *
+     * @template T, U
+     * @param {T | Promise<T>} value @param {(value: T) => U} then
+     * @returns {U | Promise<U>}
+     */
+    const after = (value, then)=>(value instanceof Promise ? value.then(then) : then(value));
+
+    /**
+     * The allocation a page is in, as VirtualQuery tells it: its base and
+     * the span of its regions; null where nothing is.
+     *
+     * @param {number} process @param {number} page
+     * @returns {{ base: number, span: number } | null
+     *     | Promise<{ base: number, span: number } | null>}
+     */
+    const allocationOf = (process, page)=>{
         scratch ||= host.allocate(BASIC.SIZE);
         if (scratch === 0)
         {
-            return PAGE;
+            return null;
         }
         const at = scratch;
-        return settled(kernel32.VirtualQueryEx.handler([process, base, at, BASIC.SIZE]),
-            wrote=>(wrote ? read32(at + BASIC.RegionSize) : PAGE));
+        /** @param {number} where @returns {any} */
+        const query = where=>settled(
+            kernel32.VirtualQueryEx.handler([process, where, at, BASIC.SIZE]),
+            wrote=>(wrote ? { allocation: read32(at + BASIC.AllocationBase),
+                size: read32(at + BASIC.RegionSize), state: read32(at + BASIC.State) } : null));
+        return after(query(page), first=>{
+            if (!first || first.state === MEM_FREE)
+            {
+                return null;
+            }
+            const base = first.allocation;
+            /** @param {any} region @param {number} from */
+            const goesOn = (region, from)=>region && region.allocation === base
+                && region.state !== MEM_FREE && region.size > 0 && from + region.size < 2 ** 32;
+            /** @param {number} from @returns {any} */
+            const walk = from=>{
+                let next = from;
+                for (;;)
+                {
+                    const region = query(next);
+                    if (region instanceof Promise)
+                    {
+                        return region.then(answer=>(goesOn(answer, next)
+                            ? walk(next + answer.size) : { base, span: next - base }));
+                    }
+                    if (!goesOn(region, next))
+                    {
+                        return { base, span: next - base };
+                    }
+                    next += region.size;
+                }
+            };
+            return walk(base);
+        });
     };
 
     /**
@@ -193,6 +306,12 @@ export function createMemoryFunctions(host){
             argBytes: 28,
             /** @param {number[]} args */
             handler: ([process, baseOut, sizeOut, type, protect, list, count])=>{
+                // VirtualAlloc2 takes NULL for this process; the native call
+                // takes no handle as none.
+                if ((process >>> 0) === 0)
+                {
+                    return STATUS.INVALID_HANDLE;
+                }
                 const asked = read32(baseOut);
                 const size = read32(sizeOut);
                 return settled(kernel32.VirtualAlloc2.handler(
@@ -217,18 +336,47 @@ export function createMemoryFunctions(host){
             handler: ([process, baseOut, sizeOut, type])=>{
                 const base = read32(baseOut);
                 const size = read32(sizeOut);
-                // A size of zero is the whole region, which is what is reported
-                // back; it is known only before the region is gone.
-                return settled(size === 0 ? regionSize(process, base) : size, extent=>
-                    settled(kernel32.VirtualFreeEx.handler([process, base, size, type]),
-                        (freed, error)=>{
-                            if (!freed)
-                            {
-                                return failure(error);
-                            }
-                            report(baseOut, sizeOut, base, base + extent);
-                            return STATUS.SUCCESS;
-                        }));
+                /** @param {number} at @param {number} bytes @param {number} extent */
+                const free = (at, bytes, extent)=>settled(
+                    kernel32.VirtualFreeEx.handler([process, at, bytes, type]),
+                    (freed, error)=>{
+                        if (!freed)
+                        {
+                            return failure(error, (type & PLACEHOLDER_FLAGS) !== 0
+                                ? STATUS_CONFLICTING_ADDRESSES : STATUS_MEMORY_NOT_ALLOCATED);
+                        }
+                        report(baseOut, sizeOut, at, at + extent);
+                        return STATUS.SUCCESS;
+                    });
+                if ((type & PLACEHOLDER_FLAGS) !== 0)
+                {
+                    return free(base, size, size);
+                }
+                // The range is whole pages, the address rounded down. No size
+                // is the whole allocation, named by a page of its base; a
+                // release names all of it, by size or by none.
+                const page = (base & ~(PAGE - 1)) >>> 0;
+                const release = (type & MEM_RELEASE) !== 0;
+                if (size !== 0 && !release)
+                {
+                    return free(base, size, size);
+                }
+                return after(allocationOf(process, page), whole=>{
+                    if (!whole)
+                    {
+                        return STATUS_MEMORY_NOT_ALLOCATED;
+                    }
+                    if (size === 0 && page !== whole.base)
+                    {
+                        return STATUS_FREE_VM_NOT_AT_BASE;
+                    }
+                    if (size !== 0 && (page !== whole.base
+                        || Math.ceil((base + size) / PAGE) * PAGE - page !== whole.span))
+                    {
+                        return STATUS_UNABLE_TO_FREE_VM;
+                    }
+                    return free(whole.base, 0, whole.span);
+                });
             },
         },
 
@@ -268,6 +416,11 @@ export function createMemoryFunctions(host){
             argBytes: 24,
             /** @param {number[]} args */
             handler: ([process, base, infoClass, buffer, length, returned])=>{
+                if (infoClass === MEMORY_MAPPED_FILENAME_INFORMATION && pointer === 4
+                    && kernel32.K32GetMappedFileNameW)
+                {
+                    return mappedFileName(process, base, buffer, length, returned);
+                }
                 if (infoClass !== MEMORY_BASIC_INFORMATION)
                 {
                     return STATUS.INVALID_INFO_CLASS;

@@ -564,8 +564,8 @@ test('K32EnumProcessModules hands out the image first and the bytes all of them 
     const fns = createModuleFunctions({
         ...host,
         list: ()=>[
-            { base: 0x400000, path: 'C:\\App\\game.exe' },
-            { base: 0x10000000, path: 'C:\\App\\engine.dll' },
+            { base: 0x400000, name: 'game.exe', path: 'C:\\App\\game.exe' },
+            { base: 0x10000000, name: 'engine.dll', path: 'C:\\App\\engine.dll' },
         ],
         /** @param {number} address @param {Uint8Array} bytes */
         writeMemory: (address, bytes)=>{ written.set(address, bytes); },
@@ -594,8 +594,8 @@ test('a 64-bit process\'s module handles are quadwords, EnumProcessModulesEx\'s 
     const fns = createModuleFunctions({
         ...host,
         pointerSize: 8,
-        list: ()=>[{ base: 0x400000, path: 'C:\\App\\game.exe' },
-            { base: 0x10000000, path: 'C:\\App\\engine.dll' }],
+        list: ()=>[{ base: 0x400000, name: 'game.exe', path: 'C:\\App\\game.exe' },
+            { base: 0x10000000, name: 'engine.dll', path: 'C:\\App\\engine.dll' }],
         /** @param {number} address @param {Uint8Array} bytes */
         writeMemory: (address, bytes)=>{ written.set(address, bytes); },
     });
@@ -659,7 +659,7 @@ test('K32GetMappedFileName names the image an address lies in, as the object man
     const written = [];
     const fns = createModuleFunctions({
         ...host,
-        list: ()=>[{ base: 0x400000, path: 'C:\\App\\gta-vc.exe' }],
+        list: ()=>[{ base: 0x400000, name: 'gta-vc.exe', path: 'C:\\App\\gta-vc.exe' }],
         nativePath: path=>`\\Device\\HarddiskVolume1${path.slice(2)}`,
         /** @param {number} address @param {number} length */
         readMemory: (address, length)=>image.slice(address - 0x400000,
@@ -676,4 +676,33 @@ test('K32GetMappedFileName names the image an address lies in, as the object man
     assert.equal(fns.K32GetMappedFileNameA.handler([0xffffffff, 0x409000, 0x500, 260]), 0,
         'past SizeOfImage');
     assert.equal(lastError(), 59, 'ERROR_UNEXP_NET_ERR: no file is mapped there');
+    assert.equal(fns.K32GetMappedFileNameW.handler([0x44, 0x401234, 0x500, 260]), 0);
+    assert.equal(lastError(), 6, 'another process\'s memory: ERROR_INVALID_HANDLE');
+    assert.equal(fns.K32GetMappedFileNameA.handler([0xffffffff, 0x401234, 0x500, 0]), 0);
+    assert.equal(lastError(), 122, 'no room at all');
+});
+
+test('K32GetMappedFileName names one of the system\'s libraries by the folder it is in', ()=>{
+    // A library the engine makes has no file of its own: it is where
+    // GetModuleFileName says it is, as ntdll's test reads it.
+    const { host } = hostFor();
+    const image = new Uint8Array(0x400);
+    const view = new DataView(image.buffer);
+    view.setUint32(0x3c, 0x80, true);
+    view.setUint32(0x80 + 24 + 56, 0x2000, true);
+    /** @type {Uint8Array[]} */
+    const written = [];
+    const fns = createModuleFunctions({
+        ...host,
+        list: ()=>[{ base: 0x7c900000, name: 'ntdll.dll' }],
+        nativePath: path=>`\\Device\\HarddiskVolume1${path.slice(2)}`,
+        /** @param {number} address @param {number} length */
+        readMemory: (address, length)=>image.slice(address - 0x7c900000,
+            address - 0x7c900000 + length),
+        writeMemory: (_, bytes)=>{ written.push(bytes); },
+    });
+    const wanted = '\\Device\\HarddiskVolume1\\Windows\\System32\\ntdll.dll';
+    assert.equal(fns.K32GetMappedFileNameA.handler([0xffffffff, 0x7c9004d2, 0x500, 260]),
+        wanted.length);
+    assert.equal(String.fromCharCode(...written.at(-1) ?? []).replace(/\0$/, ''), wanted);
 });

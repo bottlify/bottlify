@@ -178,7 +178,7 @@ export function searchesBesideProgram(knownDll, mappedFromFile){
  *           Stops telling a library of the threads that start and end. A
  *           library with static thread-local storage goes on being told: its
  *           TLS callbacks build each thread's thread-local objects.
- * @property {() => { base: number, path: string }[]} [list]
+ * @property {() => { base: number, name: string, path?: string }[]} [list]
  *           Every module of the process, the image first: what psapi's
  *           EnumProcessModules hands out.
  * @property {(path: string) => string | null} [nativePath]  A path as the object
@@ -208,7 +208,7 @@ export function createModuleFunctions(host){
      * there as a file (`withSystemLibraries`): a program comparing that path
      * against the system directory is right to find them equal.
      *
-     * @param {ModuleRecord} module
+     * @param {{ name: string, path?: string }} module
      */
     const fileNameOf = module=>module.path ?? `${host.libraryHome?.(module.name)
             ?? `C:${SEPARATOR}Windows${SEPARATOR}System32`}${SEPARATOR}${module.name}`;
@@ -471,7 +471,9 @@ export function createModuleFunctions(host){
      *     lpFilename, DWORD nSize)
      *
      * The file mapped at an address, in the object manager's terms: here an
-     * image of the process, whose span its headers give (SizeOfImage). An
+     * image of the process, whose span its headers give (SizeOfImage), named
+     * as GetModuleFileName names it - one of the system's libraries under the
+     * folder it is found in. An
      * address no image covers has no file: ERROR_UNEXP_NET_ERR, as Windows
      * answers memory of its own (Wine's psapi test).
      * ponytail: images only; a view of a file a program mapped itself is
@@ -482,14 +484,20 @@ export function createModuleFunctions(host){
     const mappedFileName = wide=>({
         argBytes: 16,
         /** @param {number[]} args */
-        handler: ([, address, buffer, size])=>{
+        handler: ([process, address, buffer, size])=>{
+            // Another process's memory is not this one's to read.
+            if ((process >>> 0) !== 0xffffffff)
+            {
+                host.setLastError(ERROR_INVALID_HANDLE);
+                return 0;
+            }
             const at = address >>> 0;
             const read = (/** @type {number} */ where)=>new DataView(
                 host.readMemory?.(where, 4).slice().buffer ?? new ArrayBuffer(4))
                 .getUint32(0, true);
             const image = (host.list?.() ?? []).find(module=>at >= module.base
                 && at < module.base + read(module.base + read(module.base + 0x3c) + 24 + 56));
-            const path = image ? host.nativePath?.(image.path) ?? null : null;
+            const path = image ? host.nativePath?.(fileNameOf(image)) ?? null : null;
             if (path === null)
             {
                 host.setLastError(ERROR_UNEXP_NET_ERR);

@@ -56,6 +56,7 @@ import { nativeNameOf } from '../kernel32/object-attributes.js';
 import { INTERACTIVE_SESSION } from '../kernel32/teb.js';
 import { REGISTRY_NATIVES, UNLOAD_KEY } from '../advapi32/functions.js';
 import { TOKEN_NATIVES, USER_SID_TEXT } from '../advapi32/tokens.js';
+import { PROCESSOR_NAME } from '../kernel32/processor.js';
 
 /**
  * The C runtime functions ntdll publishes under its own name.
@@ -101,6 +102,9 @@ const SYSTEM_CPU_INFORMATION = 1;
 /** The emulated view of it, the same structure in a process of the machine's width. */
 const SYSTEM_EMULATION_PROCESSOR_INFORMATION = 63;
 const SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION = 8;
+/** The processor's name as CPUID's leaves 0x80000002 to 4 spell it: 48 bytes and a NUL. */
+const SYSTEM_PROCESSOR_BRAND_STRING = 105;
+const BRAND_STRING_BYTES = 48;
 /**
  * SYSTEM_CPU_INFORMATION's ProcessorFeatureBits (the kernel's KF_ flags) for
  * the IsProcessorFeaturePresent features that have one.
@@ -207,6 +211,11 @@ const NAMED_KINDS = new Set(['event', 'mutex', 'semaphore', 'timer', 'mapping', 
  *           What SystemProcessInformation lists.
  * @property {(handle: number) => string | null} [handleType]
  * @property {(handle: number) => number | null} [handleAccess]
+ * @property {() => import('./query.js').OpenHandle[]} [openHandles]
+ *           The handles this process holds, what SystemHandleInformation lists.
+ * @property {number} [processId]  This process's id.
+ * @property {string} [processorName]  CPUID's brand string, what
+ *           SystemProcessorBrandString answers.
  * @property {(handle: number) => string | null} [namedObjectName]  The Win32 name
  *     a kernel object was made or opened by, null for one made with none.
  * @property {import('./query.js').QueryHost['processOf']} [processOf]
@@ -631,12 +640,23 @@ export function createNtdllFunctions(host){
             divergence: host.divergence,
             processes: host.processes,
             processors: host.processors,
+            openHandles: host.openHandles,
+            processId: host.processId,
             systemClasses: {
                 ...time.systemClasses,
                 // SYSTEM_KERNEL_DEBUGGER_INFORMATION: no kernel debugger, none
                 // present - the machine is not being debugged.
                 [SYSTEM_KERNEL_DEBUGGER_INFORMATION]: { read: ()=>Uint8Array.of(0, 1) },
                 ...processorClasses(),
+                [SYSTEM_PROCESSOR_BRAND_STRING]: { read: ()=>{
+                    const name = host.processorName ?? PROCESSOR_NAME;
+                    const bytes = new Uint8Array(BRAND_STRING_BYTES + 1);
+                    for (let i = 0; i < Math.min(name.length, BRAND_STRING_BYTES); i++)
+                    {
+                        bytes[i] = name.charCodeAt(i) & 0x7f;
+                    }
+                    return bytes;
+                } },
                 // SYSTEM_RANGE_START_INFORMATION: where the system's half of
                 // the address space begins, a pointer wide.
                 [SYSTEM_RANGE_START_INFORMATION]: { exact: true,
@@ -667,7 +687,8 @@ export function createNtdllFunctions(host){
         ...(MEMORY_ENTRIES.every(name=>kernel32[name])
             ? createMemoryFunctions({ readMemory: host.readMemory,
                 writeMemory: host.writeMemory, kernel32, allocate, pointerSize: host.pointerSize,
-                currentThread: host.currentThread, lastErrorOf: host.lastErrorOf })
+                currentThread: host.currentThread, lastErrorOf: host.lastErrorOf,
+                ...host.divergence ? { divergence: host.divergence } : {} })
             : {}),
 
         ...(/** @type {any} */ (kernel32)[HEAP_USER_INFO]

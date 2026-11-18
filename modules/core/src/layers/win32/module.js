@@ -6442,6 +6442,9 @@ export function createWin32Module(){
                 windows,
                 handleType: (/** @type {number} */ handle)=>kernel.handles.typeOf(handle),
                 handleAccess: (/** @type {number} */ handle)=>kernel.handles.access(handle),
+                openHandles: ()=>kernel.handles.list(),
+                processId,
+                processorName: config?.processorName,
                 // The name the run's namespace keeps for the object a handle opens.
                 namedObjectName: (/** @type {number} */ handle)=>
                     runObjects.nameOf(kernel.handles.resolve(handle)),
@@ -6492,6 +6495,14 @@ export function createWin32Module(){
             // Windows keeps beside the zone rules in kernelbase: one entry.
             libraries['ADVAPI32.dll'].EnumDynamicTimeZoneInformation =
                 libraries['KERNEL32.dll'].EnumDynamicTimeZoneInformation;
+
+            // powrprof's CallNtPowerInformation is the system call under its
+            // own name: one entry, the same levels and statuses.
+            if (libraries['POWRPROF.dll']?.CallNtPowerInformation)
+            {
+                libraries['ntdll.dll'].NtPowerInformation =
+                    libraries['POWRPROF.dll'].CallNtPowerInformation;
+            }
 
             /** Every function, whichever library exports it. */
             const flat = ()=>Object.assign({}, ...Object.values(libraries));
