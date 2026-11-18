@@ -3239,6 +3239,7 @@ export function createOleFunctions(host){
          * unload the library later, and nothing here ever does.
          */
         CoLoadLibrary: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([name])=>host.libraries?.load(name >>> 0) ?? 0,
@@ -4249,6 +4250,7 @@ export function createOleFunctions(host){
 
         /** LPVOID CoTaskMemAlloc(SIZE_T cb) */
         CoTaskMemAlloc: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             // A zero-byte request still yields a pointer that is not NULL, which
@@ -4299,6 +4301,7 @@ export function createOleFunctions(host){
 
         /** LPVOID CoTaskMemRealloc(LPVOID pv, SIZE_T cb) */
         CoTaskMemRealloc: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([pointer, size])=>reallocate(host.heap, host, pointer, size),

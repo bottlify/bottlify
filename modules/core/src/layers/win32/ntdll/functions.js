@@ -485,6 +485,7 @@ export function createNtdllFunctions(host){
              * laid over memory the caller gives is not made here: NULL.
              */
             RtlCreateHeap: {
+                returns: 'pointer',
                 argBytes: 24,
                 /** @param {number[]} args */
                 handler: ([flags, base, reserve, commit])=>{
@@ -504,6 +505,7 @@ export function createNtdllFunctions(host){
              * NULL once the heap is gone; the heap itself when it could not be.
              */
             RtlDestroyHeap: {
+                returns: 'pointer',
                 argBytes: 4,
                 /** @param {number[]} args */
                 handler: ([heap])=>(kernel32.HeapDestroy.handler([heap]) !== 0 ? 0 : heap >>> 0),
@@ -984,6 +986,7 @@ export function createNtdllFunctions(host){
          * every equality test it makes comes out backwards.
          */
         RtlCompareMemory: {
+            returns: 'pointer',
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([left, right, length])=>{
@@ -1006,6 +1009,7 @@ export function createNtdllFunctions(host){
          * length past the last whole ULONG is not looked at.
          */
         RtlCompareMemoryUlong: {
+            returns: 'pointer',
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([source, length, pattern])=>{

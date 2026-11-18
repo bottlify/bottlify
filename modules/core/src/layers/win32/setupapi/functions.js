@@ -3471,6 +3471,7 @@ export function createSetupapiFunctions(host){
          * line has not.
          */
         pSetupGetField: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([context, index])=>{
@@ -3635,6 +3636,7 @@ export function createSetupapiFunctions(host){
 
         /** PVOID MyMalloc(DWORD Size) -- setupapi's own heap, which MyFree gives back to */
         MyMalloc: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([size])=>host.allocate(Math.max(1, size >>> 0)),
@@ -4430,6 +4432,7 @@ export function createSetupapiFunctions(host){
 
         /** PVOID SetupInitDefaultQueueCallback(HWND OwnerWindow) */
         SetupInitDefaultQueueCallback: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([owner])=>defaultContext(owner, 0, 0),
@@ -4441,6 +4444,7 @@ export function createSetupapiFunctions(host){
          *     PVOID Reserved2)
          */
         SetupInitDefaultQueueCallbackEx: {
+            returns: 'pointer',
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([owner, progress, message])=>defaultContext(owner, progress, message),

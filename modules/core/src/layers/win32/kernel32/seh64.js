@@ -1164,6 +1164,7 @@ export function createSeh64(host){
              * throws, to read its throw information's image-relative fields.
              */
             RtlPcToFileHeader: {
+                returns: 'pointer',
                 argBytes: 8,
                 /** @param {number[]} args */
                 handler: ([pc, baseOut])=>{
@@ -1181,6 +1182,7 @@ export function createSeh64(host){
              *     PDWORD64 ImageBase, PUNWIND_HISTORY_TABLE HistoryTable)
              */
             RtlLookupFunctionEntry: {
+                returns: 'pointer',
                 argBytes: 12,
                 /** @param {number[]} args */
                 handler: ([pc, imageBaseOut])=>{
@@ -1208,6 +1210,7 @@ export function createSeh64(host){
              *     PKNONVOLATILE_CONTEXT_POINTERS ContextPointers)
              */
             RtlVirtualUnwind: {
+                returns: 'pointer',
                 argBytes: 32,
                 /** @param {number[]} args */
                 handler: ([type, imageBase, controlPc, functionEntry, contextRecord,
@@ -1386,6 +1389,7 @@ export function createSeh64(host){
              *     LPTOP_LEVEL_EXCEPTION_FILTER)
              */
             SetUnhandledExceptionFilter: {
+                returns: 'pointer',
                 argBytes: 4,
                 /** @param {number[]} args */
                 handler: ([filter])=>{

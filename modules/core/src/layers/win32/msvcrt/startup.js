@@ -544,6 +544,7 @@ export function createStartupFunctions(host){
          * through, and the same address every time.
          */
         __p__commode: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 0,
             handler: ()=>cell('commode', 0),
@@ -565,6 +566,7 @@ export function createStartupFunctions(host){
          * the calling thread's own failing calls set.
          */
         _errno: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 0,
             handler: ()=>cell(host.errnoName?.() ?? 'errno', 0),
@@ -578,6 +580,7 @@ export function createStartupFunctions(host){
 
         /** int *__p___argc(void) */
         __p___argc: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 0,
             handler: ()=>{
@@ -588,6 +591,7 @@ export function createStartupFunctions(host){
 
         /** char ***__p___argv(void) */
         __p___argv: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 0,
             handler: ()=>{
@@ -604,6 +608,7 @@ export function createStartupFunctions(host){
          * this way whichever start-up the program ran.
          */
         __p___wargv: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 0,
             handler: ()=>cell('wargv', buildWideMainArgs().argv),

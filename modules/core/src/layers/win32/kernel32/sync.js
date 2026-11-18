@@ -1372,6 +1372,7 @@ export function createSyncFunctions(host){
          * pins itself to each processor in turn reads each one's APIC id next.
          */
         SetThreadAffinityMask: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([handle, mask])=>{

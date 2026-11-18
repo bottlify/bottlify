@@ -3110,6 +3110,7 @@ export function createAutomationFunctions(host){
          *                              void *pvExtra)
          */
         SafeArrayCreateEx: {
+            returns: 'pointer',
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([vt, cDims, rgsabound, extra])=>createArray(vt & 0xffff, cDims >>> 0,
@@ -3118,6 +3119,7 @@ export function createAutomationFunctions(host){
 
         /** SAFEARRAY *SafeArrayCreateVector(VARTYPE vt, LONG lLbound, ULONG cElements) */
         SafeArrayCreateVector: {
+            returns: 'pointer',
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([vt, lower, elements])=>createArray(vt & 0xffff, 1, 0, 0,
@@ -3129,6 +3131,7 @@ export function createAutomationFunctions(host){
          *                                    void *pvExtra)
          */
         SafeArrayCreateVectorEx: {
+            returns: 'pointer',
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([vt, lower, elements, extra])=>createArray(vt & 0xffff, 1, 0,
@@ -3554,6 +3557,7 @@ export function createAutomationFunctions(host){
 
         /** BSTR SysAllocString(const OLECHAR *psz) */
         SysAllocString: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([psz])=>{
@@ -3570,6 +3574,7 @@ export function createAutomationFunctions(host){
 
         /** BSTR SysAllocStringLen(const OLECHAR *strIn, UINT ui) */
         SysAllocStringLen: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([strIn, ui])=>allocateFrom(strIn >>> 0, ui >>> 0),
@@ -3583,6 +3588,7 @@ export function createAutomationFunctions(host){
          * here interprets what it copies.
          */
         SysAllocStringByteLen: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([psz, len])=>{
@@ -3798,6 +3804,7 @@ export function createAutomationFunctions(host){
          * is how the other side tells it from an empty one.
          */
         BSTR_UserMarshal: {
+            returns: 'pointer',
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([, buffer, pbstr])=>{
@@ -3827,6 +3834,7 @@ export function createAutomationFunctions(host){
          * The string the slot held is freed and a new one made from the wire.
          */
         BSTR_UserUnmarshal: {
+            returns: 'pointer',
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([, buffer, pbstr])=>{
@@ -3857,14 +3865,16 @@ export function createAutomationFunctions(host){
         VARIANT_UserSize: noWireForm('VARIANT_UserSize', ([, start])=>start >>> 0),
 
         /** unsigned char *VARIANT_UserMarshal(ULONG *pFlags, unsigned char *pBuffer, VARIANT *pVar) */
-        VARIANT_UserMarshal: noWireForm('VARIANT_UserMarshal', ([, buffer])=>buffer >>> 0),
+        VARIANT_UserMarshal: {
+            ...noWireForm('VARIANT_UserMarshal', ([, buffer])=>buffer >>> 0), returns: 'pointer',
+        },
 
         /** unsigned char *VARIANT_UserUnmarshal(ULONG *pFlags, unsigned char *pBuffer, VARIANT *pVar) */
-        VARIANT_UserUnmarshal: noWireForm('VARIANT_UserUnmarshal', ([, buffer, pvar])=>{
+        VARIANT_UserUnmarshal: { ...noWireForm('VARIANT_UserUnmarshal', ([, buffer, pvar])=>{
             const owed = nothingOwed();
             clear(pvar >>> 0, owed);
             return settle(owed, host.callerThread?.(), buffer >>> 0);
-        }),
+        }), returns: 'pointer' },
 
         /** void VARIANT_UserFree(ULONG *pFlags, VARIANT *pVar) -- its contents, as VariantClear */
         VARIANT_UserFree: {
@@ -3881,13 +3891,19 @@ export function createAutomationFunctions(host){
         LPSAFEARRAY_UserSize: noWireForm('LPSAFEARRAY_UserSize', ([, start])=>start >>> 0),
 
         /** unsigned char *LPSAFEARRAY_UserMarshal(ULONG *pFlags, unsigned char *pBuffer, LPSAFEARRAY *ppsa) */
-        LPSAFEARRAY_UserMarshal: noWireForm('LPSAFEARRAY_UserMarshal', ([, buffer])=>buffer >>> 0),
+        LPSAFEARRAY_UserMarshal: {
+            ...noWireForm('LPSAFEARRAY_UserMarshal', ([, buffer])=>buffer >>> 0),
+            returns: 'pointer',
+        },
 
         /** unsigned char *LPSAFEARRAY_UserUnmarshal(ULONG *pFlags, unsigned char *pBuffer, LPSAFEARRAY *ppsa) */
-        LPSAFEARRAY_UserUnmarshal: noWireForm('LPSAFEARRAY_UserUnmarshal', ([, buffer, ppsa])=>{
-            writeU32(ppsa >>> 0, 0);
-            return buffer >>> 0;
-        }),
+        LPSAFEARRAY_UserUnmarshal: {
+            ...noWireForm('LPSAFEARRAY_UserUnmarshal', ([, buffer, ppsa])=>{
+                writeU32(ppsa >>> 0, 0);
+                return buffer >>> 0;
+            }),
+            returns: 'pointer',
+        },
 
         /** void LPSAFEARRAY_UserFree(ULONG *pFlags, LPSAFEARRAY *ppsa) -- the array, as SafeArrayDestroy */
         LPSAFEARRAY_UserFree: {
@@ -4700,6 +4716,7 @@ export function createAutomationFunctions(host){
          * bound readers below count from.
          */
         SafeArrayCreate: {
+            returns: 'pointer',
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([vt, cDims, rgsabound])=>createArray(vt & 0xffff, cDims >>> 0,

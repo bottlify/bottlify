@@ -872,23 +872,23 @@ export function createConversionFunctions(host){
             toText(1, true)) : toText(1, true),
 
         /** char *ltoa(long, char *, int) -- the name without the underscore */
-        ltoa: toText(1, true),
+        ltoa: { ...toText(1, true), returns: 'pointer' },
 
         /** char *_ultoa(unsigned long value, char *buffer, int radix) */
         _ultoa: readMemory ? guestEntry(inGuest._ultoa, COMPILED._ultoa, entryHost,
             toText(1, false)) : toText(1, false),
 
         /** char *_ui64toa(unsigned __int64 value, char *buffer, int radix) */
-        _ui64toa: toText(2, false),
+        _ui64toa: { ...toText(2, false), returns: 'pointer' },
 
         /** char *_i64toa(__int64 value, char *buffer, int radix) */
-        _i64toa: toText(2, true),
+        _i64toa: { ...toText(2, true), returns: 'pointer' },
 
         /** wchar_t *_ui64tow(unsigned __int64 value, wchar_t *buffer, int radix) */
-        _ui64tow: toText(2, false, true),
+        _ui64tow: { ...toText(2, false, true), returns: 'pointer' },
 
         /** wchar_t *_i64tow(__int64 value, wchar_t *buffer, int radix) */
-        _i64tow: toText(2, true, true),
+        _i64tow: { ...toText(2, true, true), returns: 'pointer' },
 
         /** int abs(int value) -- in the guest */
         abs: guestEntry(inGuest.abs, COMPILED.abs, {}),
@@ -905,7 +905,7 @@ export function createConversionFunctions(host){
          * a power of ten. `count` significant digits, of the seventeen msvcrt
          * converts a double to (`cvtDigits`).
          */
-        _ecvt: cvt(false),
+        _ecvt: { ...cvt(false), returns: 'pointer' },
 
         /**
          * char *_fcvt(double value, int count, int *dec, int *sign)
@@ -913,7 +913,7 @@ export function createConversionFunctions(host){
          * The count is digits after the point here, not significant digits, and
          * a value below one loses its leading zeros to a negative *dec.
          */
-        _fcvt: cvt(true),
+        _fcvt: { ...cvt(true), returns: 'pointer' },
 
         /**
          * int _atodbl(_CRT_DOUBLE *value, char *str)
@@ -953,6 +953,7 @@ export function createConversionFunctions(host){
          * and EINVAL, a negative count null and ERANGE.
          */
         _gcvt: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 16,
             floats: DOUBLE_FIRST,

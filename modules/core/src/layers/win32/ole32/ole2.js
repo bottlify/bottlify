@@ -1479,6 +1479,7 @@ export function createOle2Functions(env){
          * label is neither drawn nor measured here, which is said once.
          */
         OleMetafilePictFromIconAndLabel: {
+            returns: 'pointer',
             argBytes: 16,
             /** @param {number[]} args */
             handler: async([icon])=>{
@@ -1965,6 +1966,7 @@ export function createOle2Functions(env){
          * block, a metafile picture with its metafile, an enhanced metafile.
          */
         OleDuplicateData: {
+            returns: 'pointer',
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([handle, format])=>util.duplicate(handle >>> 0, format & 0xffff,

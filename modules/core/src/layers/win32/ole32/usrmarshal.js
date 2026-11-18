@@ -182,7 +182,8 @@ const after = (value, then)=>(value instanceof Promise ? value.then(then) : then
 
 /**
  * @param {UserMarshalHost} host
- * @returns {Record<string, { argBytes: number, handler: (args: number[]) => any }>}
+ * @returns {Record<string, { argBytes: number, handler: (args: number[]) => any,
+ *     returns?: string }>}
  */
 export function createUserMarshalFunctions(host){
     /** @param {number} address */
@@ -1206,16 +1207,18 @@ export function createUserMarshalFunctions(host){
          * unsigned char *WdtpInterfacePointer_UserMarshal(ULONG *pFlags,
          *     ULONG RealFlags, unsigned char *pBuffer, IUnknown *punk, REFIID riid)
          */
-        WdtpInterfacePointer_UserMarshal: entry(20, ([, , buffer, unknown, riid], thread)=>
-            (unknown === 0 ? buffer
+        WdtpInterfacePointer_UserMarshal: {
+            ...entry(20, ([, , buffer, unknown, riid], thread)=>(unknown === 0 ? buffer
                 : pointerMarshal(buffer, unknown, readGuid(host, riid), thread))),
+            returns: 'pointer',
+        },
 
         /**
          * unsigned char *WdtpInterfacePointer_UserUnmarshal(ULONG *pFlags,
          *     unsigned char *pBuffer, IUnknown **ppunk, REFIID riid)
          */
-        WdtpInterfacePointer_UserUnmarshal: entry(16, ([, buffer, slot, riid], thread)=>
-            pointerUnmarshal(buffer, slot, riid, thread)),
+        WdtpInterfacePointer_UserUnmarshal: { ...entry(16, ([, buffer, slot, riid], thread)=>
+            pointerUnmarshal(buffer, slot, riid, thread)), returns: 'pointer' },
 
         /** void WdtpInterfacePointer_UserFree(IUnknown *punk) */
         WdtpInterfacePointer_UserFree: entry(4, ([unknown], thread)=>

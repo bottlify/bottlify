@@ -1920,6 +1920,28 @@ test('a 64-bit caller finds a quadword the handler answers in two halves whole i
         'and the high half one call gave is not the next call\'s');
 });
 
+test('a 64-bit caller finds an address zero-extended in RAX, any other dword sign-extended', ()=>{
+    // VirtualAlloc, HeapAlloc, malloc above 2 GiB: an address widened by its
+    // sign is 0xFFFFFFFF_9xxxxxxx, which faults on first use. A HANDLE of -1
+    // is INVALID_HANDLE_VALUE whole only sign-extended.
+    const { dispatcher, r } = longMachine();
+    dispatcher.register(1, { name: 'X!Alloc', ...STDCALL, argBytes: 0, returns: 'pointer',
+        handler: ()=>0x90000000 });
+    dispatcher.register(2, { name: 'X!Open', ...STDCALL, argBytes: 0, handler: ()=>-1 });
+    dispatcher.register(3, { name: 'X!AllocSigned', ...STDCALL, argBytes: 0, returns: 'pointer',
+        handler: ()=>0x90000000 | 0 });
+    dispatcher.register(4, { name: 'X!Small', ...STDCALL, argBytes: 0, returns: 'pointer',
+        handler: ()=>0x1000 });
+    dispatcher.dispatch(1);
+    assert.equal(r.get('rax'), 0x90000000n);
+    dispatcher.dispatch(2);
+    assert.equal(r.get('rax'), 0xffffffffffffffffn);
+    dispatcher.dispatch(3);
+    assert.equal(r.get('rax'), 0x90000000n, 'an address the handler computed with | 0 too');
+    dispatcher.dispatch(4);
+    assert.equal(r.get('rax'), 0x1000n);
+});
+
 test('a quadword argument is one x64 slot, split into the two dwords the handler reads', ()=>{
     // _lseeki64(int fd, __int64 offset, int origin): four dwords to a 32-bit
     // handler, three arguments to an x86-64 caller -- RCX, RDX and R8.

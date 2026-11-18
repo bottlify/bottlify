@@ -183,6 +183,7 @@ export function createIdListFunctions(host){
 
         /** PIDLIST_RELATIVE ILClone(PCUIDLIST_RELATIVE pidl) */
         ILClone: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([list])=>((list >>> 0) === 0 ? 0 : allocated(bytesOf(list))),
@@ -190,6 +191,7 @@ export function createIdListFunctions(host){
 
         /** PITEMID_CHILD ILCloneFirst(PCUIDLIST_RELATIVE pidl): the first item, ended. */
         ILCloneFirst: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([list])=>{
@@ -271,6 +273,7 @@ export function createIdListFunctions(host){
          * a copy of the other, both missing NULL.
          */
         ILCombine: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([first, second])=>{
@@ -290,6 +293,7 @@ export function createIdListFunctions(host){
          * freed: what the caller holds afterwards is the answer.
          */
         ILAppendID: {
+            returns: 'pointer',
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([list, item, append])=>{
@@ -333,6 +337,7 @@ export function createIdListFunctions(host){
 
         /** LPVOID SHAlloc(SIZE_T cb): the task allocator's memory. */
         SHAlloc: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([bytes])=>host.allocate?.(Math.max(bytes >>> 0, 1)) ?? 0,

@@ -484,6 +484,7 @@ export function createDataStructureFunctions(host){
 
         /** void *DPA_GetPtr(HDPA hdpa, INT_PTR i) - NULL past either end. */
         DPA_GetPtr: {
+            returns: 'pointer',
             argBytes: 8,
             handler: (/** @type {number[]} */ [dpa, index])=>
                 dpa >>> 0 !== 0 && (index | 0) >= 0 && (index | 0) < count(dpa >>> 0)
@@ -536,6 +537,7 @@ export function createDataStructureFunctions(host){
 
         /** void *DPA_DeletePtr(HDPA hdpa, int i) - the pointer removed, NULL past either end. */
         DPA_DeletePtr: {
+            returns: 'pointer',
             argBytes: 8,
             handler: (/** @type {number[]} */ [dpa, index])=>remove(dpa >>> 0, index),
         },
@@ -901,6 +903,7 @@ export function createDataStructureFunctions(host){
 
         /** void *DSA_GetItemPtr(HDSA hdsa, int i) */
         DSA_GetItemPtr: {
+            returns: 'pointer',
             argBytes: 8,
             handler: (/** @type {number[]} */ [handle, index])=>{
                 const dsa = handle >>> 0;

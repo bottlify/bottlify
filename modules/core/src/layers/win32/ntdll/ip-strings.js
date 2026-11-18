@@ -532,7 +532,7 @@ export function createIpStringFunctions(host){
 
     return {
         /** PSTR RtlIpv4AddressToStringA(const IN_ADDR *, PSTR) */
-        RtlIpv4AddressToStringA: toString(false, ipv4ToString, 4),
+        RtlIpv4AddressToStringA: { ...toString(false, ipv4ToString, 4), returns: 'pointer' },
         RtlIpv4AddressToStringW: toString(true, ipv4ToString, 4),
         /** NTSTATUS RtlIpv4AddressToStringExA(const IN_ADDR *, USHORT Port, PSTR, PULONG) */
         RtlIpv4AddressToStringExA: toStringEx(false, 16, text4, 2, 3),
@@ -544,7 +544,7 @@ export function createIpStringFunctions(host){
         RtlIpv4StringToAddressExA: fromString4Ex(false),
         RtlIpv4StringToAddressExW: fromString4Ex(true),
         /** PSTR RtlIpv6AddressToStringA(const IN6_ADDR *, PSTR) */
-        RtlIpv6AddressToStringA: toString(false, ipv6ToString, 16),
+        RtlIpv6AddressToStringA: { ...toString(false, ipv6ToString, 16), returns: 'pointer' },
         RtlIpv6AddressToStringW: toString(true, ipv6ToString, 16),
         /** NTSTATUS RtlIpv6AddressToStringExA(const IN6_ADDR *, ULONG ScopeId, USHORT Port,
          *   PSTR, PULONG) */

@@ -383,7 +383,7 @@ export function createMfObjects(kit, host){
          *
          * Kept by the media type until it is asked again or goes.
          */
-        { name: 'GetAudioFormat', argBytes: 4, invoke: (/** @type {any} */ object)=>{
+        { name: 'GetAudioFormat', returns: 'pointer', argBytes: 4, invoke: (/** @type {any} */ object)=>{
             host.heap.free(object.state.audioFormat);
             const format = waveFormatOf(object.state.items);
             object.state.audioFormat = format ? kit.taskCopy(format) : 0;
@@ -393,7 +393,7 @@ export function createMfObjects(kit, host){
     const videoInterface = { id: IID.VIDEO_MEDIA_TYPE, methods: [
         ...mediaTypeMethods,
         /** const MFVIDEOFORMAT *GetVideoFormat(void) */
-        { name: 'GetVideoFormat', argBytes: 4, invoke: ()=>{
+        { name: 'GetVideoFormat', returns: 'pointer', argBytes: 4, invoke: ()=>{
             kit.sayOnce('IMFVideoMediaType::GetVideoFormat', 'no MFVIDEOFORMAT is made: NULL');
             return 0;
         } },

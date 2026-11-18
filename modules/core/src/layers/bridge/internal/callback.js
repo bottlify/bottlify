@@ -235,16 +235,24 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
      * argument is a dword widened by its sign as JavaScript holds it: a
      * negative one -- an LPARAM of -1, a handle such as HWND_TOPMOST -- is
      * sign-extended as a LONG is, any other zero-extended, which keeps every
-     * address below 4 GiB as it is.
+     * address below 4 GiB given unsigned as it is. A bigint is a quadword
+     * whole: an LPARAM or a pointer that came into the host whole goes back
+     * to the guest whole.
      *
-     * @param {number} resting @param {number[]} args
+     * @param {number} resting @param {(number | bigint)[]} args
      * @returns {{ frameBase: number, extent: number }}
      */
     function longFrame(resting, args){
         const slots = LONG_FRAME_SLOTS + Math.max(0, args.length - 4);
         const frameBase = ((resting - slots * 8 - 8) & ~15) + 8;
-        /** @param {number} at @param {number} value */
+        /** @param {number} at @param {number | bigint} value */
         const quad = (at, value)=>{
+            if (typeof value === 'bigint')
+            {
+                memory.writeU32(at, Number(BigInt.asUintN(32, value)));
+                memory.writeU32(at + 4, Number(BigInt.asUintN(32, value >> 32n)));
+                return;
+            }
             memory.writeU32(at, value);
             memory.writeU32(at + 4, value < 0 ? 0xffffffff : 0);
         };
@@ -265,7 +273,8 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
      * Builds a callback's frame below where the thread's stack rests and
      * records it: what `call` and `callNow` both do before sending the thread.
      *
-     * @param {{ thread: any, entry: number, args: number[], stackAtRest?: number, by: string,
+     * @param {{ thread: any, entry: number, args: (number | bigint)[], stackAtRest?: number,
+     *     by: string,
      *     settle: (value: number) => void, now: boolean }} call
      * @returns {number} the frame's base, the stack the routine starts on
      */
@@ -360,7 +369,8 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
         if (!long)
         {
             memory.writeU32(frameBase, sentinelAddress);
-            args.forEach((value, index)=>memory.writeU32(frameBase + 4 + index * 4, value));
+            args.forEach((value, index)=>memory.writeU32(frameBase + 4 + index * 4,
+                typeof value === 'bigint' ? Number(BigInt.asUintN(32, value)) : value));
         }
 
         const frames = callbackFrames(thread);
@@ -544,7 +554,7 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
          * @param {Object} call
          * @param {any} call.thread
          * @param {number} call.entry            Guest address of the routine.
-         * @param {number[]} [call.args]
+         * @param {(number | bigint)[]} [call.args]  as `callGuest` takes them
          * @param {number} [call.stackAtRest]    Where the stack is, when nothing else knows.
          * @param {string} [call.by]             Which host call is starting it.
          * @param {Record<string, number>} [call.registers]
@@ -576,7 +586,7 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
          * @param {Object} call
          * @param {any} call.thread
          * @param {number} call.entry
-         * @param {number[]} [call.args]
+         * @param {(number | bigint)[]} [call.args]  as `callGuest` takes them
          * @param {number} [call.stackAtRest]
          * @param {string} [call.by]
          * @param {(value: number) => void} call.onReturn

@@ -1607,7 +1607,7 @@ export function createShellFunctions(host){
          *
          * HINSTANCE ShellExecuteW(HWND, LPCWSTR, LPCWSTR, LPCWSTR, LPCWSTR, INT)
          */
-        ShellExecuteA: shellExecute(false),
+        ShellExecuteA: { ...shellExecute(false), returns: 'pointer' },
         ShellExecuteW: shellExecute(true),
 
         /**
@@ -1623,9 +1623,9 @@ export function createShellFunctions(host){
          * caller reads it whatever the return says and its own stack left there
          * would be read as a path.
          */
-        FindExecutableA: findExecutable(false),
+        FindExecutableA: { ...findExecutable(false), returns: 'pointer' },
         /** HINSTANCE FindExecutableW(LPCWSTR lpFile, LPCWSTR lpDirectory, LPWSTR lpResult) */
-        FindExecutableW: findExecutable(true),
+        FindExecutableW: { ...findExecutable(true), returns: 'pointer' },
 
         /**
          * void DragAcceptFiles(HWND hWnd, BOOL fAccept)
@@ -1661,6 +1661,7 @@ export function createShellFunctions(host){
          * and means the browse was cancelled, which is true.
          */
         SHBrowseForFolderA: {
+            returns: 'pointer',
             argBytes: 4,
             handler: ()=>0,
         },
@@ -1895,6 +1896,7 @@ export function createShellFunctions(host){
          * written at all.
          */
         SHGetFileInfoA: {
+            returns: 'pointer',
             argBytes: 20,
             handler: ()=>0,
         },

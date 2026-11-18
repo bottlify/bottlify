@@ -621,6 +621,7 @@ export function createGraphicsLibraries(
              * through an out-parameter, and reports failure as null.
              */
             Direct3DCreate8: {
+                returns: 'pointer',
                 argBytes: 4,
                 handler: ()=>{
                     const root = graphics.create('d3d8');
@@ -684,6 +685,7 @@ export function createGraphicsLibraries(
         'D3D9.dll': {
             /** IDirect3D9* Direct3DCreate9(UINT SDKVersion) */
             Direct3DCreate9: {
+                returns: 'pointer',
                 argBytes: 4,
                 handler: d3d9Create,
                 // A jump to the handler, and after it, never run, the
@@ -710,6 +712,7 @@ export function createGraphicsLibraries(
              * for it, so nothing can query its way to it.
              */
             Direct3DShaderValidatorCreate9: {
+                returns: 'pointer',
                 argBytes: 0,
                 handler: ()=>{
                     const validator = createShaderValidator({ memory, callGuest, currentThread,

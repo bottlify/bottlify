@@ -933,7 +933,7 @@ export function createSecurityFunctions(host){
          * LPTSTR GetTrusteeName(PTRUSTEE), TRUSTEE_FORM GetTrusteeForm(PTRUSTEE),
          * TRUSTEE_TYPE GetTrusteeType(PTRUSTEE): the fields as they are.
          */
-        GetTrusteeNameA: trusteeField(TRUSTEE.NAME),
+        GetTrusteeNameA: { ...trusteeField(TRUSTEE.NAME), returns: 'pointer' },
         GetTrusteeNameW: trusteeField(TRUSTEE.NAME),
         GetTrusteeFormA: trusteeField(TRUSTEE.FORM),
         GetTrusteeFormW: trusteeField(TRUSTEE.FORM),

@@ -48,6 +48,7 @@ export const IID_IUNKNOWN = '{00000000-0000-0000-C000-000000000046}';
  *           thread until it settles, which is what a method that has to read a
  *           file before it can answer needs.
  * @property {number[]} [quadwords]
+ * @property {string} [returns]  The answer is an address (`HostFunction.returns`).
  * @property {Record<number, 'f32' | 'f64'>} [floats]
  * @property {Record<number, number>} [structs]
  *           How a 64-bit caller passes the arguments the 32-bit layout has as

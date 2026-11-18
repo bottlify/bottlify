@@ -190,7 +190,8 @@ export function createStringTableFunctions(host){
      */
     const stdcall = (argBytes, handler)=>({ argBytes, handler });
 
-    /** @type {Record<string, { argBytes: number, handler: (args: number[]) => number }>} */
+    /** @type {Record<string, { argBytes: number, handler: (args: number[]) => number,
+        returns?: string }>} */
     const calls = {
         /** HSTRING_TABLE StringTableInitialize(void) */
         StringTableInitialize: stdcall(0, ()=>create(0)),
@@ -270,10 +271,10 @@ export function createStringTableFunctions(host){
         }),
 
         /** LPWSTR StringTableStringFromId(HSTRING_TABLE, DWORD dwId) -- in the table's own data */
-        StringTableStringFromId: stdcall(8, ([table, id])=>{
+        StringTableStringFromId: { ...stdcall(8, ([table, id])=>{
             const entry = tables.get(table >>> 0)?.find(candidate=>candidate.id === (id >>> 0));
             return entry ? readU32(table + TABLE.DATA) + entry.id + 4 : 0;
-        }),
+        }), returns: 'pointer' },
 
         /**
          * BOOL StringTableGetExtraData(HSTRING_TABLE, DWORD dwId, LPVOID lpExtraData,

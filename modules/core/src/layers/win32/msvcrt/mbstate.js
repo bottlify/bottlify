@@ -171,7 +171,7 @@ export function createRestartableFunctions(host){
          * size_t mbrlen(const char *s, size_t count, mbstate_t *state): 0 for
          * the terminator or no string, -2 when the count holds nothing, else 1.
          */
-        mbrlen: cdecl(12, ([string, count, state])=>{
+        mbrlen: { ...cdecl(12, ([string, count, state])=>{
             clear(state);
             if ((string >>> 0) === 0)
             {
@@ -182,14 +182,14 @@ export function createRestartableFunctions(host){
                 return INCOMPLETE;
             }
             return host.readMemory(string >>> 0, 1)[0] === 0 ? 0 : 1;
-        }),
+        }), returns: 'pointer' },
 
         /**
          * size_t mbrtowc(wchar_t *dest, const char *s, size_t count, mbstate_t *state)
          *
          * mbrlen's answers, the character written where asked.
          */
-        mbrtowc: cdecl(16, ([destination, string, count, state])=>{
+        mbrtowc: { ...cdecl(16, ([destination, string, count, state])=>{
             clear(state);
             if ((string >>> 0) === 0)
             {
@@ -205,14 +205,14 @@ export function createRestartableFunctions(host){
                 writeUnits(destination, [byte]);
             }
             return byte === 0 ? 0 : 1;
-        }),
+        }), returns: 'pointer' },
 
         /**
          * size_t wcrtomb(char *dest, wchar_t c, mbstate_t *state): the byte
          * and 1; -1 and EILSEQ for a character past U+00FF; no destination
          * asks the length of a reset, 1.
          */
-        wcrtomb: cdecl(12, ([destination, c, state])=>{
+        wcrtomb: { ...cdecl(12, ([destination, c, state])=>{
             clear(state);
             if ((destination >>> 0) === 0)
             {
@@ -225,7 +225,7 @@ export function createRestartableFunctions(host){
             }
             host.writeMemory(destination >>> 0, Uint8Array.of(c & 0xff));
             return 1;
-        }),
+        }), returns: 'pointer' },
 
         /**
          * errno_t wcrtomb_s(size_t *length, char *dest, size_t size, wchar_t c,
@@ -258,7 +258,7 @@ export function createRestartableFunctions(host){
          * converted, or to null once the terminator was; no destination
          * counts and moves nothing. No source is -1 and EINVAL.
          */
-        mbsrtowcs: cdecl(16, ([destination, source, count, state])=>{
+        mbsrtowcs: { ...cdecl(16, ([destination, source, count, state])=>{
             clear(state);
             if ((source >>> 0) === 0)
             {
@@ -267,7 +267,7 @@ export function createRestartableFunctions(host){
             }
             return restartable(destination, source, count, narrowUnits(readU32(source)), 1,
                 writeUnits);
-        }),
+        }), returns: 'pointer' },
 
         /**
          * size_t wcsrtombs(char *dest, const wchar_t **src, size_t count, mbstate_t *state)
@@ -275,7 +275,7 @@ export function createRestartableFunctions(host){
          * wcstombs from where `*src` points, as mbsrtowcs moves it; -1 and
          * EILSEQ at a character past U+00FF.
          */
-        wcsrtombs: cdecl(16, ([destination, source, count, state])=>{
+        wcsrtombs: { ...cdecl(16, ([destination, source, count, state])=>{
             clear(state);
             if ((source >>> 0) === 0)
             {
@@ -291,7 +291,7 @@ export function createRestartableFunctions(host){
             }
             return restartable(destination, source, count, units, 2,
                 (at, bytes)=>host.writeMemory(at >>> 0, Uint8Array.from(bytes)));
-        }),
+        }), returns: 'pointer' },
 
         /**
          * errno_t mbsrtowcs_s(size_t *converted, wchar_t *dest, size_t size,

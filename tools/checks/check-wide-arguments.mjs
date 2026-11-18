@@ -6,7 +6,8 @@
 
 /**
  * Fails when a host function or COM method that takes an argument other than
- * a dword by value does not say so to the bridge.
+ * a dword by value does not say so to the bridge, or that answers an address
+ * does not say that (`returns: 'pointer'`, `checkReturns`).
  *
  * Every handler here is written in the 32-bit stdcall layout: an __int64, a
  * REFERENCE_TIME, a LARGE_INTEGER, a POINT or a double by value is two of its
@@ -384,6 +385,132 @@ export function checkText(text){
     return found;
 }
 
+/**
+ * Pointer-sized types whose value is an address or an unsigned size: a 64-bit
+ * process's RAX holds it zero-extended. Any type written with a `*` is one too,
+ * and so is every `LP...` typedef. A pointer-sized type left out -- HANDLE,
+ * LRESULT, LONG_PTR, INT_PTR, LPARAM, a handle the host makes up -- is
+ * sign-extended, as INVALID_HANDLE_VALUE is -1 whole; a dword type's high half
+ * the caller never reads.
+ */
+export const POINTER_RESULTS = new Set(['PVOID', 'PSTR', 'PWSTR', 'PCSTR', 'PCWSTR', 'PTSTR',
+    'size_t', 'SIZE_T', 'ULONG_PTR', 'UINT_PTR', 'DWORD_PTR', 'uintptr_t', 'WPARAM',
+    'HGLOBAL', 'HLOCAL', 'HMODULE', 'HINSTANCE', 'FARPROC', 'HRSRC', 'BSTR', 'PSLIST_ENTRY',
+    'PCCERT_CONTEXT', 'PCCRL_CONTEXT', 'PCCTL_CONTEXT', 'PIDLIST_ABSOLUTE', 'PIDLIST_RELATIVE',
+    'PITEMID_CHILD', '_invalid_parameter_handler', '_purecall_handler', '_PNH',
+    'PTOP_LEVEL_EXCEPTION_FILTER',
+    'PRUNTIME_FUNCTION', 'PEXCEPTION_ROUTINE', 'PVECTORED_EXCEPTION_HANDLER']);
+
+/** Words a signature's return type may carry that are not its type. */
+const NOT_TYPE = new RegExp(String.raw`\b(WINAPI|CALLBACK|APIENTRY|__stdcall|__cdecl|CDECL|`
+    + String.raw`STDMETHODCALLTYPE|const|CONST|struct|unsigned|signed|static|inline|extern|NTAPI|`
+    + String.raw`NTSYSAPI|WINBASEAPI|WINUSERAPI)\b`, 'g');
+
+/**
+ * Whether a signature's return type, as its comment writes it before the
+ * name, is an address the bridge widens with zeros.
+ *
+ * @param {string} written  e.g. `LPVOID`, `void *`, `const char *`, `HANDLE`
+ */
+export function returnsPointer(written){
+    if (written.includes('*'))
+    {
+        return true;
+    }
+    const type = written.replace(NOT_TYPE, ' ').trim().split(/\s+/).pop() ?? '';
+    return POINTER_RESULTS.has(type) || /^LP[A-Z]/.test(type);
+}
+
+/**
+ * The dwords of a signature's parameters, in the 32-bit layout, that hold an
+ * address: what a 64-bit handler reads whole (`pointerArg`, the bridge's
+ * `args.high`) once addresses pass 4 GiB. A wide argument before one moves it
+ * as `layoutOf` counts; a by-value structure is no address.
+ *
+ * @param {string} list  The text between the parentheses.
+ * @returns {number[]}
+ */
+export function pointersOf(list){
+    const params = list.split(',').map(each=>each.trim()).filter(Boolean);
+    if (params.length === 1 && /^void$/i.test(params[0]))
+    {
+        return [];
+    }
+    /** @type {number[]} */
+    const found = [];
+    let word = 0;
+    for (const param of params)
+    {
+        if (param === '...')
+        {
+            break;
+        }
+        const type = param.replace(/\b(IN|OUT|OPTIONAL)\b|_In\w*_|_Out\w*_/g, ' ').trim();
+        const named = type.replace(NOT_TYPE, ' ').trim().split(/\s+/)[0] ?? '';
+        if (type.includes('*') || type.includes('[') || returnsPointer(named))
+        {
+            found.push(word);
+        }
+        const layout = layoutOf(param);
+        word += layout.quad.length * 2 + Object.values(layout.structs).reduce((a, b)=>a + b, 0)
+            + Object.values(layout.floats).filter(kind=>kind === 'f64').length * 2
+            + Object.values(layout.floats).filter(kind=>kind === 'f32').length
+            || 1;
+    }
+    return found;
+}
+
+/**
+ * Each signature of `text` over a spec, with whether its result is an address
+ * and whether the spec says so (`returns: 'pointer'`): one that returns an
+ * address and does not say so is widened by its sign in a 64-bit process -- a
+ * VirtualAlloc above 2 GiB answered 0xFFFFFFFF_9xxxxxxx -- and one that says
+ * so and returns no address would make INVALID_HANDLE_VALUE 0x00000000_FFFFFFFF.
+ * A spec a helper makes says so where it is made: `Name: { ...make(...),
+ * returns: 'pointer' }`, or the helper's call passes it (`...both(name, n,
+ * body, { returns: 'pointer' })`).
+ *
+ * @param {string} text
+ * @returns {{ name: string, line: number, pointer: boolean, problem: string | null }[]}
+ */
+export function checkReturns(text){
+    const found = [];
+    const comment = /\/\*\*\s*(?:\r?\n\s*\*)?\s*((?:[A-Za-z_]\w*\s*\**\s+)+?\**)\s*(\w+)\s*\(/g;
+    for (const match of text.matchAll(comment))
+    {
+        const end = text.indexOf('*/', match.index ?? 0);
+        if (end < 0 || end < (match.index ?? 0) + match[0].length)
+        {
+            continue;
+        }
+        const next = text.indexOf('/**', end);
+        const spec = text.slice(end + 2, next < 0 ? text.length : next);
+        const helper = /^\s*(?:\w+\s*:|\.\.\.)\s*(?!async\b|function\b)(\w+)\(/.exec(spec)?.[1];
+        // A spec named by a constant of the file (`malloc: allocator,`) is
+        // that constant's object.
+        const named = /^\s*\w+\s*:\s*([A-Za-z_]\w*)\s*,/.exec(spec)?.[1];
+        const defined = named
+            ? new RegExp(String.raw`const\s+${named}\s*=\s*(?=\{)`).exec(text) : null;
+        const object = defined ? balanced(text, defined.index + defined[0].length) ?? '' : spec;
+        // Only a spec right under its comment: an object with what a host
+        // function is made of, or the line a helper makes one with.
+        const made = /^\s*(?:['"]?[\w$.]+['"]?\s*:\s*)?\{(?:\s*\.\.\.\w+\(|[^]*?\b(argBytes|invoke|handler)\s*:)/;
+        if (!made.test(object) && !helper)
+        {
+            continue;
+        }
+        const pointer = returnsPointer(match[1]);
+        const own = /\breturns\s*:\s*['"](\w+)['"]/.exec(object)?.[1];
+        const line = text.slice(0, match.index).split('\n').length;
+        const problem = pointer && own !== 'pointer'
+            ? `returns ${match[1].trim()}, an address, without returns: 'pointer'`
+            : !pointer && own !== undefined
+                ? `returns: '${own}' over ${match[1].trim()}, which is no address` : null;
+        found.push({ name: match[2], line, pointer, problem });
+    }
+    return found;
+}
+
 /** @param {string} dir @returns {string[]} */
 function sources(dir){
     /** @type {string[]} */
@@ -432,6 +559,21 @@ if (isMain(import.meta.url))
             }
         }
     }
+    let results = 0;
+    let addresses = 0;
+    for (const file of sources(src))
+    {
+        const where = relative(ROOT, file).replace(/\\/g, '/');
+        for (const one of checkReturns(readFileSync(file, 'utf8')))
+        {
+            results++;
+            addresses += one.pointer ? 1 : 0;
+            if (one.problem)
+            {
+                failures.push(`${where}:${one.line} ${one.name}: ${one.problem}`);
+            }
+        }
+    }
     if (failures.length > 0)
     {
         console.error(`check-wide-arguments: ${failures.length} of ${checked} signatures with a`
@@ -442,5 +584,6 @@ if (isMain(import.meta.url))
         }
         process.exit(1);
     }
-    console.log(`check-wide-arguments: ${checked} signatures with a wide argument, each declared`);
+    console.log(`check-wide-arguments: ${checked} signatures with a wide argument, each declared;`
+        + ` ${results} results, the ${addresses} addresses among them declared`);
 }

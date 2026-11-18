@@ -186,6 +186,7 @@ export function createImageFunctions(host){
          * as the real walk is guarded.
          */
         RtlImageDirectoryEntryToData: {
+            returns: 'pointer',
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([base, mappedAsImage, entry, size])=>{

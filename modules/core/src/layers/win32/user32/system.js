@@ -4852,6 +4852,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
          * it on to copy from address zero.
          */
         CharNextA: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([text])=>{
@@ -4866,6 +4867,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
 
         /** LPWSTR CharNextW(LPCWSTR lpsz): CharNextA, a character being two bytes */
         CharNextW: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([text])=>{
@@ -5045,7 +5047,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
          * converted and handed back as a value; anything else is a pointer to
          * a string converted in place, and the pointer is the answer.
          */
-        CharLowerA: caseOfString(false),
+        CharLowerA: { ...caseOfString(false), returns: 'pointer' },
         CharUpperA: caseOfString(true),
 
         /**
@@ -5066,7 +5068,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
          *
          * The same, a character being a UTF-16 unit.
          */
-        CharLowerW: caseOfWideString(false),
+        CharLowerW: { ...caseOfWideString(false), returns: 'pointer' },
         CharUpperW: caseOfWideString(true),
         CharLowerBuffW: caseOfWideBuffer(false),
         CharUpperBuffW: caseOfWideBuffer(true),
@@ -5095,6 +5097,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
          * which is how a caller walking backwards knows to stop.
          */
         CharPrevA: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([start, current])=>previousCharacter(0, start >>> 0, current >>> 0),
@@ -5109,6 +5112,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
          * look like a lead one.
          */
         CharPrevExA: {
+            returns: 'pointer',
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([codePage, start, current])=>
@@ -5122,6 +5126,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
          * past the start -- not the start, as the ANSI call answers.
          */
         CharPrevW: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([start, current])=>(
@@ -5137,6 +5142,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
          * stepped over.
          */
         CharNextExA: {
+            returns: 'pointer',
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([codePage, text])=>{
@@ -6794,6 +6800,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
          * message and never gets past the window it was for.
          */
         SetTimer: {
+            returns: 'pointer',
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([hwnd, id, elapse, proc])=>{
@@ -6967,6 +6974,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
         ...host.pointerSize === 8 ? {
             /** ULONG_PTR GetClassLongPtrA(HWND hWnd, int nIndex) */
             GetClassLongPtrA: {
+                returns: 'pointer',
                 argBytes: 8,
                 /** @param {number[]} args */
                 handler: ([hwnd, index])=>{
@@ -6976,6 +6984,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             },
             /** ULONG_PTR GetClassLongPtrW(HWND hWnd, int nIndex) */
             GetClassLongPtrW: {
+                returns: 'pointer',
                 argBytes: 8,
                 /** @param {number[]} args */
                 handler: ([hwnd, index])=>{
@@ -6985,6 +6994,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             },
             /** ULONG_PTR SetClassLongPtrA(HWND hWnd, int nIndex, LONG_PTR dwNewLong) */
             SetClassLongPtrA: {
+                returns: 'pointer',
                 argBytes: 16,
                 quadwords: [2],
                 /** @param {number[]} args */
@@ -6993,6 +7003,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             },
             /** ULONG_PTR SetClassLongPtrW(HWND hWnd, int nIndex, LONG_PTR dwNewLong) */
             SetClassLongPtrW: {
+                returns: 'pointer',
                 argBytes: 16,
                 quadwords: [2],
                 /** @param {number[]} args */
@@ -7635,6 +7646,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
          * replaced. No input here carries any of its own.
          */
         GetMessageExtraInfo: {
+            returns: 'pointer',
             argBytes: 0,
             handler: ()=>messageExtraInfo,
         },

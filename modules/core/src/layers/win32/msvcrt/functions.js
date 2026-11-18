@@ -687,6 +687,7 @@ export function createMsvcrtFunctions(host){
          * A category past LC_TIME is no category, and null.
          */
         setlocale: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 8,
             /** @param {number[]} args */
@@ -714,7 +715,7 @@ export function createMsvcrtFunctions(host){
         },
 
         /** size_t strlen(const char *str) -- in the guest */
-        strlen: guestEntry(inGuest.strlen, COMPILED.strlen, host),
+        strlen: { ...guestEntry(inGuest.strlen, COMPILED.strlen, host), returns: 'pointer' },
 
         /** int strcmp(const char *left, const char *right) -- in the guest */
         strcmp: guestEntry(inGuest.strcmp, COMPILED.strcmp, host),
@@ -726,23 +727,23 @@ export function createMsvcrtFunctions(host){
         _stricmp: guestEntry(inGuest._stricmp, COMPILED._stricmp, host),
 
         /** char *strcpy(char *dest, const char *src) -- in the guest */
-        strcpy: guestEntry(inGuest.strcpy, COMPILED.strcpy, host),
+        strcpy: { ...guestEntry(inGuest.strcpy, COMPILED.strcpy, host), returns: 'pointer' },
 
         /**
          * char *strncpy(char *dest, const char *src, size_t count) -- in the
          * guest: padded to the full count when the source is short, and no
          * terminator at all when it truncates
          */
-        strncpy: guestEntry(inGuest.strncpy, COMPILED.strncpy, host),
+        strncpy: { ...guestEntry(inGuest.strncpy, COMPILED.strncpy, host), returns: 'pointer' },
 
         /** char *strcat(char *dest, const char *src) -- in the guest */
-        strcat: guestEntry(inGuest.strcat, COMPILED.strcat, host),
+        strcat: { ...guestEntry(inGuest.strcat, COMPILED.strcat, host), returns: 'pointer' },
 
         /** char *strchr(const char *str, int ch) -- in the guest */
-        strchr: guestEntry(inGuest.strchr, COMPILED.strchr, host),
+        strchr: { ...guestEntry(inGuest.strchr, COMPILED.strchr, host), returns: 'pointer' },
 
         /** char *strstr(const char *haystack, const char *needle) -- in the guest */
-        strstr: guestEntry(inGuest.strstr, COMPILED.strstr, host),
+        strstr: { ...guestEntry(inGuest.strstr, COMPILED.strstr, host), returns: 'pointer' },
 
         /** int toupper(int ch) -- in the guest */
         toupper: guestEntry(inGuest.toupper, COMPILED.toupper, host),
@@ -757,11 +758,11 @@ export function createMsvcrtFunctions(host){
          * void *memcpy(void *dest, const void *src, size_t count) and memmove,
          * one function: in the guest
          */
-        memcpy: guestEntry(inGuest.memmove, COMPILED.memmove, host),
+        memcpy: { ...guestEntry(inGuest.memmove, COMPILED.memmove, host), returns: 'pointer' },
         memmove: guestEntry(inGuest.memmove, COMPILED.memmove, host),
 
         /** void *memset(void *dest, int value, size_t count) -- in the guest */
-        memset: guestEntry(inGuest.memset, COMPILED.memset, host),
+        memset: { ...guestEntry(inGuest.memset, COMPILED.memset, host), returns: 'pointer' },
 
         /** int memcmp(const void *left, const void *right, size_t count) -- in the guest */
         memcmp: guestEntry(inGuest.memcmp, COMPILED.memcmp, host),
@@ -773,7 +774,7 @@ export function createMsvcrtFunctions(host){
 
         itoa,
         /** char *_itoa(int value, char *buffer, int radix) -- in the guest, ten and the powers of two */
-        _itoa: guestEntry(inGuest._itoa, COMPILED._itoa, host, itoa),
+        _itoa: { ...guestEntry(inGuest._itoa, COMPILED._itoa, host, itoa), returns: 'pointer' },
 
         /**
          * int _isnan(double x), int _finite(double x), int _fpclass(double x)
@@ -1074,7 +1075,7 @@ export function createMsvcrtFunctions(host){
          * Code in the guest's own msvcrt, as qsort is: the comparator is the
          * program's, called with a `call`.
          */
-        bsearch: guestExport(COMPILED.bsearch),
+        bsearch: { ...guestExport(COMPILED.bsearch), returns: 'pointer' },
     };
 
     const allocate = host.allocate ?? (()=>0);
@@ -1288,6 +1289,7 @@ export function createMsvcrtFunctions(host){
          * multibyte character of the locale (`___mb_cur_max_func`, locale.js).
          */
         __p___mb_cur_max: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 0,
             handler: ()=>(host.addressOf?.('__mb_cur_max') ?? 0)

@@ -2409,6 +2409,7 @@ export function createHeapFunctions(host){
 
         /** LPVOID HeapAlloc(HANDLE hHeap, DWORD dwFlags, SIZE_T dwBytes) */
         HeapAlloc: {
+            returns: 'pointer',
             argBytes: 12,
             /** @param {number[]} args */
             handler: args=>{
@@ -2445,6 +2446,7 @@ export function createHeapFunctions(host){
 
         /** LPVOID HeapReAlloc(HANDLE hHeap, DWORD dwFlags, LPVOID lpMem, SIZE_T dwBytes) */
         HeapReAlloc: {
+            returns: 'pointer',
             argBytes: 16,
             /** @param {number[]} args */
             handler: args=>{
@@ -2493,6 +2495,7 @@ export function createHeapFunctions(host){
 
         /** SIZE_T HeapSize(HANDLE hHeap, DWORD dwFlags, LPCVOID lpMem) */
         HeapSize: {
+            returns: 'pointer',
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([handle, , pointer])=>{
@@ -2517,6 +2520,7 @@ export function createHeapFunctions(host){
          * is refused, as Windows refuses it.
          */
         VirtualAlloc: {
+            returns: 'pointer',
             argBytes: 16,
             /** @param {number[]} args */
             handler: args=>virtualAlloc(args[0], wholeSize(args, 1), args[2], args[3], null),
@@ -2535,6 +2539,7 @@ export function createHeapFunctions(host){
          * flags are refused as an unknown type is.
          */
         VirtualAlloc2: {
+            returns: 'pointer',
             argBytes: 28,
             /** @param {number[]} args */
             handler: args=>{
@@ -2777,6 +2782,7 @@ export function createHeapFunctions(host){
 
         /** HGLOBAL GlobalReAlloc(HGLOBAL hMem, SIZE_T dwBytes, UINT uFlags) */
         GlobalReAlloc: {
+            returns: 'pointer',
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([handle, bytes, flags])=>
@@ -2792,6 +2798,7 @@ export function createHeapFunctions(host){
 
         /** HGLOBAL GlobalFree(HGLOBAL hMem): NULL on success, the handle back on failure. */
         GlobalFree: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([handle])=>globals.global.free(handle >>> 0),
@@ -2800,6 +2807,7 @@ export function createHeapFunctions(host){
 
         /** LPVOID GlobalLock(HGLOBAL hMem) */
         GlobalLock: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([handle])=>globals.global.lock(handle >>> 0),
@@ -2849,6 +2857,7 @@ export function createHeapFunctions(host){
 
         /** SIZE_T GlobalSize(HGLOBAL hMem) */
         GlobalSize: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([handle])=>globals.global.size(handle >>> 0),
@@ -2856,6 +2865,7 @@ export function createHeapFunctions(host){
 
         /** HGLOBAL GlobalHandle(LPCVOID pMem) */
         GlobalHandle: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([address])=>globals.global.handleOf(address >>> 0),
@@ -2867,6 +2877,7 @@ export function createHeapFunctions(host){
          * no DDE sharing; a handle one spelling makes the other takes.
          */
         LocalAlloc: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([flags, bytes])=>globals.local.allocate(flags >>> 0, bytes >>> 0),
@@ -2874,6 +2885,7 @@ export function createHeapFunctions(host){
 
         /** HLOCAL LocalFree(HLOCAL hMem) */
         LocalFree: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([handle])=>globals.local.free(handle >>> 0),
@@ -2955,6 +2967,7 @@ export function createHeapFunctions(host){
          * Zero would mean the heap is full, which it is not.
          */
         HeapCompact: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([handle])=>{
@@ -3146,6 +3159,7 @@ export function createHeapFunctions(host){
          * reserve it there.
          */
         VirtualQuery: {
+            returns: 'pointer',
             argBytes: 12,
             /** @param {number[]} args */
             handler: args=>{
@@ -3535,7 +3549,7 @@ export function createHeapFunctions(host){
             return { state: answer[4], protect: answer[5] };
         },
         /** LPVOID VirtualAllocEx(HANDLE, LPVOID, SIZE_T, DWORD, DWORD) */
-        VirtualAllocEx: inProcess('VirtualAlloc', 20),
+        VirtualAllocEx: { ...inProcess('VirtualAlloc', 20), returns: 'pointer' },
         /**
          * PVOID VirtualAlloc2FromApp(...): VirtualAlloc2 under the name a
          * packaged app may call, whose limits -- no executable pages without
@@ -3547,9 +3561,10 @@ export function createHeapFunctions(host){
         /** BOOL VirtualProtectEx(HANDLE, LPVOID, SIZE_T, DWORD, PDWORD) */
         VirtualProtectEx: inProcess('VirtualProtect', 20),
         /** SIZE_T VirtualQueryEx(HANDLE, LPCVOID, PMEMORY_BASIC_INFORMATION, SIZE_T) */
-        VirtualQueryEx: inProcess('VirtualQuery', 16),
+        VirtualQueryEx: { ...inProcess('VirtualQuery', 16), returns: 'pointer' },
         /** HLOCAL LocalReAlloc(HLOCAL hMem, SIZE_T uBytes, UINT uFlags) */
         LocalReAlloc: {
+            returns: 'pointer',
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([handle, bytes, flags])=>
@@ -3576,6 +3591,7 @@ export function createHeapFunctions(host){
          * the number is only measured.
          */
         GlobalCompact: {
+            returns: 'pointer',
             argBytes: 4,
             handler: ()=>table.HeapCompact.handler([processHeap, 0]),
         },

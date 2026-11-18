@@ -6,7 +6,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { checkText, layoutOf } from './check-wide-arguments.mjs';
+import {
+    checkReturns, checkText, layoutOf, pointersOf, returnsPointer,
+} from './check-wide-arguments.mjs';
 
 test('a signature is laid out as the 32-bit stack has it', ()=>{
     const layout = layoutOf('AUDCLNT_SHAREMODE mode, DWORD flags, REFERENCE_TIME duration,'
@@ -33,4 +35,45 @@ test('a spec is held to its signature: undeclared, misdeclared, declared, by a h
     assert.deepEqual(problem('/** float Late(int a, int b, int c, int d, float e) */\n'
         + 'Late: { argBytes: 20, handler: ()=>0 },'), [null],
     'a float past the fourth slot needs nothing');
+});
+
+test('a return type is an address by its star, its LP prefix or its name', ()=>{
+    for (const type of ['LPVOID', 'void *', 'const char*', 'PVOID', 'HMODULE', 'SIZE_T', 'FARPROC',
+        'IDirect3D9*', 'LPWSTR'])
+    {
+        assert.equal(returnsPointer(type), true, type);
+    }
+    for (const type of ['HANDLE', 'LRESULT', 'BOOL', 'DWORD', 'HRESULT', 'LONG_PTR', 'HWND', 'int'])
+    {
+        assert.equal(returnsPointer(type), false, type);
+    }
+});
+
+test('the dwords that hold an address, as the 32-bit layout counts them', ()=>{
+    assert.deepEqual(pointersOf('LPVOID at, SIZE_T size, DWORD type, DWORD protect'), [0, 1]);
+    assert.deepEqual(pointersOf('HANDLE file, LONGLONG offset, PVOID out, const char *name'),
+        [3, 4]);
+    assert.deepEqual(pointersOf('GUID g, void *p'), [4]);
+    assert.deepEqual(pointersOf('void'), []);
+});
+
+test('a spec answering an address says so, and one answering none does not', ()=>{
+    const problem = (/** @type {string} */ text)=>checkReturns(text).map(one=>one.problem);
+    const alloc = '/** LPVOID VirtualAlloc(LPVOID at, SIZE_T size, DWORD type, DWORD protect) */\n';
+    assert.match(String(problem(`${alloc}VirtualAlloc: { argBytes: 16, handler: ()=>0 },`)[0]),
+        /without returns: 'pointer'/);
+    assert.deepEqual(problem(
+        `${alloc}VirtualAlloc: { returns: 'pointer', argBytes: 16, handler: ()=>0 },`), [null]);
+    assert.match(String(problem('/** HANDLE CreateFileA(LPCSTR name) */\n'
+        + 'CreateFileA: { returns: \'pointer\', argBytes: 4, handler: ()=>0 },')[0]), /no address/);
+    assert.match(String(problem(`${alloc}VirtualAlloc: make(16),`)[0]), /without returns/,
+        'a helper\'s spec is not taken on trust');
+    assert.deepEqual(problem(`${alloc}VirtualAlloc: { ...make(16), returns: 'pointer' },`), [null]);
+    assert.deepEqual(problem('/** PSTR StrChrA(PCSTR s, WORD c) */\n'
+        + '...both(\'StrChr\', 8, ()=>0, { returns: \'pointer\' }),'), [null]);
+    assert.match(String(problem('const allocator = { argBytes: 4, handler: ()=>0 };\n'
+        + '/** void *malloc(size_t size) */\nmalloc: allocator,')[0]), /without returns/,
+    'a spec named by a constant is that constant');
+    assert.deepEqual(problem('/** void *Prose(int) is what it would be */\nconst x = 1;'), [],
+        'a comment over no spec');
 });

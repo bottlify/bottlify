@@ -216,14 +216,16 @@ const int64 = (low, high)=>BigInt.asIntN(64, BigInt(high >>> 0) << 32n | BigInt(
 export function createStringFunctions(host, { A, W }){
     /** @param {string} name @param {number} argBytes
      *  @param {(width: import('./text.js').Width, args: number[]) => number} body
-     *  @param {{ quadwords?: number[] }} [marshal]  A LONGLONG by value: one slot at 64 bits. */
+     *  @param {{ quadwords?: number[], returns?: string }} [marshal]  A LONGLONG by value: one
+     *      slot at 64 bits; an address answered (`returns: 'pointer'`). */
     const both = (name, argBytes, body, marshal = {})=>({
         [`${name}A`]: { argBytes, ...marshal, handler: (/** @type {number[]} */ args)=>body(A, args) },
         [`${name}W`]: { argBytes, ...marshal, handler: (/** @type {number[]} */ args)=>body(W, args) },
     });
     /** @param {import('./text.js').Width} width @param {number} argBytes
      *  @param {(width: import('./text.js').Width, args: number[]) => number} body
-     *  @param {{ quadwords?: number[] }} [marshal]  A LONGLONG by value: one slot at 64 bits. */
+     *  @param {{ quadwords?: number[], returns?: string }} [marshal]  A LONGLONG by value: one
+     *      slot at 64 bits; an address answered (`returns: 'pointer'`). */
     const one = (width, argBytes, body, marshal = {})=>({
         argBytes, ...marshal, handler: (/** @type {number[]} */ args)=>body(width, args),
     });
@@ -364,7 +366,7 @@ export function createStringFunctions(host, { A, W }){
             const wanted = searched(width, code);
             const at = text === null || wanted === null ? -1 : text.indexOf(wanted);
             return at < 0 ? 0 : (start >>> 0) + at * width.unit;
-        }),
+        }, { returns: 'pointer' }),
 
         /**
          * PSTR StrChrIA(PCSTR pszStart, WORD wMatch)
@@ -377,7 +379,7 @@ export function createStringFunctions(host, { A, W }){
             const at = text === null || wanted === null ? -1
                 : foldCase(text).indexOf(foldCase(wanted));
             return at < 0 ? 0 : (start >>> 0) + at * width.unit;
-        }),
+        }, { returns: 'pointer' }),
 
         /**
          * PSTR StrRChrA(PCSTR pszStart, PCSTR pszEnd, WORD wMatch)
@@ -396,7 +398,7 @@ export function createStringFunctions(host, { A, W }){
                 : Math.min(text.length, Math.floor(((end >>> 0) - (start >>> 0)) / width.unit));
             const at = stop <= 0 ? -1 : text.lastIndexOf(wanted, stop - 1);
             return at < 0 ? 0 : (start >>> 0) + at * width.unit;
-        }),
+        }, { returns: 'pointer' }),
 
         /**
          * int StrCSpnA(LPCSTR pszStr, LPCSTR pszSet)
@@ -424,14 +426,14 @@ export function createStringFunctions(host, { A, W }){
             compare(width, first, second, NORM_IGNORECASE, count | 0)),
 
         /** PWSTR StrCpyW(PWSTR psz1, PCWSTR psz2): the copy's destination. */
-        StrCpyW: one(W, 8, (width, [destination, source])=>{
+        StrCpyW: { ...one(W, 8, (width, [destination, source])=>{
             const text = width.read(source);
             if ((destination >>> 0) !== 0 && text !== null)
             {
                 host.writeMemory(destination >>> 0, width.sz(text));
             }
             return destination >>> 0;
-        }),
+        }), returns: 'pointer' },
 
         /**
          * PWSTR StrCpyNW(PWSTR pszDst, PCWSTR pszSrc, int cchMax)
@@ -441,17 +443,17 @@ export function createStringFunctions(host, { A, W }){
          * empty one, and with no room nothing is written (Wine's
          * test_StrXXX_overflows).
          */
-        StrCpyNW: one(W, 12, (width, [destination, source, room])=>{
+        StrCpyNW: { ...one(W, 12, (width, [destination, source, room])=>{
             if ((destination >>> 0) !== 0 && (room | 0) > 0)
             {
                 writeCut(width, destination, (room | 0) > 1 ? width.read(source) ?? '' : '',
                     room | 0);
             }
             return destination >>> 0;
-        }),
+        }), returns: 'pointer' },
 
         /** PWSTR StrCatW(PWSTR psz1, PCWSTR psz2): psz2 appended to psz1. */
-        StrCatW: one(W, 8, (width, [destination, source])=>{
+        StrCatW: { ...one(W, 8, (width, [destination, source])=>{
             const head = width.read(destination);
             const tail = width.read(source);
             if (head !== null && tail !== null)
@@ -459,7 +461,7 @@ export function createStringFunctions(host, { A, W }){
                 host.writeMemory((destination >>> 0) + head.length * width.unit, width.sz(tail));
             }
             return destination >>> 0;
-        }),
+        }), returns: 'pointer' },
 
         /**
          * PSTR StrCatBuffA(PSTR pszDest, PCSTR pszSrc, int cchDestBuffSize)
@@ -475,10 +477,10 @@ export function createStringFunctions(host, { A, W }){
                     (size | 0) - head.length);
             }
             return destination >>> 0;
-        }),
+        }, { returns: 'pointer' }),
 
         /** PSTR StrDupA(PCSTR pszSrch): a copy the caller LocalFrees. */
-        ...both('StrDup', 4, (width, [source])=>duplicate(width, source)),
+        ...both('StrDup', 4, (width, [source])=>duplicate(width, source), { returns: 'pointer' }),
 
         /**
          * HRESULT SHStrDupA(LPCSTR psz, LPWSTR *ppwsz)
@@ -515,7 +517,7 @@ export function createStringFunctions(host, { A, W }){
             const wanted = width.read(second);
             const at = text === null || !wanted ? -1 : text.indexOf(wanted);
             return at < 0 ? 0 : (first >>> 0) + at * width.unit;
-        }),
+        }, { returns: 'pointer' }),
 
         /**
          * PSTR StrStrIA(PCSTR pszFirst, PCSTR pszSrch)
@@ -529,7 +531,7 @@ export function createStringFunctions(host, { A, W }){
             const wanted = width.read(second);
             const at = text === null || !wanted ? -1 : foldCase(text).indexOf(foldCase(wanted));
             return at < 0 ? 0 : (first >>> 0) + at * width.unit;
-        }),
+        }, { returns: 'pointer' }),
 
         /**
          * PSTR StrRStrIA(PCSTR pszSource, PCSTR pszLast, PCSTR pszSrch)
@@ -549,7 +551,7 @@ export function createStringFunctions(host, { A, W }){
                 : Math.min(text.length, Math.floor(((last >>> 0) - (source >>> 0)) / width.unit));
             const at = stop <= 0 ? -1 : foldCase(text).lastIndexOf(foldCase(wanted), stop - 1);
             return at < 0 ? 0 : (source >>> 0) + at * width.unit;
-        }),
+        }, { returns: 'pointer' }),
 
         /**
          * int StrFromTimeIntervalA(PSTR pszOut, UINT cchMax, DWORD dwTimeMS, int digits)
@@ -616,12 +618,12 @@ export function createStringFunctions(host, { A, W }){
          *
          * StrChr within the first cchMax characters.
          */
-        StrChrNW: one(W, 12, (width, [start, code, count])=>{
+        StrChrNW: { ...one(W, 12, (width, [start, code, count])=>{
             const text = width.read(start)?.slice(0, count >>> 0) ?? null;
             const wanted = searched(width, code);
             const at = text === null || wanted === null ? -1 : text.indexOf(wanted);
             return at < 0 ? 0 : (start >>> 0) + at * width.unit;
-        }),
+        }), returns: 'pointer' },
 
         /**
          * PSTR StrPBrkA(PCSTR psz, PCSTR pszSet)
@@ -637,7 +639,7 @@ export function createStringFunctions(host, { A, W }){
             }
             const at = [...string].findIndex(c=>stops.includes(c));
             return at < 0 ? 0 : (text >>> 0) + at * width.unit;
-        }),
+        }, { returns: 'pointer' }),
 
         /**
          * PWSTR StrStrNW(PCWSTR pszFirst, PCWSTR pszSrch, UINT cchMax)
@@ -646,12 +648,12 @@ export function createStringFunctions(host, { A, W }){
          * running past them if it must (Wine's test_StrStrNW); the I form
          * ignores case.
          */
-        StrStrNW: one(W, 12, (width, [first, second, count])=>{
+        StrStrNW: { ...one(W, 12, (width, [first, second, count])=>{
             const text = width.read(first);
             const wanted = width.read(second);
             const at = text === null || !wanted ? -1 : text.indexOf(wanted);
             return at < 0 || at >= (count >>> 0) ? 0 : (first >>> 0) + at * width.unit;
-        }),
+        }), returns: 'pointer' },
         StrStrNIW: one(W, 12, (width, [first, second, count])=>{
             const text = width.read(first);
             const wanted = width.read(second);
@@ -696,7 +698,7 @@ export function createStringFunctions(host, { A, W }){
             const text = (width.read(source) ?? '').slice(0, (count | 0) - 1);
             host.writeMemory(destination >>> 0, width.sz(text));
             return (destination >>> 0) + text.length * width.unit;
-        }),
+        }, { returns: 'pointer' }),
 
         /**
          * DWORD SHAnsiToAnsi(LPCSTR lpszSrc, LPSTR lpszDst, int iLen)
@@ -754,18 +756,18 @@ export function createStringFunctions(host, { A, W }){
          *
          * `byteSize`'s text, cut to the buffer; the buffer.
          */
-        StrFormatByteSizeA: one(A, 12, (width, [size, buffer, room])=>{
+        StrFormatByteSizeA: { ...one(A, 12, (width, [size, buffer, room])=>{
             writeCut(width, buffer, byteSize(BigInt(size >>> 0)), room >>> 0);
             return buffer >>> 0;
-        }),
+        }), returns: 'pointer' },
         StrFormatByteSizeW: one(W, 16, (width, [low, high, buffer, room])=>{
             writeCut(width, buffer, byteSize(int64(low, high)), room >>> 0);
             return buffer >>> 0;
-        }, { quadwords: [0] }),
+        }, { quadwords: [0], returns: 'pointer' }),
         StrFormatByteSize64A: one(A, 16, (width, [low, high, buffer, room])=>{
             writeCut(width, buffer, byteSize(int64(low, high)), room >>> 0);
             return buffer >>> 0;
-        }, { quadwords: [0] }),
+        }, { quadwords: [0], returns: 'pointer' }),
 
         /**
          * HRESULT StrFormatByteSizeEx(ULONGLONG ull, SFBS_FLAGS flags, PWSTR pszBuf,
@@ -793,7 +795,7 @@ export function createStringFunctions(host, { A, W }){
         ...both('StrFormatKBSize', 16, (width, [low, high, buffer, room])=>{
             writeCut(width, buffer, kbSize(int64(low, high)), room >>> 0);
             return buffer >>> 0;
-        }, { quadwords: [0] }),
+        }, { quadwords: [0], returns: 'pointer' }),
 
         /**
          * int wnsprintfA(PSTR pszDest, int cchDest, PCSTR pszFmt, ...)
@@ -862,7 +864,7 @@ export function createStringFunctions(host, { A, W }){
             host.writeMemory((front >>> 0) + head.length * width.unit,
                 width.sz(tail.slice(0, (count | 0) - 1)));
             return front >>> 0;
-        }),
+        }, { returns: 'pointer' }),
 
         /**
          * LPSTR StrRChrIA(LPCSTR pszStart, LPCSTR pszEnd, WORD wMatch)
@@ -886,7 +888,7 @@ export function createStringFunctions(host, { A, W }){
                 }
             }
             return 0;
-        }),
+        }, { returns: 'pointer' }),
 
         /**
          * int StrSpnA(LPCSTR psz, LPCSTR pszSet)

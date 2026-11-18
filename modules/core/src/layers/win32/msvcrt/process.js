@@ -221,6 +221,7 @@ export function createProcessFunctions(host){
          * the exception a signal handler was called for: null until one is.
          */
         __pxcptinfoptrs: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 0,
             handler: ()=>exceptionPointers(),
@@ -321,7 +322,7 @@ export function createProcessFunctions(host){
          * Null with ENOENT, as `system` answers: the command interpreter
          * that would run the command and be piped to is not there.
          */
-        _popen: noPipeTo('_popen'),
+        _popen: { ...noPipeTo('_popen'), returns: 'pointer' },
         _wpopen: noPipeTo('_wpopen'),
 
         /**

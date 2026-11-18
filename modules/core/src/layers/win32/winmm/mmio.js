@@ -1780,7 +1780,7 @@ export function createMmioFunctions(host){
          * finding and removing answer the one installed, or null. A file
          * already open keeps the procedure it was opened through.
          */
-        mmioInstallIOProcA: install(false),
+        mmioInstallIOProcA: { ...install(false), returns: 'pointer' },
         mmioInstallIOProcW: install(true),
     };
 }

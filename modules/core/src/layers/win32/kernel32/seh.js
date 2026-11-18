@@ -1086,6 +1086,7 @@ export function createSeh(host){
              * Answers with the one it replaces, because a caller chains to it.
              */
             SetUnhandledExceptionFilter: {
+                returns: 'pointer',
                 argBytes: 4,
                 /** @param {number[]} args */
                 handler: ([filter])=>{

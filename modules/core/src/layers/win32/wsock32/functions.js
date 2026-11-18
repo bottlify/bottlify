@@ -1492,7 +1492,7 @@ export function createWinsockFunctions(host){
         // and the message loop run beside -- so there is no hook to run and
         // nothing to cancel, and each answers as Wine's tests see Windows do.
         /** FARPROC WSASetBlockingHook(FARPROC lpBlockFunc): the hook before it, none. */
-        WSASetBlockingHook: { argBytes: 4, handler: ()=>0 },
+        WSASetBlockingHook: { returns: 'pointer', argBytes: 4, handler: ()=>0 },
         /** int WSAUnhookBlockingHook(void) */
         WSAUnhookBlockingHook: { argBytes: 0, handler: ()=>0 },
         /** int WSACancelBlockingCall(void) */
@@ -2235,6 +2235,7 @@ export function createWinsockFunctions(host){
          * machine's own name. Any other address is not found.
          */
         gethostbyaddr: {
+            returns: 'pointer',
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([pointer, length, type])=>{
@@ -2261,6 +2262,7 @@ export function createWinsockFunctions(host){
          * it does not list, or a protocol it is not listed for, is not found.
          */
         getservbyname: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([namePointer, protoPointer])=>{
@@ -2284,6 +2286,7 @@ export function createWinsockFunctions(host){
          * buffer -- one call overwrites what the other returned.
          */
         getservbyport: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([port, protoPointer])=>{
@@ -2716,6 +2719,7 @@ export function createWinsockFunctions(host){
          * and its terminator.
          */
         inet_ntop: {
+            returns: 'pointer',
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([family, address, buffer, size])=>{
@@ -3138,6 +3142,7 @@ export function createWinsockFunctions(host){
          * it. One it does not list is WSANO_DATA and NULL.
          */
         getprotobyname: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>{

@@ -1124,6 +1124,7 @@ export function createSystemFunctions(host){
          * would use them allocates ordinary pages.
          */
         GetLargePageMinimum: {
+            returns: 'pointer',
             argBytes: 0,
             handler: ()=>0,
         },
@@ -2013,6 +2014,7 @@ export function createSystemFunctions(host){
          * handles.
          */
         lstrcatA: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: survivesFault(([first, second])=>{
@@ -2029,6 +2031,7 @@ export function createSystemFunctions(host){
 
         /** LPWSTR lstrcatW(LPWSTR lpString1, LPCWSTR lpString2): lstrcatA's, in UTF-16. */
         lstrcatW: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: survivesFault(([first, second])=>{
@@ -2057,6 +2060,7 @@ export function createSystemFunctions(host){
          * copy or overruns every buffer.
          */
         lstrcpynA: {
+            returns: 'pointer',
             argBytes: 12,
             /** @param {number[]} args */
             handler: survivesFault(([destination, source, max])=>{
@@ -2078,6 +2082,7 @@ export function createSystemFunctions(host){
          * terminator among them, and the copy always ends in one.
          */
         lstrcpynW: {
+            returns: 'pointer',
             argBytes: 12,
             /** @param {number[]} args */
             handler: survivesFault(([destination, source, max])=>{
@@ -2133,6 +2138,7 @@ export function createSystemFunctions(host){
          * otherwise happen inside kernel32 rather than at the caller.
          */
         lstrcpyA: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: survivesFault(([destination, source])=>{
@@ -2149,6 +2155,7 @@ export function createSystemFunctions(host){
 
         /** LPWSTR lstrcpyW(LPWSTR lpString1, LPCWSTR lpString2): lstrcpyA's, in UTF-16. */
         lstrcpyW: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: survivesFault(([destination, source])=>{

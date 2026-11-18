@@ -775,6 +775,7 @@ export function createPathFunctions(host){
              * UTF-16, `size` counted in characters.
              */
             _wgetcwd: {
+                returns: 'pointer',
                 convention: 'cdecl',
                 argBytes: 8,
                 /** @param {number[]} args */
@@ -814,6 +815,7 @@ export function createPathFunctions(host){
              * destination is one allocated for the caller to free.
              */
             _wfullpath: {
+                returns: 'pointer',
                 convention: 'cdecl',
                 argBytes: 12,
                 /** @param {number[]} args */
@@ -900,6 +902,7 @@ export function createPathFunctions(host){
          * A null destination means "allocate one", and the caller frees it.
          */
         _fullpath: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 12,
             /** @param {number[]} args */
@@ -928,6 +931,7 @@ export function createPathFunctions(host){
          * name to the directory and does so in place.
          */
         _getcwd: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 8,
             /** @param {number[]} args */
@@ -957,6 +961,7 @@ export function createPathFunctions(host){
          * prefix and a number, on the heap for the caller to free.
          */
         _tempnam: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 8,
             /** @param {number[]} args */
@@ -979,6 +984,7 @@ export function createPathFunctions(host){
          * then left as it was.
          */
         _mktemp: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 4,
             /** @param {number[]} args */
@@ -1000,6 +1006,7 @@ export function createPathFunctions(host){
 
         /** wchar_t *_wmktemp(wchar_t *template): `_mktemp` over a wide template. */
         _wmktemp: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 4,
             /** @param {number[]} args */
@@ -1028,6 +1035,7 @@ export function createPathFunctions(host){
          * the next call writes over.
          */
         tmpnam: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 4,
             /** @param {number[]} args */
@@ -1058,6 +1066,7 @@ export function createPathFunctions(host){
         ...host.readMemory ? {
             /** wchar_t *_wtempnam(const wchar_t *dir, const wchar_t *prefix) */
             _wtempnam: {
+                returns: 'pointer',
                 convention: 'cdecl',
                 argBytes: 8,
                 /** @param {number[]} args */

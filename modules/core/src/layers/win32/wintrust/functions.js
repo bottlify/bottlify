@@ -485,6 +485,7 @@ export function createWintrustFunctions(host){
          * is documented to check for, said once.
          */
         WTHelperProvDataFromStateData: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([state])=>{
@@ -516,6 +517,7 @@ export function createWintrustFunctions(host){
          * -- is NULL rather than the fault it would be on Windows.
          */
         WTHelperGetProvSignerFromChain: {
+            returns: 'pointer',
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([data, index, counter, counterIndex])=>{
@@ -543,6 +545,7 @@ export function createWintrustFunctions(host){
          * first; NULL for no signer or past the chain's end.
          */
         WTHelperGetProvCertFromChain: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([signer, index])=>((signer >>> 0) === 0 ? 0

@@ -493,6 +493,7 @@ export function createUiFunctions(host, { A, W }){
          * answered either way.
          */
         SHInterlockedCompareExchange: {
+            returns: 'pointer',
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([destination, exchange, compare])=>{
@@ -534,6 +535,7 @@ export function createUiFunctions(host, { A, W }){
          * The resource library loaded by its name, as LoadLibrary finds it.
          */
         MLLoadLibraryA: {
+            returns: 'pointer',
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([name])=>call('KERNEL32.dll', 'LoadLibraryA', [name]) ?? 0,

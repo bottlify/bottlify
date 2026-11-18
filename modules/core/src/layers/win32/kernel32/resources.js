@@ -377,6 +377,7 @@ export function createResourceFunctions(host){
          * a program with a string table per language picks its user's.
          */
         FindResourceExA: {
+            returns: 'pointer',
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([instance, type, name, language])=>
@@ -388,6 +389,7 @@ export function createResourceFunctions(host){
          *                       WORD wLanguage)
          */
         FindResourceExW: {
+            returns: 'pointer',
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([instance, type, name, language])=>
@@ -470,6 +472,7 @@ export function createResourceFunctions(host){
          * caller reads. Swapping them finds nothing, silently.
          */
         FindResourceA: {
+            returns: 'pointer',
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([instance, name, type])=>find(instance, type, name, null),
@@ -477,6 +480,7 @@ export function createResourceFunctions(host){
 
         /** HRSRC FindResourceW(HMODULE hModule, LPCWSTR lpName, LPCWSTR lpType) */
         FindResourceW: {
+            returns: 'pointer',
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([instance, name, type])=>find(instance, type, name, null, true),
@@ -500,6 +504,7 @@ export function createResourceFunctions(host){
          * and a program that reads through it without locking works there.
          */
         LoadResource: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([, resource])=>{
@@ -518,6 +523,7 @@ export function createResourceFunctions(host){
          * The handle already is the pointer, so it comes back as it went in.
          */
         LockResource: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([handle])=>handle >>> 0,

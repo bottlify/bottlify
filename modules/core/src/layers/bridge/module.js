@@ -527,6 +527,8 @@ export function createBridgeModule(){
                  *     The structures wider than eight bytes passed by value, by
                  *     their first dword and their size in dwords, which an
                  *     x86-64 caller passes by a pointer to a copy.
+                 * @param {string} [fn.returns]  The answer is an address, zero-extended
+                 *     into a 64-bit caller's RAX (`HostFunction.returns`).
                  * @returns {number} the guest address that calls it, or 0 once
                  *     this instance is disposed -- there is no guest left to place
                  *     one in.
@@ -536,6 +538,7 @@ export function createBridgeModule(){
                     {
                         convention = Convention.STDCALL, argBytes, handler,
                         preserveResult = false, lastError = true, quadwords, floats, structs,
+                        returns,
                     })
                 {
                     if (convention === Convention.FASTCALL)
@@ -556,7 +559,7 @@ export function createBridgeModule(){
                         name, calleeCleanup(convention, argBytes), { preserveResult });
                     state.dispatcher.register(id, { name, convention, argBytes, handler, lastError,
                         ...quadwords ? { quadwords } : {}, ...floats ? { floats } : {},
-                        ...structs ? { structs } : {} });
+                        ...structs ? { structs } : {}, ...returns ? { returns } : {} });
                     state.dispatcher.placed(address, name);
                     return address;
                 },
@@ -781,7 +784,12 @@ export function createBridgeModule(){
                  *
                  * @param {Object} call
                  * @param {number} call.entry
-                 * @param {number[]} [call.args]
+                 * @param {(number | bigint)[]} [call.args]
+                 *   Each a dword, which a 64-bit process takes widened by its sign
+                 *   as JavaScript holds it -- an address given unsigned (`>>> 0`)
+                 *   zero-extended, an LPARAM or a handle of -1 sign-extended -- or a
+                 *   bigint, a quadword whole (an argument that came in whole, its
+                 *   high half from `args.high`); a 32-bit process takes its low dword.
                  * @param {any} [call.thread]
                  *   Whose stack to build the frame on. Defaults to the thread on
                  *   the processor, which is right only while the host call that is
