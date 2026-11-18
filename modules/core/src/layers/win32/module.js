@@ -16,7 +16,7 @@ import {
 } from './kernel32/heap.js';
 import { createProcessFunctions, createThreadState, PERFORMANCE_FREQUENCY }
     from './kernel32/process.js';
-import { blockLayouts } from './kernel32/teb.js';
+import { SKIP_THREAD_ATTACH, blockLayouts } from './kernel32/teb.js';
 import { createModuleFunctions } from './kernel32/modules.js';
 import { createFileFunctions, withSystemLibraries } from './kernel32/files.js';
 import { createRichEditControls } from './riched/richedit.js';
@@ -203,6 +203,8 @@ const RT_MESSAGETABLE = 11;
 const MESSAGE_RESOURCE_UNICODE = 0x0001;
 /** GetLocaleInfo's LCID for the user's own locale. */
 const LOCALE_USER_DEFAULT = 0x0400;
+/** HeapAlloc's flag for a block that starts zeroed. */
+const HEAP_ZERO_MEMORY = 0x8;
 
 /**
  * A MESSAGE_RESOURCE_ENTRY's text: its length (the header's four bytes
@@ -1158,7 +1160,13 @@ export function createWin32Module(){
                 allocate: bytes=>heap.allocate(bytes),
                 allocateCode: bytes=>heap.allocateCode(bytes),
                 writeMemory: (address, bytes)=>memory.writeBytes(address, bytes),
-                images: ()=>modules.threadCalls?.() ?? [],
+                // None for a thread whose block says SkipThreadAttach: the
+                // list is asked for on the thread itself, at its start and end.
+                images: ()=>{
+                    const teb = kernel.currentThread()?.tebAddress >>> 0;
+                    return teb !== 0 && (memory.readU16(teb + blocks.teb.SAME_TEB_FLAGS)
+                        & SKIP_THREAD_ATTACH) !== 0 ? [] : modules.threadCalls?.() ?? [];
+                },
                 loaderLock: ()=>{
                     const address = modules.loaderLock?.() ?? 0;
                     const enter = kernel32Export('EnterCriticalSection');
@@ -2922,6 +2930,21 @@ export function createWin32Module(){
                 allocateCode: bytes=>heap.allocateCode(bytes),
                 /** @param {number} address */
                 free: address=>heap.free(address),
+                // The objects a program is handed, where Windows makes them.
+                processHeap: {
+                    /** @param {number} bytes */
+                    allocate: bytes=>{
+                        const kernel32 = libraries['KERNEL32.dll'];
+                        return kernel32.HeapAlloc.handler([kernel32.GetProcessHeap.handler([]),
+                            HEAP_ZERO_MEMORY, bytes >>> 0]) >>> 0;
+                    },
+                    /** @param {number} address */
+                    free: address=>{
+                        const kernel32 = libraries['KERNEL32.dll'];
+                        kernel32.HeapFree.handler([kernel32.GetProcessHeap.handler([]), 0,
+                            address >>> 0]);
+                    },
+                },
                 writeMemory,
                 threadBlock: threadMade,
                 park: (/** @type {any} */ thread)=>bridge.park(thread),

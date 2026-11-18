@@ -438,6 +438,10 @@ test('NtCreateThreadEx and RtlCreateUserThread are CreateRemoteThreadEx, their f
     const calls = [];
     let lastError = 0x77;
     let heap = 0x2000;
+    // The new thread's block: SameTebFlags at 0xfca, its TLS array pointer at 0x2c.
+    const TEB_AT = 0x3000;
+    view.setUint16(TEB_AT + 0xfca, 0x0400, true);
+    view.setUint32(TEB_AT + 0x2c, 0x1234, true);
     /** @param {string} name @param {(args: number[]) => any} answer */
     const entry = (name, answer)=>({ handler: (/** @type {number[]} */ args)=>{
         calls.push([name, ...args]);
@@ -480,7 +484,13 @@ test('NtCreateThreadEx and RtlCreateUserThread are CreateRemoteThreadEx, their f
         free: ()=>true,
         processes: ()=>[{ id: 0x1000, threads: [7, 0x120, 9] }],
         native: name=>(name === 'NtSetInformationThread'
-            ? entry('NtSetInformationThread', ()=>STATUS_SUCCESS) : undefined),
+            ? entry('NtSetInformationThread', ()=>STATUS_SUCCESS)
+            : name === 'NtQueryInformationThread'
+                ? entry('NtQueryInformationThread', ([, , out])=>{
+                    view.setUint32(out + 4, TEB_AT, true);
+                    return STATUS_SUCCESS;
+                })
+                : undefined),
         divergence: (api, detail)=>said.push(`${api}: ${detail}`),
     }));
     const RESULT = 0x100;
@@ -498,14 +508,30 @@ test('NtCreateThreadEx and RtlCreateUserThread are CreateRemoteThreadEx, their f
     assert.deepEqual(said, []);
 
     calls.length = 0;
-    assert.equal(fns.NtCreateThreadEx.handler([RESULT, 0, 0, 0xffffffff, START, 7, 0x2, 0,
+    assert.equal(fns.NtCreateThreadEx.handler([RESULT, 0, 0, 0xffffffff, START, 7, 0, 0,
         0x2000, 0, 0]), STATUS_SUCCESS);
     assert.deepEqual(calls[0].slice(0, 7),
         ['CreateRemoteThreadEx', 0xffffffff, 0, 0x2000, START, 7, 0], 'a commit, running');
     assert.equal(calls.length, 1, 'not hidden');
-    assert.equal(said.length, 1, 'a skipped attach not honoured is said');
-    fns.NtCreateThreadEx.handler([RESULT, 0, 0, 0xffffffff, START, 7, 0x2, 0, 0, 0, 0]);
-    assert.equal(said.length, 1, 'once');
+
+    // Skipping the attach: made stopped, its block marked, then let go.
+    calls.length = 0;
+    assert.equal(fns.NtCreateThreadEx.handler([RESULT, 0, 0, 0xffffffff, START, 7, 0x2, 0,
+        0x2000, 0, 0]), STATUS_SUCCESS);
+    assert.deepEqual(calls.map(([name, ...args])=>(name === 'CreateRemoteThreadEx'
+        ? [name, args[5]] : [name, args[0]])),
+    [['CreateRemoteThreadEx', 4], ['NtQueryInformationThread', 0x80], ['ResumeThread', 0x80]]);
+    assert.equal(view.getUint16(TEB_AT + 0xfca, true), 0x0408, 'SkipThreadAttach, the rest kept');
+    assert.equal(view.getUint32(TEB_AT + 0x2c, true), 0, 'no thread-local storage array');
+    calls.length = 0;
+    fns.NtCreateThreadEx.handler([RESULT, 0, 0, 0xffffffff, START, 7, 0x3, 0, 0, 0, 0]);
+    assert.ok(!calls.some(([name])=>name === 'ResumeThread'), 'asked suspended: left stopped');
+    assert.deepEqual(said, []);
+
+    // Another process's thread is told of all the same, and that is said.
+    fns.NtCreateThreadEx.handler([RESULT, 0, 0, 0x88, START, 7, 0x2, 0, 0, 0, 0]);
+    assert.equal(said.length, 1);
+    said.length = 0;
     assert.equal(fns.NtCreateThreadEx.handler([RESULT, 0, 0, 0x66, START, 7, 0, 0, 0, 0, 0]),
         STATUS_INVALID_HANDLE);
     assert.equal(lastError, 0x77, 'the last error left alone');
@@ -531,7 +557,7 @@ test('NtCreateThreadEx and RtlCreateUserThread are CreateRemoteThreadEx, their f
     assert.deepEqual(calls.filter(([name])=>name === 'ResumeThread'),
         [['ResumeThread', 0x109]]);
     assert.equal(fns.NtSuspendProcess.handler([0x44]), 0xc0000002, 'another process: said');
-    assert.equal(said.length, 2);
+    assert.equal(said.length, 1);
     assert.deepEqual([fns.NtCreateThreadEx.argBytes, fns.RtlCreateUserThread.argBytes,
         fns.NtSuspendProcess.argBytes], [44, 40, 4]);
 });

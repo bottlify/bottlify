@@ -689,6 +689,7 @@ export function createNtdllFunctions(host){
                 free,
                 processes: host.processes,
                 native: name=>natives[name],
+                ...host.pointerSize ? { pointerSize: host.pointerSize } : {},
                 ...host.divergence ? { divergence: host.divergence } : {},
             })
             : {}),

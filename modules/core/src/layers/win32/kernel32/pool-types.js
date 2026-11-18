@@ -22,6 +22,11 @@
  * @property {(bytes: number) => number} [allocateCode]
  *           Pages of their own for the loop (`code-arena.js`).
  * @property {(address: number) => void} [free]
+ * @property {{ allocate: (bytes: number) => number, free: (address: number) => void }}
+ *     [processHeap]  Blocks of the process heap, zeroed, for the objects a program
+ *           is handed (a pool, a cleanup group, a work, timer, wait or I/O
+ *           object): Windows makes them there, and HeapValidate on
+ *           GetProcessHeap() knows one until it is released. Absent, `allocate`.
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, length: number) => Uint8Array} [readMemory]
  *           Where a thread pool timer's or wait's FILETIME is read from;

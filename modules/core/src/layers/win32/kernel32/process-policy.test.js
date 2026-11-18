@@ -76,7 +76,7 @@ function machine(given = {}){
     /** @param {string} name @param {...number} args */
     const call = (name, ...args)=>(name === 'NtContinue'
         ? /** @type {any} */ (fns.RtlCaptureContext).natives.NtContinue : fns[name]).handler(args);
-    return { bytes, view, errors, handles, call, fns, childHandle, threadHandle };
+    return { bytes, view, errors, handles, call, fns, childHandle, threadHandle, thread };
 }
 
 test('RtlCaptureContext is the caller\'s registers as it will be on return', ()=>{
@@ -116,6 +116,16 @@ test('NtContinue goes on from the groups a context names and answers its EAX', (
     view.setUint32(0x2000, 0x1000b, true);
     call('NtContinue', 0x2000, 0);
     assert.match(said.join(), /floating-point/);
+});
+
+test('NtContinue gives the thread the debug registers its context names', ()=>{
+    const { view, call, thread } = machine({ setRegisters: ()=>{} });
+    view.setUint32(0x2000, 0x10010, true);
+    [0x42424242, 0, 0x100f0fe7, 0x0abebabe, 0, 0x115].forEach((value, index)=>
+        view.setUint32(0x2004 + index * 4, value, true));
+    call('NtContinue', 0x2000, 0);
+    assert.deepEqual(/** @type {any} */ (thread).debugRegisters,
+        { dr0: 0x42424242, dr1: 0, dr2: 0x100f0fe7, dr3: 0x0abebabe, dr6: 0, dr7: 0x115 });
 });
 
 test('RtlCaptureStackBackTrace walks the frame chain within the thread\'s stack', ()=>{

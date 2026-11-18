@@ -106,7 +106,8 @@ const COMPLETION_ORDER = Object.freeze(['LeaveCriticalSection', 'ReleaseMutex',
  *     handle: number, callback: number, context: number,
  *     pool: Pool, group: Group | null, cancel: number,
  *     closed: boolean, armed: boolean, clock: any, registered: Wait | null,
- *     io?: { file: number, native: boolean, expected: number }, held?: number,
+ *     io?: { file: number, native: boolean, expected: number, started: number },
+ *     held?: number,
  *     gone?: boolean }} Item
  *     `closed`: released by the program (a simple callback is never, and goes
  *     once its callback returned); `cancel`: its environment's
@@ -128,6 +129,12 @@ export function createThreadpoolApi(core){
     const groups = new Map();
     /** @type {Map<number, Item>} */
     const items = new Map();
+    /** Where the objects a program is handed live: the process heap, where it has one. */
+    const objectHeap = host.processHeap ?? {
+        allocate: host.allocate,
+        /** @param {number} address */
+        free: address=>host.free?.(address),
+    };
 
     /** @param {number} at */
     const read32 = at=>{
@@ -185,7 +192,7 @@ export function createThreadpoolApi(core){
         if (pool.released && pool.objects === 0 && pool.handle !== 0)
         {
             core.retireIdle(pool.lane);
-            host.free?.(pool.handle);
+            objectHeap.free(pool.handle);
             pool.handle = 0;
         }
     };
@@ -193,22 +200,27 @@ export function createThreadpoolApi(core){
     /**
      * A released object with nothing outstanding is gone: out of its group,
      * its pool and its handle given back. A simple callback goes so once its
-     * callback has returned.
+     * callback has returned; an I/O object once every operation started on
+     * it has completed, whether or not its callback was still owed it.
      *
      * @param {Item} item
      */
     const forget = item=>{
         if ((!item.closed && item.kind !== 'simple') || item.outstanding !== 0
-            || (item.live ?? 0) !== 0)
+            || (item.live ?? 0) !== 0 || (item.io?.started ?? 0) !== 0)
         {
             return;
+        }
+        if (item.io)
+        {
+            host.bindIo?.(item.io.file, null);
         }
         item.group?.members.delete(item);
         item.group = null;
         if (item.handle !== 0 && items.get(item.handle) === item)
         {
             items.delete(item.handle);
-            host.free?.(item.handle);
+            objectHeap.free(item.handle);
         }
         if (item.pool.objects > 0 && !item.gone)
         {
@@ -233,7 +245,7 @@ export function createThreadpoolApi(core){
         {
             return env.refused;
         }
-        const handle = kind === 'simple' ? 0 : host.allocate(8);
+        const handle = kind === 'simple' ? 0 : objectHeap.allocate(8);
         if (kind !== 'simple' && handle === 0)
         {
             return ERROR_NOT_ENOUGH_MEMORY;
@@ -330,12 +342,17 @@ export function createThreadpoolApi(core){
         }
     };
 
-    /** @param {Item} item  released: no completion is expected, and the file is let go */
+    /**
+     * Released: no completion is handed to the callback any more. The file
+     * is let go with the object (`forget`), once what was started on it has
+     * completed.
+     *
+     * @param {Item} item
+     */
     const stopIo = item=>{
         if (item.io)
         {
             unexpect(item);
-            host.bindIo?.(item.io.file, null);
         }
     };
 
@@ -349,8 +366,17 @@ export function createThreadpoolApi(core){
      */
     const ioCompleted = (item, packet)=>{
         const io = item.io;
-        if (!io || item.closed || io.expected === 0)
+        if (!io)
         {
+            return;
+        }
+        if (io.started > 0)
+        {
+            io.started--;
+        }
+        if (item.closed || io.expected === 0)
+        {
+            forget(item);
             return;
         }
         io.expected--;
@@ -403,7 +429,7 @@ export function createThreadpoolApi(core){
     const objects = {
         /** A pool of its own: a lane of threads, its maximum the process's until set. */
         allocPool: ()=>{
-            const handle = host.allocate(8);
+            const handle = objectHeap.allocate(8);
             if (handle === 0)
             {
                 return 0;
@@ -498,7 +524,7 @@ export function createThreadpoolApi(core){
         },
 
         allocGroup: ()=>{
-            const handle = host.allocate(4);
+            const handle = objectHeap.allocate(4);
             if (handle !== 0)
             {
                 groups.set(handle, { handle, members: new Set() });
@@ -510,7 +536,7 @@ export function createThreadpoolApi(core){
         releaseGroup: handle=>{
             if (groups.delete(handle >>> 0))
             {
-                host.free?.(handle >>> 0);
+                objectHeap.free(handle >>> 0);
             }
         },
 
@@ -750,16 +776,22 @@ export function createThreadpoolApi(core){
                 }
                 return { error: ERROR_INVALID_PARAMETER };
             }
-            made.io = { file: file >>> 0, native, expected: 0 };
+            made.io = { file: file >>> 0, native, expected: 0, started: 0 };
             return made.handle;
         },
 
-        /** One completion more to hand to the callback, waited for until it has. @param {number} handle */
+        /**
+         * One completion more to hand to the callback, waited for until it
+         * has; the object lasts until it comes, wait or release or not.
+         *
+         * @param {number} handle
+         */
         startIo: handle=>{
             const item = itemOf(handle, 'io');
             if (item?.io && !item.closed)
             {
                 item.io.expected++;
+                item.io.started++;
                 item.outstanding++;
                 item.live = (item.live ?? 0) + 1;
             }
@@ -768,6 +800,10 @@ export function createThreadpoolApi(core){
         /** One completion expected no more: the operation failed or finished at once. @param {number} handle */
         cancelIo: handle=>{
             const item = itemOf(handle, 'io');
+            if (item?.io && item.io.started > 0)
+            {
+                item.io.started--;
+            }
             if (item?.io && item.io.expected > 0)
             {
                 item.io.expected--;
