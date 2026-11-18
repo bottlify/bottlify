@@ -69,6 +69,9 @@ const CHUNK_ENTRIES = 256;
  *     A live heap block that starts at the address.
  * @property {(block: { address: number, size: number, owner: any }, wanted: number,
  *     how: { zeroTail: boolean, mayMove: boolean }) => number} reallocate
+ * @property {(address: number) => boolean} [readable]
+ *     Whether the byte at the address is committed and open to reading;
+ *     without it only a heap block is fixed memory a lock hands back.
  * @property {(address: number, length: number) => void} zero
  *     Zeroes what a fresh allocation handed over, where it is not zero already.
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
@@ -191,12 +194,14 @@ export function createGlobalMemory(host){
     };
 
     /**
-     * One spelling of the family: what its discardable flag is, and whether it
-     * knows DDE sharing.
+     * One spelling of the family: what its discardable flag is, whether it
+     * knows DDE sharing, and whether GMEM_MODIFY with GMEM_MOVEABLE turns a
+     * fixed block moveable - GlobalReAlloc does, LocalReAlloc leaves the
+     * block as it was (Wine's heap test, both spellings).
      *
-     * @param {{ discardable: number, shared: number }} spelling
+     * @param {{ discardable: number, shared: number, converts: boolean }} spelling
      */
-    const family = ({ discardable, shared })=>{
+    const family = ({ discardable, shared, converts })=>{
         /** @param {number} flags */
         const entryBits = flags=>IN_USE | MOVEABLE
             | ((flags & discardable) !== 0 ? DISCARDABLE : 0)
@@ -251,11 +256,18 @@ export function createGlobalMemory(host){
             return handle;
         };
 
-        /** @param {number} handle */
+        /**
+         * A moveable block's pointer, its lock count raised; anything else is
+         * fixed memory and its own pointer while it can be read - a heap block,
+         * and as much a resource LoadResource handed back, which programs lock
+         * as the 16-bit API had them do.
+         *
+         * @param {number} handle
+         */
         const lock = handle=>{
             if (!isHandle(handle))
             {
-                if (host.block(handle))
+                if (host.block(handle) || (handle !== 0 && host.readable?.(handle) === true))
                 {
                     return handle;
                 }
@@ -413,8 +425,8 @@ export function createGlobalMemory(host){
 
         /**
          * A fixed block resized, or turned moveable by GMEM_MODIFY with
-         * GMEM_MOVEABLE; GMEM_MODIFY alone changes nothing, and a discardable
-         * fixed block is not a thing.
+         * GMEM_MOVEABLE where the spelling `converts`; GMEM_MODIFY otherwise
+         * changes nothing, and a discardable fixed block is not a thing.
          *
          * @param {number} handle @param {number} bytes @param {number} flags
          */
@@ -427,7 +439,7 @@ export function createGlobalMemory(host){
             }
             if (flags & GMEM_MODIFY)
             {
-                if ((flags & GMEM_MOVEABLE) === 0)
+                if ((flags & GMEM_MOVEABLE) === 0 || !converts)
                 {
                     return handle;
                 }
@@ -561,8 +573,8 @@ export function createGlobalMemory(host){
     };
 
     return {
-        global: family({ discardable: GMEM_DISCARDABLE, shared: GMEM_DDESHARE }),
-        local: family({ discardable: LMEM_DISCARDABLE, shared: 0 }),
+        global: family({ discardable: GMEM_DISCARDABLE, shared: GMEM_DDESHARE, converts: true }),
+        local: family({ discardable: LMEM_DISCARDABLE, shared: 0, converts: false }),
         isHandle,
         /**
          * Whether the handle is a live entry, or a fixed block's address.

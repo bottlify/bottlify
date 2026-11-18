@@ -893,6 +893,10 @@ test('a locked moveable block moves only when asked, and a fixed one turns movea
     assert.equal(converted % 8, 4, 'a handle now');
     assert.equal(fns.GlobalLock.handler([converted]), fixed, 'over the same block');
     assert.equal(fns.GlobalSize.handler([converted]), 16);
+    const local = fns.LocalAlloc.handler([0, 16]);
+    assert.equal(fns.LocalReAlloc.handler([local, 0, GMEM_MODIFY | GMEM_MOVEABLE]), local,
+        'LocalReAlloc leaves a fixed block fixed');
+    assert.equal(fns.LocalFlags.handler([local]), 0);
 });
 
 test('GlobalWire and GlobalFix lock a block, GlobalUnWire and GlobalUnfix unlock it', ()=>{
@@ -979,7 +983,7 @@ test('a global block grows in place when it can and moves only when allowed to',
     assert.deepEqual([...host.bytes.subarray(moved, moved + 4)], [1, 2, 3, 4],
         'the data went with it');
     assert.equal(all(host.bytes.subarray(moved + 8, moved + 4096), 0), true, 'the tail is zeroed');
-    assert.equal(fns.GlobalLock.handler([handle]), 0, 'the old block is gone');
+    assert.equal(fns.GlobalSize.handler([handle]), 0, 'the old block is gone');
     assert.equal(fns.GlobalReAlloc.argBytes, 12);
 });
 
@@ -1309,6 +1313,80 @@ test('a 64-bit VirtualQuery past 4 GiB answers whole addresses, its walk reachin
 
         assert.equal(query(0x140030000), 0, 'past the highest region the space ends');
     });
+
+test('HeapWalk names the heap as a region and then each busy block by address', ()=>{
+    /** @type {number[]} */
+    const errors = [];
+    const host = { ...fakeHost({ base: 0x10000, size: 0x40000 }),
+        setLastError: (/** @type {number} */ code)=>errors.push(code) };
+    const fns = createHeapFunctions(host);
+    const view = new DataView(host.bytes.buffer);
+    const heap = fns.HeapCreate.handler([0, 0, 0]);
+    const second = fns.HeapAlloc.handler([heap, 0, 300]);
+    const first = fns.HeapAlloc.handler([heap, 0, 5]);
+    const process = fns.GetProcessHeap.handler();
+    const moveable = fns.GlobalAlloc.handler([GMEM_MOVEABLE, 24]);
+    const entry = fns.HeapAlloc.handler([process, HEAP_ZERO_MEMORY, 28]);
+    /** One step: the entry's fields, or null with the walk's end. */
+    const step = (/** @type {number} */ of)=>(fns.HeapWalk.handler([of, entry]) === 0 ? null : {
+        lpData: view.getUint32(entry, true), cbData: view.getUint32(entry + 4, true),
+        overhead: view.getUint8(entry + 8), flags: view.getUint16(entry + 10, true),
+        union: [0, 1, 2, 3].map(i=>view.getUint32(entry + 12 + i * 4, true)),
+    });
+
+    const region = step(heap);
+    assert.equal(region?.flags, 1, 'PROCESS_HEAP_REGION first');
+    assert.equal(region?.lpData, heap);
+    assert.equal(region?.union[2], Math.min(first, second), 'its first block');
+    const blocks = [step(heap), step(heap)];
+    assert.deepEqual(blocks.map(each=>each?.lpData), [first, second].sort((x, y)=>x - y),
+        'by address');
+    assert.deepEqual(blocks.map(each=>each?.flags), [4, 4], 'PROCESS_HEAP_ENTRY_BUSY');
+    assert.equal(blocks.find(each=>each?.lpData === first)?.cbData, 5, 'the size asked');
+    assert.equal(blocks.find(each=>each?.lpData === first)?.overhead, 8 + 3,
+        'the header and the rounding');
+    assert.equal(step(heap), null);
+    assert.equal(errors.at(-1), 259, 'ERROR_NO_MORE_ITEMS');
+
+    // A moveable block says so and names its handle.
+    view.setUint32(entry, 0, true);
+    const found = [];
+    for (let each = step(process); each; each = step(process))
+    {
+        found.push(each);
+    }
+    const block = view.getUint32(moveable, true);
+    const ours = found.find(each=>each.lpData === block);
+    assert.equal(ours?.flags, 0x14, 'busy and moveable');
+    assert.equal(ours?.union[0], moveable, 'Block.hMem');
+
+    view.setUint32(entry, 0x12345, true);
+    assert.equal(fns.HeapWalk.handler([heap, entry]), 0);
+    assert.equal(errors.at(-1), 87, 'an entry that is none of the heap\'s');
+    assert.equal(fns.HeapWalk.handler([0x777, entry]), 0);
+    assert.equal(errors.at(-1), 6, 'ERROR_INVALID_HANDLE');
+});
+
+test('GlobalLock hands back fixed memory that can be read, a heap block or not', ()=>{
+    // LoadResource's HGLOBAL is a pointer into the image, and programs lock it
+    // as the 16-bit API had them do; Wine's resource test does the same.
+    /** @type {number[]} */
+    const errors = [];
+    const host = { ...fakeHost(),
+        setLastError: (/** @type {number} */ code)=>errors.push(code),
+        viewAt: (/** @type {number} */ at)=>(at >= 0x7f0000 && at < 0x7f2000
+            ? { base: 0x7f0000, length: 0x2000, writable: false, sections: [
+                { start: 0, end: 0x1000, protect: 0x02 },
+                { start: 0x1000, end: 0x2000, protect: 0x01 }] } : null) };
+    const fns = createHeapFunctions(host);
+    assert.equal(fns.GlobalLock.handler([0x7f0010]), 0x7f0010, 'a readable resource');
+    assert.equal(fns.LocalLock.handler([0x7f0010]), 0x7f0010, 'in either spelling');
+    assert.deepEqual(errors, []);
+    assert.equal(fns.GlobalLock.handler([0x7f1010]), 0, 'a page closed to reading');
+    assert.equal(fns.GlobalLock.handler([0x900000]), 0, 'nothing mapped');
+    assert.equal(fns.GlobalLock.handler([0]), 0);
+    assert.deepEqual(errors, [6, 6, 6], 'ERROR_INVALID_HANDLE');
+});
 
 test('VirtualQuery on a view of a section answers MEM_MAPPED, as long as the view', ()=>{
     // A program opening a section another made learns its size this way.

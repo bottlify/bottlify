@@ -2507,3 +2507,15 @@ always kept Win32 names: an object made in one is found through the other. Every
 in the one interactive session, so a name a service in session 0 and a program in session 1 would
 each have to themselves does not arise. Revisit when a bottle runs a service in a session of its
 own. *2026-11-18.*
+
+**A272. A heap is not a reservation of its own: every heap's blocks come from the process's arena.**
+On Windows each heap is a reservation, 64 KiB with a page committed when it is made with no initial
+size, that grows by further segments of 1 MiB doubling to 16 MiB, and VirtualQuery and HeapWalk show
+that layout. Here every heap hands out blocks from the one arena the process's allocations share, its
+small blocks from slabs the guest takes and gives back without a crossing (`kernel32/guest-heap.js`),
+so a heap's own memory is its control block and its blocks. HeapWalk therefore answers the heap as a
+region (the control block, its committed size the blocks' total) and each busy block by address, with
+no free block or uncommitted range of the heap's own; VirtualQuery on a heap answers the arena's
+region. Wine's heap test measures segment sizes and walk entries against the Windows layout and
+fails on them. Revisit when a program is found reading a heap's segments, by VirtualQuery or by
+HeapWalk's free and uncommitted entries. *2026-11-18.*
