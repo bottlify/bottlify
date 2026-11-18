@@ -109,3 +109,18 @@ export function pointerIo(host, size = 4){
         write: (address, value)=>host.writeMemory(address, width.bytes(value)),
     };
 }
+
+/** The highest address a program may hold on 32-bit Windows, or one not large-address aware. */
+export const LOW_USER_TOP = 0x7ffeffff;
+
+/**
+ * The highest address a process's program may hold, as GetSystemInfo's
+ * lpMaximumApplicationAddress and SystemBasicInformation's
+ * MaximumUserModeAddress say it: the last byte below the 64 KiB Windows keeps
+ * off the top of the user space, its top here being where the process's arena
+ * ends - 0xFFFEFFFF for a 4 GiB process, as a large-address-aware program gets
+ * on 64-bit Windows - and never below the 32-bit 0x7FFEFFFF.
+ *
+ * @param {number} top  where the process's memory ends
+ */
+export const highestUserAddress = top=>Math.max(LOW_USER_TOP, top - 0x10001);

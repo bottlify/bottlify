@@ -26,6 +26,7 @@ import { STATUS } from './status.js';
 import { createProcessors } from '../kernel32/processor.js';
 import { verifyVersion, windowsVersion } from '../kernel32/versions.js';
 import { RTL_THREAD_ERROR_MODES } from '../kernel32/error-mode.js';
+import { highestUserAddress, pointerWidth } from '../common/pointers.js';
 
 /** RTL_OSVERSIONINFOW, and the extended form that also carries the service pack. */
 const OSVERSIONINFOW_SIZE = 276;
@@ -46,7 +47,11 @@ const OSVERSIONINFO = Object.freeze({
 /** szCSDVersion's room, in characters. */
 const CSD_VERSION_CHARACTERS = 128;
 
-/** SYSTEM_BASIC_INFORMATION as a 32-bit program declares it. */
+/**
+ * SYSTEM_BASIC_INFORMATION as a program of each width declares it: the user
+ * addresses and the affinity mask are ULONG_PTR, so a 64-bit one's are
+ * quadwords from 0x20 and its structure is 0x40 bytes.
+ */
 const SYSTEM_BASIC = Object.freeze({
     RESERVED: 0x00,
     TIMER_RESOLUTION: 0x04,
@@ -60,6 +65,14 @@ const SYSTEM_BASIC = Object.freeze({
     ACTIVE_PROCESSORS: 0x24,
     PROCESSOR_COUNT: 0x28,
     SIZE: 0x2c,
+});
+const SYSTEM_BASIC_64 = Object.freeze({
+    ...SYSTEM_BASIC,
+    MINIMUM_USER_ADDRESS: 0x20,
+    MAXIMUM_USER_ADDRESS: 0x28,
+    ACTIVE_PROCESSORS: 0x30,
+    PROCESSOR_COUNT: 0x38,
+    SIZE: 0x40,
 });
 
 /** PROCESS_BASIC_INFORMATION, likewise. */
@@ -249,7 +262,6 @@ const CURRENT_THREAD = 0xfffffffe;
 const PAGE_SIZE = 0x1000;
 const ALLOCATION_GRANULARITY = 0x10000;
 const MINIMUM_USER_ADDRESS = 0x00010000;
-const MAXIMUM_USER_ADDRESS = 0x7ffeffff;
 
 /**
  * The clock tick, in hundreds of nanoseconds. Nothing here interrupts on a
@@ -689,37 +701,38 @@ export function createQueryFunctions(host){
                 }
                 // The basic structure is asked for at its exact size; one the
                 // right size with nowhere to go is the kernel's probe failing.
-                if ((length >>> 0) !== SYSTEM_BASIC.SIZE)
+                const basic = host.pointerSize === 8 ? SYSTEM_BASIC_64 : SYSTEM_BASIC;
+                if ((length >>> 0) !== basic.SIZE)
                 {
-                    writeU32If(returnLength >>> 0, SYSTEM_BASIC.SIZE);
+                    writeU32If(returnLength >>> 0, basic.SIZE);
                     return STATUS.INFO_LENGTH_MISMATCH;
                 }
                 if ((buffer >>> 0) === 0)
                 {
                     return STATUS.ACCESS_VIOLATION;
                 }
-                writeU32If(returnLength >>> 0, SYSTEM_BASIC.SIZE);
+                writeU32If(returnLength >>> 0, basic.SIZE);
 
-                const struct = new Uint8Array(SYSTEM_BASIC.SIZE);
+                const struct = new Uint8Array(basic.SIZE);
                 const view = new DataView(struct.buffer);
-                view.setUint32(SYSTEM_BASIC.TIMER_RESOLUTION, TIMER_RESOLUTION, true);
-                view.setUint32(SYSTEM_BASIC.PAGE_SIZE, PAGE_SIZE, true);
+                view.setUint32(basic.TIMER_RESOLUTION, TIMER_RESOLUTION, true);
+                view.setUint32(basic.PAGE_SIZE, PAGE_SIZE, true);
                 // What the process actually has, not a figure chosen to look
                 // generous: a program sizes a cache from this, and one told about
                 // memory that is not there allocates until it fails.
                 const pages = Math.floor(host.arena.size / PAGE_SIZE);
-                view.setUint32(SYSTEM_BASIC.PHYSICAL_PAGES, pages, true);
-                view.setUint32(SYSTEM_BASIC.LOWEST_PHYSICAL_PAGE, pages === 0 ? 0 : 1, true);
-                view.setUint32(SYSTEM_BASIC.HIGHEST_PHYSICAL_PAGE, pages, true);
-                view.setUint32(SYSTEM_BASIC.ALLOCATION_GRANULARITY,
+                view.setUint32(basic.PHYSICAL_PAGES, pages, true);
+                view.setUint32(basic.LOWEST_PHYSICAL_PAGE, pages === 0 ? 0 : 1, true);
+                view.setUint32(basic.HIGHEST_PHYSICAL_PAGE, pages, true);
+                view.setUint32(basic.ALLOCATION_GRANULARITY,
                     ALLOCATION_GRANULARITY, true);
-                view.setUint32(SYSTEM_BASIC.MINIMUM_USER_ADDRESS,
-                    MINIMUM_USER_ADDRESS, true);
-                view.setUint32(SYSTEM_BASIC.MAXIMUM_USER_ADDRESS,
-                    MAXIMUM_USER_ADDRESS, true);
+                const pointer = pointerWidth(host.pointerSize === 8 ? 8 : 4);
+                pointer.set(view, basic.MINIMUM_USER_ADDRESS, MINIMUM_USER_ADDRESS);
+                pointer.set(view, basic.MAXIMUM_USER_ADDRESS,
+                    highestUserAddress(host.arena.base + host.arena.size));
                 // The machine's processors, whatever the process is narrowed to.
-                view.setUint32(SYSTEM_BASIC.ACTIVE_PROCESSORS, processors.systemMask(), true);
-                view.setUint8(SYSTEM_BASIC.PROCESSOR_COUNT, processors.count());
+                pointer.set(view, basic.ACTIVE_PROCESSORS, processors.systemMask());
+                view.setUint8(basic.PROCESSOR_COUNT, processors.count());
                 host.writeMemory(buffer >>> 0, struct);
                 return STATUS.SUCCESS;
             },

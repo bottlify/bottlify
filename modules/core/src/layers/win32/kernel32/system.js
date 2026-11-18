@@ -33,6 +33,7 @@ import { systemMessage } from './system-messages.js';
 import { compareStrings, decodeAnsi, encodeAnsi } from './locale.js';
 import { THREAD_ERROR_MODES, fromRtlMode, toRtlMode } from './error-mode.js';
 import { STATUS } from '../ntdll/status.js';
+import { highestUserAddress, pointerWidth } from '../common/pointers.js';
 
 const STATUS_SUCCESS = STATUS.SUCCESS;
 const STATUS_ACCESS_VIOLATION = STATUS.ACCESS_VIOLATION;
@@ -119,7 +120,6 @@ const PROCESSOR_AMD_X8664 = 8664;
 const PAGE_SIZE = 0x1000;
 const ALLOCATION_GRANULARITY = 0x10000;
 const MINIMUM_APPLICATION_ADDRESS = 0x00010000;
-const MAXIMUM_APPLICATION_ADDRESS = 0x7ffeffff;
 
 /** What GetFileType answers. */
 const FILE_TYPE_UNKNOWN = 0x0000;
@@ -881,13 +881,12 @@ export function createSystemFunctions(host){
             view.setUint16(0, x64 ? PROCESSOR_ARCHITECTURE_AMD64 : PROCESSOR_ARCHITECTURE_INTEL,
                 true);
             view.setUint32(4, PAGE_SIZE, true);
-            // The same span in a 64-bit process: its memory is the window
-            // below 4 GiB (`roadmap/x64.md`), and the high halves stay zero.
-            view.setUint32(layout.MINIMUM_ADDRESS, MINIMUM_APPLICATION_ADDRESS, true);
-            // Past 2 GiB where the arena reaches further: a large-address-aware
-            // program's 4 GiB on 64-bit Windows.
-            view.setUint32(layout.MAXIMUM_ADDRESS, Math.max(MAXIMUM_APPLICATION_ADDRESS,
-                (host.ramTop ?? 0) + 0xffff), true);
+            // Pointers of the process's width: past 2 GiB where the arena
+            // reaches further - a large-address-aware program's 4 GiB on 64-bit
+            // Windows - and past 4 GiB in a 64-bit process's wider window.
+            const pointer = pointerWidth(wide ? 8 : 4);
+            pointer.set(view, layout.MINIMUM_ADDRESS, MINIMUM_APPLICATION_ADDRESS);
+            pointer.set(view, layout.MAXIMUM_ADDRESS, highestUserAddress(host.ramTop ?? 0));
             // The processors the machine has, whatever the process is
             // narrowed to: dwActiveProcessorMask, then dwNumberOfProcessors.
             view.setUint32(layout.ACTIVE_MASK, processors.systemMask(), true);
