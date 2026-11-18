@@ -16,8 +16,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { CODE_64, KEPT_64, STACK_64, argumentOf, callLong, longMachine }
+import { CODE_64, HIGH_64, KEPT_64, STACK_64, argumentOf, callLong, longMachine }
     from '../../../../../scripts/guest-code/long.mjs';
+import { ifRoom } from '../../../../../../cork/src/testing/memory64.js';
 import { X64 } from './assemble.js';
 import {
     getLevelDescCode, getSamplerStateCode, getShaderCode, getSurfaceDescCode, getSurfaceLevelCode,
@@ -36,8 +37,6 @@ const SURFACE_BLOCK = 0x260000;
 const D3D_OK = 0;
 const D3DERR_INVALIDCALL = 0x8876086c;
 const D3DERR_NOTFOUND = 0x88760866;
-/** A pointer above 4 GiB: its low half the out-structure's address. */
-const HIGH_OUT = BigInt(OUT) | 1n << 32n;
 
 /** @param {ReturnType<typeof longMachine>} m @param {number} at @param {number[]} words */
 const writeWords = (m, at, words)=>{
@@ -62,17 +61,28 @@ const pattern = (seed, count)=>Array.from({ length: count },
  *
  * @param {Uint8Array} code @param {(m: ReturnType<typeof longMachine>) => void} [fill]
  */
-const world = (code, fill)=>{
-    const m = longMachine();
+const world = (code, fill, wide = false)=>{
+    const m = longMachine(wide ? WIDE : {});
     m.write(TRAP, [0xf4]);
     m.write(RETURN, [0xf4]);
     m.write(CODE_64, code);
     m.setQuad(THIS, 0x7000n);
     m.setQuad(THIS + 8, BigInt(BLOCK));
     m.write(OUT, new Uint8Array(128).fill(0xee));
+    if (wide)
+    {
+        m.write(HIGH_64 + OUT, new Uint8Array(128).fill(0xee));
+    }
     fill?.(m);
     return m;
 };
+
+/**
+ * A machine whose window reaches past 4 GiB, where a 64-bit process's pointer
+ * may lie: a routine is held to the long-mode interpreter there, the
+ * translator's wide window to its own gate (`runtime64-wide.itest.js`).
+ */
+const WIDE = { window: 2 ** 33, config: { translate: false } };
 
 /**
  * Runs a call that the routine answers: it returns to the caller with RSP
@@ -122,8 +132,7 @@ test('GetTransform: a type the device answers, its matrix copied out; a world ma
         assert.deepEqual(readWords(m, OUT, 16), matrices.slice(slot * 16, slot * 16 + 16));
     }
     for (const args of [[THIS_ARG, argumentOf(0, 1), OUT_ARG],
-        [THIS_ARG, argumentOf(260, 1), OUT_ARG], [THIS_ARG, argumentOf(2, 1), 0n],
-        [THIS_ARG, argumentOf(2, 1), HIGH_OUT]])
+        [THIS_ARG, argumentOf(260, 1), OUT_ARG], [THIS_ARG, argumentOf(2, 1), 0n]])
     {
         leftToHost(world(getTransformCode(CODE_64, TRAP, false, X64), fill), args);
     }
@@ -142,7 +151,6 @@ test('GetTextureStageState and GetSamplerState: the value out of its place in th
     assert.equal(readWords(m, OUT, 1)[0], stages[5 * 32 + 3]);
     leftToHost(stage(), [THIS_ARG, argumentOf(8, 1), argumentOf(3, 2), OUT_ARG]);
     leftToHost(stage(), [THIS_ARG, argumentOf(1, 1), argumentOf(0, 2), OUT_ARG]);
-    leftToHost(stage(), [THIS_ARG, argumentOf(1, 1), argumentOf(3, 2), HIGH_OUT]);
     const sampler = ()=>world(getSamplerStateCode(CODE_64, TRAP, X64), fill);
     const s = sampler();
     assert.equal(answered(s, [THIS_ARG, argumentOf(15, 1), argumentOf(13, 2), OUT_ARG]), D3D_OK);
@@ -150,7 +158,6 @@ test('GetTextureStageState and GetSamplerState: the value out of its place in th
     leftToHost(sampler(), [THIS_ARG, argumentOf(16, 1), argumentOf(1, 2), OUT_ARG]);
     leftToHost(sampler(), [THIS_ARG, argumentOf(0, 1), argumentOf(14, 2), OUT_ARG]);
     leftToHost(sampler(), [THIS_ARG, argumentOf(0, 1), argumentOf(1, 2), 0n]);
-    leftToHost(sampler(), [THIS_ARG, argumentOf(0, 1), argumentOf(1, 2), HIGH_OUT]);
 });
 
 test('GetViewport and Direct3D 8\'s GetVertexShader: copied out of the block', ()=>{
@@ -161,7 +168,6 @@ test('GetViewport and Direct3D 8\'s GetVertexShader: copied out of the block', (
     assert.equal(answered(m, [THIS_ARG, OUT_ARG]), D3D_OK);
     assert.deepEqual(readWords(m, OUT, 7), [...viewport, 0xeeeeeeee]);
     leftToHost(view(), [THIS_ARG, 0n]);
-    leftToHost(view(), [THIS_ARG, HIGH_OUT]);
     leftToHost(world(getViewportCode(CODE_64, TRAP, X64), w=>w.write(BLOCK, [FLAG_SLOW_PATH])),
         [THIS_ARG, OUT_ARG]);
     const shader = ()=>world(getShaderCode(CODE_64, TRAP, 1, X64), w=>writeWords(w,
@@ -191,7 +197,6 @@ test('GetRenderTarget: the surface\'s pointer, eight bytes, and the reference it
     leftToHost(world(code, targets(false, 0x00345678, 0)), [THIS_ARG, argumentOf(0, 1), OUT_ARG]);
     leftToHost(world(code, targets(false, 0, 0)), [THIS_ARG, argumentOf(0, 1), OUT_ARG]);
     leftToHost(world(code, targets(false, 0x00345678, 3)), [THIS_ARG, argumentOf(0, 1), 0n]);
-    leftToHost(world(code, targets(false, 0x00345678, 3)), [THIS_ARG, argumentOf(0, 1), HIGH_OUT]);
     leftToHost(world(code), [THIS_ARG, argumentOf(0, 1), OUT_ARG]);
 });
 
@@ -204,7 +209,6 @@ test('GetDepthStencilSurface: none is a null pointer, eight bytes of it, and NOT
     assert.equal(answered(d, [THIS_ARG, OUT_ARG]), D3D_OK);
     assert.equal(d.quad(OUT), 0x00456789n);
     assert.equal(readWords(d, COUNT, 1)[0], 2);
-    leftToHost(world(code, targets(true, 0, 0)), [THIS_ARG, HIGH_OUT]);
 });
 
 test('a surface\'s GetDesc: the description out of the surface\'s block', ()=>{
@@ -215,7 +219,6 @@ test('a surface\'s GetDesc: the description out of the surface\'s block', ()=>{
     assert.equal(answered(m, [THIS_ARG, OUT_ARG]), D3D_OK);
     assert.deepEqual(readWords(m, OUT, SURFACE.DESC_WORDS + 1), [...desc, 0xeeeeeeee]);
     leftToHost(surface(), [THIS_ARG, 0n]);
-    leftToHost(surface(), [THIS_ARG, HIGH_OUT]);
 });
 
 /** A texture block of three levels, the second published as SURFACE_THIS, counted in COUNT. */
@@ -239,7 +242,6 @@ test('a texture\'s GetSurfaceLevel: the level\'s pointer, eight bytes, and a ref
     assert.equal(answered(past, [THIS_ARG, argumentOf(3, 1), OUT_ARG]), D3DERR_INVALIDCALL);
     leftToHost(world(code, texture), [THIS_ARG, argumentOf(2, 1), OUT_ARG]);
     leftToHost(world(code, texture), [THIS_ARG, argumentOf(1, 1), 0n]);
-    leftToHost(world(code, texture), [THIS_ARG, argumentOf(1, 1), HIGH_OUT]);
 });
 
 test('a texture\'s GetLevelDesc: read through the level\'s block, eight bytes past it', ()=>{
@@ -250,9 +252,70 @@ test('a texture\'s GetLevelDesc: read through the level\'s block, eight bytes pa
     const past = world(code, texture);
     assert.equal(answered(past, [THIS_ARG, argumentOf(3, 1), OUT_ARG]), D3DERR_INVALIDCALL);
     leftToHost(world(code, texture), [THIS_ARG, argumentOf(2, 1), OUT_ARG]);
-    leftToHost(world(code, texture), [THIS_ARG, argumentOf(0, 1), HIGH_OUT]);
     leftToHost(world(code, m2=>{
         texture(m2);
         m2.write(SURFACE_BLOCK, [FLAG_SLOW_PATH]);
     }), [THIS_ARG, argumentOf(0, 1), OUT_ARG]);
 });
+
+/** A pointer past 4 GiB: its low half the out-structure's address. */
+const HIGH_OUT = BigInt(HIGH_64 + OUT);
+
+/**
+ * The same call with its out-pointer past 4 GiB, on a machine whose window
+ * reaches it: the answer and the out-structure as below 4 GiB, written
+ * through the whole pointer - and not at its low half, which a routine that
+ * read only the pointer's low dword would have written.
+ *
+ * @param {Uint8Array} code @param {((m: any) => void) | undefined} fill @param {bigint[]} args
+ *     with OUT_ARG where the out-pointer goes
+ */
+const throughHigh = (code, fill, args)=>{
+    const low = world(code, fill);
+    const answer = answered(low, args);
+    const high = world(code, fill, true);
+    assert.equal(answered(high, args.map(arg=>(arg === OUT_ARG ? HIGH_OUT : arg))), answer);
+    assert.deepEqual(high.read(HIGH_64 + OUT, 128), low.read(OUT, 128), 'written past 4 GiB');
+    assert.deepEqual(high.read(OUT, 128), new Uint8Array(128).fill(0xee), 'its low half untouched');
+};
+
+test('every getter writes through an out-pointer past 4 GiB', ifRoom(()=>{
+    const matrices = pattern(1, 16 * SHADOW.TRANSFORM_SLOTS);
+    throughHigh(getTransformCode(CODE_64, TRAP, false, X64),
+        m=>writeWords(m, BLOCK + SHADOW.TRANSFORMS, matrices),
+        [THIS_ARG, argumentOf(2, 1), OUT_ARG]);
+    const states = (/** @type {any} */ m)=>{
+        writeWords(m, BLOCK + SHADOW.STAGE_STATES, pattern(2, 8 * SHADOW.STAGE_STATE_STRIDE));
+        writeWords(m, BLOCK + SHADOW.SAMPLER_STATES, pattern(3, 16 * SHADOW.SAMPLER_STATE_STRIDE));
+    };
+    throughHigh(getTextureStageStateCode(CODE_64, TRAP, 0x3fffffe, X64), states,
+        [THIS_ARG, argumentOf(1, 1), argumentOf(3, 2), OUT_ARG]);
+    throughHigh(getSamplerStateCode(CODE_64, TRAP, X64), states,
+        [THIS_ARG, argumentOf(0, 1), argumentOf(1, 2), OUT_ARG]);
+    throughHigh(getViewportCode(CODE_64, TRAP, X64),
+        m=>writeWords(m, BLOCK + SHADOW.VIEWPORT, pattern(4, 6)), [THIS_ARG, OUT_ARG]);
+    throughHigh(getShaderCode(CODE_64, TRAP, 1, X64),
+        m=>writeWords(m, BLOCK + SHADOW.SHADERS, [0x11, 0x22, 1]), [THIS_ARG, OUT_ARG]);
+    throughHigh(getTargetCode(CODE_64, TRAP, { depth: false, indexed: true }, X64),
+        targets(false, 0x00345678, 3), [THIS_ARG, argumentOf(0, 1), OUT_ARG]);
+    const depth = getTargetCode(CODE_64, TRAP, { depth: true, indexed: false }, X64);
+    throughHigh(depth, targets(true, 0, 0), [THIS_ARG, OUT_ARG]);
+    throughHigh(depth, targets(true, 0x00456789, 1), [THIS_ARG, OUT_ARG]);
+    throughHigh(getSurfaceDescCode(CODE_64, TRAP, X64),
+        m=>writeWords(m, BLOCK + SURFACE.DESC, pattern(5, SURFACE.DESC_WORDS)),
+        [THIS_ARG, OUT_ARG]);
+    throughHigh(getSurfaceLevelCode(CODE_64, TRAP, X64), texture,
+        [THIS_ARG, argumentOf(1, 1), OUT_ARG]);
+    throughHigh(getLevelDescCode(CODE_64, TRAP, X64), texture,
+        [THIS_ARG, argumentOf(0, 1), OUT_ARG]);
+}));
+
+test('an out-pointer whose low half is zero is no null pointer', ifRoom(()=>{
+    // 4 GiB exactly: a routine testing the low dword alone took it for null and left it.
+    const m = world(getViewportCode(CODE_64, TRAP, X64), w=>{
+        writeWords(w, BLOCK + SHADOW.VIEWPORT, pattern(4, 6));
+        w.write(HIGH_64, new Uint8Array(32).fill(0xee));
+    }, true);
+    assert.equal(answered(m, [THIS_ARG, BigInt(HIGH_64)]), D3D_OK);
+    assert.deepEqual(readWords(m, HIGH_64, 6), pattern(4, 6));
+}));

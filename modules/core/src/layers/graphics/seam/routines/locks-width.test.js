@@ -19,8 +19,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createTestMachine } from '../../../../../../cork/src/testing/machine.js';
-import { CODE_64, STACK_64, argumentOf, callLong, longMachine }
+import { CODE_64, HIGH_64, STACK_64, argumentOf, callLong, longMachine }
     from '../../../../../scripts/guest-code/long.mjs';
+import { ifRoom } from '../../../../../../cork/src/testing/memory64.js';
 import { X64 } from './assemble.js';
 import { lockCode, lockLevelCode, moveCopyCode, unlockCode, unlockLevelCode } from './locks.js';
 import {
@@ -106,6 +107,7 @@ const lay = (w, word, kind)=>{
  * @property {number} answer
  * @property {number[][]} watched
  * @property {Uint8Array} out
+ * @property {ReturnType<typeof longMachine>} [machine]  the long-mode one, after the call
  */
 
 /** @param {Uint8Array} bytes */
@@ -155,10 +157,13 @@ const run32 = (build, kind, args, scene)=>{
  * @param {(at: number) => Uint8Array} build @param {'buffer' | 'texture' | 'surface'} kind
  * @param {number[]} args @param {Scene} scene @param {Set<number>} pointers
  * @param {Record<number, bigint>} [raw]  arguments passed exactly as given
+ * @param {number[]} [high]  pointer arguments moved past 4 GiB, on a machine whose window
+ *     reaches there (on the interpreter: the translator's wide window has its own gate),
+ *     what they point at copied with them; the out-structure read there too
  * @returns {Outcome}
  */
-const run64 = (build, kind, args, scene, pointers, raw = {})=>{
-    const m = longMachine();
+const run64 = (build, kind, args, scene, pointers, raw = {}, high = [])=>{
+    const m = longMachine(high.length > 0 ? { window: 2 ** 33, config: { translate: false } } : {});
     /** @type {(at: number, list: number[]) => void} */
     const w = (at, list)=>list.forEach((v, i)=>m.write(at + i * 4,
         [v & 0xff, v >>> 8 & 0xff, v >>> 16 & 0xff, v >>> 24 & 0xff]));
@@ -168,8 +173,12 @@ const run64 = (build, kind, args, scene, pointers, raw = {})=>{
     m.write(RETURN, [0xf4]);
     m.write(CODE_64, build(CODE_64));
     m.write(CODE_64 + 0x1000, moveCopyCode(X64));
-    const given = [BigInt(THIS), ...args.map((v, i)=>raw[i] ?? (pointers.has(i)
-        ? BigInt(v >>> 0) : argumentOf(v, i + 1)))];
+    for (const index of high)
+    {
+        m.write(HIGH_64 + args[index], m.read(args[index], 0x20));
+    }
+    const given = [BigInt(THIS), ...args.map((v, i)=>raw[i] ?? (high.includes(i)
+        ? BigInt(HIGH_64 + v) : pointers.has(i) ? BigInt(v >>> 0) : argumentOf(v, i + 1)))];
     const call = callLong(m, CODE_64, { args: given, returnTo: RETURN });
     const went = m.rip() === RETURN + 1 ? 'returned' : m.rip() === TRAP + 1 ? 'trap' : 'lost';
     assert.notEqual(went, 'lost', `the x86-64 stopped at 0x${m.rip().toString(16)}`);
@@ -188,9 +197,34 @@ const run64 = (build, kind, args, scene, pointers, raw = {})=>{
             assert.equal(m.reg(name), call.entry[name], `${name} kept`);
         }
     }
+    const outHigh = high.some(index=>args[index] === OUT);
+    if (outHigh)
+    {
+        assert.deepEqual(words(m.read(OUT, 16)), [0xa5a5a5a5, 0xa5a5a5a5, 0xa5a5a5a5, 0xa5a5a5a5],
+            'nothing written at the out-pointer\'s low half');
+    }
     return { went: /** @type {'returned' | 'trap'} */ (went),
         answer: Number(m.reg('rax') & 0xffffffffn),
-        watched: watch((at, length)=>m.read(at, length)), out: m.read(OUT, 16) };
+        watched: watch((at, length)=>m.read(at, length)),
+        out: m.read(outHigh ? HIGH_64 + OUT : OUT, 16), machine: m };
+};
+
+/**
+ * A call with pointer arguments `high` past 4 GiB answers as with them below:
+ * where it went, the answer, the scene's words and the out-structure.
+ *
+ * @param {(at: number) => Uint8Array} build @param {'buffer' | 'texture' | 'surface'} kind
+ * @param {number[]} args @param {Scene} scene @param {number[]} pointers @param {number[]} high
+ */
+const sameHigh = (build, kind, args, scene, pointers, high)=>{
+    const low = run64(build, kind, args, scene, new Set(pointers));
+    const far = run64(build, kind, args, scene, new Set(pointers), {}, high);
+    assert.equal(far.went, low.went, 'where the call went');
+    assert.equal(far.answer, low.answer, 'the answer');
+    low.watched.forEach((list, i)=>assert.deepEqual(far.watched[i], list,
+        `the words at 0x${WATCHED[i][0].toString(16)}`));
+    assert.deepEqual(words(far.out), words(low.out), 'the out-structure past 4 GiB');
+    return low;
 };
 
 /**
@@ -296,18 +330,24 @@ test('the move at 64 bits writes the record the host makes and copies what lies 
     assert.equal(b.watched[5][0x140 / 4], 0x11000140, 'and after it');
 });
 
-test('a 64-bit out-pointer with an upper half is the host\'s, before any move', ()=>{
-    for (const draws of [0, 1])
-    {
-        const scene = { set: (/** @type {any} */ w)=>w(DEVICE + SHADOW.DRAWS_PENDING, [draws]) };
-        const b = run64(lock(X64), 'buffer', [0x10, 0x10, OUT, D3DLOCK_DISCARD], scene,
-            new Set([2]), { 2: BigInt(OUT) | 1n << 32n });
-        assert.equal(b.went, 'trap');
-        assert.equal(b.watched[0][BUFFER.BASE / 4], STORAGE, 'not moved');
-        assert.equal(b.watched[0][BUFFER.LOCKED / 4], 0, 'not locked');
-        assert.equal(b.watched[2][SHADOW.HELD / 4], 0, 'the device\'s lock let go');
-    }
-});
+test('a 64-bit out-pointer past 4 GiB: the lock, and the move under a draw, as below it',
+    ifRoom(()=>{
+        for (const draws of [0, 1])
+        {
+            const scene = { set: (/** @type {any} */ w)=>w(DEVICE + SHADOW.DRAWS_PENDING, [draws]) };
+            const args = [0x10, 0x10, OUT, D3DLOCK_DISCARD];
+            const low = sameHigh(lock(X64), 'buffer', args, scene, [2], [2]);
+            assert.equal(low.went, 'returned');
+            assert.equal(low.watched[0][BUFFER.BASE / 4], draws ? SPARE : STORAGE);
+        }
+    }));
+
+test('a 64-bit out-pointer at 4 GiB exactly, its low half zero, is no null pointer', ifRoom(()=>{
+    // An address of the program's at the window's 4 GiB: `0` moved past 4 GiB (`high`).
+    const b = run64(lock(X64), 'buffer', [0x10, 0x10, 0, 0], {}, new Set([2]), {}, [2]);
+    assert.equal(b.went, 'returned');
+    assert.equal(b.machine?.quad(HIGH_64), BigInt(STORAGE + 0x10), 'written at 4 GiB');
+}));
 
 const unlock = (/** @type {any} */ width)=>(/** @type {number} */ at)=>unlockCode(at, TRAP,
     width);
@@ -368,18 +408,15 @@ for (const [kind, box] of /** @type {['texture' | 'surface', boolean][]} */ ([
                 pointers: [levelArgs.length, levelArgs.length + 1], scene, outs: lockedOut(box) });
         });
     }
-    test(`${shape} lock at 64 bits leaves an out-pointer or a rectangle above 4 GiB to the host`,
-        ()=>{
-            for (const which of [0, 1])
-            {
-                const index = levelArgs.length + which;
-                const b = run64(build(X64), kind, [...levelArgs, OUT, RECT, 0],
-                    { set: w=>w(RECT, [1, 1, 3, 2, 0, 1]) }, new Set([index]),
-                    { [index]: BigInt(which ? RECT : OUT) | 1n << 32n });
-                assert.equal(b.went, 'trap');
-                assert.equal(b.watched[1][LEVEL.LOCKED / 4], 0);
-            }
-        });
+    test(`${shape} lock at 64 bits through an out-pointer or a rectangle past 4 GiB`, ifRoom(()=>{
+        const out = levelArgs.length;
+        for (const high of [[out], [out + 1], [out, out + 1]])
+        {
+            const low = sameHigh(build(X64), kind, [...levelArgs, OUT, RECT, 0],
+                { set: w=>w(RECT, [1, 1, 3, 2, 0, 1]) }, [out, out + 1], high);
+            assert.equal(low.went, 'returned');
+        }
+    }));
     const unlockBuild = (/** @type {any} */ width)=>(/** @type {number} */ at)=>unlockLevelCode(
         at, TRAP, { find: kind }, width);
     for (const [name, scene] of /** @type {[string, Scene][]} */ ([

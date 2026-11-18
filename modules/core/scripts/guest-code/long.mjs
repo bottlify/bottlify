@@ -25,6 +25,8 @@ import { ownLayout, pageFlagsAt, pagesFor, tablesSize } from '../../../cork/src/
 import { PageFlag } from '../../../cork/src/runtime/pages.js';
 import { blockState64 } from '../../../cork/src/interp64.js';
 import { createRuntimeRunner64 } from '../../../cork/src/testing/runtime-runner64.js';
+import { allowMemory64 } from '../../../cork/src/testing/memory64.js';
+import { memory64 } from '../../../cork/src/wasm/features.js';
 
 /** Where a function's code goes: above the null range, where blocks are translated. */
 export const CODE_64 = 0x100000;
@@ -61,34 +63,56 @@ const ARGUMENT_REGISTERS = ['rcx', 'rdx', 'r8', 'r9'];
 export const argumentOf = (word, index)=>BigInt(word >>> 0)
     | BigInt((0x9e3779b9 * (index + 1)) >>> 0) << 32n;
 
+/** Where a wide machine's RAM opens again past 4 GiB (`longMachine`'s `window`). */
+export const HIGH_64 = 2 ** 32;
+
 /**
- * A machine with its RAM open but for the engine's pages.
+ * A machine with its RAM open but for the engine's pages. With `window`, a
+ * wide window's bytes (8 GiB: `wideLayout`), the RAM is a memory64 memory of
+ * its own and is open past 4 GiB too, as much of it from `HIGH_64` as below:
+ * where a 64-bit process's pointer may lie.
  *
+ * `config` goes to the translator's runtime (`translate: false`: the
+ * interpreter alone).
+ *
+ * @param {{ window?: number, config?: Record<string, unknown> }} [options]
  * @returns {LongMachine}
  */
-export function longMachine(){
-    const layout = ownLayout({ ramSize: RAM, ramBase: 0, bits: 64 });
+export function longMachine({ window, config } = {}){
+    if (window !== undefined)
+    {
+        allowMemory64();
+    }
+    const layout = window === undefined ? ownLayout({ ramSize: RAM, ramBase: 0, bits: 64 })
+        : ownLayout({ ramSize: window - 4096, ramBase: 0, bits: 64, window, codeBase: 0 });
     const memory = new WebAssembly.Memory({ initial: pagesFor(layout, tablesSize(layout)) });
-    const flags = new Uint8Array(memory.buffer, pageFlagsAt(layout), 1 << 20);
+    const ram = window === undefined ? undefined : memory64(window);
+    const flags = new Uint8Array(memory.buffer, pageFlagsAt(layout), (window ?? 2 ** 32) / 4096);
     flags.fill(PageFlag.INACCESSIBLE);
     flags.fill(0, 0, RAM >>> 12);
     flags.fill(PageFlag.INACCESSIBLE, ENGINE_PAGES[0] >>> 12, ENGINE_PAGES[1] >>> 12);
-    const runner = createRuntimeRunner64({ memory, layout });
-    const state = blockState64({ memory, layout,
+    if (window !== undefined)
+    {
+        flags.fill(0, HIGH_64 / 4096, (HIGH_64 + RAM) / 4096);
+    }
+    const runner = createRuntimeRunner64({ memory, ram, layout, config });
+    const state = blockState64({ memory, ram, layout,
         onCodeWrite: (at, size)=>runner.invalidate(at, size) });
     const view = ()=>new DataView(memory.buffer);
+    const guest = ()=>new DataView((ram ?? memory).buffer);
+    const guestBytes = ()=>new Uint8Array((ram ?? memory).buffer);
     return {
         layout,
-        bytes: ()=>new Uint8Array(memory.buffer),
+        bytes: guestBytes,
         write(address, bytes){
-            new Uint8Array(memory.buffer).set(bytes, address);
+            guestBytes().set(bytes, address);
         },
         read(address, length){
-            return new Uint8Array(memory.buffer).slice(address, address + length);
+            return guestBytes().slice(address, address + length);
         },
-        quad: address=>view().getBigUint64(address, true),
+        quad: address=>guest().getBigUint64(address, true),
         setQuad(address, value){
-            view().setBigUint64(address, BigInt.asUintN(64, value), true);
+            guest().setBigUint64(address, BigInt.asUintN(64, value), true);
         },
         reg: name=>view().getBigUint64(layout.regs + QUADS.indexOf(name) * 8, true),
         rip: ()=>Number(view().getBigUint64(layout.eip, true)),
