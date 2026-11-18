@@ -103,7 +103,13 @@ event, an error. Neither stops the program.
   loopback stream is refused. Session notifications are kept and never sent: nothing outside the
   program changes its session.
   The enumerator is there from Vista on; on XP it is not registered, so a program that would play
-  to an endpoint plays through DirectSound, as on XP.
+  to an endpoint plays through DirectSound, as on XP. The endpoint is activated as IAudioClient,
+  IAudioSessionManager, IAudioEndpointVolume (its master and channel levels and mute, which every
+  stream plays at; -65.25 to 0 dB, `roadmap/decisions.md` A265; change notifications kept and not
+  sent), and as DirectSound or DirectShow's DirectSound renderer, made through COM; IAudioClient2
+  and 3, IDeviceTopology and spatial audio are not, and answer E_NOINTERFACE. DirectShow's
+  renderer is made without quartz.dll being loaded as a module, as the engine's built-in classes
+  are.
 - Media Foundation describes media and decodes none (`roadmap/decisions.md` A238): `mfplat`'s
   attributes, media types, memory buffers, samples and events are there, and `propsys`'s
   PROPVARIANT conversions, but no source, decoder, transform or work queue. A source reader

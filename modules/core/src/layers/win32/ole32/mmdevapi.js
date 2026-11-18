@@ -17,15 +17,24 @@
  *
  * Playing straight to the endpoint is IMMDevice::Activate for IAudioClient,
  * a shared-mode stream into the machine's mixer, and its sessions are
- * IAudioSessionManager's (`audio-client.js`); another
- * interface of the endpoint is not here, and is told E_NOINTERFACE, said once
- * as a divergence.
+ * IAudioSessionManager's (`audio-client.js`); its volume is
+ * IAudioEndpointVolume's (`endpoint-volume.js`); DirectSound and DirectShow's
+ * DirectSound renderer are made on it through COM, as Windows makes them,
+ * loading their libraries. Another interface of the endpoint is not here, and
+ * is told E_NOINTERFACE, said once as a divergence.
+ *
+ * The enumerator is one object per process, keeping a reference of its own
+ * (the count after CoCreateInstance is two), and it and a collection answer
+ * IUnknown with the pointer they were asked through: a program compares them.
  */
 
 import { createComObject } from './objects.js';
 import { IID_IAUDIO_CLIENT, IID_IAUDIO_SESSION_MANAGER, createAudioClients, guidAt }
     from './audio-client.js';
 import { SOUND_DEVICE_GUID } from '../devices.js';
+import { IID_IUNKNOWN } from './objects.js';
+import { parseGuid } from './guid.js';
+import { IID_IAUDIO_ENDPOINT_VOLUME, createEndpointVolume } from './endpoint-volume.js';
 
 export const CLSID_MMDEVICE_ENUMERATOR = '{BCDE0395-E52F-467C-8E3D-C4579291692E}';
 export const IID_IMMDEVICE_ENUMERATOR = '{A95664D2-9614-4F35-A746-DE8DB63617E6}';
@@ -33,6 +42,29 @@ export const IID_IMMDEVICE_COLLECTION = '{0BD7A1BE-7A1A-44DB-8397-CC5392387B5E}'
 export const IID_IMMDEVICE = '{D666063F-1587-4E43-81F1-B948E807363F}';
 export const IID_IMMENDPOINT = '{1BE09788-6894-4089-8586-9A2A6C265AC5}';
 export const IID_IPROPERTY_STORE = '{886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99}';
+
+/**
+ * What else an endpoint is activated as: an object of another library's,
+ * made through COM and, where it says so, initialized on this device - its
+ * vtable slot and the device's GUID (IDirectSound::Initialize).
+ *
+ * @type {ReadonlyMap<string, { clsid: string, initialize?: number }>}
+ */
+const MADE_THROUGH_COM = new Map([
+    // IDirectSound and IDirectSound8, on the device DirectSound knows it as.
+    ['{279AFA83-4981-11CE-A521-0020AF0BE560}',
+        { clsid: '{47D4D946-62E8-11CF-93BC-444553540000}', initialize: 10 }],
+    ['{C50A7E93-F395-4834-9EF6-7FA99DE50966}',
+        { clsid: '{3901CC3F-84B5-4FA4-BA35-AA8172B8A09B}', initialize: 10 }],
+    // IBaseFilter: DirectShow's DirectSound renderer.
+    ['{56A86895-0AD4-11CE-B03A-0020AF0BA770}', { clsid: '{79376820-07D0-11CF-A24D-0020AFD79767}' }],
+]);
+
+/** An endpoint id's form: `{0.0.<flow>.00000000}.{<guid>}`. */
+const ENDPOINT_ID = /^\{0\.0\.[01]\.00000000\}\.\{[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}\}$/i;
+
+/** STGM_READ, STGM_WRITE, STGM_READWRITE: the access a property store is opened for. */
+const STGM_READWRITE = 2;
 
 const S_OK = 0;
 const E_POINTER = 0x80004003 | 0;
@@ -82,36 +114,63 @@ const KEYS = Object.freeze({
     FORM_FACTOR: '{1DA5D803-D492-4EDD-8C23-E0C0FFEE7F0E} 0',
     DEVICE_FORMAT: '{F19F064D-082C-4E27-BC73-6882A1BB8E4C} 0',
     AUDIO_ENDPOINT_GUID: '{1DA5D803-D492-4EDD-8C23-E0C0FFEE7F0E} 4',
+    DEVICE_INTERFACE: '{233164C8-1B2C-4C7D-BC68-B671687A2567} 1',
 });
+
+/**
+ * The endpoint's device interface path, as the software device bus names an
+ * MMDevAPI endpoint's (the class GUID is KSCATEGORY_AUDIO's render endpoint).
+ */
+const DEVICE_INTERFACE_PATH = `\\\\?\\SWD#MMDEVAPI#${SPEAKERS.id}`
+    + '#{e6327cad-dcec-4949-ae8a-991e976a79d2}';
 
 /** KSDATAFORMAT_SUBTYPE_IEEE_FLOAT's bytes. */
 const SUBTYPE_IEEE_FLOAT = Uint8Array.of(0x03, 0, 0, 0, 0, 0, 0x10, 0,
     0x80, 0, 0, 0xaa, 0, 0x38, 0x9b, 0x71);
+/** KSDATAFORMAT_SUBTYPE_PCM's bytes. */
+const SUBTYPE_PCM = Uint8Array.of(0x01, 0, 0, 0, 0, 0, 0x10, 0,
+    0x80, 0, 0, 0xaa, 0, 0x38, 0x9b, 0x71);
 
-/** The engine's mix format: WAVEFORMATEXTENSIBLE, float, front left and right. */
-function mixFormat(){
+/**
+ * A WAVEFORMATEXTENSIBLE of the endpoint's rate and channels, front left and
+ * right, of a sample's bits and subtype.
+ *
+ * @param {number} bits @param {Uint8Array} subtype
+ */
+function endpointFormat(bits, subtype){
     const bytes = new Uint8Array(40);
     const view = new DataView(bytes.buffer);
-    const block = SPEAKERS.channels * 4;
+    const block = SPEAKERS.channels * bits / 8;
     view.setUint16(0, 0xfffe, true); // WAVE_FORMAT_EXTENSIBLE
     view.setUint16(2, SPEAKERS.channels, true);
     view.setUint32(4, SPEAKERS.rate, true);
     view.setUint32(8, SPEAKERS.rate * block, true);
     view.setUint16(12, block, true);
-    view.setUint16(14, 32, true);
+    view.setUint16(14, bits, true);
     view.setUint16(16, 22, true); // cbSize
-    view.setUint16(18, 32, true); // wValidBitsPerSample
+    view.setUint16(18, bits, true); // wValidBitsPerSample
     view.setUint32(20, 0x3, true); // SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT
-    bytes.set(SUBTYPE_IEEE_FLOAT, 24);
+    bytes.set(subtype, 24);
     return bytes;
 }
+
+/** The engine's mix format: 32-bit float. */
+const mixFormat = ()=>endpointFormat(32, SUBTYPE_IEEE_FLOAT);
+
+/**
+ * The format the device itself is set to (PKEY_AudioEngine_DeviceFormat),
+ * which the engine converts its mix to: 16-bit PCM, as a sound card's default
+ * format is in its Advanced properties.
+ */
+const deviceFormat = ()=>endpointFormat(16, SUBTYPE_PCM);
 
 /**
  * @typedef {Object} MmDevApiHost
  * @property {import('./objects.js').ComRegistry} registry
  * @property {{ publish: (object: import('./objects.js').ComObject,
  *     id: string) => number }} vtables
- * @property {{ allocate: (bytes: number) => number }} heap  The task allocator's memory.
+ * @property {{ allocate: (bytes: number) => number, free?: (address: number) => void }} heap
+ *     The task allocator's memory.
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readWideString
@@ -127,6 +186,13 @@ function mixFormat(){
  *     timers, which set an event-driven stream's event.
  * @property {() => string} [program]  The program as the object manager names it.
  * @property {() => number} [processId]
+ * @property {(clsid: string, iid: number, out: number)
+ *     => number | Promise<number>} [createInstance]
+ *     CoCreateInstance in process, which loads the class's library: what an
+ *     endpoint is activated as when another library serves it.
+ * @property {(object: number, slot: number, args: number[])
+ *     => number | Promise<number>} [callMethod]
+ *     A method of a guest object, by its vtable slot.
  */
 
 /** @param {MmDevApiHost} host */
@@ -158,13 +224,20 @@ export function registerMmDevApiClasses(host){
         }
         return at;
     };
+    /** The endpoint's volume, which every stream to it plays at. */
+    const endpointVolume = createEndpointVolume({
+        readMemory: host.readMemory, writeMemory: host.writeMemory,
+        channels: SPEAKERS.channels, divergence: host.divergence,
+        changed: ()=>audioClients.refreshVolumes(),
+    });
     const audioClients = createAudioClients({
         readMemory: host.readMemory, writeMemory: host.writeMemory, heap: host.heap,
         readWideString: host.readWideString,
         vtables: host.vtables, writePointer, now: host.now ?? (()=>Date.now()),
         output: host.output, timers: host.timers, divergence: host.divergence,
         program: host.program, processId: host.processId,
-    }, { id: SPEAKERS.id, rate: SPEAKERS.rate, channels: SPEAKERS.channels, mixFormat });
+    }, { id: SPEAKERS.id, rate: SPEAKERS.rate, channels: SPEAKERS.channels, mixFormat,
+        gain: channel=>endpointVolume.gain(channel) });
     /** @type {Set<string>} */
     const said = new Set();
     /** @param {string} api @param {string} detail */
@@ -218,7 +291,8 @@ export function registerMmDevApiClasses(host){
         const text = key === KEYS.FRIENDLY_NAME ? `${SPEAKERS.name} (${SPEAKERS.adapter})`
             : key === KEYS.DEVICE_DESC ? SPEAKERS.name
                 : key === KEYS.INTERFACE_FRIENDLY_NAME ? SPEAKERS.adapter
-                    : key === KEYS.AUDIO_ENDPOINT_GUID ? SOUND_DEVICE_GUID : null;
+                    : key === KEYS.AUDIO_ENDPOINT_GUID ? SOUND_DEVICE_GUID
+                        : key === KEYS.DEVICE_INTERFACE ? DEVICE_INTERFACE_PATH : null;
         if (text !== null)
         {
             const at = taskString(text);
@@ -236,7 +310,7 @@ export function registerMmDevApiClasses(host){
         }
         else if (key === KEYS.DEVICE_FORMAT)
         {
-            const format = mixFormat();
+            const format = deviceFormat();
             const at = host.heap.allocate(format.length);
             if (at === 0)
             {
@@ -269,8 +343,24 @@ export function registerMmDevApiClasses(host){
                 writeU32(out, Object.keys(KEYS).length);
                 return S_OK;
             } },
-            /** HRESULT GetAt(DWORD iProp, PROPERTYKEY *pkey) */
-            { name: 'GetAt', argBytes: 12, invoke: ()=>E_INVALIDARG },
+            /** HRESULT GetAt(DWORD iProp, PROPERTYKEY *pkey): the keys GetValue answers, in order. */
+            { name: 'GetAt', argBytes: 12, invoke: (_, [index, out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_POINTER;
+                }
+                const key = Object.values(KEYS)[index >>> 0];
+                if (key === undefined)
+                {
+                    return E_INVALIDARG;
+                }
+                const [fmtid, pid] = key.split(' ');
+                const bytes = new Uint8Array(20);
+                bytes.set(/** @type {Uint8Array} */ (parseGuid(fmtid)), 0);
+                new DataView(bytes.buffer).setUint32(16, Number(pid), true);
+                host.writeMemory(out >>> 0, bytes);
+                return S_OK;
+            } },
             /** HRESULT GetValue(REFPROPERTYKEY key, PROPVARIANT *pv) */
             { name: 'GetValue', argBytes: 12, invoke: (_, [key, out])=>{
                 if ((key >>> 0) === 0 || (out >>> 0) === 0)
@@ -309,12 +399,30 @@ export function registerMmDevApiClasses(host){
                 {
                     return audioClients.manager(out);
                 }
+                if (wanted === IID_IAUDIO_ENDPOINT_VOLUME)
+                {
+                    return handOut([endpointVolume.descriptor], IID_IAUDIO_ENDPOINT_VOLUME,
+                        endpointVolume.state, out);
+                }
+                const made = MADE_THROUGH_COM.get(wanted);
+                if (made && host.createInstance)
+                {
+                    return makeThroughCom(made, iid, out);
+                }
                 diverge(`IMMDevice::Activate ${wanted}`,
                     `the endpoint's interface ${wanted} is not activated here`);
                 return E_NOINTERFACE;
             } },
-            /** HRESULT OpenPropertyStore(DWORD stgmAccess, IPropertyStore **ppProperties) */
-            { name: 'OpenPropertyStore', argBytes: 12, invoke: (_, [, out])=>{
+            /**
+             * HRESULT OpenPropertyStore(DWORD stgmAccess, IPropertyStore **ppProperties):
+             * an access past STGM_READWRITE is refused with the out pointer
+             * left as it was, as Windows leaves it.
+             */
+            { name: 'OpenPropertyStore', argBytes: 12, invoke: (_, [access, out])=>{
+                if ((access >>> 0) > STGM_READWRITE)
+                {
+                    return E_INVALIDARG;
+                }
                 if ((out >>> 0) === 0)
                 {
                     return E_POINTER;
@@ -363,9 +471,47 @@ export function registerMmDevApiClasses(host){
     /** The endpoint, handed out to `out`. @param {number} out */
     const handOutDevice = out=>handOut(device, IID_IMMDEVICE, SPEAKERS, out);
 
+    /**
+     * An endpoint activated as another library's object, made through COM
+     * and initialized on this device where the interface asks for it; one
+     * that fails to initialize is let go and its failure answered.
+     *
+     * @param {{ clsid: string, initialize?: number }} made
+     * @param {number} iid @param {number} out
+     * @returns {Promise<number>}
+     */
+    const makeThroughCom = async(made, iid, out)=>{
+        const hr = (await /** @type {NonNullable<MmDevApiHost['createInstance']>} */ (
+            host.createInstance)(made.clsid, iid, out)) | 0;
+        if (hr < 0 || made.initialize === undefined || !host.callMethod)
+        {
+            return hr;
+        }
+        const object = new DataView(host.readMemory(out >>> 0, 4).slice().buffer)
+            .getUint32(0, true);
+        const guid = host.heap.allocate(16);
+        if (guid === 0)
+        {
+            await host.callMethod(object, 2, []);
+            writePointer(out, 0);
+            return E_OUTOFMEMORY;
+        }
+        host.writeMemory(guid, /** @type {Uint8Array} */ (parseGuid(SOUND_DEVICE_GUID)));
+        const initialized = (await host.callMethod(object, made.initialize, [guid])) | 0;
+        host.heap.free?.(guid);
+        if (initialized < 0)
+        {
+            await host.callMethod(object, 2, []);
+            writePointer(out, 0);
+        }
+        return initialized;
+    };
+
     /** @type {import('./objects.js').ComInterfaceDescriptor} */
     const collection = {
         id: IID_IMMDEVICE_COLLECTION,
+        // Its IUnknown is the collection itself (Wine's mmdevenum test).
+        also: [IID_IUNKNOWN],
         methods: [
             /** HRESULT GetCount(UINT *pcDevices) */
             { name: 'GetCount', argBytes: 8, invoke: (object, [out])=>{
@@ -393,11 +539,17 @@ export function registerMmDevApiClasses(host){
     };
 
     host.registry.registerClass(CLSID_MMDEVICE_ENUMERATOR, ()=>{
-        /** The notification clients registered, by pointer. @type {Set<number>} */
-        const clients = new Set();
+        /**
+         * The notification clients registered, by pointer, once for each
+         * registration: a client registered twice is unregistered twice.
+         *
+         * @type {number[]}
+         */
+        const clients = [];
         return {
             interfaces: [{
                 id: IID_IMMDEVICE_ENUMERATOR,
+                also: [IID_IUNKNOWN],
                 methods: [
                     /**
                      * HRESULT EnumAudioEndpoints(EDataFlow dataFlow, DWORD dwStateMask,
@@ -408,6 +560,7 @@ export function registerMmDevApiClasses(host){
                         {
                             return E_POINTER;
                         }
+                        writePointer(out, 0);
                         if ((flow >>> 0) > E_ALL || ((mask >>> 0) & ~0xf) !== 0)
                         {
                             return E_INVALIDARG;
@@ -440,8 +593,14 @@ export function registerMmDevApiClasses(host){
                             return E_POINTER;
                         }
                         writePointer(out, 0);
-                        return host.readWideString(id >>> 0, 128 * 2) === SPEAKERS.id
-                            ? handOutDevice(out) : E_NOTFOUND;
+                        // An id not of an endpoint's form is an invalid argument;
+                        // one of the form that names no endpoint here is not found.
+                        const asked = host.readWideString(id >>> 0, 128 * 2);
+                        if (asked === SPEAKERS.id)
+                        {
+                            return handOutDevice(out);
+                        }
+                        return ENDPOINT_ID.test(asked) ? E_NOTFOUND : E_INVALIDARG;
                     } },
                     /** HRESULT RegisterEndpointNotificationCallback(IMMNotificationClient *) */
                     { name: 'RegisterEndpointNotificationCallback', argBytes: 8,
@@ -451,7 +610,7 @@ export function registerMmDevApiClasses(host){
                                 return E_POINTER;
                             }
                             // No endpoint ever comes or goes here: nothing is sent.
-                            clients.add(client >>> 0);
+                            clients.push(client >>> 0);
                             return S_OK;
                         } },
                     /** HRESULT UnregisterEndpointNotificationCallback(IMMNotificationClient *) */
@@ -461,10 +620,16 @@ export function registerMmDevApiClasses(host){
                             {
                                 return E_POINTER;
                             }
-                            return clients.delete(client >>> 0) ? S_OK : E_NOTFOUND;
+                            const at = clients.indexOf(client >>> 0);
+                            if (at < 0)
+                            {
+                                return E_NOTFOUND;
+                            }
+                            clients.splice(at, 1);
+                            return S_OK;
                         } },
                 ],
             }],
         };
-    });
+    }, { single: true });
 }

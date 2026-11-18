@@ -403,7 +403,8 @@ export function createComObject(clsid, definition, aggregation = null){
 
 /**
  * @typedef {Object} ComRegistry
- * @property {(clsid: string, factory: () => ComClassDefinition | null) => void} registerClass
+ * @property {(clsid: string, factory: () => ComClassDefinition | null,
+ *     options?: { single?: boolean }) => void} registerClass
  * @property {(clsid: string) => boolean} isRegistered
  * @property {(clsid: string) => ComObject | null} create
  * @property {(clsid: string, aggregation: Aggregation) =>
@@ -428,6 +429,15 @@ export function createComObject(clsid, definition, aggregation = null){
 export function createComRegistry(){
     /** @type {Map<string, () => ComClassDefinition | null>} */
     const classes = new Map();
+    /**
+     * The one object of a class that has one per process: made the first time
+     * it is asked for, holding a reference of its own for good, every later
+     * caller handed the same object with a reference of theirs (MMDevAPI's
+     * device enumerator, whose count after CoCreateInstance is two).
+     *
+     * @type {Map<string, ComObject | null>}
+     */
+    const singles = new Map();
     let mtaUsers = 0;
 
     return {
@@ -437,9 +447,20 @@ export function createComRegistry(){
          *        Null from a factory means the class is known but cannot produce
          *        an object right now, which is a different failure from an
          *        unregistered CLSID and is reported as one.
+         * @param {{ single?: boolean }} [options]  `single`: one object per
+         *        process, which keeps a reference of its own (`singles`).
          */
-        registerClass(clsid, factory){
-            classes.set(requireGuid(clsid, 'class id'), factory);
+        registerClass(clsid, factory, options = {}){
+            const key = requireGuid(clsid, 'class id');
+            classes.set(key, factory);
+            if (options.single)
+            {
+                singles.set(key, null);
+            }
+            else
+            {
+                singles.delete(key);
+            }
         },
 
         mtaUsage: {
@@ -471,6 +492,22 @@ export function createComRegistry(){
             {
                 return null;
             }
+            if (singles.has(/** @type {string} */ (key)))
+            {
+                let single = singles.get(/** @type {string} */ (key)) ?? null;
+                if (!single)
+                {
+                    const definition = factory();
+                    if (!definition)
+                    {
+                        return null;
+                    }
+                    single = createComObject(/** @type {string} */ (key), definition);
+                    singles.set(/** @type {string} */ (key), single);
+                }
+                single.addRef();
+                return single;
+            }
             const definition = factory();
             return definition ? createComObject(/** @type {string} */ (key), definition) : null;
         },
@@ -483,6 +520,11 @@ export function createComRegistry(){
          */
         createAggregated(clsid, aggregation){
             const key = canonicalGuid(clsid);
+            if (key !== null && singles.has(key))
+            {
+                // The one object of the process is nobody's inner object.
+                return false;
+            }
             const factory = key === null ? undefined : classes.get(key);
             const definition = factory?.();
             if (!definition)
