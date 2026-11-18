@@ -744,8 +744,10 @@ test('an interface answered with another\'s pointer is that pointer, and counts 
 test('a 64-bit process\'s interfaces have eight-byte slots, traps for the i386 code, and their'
     + ' floats declared', ()=>{
     // Every pointer the table and the interface hold is eight bytes with the
-    // high half zero, and so is a pointer QueryInterface writes; a method or a
-    // count that would run in the guest is its trap, because that code is i386.
+    // high half zero, and so is a pointer QueryInterface writes; a method that
+    // would run in the guest is its trap, because that code is i386, unless its
+    // builder is built for the process's width (`wide`); the counts are the
+    // x86-64 AddRef and Release (`COUNT_CODE_64`).
     /** @type {Map<number, number>} */
     const words = new Map();
     /** @type {Map<string, any>} */
@@ -758,6 +760,8 @@ test('a 64-bit process\'s interfaces have eight-byte slots, traps for the i386 c
             /** @param {number} address @param {number} length */
             readBytes: (address, length)=>(address === 0x5000 ? guidBytes(IID)
                 : new Uint8Array(length)),
+            /** @param {number} address @param {Uint8Array} bytes */
+            writeBytes: (address, bytes)=>void [address, bytes],
         },
         /** @param {string} name @param {any} fn */
         register: (name, fn)=>{
@@ -780,6 +784,7 @@ test('a 64-bit process\'s interfaces have eight-byte slots, traps for the i386 c
         { name: 'Scale', argBytes: 8, floats: { 1: /** @type {'f32'} */ ('f32') } },
         { name: 'Seek', argBytes: 20, quadwords: [1] },
         { name: 'Register', argBytes: 24, structs: { 1: 4 } },
+        { name: 'Fill', argBytes: 8, guest: Object.assign(()=>0x7100, { wide: true }) },
     ];
     const longObject = {
         /** @param {string} id */
@@ -795,8 +800,9 @@ test('a 64-bit process\'s interfaces have eight-byte slots, traps for the i386 c
     const slots = [0, 1, 2, 3, 4].map(index=>[words.get(vtable + index * 8),
         words.get(vtable + index * 8 + 4)]);
     assert.ok(slots.every(([, high])=>high === 0), 'each slot eight bytes, its high half zero');
-    assert.deepEqual(slots.map(([low])=>low), [1, 2, 3, 4, 5].map(index=>0x1000 + index * 0x10),
-        'every slot a trap: AddRef, Release and the guest method too');
+    assert.deepEqual(slots.map(([low])=>low), [0x1010, 0x6000, 0x6000, 0x1040, 0x1050],
+        'AddRef and Release the x86-64 counts, every other slot a trap: the i386 guest method too');
+    assert.equal(words.get(vtable + 7 * 8), 0x7100, 'a guest method built for the width is code');
     assert.deepEqual(registered.get(`${IID}::Scale`).floats, { 1: 'f32' },
         'a float argument is declared to the bridge');
     assert.deepEqual(registered.get(`${IID}::Seek`).quadwords, [1],

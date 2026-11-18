@@ -137,6 +137,38 @@ const COUNT_CODE = {
 };
 
 /**
+ * The same in a 64-bit process, where `this` comes in RCX and the interface is
+ * three quadwords, the count's word at [this+16]. RCX and RSP are left as they
+ * came, so the slow way reaches the trap with the call as it was made; the
+ * work is done in RAX, R10 and R11, which the convention lets a callee change
+ * and the trap's stub does not read.
+ *
+ *     AddRef(this)                       Release(this)
+ *     mov r10, [rcx+16]                  mov r10, [rcx+16]
+ *     test r10, r10                      test r10, r10
+ *     jz host                            jz host
+ *   again:                             again:
+ *     mov eax, [r10]                     mov eax, [r10]
+ *     test eax, eax                      cmp eax, 2
+ *     jz host                            jb host
+ *     lea r11d, [rax+1]                  lea r11d, [rax-1]
+ *     lock cmpxchg [r10], r11d           lock cmpxchg [r10], r11d
+ *     jne again                          jne again
+ *     mov eax, r11d                      mov eax, r11d
+ *     ret                                ret
+ *   host:                              host:
+ *     jmp trap                           jmp trap
+ */
+const COUNT_CODE_64 = {
+    addRef: [0x4c, 0x8b, 0x51, 0x10, 0x4d, 0x85, 0xd2, 0x74, 0x16,
+        0x41, 0x8b, 0x02, 0x85, 0xc0, 0x74, 0x0f, 0x44, 0x8d, 0x58, 0x01,
+        0xf0, 0x45, 0x0f, 0xb1, 0x1a, 0x75, 0xee, 0x44, 0x89, 0xd8, 0xc3],
+    release: [0x4c, 0x8b, 0x51, 0x10, 0x4d, 0x85, 0xd2, 0x74, 0x17,
+        0x41, 0x8b, 0x02, 0x83, 0xf8, 0x02, 0x72, 0x0f, 0x44, 0x8d, 0x58, 0xff,
+        0xf0, 0x45, 0x0f, 0xb1, 0x1a, 0x75, 0xed, 0x44, 0x89, 0xd8, 0xc3],
+};
+
+/**
  * @param {Object} deps
  * @param {any} deps.memory
  * @param {(name: string, fn: any) => number} deps.register  Bridge registration.
@@ -146,9 +178,10 @@ const COUNT_CODE = {
  *        `allocateCode`, where it is given, places IUnknown's count routines;
  *        `allocateTable` the method tables, on pages of data rather than code.
  * @param {() => boolean} [deps.long]  Whether the process is a 64-bit one, asked
- *        when a table is laid out: its slots are eight bytes, and the methods
- *        and counts that run in the guest are traps there unless built for
- *        its width (a `wide` guest builder).
+ *        when a table is laid out: its slots are eight bytes, its counts run
+ *        in the guest as x86-64 (`COUNT_CODE_64`), and its methods that run in
+ *        the guest are traps there unless built for its width (a `wide` guest
+ *        builder).
  * @param {(label: string) => void} [deps.unimplemented]  told of a call to a method an
  *        interface has a slot for and no implementation of, which answers E_NOTIMPL
  */
@@ -248,13 +281,14 @@ export function createVtables({ memory, register, heap, long = ()=>false, unimpl
     let refusedBecause = null;
 
     /**
-     * AddRef or Release in the guest (`COUNT_CODE`), falling back on `trap`;
-     * the trap itself where there is nowhere to put code.
+     * AddRef or Release in the guest (`COUNT_CODE`, `COUNT_CODE_64` in a 64-bit
+     * process), falling back on `trap`; the trap itself where there is nowhere
+     * to put code.
      *
      * @param {'addRef' | 'release'} which @param {number} trap
      */
     function countRoutine(which, trap){
-        const code = COUNT_CODE[which];
+        const code = (long() ? COUNT_CODE_64 : COUNT_CODE)[which];
         const at = heap.allocateCode?.(code.length + 5) ?? 0;
         if (at === 0)
         {
@@ -361,7 +395,7 @@ export function createVtables({ memory, register, heap, long = ()=>false, unimpl
                 {
                     inPlace.set(trap, method.inPlace);
                 }
-                return (method.builtin === 'addRef' || method.builtin === 'release') && !long()
+                return method.builtin === 'addRef' || method.builtin === 'release'
                     ? countRoutine(method.builtin, trap)
                     : trap;
             });
