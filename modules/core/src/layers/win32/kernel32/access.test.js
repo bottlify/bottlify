@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { SYNCHRONIZE, allows, grantedAccess } from './access.js';
+import { SYNCHRONIZE, allows, duplicateAccess, grantedAccess } from './access.js';
 
 test('a mutex opened by name refuses no rights and rights it does not have', ()=>{
     // Wine's kernel32 sync.c test_mutex: OpenMutex of each single bit, and
@@ -49,4 +49,21 @@ test('a thread\'s rights: generic ones mapped, and a query right carries its lim
     const read = grantedAccess('thread', 0x80000000);
     assert.deepEqual(read, { granted: 0x20848 }, 'GENERIC_READ: the context and the information');
     assert.ok('granted' in read && !allows(read.granted, SYNCHRONIZE));
+});
+
+test('a section\'s generic rights are its FILE_MAP_* rights; a duplicate may ask for none', ()=>{
+    // winnt.h's SECTION_* generic mapping: read is QUERY and MAP_READ, write
+    // MAP_WRITE, execute MAP_EXECUTE, each with READ_CONTROL.
+    assert.deepEqual(grantedAccess('mapping', 0x80000000), { granted: 0x20005 });
+    assert.deepEqual(grantedAccess('mapping', 0x40000000), { granted: 0x20002 });
+    assert.deepEqual(grantedAccess('mapping', 0x20000000), { granted: 0x20008 });
+    assert.deepEqual(grantedAccess('mapping', 0x0004), { granted: 0x0004 }, 'FILE_MAP_READ');
+    assert.deepEqual(grantedAccess('mapping', 0x000f001f), { granted: 0x000f001f },
+        'SECTION_ALL_ACCESS: every right of its own, no SYNCHRONIZE');
+    assert.ok('error' in grantedAccess('mapping', 0), 'an open by name asks for something');
+    assert.deepEqual(duplicateAccess('mapping', 0, null, false), { granted: 0 });
+    assert.deepEqual(duplicateAccess('file', 0, null, false), { granted: 0 },
+        'whatever the kind');
+    assert.deepEqual(duplicateAccess('mapping', 0x0004, null, false), { granted: 0x0004 });
+    assert.deepEqual(duplicateAccess('mapping', 0x0004, 0x0006, true), { granted: 0x0006 });
 });
