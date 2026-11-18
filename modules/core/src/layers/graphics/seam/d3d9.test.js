@@ -2659,6 +2659,7 @@ test('the guest\'s TestCooperativeLevel and a query\'s methods answer and write 
         setU32: (/** @type {number} */ at, /** @type {number} */ value)=>
             memory.writeU32(at, value >>> 0),
         host: ()=>HANDED,
+        pointerBytes: 4,
     });
     for (const name of ['TestCooperativeLevel'])
     {
@@ -2735,6 +2736,7 @@ test('an occlusion count that does not come leaves one poll in so many to the ho
         setU32: (/** @type {number} */ at, /** @type {number} */ value)=>
             memory.writeU32(at, value >>> 0),
         host: ()=>HANDED,
+        pointerBytes: 4,
     });
     const out = 0x3200;
     assert.equal(h.device(device, 'CreateQuery', [D3DQUERYTYPE.OCCLUSION, out]), D3D_OK);
@@ -2778,6 +2780,7 @@ test('an occlusion count told as it comes is polled in the guest as the host ans
         setU32: (/** @type {number} */ at, /** @type {number} */ value)=>
             memory.writeU32(at, value >>> 0),
         host: ()=>HANDED,
+        pointerBytes: 4,
     });
     const out = 0x3200;
     assert.equal(h.device(device, 'CreateQuery', [D3DQUERYTYPE.OCCLUSION, out]), D3D_OK);
@@ -2928,6 +2931,7 @@ test('an occlusion count the side that draws writes into the guest answers as th
         setU32: (/** @type {number} */ at, /** @type {number} */ value)=>
             memory.writeU32(at, value >>> 0),
         host: ()=>HANDED,
+        pointerBytes: 4,
     });
     const out = 0x3200;
     assert.equal(h.device(device, 'CreateQuery', [D3DQUERYTYPE.OCCLUSION, out]), D3D_OK);

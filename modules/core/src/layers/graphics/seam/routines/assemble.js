@@ -100,6 +100,17 @@ const onStack = (opcode, reg, disp)=>(disp < 0x80
     : [...opcode, 0x84 | reg << 3, 0x24, ...dword(disp)]);
 
 /**
+ * The ModR/M bytes of `[base+disp]` with `reg`, the shortest form: none, a
+ * byte or four of displacement. `base` is neither ESP nor EBP, which need
+ * other forms.
+ *
+ * @param {number} reg @param {number} base @param {number} disp
+ */
+const memoryOperand = (reg, base, disp)=>(disp === 0 ? [reg << 3 | base]
+    : disp >= -0x80 && disp < 0x80 ? [0x40 | reg << 3 | base, disp & 0xff]
+        : [0x80 | reg << 3 | base, ...dword(disp)]);
+
+/**
  * What a routine's code depends on the process's width for, so that one
  * source builds a routine for a 32-bit process and a 64-bit one alike.
  *
@@ -143,7 +154,7 @@ export const I386 = Object.freeze({
     argOp: (opcode, reg, index, pushed = 0)=>onStack(opcode, reg, 4 * (1 + index + pushed)),
     highZero: ()=>[],
     blockOf: (dst, src)=>[0x8b, 0x40 | dst << 3 | src, 4],
-    storePointer: (base, src, disp)=>[0x89, 0x80 | src << 3 | base, ...dword(disp)],
+    storePointer: (base, src, disp)=>[0x89, ...memoryOperand(src, base, disp)],
     ret: args=>[0xc2, 4 * args, 0x00],
     entry: ()=>[],
     reload: ()=>[],
@@ -163,7 +174,7 @@ export const X64 = Object.freeze({
         { jcc: 0x75, to: slow, near: true },                         // jne slow
     ],
     blockOf: (dst, src)=>[0x8b, 0x40 | dst << 3 | src, 8],
-    storePointer: (base, src, disp)=>[0x48, 0x89, 0x80 | src << 3 | base, ...dword(disp)],
+    storePointer: (base, src, disp)=>[0x48, 0x89, ...memoryOperand(src, base, disp)],
     ret: ()=>[0xc3],
     entry: ()=>HOMES.flatMap(([rex, reg, disp])=>onStack([rex, 0x89], reg, disp)),
     reload: ()=>HOMES.flatMap(([rex, reg, disp])=>onStack([rex, 0x8b], reg, disp)),

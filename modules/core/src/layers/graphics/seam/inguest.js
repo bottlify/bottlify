@@ -22,13 +22,18 @@
  *   millions of times a minute -- but for one poll in so many, which is the
  *   host's (`QUERY.BUDGET`).
  *
- * The offsets are the blocks' (`shadow.js`); the test holds them to it.
+ * The offsets are the blocks' (`block.js`); the test holds them to it. An
+ * interface's block is the word after its method table's: `self + 4` in a
+ * 32-bit process, `self + 8` in a 64-bit one (`pointerBytes`), whose
+ * x86-64 build is `inguest.x64.js`.
  */
 
 /**
- * The guest's memory: none of these touches the x87's control or status words.
+ * The guest's memory and the pointer's size: none of these touches the x87's
+ * control or status words.
  *
- * @typedef {import('../../win32/msvcrt/guest-code.js').GuestMemory} Guest
+ * @typedef {import('../../win32/msvcrt/guest-code.js').GuestMemory
+ *     & Pick<import('../../win32/msvcrt/guest-code.js').Guest, 'pointerBytes'>} Guest
  */
 /** @typedef {import('../../win32/msvcrt/guest-code.js').u32} u32 */
 
@@ -63,8 +68,8 @@ const FLAG_SLOW_PATH = 1;
  * @param {Guest} guest @param {u32} self
  * @returns {u32}
  */
-export function TestCooperativeLevel({ u32, host }, self){
-    const block = u32(self + 4);
+export function TestCooperativeLevel({ u32, host, pointerBytes }, self){
+    const block = u32(self + pointerBytes);
     if (block === 0 || (u32(block) & FLAG_SLOW_PATH) !== 0 || u32(block + COOPERATIVE) !== 0)
     {
         return host();
@@ -79,8 +84,8 @@ export function TestCooperativeLevel({ u32, host }, self){
  * @param {Guest} guest @param {u32} self
  * @returns {u32}
  */
-export function QueryGetType({ u32, host }, self){
-    const block = u32(self + 4);
+export function QueryGetType({ u32, host, pointerBytes }, self){
+    const block = u32(self + pointerBytes);
     if (block === 0)
     {
         return host();
@@ -96,8 +101,8 @@ export function QueryGetType({ u32, host }, self){
  * @param {Guest} guest @param {u32} self
  * @returns {u32}
  */
-export function QueryGetDataSize({ u32, host }, self){
-    if (u32(self + 4) === 0)
+export function QueryGetDataSize({ u32, host, pointerBytes }, self){
+    if (u32(self + pointerBytes) === 0)
     {
         return host();
     }
@@ -112,8 +117,8 @@ export function QueryGetDataSize({ u32, host }, self){
  * @param {Guest} guest @param {u32} self @param {u32} flags
  * @returns {u32}
  */
-export function QueryIssue({ u32, host }, self, flags){
-    const block = u32(self + 4);
+export function QueryIssue({ u32, host, pointerBytes }, self, flags){
+    const block = u32(self + pointerBytes);
     if (block === 0 || u32(block + QUERY_TYPE) !== D3DQUERYTYPE_EVENT
         || (flags & D3DISSUE_BEGIN) !== 0)
     {
@@ -135,8 +140,8 @@ export function QueryIssue({ u32, host }, self, flags){
  * @param {u32} flags
  * @returns {u32}
  */
-export function QueryGetData({ u32, setU32, host }, self, data, size, flags){
-    const block = u32(self + 4);
+export function QueryGetData({ u32, setU32, host, pointerBytes }, self, data, size, flags){
+    const block = u32(self + pointerBytes);
     if (block === 0 || (size !== 0 && size < 4) || flags > 1)
     {
         return host();

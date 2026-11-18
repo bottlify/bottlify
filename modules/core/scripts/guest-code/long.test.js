@@ -260,6 +260,64 @@ function floatBits(value){
 }
 
 /**
+ * The modules whose functions take an interface: `self` points at an object
+ * whose word after the method table's (`self + pointerBytes`) is its block,
+ * and they read the block's words. Random bytes hold no pointer, so every
+ * input ran out of bounds; these get an area of objects and blocks instead.
+ */
+const OBJECT_MODULES = new Set(['layers/graphics/seam/inguest.js']);
+
+/** A method's flags and sizes: none, each of a few bits, a size of four and of eight. */
+const FLAGS = [0, 1, 2, 3, 4, 8];
+/** The small words a block holds: nulls, states, query types, counts. */
+const SMALL = [0, 1, 2, 3, 4, 8, 8, 8, 9, 9, 9];
+/** Room past a block's start for the farthest word a function reads in it. */
+const BLOCK_REACH = 0x1600;
+
+/**
+ * An area of objects and blocks: each aligned dword a pointer into the area,
+ * low enough that a block read from it lies within, a small word (`SMALL`),
+ * or the bytes `area` made.
+ *
+ * @param {() => number} next
+ * @returns {{ bytes: Uint8Array, twins: [number, number][] }}
+ */
+function objectArea(next){
+    const made = area(next);
+    const view = new DataView(made.bytes.buffer);
+    for (let at = 0; at < AREA; at += 4)
+    {
+        const pick = next() % 8;
+        if (pick < 3)
+        {
+            view.setUint32(at, DATA + (next() % (AREA - BLOCK_REACH) & ~3), true);
+        }
+        else if (pick < 7)
+        {
+            view.setUint32(at, SMALL[next() % SMALL.length], true);
+        }
+    }
+    return made;
+}
+
+/**
+ * An interface's arguments: `self` an aligned pointer into the area most of
+ * the time, the rest as `argumentsOf` makes them or flags
+ * and sizes as a method takes them (`FLAGS`), three times in four.
+ *
+ * @param {() => number} next @param {number} count @param {[number, number][]} twins
+ */
+function objectArgumentsOf(next, count, twins){
+    const given = argumentsOf(next, count, twins).map((value, i)=>(i > 0 && next() % 4 !== 0
+        ? FLAGS[next() % FLAGS.length] : value));
+    if (next() % 8 !== 0)
+    {
+        given[0] = DATA + (next() % (AREA - BLOCK_REACH) & ~3);
+    }
+    return given;
+}
+
+/**
  * Whether a run of the JavaScript failed for the input's sake: an address
  * past the test's memory, which the x86-64 would reach as well.
  *
@@ -296,7 +354,9 @@ test('each function\'s x86-64 answers as its JavaScript, on inputs of every shap
             }
             const next = random(0x64 + index);
             // A few areas, each input in one of them.
-            const areas = Array.from({ length: 8 }, ()=>area(next));
+            const objects = OBJECT_MODULES.has(path);
+            const areas = Array.from({ length: 8 }, ()=>(objects ? objectArea : area)(next));
+            const argumentsFor = objects ? objectArgumentsOf : argumentsOf;
             let ran = 0;
             let handed = 0;
             let tried = 0;
@@ -305,7 +365,7 @@ test('each function\'s x86-64 answers as its JavaScript, on inputs of every shap
             for (; tried < 4000 && ran < 200; tried++)
             {
                 const { bytes, twins } = areas[next() % areas.length];
-                const stack = wordsOf(next, fn.params, argumentsOf(next, fn.params.length, twins));
+                const stack = wordsOf(next, fn.params, argumentsFor(next, fn.params.length, twins));
                 // A function that names no memory is run with none.
                 const memory = /** @type {[number, Uint8Array][]} */ (fn.uses.some((
                     /** @type {string} */ use)=>use !== 'host') ? [[DATA, bytes]] : []);

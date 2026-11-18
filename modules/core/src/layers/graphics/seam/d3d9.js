@@ -95,7 +95,8 @@ import { I386, X64 } from './routines/assemble.js';
 import {
     lockCode, moveCopyCode, unlockCode, lockLevelCode, unlockLevelCode,
 } from './routines/locks.js';
-import { COMPILED as IN_GUEST } from './inguest.x86.js';
+import { COMPILED as IN_GUEST_I386 } from './inguest.x86.js';
+import { COMPILED as IN_GUEST_X64 } from './inguest.x64.js';
 import { D3DTSS9 } from '../d3d9/samplerstates.js';
 import { COMMANDS, commandObjects, commandSlot } from '../d3d9/commands.js';
 import { loudRefusals } from './refusals.js';
@@ -310,6 +311,8 @@ export function createDirect3D9Seam(
      * @returns {F & { wide: true }}
      */
     const builtWide = build=>Object.assign(build, { wide: /** @type {true} */ (true) });
+    /** The methods compiled from `inguest.js`, for the process's width. */
+    const IN_GUEST = long ? IN_GUEST_X64 : IN_GUEST_I386;
     /**
      * An interface, an address or a handle written to an out parameter: in a
      * 64-bit process the parameter is eight bytes and its high half is
@@ -922,8 +925,9 @@ export function createDirect3D9Seam(
             return queryAs(publisher, fields, device, deviceInterfacesOf(device), id, out);
         },
     }, guestsBut(levelGroup, allocate
-        ? { GetDesc: (/** @type {{ trap: number }} */ { trap })=>
-            placeCode(at=>getSurfaceDescCode(at, trap)), ...levelGuests('surface') }
+        ? { GetDesc: builtWide((/** @type {{ trap: number }} */ { trap })=>
+            placeCode(at=>getSurfaceDescCode(at, trap, routineWidth))),
+        ...levelGuests('surface') }
         : {}), privateData.released)];
 
     /**
@@ -1082,10 +1086,11 @@ export function createDirect3D9Seam(
     ];
     const textureInterfaces = textureFamily(IID_IDirect3DTexture9, IDIRECT3DTEXTURE9_SLOTS,
         textureMethods, guestsBut(levelGroup, allocate
-            ? { GetSurfaceLevel: (/** @type {{ trap: number }} */ { trap })=>
-                placeCode(at=>getSurfaceLevelCode(at, trap)),
-            GetLevelDesc: (/** @type {{ trap: number }} */ { trap })=>
-                placeCode(at=>getLevelDescCode(at, trap)), ...levelGuests('texture') }
+            ? { GetSurfaceLevel: builtWide((/** @type {{ trap: number }} */ { trap })=>
+                placeCode(at=>getSurfaceLevelCode(at, trap, routineWidth))),
+            GetLevelDesc: builtWide((/** @type {{ trap: number }} */ { trap })=>
+                placeCode(at=>getLevelDescCode(at, trap, routineWidth))),
+            ...levelGuests('texture') }
             : {}));
     const cubeTextureInterfaces = textureFamily(IID_IDirect3DCubeTexture9,
         IDIRECT3DCUBETEXTURE9_SLOTS, cubeTextureMethods);
@@ -1567,8 +1572,8 @@ export function createDirect3D9Seam(
         },
     }, guestsBut('queries', allocate
         ? Object.fromEntries(['GetType', 'GetDataSize', 'Issue', 'GetData'].map(name=>[name,
-            (/** @type {{ trap: number }} */ { trap })=>placeCode(at=>compiledAt(
-                IN_GUEST[/** @type {keyof typeof IN_GUEST} */ (`Query${name}`)], at, trap))]))
+            builtWide((/** @type {{ trap: number }} */ { trap })=>placeCode(at=>compiledAt(
+                IN_GUEST[/** @type {keyof typeof IN_GUEST} */ (`Query${name}`)], at, trap)))]))
         : {}))];
 
     /** @param {number} address */
@@ -3166,17 +3171,20 @@ export function createDirect3D9Seam(
         ? {
             GetRenderState: builtWide(({ trap })=>placeCode(at=>getRenderStateCode(at, trap,
                 routineWidth))),
-            GetTransform: ({ trap })=>placeCode(at=>getTransformCode(at, trap)),
-            GetTextureStageState: ({ trap })=>placeCode(at=>getTextureStageStateCode(at, trap,
-                STAGE_STATE_TYPES_9)),
-            GetViewport: ({ trap })=>placeCode(at=>getViewportCode(at, trap)),
-            GetSamplerState: ({ trap })=>placeCode(at=>getSamplerStateCode(at, trap)),
-            GetRenderTarget: ({ trap })=>placeCode(at=>getTargetCode(at, trap,
-                { depth: false, indexed: true })),
-            GetDepthStencilSurface: ({ trap })=>placeCode(at=>getTargetCode(at, trap,
-                { depth: true, indexed: false })),
-            TestCooperativeLevel: ({ trap })=>placeCode(at=>compiledAt(
-                IN_GUEST.TestCooperativeLevel, at, trap)),
+            GetTransform: builtWide(({ trap })=>placeCode(at=>getTransformCode(at, trap, false,
+                routineWidth))),
+            GetTextureStageState: builtWide(({ trap })=>placeCode(at=>getTextureStageStateCode(
+                at, trap, STAGE_STATE_TYPES_9, routineWidth))),
+            GetViewport: builtWide(({ trap })=>placeCode(at=>getViewportCode(at, trap,
+                routineWidth))),
+            GetSamplerState: builtWide(({ trap })=>placeCode(at=>getSamplerStateCode(at, trap,
+                routineWidth))),
+            GetRenderTarget: builtWide(({ trap })=>placeCode(at=>getTargetCode(at, trap,
+                { depth: false, indexed: true }, routineWidth))),
+            GetDepthStencilSurface: builtWide(({ trap })=>placeCode(at=>getTargetCode(at, trap,
+                { depth: true, indexed: false }, routineWidth))),
+            TestCooperativeLevel: builtWide(({ trap })=>placeCode(at=>compiledAt(
+                IN_GUEST.TestCooperativeLevel, at, trap))),
             ...Object.fromEntries(Object.entries(COMMANDS).map(([name, shape])=>[name,
                 (/** @type {{ trap: number }} */ { trap })=>placeCode(at=>commandCode(at, trap,
                     { ...shape, slot: commandSlot(name), mirror: COMMAND_MIRRORS[name] }))])),
