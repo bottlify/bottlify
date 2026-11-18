@@ -97,6 +97,27 @@ test('D3DX10CreateTextureFromMemory makes a 2D texture with the full chain throu
     assert.deepEqual(calls[0].data.map(([at])=>at - calls[0].data[0][0]), [0, 32, 40]);
 });
 
+test('D3DX10CreateTextureFromResource takes a name past 2 GiB as a name, not a number', async()=>{
+    // The bridge hands a dword argument as a signed number: a name string's address past 2 GiB,
+    // in a program linked /LARGEADDRESSAWARE, is negative there, and `name < 0x10000` took it
+    // for MAKEINTRESOURCE's number.
+    const { host, device, memory } = machine();
+    /** @type {unknown[]} */
+    const asked = [];
+    // The low megabyte stands for every address: 0x9000_8000 reads what 0x8000 holds.
+    host.readMemory = (/** @type {number} */ at, /** @type {number} */ length)=>
+        memory.subarray((at >>> 0) & 0xfffff, ((at >>> 0) & 0xfffff) + length);
+    /** @type {any} */ (host).resource = async(/** @type {number} */ _, /** @type {unknown} */ name)=>{
+        asked.push(name);
+        return null;
+    };
+    const fns = createD3dx10Functions(host, 34);
+    memory.set([0x54, 0x45, 0x58, 0], 0x8000);
+    await fns.D3DX10CreateTextureFromResourceA.handler([device, 0x400000, 0x9000_8000 | 0, 0, 0,
+        0x200, 0x204]);
+    assert.deepEqual(asked, ['TEX']);
+});
+
 test('D3DX10GetImageInfoFromMemory says a DX10 DDS file\'s own DXGI format', async()=>{
     // 3DMark Vantage's lookup table: 256x1 R8_UNORM, no mip-count flag.
     const { host, view, memory } = machine();
