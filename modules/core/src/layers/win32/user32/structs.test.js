@@ -169,6 +169,40 @@ test('a 64-bit field widens a dword as its type does: a handle and an LPARAM by 
     assert.equal(view.getUint32(0x100 + 32, true), 4);
 });
 
+test('a 64-bit pointer field widens a dword by zero: an address past 2 GiB stays itself', ()=>{
+    // A program linked /LARGEADDRESSAWARE is handed addresses past 2 GiB; the window procedure,
+    // the class name, CREATESTRUCT's lpCreateParams and the hook structures' pointers are
+    // addresses there, which sign extension would turn into 0xFFFFFFFF_8...: another address.
+    const memory = fakeMemory(0x400);
+    const L = userLayouts(8);
+    memory.bytes.fill(0xaa);
+    const view = new DataView(memory.bytes.buffer);
+    const high = 0x9000_1000;
+    writeWindowClass(memory, 0x40, { style: 0, wndProc: high, classExtra: 0, windowExtra: 0,
+        instance: high + 0x1000, icon: 0, cursor: 0, background: 0, menuName: high + 0x2000,
+        className: high + 0x3000, iconSm: 0 }, L, L.WNDCLASSEXA);
+    for (const [name, value] of /** @type {[string, number][]} */ ([['lpfnWndProc', high],
+        ['hInstance', high + 0x1000], ['lpszMenuName', high + 0x2000],
+        ['lpszClassName', high + 0x3000]]))
+    {
+        assert.equal(view.getBigUint64(0x40 + L.WNDCLASSEXA[name], true), BigInt(value), name);
+    }
+    writeFields(memory, 0x100, L, L.CREATESTRUCTA, { lpCreateParams: high, hInstance: high,
+        hwndParent: -1, lpszName: high + 4, lpszClass: high + 8 });
+    for (const [name, value] of /** @type {[string, number][]} */ ([['lpCreateParams', high],
+        ['hInstance', high], ['lpszName', high + 4], ['lpszClass', high + 8]]))
+    {
+        assert.equal(view.getBigUint64(0x100 + L.CREATESTRUCTA[name], true), BigInt(value), name);
+    }
+    assert.equal(view.getBigInt64(0x100 + L.CREATESTRUCTA.hwndParent, true), -1n,
+        'a handle keeps its sign');
+    writeFields(memory, 0x200, L, L.CBT_CREATEWNDA, { lpcs: high, hwndInsertAfter: -2 });
+    assert.equal(view.getBigUint64(0x200 + L.CBT_CREATEWNDA.lpcs, true), BigInt(high));
+    assert.equal(view.getBigInt64(0x200 + L.CBT_CREATEWNDA.hwndInsertAfter, true), -2n);
+    writeFields(memory, 0x300, L, L.NCCALCSIZE_PARAMS, { lppos: high });
+    assert.equal(view.getBigUint64(0x300 + L.NCCALCSIZE_PARAMS.lppos, true), BigInt(high));
+});
+
 test('a class written back at 64 bits reads the same way it was read', ()=>{
     const memory = fakeMemory();
     const L = userLayouts(8);

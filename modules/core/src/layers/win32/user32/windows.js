@@ -3512,8 +3512,13 @@ export function createWindowFunctions(host){
 
     /**
      * A pointer-sized long of a 64-bit process's window: eight of its extra
-     * bytes whole, or a field GWLP_ names -- a pointer, a handle, a style --
-     * sign-extended from the dword the record keeps, as RAX is.
+     * bytes whole, or a field GWLP_ names. The procedure and the module are
+     * addresses, zero-extended: one past 2 GiB in a program linked
+     * /LARGEADDRESSAWARE is itself, not 0xFFFFFFFF_8... (a procedure's handle,
+     * 0xFFFFxxxx, is ULONG_PTR-wide as Wine's WINPROC_HANDLE is). USERDATA
+     * and ID are LONG_PTRs: whole where SetWindowLongPtr set them
+     * (`longHigh`), a LONG set through SetWindowLong sign-extended; a handle
+     * and a style sign-extended, as RAX is.
      *
      * @param {any} record @param {number} index
      * @param {boolean} [unicode]  Read through GetWindowLongPtrW: a procedure is
@@ -3526,7 +3531,14 @@ export function createWindowFunctions(host){
         {
             return at + 8 <= record.extra.byteLength ? record.extra.getBigUint64(at, true) : 0n;
         }
-        return BigInt.asUintN(64, BigInt(readLong(record, index, unicode) | 0));
+        const low = readLong(record, index, unicode) >>> 0;
+        if (at === GWL_WNDPROC || at === GWL_HINSTANCE)
+        {
+            return BigInt(low);
+        }
+        const high = record.longHigh?.get(at);
+        return high !== undefined ? BigInt(high) << 32n | BigInt(low)
+            : BigInt.asUintN(64, BigInt(low | 0));
     };
 
     /**
@@ -3547,8 +3559,17 @@ export function createWindowFunctions(host){
         const at = index | 0;
         if (at < 0)
         {
-            return andThen(setLong(record, index, low, unicode),
-                done=>(done === false ? 0n : previous));
+            return andThen(setLong(record, index, low, unicode), done=>{
+                if (done === false)
+                {
+                    return 0n;
+                }
+                if (at === GWL_USERDATA || at === GWL_ID)
+                {
+                    (record.longHigh ??= new Map()).set(at, high >>> 0);
+                }
+                return previous;
+            });
         }
         if (at + 8 <= record.extra.byteLength)
         {
@@ -3645,6 +3666,7 @@ export function createWindowFunctions(host){
             }
             case GWL_ID:
                 record.id = value >>> 0;
+                record.longHigh?.delete(GWL_ID);
                 return;
             case GWL_STYLE:
                 // A top-level window clips its siblings whatever it is given,
@@ -3669,6 +3691,7 @@ export function createWindowFunctions(host){
                 return;
             case GWL_USERDATA:
                 record.userData = value >>> 0;
+                record.longHigh?.delete(GWL_USERDATA);
                 return;
             case GWL_HINSTANCE:
                 record.instance = value >>> 0;
