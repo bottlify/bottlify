@@ -170,6 +170,88 @@ export const X64 = Object.freeze({
 });
 
 /**
+ * A part of a routine whose bytes depend on the process's width, written
+ * where the routine reads an argument, checks a pointer argument's upper
+ * half, finds an object's block or its count, or returns; `routine` lays
+ * each out for its `Width`. A routine's pieces made apart from it - a
+ * command's mirror, a guard - say so with these, and are the same data at
+ * both widths.
+ *
+ * @typedef {{ argOp: number[], reg: number, index: number, tail: number[], pushed: number }
+ *     | { high: number, to: string, pushed: number }
+ *     | { block: [number, number] } | { count: [number, number] } | { ret: number }} Wide
+ * @typedef {number[] | { label: string } | { jcc: number, to: string, near?: boolean }
+ *     | Wide} Part
+ */
+
+/**
+ * `op reg, argument` or `op argument, reg` - the ModR/M form of `opcode` with
+ * argument `index` (`this` the first of a method) as its memory operand, then
+ * `tail` (an immediate) - with `pushed` words pushed since the entry.
+ *
+ * @param {number[]} opcode @param {number} reg @param {number} index
+ * @param {number[]} [tail] @param {number} [pushed]
+ * @returns {Wide}
+ */
+export const argAt = (opcode, reg, index, tail = [], pushed = 0)=>({ argOp: opcode, reg, index,
+    tail, pushed });
+
+/**
+ * To `to` where argument `index`'s upper half is not zero: a pointer the
+ * routine reads through or records must be a guest address below 4 GiB.
+ * Nothing in a 32-bit process.
+ *
+ * @param {number} index @param {string} to @param {number} [pushed]
+ * @returns {Wide}
+ */
+export const highAt = (index, to, pushed = 0)=>({ high: index, to, pushed });
+
+/** `mov dst, [src + word]`: an interface's block. @param {number} dst @param {number} src */
+export const blockAt = (dst, src)=>/** @type {Wide} */ ({ block: [dst, src] });
+
+/**
+ * `mov dst, [src + 2*word]`: the word an interface's count is kept in, the
+ * third of its block (`bridge/internal/vtable.js`).
+ *
+ * @param {number} dst @param {number} src
+ */
+export const countAt = (dst, src)=>/** @type {Wide} */ ({ count: [dst, src] });
+
+/** The return of a method of `args` arguments, `this` among them. @param {number} args */
+export const retOf = args=>/** @type {Wide} */ ({ ret: args });
+
+/**
+ * A routine's parts with each `Wide` one laid out for `width`.
+ *
+ * @param {Part[]} parts @param {Width} width
+ * @returns {(number[] | { label: string } | { jcc: number, to: string, near?: boolean })[]}
+ */
+export const resolveParts = (parts, width)=>parts.flatMap(part=>{
+    if (Array.isArray(part) || 'label' in part || 'jcc' in part)
+    {
+        return [part];
+    }
+    if ('argOp' in part)
+    {
+        return [[...width.argOp(part.argOp, part.reg, part.index, part.pushed), ...part.tail]];
+    }
+    if ('high' in part)
+    {
+        return width.highZero(part.high, part.to, part.pushed);
+    }
+    if ('block' in part)
+    {
+        return [width.blockOf(...part.block)];
+    }
+    if ('count' in part)
+    {
+        const [dst, src] = part.count;
+        return [[0x8b, 0x40 | dst << 3 | src, 2 * width.word]];
+    }
+    return [width.ret(part.ret)];
+});
+
+/**
  * What every routine starts with: the object's block into ECX, and the two
  * cases that are the host's whatever the call -- no block, or the host's flag.
  *
@@ -313,12 +395,13 @@ export const threadPrologue = (slow = 'slow')=>[
  *     test dword [ecx], 1
  *     jnz slow
  *
- * @param {'rect' | 'box'} kind @param {string} slow
- * @returns {(number[] | { jcc: number, to: string })[]}
+ * @param {'rect' | 'box'} kind @param {string} slow @param {Width} [width]
+ * @returns {Part[]}
  */
-export const dirtyPrologue = (kind, slow)=>[
-    ...prologue(slow),
-    [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
+export const dirtyPrologue = (kind, slow, width = I386)=>[
+    ...prologue(slow, FLAG_SLOW_PATH, width),
+    highAt(1, slow),                                         // (64 bits: below 4 GiB)
+    argAt([0x8b], EAX, 1),                                   // mov eax, [esp+8]
     [0x85, 0xc0],                                            // test eax, eax
     { jcc: 0x74, to: slow },                                 // jz slow
     ...[[8, 0, TEXTURE.WIDTH], [12, 4, TEXTURE.HEIGHT],
@@ -345,15 +428,14 @@ export const TEB_GL_CONTEXT = 0xbf0;
  * label goes on to -- and last the jump to the trap its slow label lands on,
  * the argument registers put back first in a 64-bit process.
  *
- * @param {number} at @param {number} trap
- * @param {(number[] | { label: string } | { jcc: number, to: string, near?: boolean })[]} parts
+ * @param {number} at @param {number} trap @param {Part[]} parts
  * @param {Record<string, number>} [exits]
  * @param {Width} [width]
  */
 export const routine = (at, trap, parts, exits = {}, width = I386)=>{
     const names = Object.keys(exits);
     const reload = width.reload();
-    const body = assemble([width.entry(), ...parts,
+    const body = assemble([width.entry(), ...resolveParts(parts, width),
         ...names.flatMap(name=>[{ label: name }, [0xe9, 0, 0, 0, 0]]), { label: 'slow' }, reload]);
     names.forEach((name, i)=>{
         const from = body.length - reload.length - (names.length - i) * 5;

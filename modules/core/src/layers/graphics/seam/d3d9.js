@@ -1406,9 +1406,10 @@ export function createDirect3D9Seam(
     const touchesDraws = record=>record.vertexDeclaration !== undefined
         || record.indices !== undefined || record.streams.size > 0;
     /** @param {string} name @param {boolean} [staleDraws] */
-    const stateBlockGuest = (name, staleDraws = false)=>(/** @type {{ trap: number }} */ { trap })=>
-        placeCode(at=>commandCode(at, trap, { ...COMMANDS[`StateBlock.${name}`],
-            slot: commandSlot(`StateBlock.${name}`), staleDraws }));
+    const stateBlockGuest = (name, staleDraws = false)=>builtWide(
+        (/** @type {{ trap: number }} */ { trap })=>placeCode(at=>commandCode(at, trap,
+            { ...COMMANDS[`StateBlock.${name}`], slot: commandSlot(`StateBlock.${name}`),
+                staleDraws }, routineWidth)));
     /** @param {boolean} staleDraws */
     const stateBlockDescriptors = staleDraws=>[
         describeResource(IID_IDirect3DStateBlock9, IDIRECT3DSTATEBLOCK9_SLOTS, {
@@ -3178,8 +3179,9 @@ export function createDirect3D9Seam(
             TestCooperativeLevel: ({ trap })=>placeCode(at=>compiledAt(
                 IN_GUEST.TestCooperativeLevel, at, trap)),
             ...Object.fromEntries(Object.entries(COMMANDS).map(([name, shape])=>[name,
-                (/** @type {{ trap: number }} */ { trap })=>placeCode(at=>commandCode(at, trap,
-                    { ...shape, slot: commandSlot(name), mirror: COMMAND_MIRRORS[name] }))])),
+                builtWide((/** @type {{ trap: number }} */ { trap })=>placeCode(at=>commandCode(
+                    at, trap, { ...shape, slot: commandSlot(name), mirror: COMMAND_MIRRORS[name] },
+                    routineWidth)))])),
         }
         : {});
     /**

@@ -13,14 +13,16 @@
 
 import { D3DFVF_RESERVED0 } from '../../d3d8/constants.js';
 import {
-    EBX, ECX, countLeft, dirtyPrologue, dword, letHeldGo, prologue, routine, takeHeld,
-    threadPrologue,
+    EAX, EBX, ECX, EDX, I386, argAt, blockAt, countAt, countLeft, dirtyPrologue, dword, highAt,
+    letHeldGo, prologue, retOf, routine, takeHeld, threadPrologue,
 } from './assemble.js';
 import {
     COMMAND, D3DFMT_D24S8, D3DUSAGE_RENDERTARGET, DRAW, FLAG_DRAW_STALE, FLAG_SLOW_PATH, FLAG_STALE,
     SHADOW, SURFACE, VERTEX_BUFFER7, WORLD_SLOT, WORLD_TYPE,
 } from '../block.js';
 import { ANSWERED_TRANSFORMS, TRANSFORMS_7 } from './getters.js';
+
+/** @typedef {import('./assemble.js').Part} Part */
 
 /**
  * A shape's surface arguments and the usage each must have (`surfaceUsage`).
@@ -41,11 +43,11 @@ export const usagesOf = shape=>{
  * written before.
  *
  * @param {CommandShape} shape
- * @param {(argument: number) => number} at  where an argument is on entry
- * @returns {(number[] | { label: string } | { jcc: number, to: string, near?: boolean })[]}
+ * @param {(argument: number) => number} at  an argument's index on entry (`argAt`)
+ * @returns {Part[]}
  */
 function commandChecks(shape, at){
-    /** @type {(number[] | { label: string } | { jcc: number, to: string, near?: boolean })[]} */
+    /** @type {Part[]} */
     const parts = [];
     if (shape.needs)
     {
@@ -62,7 +64,7 @@ function commandChecks(shape, at){
             { jcc: 0x75, to: 'out', near: true });               // jnz out
     }
     (shape.within ?? []).forEach(({ arg, ranges }, index)=>{
-        parts.push([0x8b, 0x44, 0x24, at(arg)]);                 // mov eax, [esp+arg]
+        parts.push(argAt([0x8b], EAX, at(arg)));                 // mov eax, [esp+arg]
         for (const [low, high] of ranges)
         {
             parts.push(
@@ -79,17 +81,17 @@ function commandChecks(shape, at){
     {
         const { arg, equals, flagsOf, mask } = shape.refusedWhen;
         parts.push(
-            [0x81, 0x7c, 0x24, at(arg), ...dword(equals)],       // cmp dword [esp+arg], equals
+            argAt([0x81], 7, at(arg), dword(equals)),            // cmp dword [esp+arg], equals
             { jcc: 0x75, to: 'paired' },                         // jne paired
-            [0xf7, 0x44, 0x24, at(flagsOf), ...dword(mask)],     // test dword [esp+flags], mask
+            argAt([0xf7], 0, at(flagsOf), dword(mask)),          // test dword [esp+flags], mask
             { jcc: 0x75, to: 'out', near: true },                // jnz out
             { label: 'paired' });
     }
     if (shape.span !== undefined && shape.count)
     {
         parts.push(
-            [0x8b, 0x44, 0x24, at(shape.span)],                  // mov eax, [esp+start]
-            [0x03, 0x44, 0x24, at(shape.count.arg)],             // add eax, [esp+count]
+            argAt([0x8b], EAX, at(shape.span)),                  // mov eax, [esp+start]
+            argAt([0x03], EAX, at(shape.count.arg)),             // add eax, [esp+count]
             { jcc: 0x72, to: 'out', near: true },                // jc out
             [0x3d, ...dword(shape.count.most)],                  // cmp eax, most
             { jcc: 0x77, to: 'out', near: true });               // ja out
@@ -97,16 +99,16 @@ function commandChecks(shape, at){
     if (shape.below)
     {
         parts.push(
-            [0x8b, 0x44, 0x24, at(shape.below.arg)],             // mov eax, [esp+arg]
+            argAt([0x8b], EAX, at(shape.below.arg)),             // mov eax, [esp+arg]
             [0x3b, 0x81, ...dword(shape.below.word)],            // cmp eax, [ecx+word]
             { jcc: 0x73, to: 'out', near: true });               // jae out
     }
     usagesOf(shape).forEach(({ arg, mask, nullable = false }, index)=>{
         parts.push(
-            [0x8b, 0x44, 0x24, at(arg)],                         // mov eax, [esp+arg]
+            argAt([0x8b], EAX, at(arg)),                         // mov eax, [esp+arg]
             [0x85, 0xc0],                                        // test eax, eax
             { jcc: 0x74, to: nullable ? `usable${index}` : 'out', near: true }, // jz usable / out
-            [0x8b, 0x40, 0x04],                                  // mov eax, [eax+4]: its block
+            blockAt(EAX, EAX),                                   // mov eax, [eax+4]: its block
             [0x85, 0xc0],                                        // test eax, eax
             { jcc: 0x74, to: 'out', near: true },                // jz out
             [0x3b, 0x48, SURFACE.OWNER],                         // cmp ecx, [eax+OWNER]
@@ -124,12 +126,12 @@ function commandChecks(shape, at){
         for (const side of [SURFACE.DESC + 24, SURFACE.DESC + 28])
         {
             parts.push(
-                [0x8b, 0x44, 0x24, at(depth)],                   // mov eax, [esp+depth]
+                argAt([0x8b], EAX, at(depth)),                   // mov eax, [esp+depth]
                 [0x85, 0xc0],                                    // test eax, eax
                 { jcc: 0x74, to: 'covered', near: true },        // jz covered: none
-                [0x8b, 0x40, 0x04],                              // mov eax, [eax+4]: its block
-                [0x8b, 0x54, 0x24, at(target)],                  // mov edx, [esp+target]
-                [0x8b, 0x52, 0x04],                              // mov edx, [edx+4]: its block
+                blockAt(EAX, EAX),                               // mov eax, [eax+4]: its block
+                argAt([0x8b], EDX, at(target)),                  // mov edx, [esp+target]
+                blockAt(EDX, EDX),                               // mov edx, [edx+4]: its block
                 [0x8b, 0x52, side],                              // mov edx, [edx+side]
                 [0x39, 0x50, side],                              // cmp [eax+side], edx
                 { jcc: 0x72, to: 'out', near: true });           // jb out: smaller
@@ -139,7 +141,7 @@ function commandChecks(shape, at){
     if (shape.token !== undefined)
     {
         parts.push(
-            [0x8b, 0x44, 0x24, at(shape.token)],                 // mov eax, [esp+token]
+            argAt([0x8b], EAX, at(shape.token)),                 // mov eax, [esp+token]
             [0x3d, ...dword(SHADOW.STATE_BLOCK_TOKENS)],         // cmp eax, 256
             { jcc: 0x73, to: 'out', near: true },                // jae out
             [0x0f, 0xa3, 0x81, ...dword(SHADOW.STATE_BLOCKS)],   // bt [ecx+STATE_BLOCKS], eax
@@ -149,16 +151,16 @@ function commandChecks(shape, at){
     {
         const { buffer, start, count } = shape.vertexRange;
         parts.push(
-            [0x8b, 0x44, 0x24, at(buffer)],                      // mov eax, [esp+buffer]
+            argAt([0x8b], EAX, at(buffer)),                      // mov eax, [esp+buffer]
             [0x85, 0xc0],                                        // test eax, eax
             { jcc: 0x74, to: 'out', near: true },                // jz out
-            [0x8b, 0x40, 0x04],                                  // mov eax, [eax+4]: its block
+            blockAt(EAX, EAX),                                   // mov eax, [eax+4]: its block
             [0x85, 0xc0],                                        // test eax, eax
             { jcc: 0x74, to: 'out', near: true },                // jz out
             [0x83, 0x78, VERTEX_BUFFER7.LOCKED, 0x00],           // cmp dword [eax+LOCKED], 0
             { jcc: 0x75, to: 'out', near: true },                // jne out
-            [0x8b, 0x54, 0x24, at(start)],                       // mov edx, [esp+start]
-            [0x03, 0x54, 0x24, at(count)],                       // add edx, [esp+count]
+            argAt([0x8b], EDX, at(start)),                       // mov edx, [esp+start]
+            argAt([0x03], EDX, at(count)),                       // add edx, [esp+count]
             { jcc: 0x72, to: 'out', near: true },                // jc out
             [0x3b, 0x50, VERTEX_BUFFER7.VERTICES],               // cmp edx, [eax+VERTICES]
             { jcc: 0x77, to: 'out', near: true });               // ja out
@@ -166,7 +168,7 @@ function commandChecks(shape, at){
     if (shape.flagNeeds)
     {
         const { arg, pairs } = shape.flagNeeds;
-        parts.push([0x8b, 0x44, 0x24, at(arg)]);                 // mov eax, [esp+arg]
+        parts.push(argAt([0x8b], EAX, at(arg)));                 // mov eax, [esp+arg]
         pairs.forEach(([flag, bits], index)=>{
             parts.push(
                 [0xa9, ...dword(flag)],                          // test eax, flag
@@ -181,7 +183,7 @@ function commandChecks(shape, at){
     if (shape.validated)
     {
         parts.push(
-            [0x8b, 0x44, 0x24, at(shape.validated.arg)],         // mov eax, [esp+arg]
+            argAt([0x8b], EAX, at(shape.validated.arg)),         // mov eax, [esp+arg]
             [0xa9, ...dword(shape.validated.when)],              // test eax, when
             { jcc: 0x74, to: 'validated', near: true });         // jz validated
         const table = SHADOW.VALIDATED
@@ -230,8 +232,9 @@ export const RECT_BYTES = 16;
  * @property {'empty' | 'any'} [nullable]  the pointer may be null, and is
  *     then recorded as null with nothing copied: with a count of zero alone
  *     ('empty'), or whatever the count ('any')
- * @property {(number[] | { label: string } | { jcc: number, to: string, near?: boolean })[]
- *     } [mirror]  guest code run first, with the block in ECX, that keeps what
+ * @property {readonly number[]} [objects]  the arguments naming an object of the
+ *     device's, as an interface pointer
+ * @property {Part[]} [mirror]  guest code run first, with the block in ECX, that keeps what
  *     a getter in the guest reads current; it may leave for the host through
  *     `out`, and leaves ECX and the stack as it found them
  * @property {{ arg: number, cases: readonly [number, number][], otherwise: number }} [choose]
@@ -329,10 +332,16 @@ export const RECT_BYTES = 16;
  *     pop edi; pop esi; pop ebx
  *     jmp slow
  *
+ * In a 64-bit process (`width` X64) every argument that is a pointer - an
+ * object's, the one copied from, a rectangle's - is taken only below 4 GiB,
+ * the records' words being dwords; a function's routine (`thread`) is i386
+ * only.
+ *
  * @param {number} at @param {number} trap @param {CommandShape} shape
+ * @param {import('./assemble.js').Width} [width]
  * @returns {Uint8Array}
  */
-export function commandCode(at, trap, shape){
+export function commandCode(at, trap, shape, width = I386){
     const { slot, args, pointer = -1, bytes = 0, count, choose, vertices, mirror = [],
         draws = false, thread = false, self = false, stale = false, staleDraws = false,
         nullable = false, fresh = false, rects = [] } = shape;
@@ -370,15 +379,27 @@ export function commandCode(at, trap, shape){
     {
         throw new Error(`shadow: a command copies whole dwords, not ${bytes} bytes`);
     }
-    // Where argument i is on entry, and once three registers are pushed:
-    // past `this` for a method, at once for a function.
-    const entry = thread ? 4 : 8;
-    const pushed = entry + 12;
-    /** @type {(number[] | { label: string } | { jcc: number, to: string, near?: boolean })[]} */
+    if (thread && width.bits === 64)
+    {
+        throw new Error('shadow: a function\'s routine reads a 32-bit thread\'s TEB');
+    }
+    // Argument i's index on entry (`argAt`): past `this` for a method, the
+    // first for a function, and the object's own as the record's first.
+    const first = thread ? 0 : 1;
+    /** @param {number} arg */
+    const argIndex = arg=>first + arg - shift;
+    // The arguments a pointer is passed in, which a 64-bit process passes
+    // whole: the routine reads through them or records them as dwords.
+    const pointers = new Set([...shape.objects ?? [], ...pointer >= 0 ? [pointer] : [], ...rects,
+        ...usagesOf(shape).map(usage=>usage.arg),
+        ...shape.depthCovers ? [shape.depthCovers.target, shape.depthCovers.depth] : [],
+        ...shape.vertexRange ? [shape.vertexRange.buffer] : []]);
+    /** @type {Part[]} */
     const parts = [
         ...(thread ? threadPrologue('early')
-            : shape.dirty ? dirtyPrologue(shape.dirty, 'early')
-                : prologue('early', fresh ? FLAG_SLOW_PATH | FLAG_DRAW_STALE : FLAG_SLOW_PATH)),
+            : shape.dirty ? dirtyPrologue(shape.dirty, 'early', width)
+                : prologue('early', fresh ? FLAG_SLOW_PATH | FLAG_DRAW_STALE : FLAG_SLOW_PATH,
+                    width)),
         [0x83, 0xb9, ...dword(SHADOW.COMMANDS), 0x00],           // cmp dword [ecx+disp], 0
         { jcc: 0x74, to: 'early' },                              // je early
         { jcc: 0xeb, to: 'body' },                               // jmp body
@@ -387,20 +408,21 @@ export function commandCode(at, trap, shape){
         { label: 'body' },
         // A device's; a thread's own context (OpenGL) is no other thread's.
         ...(thread ? [] : takeHeld(ECX, 'early')),
-        ...commandChecks(shape, argument=>entry + 4 * (argument - (self ? 1 : 0))),
+        ...[...pointers].map(arg=>highAt(argIndex(arg), 'out')),
+        ...commandChecks(shape, argIndex),
         ...mirror,
     ];
     if (pointer >= 0)
     {
         parts.push(
-            [0x8b, 0x44, 0x24, entry + 4 * (pointer - shift)],   // mov eax, [esp+entry+4p]
+            argAt([0x8b], EAX, argIndex(pointer)),                  // mov eax, [esp+entry+4p]
             [0x85, 0xc0],                                        // test eax, eax
             { jcc: 0x74, to: nullable ? 'none' : 'out', near: true }); // jz out
     }
     if (choose)
     {
         parts.push(
-            [0x8b, 0x44, 0x24, entry + 4 * choose.arg],          // mov eax, [esp+entry+4c]
+            argAt([0x8b], EAX, argIndex(choose.arg)),               // mov eax, [esp+entry+4c]
             [0xba, ...dword(choose.otherwise)]);                 // mov edx, otherwise
         choose.cases.forEach(([value, size], index)=>parts.push(
             [0x3d, ...dword(value)],                             // cmp eax, value
@@ -416,8 +438,8 @@ export function commandCode(at, trap, shape){
         // block says; a format with none, or a copy past `most`, is the host's.
         const { type, fvf, count: vertexCount, most } = shape.fvfVertices;
         parts.push(
-            [0x8b, 0x44, 0x24, entry + 4 * type],                // mov eax, [esp+entry+4t]
-            [0x8b, 0x54, 0x24, entry + 4 * vertexCount],         // mov edx, [esp+entry+4c]
+            argAt([0x8b], EAX, argIndex(type)),                     // mov eax, [esp+entry+4t]
+            argAt([0x8b], EDX, argIndex(vertexCount)),              // mov edx, [esp+entry+4c]
             [0x85, 0xd2],                                        // test edx, edx
             { jcc: 0x74, to: 'out', near: true },                // jz out
             [0x81, 0xfa, ...dword(most)],                        // cmp edx, most
@@ -447,7 +469,7 @@ export function commandCode(at, trap, shape){
             [0x3d, ...dword(0x55555555)],                        // cmp eax, 0x55555555
             { jcc: 0x77, to: 'out', near: true },                // ja out
             { label: 'counted' },
-            [0x8b, 0x44, 0x24, entry + 4 * fvf]);                // mov eax, [esp+entry+4f]
+            argAt([0x8b], EAX, argIndex(fvf)));                     // mov eax, [esp+entry+4f]
         for (let index = 0; index < SHADOW.FVF_STRIDE_PAIRS; index++)
         {
             parts.push(
@@ -485,8 +507,8 @@ export function commandCode(at, trap, shape){
             [6, [[0x83, 0xc2, 0x02]]],                           // TRIANGLEFAN: add edx, 2
         ];
         parts.push(
-            [0x8b, 0x44, 0x24, entry + 4 * vertices.type],       // mov eax, [esp+entry+4t]
-            [0x8b, 0x54, 0x24, entry + 4 * vertices.count],      // mov edx, [esp+entry+4c]
+            argAt([0x8b], EAX, argIndex(vertices.type)),            // mov eax, [esp+entry+4t]
+            argAt([0x8b], EDX, argIndex(vertices.count)),           // mov edx, [esp+entry+4c]
             [0x85, 0xd2],                                        // test edx, edx
             { jcc: 0x74, to: 'out', near: true },                // jz out
             [0x81, 0xfa, ...dword(vertices.most)],               // cmp edx, most
@@ -500,7 +522,7 @@ export function commandCode(at, trap, shape){
                 ...step,
                 { jcc: 0xeb, to: 'stride', near: true }]),       // jmp stride
             { label: 'stride' },
-            [0x8b, 0x44, 0x24, entry + 4 * vertices.stride],     // mov eax, [esp+entry+4s]
+            argAt([0x8b], EAX, argIndex(vertices.stride)),          // mov eax, [esp+entry+4s]
             [0xa8, 0x03],                                        // test al, 3
             { jcc: 0x75, to: 'out', near: true },                // jnz out
             [0x3d, ...dword(vertices.most)],                     // cmp eax, most
@@ -514,7 +536,7 @@ export function commandCode(at, trap, shape){
     else if (count)
     {
         parts.push(
-            [0x8b, 0x54, 0x24, entry + 4 * count.arg],           // mov edx, [esp+entry+4c]
+            argAt([0x8b], EDX, argIndex(count.arg)),                // mov edx, [esp+entry+4c]
             [0x85, 0xd2],                                        // test edx, edx
             { jcc: 0x74, to: 'out' },                            // jz out
             [0x81, 0xfa, ...dword(count.most)],                  // cmp edx, most
@@ -532,7 +554,7 @@ export function commandCode(at, trap, shape){
         parts.push(
             { jcc: 0xeb, to: 'take' },                           // jmp take
             { label: 'none' },
-            [0x8b, 0x54, 0x24, entry + 4 * count.arg],           // mov edx, [esp+entry+4c]
+            argAt([0x8b], EDX, argIndex(count.arg)),                // mov edx, [esp+entry+4c]
             [0x85, 0xd2],                                        // test edx, edx
             { jcc: 0x75, to: 'out' });                           // jnz out
     }
@@ -555,7 +577,7 @@ export function commandCode(at, trap, shape){
             { label: 'same' },
             letHeldGo(ECX),                                      // lock and dword [ecx+HELD], 0
             [0x31, 0xc0],                                        // xor eax, eax
-            [0xc2, entry - 4 + 4 * popped, 0x00],                // ret 4*args (+4 for this)
+            retOf(first + popped),                               // ret 4*args (+4 for this)
         ] : []),
         { label: 'take' },
         [0x53, 0x56, 0x57],                                      // push ebx; push esi; push edi
@@ -578,7 +600,7 @@ export function commandCode(at, trap, shape){
         {
             // Its copy's address, or none for none.
             parts.push(
-                [0x8b, 0x44, 0x24, pushed + 4 * arg],            // mov eax, [esp+pushed+4r]
+                argAt([0x8b], EAX, argIndex(arg), [], 3),           // mov eax, [esp+pushed+4r]
                 [0x85, 0xc0],                                    // test eax, eax
                 { jcc: 0x74, to: `noRect${rect}` },              // jz noRect: it stays 0
                 [0x8d, 0x87, ...dword(header + RECT_BYTES * rect)], // lea eax, [edi+copy]
@@ -587,7 +609,7 @@ export function commandCode(at, trap, shape){
         else if (arg === pointer && nullable)
         {
             parts.push(
-                [0x8b, 0x44, 0x24, pushed + 4 * (arg - shift)],  // mov eax, [esp+pushed+4p]
+                argAt([0x8b], EAX, argIndex(arg), [], 3),           // mov eax, [esp+pushed+4p]
                 [0x85, 0xc0],                                    // test eax, eax
                 { jcc: 0x74, to: 'null' },                       // jz null: it stays 0
                 [0x8d, 0x87, ...dword(header)],                  // lea eax, [edi+header]
@@ -597,7 +619,7 @@ export function commandCode(at, trap, shape){
         {
             parts.push(arg === pointer
                 ? [0x8d, 0x87, ...dword(header)]                 // lea eax, [edi+header]
-                : [0x8b, 0x44, 0x24, pushed + 4 * (arg - (self ? 1 : 0))]); // mov eax, [esp+..]
+                : argAt([0x8b], EAX, argIndex(arg), [], 3));        // mov eax, [esp+pushed+4i]
         }
         parts.push([0x89, 0x47, COMMAND.ARGS + 4 * arg]);        // mov [edi+8+4i], eax
     }
@@ -605,7 +627,7 @@ export function commandCode(at, trap, shape){
     {
         parts.push(
             [0x89, 0xf8],                                        // mov eax, edi
-            [0x8b, 0x74, 0x24, pushed + 4 * (pointer - shift)],  // mov esi, [esp+pushed+4p]
+            argAt([0x8b], 6, argIndex(pointer), [], 3),             // mov esi, [esp+pushed+4p]
             [0x8d, 0xbf, ...dword(header)],                      // lea edi, [edi+header]
             [0x89, 0xd1],                                        // mov ecx, edx
             [0xc1, 0xe9, 0x02],                                  // shr ecx, 2
@@ -620,7 +642,7 @@ export function commandCode(at, trap, shape){
     }
     rects.forEach((arg, rect)=>{
         parts.push(
-            [0x8b, 0x44, 0x24, pushed + 4 * arg],                // mov eax, [esp+pushed+4r]
+            argAt([0x8b], EAX, argIndex(arg), [], 3),               // mov eax, [esp+pushed+4r]
             [0x85, 0xc0],                                        // test eax, eax
             { jcc: 0x74, to: `copied${rect}` },                  // jz copied
             ...[0, 4, 8, 12].flatMap(offset=>[
@@ -641,7 +663,7 @@ export function commandCode(at, trap, shape){
     {
         // As the token's block says: what the draws' checks read too, or not.
         parts.push(
-            [0x8b, 0x44, 0x24, pushed + 4 * shape.token],        // mov eax, [esp+token]
+            argAt([0x8b], EAX, argIndex(shape.token), [], 3),       // mov eax, [esp+token]
             [0x0f, 0xa3, 0x83, ...dword(SHADOW.STATE_BLOCK_DRAWS)], // bt [ebx+disp], eax
             [0x19, 0xc0],                                        // sbb eax, eax
             [0x83, 0xe0, FLAG_DRAW_STALE],                       // and eax, 4
@@ -657,13 +679,13 @@ export function commandCode(at, trap, shape){
         ...(thread ? [] : [letHeldGo(EBX)]),                     // mov dword [ebx+HELD], 0
         [0x5f, 0x5e, 0x5b],                                      // pop edi; pop esi; pop ebx
         [0x31, 0xc0],                                            // xor eax, eax
-        [0xc2, entry - 4 + 4 * popped, 0x00],                    // ret 4*args (+4 for this)
+        retOf(first + popped),                                   // ret 4*args (+4 for this)
         { label: 'full' },
         ...(thread ? [] : [letHeldGo(EBX),                       // mov dword [ebx+HELD], 0
             countLeft(EBX, SHADOW.LEFT_FULL)]),                  // lock inc dword [ebx+LEFT_FULL]
         [0x5f, 0x5e, 0x5b],                                      // pop edi; pop esi; pop ebx
         { jcc: 0xeb, to: 'slow', near: true });                  // jmp slow
-    return routine(at, trap, parts);
+    return routine(at, trap, parts, {}, width);
 }
 
 /**
@@ -698,18 +720,18 @@ const storeState = disp=>[
  * other state is the host's.
  */
 export const RENDER_STATE_MIRROR = Object.freeze([
-    [0x8b, 0x44, 0x24, 0x08],                                    // mov eax, [esp+8]
+    argAt([0x8b], EAX, 1),                                       // mov eax, [esp+8]
     [0x3d, ...dword(SHADOW.RENDER_STATE_COUNT)],                 // cmp eax, 256
     { jcc: 0x73, to: 'out', near: true },                        // jae out
     [0x0f, 0xa3, 0x81, ...dword(SHADOW.RENDER_STATE_VALID)],     // bt [ecx+disp], eax
     { jcc: 0x73, to: 'out', near: true },                        // jnc out: one the device refuses
-    [0x8b, 0x54, 0x24, 0x0c],                                    // mov edx, [esp+12]
+    argAt([0x8b], EDX, 2),                                       // mov edx, [esp+12]
     ...storeState(SHADOW.RENDER_STATES),
 ]);
 
 /** The same for SetTransform: the matrix into its type's slot. */
 export const TRANSFORM_MIRROR = Object.freeze([
-    [0x8b, 0x44, 0x24, 0x08],                                    // mov eax, [esp+8]
+    argAt([0x8b], EAX, 1),                                       // mov eax, [esp+8]
     [0x3d, ...dword(WORLD_SLOT)],                                // cmp eax, 24
     { jcc: 0x72, to: 'low' },                                    // jb low
     [0x2d, ...dword(WORLD_TYPE - WORLD_SLOT)],                   // sub eax, 232
@@ -724,7 +746,7 @@ export const TRANSFORM_MIRROR = Object.freeze([
     [0x0f, 0xa3, 0xc2],                                          // bt edx, eax
     { jcc: 0x73, to: 'out', near: true },                        // jnc out
     { label: 'slot' },
-    [0x8b, 0x54, 0x24, 0x0c],                                    // mov edx, [esp+12]
+    argAt([0x8b], EDX, 2),                                       // mov edx, [esp+12]
     [0x85, 0xd2],                                                // test edx, edx
     { jcc: 0x74, to: 'out', near: true },                        // jz out
     [0x56, 0x57],                                                // push esi; push edi
@@ -746,7 +768,7 @@ export const TRANSFORM_MIRROR = Object.freeze([
  * (`transformType`); any other type is the host's to refuse.
  */
 export const TRANSFORM_MIRROR_7 = Object.freeze([
-    [0x8b, 0x44, 0x24, 0x08],                                    // mov eax, [esp+8]
+    argAt([0x8b], EAX, 1),                                       // mov eax, [esp+8]
     [0x3d, ...dword(WORLD_SLOT)],                                // cmp eax, 24
     { jcc: 0x73, to: 'out', near: true },                        // jae out
     [0xba, ...dword(TRANSFORMS_7)],                              // mov edx, imm32
@@ -758,7 +780,7 @@ export const TRANSFORM_MIRROR_7 = Object.freeze([
 
 /** The same for SetViewport: the six dwords into the block. */
 export const VIEWPORT_MIRROR = Object.freeze([
-    [0x8b, 0x54, 0x24, 0x08],                                    // mov edx, [esp+8]
+    argAt([0x8b], EDX, 1),                                       // mov edx, [esp+8]
     [0x85, 0xd2],                                                // test edx, edx
     { jcc: 0x74, to: 'out', near: true },                        // jz out
     [0x56, 0x57],                                                // push esi; push edi
@@ -775,7 +797,7 @@ export const VIEWPORT_MIRROR = Object.freeze([
  * The same for a SetRenderTarget, after its checks have found the surface a
  * target with a block: the viewport a new target brings -- all of it, depths
  * 0 and 1 -- and the target's size, from the surface's description. The
- * surface is the argument at `[esp+at]`: Direct3D 9's second, 8's first.
+ * surface is argument `at` (`argAt`): Direct3D 9's second, 8's first.
  * The pair GetRenderTarget answers with is the surface and the word it
  * counts in, the third of its interface's (`bridge/internal/vtable.js`): a
  * program saves and restores its target around every pass, and a pair left
@@ -787,17 +809,17 @@ export const VIEWPORT_MIRROR = Object.freeze([
  */
 export const renderTargetMirror = at=>Object.freeze([
     [0x83, 0xa1, ...dword(SHADOW.TARGETS_VALID), 0xfe],          // and dword [ecx+disp], ~1
-    [0x8b, 0x44, 0x24, at],                                      // mov eax, [esp+at]: the surface
-    [0x8b, 0x40, 0x08],                                          // mov eax, [eax+8]: its count
+    argAt([0x8b], EAX, at),                                      // mov eax, [esp+at]: the surface
+    countAt(EAX, EAX),                                           // mov eax, [eax+8]: its count
     [0x85, 0xc0],                                                // test eax, eax
     { jcc: 0x74, to: 'targetHeld' },                             // jz targetHeld
     [0x89, 0x81, ...dword(SHADOW.TARGETS + 4)],                  // mov [ecx+pair+4], eax
-    [0x8b, 0x44, 0x24, at],                                      // mov eax, [esp+at]
+    argAt([0x8b], EAX, at),                                      // mov eax, [esp+at]
     [0x89, 0x81, ...dword(SHADOW.TARGETS)],                      // mov [ecx+pair], eax
     [0x83, 0x89, ...dword(SHADOW.TARGETS_VALID), 0x01],          // or dword [ecx+disp], 1
     { label: 'targetHeld' },
-    [0x8b, 0x44, 0x24, at],                                      // mov eax, [esp+at]: the surface
-    [0x8b, 0x40, 0x04],                                          // mov eax, [eax+4]: its block
+    argAt([0x8b], EAX, at),                                      // mov eax, [esp+at]: the surface
+    blockAt(EAX, EAX),                                           // mov eax, [eax+4]: its block
     [0x8b, 0x90, ...dword(SURFACE.DESC + 24)],                   // mov edx, [eax+Width]
     [0x89, 0x91, ...dword(SHADOW.VIEWPORT + 8)],                 // mov [ecx+viewport W], edx
     [0x89, 0x91, ...dword(SHADOW.TARGET_WIDTH)],                 // mov [ecx+target W], edx
@@ -809,7 +831,7 @@ export const renderTargetMirror = at=>Object.freeze([
     [0xc7, 0x81, ...dword(SHADOW.VIEWPORT + 16), ...dword(0)],   // MinZ 0
     [0xc7, 0x81, ...dword(SHADOW.VIEWPORT + 20), ...dword(0x3f800000)], // MaxZ 1
 ]);
-export const RENDER_TARGET_MIRROR = renderTargetMirror(0x0c);
+export const RENDER_TARGET_MIRROR = renderTargetMirror(2);
 
 /** `or dword [ecx+DRAWABLE], bits`. @param {number} bits */
 const markDrawable = bits=>[0x83, 0x89, ...dword(SHADOW.DRAWABLE), bits];
@@ -829,16 +851,16 @@ const unmarkDrawable = bits=>[0x83, 0xa1, ...dword(SHADOW.DRAWABLE), ~bits & 0xf
 const STRETCH_SURFACES = Object.freeze([
     [0x83, 0xb9, ...dword(SHADOW.ELSEWHERE), 0x00],              // cmp dword [ecx+disp], 0
     { jcc: 0x74, to: 'out', near: true },                        // je out
-    [0x8b, 0x44, 0x24, 0x08],                                    // mov eax, [esp+8]: the source
+    argAt([0x8b], EAX, 1),                                       // mov eax, [esp+8]: the source
     [0x85, 0xc0],                                                // test eax, eax
     { jcc: 0x74, to: 'out', near: true },                        // jz out
-    [0x8b, 0x40, 0x04],                                          // mov eax, [eax+4]: its block
+    blockAt(EAX, EAX),                                           // mov eax, [eax+4]: its block
     [0x85, 0xc0],                                                // test eax, eax
     { jcc: 0x74, to: 'out', near: true },                        // jz out
-    [0x8b, 0x54, 0x24, 0x10],                                    // mov edx, [esp+16]: the target
+    argAt([0x8b], EDX, 3),                                       // mov edx, [esp+16]: the target
     [0x85, 0xd2],                                                // test edx, edx
     { jcc: 0x74, to: 'out', near: true },                        // jz out
-    [0x8b, 0x52, 0x04],                                          // mov edx, [edx+4]: its block
+    blockAt(EDX, EDX),                                           // mov edx, [edx+4]: its block
     [0x85, 0xd2],                                                // test edx, edx
     { jcc: 0x74, to: 'out', near: true },                        // jz out
     [0x39, 0xd0],                                                // cmp eax, edx
@@ -860,8 +882,8 @@ const STRETCH_SURFACES = Object.freeze([
 ]);
 
 /**
- * A rectangle argument at `[esp+rect]` checked against the surface at
- * `[esp+surface]`, as the device checks one: none is the whole surface; one
+ * Rectangle argument `rect` checked against surface argument `surface`
+ * (`argAt`), as the device checks one: none is the whole surface; one
  * is taken only within it and not empty: left below right, right not past
  * the width, top below bottom, bottom not past the height, compared unsigned
  * as the host reads the words, so a negative edge is past every surface.
@@ -887,11 +909,12 @@ const STRETCH_SURFACES = Object.freeze([
  *     ja out
  *   whole:
  *
- * @param {number} rect @param {number} surface  stack offsets on entry
+ * @param {number} rect @param {number} surface  argument indices
  * @param {string} whole  the label it ends at
+ * @returns {Part[]}
  */
 const rectWithin = (rect, surface, whole)=>[
-    [0x8b, 0x54, 0x24, rect],                                    // mov edx, [esp+rect]
+    argAt([0x8b], EDX, rect),                                    // mov edx, [esp+rect]
     [0x85, 0xd2],                                                // test edx, edx
     { jcc: 0x74, to: whole, near: true },                        // jz whole
     [0x8b, 0x42, 0x08],                                          // mov eax, [edx+8]
@@ -901,8 +924,8 @@ const rectWithin = (rect, surface, whole)=>[
     [0x39, 0x42, 0x04],                                          // cmp [edx+4], eax
     { jcc: 0x73, to: 'out', near: true },                        // jae out
     ...[[0x08, 24], [0x0c, 28]].flatMap(([edge, size])=>[
-        [0x8b, 0x44, 0x24, surface],                             // mov eax, [esp+surface]
-        [0x8b, 0x40, 0x04],                                      // mov eax, [eax+4]: its block
+        argAt([0x8b], EAX, surface),                             // mov eax, [esp+surface]
+        blockAt(EAX, EAX),                                       // mov eax, [eax+4]: its block
         [0x8b, 0x40, SURFACE.DESC + size],                       // mov eax, [eax+Width/Height]
         [0x39, 0x42, edge],                                      // cmp [edx+right/bottom], eax
         { jcc: 0x77, to: 'out', near: true },                    // ja out
@@ -912,13 +935,12 @@ const rectWithin = (rect, surface, whole)=>[
 
 export const STRETCH_GUARD = Object.freeze([
     ...STRETCH_SURFACES,
-    ...rectWithin(0x0c, 0x08, 'sourceWhole'),
-    ...rectWithin(0x14, 0x10, 'targetWhole'),
+    ...rectWithin(2, 1, 'sourceWhole'),
+    ...rectWithin(4, 3, 'targetWhole'),
 ]);
 
 /** Where `STRETCH_SURFACES` loads the target, and where it reads the source's texture. */
-const STRETCH_TARGET = STRETCH_SURFACES.findIndex(part=>Array.isArray(part) && part[0] === 0x8b
-    && part[1] === 0x54);
+const STRETCH_TARGET = STRETCH_SURFACES.findIndex(part=>'argOp' in part && part.reg === EDX);
 const STRETCH_CONTAINER = STRETCH_SURFACES.findIndex(part=>Array.isArray(part)
     && part[0] === 0x8b && part[1] === 0x40 && part[2] === SURFACE.CONTAINER);
 
@@ -931,21 +953,21 @@ const STRETCH_CONTAINER = STRETCH_SURFACES.findIndex(part=>Array.isArray(part)
  * copies between them on the GPU.
  */
 export const COPY_GUARD_8 = Object.freeze([
-    [0x83, 0x7c, 0x24, 0x0c, 0x00],                              // cmp dword [esp+12], 0
+    argAt([0x83], 7, 2, [0x00]),                                 // cmp dword [esp+12], 0
     { jcc: 0x75, to: 'out', near: true },                        // jne out: rectangles
     ...STRETCH_SURFACES.slice(0, STRETCH_TARGET),                 // ELSEWHERE, the source
-    [0x8b, 0x54, 0x24, 0x14],                                    // mov edx, [esp+20]: the target
+    argAt([0x8b], EDX, 4),                                       // mov edx, [esp+20]: the target
     ...STRETCH_SURFACES.slice(STRETCH_TARGET + 1, STRETCH_CONTAINER), // its block, pools, usages
     // One format and one size, a word at a time: the source's block again in EAX.
     ...[0, 24, 28].flatMap(offset=>[
-        [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
-        [0x8b, 0x40, 0x04],                                      // mov eax, [eax+4]
+        argAt([0x8b], EAX, 1),                                   // mov eax, [esp+8]
+        blockAt(EAX, EAX),                                       // mov eax, [eax+4]
         [0x8b, 0x40, SURFACE.DESC + offset],                     // mov eax, [eax+DESC+o]
         [0x3b, 0x42, SURFACE.DESC + offset],                     // cmp eax, [edx+DESC+o]
         { jcc: 0x75, to: 'out', near: true },                    // jne out
     ]),
-    [0x8b, 0x44, 0x24, 0x08],                                    // mov eax, [esp+8]
-    [0x8b, 0x40, 0x04],                                          // mov eax, [eax+4]
+    argAt([0x8b], EAX, 1),                                       // mov eax, [esp+8]
+    blockAt(EAX, EAX),                                           // mov eax, [eax+4]
     [0x8b, 0x40, SURFACE.CONTAINER],                             // mov eax, [eax+CONTAINER]
     [0x85, 0xc0],                                                // test eax, eax
     { jcc: 0x74, to: 'copyApart' },                              // jz apart
@@ -961,51 +983,51 @@ export const COPY_GUARD_8 = Object.freeze([
  * it holds a stencil, which Clear's checks read; and the pair
  * GetDepthStencilSurface answers with, as `renderTargetMirror` writes the
  * target's: the surface and its count's word, or zeros for none. The surface
- * is the argument at `[esp+at]`.
+ * is argument `at` (`argAt`).
  *
  * @param {number} at
  */
 export const depthStencilMirror = at=>Object.freeze([
     [0x83, 0xa1, ...dword(SHADOW.TARGETS_VALID), 0xfd],          // and dword [ecx+disp], ~2
-    [0x8b, 0x44, 0x24, at],                                      // mov eax, [esp+at]: the surface
+    argAt([0x8b], EAX, at),                                      // mov eax, [esp+at]: the surface
     [0x85, 0xc0],                                                // test eax, eax
     { jcc: 0x74, to: 'depthPair' },                              // jz depthPair: none, zeros
-    [0x8b, 0x40, 0x08],                                          // mov eax, [eax+8]: its count
+    countAt(EAX, EAX),                                           // mov eax, [eax+8]: its count
     [0x85, 0xc0],                                                // test eax, eax
     { jcc: 0x74, to: 'depthHeld' },                              // jz depthHeld
     { label: 'depthPair' },
     [0x89, 0x81, ...dword(SHADOW.TARGETS + 12)],                 // mov [ecx+pair+4], eax
-    [0x8b, 0x44, 0x24, at],                                      // mov eax, [esp+at]
+    argAt([0x8b], EAX, at),                                      // mov eax, [esp+at]
     [0x89, 0x81, ...dword(SHADOW.TARGETS + 8)],                  // mov [ecx+pair], eax
     [0x83, 0x89, ...dword(SHADOW.TARGETS_VALID), 0x02],          // or dword [ecx+disp], 2
     { label: 'depthHeld' },
     unmarkDrawable(DRAW.DEPTH | DRAW.STENCIL),
-    [0x8b, 0x44, 0x24, at],                                      // mov eax, [esp+at]: the surface
+    argAt([0x8b], EAX, at),                                      // mov eax, [esp+at]: the surface
     [0x85, 0xc0],                                                // test eax, eax
     { jcc: 0x74, to: 'depth' },                                  // jz depth
     markDrawable(DRAW.DEPTH),
-    [0x8b, 0x40, 0x04],                                          // mov eax, [eax+4]: its block
+    blockAt(EAX, EAX),                                           // mov eax, [eax+4]: its block
     [0x81, 0xb8, ...dword(SURFACE.DESC), ...dword(D3DFMT_D24S8)], // cmp [eax+Format], D24S8
     { jcc: 0x75, to: 'depth' },                                  // jne depth
     markDrawable(DRAW.STENCIL),
     { label: 'depth' },
 ]);
-export const DEPTH_STENCIL_MIRROR = depthStencilMirror(0x08);
+export const DEPTH_STENCIL_MIRROR = depthStencilMirror(1);
 
 /**
  * The same for SetSamplerState: the value into its sampler's slot. A sampler
  * or a type past the block is the host's.
  */
 export const SAMPLER_STATE_MIRROR = Object.freeze([
-    [0x8b, 0x44, 0x24, 0x08],                                    // mov eax, [esp+8]
+    argAt([0x8b], EAX, 1),                                       // mov eax, [esp+8]
     [0x3d, ...dword(SHADOW.SAMPLER_COUNT)],                      // cmp eax, 16
     { jcc: 0x73, to: 'out', near: true },                        // jae out
-    [0x8b, 0x54, 0x24, 0x0c],                                    // mov edx, [esp+12]
+    argAt([0x8b], EDX, 2),                                       // mov edx, [esp+12]
     [0x81, 0xfa, ...dword(SHADOW.SAMPLER_STATE_STRIDE)],         // cmp edx, 16
     { jcc: 0x73, to: 'out', near: true },                        // jae out
     [0xc1, 0xe0, 0x04],                                          // shl eax, 4
     [0x01, 0xd0],                                                // add eax, edx
-    [0x8b, 0x54, 0x24, 0x10],                                    // mov edx, [esp+16]
+    argAt([0x8b], EDX, 3),                                       // mov edx, [esp+16]
     ...storeState(SHADOW.SAMPLER_STATES),
 ]);
 
@@ -1014,7 +1036,7 @@ export const SAMPLER_STATE_MIRROR = Object.freeze([
  * a corner that is not negative. It may reach past the target.
  */
 export const VIEWPORT_GUARD_9 = Object.freeze([
-    [0x8b, 0x54, 0x24, 0x08],                                    // mov edx, [esp+8]
+    argAt([0x8b], EDX, 1),                                       // mov edx, [esp+8]
     [0x85, 0xd2],                                                // test edx, edx
     { jcc: 0x74, to: 'out', near: true },                        // jz out
     [0x83, 0x3a, 0x00],                                          // cmp dword [edx], 0
@@ -1058,7 +1080,7 @@ export const DRAWABLE_MIRRORS = Object.freeze({
      * draw reads if it has a position.
      */
     SetFVF: Object.freeze([
-        [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
+        argAt([0x8b], EAX, 1),                                   // mov eax, [esp+8]
         [0x85, 0xc0],                                            // test eax, eax
         { jcc: 0x74, to: 'drawn' },                              // jz drawn
         unmarkDrawable(DRAW.DECLARED),
@@ -1070,7 +1092,7 @@ export const DRAWABLE_MIRRORS = Object.freeze({
     /** SetVertexDeclaration: a declaration is one a draw reads, none is none. */
     SetVertexDeclaration: Object.freeze([
         unmarkDrawable(DRAW.DECLARED),
-        [0x83, 0x7c, 0x24, 0x08, 0x00],                          // cmp dword [esp+8], 0
+        argAt([0x83], 7, 1, [0x00]),                             // cmp dword [esp+8], 0
         { jcc: 0x74, to: 'drawn' },                              // je drawn
         markDrawable(DRAW.DECLARED),
         { label: 'drawn' },
@@ -1081,7 +1103,7 @@ export const DRAWABLE_MIRRORS = Object.freeze({
      */
     SetVertexShader8: Object.freeze([
         unmarkDrawable(DRAW.DECLARED),
-        [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
+        argAt([0x8b], EAX, 1),                                   // mov eax, [esp+8]
         [0xa9, ...dword(D3DFVF_RESERVED0)],                      // test eax, RESERVED0
         { jcc: 0x75, to: 'declared' },                           // jnz declared
         [0xa8, 0x0e],                                            // test al, 0x0e
@@ -1096,16 +1118,16 @@ export const DRAWABLE_MIRRORS = Object.freeze({
      * whole number of four bytes, where WebGPU can bind a vertex buffer.
      */
     SetStreamSource9: Object.freeze([
-        [0x83, 0x7c, 0x24, 0x08, 0x00],                          // cmp dword [esp+8], 0
+        argAt([0x83], 7, 1, [0x00]),                             // cmp dword [esp+8], 0
         { jcc: 0x75, to: 'drawn' },                              // jne drawn
         unmarkDrawable(DRAW.STREAM),
-        [0x83, 0x7c, 0x24, 0x0c, 0x00],                          // cmp dword [esp+12], 0
+        argAt([0x83], 7, 2, [0x00]),                             // cmp dword [esp+12], 0
         { jcc: 0x74, to: 'drawn' },                              // je drawn
-        [0x83, 0x7c, 0x24, 0x14, 0x00],                          // cmp dword [esp+20], 0
+        argAt([0x83], 7, 4, [0x00]),                             // cmp dword [esp+20], 0
         { jcc: 0x74, to: 'drawn' },                              // je drawn
-        [0x8b, 0x44, 0x24, 0x10],                                // mov eax, [esp+16]
+        argAt([0x8b], EAX, 3),                                   // mov eax, [esp+16]
         [0x31, 0xd2],                                            // xor edx, edx
-        [0xf7, 0x74, 0x24, 0x14],                                // div dword [esp+20]
+        argAt([0xf7], 6, 4),                                     // div dword [esp+20]
         [0xf6, 0xc2, 0x03],                                      // test dl, 3
         { jcc: 0x75, to: 'drawn' },                              // jnz drawn
         markDrawable(DRAW.STREAM),
@@ -1113,10 +1135,10 @@ export const DRAWABLE_MIRRORS = Object.freeze({
     ]),
     /** Direct3D 8's: stream zero is drawn from when it has a buffer. */
     SetStreamSource8: Object.freeze([
-        [0x83, 0x7c, 0x24, 0x08, 0x00],                          // cmp dword [esp+8], 0
+        argAt([0x83], 7, 1, [0x00]),                             // cmp dword [esp+8], 0
         { jcc: 0x75, to: 'drawn' },                              // jne drawn
         unmarkDrawable(DRAW.STREAM),
-        [0x83, 0x7c, 0x24, 0x0c, 0x00],                          // cmp dword [esp+12], 0
+        argAt([0x83], 7, 2, [0x00]),                             // cmp dword [esp+12], 0
         { jcc: 0x74, to: 'drawn' },                              // je drawn
         markDrawable(DRAW.STREAM),
         { label: 'drawn' },
@@ -1124,7 +1146,7 @@ export const DRAWABLE_MIRRORS = Object.freeze({
     /** SetIndices: an index buffer, or none. */
     SetIndices: Object.freeze([
         unmarkDrawable(DRAW.INDEXED),
-        [0x83, 0x7c, 0x24, 0x08, 0x00],                          // cmp dword [esp+8], 0
+        argAt([0x83], 7, 1, [0x00]),                             // cmp dword [esp+8], 0
         { jcc: 0x74, to: 'drawn' },                              // je drawn
         markDrawable(DRAW.INDEXED),
         { label: 'drawn' },
@@ -1141,18 +1163,18 @@ export const DRAWABLE_MIRRORS = Object.freeze({
  * @param {number} types
  */
 export const stageStateMirror = types=>[
-    [0x8b, 0x44, 0x24, 0x0c],                                    // mov eax, [esp+12]
+    argAt([0x8b], EAX, 2),                                       // mov eax, [esp+12]
     [0x3d, ...dword(SHADOW.STAGE_STATE_STRIDE)],                 // cmp eax, 32
     { jcc: 0x73, to: 'out', near: true },                        // jae out
     [0xba, ...dword(types)],                                     // mov edx, imm32
     [0x0f, 0xa3, 0xc2],                                          // bt edx, eax
     { jcc: 0x73, to: 'out', near: true },                        // jnc out
-    [0x8b, 0x44, 0x24, 0x08],                                    // mov eax, [esp+8]
+    argAt([0x8b], EAX, 1),                                       // mov eax, [esp+8]
     [0x3d, ...dword(SHADOW.STAGE_COUNT)],                        // cmp eax, 8
     { jcc: 0x73, to: 'out', near: true },                        // jae out
     [0xc1, 0xe0, 0x05],                                          // shl eax, 5
-    [0x03, 0x44, 0x24, 0x0c],                                    // add eax, [esp+12]
-    [0x8b, 0x54, 0x24, 0x10],                                    // mov edx, [esp+16]
+    argAt([0x03], EAX, 2),                                       // add eax, [esp+12]
+    argAt([0x8b], EDX, 3),                                       // mov edx, [esp+16]
     ...storeState(SHADOW.STAGE_STATES),
 ];
 
