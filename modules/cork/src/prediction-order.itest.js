@@ -25,6 +25,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createCorkHost } from '../../core/src/layers/cpu/internal/cork-host.js';
 import * as engine from './index.js';
+import { allowMemory64, ifRoom } from './testing/memory64.js';
 
 const IMAGE_BASE = 0x401000;
 const ENTRY_VECTOR = 0x7000;
@@ -39,13 +40,14 @@ const WORKLOADS = ['vcall', 'calls8-order', 'calls8-scatter'];
  * order the call compares them.
  *
  * @param {32 | 64} bits @param {string} name @param {number} slice
+ * @param {{ iterations?: number, window?: number }} [how]  `window`: a wide window's bytes
  * @returns {Promise<Map<number, number[]>>}
  */
-async function predictionOf(bits, name, slice){
+async function predictionOf(bits, name, slice, { iterations = ITERATIONS, window } = {}){
     const host = createCorkHost({
         engine, memorySize: 16 << 20, trapPort: 0xb077, entryVector: ENTRY_VECTOR,
         initialStack: 0x800000, cork: { clock: 'virtual', worker: false, sliceMs: Infinity },
-        ...(bits === 64 ? { bits } : {}),
+        ...(bits === 64 ? { bits } : {}), ...(window === undefined ? {} : { window }),
     });
     host.writePhysical(IMAGE_BASE, readFileSync(new URL(bits === 64
         ? `../bench/micro/images64/${name}-x64.bin` : `../bench/micro/images/${name}-x87.bin`,
@@ -53,7 +55,7 @@ async function predictionOf(bits, name, slice){
     const vector = new Uint8Array(4);
     new DataView(vector.buffer).setUint32(0, IMAGE_BASE, true);
     host.writePhysical(ENTRY_VECTOR, vector);
-    for (let i = 0; i < ITERATIONS; i++)
+    for (let i = 0; i < iterations; i++)
     {
         host.runSlice(slice);
         while (!host.halted())
@@ -92,4 +94,32 @@ for (const bits of /** @type {const} */ ([32, 64]))
                 `slices of ${SLICES[i + 1]} against ${SLICES[0]} instructions`));
         });
     }
+}
+
+/**
+ * A call spread evenly over hundreds of callees has none worth its compares
+ * (`calleesWorth`), however the run is sliced: with the profile's count begun
+ * again at each reading, the calls a reading kept were the same ones every
+ * time a slice began at the same place in the program - a program that does
+ * the same work every iteration, a frame - and a few dozen of four thousand
+ * callees, sampled eight times each, looked like all of them: they were
+ * formed in and every other call left the region through the transfer.
+ */
+for (const [bits, name, window] of /** @type {const} */ ([[32, 'calls512-order'],
+    [64, 'calls512-order'], [32, 'calls4096-order'], [64, 'calls4096-order'],
+    [64, 'calls4096-order', 2 ** 33]]))
+{
+    test(`${name} at ${bits} bits${window ? ', a wide window' : ''}: a call spread over hundreds`
+        + ' of callees has none formed in, however the run is sliced', ifRoom(async()=>{
+        if (window)
+        {
+            allowMemory64();
+        }
+        for (const slice of SLICES)
+        {
+            const formed = await predictionOf(bits, name, slice, { iterations: 40, window });
+            assert.deepEqual([...formed].map(([site, callees])=>
+                `${site.toString(16)}: ${callees.length} callees`), [], `slices of ${slice}`);
+        }
+    }));
 }

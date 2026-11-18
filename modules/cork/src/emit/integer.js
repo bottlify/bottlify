@@ -38,7 +38,7 @@ import {
     stackLow, windowAddress,
     wrapsRead, wrapMask, ramAlways, ram, ramAt, registersChanged,
 } from './memory.js';
-import { CALL_STRIDE, Mechanism, Tables, pageFlagsAt } from '../runtime/layout.js';
+import { CALL_HASH, CALL_STRIDE, Mechanism, Tables, pageFlagsAt } from '../runtime/layout.js';
 import { PageFlag, STORE_FLAGS } from '../runtime/pages.js';
 import { emitSimd } from './simd.js';
 import { SIMD } from '../wasm/simd.js';
@@ -207,7 +207,7 @@ export function profileCall(e, site, target = undefined){
     e.openIf('profile');
     atState(context, atState(context, b)).load('i32', { offset: at + 4 }).localTee(Local.t1)
         .i32const(1).op(I32.add).store('i32', { offset: at + 4 });
-    b.localGet(Local.t1).i32const(0x9e3779b1 | 0).op(I32.mul)
+    b.localGet(Local.t1).i32const(CALL_HASH | 0).op(I32.mul)
         .i32const(32 - Math.log2(CALL_STRIDE)).op(I32.shrU).op(I32.eqz);
     e.openIf('sampled');
     b.localGet(Local.t1).i32const(Math.log2(CALL_STRIDE)).op(I32.shrU).i32const(15).op(I32.and)
@@ -2092,7 +2092,7 @@ export function prepare(e, operand, options){
 function wrappedFirst(e, operand, store){
     const disp = operand.disp ?? 0;
     const { ramSize } = e.layout;
-    if ((ramSize & ramSize - 1) !== 0
+    if ((ramSize & ramSize - 1) !== 0 || e.guest !== null
         || operand.addressSize === 16 || (operand.base ?? -1) < 0 && (operand.index ?? -1) < 0
         || e.memPlan?.access != null || !wrapsRead(e, store))
     {
@@ -2400,8 +2400,8 @@ function windowed(e, operand, store){
         b.i32const(disp | 0).localSet(Local.addr);
         if (e.guest !== null)
         {
-            // A wide window's: the constant's high half, past 4 GiB for an image there.
-            b.i64const(BigInt(disp) & -(2n ** 32n)).localSet(e.guest.high);
+            // A wide window's: the constant whole, past 4 GiB for an image there.
+            b.i64const(BigInt(disp)).localSet(e.guest.whole);
         }
         return false;
     }
@@ -2411,6 +2411,16 @@ function windowed(e, operand, store){
         // high half the access takes (`Body.guest`) -- the high half the test left
         // is its group's, and a block tests its groups before any access of them.
         windowAddress(e, ()=>emitAddress64(e, operand));
+        return false;
+    }
+    if (e.guest !== null && wrapsRead(e, store))
+    {
+        // A wide window's read left untested: its whole address, the quadword sum
+        // wrapped into the window as a 4 GiB one's 32-bit sum is into RAM
+        // (`Body.guest`).
+        emitAddress64(e, operand);
+        b.i64const(BigInt(/** @type {number} */ (e.layout.window) - 1)).op(I64.and)
+            .localTee(e.guest.whole).op(I64.wrap).localSet(Local.addr);
         return false;
     }
     if (wrapsRead(e, store) || e.memPlan?.access != null)

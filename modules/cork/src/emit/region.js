@@ -580,15 +580,16 @@ export function prepareModule(m, layout, features, memory = {},
     {
         context.precise = true;
     }
-    // A loose stack's access takes rsp's low half for its address, which a wide
-    // window's stack past 4 GiB is not.
-    else if (looseStacks && undoLog !== true && layout.window === undefined)
+    // A loose stack's access takes rsp's low half for its address and, over a wide
+    // window, rsp's high half with it (`stackLow`).
+    else if (looseStacks && undoLog !== true)
     {
         context.looseStacks = true;
     }
-    // A wide window tests every read: a read wrapped into RAM, or folded off a
-    // wrapped sum, reckons with RAM the size of its 32-bit address.
-    if (checkReads || layout.window !== undefined)
+    // A wide window's reads go untested as 4 GiB's do: each takes its whole address,
+    // the registers' quadword sum wrapped into the window (`windowed`), not the
+    // 32-bit one a read wrapped into RAM takes in 4 GiB.
+    if (checkReads)
     {
         context.checkReads = true;
     }
@@ -1176,8 +1177,8 @@ export class RegionEmitter {
         const emitter = this;
         this.guest = this.layout.ramMemory === undefined ? null : {
             memory: this.layout.ramMemory,
-            get high(){
-                return emitter.wideLocal(ValType.i64, 'high');
+            get whole(){
+                return emitter.wideLocal(ValType.i64, 'whole');
             },
             /** @param {number} type */
             scratch: type=>emitter.wideLocal(type, 'scratch'),
@@ -1656,11 +1657,11 @@ export class RegionEmitter {
     }
 
     /**
-     * A wide window's local of `type` for `use` (`guest`): the i64 high half of
+     * A wide window's local of `type` for `use` (`guest`): the i64 whole of
      * the access's address, or the value a store holds while its address is
      * widened. Made at its first use, as the region's other lazy locals.
      *
-     * @param {number} type @param {'high' | 'scratch'} use
+     * @param {number} type @param {'whole' | 'scratch'} use
      */
     wideLocal(type, use){
         const key = `${use}${type}`;
