@@ -161,15 +161,23 @@ export function createEntryPointCaller(host){
     const call = createGuardedCaller(host);
     /**
      * @param {{ routines: number[], base: number, reason: number, reserved: number,
-     *     thread: any }} image
+     *     thread: any, raised?: (code: number) => void }} image  `raised`: told the
+     *     code of an exception a routine raised, which ends the routines there
      * @returns {Promise<number>} what the last routine answered, 0 when it raised
      */
-    return ({ routines, base, reason, reserved, thread })=>routines.reduce(
-        (told, entry)=>told.then(()=>call({
-            entry, args: [base, reason, reserved], thread, failed: 0,
-            report: code=>host.divergence?.(`exception 0x${code} in the routine at 0x${
-                (entry >>> 0).toString(16)} of the image at 0x${(base >>> 0).toString(16)}`
-                + ` (reason ${reason}), taken by the loader`),
-        })),
-        Promise.resolve(0));
+    return ({ routines, base, reason, reserved, thread, raised })=>{
+        let failed = false;
+        return routines.reduce(
+            (told, entry)=>told.then(answer=>(failed ? answer : call({
+                entry, args: [base, reason, reserved], thread, failed: 0,
+                report: code=>{
+                    failed = raised !== undefined;
+                    raised?.(Number.parseInt(String(code), 16) >>> 0);
+                    host.divergence?.(`exception 0x${code} in the routine at 0x${
+                        (entry >>> 0).toString(16)} of the image at 0x${
+                        (base >>> 0).toString(16)} (reason ${reason}), taken by the loader`);
+                },
+            }))),
+            Promise.resolve(0));
+    };
 }

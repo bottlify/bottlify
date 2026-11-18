@@ -194,7 +194,9 @@ flowchart TD
   `LoadLibrary` and `NtCreateSection(SEC_IMAGE)` alike with `ERROR_BAD_EXE_FORMAT`
   (`loader/internal/image.js`). An image is mapped in whole pages, one aligned below a page flat
   (the file as it lies), and an optional header cut short has no data directory past its end.
-  A library file is read sharing
+  A `DllMain` (or TLS callback) that raises on `DLL_PROCESS_ATTACH` is ended by the loader's
+  own frame, and one that answers FALSE is told `DLL_PROCESS_DETACH`: either way the library is
+  unloaded and `LoadLibrary` fails with `ERROR_DLL_INIT_FAILED`. A library file is read sharing
   reading and deletion, as Windows'
   loader opens it. `LdrRegisterDllNotification`'s callbacks hear of every library read off the
   volume after it is mapped and before its `DllMain`, and on unload after it.

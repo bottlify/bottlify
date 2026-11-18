@@ -2642,6 +2642,8 @@ const LOAD_AS_DATA = LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_IMAGE_RESOURCE
 /** LoadLibrary's error for a file that is no image for the process. */
 const ERROR_BAD_EXE_FORMAT = 193;
 const ERROR_NOT_ENOUGH_MEMORY = 8;
+/** LoadLibrary's error for a library whose initialisation failed or raised. */
+const ERROR_DLL_INIT_FAILED = 1114;
 /** A page: a view of a file is mapped in whole ones. */
 const PAGE_SIZE = 0x1000;
 
@@ -7777,6 +7779,9 @@ async function buildApp(options){
                             + Math.ceil(image.sizeOfImage / LIBRARY_ALIGN) * LIBRARY_ALIGN;
                     }
 
+                    /** The libraries loaded for it, given back if it is refused. @type {any[]} */
+                    const brought = [];
+
                     // Its own libraries first, then binding.
                     //
                     // The order is the whole of it. A library brought in by
@@ -7798,8 +7803,7 @@ async function buildApp(options){
                         // renderer).
                         /** @type {string[]} */
                         const absent = [];
-                        /** @type {any[]} */
-                        const brought = [];
+
                         for (const dependency of readImports(file, image))
                         {
                             if (findModule(dependency.dll) === null)
@@ -7897,16 +7901,24 @@ async function buildApp(options){
                     const cookie = routines.length === 0 || !activation ? 0
                         : activation.activate(activation.moduleContext(base)
                             || redirected?.context || 0, teb);
+                    // Inside the loader's own frame, as Windows' loader calls
+                    // them: an exception one of them leaves fails the load and
+                    // never reaches the program's handlers, and a DllMain that
+                    // answers FALSE fails it too - told DLL_PROCESS_DETACH and
+                    // unloaded, as the DllMain contract says - with
+                    // ERROR_DLL_INIT_FAILED either way.
+                    /** @type {number | null} */
+                    let raised = null;
+                    /** @type {number} */
+                    let answer;
                     try
                     {
-                        for (const routine of routines)
-                        {
-                            await bridge.callGuest({
-                                entry: routine,
-                                args: [base, DLL_PROCESS_ATTACH, 0],
-                                thread: asked,
-                            });
-                        }
+                        answer = routines.length === 0 ? 1 : await win32.callEntryPoint({
+                            routines, base, reason: DLL_PROCESS_ATTACH, reserved: 0,
+                            thread: asked, raised: (/** @type {number} */ code)=>{
+                                raised = code;
+                            },
+                        });
                     }
                     finally
                     {
@@ -7915,6 +7927,30 @@ async function buildApp(options){
                     if (routines.length > 0)
                     {
                         attachOrder.push(held);
+                    }
+                    const entryRan = routines.at(-1) === held.entryPoint;
+                    if (raised !== null || (entryRan && answer === 0))
+                    {
+                        // An exception leaves nothing to detach: its DllMain
+                        // never answered.
+                        if (raised !== null)
+                        {
+                            Object.assign(held, { attached: false });
+                        }
+                        Object.assign(held, { references: 1 });
+                        await releaseLibrary(held);
+                        for (const other of brought)
+                        {
+                            if (other)
+                            {
+                                await releaseLibrary(other);
+                            }
+                        }
+                        loadErrors.set(key, ERROR_DLL_INIT_FAILED);
+                        events.emit('libraries-missing', { names: [name],
+                            reason: raised !== null ? `its initialisation raised 0x${
+                                (raised >>> 0).toString(16)}` : 'its DllMain answered FALSE' });
+                        return 0;
                     }
                     events.emit('library-loaded', { name, base });
                     return base;
