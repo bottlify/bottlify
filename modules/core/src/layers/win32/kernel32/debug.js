@@ -19,7 +19,15 @@
  * @property {(address: number, maxLength: number) => string} readCString
  * @property {(address: number, maxLength: number) => string} readWideString
  * @property {(text: string) => void} say  Where a program's own words go.
+ * @property {(report: { code: number, string: { address: number, length: number,
+ *     unicode: boolean } }) => Promise<number>} [report]  This process's debugger, when
+ *     its parent debugs it: its words go there too, the thread waiting until heard.
+ * @property {() => boolean} [beingDebugged]  The process block's BeingDebugged, which
+ *     IsDebuggerPresent reads.
  */
+
+/** OUTPUT_DEBUG_STRING_EVENT (`debug-events.js`). */
+const OUTPUT_DEBUG_STRING_EVENT = 8;
 
 /** A trace longer than this is a program that lost its terminator. */
 const MAX_TRACE = 1 << 16;
@@ -28,14 +36,31 @@ const MAX_TRACE = 1 << 16;
  * @param {DebugHost} host
  */
 export function createDebugFunctions(host){
+    /**
+     * A debuggee's words, told to its debugger as OUTPUT_DEBUG_STRING: the
+     * string where it is, its length in characters with the terminator.
+     *
+     * @param {number} address @param {number} length @param {boolean} unicode
+     * @returns {number | Promise<number>}
+     */
+    const tell = (address, length, unicode)=>(host.report
+        ? host.report({ code: OUTPUT_DEBUG_STRING_EVENT,
+            string: { address, length, unicode } }).then(()=>0)
+        : 0);
+
     return {
         /** VOID OutputDebugStringA(LPCSTR lpOutputString) */
         OutputDebugStringA: {
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([text])=>{
-                host.say(host.readCString(text >>> 0, MAX_TRACE));
-                return 0;
+                if ((text >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const said = host.readCString(text >>> 0, MAX_TRACE);
+                host.say(said);
+                return tell(text >>> 0, said.length + 1, false);
             },
         },
 
@@ -44,8 +69,13 @@ export function createDebugFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([text])=>{
-                host.say(host.readWideString(text >>> 0, MAX_TRACE * 2));
-                return 0;
+                if ((text >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const said = host.readWideString(text >>> 0, MAX_TRACE * 2);
+                host.say(said);
+                return tell(text >>> 0, said.length + 1, true);
             },
         },
 
@@ -71,10 +101,10 @@ export function createDebugFunctions(host){
         /** BOOL IsDebuggerPresent() */
         IsDebuggerPresent: {
             argBytes: 0,
-            // Answering yes would be true in spirit and wrong in effect: a
-            // program that believes a debugger is attached may break into it,
-            // wait for it, or take a path meant for a developer's machine.
-            handler: ()=>0,
+            // What the process block says, as on Windows: set when the
+            // parent debugs this process, and the program may clear it. The
+            // trace this file keeps is not a debugger a program should see.
+            handler: ()=>(host.beingDebugged?.() ? 1 : 0),
         },
     };
 }

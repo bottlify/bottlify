@@ -143,3 +143,11 @@
 - Windows are the run's: a process finds another's window (`FindWindow`), reads who made it, its
   caption and class, and posts to it. A message sent to another process's window is answered with
   every concurrency; its pointers cross only for `WM_COPYDATA`, `WM_SETTEXT` and `WM_GETTEXT`.
+- A child started with `DEBUG_PROCESS` or `DEBUG_ONLY_THIS_PROCESS` reports its debug events to
+  its parent, each stopping the reporting thread until `ContinueDebugEvent`. Not done: attaching
+  to a running process and the native debug objects (`DebugActiveProcess`,
+  `NtCreateDebugObject` and the `DbgUi*` calls refuse); a debuggee's own children are not debugged under `DEBUG_PROCESS`;
+  `DebugBreakProcess` raises no breakpoint; hardware breakpoints and the trap flag raise nothing;
+  a 64-bit debuggee reports neither its start nor its exceptions; `hFile` and `lpImageName` are
+  always null. A library of the engine's loaded after the start and a new thread are reported
+  without the debuggee waiting for the answer.

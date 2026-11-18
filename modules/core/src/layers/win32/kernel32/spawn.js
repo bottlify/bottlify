@@ -37,6 +37,7 @@ import { SYSTEM_DIRECTORY, systemProgramAt } from '../programs/table.js';
 import { decodeAnsi, encodeAnsi } from './locale.js';
 import { STARTUPINFO, readStartupInfo } from './startup-info.js';
 import { askChild, childThread } from './cross-process.js';
+import { debuggeeFor } from './debug-events.js';
 import { grantedAccess } from './access.js';
 import { PROCESS_VM_OPERATION, PROCESS_VM_READ, PROCESS_VM_WRITE, createProcessTarget }
     from './process-target.js';
@@ -133,8 +134,6 @@ const ATTRIBUTE_SIZES = new Map([
 
 /** dwCreationFlags, the one bit that changes what a create does here. */
 const CREATE_SUSPENDED = 0x00000004;
-const DEBUG_PROCESS = 0x00000001;
-const DEBUG_ONLY_THIS_PROCESS = 0x00000002;
 
 /** STARTUPINFO's dwFlags bit that says its three handles are the child's own. */
 const STARTF_USESTDHANDLES = 0x00000100;
@@ -463,10 +462,8 @@ export function createSpawner(host){
             made.handle = kernel.handles.open('process', made);
             made.threadHandle = kernel.handles.open('process-thread',
                 childThread(made, made.threadId));
-            // A child its parent debugs reports its creation and its exit to
-            // WaitForDebugEvent.
-            made.debugEvents = (flags & (DEBUG_PROCESS | DEBUG_ONLY_THIS_PROCESS)) !== 0
-                ? ['create', 'exit'] : null;
+            // A child its parent debugs reports to it (`debug-events.js`).
+            made.debugged = debuggeeFor(flags);
             // A child starts where Windows starts it: in the directory asked
             // for, else in its parent's current one -- which is where the
             // paths on its command line, and the libraries it loads by bare

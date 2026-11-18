@@ -285,7 +285,8 @@ test('the handle count, debugging, power and memory notifications', ()=>{
     assert.equal(call('CheckRemoteDebuggerPresent', CURRENT_PROCESS, 0x2000), 1);
     assert.equal(view.getUint32(0x2000, true), 0);
     // Wine's debugger test_RemoteDebugger and test_debug_children.
-    const debugged = handles.open('process', { id: 0x2c0, debugEvents: ['create', 'exit'] });
+    const debugged = handles.open('process',
+        { id: 0x2c0, debugged: { events: [], current: null } });
     assert.equal(call('CheckRemoteDebuggerPresent', debugged, 0x2000), 1);
     assert.equal(view.getUint32(0x2000, true), 1, 'a child started with DEBUG_PROCESS');
     view.setUint32(0x2000, 7, true);

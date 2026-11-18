@@ -11,6 +11,7 @@ import { createFiberLocalStorage } from './kernel32/fls.js';
 import { createNamedObjects, createRemoteNamedObjects } from './kernel32/named-objects.js';
 import { createRegistryService } from './advapi32/registry-service.js';
 import { createDebugFunctions } from './kernel32/debug.js';
+import { DEBUG_EVENT, createDebuggerFunctions } from './kernel32/debug-events.js';
 import {
     ALIGNMENT_64, GLOBAL_MEMORY, GUARD_PAGES, PAGE_STATE, TABLES, createHeapAllocator,
     createHeapFunctions,
@@ -608,6 +609,11 @@ export function createWin32Module(){
                 config?.threadBlock?.(thread);
                 // Its block made, the creator's active context goes on it.
                 activation.loaderApi.inherit(thread?.tebAddress ?? 0);
+                // Told to the debugger as it is made, without the creator
+                // waiting for the answer (`debug-events.js`).
+                config?.debugger?.report({ code: DEBUG_EVENT.CREATE_THREAD,
+                    threadId: thread?.id >>> 0,
+                    start: (thread?.start ?? thread?.entry ?? 0) >>> 0 });
             };
             /**
              * The string values of an environment key in the registry: the
@@ -748,6 +754,8 @@ export function createWin32Module(){
 
             /** @type {Record<string, Record<string, any>>} */
             let libraries = {};
+            /** @type {ReturnType<typeof createDebuggerFunctions> | null} */
+            let debuggerSide = null;
             /** Whether CreateProcessWithLogonW has said it checks no password. */
             let loggedOnSaid = false;
             /**
@@ -1222,9 +1230,10 @@ export function createWin32Module(){
              * endThread's rest, once the fibre-local values are called back.
              *
              * @param {any} thread @param {number} code @param {boolean} others
+             * @param {boolean} [heard]  its debugger has heard of its end
              * @returns {Promise<number> | null}
              */
-            const tellAndEnd = (thread, code, others)=>{
+            const tellAndEnd = (thread, code, others, heard = false)=>{
                 if (!others && exitCode === null)
                 {
                     // On this thread, which goes on standing while they are told.
@@ -1234,6 +1243,15 @@ export function createWin32Module(){
                         kernel.exitThread(thread, code, true);
                     }
                     return told;
+                }
+                // A debuggee's thread ending tells its debugger first and
+                // waits for the answer (`debug-events.js`).
+                const debugged = others && !heard ? config?.debugger?.report({
+                    code: DEBUG_EVENT.EXIT_THREAD, threadId: thread.id >>> 0,
+                    exitCode: code >>> 0 }) : null;
+                if (debugged)
+                {
+                    return debugged.then(()=>tellAndEnd(thread, code, others, true) ?? 0);
                 }
                 const walk = others && threadCalls.pending() ? threadCalls.walk() : 0;
                 if (walk === 0)
@@ -2300,6 +2318,9 @@ export function createWin32Module(){
                 },
                 /** @param {string} text */
                 trace: text=>trace(text),
+                // Its debugger, when its parent debugs it (`debug-events.js`).
+                ...config?.debugger ? { debugReport: (/** @type {any} */ report)=>
+                    config.debugger.report(report) } : {},
                 // What Windows does once nothing handled an exception and the
                 // last-chance filter declined it: the process ends, with the
                 // exception's code as its exit code.
@@ -3336,6 +3357,19 @@ export function createWin32Module(){
                 // A modal sheet's own loop, which user32 lends it.
                 modal: (hwnd, options)=>windowService.modalLoop(hwnd, options),
             });
+            // The debugger's side of debugging a child: the events a child
+            // started with DEBUG_PROCESS reports, each stopping its thread until
+            // continued (`debug-events.js`).
+            debuggerSide = createDebuggerFunctions({
+                kernel,
+                writeMemory,
+                setLastError: setError,
+                setLastErrorFor: setErrorOn,
+                currentThread: ()=>kernel.currentThread(),
+                park: (/** @type {any} */ thread)=>bridge.park(thread),
+                divergence: config?.divergence,
+                windows,
+            });
             // The libraries this build implements, standing in the system
             // folder for a setup that looks before it loads -- kernel32's
             // file calls and setupapi's alike. Every layer's, not only this
@@ -3434,7 +3468,23 @@ export function createWin32Module(){
                         readCString,
                         readWideString,
                         say: text=>trace(text),
+                        beingDebugged: ()=>{
+                            const { teb, peb, pointer } = blockLayouts(pointerSize);
+                            const block = kernel.currentThread()?.tebAddress ?? 0;
+                            if (!block)
+                            {
+                                return false;
+                            }
+                            const at = new DataView(readMemory(block + teb.PEB, pointer).slice()
+                                .buffer).getUint32(0, true);
+                            return at !== 0 && readMemory(at + peb.BEING_DEBUGGED, 1)[0] !== 0;
+                        },
+                        // Told to its debugger too, when its parent debugs it.
+                        ...config?.debugger ? { report: (/** @type {any} */ report)=>
+                            config.debugger.report({ ...report,
+                                threadId: kernel.currentThread()?.id >>> 0 }) } : {},
                     }),
+                    ...debuggerSide.functions,
                     ...createHeapFunctions({
                         pointerSize,
                         arena, allocator, readMemory, writeMemory, fillMemory, viewAt,
@@ -3559,6 +3609,7 @@ export function createWin32Module(){
                     ...createSyncFunctions({
                         pointerSize,
                         processId,
+                        debugged: ()=>Boolean(config?.debugger),
                         windows,
                         kernel,
                         namedObjects,
@@ -7057,6 +7108,17 @@ export function createWin32Module(){
                 },
 
                 /**
+                 * An event a child this process debugs reported, answered with
+                 * the status its debugger continued it with (`debug-events.js`).
+                 *
+                 * @param {any} child
+                 * @param {import('./kernel32/debug-events.js').DebugReport} report
+                 * @returns {Promise<number>}
+                 */
+                debugEvent: (child, report)=>/** @type {any} */ (debuggerSide)
+                    .deliver(child, report),
+
+                /**
                  * A child run beside this process has exited: its record takes the
                  * exit code -- what GetExitCodeProcess and a later wait read --
                  * and every thread waiting on it wakes with its wait's answer.
@@ -7065,6 +7127,7 @@ export function createWin32Module(){
                  */
                 childExited(child, code){
                     kernel.processes.finish(child, code);
+                    debuggerSide?.exited(child);
                     // A thread whose timed wait ran out has gone on, to
                     // whatever it waits on now.
                     const waiters = (child.waiters ?? []).filter(

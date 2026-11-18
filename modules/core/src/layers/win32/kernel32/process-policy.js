@@ -161,6 +161,7 @@ const HANDLE_PROBE = 1 << 20;
  * @property {(process: any, code: number) => any} [terminateProcess]  A process ended as
  *     TerminateProcess ends it, null for this one (which does not return: its answer is the park).
  * @property {number} [processId]  This process's id, which a job's id list names.
+ * @property {() => boolean} [debugged]  Whether this process's parent debugs it.
  * @property {ReturnType<typeof import('./named-objects.js').createNamedObjects>} [namedObjects]
  *     the run's one namespace, where a job made by name is found again
  * @property {{ count: () => number, systemMask: () => number }} [processors]  The
@@ -1185,7 +1186,8 @@ export function createProcessPolicyFunctions(host){
          *
          * Whether a debugger debugs the process: a child this process started
          * with DEBUG_PROCESS or DEBUG_ONLY_THIS_PROCESS is debugged by it, and
-         * nothing else is debugged here. No process handle, or nowhere to
+         * this process is when its parent started it so (`debug-events.js`).
+         * No process handle, or nowhere to
          * answer, is a bad parameter; a handle that names no process a bad
          * handle. The last error is left alone on success.
          */
@@ -1202,7 +1204,8 @@ export function createProcessPolicyFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                writeDword(out >>> 0, process !== SELF && process.debugEvents ? 1 : 0);
+                writeDword(out >>> 0, (process === SELF ? host.debugged?.() === true
+                    : Boolean(process.debugged)) ? 1 : 0);
                 return 1;
             },
         },
