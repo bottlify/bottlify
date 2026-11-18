@@ -34,9 +34,10 @@
  *   f32       a float: one stack slot; ST0 as a result, a value a float holds
  *   x87       a double the caller left on the x87 stack (the last such
  *             parameter in ST0), which the function pops, as `_ftol` does
- *   i64       a result in EDX:EAX: a double truncated toward zero (NaN and
- *             out of range the integer indefinite, as `fisttp` answers), or
- *             an integer extended by its sign
+ *   i64       a result in EDX:EAX (RAX at 64 bits): a double truncated
+ *             toward zero (NaN and out of range the integer indefinite, as
+ *             `fisttp` and `cvttsd2si` answer), or an integer extended by
+ *             its sign
  *   void      no result
  *
  * A function that touches guest memory or calls a guest function takes the
@@ -186,7 +187,8 @@
  * XMM register of its place (or its slot past the fourth) and is read from
  * its home slot, the result goes in XMM0 (a float's rounded by `cvtsd2ss`),
  * and the expression's doubles are XMM0 to XMM3 as the x87's stack would be,
- * XMM4 and XMM5 scratch: `+ - * /`, unary `-`, `Math.sqrt` (`sqrtsd`),
+ * XMM4 and XMM5 scratch (two deeper at most, XMM6 and XMM7 saved in the
+ * frame): `+ - * /`, unary `-`, `Math.sqrt` (`sqrtsd`),
  * `Math.abs`, `Math.fround`, `Math.floor`, `Math.ceil` and `Math.trunc`
  * (through a quadword under 2^52, the sign put back), the comparisons
  * (`ucomisd`), `| 0` and `>>> 0` (`cvttsd2si` into RAX, the significand
@@ -198,7 +200,7 @@
  * `Math.sin`, `cos`, `tan`, `atan`, `atan2` and `log2`, and `X87`'s
  * operations, and `%` of doubles (`fprem`'s loop), are the x87's over doubles
  * stored below RSP and taken back (`x87OverXmm`). What only the x87 does past
- * that -- x87 arguments, the control and status words, an i64 in EDX:EAX --
+ * that -- x87 arguments, the control and status words --
  * is refused at 64 bits with its reason (`onRefused`), and the function
  * stays a trap into its handler there.
  */
@@ -272,6 +274,8 @@ import {
  * @property {Set<any>} homes              x86-64 code's variables kept in the home space.
  * @property {number[]} homeSaves          The home slots left, by argument place, where
  *                                         x86-64 code keeps a register its caller keeps.
+ * @property {number} xmmKept              How many of XMM6 and XMM7, which its caller
+ *                                         keeps, x86-64 code takes: saved in the frame.
  * @property {{ locals: number, saved: number, pushed: boolean }} [frame]
  *     The bytes of variables in the frame and the registers saved above it,
  *     once a compilation with the registers has found them -- pushed there,
@@ -406,7 +410,14 @@ const POOL = '$f64';
 const X87_DEPTH = 7;
 
 /** How many XMM registers an expression may hold at once in x86-64 code: two more are scratch. */
-const SSE_DEPTH = 4;
+const SSE_DEPTH = 6;
+/**
+ * The last XMM register the convention lets a callee change. Past it, XMM6
+ * and XMM7, which the caller keeps, are taken by an XMM stack deeper than
+ * four with an operation's scratch above it: saved in the frame at the entry
+ * and put back at the exit.
+ */
+const LAST_VOLATILE_XMM = 5;
 
 /** The name of the table of quadwords x86-64 code reads RIP-relative: doubles' bits, masks. */
 const QUADS = '$q64';
@@ -857,6 +868,21 @@ class FunctionCompiler {
         {
             this.temps = this.placement(planned).temps;
         }
+        /** The highest XMM register the code writes, over the whole function. */
+        this.highestXmm = -1;
+        /**
+         * Where XMM6 and XMM7 wait while the function takes them: the frame's
+         * first sixteen bytes each, laid out before any variable so that every
+         * compilation with the plan addresses them alike.
+         *
+         * @type {number[]}
+         */
+        this.xmmSlots = [];
+        for (let i = 0; i < (planned?.xmmKept ?? 0); i++)
+        {
+            this.locals += 16;
+            this.xmmSlots.push(-this.locals);
+        }
     }
 
     /**
@@ -1039,17 +1065,8 @@ class FunctionCompiler {
                 {
                     this.bind(property.key, { constant: this.word });
                 }
-                if (this.long && property.key.name === 'compareExchange')
-                {
-                    this.fail(property, 'compareExchange: the 32-bit kernel\'s exchange of a '
-                        + 'word, refused at 64 bits');
-                }
             }
             params.shift();
-        }
-        if (this.long && this.returns === 'i64')
-        {
-            this.fail(node, `${name}: an i64 is EDX:EAX at 32 bits, refused at 64 bits`);
         }
         /** @type {ParamType[]} */
         const types = [];
@@ -1386,6 +1403,10 @@ class FunctionCompiler {
         {
             out.emit(...moveStack64(-this.locals));
         }
+        this.xmmSlots.forEach((disp, i)=>{
+            // movdqu [slot], xmm6 or xmm7: the caller's, given back at the exit.
+            out.emit(0xf3, 0x0f, 0x7f, ...memory(6 + i, { base: ESP, disp: this.locals + disp }));
+        });
         if (this.tables.size > 0)
         {
             // lea r11, [rip]: the address every table is reached from.
@@ -1411,6 +1432,11 @@ class FunctionCompiler {
         out.append(this.a);
         /** RSP and the kept registers as the caller left them. */
         const takeDown = ()=>{
+            this.xmmSlots.forEach((disp, i)=>{
+                // movdqu xmm6 or xmm7, [slot]
+                out.emit(0xf3, 0x0f, 0x6f,
+                    ...memory(6 + i, { base: ESP, disp: this.locals + disp }));
+            });
             if (this.locals > 0)
             {
                 out.emit(...moveStack64(this.locals));
@@ -1696,6 +1722,7 @@ class FunctionCompiler {
             homes,
             // The home slots the variables leave, where the kept registers wait.
             homeSaves: this.homeSlots(registers).slice(homes.size),
+            xmmKept: Math.max(0, this.highestXmm - LAST_VOLATILE_XMM),
         };
     }
 
@@ -2593,6 +2620,14 @@ class FunctionCompiler {
                 }
                 this.fpu--;
             }
+            else if (returns === 'i64' && isFloat(value.type) && this.long)
+            {
+                this.toFloat(value, node.argument);
+                this.fpu--;
+                // cvttsd2si rax, xmm0: truncated, NaN and out of range the
+                // integer indefinite, as the i386's fisttp answers.
+                this.a.emit(0xf2, 0x48, 0x0f, 0x2c, 0xc0);
+            }
             else if (returns === 'i64' && isFloat(value.type))
             {
                 this.toSt0(value, node.argument);
@@ -2615,7 +2650,16 @@ class FunctionCompiler {
                         + `is an ${value.type}`);
                 }
                 this.toEax(value, node.argument);
-                if (returns === 'i64')
+                if (returns === 'i64' && this.long)
+                {
+                    // The whole of RAX: a u32 is there zero-extended by the
+                    // move that made EAX; an i32 is extended by its sign.
+                    if (value.type !== 'u32')
+                    {
+                        this.a.emit(0x48, 0x63, 0xc0);                     // movsxd rax, eax
+                    }
+                }
+                else if (returns === 'i64')
                 {
                     this.a.emit(...value.type === 'u32' ? [0x31, 0xd2] : [0x99]); // xor edx / cdq
                 }
@@ -3197,8 +3241,9 @@ class FunctionCompiler {
     // XMM(fpu - 1), the next pushed into the register past it. Scalar SSE2
     // arithmetic is IEEE double's to the last bit, as JavaScript's is, under
     // the convention's MXCSR (round to nearest, no exception unmasked). XMM0
-    // to XMM5 are the callee's to change: four deep at most, two past them
-    // for an operation's own use.
+    // to XMM5 are the callee's to change: four deep, two past them for an
+    // operation's own use. Six deep at most, XMM6 and XMM7 then saved in the
+    // frame (`LAST_VOLATILE_XMM`).
 
     /** The next XMM register an expression takes. @param {any} node */
     pushXmm(node){
@@ -3207,7 +3252,23 @@ class FunctionCompiler {
             this.fail(node, 'the expression holds more doubles at once than x86-64 code keeps '
                 + 'in registers');
         }
-        return this.fpu - 1;
+        return this.takeXmm(this.fpu - 1);
+    }
+
+    /**
+     * An XMM register the code writes: past XMM5 one its caller keeps, which
+     * the plan has it save (`xmmKept`).
+     *
+     * @param {number} reg @returns {number}
+     */
+    takeXmm(reg){
+        this.highestXmm = Math.max(this.highestXmm, reg);
+        if (this.planned !== null && reg > LAST_VOLATILE_XMM + this.planned.xmmKept)
+        {
+            throw new Error(`guest code: ${this.node.id.name} takes an XMM register its plan `
+                + 'did not save');
+        }
+        return reg;
     }
 
     /**
@@ -3245,7 +3306,7 @@ class FunctionCompiler {
      */
     masked(opcode, bits){
         const x = this.fpu - 1;
-        this.sseConstant(0xf2, 0x10, x + 1, bits);                         // movsd scratch, [mask]
+        this.sseConstant(0xf2, 0x10, this.takeXmm(x + 1), bits);           // movsd scratch, [mask]
         this.sse(0x66, opcode, x, x + 1);
     }
 
@@ -3367,8 +3428,8 @@ class FunctionCompiler {
     roundXmm(name){
         const a = this.a;
         const x = this.fpu - 1;
-        const s = x + 1;
-        const t = x + 2;
+        const s = this.takeXmm(x + 1);
+        const t = this.takeXmm(x + 2);
         const done = a.fresh('whole');
         this.sseConstant(0xf2, 0x10, s, ABS_MASK);                             // movsd s, [abs]
         this.sse(0x66, 0x54, s, x);                                            // andpd s, x
@@ -4832,7 +4893,8 @@ class FunctionCompiler {
      * at the address, answering what it held -- `expected` where the value
      * was stored. The value and the address are held while the expected
      * value is made in EAX, where the instruction takes it; EDX, which a
-     * variable may have, carries the value and is put back.
+     * variable may have, carries the value and is put back. The same bytes
+     * in long mode, a slot a quadword.
      *
      * @param {any} node @returns {Value}
      */
@@ -4851,12 +4913,22 @@ class FunctionCompiler {
         this.integer(made, expected, 'intish');
         this.toEax(made, expected);
         this.unhold(ECX);                                                  // pop ecx: the address
+        const valueAt = /** @type {number} */ (this.held.at(-1));
         a.emit(0x52);                                                      // push edx
-        this.grew(4);
-        a.emit(0x8b, 0x54, 0x24, 0x04);                                    // mov edx, [esp+4]
+        this.grew(this.word);
+        if (valueAt < 0)
+        {
+            a.emit(0x8b, 0x54, 0x24, this.word);                           // mov edx, [esp+word]
+        }
+        else
+        {
+            this.op(0x89, this.regs(valueAt, EDX));                        // mov edx, reg
+        }
+        // The address zero-extended by the 32-bit operation that made it: in
+        // long mode [rcx] is the guest's address as [ecx] is in the i386.
         a.emit(0xf0, 0x0f, 0xb1, 0x11);                                    // lock cmpxchg [ecx],edx
         a.emit(0x5a);                                                      // pop edx
-        this.grew(-4);
+        this.grew(-this.word);
         this.unhold(ECX);                                                  // pop ecx: the value
         return { where: 'eax', type: 'u32' };
     }
