@@ -1324,11 +1324,15 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
      * @param {number[]} args  lpPrevWndFunc, hWnd, Msg, wParam, lParam.
      * @param {boolean} unicode
      */
-    const callWindowProc = ([previous, hwnd, message, wParam, lParam], unicode)=>{
+    const callWindowProc = (args, unicode)=>{
+        const [previous, hwnd, message, wParam, lParam] = args;
         if ((previous >>> 0) === 0)
         {
             return 0;
         }
+        // What a 64-bit caller passed that the dwords do not say, and a holder
+        // for a quadword the procedure answers (`wideOf`).
+        const wide = wideOf(args, 3, 4, true);
         // A system class's procedure lives on this side, and a program
         // that subclassed one calls it through here with its address. An
         // address is called as a procedure of the call's own encoding; a
@@ -1338,13 +1342,14 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
         const behind = host.procBehind?.(previous) ?? null;
         /** @type {boolean} */
         const reads = behind ? behind.unicode : host.entryReads?.(previous) ?? unicode;
-        return host.callProcedure(behind ? behind.address : previous >>> 0, {
+        return andThen(host.callProcedure(behind ? behind.address : wholeAddress(previous), {
             hwnd: hwnd >>> 0,
             message: message >>> 0,
             wParam: wParam >>> 0,
             lParam: lParam >>> 0,
             ...(behind ? unicode : reads) ? { unicode: true } : {},
-        }, host.callerThread?.(), reads);
+            ...wide ? { wide } : {},
+        }, host.callerThread?.(), reads), result=>wholeAnswer(result, wide));
     };
 
     /**
@@ -1357,7 +1362,9 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
      * @param {number[]} args  hWnd, Msg, wParam, lParam, fuFlags, uTimeout, lpdwResult.
      * @param {boolean} unicode
      */
-    const sendMessageTimeout = ([hwnd, message, wParam, lParam, , timeout, result], unicode)=>{
+    const sendMessageTimeout = (args, unicode)=>{
+        const [hwnd, message, wParam, lParam, , timeout, result] = args;
+        const wide = wideOf(args, 2, 3, true);
         if ((hwnd >>> 0) !== HWND_BROADCAST && !live(hwnd) && !elsewhere(hwnd))
         {
             host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
@@ -1372,11 +1379,18 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             }
             if ((result >>> 0) !== 0)
             {
-                writeU32s(host, result >>> 0, [answer >>> 0]);
+                // A DWORD_PTR: the LRESULT whole at 64 bits, a dword widened
+                // by its sign where the procedure answered no more.
+                const whole = wholeAnswer(answer, wide);
+                writeU32s(host, result >>> 0, host.pointerSize === 8
+                    ? typeof whole === 'bigint'
+                        ? [Number(whole & 0xffffffffn), Number(whole >> 32n & 0xffffffffn)]
+                        : [answer >>> 0, (answer | 0) < 0 ? 0xffffffff : 0]
+                    : [answer >>> 0]);
             }
             return 1;
         };
-        const answer = sendMessage(hwnd, message, wParam, lParam, unicode, timeout >>> 0);
+        const answer = sendMessage(hwnd, message, wParam, lParam, unicode, timeout >>> 0, wide);
         return typeof (/** @type {any} */ (answer))?.then === 'function'
             ? /** @type {Promise<number | null>} */ (answer).then(report)
             : report(/** @type {number} */ (answer));

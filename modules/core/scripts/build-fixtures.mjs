@@ -123,7 +123,7 @@ const IMPORTS = {
             'UpdateWindow@4', 'SetWindowPos@28', 'DestroyWindow@4', 'BeginPaint@8', 'EndPaint@8',
             'GetDC@4', 'ReleaseDC@8', 'FillRect@12', 'GetClientRect@8', 'SetFocus@4',
             'SetWindowsHookExA@16', 'UnhookWindowsHookEx@4', 'CallNextHookEx@16', 'SendInput@12',
-            'GetSystemMetrics@4',
+            'GetSystemMetrics@4', 'CallWindowProcA@20', 'SendNotifyMessageA@16',
         ],
     },
     'GDI32.dll': {

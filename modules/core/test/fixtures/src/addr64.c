@@ -81,6 +81,15 @@ __declspec(dllimport) DWORD __stdcall QueueUserAPC(void (*apc)(unsigned long lon
     unsigned long long parameter);
 __declspec(dllimport) DWORD __stdcall SleepEx(DWORD ms, int alertable);
 __declspec(dllimport) HANDLE __stdcall GetCurrentThread(void);
+__declspec(dllimport) DWORD __stdcall GetCurrentThreadId(void);
+__declspec(dllimport) LRESULT __stdcall SendMessageTimeoutA(HWND hwnd, UINT message, WPARAM w,
+    LPARAM l, UINT flags, UINT timeout, ULONG_PTR *result);
+__declspec(dllimport) int __stdcall SendNotifyMessageA(HWND hwnd, UINT message, WPARAM w,
+    LPARAM l);
+__declspec(dllimport) int __stdcall PostThreadMessageA(DWORD thread, UINT message, WPARAM w,
+    LPARAM l);
+__declspec(dllimport) LRESULT __stdcall CallWindowProcA(WNDPROC procedure, HWND hwnd,
+    UINT message, WPARAM w, LPARAM l);
 
 typedef struct
 {
@@ -202,7 +211,9 @@ static void apc(unsigned long long parameter)
 }
 
 /* Values the host only hands on: each must reach the other side whole. */
-static void forwarded(HWND hwnd, unsigned long long value, const char *names[9])
+static LRESULT windowProc(HWND hwnd, UINT message, WPARAM w, LPARAM l);
+
+static void forwarded(HWND hwnd, unsigned long long value, const char *names[15])
 {
     sentW = 0;
     sentL = 0;
@@ -228,6 +239,23 @@ static void forwarded(HWND hwnd, unsigned long long value, const char *names[9])
     QueueUserAPC(apc, GetCurrentThread(), value);
     SleepEx(0, 1);
     check(names[8], apcSaw, value);
+    ULONG_PTR timed = 0;
+    sentL = 0;
+    SendMessageTimeoutA(hwnd, WM_USER, (WPARAM)value, (LPARAM)value, 0, 1000, &timed);
+    check(names[9], (unsigned long long)sentL, value);
+    check(names[10], (unsigned long long)timed, value);
+    sentW = 0;
+    sentL = 0;
+    LRESULT called = CallWindowProcA(windowProc, hwnd, WM_USER, (WPARAM)value, (LPARAM)value);
+    check(names[11], (unsigned long long)sentL, value);
+    check(names[12], (unsigned long long)called, value);
+    sentL = 0;
+    SendNotifyMessageA(hwnd, WM_USER, (WPARAM)value, (LPARAM)value);
+    check(names[13], (unsigned long long)sentL, value);
+    PostThreadMessageA(GetCurrentThreadId(), WM_USER + 2, (WPARAM)value, (LPARAM)value);
+    message.lParam = 0;
+    PeekMessageA(&message, (HWND)-1, WM_USER + 2, WM_USER + 2, 1);
+    check(names[14], (unsigned long long)message.lParam, value);
 }
 
 static void windowChecks(void *high)
@@ -252,17 +280,23 @@ static void windowChecks(void *high)
             SetWindowLongPtrA(hwnd, GWLP_USERDATA, values[i]);
             check(longs[i], (unsigned long long)GetWindowLongPtrA(hwnd, GWLP_USERDATA),
                 (unsigned long long)values[i]);
-            static const char *passed[2][9] = {
+            static const char *passed[2][15] = {
                 { "SendMessage's WPARAM past 2 GiB", "SendMessage's LPARAM past 2 GiB",
                     "an LRESULT past 2 GiB", "a posted WPARAM past 2 GiB",
                     "a posted LPARAM past 2 GiB", "EnumWindows' LPARAM past 2 GiB",
                     "a TLS value past 2 GiB", "an FLS value past 2 GiB",
-                    "an APC's parameter past 2 GiB" },
+                    "an APC's parameter past 2 GiB", "a timed send's LPARAM past 2 GiB",
+                    "a timed send's result past 2 GiB", "CallWindowProc's LPARAM past 2 GiB",
+                    "CallWindowProc's answer past 2 GiB", "a notified LPARAM past 2 GiB",
+                    "a thread message's LPARAM past 2 GiB" },
                 { "SendMessage's WPARAM past 4 GiB", "SendMessage's LPARAM past 4 GiB",
                     "an LRESULT past 4 GiB", "a posted WPARAM past 4 GiB",
                     "a posted LPARAM past 4 GiB", "EnumWindows' LPARAM past 4 GiB",
                     "a TLS value past 4 GiB", "an FLS value past 4 GiB",
-                    "an APC's parameter past 4 GiB" },
+                    "an APC's parameter past 4 GiB", "a timed send's LPARAM past 4 GiB",
+                    "a timed send's result past 4 GiB", "CallWindowProc's LPARAM past 4 GiB",
+                    "CallWindowProc's answer past 4 GiB", "a notified LPARAM past 4 GiB",
+                    "a thread message's LPARAM past 4 GiB" },
             };
             forwarded(hwnd, (unsigned long long)values[i], passed[i]);
             DestroyWindow(hwnd);

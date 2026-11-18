@@ -8093,7 +8093,9 @@ export function createWindowFunctions(host){
      * @param {number[]} args  hWnd, Msg, wParam, lParam.
      * @param {boolean} unicode
      */
-    const notify = ([hwnd, message, wParam, lParam], unicode)=>{
+    const notify = (args, unicode)=>{
+        const [hwnd, message, wParam, lParam] = args;
+        const wide = wideOf(args, 2, 3);
         if ((hwnd >>> 0) !== HWND_BROADCAST && !live(hwnd)
             && !directory.describe(hwnd, processId))
         {
@@ -8101,7 +8103,7 @@ export function createWindowFunctions(host){
             return 0;
         }
         return andThen(sendAcross(hwnd, message, wParam, lParam, host.callerThread?.(), unicode,
-            { kind: ISMEX_NOTIFY }), ()=>1);
+            { kind: ISMEX_NOTIFY, ...wide ? { wide } : {} }), ()=>1);
     };
 
     /**
@@ -8110,7 +8112,9 @@ export function createWindowFunctions(host){
      * @param {number[]} args  hWnd, Msg, wParam, lParam, lpResultCallBack, dwData.
      * @param {boolean} unicode
      */
-    const sendWithCallback = ([hwnd, message, wParam, lParam, callback, data], unicode)=>{
+    const sendWithCallback = (args, unicode)=>{
+        const [hwnd, message, wParam, lParam, callback, data] = args;
+        const wide = wideOf(args, 2, 3);
         const record = live(hwnd);
         if (!record)
         {
@@ -8123,9 +8127,10 @@ export function createWindowFunctions(host){
         if (owner !== null && self !== null && owner !== self)
         {
             return sendAcross(hwnd, message, wParam, lParam, thread, unicode,
-                { kind: ISMEX_CALLBACK, callback: callback >>> 0, data: data >>> 0 });
+                { kind: ISMEX_CALLBACK, callback: callback >>> 0, data: data >>> 0,
+                    ...wide ? { wide } : {} });
         }
-        return andThen(send(hwnd, message, wParam, lParam, thread, unicode), result=>
+        return andThen(send(hwnd, message, wParam, lParam, thread, unicode, wide), result=>
             andThen((callback >>> 0) !== 0 && host.call
                 ? host.call(callback >>> 0, [record.hwnd, message >>> 0, data >>> 0, result],
                     thread)
@@ -8144,7 +8149,9 @@ export function createWindowFunctions(host){
      * @param {number[]} args  idThread, Msg, wParam, lParam.
      * @param {boolean} unicode
      */
-    const postToThread = ([thread, message, wParam, lParam], unicode)=>{
+    const postToThread = (args, unicode)=>{
+        const [thread, message, wParam, lParam] = args;
+        const wide = wideOf(args, 2, 3);
         const id = thread >>> 0;
         const known = host.threadExists ? host.threadExists(id) : id !== 0;
         if (!known)
@@ -8153,7 +8160,7 @@ export function createWindowFunctions(host){
             return 0;
         }
         host.queue.post({ hwnd: 0, message, wParam, lParam, thread: id,
-            ...unicode ? { unicode } : {} });
+            ...unicode ? { unicode } : {}, ...wide ? { wide } : {} });
         return 1;
     };
 
