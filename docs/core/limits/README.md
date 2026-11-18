@@ -61,9 +61,11 @@ event, an error. Neither stops the program.
   and on no volume ends the process at its start with STATUS_DLL_NOT_FOUND (0xC0000135), as on
   Windows (`roadmap/decisions.md` A256).
 - Common Controls 6 is bound where a manifest asks for it (`roadmap/decisions.md` A257), but of the
-  exports only it has, GetWindowSubclass is there and TaskDialog, TaskDialogIndirect,
-  DrawShadowText, LoadIconMetric, LoadIconWithScaleDown, DPA_GetSize, DSA_Clone, DSA_GetSize,
-  ImageList_CoCreateInstance, ImageList_WriteEx, HIMAGELIST_QueryInterface and DllInstall are not.
+  exports only it has, GetWindowSubclass, HIMAGELIST_QueryInterface, ImageList_CoCreateInstance and
+  ImageList_WriteEx are there and TaskDialog, TaskDialogIndirect, DrawShadowText, LoadIconMetric,
+  LoadIconWithScaleDown, DPA_GetSize, DSA_Clone, DSA_GetSize and DllInstall are not. An image
+  list is the IImageList its handle points at in both libraries; of IImageList2's own methods only
+  Resize and Initialize are there, the rest answer E_NOTIMPL and say so.
   Version 6's button keeps what its BCM_ messages set (image list, text margin, split part,
   command-link note) and answers BCM_GETIDEALSIZE by its own layout - the text in its font, the
   image where the style puts it, its frame - which holds the content but is not Windows' pixel

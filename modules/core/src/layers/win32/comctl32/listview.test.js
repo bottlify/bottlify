@@ -28,8 +28,9 @@ const LVN_GETDISPINFOW = -177;
  * "asked <item>" into the buffer it is handed.
  *
  * @param {number} style @param {(code: number) => number} [answer]
+ * @param {(hdc: number, mode: number) => number} [setBkMode]
  */
-function listview(style, answer = ()=>0){
+function listview(style, answer = ()=>0, setBkMode = undefined){
     const bytes = new Uint8Array(0x20000);
     const view = new DataView(bytes.buffer);
     let heap = 0x11000;
@@ -73,7 +74,10 @@ function listview(style, answer = ()=>0){
                 view.getUint32(lParam + 24, true)]);
             return answer(code);
         },
-    }), { stateOf: (/** @type {any} */ record)=>(record.held ??= {}), common: ()=>0 });
+        draw: { fill: ()=>true },
+    }), { stateOf: (/** @type {any} */ record)=>(record.held ??= {}), common: ()=>0,
+        painting: (/** @type {any} */ _record, /** @type {any} */ paint)=>paint(0x99,
+            { left: 0, top: 0, right: 200, bottom: 100 }) }, setBkMode);
     const record = { hwnd: 0x50, id: 3, parent: 0x40, style };
     const send = (/** @type {number} */ message, /** @type {number} */ wParam,
         /** @type {number} */ lParam)=>procedure(record, { hwnd: 0x50, message, wParam, lParam });
@@ -231,4 +235,21 @@ test('a column keeps its title and width; the first is always left aligned', asy
     assert.equal(await lv.send(LVM.GETCOLUMNA, 0, BUFFER), 1);
     assert.equal(lv.string(TEXT + 0x80), 'Name');
     assert.equal(lv.view.getUint32(BUFFER + LVCOLUMN.fmt, true), 0);
+});
+
+test('a list view tells its custom draw with the context TRANSPARENT', async()=>{
+    // Wine's listview test_customdraw_background: GetBkMode in the parent's
+    // NM_CUSTOMDRAW is TRANSPARENT at every stage, whatever the text's colour.
+    /** @type {string[]} */
+    const order = [];
+    const lv = listview(LVS_REPORT, code=>{
+        order.push(`notify ${code}`);
+        return 0;
+    }, (/** @type {number} */ hdc, /** @type {number} */ mode)=>{
+        order.push(`mode ${hdc.toString(16)} ${mode}`);
+        return 2;
+    });
+    await lv.send(0x000f, 0, 0);
+    assert.deepEqual(order.slice(0, 2), ['mode 99 1', 'notify -12'],
+        'TRANSPARENT before NM_CUSTOMDRAW\'s first stage');
 });

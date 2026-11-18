@@ -42,9 +42,11 @@ const FACE_BACKGROUND = 15 + 1;
  *     toolbar draw from.
  * @param {{ loadBitmap?: (instance: number, id: number) => number,
  *     subclassing?: import('./updown.js').Subclassing,
- *     loadString?: (instance: number, id: number) => string | null }} [resources]
- *     A module's bitmap resources, which a toolbar takes its images from, and
- *     comctl32's subclassing, which an up-down control hooks its buddy with.
+ *     loadString?: (instance: number, id: number) => string | null,
+ *     setBkMode?: (hdc: number, mode: number) => number }} [resources]
+ *     A module's bitmap resources, which a toolbar takes its images from,
+ *     comctl32's subclassing, which an up-down control hooks its buddy with,
+ *     and gdi32's SetBkMode, which a list view paints its items under.
  * @returns {{ name: string, procedure: any, atom: number,
  *     windowExtra?: number, background?: number }[]}
  */
@@ -100,7 +102,7 @@ export function createCommonControls(host, toolkit, images, resources){
         {
             name: LISTVIEW_CLASS,
             atom: LISTVIEW_ATOM,
-            procedure: createListViewProcedure(host, toolkit),
+            procedure: createListViewProcedure(host, toolkit, resources?.setBkMode),
         },
     ];
 }

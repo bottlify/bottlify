@@ -3006,6 +3006,8 @@ export function createWin32Module(){
             // and what its tab control draws from.
             const imageLists = createImageLists({
                 readMemory, writeMemory, divergence: config?.divergence,
+                // A list is the IImageList its handle points at.
+                vtables: comVtables,
                 gdi32: name=>libraries['GDI32.dll']?.[name],
                 user32: name=>libraries['USER32.dll']?.[name],
                 bitmapSize: bitmap=>gdi.bitmapSize(bitmap),
@@ -5523,6 +5525,8 @@ export function createWin32Module(){
                                 // the instance its tool names.
                                 loadString: (instance, id)=>modules.loadString?.(instance, id)
                                     ?? null,
+                                setBkMode: (hdc, mode)=>libraries['GDI32.dll']?.SetBkMode
+                                    ?.handler([hdc, mode]) ?? 0,
                                 // A control that subclasses another window -- an
                                 // up-down control its buddy -- does it with
                                 // comctl32's own SetWindowSubclass.

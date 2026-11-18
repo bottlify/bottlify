@@ -189,6 +189,8 @@ const PANE_INSET = 4;
  * @property {(list: number) => { cx: number, cy: number } | null} size
  * @property {(list: number, index: number, hdc: number, x: number, y: number)
  *     => boolean} draw
+ * @property {Record<string, { handler: (args: number[]) => any }>} [functions]
+ *     comctl32's flat image-list exports, TCM_REMOVEIMAGE's ImageList_Remove
  */
 
 /**
@@ -334,9 +336,10 @@ export function createTabProcedure(host, tk, images){
     };
 
     /**
-     * The font's measures a layout needs: each label's width, the average
-     * character's (the width of an x, as a font's average is defined) and
-     * the line's height.
+     * The font's measures a layout needs: each label's width, the font's
+     * average character width (tmAveCharWidth, which a tab's least width is
+     * counted in: Wine's tab test, default_min_tab_width) and the line's
+     * height.
      *
      * @param {any} record
      */
@@ -348,12 +351,15 @@ export function createTabProcedure(host, tk, images){
         }
         const draw = host.draw;
         const { hdc } = host.contextOn(record);
-        const found = hdc === 0
+        const font = hdc === 0 ? null : draw.measure(hdc, 'M');
+        const found = font === null
             ? { labels: held.items.map(()=>0), average: 7, line: 16 }
             : {
                 labels: held.items.map(item=>draw.measure(hdc, item.text).width),
-                average: draw.measure(hdc, 'x').width,
-                line: draw.measure(hdc, 'M').height,
+                // gdi32's measure answers the font's tmAveCharWidth beside the
+                // extent; the toolkit's typedef (user32) names only the extent.
+                average: /** @type {{ average: number }} */ (/** @type {unknown} */ (font)).average,
+                line: font.height,
             };
         host.endPaint(record, hdc);
         return found;
@@ -913,15 +919,31 @@ export function createTabProcedure(host, tk, images){
                 return previous;
             }
             case TCM_REMOVEIMAGE: {
-                // The items follow the images that are left; the list itself
-                // is comctl32's, and nothing here takes an image out of it.
+                // The image goes out of the list itself and the items follow
+                // the images that are left (Wine's tab test_removeimage).
                 const removed = message.wParam | 0;
+                const remove = images?.functions?.ImageList_Remove;
+                if (removed < 0)
+                {
+                    return 0;
+                }
+                if (held.imageList !== 0)
+                {
+                    if (!remove)
+                    {
+                        host.divergence?.('TCM_REMOVEIMAGE',
+                            'no image lists: the list keeps the image');
+                    }
+                    else if (!remove.handler([held.imageList, removed]))
+                    {
+                        return 0;
+                    }
+                }
                 for (const item of held.items)
                 {
                     item.image = item.image === removed ? -1
                         : item.image > removed ? item.image - 1 : item.image;
                 }
-                host.divergence?.('TCM_REMOVEIMAGE', 'the image list keeps the image');
                 host.invalidate(record);
                 return 0;
             }
