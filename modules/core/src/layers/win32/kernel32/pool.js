@@ -331,6 +331,7 @@ export function createThreadPool(host){
             uncount(job.owner, 1);
         }
         unlive(job.owner, 1);
+        job.done?.();
     };
 
     /** @param {Lane} lane  callbacks its threads are running */
@@ -1208,7 +1209,8 @@ export function createThreadPool(host){
      * calls) over these threads, lanes and waits: one mechanism under both.
      */
     const api = createThreadpoolApi({
-        kernel, host, poolLane, makeLane, spawn, dispatch, drop, uncount, gather, complete, running,
+        kernel, host, poolLane, makeLane, spawn, dispatch, drop, uncount, unlive, gather,
+        complete, running,
         instanceOf, registerWait, cancelWait, dueIn, retireIdle,
     });
 

@@ -168,6 +168,28 @@ export function createPoolFunctions({ kernel32, deletions, writeMemory }){
         /** VOID TpReleaseWait(TP_WAIT *) */
         TpReleaseWait: act(4, ([wait])=>objects.close(wait)),
 
+        /**
+         * NTSTATUS TpAllocIoCompletion(TP_IO **, HANDLE, PTP_IO_CALLBACK, PVOID,
+         *     TP_CALLBACK_ENVIRON *)
+         */
+        TpAllocIoCompletion: fn(20, ([out, file, callback, context, environment])=>{
+            const made = objects.createIo(file, callback, context, environment, true);
+            if (typeof made !== 'number')
+            {
+                return statusOf(made.error);
+            }
+            write32(out, made);
+            return STATUS.SUCCESS;
+        }),
+        /** VOID TpStartAsyncIoOperation(TP_IO *) */
+        TpStartAsyncIoOperation: act(4, ([io])=>objects.startIo(io)),
+        /** VOID TpCancelAsyncIoOperation(TP_IO *) */
+        TpCancelAsyncIoOperation: act(4, ([io])=>objects.cancelIo(io)),
+        /** VOID TpWaitForIoCompletion(TP_IO *, BOOL cancel) */
+        TpWaitForIoCompletion: fn(8, ([io, cancel])=>objects.waitFor(io, cancel)),
+        /** VOID TpReleaseIoCompletion(TP_IO *) */
+        TpReleaseIoCompletion: act(4, ([io])=>objects.close(io)),
+
         /** NTSTATUS TpCallbackMayRunLong(TP_CALLBACK_INSTANCE *) */
         TpCallbackMayRunLong: fn(4, ([instance])=>
             (objects.mayRunLong(instance) ? STATUS.SUCCESS : STATUS_TOO_MANY_THREADS)),

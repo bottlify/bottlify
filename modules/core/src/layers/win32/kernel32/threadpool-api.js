@@ -34,6 +34,10 @@ const TP_CALLBACK_PRIORITY_LOW = 2;
 const WT_EXECUTEONLYONCE = 0x00000008;
 const INFINITE = 0xffffffff;
 const INVALID_HANDLE_VALUE = 0xffffffff;
+/** The pseudo-handles of the process and the thread, which no handle of its own names. */
+const CURRENT_PROCESS = 0xffffffff;
+const CURRENT_THREAD = 0xfffffffe;
+const DUPLICATE_SAME_ACCESS = 2;
 
 const ERROR_NOT_ENOUGH_MEMORY = 8;
 const ERROR_INVALID_PARAMETER = 87;
@@ -67,6 +71,7 @@ const COMPLETION_ORDER = Object.freeze(['LeaveCriticalSection', 'ReleaseMutex',
  * @property {(job: Job, lane?: Lane) => void} dispatch
  * @property {(owner: Owner, lane: Lane) => number} drop  the owner's callbacks not yet started
  * @property {(owner: Owner, count: number) => void} uncount
+ * @property {(owner: Owner, count: number) => void} unlive
  * @property {(owners: Owner[], own: number) => 0 | Promise<0>} gather
  * @property {(owner: Owner, event: number, own: number) => any} complete
  * @property {() => Job | null} running  the calling pool thread's callback
@@ -97,10 +102,11 @@ const COMPLETION_ORDER = Object.freeze(['LeaveCriticalSection', 'ReleaseMutex',
  * pool and not yet returned.
  *
  * @typedef {Owner & {
- *     kind: 'work' | 'simple' | 'timer' | 'wait',
+ *     kind: 'work' | 'simple' | 'timer' | 'wait' | 'io',
  *     handle: number, callback: number, context: number,
  *     pool: Pool, group: Group | null, cancel: number,
  *     closed: boolean, armed: boolean, clock: any, registered: Wait | null,
+ *     io?: { file: number, native: boolean, expected: number }, held?: number,
  *     gone?: boolean }} Item
  *     `closed`: released by the program (a simple callback is never, and goes
  *     once its callback returned); `cancel`: its environment's
@@ -266,6 +272,38 @@ export function createThreadpoolApi(core){
         item.armed = false;
     };
 
+    /**
+     * A handle of the wait's own to the object a thread pool wait is set on,
+     * 0 for a pseudo-handle or where none can be made.
+     *
+     * @param {number} object
+     */
+    const hold = object=>{
+        if (object === CURRENT_PROCESS || object === CURRENT_THREAD || !host.call)
+        {
+            return 0;
+        }
+        const out = host.allocate(4);
+        if (out === 0)
+        {
+            return 0;
+        }
+        const made = host.call('DuplicateHandle', [CURRENT_PROCESS, object, CURRENT_PROCESS, out,
+            0, 0, DUPLICATE_SAME_ACCESS]);
+        const held = (made >>> 0) !== 0 ? read32(out) : 0;
+        host.free?.(out);
+        return held;
+    };
+
+    /** @param {Item} item  the wait's own handle closed, once it fired or stopped */
+    const letGo = item=>{
+        if (item.held)
+        {
+            host.call?.('CloseHandle', [item.held]);
+            item.held = 0;
+        }
+    };
+
     /** @param {Item} item  the wait stops; one already handed over still runs */
     const stopWait = item=>{
         if (item.registered)
@@ -273,6 +311,67 @@ export function createThreadpoolApi(core){
             core.cancelWait(item.registered);
             item.registered = null;
         }
+        letGo(item);
+    };
+
+    /**
+     * Completions expected and not yet come are expected no more: waits for
+     * the object no longer wait for them, and they will not be delivered.
+     *
+     * @param {Item} item
+     */
+    const unexpect = item=>{
+        const expected = item.io?.expected ?? 0;
+        if (item.io && expected > 0)
+        {
+            item.io.expected = 0;
+            core.uncount(item, expected);
+            core.unlive(item, expected);
+        }
+    };
+
+    /** @param {Item} item  released: no completion is expected, and the file is let go */
+    const stopIo = item=>{
+        if (item.io)
+        {
+            unexpect(item);
+            host.bindIo?.(item.io.file, null);
+        }
+    };
+
+    /**
+     * A completion of the I/O object's file: handed to its callback when one
+     * was expected. The expectation it fulfils is let go only once the
+     * callback is handed over, so a wait never sees the object idle between.
+     *
+     * @param {Item} item @param {{ transferred: number, overlapped: number,
+     *     error?: number, status?: number }} packet
+     */
+    const ioCompleted = (item, packet)=>{
+        const io = item.io;
+        if (!io || item.closed || io.expected === 0)
+        {
+            return;
+        }
+        io.expected--;
+        if (io.native)
+        {
+            // IO_STATUS_BLOCK: the status, then the bytes; the callback's own,
+            // given back once it has returned.
+            const block = host.allocate(8);
+            write32(block, packet.status ?? 0);
+            write32(block + 4, packet.transferred);
+            core.dispatch({ entry: item.callback, instanced: true, owner: item,
+                args: [item.context, packet.overlapped, block, item.handle],
+                done: ()=>host.free?.(block) }, item.pool.lane);
+        }
+        else
+        {
+            run(item, [item.context, packet.overlapped, packet.error ?? 0, packet.transferred,
+                item.handle]);
+        }
+        core.uncount(item, 1);
+        core.unlive(item, 1);
     };
 
     /**
@@ -445,6 +544,7 @@ export function createThreadpoolApi(core){
                 item.group = null;
                 stopTimer(item);
                 stopWait(item);
+                stopIo(item);
                 if (cancel !== 0 && core.drop(item, item.pool.lane) > 0)
                 {
                     dropped.add(item);
@@ -575,16 +675,24 @@ export function createThreadpoolApi(core){
             {
                 return was;
             }
-            const made = core.registerWait(object, item.callback, item.context,
+            // The wait holds the object, not the program's handle to it: a
+            // handle closed once the wait is set leaves the wait on its
+            // object (Wine's ntdll test_tp_wait_early_closure).
+            item.held = hold(object >>> 0);
+            const made = core.registerWait(item.held || object, item.callback, item.context,
                 (timeout >>> 0) === 0 ? INFINITE : core.dueIn(timeout >>> 0), WT_EXECUTEONLYONCE);
             if (typeof made === 'number')
             {
+                letGo(item);
                 host.divergence?.('SetThreadpoolWait',
                     `the wait could not be made (error ${made})`);
                 return was;
             }
             made.owner = item;
-            made.argsFor = result=>[item.context, item.handle, result];
+            made.argsFor = result=>{
+                letGo(item);
+                return [item.context, item.handle, result];
+            };
             made.instanced = true;
             made.lane = item.pool.lane;
             item.registered = made;
@@ -606,9 +714,66 @@ export function createThreadpoolApi(core){
             if (cancel !== 0)
             {
                 core.drop(item, item.pool.lane);
+                unexpect(item);
             }
             const done = core.complete(item, INVALID_HANDLE_VALUE, ownShare(item));
             return done === 1 ? 0 : done;
+        },
+
+        /**
+         * A thread pool I/O object: the file's completions go to it, each
+         * one expected (`startIo`) handed to its callback -- kernel32's with
+         * its instance, context, OVERLAPPED, Win32 result, bytes and the
+         * object; ntdll's (`native`) with its instance, context, completion
+         * value, an IO_STATUS_BLOCK and the object. One not expected is not
+         * delivered, as CancelThreadpoolIo says.
+         *
+         * @param {number} file @param {number} callback @param {number} context
+         * @param {number} environment @param {boolean} native
+         * @returns {number | { error: number }}  the object's handle
+         */
+        createIo: (file, callback, context, environment, native)=>{
+            const made = make('io', callback, context, environment);
+            if (typeof made === 'number')
+            {
+                return { error: made };
+            }
+            const bound = host.bindIo?.(file >>> 0, packet=>ioCompleted(made, packet));
+            if (bound !== true)
+            {
+                made.closed = true;
+                forget(made);
+                if (!host.bindIo)
+                {
+                    host.divergence?.('CreateThreadpoolIo',
+                        'no completion ports to bind the file to');
+                }
+                return { error: ERROR_INVALID_PARAMETER };
+            }
+            made.io = { file: file >>> 0, native, expected: 0 };
+            return made.handle;
+        },
+
+        /** One completion more to hand to the callback, waited for until it has. @param {number} handle */
+        startIo: handle=>{
+            const item = itemOf(handle, 'io');
+            if (item?.io && !item.closed)
+            {
+                item.io.expected++;
+                item.outstanding++;
+                item.live = (item.live ?? 0) + 1;
+            }
+        },
+
+        /** One completion expected no more: the operation failed or finished at once. @param {number} handle */
+        cancelIo: handle=>{
+            const item = itemOf(handle, 'io');
+            if (item?.io && item.io.expected > 0)
+            {
+                item.io.expected--;
+                core.uncount(item, 1);
+                core.unlive(item, 1);
+            }
         },
 
         /**
@@ -626,6 +791,7 @@ export function createThreadpoolApi(core){
             item.closed = true;
             stopTimer(item);
             stopWait(item);
+            stopIo(item);
             item.group?.members.delete(item);
             item.group = null;
             forget(item);
@@ -799,6 +965,29 @@ export function createThreadpoolApi(core){
         /** VOID CloseThreadpoolWait(PTP_WAIT) */
         CloseThreadpoolWait: fn(4, ([wait])=>{
             objects.close(wait);
+            return 0;
+        }),
+
+        /** PTP_IO CreateThreadpoolIo(HANDLE, PTP_WIN32_IO_CALLBACK, PVOID, PTP_CALLBACK_ENVIRON) */
+        CreateThreadpoolIo: fn(16, ([file, callback, context, environment])=>{
+            const made = objects.createIo(file, callback, context, environment, false);
+            return typeof made === 'number' ? made : fail(made.error);
+        }),
+        /** VOID StartThreadpoolIo(PTP_IO) */
+        StartThreadpoolIo: fn(4, ([io])=>{
+            objects.startIo(io);
+            return 0;
+        }),
+        /** VOID CancelThreadpoolIo(PTP_IO) */
+        CancelThreadpoolIo: fn(4, ([io])=>{
+            objects.cancelIo(io);
+            return 0;
+        }),
+        /** VOID WaitForThreadpoolIoCallbacks(PTP_IO, BOOL fCancelPendingCallbacks) */
+        WaitForThreadpoolIoCallbacks: fn(8, ([io, cancel])=>objects.waitFor(io, cancel)),
+        /** VOID CloseThreadpoolIo(PTP_IO) */
+        CloseThreadpoolIo: fn(4, ([io])=>{
+            objects.close(io);
             return 0;
         }),
 

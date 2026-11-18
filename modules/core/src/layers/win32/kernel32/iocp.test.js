@@ -397,6 +397,19 @@ test('an operation that failed posts all the same, and its packet answers FALSE'
         'a completion mode that skips the port');
 });
 
+test('a file bound to a thread pool I/O object hands it its completions, not a port', ()=>{
+    const { ports, memory } = setup();
+    /** @type {any[]} */
+    const taken = [];
+    assert.equal(ports.bindSink(0x40, packet=>taken.push(packet)), true);
+    assert.equal(ports.completed(0x40, 8, OVERLAPPED, 0xc0000120), true);
+    assert.deepEqual(taken, [{ transferred: 8, key: 0, overlapped: OVERLAPPED,
+        status: 0xc0000120, error: 995 }]);
+    assert.equal(memory.dword(OVERLAPPED + 4), 8, 'the OVERLAPPED finished as ever');
+    assert.equal(ports.bindSink(0x40, null), true);
+    assert.equal(ports.completed(0x40, 8, OVERLAPPED), false, 'let go');
+});
+
 test('an operation on a handle bound to nothing posts nothing, and is not an error', ()=>{
     const { ports, memory } = setup();
     assert.equal(ports.completed(0x40, 8, OVERLAPPED), false);

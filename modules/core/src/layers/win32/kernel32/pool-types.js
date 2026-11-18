@@ -52,6 +52,10 @@
  * @property {() => { reserve: number, commit: number } | null} [imageStack]
  *           The program's SizeOfStackReserve and SizeOfStackCommit, a pool's
  *           stack sizes until it is given its own.
+ * @property {(file: number, sink: ((packet: any) => void) | null)
+ *     => boolean | 'synchronous'} [bindIo]
+ *           Sends a file's completions to a thread pool I/O object (`iocp.js`
+ *           `bindSink`), or with null takes them back.
  */
 
 /**
@@ -65,6 +69,7 @@
  * @property {boolean} [instanced]  handed its callback instance before `args`
  * @property {Instance} [state]  what the callback asked of its instance
  * @property {boolean} [finalizing]  the owner's FinalizationCallback, after its callback
+ * @property {() => void} [done]  told once the callback has returned
  */
 
 /**

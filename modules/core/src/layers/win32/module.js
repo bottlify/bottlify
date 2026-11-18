@@ -2923,6 +2923,9 @@ export function createWin32Module(){
                 // kernel32 call that does it, on the pool thread it ran on.
                 call: (name, args)=>libraries['KERNEL32.dll'][name].handler(args),
                 callGuest: call=>bridge.callGuest(call),
+                // A thread pool I/O object takes its file's completions as a
+                // port would.
+                bindIo: (file, taker)=>ports.bindSink(file, taker),
                 imageStack: ()=>{
                     // The program's own stack sizes, from its optional header:
                     // SizeOfStackReserve and SizeOfStackCommit, 4 bytes each
