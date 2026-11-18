@@ -306,24 +306,32 @@ test('DELTAPOS moves by an amount and STEPIT by the step, wrapping at the top',
         context.fns.SendMessageA.handler([bar, PBM_SETSTEP, 10, 0]);
         assert.equal(context.fns.SendMessageA.handler([bar, PBM_STEPIT, 0, 0]), 7);
         assert.equal(context.fns.SendMessageA.handler([bar, PBM_GETPOS, 0, 0]), 17);
-        // One more step of ten past twenty comes back around at the bottom.
+        // One more step of ten past twenty comes back around by the range's
+        // width: 27 is 7 (Wine's progress test_PBM_STEPIT).
         context.fns.SendMessageA.handler([bar, PBM_STEPIT, 0, 0]);
-        assert.equal(context.fns.SendMessageA.handler([bar, PBM_GETPOS, 0, 0]), 6,
+        assert.equal(context.fns.SendMessageA.handler([bar, PBM_GETPOS, 0, 0]), 7,
             'the step that overflowed wrapped');
+        // A negative step below the bottom comes around at the top.
+        context.fns.SendMessageA.handler([bar, PBM_SETSTEP, -10, 0]);
+        context.fns.SendMessageA.handler([bar, PBM_STEPIT, 0, 0]);
+        assert.equal(context.fns.SendMessageA.handler([bar, PBM_GETPOS, 0, 0]), 17);
+        assert.equal(context.fns.SendMessageA.handler([bar, PBM_SETRANGE32, 3, 15]), 20 << 16,
+            'SETRANGE32 answers the range before, two WORDs');
     });
 
 test('SETBARCOLOR and SETBKCOLOR answer the colour they replace', async()=>{
     const context = setup();
     await context.makeHost();
     const bar = await context.bar(PBS_SMOOTH);
-    // The colours a bar starts with are the system's, as COLORREFs (blue in
-    // the high byte); the desktop reads back pixels, the order reversed.
-    const HIGHLIGHT_REF = 0x00800000;
-    const FACE_REF = 0x00c0c0c0;
-    assert.equal(context.fns.SendMessageA.handler([bar, PBM_SETBARCOLOR, 0x00ffffff, 0]),
-        HIGHLIGHT_REF, 'the bar was the highlight until now');
-    assert.equal(context.fns.SendMessageA.handler([bar, PBM_SETBKCOLOR, 0x000000ff, 0]),
-        FACE_REF, 'and the track was the dialog face');
+    // The colour is lParam; a bar's colours are CLR_DEFAULT, the system's,
+    // until set (Wine's progress test_setcolors).
+    const CLR_DEFAULT = 0xff000000;
+    assert.equal(context.fns.SendMessageA.handler([bar, PBM_SETBARCOLOR, 0, 0x00ffffff]),
+        CLR_DEFAULT, 'the bar was the system\'s until now');
+    assert.equal(context.fns.SendMessageA.handler([bar, PBM_SETBKCOLOR, 0, 0x000000ff]),
+        CLR_DEFAULT, 'and so was the track');
+    assert.equal(context.fns.SendMessageA.handler([bar, PBM_SETBKCOLOR, 0, 0x000000ff]),
+        0x000000ff, 'and then the colour set');
     context.fns.SendMessageA.handler([bar, PBM_SETPOS, 100, 0]);
     await context.pump();
     // White is its own byte reversal, so the pixel and the COLORREF agree.
