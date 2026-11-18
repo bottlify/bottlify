@@ -22,6 +22,7 @@
  */
 
 import { STATUS } from './status.js';
+import { SKIP_THREAD_ATTACH, TEB } from '../kernel32/teb.js';
 
 /** RT_MESSAGETABLE's resource name: a module has one table, and it is number one. */
 const MESSAGE_TABLE_NAME = 1;
@@ -94,6 +95,12 @@ const THREAD_CREATE_FLAGS_BYPASS_PROCESS_FREEZE = 0x40;
 const STACK_SIZE_PARAM_IS_A_RESERVATION = 0x10000;
 /** THREADINFOCLASS ThreadHideFromDebugger. */
 const THREAD_HIDE_FROM_DEBUGGER = 17;
+/** ThreadBasicInformation: THREAD_BASIC_INFORMATION, TebBaseAddress after ExitStatus. */
+const THREAD_BASIC_INFORMATION = 0;
+const THREAD_BASIC_INFORMATION_BYTES = 28;
+const THREAD_BASIC_TEB = 4;
+/** The pseudo-handle for the calling process. */
+const OWN_PROCESS = 0xffffffff;
 
 /** CreateProcess's flags: the first thread waits, the environment is wide. */
 const CREATE_SUSPENDED = 0x4;
@@ -133,7 +140,9 @@ const DOS_DEVICES = '\\??\\';
  *           with no handle ends and NtSuspendProcess stops.
  * @property {(name: string) => ({ handler: Function } | undefined)} [native]
  *           Another native call by name, made over kernel32's state
- *           (NtSetInformationThread, which marks a thread hidden).
+ *           (NtSetInformationThread, which marks a thread hidden;
+ *           NtQueryInformationThread, which names its block).
+ * @property {number} [pointerSize]  8 in a 64-bit process; absent, 4.
  * @property {(api: string, detail: string) => void} [divergence]
  */
 
@@ -438,6 +447,38 @@ export function createProcessFunctions(host){
     };
 
     /**
+     * Marks a stopped thread of this process as made with
+     * THREAD_CREATE_FLAGS_SKIP_THREAD_ATTACH, in its block, where Windows
+     * keeps it and the loader reads it: SameTebFlags' SkipThreadAttach set,
+     * and no thread-local storage array, which only the libraries' attach
+     * would have filled. Another process's thread, or a 64-bit one, is told
+     * of as any thread, and that is said.
+     *
+     * @param {number} process @param {number} handle
+     */
+    const markSkipThreadAttach = (process, handle)=>{
+        const scratch = (process >>> 0) === OWN_PROCESS && (host.pointerSize ?? 4) === 4
+            ? host.allocate(THREAD_BASIC_INFORMATION_BYTES) >>> 0 : 0;
+        const asked = scratch === 0 ? null : host.native?.('NtQueryInformationThread')
+            ?.handler([handle, THREAD_BASIC_INFORMATION, scratch, THREAD_BASIC_INFORMATION_BYTES,
+                0]);
+        const teb = asked === STATUS.SUCCESS ? readU32(scratch + THREAD_BASIC_TEB) : 0;
+        if (scratch !== 0)
+        {
+            host.free(scratch);
+        }
+        if (teb === 0)
+        {
+            host.divergence?.('NtCreateThreadEx', 'THREAD_CREATE_FLAGS_SKIP_THREAD_ATTACH:'
+                + ' the libraries are told of the thread all the same');
+            return;
+        }
+        const word = readU16(teb + TEB.SAME_TEB_FLAGS) | SKIP_THREAD_ATTACH;
+        host.writeMemory(teb + TEB.SAME_TEB_FLAGS, Uint8Array.of(word & 0xff, word >>> 8));
+        writeU32(teb + TEB.TLS_POINTER, 0);
+    };
+
+    /**
      * Every thread of this process but those that bypass a freeze, each
      * handed to SuspendThread or ResumeThread; the caller last, since
      * suspending itself does not return until another resumes it.
@@ -595,10 +636,11 @@ export function createProcessFunctions(host){
          * THREAD_CREATE_FLAGS_CREATE_SUSPENDED, hidden from a debugger with
          * THREAD_CREATE_FLAGS_HIDE_FROM_DEBUGGER, left running by
          * NtSuspendProcess with THREAD_CREATE_FLAGS_BYPASS_PROCESS_FREEZE. A
-         * maximum stack size is its reserve, a stack size its commit. The
-         * libraries are told of it as of any thread: skipping that
-         * (THREAD_CREATE_FLAGS_SKIP_THREAD_ATTACH, _SKIP_LOADER_INIT) is not
-         * done, and said.
+         * maximum stack size is its reserve, a stack size its commit. With
+         * THREAD_CREATE_FLAGS_SKIP_THREAD_ATTACH its block says SkipThreadAttach
+         * before it runs, and the loader, which reads that, tells no library
+         * of its start or end and it has no thread-local storage array
+         * (`markSkipThreadAttach`). _SKIP_LOADER_INIT is not done, and said.
          */
         NtCreateThreadEx: {
             argBytes: 44,
@@ -608,16 +650,18 @@ export function createProcessFunctions(host){
                 {
                     return STATUS.INVALID_PARAMETER;
                 }
-                const skipped = (flags >>> 0) & (THREAD_CREATE_FLAGS_SKIP_THREAD_ATTACH
-                    | THREAD_CREATE_FLAGS_SKIP_LOADER_INIT);
-                if (skipped !== 0 && !unhonoured.has(skipped))
+                const suspended = ((flags >>> 0) & THREAD_CREATE_FLAGS_CREATE_SUSPENDED) !== 0;
+                const skipAttach = ((flags >>> 0) & THREAD_CREATE_FLAGS_SKIP_THREAD_ATTACH) !== 0;
+                if (((flags >>> 0) & THREAD_CREATE_FLAGS_SKIP_LOADER_INIT) !== 0
+                    && !unhonoured.has(THREAD_CREATE_FLAGS_SKIP_LOADER_INIT))
                 {
-                    unhonoured.add(skipped);
-                    host.divergence?.('NtCreateThreadEx', `flags 0x${skipped.toString(16)}: the`
-                        + ' libraries are told of the thread all the same');
+                    unhonoured.add(THREAD_CREATE_FLAGS_SKIP_LOADER_INIT);
+                    host.divergence?.('NtCreateThreadEx', 'THREAD_CREATE_FLAGS_SKIP_LOADER_INIT:'
+                        + ' the loader starts the thread all the same');
                 }
+                // Made stopped, so that its block says so before it runs.
                 const made = makeThread({ process, start, argument,
-                    suspended: ((flags >>> 0) & THREAD_CREATE_FLAGS_CREATE_SUSPENDED) !== 0,
+                    suspended: suspended || skipAttach,
                     hidden: ((flags >>> 0) & THREAD_CREATE_FLAGS_HIDE_FROM_DEBUGGER) !== 0,
                     commit, reserve });
                 /** @param {any} thread */
@@ -629,6 +673,14 @@ export function createProcessFunctions(host){
                     if (((flags >>> 0) & THREAD_CREATE_FLAGS_BYPASS_PROCESS_FREEZE) !== 0)
                     {
                         unfrozen.add(thread.id);
+                    }
+                    if (skipAttach)
+                    {
+                        markSkipThreadAttach(process, thread.handle);
+                        if (!suspended)
+                        {
+                            quietly('ResumeThread', [thread.handle]);
+                        }
                     }
                     writeU32(out, thread.handle);
                     return STATUS.SUCCESS;

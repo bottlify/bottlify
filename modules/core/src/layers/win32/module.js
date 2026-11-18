@@ -16,7 +16,7 @@ import {
 } from './kernel32/heap.js';
 import { createProcessFunctions, createThreadState, PERFORMANCE_FREQUENCY }
     from './kernel32/process.js';
-import { blockLayouts } from './kernel32/teb.js';
+import { SKIP_THREAD_ATTACH, blockLayouts } from './kernel32/teb.js';
 import { createModuleFunctions } from './kernel32/modules.js';
 import { createFileFunctions, withSystemLibraries } from './kernel32/files.js';
 import { createRichEditControls } from './riched/richedit.js';
@@ -1158,7 +1158,13 @@ export function createWin32Module(){
                 allocate: bytes=>heap.allocate(bytes),
                 allocateCode: bytes=>heap.allocateCode(bytes),
                 writeMemory: (address, bytes)=>memory.writeBytes(address, bytes),
-                images: ()=>modules.threadCalls?.() ?? [],
+                // None for a thread whose block says SkipThreadAttach: the
+                // list is asked for on the thread itself, at its start and end.
+                images: ()=>{
+                    const teb = kernel.currentThread()?.tebAddress >>> 0;
+                    return teb !== 0 && (memory.readU16(teb + blocks.teb.SAME_TEB_FLAGS)
+                        & SKIP_THREAD_ATTACH) !== 0 ? [] : modules.threadCalls?.() ?? [];
+                },
                 loaderLock: ()=>{
                     const address = modules.loaderLock?.() ?? 0;
                     const enter = kernel32Export('EnterCriticalSection');
