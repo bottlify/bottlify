@@ -53,6 +53,7 @@ import { readFileSync } from 'node:fs';
 import { isMain } from '../lib/common.mjs';
 import { ORIGINAL_EXPORT } from '../../modules/core/src/layers/win32/msvcrt/invalid-parameter.js';
 import { standIn } from './check-guest-pointers.mjs';
+import { longAnswer, zeroExtendsOf } from '../../modules/core/src/layers/bridge/internal/dispatch.js';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const LAYERS = join(ROOT, 'modules', 'core', 'src', 'layers');
@@ -210,20 +211,17 @@ async function layerAt(base){
 }
 
 /**
- * RAX as the bridge writes it for a 64-bit call (dispatch.js, `long`): a
- * bigint whole, a dword sign-extended.
+ * RAX as the bridge writes it for a 64-bit call: its own `longAnswer`, the
+ * spec's type deciding (`zeroExtendsOf`) - an address zero-extended, any other
+ * dword sign-extended.
  *
- * @param {unknown} answer
+ * @param {unknown} answer @param {{ returns?: string }} [spec]
  * @returns {bigint | null}  null for no number (a promise left waiting, nothing)
  */
-export function raxOf(answer){
-    if (typeof answer === 'bigint')
+export function raxOf(answer, spec = {}){
+    if (typeof answer === 'bigint' || typeof answer === 'number')
     {
-        return BigInt.asUintN(64, answer);
-    }
-    if (typeof answer === 'number')
-    {
-        return BigInt.asUintN(64, BigInt(answer | 0));
+        return longAnswer(answer, null, zeroExtendsOf(spec));
     }
     return null;
 }
@@ -392,8 +390,9 @@ export async function compare(low, high){
                             + ` ${b.threw ?? 'nothing'} high` });
                     continue;
                 }
-                const lowRax = raxOf(a.answer);
-                const highRax = raxOf(b.answer);
+                const spec = entry?.[ORIGINAL_EXPORT] ?? entry;
+                const lowRax = raxOf(a.answer, spec);
+                const highRax = raxOf(b.answer, spec);
                 if (!sameAnswer(lowRax, highRax, low.base, high.base))
                 {
                     differences.push({ key, label, detail: `RAX 0x${lowRax?.toString(16)} low,`

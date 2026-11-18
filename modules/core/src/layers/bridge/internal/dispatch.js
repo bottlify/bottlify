@@ -413,6 +413,35 @@ function makeRecord(){
 const NO_ERROR = ()=>0;
 
 /**
+ * Whether a function's answer is an address, which RAX takes zero-extended
+ * in a 64-bit process (`longAnswer`): its spec says `returns: 'pointer'`.
+ *
+ * @param {{ returns?: string }} fn
+ */
+export const zeroExtendsOf = fn=>fn.returns === 'pointer';
+
+/**
+ * RAX as a 64-bit call's answer leaves it, as the function's type has it: a
+ * bigint whole; a quadword answered the 32-bit way, its high half for EDX
+ * (`high`), the two halves whole; an address zero-extended; any other dword
+ * sign-extended - a handle of -1 is INVALID_HANDLE_VALUE whole.
+ *
+ * @param {number | bigint} result @param {number | null} high @param {boolean} zeroExtends
+ * @returns {bigint}
+ */
+export function longAnswer(result, high, zeroExtends){
+    if (typeof result === 'bigint')
+    {
+        return BigInt.asUintN(64, result);
+    }
+    if (high !== null)
+    {
+        return BigInt(high) << 32n | BigInt(result >>> 0);
+    }
+    return zeroExtends ? BigInt(result >>> 0) : BigInt.asUintN(64, BigInt(result | 0));
+}
+
+/**
  * @param {Object} deps
  * @param {any} deps.cpu       For the registers a call frame is read from.
  * @param {any} deps.memory    For the stack itself, so a wild ESP is caught here.
@@ -1689,12 +1718,8 @@ class Dispatcher {
             // zero-extended, any other dword sign-extended - a handle of -1 is
             // INVALID_HANDLE_VALUE whole. A quadword answered the 32-bit way,
             // its high half for EDX, is the two halves whole.
-            const high = this.wideHigh;
-            const low = /** @type {number} */ (result);
-            this.cpu.writeReg64('rax', typeof result === 'bigint' ? BigInt.asUintN(64, result)
-                : high !== null ? BigInt(high) << 32n | BigInt(low >>> 0)
-                    : entry.zeroExtends ? BigInt(low >>> 0)
-                        : BigInt.asUintN(64, BigInt(low | 0)));
+            this.cpu.writeReg64('rax', longAnswer(/** @type {number | bigint} */ (result),
+                this.wideHigh, entry.zeroExtends));
             return;
         }
         // Asked again rather than reusing `regs`: the handler may have
@@ -1792,7 +1817,7 @@ class Dispatcher {
                 ? { calls: 0, handled: 0, fellThrough: 0, mismatches: 0, ms: 0 } : null,
             readsError: this.errorReader && fn.lastError !== false,
             quadwords,
-            zeroExtends: fn.returns === 'pointer',
+            zeroExtends: zeroExtendsOf(fn),
             longSlots: quadwords || floats || structs
                 ? longSlotsOf(words, quadwords, floats, structs) : null,
             args: argumentArray(site ? 8 : stackWords + registerArgs),

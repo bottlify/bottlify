@@ -21,6 +21,9 @@ test('RAX is a dword sign-extended, a bigint whole, nothing for no number', ()=>
     assert.equal(raxOf(-1), 0xffffffffffffffffn);
     assert.equal(raxOf(0x90100000n), 0x90100000n);
     assert.equal(raxOf(undefined), null);
+    // An address the spec declares (`returns: 'pointer'`) is zero-extended, as the bridge does.
+    assert.equal(raxOf(0x90100000, { returns: 'pointer' }), 0x90100000n);
+    assert.equal(raxOf(-1, { returns: 'pointer' }), 0xffffffffn);
 });
 
 test('an answer pointing into the window may move by the distance, nothing else may', ()=>{
