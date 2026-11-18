@@ -3598,6 +3598,7 @@ export function createWin32Module(){
                         readWideString,
                         files: volume,
                         setLastError: setError,
+                        registry: hive,
                     }),
                     ...createDriveFunctions({
                         readCString, readWideString, readMemory, writeMemory,
