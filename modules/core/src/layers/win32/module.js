@@ -3014,6 +3014,12 @@ export function createWin32Module(){
                 gdi32: name=>libraries['GDI32.dll']?.[name],
                 user32: name=>libraries['USER32.dll']?.[name],
                 bitmapSize: bitmap=>gdi.bitmapSize(bitmap),
+                // A list's image is a DIB section at its depth, described to
+                // gdi32 in guest memory.
+                allocate: bytes=>heap.allocate(bytes),
+                release: address=>heap.free(address),
+                // comctl32's own module, whose standard strips a list loads.
+                ownInstance: ()=>/** @type {any} */ (modules.find('comctl32.dll'))?.base ?? 0,
             });
 
             /** The runtime's heap: HeapCreate's, the first time malloc needs it. */

@@ -2450,3 +2450,14 @@ hinted width carries its own rounding, so a scaled one may be a pixel off Window
 fixed pitch for every character - the estimate before - made a string of wide letters a third too
 narrow. Where a font engine draws, its own widths answer. Removed when the engine carries these
 faces' design widths (their `hmtx`). *2026-11-18.*
+
+**A267. Temporary: a pager places its child when the program next takes its messages.** Windows'
+pager recalculates its frame with SWP_FRAMECHANGED - WM_NCCALCSIZE, where it asks its parent
+PGN_CALCSIZE, then WM_WINDOWPOSCHANGED though nothing moved - and moves its child with SetWindowPos,
+which sends the child WM_CHILDACTIVATE (Wine's pager test, set_child_seq). A control here moves a
+window only through the window manager's MoveWindow (`ControlHost.move`), which says neither; the
+child moved at once hears its messages out of Windows' order. So PGM_SETCHILD, PGM_SETPOS and
+PGM_RECALCSIZE recalculate the frame at once and post the pager its own PGM_PLACECHILD, which puts
+the child in place from the message loop. Removed when `ControlHost` moves a window with
+SetWindowPos's flags: the child is then placed at once, inside the message that asked.
+*2026-11-18.*

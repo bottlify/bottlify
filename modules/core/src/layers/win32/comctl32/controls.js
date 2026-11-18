@@ -29,6 +29,8 @@ import { UPDOWN_CLASS, UPDOWN_ATOM, createUpDownProcedure } from './updown.js';
 import { TOOLTIPS_CLASS, TOOLTIPS_ATOM, createTooltipProcedure } from './tooltips.js';
 import { HEADER_CLASS, HEADER_ATOM, createHeaderProcedure } from './header.js';
 import { LISTVIEW_CLASS, LISTVIEW_ATOM, createListViewProcedure } from './listview.js';
+import { REBAR_CLASS, REBAR_ATOM, createRebarProcedure } from './rebar.js';
+import { PAGER_CLASS, PAGER_ATOM, createPagerProcedure } from './pager.js';
 
 /** The face colour's brush, as a class's background names it: the index plus one. */
 const FACE_BACKGROUND = 15 + 1;
@@ -38,8 +40,8 @@ const FACE_BACKGROUND = 15 + 1;
  *
  * @param {import('../user32/controls.js').ControlHost} host
  * @param {any} toolkit  The drawing helpers the system classes share.
- * @param {import('./toolbar.js').ToolbarImages} [images]  The image lists a tab and a
- *     toolbar draw from.
+ * @param {import('./toolbar.js').ToolbarImages} [images]  The image lists a tab, a
+ *     toolbar and a rebar's bands draw from.
  * @param {{ loadBitmap?: (instance: number, id: number) => number,
  *     subclassing?: import('./updown.js').Subclassing,
  *     loadString?: (instance: number, id: number) => string | null,
@@ -103,6 +105,16 @@ export function createCommonControls(host, toolkit, images, resources){
             name: LISTVIEW_CLASS,
             atom: LISTVIEW_ATOM,
             procedure: createListViewProcedure(host, toolkit, resources?.setBkMode),
+        },
+        {
+            name: REBAR_CLASS,
+            atom: REBAR_ATOM,
+            procedure: createRebarProcedure(host, toolkit, images),
+        },
+        {
+            name: PAGER_CLASS,
+            atom: PAGER_ATOM,
+            procedure: createPagerProcedure(host, toolkit),
         },
     ];
 }

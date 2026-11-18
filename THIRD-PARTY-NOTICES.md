@@ -126,7 +126,11 @@ Windows' own files establish; the list is Wine's work of finding them.
 
 Wine's `dlls/gdiplus/tests/brush.c` is used the same way for the pixels of GDI+'s 53 hatch styles:
 the 8x8 cells in `modules/core/src/layers/win32/gdiplus/raster.js` (`HATCHES`) are Windows' own
-output as that test records it - data about what Windows draws, not code.
+output as that test records it - data about what Windows draws, not code. Its
+`dlls/comctl32/tests/imagelist.c` is used so for the colour tables a list of four and of eight
+bits a pixel starts with (`DEFAULT_COLORS_4`, `DEFAULT_COLORS_8` in
+`modules/core/src/layers/win32/comctl32/imagelist.js`): the colours Windows reports, as the
+test's failures print them.
 
 What is not taken: no code, no test structure, no helper, no assertion text, no ordering. Every
 test in this repository is written independently, against this project's own conventions.

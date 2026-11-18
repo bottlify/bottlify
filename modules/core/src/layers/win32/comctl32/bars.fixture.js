@@ -163,6 +163,13 @@ export function setupBars(gdiEngine){
     };
     /** Every message the parent's procedure was sent. @type {any[]} */
     const sent = [];
+    /**
+     * What the parent's procedure does with a message before DefWindowProc:
+     * an answer, or undefined to leave it to DefWindowProc.
+     *
+     * @type {((message: any) => number | undefined) | null}
+     */
+    let parentAnswers = null;
     /** @type {string[]} */
     const divergences = [];
     /** The bitmap resources a module holds, by id. @type {Map<number, number>} */
@@ -221,6 +228,11 @@ export function setupBars(gdiEngine){
         screen: SCREEN,
         dispatch: (wndProc, message)=>{
             sent.push({ ...message });
+            const answer = parentAnswers?.(message);
+            if (answer !== undefined)
+            {
+                return answer;
+            }
             return table.DefWindowProcA.handler(
                 [message.hwnd, message.message, message.wParam, message.lParam]);
         },
@@ -357,7 +369,12 @@ export function setupBars(gdiEngine){
         return desktop.read(point.x, point.y);
     };
 
-    return { memory, desktop, fns: table, send, pump, sent, divergences, resources,
+    /** @param {(message: any) => number | undefined} answers */
+    const answerParent = answers=>{
+        parentAnswers = answers;
+    };
+
+    return { memory, desktop, fns: table, send, pump, sent, divergences, resources, answerParent,
         makeParent, control, bitmap, windowRect, clientSize, toScreen, pixel, gdi32, gdi,
         lists: imageLists.functions };
 }
