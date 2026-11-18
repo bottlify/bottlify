@@ -126,6 +126,16 @@ test('the ideal size holds the text and the image as the alignment places them',
     const [sx, sy] = ideal(stacked);
     assert.ok(sx >= 48 && sy >= 48 + 16, 'centred at the top: the image above the text');
 
+    // At the top alone the image goes above too; left at the top keeps it beside.
+    for (const [style, above] of /** @type {[number, boolean][]} */ ([[0x0400, true], [0x0800, true], [0x0100 | 0x0400, false]]))
+    {
+        const b = m.button(style);
+        b.state.image = { type: 0, handle: 0x800 };
+        const [w, h] = ideal(b);
+        assert.ok(above ? h >= 48 + 16 && w < 48 + text : w >= 48 + text,
+            `style ${style.toString(16)}`);
+    }
+
     const split = m.button(BS_SPLITBUTTON);
     m.view.setUint32(IN, 8, true);
     m.view.setInt32(IN + 12, 123, true);
