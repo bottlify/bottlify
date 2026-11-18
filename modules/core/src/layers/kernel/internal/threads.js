@@ -810,7 +810,8 @@ export function createScheduler(options){
                 // stack carries these: an exception handler's block.
                 ...next.resumeRegisters ? { registers: next.resumeRegisters } : {},
             };
-            onResume?.(next, next.lastWaitingOn ?? null, resume.returnValue >>> 0);
+            onResume?.(next, next.lastWaitingOn ?? null, typeof resume.returnValue === 'bigint'
+                ? Number(BigInt.asUintN(32, resume.returnValue)) : resume.returnValue >>> 0);
             next.parkedReturn = null;
             next.parkedInStub = false;
             next.resumeStack = null;

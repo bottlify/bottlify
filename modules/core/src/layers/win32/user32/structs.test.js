@@ -230,3 +230,25 @@ test('a 64-bit class keeps a procedure and a name past 4 GiB whole, both ways', 
     assert.equal(view.getBigUint64(0x100 + L.lpfnWndProc, true), 0x140001740n);
     assert.equal(view.getBigUint64(0x100 + L.lpszClassName, true), 0x1400023ben);
 });
+
+test('a 64-bit MSG carries a WPARAM and an LPARAM a dword does not say, both ways', ()=>{
+    const memory = fakeMemory();
+    const layouts = userLayouts(8);
+    const L = layouts.MSG;
+    const view = new DataView(memory.bytes.buffer);
+    writeMessage(memory, 0x20, { hwnd: 0x1004, message: 0x401, wParam: 0x23456789,
+        lParam: 0x90000000, time: 5, x: 1, y: 2,
+        wide: { w: 0x123456789n, l: 0x90000000n } }, layouts);
+    assert.equal(view.getBigUint64(0x20 + L.wParam, true), 0x123456789n);
+    assert.equal(view.getBigUint64(0x20 + L.lParam, true), 0x90000000n,
+        'a pointer past 2 GiB, not its sign\'s ones');
+    const back = readMessage(memory, 0x20, layouts);
+    assert.deepEqual(back.wide, { w: 0x123456789n, l: 0x90000000n });
+    assert.equal(back.lParam, 0x90000000);
+    // Where the dwords say it all, nothing rides beside them.
+    writeMessage(memory, 0x80, { hwnd: 0x1004, message: 0x401, wParam: 7, lParam: 0xffffffff,
+        time: 5, x: 1, y: 2 }, layouts);
+    assert.equal(view.getBigUint64(0x80 + L.lParam, true), 0xffffffffffffffffn);
+    assert.equal(readMessage(memory, 0x80, layouts).wide, undefined);
+    assert.equal(readMessage(memory, 0x80).wide, undefined, 'nor in a 32-bit MSG');
+});

@@ -61,7 +61,7 @@ import { ANY_WINDOW, threadIdOf } from './messages.js';
 import { DISPLAY_DEVICE_NAME, VIDEO_ADAPTER_NAME } from '../devices.js';
 import { createRefusals } from '../common/refusal.js';
 import { charactersOf, readToTerminator } from '../common/scan-windows.js';
-import { wholeAddress } from '../common/pointers.js';
+import { wholeAddress, wholeAnswer, wideOf } from '../common/pointers.js';
 
 /** GetSystemMetrics indices this build has a real answer for. */
 /** How many argument slots a `va_list` is read for, since it carries no count. */
@@ -1251,14 +1251,18 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
      * @param {number} lParam
      * @param {boolean} [unicode]  Whether the text the message carries is wide.
      * @param {number} [timeout]  How long to wait for another thread, in milliseconds.
+     * @param {import('../common/pointers.js').WideParams} [wide]  The WPARAM and LPARAM a
+     *     64-bit caller passed, where the dwords do not say them.
      * @returns {number | Promise<number | null>} null when the timeout passed first
      */
-    const sendMessage = (hwnd, message, wParam, lParam, unicode = false, timeout = undefined)=>
+    const sendMessage = (hwnd, message, wParam, lParam, unicode = false, timeout = undefined,
+        wide = undefined)=>
         (host.sendAcross
             ? host.sendAcross(hwnd >>> 0, message >>> 0, wParam >>> 0, lParam >>> 0,
-                host.callerThread?.(), unicode, timeout === undefined ? {} : { timeout })
+                host.callerThread?.(), unicode,
+                { ...timeout === undefined ? {} : { timeout }, ...wide ? { wide } : {} })
             : host.send(hwnd >>> 0, message >>> 0, wParam >>> 0, lParam >>> 0,
-                host.callerThread?.(), unicode));
+                host.callerThread?.(), unicode, wide));
 
     /** @param {number} codePage @param {number} start @param {number} current */
     const previousCharacter = (codePage, start, current)=>
@@ -6841,7 +6845,11 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
         SendMessageA: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([hwnd, message, wParam, lParam])=>sendMessage(hwnd, message, wParam, lParam),
+            handler: args=>{
+                const wide = wideOf(args, 2, 3, true);
+                return andThen(sendMessage(args[0], args[1], args[2], args[3], false, undefined,
+                    wide), result=>wholeAnswer(result, wide));
+            },
         },
 
         /**
@@ -6853,8 +6861,11 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
         SendMessageW: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([hwnd, message, wParam, lParam])=>
-                sendMessage(hwnd, message, wParam, lParam, true),
+            handler: args=>{
+                const wide = wideOf(args, 2, 3, true);
+                return andThen(sendMessage(args[0], args[1], args[2], args[3], true, undefined,
+                    wide), result=>wholeAnswer(result, wide));
+            },
         },
 
         /**

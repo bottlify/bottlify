@@ -242,7 +242,10 @@ export function createBridgeModule(){
                             state.callbacks.finish(thread, value.value | 0, value.registers);
                             return;
                         }
-                        state.callbacks.finish(thread, value | 0);
+                        // A quadword answered whole (an LRESULT handed on) goes
+                        // back whole; a dword by its sign, as ever.
+                        state.callbacks.finish(thread, typeof value === 'bigint' ? value
+                            : value | 0);
                     },
                     // Nothing above is waiting on this promise, so a handler that
                     // throws would otherwise vanish and leave the guest parked

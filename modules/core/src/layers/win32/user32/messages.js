@@ -68,6 +68,8 @@ export const threadIdOf = thread=>{
  * @property {boolean} [unicode]  Posted by a wide caller, so a character is a UTF-16 unit.
  * @property {number} [side]     The input layer's left or right key of a shift, control
  *     or alt, which the wParam names as one.
+ * @property {import('../common/pointers.js').WideParams} [wide]  The WPARAM and LPARAM a
+ *     64-bit poster passed, where the dwords do not say them.
  * @property {number | null} [thread]  The thread whose queue it goes to, for a
  *     message with no window; null for whichever thread looks first. Left out,
  *     a window's message goes to the thread that created the window.
@@ -936,6 +938,8 @@ export function createMessageQueue(options = {}){
             ...message.unicode ? { unicode: true } : {},
             // The input layer's left or right modifier key, for the key state.
             ...message.side !== undefined ? { side: message.side } : {},
+            // What a 64-bit poster passed that the dwords do not say.
+            ...message.wide ? { wide: message.wide } : {},
         };
         if (message.x !== undefined)
         {

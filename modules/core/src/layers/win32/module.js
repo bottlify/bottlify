@@ -224,6 +224,7 @@ import { CLSID_MF_READ_WRITE_CLASS_FACTORY, createMfReadWriteFunctions }
     from './mfreadwrite/functions.js';
 import { createPropsysFunctions } from './propsys/functions.js';
 import { SHARED_RESOURCE_HANDLE } from './ntdll/query.js';
+import { paramsOf } from './common/pointers.js';
 
 // MultiByteToWideChar, WideCharToMultiByte and FlushInstructionCache carry x86-64 a
 // 64-bit process places (`withLongCode`), the conversions here and the flush in heap.js.
@@ -5347,11 +5348,30 @@ export function createWin32Module(){
                         // The four arguments a window procedure declares, in
                         // order: at 64 bits a WPARAM widens as the UINT it is
                         // kept as, an LPARAM as the LONG (`callback.js`).
+                        // A value a 64-bit caller passed that a dword does not
+                        // say - a pointer past 2 GiB in an LPARAM, any past
+                        // 4 GiB - goes whole (`paramsOf`).
+                        /** @type {(number | bigint)[]} */
                         const args = [message.hwnd >>> 0, message.message >>> 0,
-                            message.wParam >>> 0, message.lParam | 0];
-                        return guarded
-                            ? callGuarded({ entry: wndProc, args, thread, failed: 0 })
-                            : bridge.callGuest({ entry: wndProc, args, thread });
+                            ...paramsOf(message)];
+                        if (guarded)
+                        {
+                            return callGuarded({ entry: wndProc,
+                                args: /** @type {any} */ (args), thread, failed: 0 });
+                        }
+                        const answer = bridge.callGuest({ entry: wndProc, args, thread });
+                        const { wide } = message;
+                        // An LRESULT a dword does not say, for the sender that
+                        // asked to be told (`wholeAnswer`).
+                        return wide === undefined ? answer : answer.then((
+                            /** @type {number} */ value)=>{
+                            const { high } = /** @type {{ high?: number }} */ (answer);
+                            if (high !== undefined && high !== ((value | 0) < 0 ? 0xffffffff : 0))
+                            {
+                                wide.r = BigInt(high) << 32n | BigInt(value >>> 0);
+                            }
+                            return value;
+                        });
                     },
                     call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
                     callerThread: ()=>bridge.callerThread(),

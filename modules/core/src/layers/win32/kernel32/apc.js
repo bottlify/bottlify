@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { forwarded } from '../common/pointers.js';
+
 /**
  * Asynchronous procedure calls: routines queued to a thread, run by that thread
  * the next time it waits alertably.
@@ -80,7 +82,7 @@ export function createApcs(host){
     /**
      * What each thread has queued, oldest first.
      *
-     * @type {WeakMap<object, { routine: number, args: number[] }[]>}
+     * @type {WeakMap<object, { routine: number, args: (number | bigint)[] }[]>}
      */
     const queues = new WeakMap();
     /** @param {any} thread */
@@ -112,7 +114,7 @@ export function createApcs(host){
         thread.apcAnswer = undefined;
         while (queue.length > 0)
         {
-            const { routine, args } = /** @type {{ routine: number, args: number[] }} */
+            const { routine, args } = /** @type {{ routine: number, args: any[] }} */
                 (queue.shift());
             delivered++;
             await host.callGuest({ entry: routine, args, thread });
@@ -141,7 +143,7 @@ export function createApcs(host){
      *
      * @param {any} thread
      * @param {number} routine
-     * @param {number[]} args
+     * @param {(number | bigint)[]} args
      */
     const queue = (thread, routine, args)=>{
         queueOf(thread).push({ routine: routine >>> 0, args });
@@ -217,7 +219,8 @@ export function createApcs(host){
      *
      * @param {number[]} args
      */
-    const queueUser = ([routine, handle, data])=>{
+    const queueUser = args=>{
+        const [routine, handle] = args;
         const thread = threadOf(handle);
         if (!thread || (routine >>> 0) === 0)
         {
@@ -231,7 +234,8 @@ export function createApcs(host){
             host.setLastError(ERROR_GEN_FAILURE);
             return 0;
         }
-        queue(thread, routine, [data >>> 0]);
+        // The parameter is the program's alone: whole to its routine.
+        queue(thread, routine, [forwarded(args, 2)]);
         return 1;
     };
 
@@ -317,10 +321,11 @@ export function createApcs(host){
             QueueUserAPC2: {
                 argBytes: 16,
                 /** @param {number[]} args */
-                handler: ([routine, handle, data, flags])=>{
+                handler: args=>{
+                    const flags = args[3];
                     if ((flags >>> 0) === QUEUE_USER_APC_FLAGS_NONE)
                     {
-                        return queueUser([routine, handle, data]);
+                        return queueUser(args);
                     }
                     host.setLastError((flags >>> 0) === QUEUE_USER_APC_FLAGS_SPECIAL_USER_APC
                         ? ERROR_NOT_SUPPORTED : ERROR_INVALID_PARAMETER);

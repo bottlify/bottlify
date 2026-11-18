@@ -16,6 +16,8 @@
  * Reading and writing them lives here too, so that the offsets and the code
  * that uses them cannot drift apart.
  */
+import { paramsOf, wideParams } from '../common/pointers.js';
+
 
 /** WNDCLASSA, the classic form RegisterClassA takes. */
 export const WNDCLASSA = Object.freeze({
@@ -379,6 +381,7 @@ export function writeWindowClass(memory, address, fields, layouts = userLayouts(
  * @property {number} time
  * @property {number} x
  * @property {number} y
+ * @property {import('../common/pointers.js').WideParams} [wide]
  */
 
 /**
@@ -399,6 +402,17 @@ export function writeMessage(memory, address, message, layouts = userLayouts(4))
         ptX: message.x,
         ptY: message.y,
     });
+    // What a 64-bit poster passed that the dwords do not say goes back whole.
+    const [w, l] = layouts.pointerSize === 8 ? paramsOf(message) : [0, 0];
+    const view = new DataView(bytes.buffer);
+    if (typeof w === 'bigint')
+    {
+        view.setBigUint64(layout.wParam, w, true);
+    }
+    if (typeof l === 'bigint')
+    {
+        view.setBigUint64(layout.lParam, l, true);
+    }
     // The 32-bit MSG ends at the point; a 64-bit one's lPrivate after it is
     // the system's, and left as the caller had it.
     memory.writeMemory(address, bytes.subarray(0, layout.ptY + 4));
@@ -410,25 +424,31 @@ export function writeMessage(memory, address, message, layouts = userLayouts(4))
  * what a TIMERPROC takes in their place. The cursor position is the queue's
  * own bookkeeping and nothing here decides anything by it.
  *
- * A field of a 64-bit MSG is read by its low half: a pointer, a handle and
- * every value the queue holds lie within it.
+ * A field of a 64-bit MSG is read by its low half; a WPARAM or an LPARAM whose
+ * high half says more than the dword does is carried beside it (`wide`).
  *
  * @param {StructMemory} memory
  * @param {number} address
  * @param {UserLayouts} [layouts]  The process's width; a 32-bit one's by default.
  * @returns {{ hwnd: number, message: number, wParam: number, lParam: number,
- *             time: number }}
+ *             time: number, wide?: import('../common/pointers.js').WideParams }}
  */
 export function readMessage(memory, address, layouts = userLayouts(4)){
     const layout = layouts.MSG;
+    const wParam = readU32(memory, address + layout.wParam);
+    const lParam = readU32(memory, address + layout.lParam);
+    const wide = layouts.pointerSize === 8 ? wideParams(wParam,
+        readU32(memory, address + layout.wParam + 4), lParam,
+        readU32(memory, address + layout.lParam + 4)) : undefined;
     return {
         hwnd: readU32(memory, address + layout.hwnd),
         message: readU32(memory, address + layout.message),
-        wParam: readU32(memory, address + layout.wParam),
-        lParam: readU32(memory, address + layout.lParam),
+        wParam,
+        lParam,
         // What a TIMERPROC is handed as its tick count when DispatchMessage
         // calls it.
         time: readU32(memory, address + layout.time),
+        ...wide ? { wide } : {},
     };
 }
 

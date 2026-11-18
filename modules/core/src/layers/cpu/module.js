@@ -1546,23 +1546,28 @@ export function createCpuModule(){
                  * @param {any} context
                  * @param {Object} options
                  * @param {number} options.eip
-                 * @param {number} options.returnValue
+                 * @param {number | bigint} options.returnValue
                  * @param {number | null} [options.esp]
                  * @param {Record<string, number> | null} [options.registers]
                  */
                 resumeContextAt(context, { eip, returnValue, esp = null, registers = null }){
                     context.eip = eip;
-                    context.reg32[0] = returnValue | 0; // EAX
-                    // A 64-bit thread's RAX whole, sign-extended as a dword
-                    // the host answers is meant -- what a call answered at
-                    // once gets (the bridge): a restore writes the low dword
-                    // alone, and the high one left was whatever RAX held at
-                    // the call.
+                    // A quadword the host answers whole (a bigint), or a dword.
+                    const low = typeof returnValue === 'bigint'
+                        ? Number(BigInt.asIntN(32, returnValue)) : returnValue | 0;
+                    context.reg32[0] = low; // EAX
+                    // A 64-bit thread's RAX whole: the quadword's high half, or
+                    // a dword sign-extended as a dword the host answers is
+                    // meant -- what a call answered at once gets (the bridge):
+                    // a restore writes the low dword alone, and the high one
+                    // left was whatever RAX held at the call.
                     if (context.layout?.bits === 64 && context.block instanceof Uint8Array)
                     {
                         new DataView(context.block.buffer, context.block.byteOffset,
                             context.block.byteLength).setUint32(context.layout.regs + 4,
-                            (returnValue | 0) < 0 ? 0xffffffff : 0, true);
+                            typeof returnValue === 'bigint'
+                                ? Number(BigInt.asUintN(32, returnValue >> 32n))
+                                : low < 0 ? 0xffffffff : 0, true);
                     }
                     if (registers !== null)
                     {

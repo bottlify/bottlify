@@ -577,14 +577,23 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
          *        What the routine finds in the registers besides its stack --
          *        a funclet reads its parent's frame through EBP before it has
          *        set anything.
-         * @returns {Promise<number>}
+         * @returns {Promise<number> & { high?: number }}  `high`, once resolved: the
+         *     high half of a 64-bit routine's RAX
          */
         call({ thread, entry, args = [], stackAtRest, by = 'somewhere', registers }){
             /** @type {(value: number) => void} */
-            let settle = ()=>{};
+            let resolved = ()=>{};
+            /** @type {Promise<number> & { high?: number }} */
             const answer = new Promise(resolve=>{
-                settle = resolve;
+                resolved = resolve;
             });
+            // The answer's high half, set on the promise before it resolves:
+            // whoever awaits it reads this call's, not a later one's.
+            /** @param {number} value @param {number} [high] */
+            const settle = (value, high)=>{
+                answer.high = high;
+                resolved(value);
+            };
             const frameBase = enter({ thread, entry, args, stackAtRest, by, settle, now: false });
             const start = startOf(entry, registers);
             kernel.scheduleResume(thread, { eip: start.eip, esp: frameBase,
@@ -666,7 +675,11 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
             // Back inside whatever host call was waiting for it, which has not
             // answered yet: nothing for this thread to run until it does.
             awaitHost(thread, hostCalls(thread).length > 0);
-            frame.settle(cpu.readReg32('ecx') | 0);
+            // A 64-bit routine's answer is RAX whole, which the sentinel's stub
+            // kept in RCX: its high half goes beside the dword, for a caller
+            // that hands the answer on (an LRESULT).
+            frame.settle(cpu.readReg32('ecx') | 0, cpu.bits?.() === 64 && cpu.readReg64
+                ? Number(BigInt.asUintN(32, cpu.readReg64('rcx') >> 32n)) : undefined);
             return true;
         },
 
@@ -675,7 +688,7 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
          * code, with the stack it had before any of this started.
          *
          * @param {any} thread
-         * @param {number} returnValue
+         * @param {number | bigint} returnValue  a dword, or a quadword answered whole
          * @param {Record<string, number>} [registers]  What else the answer
          *     sets, for a call that answers in registers as well as in EAX.
          *     Applied when the thread is resumed, which is the only moment the

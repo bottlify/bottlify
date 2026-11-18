@@ -67,7 +67,7 @@ import { DESKTOP_WINDOW, HWND_BROADCAST, createWindowDirectory } from './directo
 import { createClassRegistry } from './classes.js';
 import { boundsOf, subtractFromArea } from '../gdi32/rects.js';
 import { areaOf } from '../gdi32/regions.js';
-import { wholeAddress } from '../common/pointers.js';
+import { forwarded, wholeAddress, wideOf } from '../common/pointers.js';
 
 /** @typedef {import('../gdi32/rects.js').Rect} Rect */
 
@@ -681,6 +681,8 @@ const MAX_WINDOW_TEXT = 1 << 16;
  * @property {number} wParam
  * @property {number} lParam
  * @property {boolean} [unicode]  whether its text is wide (`unicode.js`)
+ * @property {import('../common/pointers.js').WideParams} [wide]  its WPARAM and LPARAM as a 64-bit
+ *     caller passed them, where the dwords do not say them
  */
 
 /**
@@ -1461,9 +1463,11 @@ export function createWindowFunctions(host){
      * @param {number} hwnd @param {number} message @param {number} wParam @param {number} lParam
      * @param {unknown} [thread]
      * @param {boolean} [unicode]  whether the text the message carries is wide
+     * @param {import('../common/pointers.js').WideParams} [wide]  the WPARAM and LPARAM a
+     *     64-bit caller passed, where the dwords do not say them
      * @returns {number | Promise<number>}
      */
-    const send = (hwnd, message, wParam, lParam, thread, unicode = false)=>{
+    const send = (hwnd, message, wParam, lParam, thread, unicode = false, wide = undefined)=>{
         const record = live(hwnd);
         if (!record || record.wndProc === 0)
         {
@@ -1482,7 +1486,7 @@ export function createWindowFunctions(host){
         }
         return callProcedure(record.wndProc, {
             hwnd: record.hwnd, message: message >>> 0, wParam: wParam >>> 0, lParam: lParam >>> 0,
-            ...unicode ? { unicode } : {},
+            ...unicode ? { unicode } : {}, ...wide ? { wide } : {},
         }, thread);
     };
 
@@ -1494,7 +1498,8 @@ export function createWindowFunctions(host){
      * @typedef {{ hwnd: number, message: number, wParam: number, lParam: number,
      *     unicode: boolean, kind: number, replied: boolean, result: number,
      *     from: number | null, callback: number, data: number,
-     *     elsewhere?: number }} SentMessage
+     *     elsewhere?: number,
+     *     wide?: import('../common/pointers.js').WideParams }} SentMessage
      *     `elsewhere`: the number another process asks for its answer by.
      */
 
@@ -1623,7 +1628,7 @@ export function createWindowFunctions(host){
         const inside = listOf(handling, id);
         inside.push(sent);
         return andThen(send(sent.hwnd, sent.message, sent.wParam, sent.lParam, thread,
-            sent.unicode), result=>{
+            sent.unicode, sent.wide), result=>{
             inside.splice(inside.lastIndexOf(sent), 1);
             reply(sent, result);
             return receiveSent(thread);
@@ -1640,8 +1645,10 @@ export function createWindowFunctions(host){
      * @param {number} hwnd @param {number} message @param {number} wParam
      * @param {number} lParam @param {unknown} thread
      * @param {boolean} [unicode]
-     * @param {{ kind?: number, timeout?: number, callback?: number, data?: number }} [how]
-     *     `timeout` in milliseconds, for SendMessageTimeout.
+     * @param {{ kind?: number, timeout?: number, callback?: number, data?: number,
+     *     wide?: import('../common/pointers.js').WideParams }} [how]
+     *     `timeout` in milliseconds, for SendMessageTimeout; `wide` the WPARAM
+     *     and LPARAM a 64-bit caller passed where the dwords do not say them.
      * @returns {number | null | Promise<number | null>} the answer; null when
      *     the timeout passed first
      */
@@ -1659,13 +1666,14 @@ export function createWindowFunctions(host){
         const self = threadIdOf(thread);
         if (!record || owner === null || self === null || owner === self)
         {
-            return send(hwnd, message, wParam, lParam, thread, unicode);
+            return send(hwnd, message, wParam, lParam, thread, unicode, how.wide);
         }
         /** @type {SentMessage} */
         const sent = {
             hwnd: record.hwnd, message: message >>> 0, wParam: wParam >>> 0,
             lParam: lParam >>> 0, unicode, kind: how.kind ?? ISMEX_SEND, replied: false,
             result: 0, from: self, callback: how.callback ?? 0, data: how.data ?? 0,
+            ...how.wide ? { wide: how.wide } : {},
         };
         listOf(inbox, owner).push(sent);
         host.queue.sent?.(owner);
@@ -7946,7 +7954,10 @@ export function createWindowFunctions(host){
      * @param {number[]} args  hWnd, Msg, wParam, lParam.
      * @param {boolean} unicode
      */
-    const postTo = ([hwnd, message, wParam, lParam], unicode)=>{
+    const postTo = (args, unicode)=>{
+        const [hwnd, message, wParam, lParam] = args;
+        // What a 64-bit poster passed that the dwords do not say (`wideOf`).
+        const wide = wideOf(args, 2, 3);
         const target = hwnd >>> 0;
         if (target === HWND_BROADCAST)
         {
@@ -7976,6 +7987,7 @@ export function createWindowFunctions(host){
         // No window is a message for the poster's own thread, as
         // PostThreadMessage to itself would post it.
         host.queue.post({ hwnd: target, message, wParam, lParam, ...unicode ? { unicode } : {},
+            ...wide ? { wide } : {},
             ...target === 0 ? { thread: threadIdOf(host.callerThread?.()) } : {} });
         return 1;
     };
@@ -10112,7 +10124,11 @@ export function createWindowFunctions(host){
         EnumChildWindows: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([parent, callback, lParam])=>{
+            handler: args=>{
+                const [parent, callback] = args;
+                // The context is the program's alone: whole to its routine.
+                // (a bigint among a callback's arguments is the bridge's to widen)
+                const lParam = /** @type {number} */ (forwarded(args, 2, true));
                 const call = host.call;
                 if (!call || (callback >>> 0) === 0)
                 {
@@ -10127,7 +10143,7 @@ export function createWindowFunctions(host){
                 return (async()=>{
                     for (const hwnd of listed)
                     {
-                        if ((await call(callback >>> 0, [hwnd, lParam >>> 0], thread) | 0) === 0)
+                        if ((await call(callback >>> 0, [hwnd, lParam], thread) | 0) === 0)
                         {
                             break;
                         }
@@ -10148,7 +10164,11 @@ export function createWindowFunctions(host){
         EnumWindows: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([callback, lParam])=>{
+            handler: args=>{
+                const [callback] = args;
+                // The context is the program's alone: whole to its routine.
+                // (a bigint among a callback's arguments is the bridge's to widen)
+                const lParam = /** @type {number} */ (forwarded(args, 1, true));
                 const call = host.call;
                 if (!call || (callback >>> 0) === 0)
                 {
@@ -10165,7 +10185,7 @@ export function createWindowFunctions(host){
                 return (async()=>{
                     for (const hwnd of listed)
                     {
-                        if ((await call(callback >>> 0, [hwnd, lParam >>> 0], thread) | 0) === 0)
+                        if ((await call(callback >>> 0, [hwnd, lParam], thread) | 0) === 0)
                         {
                             return 0;
                         }
@@ -10311,7 +10331,11 @@ export function createWindowFunctions(host){
         EnumThreadWindows: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([threadId, callback, lParam])=>{
+            handler: args=>{
+                const [threadId, callback] = args;
+                // The context is the program's alone: whole to its routine.
+                // (a bigint among a callback's arguments is the bridge's to widen)
+                const lParam = /** @type {number} */ (forwarded(args, 2, true));
                 const call = host.call;
                 if (!call || (callback >>> 0) === 0)
                 {
@@ -10328,7 +10352,7 @@ export function createWindowFunctions(host){
                 return (async()=>{
                     for (const hwnd of listed)
                     {
-                        if ((await call(callback >>> 0, [hwnd, lParam >>> 0], thread) | 0) === 0)
+                        if ((await call(callback >>> 0, [hwnd, lParam], thread) | 0) === 0)
                         {
                             return 0;
                         }

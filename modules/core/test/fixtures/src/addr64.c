@@ -66,6 +66,32 @@ __declspec(dllimport) int __stdcall DestroyWindow(HWND hwnd);
 __declspec(dllimport) LONG_PTR __stdcall SetWindowLongPtrA(HWND hwnd, int index, LONG_PTR value);
 __declspec(dllimport) LONG_PTR __stdcall GetWindowLongPtrA(HWND hwnd, int index);
 __declspec(dllimport) char *strchr(const char *text, int c);
+__declspec(dllimport) LRESULT __stdcall SendMessageA(HWND hwnd, UINT message, WPARAM w, LPARAM l);
+__declspec(dllimport) int __stdcall PostMessageA(HWND hwnd, UINT message, WPARAM w, LPARAM l);
+__declspec(dllimport) int __stdcall PeekMessageA(void *message, HWND hwnd, UINT first, UINT last,
+    UINT remove);
+__declspec(dllimport) int __stdcall EnumWindows(int (*each)(HWND, LPARAM), LPARAM l);
+__declspec(dllimport) DWORD __stdcall TlsAlloc(void);
+__declspec(dllimport) int __stdcall TlsSetValue(DWORD slot, void *value);
+__declspec(dllimport) void *__stdcall TlsGetValue(DWORD slot);
+__declspec(dllimport) DWORD __stdcall FlsAlloc(void *callback);
+__declspec(dllimport) int __stdcall FlsSetValue(DWORD slot, void *value);
+__declspec(dllimport) void *__stdcall FlsGetValue(DWORD slot);
+__declspec(dllimport) DWORD __stdcall QueueUserAPC(void (*apc)(unsigned long long), HANDLE thread,
+    unsigned long long parameter);
+__declspec(dllimport) DWORD __stdcall SleepEx(DWORD ms, int alertable);
+__declspec(dllimport) HANDLE __stdcall GetCurrentThread(void);
+
+typedef struct
+{
+    HWND hwnd;
+    UINT message;
+    WPARAM wParam;
+    LPARAM lParam;
+    DWORD time;
+    long x, y;
+} MSG;
+#define WM_USER 0x0400
 
 #define MEM_COMMIT 0x1000
 #define MEM_RESERVE 0x2000
@@ -140,6 +166,8 @@ static void *threadParameter(void *parameter)
 }
 
 static void *createSaw;
+static WPARAM sentW;
+static LPARAM sentL;
 
 static LRESULT windowProc(HWND hwnd, UINT message, WPARAM w, LPARAM l)
 {
@@ -147,7 +175,59 @@ static LRESULT windowProc(HWND hwnd, UINT message, WPARAM w, LPARAM l)
     {
         createSaw = ((CREATESTRUCTA *)l)->lpCreateParams;
     }
+    if (message == WM_USER)
+    {
+        sentW = w;
+        sentL = l;
+        /* An LRESULT is a quadword: what the procedure answers comes back whole. */
+        return l;
+    }
     return DefWindowProcA(hwnd, message, w, l);
+}
+
+static LPARAM enumSaw;
+
+static int eachWindow(HWND hwnd, LPARAM l)
+{
+    (void)hwnd;
+    enumSaw = l;
+    return 0;
+}
+
+static unsigned long long apcSaw;
+
+static void apc(unsigned long long parameter)
+{
+    apcSaw = parameter;
+}
+
+/* Values the host only hands on: each must reach the other side whole. */
+static void forwarded(HWND hwnd, unsigned long long value, const char *names[9])
+{
+    sentW = 0;
+    sentL = 0;
+    LRESULT answered = SendMessageA(hwnd, WM_USER, (WPARAM)value, (LPARAM)value);
+    check(names[0], (unsigned long long)sentW, value);
+    check(names[1], (unsigned long long)sentL, value);
+    check(names[2], (unsigned long long)answered, value);
+    MSG message = { 0 };
+    PostMessageA(hwnd, WM_USER + 1, (WPARAM)value, (LPARAM)value);
+    PeekMessageA(&message, hwnd, WM_USER + 1, WM_USER + 1, 1);
+    check(names[3], (unsigned long long)message.wParam, value);
+    check(names[4], (unsigned long long)message.lParam, value);
+    enumSaw = 0;
+    EnumWindows(eachWindow, (LPARAM)value);
+    check(names[5], (unsigned long long)enumSaw, value);
+    DWORD tls = TlsAlloc();
+    TlsSetValue(tls, (void *)value);
+    check(names[6], (unsigned long long)TlsGetValue(tls), value);
+    DWORD fls = FlsAlloc(0);
+    FlsSetValue(fls, (void *)value);
+    check(names[7], (unsigned long long)FlsGetValue(fls), value);
+    apcSaw = 0;
+    QueueUserAPC(apc, GetCurrentThread(), value);
+    SleepEx(0, 1);
+    check(names[8], apcSaw, value);
 }
 
 static void windowChecks(void *high)
@@ -172,6 +252,19 @@ static void windowChecks(void *high)
             SetWindowLongPtrA(hwnd, GWLP_USERDATA, values[i]);
             check(longs[i], (unsigned long long)GetWindowLongPtrA(hwnd, GWLP_USERDATA),
                 (unsigned long long)values[i]);
+            static const char *passed[2][9] = {
+                { "SendMessage's WPARAM past 2 GiB", "SendMessage's LPARAM past 2 GiB",
+                    "an LRESULT past 2 GiB", "a posted WPARAM past 2 GiB",
+                    "a posted LPARAM past 2 GiB", "EnumWindows' LPARAM past 2 GiB",
+                    "a TLS value past 2 GiB", "an FLS value past 2 GiB",
+                    "an APC's parameter past 2 GiB" },
+                { "SendMessage's WPARAM past 4 GiB", "SendMessage's LPARAM past 4 GiB",
+                    "an LRESULT past 4 GiB", "a posted WPARAM past 4 GiB",
+                    "a posted LPARAM past 4 GiB", "EnumWindows' LPARAM past 4 GiB",
+                    "a TLS value past 4 GiB", "an FLS value past 4 GiB",
+                    "an APC's parameter past 4 GiB" },
+            };
+            forwarded(hwnd, (unsigned long long)values[i], passed[i]);
             DestroyWindow(hwnd);
         }
     }
