@@ -277,13 +277,19 @@ export function translated(memory, message, toUnicode, call, style = undefined){
                 return 0;
             }
             // Room for the characters in the procedure's encoding; a character
-            // of the ANSI page is never more than two bytes. What it wrote is
-            // read back up to its terminator, and the answer is the count of
+            // of the ANSI page is never more than two bytes. As many
+            // characters as the procedure answers it wrote are read back, up
+            // to a terminator - a procedure that answers 0 has written
+            // nothing, whatever the buffer holds (dialog.c
+            // test_aw_conversion_dlgproc) - and the answer is the count of
             // characters the caller's buffer took.
             const size = room * 2 + 2;
             return lending(memory, size, ()=>new Uint8Array(size),
-                into=>andThen(call({ ...converted, lParam: into }), ()=>writeText(memory,
-                    message.lParam, readText(memory, into, toUnicode, room), room, fromUnicode)));
+                into=>andThen(call({ ...converted, lParam: into }), answer=>{
+                    const count = Math.max(0, Math.min(answer | 0, toUnicode ? room : room * 2));
+                    const text = count === 0 ? '' : readText(memory, into, toUnicode, count);
+                    return writeText(memory, message.lParam, text, room, fromUnicode);
+                }));
         }
         case EM_GETLINE:
         {

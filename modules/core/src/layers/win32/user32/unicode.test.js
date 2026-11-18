@@ -135,6 +135,22 @@ test('WM_GETTEXT answers the wide caller in its own buffer, in characters', ()=>
     assert.equal(m.lent.size, 0);
 });
 
+test('WM_GETTEXT copies back only as many characters as the procedure answers', ()=>{
+    // dialog.c test_aw_conversion_dlgproc: a dialog procedure that filled
+    // the buffer and answered through DWLP_MSGRESULT (0) leaves the caller
+    // an empty text, its buffer past the terminator untouched.
+    const m = memory();
+    m.writeMemory(0x400, new Uint8Array(8).fill(0x41));
+    const answer = translated(m, { hwnd: 1, message: WM_GETTEXT, wParam: 8, lParam: 0x400 },
+        true, got=>{
+            writeText(m, got.lParam, 'WndText', got.wParam, true);
+            return 0;
+        });
+    assert.equal(answer, 0);
+    assert.deepEqual([...m.bytes.subarray(0x400, 0x402)], [0, 0x41]);
+    assert.equal(m.lent.size, 0);
+});
+
 test('a broadcast\'s section and a file to add cross converted, as a path does', ()=>{
     // dialog.c test_aw_conversion_dlgproc: WM_WININICHANGE, WM_DEVMODECHANGE
     // and LB_ADDFILE carry a string in lParam like LB_DIR.
