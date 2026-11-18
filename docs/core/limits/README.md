@@ -90,6 +90,12 @@ event, an error. Neither stops the program.
 - 64 voices play at once.
 - DirectSound 3D keeps every parameter but does not position the sound: a 3D buffer plays as with
   3D processing off.
+- A DirectSound buffer's effects (SetFX) are made and driven as on Windows - a program's own DMO
+  runs over what it plays - but the standard ones (echo, chorus, reverb, the equalizer and the
+  rest) keep their parameters and pass the sound through unchanged, said once each
+  (`roadmap/decisions.md` A264). Effects run over a span when it is unlocked and over the whole
+  buffer at Play, not as the cursor reaches it. A buffer whose last reference goes does not
+  release its effects: a program's own DMO keeps one reference more than on Windows.
 - No capture: recording answers `DSERR_NODRIVER`.
 - WASAPI (`IMMDevice::Activate` for `IAudioClient`) plays in shared mode only, as XAudio2's
   redistributable and FMOD do on Vista and later: exclusive mode answers

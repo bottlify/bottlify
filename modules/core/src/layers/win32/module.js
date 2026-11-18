@@ -6584,6 +6584,19 @@ export function createWin32Module(){
                 com: ()=>com,
 
                 /**
+                 * CoCreateInstance as a program calls it, guest pointers in and
+                 * the HRESULT out: how another layer makes an object a class
+                 * names, the program's own registered class included (a
+                 * DirectSound buffer's effects).
+                 *
+                 * @param {number} clsid @param {number} outer @param {number} context
+                 * @param {number} iid @param {number} out
+                 * @returns {number | Promise<number>}
+                 */
+                createInstance: (clsid, outer, context, iid, out)=>libraries['ole32.dll']
+                    .CoCreateInstance.handler([clsid, outer, context, iid, out]),
+
+                /**
                  * Installs a driver in the Audio Compression Manager: a codec another
                  * layer implements, found by a program that enumerates the drivers as
                  * it finds Windows' own.

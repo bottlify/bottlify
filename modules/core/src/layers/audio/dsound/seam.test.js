@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { createVtables } from '../../bridge/internal/vtable.js';
 import { synthesiseModule } from '../../loader/internal/synth.js';
 import { IUNKNOWN_METHODS, IID_IUNKNOWN } from '../../win32/ole32/objects.js';
-import { parseGuid, writeGuid } from '../../win32/ole32/guid.js';
+import { parseGuid, readGuid, writeGuid } from '../../win32/ole32/guid.js';
 import {
     createDirectSound, createPublisher, describe,
     DS_OK, WAVEFORMATEX, DSBUFFERDESC, DSBUFFERDESC_64, DSBCAPS, DSCAPS, DSCAPS_FLAGS,
@@ -26,6 +26,15 @@ const DSERR_INVALIDPARAM = 0x80070057 | 0;
 const DSERR_CONTROLUNAVAIL = 0x8878001e | 0;
 const DSERR_INVALIDCALL = 0x88780032 | 0;
 const DSERR_NODRIVER = 0x88780078 | 0;
+const DSERR_OBJECTNOTFOUND = 0x88781161 | 0;
+const REGDB_E_CLASSNOTREG = 0x80040154 | 0;
+const E_NOINTERFACE = 0x80004002 | 0;
+const E_NOTIMPL = 0x80004001 | 0;
+const DSFXR_PRESENT = 0;
+const DSFXR_LOCSOFTWARE = 2;
+const DSFXR_UNKNOWN = 5;
+/** @param {any} memory @param {number} at */
+const readGuidAt = (memory, at)=>readGuid(memory, at);
 const DS_UNCERTIFIED = 1;
 const DSBCAPS_PRIMARYBUFFER = 0x00000001;
 const DSBCAPS_LOCHARDWARE = 0x00000004;
@@ -123,7 +132,9 @@ function fakeBridge(){
             const method = entry.methods.find((/** @type {any} */ m)=>m.name === name);
             assert.ok(method, `${entry.id} has no ${name}`);
             assert.ok(method.invoke, `${entry.id}::${name} is not implemented`);
-            return method.invoke(entry.object, args) | 0;
+            const answer = method.invoke(entry.object, args);
+            // A method that calls into the guest answers once it is done.
+            return typeof answer?.then === 'function' ? answer : answer | 0;
         },
         /** @param {number} pointer */
         methodsOf: pointer=>byPointer.get(pointer)?.methods ?? [],
@@ -141,10 +152,12 @@ function clock(){
 /**
  * Everything a test needs, wired the way the module wires it.
  *
- * @param {{ pointerSize?: 4 | 8 }} [options]
+ * @param {{ pointerSize?: 4 | 8, memory?: ReturnType<typeof guestMemory>,
+ *     callGuest?: (entry: number, args: number[]) => Promise<number>,
+ *     createInstance?: (clsid: number, outer: number, context: number, iid: number,
+ *         out: number) => number }} [options]
  */
-function fixture({ pointerSize = 4 } = {}){
-    const memory = guestMemory();
+function fixture({ pointerSize = 4, memory = guestMemory(), callGuest, createInstance } = {}){
     const bridge = fakeBridge();
     const time = clock();
     /** @type {number[]} */
@@ -167,6 +180,8 @@ function fixture({ pointerSize = 4 } = {}){
         signal: event=>signalled.push(event),
         mtaUsage: mta,
         pointerSize,
+        callGuest,
+        createInstance,
     });
     return { memory, bridge, time, dsound, signalled, mta };
 }
@@ -2231,3 +2246,175 @@ test('ENUMERATE ends when the callback answers FALSE', async()=>{
         .handler([0x9000, 0]), DS_OK);
     assert.equal(p.guestCalls.length, 1);
 });
+
+/**
+ * A program's own effect, laid in guest memory as a DMO would be: an
+ * IMediaObject and an IMediaObjectInPlace whose slots lead to the test's
+ * functions, reached by the fake callGuest. Its Process turns every byte
+ * over, so what is heard can be told from what was written.
+ *
+ * @param {ReturnType<typeof guestMemory>} memory
+ */
+function guestEffect(memory){
+    const object = 0x9000;
+    const inPlace = 0x9010;
+    /** @type {Map<number, (args: number[]) => number>} */
+    const routines = new Map();
+    const calls = /** @type {string[]} */ ([]);
+    let references = 0;
+    /** @type {number[]} */
+    const typeSamples = [];
+    /**
+     * @param {number} pointer @param {number} vtable
+     * @param {[string, (args: number[]) => number][]} slots
+     */
+    const lay = (pointer, vtable, slots)=>{
+        memory.setU32(pointer, vtable);
+        slots.forEach(([name, routine], slot)=>{
+            const entry = vtable * 0x100 + slot * 4;
+            memory.setU32(vtable + slot * 4, entry);
+            routines.set(entry, args=>{
+                calls.push(name);
+                return routine(args);
+            });
+        });
+    };
+    const IID_INPLACE = '{651B9AD0-0FC7-4AA9-9538-D89931010741}';
+    const unknown = /** @type {[string, (args: number[]) => number][]} */ ([
+        ['QueryInterface', ([, iid, out])=>{
+            const asked = [...memory.bytes.subarray(iid, iid + 16)];
+            const wanted = [.../** @type {Uint8Array} */ (parseGuid(IID_INPLACE))];
+            if (asked.join() !== wanted.join())
+            {
+                memory.setU32(out, 0);
+                return E_NOINTERFACE;
+            }
+            memory.setU32(out, inPlace);
+            references++;
+            return 0;
+        }],
+        ['AddRef', ()=>++references],
+        ['Release', ()=>--references],
+    ]);
+    /** @type {[string, (args: number[]) => number][]} */
+    const media = [...unknown];
+    for (let slot = 3; slot < 24; slot++)
+    {
+        media.push([`slot${slot}`, ()=>E_NOTIMPL]);
+    }
+    media[8] = ['SetInputType', ([, , type])=>{
+        typeSamples.push(memory.u32(type + 40));
+        return 0;
+    }];
+    media[9] = ['SetOutputType', ([, , type])=>{
+        typeSamples.push(memory.u32(type + 40));
+        return 0;
+    }];
+    media[17] = ['Discontinuity', ()=>0];
+    lay(object, 0x9100, media);
+    lay(inPlace, 0x9200, [...unknown, ['Process', ([, size, data])=>{
+        for (let at = 0; at < size; at++)
+        {
+            memory.bytes[data + at] ^= 0xff;
+        }
+        return 1;
+    }]]);
+    return {
+        object, calls, typeSamples,
+        get references(){
+            return references;
+        },
+        /** A new reference, as a class object hands one out. */
+        made: ()=>++references,
+        /** @param {number} entry @param {number[]} args */
+        callGuest: async(entry, args)=>/** @type {any} */ (routines.get(entry))(args),
+    };
+}
+
+/** DSEFFECTDESC for each class, laid in guest memory. @param {any} memory @param {string[]} classes */
+function describeEffects(memory, classes){
+    const at = 0x1c00;
+    classes.forEach((clsid, index)=>{
+        memory.setU32(at + index * 32, 32);
+        memory.writeMemory(at + index * 32 + 8, /** @type {Uint8Array} */ (parseGuid(clsid)));
+    });
+    return at;
+}
+
+test('SetFX makes each effect through COM, gives it the buffer\'s format and runs it on Play',
+    async()=>{
+        // Wine's dsound8 test_effects, with the program's own DMO.
+        const memory = guestMemory();
+        const effect = guestEffect(memory);
+        const OWN = '{00001234-0000-0000-0000-000000000000}';
+        /** @type {string[]} */
+        const asked = [];
+        /**
+         * CoCreateInstance: the effect for its class, nothing for any other.
+         *
+         * @param {number} clsid @param {number} _outer @param {number} _context
+         * @param {number} _iid @param {number} out
+         */
+        const createInstance = (clsid, _outer, _context, _iid, out)=>{
+            const name = readGuidAt(memory, clsid);
+            asked.push(name);
+            if (name !== OWN)
+            {
+                return REGDB_E_CLASSNOTREG;
+            }
+            memory.setU32(out, effect.object);
+            effect.made();
+            return 0;
+        };
+        const f = createRoot(fixture({ memory, callGuest: effect.callGuest, createInstance }));
+        const pointer = f.bridge.query(createBuffer(f, { flags: DSBCAPS_CTRLFX, bytes: 64,
+            channels: 1, bits: 8, rate: 11025 }), IID_IDirectSoundBuffer8);
+        const results = 0x1c80;
+        assert.equal(await f.bridge.call(pointer, 'SetFX', [1, describeEffects(f.memory, [OWN]),
+            results]), DS_OK);
+        assert.equal(f.memory.u32(results), DSFXR_LOCSOFTWARE);
+        assert.deepEqual(effect.typeSamples, [1, 1],
+            'a frame of 8-bit mono going in, a byte coming out');
+
+        // The program's samples, then Play: told once, then run in place on a copy.
+        const record = [...f.dsound.awakeBuffers()].find((/** @type {any} */ b)=>!b.primary);
+        f.memory.bytes.fill(0x11, record.address, record.address + 64);
+        assert.equal(await f.bridge.call(pointer, 'Play', [0, 0, 0]), DS_OK);
+        assert.equal(effect.calls.filter(name=>name === 'Discontinuity').length, 1);
+        assert.deepEqual([...record.effectedWindow(0, 4)], [0xee, 0xee, 0xee, 0xee],
+            'what is heard is what the effect made');
+        assert.equal(f.memory.bytes[record.address], 0x11, 'the program\'s samples as written');
+        f.bridge.call(pointer, 'Stop', []);
+
+        // GetObjectInPath by any object and by class, and past the chain.
+        const out = 0x1d00;
+        const all = 0x1d10;
+        const iid = 0x1d20;
+        f.memory.writeMemory(all, /** @type {Uint8Array} */ (
+            parseGuid('{AA114DE5-C262-4169-A1C8-23D698CC73B5}')));
+        f.memory.writeMemory(iid, /** @type {Uint8Array} */ (
+            parseGuid('{651B9AD0-0FC7-4AA9-9538-D89931010741}')));
+        assert.equal(await f.bridge.call(pointer, 'GetObjectInPath', [all, 0, iid, 0]),
+            DSERR_INVALIDPARAM);
+        assert.equal(await f.bridge.call(pointer, 'GetObjectInPath', [all, 0, iid, out]), 0);
+        assert.equal(f.memory.u32(out), 0x9010);
+        f.memory.setU32(out, 0xdeadbeef);
+        assert.equal(await f.bridge.call(pointer, 'GetObjectInPath', [all, 1, iid, out]),
+            DSERR_OBJECTNOTFOUND);
+        assert.equal(f.memory.u32(out), 0xdeadbeef, 'nothing found, nothing written');
+
+        // A chain with a class nobody registered: the call fails with its
+        // answer, what was made is said and let go, and no effect is left.
+        const before = effect.references;
+        assert.equal(await f.bridge.call(pointer, 'SetFX', [2,
+            describeEffects(f.memory, [OWN, '{00000000-0000-0000-0000-000000000000}']), results]),
+        REGDB_E_CLASSNOTREG);
+        assert.deepEqual([f.memory.u32(results), f.memory.u32(results + 4)],
+            [DSFXR_PRESENT, DSFXR_UNKNOWN]);
+        assert.ok(effect.references < before,
+            `the chain before it and the one made let go: ${before} -> ${effect.references}`);
+        assert.equal(await f.bridge.call(pointer, 'GetObjectInPath', [all, 0, iid, out]),
+            DSERR_OBJECTNOTFOUND);
+        assert.equal(record.effectedWindow(0, 4), null, 'the program\'s samples are heard again');
+        assert.deepEqual(asked.slice(-2), [OWN, '{00000000-0000-0000-0000-000000000000}']);
+    });

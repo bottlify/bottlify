@@ -187,6 +187,12 @@ export function createSoundBuffer({
      * @type {{ voice: any, copy: (from: number, count: number) => void } | null}
      */
     let device = null;
+    /**
+     * What the buffer's effects made of it (`setEffected`), heard in place of
+     * the program's samples; null while it has no effects.
+     * @type {Uint8Array | null}
+     */
+    let effected = null;
     /** The device's lap count as last seen. */
     let seenLaps = 0;
     /** The device's position as it last reported it, and the clock then (`devicePosition`). */
@@ -535,6 +541,35 @@ export function createSoundBuffer({
         },
         get format(){
             return format;
+        },
+
+        /**
+         * A span as its effects made it: what the device and the mix play
+         * of it from now on, the program's own samples left as written.
+         *
+         * @param {number} from @param {Uint8Array} samples
+         */
+        setEffected(from, samples){
+            effected ??= new Uint8Array(bytes);
+            effected.set(samples.subarray(0, Math.max(0, bytes - from)), from);
+            device?.copy(from, Math.min(samples.length, bytes - from));
+        },
+        /** The effects gone: the program's samples are heard again. */
+        clearEffected(){
+            if (effected)
+            {
+                effected = null;
+                device?.copy(0, bytes);
+            }
+        },
+        /**
+         * What is heard of a span when effects run on the buffer, or null
+         * when the program's samples are.
+         *
+         * @param {number} from @param {number} count
+         */
+        effectedWindow(from, count){
+            return effected ? effected.subarray(from, from + count) : null;
         },
 
         /**
