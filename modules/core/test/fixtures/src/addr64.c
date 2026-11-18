@@ -91,6 +91,21 @@ __declspec(dllimport) int __stdcall PostThreadMessageA(DWORD thread, UINT messag
 __declspec(dllimport) LRESULT __stdcall CallWindowProcA(WNDPROC procedure, HWND hwnd,
     UINT message, WPARAM w, LPARAM l);
 
+__declspec(dllimport) int __stdcall EnumDesktopWindows(HANDLE desktop, int (*each)(HWND, LPARAM),
+    LPARAM l);
+__declspec(dllimport) int __stdcall EnumWindowStationsA(int (*each)(char *, LPARAM), LPARAM l);
+__declspec(dllimport) HANDLE __stdcall GetDC(HWND hwnd);
+__declspec(dllimport) int __stdcall ReleaseDC(HWND hwnd, HANDLE dc);
+__declspec(dllimport) int __stdcall EnumFontFamiliesA(HANDLE dc, const char *family,
+    int (*each)(const void *, const void *, DWORD, LPARAM), LPARAM l);
+__declspec(dllimport) int __stdcall LineDDA(int x0, int y0, int x1, int y1,
+    void (*each)(int, int, LPARAM), LPARAM l);
+__declspec(dllimport) ULONG_PTR __stdcall SetTimer(HWND hwnd, ULONG_PTR id, UINT elapse,
+    void (*proc)(HWND, UINT, ULONG_PTR, DWORD));
+__declspec(dllimport) int __stdcall KillTimer(HWND hwnd, ULONG_PTR id);
+__declspec(dllimport) LRESULT __stdcall DispatchMessageA(const void *message);
+__declspec(dllimport) void __stdcall Sleep(DWORD ms);
+
 typedef struct
 {
     HWND hwnd;
@@ -101,6 +116,7 @@ typedef struct
     long x, y;
 } MSG;
 #define WM_USER 0x0400
+#define WM_TIMER 0x0113
 
 #define MEM_COMMIT 0x1000
 #define MEM_RESERVE 0x2000
@@ -203,6 +219,53 @@ static int eachWindow(HWND hwnd, LPARAM l)
     return 0;
 }
 
+static int eachName(char *name, LPARAM l)
+{
+    (void)name;
+    enumSaw = l;
+    return 0;
+}
+
+static int eachFace(const void *font, const void *metrics, DWORD type, LPARAM l)
+{
+    (void)font;
+    (void)metrics;
+    (void)type;
+    enumSaw = l;
+    return 0;
+}
+
+static void eachPoint(int x, int y, LPARAM l)
+{
+    (void)x;
+    (void)y;
+    enumSaw = l;
+}
+
+static ULONG_PTR timerSaw;
+
+static void timerProc(HWND hwnd, UINT message, ULONG_PTR id, DWORD time)
+{
+    (void)hwnd;
+    (void)message;
+    (void)time;
+    timerSaw = id;
+}
+
+/* The timer's next tick, taken off the queue: zero where none came. */
+static int tick(HWND hwnd, MSG *message)
+{
+    for (int i = 0; i < 2000; i++)
+    {
+        if (PeekMessageA(message, hwnd, WM_TIMER, WM_TIMER, 1))
+        {
+            return 1;
+        }
+        Sleep(5);
+    }
+    return 0;
+}
+
 static unsigned long long apcSaw;
 
 static void apc(unsigned long long parameter)
@@ -213,7 +276,7 @@ static void apc(unsigned long long parameter)
 /* Values the host only hands on: each must reach the other side whole. */
 static LRESULT windowProc(HWND hwnd, UINT message, WPARAM w, LPARAM l);
 
-static void forwarded(HWND hwnd, unsigned long long value, const char *names[15])
+static void forwarded(HWND hwnd, unsigned long long value, const char *names[22])
 {
     sentW = 0;
     sentL = 0;
@@ -256,6 +319,34 @@ static void forwarded(HWND hwnd, unsigned long long value, const char *names[15]
     message.lParam = 0;
     PeekMessageA(&message, (HWND)-1, WM_USER + 2, WM_USER + 2, 1);
     check(names[14], (unsigned long long)message.lParam, value);
+    enumSaw = 0;
+    EnumDesktopWindows(0, eachWindow, (LPARAM)value);
+    check(names[15], (unsigned long long)enumSaw, value);
+    enumSaw = 0;
+    EnumWindowStationsA(eachName, (LPARAM)value);
+    check(names[16], (unsigned long long)enumSaw, value);
+    enumSaw = 0;
+    HANDLE dc = GetDC(hwnd);
+    EnumFontFamiliesA(dc, 0, eachFace, (LPARAM)value);
+    ReleaseDC(hwnd, dc);
+    check(names[17], (unsigned long long)enumSaw, value);
+    /* A timer's id is the program's own name for it, a pointer often enough. */
+    message.wParam = 0;
+    SetTimer(hwnd, (ULONG_PTR)value, 10, 0);
+    tick(hwnd, &message);
+    check(names[18], (unsigned long long)message.wParam, value);
+    check(names[19], (unsigned long long)KillTimer(hwnd, (ULONG_PTR)value), 1);
+    timerSaw = 0;
+    SetTimer(hwnd, (ULONG_PTR)value, 10, timerProc);
+    if (tick(hwnd, &message))
+    {
+        DispatchMessageA(&message);
+    }
+    KillTimer(hwnd, (ULONG_PTR)value);
+    check(names[20], (unsigned long long)timerSaw, value);
+    enumSaw = 0;
+    LineDDA(0, 0, 3, 0, eachPoint, (LPARAM)value);
+    check(names[21], (unsigned long long)enumSaw, value);
 }
 
 static void windowChecks(void *high)
@@ -280,7 +371,7 @@ static void windowChecks(void *high)
             SetWindowLongPtrA(hwnd, GWLP_USERDATA, values[i]);
             check(longs[i], (unsigned long long)GetWindowLongPtrA(hwnd, GWLP_USERDATA),
                 (unsigned long long)values[i]);
-            static const char *passed[2][15] = {
+            static const char *passed[2][22] = {
                 { "SendMessage's WPARAM past 2 GiB", "SendMessage's LPARAM past 2 GiB",
                     "an LRESULT past 2 GiB", "a posted WPARAM past 2 GiB",
                     "a posted LPARAM past 2 GiB", "EnumWindows' LPARAM past 2 GiB",
@@ -288,7 +379,12 @@ static void windowChecks(void *high)
                     "an APC's parameter past 2 GiB", "a timed send's LPARAM past 2 GiB",
                     "a timed send's result past 2 GiB", "CallWindowProc's LPARAM past 2 GiB",
                     "CallWindowProc's answer past 2 GiB", "a notified LPARAM past 2 GiB",
-                    "a thread message's LPARAM past 2 GiB" },
+                    "a thread message's LPARAM past 2 GiB",
+                    "EnumDesktopWindows' LPARAM past 2 GiB",
+                    "EnumWindowStations' LPARAM past 2 GiB",
+                    "EnumFontFamilies' LPARAM past 2 GiB", "a timer's id past 2 GiB",
+                    "KillTimer of an id past 2 GiB", "a TIMERPROC's id past 2 GiB",
+                    "LineDDA's LPARAM past 2 GiB" },
                 { "SendMessage's WPARAM past 4 GiB", "SendMessage's LPARAM past 4 GiB",
                     "an LRESULT past 4 GiB", "a posted WPARAM past 4 GiB",
                     "a posted LPARAM past 4 GiB", "EnumWindows' LPARAM past 4 GiB",
@@ -296,7 +392,12 @@ static void windowChecks(void *high)
                     "an APC's parameter past 4 GiB", "a timed send's LPARAM past 4 GiB",
                     "a timed send's result past 4 GiB", "CallWindowProc's LPARAM past 4 GiB",
                     "CallWindowProc's answer past 4 GiB", "a notified LPARAM past 4 GiB",
-                    "a thread message's LPARAM past 4 GiB" },
+                    "a thread message's LPARAM past 4 GiB",
+                    "EnumDesktopWindows' LPARAM past 4 GiB",
+                    "EnumWindowStations' LPARAM past 4 GiB",
+                    "EnumFontFamilies' LPARAM past 4 GiB", "a timer's id past 4 GiB",
+                    "KillTimer of an id past 4 GiB", "a TIMERPROC's id past 4 GiB",
+                    "LineDDA's LPARAM past 4 GiB" },
             };
             forwarded(hwnd, (unsigned long long)values[i], passed[i]);
             DestroyWindow(hwnd);

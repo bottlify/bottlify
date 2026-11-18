@@ -67,7 +67,7 @@ import { DESKTOP_WINDOW, HWND_BROADCAST, createWindowDirectory } from './directo
 import { createClassRegistry } from './classes.js';
 import { boundsOf, subtractFromArea } from '../gdi32/rects.js';
 import { areaOf } from '../gdi32/regions.js';
-import { forwarded, wholeAddress, wideOf } from '../common/pointers.js';
+import { forwarded, paramsOf, wholeAddress, wideOf } from '../common/pointers.js';
 
 /** @typedef {import('../gdi32/rects.js').Rect} Rect */
 
@@ -3769,8 +3769,9 @@ export function createWindowFunctions(host){
             // Only a procedure a live timer registered: anyone can post a
             // WM_TIMER, and its lParam is otherwise an address to call that
             // the poster chose. Windows drops such a message undispatched.
-            if (host.queue.isTimerProc
-                && !host.queue.isTimerProc(message.hwnd, message.wParam, message.lParam))
+            const [id, whole] = paramsOf(message);
+            const proc = typeof whole === 'bigint' ? Number(whole) : message.lParam >>> 0;
+            if (host.queue.isTimerProc && !host.queue.isTimerProc(message.hwnd, id, proc))
             {
                 return 0;
             }
@@ -3778,11 +3779,12 @@ export function createWindowFunctions(host){
             // around the call: an exception the procedure does not take ends
             // the call answering zero (UOI_TIMERPROC_EXCEPTION_SUPPRESSION,
             // on by default).
-            return host.dispatch(message.lParam >>> 0, {
+            return host.dispatch(proc, {
                 ...message,
                 // A TIMERPROC takes the tick count where a window procedure
                 // takes the lParam.
                 lParam: message.time ?? 0,
+                wide: typeof id === 'bigint' ? { w: id } : undefined,
             }, thread, true);
         }
         // Not `live`: a WM_DESTROY still has to reach the procedure of the
@@ -9500,9 +9502,15 @@ export function createWindowFunctions(host){
             },
         },
 
-        /** HHOOK SetWindowsHookExW(...), as the ANSI form. */
+        /**
+         * HHOOK SetWindowsHookExW(int idHook, HOOKPROC lpfn, HINSTANCE hmod,
+         *                         DWORD dwThreadId)
+         *
+         * As the ANSI form.
+         */
         SetWindowsHookExW: {
             argBytes: 16,
+            addresses: [1],
             /** @param {number[]} args */
             handler: args=>table.SetWindowsHookExA.handler(args),
         },
@@ -9526,6 +9534,7 @@ export function createWindowFunctions(host){
          */
         SetWindowsHookExA: {
             argBytes: 16,
+            addresses: [1],
             /** @param {number[]} args */
             handler: ([type, proc, module, thread])=>{
                 const kind = type | 0;
@@ -9550,7 +9559,8 @@ export function createWindowFunctions(host){
                     host.setLastError?.(ERROR_GLOBAL_ONLY_HOOK);
                     return 0;
                 }
-                const hook = { handle: 0, type: type | 0, proc: proc >>> 0, thread: thread >>> 0,
+                const hook = { handle: 0, type: type | 0, proc: wholeAddress(proc),
+                    thread: thread >>> 0,
                     owner: threadIdOf(host.callerThread?.()) };
                 hook.handle = host.handles.open('hook', hook);
                 hooks.push(hook);
@@ -9627,16 +9637,19 @@ export function createWindowFunctions(host){
         CallNextHookEx: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([handle, code, wParam, lParam])=>{
+            handler: args=>{
+                const [handle, code] = args;
                 const hook = hooks.find(each=>each.handle === (handle >>> 0));
                 if (!hook)
                 {
                     return 0;
                 }
-                // At 64 bits the next hook is handed the LPARAM as a message's
-                // is (decision A63): what this handler reads is its low half.
-                return callHook(hook.type, hook.handle, [code, wParam >>> 0, lParam | 0],
-                    host.callerThread?.());
+                // The next hook is handed what this one passed on, whole: at
+                // 64 bits an LPARAM that names a structure past 2 GiB is not
+                // its dword widened by sign (decision A63 is the dword's case).
+                const passed = /** @type {number[]} */ (
+                    [code, forwarded(args, 2), forwarded(args, 3, true)]);
+                return callHook(hook.type, hook.handle, passed, host.callerThread?.());
             },
         },
 

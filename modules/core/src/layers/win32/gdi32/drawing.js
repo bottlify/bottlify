@@ -39,6 +39,7 @@ import { readRect, writeU16, writeU32s } from '../user32/structs.js';
 export { bezierPoints } from './paths.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import { boundsOf, intersectArea, subtractFromArea } from './rects.js';
+import { forwarded } from '../common/pointers.js';
 import {
     ALTERNATE, RGN_AND, RGN_COPY, RGN_DIFF, WINDING, areaBox, areaContains, areaOf, areasEqual,
     combineAreas, offsetArea, orderedRect, polygonArea, roundedArea,
@@ -2882,7 +2883,9 @@ export function createDrawingFunctions(
         LineDDA: {
             argBytes: 24,
             /** @param {number[]} args */
-            handler: ([xStart, yStart, xEnd, yEnd, proc, data])=>{
+            handler: args=>{
+                const [xStart, yStart, xEnd, yEnd, proc] = args;
+                const data = /** @type {number} */ (forwarded(args, 5, true));
                 if ((xStart | 0) === (xEnd | 0) && (yStart | 0) === (yEnd | 0))
                 {
                     return 1;
@@ -2899,7 +2902,7 @@ export function createDrawingFunctions(
                 return (async()=>{
                     for (const point of points)
                     {
-                        await call(proc >>> 0, [point.x >>> 0, point.y >>> 0, data >>> 0], thread);
+                        await call(proc >>> 0, [point.x >>> 0, point.y >>> 0, data], thread);
                     }
                     return 1;
                 })();
@@ -4577,7 +4580,9 @@ export function createDrawingFunctions(
         EnumObjects: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([handle, type, proc, data])=>{
+            handler: args=>{
+                const [handle, type, proc] = args;
+                const data = /** @type {number} */ (forwarded(args, 3, true));
                 const call = host.call;
                 const scratch = host.surfaces;
                 if (!dcOf(handle) || (proc >>> 0) === 0 || !call || !scratch)
@@ -4608,7 +4613,7 @@ export function createDrawingFunctions(
                         for (const fields of offered)
                         {
                             writeU32s(host, buffer, fields);
-                            answer = (await call(proc >>> 0, [buffer, data >>> 0], thread)) | 0;
+                            answer = (await call(proc >>> 0, [buffer, data], thread)) | 0;
                             if (answer === 0)
                             {
                                 break;

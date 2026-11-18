@@ -14,6 +14,7 @@
 
 import { IID_IUNKNOWN, IUNKNOWN_METHODS } from '../ole32/objects.js';
 import { parseGuid } from '../ole32/guid.js';
+import { forwarded } from '../common/pointers.js';
 
 const S_OK = 0;
 const E_FAIL = 0x80004005 | 0;
@@ -395,7 +396,10 @@ export function createUnknownFunctions(host){
         SHCreateThread: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: async([routine, data, flags, callback])=>{
+            handler: async args=>{
+                const [routine, , flags, callback] = args;
+                // The routine's own parameter: whole to it, on either thread.
+                const data = /** @type {number} */ (forwarded(args, 1));
                 const thread = host.callerThread();
                 if ((flags & (CTF_THREAD_REF | CTF_PROCESS_REF | CTF_COINIT)) !== 0
                     || (callback >>> 0) !== 0)
@@ -409,11 +413,11 @@ export function createUnknownFunctions(host){
                 }
                 if ((callback >>> 0) !== 0)
                 {
-                    await host.call(callback >>> 0, [data >>> 0], thread);
+                    await host.call(callback >>> 0, [data], thread);
                 }
                 const create = host.library?.('KERNEL32.dll')?.CreateThread;
                 const handle = create ? /** @type {number} */ (await create.handler([0, 0,
-                    routine >>> 0, data >>> 0, 0, 0])) >>> 0 : 0;
+                    routine >>> 0, Number(data), 0, 0])) >>> 0 : 0;
                 if (handle !== 0)
                 {
                     await host.library?.('KERNEL32.dll')?.CloseHandle?.handler([handle]);
@@ -421,7 +425,7 @@ export function createUnknownFunctions(host){
                 }
                 if ((flags & CTF_INSIST) !== 0)
                 {
-                    await host.call(routine >>> 0, [data >>> 0], thread);
+                    await host.call(routine >>> 0, [data], thread);
                     return 1;
                 }
                 return 0;

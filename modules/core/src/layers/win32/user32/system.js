@@ -61,7 +61,7 @@ import { ANY_WINDOW, threadIdOf } from './messages.js';
 import { DISPLAY_DEVICE_NAME, VIDEO_ADAPTER_NAME } from '../devices.js';
 import { createRefusals } from '../common/refusal.js';
 import { charactersOf, readToTerminator } from '../common/scan-windows.js';
-import { wholeAddress, wholeAnswer, wideOf } from '../common/pointers.js';
+import { forwarded, wholeAddress, wholeAnswer, wideOf } from '../common/pointers.js';
 
 /** GetSystemMetrics indices this build has a real answer for. */
 /** How many argument slots a `va_list` is read for, since it carries no count. */
@@ -6826,15 +6826,18 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
         SetTimer: {
             returns: 'pointer',
             argBytes: 16,
+            addresses: [3],
             /** @param {number[]} args */
-            handler: ([hwnd, id, elapse, proc])=>{
+            handler: args=>{
+                const [hwnd, , elapse, proc] = args;
                 const window = hwnd >>> 0;
+                // The id is the program's own name for the timer, a pointer of
+                // its own often enough: whole.
+                const id = forwarded(args, 1);
                 // A thread timer named again by the id SetTimer gave it is
                 // retuned, as a window's is; any other id is a new timer.
-                const timerId = window === 0 && !host.queue.hasTimer?.(0, id >>> 0)
-                    ? nextTimerId++
-                    : id >>> 0;
-                host.queue.setTimer(window, timerId, elapse >>> 0, proc >>> 0);
+                const timerId = window === 0 && !host.queue.hasTimer?.(0, id) ? nextTimerId++ : id;
+                host.queue.setTimer(window, timerId, elapse >>> 0, proc);
                 return timerId === 0 ? 1 : timerId;
             },
         },
@@ -6843,7 +6846,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
         KillTimer: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([hwnd, id])=>(host.queue.killTimer(hwnd >>> 0, id >>> 0) ? 1 : 0),
+            handler: args=>(host.queue.killTimer(args[0] >>> 0, forwarded(args, 1)) ? 1 : 0),
         },
 
         /**

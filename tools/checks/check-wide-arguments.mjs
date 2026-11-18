@@ -531,7 +531,10 @@ export function pointersOf(list, { addresses = false } = {}){
         const type = param.replace(/\b(IN|OUT|OPTIONAL)\b|_In\w*_|_Out\w*_/g, ' ').trim();
         const named = type.replace(NOT_TYPE, ' ').trim().split(/\s+/)[0] ?? '';
         if (type.includes('*') || type.includes('[')
-            || (returnsPointer(named) && !(addresses && SIZES.has(named))))
+            || (returnsPointer(named) && !(addresses && SIZES.has(named)))
+            // A routine of the program's (WNDPROC, TIMERPROC, an ...ENUMPROCA) is an
+            // address to call, whole or not at all.
+            || (addresses && /PROC[AW]?$/.test(named)))
         {
             found.push(word);
         }

@@ -294,6 +294,23 @@ test('the types of an image are enumerated once each, a string type placed for i
     assert.deepEqual(none.errors, [1812], 'no callback: ERROR_RESOURCE_DATA_NOT_FOUND');
 });
 
+test('a 64-bit caller\'s context past a dword reaches each enumeration\'s callback whole', ()=>{
+    const past = 0x1_4000_0010n;
+    /** @param {number[]} args @param {number} at  the context's place among them */
+    const wide = (args, at)=>Object.assign(args, { high: args.map((_, i)=>(i === at ? 1 : 0)) });
+    const types = setup();
+    types.fns.EnumResourceTypesA.handler(wide([0, 0x401000, 0x40000010], 2));
+    assert.deepEqual(types.called.map(({ args })=>args.at(-1)), [past, past, past]);
+    const names = setup();
+    names.fns.EnumResourceNamesA.handler(wide([0, RT_STRING, 0x401000, 0x40000010], 3));
+    assert.deepEqual(names.called.map(({ args })=>args.at(-1)), [past, past]);
+    const languages = setup();
+    languages.fns.EnumResourceLanguagesA.handler(wide([0, RT_STRING, 1, 0x401000, 0x40000010], 4));
+    assert.ok(languages.called.length > 0);
+    assert.deepEqual(languages.called.map(({ args })=>args.at(-1)),
+        languages.called.map(()=>past));
+});
+
 test('a name that is not there is ERROR_INVALID_PARAMETER, as the lookup catches the fault', ()=>{
     const { fns, errors, asked } = setup();
     assert.equal(fns.FindResourceA.handler([0x00400000, 0x5dee7f10, RT_BITMAP]), 0);

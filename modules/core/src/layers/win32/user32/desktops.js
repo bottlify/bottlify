@@ -21,6 +21,7 @@
  */
 
 import { threadIdOf } from './messages.js';
+import { forwarded } from '../common/pointers.js';
 import { readText, textBytes } from './unicode.js';
 
 const ERROR_INVALID_HANDLE = 6;
@@ -333,7 +334,7 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
                     return fail(ERROR_NOT_ENOUGH_MEMORY);
                 }
                 host.writeMemory(at, bytes);
-                answer = await call(callback >>> 0, [at, lParam >>> 0], thread) >>> 0;
+                answer = await call(callback >>> 0, [at, lParam], thread) >>> 0;
                 host.release?.(at);
                 if (answer === 0)
                 {
@@ -350,7 +351,9 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
      * @param {number[]} args  hwinsta, lpEnumFunc, lParam.
      * @param {boolean} unicode
      */
-    const enumDesktops = ([handle, callback, lParam], unicode)=>{
+    const enumDesktops = (args, unicode)=>{
+        const [handle, callback] = args;
+        const lParam = /** @type {number} */ (forwarded(args, 2, true));
         if ((handle >>> 0) !== 0 && !named(handle, 'station'))
         {
             return fail(ERROR_INVALID_HANDLE);
@@ -655,7 +658,9 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
         EnumDesktopWindows: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([handle, callback, lParam])=>{
+            handler: args=>{
+                const [handle, callback] = args;
+                const lParam = /** @type {number} */ (forwarded(args, 2, true));
                 const entry = (handle >>> 0) === 0 ? { object: input } : named(handle, 'desktop');
                 const call = host.call;
                 if (!entry)
@@ -671,7 +676,7 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
                 return (async()=>{
                     for (const hwnd of listed)
                     {
-                        if ((await call(callback >>> 0, [hwnd, lParam >>> 0], thread) | 0) === 0)
+                        if ((await call(callback >>> 0, [hwnd, lParam], thread) | 0) === 0)
                         {
                             return 0;
                         }
@@ -703,13 +708,15 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
         EnumWindowStationsA: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([callback, lParam])=>enumNames(stations, callback, lParam, false),
+            handler: args=>enumNames(stations, args[0],
+                /** @type {number} */ (forwarded(args, 1, true)), false),
         },
         /** BOOL EnumWindowStationsW(WINSTAENUMPROCW lpEnumFunc, LPARAM lParam) */
         EnumWindowStationsW: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([callback, lParam])=>enumNames(stations, callback, lParam, true),
+            handler: args=>enumNames(stations, args[0],
+                /** @type {number} */ (forwarded(args, 1, true)), true),
         },
 
         /**

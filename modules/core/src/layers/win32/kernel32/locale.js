@@ -13,6 +13,7 @@ import { unitsFromUtf8, utf8FromUnits } from './utf8.js';
 import { bestFit, codePage } from './codepages.js';
 import { ALTERNATE_SORTS, LOCALES, lcidOfName, localeByLcid, localeByName } from './locales.js';
 import { renderDate, renderTime } from './datetime-format.js';
+import { forwarded } from '../common/pointers.js';
 import { compareText, isSymbol, sortKey } from './collation.js';
 import { LCMAP_LINGUISTIC_CASING, LCMAP_SORTKEY, LCMAP_TITLECASE, mapText, validMapFlags }
     from './lcmap.js';
@@ -1774,7 +1775,8 @@ export function createLocaleFunctions(host){
     const enumUILanguages = wide=>({
         argBytes: 12,
         /** @param {number[]} args */
-        handler: (/** @type {number[]} */ [proc, flags, parameter])=>{
+        handler: args=>{
+            const [proc, flags] = args;
             if ((proc >>> 0) === 0)
             {
                 return refuse(ERROR_INVALID_PARAMETER);
@@ -1787,7 +1789,8 @@ export function createLocaleFunctions(host){
             const text = asked === MUI_LANGUAGE_NAME
                 ? /** @type {string} */ (LANGUAGE_NAMES.get(UI_LANGUAGE))
                 : UI_LANGUAGE.toString(16).toUpperCase().padStart(4, '0');
-            const ran = enumerateFormats(proc, [text], wide, [parameter >>> 0]);
+            const parameter = /** @type {number} */ (forwarded(args, 2, true));
+            const ran = enumerateFormats(proc, [text], wide, [parameter]);
             // A number back means the callback was never run -- no bridge to
             // run it, or no memory for its text -- and the call says so.
             return ran instanceof Promise ? ran.then(()=>1) : refuse(ERROR_CALL_NOT_IMPLEMENTED);
@@ -3083,9 +3086,10 @@ export function createLocaleFunctions(host){
         EnumDateFormatsExEx: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([proc, name, flags, parameter])=>(localeOfName(name >>> 0) === null
+            handler: args=>(localeOfName(args[1] >>> 0) === null
                 ? refuse(ERROR_INVALID_PARAMETER)
-                : enumerateDateFormats(proc, flags >>> 0, true, [CAL_GREGORIAN, parameter >>> 0])),
+                : enumerateDateFormats(args[0], args[2] >>> 0, true,
+                    [CAL_GREGORIAN, /** @type {number} */ (forwarded(args, 3, true))])),
         },
     };
 
@@ -3152,7 +3156,7 @@ export function createLocaleFunctions(host){
                 writeWide(block, `${locale.name}\0`);
                 const kind = LOCALE_WINDOWS
                     | (locale.neutral ? LOCALE_NEUTRALDATA : LOCALE_SPECIFICDATA);
-                if (((await call(proc >>> 0, [block, kind, parameter >>> 0], thread)) | 0) === 0)
+                if (((await call(proc >>> 0, [block, kind, parameter], thread)) | 0) === 0)
                 {
                     break;
                 }
@@ -3281,8 +3285,8 @@ export function createLocaleFunctions(host){
         EnumSystemLocalesEx: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([proc, flags, parameter])=>
-                enumerateLocaleNames(proc, flags >>> 0, parameter),
+            handler: args=>enumerateLocaleNames(args[0], args[1] >>> 0,
+                /** @type {number} */ (forwarded(args, 2, true))),
         },
         GetStringTypeExA: table.GetStringTypeA,
 

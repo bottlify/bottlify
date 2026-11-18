@@ -124,12 +124,14 @@ const IMPORTS = {
             'GetDC@4', 'ReleaseDC@8', 'FillRect@12', 'GetClientRect@8', 'SetFocus@4',
             'SetWindowsHookExA@16', 'UnhookWindowsHookEx@4', 'CallNextHookEx@16', 'SendInput@12',
             'GetSystemMetrics@4', 'CallWindowProcA@20', 'SendNotifyMessageA@16',
+            'EnumDesktopWindows@12', 'EnumWindowStationsA@8', 'SetTimer@16', 'KillTimer@8',
         ],
     },
     'GDI32.dll': {
         undecorated: ['CreateSolidBrush@4', 'CreatePen@12', 'SelectObject@8', 'DeleteObject@4',
             'Rectangle@20', 'TextOutA@20', 'GetPixel@12', 'GetObjectA@12',
-            'CreateDIBSection@24', 'ChoosePixelFormat@8', 'SetPixelFormat@12', 'SwapBuffers@4'],
+            'CreateDIBSection@24', 'ChoosePixelFormat@8', 'SetPixelFormat@12', 'SwapBuffers@4',
+            'EnumFontFamiliesA@16', 'LineDDA@24'],
     },
     'OPENGL32.dll': {
         undecorated: [

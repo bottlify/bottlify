@@ -32,6 +32,7 @@ import {
 } from './faces.js';
 import { ANSI_PAGE, OEM_PAGE, decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { DISPLAY_DEVICE_NAME } from '../devices.js';
+import { forwarded } from '../common/pointers.js';
 import {
     BITMAP,
     BITMAPINFOHEADER,
@@ -2498,8 +2499,9 @@ export function createGdiFunctions(host){
      * @param {number[]} args @param {boolean} wide
      * @param {{ charSet: number, faceName: string } | null} [asked]  The request
      *     itself, for the older call that names a family instead of a LOGFONT.
+     * @param {number | bigint} [lParam]  The program's own context, whole.
      */
-    const enumerateFaces = ([hdc, logfont, proc, lParam], wide, asked)=>{
+    const enumerateFaces = ([hdc, logfont, proc], wide, asked, lParam)=>{
         if (!dcOf(hdc))
         {
             return 0;
@@ -2552,7 +2554,7 @@ export function createGdiFunctions(host){
                     (wide ? writeTextMetricsW : writeTextMetrics)(host, block + enumSize, metrics);
                     answer = (await call(proc >>> 0,
                         [block, block + enumSize, strike ? RASTER_FONTTYPE : ENUMERATED_FONTTYPE,
-                            lParam >>> 0], thread)) | 0;
+                            /** @type {number} */ (lParam)], thread)) | 0;
                     if (answer === 0)
                     {
                         break;
@@ -4418,13 +4420,13 @@ export function createGdiFunctions(host){
         EnumFontFamiliesExA: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: args=>enumerateFaces(args, false),
+            handler: args=>enumerateFaces(args, false, undefined, forwarded(args, 3, true)),
         },
 
         EnumFontFamiliesExW: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: args=>enumerateFaces(args, true),
+            handler: args=>enumerateFaces(args, true, undefined, forwarded(args, 3, true)),
         },
 
         /**
@@ -4438,10 +4440,11 @@ export function createGdiFunctions(host){
         EnumFontFamiliesA: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([hdc, family, proc, lParam])=>enumerateFaces([hdc, 0, proc, lParam], false, {
+            handler: args=>enumerateFaces([args[0], 0, args[2]], false, {
                 charSet: DEFAULT_CHARSET,
-                faceName: (family >>> 0) === 0 ? '' : host.readCString(family >>> 0, MAX_FACE_NAME),
-            }),
+                faceName: (args[1] >>> 0) === 0 ? ''
+                    : host.readCString(args[1] >>> 0, MAX_FACE_NAME),
+            }, forwarded(args, 3, true)),
         },
 
         /**
@@ -4454,10 +4457,10 @@ export function createGdiFunctions(host){
         EnumFontFamiliesW: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([hdc, family, proc, lParam])=>enumerateFaces([hdc, 0, proc, lParam], true, {
+            handler: args=>enumerateFaces([args[0], 0, args[2]], true, {
                 charSet: DEFAULT_CHARSET,
-                faceName: (family >>> 0) === 0 ? '' : wideText(family >>> 0, MAX_FACE_NAME),
-            }),
+                faceName: (args[1] >>> 0) === 0 ? '' : wideText(args[1] >>> 0, MAX_FACE_NAME),
+            }, forwarded(args, 3, true)),
         },
 
         /**

@@ -23,6 +23,7 @@
  * and the flag only becomes a message once the queue has nothing else to give,
  * which is what lets a program finish the work it already had before it exits.
  */
+import { wholeAddress } from '../common/pointers.js';
 
 /** The message that ends a message loop. */
 export const WM_PAINT = 0x000f;
@@ -483,10 +484,29 @@ export function createMessageQueue(options = {}){
      * longer than its timer would find the queue full of stale ticks and never
      * reach anything else.
      *
-     * @type {Map<string, { hwnd: number, id: number, elapse: number,
+     * @type {Map<string, { hwnd: number, id: number, whole?: bigint, elapse: number,
      *                      proc: number, due: number, thread: any }>}
      */
     const timers = new Map();
+
+    /**
+     * A timer's name: its window and its id, the id whole - two ids of a
+     * 64-bit program that differ past the dword are two timers.
+     *
+     * @param {number} hwnd @param {number | bigint} id
+     */
+    const timerKey = (hwnd, id)=>`${hwnd >>> 0}:${typeof id === 'bigint' ? id : id >>> 0}`;
+
+    /**
+     * What a tick carries beside its dwords: an id or a TIMERPROC past 4 GiB.
+     *
+     * @param {{ whole?: bigint, proc: number }} timer
+     * @returns {{ wide?: import('../common/pointers.js').WideParams }}
+     */
+    const timerWide = timer=>(timer.whole === undefined && timer.proc < 2 ** 32 ? {} : { wide: {
+        ...timer.whole === undefined ? {} : { w: timer.whole },
+        ...timer.proc < 2 ** 32 ? {} : { l: BigInt(timer.proc) },
+    } });
 
     /**
      * Whether a thread's pump may be handed this timer's tick. A window's
@@ -685,7 +705,8 @@ export function createMessageQueue(options = {}){
                 // A TIMERPROC travels in lParam, and DispatchMessage calls it
                 // instead of the window procedure. That is the contract, not a
                 // convenience: a timer with no window has nowhere else to go.
-                lParam: timer.proc,
+                lParam: timer.proc >>> 0,
+                ...timerWide(timer),
                 time: at >>> 0,
                 x: 0,
                 y: 0,
@@ -1218,8 +1239,11 @@ export function createMessageQueue(options = {}){
          * period rather than making a second, which is what a program relies on
          * when it retunes a timer it already owns.
          *
-         * @param {number} hwnd @param {number} id @param {number} elapse
-         * @param {number} proc  A TIMERPROC, or zero for a queued WM_TIMER.
+         * @param {number} hwnd
+         * @param {number | bigint} id  A bigint where a 64-bit program's id is past
+         *     a dword - a pointer of its own, commonly.
+         * @param {number} elapse
+         * @param {number} proc  A TIMERPROC, whole, or zero for a queued WM_TIMER.
          */
         setTimer(hwnd, id, elapse, proc){
             // Windows clamps to its own resolution rather than firing a zero
@@ -1227,8 +1251,10 @@ export function createMessageQueue(options = {}){
             // often as you can".
             const period = Math.max(10, elapse >>> 0);
             soonestTimer = -Infinity;
-            timers.set(`${hwnd >>> 0}:${id >>> 0}`, {
-                hwnd: hwnd >>> 0, id: id >>> 0, elapse: period, proc: proc >>> 0,
+            timers.set(timerKey(hwnd, id), {
+                hwnd: hwnd >>> 0, id: Number(BigInt(id) & 0xffffffffn), elapse: period,
+                proc: wholeAddress(proc),
+                ...typeof id === 'bigint' ? { whole: id } : {},
                 due: now() + period,
                 thread: (hwnd >>> 0) === 0 ? currentThread() : null,
             });
@@ -1238,10 +1264,10 @@ export function createMessageQueue(options = {}){
          * Whether a timer of this window and id is set -- for a thread
          * timer, one set by the thread asking.
          *
-         * @param {number} hwnd @param {number} id
+         * @param {number} hwnd @param {number | bigint} id
          */
         hasTimer(hwnd, id){
-            const key = `${hwnd >>> 0}:${id >>> 0}`;
+            const key = timerKey(hwnd, id);
             const timer = timers.get(key);
             return timer !== undefined && deliverable(key, timer, running());
         },
@@ -1252,16 +1278,16 @@ export function createMessageQueue(options = {}){
          * names, because a WM_TIMER can be posted by anyone with any lParam,
          * and calling it would run whatever address the poster chose.
          *
-         * @param {number} hwnd @param {number} id @param {number} proc
+         * @param {number} hwnd @param {number | bigint} id @param {number} proc
          */
         isTimerProc(hwnd, id, proc){
-            const timer = timers.get(`${hwnd >>> 0}:${id >>> 0}`);
-            return timer !== undefined && timer.proc !== 0 && timer.proc === (proc >>> 0);
+            const timer = timers.get(timerKey(hwnd, id));
+            return timer !== undefined && timer.proc !== 0 && timer.proc === wholeAddress(proc);
         },
 
-        /** @param {number} hwnd @param {number} id */
+        /** @param {number} hwnd @param {number | bigint} id */
         killTimer(hwnd, id){
-            return timers.delete(`${hwnd >>> 0}:${id >>> 0}`);
+            return timers.delete(timerKey(hwnd, id));
         },
 
         /** Every timer belonging to a window that has gone. @param {number} hwnd */
