@@ -14,7 +14,7 @@ import {
     TOOLBAR_CLASS, TBSTATE_ENABLED, TBSTATE_CHECKED, TBSTYLE_SEP, TBSTYLE_CHECK,
     TBSTYLE_CHECKGROUP, TBSTYLE_FLAT,
     TB_BUTTONSTRUCTSIZE, TB_GETIMAGELIST, TB_SETBITMAPSIZE, TB_SETBUTTONSIZE,
-    TB_GETBUTTONSIZE, TB_ADDBITMAP,
+    TB_GETBUTTONSIZE, TB_ADDBITMAP, TB_LOADIMAGES,
     TB_ADDBUTTONSA, TB_INSERTBUTTONA, TB_DELETEBUTTON, TB_BUTTONCOUNT, TB_GETBUTTON,
     TB_GETITEMRECT, TB_COMMANDTOINDEX, TB_ISBUTTONENABLED, TB_ISBUTTONCHECKED,
     TB_ISBUTTONPRESSED, TB_CHECKBUTTON, TB_ENABLEBUTTON, TB_SETPARENT, TB_GETSTATE,
@@ -314,4 +314,15 @@ test('a standard strip into an empty toolbar makes its list: square, 16 or 24 pi
         assert.deepEqual([context.memory.i32(OUT), context.memory.i32(OUT + 4)], [side, side]);
         assert.equal(context.lists.ImageList_GetImageCount.handler([list]), count);
     }
+});
+
+test('TB_LOADIMAGES takes a standard strip by its IDB_ number, as TB_ADDBITMAP does', async()=>{
+    const context = setupBars();
+    await context.makeParent();
+    const hwnd = await context.control(TOOLBAR_CLASS, MFC_STYLE, [0, 0, 0, 0]);
+    context.send([hwnd, TB_BUTTONSTRUCTSIZE, 20, 0]);
+    assert.equal(context.send([hwnd, TB_LOADIMAGES, 4, 0xffffffff]), 0);
+    assert.equal(context.send([hwnd, TB_LOADIMAGES, 9, 0xffffffff]), 12, 'after the twelve');
+    const list = context.send([hwnd, TB_GETIMAGELIST, 0, 0]);
+    assert.equal(context.lists.ImageList_GetImageCount.handler([list]), 17);
 });

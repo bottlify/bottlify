@@ -36,6 +36,7 @@ import { encodeAnsi } from '../kernel32/locale.js';
 import { notifyWindow } from './notify.js';
 import { readText, writeText } from './strings.js';
 import { CCM_GETVERSION, CCM_SETVERSION, answerVersion } from './version.js';
+import { stripOfBitmapId } from './strips.js';
 
 /** The class name a program creates the control by. */
 export const TOOLBAR_CLASS = 'ToolbarWindow32';
@@ -103,6 +104,7 @@ export const TB_REPLACEBITMAP = WM_USER + 46;
 export const TB_SETINDENT = WM_USER + 47;
 export const TB_SETIMAGELIST = WM_USER + 48;
 export const TB_GETIMAGELIST = WM_USER + 49;
+export const TB_LOADIMAGES = WM_USER + 50;
 export const TB_GETRECT = WM_USER + 51;
 export const TB_SETHOTIMAGELIST = WM_USER + 52;
 export const TB_GETHOTIMAGELIST = WM_USER + 53;
@@ -148,14 +150,6 @@ const TBIF_BYINDEX = 0x80000000;
 const TBBUTTON_SIZE = 20;
 /** TBADDBITMAP's hInst for comctl32's own strips, and how many images each holds. */
 const HINST_COMMCTRL = 0xffffffff;
-/**
- * comctl32's standard strips by IDB_ number: how many images each holds -
- * fifteen standard, twelve view, five history - its odd numbers the large
- * ones, 24 pixels square, its even ones 16 (Wine's toolbar test, test_add_bitmap,
- * with the numbers between the named ones answering as their neighbours).
- */
-const STANDARD_COUNTS = Object.freeze({ 0: 15, 1: 15, 2: 15, 3: 15, 4: 12, 5: 12, 6: 12, 7: 12,
-    8: 5, 9: 5 });
 const ILC_MASK_COLOR32 = 0x0021;
 /** The first row's distance from the top, and a separator's width when it gives none. */
 const TOP_MARGIN = 2;
@@ -404,8 +398,8 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
     };
 
     /**
-     * TB_ADDBITMAP: a bitmap handle (hInst NULL), a bitmap resource of a
-     * module, or one of comctl32's standard strips.
+     * TB_ADDBITMAP's TBADDBITMAP: a bitmap handle (hInst NULL), a bitmap
+     * resource of a module, or one of comctl32's standard strips.
      *
      * @param {any} record @param {number} count @param {number} address  the TBADDBITMAP
      */
@@ -416,21 +410,29 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
         }
         const bytes = host.readMemory(address, 8);
         const view = new DataView(bytes.buffer, bytes.byteOffset, 8);
-        const instance = view.getUint32(0, true);
-        const id = view.getUint32(4, true);
+        return addFrom(record, count, view.getUint32(0, true), view.getUint32(4, true));
+    };
+
+    /**
+     * Adds a bitmap's images, named as a TBADDBITMAP names it: the index of
+     * the first, or -1.
+     *
+     * @param {any} record @param {number} count @param {number} instance @param {number} id
+     */
+    const addFrom = (record, count, instance, id)=>{
         let bitmap = 0;
         let blank = 0;
         if (instance === HINST_COMMCTRL)
         {
             host.divergence?.('TB_ADDBITMAP', `comctl32's standard bitmap ${id} is left blank`);
-            blank = /** @type {any} */ (STANDARD_COUNTS)[id] ?? count;
+            const strip = stripOfBitmapId(id);
+            blank = strip?.count ?? count;
             count = blank;
             const held = state(record);
-            if (held.list === 0 && held.images === 0)
+            if (strip && held.list === 0 && held.images === 0)
             {
                 // A first strip sizes the list it makes, as its own images are.
-                const side = (id & 1) !== 0 ? 24 : 16;
-                held.bitmap = { cx: side, cy: side };
+                held.bitmap = { cx: strip.side, cy: strip.side };
             }
         }
         else
@@ -722,6 +724,9 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
                 return (held.button.cy << 16 | held.button.cx) >>> 0;
             case TB_ADDBITMAP:
                 return addBitmap(record, wParam | 0, lParam);
+            // A standard strip by its IDB_ number, from HINST_COMMCTRL.
+            case TB_LOADIMAGES:
+                return addFrom(record, 0, lParam, wParam);
             case TB_REPLACEBITMAP:
                 return replaceBitmap(record, lParam);
             case TB_ADDBUTTONSA:

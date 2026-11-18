@@ -31,6 +31,7 @@
  */
 
 import { CLSID_IMAGELIST, createImageListObjects } from './imagelist-com.js';
+import { STANDARD_STRIPS } from './strips.js';
 
 /** ImageList_Add and friends report failure with this, not with zero. */
 const FAILED = -1;
@@ -171,6 +172,8 @@ const dwords = values=>new Uint8Array(new Uint32Array(values.map(value=>value >>
  *           user32's exports, which a list made out of a module's bitmap
  *           resource loads it with.
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {() => number} [ownInstance]  comctl32's own module handle, whose
+ *           standard strips ImageList_LoadImage is asked for by resource id.
  * @property {ReturnType<typeof createImageLists>} [imageLists]  The lists to
  *           export, when the host built them itself to share with the
  *           controls that draw from them.
@@ -804,8 +807,29 @@ export function createImageLists(host){
     };
 
     /**
+     * One of comctl32's standard strips, named as its own resource: a blank
+     * bitmap of the strip's size, its pixels not being in this build. Null
+     * for anything else.
+     *
+     * @param {number} instance @param {number} name
+     */
+    const ownStrip = (instance, name)=>{
+        const own = host.ownInstance?.() ?? 0;
+        const strip = /** @type {Record<number, { count: number, side: number }>} */ (
+            STANDARD_STRIPS)[name >>> 0];
+        if (own === 0 || (instance >>> 0) !== own || !strip)
+        {
+            return null;
+        }
+        host.divergence?.('ImageList_LoadImage', `comctl32's standard bitmap ${name >>> 0}`
+            + ' is left blank');
+        return gdi('CreateBitmap', strip.count * strip.side, strip.side, 1, 32, 0) >>> 0;
+    };
+
+    /**
      * ImageList_LoadImageA and W: one body, user32's LoadImage in the
-     * spelling the name was given in.
+     * spelling the name was given in; comctl32's own standard strips, which
+     * are no module's resources here, made at their size.
      *
      * @param {'LoadImageA' | 'LoadImageW'} loader
      */
@@ -819,8 +843,9 @@ export function createImageLists(host){
                     `an image list of type ${type >>> 0} is not loaded: only a bitmap's`);
                 return 0;
             }
-            const bitmap = (host.user32?.(loader)
-                ?.handler([instance, name, IMAGE_BITMAP, 0, 0, flags]) ?? 0) >>> 0;
+            const bitmap = ownStrip(instance, name)
+                ?? (host.user32?.(loader)?.handler([instance, name, IMAGE_BITMAP, 0, 0, flags])
+                    ?? 0) >>> 0;
             const size = bitmap === 0 ? null : host.bitmapSize?.(bitmap) ?? null;
             if (!size || size.height <= 0)
             {

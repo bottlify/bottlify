@@ -38,8 +38,8 @@ const SRCCOPY = 0x00cc0020;
 const SRCINVERT = 0x00660046;
 
 /**
- * @param {{ user32?: (name: string) => ({ handler: (args: number[]) => number } | undefined) }}
- *     [wired]
+ * @param {{ user32?: (name: string) => ({ handler: (args: number[]) => number } | undefined),
+ *     ownInstance?: () => number }} [wired]
  */
 function machine(wired = {}){
     const bytes = new Uint8Array(0x100000);
@@ -77,6 +77,7 @@ function machine(wired = {}){
         release: ()=>undefined,
         gdi32: name=>gdi32[name],
         user32: wired.user32,
+        ownInstance: wired.ownInstance,
         bitmapSize: bitmap=>gdi.bitmapSize(bitmap),
     });
     const fns = /** @type {Record<string, { argBytes: number,
@@ -150,6 +151,20 @@ test('a list loaded out of a bitmap resource is cut into images cx wide', ()=>{
     assert.equal(fns.ImageList_GetImageCount.handler([square]), 2, 'a cx of 0 cuts squares');
     assert.equal(fns.ImageList_LoadImageA.handler([0x400000, 0x71, 16, 10, CLR_NONE, 1, 0]), 0,
         'an icon resource is not loaded');
+});
+
+test('comctl32\'s own standard strips load at their size, blank, without user32', ()=>{
+    // Wine's rebar test makes a band's image list of resource 121, the
+    // standard strip 24 pixels square.
+    const { fns, view } = machine({ ownInstance: ()=>0x70000000,
+        user32: ()=>({ handler: ()=>assert.fail('no module holds these here') }) });
+    const list = fns.ImageList_LoadImageA.handler([0x70000000, 121, 24, 2, CLR_NONE, 0, 0]);
+    assert.notEqual(list, 0);
+    assert.equal(fns.ImageList_GetImageCount.handler([list]), 15);
+    fns.ImageList_GetIconSize.handler([list, OUT, OUT + 4]);
+    assert.deepEqual([view.getInt32(OUT, true), view.getInt32(OUT + 4, true)], [24, 24]);
+    const small = fns.ImageList_LoadImageA.handler([0x70000000, 130, 16, 2, CLR_NONE, 0, 0]);
+    assert.equal(fns.ImageList_GetImageCount.handler([small]), 5);
 });
 
 test('ImageList_DrawIndirect refuses no structure, no DC, no list and a missing image', ()=>{
