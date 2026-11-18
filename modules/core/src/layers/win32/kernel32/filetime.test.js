@@ -370,6 +370,18 @@ test('SystemTimeToTzSpecificLocalTimeEx reads 1 January by the year before\'s ru
         .find(part=>part.type === 'timeZoneName')?.value ?? '';
     const [, sign, hours] = /GMT([+-])(\d\d)/.exec(offset) ?? [];
     const local = new Date(moment + (sign === '-' ? -1 : 1) * Number(hours) * 3_600_000);
+    // Turks and Caicos stayed on UTC-4 through 2017 and went back to Eastern
+    // time in March 2018: 2018's rules are daylight (UTC-4) from 1 January at
+    // midnight, which takes in the last hours of 2017 on the standard clock.
+    bytes.fill(0, DYNAMIC, DYNAMIC + 432);
+    [...'Turks And Caicos Standard Time'].forEach((character, at)=>view.setUint16(
+        DYNAMIC + 172 + at * 2, character.charCodeAt(0), true));
+    putWords(bytes, 0x100, [2018, 1, 0, 1, 4, 15, 0, 0]);
+    fns.SystemTimeToTzSpecificLocalTimeEx.handler([DYNAMIC, 0x100, 0x120]);
+    assert.deepEqual(words(bytes, 0x120).slice(0, 6), [2018, 1, 1, 1, 0, 15]);
+    bytes.fill(0, DYNAMIC, DYNAMIC + 432);
+    [...'Alberta Standard Time'].forEach((character, at)=>view.setUint16(DYNAMIC + 172 + at * 2,
+        character.charCodeAt(0), true));
     putWords(bytes, 0x100, [2027, 1, 0, 1, 6, 15, 0, 0]);
     fns.SystemTimeToTzSpecificLocalTimeEx.handler([DYNAMIC, 0x100, 0x120]);
     assert.deepEqual(words(bytes, 0x120).slice(0, 6), [local.getUTCFullYear(),

@@ -191,7 +191,13 @@ function biasAt(zone, utc, year){
     }
     const minute = 60_000;
     const rulesYear = year ?? new Date(utc - (bias + standardBias) * minute).getUTCFullYear();
-    const daylightStarts = transitionIn(daylightRule, rulesYear) + (bias + standardBias) * minute;
+    // Daylight from 1 January at midnight is daylight from before the year:
+    // a moment of the year before read by these rules is inside it.
+    const fromYearStart = daylightRule.getUint16(2, true) === 1
+        && daylightRule.getUint16(6, true) === 1 && daylightRule.getUint16(8, true) === 0
+        && daylightRule.getUint16(12, true) === 0;
+    const daylightStarts = fromYearStart ? -Infinity
+        : transitionIn(daylightRule, rulesYear) + (bias + standardBias) * minute;
     const daylightEnds = transitionIn(standardRule, rulesYear) + (bias + daylightBias) * minute;
     const daylight = daylightStarts < daylightEnds
         ? utc >= daylightStarts && utc < daylightEnds
