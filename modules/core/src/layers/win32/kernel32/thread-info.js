@@ -205,6 +205,10 @@ export function createThreadInfoFunctions(host){
             }
             case THREAD_INFO.PRIORITY_BOOST:
                 return dword(thread.priorityBoostDisabled ? 1 : 0);
+            case THREAD_INFO.HIDE_FROM_DEBUGGER:
+                // A BOOLEAN: whether the thread was hidden, by this class set
+                // or by THREAD_CREATE_FLAGS_HIDE_FROM_DEBUGGER.
+                return new Uint8Array([thread.hiddenFromDebugger ? 1 : 0]);
             case THREAD_INFO.GROUP: {
                 const bytes = new Uint8Array(GROUP_AFFINITY_SIZE);
                 new DataView(bytes.buffer).setUint32(0, processors.threadMask(thread), true);
@@ -259,7 +263,7 @@ export function createThreadInfoFunctions(host){
         /** @type {Map<number, number>} */
         const sizes = new Map([[THREAD_INFO.BASIC, BASIC_SIZE], [THREAD_INFO.TIMES, TIMES_SIZE],
             [THREAD_INFO.AM_I_LAST_THREAD, 4], [THREAD_INFO.PRIORITY_BOOST, 4],
-            [THREAD_INFO.GROUP, GROUP_AFFINITY_SIZE]]);
+            [THREAD_INFO.GROUP, GROUP_AFFINITY_SIZE], [THREAD_INFO.HIDE_FROM_DEBUGGER, 1]]);
         const size = sizes.get(infoClass >>> 0);
         if (size === undefined)
         {
@@ -375,8 +379,14 @@ export function createThreadInfoFunctions(host){
                     : setAffinity(thread, asked.mask, STATUS_SUCCESS);
             }
             case THREAD_INFO.HIDE_FROM_DEBUGGER:
-            // No debugger is told of this process's threads to hide one from.
-                return (length >>> 0) === 0 ? STATUS_SUCCESS : STATUS_INFO_LENGTH_MISMATCH;
+                // No debugger is told of this process's threads to hide one
+                // from; the thread is marked, and says so when asked.
+                if ((length >>> 0) !== 0)
+                {
+                    return STATUS_INFO_LENGTH_MISMATCH;
+                }
+                thread.hiddenFromDebugger = true;
+                return STATUS_SUCCESS;
             case THREAD_INFO.NAME: {
                 if ((length >>> 0) !== NAME_SIZE)
                 {

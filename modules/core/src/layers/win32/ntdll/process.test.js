@@ -430,3 +430,108 @@ test('NtTerminateProcess with no handle ends the other threads, then the process
     assert.equal(lastError, 0x77, 'the last error left alone');
     assert.equal(fns.NtTerminateProcess.argBytes, 8);
 });
+
+test('NtCreateThreadEx and RtlCreateUserThread are CreateRemoteThreadEx, their flags read', ()=>{
+    const bytes = new Uint8Array(0x4000);
+    const view = new DataView(bytes.buffer);
+    /** @type {any[][]} */
+    const calls = [];
+    let lastError = 0x77;
+    let heap = 0x2000;
+    /** @param {string} name @param {(args: number[]) => any} answer */
+    const entry = (name, answer)=>({ handler: (/** @type {number[]} */ args)=>{
+        calls.push([name, ...args]);
+        return answer(args);
+    } });
+    const kernel32 = {
+        GetLastError: { handler: ()=>lastError },
+        SetLastError: { handler: (/** @type {number[]} */ [code])=>{
+            lastError = code;
+            return 0;
+        } },
+        CreateRemoteThreadEx: entry('CreateRemoteThreadEx', ([process, , , , , , , idOut])=>{
+            if (process === 0x66)
+            {
+                lastError = 6;
+                return 0;
+            }
+            view.setUint32(idOut, 0x120, true);
+            return 0x80;
+        }),
+        GetProcessIdOfThread: entry('GetProcessIdOfThread', ()=>0x1000),
+        GetCurrentThreadId: entry('GetCurrentThreadId', ()=>7),
+        OpenThread: entry('OpenThread', ([, , id])=>0x100 + id),
+        SuspendThread: entry('SuspendThread', ()=>0),
+        ResumeThread: entry('ResumeThread', ()=>1),
+        CloseHandle: entry('CloseHandle', ()=>1),
+    };
+    /** @type {string[]} */
+    const said = [];
+    const fns = /** @type {Record<string, any>} */ (createProcessFunctions({
+        readMemory: (address, length)=>bytes.subarray(address, address + length),
+        writeMemory: (address, data)=>bytes.set(data, address),
+        kernel32,
+        teb: ()=>0,
+        allocate: size=>{
+            const at = heap;
+            heap += (size + 7) & ~7;
+            return at;
+        },
+        free: ()=>true,
+        processes: ()=>[{ id: 0x1000, threads: [7, 0x120, 9] }],
+        native: name=>(name === 'NtSetInformationThread'
+            ? entry('NtSetInformationThread', ()=>STATUS_SUCCESS) : undefined),
+        divergence: (api, detail)=>said.push(`${api}: ${detail}`),
+    }));
+    const RESULT = 0x100;
+    const START = 0x401000;
+
+    // Suspended (1), hidden from a debugger (4), bypassing a freeze (0x40),
+    // a reserve of 1 MiB.
+    assert.equal(fns.NtCreateThreadEx.handler([RESULT, 0x1fffff, 0, 0xffffffff, START, 7,
+        0x45, 0, 0x1000, 0x100000, 0]), STATUS_SUCCESS);
+    assert.deepEqual(calls[0].slice(0, 8),
+        ['CreateRemoteThreadEx', 0xffffffff, 0, 0x100000, START, 7, 0x10004, 0],
+        'CREATE_SUSPENDED and the reserve as the size, STACK_SIZE_PARAM_IS_A_RESERVATION');
+    assert.deepEqual(calls[1], ['NtSetInformationThread', 0x80, 17, 0, 0], 'marked hidden');
+    assert.equal(view.getUint32(RESULT, true), 0x80);
+    assert.deepEqual(said, []);
+
+    calls.length = 0;
+    assert.equal(fns.NtCreateThreadEx.handler([RESULT, 0, 0, 0xffffffff, START, 7, 0x2, 0,
+        0x2000, 0, 0]), STATUS_SUCCESS);
+    assert.deepEqual(calls[0].slice(0, 7),
+        ['CreateRemoteThreadEx', 0xffffffff, 0, 0x2000, START, 7, 0], 'a commit, running');
+    assert.equal(calls.length, 1, 'not hidden');
+    assert.equal(said.length, 1, 'a skipped attach not honoured is said');
+    fns.NtCreateThreadEx.handler([RESULT, 0, 0, 0xffffffff, START, 7, 0x2, 0, 0, 0, 0]);
+    assert.equal(said.length, 1, 'once');
+    assert.equal(fns.NtCreateThreadEx.handler([RESULT, 0, 0, 0x66, START, 7, 0, 0, 0, 0, 0]),
+        STATUS_INVALID_HANDLE);
+    assert.equal(lastError, 0x77, 'the last error left alone');
+
+    calls.length = 0;
+    const CLIENT = 0x200;
+    assert.equal(fns.RtlCreateUserThread.handler([0xffffffff, 0, 1, 0, 0, 0x3000, START, 9,
+        RESULT, CLIENT]), STATUS_SUCCESS);
+    assert.deepEqual(calls[0].slice(0, 7),
+        ['CreateRemoteThreadEx', 0xffffffff, 0, 0x3000, START, 9, 0x4]);
+    assert.deepEqual([view.getUint32(CLIENT, true), view.getUint32(CLIENT + 4, true)],
+        [0x1000, 0x120], 'the client id');
+
+    // The thread made to bypass a freeze (0x120) is left running, the caller
+    // (7) is the one asking, so only thread 9 is suspended.
+    calls.length = 0;
+    assert.equal(fns.NtSuspendProcess.handler([0xffffffff]), STATUS_SUCCESS);
+    assert.deepEqual(calls.filter(([name])=>name === 'SuspendThread'),
+        [['SuspendThread', 0x109], ['SuspendThread', 0xfffffffe]],
+        'the others, then the caller itself');
+    calls.length = 0;
+    assert.equal(fns.NtResumeProcess.handler([0xffffffff]), STATUS_SUCCESS);
+    assert.deepEqual(calls.filter(([name])=>name === 'ResumeThread'),
+        [['ResumeThread', 0x109]]);
+    assert.equal(fns.NtSuspendProcess.handler([0x44]), 0xc0000002, 'another process: said');
+    assert.equal(said.length, 2);
+    assert.deepEqual([fns.NtCreateThreadEx.argBytes, fns.RtlCreateUserThread.argBytes,
+        fns.NtSuspendProcess.argBytes], [44, 40, 4]);
+});

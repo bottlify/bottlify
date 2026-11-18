@@ -80,9 +80,20 @@ const PROCESS_CREATE_FLAGS_INHERIT_HANDLES = 0x4;
 const THREAD_CREATE_FLAGS_CREATE_SUSPENDED = 0x1;
 const THREAD_CREATE_FLAGS_HIDE_FROM_DEBUGGER = 0x4;
 
-/** GetCurrentProcess's pseudo-handle; OpenThread's right to end a thread. */
+/** GetCurrentProcess's and GetCurrentThread's pseudo-handles; OpenThread's rights. */
 const CURRENT_PROCESS = 0xffffffff;
+const CURRENT_THREAD = 0xfffffffe;
 const THREAD_TERMINATE = 0x1;
+const THREAD_SUSPEND_RESUME = 0x2;
+
+/** NtCreateThreadEx's flags this honours, and the ones it does not. */
+const THREAD_CREATE_FLAGS_SKIP_THREAD_ATTACH = 0x2;
+const THREAD_CREATE_FLAGS_SKIP_LOADER_INIT = 0x20;
+const THREAD_CREATE_FLAGS_BYPASS_PROCESS_FREEZE = 0x40;
+/** CreateThread's: the size given is the stack's reserve. */
+const STACK_SIZE_PARAM_IS_A_RESERVATION = 0x10000;
+/** THREADINFOCLASS ThreadHideFromDebugger. */
+const THREAD_HIDE_FROM_DEBUGGER = 17;
 
 /** CreateProcess's flags: the first thread waits, the environment is wide. */
 const CREATE_SUSPENDED = 0x4;
@@ -119,7 +130,11 @@ const DOS_DEVICES = '\\??\\';
  * @property {(address: number) => boolean} free
  * @property {() => { id: number, threads: number[] }[]} [processes]
  *           This process first, its threads by id: the ones NtTerminateProcess
- *           with no handle ends.
+ *           with no handle ends and NtSuspendProcess stops.
+ * @property {(name: string) => ({ handler: Function } | undefined)} [native]
+ *           Another native call by name, made over kernel32's state
+ *           (NtSetInformationThread, which marks a thread hidden).
+ * @property {(api: string, detail: string) => void} [divergence]
  */
 
 /** @param {string} text @returns {Uint8Array} UTF-16, unterminated. */
@@ -133,6 +148,12 @@ export function createProcessFunctions(host){
     /** The exit code an earlier NtTerminateProcess with no handle kept, or null. */
     /** @type {number | null} */
     let ending = null;
+    /** Threads made with THREAD_CREATE_FLAGS_BYPASS_PROCESS_FREEZE, by id. */
+    /** @type {Set<number>} */
+    const unfrozen = new Set();
+    /** The flags NtCreateThreadEx was handed and does not honour, each said once. */
+    /** @type {Set<number>} */
+    const unhonoured = new Set();
 
     /** @param {number} address */
     const readU32 = address=>{
@@ -377,6 +398,90 @@ export function createProcessFunctions(host){
         return created instanceof Promise ? created.then(settle) : settle(created);
     };
 
+    /**
+     * A thread CreateRemoteThreadEx makes, in this process or a child, its
+     * handle and id, or the status its refusal is made from; hidden from a
+     * debugger where asked, which the thread then says when asked.
+     *
+     * @param {{ process: number, start: number, argument: number, suspended: boolean,
+     *     commit: number, reserve: number, hidden?: boolean }} asked
+     * @returns {any}  `{ handle, id }` or `{ status }`, or a promise of one
+     */
+    const makeThread = asked=>{
+        const scratch = host.allocate(4) >>> 0;
+        if (scratch === 0)
+        {
+            return { status: STATUS.NO_MEMORY };
+        }
+        const reserve = asked.reserve >>> 0;
+        const flags = (asked.suspended ? CREATE_SUSPENDED : 0)
+            | (reserve !== 0 ? STACK_SIZE_PARAM_IS_A_RESERVATION : 0);
+        const { result, error } = quietly('CreateRemoteThreadEx', [asked.process, 0,
+            reserve !== 0 ? reserve : asked.commit, asked.start, asked.argument, flags, 0,
+            scratch]);
+        /** @param {number} handle */
+        const settle = handle=>{
+            const id = readU32(scratch);
+            host.free(scratch);
+            if ((handle >>> 0) === 0)
+            {
+                return { status: ERROR_TO_STATUS.get(error) ?? STATUS.UNSUCCESSFUL };
+            }
+            if (asked.hidden)
+            {
+                host.native?.('NtSetInformationThread')?.handler(
+                    [handle, THREAD_HIDE_FROM_DEBUGGER, 0, 0]);
+            }
+            return { handle: handle >>> 0, id };
+        };
+        return result instanceof Promise ? result.then(settle) : settle(result);
+    };
+
+    /**
+     * Every thread of this process but those that bypass a freeze, each
+     * handed to SuspendThread or ResumeThread; the caller last, since
+     * suspending itself does not return until another resumes it.
+     *
+     * @param {'SuspendThread' | 'ResumeThread'} call
+     */
+    const everyThread = call=>{
+        const caller = quietly('GetCurrentThreadId', []).result >>> 0;
+        for (const id of host.processes?.()[0]?.threads ?? [])
+        {
+            if ((id >>> 0) === caller || unfrozen.has(id >>> 0))
+            {
+                continue;
+            }
+            const thread = quietly('OpenThread', [THREAD_SUSPEND_RESUME, 0, id]).result >>> 0;
+            if (thread !== 0)
+            {
+                quietly(call, [thread]);
+                quietly('CloseHandle', [thread]);
+            }
+        }
+        if (call === 'SuspendThread' && !unfrozen.has(caller))
+        {
+            const parked = quietly(call, [CURRENT_THREAD]).result;
+            return typeof parked === 'number' ? STATUS.SUCCESS : parked;
+        }
+        return STATUS.SUCCESS;
+    };
+
+    /**
+     * NtSuspendProcess and NtResumeProcess: this process's threads; a child's
+     * are not reached from here yet, and saying so is all that is done.
+     *
+     * @param {string} api @param {number} handle @param {'SuspendThread' | 'ResumeThread'} call
+     */
+    const wholeProcess = (api, handle, call)=>{
+        if ((handle >>> 0) !== CURRENT_PROCESS)
+        {
+            host.divergence?.(api, 'another process\'s threads are not reached; nothing done');
+            return STATUS.NOT_IMPLEMENTED;
+        }
+        return everyThread(call);
+    };
+
     return {
         /**
          * NTSTATUS NtResumeThread(HANDLE ThreadHandle, PULONG SuspendCount)
@@ -477,6 +582,121 @@ export function createProcessFunctions(host){
                 }
                 return STATUS.SUCCESS;
             },
+        },
+
+        /**
+         * NTSTATUS NtCreateThreadEx(PHANDLE ThreadHandle, ACCESS_MASK DesiredAccess,
+         *   POBJECT_ATTRIBUTES ObjectAttributes, HANDLE ProcessHandle,
+         *   PUSER_THREAD_START_ROUTINE StartRoutine, PVOID Argument, ULONG CreateFlags,
+         *   SIZE_T ZeroBits, SIZE_T StackSize, SIZE_T MaximumStackSize,
+         *   PPS_ATTRIBUTE_LIST AttributeList)
+         *
+         * CreateRemoteThreadEx's thread: suspended with
+         * THREAD_CREATE_FLAGS_CREATE_SUSPENDED, hidden from a debugger with
+         * THREAD_CREATE_FLAGS_HIDE_FROM_DEBUGGER, left running by
+         * NtSuspendProcess with THREAD_CREATE_FLAGS_BYPASS_PROCESS_FREEZE. A
+         * maximum stack size is its reserve, a stack size its commit. The
+         * libraries are told of it as of any thread: skipping that
+         * (THREAD_CREATE_FLAGS_SKIP_THREAD_ATTACH, _SKIP_LOADER_INIT) is not
+         * done, and said.
+         */
+        NtCreateThreadEx: {
+            argBytes: 44,
+            /** @param {number[]} args */
+            handler: ([out, , , process, start, argument, flags, , commit, reserve])=>{
+                if ((out >>> 0) === 0 || (start >>> 0) === 0)
+                {
+                    return STATUS.INVALID_PARAMETER;
+                }
+                const skipped = (flags >>> 0) & (THREAD_CREATE_FLAGS_SKIP_THREAD_ATTACH
+                    | THREAD_CREATE_FLAGS_SKIP_LOADER_INIT);
+                if (skipped !== 0 && !unhonoured.has(skipped))
+                {
+                    unhonoured.add(skipped);
+                    host.divergence?.('NtCreateThreadEx', `flags 0x${skipped.toString(16)}: the`
+                        + ' libraries are told of the thread all the same');
+                }
+                const made = makeThread({ process, start, argument,
+                    suspended: ((flags >>> 0) & THREAD_CREATE_FLAGS_CREATE_SUSPENDED) !== 0,
+                    hidden: ((flags >>> 0) & THREAD_CREATE_FLAGS_HIDE_FROM_DEBUGGER) !== 0,
+                    commit, reserve });
+                /** @param {any} thread */
+                const settle = thread=>{
+                    if ('status' in thread)
+                    {
+                        return thread.status;
+                    }
+                    if (((flags >>> 0) & THREAD_CREATE_FLAGS_BYPASS_PROCESS_FREEZE) !== 0)
+                    {
+                        unfrozen.add(thread.id);
+                    }
+                    writeU32(out, thread.handle);
+                    return STATUS.SUCCESS;
+                };
+                return made instanceof Promise ? made.then(settle) : settle(made);
+            },
+        },
+
+        /**
+         * NTSTATUS RtlCreateUserThread(HANDLE Process, PSECURITY_DESCRIPTOR,
+         *   BOOLEAN CreateSuspended, ULONG StackZeroBits, SIZE_T StackReserve,
+         *   SIZE_T StackCommit, PUSER_THREAD_START_ROUTINE StartAddress, PVOID Parameter,
+         *   PHANDLE Thread, PCLIENT_ID ClientId)
+         *
+         * The same thread, its handle and client id where asked for.
+         */
+        RtlCreateUserThread: {
+            argBytes: 40,
+            /** @param {number[]} args */
+            handler: ([process, , suspended, , reserve, commit, start, argument, out,
+                client])=>{
+                if ((start >>> 0) === 0)
+                {
+                    return STATUS.INVALID_PARAMETER;
+                }
+                const made = makeThread({ process, start, argument,
+                    suspended: (suspended & 0xff) !== 0, commit, reserve });
+                /** @param {any} thread */
+                const settle = thread=>{
+                    if ('status' in thread)
+                    {
+                        return thread.status;
+                    }
+                    if ((out >>> 0) !== 0)
+                    {
+                        writeU32(out, thread.handle);
+                    }
+                    else
+                    {
+                        quietly('CloseHandle', [thread.handle]);
+                    }
+                    if ((client >>> 0) !== 0)
+                    {
+                        writeU32(client, quietly('GetProcessIdOfThread', [thread.handle]).result);
+                        writeU32(client + 4, thread.id);
+                    }
+                    return STATUS.SUCCESS;
+                };
+                return made instanceof Promise ? made.then(settle) : settle(made);
+            },
+        },
+
+        /**
+         * NTSTATUS NtSuspendProcess(HANDLE ProcessHandle)
+         * NTSTATUS NtResumeProcess(HANDLE ProcessHandle)
+         *
+         * Every thread of the process suspended, or resumed, once - but
+         * those made to bypass a freeze.
+         */
+        NtSuspendProcess: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>wholeProcess('NtSuspendProcess', handle, 'SuspendThread'),
+        },
+        NtResumeProcess: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>wholeProcess('NtResumeProcess', handle, 'ResumeThread'),
         },
 
         /**

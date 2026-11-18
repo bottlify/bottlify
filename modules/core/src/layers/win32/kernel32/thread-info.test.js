@@ -150,10 +150,28 @@ test('ThreadAffinityMask takes every bit as every processor, and refuses one pas
         STATUS_INVALID_PARAMETER);
     assert.equal(set([CURRENT_THREAD, THREAD_INFO.AFFINITY_MASK, 0x1000, 8]),
         STATUS_INFO_LENGTH_MISMATCH);
-    assert.equal(set([CURRENT_THREAD, THREAD_INFO.HIDE_FROM_DEBUGGER, 0, 0]), STATUS_SUCCESS);
     assert.equal(set([CURRENT_THREAD, THREAD_INFO.HIDE_FROM_DEBUGGER, 0x1000, 4]),
         STATUS_INFO_LENGTH_MISMATCH);
     assert.equal(set([CURRENT_THREAD, 2, 0x1000, 4]), STATUS_INVALID_INFO_CLASS);
+});
+
+test('ThreadHideFromDebugger is a BOOLEAN that says whether the thread was hidden', ()=>{
+    // Wine's ntdll test_dbg_hidden_thread_creation reads it before and after.
+    const { natives, view, self } = setup();
+    const query = natives.NtQueryInformationThread.handler;
+    const set = natives.NtSetInformationThread.handler;
+
+    view.setUint8(0x1000, 0xcc);
+    assert.equal(query([CURRENT_THREAD, THREAD_INFO.HIDE_FROM_DEBUGGER, 0x1000, 1, 0]),
+        STATUS_SUCCESS);
+    assert.equal(view.getUint8(0x1000), 0, 'not hidden');
+    assert.equal(set([CURRENT_THREAD, THREAD_INFO.HIDE_FROM_DEBUGGER, 0, 0]), STATUS_SUCCESS);
+    assert.equal(query([CURRENT_THREAD, THREAD_INFO.HIDE_FROM_DEBUGGER, 0x1000, 1, 0]),
+        STATUS_SUCCESS);
+    assert.equal(view.getUint8(0x1000), 1, 'hidden');
+    assert.equal(/** @type {any} */ (self).hiddenFromDebugger, true);
+    assert.equal(query([CURRENT_THREAD, THREAD_INFO.HIDE_FROM_DEBUGGER, 0x1000, 4, 0]),
+        STATUS_INFO_LENGTH_MISMATCH, 'a BOOLEAN, one byte');
 });
 
 test('group affinity reads and sets the thread\'s mask, 0 handing it back to the process', ()=>{
