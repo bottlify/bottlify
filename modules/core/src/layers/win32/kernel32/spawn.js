@@ -51,6 +51,7 @@ const ERROR_ACCESS_DENIED = 5;
 const ERROR_INVALID_PARAMETER = 87;
 /** ReadProcessMemory of a range nothing is at. */
 const ERROR_PARTIAL_COPY = 299;
+const ERROR_DIRECTORY = 267;
 const ERROR_INSUFFICIENT_BUFFER = 122;
 const ERROR_BAD_LENGTH = 24;
 const ERROR_NOT_SUPPORTED = 50;
@@ -856,6 +857,25 @@ export function createSpawnFunctions(host){
     };
 
     /**
+     * Whether a path names a directory: a relative one from the current
+     * directory, as CreateProcess's lpCurrentDirectory is read.
+     *
+     * @param {string} path
+     */
+    const isDirectory = path=>{
+        const full = /^[a-z]:\\|^\\\\/i.test(path) ? path
+            : `${(host.currentDirectory?.() ?? 'C:\\').replace(/\\$/, '')}\\${path}`;
+        try
+        {
+            return host.stat?.(full)?.isDirectory === true;
+        }
+        catch (e){
+            void e;
+            return false;
+        }
+    };
+
+    /**
      * @param {string | null} named  null where no application name was given.
      * @param {string} line
      * @param {number} flags @param {number} information @param {number} [startup]
@@ -876,6 +896,13 @@ export function createSpawnFunctions(host){
         if (refused !== 0)
         {
             host.setLastError(refused);
+            return 0;
+        }
+        // A directory to start in that is not one is refused before anything
+        // is made, as Windows refuses it.
+        if (directory.trim() !== '' && !isDirectory(directory.trim()))
+        {
+            host.setLastError(ERROR_DIRECTORY);
             return 0;
         }
         const inheritedHandles = inherit && host.inheritedHandles

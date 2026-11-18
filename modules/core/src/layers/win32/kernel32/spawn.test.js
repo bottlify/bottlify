@@ -25,8 +25,11 @@ const WINEXEC_SUCCESS = 33;
  * @param {string} [options.imagePath]
  * @param {string} [options.cwd]  The current directory a relative name is taken
  *        against, as the volume takes it.
+ * @param {string[]} [options.directories]  Full paths that are directories.
  */
-function fakeHost({ files = [], imagePath = 'C:\\App\\launcher.exe', cwd = 'C:\\' } = {}){
+function fakeHost({ files = [], imagePath = 'C:\\App\\launcher.exe', cwd = 'C:\\',
+    directories = [] } = {})
+{
     const bytes = new Uint8Array(0x2000);
     /** @type {number[]} */
     const errors = [];
@@ -36,6 +39,7 @@ function fakeHost({ files = [], imagePath = 'C:\\App\\launcher.exe', cwd = 'C:\\
     const handles = new Map();
     let nextHandle = 0x40;
     const present = new Set(files.map(path=>path.toLowerCase()));
+    const folders = new Set(directories.map(path=>path.toLowerCase()));
 
     /** @param {string} path */
     const qualify = path=>(/^[A-Za-z]:[\\/]/.test(path) ? path : `${cwd}${path}`);
@@ -100,7 +104,8 @@ function fakeHost({ files = [], imagePath = 'C:\\App\\launcher.exe', cwd = 'C:\\
         /** @param {string} path */
         stat: path=>(present.has(qualify(path).toLowerCase())
             ? { exists: true, isDirectory: false }
-            : null),
+            : folders.has(qualify(path).toLowerCase()) ? { exists: true, isDirectory: true }
+                : null),
         resolve: qualify,
         imagePath: ()=>imagePath,
         /** @param {any} request */
@@ -977,7 +982,7 @@ test('a file the volume has wins over the program the engine provides, and start
     });
 
 test('CreateProcess\'s current directory is where a system program starts', ()=>{
-    const host = fakeHost({ cwd: 'C:\\App\\' });
+    const host = fakeHost({ cwd: 'C:\\App\\', directories: ['C:\\Libraries', 'C:\\App\\Other'] });
     const fns = createSpawnFunctions({ ...host, currentDirectory: ()=>'C:\\App' });
     const line = putAnsi(host, 0x100, 'regsvr32 /s x.dll');
     const directory = putAnsi(host, 0x200, 'C:\\Libraries');
@@ -989,6 +994,11 @@ test('CreateProcess\'s current directory is where a system program starts', ()=>
     assert.equal(/** @type {any} */ (host.kernel.processes.all()[1]).startDirectory,
         'C:\\App\\Other',
         'a relative one taken against the parent\'s');
+    // Wine's process test_Directory: a directory that is not one is refused.
+    const nowhere = putAnsi(host, 0x700, 'non\\existent\\directory');
+    assert.equal(fns.CreateProcessA.handler([0, line, 0, 0, 0, 0, 0, nowhere, 0, 0x300]), 0);
+    assert.equal(host.errors.at(-1), 267, 'ERROR_DIRECTORY');
+    assert.equal(host.kernel.processes.all().length, 2, 'and nothing is made');
 });
 
 test('an unquoted image name with a space reaches the child quoted, as CreateProcess quotes it',
