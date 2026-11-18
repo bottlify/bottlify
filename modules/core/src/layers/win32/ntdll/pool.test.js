@@ -73,3 +73,34 @@ test('a refusal is the status of its last error, and a queue is written where as
     assert.equal(table.RtlCreateTimerQueue.handler([0x200]), STATUS.SUCCESS);
     assert.deepEqual([...written[0]], [0x44, 0, 0, 0]);
 });
+
+test('the Tp* calls are the thread pool API\'s objects, a new one written where asked', ()=>{
+    /** @type {[string, any[]][]} */
+    const asked = [];
+    /** @type {Uint8Array[]} */
+    const written = [];
+    const objects = new Proxy({}, { get: (_, name)=>(/** @type {any[]} */ ...args)=>{
+        asked.push([String(name), args]);
+        return { create: args[1] === 0 ? { error: 87 } : 0x500, allocPool: 0x600,
+            allocGroup: 0, simple: 8, mayRunLong: false, setTimer: true }[String(name)];
+    } });
+    const table = createPoolFunctions({ kernel32: {}, writeMemory: (_, bytes)=>written.push(bytes),
+        deletions: { deregisterWait: ()=>0, deleteTimer: ()=>0, deleteTimerQueue: ()=>0,
+            objects } });
+    assert.equal(table.TpAllocWork.handler([0x100, 0x401000, 7, 0]), STATUS.SUCCESS);
+    assert.deepEqual(asked.at(-1), ['create', ['work', 0x401000, 7, 0]]);
+    assert.deepEqual([...written.at(-1) ?? []], [0, 5, 0, 0]);
+    assert.equal(table.TpAllocTimer.handler([0x100, 0, 7, 0]), STATUS.INVALID_PARAMETER,
+        'refused, as its Win32 error\'s status');
+    assert.equal(table.TpAllocPool.handler([0x104, 0]), STATUS.SUCCESS);
+    assert.deepEqual([...written.at(-1) ?? []], [0, 6, 0, 0]);
+    assert.equal(table.TpAllocCleanupGroup.handler([0x108]), STATUS.NO_MEMORY);
+    assert.equal(table.TpSimpleTryPost.handler([0x401000, 0, 0]), STATUS.NO_MEMORY);
+    assert.equal(table.TpCallbackMayRunLong.handler([0x8000]), 0xc0000129,
+        'STATUS_TOO_MANY_THREADS');
+    assert.equal(table.TpSetTimerEx.handler([0x500, 0x200, 0, 0]), 1, 'it was set');
+    table.TpCallbackReleaseSemaphoreOnCompletion.handler([0x8000, 0x50, 3]);
+    assert.deepEqual(asked.at(-1), ['onCompletion', [0x8000, 'ReleaseSemaphore', [0x50, 3, 0]]]);
+    table.TpCallbackUnloadDllOnCompletion.handler([0x8000, 0x10000000]);
+    assert.deepEqual(asked.at(-1), ['onCompletion', [0x8000, 'FreeLibrary', [0x10000000]]]);
+});

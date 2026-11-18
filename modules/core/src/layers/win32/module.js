@@ -2931,6 +2931,27 @@ export function createWin32Module(){
                 divergence: config?.divergence,
                 threadReturn: ()=>threadReturnAddress(),
                 threadStart: ()=>threadCalls.start(),
+                // What a callback asks to be done once it returns, by the
+                // kernel32 call that does it, on the pool thread it ran on.
+                call: (name, args)=>libraries['KERNEL32.dll'][name].handler(args),
+                callGuest: call=>bridge.callGuest(call),
+                // A thread pool I/O object takes its file's completions as a
+                // port would.
+                bindIo: (file, taker)=>ports.bindSink(file, taker),
+                imageStack: ()=>{
+                    // The program's own stack sizes, from its optional header:
+                    // SizeOfStackReserve and SizeOfStackCommit, 4 bytes each
+                    // in PE32 and 8 in PE32+ (where they fit in the low half).
+                    const base = libraries['KERNEL32.dll'].GetModuleHandleW.handler([0]) >>> 0;
+                    if (base === 0)
+                    {
+                        return null;
+                    }
+                    const optional = base + memory.readU32(base + 0x3c) + 24;
+                    const wide = (memory.readU32(optional) & 0xffff) === 0x20b;
+                    return { reserve: memory.readU32(optional + 72),
+                        commit: memory.readU32(optional + (wide ? 80 : 76)) };
+                },
             });
 
             // Routines queued to a thread and run by it when it waits alertably:

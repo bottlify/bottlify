@@ -155,7 +155,9 @@ export function createIoCompletionPorts(host){
      * One table for the process rather than one per port: a completion is posted
      * from the file's side, which knows a handle and nothing else.
      *
-     * @type {Map<number, { port: any, key: number }>}
+     * A thread pool I/O object takes its file's completions itself (`sink`).
+     *
+     * @type {Map<number, { port: any, key: number, sink?: (packet: CompletionPacket) => void }>}
      */
     const associations = new Map();
 
@@ -324,6 +326,22 @@ export function createIoCompletionPorts(host){
         }
         port.queue.push(packet);
         kernel.setEvent(port);
+    };
+
+    /**
+     * A finished operation's packet, to the port its file is bound to, or to
+     * the thread pool I/O object that took the file.
+     *
+     * @param {{ port: any, sink?: (packet: CompletionPacket) => void }} association
+     * @param {CompletionPacket} packet
+     */
+    const deliver = (association, packet)=>{
+        if (association.sink)
+        {
+            association.sink(packet);
+            return;
+        }
+        post(association.port, packet);
     };
 
     /**
@@ -842,7 +860,7 @@ export function createIoCompletionPorts(host){
                 return false;
             }
             const error = (status >>> 0) === 0 ? 0 : toDosError(status >>> 0);
-            post(association.port, {
+            deliver(association, {
                 transferred: transferred >>> 0,
                 key: association.key,
                 overlapped: pointer,
@@ -870,13 +888,40 @@ export function createIoCompletionPorts(host){
                 return false;
             }
             const error = (status >>> 0) === 0 ? 0 : toDosError(status >>> 0);
-            post(association.port, {
+            deliver(association, {
                 transferred: transferred >>> 0,
                 key: association.key,
                 overlapped: value >>> 0,
                 status: status >>> 0,
                 ...error !== 0 ? { error } : {},
             });
+            return true;
+        },
+
+        /**
+         * Binds a file handle to a thread pool I/O object (CreateThreadpoolIo):
+         * its completions go to `sink` instead of a port, as Windows binds the
+         * file to the pool's own port.
+         *
+         * @param {number} file @param {((packet: CompletionPacket) => void) | null} sink
+         *     null takes the binding away
+         * @returns {boolean | 'synchronous'} 'synchronous' for a handle opened
+         *     for synchronous I/O, which no port takes
+         */
+        bindSink(file, sink){
+            if (sink === null)
+            {
+                if (associations.get(file >>> 0)?.sink)
+                {
+                    associations.delete(file >>> 0);
+                }
+                return true;
+            }
+            if (host.synchronous?.(file >>> 0))
+            {
+                return 'synchronous';
+            }
+            associations.set(file >>> 0, { port: null, key: 0, sink });
             return true;
         },
 
