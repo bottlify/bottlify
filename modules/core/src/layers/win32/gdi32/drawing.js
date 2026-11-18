@@ -3134,6 +3134,7 @@ export function createDrawingFunctions(
          */
         SetMiterLimit: {
             argBytes: 12,
+            floats: { 1: 'f32' },
             /** @param {number[]} args */
             handler: ([handle, limit, old])=>{
                 const dc = dcOf(handle);

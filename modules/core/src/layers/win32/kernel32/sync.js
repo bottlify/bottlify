@@ -105,7 +105,27 @@ const CONTEXT_CONTROL = 0x10001;
 const CONTEXT_INTEGER = 0x10002;
 const CONTEXT_SEGMENTS = 0x10004;
 const CONTEXT_DEBUG_REGISTERS = 0x10010;
+const CONTEXT_FLOATING_POINT = 0x10008;
+const CONTEXT_EXTENDED_REGISTERS = 0x10020;
 const CONTEXT_BYTES = 0x2cc;
+/** The 32-bit CONTEXT's integer and control registers, by winnt.h's offsets. */
+const CONTEXT_INTEGERS = /** @type {const} */ ([['edi', 0x9c], ['esi', 0xa0], ['ebx', 0xa4],
+    ['edx', 0xa8], ['ecx', 0xac], ['eax', 0xb0]]);
+const CONTEXT_CONTROLS = /** @type {const} */ ([['ebp', 0xb4], ['eip', 0xb8], ['eflags', 0xc0],
+    ['esp', 0xc4]]);
+/**
+ * The 64-bit CONTEXT (winnt.h's CONTEXT_AMD64 groups): its flags, MXCSR, the
+ * flags word, the sixteen general registers from RAX in the encoding's order,
+ * RIP, and XMM0 onward. Control is RSP, RIP and the flags; integer the other
+ * fifteen; floating point the XMM registers and MXCSR.
+ */
+const CONTEXT64 = Object.freeze({ FLAGS: 0x30, MXCSR: 0x34, EFLAGS: 0x44, RAX: 0x78, RIP: 0xf8,
+    XMM0: 0x1a0, SIZE: 0x4d0 });
+const CONTEXT64_CONTROL = 0x100001;
+const CONTEXT64_INTEGER = 0x100002;
+const CONTEXT64_FLOATING_POINT = 0x100008;
+/** RSP's index among the sixteen general registers. */
+const RSP_INDEX = 4;
 /** The bits of ContextFlags that name a part of the context, the machine's bit aside. */
 const CONTEXT_PARTS = 0x3f;
 /** The 32-bit CONTEXT's head: its flags, then Dr0-Dr3, Dr6 and Dr7. */
@@ -434,6 +454,174 @@ export function createSyncFunctions(host){
         }
         return { eax, ecx, edx, ebx, esp, ebp, esi, edi, eip: context.eip >>> 0,
             eflags: (eflags ?? 0x202) >>> 0 };
+    };
+
+    /**
+     * What a stopped thread will run with, as GetThreadContext reads it: its
+     * saved registers, under what a SetThreadContext not yet run put in their
+     * place - a caller that sets a context and reads it back sees its own.
+     *
+     * @param {any} thread
+     */
+    const stoppedRegisters = thread=>{
+        const saved = savedRegisters(thread.context);
+        const pending = thread.resumeRegisters;
+        if (!pending)
+        {
+            return saved;
+        }
+        // A 64-bit thread's registers whole are read by `writeLongContext`.
+        const registers = { ...pending };
+        delete registers.long;
+        return { ...saved, ...registers,
+            ...thread.parkedReturn !== null && thread.parkedReturn !== undefined
+                ? { eip: thread.parkedReturn >>> 0 } : {},
+            ...thread.resumeStack !== null && thread.resumeStack !== undefined
+                ? { esp: thread.resumeStack >>> 0 } : {} };
+    };
+
+    /**
+     * A long-mode thread's sixteen general registers whole, its XMM registers
+     * and MXCSR, from the state block its context saved. The first eight's low
+     * dwords are the context's dword view, as a restore writes them over the
+     * block: a thread made and not yet run has its stack pointer there alone,
+     * and read from the block it had none (a context set from it sent the
+     * thread off with RSP 0).
+     *
+     * @param {any} context
+     */
+    const savedLong = context=>{
+        const { block, layout } = context;
+        const view = new DataView(block.buffer, block.byteOffset, block.byteLength);
+        /** @param {number} index */
+        const whole = index=>{
+            const value = view.getBigUint64(layout.regs + index * 8, true);
+            return index < 8
+                ? (value & 0xffffffff00000000n) | BigInt(context.reg32[index] >>> 0)
+                : value;
+        };
+        return {
+            gpr: Array.from({ length: 16 }, (_, index)=>whole(index)),
+            xmm: block.slice(layout.xmm, layout.xmm + 256),
+            mxcsr: view.getUint32(layout.mxcsr, true),
+        };
+    };
+
+    /**
+     * GetThreadContext's answer for another thread of a 64-bit process: the
+     * groups its flags ask for, in the 64-bit CONTEXT's layout.
+     *
+     * @param {number} at @param {any} thread
+     */
+    const writeLongContext = (at, thread)=>{
+        const bytes = host.readMemory(at, CONTEXT64.SIZE).slice();
+        const view = new DataView(bytes.buffer);
+        const flags = view.getUint32(CONTEXT64.FLAGS, true);
+        const long = thread.resumeRegisters?.long ?? savedLong(thread.context);
+        const { eip, eflags } = stoppedRegisters(thread);
+        const gpr = [...long.gpr];
+        if (!thread.resumeRegisters?.long && thread.resumeStack !== null
+            && thread.resumeStack !== undefined)
+        {
+            gpr[RSP_INDEX] = BigInt(thread.resumeStack >>> 0);
+        }
+        /** @param {number} index */
+        const put = index=>view.setBigUint64(CONTEXT64.RAX + index * 8,
+            BigInt.asUintN(64, gpr[index]), true);
+        if ((flags & CONTEXT64_INTEGER) === CONTEXT64_INTEGER)
+        {
+            gpr.forEach((_, index)=>index !== RSP_INDEX && put(index));
+        }
+        if ((flags & CONTEXT64_CONTROL) === CONTEXT64_CONTROL)
+        {
+            put(RSP_INDEX);
+            view.setBigUint64(CONTEXT64.RIP, BigInt(thread.parkedReturn ?? eip ?? 0), true);
+            view.setUint32(CONTEXT64.EFLAGS, eflags ?? 0x202, true);
+        }
+        if ((flags & CONTEXT64_FLOATING_POINT) === CONTEXT64_FLOATING_POINT)
+        {
+            bytes.set(long.xmm.subarray(0, 256), CONTEXT64.XMM0);
+            view.setUint32(CONTEXT64.MXCSR, long.mxcsr >>> 0, true);
+        }
+        host.writeMemory(at, bytes);
+    };
+
+    /**
+     * SetThreadContext's work on a stopped thread: the groups the record's
+     * flags name, applied where it next runs. A thread parked in a wait keeps
+     * its wait's continuation when the record moves no control register.
+     *
+     * @param {any} thread @param {number} at
+     */
+    const replaceContext = (thread, at)=>{
+        const parked = thread.parkedReturn !== null && thread.parkedReturn !== undefined;
+        /** @type {Record<string, any>} */
+        const values = {};
+        if (handleSize === 4)
+        {
+            const bytes = host.readMemory(at, CONTEXT_BYTES);
+            const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+            const flags = view.getUint32(0, true);
+            for (const [group, fields] of /** @type {const} */ ([
+                [CONTEXT_INTEGER, CONTEXT_INTEGERS], [CONTEXT_CONTROL, CONTEXT_CONTROLS]]))
+            {
+                for (const [name, offset] of (flags & group) === group ? fields : [])
+                {
+                    values[name] = view.getUint32(offset, true);
+                }
+            }
+            if ((flags & CONTEXT_FLOATING_POINT) === CONTEXT_FLOATING_POINT
+                || (flags & CONTEXT_EXTENDED_REGISTERS) === CONTEXT_EXTENDED_REGISTERS)
+            {
+                host.divergence?.('SetThreadContext',
+                    'the floating-point registers of a context are not put back');
+            }
+        }
+        else
+        {
+            const bytes = host.readMemory(at, CONTEXT64.SIZE);
+            const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+            const flags = view.getUint32(CONTEXT64.FLAGS, true);
+            const long = { ...thread.resumeRegisters?.long ?? savedLong(thread.context) };
+            const gpr = [...long.gpr];
+            /** @param {number} index */
+            const take = index=>{
+                gpr[index] = view.getBigUint64(CONTEXT64.RAX + index * 8, true);
+            };
+            if ((flags & CONTEXT64_INTEGER) === CONTEXT64_INTEGER)
+            {
+                gpr.forEach((_, index)=>index !== RSP_INDEX && take(index));
+            }
+            if ((flags & CONTEXT64_CONTROL) === CONTEXT64_CONTROL)
+            {
+                take(RSP_INDEX);
+                values.esp = Number(BigInt.asUintN(32, gpr[RSP_INDEX]));
+                values.eip = Number(view.getBigUint64(CONTEXT64.RIP, true));
+                values.eflags = view.getUint32(CONTEXT64.EFLAGS, true);
+            }
+            if ((flags & CONTEXT64_FLOATING_POINT) === CONTEXT64_FLOATING_POINT)
+            {
+                long.xmm = bytes.slice(CONTEXT64.XMM0, CONTEXT64.XMM0 + 256);
+                long.mxcsr = view.getUint32(CONTEXT64.MXCSR, true);
+            }
+            values.long = { ...long, gpr };
+            // RAX whole goes with the rest; its low dword is what the resume answers.
+            values.eax = Number(BigInt.asUintN(32, gpr[0]));
+        }
+        const { eip, esp, ...registers } = values;
+        const merged = { ...thread.resumeRegisters ?? {}, ...registers };
+        if (eip === undefined && parked)
+        {
+            thread.resumeRegisters = merged;
+            return;
+        }
+        kernel.scheduleResume(thread, {
+            eip: eip ?? (parked ? thread.parkedReturn : thread.context.eip),
+            // A 64-bit stack pointer moves whole with the other registers.
+            esp: esp ?? (parked ? thread.resumeStack ?? undefined : undefined),
+            returnValue: parked ? thread.waitResult ?? 0 : thread.context.reg32[0] >>> 0,
+            registers: merged,
+        });
     };
 
     /**
@@ -1313,8 +1501,13 @@ export function createSyncFunctions(host){
                 }
                 const own = thread === host.currentThread();
                 const answer = ()=>{
+                    if (handleSize === 8 && !own)
+                    {
+                        writeLongContext(out >>> 0, thread);
+                        return 1;
+                    }
                     writeThreadContext(out >>> 0,
-                        own ? host.registers?.() ?? {} : savedRegisters(thread.context));
+                        own ? host.registers?.() ?? {} : stoppedRegisters(thread));
                     return 1;
                 };
                 // Windows answers for a suspended thread once it has stopped:
@@ -1335,10 +1528,18 @@ export function createSyncFunctions(host){
         /**
          * BOOL SetThreadContext(HANDLE hThread, const CONTEXT *lpContext)
          *
-         * Refused: a thread stopped here is usually stopped inside a call
-         * into the system, whose return would overwrite whatever registers
-         * were put in its place, and a context that took effect only
-         * sometimes would be worse than one refused.
+         * The groups ContextFlags names replace the thread's registers where
+         * it next runs, as Windows replaces the context a thread returns to
+         * user mode with: one stopped between instructions goes on from the
+         * new context; one waiting in a call into the system finishes the
+         * wait and then returns into it, not into its caller. What a .NET
+         * runtime's collector does to a thread it suspended in managed code:
+         * it sends it to a stub that waits for the collection to end. Put
+         * through the resume the switch applies (`scheduleResume`), the one
+         * place a stopped thread's continuation is decided. A thread running
+         * on another executor is brought back first, as GetThreadContext
+         * does. The calling thread's own context is refused, as before.
+         * The x87 state of a 32-bit context is not put back, and that is said.
          */
         SetThreadContext: {
             argBytes: 8,
@@ -1375,9 +1576,28 @@ export function createSyncFunctions(host){
                         return 1;
                     }
                 }
-                host.divergence?.('SetThreadContext', 'the registers of a thread are not replaced');
-                host.setLastError?.(ERROR_ACCESS_DENIED);
-                return 0;
+                if (kernel.ThreadState && thread.state === kernel.ThreadState.TERMINATED)
+                {
+                    host.setLastError?.(ERROR_GEN_FAILURE);
+                    return 0;
+                }
+                if (thread === host.currentThread() || !kernel.scheduleResume)
+                {
+                    host.divergence?.('SetThreadContext',
+                        'the calling thread\'s own registers are not replaced');
+                    host.setLastError?.(ERROR_ACCESS_DENIED);
+                    return 0;
+                }
+                const at = context >>> 0;
+                const apply = ()=>{
+                    replaceContext(thread, at);
+                    return 1;
+                };
+                if (kernel.settleThread?.(thread) === false && kernel.settledThread)
+                {
+                    return kernel.settledThread(thread).then(apply);
+                }
+                return apply();
             },
         },
 

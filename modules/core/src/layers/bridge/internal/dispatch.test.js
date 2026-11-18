@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { Convention } from './conventions.js';
 import { createParking, isParkedCall } from './parking.js';
 import { createDispatcher } from './dispatch.js';
+import { longMachine as machine64 } from './long-machine.fixture.js';
 import { WRITER_COLUMNS, createWriterAccount } from '../../memory/internal/writers.js';
 import { createTable, readTable } from '../../log/internal/table.js';
 
@@ -1884,35 +1885,11 @@ test('a function kept out of the ring of recent calls is counted but not kept th
 });
 
 /**
- * A 64-bit machine: its registers quadwords, its calls the x64 convention's,
- * RDX's first argument kept in R11 by the stub.
+ * A 64-bit machine (`long-machine.fixture.js`) with these registers set.
  *
- * @param {Record<string, bigint>} [set]
+ * @param {Record<string, bigint>} [registers]
  */
-function longMachine(set = {}){
-    const rsp = 0x8000;
-    /** @type {Map<string, bigint>} */
-    const r = new Map(Object.entries({ rsp: BigInt(rsp), rax: 0n, ...set }));
-    const cpu = {
-        bits: ()=>64,
-        /** @param {string} name */
-        readReg64: name=>r.get(name) ?? 0n,
-        /** @param {string} name @param {bigint} value */
-        writeReg64: (name, value)=>r.set(name, value),
-        /** @param {string} name */
-        readReg32: name=>Number((r.get(name === 'esp' ? 'rsp' : name) ?? 0n) & 0xffffffffn),
-        writeReg32: ()=>{},
-    };
-    const memory = {
-        /** @param {number} address */
-        readU32: address=>(address === rsp ? 0x401234 : 0),
-        writeU32: ()=>{},
-    };
-    const kernel = { currentThread: ()=>({ name: 'main' }), parkThread: ()=>{} };
-    const dispatcher = createDispatcher({ cpu, memory, parking: createParking({ kernel }),
-        suspend: ()=>{} });
-    return { dispatcher, r };
-}
+const longMachine = (registers = {})=>machine64({ registers });
 
 test('a 64-bit caller finds a quadword the handler answers in two halves whole in RAX', ()=>{
     // GetTickCount64, _lseeki64, _atoi64: the 32-bit way of answering a
@@ -2021,6 +1998,33 @@ test('a float or a double among the first four is read from the XMM register of 
     assert.throws(()=>dispatcher.register(5, { name: 'X!Both', ...STDCALL, argBytes: 8,
         quadwords: [0], floats: { 0: 'f64' }, handler: ()=>0 }), /f64/,
     'and is not a quadword besides');
+});
+
+test('a structure passed by value is a pointer in one x64 slot, read into its dwords', ()=>{
+    // MFTRegister(CLSID clsid, GUID category, ...): each GUID four dwords to a
+    // 32-bit handler, a pointer to the caller's copy to an x86-64 one -- in a
+    // register among the first four, on the stack past them.
+    const { dispatcher } = longMachine({ rcx: 0x9000n, r11: 0x9010n, r8: 0x55n, r9: 0x66n });
+    /** @type {Map<number, number>} */
+    const words = new Map([[0x8000, 0x401234], [0x8028, 0x9020],
+        [0x9000, 1], [0x9004, 2], [0x9008, 3], [0x900c, 4],
+        [0x9010, 5], [0x9014, 6], [0x9018, 7], [0x901c, 8],
+        [0x9020, 9], [0x9024, 10], [0x9028, 11], [0x902c, 12]]);
+    /** @type {any} */ (dispatcher).memory = {
+        /** @param {number} address */
+        readU32: address=>words.get(address) ?? 0, writeU32: ()=>{} };
+    /** @type {number[][]} */
+    const seen = [];
+    dispatcher.register(1, { name: 'X!Guids', ...STDCALL, argBytes: 56,
+        structs: { 0: 4, 4: 4, 10: 4 },
+        /** @param {number[]} args */
+        handler: args=>(seen.push(args.slice()), 0) });
+    dispatcher.dispatch(1);
+    assert.deepEqual(seen[0], [1, 2, 3, 4, 5, 6, 7, 8, 0x55, 0x66, 9, 10, 11, 12]);
+
+    assert.throws(()=>dispatcher.register(2, { name: 'X!Short', ...STDCALL, argBytes: 8,
+        structs: { 0: 4 }, handler: ()=>0 }), /structure/,
+    'a structure wider than the arguments is refused');
 });
 
 /** A refused guest access, as memory throws it. @param {'read' | 'write'} mode */

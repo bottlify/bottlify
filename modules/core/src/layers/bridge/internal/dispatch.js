@@ -41,6 +41,11 @@ import { isDriven } from './drive.js';
  *     one among its first four in the XMM register of its position, and
  *     `readLongCall` reads it from there into the dwords the 32-bit signature
  *     has it in -- a double's two, low first.
+ * @property {Record<number, number>} [structs]  The structures wider than eight
+ *     bytes passed by value -- a GUID, a VARIANT -- by their first dword's index,
+ *     and how many dwords each is: the 32-bit signature has them inline, an
+ *     x86-64 caller passes a pointer to a copy in one slot, which
+ *     `readLongCall` reads the dwords through.
  * @property {boolean} [hook]
  *     A slot hook: `handler` answers `true` (it computed the call itself) or
  *     `false` (run the guest's own code, at `target`). Which of the two
@@ -275,28 +280,32 @@ const LONG_ARGUMENT_REGISTERS = Object.freeze(['rcx', 'r11', 'r8', 'r9']);
 
 /**
  * One x64 argument slot of a function: the first of its dwords in the 32-bit
- * signature, how many it is there, and whether an XMM register carries it
- * when it is among the first four.
+ * signature, how many it is there, whether an XMM register carries it when it
+ * is among the first four, and whether it is a pointer to a structure the
+ * signature has inline (`ref`).
  *
- * @typedef {{ word: number, words: 1 | 2, xmm: boolean }} LongSlot
+ * @typedef {{ word: number, words: number, xmm: boolean, ref: boolean }} LongSlot
  */
 
 /**
  * The x64 slots of a signature of `count` dwords: one per argument, an
- * argument of two dwords -- a quadword or a double -- one slot.
+ * argument of two dwords -- a quadword or a double -- one slot, and a
+ * structure passed by value one slot holding a pointer to it.
  *
  * @param {number} count @param {number[] | null} quadwords
  * @param {Record<number, 'f32' | 'f64'> | null} floats
+ * @param {Record<number, number> | null} [structs]
  * @returns {LongSlot[]}
  */
-const longSlotsOf = (count, quadwords, floats)=>{
+const longSlotsOf = (count, quadwords, floats, structs = null)=>{
     /** @type {LongSlot[]} */
     const slots = [];
     for (let word = 0; word < count;)
     {
         const kind = floats?.[word];
-        const words = quadwords?.includes(word) || kind === 'f64' ? 2 : 1;
-        slots.push({ word, words, xmm: kind !== undefined });
+        const struct = structs?.[word];
+        const words = struct ?? (quadwords?.includes(word) || kind === 'f64' ? 2 : 1);
+        slots.push({ word, words, xmm: kind !== undefined, ref: struct !== undefined });
         word += words;
     }
     return slots;
@@ -1071,7 +1080,20 @@ class Dispatcher {
         // on the stack past them as any other slot is.
         for (let slot = 0; slot < slots.length; slot++)
         {
-            const { word, words, xmm } = slots[slot];
+            const { word, words, xmm, ref } = slots[slot];
+            if (ref)
+            {
+                // A structure passed by value: the slot is a pointer to the
+                // caller's copy, whose dwords the 32-bit signature has inline.
+                const at = slot < 4
+                    ? Number(BigInt.asUintN(32, this.cpu.readReg64(registers[slot])))
+                    : this.memory.readU32(rsp + 8 + 0x20 + (slot - 4) * 8) >>> 0;
+                for (let k = 0; k < words && word + k < count; k++)
+                {
+                    args[word + k] = at === 0 ? 0 : this.memory.readU32(at + k * 4) | 0;
+                }
+                continue;
+            }
             if (slot >= 4)
             {
                 const at = rsp + 8 + 0x20 + (slot - 4) * 8;
@@ -1727,6 +1749,18 @@ class Dispatcher {
                     + ' arguments');
             }
         }
+        const structs = fn.structs !== undefined && Object.keys(fn.structs).length > 0
+            ? { ...fn.structs } : null;
+        for (const [at, size] of Object.entries(structs ?? {}))
+        {
+            const word = Number(at);
+            if (!Number.isInteger(word) || word < 0 || !Number.isInteger(size) || size < 3
+                || word + size > words || quadwords?.includes(word) || floats?.[word])
+            {
+                throw new Error(`bridge: ${fn.name}'s structure of ${size} dwords at dword ${at}`
+                    + ' is not among its arguments');
+            }
+        }
         this.functions[id] = {
             fn,
             name: fn.name,
@@ -1749,7 +1783,8 @@ class Dispatcher {
                 ? { calls: 0, handled: 0, fellThrough: 0, mismatches: 0, ms: 0 } : null,
             readsError: this.errorReader && fn.lastError !== false,
             quadwords,
-            longSlots: quadwords || floats ? longSlotsOf(words, quadwords, floats) : null,
+            longSlots: quadwords || floats || structs
+                ? longSlotsOf(words, quadwords, floats, structs) : null,
             args: argumentArray(site ? 8 : stackWords + registerArgs),
             kept: Math.min(site ? 8 : stackWords + registerArgs, KEPT_ARGS),
             chainCount: 0,

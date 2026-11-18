@@ -333,9 +333,12 @@ export function createShapes(host, meshes, buffers){
      * @param {(args: number[]) => Shape | null} shapeOf  Its own arguments, raw; null for
      *     arguments that make no shape.
      * @param {(args: number[]) => number} count  The vertices they make.
+     * @param {{ floats: Record<number, 'f32'> }} marshal  Its FLOATs, by dword: in XMM
+     *     registers at 64 bits, among the first four (the bridge's `floats`).
      */
-    const entry = (argBytes, shapeOf, count)=>({
+    const entry = (argBytes, shapeOf, count, marshal)=>({
         argBytes,
+        ...marshal,
         /** @param {number[]} args */
         handler: args=>{
             const [device, ...rest] = args.map(a=>a >>> 0);
@@ -373,7 +376,7 @@ export function createShapes(host, meshes, buffers){
         D3DXCreateBox: entry(24, ([w, h, d])=>{
             const [width, height, depth] = [w, h, d].map(floatOf);
             return width >= 0 && height >= 0 && depth >= 0 ? box(width, height, depth) : null;
-        }, ()=>24),
+        }, ()=>24, { floats: { 1: 'f32', 2: 'f32', 3: 'f32' } }),
         /**
          * HRESULT D3DXCreateSphere(LPDIRECT3DDEVICE9 pDevice, FLOAT Radius, UINT Slices,
          *     UINT Stacks, LPD3DXMESH *ppMesh, LPD3DXBUFFER *ppAdjacency)
@@ -382,7 +385,7 @@ export function createShapes(host, meshes, buffers){
             const radius = floatOf(r);
             return radius >= 0 && slices >= 2 && stacks >= 2 ? sphere(radius, slices, stacks)
                 : null;
-        }, ([, slices, stacks])=>slices * stacks),
+        }, ([, slices, stacks])=>slices * stacks, { floats: { 1: 'f32' } }),
         /**
          * HRESULT D3DXCreateCylinder(LPDIRECT3DDEVICE9 pDevice, FLOAT Radius1,
          *     FLOAT Radius2, FLOAT Length, UINT Slices, UINT Stacks, LPD3DXMESH *ppMesh,
@@ -392,7 +395,8 @@ export function createShapes(host, meshes, buffers){
             const [radius1, radius2, length] = [r1, r2, l].map(floatOf);
             return radius1 >= 0 && radius2 >= 0 && length >= 0 && slices >= 2 && stacks >= 1
                 ? cylinder(radius1, radius2, length, slices, stacks) : null;
-        }, ([, , , slices, stacks])=>slices * (stacks + 3)),
+        }, ([, , , slices, stacks])=>slices * (stacks + 3),
+        { floats: { 1: 'f32', 2: 'f32', 3: 'f32' } }),
         /**
          * HRESULT D3DXCreateTorus(LPDIRECT3DDEVICE9 pDevice, FLOAT InnerRadius,
          *     FLOAT OuterRadius, UINT Sides, UINT Rings, LPD3DXMESH *ppMesh,
@@ -402,7 +406,7 @@ export function createShapes(host, meshes, buffers){
             const [inner, outer] = [i, o].map(floatOf);
             return inner >= 0 && outer >= 0 && sides >= 3 && rings >= 3
                 ? torus(inner, outer, sides, rings) : null;
-        }, ([, , sides, rings])=>sides * rings),
+        }, ([, , sides, rings])=>sides * rings, { floats: { 1: 'f32', 2: 'f32' } }),
         /**
          * HRESULT D3DXCreatePolygon(LPDIRECT3DDEVICE9 pDevice, FLOAT Length, UINT Sides,
          *     LPD3DXMESH *ppMesh, LPD3DXBUFFER *ppAdjacency)
@@ -410,6 +414,6 @@ export function createShapes(host, meshes, buffers){
         D3DXCreatePolygon: entry(20, ([l, sides])=>{
             const length = floatOf(l);
             return length >= 0 && sides >= 3 ? polygon(length, sides) : null;
-        }, ([, sides])=>sides),
+        }, ([, sides])=>sides, { floats: { 1: 'f32' } }),
     };
 }

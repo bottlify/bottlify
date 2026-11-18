@@ -173,7 +173,7 @@ export function createMfplatFunctions(host){
                 return S_OK;
             } },
         /** HRESULT MFAverageTimePerFrameToFrameRate(UINT64 time, UINT32 *numerator, UINT32 *denominator) */
-        MFAverageTimePerFrameToFrameRate: { argBytes: 16,
+        MFAverageTimePerFrameToFrameRate: { argBytes: 16, quadwords: [0],
             handler: (/** @type {number[]} */ [low, high, numerator, denominator])=>{
                 if ((numerator >>> 0) === 0 || (denominator >>> 0) === 0)
                 {
@@ -185,7 +185,7 @@ export function createMfplatFunctions(host){
                 return S_OK;
             } },
         /** LONGLONG MFllMulDiv(LONGLONG a, LONGLONG b, LONGLONG c, LONGLONG d): (a * b + d) / c */
-        MFllMulDiv: { argBytes: 32, handler: (/** @type {number[]} */ args)=>{
+        MFllMulDiv: { argBytes: 32, quadwords: [0, 2, 4, 6], handler: (/** @type {number[]} */ args)=>{
             const [a, b, c, d] = [0, 2, 4, 6]
                 .map(at=>BigInt.asIntN(64, kit.wide(args[at], args[at + 1])));
             return answer64(mulDiv(a, b, c, d));
@@ -417,7 +417,7 @@ export function createMfplatFunctions(host){
          * No transform this build could load is registered: refused as a
          * user who may not write the machine's registration is refused.
          */
-        MFTRegister: { argBytes: 60, handler: ()=>{
+        MFTRegister: { argBytes: 60, structs: { 0: 4, 4: 4 }, handler: ()=>{
             kit.sayOnce('MFTRegister',
                 'a transform is not registered: refused with E_ACCESSDENIED');
             return E_ACCESSDENIED;

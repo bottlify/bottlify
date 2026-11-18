@@ -429,7 +429,7 @@ export function createShellItems(host, namespace){
          * The size travels by value, two words. There is no picture of any
          * item to scale: E_NOTIMPL and no bitmap.
          */
-        { name: 'GetImage', argBytes: 20,
+        { name: 'GetImage', argBytes: 20, quadwords: [1],
             /** @param {any} object @param {number[]} args */
             invoke: (object, [, , , out])=>{
                 writeU32(out, 0);

@@ -389,9 +389,12 @@ export function createMeshObjects(host, buffers){
      * @param {string} name @param {number} argBytes
      * @param {(state: any, args: number[], thread: any) => Promise<number>} work
      * @param {(state: any, args: number[]) => boolean} [refused]  Checked first, at once.
+     * @param {{ floats?: Record<number, 'f32'> }} [marshal]  A FLOAT by value, by dword
+     *     counting `this`: the bridge's `floats`.
      * @returns {import('../ole32/objects.js').ComMethod}
      */
-    const later = (name, argBytes, work, refused)=>({ name, argBytes,
+    const later = (name, argBytes, work, refused, marshal = {})=>({ name, argBytes,
+        ...marshal,
         invoke: (object, args)=>{
             if (refused?.(object.state, args))
             {
@@ -753,7 +756,8 @@ export function createMeshObjects(host, buffers){
                 within)));
             return D3D_OK;
         }, (_, [epsilon, out])=>(out >>> 0) === 0
-            || !(new Float32Array(Uint32Array.of(epsilon >>> 0).buffer)[0] >= 0)),
+            || !(new Float32Array(Uint32Array.of(epsilon >>> 0).buffer)[0] >= 0),
+        { floats: { 1: 'f32' } }),
         /**
          * HRESULT UpdateSemantics(D3DVERTEXELEMENT9 Declaration[MAX_FVF_DECL_SIZE]) --
          * the same vertices read another way: a declaration wider than they are is

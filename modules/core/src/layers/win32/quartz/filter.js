@@ -69,7 +69,9 @@ export const IMEM_INPUT_PIN_SLOTS = [
 /** IEnumPins and IEnumMediaTypes share their shape. @type {[string, number][]} */
 const IENUM_SLOTS = [['Next', 3], ['Skip', 1], ['Reset', 0], ['Clone', 1]];
 /** IQualityControl. `Notify` takes a Quality by value: four words and a REFERENCE_TIME. */
-const IQUALITY_CONTROL_SLOTS = /** @type {[string, number][]} */ ([['Notify', 7], ['SetSink', 1]]);
+const IQUALITY_CONTROL_SLOTS = /** @type {import('./describe.js').Slot[]} */ ([
+    // Quality by value: 24 bytes, a pointer to a copy at 64 bits.
+    ['Notify', 7, { structs: { 2: 6 } }], ['SetSink', 1]]);
 
 export const GUID_NULL = '{00000000-0000-0000-0000-000000000000}';
 export const MEDIATYPE_STREAM = '{E436EB83-524F-11CE-9F53-0020AF0BA770}';

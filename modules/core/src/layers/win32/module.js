@@ -1062,11 +1062,15 @@ export function createWin32Module(){
             // A run made with a signed-in Steam account has its client running,
             // as a game finds one: a process that stays in the run's directory
             // for as long as the run lasts, and the registry saying so.
+            // Its id is kept for the run to announce it again over a saved
+            // session the registry is restored from (`steamClient`).
+            let steamClientId = 0;
             if (config?.steam && processDirectory && !inheritedHive)
             {
                 const ids = /** @type {any} */ (system)?.ids;
                 const pid = typeof ids?.take === 'function' ? ids.take('process', 8)
                     : ids ? (ids.process += 8) - 8 : 0x1ff8;
+                steamClientId = pid;
                 processDirectory.set(pid, { kind: 'process', id: pid, threadId: pid + 1,
                     imagePath: `${STEAM_PATH}\\steam.exe`, commandLine: '', suspended: false,
                     completed: false, exitCode: kernel.processes.STILL_ACTIVE, started: true,
@@ -5522,6 +5526,10 @@ export function createWin32Module(){
                         handles,
                         readMemory,
                         writeMemory,
+                        // A program's error event in the run's journal, as Event
+                        // Viewer would show it: a runtime says there why it stops.
+                        reportError: (source, id, strings)=>journal.write('error', 'eventlog',
+                            '{0} event {1}: {2}', source, id, strings.join(' | ')),
                         // The logs and their sources are named in the registry,
                         // and a backup is a file of the volume.
                         hive,
@@ -6525,6 +6533,9 @@ export function createWin32Module(){
                  * into a fresh hive is in it, and newer.
                  */
                 registryInherited: ()=>inheritedHive !== null,
+
+                /** The Steam client's process id this process listed, or 0. */
+                steamClient: ()=>steamClientId,
 
                 // The running thread's last error, for whoever is tracing. A
                 // program reports a code long after the call that produced it has

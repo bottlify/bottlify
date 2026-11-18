@@ -354,14 +354,15 @@ export function createLines(host){
             /** DWORD GetPattern() */
             { name: 'GetPattern', argBytes: 4, invoke: object=>object.state.pattern },
             /** HRESULT SetPatternScale(FLOAT fPatternScale) */
-            { name: 'SetPatternScale', argBytes: 8, invoke: (object, [scale])=>{
-                object.state.patternScale = floatOf(scale);
-                return D3D_OK;
-            } },
+            { name: 'SetPatternScale', argBytes: 8, floats: { 1: 'f32' },
+                invoke: (object, [scale])=>{
+                    object.state.patternScale = floatOf(scale);
+                    return D3D_OK;
+                } },
             /** FLOAT GetPatternScale() */
             floatMethod('GetPatternScale', state=>state.patternScale),
             /** HRESULT SetWidth(FLOAT fWidth) -- a width of zero or less is refused. */
-            { name: 'SetWidth', argBytes: 8, invoke: (object, [bits])=>{
+            { name: 'SetWidth', argBytes: 8, floats: { 1: 'f32' }, invoke: (object, [bits])=>{
                 const width = floatOf(bits);
                 if (!(width > 0))
                 {

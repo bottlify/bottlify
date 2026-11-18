@@ -356,21 +356,23 @@ export function createMfObjects(kit, host){
             })());
         } },
         /** HRESULT GetRepresentation(GUID representation, void **out) */
-        { name: 'GetRepresentation', argBytes: 24, invoke: (object, [a, b, c, d, out])=>
-            representation(object, [a, b, c, d], out) },
+        { name: 'GetRepresentation', argBytes: 24, structs: { 1: 4 },
+            invoke: (object, [a, b, c, d, out])=>
+                representation(object, [a, b, c, d], out) },
         /**
          * HRESULT FreeRepresentation(GUID representation, void *record)
          *
          * Whatever the GUID: GetRepresentation makes only one kind.
          */
-        { name: 'FreeRepresentation', argBytes: 24, invoke: (object, [, , , , record])=>{
-            if ((record >>> 0) !== 0)
-            {
-                host.heap.free(u32(record + 68));
-                host.heap.free(record >>> 0);
-            }
-            return S_OK;
-        } },
+        { name: 'FreeRepresentation', argBytes: 24, structs: { 1: 4 },
+            invoke: (object, [, , , , record])=>{
+                if ((record >>> 0) !== 0)
+                {
+                    host.heap.free(u32(record + 68));
+                    host.heap.free(record >>> 0);
+                }
+                return S_OK;
+            } },
     ];
 
     const mediaTypeInterface = { id: IID.MEDIA_TYPE, methods: mediaTypeMethods };
@@ -396,7 +398,7 @@ export function createMfObjects(kit, host){
             return 0;
         } },
         /** HRESULT GetVideoRepresentation(GUID representation, void **out, LONG stride) */
-        { name: 'GetVideoRepresentation', argBytes: 28,
+        { name: 'GetVideoRepresentation', argBytes: 28, structs: { 1: 4 },
             invoke: (/** @type {any} */ object, /** @type {number[]} */ [a, b, c, d, out])=>
                 representation(object, [a, b, c, d], out) },
     ] };
@@ -612,12 +614,12 @@ export function createMfObjects(kit, host){
         { name: 'GetSampleTime', argBytes: 8,
             invoke: timeGetter('time', MF_E_NO_SAMPLE_TIMESTAMP) },
         /** HRESULT SetSampleTime(LONGLONG time) */
-        { name: 'SetSampleTime', argBytes: 12, invoke: timeSetter('time') },
+        { name: 'SetSampleTime', argBytes: 12, quadwords: [1], invoke: timeSetter('time') },
         /** HRESULT GetSampleDuration(LONGLONG *duration) */
         { name: 'GetSampleDuration', argBytes: 8,
             invoke: timeGetter('duration', MF_E_NO_SAMPLE_DURATION) },
         /** HRESULT SetSampleDuration(LONGLONG duration) */
-        { name: 'SetSampleDuration', argBytes: 12, invoke: timeSetter('duration') },
+        { name: 'SetSampleDuration', argBytes: 12, quadwords: [1], invoke: timeSetter('duration') },
         /** HRESULT GetBufferCount(DWORD *count) */
         { name: 'GetBufferCount', argBytes: 8, invoke: (object, [out])=>{
             if ((out >>> 0) === 0)

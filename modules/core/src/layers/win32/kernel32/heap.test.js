@@ -5,6 +5,7 @@
  */
 
 import { imageHeaders } from './image-protection.fixture.js';
+import { createWriteClock } from '../../cpu/internal/write-clock.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
@@ -1657,6 +1658,157 @@ test('GetWriteWatch tells the pages written since the reset, and RESET starts th
     marks.add(base >>> 12);
     assert.deepEqual(told(0), [0], 'ResetWriteWatch takes its range alone');
     assert.equal(asked.length, 1);
+});
+
+test('GetWriteWatch over the write clock: every page written since its last report or reset '
+    + 'is told, against a model of Windows, in seeded runs', ()=>{
+    // A collector's background marking (the .NET runtime's) rescans what
+    // GetWriteWatch tells; a page written and not told is an object it never
+    // revisits. The engine's marks are cork's (`takeWrites`: written since
+    // armed, each take arming again), the clock the cpu layer's; another
+    // watch over the same pages (the graphics recorder's) takes too.
+    const MEM_WRITE_WATCH = 0x200000;
+    const RESET = 1;
+    let seed = 0x9e37;
+    /** @param {number} n */
+    const next = n=>{
+        seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
+        return (seed >>> 8) % n;
+    };
+    for (let run = 0; run < 40; run++)
+    {
+        /** The pages armed and not written since (cork's WATCH), by page. @type {Set<number>} */
+        const armed = new Set();
+        /** @param {number} page */
+        const store = page=>armed.delete(page);
+        const host = fakeHost(RESERVING_ARENA);
+        const plain = { writeMemory: host.writeMemory, fillMemory: host.fillMemory };
+        const clock = createWriteClock({
+            take: (from, bytes)=>{
+                /** @type {number[]} */
+                const written = [];
+                for (let page = from >>> 12; page < Math.ceil((from + bytes) / PAGE_SIZE); page++)
+                {
+                    if (!armed.has(page))
+                    {
+                        written.push(page);
+                        armed.add(page);
+                    }
+                }
+                return written;
+            },
+            epochs: ()=>[],
+        });
+        const fns = createHeapFunctions({ ...host, setLastError: ()=>{},
+            // The host's own writes mark what they reach, as cork's do.
+            writeMemory: (address, data)=>{
+                for (let page = address >>> 12; page <= (address + data.length - 1) >>> 12; page++)
+                {
+                    store(page);
+                }
+                plain.writeMemory(address, data);
+            },
+            fillMemory: (address, value, length)=>{
+                for (let page = address >>> 12; page <= (address + length - 1) >>> 12; page++)
+                {
+                    store(page);
+                }
+                plain.fillMemory(address, value, length);
+            },
+            watchWrites: (from, length)=>clock.watch(from, length) });
+        const view = new DataView(host.bytes.buffer);
+        const pages = 12;
+        const base = fns.VirtualAlloc.handler([0, pages * PAGE_SIZE,
+            MEM_RESERVE | MEM_WRITE_WATCH, 0x04]);
+        assert.notEqual(base, 0);
+        const other = clock.watch(base, pages * PAGE_SIZE);
+        /** Windows: the committed pages written since their last report with RESET. */
+        const model = new Set();
+        const committed = new Set();
+        for (let step = 0; step < 300; step++)
+        {
+            const page = next(pages);
+            switch (next(8))
+            {
+                case 0: case 1: case 2:
+                    if (committed.has(page))
+                    {
+                        store((base >>> 12) + page);
+                        model.add(page);
+                    }
+                    break;
+                case 3:
+                {
+                    const count = 1 + next(pages - page);
+                    fns.VirtualAlloc.handler([base + page * PAGE_SIZE, count * PAGE_SIZE,
+                        MEM_COMMIT, 0x04]);
+                    for (let at = page; at < page + count; at++)
+                    {
+                        // A page committed again after a decommit is zeroes,
+                        // written as far as a watch knows; a fresh one may be
+                        // told or not, and the model does not ask.
+                        committed.add(at);
+                    }
+                    break;
+                }
+                case 4:
+                    fns.VirtualFree.handler([base + page * PAGE_SIZE, PAGE_SIZE, MEM_DECOMMIT]);
+                    committed.delete(page);
+                    model.delete(page);
+                    break;
+                case 5:
+                    other.take(base, pages * PAGE_SIZE);
+                    break;
+                case 6:
+                {
+                    const from = next(pages);
+                    const count = 1 + next(pages - from);
+                    assert.equal(fns.ResetWriteWatch.handler([base + from * PAGE_SIZE,
+                        count * PAGE_SIZE]), 0);
+                    for (let at = from; at < from + count; at++)
+                    {
+                        model.delete(at);
+                    }
+                    break;
+                }
+                default:
+                {
+                    const flags = next(2) === 0 ? RESET : 0;
+                    const room = 1 + next(pages);
+                    // The collector's loop: on from past the last page told
+                    // while the room was filled.
+                    let from = base;
+                    /** @type {number[]} */
+                    const told = [];
+                    for (;;)
+                    {
+                        view.setUint32(0x100, room, true);
+                        assert.equal(fns.GetWriteWatch.handler([flags, from,
+                            base + pages * PAGE_SIZE - from, 0x200, 0x100, 0x104]), 0);
+                        const count = view.getUint32(0x100, true);
+                        for (let at = 0; at < count; at++)
+                        {
+                            told.push((view.getUint32(0x200 + 4 * at, true) - base) / PAGE_SIZE);
+                        }
+                        if (count < room || told.at(-1) === pages - 1)
+                        {
+                            break;
+                        }
+                        from = base + ((told.at(-1) ?? 0) + 1) * PAGE_SIZE;
+                    }
+                    for (const written of model)
+                    {
+                        assert.ok(told.includes(written), `run ${run} step ${step}: page ${
+                            written} written and not told (${told})`);
+                    }
+                    if (flags === RESET)
+                    {
+                        told.forEach(at=>model.delete(at));
+                    }
+                }
+            }
+        }
+    }
 });
 
 test('kernel32\'s Rtl memory routines move, zero and fill, overlap either way', ()=>{

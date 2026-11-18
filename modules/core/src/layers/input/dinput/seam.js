@@ -661,6 +661,10 @@ function methodsFor(descriptor){
             ...descriptor.methods.map((/** @type {any} */ method)=>({
                 name: method.name,
                 argBytes: method.argBytes,
+                ...method.floats ? { floats: method.floats } : {},
+                ...method.quadwords ? { quadwords: method.quadwords } : {},
+
+                ...method.structs ? { structs: method.structs } : {},
                 invoke: method.invoke
                     ? (/** @type {any} */ adapter, /** @type {number[]} */ args)=>
                         method.invoke(adapter.api, args, descriptor) ?? 0

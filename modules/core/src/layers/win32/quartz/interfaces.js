@@ -57,7 +57,7 @@ export const IID_IFILTER_MAPPER2 = '{B79BB0B0-33C1-11D1-ABE1-00A0C905F375}';
  * and its own. `Invoke` takes eight words: `wFlags` is a WORD in the header and
  * still occupies a whole stack slot.
  *
- * @type {[string, number][]}
+ * @type {import('./describe.js').Slot[]}
  */
 export const IDISPATCH_SLOTS = [
     ['GetTypeInfoCount', 1],
@@ -66,7 +66,7 @@ export const IDISPATCH_SLOTS = [
     ['Invoke', 8],
 ];
 
-/** IFilterGraph, which IGraphBuilder extends. IUnknown-derived. @type {[string, number][]} */
+/** IFilterGraph, which IGraphBuilder extends. IUnknown-derived. @type {import('./describe.js').Slot[]} */
 export const IFILTER_GRAPH_SLOTS = [
     ['AddFilter', 2],
     ['RemoveFilter', 1],
@@ -78,7 +78,7 @@ export const IFILTER_GRAPH_SLOTS = [
     ['SetDefaultSyncSource', 0],
 ];
 
-/** @type {[string, number][]} */
+/** @type {import('./describe.js').Slot[]} */
 export const IGRAPH_BUILDER_SLOTS = [
     ...IFILTER_GRAPH_SLOTS,
     ['Connect', 2],
@@ -90,7 +90,7 @@ export const IGRAPH_BUILDER_SLOTS = [
     ['ShouldOperationContinue', 0],
 ];
 
-/** @type {[string, number][]} */
+/** @type {import('./describe.js').Slot[]} */
 export const IMEDIA_CONTROL_SLOTS = [
     ...IDISPATCH_SLOTS,
     ['Run', 0],
@@ -104,7 +104,7 @@ export const IMEDIA_CONTROL_SLOTS = [
     ['StopWhenReady', 0],
 ];
 
-/** @type {[string, number][]} */
+/** @type {import('./describe.js').Slot[]} */
 export const IMEDIA_EVENT_SLOTS = [
     ...IDISPATCH_SLOTS,
     ['GetEventHandle', 1],
@@ -115,7 +115,7 @@ export const IMEDIA_EVENT_SLOTS = [
     ['FreeEventParams', 3],
 ];
 
-/** @type {[string, number][]} */
+/** @type {import('./describe.js').Slot[]} */
 export const IMEDIA_EVENT_EX_SLOTS = [
     ...IMEDIA_EVENT_SLOTS,
     ['SetNotifyWindow', 3],
@@ -131,7 +131,7 @@ export const IMEDIA_EVENT_EX_SLOTS = [
  * transcription slip and is not: it is the order in `control.odl`, and the
  * order in `control.odl` is the vtable.
  *
- * @type {[string, number][]}
+ * @type {import('./describe.js').Slot[]}
  */
 export const IVIDEO_WINDOW_SLOTS = [
     ...IDISPATCH_SLOTS,
@@ -176,7 +176,7 @@ export const IVIDEO_WINDOW_SLOTS = [
     ['IsCursorHidden', 1],
 ];
 
-/** @type {[string, number][]} */
+/** @type {import('./describe.js').Slot[]} */
 export const IBASIC_VIDEO_SLOTS = [
     ...IDISPATCH_SLOTS,
     ['get_AvgTimePerFrame', 1],
@@ -213,7 +213,7 @@ export const IBASIC_VIDEO_SLOTS = [
     ['IsUsingDefaultDestination', 0],
 ];
 
-/** @type {[string, number][]} */
+/** @type {import('./describe.js').Slot[]} */
 export const IBASIC_AUDIO_SLOTS = [
     ...IDISPATCH_SLOTS,
     ['put_Volume', 1],
@@ -226,18 +226,18 @@ export const IBASIC_AUDIO_SLOTS = [
  * IMediaPosition. Every REFTIME and every `double` here is two words, which is
  * why the setters count two and the getters -- which take a pointer -- count one.
  *
- * @type {[string, number][]}
+ * @type {import('./describe.js').Slot[]}
  */
 export const IMEDIA_POSITION_SLOTS = [
     ...IDISPATCH_SLOTS,
     ['get_Duration', 1],
-    ['put_CurrentPosition', 2],
+    ['put_CurrentPosition', 2, { floats: { 1: 'f64' } }],
     ['get_CurrentPosition', 1],
     ['get_StopTime', 1],
-    ['put_StopTime', 2],
+    ['put_StopTime', 2, { floats: { 1: 'f64' } }],
     ['get_PrerollTime', 1],
-    ['put_PrerollTime', 2],
-    ['put_Rate', 2],
+    ['put_PrerollTime', 2, { floats: { 1: 'f64' } }],
+    ['put_Rate', 2, { floats: { 1: 'f64' } }],
     ['get_Rate', 1],
     ['CanSeekForward', 1],
     ['CanSeekBackward', 1],
@@ -249,7 +249,7 @@ export const IMEDIA_POSITION_SLOTS = [
  * IDispatch block. LONGLONG positions travel by pointer, except the one
  * `ConvertTimeFormat` takes by value; `SetRate` takes a double by value.
  *
- * @type {[string, number][]}
+ * @type {import('./describe.js').Slot[]}
  */
 export const IMEDIA_SEEKING_SLOTS = [
     ['GetCapabilities', 1],
@@ -262,11 +262,11 @@ export const IMEDIA_SEEKING_SLOTS = [
     ['GetDuration', 1],
     ['GetStopPosition', 1],
     ['GetCurrentPosition', 1],
-    ['ConvertTimeFormat', 5],
+    ['ConvertTimeFormat', 5, { quadwords: [3] }],
     ['SetPositions', 4],
     ['GetPositions', 2],
     ['GetAvailable', 2],
-    ['SetRate', 2],
+    ['SetRate', 2, { floats: { 1: 'f64' } }],
     ['GetRate', 1],
     ['GetPreroll', 1],
 ];
@@ -275,20 +275,20 @@ export const IMEDIA_SEEKING_SLOTS = [
  * IFilterMapper, which is IUnknown-derived. A CLSID it takes by value is four
  * dwords on the stack.
  *
- * @type {[string, number][]}
+ * @type {import('./describe.js').Slot[]}
  */
 export const IFILTER_MAPPER_SLOTS = [
-    ['RegisterFilter', 6],
-    ['RegisterFilterInstance', 6],
-    ['RegisterPin', 14],
-    ['RegisterPinType', 13],
-    ['UnregisterFilter', 4],
-    ['UnregisterFilterInstance', 4],
-    ['UnregisterPin', 5],
-    ['EnumMatchingFilters', 21],
+    ['RegisterFilter', 6, { structs: { 1: 4 } }],
+    ['RegisterFilterInstance', 6, { structs: { 1: 4 } }],
+    ['RegisterPin', 14, { structs: { 1: 4, 10: 4 } }],
+    ['RegisterPinType', 13, { structs: { 1: 4, 6: 4, 10: 4 } }],
+    ['UnregisterFilter', 4, { structs: { 1: 4 } }],
+    ['UnregisterFilterInstance', 4, { structs: { 1: 4 } }],
+    ['UnregisterPin', 5, { structs: { 1: 4 } }],
+    ['EnumMatchingFilters', 21, { structs: { 4: 4, 8: 4, 14: 4, 18: 4 } }],
 ];
 
-/** IFilterMapper2, which is IUnknown-derived. @type {[string, number][]} */
+/** IFilterMapper2, which is IUnknown-derived. @type {import('./describe.js').Slot[]} */
 export const IFILTER_MAPPER2_SLOTS = [
     ['CreateCategory', 3],
     ['UnregisterFilter', 3],
@@ -305,7 +305,7 @@ export const IID_IGRAPH_VERSION = '{56A868AB-0AD4-11CE-B03A-0020AF0BA770}';
 export const IID_IOBJECT_WITH_SITE = '{FC4801A3-2BA9-11CF-A229-00AA003D7352}';
 export const IID_IVIDEO_FRAME_STEP = '{E46A9787-2B71-444D-A4B5-1FAB7B708D6A}';
 
-/** IFilterGraph2: IGraphBuilder and three more. @type {[string, number][]} */
+/** IFilterGraph2: IGraphBuilder and three more. @type {import('./describe.js').Slot[]} */
 export const IFILTER_GRAPH2_SLOTS = [
     ...IGRAPH_BUILDER_SLOTS,
     ['AddSourceFilterForMoniker', 4],
@@ -313,13 +313,13 @@ export const IFILTER_GRAPH2_SLOTS = [
     ['RenderEx', 3],
 ];
 
-/** IBasicVideo2: IBasicVideo and its preferred aspect ratio. @type {[string, number][]} */
+/** IBasicVideo2: IBasicVideo and its preferred aspect ratio. @type {import('./describe.js').Slot[]} */
 export const IBASIC_VIDEO2_SLOTS = [...IBASIC_VIDEO_SLOTS, ['GetPreferredAspectRatio', 2]];
 
-/** IFilterMapper3: IFilterMapper2 and the device enumerator it uses. @type {[string, number][]} */
+/** IFilterMapper3: IFilterMapper2 and the device enumerator it uses. @type {import('./describe.js').Slot[]} */
 export const IFILTER_MAPPER3_SLOTS = [...IFILTER_MAPPER2_SLOTS, ['GetICreateDevEnum', 1]];
 
-/** IGraphConfig, the dynamic reconnection of a running graph. @type {[string, number][]} */
+/** IGraphConfig, the dynamic reconnection of a running graph. @type {import('./describe.js').Slot[]} */
 export const IGRAPH_CONFIG_SLOTS = [
     ['Reconnect', 8],
     ['Reconfigure', 4],
@@ -333,13 +333,13 @@ export const IGRAPH_CONFIG_SLOTS = [
     ['RemoveFilterEx', 2],
 ];
 
-/** IGraphVersion. @type {[string, number][]} */
+/** IGraphVersion. @type {import('./describe.js').Slot[]} */
 export const IGRAPH_VERSION_SLOTS = [['QueryVersion', 1]];
 
-/** IObjectWithSite. @type {[string, number][]} */
+/** IObjectWithSite. @type {import('./describe.js').Slot[]} */
 export const IOBJECT_WITH_SITE_SLOTS = [['SetSite', 1], ['GetSite', 2]];
 
-/** IVideoFrameStep. @type {[string, number][]} */
+/** IVideoFrameStep. @type {import('./describe.js').Slot[]} */
 export const IVIDEO_FRAME_STEP_SLOTS = [['Step', 2], ['CanStep', 2], ['CancelStep', 0]];
 
 /*
@@ -360,18 +360,18 @@ export const IID_IMEDIA_EVENT_SINK = '{56A868A2-0AD4-11CE-B03A-0020AF0BA770}';
 /** The class this file's source filter reports from IPersist::GetClassID: File Source (Async.). */
 export const CLSID_ASYNC_READER = '{E436EBB5-524F-11CE-9F53-0020AF0BA770}';
 
-/** IMediaFilter, which IBaseFilter extends after IPersist's one. `Run` takes a REFERENCE_TIME. @type {[string, number][]} */
+/** IMediaFilter, which IBaseFilter extends after IPersist's one. `Run` takes a REFERENCE_TIME. @type {import('./describe.js').Slot[]} */
 export const IMEDIA_FILTER_SLOTS = [
     ['GetClassID', 1],
     ['Stop', 0],
     ['Pause', 0],
-    ['Run', 2],
+    ['Run', 2, { quadwords: [1] }],
     ['GetState', 2],
     ['SetSyncSource', 1],
     ['GetSyncSource', 1],
 ];
 
-/** @type {[string, number][]} */
+/** @type {import('./describe.js').Slot[]} */
 export const IBASE_FILTER_SLOTS = [
     ...IMEDIA_FILTER_SLOTS,
     ['EnumPins', 1],
@@ -381,7 +381,7 @@ export const IBASE_FILTER_SLOTS = [
     ['QueryVendorInfo', 1],
 ];
 
-/** IPin. `NewSegment` takes two REFERENCE_TIMEs and a double: six words. @type {[string, number][]} */
+/** IPin. `NewSegment` takes two REFERENCE_TIMEs and a double: six words. @type {import('./describe.js').Slot[]} */
 export const IPIN_SLOTS = [
     ['Connect', 2],
     ['ReceiveConnection', 2],
@@ -397,7 +397,7 @@ export const IPIN_SLOTS = [
     ['EndOfStream', 0],
     ['BeginFlush', 0],
     ['EndFlush', 0],
-    ['NewSegment', 6],
+    ['NewSegment', 6, { quadwords: [1, 3], floats: { 5: 'f64' } }],
 ];
 
 /** Slot numbers in a vtable, IUnknown's three counted, for calling a program's own objects. */
@@ -426,7 +426,7 @@ export const VTABLE = {
     MemReceive: 6,
 };
 
-/** @type {[string, number][]} */
+/** @type {import('./describe.js').Slot[]} */
 export const IMEM_ALLOCATOR_SLOTS = [
     ['SetProperties', 2],
     ['GetProperties', 1],
@@ -440,7 +440,7 @@ export const IMEM_ALLOCATOR_SLOTS = [
  * IMediaSample. `GetSize` and `GetActualDataLength` answer the number itself
  * rather than an HRESULT, which is how the header declares them.
  *
- * @type {[string, number][]}
+ * @type {import('./describe.js').Slot[]}
  */
 export const IMEDIA_SAMPLE_SLOTS = [
     ['GetPointer', 1],
@@ -465,7 +465,7 @@ export const IMEDIA_SAMPLE_SLOTS = [
 export const CLSID_MEMORY_ALLOCATOR = '{1E651CC0-B199-11D0-8212-00C04FC32C45}';
 export const IID_IMEDIA_SAMPLE2 = '{36B73884-C2C8-11CF-8B46-00805F6CEF60}';
 
-/** IMediaSample2: IMediaSample's slots, then the properties block both ways. @type {[string, number][]} */
+/** IMediaSample2: IMediaSample's slots, then the properties block both ways. @type {import('./describe.js').Slot[]} */
 export const IMEDIA_SAMPLE2_SLOTS = [
     ...IMEDIA_SAMPLE_SLOTS,
     ['GetProperties', 2],
@@ -480,16 +480,16 @@ export const IID_IREFERENCE_CLOCK = '{56A86897-0AD4-11CE-B03A-0020AF0BA770}';
  * IReferenceClock. The two Advise methods take two REFERENCE_TIMEs by value:
  * six words each, the handle and the cookie's address after them.
  *
- * @type {[string, number][]}
+ * @type {import('./describe.js').Slot[]}
  */
 export const IREFERENCE_CLOCK_SLOTS = [
     ['GetTime', 1],
-    ['AdviseTime', 6],
-    ['AdvisePeriodic', 6],
+    ['AdviseTime', 6, { quadwords: [1, 3] }],
+    ['AdvisePeriodic', 6, { quadwords: [1, 3] }],
     ['Unadvise', 1],
 ];
 
-/** What a filter tells its graph through: `Notify(EventCode, Param1, Param2)`. @type {[string, number][]} */
+/** What a filter tells its graph through: `Notify(EventCode, Param1, Param2)`. @type {import('./describe.js').Slot[]} */
 export const IMEDIA_EVENT_SINK_SLOTS = [
     ['Notify', 3],
 ];

@@ -1522,6 +1522,14 @@ export function createHeapFunctions(host){
         if (state.watch === undefined)
         {
             state.watch = host.watchWrites?.(block.address, block.capacity) ?? null;
+            // Windows tracks writes from the reservation on, and a watch
+            // begins at its first look, which takes nothing written before
+            // it: every page counts as written until a reset takes it.
+            for (let page = block.address >>> 12;
+                page < (block.address + block.capacity) >>> 12; page++)
+            {
+                state.written.add(page);
+            }
         }
         if (state.watch === null)
         {

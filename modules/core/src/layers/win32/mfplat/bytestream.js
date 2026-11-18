@@ -157,14 +157,15 @@ export function createByteStreams(kit, host, attributes, files){
                     yield /** @type {FileCalls} */ (files).size(stateOf(object).handle));
             })());
         } },
-        { name: 'SetLength', argBytes: 12, invoke: (object, [low, high])=>drive((function* (){
-            const ok = yield /** @type {FileCalls} */ (files).setSize(stateOf(object).handle,
-                kit.wide(low, high));
-            return ok ? S_OK : E_ACCESSDENIED;
-        })()) },
+        { name: 'SetLength', argBytes: 12, quadwords: [1],
+            invoke: (object, [low, high])=>drive((function* (){
+                const ok = yield /** @type {FileCalls} */ (files).setSize(stateOf(object).handle,
+                    kit.wide(low, high));
+                return ok ? S_OK : E_ACCESSDENIED;
+            })()) },
         { name: 'GetCurrentPosition', argBytes: 8,
             invoke: (object, [out])=>writeQword(out, stateOf(object).position) },
-        { name: 'SetCurrentPosition', argBytes: 12, invoke: (object, [low, high])=>{
+        { name: 'SetCurrentPosition', argBytes: 12, quadwords: [1], invoke: (object, [low, high])=>{
             stateOf(object).position = kit.wide(low, high);
             return S_OK;
         } },
@@ -189,21 +190,22 @@ export function createByteStreams(kit, host, attributes, files){
         { name: 'BeginWrite', argBytes: 20, invoke: noQueue('BeginWrite') },
         { name: 'EndWrite', argBytes: 12, invoke: noQueue('EndWrite') },
         /** HRESULT Seek(MFBYTESTREAM_SEEK_ORIGIN origin, LONGLONG offset, DWORD flags, QWORD *current) */
-        { name: 'Seek', argBytes: 24, invoke: (object, [origin, low, high, , out])=>{
-            const state = stateOf(object);
-            const offset = BigInt.asIntN(64, kit.wide(low, high));
-            const position = (origin >>> 0) === SEEK_CURRENT ? state.position + offset : offset;
-            if (position < 0n)
-            {
-                return E_INVALIDARG;
-            }
-            state.position = position;
-            if ((out >>> 0) !== 0)
-            {
-                putU64(out, position);
-            }
-            return S_OK;
-        } },
+        { name: 'Seek', argBytes: 24, quadwords: [2],
+            invoke: (object, [origin, low, high, , out])=>{
+                const state = stateOf(object);
+                const offset = BigInt.asIntN(64, kit.wide(low, high));
+                const position = (origin >>> 0) === SEEK_CURRENT ? state.position + offset : offset;
+                if (position < 0n)
+                {
+                    return E_INVALIDARG;
+                }
+                state.position = position;
+                if ((out >>> 0) !== 0)
+                {
+                    putU64(out, position);
+                }
+                return S_OK;
+            } },
         { name: 'Flush', argBytes: 4, invoke: object=>drive((function* (){
             const ok = yield /** @type {FileCalls} */ (files).flush(stateOf(object).handle);
             return ok ? S_OK : E_ACCESSDENIED;

@@ -241,6 +241,7 @@ export function createBitmapFunctions(host){
     /** @param {boolean} most */
     const significant = most=>({
         argBytes: 8,
+        quadwords: [0],
         /** @param {number[]} args */
         handler: ([low, high])=>{
             const value = BigInt(high >>> 0) << 32n | BigInt(low >>> 0);

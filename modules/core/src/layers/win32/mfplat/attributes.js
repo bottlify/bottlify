@@ -596,10 +596,10 @@ export function createAttributes(kit, host){
         /** HRESULT SetUINT32(REFGUID key, UINT32 value) */
         { name: 'SetUINT32', argBytes: 12, invoke: setter(TYPE.UINT32, ([, value])=>value >>> 0) },
         /** HRESULT SetUINT64(REFGUID key, UINT64 value) */
-        { name: 'SetUINT64', argBytes: 16,
+        { name: 'SetUINT64', argBytes: 16, quadwords: [2],
             invoke: setter(TYPE.UINT64, ([, low, high])=>kit.wide(low, high)) },
         /** HRESULT SetDouble(REFGUID key, double value) */
-        { name: 'SetDouble', argBytes: 16,
+        { name: 'SetDouble', argBytes: 16, floats: { 2: 'f64' },
             invoke: setter(TYPE.DOUBLE, ([, low, high])=>kit.double(low, high)) },
         /** HRESULT SetGUID(REFGUID key, REFGUID value) */
         { name: 'SetGUID', argBytes: 12, invoke: (object, args)=>((args[1] >>> 0) === 0 ? E_POINTER

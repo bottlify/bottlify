@@ -557,16 +557,17 @@ export function createAudioClients(host, endpoint){
         id: IID_ISIMPLE_AUDIO_VOLUME,
         methods: [
             /** HRESULT SetMasterVolume(float fLevel, LPCGUID EventContext) */
-            { name: 'SetMasterVolume', argBytes: 12, invoke: ({ state: { session } }, [bits])=>{
-                const level = floatOf(bits);
-                if (!(level >= 0 && level <= 1))
-                {
-                    return E_INVALIDARG;
-                }
-                session.volume = level;
-                session.streams.forEach(applyVolume);
-                return S_OK;
-            } },
+            { name: 'SetMasterVolume', argBytes: 12, floats: { 1: 'f32' },
+                invoke: ({ state: { session } }, [bits])=>{
+                    const level = floatOf(bits);
+                    if (!(level >= 0 && level <= 1))
+                    {
+                        return E_INVALIDARG;
+                    }
+                    session.volume = level;
+                    session.streams.forEach(applyVolume);
+                    return S_OK;
+                } },
             /** HRESULT GetMasterVolume(float *pfLevel) */
             { name: 'GetMasterVolume', argBytes: 8, invoke: ({ state: { session } }, [out])=>{
                 if ((out >>> 0) === 0)
@@ -815,25 +816,26 @@ export function createAudioClients(host, endpoint){
         id: IID_IAUDIO_CLOCK_ADJUSTMENT,
         methods: [
             /** HRESULT SetSampleRate(float flSampleRate) */
-            { name: 'SetSampleRate', argBytes: 8, invoke: ({ state: stream }, [bits])=>{
-                if (!stream.initialized)
-                {
-                    return AUDCLNT_E_NOT_INITIALIZED;
-                }
-                if ((stream.flags & STREAMFLAGS_RATEADJUST) === 0)
-                {
-                    return AUDCLNT_E_WRONG_ENDPOINT_TYPE;
-                }
-                const rate = floatOf(bits);
-                if (!(rate > 0))
-                {
-                    return E_INVALIDARG;
-                }
-                played(stream);
-                stream.rate = rate;
-                stream.track?.retune?.(rate);
-                return S_OK;
-            } },
+            { name: 'SetSampleRate', argBytes: 8, floats: { 1: 'f32' },
+                invoke: ({ state: stream }, [bits])=>{
+                    if (!stream.initialized)
+                    {
+                        return AUDCLNT_E_NOT_INITIALIZED;
+                    }
+                    if ((stream.flags & STREAMFLAGS_RATEADJUST) === 0)
+                    {
+                        return AUDCLNT_E_WRONG_ENDPOINT_TYPE;
+                    }
+                    const rate = floatOf(bits);
+                    if (!(rate > 0))
+                    {
+                        return E_INVALIDARG;
+                    }
+                    played(stream);
+                    stream.rate = rate;
+                    stream.track?.retune?.(rate);
+                    return S_OK;
+                } },
         ],
     };
 
@@ -846,7 +848,7 @@ export function createAudioClients(host, endpoint){
              *     REFERENCE_TIME hnsBufferDuration, REFERENCE_TIME hnsPeriodicity,
              *     const WAVEFORMATEX *pFormat, LPCGUID AudioSessionGuid)
              */
-            { name: 'Initialize', argBytes: 36, invoke: (object, args)=>{
+            { name: 'Initialize', argBytes: 36, quadwords: [3, 5], invoke: (object, args)=>{
                 const stream = object.state;
                 const [mode, flags, durationLow, durationHigh, , , format, session] = args;
                 if ((format >>> 0) === 0)
