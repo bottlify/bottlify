@@ -380,6 +380,12 @@ const LB_SETTOPINDEX = 0x0197;
 const LB_GETITEMRECT = 0x0198;
 const LB_GETITEMDATA = 0x0199;
 const LB_SETITEMDATA = 0x019a;
+const LB_SELITEMRANGEEX = 0x0183;
+const LB_SELITEMRANGE = 0x019b;
+const LB_SETANCHORINDEX = 0x019c;
+const LB_GETANCHORINDEX = 0x019d;
+const LB_SETCARETINDEX = 0x019e;
+const LB_GETCARETINDEX = 0x019f;
 const LB_SETITEMHEIGHT = 0x01a0;
 const LB_GETITEMHEIGHT = 0x01a1;
 const LB_GETLISTBOXINFO = 0x01b2;
@@ -3052,7 +3058,8 @@ export function createControlProcedures(host){
 
     /**
      * @param {any} record
-     * @returns {{ items: ListItem[], current: number, top: number, itemHeight?: number,
+     * @returns {{ items: ListItem[], current: number, caret: number, anchor: number,
+     *     multi: boolean, top: number, itemHeight?: number,
      *     droppedHeight?: number, droppedWidth?: number, dropped?: number, hot?: number,
      *     fieldHeight?: number, grab?: number, bars?: number }}
      */
@@ -3060,8 +3067,47 @@ export function createControlProcedures(host){
         const state = stateOf(record);
         state.items ??= [];
         state.current ??= -1;
+        // The item with the focus rectangle, and the end of a range a
+        // shift-click or LB_SELITEMRANGE grows from: the first item, and
+        // none, until something moves them.
+        state.caret ??= 0;
+        state.anchor ??= -1;
+        // Whether it keeps a set of items selected: LBS_MULTIPLESEL or
+        // LBS_EXTENDEDSEL, but not with LBS_NOSEL, which makes any list box
+        // answer as a single-selection one; fixed when it is made, as a
+        // later SetWindowLong of the style changes nothing (Wine's listbox
+        // test, test_changing_selection_styles).
+        // A combo box's style bits mean other things: its list is single.
+        state.multi ??= String(record.className).toLowerCase() === 'listbox'
+            && (record.style & (LBS_MULTIPLESEL | LBS_EXTENDEDSEL)) !== 0
+            && (record.style & LBS_NOSEL) === 0;
         state.top ??= 0;
         return state;
+    };
+
+    /** Whether a list box keeps a set of items selected (`listState`). @param {any} record */
+    const multiSelect = record=>listState(record).multi;
+
+    /**
+     * The current, caret and anchor indices after an item is put in at
+     * `at` (`delta` 1) or taken out there (-1): each one past it follows its
+     * item, and one on a removed item is gone.
+     *
+     * @param {ReturnType<typeof listState>} state @param {number} at @param {1 | -1} delta
+     */
+    const shiftIndices = (state, at, delta)=>{
+        for (const key of /** @type {const} */ (['current', 'caret', 'anchor']))
+        {
+            if (delta < 0 && state[key] === at)
+            {
+                state[key] = key === 'caret' ? Math.max(0, Math.min(at, state.items.length - 1))
+                    : -1;
+            }
+            else if (state[key] >= at && (delta > 0 || state[key] > at))
+            {
+                state[key] += delta;
+            }
+        }
     };
 
     /**
@@ -3083,9 +3129,10 @@ export function createControlProcedures(host){
         }
         index = Math.max(0, Math.min(state.items.length, index));
         state.items.splice(index, 0, item);
-        if (state.current >= index)
+        // The caret of an empty list stays on the first item.
+        if (state.items.length > 1)
         {
-            state.current++;
+            shiftIndices(state, index, 1);
         }
         host.invalidate(record);
         return index;
@@ -3194,27 +3241,39 @@ export function createControlProcedures(host){
                     return LB_ERR;
                 }
                 items.splice(at, 1);
-                if (state.current === at)
-                {
-                    state.current = -1;
-                }
-                else if (state.current > at)
-                {
-                    state.current--;
-                }
+                shiftIndices(state, at, -1);
                 host.invalidate(record);
                 return items.length;
             }
             case LB_RESETCONTENT:
                 items.length = 0;
                 state.current = -1;
+                state.caret = 0;
+                state.anchor = -1;
                 state.top = 0;
                 host.invalidate(record);
                 return 0;
             case LB_GETCOUNT:
                 return items.length;
+            // A multiple-selection list box answers its caret: it has no one
+            // current item.
             case LB_GETCURSEL:
-                return state.current;
+                return multiSelect(record) ? state.caret : state.current;
+            case LB_GETCARETINDEX:
+                return state.caret;
+            case LB_GETANCHORINDEX:
+                return state.anchor;
+            case LB_SETCARETINDEX:
+            case LB_SETANCHORINDEX: {
+                const at = message.wParam | 0;
+                if (at < 0 || at >= items.length)
+                {
+                    return LB_ERR;
+                }
+                state[message.message === LB_SETCARETINDEX ? 'caret' : 'anchor'] = at;
+                host.invalidate(record);
+                return 0;
+            }
             case LB_SETCURSEL:
             case LB_SELECTSTRING: {
                 // LB_SELECTSTRING: the first item after wParam whose text
@@ -3222,8 +3281,10 @@ export function createControlProcedures(host){
                 const at = message.message === LB_SETCURSEL ? message.wParam | 0
                     : strings ? findItem(record, message.wParam | 0, false, text())
                         : findData(record, message.wParam | 0, message.lParam);
+                // LB_SETCURSEL is a single-selection list's alone.
                 if (at < -1 || at >= items.length
-                    || (at === -1 && message.message === LB_SELECTSTRING))
+                    || (at === -1 && message.message === LB_SELECTSTRING)
+                    || (message.message === LB_SETCURSEL && state.multi))
                 {
                     return LB_ERR;
                 }
@@ -3234,6 +3295,8 @@ export function createControlProcedures(host){
                 if (at !== -1)
                 {
                     items[at].selected = true;
+                    state.caret = at;
+                    state.anchor = at;
                 }
                 host.invalidate(record);
                 return at;
@@ -3329,24 +3392,37 @@ export function createControlProcedures(host){
      * @param {any} record @param {number} index @param {number} code  LBN_ or CBN_SELCHANGE.
      * @param {boolean} always  Whether to notify without LBS_NOTIFY.
      * @param {unknown} [thread]
+     * @param {'click' | 'key'} [by]  A key moves a multiple-selection list's caret only.
      */
-    const chooseItem = (record, index, code, always, thread)=>{
+    const chooseItem = (record, index, code, always, thread, by = 'click')=>{
         const state = listState(record);
-        if (index < 0 || index >= state.items.length || (record.style & LBS_NOSEL) !== 0)
+        if (index < 0 || index >= state.items.length)
         {
             return 0;
         }
-        if ((record.style & (LBS_MULTIPLESEL | LBS_EXTENDEDSEL)) !== 0 && code === LBN_SELCHANGE)
+        const multiple = multiSelect(record) && code === LBN_SELCHANGE;
+        const extended = multiple && (record.style & LBS_EXTENDEDSEL) !== 0;
+        if (multiple && !extended)
         {
-            state.items[index].selected = !state.items[index].selected;
+            // LBS_MULTIPLESEL: a click toggles the item and anchors there; a
+            // key only moves the caret.
+            if (by === 'click')
+            {
+                state.items[index].selected = !state.items[index].selected;
+                state.anchor = index;
+            }
         }
         else
         {
+            // One item selected: a single-selection list's, or an extended
+            // one's without a modifier - the anchor moves with it.
             state.items.forEach(item=>{
                 item.selected = false;
             });
             state.items[index].selected = true;
+            state.anchor = index;
         }
+        state.caret = index;
         state.current = index;
         host.invalidate(record);
         return always || (record.style & LBS_NOTIFY) !== 0 ? notify(record, code, thread) : 0;
@@ -3476,11 +3552,13 @@ export function createControlProcedures(host){
                 {
                     return 0;
                 }
-                const index = Math.max(0, Math.min(state.items.length - 1, state.current + step));
+                const from = multiSelect(record) ? state.caret : state.current;
+                const index = Math.max(0, Math.min(state.items.length - 1,
+                    from < 0 ? 0 : from + step));
                 // The item chosen is scrolled into the rows that show.
                 scrollList(record, index < state.top ? index
                     : index >= state.top + rows ? index - rows + 1 : state.top);
-                return chooseItem(record, index, LBN_SELCHANGE, false, thread);
+                return chooseItem(record, index, LBN_SELCHANGE, false, thread, 'key');
             }
             case WM_VSCROLL: {
                 const code = message.wParam & 0xffff;
@@ -3501,7 +3579,32 @@ export function createControlProcedures(host){
                 const item = state.items[message.wParam | 0];
                 return item ? (item.selected ? 1 : 0) : LB_ERR;
             }
+            case LB_SELITEMRANGE:
+            case LB_SELITEMRANGEEX: {
+                // A range of a multiple-selection list box; a single one has none.
+                if (!multiSelect(record))
+                {
+                    return LB_ERR;
+                }
+                const ex = message.message === LB_SELITEMRANGEEX;
+                const first = ex ? message.wParam | 0 : message.lParam & 0xffff;
+                const last = ex ? message.lParam | 0 : message.lParam >>> 16;
+                // LB_SELITEMRANGEEX with the last before the first deselects.
+                const on = ex ? first <= last : message.wParam !== 0;
+                const low = Math.max(0, Math.min(first, last));
+                const high = Math.min(state.items.length - 1, Math.max(first, last));
+                for (let at = low; at <= high; at++)
+                {
+                    state.items[at].selected = on;
+                }
+                host.invalidate(record);
+                return 0;
+            }
             case LB_SETSEL: {
+                if (!multiSelect(record))
+                {
+                    return LB_ERR;
+                }
                 const at = message.lParam | 0;
                 const on = message.wParam !== 0;
                 if (at === -1)
@@ -3513,6 +3616,10 @@ export function createControlProcedures(host){
                 else if (state.items[at])
                 {
                     state.items[at].selected = on;
+                    // The item set, either way, is where the caret and the
+                    // anchor go.
+                    state.anchor = at;
+                    state.caret = at;
                 }
                 else
                 {
@@ -3522,9 +3629,13 @@ export function createControlProcedures(host){
                 return 0;
             }
             case LB_GETSELCOUNT:
-                return (record.style & (LBS_MULTIPLESEL | LBS_EXTENDEDSEL)) === 0
+                return !multiSelect(record)
                     ? LB_ERR : state.items.filter(item=>item.selected).length;
             case LB_GETSELITEMS: {
+                if (!multiSelect(record))
+                {
+                    return LB_ERR;
+                }
                 const chosen = state.items.map((item, index)=>(item.selected ? index : -1))
                     .filter(index=>index >= 0).slice(0, message.wParam | 0);
                 chosen.forEach((index, slot)=>writeU32((message.lParam >>> 0) + slot * 4, index));
