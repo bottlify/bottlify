@@ -656,8 +656,9 @@ export function createWin32Module(){
             // Across a link the run's namespace is asked there, and the
             // objects here are stand-ins for the run's (`system-objects.js`).
             const runObjects = system?.objects
-                ? createRemoteNamedObjects({ objects: system.objects, kernel })
-                : createNamedObjects({ table: system?.namedObjects });
+                ? createRemoteNamedObjects({ objects: system.objects, kernel,
+                    handles: kernel.handles })
+                : createNamedObjects({ table: system?.namedObjects, handles: kernel.handles });
             leaveNames = ()=>runObjects.ended(object=>kernel.forsake?.(object));
             // The objects a running Steam client offers by name (its
             // SteamStart lock and section), made when a process first opens

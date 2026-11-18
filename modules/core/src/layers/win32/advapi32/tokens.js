@@ -27,6 +27,7 @@
 
 import { COMPUTER_NAME } from '../kernel32/drives.js';
 import { createDescriptorCodec } from './descriptors.js';
+import { probedNatives } from '../ntdll/probe.js';
 
 /**
  * Who the program is running as. There is one account and no way to become
@@ -2103,7 +2104,7 @@ export function createTokenFunctions(host){
             storeParts(object, parts, wanted);
         },
 
-        [TOKEN_NATIVES]: {
+        [TOKEN_NATIVES]: probedNatives({
             RtlAreAllAccessesGranted: accessesGranted(true),
             RtlAreAnyAccessesGranted: accessesGranted(false),
             RtlMapGenericMask: mapGenericMask,
@@ -2263,7 +2264,7 @@ export function createTokenFunctions(host){
                     return STATUS_SUCCESS;
                 },
             },
-        },
+        }),
 
         /**
          * BOOL InitializeSecurityDescriptor(PSECURITY_DESCRIPTOR, DWORD dwRevision)

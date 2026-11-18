@@ -31,6 +31,8 @@
 
 import { STATUS, toDosError } from '../ntdll/status.js';
 import { overlappedLayout, overlappedResult } from '../common/overlapped.js';
+import { OBJ_INHERIT, readObjectAttributes } from './object-attributes.js';
+import { readLargeInteger } from './due-time.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -81,6 +83,14 @@ const GENERIC_READ = 0x80000000;
 const GENERIC_WRITE = 0x40000000;
 const FILE_READ_DATA = 0x1;
 const FILE_WRITE_DATA = 0x2;
+/** NtCreateNamedPipeFile's dispositions and the option that makes an end synchronous. */
+const FILE_OPEN = 1;
+const FILE_CREATE = 2;
+const FILE_OPEN_IF = 3;
+/** FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT. */
+const FILE_SYNCHRONOUS_IO = 0x30;
+/** IO_STATUS_BLOCK.Information of a create that made its object. */
+const FILE_CREATED = 2;
 
 /** SetFileCompletionNotificationModes' flags. */
 const FILE_SKIP_COMPLETION_PORT_ON_SUCCESS = 0x1;
@@ -849,58 +859,60 @@ export function createNamedPipes(host){
     };
 
     /**
-     * Makes a server instance.
+     * A server instance of a pipe, as the native create asks for one
+     * (NtCreateNamedPipeFile; CreateNamedPipe is spelt over it): a first
+     * instance makes the pipe, a later one is the first's kind of pipe. The
+     * instance count is the first refusal - an instance asked for past it is
+     * busy whether or not the call wanted the first instance - then a first
+     * instance asked for of a pipe that is already there.
      *
-     * @param {string | null} name
-     * @param {number[]} args  the rest of CreateNamedPipe's arguments
+     * @param {string} name  a `\\.\pipe\` name
+     * @param {{ direction: number, messages: boolean, readMessages: boolean,
+     *     nowait: boolean, overlapped: boolean, maxInstances: number, outSize: number,
+     *     inSize: number, timeoutMs: number, disposition: 'create' | 'open' | 'either',
+     *     inherit: boolean }} asked
+     * @returns {{ handle: number } | { error: number }}  a Win32 error
      */
-    const createPipe = (name, args)=>{
-        const [openMode, pipeMode, maxInstances, outSize, inSize, timeout, attributes] = args;
+    const makeInstance = (name, asked)=>{
         if (host.remote)
         {
             host.divergence?.('CreateNamedPipe', 'a process in a worker of its own has no '
                 + 'way to the run\'s pipes; refused as Windows 9x refuses it');
-            return fail(ERROR_CALL_NOT_IMPLEMENTED, INVALID_HANDLE_VALUE);
+            return { error: ERROR_CALL_NOT_IMPLEMENTED };
         }
-        if (name === null || !isPipeName(name))
-        {
-            return fail(ERROR_INVALID_NAME, INVALID_HANDLE_VALUE);
-        }
-        const mode = openMode >>> 0;
-        const kind = pipeMode >>> 0;
-        const max = maxInstances >>> 0;
-        const direction = mode & (PIPE_ACCESS_INBOUND | PIPE_ACCESS_OUTBOUND);
+        const { direction, maxInstances: max } = asked;
         if (max === 0 || max > PIPE_UNLIMITED_INSTANCES || direction === 0
-            || ((kind & PIPE_READMODE_MESSAGE) !== 0 && (kind & PIPE_TYPE_MESSAGE) === 0))
+            || (asked.readMessages && !asked.messages))
         {
-            return fail(ERROR_INVALID_PARAMETER, INVALID_HANDLE_VALUE);
+            return { error: ERROR_INVALID_PARAMETER };
         }
         const key = keyOf(name);
         let pipe = pipeAt(key);
         if (pipe)
         {
-            if ((mode & FILE_FLAG_FIRST_PIPE_INSTANCE) !== 0)
-            {
-                return fail(ERROR_ACCESS_DENIED, INVALID_HANDLE_VALUE);
-            }
             if (pipe.instances.size >= pipe.maxInstances)
             {
-                return fail(ERROR_PIPE_BUSY, INVALID_HANDLE_VALUE);
+                return { error: ERROR_PIPE_BUSY };
             }
             // A second instance is the first's kind of pipe.
-            if ((direction !== (pipe.openMode & (PIPE_ACCESS_INBOUND | PIPE_ACCESS_OUTBOUND)))
-                || ((kind & PIPE_TYPE_MESSAGE) !== 0) !== pipe.messages)
+            if (asked.disposition === 'create'
+                || direction !== (pipe.openMode & (PIPE_ACCESS_INBOUND | PIPE_ACCESS_OUTBOUND))
+                || asked.messages !== pipe.messages)
             {
-                return fail(ERROR_ACCESS_DENIED, INVALID_HANDLE_VALUE);
+                return { error: ERROR_ACCESS_DENIED };
             }
         }
         else
         {
+            if (asked.disposition === 'open')
+            {
+                return { error: ERROR_FILE_NOT_FOUND };
+            }
             pipe = {
-                name, key, maxInstances: max, openMode: mode,
-                messages: (kind & PIPE_TYPE_MESSAGE) !== 0,
-                timeout: (timeout >>> 0) === 0 ? DEFAULT_TIMEOUT : timeout >>> 0,
-                outSize: outSize >>> 0, inSize: inSize >>> 0,
+                name, key, maxInstances: max, openMode: direction,
+                messages: asked.messages,
+                timeout: asked.timeoutMs === 0 ? DEFAULT_TIMEOUT : asked.timeoutMs,
+                outSize: asked.outSize, inSize: asked.inSize,
                 instances: new Set(), waiters: [],
             };
             table.set(key, { kind: 'pipe', object: pipe, refs: 1 });
@@ -912,16 +924,48 @@ export function createNamedPipes(host){
         };
         instance.server = makeEnd(instance, 'server', (direction & PIPE_ACCESS_INBOUND) !== 0,
             (direction & PIPE_ACCESS_OUTBOUND) !== 0);
-        instance.server.readMessages = (kind & PIPE_READMODE_MESSAGE) !== 0;
-        instance.server.nowait = (kind & PIPE_NOWAIT) !== 0;
-        /** @type {any} */ (instance.server).overlapped = (mode & FILE_FLAG_OVERLAPPED) !== 0;
+        instance.server.readMessages = asked.readMessages;
+        instance.server.nowait = asked.nowait;
+        /** @type {any} */ (instance.server).overlapped = asked.overlapped;
         /** @type {any} */ (instance.server).serverProcess = host.processId ?? 0;
         pipe.instances.add(instance);
         const handle = host.handles.open('pipe', instance.server);
-        inheritable.set(handle, inheritsBy(attributes));
+        inheritable.set(handle, asked.inherit);
         listening(pipe);
+        return { handle };
+    };
+
+    /**
+     * CreateNamedPipe: a server instance, in the Win32 spelling.
+     *
+     * @param {string | null} name
+     * @param {number[]} args  the rest of CreateNamedPipe's arguments
+     */
+    const createPipe = (name, args)=>{
+        const [openMode, pipeMode, maxInstances, outSize, inSize, timeout, attributes] = args;
+        if (!host.remote && (name === null || !isPipeName(name)))
+        {
+            return fail(ERROR_INVALID_NAME, INVALID_HANDLE_VALUE);
+        }
+        const mode = openMode >>> 0;
+        const kind = pipeMode >>> 0;
+        const made = makeInstance(name ?? '', {
+            direction: mode & (PIPE_ACCESS_INBOUND | PIPE_ACCESS_OUTBOUND),
+            messages: (kind & PIPE_TYPE_MESSAGE) !== 0,
+            readMessages: (kind & PIPE_READMODE_MESSAGE) !== 0,
+            nowait: (kind & PIPE_NOWAIT) !== 0,
+            overlapped: (mode & FILE_FLAG_OVERLAPPED) !== 0,
+            maxInstances: maxInstances >>> 0,
+            outSize: outSize >>> 0, inSize: inSize >>> 0, timeoutMs: timeout >>> 0,
+            disposition: (mode & FILE_FLAG_FIRST_PIPE_INSTANCE) !== 0 ? 'create' : 'either',
+            inherit: inheritsBy(attributes),
+        });
+        if ('error' in made)
+        {
+            return fail(made.error, INVALID_HANDLE_VALUE);
+        }
         host.setLastError(ERROR_SUCCESS);
-        return handle;
+        return made.handle;
     };
 
     /**
@@ -1752,6 +1796,117 @@ export function createNamedPipes(host){
         ctx.modes.set(handle >>> 0, (ctx.modes.get(handle >>> 0) ?? 0) | (flags >>> 0));
         return 0;
     }
+
+    /** What a pipe's native create was refused with, by the Win32 error the instance gave. */
+    const NATIVE_REFUSALS = new Map([
+        [ERROR_PIPE_BUSY, STATUS.INSTANCE_NOT_AVAILABLE],
+        [ERROR_ACCESS_DENIED, STATUS.ACCESS_DENIED],
+        [ERROR_INVALID_PARAMETER, STATUS.INVALID_PARAMETER],
+        [ERROR_FILE_NOT_FOUND, STATUS.OBJECT_NAME_NOT_FOUND],
+        [ERROR_CALL_NOT_IMPLEMENTED, STATUS.NOT_IMPLEMENTED],
+    ]);
+    /** Whether a create relative to a directory handle was said to be refused. */
+    let rootSaid = false;
+
+    /**
+     * The native calls over the same pipes, which ntdll publishes.
+     */
+    const natives = {
+        /**
+         * NTSTATUS NtCreateNamedPipeFile(PHANDLE FileHandle, ULONG DesiredAccess,
+         *   POBJECT_ATTRIBUTES, PIO_STATUS_BLOCK, ULONG ShareAccess,
+         *   ULONG CreateDisposition, ULONG CreateOptions, ULONG NamedPipeType,
+         *   ULONG ReadMode, ULONG CompletionMode, ULONG MaximumInstances,
+         *   ULONG InboundQuota, ULONG OutboundQuota, PLARGE_INTEGER DefaultTimeout)
+         *
+         * The server instance CreateNamedPipe makes, by the pipe's name in the
+         * object namespace (`\??\pipe\` or the device's own `\Device\NamedPipe\`,
+         * in any case, as the pipe file system compares names). What the server
+         * end may do is the access asked for: reading makes it inbound, writing
+         * outbound. FILE_CREATE asks for the first instance, FILE_OPEN for one
+         * of a pipe already there, FILE_OPEN_IF for either; an instance without
+         * FILE_SYNCHRONOUS_IO_* is overlapped. The handle is written as 0 when
+         * the call fails, as Windows 7 and later write it.
+         */
+        NtCreateNamedPipeFile: {
+            argBytes: 56,
+            /** @param {number[]} args */
+            handler: ([out, access, attributes, status, , disposition, options, type,
+                readMode, completion, maxInstances, inbound, outbound, timeout])=>{
+                // The handle's place is written before anything is made: a call
+                // that cannot answer makes no instance.
+                writeDword(out, 0);
+                const given = readObjectAttributes(host.readMemory, attributes,
+                    host.pointerSize === 8 ? 8 : 4);
+                if (given === null || given.name === null)
+                {
+                    return STATUS.OBJECT_NAME_INVALID;
+                }
+                if (given.root !== 0)
+                {
+                    if (!rootSaid)
+                    {
+                        rootSaid = true;
+                        host.divergence?.('NtCreateNamedPipeFile', 'a name relative to a '
+                            + 'directory handle is refused: the pipe device opens as no directory');
+                    }
+                    return STATUS.OBJECT_PATH_NOT_FOUND;
+                }
+                const named = /^\\(?:\?\?|DosDevices|GLOBAL\?\?)\\pipe\\|^\\Device\\NamedPipe\\/i
+                    .exec(given.name);
+                if (!named)
+                {
+                    return STATUS.OBJECT_PATH_NOT_FOUND;
+                }
+                const rest = given.name.slice(named[0].length);
+                if (rest === '')
+                {
+                    return STATUS.OBJECT_NAME_INVALID;
+                }
+                const wanted = access >>> 0;
+                const reads = (wanted & (GENERIC_READ | FILE_READ_DATA)) !== 0;
+                const writes = (wanted & (GENERIC_WRITE | FILE_WRITE_DATA)) !== 0;
+                /** @type {Record<number, 'open' | 'create' | 'either'>} */
+                const dispositions = { [FILE_OPEN]: 'open', [FILE_CREATE]: 'create',
+                    [FILE_OPEN_IF]: 'either' };
+                const asked = dispositions[disposition >>> 0];
+                if (asked === undefined)
+                {
+                    return STATUS.INVALID_PARAMETER;
+                }
+                const count = maxInstances >>> 0;
+                const due = (timeout >>> 0) === 0 ? 0n
+                    : readLargeInteger(host.readMemory, timeout >>> 0);
+                const made = makeInstance(`\\\\.\\pipe\\${rest}`, {
+                    direction: (reads ? PIPE_ACCESS_INBOUND : 0)
+                        | (writes ? PIPE_ACCESS_OUTBOUND : 0),
+                    messages: (type >>> 0) !== 0,
+                    readMessages: (readMode >>> 0) !== 0,
+                    nowait: (completion >>> 0) !== 0,
+                    overlapped: ((options >>> 0) & FILE_SYNCHRONOUS_IO) === 0,
+                    // Unlimited is -1 here and PIPE_UNLIMITED_INSTANCES to
+                    // Win32, the count GetNamedPipeInfo answers.
+                    maxInstances: count === 0xffffffff ? PIPE_UNLIMITED_INSTANCES : count,
+                    outSize: outbound >>> 0, inSize: inbound >>> 0,
+                    timeoutMs: due < 0n ? Math.round(Number(-due) / 10000) : 0,
+                    disposition: asked,
+                    inherit: (given.attributes & OBJ_INHERIT) !== 0,
+                });
+                if ('error' in made)
+                {
+                    return NATIVE_REFUSALS.get(made.error) ?? STATUS.UNSUCCESSFUL;
+                }
+                writeDword(out, made.handle);
+                if ((status >>> 0) !== 0)
+                {
+                    writeDword(status, STATUS.SUCCESS);
+                    writeDword((status >>> 0) + 4, FILE_CREATED);
+                }
+                return STATUS.SUCCESS;
+            },
+        },
+    };
+    /** @type {any} */ (functions.CreateNamedPipeW).natives = natives;
 
     /** Numbers the unnamed pipes CreatePipe makes, the run's way Windows numbers them. */
     let anonymousCount = 0;

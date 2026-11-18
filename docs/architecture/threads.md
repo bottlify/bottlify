@@ -113,8 +113,8 @@ thread then runs no program and is the system (what it builds before any process
 section 4), and what the page asks of the program it asks the program's thread.
 
 What the processes of a run share stays on the engine thread: the registry, the volume and the
-sharing of its open files, the window directory, ids, named events, semaphores and mutexes, the
-bundle, COM's class table and the services it started ([`core/src/com-link.js`](../../modules/core/src/com-link.js)), the run's directory of processes, the translation store ([`core/src/layers/cpu/internal/store-link.js`](../../modules/core/src/layers/cpu/internal/store-link.js)),
+sharing of its open files, the window directory, ids, named events, semaphores and mutexes and
+the object directories and links a native call names them through, the bundle, COM's class table and the services it started ([`core/src/com-link.js`](../../modules/core/src/com-link.js)), the run's directory of processes, the translation store ([`core/src/layers/cpu/internal/store-link.js`](../../modules/core/src/layers/cpu/internal/store-link.js)),
 and the batch modules the processes in workers compile: each is posted to the engine thread,
 which keeps it alive for the run (`withHeldModules`, as many wasm bytes as `sharedModuleBytes`),
 so a later process that compiles the same bytes from the store gets the code V8 compiled and

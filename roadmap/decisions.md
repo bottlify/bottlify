@@ -2494,3 +2494,13 @@ of 4 GiB wraps to zero and reads as a full disk, one 2 GiB past it to a negative
 therefore 1.5 GiB past a multiple of 4 GiB (`kernel32/drives.js`), so the wrapped product, signed or
 not, is still room to install in. Revisit when a bottle carries a quota of its own to report.
 *2026-11-18.*
+
+**A271. The two BaseNamedObjects directories are one set of names.** On Windows a program's Win32
+names live in its session's `\Sessions\1\BaseNamedObjects` and `Global\` names in the shared
+`\BaseNamedObjects`, two directories with names of their own. The object namespace
+(`kernel32/object-namespace.js`) has both directories and the links between them (Global, Local,
+Session, `\Sessions\BNOLINKS`), but keeps the names of either under the name alone, as kernel32
+always kept Win32 names: an object made in one is found through the other. Every program here runs
+in the one interactive session, so a name a service in session 0 and a program in session 1 would
+each have to themselves does not arise. Revisit when a bottle runs a service in a session of its
+own. *2026-11-18.*
