@@ -103,10 +103,18 @@ const faulting = buildExe({
     ],
 });
 
-/** @param {Uint8Array} executable @param {Uint8Array} child */
-async function run(executable, child){
-    const app = await createApp({ executable, imagePath: 'C:\\debugger.exe',
+/**
+ * @param {Uint8Array} executable @param {Uint8Array} child
+ * @param {import('../../../mode.js').Concurrency} [concurrency]  above one, the debugger runs in a worker and
+ *     its child beside it there
+ * @param {[string, boolean][]} [started]  each process started: its image,
+ *     and whether in a worker of its own
+ */
+async function run(executable, child, concurrency = 1, started = []){
+    const app = await createApp({ executable, imagePath: 'C:\\debugger.exe', concurrency,
         files: [{ path: 'C:\\child.exe', bytes: child }] });
+    app.on('process-started', (/** @type {any} */ event)=>
+        started.push([event.image, event.worker === true]));
     try
     {
         return (await app.run({ timeoutMs: 60_000 })) >>> 0;
@@ -136,4 +144,19 @@ test('an exception the debugger and the child decline is reported twice and ends
         const heard = unpack(await run(debuggerOf(DBG_EXCEPTION_NOT_HANDLED), faulting));
         assert.equal(heard.exceptions, 3, 'the breakpoint, then the first and the second chance');
         assert.equal(heard.exit, 0x1d, 'ended with STATUS_ILLEGAL_INSTRUCTION (its low byte)');
+    });
+
+test('a debugger in a worker hears its child, started beside it there, the same way',
+    { timeout: 120_000 }, async()=>{
+        /** @type {[string, boolean][]} */
+        const started = [];
+        const heard = unpack(await run(debuggerOf(DBG_EXCEPTION_NOT_HANDLED), talking, 2,
+            started));
+        assert.deepEqual(started, [['C:\\debugger.exe', true], ['C:\\child.exe', false]],
+            'the debugger in a worker, its child beside it');
+        assert.equal(heard.created, 1, 'CREATE_PROCESS_DEBUG_EVENT');
+        assert.ok(heard.libraries >= 2, `a LOAD_DLL for each library mapped: ${heard.libraries}`);
+        assert.equal(heard.exceptions, 1, 'the loader\'s breakpoint');
+        assert.equal(heard.said, 1, 'OUTPUT_DEBUG_STRING_EVENT');
+        assert.equal(heard.exit, 7, 'EXIT_PROCESS_DEBUG_EVENT with its code');
     });

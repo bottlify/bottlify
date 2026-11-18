@@ -112,8 +112,8 @@ bytes cross. The other way, a child its parent started with `DEBUG_PROCESS` repo
 events to the parent as values - its start (the process, every library mapped with it, the loader's
 breakpoint), a library loaded or unloaded, a thread made or ended, `OutputDebugString`, an exception
 first and, unhandled, again - and the reporting thread waits for the status `ContinueDebugEvent`
-answers: called directly when the child runs on the parent's thread, across its link (`debug`)
-from a worker; a child its parent debugs is always started where its parent can hear it. While a
+answers, called directly: a child its parent debugs is always started beside it, on its thread or
+in its worker, never in a worker of its own, so its parent always hears it. While a
 thread waits on an exception's answer the exception's context is its context, so a debugger's
 `GetThreadContext` and `SetThreadContext` read and change the context it goes on from
 ([`kernel32/debug-events.js`](../../modules/core/src/layers/win32/kernel32/debug-events.js)). A

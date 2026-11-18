@@ -42,7 +42,7 @@ import { mangledCall } from './layers/loader/internal/mangling.js';
 import { mapImage } from './layers/loader/internal/image.js';
 import { imagePlacementOf, installedHeaders } from './layers/loader/internal/synth.js';
 import { blockLayouts, createProcessBlocks, TEB, TEB64 } from './layers/win32/kernel32/teb.js';
-import { DBG_CONTINUE, DEBUG_EVENT } from './layers/win32/kernel32/debug-events.js';
+import { DEBUG_EVENT } from './layers/win32/kernel32/debug-events.js';
 import { KUSER, KUSER_REGION, SHARED_USER_DATA, createSharedUserData, sharedPageAt }
     from './layers/win32/kernel32/shared-data.js';
 import { supportedOsOf, windowsVersion } from './layers/win32/kernel32/versions.js';
@@ -12799,10 +12799,9 @@ export async function createApp(options){
      *
      * @param {{ readImage: (path: string) => Promise<Uint8Array | null>,
      *     sound: () => ({ options: any, giveBack: () => void } | null),
-     *     server?: boolean, debugEvent?: ((report: any) => Promise<number>) | null }} from
-     *     `server` for one COM started, whose code is no run's
-     *     its parent, as the run reaches it: where its image is read, the
-     *     sound it lends, and where it reports when its parent debugs it
+     *     server?: boolean }} from  `server` for one COM started, whose code is no run's
+     *     its parent, as the run reaches it: where its image is read, and the
+     *     sound it lends
      * @param {any} request
      * @param {{ link: ReturnType<typeof openLink> | null, code: number | null,
      *     opened?: () => void }} [reach]
@@ -12904,12 +12903,6 @@ export async function createApp(options){
                     terminateBeside({ id }, code),
                 ask: (/** @type {number} */ id, /** @type {any} */ call)=>
                     askBeside({ id }, call),
-            },
-            // What it reports to the parent that debugs it, answered with the
-            // status the debugger continues it with (`debug-events.js`).
-            debug: {
-                report: (/** @type {any} */ report)=>(from.debugEvent
-                    ? from.debugEvent(report) : DBG_CONTINUE),
             },
             // The parent's open files the child writes its output and error
             // into: one position, the parent's, which the child's writes move.
@@ -13068,7 +13061,6 @@ export async function createApp(options){
                         startup: request.startup ?? null,
                         parentProcessId: request.parentId ?? 0,
                         suspended: request.suspended === true,
-                        ...from.debugEvent ? { debugged: true } : {},
                         ...request.parentId ? { startedBeside: true } : {},
                         ...request.environment ? { environment: request.environment } : {},
                         processId: request.id,
@@ -13412,8 +13404,6 @@ export async function createApp(options){
             startAcross({
                 readImage: path=>parent.readImage(path),
                 sound: ()=>(shared ? lendSound(parent) : null),
-                debugEvent: request.debugged ? (/** @type {any} */ report)=>
-                    parent.debugEvent(request, report) : null,
             }, request, code=>parent.childExited(request, code));
             return;
         }
