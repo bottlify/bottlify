@@ -17,6 +17,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { COMPILED } from './inguest.x86.js';
+import { COMPILED as LONG } from './inguest.x64.js';
 import * as sources from './inguest.js';
 import { DATA, equivalence, random } from '../../../../scripts/guest-code/equivalence.mjs';
 import { loadModel } from '../../../../scripts/guest-code/model.mjs';
@@ -25,7 +26,8 @@ const SOURCE = new URL('./inguest.js', import.meta.url);
 const model = await loadModel(await readFile(SOURCE, 'utf8'), {
     file: 'inguest.js', url: SOURCE.href, values: sources,
 });
-const { same } = equivalence(COMPILED, sources, model);
+// The x86-64 beside the i386, each case run through both (`equivalence`).
+const { same } = equivalence(COMPILED, sources, model, LONG);
 
 /** Double, single, and a rounding toward zero, which the float stores keep to nearest. */
 const CONTROLS = [0x27f, 0x07f, 0xf7f];

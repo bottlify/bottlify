@@ -285,16 +285,24 @@ test('every function of the 64-bit modules is x86-64 code or refused with a reas
 });
 
 /**
- * The modules whose functions take a structure the areas cannot make - a
- * length and a capacity at their offsets, a buffer's pointer - so that random
- * inputs run out of bounds or never take one way: each with the test that
- * holds every function to its JavaScript at 64 bits on structures it lays out.
+ * The modules whose inputs the areas cannot make - a structure with a length
+ * and a capacity at their offsets, floats that are not NaNs - so that random
+ * inputs run out of bounds, never take one way, or meet what the source is no
+ * judge of: each with the test that holds every function to its JavaScript at
+ * 64 bits on inputs it lays out.
  *
  * @type {Readonly<Record<string, string>>}
  */
 const HELD_ELSEWHERE = Object.freeze({
     'layers/win32/msvcrt/inguest-string.js': 'a std::string of forty bytes: '
         + 'msvcrt/inguest-string.test.js',
+    // Floats a program's matrices hold: random bytes are NaNs, whose payload
+    // SSE2 keeps and JavaScript does not, so the source is no judge of them.
+    'layers/win32/d3dx9/inguest.js': 'matrices without NaN: d3dx9/inguest.test.js',
+    'layers/win32/d3dx9/inguest-matrix.js': 'matrices without NaN: d3dx9/inguest-matrix.test.js',
+    'layers/win32/d3dx9/inguest-vector.js': 'vectors without NaN: d3dx9/inguest-vector.test.js',
+    'layers/win32/d3dx9/inguest-quaternion.js': 'quaternions without NaN: '
+        + 'd3dx9/inguest-quaternion.test.js',
 });
 
 test('each function\'s x86-64 answers as its JavaScript, on inputs of every shape', async()=>{

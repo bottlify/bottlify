@@ -49,12 +49,24 @@ const LONG_CODE = new Map();
 /** @type {[Record<string, CompiledGuestCode>, Record<string, CompiledGuestCode>][]} */
 const PAIRS = [[RUNTIME, RUNTIME_LONG], [MATH, MATH_LONG], [PRINT, PRINT_LONG],
     [FLOAT, FLOAT_LONG], [STRING, STRING_LONG]];
-for (const [i386, long] of PAIRS)
-{
+/**
+ * Pairs each function of a module's x86-64 with its i386 record, so that an
+ * export bound with the i386 (`guestEntry`, `guestExport`) carries the x86-64
+ * a 64-bit process places: called once for each module the build compiles at
+ * 64 bits (`LONG` in scripts/build-guest-code.mjs), by the library it serves.
+ *
+ * @param {Readonly<Record<string, CompiledGuestCode>>} i386
+ * @param {Readonly<Record<string, CompiledGuestCode>>} long
+ */
+export function withLongCode(i386, long){
     for (const [name, compiled] of Object.entries(long))
     {
         LONG_CODE.set(i386[name], compiled);
     }
+}
+for (const [i386, long] of PAIRS)
+{
+    withLongCode(i386, long);
 }
 
 /**
