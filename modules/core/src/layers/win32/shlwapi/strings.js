@@ -215,15 +215,17 @@ const int64 = (low, high)=>BigInt.asIntN(64, BigInt(high >>> 0) << 32n | BigInt(
  */
 export function createStringFunctions(host, { A, W }){
     /** @param {string} name @param {number} argBytes
-     *  @param {(width: import('./text.js').Width, args: number[]) => number} body */
-    const both = (name, argBytes, body)=>({
-        [`${name}A`]: { argBytes, handler: (/** @type {number[]} */ args)=>body(A, args) },
-        [`${name}W`]: { argBytes, handler: (/** @type {number[]} */ args)=>body(W, args) },
+     *  @param {(width: import('./text.js').Width, args: number[]) => number} body
+     *  @param {{ quadwords?: number[] }} [marshal]  A LONGLONG by value: one slot at 64 bits. */
+    const both = (name, argBytes, body, marshal = {})=>({
+        [`${name}A`]: { argBytes, ...marshal, handler: (/** @type {number[]} */ args)=>body(A, args) },
+        [`${name}W`]: { argBytes, ...marshal, handler: (/** @type {number[]} */ args)=>body(W, args) },
     });
     /** @param {import('./text.js').Width} width @param {number} argBytes
-     *  @param {(width: import('./text.js').Width, args: number[]) => number} body */
-    const one = (width, argBytes, body)=>({
-        argBytes, handler: (/** @type {number[]} */ args)=>body(width, args),
+     *  @param {(width: import('./text.js').Width, args: number[]) => number} body
+     *  @param {{ quadwords?: number[] }} [marshal]  A LONGLONG by value: one slot at 64 bits. */
+    const one = (width, argBytes, body, marshal = {})=>({
+        argBytes, ...marshal, handler: (/** @type {number[]} */ args)=>body(width, args),
     });
 
     /**
@@ -759,11 +761,11 @@ export function createStringFunctions(host, { A, W }){
         StrFormatByteSizeW: one(W, 16, (width, [low, high, buffer, room])=>{
             writeCut(width, buffer, byteSize(int64(low, high)), room >>> 0);
             return buffer >>> 0;
-        }),
+        }, { quadwords: [0] }),
         StrFormatByteSize64A: one(A, 16, (width, [low, high, buffer, room])=>{
             writeCut(width, buffer, byteSize(int64(low, high)), room >>> 0);
             return buffer >>> 0;
-        }),
+        }, { quadwords: [0] }),
 
         /**
          * HRESULT StrFormatByteSizeEx(ULONGLONG ull, SFBS_FLAGS flags, PWSTR pszBuf,
@@ -781,7 +783,7 @@ export function createStringFunctions(host, { A, W }){
             const size = BigInt.asUintN(64, int64(low, high));
             writeCut(width, buffer, byteSize(size, flags === 1), room >>> 0);
             return S_OK;
-        }),
+        }, { quadwords: [0] }),
 
         /**
          * PSTR StrFormatKBSizeA(LONGLONG qdw, PSTR pszBuf, UINT cchBuf)
@@ -791,7 +793,7 @@ export function createStringFunctions(host, { A, W }){
         ...both('StrFormatKBSize', 16, (width, [low, high, buffer, room])=>{
             writeCut(width, buffer, kbSize(int64(low, high)), room >>> 0);
             return buffer >>> 0;
-        }),
+        }, { quadwords: [0] }),
 
         /**
          * int wnsprintfA(PSTR pszDest, int cchDest, PCSTR pszFmt, ...)

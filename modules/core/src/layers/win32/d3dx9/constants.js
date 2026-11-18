@@ -735,10 +735,12 @@ export function createConstantTableObjects(host){
      *
      * @param {string} name @param {number} argBytes
      * @param {(table: TableState, constant: Constant, args: number[]) => number[]} read
+     * @param {{ floats?: Record<number, 'f32'> }} [marshal]  A FLOAT by value, by dword
+     *     counting `this`: the bridge's `floats`.
      * @returns {import('../ole32/objects.js').ComMethod}
      */
-    const setter = (name, argBytes, read)=>({
-        name, argBytes,
+    const setter = (name, argBytes, read, marshal = {})=>({
+        name, argBytes, ...marshal,
         invoke: (object, [device, handle, ...rest])=>{
             const table = tableOf(object);
             const constant = resolve(table, handle);
@@ -899,7 +901,8 @@ export function createConstantTableObjects(host){
             /** HRESULT SetIntArray(device, handle, const INT *pn, UINT Count) */
             setter('SetIntArray', 20, (_, __, [at, count])=>ints(at, count >>> 0)),
             /** HRESULT SetFloat(device, handle, FLOAT f) */
-            setter('SetFloat', 16, (_, __, [value])=>[asFloat(value)]),
+            // SetFloat(device, handle, FLOAT): the value in the fourth slot, XMM3 at 64 bits.
+            setter('SetFloat', 16, (_, __, [value])=>[asFloat(value)], { floats: { 3: 'f32' } }),
             /** HRESULT SetFloatArray(device, handle, const FLOAT *pf, UINT Count) */
             setter('SetFloatArray', 20, (_, __, [at, count])=>floats(at, count >>> 0)),
             /** HRESULT SetVector(device, handle, const D3DXVECTOR4 *pVector) */

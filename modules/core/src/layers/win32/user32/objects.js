@@ -2447,6 +2447,7 @@ export function createObjectFunctions(options){
          */
         MenuItemFromPoint: {
             argBytes: 16,
+            quadwords: [2],
             /** @param {number[]} args */
             handler: ([hwnd, handle, x, y])=>{
                 const menu = menuOf(handle);

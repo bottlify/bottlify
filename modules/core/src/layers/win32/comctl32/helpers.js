@@ -281,6 +281,7 @@ export function createHelperFunctions(host){
          */
         LBItemFromPt: {
             argBytes: 16,
+            quadwords: [1],
             /** @param {number[]} args */
             handler: ([list, x, y, scroll])=>{
                 if (!host.user32)

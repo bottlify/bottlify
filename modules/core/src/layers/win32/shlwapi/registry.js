@@ -719,6 +719,7 @@ export function createRegistryHelpers(host){
          */
         AssocCreate: {
             argBytes: 24,
+            structs: { 0: 4 },
             /** @param {number[]} args */
             handler: args=>{
                 const out = args[5] >>> 0;

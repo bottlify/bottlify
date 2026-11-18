@@ -420,6 +420,7 @@ From `arg-bytes-audit.mjs dbg/wine-specs`. Every stdcall entry of the win32 laye
 - [`checks/check-volume-spread.mjs`](checks/check-volume-spread.mjs) - No volume is copied by object spread (`npm run check:boundaries`)
 - [`checks/check-wall-bounds.mjs`](checks/check-wall-bounds.mjs) - No test bounds a wall-clock time (`npm run check:boundaries`)
 - [`checks/check-wide-limits.mjs`](checks/check-wide-limits.mjs) - A UTF-16 read's limit is in bytes (`npm run check:boundaries`)
+- [`checks/check-wide-arguments.mjs`](checks/check-wide-arguments.mjs) - A host function or COM method taking a 64-bit, floating or wide structure argument by value says so to the bridge, for an x86-64 caller (`npm run check:boundaries`)
 - [`checks/check-decision-numbers.mjs`](checks/check-decision-numbers.mjs) - Each decision number is one heading, and every citation of one is carried (`npm run check:boundaries`)
 - [`checks/emit-digest.mjs`](checks/emit-digest.mjs) - The 32-bit translation is unchanged (--check against emit-digest.json) (`npm run check:boundaries`)
 - [`checks/check-catalog.mjs`](checks/check-catalog.mjs) - Every file under tools/ is in this catalog, in its category, and every instrument has a real sample (`npm run check:boundaries`)

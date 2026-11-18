@@ -778,6 +778,8 @@ test('a 64-bit process\'s interfaces have eight-byte slots, traps for the i386 c
         ...METHODS.slice(0, 3),
         { name: 'Draw', argBytes: 8, guest: ()=>0x7000 },
         { name: 'Scale', argBytes: 8, floats: { 1: /** @type {'f32'} */ ('f32') } },
+        { name: 'Seek', argBytes: 20, quadwords: [1] },
+        { name: 'Register', argBytes: 24, structs: { 1: 4 } },
     ];
     const longObject = {
         /** @param {string} id */
@@ -797,6 +799,10 @@ test('a 64-bit process\'s interfaces have eight-byte slots, traps for the i386 c
         'every slot a trap: AddRef, Release and the guest method too');
     assert.deepEqual(registered.get(`${IID}::Scale`).floats, { 1: 'f32' },
         'a float argument is declared to the bridge');
+    assert.deepEqual(registered.get(`${IID}::Seek`).quadwords, [1],
+        'and a quadword: one slot to a 64-bit caller');
+    assert.deepEqual(registered.get(`${IID}::Register`).structs, { 1: 4 },
+        'and a structure by value: a pointer to a copy');
 
     words.set(0x8000, 0xdead);
     words.set(0x8004, 0xbeef);

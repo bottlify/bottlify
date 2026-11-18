@@ -1177,7 +1177,7 @@ export function createEffects(host, helpers, options = {}){
             arraySetter('SetIntArray', PT.INT),
             arrayGetter('GetIntArray', PT.INT),
             /** HRESULT SetFloat(D3DXHANDLE, FLOAT) */
-            { name: 'SetFloat', argBytes: 12, invoke: (object, [h, f])=>{
+            { name: 'SetFloat', argBytes: 12, floats: { 2: 'f32' }, invoke: (object, [h, f])=>{
                 const p = paramOf(of(object), h);
                 if (!p || p.model.elements || p.model.rows !== 1 || p.model.columns !== 1)
                 {

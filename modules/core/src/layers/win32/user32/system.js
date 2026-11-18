@@ -3898,6 +3898,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
          */
         MonitorFromPoint: {
             argBytes: 12,
+            quadwords: [0],
             /** @param {number[]} args */
             handler: ([x, y, flags])=>monitorFromBox({ left: x | 0, top: y | 0,
                 right: (x | 0) + 1, bottom: (y | 0) + 1 }, flags),
@@ -4793,6 +4794,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
          */
         WindowFromPoint: {
             argBytes: 8,
+            quadwords: [0],
             /** @param {number[]} args */
             handler: ([x, y])=>{
                 // Another program's window over the point is the answer; one
@@ -4818,6 +4820,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
          */
         ChildWindowFromPointEx: {
             argBytes: 16,
+            quadwords: [1],
             /** @param {number[]} args */
             handler: ([parent, x, y, flags])=>childFromPoint(parent, x, y, flags),
         },
@@ -4825,6 +4828,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
         /** HWND ChildWindowFromPoint(HWND hWndParent, POINT pt) */
         ChildWindowFromPoint: {
             argBytes: 12,
+            quadwords: [1],
             /** @param {number[]} args */
             handler: ([parent, x, y])=>childFromPoint(parent, x, y, 0),
         },
@@ -4837,6 +4841,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
          */
         RealChildWindowFromPoint: {
             argBytes: 12,
+            quadwords: [1],
             /** @param {number[]} args */
             handler: ([parent, x, y])=>childFromPoint(parent, x, y, 0x0001 | 0x0004),
         },
@@ -6734,6 +6739,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
          */
         DragDetect: {
             argBytes: 12,
+            quadwords: [1],
             /** @param {number[]} args */
             handler: ([hwnd, x, y])=>{
                 const VK_LBUTTON = 0x01;

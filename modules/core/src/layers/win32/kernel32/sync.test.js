@@ -1108,8 +1108,8 @@ test('a count of nothing or of too much is ERROR_INVALID_PARAMETER', ()=>{
     assert.deepEqual(host.errors, [87, 87]);
 });
 
-test('GetThreadContext fills the groups asked for, and SetThreadContext of registers is'
-    + ' refused', ()=>{
+test('GetThreadContext fills the groups asked for, and SetThreadContext of the calling'
+    + ' thread is refused', ()=>{
     const host = /** @type {any} */ (fakeHost());
     const said = /** @type {string[]} */ ([]);
     host.divergence = (/** @type {string} */ api)=>said.push(api);
@@ -1137,9 +1137,53 @@ test('GetThreadContext fills the groups asked for, and SetThreadContext of regis
     assert.equal(view.getUint32(at + 0xc4, true), 0x6000);
     assert.equal(view.getUint32(at + 0xb0, true), 0xcccccccc, 'integer registers not asked for');
 
-    assert.equal(fns.SetThreadContext.handler([0x20, at]), 0);
+    assert.equal(fns.SetThreadContext.handler([0xfffffffe, at]), 0);
     assert.deepEqual(said, ['SetThreadContext']);
     assert.equal(fns.GetThreadContext.handler([0x99, at]), 0, 'no such thread');
+});
+
+test('SetThreadContext puts its groups where the thread next runs: a stopped one from them,'
+    + ' a waiting one after its wait', ()=>{
+    const host = /** @type {any} */ (fakeHost());
+    /** @type {any[]} */
+    const scheduled = [];
+    host.kernel.scheduleResume = (/** @type {any} */ thread, /** @type {any} */ where)=>{
+        scheduled.push(where);
+        thread.parkedReturn = where.eip;
+        thread.resumeStack = where.esp ?? null;
+        thread.resumeRegisters = where.registers;
+    };
+    const fns = createSyncFunctions(host);
+    const other = host.threads.second;
+    other.context = { reg32: Int32Array.of(10, 11, 12, 13, 0x6000, 15, 16, 17), eip: 0x402000,
+        flags: 0x202 };
+    host.register(0x20, 'thread', other);
+    const at = 0x400;
+    const view = new DataView(host.bytes.buffer);
+    view.setUint32(at, 0x10003, true); // control and integer
+    view.setUint32(at + 0xb8, 0x403000, true); // Eip
+    view.setUint32(at + 0xc4, 0x5f00, true); // Esp
+    view.setUint32(at + 0xa4, 0x1234, true); // Ebx
+    assert.equal(fns.SetThreadContext.handler([0x20, at]), 1);
+    assert.equal(scheduled[0].eip, 0x403000);
+    assert.equal(scheduled[0].esp, 0x5f00);
+    assert.equal(scheduled[0].registers.ebx, 0x1234);
+    view.setUint32(at + 0xb8, 0, true);
+    view.setUint32(at + 0xa4, 0, true);
+    assert.equal(fns.GetThreadContext.handler([0x20, at]), 1);
+    assert.deepEqual([view.getUint32(at + 0xb8, true), view.getUint32(at + 0xa4, true)],
+        [0x403000, 0x1234], 'read back as it will run');
+
+    // Waiting in a call: integer registers alone keep the wait's continuation.
+    const waiting = { id: 0x108, parkedReturn: 0x404000, resumeStack: 0x5e00,
+        context: { reg32: Int32Array.of(0, 0, 0, 0, 0x5d00, 0, 0, 0), eip: 0x7ff00000 } };
+    host.register(0x24, 'thread', waiting);
+    view.setUint32(at, 0x10002, true);
+    view.setUint32(at + 0xa4, 0x55, true);
+    assert.equal(fns.SetThreadContext.handler([0x24, at]), 1);
+    assert.equal(scheduled.length, 1, 'no new continuation');
+    assert.equal(waiting.parkedReturn, 0x404000);
+    assert.equal(/** @type {any} */ (waiting).resumeRegisters.ebx, 0x55);
 });
 
 test('GetThreadContext of a thread still running on another executor answers once it has'

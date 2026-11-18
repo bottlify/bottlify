@@ -2723,7 +2723,14 @@ export function createCorkHost(config){
             Atomics.store(tscWords, TscWord.GUEST_US, BigInt(Math.round(guestClock() * 1000)));
         }
     };
-    host.captureContext = (/** @type {any} */ into)=>captureBlockContext(host, into);
+    // The record a region left is folded into the flags word first, the same
+    // state said whole: a saved context's word is what GetThreadContext answers
+    // and what a context set back puts in place, and the record would be dropped
+    // there - a .NET collector restores the context it read once it is done.
+    host.captureContext = (/** @type {any} */ into)=>{
+        eflagsWord();
+        return captureBlockContext(host, into);
+    };
     host.restoreContext = (/** @type {any} */ context)=>{
         restoreBlockContext(host, context);
         entered = true;

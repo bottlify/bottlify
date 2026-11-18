@@ -37,12 +37,12 @@ const VFW_E_BADALIGN = 0x8004020e | 0;
 export const IID_IFILE_SOURCE_FILTER = '{56A868A6-0AD4-11CE-B03A-0020AF0BA770}';
 export const IID_IASYNC_READER = '{56A868AA-0AD4-11CE-B03A-0020AF0BA770}';
 
-/** IFileSourceFilter. @type {[string, number][]} */
+/** IFileSourceFilter. @type {import('./describe.js').Slot[]} */
 const IFILE_SOURCE_FILTER_SLOTS = [['Load', 2], ['GetCurFile', 2]];
-/** IAsyncReader. SyncRead takes a LONGLONG position: two words. @type {[string, number][]} */
+/** IAsyncReader. SyncRead takes a LONGLONG position: two words. @type {import('./describe.js').Slot[]} */
 const IASYNC_READER_SLOTS = [
     ['RequestAllocator', 3], ['Request', 2], ['WaitForNext', 3], ['SyncReadAligned', 1],
-    ['SyncRead', 4], ['Length', 2], ['BeginFlush', 0], ['EndFlush', 0],
+    ['SyncRead', 4, { quadwords: [1] }], ['Length', 2], ['BeginFlush', 0], ['EndFlush', 0],
 ];
 
 /** The stream subtypes Windows' check bytes name. */

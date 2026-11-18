@@ -85,6 +85,17 @@ const LONG_WORD = 8;
  *           The float and double arguments, by their first dword counting the
  *           interface pointer, which a 64-bit caller passes among its first
  *           four in XMM registers (the bridge's `floats`).
+ * @property {number[]} [quadwords]
+ *           The arguments the 32-bit signature counts as two dwords -- a
+ *           REFERENCE_TIME, a LARGE_INTEGER, a POINT by value -- by their first
+ *           dword counting the interface pointer: a 64-bit caller passes each
+ *           in one slot, and the method still reads the two dwords (the
+ *           bridge's `quadwords`).
+ * @property {Record<number, number>} [structs]
+ *           The structures wider than eight bytes passed by value -- a GUID, a
+ *           VARIANT -- by their first dword counting the interface pointer and
+ *           their size in dwords: a 64-bit caller passes a pointer to a copy
+ *           (the bridge's `structs`).
  */
 
 /**
@@ -188,7 +199,9 @@ export function createVtables({ memory, register, heap, long = ()=>false, unimpl
     const shapeOf = (interfaceId, table)=>(table.some(method=>method.guest) && !long()
         ? null
         : `${interfaceId}|${table.map(method=>`${method.argBytes}:${method.builtin ?? ''}:${
-            method.floats ? JSON.stringify(method.floats) : ''}`).join(',')}`);
+            method.floats ? JSON.stringify(method.floats) : ''}:${
+            method.quadwords ? method.quadwords.join('.') : ''}:${
+            method.structs ? JSON.stringify(method.structs) : ''}`).join(',')}`);
     /**
      * Which object an interface pointer belongs to, and that object's own
      * methods for it. A shared stub is called through many pointers, and the
@@ -281,6 +294,9 @@ export function createVtables({ memory, register, heap, long = ()=>false, unimpl
                     // thread's error, so the trace need not read it.
                     lastError: false,
                     ...method.floats ? { floats: method.floats } : {},
+                    ...method.quadwords ? { quadwords: method.quadwords } : {},
+
+                    ...method.structs ? { structs: method.structs } : {},
                     /** @param {number[]} args */
                     handler: args=>{
                         // The first argument is the interface pointer the guest

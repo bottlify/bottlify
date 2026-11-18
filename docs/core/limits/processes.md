@@ -46,13 +46,14 @@
   thread; with 2 or 4 they run at once (`concurrency` in [api.md](../api.md)). Either way a parent
   reaches into its child: its memory (`VirtualAllocEx`, `VirtualFreeEx`, `VirtualProtectEx`,
   `VirtualQueryEx`, `ReadProcessMemory`, `WriteProcessMemory` and ntdll's forms), its first
-  thread (`SuspendThread`, `ResumeThread`, `GetThreadContext`), and a thread it makes there with
+  thread (`SuspendThread`, `ResumeThread`, `GetThreadContext`, `SetThreadContext`), and a thread it makes there with
   `CreateRemoteThread`, which it waits on and reads the exit code of. A wait on a
   child's thread is answered within a few milliseconds of its end, asked of the child until
   then. `NtQueryInformationProcess` on a child's handle is answered by the child; once it has
-  ended, its id, parent and exit status remain and its PEB address does not. Not yet:
-  `SetThreadContext` (refused for every thread: one stopped inside a call into the system would
-  have the registers put in its place overwritten as the call returns), `OpenThread` of a child's
+  ended, its id, parent and exit status remain and its PEB address does not. `SetThreadContext` replaces
+  another thread's registers where it next runs, after the wait it may be in, as Windows does at its
+  return to user mode; the calling thread's own and the x87 state of a 32-bit context are not
+  replaced. Not yet: `OpenThread` of a child's
   thread the parent was not told of, and reading another process's TEB or PEB. Any process of the
   run opens another by its id (`OpenProcess`) wherever each of them runs: a wait on that handle
   ends with the other's exit and `GetExitCodeProcess` reads its code; nothing else of it is asked

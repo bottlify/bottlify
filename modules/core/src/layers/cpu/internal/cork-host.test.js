@@ -115,6 +115,10 @@ test('a captured context round-trips every block field', ()=>{
     {
         block[at] = (at * 31 + 7) & 0xff;
     }
+    // No arithmetic record pending: one is folded into the flags word at the
+    // capture (the next test), the same state said otherwise.
+    new DataView(block.buffer, block.byteOffset).setUint32(layout.flagRecord ?? 0, 0, true);
+    const pattern = block.slice();
     const context = h.captureContext();
     block.fill(0);
     h.restoreContext(context);
@@ -127,9 +131,46 @@ test('a captured context round-trips every block field', ()=>{
         {
             continue;
         }
-        assert.equal(restored[at], (at * 31 + 7) & 0xff, `byte ${at}`);
+        assert.equal(restored[at], pattern[at], `byte ${at}`);
     }
 });
+
+test('a captured context carries the flags word whole: a region\'s pending record folded in',
+    ()=>{
+        // A .NET collector reads a stopped thread's EFLAGS and puts them back with
+        // its context: the word alone, the record beside it dropped, has to be
+        // the flags the thread's last instruction left.
+        const h = host();
+        const layout = h.blockLayout();
+        const block = h.block();
+        const view = new DataView(block.buffer, block.byteOffset, block.byteLength);
+        const record = /** @type {number} */ (layout.flagRecord);
+        view.setUint32(layout.eflags, 0x202, true);
+        // A record left by `add eax, 1` with eax -1: result 0, carry out and zero.
+        const kindOfAdd = (()=>{
+            for (let kind = 1; kind < 64; kind++)
+            {
+                view.setUint32(layout.eflags, 0x202, true);
+                view.setUint32(record, kind, true);
+                view.setUint32(record + 4, 0, true);
+                view.setUint32(record + 8, 0xffffffff, true);
+                view.setUint32(record + 12, 1, true);
+                view.setUint32(record + 16, 0, true);
+                const context = h.captureContext();
+                const word = new DataView(context.block.buffer, context.block.byteOffset)
+                    .getUint32(layout.eflags, true);
+                if ((word & 0x41) === 0x41)
+                {
+                    return { kind, context };
+                }
+            }
+            return null;
+        })();
+        assert.ok(kindOfAdd, 'some record kind folds to CF and ZF');
+        const saved = new DataView(kindOfAdd.context.block.buffer,
+            kindOfAdd.context.block.byteOffset);
+        assert.equal(saved.getUint32(record, true), 0, 'the record cleared once folded');
+    });
 
 test('a restore leaves the live instruction counter where it is', ()=>{
     const h = host();

@@ -147,6 +147,7 @@ export function createDiskSpaceFunctions(host){
     /** @param {boolean} wide */
     const add = wide=>({
         argBytes: 28,
+        quadwords: [2],
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ [handle, filePointer, sizeLow, sizeHigh, operation])=>{
             const list = listOf(handle);

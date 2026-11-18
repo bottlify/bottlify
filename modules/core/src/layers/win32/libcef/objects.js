@@ -22,6 +22,10 @@ export const BASE_SIZE = 20;
  * @property {string} name
  * @property {number} argBytes  Counting the structure itself.
  * @property {(state: any, args: number[], self: number) => any} handler
+ * @property {number[]} [quadwords]
+ * @property {Record<number, 'f32' | 'f64'>} [floats]
+ * @property {Record<number, number>} [structs]
+ *           How a 64-bit caller passes wide arguments (the bridge's own words).
  *           Its arguments after the structure; what it answers.
  */
 
@@ -94,6 +98,10 @@ export function createCefObjects(host){
         {
             placed.set(type, methods.map(method=>host.register(`${type}.${method.name}`, {
                 argBytes: method.argBytes,
+                ...method.floats ? { floats: method.floats } : {},
+                ...method.quadwords ? { quadwords: method.quadwords } : {},
+
+                ...method.structs ? { structs: method.structs } : {},
                 handler: args=>{
                     const self = args[0] >>> 0;
                     return method.handler(live.get(self)?.state, args.slice(1), self);

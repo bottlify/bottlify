@@ -599,6 +599,7 @@ export function createQueryFunctions(host){
          */
         RtlVerifyVersionInfo: {
             argBytes: 16,
+            quadwords: [2],
             /** @param {number[]} args */
             handler: ([pointer, typeMask, maskLow, maskHigh])=>{
                 const block = peb();

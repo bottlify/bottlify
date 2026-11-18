@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createAudioClients, readStreamFormat, validateFormat } from './audio-client.js';
+import { LONG_RSP, callLong } from '../../bridge/internal/long-machine.fixture.js';
 
 const S_OK = 0;
 const S_FALSE = 1;
@@ -190,6 +191,18 @@ function setup(options = {}){
             assert.equal(clients.activate(OUT), S_OK);
             return view.getUint32(OUT, true);
         },
+        /**
+         * A method called as a 64-bit program calls it, through the bridge's
+         * x64 path: `this` in RCX, then RDX, R8, R9 and the stack.
+         *
+         * @param {number} pointer @param {string} name
+         * @param {Parameters<typeof callLong>[2]} machine
+         */
+        callLong(pointer, name, machine){
+            const record = records.get(pointer);
+            const method = record.methods.find((/** @type {any} */ m)=>m.name === name);
+            return callLong(method, record.object, machine);
+        },
         /** @param {number} pointer @param {string} name @param {number[]} [args] */
         call(pointer, name, args = []){
             const record = records.get(pointer);
@@ -285,6 +298,23 @@ test('a client is uninitialized until it is, and once only; exclusive mode is no
     s.bytes.set(format({ sub: 1, bits: 16 }), FORMAT);
     assert.equal(s.call(client, 'IsFormatSupported', [0, FORMAT, OUT]), S_OK);
     assert.equal(s.view.getUint32(OUT, true), 0);
+});
+
+test('a 64-bit program initializes a client: each REFERENCE_TIME one slot, then the format', ()=>{
+    // SDL2's WASAPI in a 64-bit game: Initialize(mode, flags, duration, period,
+    // format, session) is this in RCX, mode, flags and the duration in RDX, R8
+    // and R9, the period, the format and the session on the stack.
+    const s = setup();
+    const client = s.activate();
+    s.bytes.set(format(), FORMAT);
+    const answer = s.callLong(client, 'Initialize', {
+        registers: { rcx: BigInt(client), r11: 0n, r8: 0n, r9: 5000000n },
+        words: new Map([[LONG_RSP + 0x28, 0], [LONG_RSP + 0x2c, 0],
+            [LONG_RSP + 0x30, FORMAT], [LONG_RSP + 0x38, 0]]),
+    });
+    assert.equal(answer, S_OK, 'the format read from its own slot, not E_POINTER');
+    assert.equal(s.call(client, 'GetBufferSize', [OUT]), S_OK);
+    assert.equal(s.view.getUint32(OUT, true), RATE / 2, 'half a second: the duration whole');
 });
 
 test('with nothing listening a stream plays against the clock, padding falling as it plays', ()=>{

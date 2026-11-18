@@ -530,6 +530,7 @@ export function createThemeFunctions(host){
          */
         HitTestThemeBackground: {
             argBytes: 40,
+            quadwords: [7],
             handler: noTheme,
         },
 

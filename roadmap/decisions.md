@@ -2400,7 +2400,11 @@ attached (`programs/runonce.js`); a process the session starts later does not. T
 run by the system programs this engine provides, in the first process and on its thread, each
 with its own command line, rather than as processes of their own: what they do is what their
 exports do there, and regsvr32's library is loaded and freed before the program's first
-instruction. A command naming any other program is not run, said. It is where an install that
+instruction. A command naming any other program is not run, said. A regsvr32 command whose
+library is of the other width than the first process (an install leaves both system32's and
+SysWOW64's) is not run either, said, and its value stays for a session whose first process has
+that width - Windows' 64-bit regsvr32 starts the 32-bit one for it instead, and nothing here
+starts a process for the pass. It is where an install that
 runs no guest code leaves a COM server's registration (A67, and DirectX's setup): the library's
 own DllRegisterServer writes what it writes. Revisit when a setup is found that leaves another
 program in RunOnce, or a registration that must run in a process of its own. *2026-11-17.*

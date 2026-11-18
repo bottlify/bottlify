@@ -521,7 +521,7 @@ export function createDwriteFunctions(host){
          * HRESULT ReadFileFragment(void const **start, UINT64 offset, UINT64 size,
          *     void **context)
          */
-        { name: 'ReadFileFragment', argBytes: bytes(6), invoke: (o, args)=>{
+        { name: 'ReadFileFragment', argBytes: bytes(6), quadwords: [2, 4], invoke: (o, args)=>{
             const [startAt, offsetLow, offsetHigh, sizeLow, sizeHigh, contextAt] = args;
             putU32s(startAt, [0]);
             putU32s(contextAt, [0]);
@@ -824,7 +824,7 @@ export function createDwriteFunctions(host){
          *     DWRITE_GLYPH_OFFSET const*, UINT32 count, BOOL isSideways, BOOL isRtl,
          *     IDWriteGeometrySink*)
          */
-        { name: 'GetGlyphRunOutline', argBytes: bytes(8), invoke: ()=>{
+        { name: 'GetGlyphRunOutline', argBytes: bytes(8), floats: { 1: 'f32' }, invoke: ()=>{
             say('IDWriteFontFace::GetGlyphRunOutline', 'refused: glyph outlines are not read'
                 + ' here (the faces are drawn by the browser)');
             return E_NOTIMPL;
@@ -833,77 +833,81 @@ export function createDwriteFunctions(host){
          * HRESULT GetRecommendedRenderingMode(FLOAT emSize, FLOAT pixelsPerDip,
          *     DWRITE_MEASURING_MODE, IDWriteRenderingParams*, DWRITE_RENDERING_MODE*)
          */
-        { name: 'GetRecommendedRenderingMode', argBytes: bytes(5), invoke: (_o, args)=>{
-            const [em, ppd, measuring, params, out] = args;
-            if ((out >>> 0) === 0)
-            {
-                return E_INVALIDARG;
-            }
-            putU32s(out, [0]);
-            const values = (params >>> 0) === 0 ? null
-                : host.objectAt(params >>> 0)?.state?.values;
-            if (!values || (measuring >>> 0) > 2)
-            {
-                return E_INVALIDARG;
-            }
-            const pixels = f32(em) * f32(ppd);
-            // Outlines past a size (larger for GDI's measuring); then GDI's
-            // measuring draws as GDI does, and natural text smooths
-            // symmetrically past 20 pixels (no face here has a 'gasp' saying
-            // otherwise).
-            const mode = values[4] !== 0 ? values[4]
-                : pixels >= ((measuring >>> 0) === 0 ? 100 : 350) ? 6
-                    : (measuring >>> 0) === 1 ? 2 : (measuring >>> 0) === 2 ? 3
-                        : pixels <= 20 ? 4 : 5;
-            putU32s(out, [mode]);
-            return S_OK;
-        } },
+        { name: 'GetRecommendedRenderingMode', argBytes: bytes(5), floats: { 1: 'f32', 2: 'f32' },
+            invoke: (_o, args)=>{
+                const [em, ppd, measuring, params, out] = args;
+                if ((out >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                putU32s(out, [0]);
+                const values = (params >>> 0) === 0 ? null
+                    : host.objectAt(params >>> 0)?.state?.values;
+                if (!values || (measuring >>> 0) > 2)
+                {
+                    return E_INVALIDARG;
+                }
+                const pixels = f32(em) * f32(ppd);
+                // Outlines past a size (larger for GDI's measuring); then GDI's
+                // measuring draws as GDI does, and natural text smooths
+                // symmetrically past 20 pixels (no face here has a 'gasp' saying
+                // otherwise).
+                const mode = values[4] !== 0 ? values[4]
+                    : pixels >= ((measuring >>> 0) === 0 ? 100 : 350) ? 6
+                        : (measuring >>> 0) === 1 ? 2 : (measuring >>> 0) === 2 ? 3
+                            : pixels <= 20 ? 4 : 5;
+                putU32s(out, [mode]);
+                return S_OK;
+            } },
         /**
          * HRESULT GetGdiCompatibleMetrics(FLOAT emSize, FLOAT pixelsPerDip,
          *     DWRITE_MATRIX const*, DWRITE_FONT_METRICS*)
          */
-        { name: 'GetGdiCompatibleMetrics', argBytes: bytes(4), invoke: (o, args)=>{
-            const [em, ppd, transform, out] = args;
-            if ((out >>> 0) === 0)
-            {
-                return E_INVALIDARG;
-            }
-            const ppem = pixelsPerEm(f32(em), f32(ppd), transform);
-            if (!(f32(em) > 0) || !(f32(ppd) > 0) || !(ppem > 0))
-            {
-                host.writeMemory(out >>> 0, new Uint8Array(20));
-                return E_INVALIDARG;
-            }
-            const face = o.state.face;
-            const units = face.metrics.designUnitsPerEm;
-            // Each metric to whole pixels at the size, back in design units.
-            /** @param {number} value */
-            const snap = value=>roundAway(roundAway(value * ppem / units) * units / ppem);
-            const m = face.metrics;
-            putMetrics(out, { ...face, metrics: { ...m, ascent: snap(m.ascent),
-                descent: snap(m.descent), lineGap: snap(m.lineGap), capHeight: snap(m.capHeight),
-                xHeight: snap(m.xHeight), underlinePosition: snap(m.underlinePosition),
-                underlineThickness: snap(m.underlineThickness),
-                strikethroughPosition: snap(m.strikethroughPosition),
-                strikethroughThickness: snap(m.strikethroughThickness) } });
-            return S_OK;
-        } },
+        { name: 'GetGdiCompatibleMetrics', argBytes: bytes(4), floats: { 1: 'f32', 2: 'f32' },
+            invoke: (o, args)=>{
+                const [em, ppd, transform, out] = args;
+                if ((out >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const ppem = pixelsPerEm(f32(em), f32(ppd), transform);
+                if (!(f32(em) > 0) || !(f32(ppd) > 0) || !(ppem > 0))
+                {
+                    host.writeMemory(out >>> 0, new Uint8Array(20));
+                    return E_INVALIDARG;
+                }
+                const face = o.state.face;
+                const units = face.metrics.designUnitsPerEm;
+                // Each metric to whole pixels at the size, back in design units.
+                /** @param {number} value */
+                const snap = value=>roundAway(roundAway(value * ppem / units) * units / ppem);
+                const m = face.metrics;
+                putMetrics(out, { ...face, metrics: { ...m, ascent: snap(m.ascent),
+                    descent: snap(m.descent), lineGap: snap(m.lineGap),
+                    capHeight: snap(m.capHeight),
+                    xHeight: snap(m.xHeight), underlinePosition: snap(m.underlinePosition),
+                    underlineThickness: snap(m.underlineThickness),
+                    strikethroughPosition: snap(m.strikethroughPosition),
+                    strikethroughThickness: snap(m.strikethroughThickness) } });
+                return S_OK;
+            } },
         /**
          * HRESULT GetGdiCompatibleGlyphMetrics(FLOAT emSize, FLOAT pixelsPerDip,
          *     DWRITE_MATRIX const*, BOOL useGdiNatural, UINT16 const*, UINT32 count,
          *     DWRITE_GLYPH_METRICS*, BOOL isSideways)
          */
-        { name: 'GetGdiCompatibleGlyphMetrics', argBytes: bytes(8), invoke: (o, args)=>{
-            const [em, ppd, transform, , indices, count, out] = args;
-            const ppem = pixelsPerEm(f32(em), f32(ppd), transform);
-            if (!(ppem > 0))
-            {
-                return E_INVALIDARG;
-            }
-            const units = o.state.face.metrics.designUnitsPerEm;
-            return putGlyphMetrics(o.state.face, indices, count, out, advance=>roundAway(
-                roundAway(advance * ppem / units) * units / ppem));
-        } },
+        { name: 'GetGdiCompatibleGlyphMetrics', argBytes: bytes(8), floats: { 1: 'f32', 2: 'f32' },
+            invoke: (o, args)=>{
+                const [em, ppd, transform, , indices, count, out] = args;
+                const ppem = pixelsPerEm(f32(em), f32(ppd), transform);
+                if (!(ppem > 0))
+                {
+                    return E_INVALIDARG;
+                }
+                const units = o.state.face.metrics.designUnitsPerEm;
+                return putGlyphMetrics(o.state.face, indices, count, out, advance=>roundAway(
+                    roundAway(advance * ppem / units) * units / ppem));
+            } },
     ] };
 
     // ----- Collections, families, fonts -----
@@ -1648,21 +1652,23 @@ export function createDwriteFunctions(host){
          * HRESULT CreateCustomRenderingParams(FLOAT gamma, FLOAT enhancedContrast,
          *     FLOAT clearTypeLevel, DWRITE_PIXEL_GEOMETRY, DWRITE_RENDERING_MODE, params**)
          */
-        { name: 'CreateCustomRenderingParams', argBytes: bytes(6), invoke: (_o, args)=>{
-            const [gamma, contrast, level, geometry, mode, out] = args;
-            if ((out >>> 0) === 0)
-            {
-                return E_INVALIDARG;
-            }
-            putU32s(out, [0]);
-            const values = [f32(gamma), f32(contrast), f32(level), geometry >>> 0, mode >>> 0];
-            if (!(values[0] > 0) || !(values[1] >= 0) || !(values[2] >= 0) || values[3] > 2
+        { name: 'CreateCustomRenderingParams', argBytes: bytes(6),
+            floats: { 1: 'f32', 2: 'f32', 3: 'f32' },
+            invoke: (_o, args)=>{
+                const [gamma, contrast, level, geometry, mode, out] = args;
+                if ((out >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                putU32s(out, [0]);
+                const values = [f32(gamma), f32(contrast), f32(level), geometry >>> 0, mode >>> 0];
+                if (!(values[0] > 0) || !(values[1] >= 0) || !(values[2] >= 0) || values[3] > 2
                 || values[4] > 6)
-            {
-                return E_INVALIDARG;
-            }
-            return give(out, newParams(values), IID.RENDERING_PARAMS);
-        } },
+                {
+                    return E_INVALIDARG;
+                }
+                return give(out, newParams(values), IID.RENDERING_PARAMS);
+            } },
         /** HRESULT RegisterFontFileLoader(IDWriteFontFileLoader*) */
         { name: 'RegisterFontFileLoader', argBytes: bytes(1), invoke: (o, [loader])=>
             register(o.state.fileLoaders, loader) },
@@ -1734,16 +1740,17 @@ export function createDwriteFunctions(host){
          *     DWRITE_MATRIX const*, DWRITE_RENDERING_MODE, DWRITE_MEASURING_MODE,
          *     FLOAT baselineOriginX, FLOAT baselineOriginY, IDWriteGlyphRunAnalysis**)
          */
-        { name: 'CreateGlyphRunAnalysis', argBytes: bytes(8), invoke: (_o, args)=>{
-            const out = args[7] >>> 0;
-            if (out === 0)
-            {
-                return E_INVALIDARG;
-            }
-            putU32s(out, [0]);
-            const made = analysis.glyphRun(args);
-            return typeof made === 'number' ? made : give(out, made, IID.GLYPH_RUN_ANALYSIS);
-        } },
+        { name: 'CreateGlyphRunAnalysis', argBytes: bytes(8), floats: { 2: 'f32' },
+            invoke: (_o, args)=>{
+                const out = args[7] >>> 0;
+                if (out === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                putU32s(out, [0]);
+                const made = analysis.glyphRun(args);
+                return typeof made === 'number' ? made : give(out, made, IID.GLYPH_RUN_ANALYSIS);
+            } },
     ] };
 
     /** A factory: its system collection and interop kept, its registered loaders. */

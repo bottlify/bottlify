@@ -490,6 +490,7 @@ export function createDbghelpFunctions(host){
         /** DWORD64 SymGetModuleBase64(HANDLE hProcess, DWORD64 qwAddr) */
         SymGetModuleBase64: {
             argBytes: 12,
+            quadwords: [1],
             /** @param {number[]} args */
             handler: ([, address, high])=>{
                 const base = (high >>> 0) === 0 ? moduleBase(address) : 0;
@@ -498,19 +499,20 @@ export function createDbghelpFunctions(host){
         },
 
         /** PVOID SymFunctionTableAccess64(HANDLE hProcess, DWORD64 AddrBase): none on x86. */
-        SymFunctionTableAccess64: { argBytes: 12, handler: ()=>0 },
+        SymFunctionTableAccess64: { argBytes: 12, quadwords: [1], handler: ()=>0 },
 
         /**
          * BOOL SymFromAddr(HANDLE hProcess, DWORD64 Address, PDWORD64 Displacement,
          *     PSYMBOL_INFO Symbol): no symbol is known.
          */
-        SymFromAddr: { argBytes: 20, handler: ()=>fail(0, ERROR_INVALID_ADDRESS) },
+        SymFromAddr: { argBytes: 20, quadwords: [1], handler: ()=>fail(0, ERROR_INVALID_ADDRESS) },
 
         /**
          * BOOL SymGetLineFromAddr64(HANDLE hProcess, DWORD64 qwAddr,
          *     PDWORD pdwDisplacement, PIMAGEHLP_LINE64 Line): no line is known.
          */
-        SymGetLineFromAddr64: { argBytes: 20, handler: ()=>fail(0, ERROR_INVALID_ADDRESS) },
+        SymGetLineFromAddr64: { argBytes: 20, quadwords: [1],
+            handler: ()=>fail(0, ERROR_INVALID_ADDRESS) },
 
         /**
          * BOOL SymGetModuleInfo64(HANDLE hProcess, DWORD64 qwAddr,

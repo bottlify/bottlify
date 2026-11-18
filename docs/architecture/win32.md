@@ -61,6 +61,16 @@ CC ...           int3 up to 16 bytes
 How many bytes `ret N` takes off, the bridge decides from the calling convention: stdcall takes all
 of `argBytes`, cdecl none, and thiscall and fastcall leave out the arguments passed in registers.
 
+A handler is written once, in the 32-bit layout, and a 64-bit program's call is read back into it.
+There every argument is one slot (RCX, RDX, R8, R9, then the stack), so an argument wider than a
+dword says so in its table entry, by the dword it starts at: `quadwords` for an eight-byte integer or
+a POINT by value (two dwords here, one slot there), `floats` for a float or a double (an XMM
+register among the first four), `structs` for a structure wider than eight bytes by value, a GUID or
+a VARIANT (a pointer to the caller's copy there). `IStream::Seek` is
+`{ name: 'Seek', argBytes: 20, quadwords: [1] }`, counting `this` as 0. `npm run check:boundaries`
+runs `tools/checks/check-wide-arguments.mjs`, which holds each entry to the signature comment
+above it.
+
 ## One call, from the program to JS and back
 
 ```mermaid

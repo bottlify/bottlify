@@ -66,7 +66,9 @@ The order matters in three places.
   (`programs/runonce.js`): each command under `HKLM` and then `HKCU`
   `Software\Microsoft\Windows\CurrentVersion\RunOnce`, by name, run by the system program it names
   (regsvr32 above all) on that thread and waited for, its value deleted first, or after it
-  succeeds for a name starting with `!`. A process the session starts later skips it. An install
+  succeeds for a name starting with `!`. A regsvr32 command for a library of the other width is
+  not run and its value is kept for a session of that width. A process the session starts later
+  skips it. An install
   that registers no COM server itself leaves `regsvr32 /s` there (`roadmap/decisions.md` A261).
 
 With processes at once (`concurrency` 2 or 4), the engine thread builds the run's system instead:

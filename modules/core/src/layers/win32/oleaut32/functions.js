@@ -2165,9 +2165,12 @@ export function createAutomationFunctions(host){
      * required, E_POINTER without it.
      *
      * @param {number} argBytes @param {(args: number[]) => string | number} spell
+     * @param {{ quadwords?: number[], floats?: Record<number, 'f32' | 'f64'> }} [marshal]
+     *     How a 64-bit caller passes the value (`wideOf`).
      */
-    const toBstr = (argBytes, spell)=>({
+    const toBstr = (argBytes, spell, marshal = {})=>({
         argBytes,
+        ...marshal,
         /** @param {number[]} args */
         handler: args=>{
             const out = args[argBytes / 4 - 1] >>> 0;
@@ -2416,6 +2419,41 @@ export function createAutomationFunctions(host){
     });
 
     /**
+     * How a 64-bit caller passes arguments of these types and stack widths, in
+     * order from the first dword: an eight-byte integer (CY, I8, UI8) in one
+     * slot, a double (R8, DATE) and a float (R4) in an XMM register among the
+     * first four -- the bridge's `quadwords` and `floats`.
+     *
+     * @param {[number, number][]} widths  each argument's VARTYPE and stack bytes
+     * @returns {{ quadwords?: number[], floats?: Record<number, 'f32' | 'f64'> }}
+     */
+    const wideOf = widths=>{
+        /** @type {number[]} */
+        const quadwords = [];
+        /** @type {Record<number, 'f32' | 'f64'>} */
+        const floats = {};
+        let word = 0;
+        for (const [type, bytes] of widths)
+        {
+            if (type === VT_R8 || type === VT_DATE)
+            {
+                floats[word] = 'f64';
+            }
+            else if (type === VT_R4)
+            {
+                floats[word] = 'f32';
+            }
+            else if (bytes === 8)
+            {
+                quadwords.push(word);
+            }
+            word += bytes / 4;
+        }
+        return { ...quadwords.length > 0 ? { quadwords } : {},
+            ...Object.keys(floats).length > 0 ? { floats } : {} };
+    };
+
+    /**
      * A Var<to>From<from>'s argument as a value, read by its type's width
      * and sign; a DECIMAL whose scale or sign byte no DECIMAL has is an
      * invalid argument, and a missing string holds no number.
@@ -2498,6 +2536,7 @@ export function createAutomationFunctions(host){
             const api = `Var${to}From${from}`;
             conversions[api] = {
                 argBytes: width + 4,
+                ...wideOf([[source, width]]),
                 handler: args=>{
                     const out = args[width / 4] >>> 0;
                     const value = argumentValue(source, args);
@@ -2619,6 +2658,7 @@ export function createAutomationFunctions(host){
         const argBytes = widths.reduce((sum, [, bytes])=>sum + bytes, 4);
         return {
             argBytes,
+            ...wideOf(widths),
             /** @param {number[]} args */
             handler: args=>{
                 const out = args[argBytes / 4 - 1] >>> 0;
@@ -2689,6 +2729,7 @@ export function createAutomationFunctions(host){
         const argBytes = widths.reduce((sum, [, bytes])=>sum + bytes, 0);
         return {
             argBytes,
+            ...wideOf(widths),
             /** @param {number[]} args */
             handler: args=>{
                 const left = argumentValue(type, args.slice(0, widths[0][1] / 4));
@@ -2817,6 +2858,7 @@ export function createAutomationFunctions(host){
         /** HRESULT VarR8Round(double dblIn, int nDig, double *pDblOut) */
         VarR8Round: {
             argBytes: 16,
+            floats: { 0: 'f64' },
             /** @param {number[]} args */
             handler: ([low, high, places, out])=>{
                 if ((places | 0) < 0 || (out >>> 0) === 0)
@@ -2842,7 +2884,7 @@ export function createAutomationFunctions(host){
                 english(`VarBstrFrom${from}`, args[width / 4]);
                 const value = argumentValue(source, args);
                 return typeof value === 'number' ? value : spelled(value, args[width / 4 + 1]);
-            });
+            }, wideOf([[source, width]]));
         }
     }
 
@@ -4063,7 +4105,7 @@ export function createAutomationFunctions(host){
         VarBstrFromCy: toBstr(20, ([low, high, lcid])=>{
             english('VarBstrFromCy', lcid);
             return textOfCurrency(BigInt.asIntN(64, BigInt(high >>> 0) << 32n | BigInt(low >>> 0)));
-        }),
+        }, { quadwords: [0] }),
 
         /**
          * HRESULT VarBstrFromDate(DATE dateIn, LCID lcid, ULONG dwFlags, BSTR *pbstrOut)
@@ -4076,7 +4118,7 @@ export function createAutomationFunctions(host){
         VarBstrFromDate: toBstr(20, ([low, high, lcid, flags])=>{
             english('VarBstrFromDate', lcid);
             return textOfDate(doubleOf(low, high), flags >>> 0) ?? E_INVALIDARG;
-        }),
+        }, { floats: { 0: 'f64' } }),
         /** HRESULT VarRound(LPVARIANT pvarIn, int cDecimals, LPVARIANT pvarResult) */
         VarRound: {
             argBytes: 12,
@@ -4253,6 +4295,7 @@ export function createAutomationFunctions(host){
         /** HRESULT VarUdateFromDate(DATE dateIn, ULONG dwFlags, UDATE *pudateOut) */
         VarUdateFromDate: {
             argBytes: 16,
+            floats: { 0: 'f64' },
             /** @param {number[]} args */
             handler: ([low, high, , out])=>{
                 const fields = fieldsOf(doubleOf(low, high));
@@ -4309,6 +4352,7 @@ export function createAutomationFunctions(host){
         /** INT VariantTimeToSystemTime(double vtime, LPSYSTEMTIME lpSystemTime) */
         VariantTimeToSystemTime: {
             argBytes: 12,
+            floats: { 0: 'f64' },
             /** @param {number[]} args */
             handler: ([low, high, out])=>{
                 const fields = fieldsOf(doubleOf(low, high));
@@ -4349,6 +4393,7 @@ export function createAutomationFunctions(host){
         /** INT VariantTimeToDosDateTime(double vtime, USHORT *pwDosDate, USHORT *pwDosTime) */
         VariantTimeToDosDateTime: {
             argBytes: 16,
+            floats: { 0: 'f64' },
             /** @param {number[]} args */
             handler: ([low, high, dateOut, timeOut])=>{
                 const fields = fieldsOf(doubleOf(low, high));
@@ -5286,6 +5331,7 @@ export function createAutomationFunctions(host){
          */
         OleLoadPictureFile: {
             argBytes: 20,
+            structs: { 0: 4 },
             /** @param {number[]} args */
             handler: ([type, , name, , out])=>{
                 if ((out >>> 0) === 0)

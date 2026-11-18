@@ -48,6 +48,7 @@ import { supportedOsOf, windowsVersion } from './layers/win32/kernel32/versions.
 import { KNOWN_ROUTINES } from './layers/win32/msvcrt/known-routines.js';
 import { GRAPHICS_CHOICES, graphicsChoice } from './layers/graphics/choice.js';
 import { searchesBesideProgram } from './layers/win32/kernel32/modules.js';
+import { STEAM_PATH, announceSteamClient } from './layers/win32/steamclient/functions.js';
 import { synthesiseProcessInit, synthesiseStartRefused, DLL_PROCESS_ATTACH, DLL_PROCESS_DETACH }
     from './layers/loader/internal/init.js';
 import { BLOCK_MISS, createBundleSource } from './layers/filesystem/internal/bundle/source.js';
@@ -6463,6 +6464,14 @@ async function buildApp(options){
     const { seeded, saver, stopSavingRegistry } = await openSession({ options, events, filesystem,
         registry: core.api('win32').registry(), inherited: registryInherited,
         standing: filesystem.inherited?.() ?? false, system: options.system });
+    // A saved session restored the registry whole, with the client a past run
+    // had: this run's is announced over it.
+    const steamClient = core.api('win32').steamClient?.() ?? 0;
+    if (steamClient !== 0 && options.win32?.steam)
+    {
+        announceSteamClient(core.api('win32').registry(),
+            { pid: steamClient, account: options.win32.steam });
+    }
 
     const journal = core.api('log');
     // The run's processes share one event bus and one journal, so only the
@@ -12518,6 +12527,20 @@ export async function createApp(options){
         completed: false, exitCode: STILL_ACTIVE,
         exited: processEvents.createEvent({ manualReset: true, signalled: false,
             name: `process ${request.id}` }) });
+
+    // A run made with a signed-in Steam account has its client running, as a
+    // game finds one. With every program in a worker of its own the registry
+    // and the directory of processes are the system half's, made here before
+    // any program: the client is listed and announced here, once, over what a
+    // saved session left (a pid of a client long gone). On the run's thread
+    // the first program's win32 does it, the hive being its own.
+    if (rootAcross && options.win32?.steam)
+    {
+        const { processId } = newProcessIds();
+        system.processDirectory?.set(processId,
+            listedAcross({ id: processId, imagePath: `${STEAM_PATH}\\steam.exe` }));
+        announceSteamClient(system.registry, { pid: processId, account: options.win32.steam });
+    }
 
     /**
      * Runs a child in a worker of its own: its machine there, the run's

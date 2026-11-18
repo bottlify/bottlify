@@ -92,7 +92,7 @@ export function createRenderTargets(t){
          *     DWRITE_MEASURING_MODE, DWRITE_GLYPH_RUN const*, IDWriteRenderingParams*,
          *     COLORREF textColor, RECT *blackBoxRect)
          */
-        { name: 'DrawGlyphRun', argBytes: 32, invoke: (o, args)=>{
+        { name: 'DrawGlyphRun', argBytes: 32, floats: { 1: 'f32', 2: 'f32' }, invoke: (o, args)=>{
             const [x, y, measuring, run, params, color, boxOut] = args;
             const state = o.state;
             // An empty target draws nothing and checks nothing.
@@ -141,7 +141,7 @@ export function createRenderTargets(t){
         { name: 'GetPixelsPerDip', argBytes: 4, invoke: o=>t.floatAnswer(
             'IDWriteBitmapRenderTarget::GetPixelsPerDip', o.state.ppd) },
         /** HRESULT SetPixelsPerDip(FLOAT) */
-        { name: 'SetPixelsPerDip', argBytes: 8, invoke: (o, [value])=>{
+        { name: 'SetPixelsPerDip', argBytes: 8, floats: { 1: 'f32' }, invoke: (o, [value])=>{
             const ppd = f32(value);
             if (!(ppd > 0))
             {

@@ -11,7 +11,8 @@ import { createEventLogFunctions } from './eventlog.js';
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_PARAMETER = 87;
 
-function setup(){
+/** @param {Partial<import('./eventlog.js').EventLogHost>} [more] */
+function setup(more = {}){
     const bytes = new Uint8Array(0x1000);
     /** @type {number[]} */
     const errors = [];
@@ -63,6 +64,7 @@ function setup(){
                 return table.delete(handle);
             },
         },
+        ...more,
     }));
     return { bytes, errors, fns, table };
 }
@@ -129,6 +131,22 @@ test('an event reported is read back as an EVENTLOGRECORD, oldest first, then th
     assert.equal(fns.ClearEventLogA.handler([reader, 0]), 1);
     fns.GetNumberOfEventLogRecords.handler([reader, 0x300]);
     assert.equal(view.getUint32(0x300, true), 0);
+});
+
+test('an error event is told to the run with its source, id and strings; others are not', ()=>{
+    /** @type {any[]} */
+    const told = [];
+    const { bytes, fns } = setup({ reportError: (source, id, strings)=>told.push([source, id,
+        strings]) });
+    const view = new DataView(bytes.buffer);
+    bytes.set([...'.NET Runtime\0'].map(character=>character.charCodeAt(0)), 0x100);
+    bytes.set([...'internal error\0'].map(character=>character.charCodeAt(0)), 0x140);
+    view.setUint32(0x180, 0x140, true);
+    const log = fns.RegisterEventSourceA.handler([0, 0x100]);
+    assert.equal(fns.ReportEventA.handler([log, 1, 0, 1023, 0, 1, 0, 0x180, 0]), 1);
+    assert.equal(fns.ReportEventA.handler([log, 4, 0, 1000, 0, 1, 0, 0x180, 0]), 1);
+    assert.deepEqual(told, [['.NET Runtime', 1023, ['internal error']]],
+        'EVENTLOG_ERROR_TYPE alone');
 });
 
 test('the System log opens on its service\'s start, whatever the case of its name', ()=>{

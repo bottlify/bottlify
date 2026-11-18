@@ -165,9 +165,16 @@ export function createUiaFunctions(host){
         } },
     ] };
 
-    /** An event raised: S_OK, as no client listens. @param {number} argBytes */
-    const raised = argBytes=>({
+    /**
+     * An event raised: S_OK, as no client listens.
+     *
+     * @param {number} argBytes
+     * @param {{ floats?: Record<number, 'f64'>, structs?: Record<number, number> }} [marshal]
+     *     A double or a VARIANT by value, as a 64-bit caller passes it.
+     */
+    const raised = (argBytes, marshal = {})=>({
         argBytes,
+        ...marshal,
         /** @param {number[]} args */
         handler: ([provider])=>((provider >>> 0) === 0 ? E_INVALIDARG : S_OK),
     });
@@ -247,11 +254,12 @@ export function createUiaFunctions(host){
         /** HRESULT UiaRaiseAutomationEvent(IRawElementProviderSimple *, EVENTID) */
         UiaRaiseAutomationEvent: raised(8),
         /** HRESULT UiaRaiseAutomationPropertyChangedEvent(provider, PROPERTYID, VARIANT, VARIANT) */
-        UiaRaiseAutomationPropertyChangedEvent: raised(8 + 2 * VARIANT_SIZE),
+        UiaRaiseAutomationPropertyChangedEvent: raised(8 + 2 * VARIANT_SIZE,
+            { structs: { 2: 4, 6: 4 } }),
         /** HRESULT UiaRaiseStructureChangedEvent(provider, StructureChangeType, int *, int) */
         UiaRaiseStructureChangedEvent: raised(16),
         /** HRESULT UiaRaiseAsyncContentLoadedEvent(provider, AsyncContentLoadedState, double) */
-        UiaRaiseAsyncContentLoadedEvent: raised(16),
+        UiaRaiseAsyncContentLoadedEvent: raised(16, { floats: { 2: 'f64' } }),
         /** HRESULT UiaRaiseNotificationEvent(provider, kind, processing, BSTR, BSTR) */
         UiaRaiseNotificationEvent: raised(20),
         /** HRESULT UiaRaiseTextEditTextChangedEvent(provider, TextEditChangeType, SAFEARRAY *) */
