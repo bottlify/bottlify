@@ -1228,6 +1228,13 @@ export function createHeapFunctions(host){
             + (holders ? ` (${holders})` : ''));
     };
 
+    /**
+     * A SIZE_T argument whole: in a 64-bit process its high dword comes beside
+     * the low one (`pointerArg`), and a size past 4 GiB is one no request in
+     * this address space meets - refused, not its low half taken.
+     */
+    const wholeSize = pointerArg;
+
     /** @param {number} address */
     const readDword = address=>{
         const bytes = host.readMemory(address, 4);
@@ -1983,6 +1990,11 @@ export function createHeapFunctions(host){
      */
     const virtualAlloc = (pointer, bytes, type, protect, where)=>{
         const kind = type >>> 0;
+        if (bytes > 0xffffffff)
+        {
+            host.setLastError(ERROR_NOT_ENOUGH_MEMORY);
+            return 0;
+        }
         const size = bytes >>> 0;
         const requested = pointer >>> 0;
         const protection = protect >>> 0;
@@ -2399,14 +2411,16 @@ export function createHeapFunctions(host){
         HeapAlloc: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([handle, flags, bytes])=>{
+            handler: args=>{
+                const [handle, flags] = args;
                 const heap = handle >>> 0;
                 if (!heaps.has(heap))
                 {
                     return 0;
                 }
-                const size = bytes >>> 0;
-                if (!fits(heap, size, 0))
+                const whole = wholeSize(args, 2);
+                const size = whole >>> 0;
+                if (whole !== size || !fits(heap, size, 0))
                 {
                     host.setLastError(ERROR_NOT_ENOUGH_MEMORY);
                     return 0;
@@ -2433,7 +2447,8 @@ export function createHeapFunctions(host){
         HeapReAlloc: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([handle, flags, pointer, bytes])=>{
+            handler: args=>{
+                const [handle, flags, pointer, bytes] = args;
                 const heap = handle >>> 0;
                 const address = pointer >>> 0;
                 const block = blockOf(heap, address);
@@ -2441,7 +2456,7 @@ export function createHeapFunctions(host){
                 {
                     return 0;
                 }
-                if (!fits(heap, bytes >>> 0, block.size))
+                if (wholeSize(args, 3) !== bytes >>> 0 || !fits(heap, bytes >>> 0, block.size))
                 {
                     host.setLastError(ERROR_NOT_ENOUGH_MEMORY);
                     return 0;
@@ -2504,8 +2519,7 @@ export function createHeapFunctions(host){
         VirtualAlloc: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([pointer, bytes, type, protect])=>
-                virtualAlloc(pointer, bytes, type, protect, null),
+            handler: args=>virtualAlloc(args[0], wholeSize(args, 1), args[2], args[3], null),
         },
 
         /**
@@ -2523,7 +2537,8 @@ export function createHeapFunctions(host){
         VirtualAlloc2: {
             argBytes: 28,
             /** @param {number[]} args */
-            handler: ([process, pointer, bytes, type, protect, list, count])=>{
+            handler: args=>{
+                const [process, pointer, , type, protect, list, count] = args;
                 if ((process >>> 0) !== 0 && (process >>> 0) !== CURRENT_PROCESS)
                 {
                     host.divergence?.('VirtualAlloc2', `process 0x${(process >>> 0)
@@ -2537,7 +2552,7 @@ export function createHeapFunctions(host){
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                return virtualAlloc(pointer, bytes, type, protect, where);
+                return virtualAlloc(pointer, wholeSize(args, 2), type, protect, where);
             },
         },
 
@@ -2553,10 +2568,17 @@ export function createHeapFunctions(host){
         VirtualFree: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([pointer, bytes, type])=>{
+            handler: args=>{
+                const [pointer, bytes, type] = args;
                 const address = pointer >>> 0;
                 const kind = type >>> 0;
                 const size = bytes >>> 0;
+                if (wholeSize(args, 1) !== size)
+                {
+                    // More than the address space holds: no range of a reservation.
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
                 if (kind !== MEM_DECOMMIT && kind !== MEM_RELEASE)
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
@@ -2694,8 +2716,19 @@ export function createHeapFunctions(host){
                         tracked.delete(page >>> 12);
                     }
                 }
-                written.forEach((page, at)=>writeDword((addresses >>> 0) + at * 4, page));
-                writeDword(count >>> 0, written.length);
+                // PVOID and ULONG_PTR: eight bytes each in a 64-bit process, the upper half zero.
+                const wide = host.pointerSize === 8;
+                /** @param {number} at @param {number} value */
+                const writeWord = (at, value)=>{
+                    writeDword(at, value);
+                    if (wide)
+                    {
+                        writeDword(at + 4, 0);
+                    }
+                };
+                const stride = wide ? 8 : 4;
+                written.forEach((page, at)=>writeWord((addresses >>> 0) + at * stride, page));
+                writeWord(count >>> 0, written.length);
                 writeDword(granularity >>> 0, PAGE_SIZE);
                 return 0;
             },

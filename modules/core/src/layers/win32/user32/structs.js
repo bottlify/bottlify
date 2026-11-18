@@ -142,13 +142,18 @@ const INPUT64 = Object.freeze({
 const NCCALCSIZE_PARAMS32 = Object.freeze({ rgrc: 0, lppos: 48, SIZE: 52 });
 const NCCALCSIZE_PARAMS64 = Object.freeze({ rgrc: 0, lppos: 48, SIZE: 56 });
 
-/** How each eight-byte field widens a 32-bit value: as a LONG, or as a UINT. */
+/**
+ * How each eight-byte field widens a 32-bit value: a handle and an LPARAM as a
+ * LONG (HWND_TOPMOST is -1 whole), an address and a WPARAM as a UINT. An address
+ * - a window procedure, a string, lpCreateParams, a module's base (HINSTANCE) -
+ * past 2 GiB in a program linked /LARGEADDRESSAWARE stays itself.
+ */
 const WIDE = Object.freeze({
-    hwnd: 'signed', hwndInsertAfter: 'signed', lpfnWndProc: 'signed', hInstance: 'signed',
-    hIcon: 'signed', hCursor: 'signed', hbrBackground: 'signed', lpszMenuName: 'signed',
-    lpszClassName: 'signed', hIconSm: 'signed', wParam: 'unsigned', lParam: 'signed',
-    hdc: 'signed', lpCreateParams: 'signed', hMenu: 'signed', hwndParent: 'signed',
-    lpszName: 'signed', lpszClass: 'signed', lpcs: 'signed', lppos: 'signed',
+    hwnd: 'signed', hwndInsertAfter: 'signed', lpfnWndProc: 'unsigned', hInstance: 'unsigned',
+    hIcon: 'signed', hCursor: 'signed', hbrBackground: 'signed', lpszMenuName: 'unsigned',
+    lpszClassName: 'unsigned', hIconSm: 'signed', wParam: 'unsigned', lParam: 'signed',
+    hdc: 'signed', lpCreateParams: 'unsigned', hMenu: 'signed', hwndParent: 'signed',
+    lpszName: 'unsigned', lpszClass: 'unsigned', lpcs: 'unsigned', lppos: 'unsigned',
     hWndActive: 'signed', dwExtraInfo: 'unsigned',
 });
 

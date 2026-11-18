@@ -1660,6 +1660,53 @@ test('GetWriteWatch tells the pages written since the reset, and RESET starts th
     assert.equal(asked.length, 1);
 });
 
+test('GetWriteWatch in a 64-bit process writes its PVOID array and ULONG_PTR count whole', ()=>{
+    // lpAddresses is PVOID* and lpdwCount ULONG_PTR*: eight bytes each at 64 bits. Every byte of
+    // both starts as 0xAA, so a dword write leaves the upper halves as garbage a collector reads
+    // as addresses and as a count (the Boehm collector Unity's Mono builds on watches its heap).
+    const MEM_WRITE_WATCH = 0x200000;
+    const host = { ...fakeHost(RESERVING_ARENA), pointerSize: 8, setLastError: ()=>{},
+        watchWrites: ()=>({ take: (/** @type {number} */ address)=>[(address >>> 12) + 1] }) };
+    const fns = createHeapFunctions(host);
+    const view = new DataView(host.bytes.buffer);
+    const base = fns.VirtualAlloc.handler([0, 4 * PAGE_SIZE,
+        MEM_RESERVE | MEM_COMMIT | MEM_WRITE_WATCH, 0x04]);
+    host.bytes.fill(0xaa, 0x100, 0x300);
+    view.setUint32(0x100, 64, true);
+    assert.equal(fns.GetWriteWatch.handler([0, base, 4 * PAGE_SIZE, 0x200, 0x100, 0x180]), 0);
+    assert.equal(view.getBigUint64(0x100, true), 4n, 'the count, all eight bytes');
+    assert.deepEqual(Array.from({ length: 4 }, (_, at)=>view.getBigUint64(0x200 + 8 * at, true)),
+        [0, 1, 2, 3].map(page=>BigInt(base + page * PAGE_SIZE)), 'each address eight bytes apart');
+    assert.equal(view.getBigUint64(0x220, true), 0xaaaaaaaaaaaaaaaan, 'nothing past the answer');
+    assert.equal(view.getUint32(0x180, true), PAGE_SIZE, 'the granularity is a DWORD');
+    assert.equal(view.getUint32(0x184, true), 0xaaaaaaaa, 'and only a DWORD');
+});
+
+test('a 64-bit process\'s SIZE_T past 4 GiB is refused whole, not taken by its low half', ()=>{
+    // The bridge hands a 64-bit argument's low dword and its high one beside it (`args.high`):
+    // VirtualAlloc(4 GiB + 64 KiB) was a 64 KiB reservation, HeapAlloc of 4 GiB + 16 a block of 16.
+    /** @type {number[]} */
+    const errors = [];
+    const host = { ...fakeHost(RESERVING_ARENA), pointerSize: 8,
+        setLastError: (/** @type {number} */ code)=>errors.push(code) };
+    const fns = createHeapFunctions(host);
+    /** @param {number[]} words @param {number} at @returns {number[] & { high: number[] }} */
+    const wide = (words, at)=>Object.assign(words, { high: words.map((_, i)=>(i === at ? 1 : 0)) });
+    const MEM_RESERVE_COMMIT = 0x3000;
+    assert.equal(fns.VirtualAlloc.handler(wide([0, 0x10000, MEM_RESERVE_COMMIT, 0x04], 1)), 0);
+    assert.equal(errors.at(-1), 8, 'ERROR_NOT_ENOUGH_MEMORY');
+    const heap = fns.GetProcessHeap.handler();
+    assert.equal(fns.HeapAlloc.handler(wide([heap, 0, 16], 2)), 0, 'HeapAlloc');
+    const block = fns.HeapAlloc.handler([heap, 0, 16]);
+    assert.notEqual(block, 0);
+    assert.equal(fns.HeapReAlloc.handler(wide([heap, 0, block, 32], 3)), 0, 'HeapReAlloc');
+    assert.equal(fns.HeapSize.handler([heap, 0, block]), 16, 'the block left as it was');
+    const base = fns.VirtualAlloc.handler([0, 0x10000, MEM_RESERVE_COMMIT, 0x04]);
+    assert.notEqual(base, 0);
+    assert.equal(fns.VirtualFree.handler(wide([base, 0x1000, MEM_DECOMMIT], 1)), 0, 'VirtualFree');
+    assert.equal(errors.at(-1), 87, 'ERROR_INVALID_PARAMETER');
+});
+
 test('GetWriteWatch over the write clock: every page written since its last report or reset '
     + 'is told, against a model of Windows, in seeded runs', ()=>{
     // A collector's background marking (the .NET runtime's) rescans what
