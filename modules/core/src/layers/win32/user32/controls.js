@@ -459,23 +459,25 @@ const VK_F4 = 0x73;
 /** How far one notch of the wheel scrolls a dropped list, in items. */
 const WHEEL_ITEMS = 3;
 
-/**
- * The notices an editing field gives its parent as text changes: an edit
- * reports the EN_* pair, the field of an editable combo box the CBN_* one.
- * A combo box has no code for a limit reached, so its overflow is null.
- */
-const EDIT_NOTICES = Object.freeze({ update: EN_UPDATE, change: EN_CHANGE,
-    overflow: EN_MAXTEXT });
-const COMBO_NOTICES = Object.freeze({ update: CBN_EDITUPDATE, change: CBN_EDITCHANGE,
-    overflow: null });
 /** The drop button at the right of a combo box, as wide as a scroll bar. */
 const COMBO_BUTTON = 16;
 const CB_SETITEMHEIGHT = 0x0153;
 const CB_GETITEMHEIGHT = 0x0154;
 const CB_GETDROPPEDWIDTH = 0x015f;
 const CB_GETCOMBOBOXINFO = 0x0164;
-/** The id a combo box gives its list, as Windows gives it. */
+/** The ids a combo box gives its list and its edit, as Windows gives them. */
 const COMBO_LIST_ID = 1000;
+const COMBO_EDIT_ID = 1001;
+/** The combo box styles its edit takes on as the edit's own. */
+const CBS_AUTOHSCROLL = 0x0040;
+const CBS_OEMCONVERT = 0x0080;
+const CBS_UPPERCASE = 0x2000;
+const CBS_LOWERCASE = 0x4000;
+const ES_UPPERCASE = 0x0008;
+const ES_LOWERCASE = 0x0010;
+const ES_NOHIDESEL = 0x0100;
+const ES_OEMCONVERT = 0x0400;
+const WM_CTLCOLORMSGBOX = 0x0132;
 /** A combo box's list: a list box that tells the combo box, not its parent. */
 const LBS_COMBOBOX = 0x8000;
 const LBS_NOINTEGRALHEIGHT = 0x0100;
@@ -840,7 +842,8 @@ export function thumbValue(rect, vertical, held, start){
  *             held: ScrollBarState) => void,
  *         scrollHit: (rect: Rect, vertical: boolean, held: ScrollBarState,
  *             x: number, y: number) => number,
- *         comboWindows: (combo: any) => { edit: number, list: number } },
+ *         comboInfo: (combo: any) => { item: Rect, button: Rect, edit: number,
+ *             list: number } },
  *     toolkit: ControlToolkit }}
  */
 export function createControlProcedures(host){
@@ -2032,15 +2035,12 @@ export function createControlProcedures(host){
 
     /**
      * Replaces the selection with text, keeps within the limit, moves the
-     * caret past what was inserted, and tells the parent. Which pair of
-     * notices the parent gets is the control's own: an edit reports EN_*,
-     * the field of an editable combo box the CBN_* pair -- and a combo has
-     * no code for a limit reached, so its overflow notice is null.
+     * caret past what was inserted, and tells the parent: EN_UPDATE, EN_CHANGE,
+     * and EN_MAXTEXT when the limit cut the text short.
      *
      * @param {any} record @param {string} text @param {unknown} [thread]
-     * @param {{ update: number, change: number, overflow: number | null }} [codes]
      */
-    const replaceSelection = (record, text, thread, codes = EDIT_NOTICES)=>{
+    const replaceSelection = (record, text, thread)=>{
         const state = editState(record);
         const from = Math.min(state.selStart, state.selEnd);
         const to = Math.max(state.selStart, state.selEnd);
@@ -2050,10 +2050,9 @@ export function createControlProcedures(host){
         state.selStart = state.selEnd = from + inserted.length;
         state.modified = true;
         host.invalidate(record);
-        return after(notify(record, codes.update, thread), ()=>after(
-            notify(record, codes.change, thread),
-            ()=>(inserted.length < text.length && codes.overflow !== null
-                ? notify(record, codes.overflow, thread) : 0)));
+        return after(notify(record, EN_UPDATE, thread), ()=>after(
+            notify(record, EN_CHANGE, thread),
+            ()=>(inserted.length < text.length ? notify(record, EN_MAXTEXT, thread) : 0)));
     };
 
     /**
@@ -2168,16 +2167,14 @@ export function createControlProcedures(host){
     };
 
     /**
-     * A character arriving at an editing field: an edit's, or the field of an
-     * editable combo box. Backspace narrows or deletes the selection, a return
+     * A character arriving at an edit. Backspace narrows or deletes the selection, a return
      * belongs to a multi-line edit that asked for one, control characters are
      * not text, and anything else replaces the selection.
      *
      * @param {any} record @param {number} character @param {unknown} thread
-     * @param {{ update: number, change: number, overflow: number | null }} codes
      * @param {boolean} readOnly
      */
-    const editCharacter = (record, character, thread, codes, readOnly)=>{
+    const editCharacter = (record, character, thread, readOnly)=>{
         if (readOnly || disabled(record))
         {
             return 0;
@@ -2190,7 +2187,7 @@ export function createControlProcedures(host){
             {
                 state.selStart = state.selEnd - 1;
             }
-            return replaceSelection(record, '', thread, codes);
+            return replaceSelection(record, '', thread);
         }
         // Return and tab are text to a multi-line edit, whatever its
         // ES_WANTRETURN: that style says what the edit does with the key in a
@@ -2208,14 +2205,14 @@ export function createControlProcedures(host){
         {
             rememberUndo(record, true);
             return replaceSelection(record, character === VK_RETURN ? '\r\n' : '\t',
-                thread, codes);
+                thread);
         }
         if (character < VK_SPACE || character === VK_ESCAPE || character === 0x7f)
         {
             return 0;
         }
         rememberUndo(record, true);
-        return replaceSelection(record, String.fromCharCode(character), thread, codes);
+        return replaceSelection(record, String.fromCharCode(character), thread);
     };
 
     /**
@@ -2521,8 +2518,10 @@ export function createControlProcedures(host){
                 {
                     state.dialogMode = true;
                 }
+                // A combo box's edit wants Enter and Escape while the list is
+                // dropped: they close it.
                 return DLGC_WANTCHARS | DLGC_WANTARROWS | DLGC_HASSETSEL
-                    | (multiline(record) ? DLGC_WANTALLKEYS : 0);
+                    | (multiline(record) || comboDropped(record) ? DLGC_WANTALLKEYS : 0);
             case WM_SETFOCUS:
                 takeCaret(record);
                 host.invalidate(record);
@@ -2554,11 +2553,26 @@ export function createControlProcedures(host){
                 {
                     return after(host.send(record.hwnd, command, 0, 0, thread), ()=>1);
                 }
-                return after(editCharacter(record, character, thread, EDIT_NOTICES, readOnly()),
+                return after(editCharacter(record, character, thread, readOnly()),
                     ()=>1);
             }
+            case WM_SYSKEYDOWN:
             case WM_KEYDOWN: {
                 const key = message.wParam & 0xff;
+                // A combo box's edit hands its combo box the keys that walk
+                // and drop the list, and Enter and Escape while it is dropped.
+                const combo = comboOfEdit(record);
+                if (combo && (key === VK_UP || key === VK_DOWN
+                    || (message.message === WM_KEYDOWN && (key === VK_F4
+                        || ((key === VK_RETURN || key === VK_ESCAPE) && comboDropped(record))))))
+                {
+                    return host.send(combo.hwnd, message.message, message.wParam, message.lParam,
+                        thread);
+                }
+                if (message.message === WM_SYSKEYDOWN)
+                {
+                    return common(record, message, thread);
+                }
                 const rows = editGridRows(record);
                 if (state.dialogMode === true && multiline(record) && record.parent)
                 {
@@ -3702,45 +3716,180 @@ export function createControlProcedures(host){
     };
 
     /**
-     * A simple combo box's two parts, in its client area: the field at the
-     * top, as tall as a dropdown combo box's, and under it its list window,
-     * which is always shown.
+     * A combo box's parts, in its client area: the field at the top - all
+     * of a drop-down one, as tall as a drop-down one's in a simple one - its
+     * item inside the field's edge, where the edit or the selection is, the
+     * drop button at the field's right, none in a simple one, and under the
+     * field a simple one's list.
      *
-     * @param {any} record
+     * @param {any} combo
      */
-    const simpleParts = record=>{
-        const size = host.clientSize(record);
-        const bottom = Math.min(size.height, listState(record).fieldHeight ?? 21);
-        const list = { left: 0, top: bottom, right: size.width, bottom: size.height };
-        return { field: { left: 0, top: 0, right: size.width, bottom }, list };
+    const comboParts = combo=>{
+        const size = host.clientSize(combo);
+        const simple = (combo.style & CBS_TYPEMASK) === CBS_SIMPLE;
+        const bottom = simple ? Math.min(size.height, listState(combo).fieldHeight ?? 21)
+            : size.height;
+        const button = simple ? { left: 0, top: 0, right: 0, bottom: 0 }
+            : { left: size.width - 2 - COMBO_BUTTON, top: 2, right: size.width - 2,
+                bottom: bottom - 2 };
+        return { field: { left: 0, top: 0, right: size.width, bottom },
+            item: { left: 3, top: 3, right: (simple ? size.width : button.left) - 2,
+                bottom: bottom - 3 },
+            button,
+            list: { left: 0, top: bottom, right: size.width, bottom: size.height } };
     };
 
     /** A combo box's list window, live, or null. @param {any} combo */
     const listOf = combo=>host.live(stateOf(combo).listWindow ?? 0);
 
-    /**
-     * The windows a combo box is made of, as GetComboBoxInfo names them:
-     * its edit, zero for a drop-down list, and its list.
-     *
-     * @param {any} combo
-     */
-    const comboWindows = combo=>({ edit: 0, list: listOf(combo)?.hwnd ?? 0 });
+    /** An editable combo box's edit, live, or null. @param {any} combo */
+    const editOf = combo=>host.live(stateOf(combo).editWindow ?? 0);
 
     /**
-     * Puts a simple combo box's list window under its field, in the rest of
-     * the combo box's client area.
+     * What GetComboBoxInfo says of a combo box: its item and its button, in
+     * its client area, and its edit, zero for a drop-down list, and its list.
      *
      * @param {any} combo
      */
-    const placeSimpleList = combo=>{
-        const list = listOf(combo);
-        if (!list || (combo.style & CBS_TYPEMASK) !== CBS_SIMPLE || !host.move)
+    const comboInfo = combo=>{
+        const { item, button } = comboParts(combo);
+        return { item, button, edit: editOf(combo)?.hwnd ?? 0, list: listOf(combo)?.hwnd ?? 0 };
+    };
+
+    /**
+     * Puts a combo box's edit in its item and a simple one's list under its
+     * field, in the rest of its client area.
+     *
+     * @param {any} combo
+     */
+    const placeComboChildren = combo=>{
+        const parts = comboParts(combo);
+        /** @param {any} child @param {Rect} rect */
+        const place = (child, rect)=>(child && host.move
+            ? host.move(child.hwnd, rect.left, rect.top, Math.max(0, rect.right - rect.left),
+                Math.max(0, rect.bottom - rect.top))
+            : 0);
+        return after(place(editOf(combo), parts.item),
+            ()=>((combo.style & CBS_TYPEMASK) === CBS_SIMPLE ? place(listOf(combo), parts.list)
+                : 0));
+    };
+
+    /**
+     * Makes an editable combo box's edit, a child in its field (id 1001)
+     * with the edit styles the combo box's ask for. Its text is the combo
+     * box's; it tells the combo box what happens to it, and hands it the
+     * keys that walk or drop the list.
+     *
+     * @param {any} combo @param {unknown} [thread]
+     */
+    const makeComboEdit = (combo, thread)=>{
+        if (!comboEditable(combo) || !host.popup)
         {
             return 0;
         }
-        const { list: rect } = simpleParts(combo);
-        return host.move(list.hwnd, rect.left, rect.top, rect.right - rect.left,
-            Math.max(0, rect.bottom - rect.top));
+        const style = (WS_CHILD | WS_VISIBLE | ES_NOHIDESEL
+            | ((combo.style & CBS_AUTOHSCROLL) !== 0 ? ES_AUTOHSCROLL : 0)
+            | ((combo.style & CBS_UPPERCASE) !== 0 ? ES_UPPERCASE : 0)
+            | ((combo.style & CBS_LOWERCASE) !== 0 ? ES_LOWERCASE : 0)
+            | ((combo.style & CBS_OEMCONVERT) !== 0 ? ES_OEMCONVERT : 0)
+            | (combo.style & WS_DISABLED)) >>> 0;
+        return after(host.popup('Edit', { x: 0, y: 0, width: 0, height: 0 }, combo.hwnd, 0, style,
+            thread, COMBO_EDIT_ID), hwnd=>{
+            const edit = hwnd !== 0 ? host.live(hwnd) : null;
+            if (edit)
+            {
+                edit.font = combo.font;
+                stateOf(combo).editWindow = hwnd;
+            }
+            return 0;
+        });
+    };
+
+    /**
+     * The combo box an edit is the field of, or null.
+     *
+     * @param {any} record
+     */
+    const comboOfEdit = record=>{
+        const parent = record.parent ? host.live(record.parent) : null;
+        return parent && parent.className === 'ComboBox'
+            && stateOf(parent).editWindow === record.hwnd ? parent : null;
+    };
+
+    /** Whether an edit is a combo box's whose list is dropped. @param {any} record */
+    const comboDropped = record=>{
+        const combo = comboOfEdit(record);
+        return combo !== null && (listState(combo).dropped ?? 0) !== 0;
+    };
+
+    /**
+     * Shows an item in a combo box's field: its text in the edit, all of it
+     * selected, or the field of a drop-down list. The edit is handed the
+     * text as a program would hand it, and what it says of it the combo
+     * box does not pass on: nobody typed.
+     *
+     * @param {any} combo @param {number} index @param {unknown} [thread]
+     */
+    const showItem = (combo, index, thread)=>{
+        const text = listState(combo).items[index]?.text ?? '';
+        const edit = editOf(combo);
+        host.invalidate(combo);
+        if (!edit)
+        {
+            combo.title = text;
+            return 0;
+        }
+        const bytes = encodeAnsi(`${text}\0`);
+        const at = host.allocate?.(bytes.length) ?? 0;
+        if (at === 0)
+        {
+            host.divergence?.('ComboBox', 'no memory to hand its edit the item\'s text');
+            return 0;
+        }
+        host.writeMemory(at, bytes);
+        const state = stateOf(combo);
+        state.quiet = true;
+        return after(host.send(edit.hwnd, WM_SETTEXT, 0, at, thread), ()=>{
+            state.quiet = false;
+            host.release?.(at);
+            return host.focus() === edit.hwnd ? host.send(edit.hwnd, EM_SETSEL, 0, -1, thread) : 0;
+        });
+    };
+
+    /**
+     * What a combo box makes of its edit's notifications: the focus coming
+     * or going is the combo box's, its text selected whole as it comes and
+     * the list closed as it goes, and an edit typed in is CBN_EDITUPDATE
+     * then CBN_EDITCHANGE - but not a text the combo box put there itself.
+     *
+     * @param {any} combo @param {any} edit @param {number} code @param {unknown} [thread]
+     */
+    const editNotice = (combo, edit, code, thread)=>{
+        switch (code){
+            case EN_SETFOCUS:
+                host.invalidate(combo);
+                return after(host.send(edit.hwnd, EM_SETSEL, 0, -1, thread),
+                    ()=>notify(combo, CBN_SETFOCUS, thread));
+            case EN_KILLFOCUS:
+                host.invalidate(combo);
+                return after(closeList(combo, false, thread),
+                    ()=>after(host.send(edit.hwnd, EM_SETSEL, -1, 0, thread),
+                        ()=>notify(combo, CBN_KILLFOCUS, thread)));
+            case EN_UPDATE:
+                return stateOf(combo).quiet ? 0 : notify(combo, CBN_EDITUPDATE, thread);
+            case EN_CHANGE:
+                if (stateOf(combo).quiet)
+                {
+                    return 0;
+                }
+                if ((combo.style & CBS_TYPEMASK) === CBS_SIMPLE)
+                {
+                    followField(combo);
+                }
+                return notify(combo, CBN_EDITCHANGE, thread);
+            default:
+                return 0;
+        }
     };
 
     /**
@@ -3779,23 +3928,21 @@ export function createControlProcedures(host){
     };
 
     /**
-     * The combo box's selection field: a sunken white box with the current
-     * item's text and, but for a simple combo box, a drop button at the
-     * right; a simple one has its list under the field instead.
+     * The combo box's field: a sunken white box with, but for a simple combo
+     * box, a drop button at the right. A drop-down list shows the current
+     * item's text there, selected while it has the focus; an editable combo
+     * box's edit and a simple one's list are windows of their own.
      *
-     * @param {any} record @param {number} hdc @param {Rect} rect
+     * @param {any} record @param {number} hdc
      */
-    const paintCombo = (record, hdc, rect)=>{
+    const paintCombo = (record, hdc)=>{
         const draw = /** @type {Drawing} */ (host.draw);
         const state = listState(record);
         const simple = (record.style & CBS_TYPEMASK) === CBS_SIMPLE;
-        const parts = simple ? simpleParts(record) : null;
-        const box = parts ? parts.field : rect;
+        const { field: box, button } = comboParts(record);
         draw.fill(hdc, box, color(disabled(record) ? COLOR_3DFACE : COLOR_WINDOW));
         sunkenEdge(hdc, box);
-        const button = { left: box.right - 2 - (parts ? 0 : COMBO_BUTTON), top: box.top + 2,
-            right: box.right - 2, bottom: box.bottom - 2 };
-        if (!parts)
+        if (!simple)
         {
             draw.fill(hdc, button, color(COLOR_3DFACE));
             buttonEdge(hdc, button, false);
@@ -3808,17 +3955,14 @@ export function createControlProcedures(host){
                     bottom: arrowY + row + 1 }, color(COLOR_BTNTEXT));
             }
         }
-        const current = state.items[state.current];
-        const editable = comboEditable(record);
-        const text = editable ? record.title : current?.text ?? '';
+        if (comboEditable(record))
+        {
+            return;
+        }
+        const text = state.items[state.current]?.text ?? '';
         const field = { left: box.left + 3, top: box.top + 2, right: button.left - 1,
             bottom: box.bottom - 2 };
-        const focused = host.focus() === record.hwnd;
-        // A drop-down list in focus shows its item selected; a drop-down
-        // combo box's field is an edit, its text typed into at a caret --
-        // filled with the selection colour, a path typed there read as one
-        // block of blue.
-        const selected = focused && !editable;
+        const selected = host.focus() === record.hwnd;
         if (selected)
         {
             draw.fill(hdc, field, color(COLOR_HIGHLIGHT));
@@ -3828,26 +3972,6 @@ export function createControlProcedures(host){
             Math.floor((field.bottom - field.top - metrics.height) / 2));
         draw.text(hdc, field.left + 1, top, text, { color: color(selected ? COLOR_HIGHLIGHTTEXT
             : disabled(record) ? COLOR_GRAYTEXT : COLOR_WINDOWTEXT), clip: field });
-        if (focused && editable)
-        {
-            // The edit's own selection over its text, and the caret where it ends.
-            const edit = editState(record);
-            const from = Math.max(0, Math.min(edit.selStart, edit.selEnd, text.length));
-            const to = Math.min(text.length, Math.max(edit.selStart, edit.selEnd));
-            /** @param {number} at */
-            const xOf = at=>field.left + 1 + draw.measure(hdc, text.slice(0, at)).width;
-            if (to > from)
-            {
-                const span = { left: xOf(from), top, right: Math.min(field.right, xOf(to)),
-                    bottom: top + metrics.height };
-                draw.fill(hdc, span, color(COLOR_HIGHLIGHT));
-                draw.text(hdc, span.left, top, text.slice(from, to),
-                    { color: color(COLOR_HIGHLIGHTTEXT), clip: span });
-            }
-            const at = Math.min(field.right - 1, xOf(Math.min(text.length, edit.selEnd)));
-            draw.fill(hdc, { left: at, top, right: at + 1, bottom: top + metrics.height },
-                color(COLOR_WINDOWTEXT));
-        }
     };
 
     /** A combo box message as the list box spells it, or null. @param {number} message */
@@ -3912,10 +4036,10 @@ export function createControlProcedures(host){
         {
             listState(record).fieldHeight = (listState(record).fieldItem ?? rows + 2) + 6;
             host.invalidate(record);
-            return placeSimpleList(record);
+            return placeComboChildren(record);
         }
         record.height = (listState(record).fieldItem ?? rows + 2) + 6;
-        return 0;
+        return placeComboChildren(record);
     };
 
     /**
@@ -3993,13 +4117,10 @@ export function createControlProcedures(host){
         return after(host.show?.(hwnd, SW_HIDE) ?? 0, ()=>{
             host.invalidate(combo);
             const changed = accept && hot >= 0 && hot < state.items.length && hot !== state.current;
-            if (changed)
-            {
-                combo.title = state.items[hot].text;
-            }
-            return after(changed ? chooseItem(combo, hot, CBN_SELCHANGE, true, thread) : 0,
-                ()=>after(notify(combo, accept ? CBN_SELENDOK : CBN_SELENDCANCEL, thread),
-                    ()=>notify(combo, CBN_CLOSEUP, thread)));
+            const chosen = changed ? after(showItem(combo, hot, thread),
+                ()=>chooseItem(combo, hot, CBN_SELCHANGE, true, thread)) : 0;
+            return after(chosen, ()=>after(notify(combo, accept ? CBN_SELENDOK : CBN_SELENDCANCEL,
+                thread), ()=>notify(combo, CBN_CLOSEUP, thread)));
         });
     };
 
@@ -4086,7 +4207,7 @@ export function createControlProcedures(host){
      */
     const followField = combo=>{
         const state = listState(combo);
-        const text = String(combo.title).toLowerCase();
+        const text = String((editOf(combo) ?? combo).title).toLowerCase();
         const index = text === '' ? -1
             : state.items.findIndex(item=>item.text.toLowerCase().startsWith(text));
         state.current = index;
@@ -4157,8 +4278,8 @@ export function createControlProcedures(host){
         {
             return 0;
         }
-        combo.title = state.items[index].text;
-        return chooseItem(combo, index, CBN_SELCHANGE, true, thread);
+        return after(showItem(combo, index, thread),
+            ()=>chooseItem(combo, index, CBN_SELCHANGE, true, thread));
     };
 
     /**
@@ -4299,28 +4420,34 @@ export function createControlProcedures(host){
     const comboBoxProc = (record, message, thread)=>{
         const state = listState(record);
         const sorted = (record.style & CBS_SORT) !== 0;
-        const editable = comboEditable(record);
         const simple = (record.style & CBS_TYPEMASK) === CBS_SIMPLE;
+        const edit = editOf(record);
         const asList = comboAsList(message.message);
         if (asList !== null)
         {
             const answer = listMessage(record, sorted, { ...message, message: asList });
-            // A selection set by the program shows in the field; a text a
-            // program reads back is that item's text.
-            if ((asList === LB_SETCURSEL || asList === LB_SELECTSTRING) && answer !== LB_ERR)
-            {
-                record.title = state.items[state.current]?.text ?? '';
-            }
             if (simple)
             {
                 host.invalidate(listOf(record) ?? record);
             }
+            // A selection set by the program shows in the field.
+            if ((asList === LB_SETCURSEL || asList === LB_SELECTSTRING) && answer !== LB_ERR)
+            {
+                return after(showItem(record, state.current, thread), ()=>answer);
+            }
             return answer ?? CB_ERR;
+        }
+        if (message.message >= WM_CTLCOLORMSGBOX && message.message <= WM_CTLCOLORSTATIC)
+        {
+            // Its edit and its list ask the combo box for their colours; the
+            // combo box asks its own parent, as Windows' does.
+            return record.parent ? host.send(record.parent, message.message, message.wParam,
+                message.lParam, thread) : common(record, message, thread);
         }
         switch (message.message){
             case WM_CREATE:
-                return after(makeComboList(record, thread), ()=>after(fitComboField(record, true),
-                    ()=>common(record, message, thread)));
+                return after(makeComboList(record, thread), ()=>after(makeComboEdit(record, thread),
+                    ()=>after(fitComboField(record, true), ()=>common(record, message, thread))));
             case WM_SETFONT: {
                 const list = listOf(record);
                 if (list)
@@ -4329,11 +4456,12 @@ export function createControlProcedures(host){
                 }
                 // A new font sizes the field's item afresh.
                 listState(record).fieldItem = undefined;
-                return after(common(record, message, thread), answer=>after(
-                    fitComboField(record, false), ()=>answer));
+                return after(edit ? host.send(edit.hwnd, WM_SETFONT, message.wParam, 0, thread) : 0,
+                    ()=>after(common(record, message, thread), answer=>after(
+                        fitComboField(record, false), ()=>answer)));
             }
             case WM_SIZE:
-                return after(placeSimpleList(record), ()=>common(record, message, thread));
+                return after(placeComboChildren(record), ()=>common(record, message, thread));
             case WM_WINDOWPOSCHANGING: {
                 // A drop-down combo box stays as tall as its field, whatever
                 // height it is given: that height is how far it drops, never
@@ -4349,8 +4477,8 @@ export function createControlProcedures(host){
                 return common(record, message, thread);
             }
             case WM_PAINT:
-                return painting(record, (hdc, rect)=>{
-                    paintCombo(record, hdc, rect);
+                return painting(record, hdc=>{
+                    paintCombo(record, hdc);
                 });
             case WM_ERASEBKGND:
                 return 1;
@@ -4360,12 +4488,32 @@ export function createControlProcedures(host){
                 return DLGC_WANTARROWS | DLGC_WANTCHARS
                     | ((state.dropped ?? 0) !== 0 ? DLGC_WANTALLKEYS : 0);
             case WM_SETFOCUS:
+                // An editable combo box's focus is its edit's, which tells it
+                // so (EN_SETFOCUS below).
+                if (edit)
+                {
+                    return after(host.setFocus(edit.hwnd, thread), ()=>0);
+                }
                 host.invalidate(record);
                 return notify(record, CBN_SETFOCUS, thread);
             case WM_KILLFOCUS:
+                if (edit)
+                {
+                    return 0;
+                }
                 host.invalidate(record);
                 return after(closeList(record, false, thread),
                     ()=>notify(record, CBN_KILLFOCUS, thread));
+            case WM_COMMAND:
+                return edit && (message.lParam >>> 0) === edit.hwnd
+                    ? editNotice(record, edit, message.wParam >>> 16, thread)
+                    : common(record, message, thread);
+            case WM_SETTEXT:
+            case WM_GETTEXT:
+            case WM_GETTEXTLENGTH:
+                // An editable combo box's text is its edit's.
+                return edit ? host.send(edit.hwnd, message.message, message.wParam, message.lParam,
+                    thread) : common(record, message, thread);
             case WM_DESTROY:
                 // A simple combo box's list is its child and goes with it.
                 return after(closeList(record, false, thread), ()=>after(
@@ -4397,41 +4545,22 @@ export function createControlProcedures(host){
             }
             case WM_LBUTTONDOWN:
             case WM_LBUTTONDBLCLK: {
-                // A click in the field of an editable combo puts the caret
-                // where it landed, as a click in an edit does; one on the
-                // drop button, or anywhere on a dropdown list, drops the list.
+                // The field of an editable combo box is its edit's; a click on
+                // the drop button, or anywhere on a dropdown list, drops the
+                // list, and a click on what is left of the field focuses it.
                 const point = pointOf(message.lParam);
-                if (editable && (simple
-                    || point.x < host.clientSize(record).width - COMBO_BUTTON - 2))
+                const { button } = comboParts(record);
+                if (edit && (simple || point.x < button.left))
                 {
-                    const { hdc } = host.contextOn(record);
-                    if (hdc !== 0)
-                    {
-                        const at = charFromPoint(record, hdc, point.x, point.y);
-                        const field = editState(record);
-                        field.selStart = at;
-                        field.selEnd = at;
-                    }
-                    host.endPaint(record, hdc);
-                    host.invalidate(record);
                     return after(host.setFocus(record.hwnd, thread), ()=>0);
                 }
                 return after(host.setFocus(record.hwnd, thread), ()=>((state.dropped ?? 0) !== 0
                     ? closeList(record, false, thread) : dropList(record, thread)));
             }
             case WM_CHAR:
-                if (!editable)
-                {
-                    return 0;
-                }
-                return after(editCharacter(record, message.wParam & 0xffff, thread,
-                    COMBO_NOTICES, false), answer=>{
-                    if (simple)
-                    {
-                        followField(record);
-                    }
-                    return answer;
-                });
+                // Typing is the edit's; a dropdown list takes none.
+                return edit ? host.send(edit.hwnd, WM_CHAR, message.wParam, message.lParam, thread)
+                    : 0;
             case WM_KEYDOWN: {
                 const key = message.wParam & 0xff;
                 if (key === VK_F4)
@@ -4459,35 +4588,8 @@ export function createControlProcedures(host){
                     }
                     return 0;
                 }
-                // In the field of an editable combo the caret keys edit the
-                // text; up and down still walk the list, as they do in every
-                // kind of combo.
-                if (editable && !disabled(record))
-                {
-                    const field = editState(record);
-                    switch (key){
-                        case VK_LEFT:
-                            moveCaret(record, field.selEnd - 1);
-                            return 0;
-                        case VK_RIGHT:
-                            moveCaret(record, field.selEnd + 1);
-                            return 0;
-                        case VK_HOME:
-                            moveCaret(record, 0);
-                            return 0;
-                        case VK_END:
-                            moveCaret(record, record.title.length);
-                            return 0;
-                        case VK_DELETE:
-                            if (field.selStart === field.selEnd)
-                            {
-                                field.selEnd = Math.min(record.title.length, field.selEnd + 1);
-                            }
-                            return replaceSelection(record, '', thread, COMBO_NOTICES);
-                        default:
-                            break;
-                    }
-                }
+                // Closed, up and down walk the list in every kind of combo
+                // box; the edit hands them here.
                 const step = key === VK_UP ? -1 : key === VK_DOWN ? 1 : 0;
                 if (step === 0 || state.items.length === 0)
                 {
@@ -4505,20 +4607,9 @@ export function createControlProcedures(host){
                     scrollDropped(record, index < state.top ? index
                         : index >= state.top + visible ? index - visible + 1 : state.top, visible);
                 }
-                record.title = state.items[index].text;
-                return chooseItem(record, index, CBN_SELCHANGE, true, thread);
+                return after(showItem(record, index, thread),
+                    ()=>chooseItem(record, index, CBN_SELCHANGE, true, thread));
             }
-            case WM_SETTEXT:
-                // A text the program puts in the field leaves nothing of what
-                // was selected before, as a program setting an edit's text
-                // does.
-                if (editable)
-                {
-                    const field = editState(record);
-                    field.selStart = 0;
-                    field.selEnd = 0;
-                }
-                return common(record, message, thread);
             case CB_SHOWDROPDOWN:
                 return after((message.wParam >>> 0) !== 0 ? dropList(record, thread)
                     : closeList(record, false, thread), ()=>1);
@@ -4528,38 +4619,17 @@ export function createControlProcedures(host){
                 return 0;
             case CB_GETEXTENDEDUI:
                 return 0;
-            case CB_GETEDITSEL: {
-                if (!editable)
-                {
-                    return 0;
-                }
-                const field = editState(record);
-                const from = Math.min(field.selStart, field.selEnd);
-                const to = Math.max(field.selStart, field.selEnd);
-                if ((message.wParam >>> 0) !== 0)
-                {
-                    writeU32(message.wParam, from);
-                }
-                if ((message.lParam >>> 0) !== 0)
-                {
-                    writeU32(message.lParam, to);
-                }
-                return 1;
-            }
+            case CB_GETEDITSEL:
+                return edit ? host.send(edit.hwnd, EM_GETSEL, message.wParam, message.lParam,
+                    thread) : CB_ERR;
             case CB_SETEDITSEL:
-                if (!editable)
-                {
-                    return 0;
-                }
-                setSelection(record, message.wParam | 0, message.lParam | 0);
-                return 1;
+                // The low word is where the selection starts, the high word
+                // where it ends, each -1 as the edit takes it.
+                return edit ? after(host.send(edit.hwnd, EM_SETSEL, message.lParam << 16 >> 16,
+                    message.lParam >> 16, thread), ()=>1) : CB_ERR;
             case CB_LIMITTEXT:
-                if (editable)
-                {
-                    editState(record).limit = (message.wParam >>> 0) === 0
-                        ? DEFAULT_EDIT_LIMIT : message.wParam >>> 0;
-                }
-                return 0;
+                return after(edit ? host.send(edit.hwnd, EM_LIMITTEXT, message.wParam, 0, thread)
+                    : 0, ()=>1);
             case CB_SETDROPPEDWIDTH:
                 // A width wider than nothing is kept; the list is never
                 // narrower than the combo box.
@@ -5195,7 +5265,7 @@ export function createControlProcedures(host){
             '#32770': dialogProc,
         },
         helpers: { dialogProc, markDefault, defaultControlColors, paintScrollBar, scrollHit,
-            comboWindows },
+            comboInfo },
         // The drawing and messaging the classes above share, handed out whole
         // so the common controls paint and tell their parent with the same
         // helpers: one look, and a change to it is one change.

@@ -1837,6 +1837,67 @@ test('a combo box\'s list is a window of its own for the combo box\'s whole life
     assert.equal(context.fns.IsWindow.handler([list]), 0, 'the list goes with the combo box');
 });
 
+test('an editable combo box\'s field is an Edit child that has the focus and hands it keys',
+    async()=>{
+        // A program subclasses the edit GetComboBoxInfo names; its colours
+        // are asked of the combo box, which asks the dialog.
+        const GWL_ID = -12;
+        const CBN_SETFOCUS = 3;
+        const WM_CTLCOLOREDIT = 0x0133;
+        /** @type {{ message: number, lParam: number }[]} */
+        const colours = [];
+        const context = setup({ reply: message=>{
+            if (message.message === WM_CTLCOLOREDIT)
+            {
+                colours.push({ message: message.message, lParam: message.lParam >>> 0 });
+            }
+            return message.message === WM_INITDIALOG ? 1 : 0;
+        } });
+        const dialog = await openDialog(context);
+        context.memory.putString(TEXT, 'ComboBox');
+        const combo = context.fns.CreateWindowExA.handler([0, TEXT, 0,
+            WS_CHILD | WS_VISIBLE | 0x0002, 8, 60, 100, 120, dialog, 500, HINSTANCE, 0]);
+        context.memory.writeMemory(OUT, new Uint8Array([52, 0, 0, 0]));
+        assert.equal(context.fns.GetComboBoxInfo.handler([combo, OUT]), 1);
+        const edit = context.memory.u32(OUT + 44);
+        const item = [4, 8, 12, 16].map(at=>context.memory.u32(OUT + at) | 0);
+        context.fns.GetClassNameA.handler([edit, TEXT, 32]);
+        assert.equal(context.memory.readCString(TEXT, 32), 'Edit');
+        assert.equal(context.fns.GetParent.handler([edit]), combo);
+        assert.equal(context.fns.GetWindowLongA.handler([edit, GWL_ID]), 1001);
+        context.fns.GetWindowRect.handler([edit, OUT]);
+        const placed = [0, 4, 8, 12].map(at=>context.memory.u32(OUT + at) | 0);
+        context.fns.GetWindowRect.handler([combo, OUT]);
+        const [left, top] = [0, 4].map(at=>context.memory.u32(OUT + at) | 0);
+        assert.deepEqual(placed, [item[0] + left, item[1] + top, item[2] + left, item[3] + top],
+            'in the item GetComboBoxInfo names');
+
+        for (const text of ['One', 'Two'])
+        {
+            context.memory.putString(TEXT, text);
+            context.fns.SendMessageA.handler([combo, CB_ADDSTRING, 0, TEXT]);
+        }
+        await context.fns.SetFocus.handler([combo]);
+        await context.pump(dialog);
+        assert.equal(context.fns.GetFocus.handler([]), edit, 'the focus is the edit\'s');
+        const codes = ()=>context.commands().filter(([id])=>id === 500).map(([, code])=>code);
+        assert.ok(codes().includes(CBN_SETFOCUS));
+        assert.ok(colours.some(asked=>asked.lParam === edit), 'the edit\'s colours, asked');
+
+        // Down in the edit walks the list: the item shows in the edit, and
+        // nobody typed, so no CBN_EDITCHANGE.
+        context.dispatched.length = 0;
+        context.key(WM_KEYDOWN, VK_DOWN);
+        await context.pump(dialog);
+        assert.equal(context.fns.SendMessageA.handler([combo, CB_GETCURSEL, 0, 0]), 0);
+        assert.equal(context.fns.GetWindowTextA.handler([edit, OUT, 16]), 3);
+        assert.equal(context.memory.readCString(OUT, 16), 'One');
+        assert.deepEqual(codes(), [CBN_SELCHANGE]);
+        context.fns.GetWindowTextA.handler([combo, OUT, 16]);
+        assert.equal(context.memory.readCString(OUT, 16), 'One',
+            'the combo box\'s text is the edit\'s');
+    });
+
 test('an editable combo box in focus shows its text with a caret, not a field of blue', async()=>{
     // A self-extractor's destination box, typed into, was one block of the
     // selection colour from edge to edge; Windows shows an edit there.
@@ -1878,7 +1939,8 @@ test('an editable combo box field takes typing and answers the edit selection', 
 
     // The field is what a program reads back: select it whole and type the
     // replacement, as a person driving the dialog would.
-    assert.equal(context.fns.SendMessageA.handler([combo, CB_SETEDITSEL, 0, -1]), 1);
+    // The low word is where the selection starts, the high word, -1, its end.
+    assert.equal(context.fns.SendMessageA.handler([combo, CB_SETEDITSEL, 0, 0xffff0000]), 1);
     for (const character of 'C:\\App')
     {
         context.key(WM_CHAR, character.charCodeAt(0));
@@ -1896,7 +1958,8 @@ test('an editable combo box field takes typing and answers the edit selection', 
     await context.pump(dialog);
     context.fns.GetWindowTextA.handler([combo, OUT, 16]);
     assert.equal(context.memory.readCString(OUT, 16), 'C:\\Ap');
-    assert.equal(context.fns.SendMessageA.handler([combo, CB_GETEDITSEL, OUT, OUT + 4]), 1);
+    assert.equal(context.fns.SendMessageA.handler([combo, CB_GETEDITSEL, OUT, OUT + 4]),
+        5 << 16 | 5, 'both ends in one answer too');
     assert.deepEqual([context.memory.u32(OUT), context.memory.u32(OUT + 4)], [5, 5]);
 
     // A limit the program sets holds, as an edit's does, and a character the

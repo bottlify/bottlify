@@ -8271,7 +8271,7 @@ export function createWindowFunctions(host){
                 capture: ()=>captured, setCapture, releaseCapture, colors: systemColors,
                 heldByCaller, lowLevelHook, winEvent, procAs, procBehind, entryReads,
                 send, sendAcross, callProcedure, geometry, windowFromPoint, askedFromPoint,
-                isChild, repaint, comboWindows: controls.helpers.comboWindows,
+                isChild, repaint, comboInfo: controls.helpers.comboInfo,
                 appear, beforeChange, afterChange, eraseShown, wholeOnScreen, moveBits, dragging,
                 dragMove,
                 /** @param {(handle: number) => any} decode */
