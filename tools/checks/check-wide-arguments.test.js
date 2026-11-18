@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     checkAddresses, checkReturns, checkText, layoutOf, pointersOf, resultOf, returnsPointer,
+    cutAddresses,
 } from './check-wide-arguments.mjs';
 
 test('a signature is laid out as the 32-bit stack has it', ()=>{
@@ -137,4 +138,19 @@ test('an argument a spec takes whole is an address of its signature', ()=>{
     // A COM method's dwords count its interface pointer first.
     assert.deepEqual(problem('/** HRESULT Advise(IUnknown *sink, DWORD *cookie) */\n'
         + '{ name: \'Advise\', argBytes: 12, addresses: [1], invoke: ()=>0 },'), [null]);
+});
+
+test('a handler that cuts an address it takes whole back to a dword is found', ()=>{
+    const spec = `{ argBytes: 16, addresses: [1, 3],
+        handler: ([type, proc, module, context])=>{
+            if ((proc >>> 0) === 0) { return 0; }
+            return keep(wholeAddress(proc), module >>> 0, context >>> 0);
+        } }`;
+    assert.deepEqual(cutAddresses(spec, [1, 3]), ['context >>> 0'],
+        'the null test of proc and the undeclared module are let be');
+    assert.deepEqual(cutAddresses(
+        '{ addresses: [2], handler: args=>start(args[2] | 0, args[1] >>> 0) }', [2]),
+    ['args[2] | 0']);
+    assert.deepEqual(cutAddresses(
+        '{ addresses: [0], handler: ([start])=>run(wholeAddress(start)) }', [0]), []);
 });

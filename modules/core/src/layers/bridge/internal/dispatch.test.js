@@ -1942,6 +1942,22 @@ test('a 64-bit caller finds an address zero-extended in RAX, any other dword sig
     assert.equal(r.get('rax'), 0x1000n);
 });
 
+test('a call that waits says whether its answer is an address, for the resume to widen it', ()=>{
+    // An allocation that waits (a file mapped once its blocks are fetched):
+    // the answer comes after the dispatcher has gone on, and RAX must take it
+    // as the call in place would - an address by zeros, a handle by its sign.
+    /** @type {boolean[]} */
+    const said = [];
+    const { dispatcher } = machine64({ suspend: (answer, frame)=>said.push(frame.zeroExtends) });
+    dispatcher.register(1, { name: 'X!MapLater', ...STDCALL, argBytes: 0, returns: 'pointer',
+        handler: ()=>Promise.resolve(0x90000000) });
+    dispatcher.register(2, { name: 'X!OpenLater', ...STDCALL, argBytes: 0,
+        handler: ()=>Promise.resolve(-1) });
+    dispatcher.dispatch(1);
+    dispatcher.dispatch(2);
+    assert.deepEqual(said, [true, false]);
+});
+
 test('an argument declared an address is handed whole where its high half names one', ()=>{
     // CreateThread's start routine and parameter in an image a 64-bit program
     // keeps past 4 GiB: whole to a handler that declares them. Any other high

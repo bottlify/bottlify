@@ -151,6 +151,8 @@ import { isDriven } from './drive.js';
  *     is here and the stack arguments above it.
  * @property {number} restingStack Where the stack will be once the stub returns.
  * @property {number} hostReturn
+ * @property {boolean} zeroExtends  A 64-bit caller of a function that answers an address:
+ *     an answer that comes after a wait goes into RAX zero-extended, as one in place does.
  * @property {any} thread           Whose call this is: parking stamps it as the call begins.
  */
 
@@ -1457,7 +1459,7 @@ class Dispatcher {
         const depth = this.depth;
         const frame = this.frames[depth] ??= {
             name: '', freeStack: 0, callerStack: 0, restingStack: 0, hostReturn: 0,
-            thread: null,
+            zeroExtends: false, thread: null,
         };
         frame.name = entry.name;
         frame.freeStack = pushed;
@@ -1466,6 +1468,7 @@ class Dispatcher {
         // cleans up whatever the convention.
         frame.restingStack = long ? esp + 8 : esp + 4 + entry.cleanup;
         frame.hostReturn = hostReturn;
+        frame.zeroExtends = long && entry.zeroExtends;
 
         // Which instruction made this call. Read from the frame that was
         // captured above rather than the stack, because a handler that

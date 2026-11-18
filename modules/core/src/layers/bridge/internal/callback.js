@@ -725,7 +725,9 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
          * and the thread goes back to its own code in this slice: EAX, and
          * where the call's stub would have returned with the stack it pops.
          *
-         * @param {any} thread @param {number} returnValue
+         * @param {any} thread
+         * @param {number | bigint} returnValue  a 64-bit caller's quadword whole (a
+         *     bigint), or a dword, which RAX takes by its sign
          */
         finishNow(thread, returnValue){
             const call = hostCalls(thread).pop();
@@ -741,7 +743,15 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
                 answered = null;
                 open();
             }
-            cpu.writeReg32('eax', returnValue >>> 0);
+            if (cpu.bits?.() === 64)
+            {
+                cpu.writeReg64('rax', BigInt.asUintN(64, typeof returnValue === 'bigint'
+                    ? returnValue : BigInt(returnValue | 0)));
+            }
+            else
+            {
+                cpu.writeReg32('eax', Number(BigInt.asUintN(32, BigInt(returnValue))));
+            }
             cpu.writeReg32('esp', call.restingStack);
             if (call.hostReturn >= 2 ** 32)
             {

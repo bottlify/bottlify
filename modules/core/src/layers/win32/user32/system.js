@@ -7848,6 +7848,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
          */
         CallWindowProcA: {
             argBytes: 20,
+            addresses: [0],
             /** @param {number[]} args */
             handler: args=>callWindowProc(args, false),
         },
@@ -7861,6 +7862,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
          */
         CallWindowProcW: {
             argBytes: 20,
+            addresses: [0],
             /** @param {number[]} args */
             handler: args=>callWindowProc(args, true),
         },

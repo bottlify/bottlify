@@ -99,6 +99,7 @@ __declspec(dllimport) HWND __stdcall CreateWindowExA(DWORD exStyle, const char *
 __declspec(dllimport) LRESULT __stdcall DefWindowProcA(HWND, UINT, WPARAM, LPARAM);
 __declspec(dllimport) LONG_PTR __stdcall GetWindowLongPtrA(HWND, int);
 __declspec(dllimport) LONG_PTR __stdcall SetWindowLongPtrA(HWND, int, LONG_PTR);
+__declspec(dllimport) LRESULT __stdcall CallWindowProcA(WNDPROC, HWND, UINT, WPARAM, LPARAM);
 __declspec(dllimport) ULONG_PTR __stdcall GetClassLongPtrA(HWND, int);
 __declspec(dllimport) ULONG_PTR __stdcall SetClassLongPtrA(HWND, int, LONG_PTR);
 __declspec(dllimport) int __stdcall ShowWindow(HWND, int);
@@ -208,6 +209,19 @@ static int marker;
 static HINSTANCE instance;
 static HBRUSH red;
 static int nccreate, created, minmax, changing, changed, calcsize, painted;
+
+static LRESULT window_procedure(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
+static int subclassed;
+
+/* The procedure a subclass sets over the class's: counts and hands on. */
+static LRESULT subclass_procedure(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    if (message == WM_USER)
+    {
+        subclassed++;
+    }
+    return CallWindowProcA(window_procedure, hwnd, message, wParam, lParam);
+}
 
 static LRESULT window_procedure(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
@@ -322,6 +336,15 @@ int mainCRTStartup(void)
         SendMessageA(hwnd, WM_USER, 0, -21) == -42);
     check("a WPARAM widens as a UINT, an LPARAM as a LONG", SendMessageA(hwnd, WM_USER + 1,
         0x80000001ULL, -1) == 1);
+
+    check("SetWindowLongPtr(GWLP_WNDPROC) answers the procedure it replaces",
+        SetWindowLongPtrA(hwnd, GWLP_WNDPROC, (LONG_PTR)subclass_procedure)
+        == (LONG_PTR)window_procedure);
+    check("and the window has the new one whole", GetWindowLongPtrA(hwnd, GWLP_WNDPROC)
+        == (LONG_PTR)subclass_procedure);
+    check("which its messages reach, handed on to the old", SendMessageA(hwnd, WM_USER, 0, -21)
+        == -42 && subclassed == 1);
+    SetWindowLongPtrA(hwnd, GWLP_WNDPROC, (LONG_PTR)window_procedure);
 
     ShowWindow(hwnd, 3);
     check("WM_GETMINMAXINFO's MINMAXINFO, maximised", minmax > 0);

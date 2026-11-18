@@ -695,13 +695,57 @@ export function checkAddresses(text){
             : new Set(pointersOf(params, { addresses: true }).map(word=>word + shift));
         const named = declared[1].split(',').map(each=>each.trim()).filter(Boolean).map(Number);
         const stray = has === null ? named : named.filter(word=>!has.has(word));
+        const cut = cutAddresses(spec, named);
         found.push({ name: match[1], line: line0(text, match.index) + 1,
             problem: has === null ? 'declares addresses under a signature that does not close'
                 : stray.length > 0 ? `addresses names dword ${stray.join(', ')}, which the`
                     + ` signature has no address in (it has them in ${[...has].join(', ')})`
-                    : null });
+                    : cut.length > 0
+                        ? `cuts the address it takes whole to a dword: ${cut.join(', ')}`
+                            + ' (keep it with wholeAddress)'
+                        : null });
     }
     return found;
+}
+
+/**
+ * Where a spec's own handler cuts an argument it declared whole back to a
+ * dword (`name >>> 0`, `name | 0`): the address past 4 GiB the bridge joined
+ * is its low half again. A cut that only asks whether the argument is null
+ * (`(name >>> 0) === 0`) keeps the answer and is let be.
+ *
+ * @param {string} spec  the spec's text @param {number[]} named  the dwords declared
+ * @returns {string[]}  each cut as written
+ */
+export function cutAddresses(spec, named){
+    const listed = /\bhandler\s*:\s*(?:async\s*)?\(?\s*\[([^\]]*)\]/.exec(spec);
+    const whole = /\bhandler\s*:\s*(?:async\s*)?\(?\s*(\w+)\s*\)?\s*=>/.exec(spec);
+    /** @type {string[]} */
+    const names = [];
+    for (const word of named)
+    {
+        const name = listed ? listed[1].split(',')[word]?.trim() : undefined;
+        if (name)
+        {
+            names.push(name.replace(/[$]/g, '\\$&'));
+        }
+        if (whole)
+        {
+            names.push(`${whole[1]}\\[${word}\\]`);
+        }
+    }
+    /** @type {string[]} */
+    const cuts = [];
+    for (const name of names)
+    {
+        const cut = new RegExp(String.raw`(?<![\w.])${name}\s*(?:>>>|\|)\s*0\b`
+            + String.raw`(?!\s*\)\s*[!=]==\s*0)`, 'g');
+        for (const one of spec.matchAll(cut))
+        {
+            cuts.push(one[0].replace(/\s+/g, ' '));
+        }
+    }
+    return cuts;
 }
 
 /** @param {string} text @param {number | undefined} at */

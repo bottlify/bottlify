@@ -256,6 +256,9 @@ export function blockState64(what){
 export function interpret64(state, budget, options = {}){
     const before = state.retired;
     const memory = state.blockMemory;
+    // A growing memory may have grown since the last run (`fit`): a page the
+    // host opened past where the memory ended is read through the views of now.
+    /** @type {any} */ (memory).fit?.();
     /** @param {number} address */
     const fetch = address=>{
         if (address >= state.window)

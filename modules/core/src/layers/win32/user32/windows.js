@@ -1322,7 +1322,8 @@ export function createWindowFunctions(host){
      *
      * @param {number} value
      */
-    const procBehind = value=>(((value >>> 0) & 0xffff0000) >>> 0 === WINPROC_HANDLE
+    const procBehind = value=>(value < 2 ** 32
+        && ((value >>> 0) & 0xffff0000) >>> 0 === WINPROC_HANDLE
         ? winprocs[value & 0xffff] ?? null : null);
     /**
      * A procedure as a call of one encoding reads it: its address when it
@@ -3569,7 +3570,12 @@ export function createWindowFunctions(host){
         const at = index | 0;
         if (at < 0)
         {
-            return andThen(setLong(record, index, low, unicode), done=>{
+            // A procedure or an instance of an image past 4 GiB: whole, as
+            // the bridge joins a declared address (a high half that names one).
+            const high32 = high >>> 0;
+            const value = (at === GWL_WNDPROC || at === GWL_HINSTANCE) && high32 !== 0
+                && high32 < 2 ** 21 ? high32 * 2 ** 32 + (low >>> 0) : low;
+            return andThen(setLong(record, index, value, unicode), done=>{
                 if (done === false)
                 {
                     return 0n;
@@ -3633,14 +3639,14 @@ export function createWindowFunctions(host){
                 // reads; NULL keeps the procedure and only switches the
                 // encoding (win.c test_set_window_long).
                 const behind = procBehind(value);
-                if ((value >>> 0) === 0)
+                if (wholeAddress(value) === 0)
                 {
                     record.procUnicode = procReads(record);
                     record.unicode = unicode;
                     return;
                 }
                 delete record.procUnicode;
-                record.wndProc = behind ? behind.address : value >>> 0;
+                record.wndProc = behind ? behind.address : wholeAddress(value);
                 record.unicode = behind ? behind.unicode : unicode;
                 return;
             }
@@ -3704,7 +3710,7 @@ export function createWindowFunctions(host){
                 record.longHigh?.delete(GWL_USERDATA);
                 return;
             case GWL_HINSTANCE:
-                record.instance = value >>> 0;
+                record.instance = wholeAddress(value);
                 return;
             default:
                 break;

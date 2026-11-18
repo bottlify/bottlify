@@ -207,6 +207,18 @@ export function createBridgeModule(){
             state.callbacks = createCallbacks({ cpu, kernel, memory, reserveTrap });
 
             /**
+             * An answer that comes after its call returned to the dispatcher, as
+             * the thread's resume takes it: a quadword whole, an address of a
+             * 64-bit caller's zero-extended (`zeroExtends`, a bigint the resume
+             * writes into RAX whole), any other dword by its sign.
+             *
+             * @param {number | bigint} value @param {boolean} zeroExtends
+             * @returns {number | bigint}
+             */
+            const lateAnswer = (value, zeroExtends)=>(typeof value === 'bigint' ? value
+                : zeroExtends ? BigInt(value >>> 0) : value | 0);
+
+            /**
              * A handler that has not finished: the thread is stopped, and told where
              * to pick up its own code once the answer arrives.
              *
@@ -222,7 +234,7 @@ export function createBridgeModule(){
                 const thread = kernel.currentThread();
                 // Everything wanted of the frame is taken now: it describes this
                 // call only until the dispatcher's next one.
-                const { name, restingStack, hostReturn } = frame;
+                const { name, restingStack, hostReturn, zeroExtends } = frame;
                 record({ t: 'park', name, thread: thread?.name });
                 // Where it returns to was read before the handler ran: a handler
                 // that called the guest back has since written over that part of
@@ -243,9 +255,8 @@ export function createBridgeModule(){
                             return;
                         }
                         // A quadword answered whole (an LRESULT handed on) goes
-                        // back whole; a dword by its sign, as ever.
-                        state.callbacks.finish(thread, typeof value === 'bigint' ? value
-                            : value | 0);
+                        // back whole; a dword as the function's type has it.
+                        state.callbacks.finish(thread, lateAnswer(value, zeroExtends));
                     },
                     // Nothing above is waiting on this promise, so a handler that
                     // throws would otherwise vanish and leave the guest parked
@@ -268,7 +279,7 @@ export function createBridgeModule(){
              */
             const driveNow = (token, frame)=>{
                 const thread = kernel.currentThread();
-                const { name, restingStack, hostReturn, freeStack } = frame;
+                const { name, restingStack, hostReturn, freeStack, zeroExtends } = frame;
                 record({ t: 'drive', name, thread: thread?.name });
                 state.drive.call = name;
                 // From the call's first guest routine to its answer: the steps'
@@ -345,7 +356,7 @@ export function createBridgeModule(){
                         }
                         return;
                     }
-                    state.callbacks.finishNow(thread, value | 0);
+                    state.callbacks.finishNow(thread, lateAnswer(value, zeroExtends));
                 }
                 // The first call from where the call in flight left the stack;
                 // the rest from where it rests, as `callGuest` builds them.
