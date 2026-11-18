@@ -1535,6 +1535,71 @@ test('EnumSystemLocalesEx hands out names with their kind and the lParam', async
     assert.equal(fns.EnumSystemLocalesEx.handler([0, 0, 0, 0]), 0);
 });
 
+test('EnumSystemLocalesEx hands the names out in order, a language before its regions', async()=>{
+    // The C runtime's setlocale("chinese") takes the first locale whose
+    // language is Chinese and Wine's msvcr120 test expects "zh", as
+    // setlocale("american") the first whose abbreviation is ENU, "en".
+    const host = fakeHost();
+    /** @type {string[]} */
+    const seen = [];
+    const fns = /** @type {any} */ (createLocaleFunctions({
+        ...host,
+        callerThread: ()=>({ id: 1 }),
+        allocate: ()=>0x800,
+        free: ()=>{},
+        /** @param {number} entry @param {number[]} args */
+        call: async(entry, [buffer])=>{
+            void entry;
+            seen.push(host.readWide(buffer, host.stringLength(buffer, 2)));
+            return 1;
+        },
+    }));
+    assert.equal(await fns.EnumSystemLocalesEx.handler([0x1234, 0, 0, 0]), 1);
+    const lower = seen.map(name=>name.toLowerCase());
+    assert.deepEqual(lower, [...lower].sort());
+    assert.deepEqual(seen.filter(name=>/^zh(-|$)/.test(name)).slice(0, 3), ['zh', 'zh-CN', 'zh-Hans']);
+    assert.ok(seen.indexOf('en') < seen.indexOf('en-US'));
+});
+
+test('a locale answers Windows\' three-letter codes, a neutral one its default\'s country', ()=>{
+    // What the C runtime's setlocale matches "american", "chs" and
+    // "Chinese_China" against (Wine's msvcr110 test_setlocale, msvcr120
+    // test____lc_locale_name_func); every locale answered en-US's "ENU".
+    const host = fakeHost();
+    const fns = /** @type {any} */ (createLocaleFunctions(host));
+    /** @param {string} name @param {number} type */
+    const info = (name, type)=>{
+        host.plantWide(0x200, name);
+        const length = fns.GetLocaleInfoEx.handler([0x200, type, 0x300, 64]);
+        return length === 0 ? null : host.readWide(0x300, length - 1);
+    };
+    const [SABBREVLANGNAME, SABBREVCTRYNAME, SISO639LANGNAME2, SISO3166CTRYNAME2] =
+        [0x03, 0x07, 0x67, 0x68];
+    const [SENGLANGUAGE, SENGCOUNTRY, SSHORTDATE, SNAME] = [0x1001, 0x1002, 0x1f, 0x5c];
+    for (const [name, language, abbreviation, country, alpha3] of [
+        ['ar-SA', 'Arabic', 'ARA', 'Saudi Arabia', 'SAU'],
+        ['zh-CN', 'Chinese (Simplified)', 'CHS', 'China', 'CHN'],
+        ['zh-TW', 'Chinese (Traditional)', 'CHT', 'Taiwan', 'TWN'],
+        ['zh', 'Chinese', 'CHS', 'China', 'CHN'],
+        ['zh-Hans', 'Chinese (Simplified)', 'CHS', 'China', 'CHN'],
+        ['nn-NO', 'Norwegian Nynorsk', 'NON', 'Norway', 'NOR'],
+        ['en-GB', 'English', 'ENG', 'United Kingdom', 'GBR'],
+        ['en', 'English', 'ENU', 'United States', 'USA'],
+        ['es', 'Spanish', 'ESP', 'Spain', 'ESP'], ['es-ES', 'Spanish', 'ESN', 'Spain', 'ESP'],
+        ['sr-Latn-RS', 'Serbian (Latin)', 'SRM', 'Serbia', 'SRB']])
+    {
+        assert.equal(info(name, SENGLANGUAGE), language, `${name}: LOCALE_SENGLANGUAGE`);
+        assert.equal(info(name, SABBREVLANGNAME), abbreviation, `${name}: LOCALE_SABBREVLANGNAME`);
+        assert.equal(info(name, SENGCOUNTRY), country, `${name}: LOCALE_SENGCOUNTRY`);
+        assert.equal(info(name, SABBREVCTRYNAME), alpha3, `${name}: LOCALE_SABBREVCTRYNAME`);
+        assert.equal(info(name, SISO3166CTRYNAME2), alpha3, `${name}: LOCALE_SISO3166CTRYNAME2`);
+        assert.equal(info(name, SNAME), name, `${name}: its own name`);
+    }
+    assert.equal(info('zh-CN', SISO639LANGNAME2), 'zho');
+    assert.equal(info('ro-RO', SISO639LANGNAME2), 'ron');
+    assert.equal(info('en', SSHORTDATE), 'M/d/yyyy', 'the neutral English dates as en-US');
+});
+
 test('IsValidLanguageGroup: the one locale\'s group installed, seventeen known', ()=>{
     const host = fakeHost();
     const fns = createLocaleFunctions(host);

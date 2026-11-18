@@ -15,11 +15,16 @@
  * (`locales.js`). Where the platform's data and Windows' part, Windows' is
  * taken: a group separator CLDR writes as a narrow no-break space Windows
  * writes as a no-break space. What CLDR says nothing about -- currency
- * pictures, paper size -- is en-US's.
+ * pictures, paper size -- is en-US's; the three-letter codes are kept
+ * beside it (`locale-codes.js`). A neutral locale answers as its default
+ * specific one but for its identity and its language's names.
  *
  * A number is answered as its digits, or with LOCALE_RETURN_NUMBER as the
  * DWORD itself; the two LANGIDs are four hex digits.
  */
+
+import { LOCALES, localeByLcid } from './locales.js';
+import { LANGUAGE_ABBREVIATIONS, LANGUAGE_ALPHA3, REGION_ALPHA3 } from './locale-codes.js';
 
 /**
  * @typedef {import('./locales.js').Locale} Locale
@@ -215,6 +220,43 @@ const picture = (parts, letters)=>parts.map(part=>{
 }).join('');
 
 /**
+ * The languages Windows names with their script, by the neutral locales it
+ * has for one script of theirs: "zh-Hans", "sr-Latn".
+ */
+const SCRIPTED = new Set(LOCALES.filter(locale=>locale.neutral
+    && /-[A-Z][a-z]{3}$/.test(locale.name)).map(locale=>locale.name));
+
+/**
+ * The language a locale's language names name: its script with it where the
+ * tag writes one (sr-Latn-RS) or where its region implies one the language
+ * is written in apart (zh-CN is Simplified, zh-TW Traditional, as Windows
+ * names them); the neutral "zh" is Chinese alone.
+ *
+ * @param {string} tag @param {string} language @param {string[]} rest
+ * @param {string} region
+ */
+const languageOf = (tag, language, rest, region)=>{
+    const script = rest.find(part=>/^[A-Z][a-z]{3}$/.test(part));
+    if (script !== undefined)
+    {
+        return `${language}-${script}`;
+    }
+    if (region === '')
+    {
+        return language;
+    }
+    try
+    {
+        const implied = new Intl.Locale(tag).maximize().script;
+        return SCRIPTED.has(`${language}-${implied}`) ? `${language}-${implied}` : language;
+    }
+    catch (e){
+        void e;
+        return language;
+    }
+};
+
+/**
  * A locale's answers, its identity from the table and the rest from the
  * platform; en-US's where the platform has nothing to say.
  *
@@ -222,12 +264,20 @@ const picture = (parts, letters)=>parts.map(part=>{
  * @returns {LocaleValues}
  */
 function derive(locale){
-    const strings = new Map(EN_US.strings);
-    const numbers = new Map(EN_US.numbers);
+    // A neutral locale answers what its default specific locale does - its
+    // country, dates and numbers ("en" is in the United States) - and only
+    // its identity and its language's names are its own.
+    const specific = locale.neutral ? localeByLcid(locale.specific) : null;
+    const base = specific ? localeValues(specific) : EN_US;
+    const strings = new Map(base.strings);
+    const numbers = new Map(base.numbers);
     const tag = locale.name.split('_')[0];
     const [language, ...rest] = tag.split('-');
     const region = rest.find(part=>/^([A-Z]{2}|\d{3})$/.test(part)) ?? '';
     const parent = locale.neutral ? '' : tag.split('-').slice(0, -1).join('-');
+    const languageTag = languageOf(tag, language, rest, region);
+    const abbreviation = LANGUAGE_ABBREVIATIONS.get(tag)
+        ?? (specific ? null : language.toUpperCase());
 
     numbers.set(T.ILANGUAGE, locale.lcid & 0xffff);
     numbers.set(T.IDEFAULTLANGUAGE, locale.specific & 0xffff);
@@ -240,23 +290,41 @@ function derive(locale){
     strings.set(T.SCONSOLEFALLBACKNAME, locale.name);
     strings.set(T.SPARENT, parent);
     strings.set(T.SISO639LANGNAME, language);
+    strings.set(T.SISO639LANGNAME2, LANGUAGE_ALPHA3.get(language) ?? language);
+    if (abbreviation !== null)
+    {
+        strings.set(T.SABBREVLANGNAME, abbreviation);
+    }
+
+    try
+    {
+        const standard = /** @type {const} */ ({ type: 'language', languageDisplay: 'standard' });
+        const english = new Intl.DisplayNames('en', standard);
+        const native = new Intl.DisplayNames(tag, standard);
+        const englishLanguage = english.of(languageTag) ?? language;
+        strings.set(T.SENGLANGUAGE, englishLanguage);
+        strings.set(T.SLOCALIZEDLANGUAGENAME, englishLanguage);
+        strings.set(T.SNATIVELANGNAME, native.of(languageTag) ?? englishLanguage);
+        strings.set(T.SLANGUAGE, english.of(tag) ?? englishLanguage);
+        strings.set(T.SENGLISHDISPLAYNAME, english.of(tag) ?? englishLanguage);
+        strings.set(T.SNATIVEDISPLAYNAME, native.of(tag) ?? englishLanguage);
+    }
+    catch (e){
+        void e;
+    }
+    if (specific)
+    {
+        return { strings, numbers };
+    }
     strings.set(T.SISO3166CTRYNAME, region);
+    strings.set(T.SISO3166CTRYNAME2, REGION_ALPHA3.get(region) ?? region);
+    strings.set(T.SABBREVCTRYNAME, REGION_ALPHA3.get(region) ?? region);
 
     try
     {
         const intlTag = `${tag}-u-nu-latn`;
-        const standard = /** @type {const} */ ({ type: 'language', languageDisplay: 'standard' });
-        const english = new Intl.DisplayNames('en', standard);
-        const native = new Intl.DisplayNames(tag, standard);
         const englishRegion = new Intl.DisplayNames('en', { type: 'region' });
         const nativeRegion = new Intl.DisplayNames(tag, { type: 'region' });
-        const englishLanguage = english.of(language) ?? language;
-        strings.set(T.SENGLANGUAGE, englishLanguage);
-        strings.set(T.SLOCALIZEDLANGUAGENAME, englishLanguage);
-        strings.set(T.SNATIVELANGNAME, native.of(language) ?? englishLanguage);
-        strings.set(T.SLANGUAGE, english.of(tag) ?? englishLanguage);
-        strings.set(T.SENGLISHDISPLAYNAME, english.of(tag) ?? englishLanguage);
-        strings.set(T.SNATIVEDISPLAYNAME, native.of(tag) ?? englishLanguage);
         const country = region === '' ? '' : englishRegion.of(region) ?? region;
         strings.set(T.SENGCOUNTRY, country);
         strings.set(T.SCOUNTRY, country);

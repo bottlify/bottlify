@@ -89,6 +89,7 @@
     "src/layers/win32/kernel32/datetime-format.js",
     "src/layers/win32/kernel32/languages.js",
     "src/layers/win32/kernel32/lcmap.js",
+    "src/layers/win32/kernel32/locale-codes.js",
     "src/layers/win32/kernel32/locale-data.js",
     "src/layers/win32/kernel32/locale.js",
     "src/layers/win32/kernel32/locales.js",

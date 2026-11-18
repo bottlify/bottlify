@@ -201,6 +201,20 @@ Joliet specification.
   but read at run time from the platform's own zone data
 - License: Unicode License v3 (https://www.unicode.org/license.txt)
 
+## Locales' three-letter codes: Windows' language abbreviations, CLDR's ISO codes
+
+- Sources: .NET's culture table, `src/libraries/System.Private.CoreLib/src/System/Globalization/IcuLocaleData.cs`
+  (https://github.com/dotnet/runtime), its `ThreeLetterWindowsLanguageName` column: the
+  LOCALE_SABBREVLANGNAME Windows gives each locale; and the Unicode Common Locale Data Repository
+  (https://github.com/unicode-org/cldr), `common/supplemental/supplementalData.xml` (each
+  territory's ISO 3166 alpha-3 code) and `common/supplemental/supplementalMetadata.xml` (each
+  language's ISO 639-2 code, from its "overlong" aliases)
+- Location in this repository: `modules/core/src/layers/win32/kernel32/locale-codes.js`, the
+  three code tables, for the locales and regions the engine's locale table has
+- Licenses: .NET's under the MIT License (Copyright (c) .NET Foundation and Contributors,
+  https://github.com/dotnet/runtime/blob/main/LICENSE.TXT); CLDR's under the Unicode License v3
+  (https://www.unicode.org/license.txt)
+
 ## The LZMA specification: used as a specification
 
 - Source: Igor Pavlov's `lzma-specification.txt` from the LZMA SDK (https://www.7-zip.org/sdk.html),
