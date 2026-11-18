@@ -157,7 +157,8 @@ function clock(){
  *     seam is told nothing and takes any handle as a window.
  */
 /** @param {{ windows?: Record<number, 'top' | 'child'>, foreground?: () => number,
- *     mouseHeld?: (held: boolean) => void }} [options] */
+ *     mouseHeld?: (held: boolean) => void, rawInput?: { claim: (usage: number,
+ *     flags: number) => number, release: (usage: number) => void } }} [options] */
 function fixture({ windows, foreground, mouseHeld, rawInput } = {}){
     const memory = guestMemory();
     const bridge = fakeBridge();

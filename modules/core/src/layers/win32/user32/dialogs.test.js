@@ -2133,3 +2133,10 @@ test('the AorW calls make the Unicode dialog for flags zero and the ANSI one oth
     assert.equal(fns.DialogBoxIndirectParamAorW.handler([HINSTANCE, 0, 0, DIALOGPROC, 0, 0]), -1);
     assert.equal(fns.DialogBoxIndirectParamAorW.argBytes, 24);
 });
+
+test('DialogBoxParam with an owner that is no window answers zero and makes nothing', ()=>{
+    // "If the function fails because the hWndParent parameter is invalid,
+    // the return value is zero" (Wine's dialog.c test_DialogBoxParam).
+    const { fns } = setup();
+    assert.equal(fns.DialogBoxParamA.handler([HINSTANCE, 0x10, 0x4444, DIALOGPROC, 0]), 0);
+});

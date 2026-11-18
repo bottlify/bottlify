@@ -7152,9 +7152,14 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
                 }
                 // A change is announced, as Windows announces it: a control
                 // greys itself on WM_ENABLE, and a program watches for it.
+                // A window disabled while it has the keyboard focus loses it
+                // first, to no window (Wine's dialog.c test_DisabledDialogTest
+                // sees Windows leave the focus nowhere).
                 const WM_ENABLE = 0x000a;
-                return andThen(sendMessage(hwnd, WM_ENABLE, disable ? 0 : 1, 0),
-                    ()=>(wasDisabled ? 1 : 0));
+                const losing = disable && (host.focus?.() ?? 0) === (hwnd >>> 0)
+                    ? host.setFocus(0, host.callerThread?.()) : 0;
+                return andThen(losing, ()=>andThen(sendMessage(hwnd, WM_ENABLE,
+                    disable ? 0 : 1, 0), ()=>(wasDisabled ? 1 : 0)));
             },
         },
 

@@ -87,6 +87,7 @@ const DS_SETFONT = 0x0040;
 const DS_NOFAILCREATE = 0x0010;
 /** What a dialog that names a class nobody has leaves in GetLastError. */
 const ERROR_CANNOT_FIND_WND_CLASS = 1407;
+const ERROR_INVALID_WINDOW_HANDLE = 1400;
 
 /**
  * The classes Windows' own libraries register besides user32's, lower-case:
@@ -311,6 +312,10 @@ const MAX_RESOURCE_NAME = 256;
  *     UTF-16 name in guest memory.
  * @property {(message: { hwnd: number, message: number, wParam: number, lParam: number })
  *     => number} [translate]  What TranslateMessage does with a key message.
+ * @property {() => void} [releaseCapture]  ReleaseCapture, as a modal loop starting does.
+ * @property {(msg: number, code: number, thread?: unknown) => number | Promise<number>}
+ *     [msgFilter]  CallMsgFilter: the thread's WH_MSGFILTER hooks shown the MSG at `msg`;
+ *     nonzero when one of them took it.
  * @property {(record: any) => any[]} children
  * @property {(dialog: any, focused: number) => void} [markDefault]
  *           Styles the push button Enter would press as the default, as the
@@ -1003,14 +1008,31 @@ export function createDialogFunctions(options){
      * @param {number} dialog
      * @param {{ hwnd: number, message: number, wParam: number, lParam: number, time: number,
      *     unicode?: boolean }} message
+     * @param {number} [msg]  where the program's MSG is, for the message filter hooks
      * @returns {number | Promise<number>}
      */
-    const isDialogMessage = (dialog, message)=>{
+    const isDialogMessage = (dialog, message, msg = 0)=>{
+        const thread = host.callerThread?.();
+        // The message filter hooks hear the message first, for a dialog that
+        // is a window, whichever window the message is for, and one that
+        // takes it has it processed (Wine's dialog.c test_IsDialogMessage).
+        const filtered = msg === 0 || !live(dialog) ? 0
+            : host.msgFilter?.(msg, MSGF_DIALOGBOX, thread) ?? 0;
+        return after(filtered, hooked=>(hooked !== 0 ? 1 : isDialogMessageOf(dialog, message,
+            thread)));
+    };
+
+    /**
+     * IsDialogMessage past the message filter hooks.
+     *
+     * @param {number} dialog @param {any} message @param {unknown} thread
+     * @returns {number | Promise<number>}
+     */
+    const isDialogMessageOf = (dialog, message, thread)=>{
         if (!live(dialog) || !within(message.hwnd, dialog))
         {
             return 0;
         }
-        const thread = host.callerThread?.();
         return after(dialogKey(dialog, message, thread), taken=>{
             if (taken !== null)
             {
@@ -1076,6 +1098,11 @@ export function createDialogFunctions(options){
         // finds it still hidden (dialog.c test_focus). One its WM_INITDIALOG
         // already ended is not shown at all.
         let shown = (record.style & WS_VISIBLE) !== 0;
+        // The mouse capture is let go of as the modal loop starts, whichever
+        // window held it: what WM_INITDIALOG still saw held is free by the
+        // first message the loop takes (Wine's dialog.c test_capture_release;
+        // a modeless dialog leaves it).
+        host.releaseCapture?.();
         // Unattended, a dialog waiting for input is put to whoever answers for
         // the run, and the button chosen is pressed as a click presses it; one
         // that stays up after a few presses is left.
@@ -1210,6 +1237,13 @@ export function createDialogFunctions(options){
      * @returns {number | Promise<number>}
      */
     const dialogBox = (instance, template, parent, dialogFunc, initParam, unicode = false)=>{
+        // "If the function fails because the hWndParent parameter is
+        // invalid, the return value is zero" (DialogBoxParam's documentation).
+        if ((parent >>> 0) !== 0 && !live(parent >>> 0))
+        {
+            host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
+            return 0;
+        }
         const thread = host.callerThread?.();
         const owner = modalOwner(parent);
         const disabled = owner && (owner.style & WS_DISABLED) === 0 ? owner.hwnd : 0;
@@ -1753,7 +1787,7 @@ export function createDialogFunctions(options){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([dialog, msg])=>isDialogMessage(dialog >>> 0,
-                readMessage(host, msg >>> 0, userLayouts(host.pointerSize))),
+                readMessage(host, msg >>> 0, userLayouts(host.pointerSize)), msg >>> 0),
         },
 
         /** BOOL IsDialogMessageW(HWND hDlg, LPMSG lpMsg), a wide caller's message. */
@@ -1761,7 +1795,8 @@ export function createDialogFunctions(options){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([dialog, msg])=>isDialogMessage(dialog >>> 0,
-                { ...readMessage(host, msg >>> 0, userLayouts(host.pointerSize)), unicode: true }),
+                { ...readMessage(host, msg >>> 0, userLayouts(host.pointerSize)), unicode: true },
+                msg >>> 0),
         },
     };
 }

@@ -8004,3 +8004,31 @@ test('a mode change does not wait for ever on a window whose thread takes no mes
     await tick();
     assert.equal(await answer, 0, 'DISP_CHANGE_SUCCESSFUL, then');
 });
+
+test('CallMsgFilter shows the message to the thread\'s WH_MSGFILTER hooks; nonzero takes it', ()=>{
+    /** @type {number[][]} */
+    const heard = [];
+    let answer = 0;
+    const { fns } = setup({ hookReply: (entry, args)=>{
+        heard.push([entry, ...args]);
+        return answer;
+    } });
+    const WH_MSGFILTER = -1;
+    assert.equal(fns.CallMsgFilterA.handler([MSG_BUFFER, 0]), 0, 'no hook: not taken');
+    assert.notEqual(fns.SetWindowsHookExA.handler([WH_MSGFILTER, HOOK_PROC, HINSTANCE, 0]), 0);
+    assert.equal(fns.CallMsgFilterA.handler([MSG_BUFFER, 2]), 0);
+    assert.deepEqual(heard, [[HOOK_PROC, 2, 0, MSG_BUFFER]], 'code, 0 and the MSG');
+    answer = 1;
+    assert.equal(fns.CallMsgFilterW.handler([MSG_BUFFER, 0]), 1, 'a hook took it');
+});
+
+test('a window disabled while it has the focus leaves the focus nowhere', ()=>{
+    const { fns, hwnd, memory } = withWindow();
+    const child = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE, parent: hwnd });
+    fns.SetFocus.handler([child]);
+    assert.equal(fns.GetFocus.handler(), child);
+    fns.EnableWindow.handler([child, 0]);
+    assert.equal(fns.GetFocus.handler(), 0, 'Wine\'s dialog.c test_DisabledDialogTest');
+    fns.EnableWindow.handler([child, 1]);
+    assert.equal(fns.GetFocus.handler(), 0, 'and enabling gives nothing back');
+});

@@ -283,6 +283,7 @@ const WH_MAX = 14;
 const WH_JOURNALRECORD = 0;
 const WH_JOURNALPLAYBACK = 1;
 const WH_SYSMSGFILTER = 6;
+const WH_MSGFILTER = -1;
 const WH_KEYBOARD_LL = 13;
 const WH_MOUSE_LL = 14;
 
@@ -3734,6 +3735,21 @@ export function createWindowFunctions(host){
         const heard = hooks.filter(hook=>hook.type === type && hears(hook, thread)).reverse();
         return [...heard.filter(hook=>hook.thread !== 0), ...heard.filter(hook=>hook.thread === 0)];
     };
+
+    /**
+     * A message shown to the message filter hooks - WH_SYSMSGFILTER's, the
+     * system's, then the thread's WH_MSGFILTER - as a modal loop shows them
+     * each message it is about to process: 1 when a hook answered nonzero,
+     * and the message is not to be processed.
+     *
+     * @param {number} msg  the MSG in guest memory
+     * @param {number} code @param {unknown} thread
+     * @returns {number | Promise<number>}
+     */
+    const msgFilter = (msg, code, thread)=>andThen(
+        callHook(WH_SYSMSGFILTER, null, [code, 0, msg], thread), system=>(system !== 0 ? 1
+            : andThen(callHook(WH_MSGFILTER, null, [code, 0, msg], thread),
+                own=>(own !== 0 ? 1 : 0))));
 
     /**
      * Calls the first hook of a thread's chain of a type, or the one after `after`.
@@ -8277,6 +8293,14 @@ export function createWindowFunctions(host){
                     /** @type {number} */ type)=>table.LoadImageW.handler([instance, name, type,
                     0, 0, 0]),
                 translate,
+                releaseCapture: ()=>{
+                    if (captured !== 0)
+                    {
+                        releaseCapture();
+                    }
+                },
+                msgFilter: (/** @type {number} */ msg, /** @type {number} */ code,
+                    /** @type {unknown} */ thread)=>msgFilter(msg, code, thread),
                 // GetMessage, as the dialog manager's loop is: what other
                 // threads sent is handled first, or a thread waiting on its
                 // modal dialog never answers another thread's SendMessage --
@@ -8296,6 +8320,24 @@ export function createWindowFunctions(host){
             },
         }),
         ...rawInput.table,
+
+        /**
+         * BOOL CallMsgFilterA(LPMSG lpMsg, int nCode)
+         *
+         * The thread's WH_MSGFILTER hooks shown a message a modal loop of the
+         * program's own is about to process; TRUE when one of them took it.
+         */
+        CallMsgFilterA: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([msg, code])=>msgFilter(msg >>> 0, code | 0, host.callerThread?.()),
+        },
+        /** BOOL CallMsgFilterW(LPMSG lpMsg, int nCode) */
+        CallMsgFilterW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([msg, code])=>msgFilter(msg >>> 0, code | 0, host.callerThread?.()),
+        },
 
         /** ATOM RegisterClassA(const WNDCLASSA *lpWndClass) */
         RegisterClassA: {
