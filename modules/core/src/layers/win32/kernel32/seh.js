@@ -371,7 +371,8 @@ export function createSeh(host){
      * @param {any} thread  Whose chain. Named by every caller rather than taken
      *        to be the running thread: a dispatch that has awaited anything is
      *        no longer answering for the thread on the processor.
-     * @returns {{ frames: { frame: number, handler: number }[], damaged: boolean }}
+     * @returns {{ frames: { frame: number, handler: number }[], damaged: boolean,
+     *     broken?: number }}  `broken` the link a damaged walk stopped at
      */
     const chain = thread=>{
         /** @type {{ frame: number, handler: number }[]} */
@@ -382,17 +383,30 @@ export function createSeh(host){
         {
             if (!host.isMapped(at) || at <= previous)
             {
-                return { frames, damaged: true };
+                return { frames, damaged: true, broken: at };
             }
             frames.push({ frame: at, handler: readU32(at + 4) });
             previous = at;
             at = readU32(at);
             if (frames.length > 256)
             {
-                return { frames, damaged: true };
+                return { frames, damaged: true, broken: at };
             }
         }
         return { frames, damaged: false };
+    };
+
+    /**
+     * Where a damaged chain broke, for the trace: its frames, the link that
+     * left them, and the stack the thread block says the thread has - a frame
+     * on another thread's stack, or past this one's, is a stack overrun.
+     *
+     * @param {any} thread @param {{ frame: number }[]} frames @param {number} [broken]
+     */
+    const damagedAt = (thread, frames, broken)=>{
+        const teb = tebOf(thread);
+        return ` at ${hex(broken ?? 0)} after [${frames.map(one=>hex(one.frame)).join(' ')}],`
+            + ` stack ${hex(readU32(teb + 8))}..${hex(readU32(teb + 4))}`;
     };
 
     /**
@@ -621,7 +635,7 @@ export function createSeh(host){
         // The asking thread's chain: after the vectored handlers the thread on
         // the processor, or the one an executor's call is answered for, may
         // be another, and its frames are not this exception's.
-        const { frames, damaged } = chain(asked);
+        const { frames, damaged, broken } = chain(asked);
         // A jump into the first page is a call through a null pointer, whose
         // return address -- the call's own place -- is the only lead.
         // A raised one's address is inside RaiseException; who raised it is
@@ -649,7 +663,9 @@ export function createSeh(host){
             ? ` [${(what.parameters ?? []).slice(0, 4).map(hex).join(' ')}]` : '';
         host.trace?.(`exception ${hex(what.code)}${told} at ${hex(what.address)}${reached}`
             + `${refused}${caller}, `
-            + `${frames.length} frame(s)${damaged ? ', chain damaged' : ''}`);
+            + `${frames.length} frame(s)`
+            + `${damaged ? `, chain damaged${damagedAt(asked, frames, broken)}` : ''}`
+            + ` on ${asked?.name ?? 'the thread'}`);
 
         // Windows calls each handler with a frame of its own at the head of
         // the chain, and the C runtime's catch counts on it: the frame
