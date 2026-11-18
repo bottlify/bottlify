@@ -5924,6 +5924,14 @@ async function buildApp(options){
             resolution: (width, height, where = {})=>{
                 if (width > 0 && height > 0)
                 {
+                    // A device's mode is a resolution change like one
+                    // ChangeDisplaySettings makes, and resets the cursor's
+                    // clip as that does: a program clips to its full-screen
+                    // mode and leaves the clip there when the device goes.
+                    if (display.width !== width || display.height !== height)
+                    {
+                        win32.user32?.('ClipCursor')?.handler([0]);
+                    }
                     display.width = width;
                     display.height = height;
                     // A fullscreen device takes the window it presents into

@@ -60,6 +60,7 @@ import { LOGFONTA, LOGFONTW_SIZE, logFontBytes, readLogFont, readLogFontW } from
 import { ANY_WINDOW, threadIdOf } from './messages.js';
 import { DISPLAY_DEVICE_NAME, VIDEO_ADAPTER_NAME } from '../devices.js';
 import { createRefusals } from '../common/refusal.js';
+import { afterWait } from './after-wait.js';
 import { charactersOf, readToTerminator } from '../common/scan-windows.js';
 import { forwarded, wholeAddress, wholeAnswer, wideOf } from '../common/pointers.js';
 
@@ -2730,6 +2731,12 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
         screen.height = height;
         screen.bitsPerPixel = bits;
         workArea = null;
+        // A resolution change resets the cursor's clip (Wine's monitor.c
+        // test_ChangeDisplaySettingsEx): one a program set for the mode it
+        // ran in and never lifted would otherwise stay the space the pointer
+        // is scaled into, and every click after the mode came back missed.
+        clip = null;
+        host.clipCursor?.(null);
         return andThen(sendMessage(HWND_BROADCAST, WM_DISPLAYCHANGE, screen.bitsPerPixel,
             ((height & 0xffff) << 16 | (width & 0xffff)) >>> 0, false, DISPLAY_CHANGE_WAIT_MS),
         ()=>DISP_CHANGE_SUCCESSFUL);
@@ -3674,10 +3681,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
         }
     };
 
-    /** @param {any} value @param {(answer: any) => any} then */
-    const andThen = (value, then)=>(typeof value?.then === 'function'
-        ? value.then(then)
-        : then(value));
+    const andThen = afterWait(host);
 
     /**
      * ChildWindowFromPoint, both spellings: the topmost child whose rectangle

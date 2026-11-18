@@ -3372,6 +3372,18 @@ test('GetClipCursor answers the rectangle ClipCursor set, cut to the screen, or 
     assert.equal(memory.u32(RECT_BUFFER + 8), SCREEN.width);
 });
 
+test('a resolution change resets the clip of the cursor', ()=>{
+    const { memory, fns } = setup();
+    memory.putU32s(OUT_BUFFER, [0, 0, 320, 200]);
+    fns.ClipCursor.handler([OUT_BUFFER]);
+    putMode(memory, 640, 480);
+    memory.putU32s(DEVMODE_BUFFER + DEVMODEA.dmFields, [DM_PELSWIDTH | DM_PELSHEIGHT]);
+    assert.equal(fns.ChangeDisplaySettingsA.handler([DEVMODE_BUFFER, 0]), DISP_CHANGE_SUCCESSFUL);
+    fns.GetClipCursor.handler([RECT_BUFFER]);
+    assert.deepEqual([0, 4, 8, 12].map(at=>memory.u32(RECT_BUFFER + at) | 0), [0, 0, 640, 480],
+        'the whole of the new screen, not the rectangle set before');
+});
+
 test('SubtractRect takes off a band that covers one side right across, and nothing else', ()=>{
     const { memory, fns } = setup();
     const A = OUT_BUFFER;
