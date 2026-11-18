@@ -30,6 +30,8 @@
  * or cGrow -- rounded up to a multiple of four -- whichever is more, plus one.
  */
 
+import { CLSID_IMAGELIST, createImageListObjects } from './imagelist-com.js';
+
 /** ImageList_Add and friends report failure with this, not with zero. */
 const FAILED = -1;
 
@@ -50,6 +52,11 @@ const MAX_OVERLAYS = 15;
 const SAVED_OVERLAYS = 4;
 
 /** No overlay image is set, as a list starts. */
+const E_NOINTERFACE = 0x80004002 | 0;
+const E_POINTER = 0x80004003 | 0;
+const CLASS_E_NOAGGREGATION = 0x80040110 | 0;
+const CLASS_E_CLASSNOTAVAILABLE = 0x80040111 | 0;
+
 const NO_OVERLAYS = Object.freeze(Array(MAX_OVERLAYS).fill(-1));
 
 /** The bits of a drawing style that name an overlay, one-based. */
@@ -102,6 +109,10 @@ const dwords = values=>new Uint8Array(new Uint32Array(values.map(value=>value >>
 /**
  * @typedef {Object} ImageListHost
  * @property {(address: number, length: number) => Uint8Array} [readMemory]
+ * @property {{ publish: (object: any, interfaceId: string) => number }} [vtables]
+ *           Where a list is published as the IImageList its handle is
+ *           (`imagelist-com.js`). Absent, a handle is a number of the list's own
+ *           and no COM call reaches it.
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(bitmap: number) => { width: number, height: number } | null} [bitmapSize]
  *           How large a bitmap handle is, for counting the images in a strip.
@@ -187,6 +198,22 @@ export function createImageLists(host){
 
     /** @param {number} handle */
     const listOf = handle=>lists.get(handle >>> 0) ?? null;
+
+    /** The lists as COM objects, where there is a bridge to publish them on. */
+    const objects = host.vtables && host.readMemory ? createImageListObjects({
+        publish: (object, id)=>/** @type {NonNullable<ImageListHost['vtables']>} */ (host.vtables)
+            .publish(object, id),
+        flat: (name, args)=>/** @type {any} */ (functions)[name].handler(args),
+        putU32: (at, value)=>host.writeMemory(at, Uint8Array.of(value & 255, value >>> 8 & 255,
+            value >>> 16 & 255, value >>> 24 & 255)),
+        readGuid: at=>/** @type {NonNullable<ImageListHost['readMemory']>} */ (host.readMemory)(
+            at, 16).slice(),
+        divergence: host.divergence,
+        initialize: (handle, cx, cy, flags, initial, grow)=>{
+            const list = listOf(handle);
+            return list !== null && cx > 0 && cy > 0 && setUp(list, cx, cy, flags, initial, grow);
+        },
+    }) : null;
 
     /**
      * One of gdi32's exports called as a program would call it, or zero
@@ -302,21 +329,56 @@ export function createImageLists(host){
      * @returns {number} its handle
      */
     const makeList = (cx, cy, flags, initial, grow, max = initial + 1)=>{
-        const colour = (flags & ILC_COLORMASK) === 0 ? ILC_COLOR4 : 0;
         /** @type {ImageList} */
-        const list = {
-            cx, cy, flags: (flags | colour) >>> 0, count: 0, max: 0, initial,
-            // A WORD, as it is kept and written.
-            grow: (Math.max(grow, 1) + 3) & 0xfffc,
-            image: 0, mask: 0, background: CLR_NONE, overlays: NO_OVERLAYS,
-        };
-        if (!resize(list, max, 0))
+        const list = { cx: 0, cy: 0, flags: 0, count: 0, max: 0, initial: 0, grow: 0, image: 0,
+            mask: 0, background: CLR_NONE, overlays: NO_OVERLAYS };
+        if (!setUp(list, cx, cy, flags, initial, grow, max))
         {
             return 0;
         }
-        const handle = nextHandle++;
+        const handle = objects ? objects.make(forget) : nextHandle++;
+        if (handle === 0)
+        {
+            freeBitmaps(list);
+            return 0;
+        }
         lists.set(handle, list);
         return handle;
+    };
+
+    /**
+     * A list made empty at a size and depth: what ImageList_Create makes, and
+     * what IImageList2::Initialize makes of a list again.
+     *
+     * @param {ImageList} list @param {number} cx @param {number} cy @param {number} flags
+     * @param {number} initial @param {number} grow @param {number} [max]
+     */
+    const setUp = (list, cx, cy, flags, initial, grow, max = initial + 1)=>{
+        const colour = (flags & ILC_COLORMASK) === 0 ? ILC_COLOR4 : 0;
+        freeBitmaps(list);
+        Object.assign(list, { cx, cy, flags: (flags | colour) >>> 0, count: 0, max: 0, initial,
+            // A WORD, as it is kept and written.
+            grow: (Math.max(grow, 1) + 3) & 0xfffc,
+            image: 0, mask: 0, background: CLR_NONE, overlays: NO_OVERLAYS });
+        return resize(list, max, 0);
+    };
+
+    /** @param {ImageList} list */
+    const freeBitmaps = list=>{
+        [list.image, list.mask].filter(bitmap=>bitmap !== 0)
+            .forEach(bitmap=>gdi('DeleteObject', bitmap));
+        list.image = 0;
+        list.mask = 0;
+    };
+
+    /** A list whose last reference went: its bitmaps with it. @param {number} handle */
+    const forget = handle=>{
+        const list = listOf(handle);
+        if (list)
+        {
+            freeBitmaps(list);
+            lists.delete(handle >>> 0);
+        }
     };
 
     /**
@@ -615,6 +677,50 @@ export function createImageLists(host){
 
     const functions = {
         /**
+         * HRESULT HIMAGELIST_QueryInterface(HIMAGELIST himl, REFIID riid, void **ppv)
+         *
+         * The list is the object: IImageList, IImageList2 and IUnknown are its
+         * handle, referenced once more.
+         */
+        HIMAGELIST_QueryInterface: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, riid, out])=>(objects ? objects.queryInterface(handle, riid, out)
+                : E_NOINTERFACE),
+        },
+
+        /**
+         * HRESULT ImageList_CoCreateInstance(REFCLSID rclsid, const IUnknown *punkOuter,
+         *     REFIID riid, void **ppv)
+         *
+         * CLSID_ImageList without COM's registry: an empty list, sized by
+         * IImageList2::Initialize. No aggregation.
+         */
+        ImageList_CoCreateInstance: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([clsid, outer, riid, out])=>{
+                if (!objects)
+                {
+                    return E_NOINTERFACE;
+                }
+                if ((out >>> 0) === 0)
+                {
+                    return E_POINTER;
+                }
+                if ((outer >>> 0) !== 0)
+                {
+                    return CLASS_E_NOAGGREGATION;
+                }
+                if (objects.guidAt(clsid) !== CLSID_IMAGELIST)
+                {
+                    return CLASS_E_CLASSNOTAVAILABLE;
+                }
+                return objects.handOut(makeList(1, 1, 0, 0, 1), riid, out);
+            },
+        },
+
+        /**
          * HIMAGELIST ImageList_Create(int cx, int cy, UINT flags, int cInitial,
          *                             int cGrow)
          */
@@ -651,14 +757,21 @@ export function createImageLists(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([handle])=>{
-                const list = listOf(handle);
-                if (!list)
+                if (!listOf(handle))
                 {
                     return 0;
                 }
-                [list.image, list.mask].filter(bitmap=>bitmap !== 0)
-                    .forEach(bitmap=>gdi('DeleteObject', bitmap));
-                lists.delete(handle >>> 0);
+                // A list is a COM object: Destroy lets go of one reference,
+                // and the list goes with the last (Wine's test_iimagelist).
+                const object = objects?.objectOf(handle);
+                if (object)
+                {
+                    object.release();
+                }
+                else
+                {
+                    forget(handle);
+                }
                 return 1;
             },
         },

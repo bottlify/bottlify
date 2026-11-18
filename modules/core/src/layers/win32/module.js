@@ -2985,6 +2985,8 @@ export function createWin32Module(){
             // and what its tab control draws from.
             const imageLists = createImageLists({
                 readMemory, writeMemory, divergence: config?.divergence,
+                // A list is the IImageList its handle points at.
+                vtables: comVtables,
                 gdi32: name=>libraries['GDI32.dll']?.[name],
                 user32: name=>libraries['USER32.dll']?.[name],
                 bitmapSize: bitmap=>gdi.bitmapSize(bitmap),

@@ -34,6 +34,10 @@ const ILHEAD = Object.freeze({
 const IMAGELIST_MAGIC = 0x4c49;
 const IMAGELIST_VERSION = 0x101;
 /** How many images a row of a written bitmap holds. */
+const S_OK = 0;
+const E_FAIL = 0x80004005 | 0;
+const E_INVALIDARG = 0x80070057 | 0;
+
 const TILE_COLUMNS = 4;
 
 /** BITMAPFILEHEADER: 'BM', then the sizes, packed to two bytes. */
@@ -252,7 +256,7 @@ export function createImageListStreams(host, lists){
         release: address=>host.release?.(address),
     };
 
-    return {
+    const functions = {
         /**
          * BOOL ImageList_Write(HIMAGELIST himl, LPSTREAM pstm)
          *
@@ -289,6 +293,25 @@ export function createImageListStreams(host, lists){
                     }
                 }
                 return 1;
+            },
+        },
+
+        /**
+         * HRESULT ImageList_WriteEx(HIMAGELIST himl, DWORD dwFlags, LPSTREAM pstm)
+         *
+         * ImageList_Write as an HRESULT. ILP_DOWNLEVEL asks for the 5.82
+         * library's form, which is the one form written here.
+         */
+        ImageList_WriteEx: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: async([handle, , stream])=>{
+                if ((stream >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const written = await functions.ImageList_Write.handler([handle, stream]);
+                return written ? S_OK : E_FAIL;
             },
         },
 
@@ -340,6 +363,7 @@ export function createImageListStreams(host, lists){
             },
         },
     };
+    return functions;
 }
 
 /**
