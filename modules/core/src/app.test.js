@@ -14,7 +14,8 @@ import assert from 'node:assert/strict';
 import {
     createMacrotask, groupBlocks, idleWait, inParallel, pacedYield, pageIsHidden,
     withReadAhead, withWindow, refetchedIn, windowFor, NEAR_ROUND_TRIP_MS, READ_AHEAD_BYTES,
-    fixedLibraryPath, startDirectoryOf, libraryCandidates, withLibraryExtension, timedWait,
+    fixedLibraryPath, searchedDirectories, startDirectoryOf, libraryCandidates,
+    withLibraryExtension, timedWait,
     pathDirectories, divergenceReporter,
     pagePacing,
     PAGE_YIELD_MS,
@@ -593,6 +594,18 @@ test('a bare name is looked for beside the executable, then where the system kee
     // wins, the system's is the engine's.
     assert.deepEqual(libraryCandidates('d3dx9_24.dll', IMAGE, undefined, { ours: true }),
         ['C:\\App\\d3dx9_24.dll']);
+});
+
+test('a LOAD_LIBRARY_SEARCH_* search looks in its places alone, in the documented order', ()=>{
+    const only = searchedDirectories({ application: true, user: ['E:\\Added'], system: true,
+        from: 'D:\\Lib' }, IMAGE);
+    assert.deepEqual(only, ['D:\\Lib', 'C:\\App', 'E:\\Added', 'C:\\WINDOWS\\system32\\']);
+    assert.deepEqual(libraryCandidates('1\\x.dll', IMAGE, 'C:\\Temp', { only: [
+        'C:\\WINDOWS\\system32\\'] }), ['C:\\WINDOWS\\system32\\1\\x.dll'],
+    'not the current directory, not the program\'s');
+    assert.deepEqual(libraryCandidates('C:\\Temp\\x.dll', IMAGE, 'C:\\Temp', { only: [] }),
+        ['C:\\Temp\\x.dll'], 'a full path is its own place still');
+    assert.equal(searchedDirectories(null, IMAGE), undefined, 'none: the standard search');
 });
 
 test('a library loaded with an altered search finds its imports beside it, then on PATH', ()=>{

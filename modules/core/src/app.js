@@ -2343,12 +2343,14 @@ const SYSTEM_DIRECTORY = 'WINDOWS\\system32';
  *
  * `from` replaces the program's directory with a library's own, as
  * LOAD_WITH_ALTERED_SEARCH_PATH has Windows search for that library's imports;
- * `path` is the directories of the process's PATH, searched last.
+ * `path` is the directories of the process's PATH, searched last. `only` is
+ * the whole search instead, the directories LoadLibraryEx's
+ * LOAD_LIBRARY_SEARCH_* flags allow (`searchedDirectories`).
  *
  * @param {string} name
  * @param {string} imagePath
  * @param {string} [currentDirectory]
- * @param {{ ours?: boolean, from?: string, path?: string[] }} [how]
+ * @param {{ ours?: boolean, from?: string, path?: string[], only?: string[] }} [how]
  * @returns {string[]}
  */
 export function libraryCandidates(name, imagePath, currentDirectory, how = {}){
@@ -2357,9 +2359,13 @@ export function libraryCandidates(name, imagePath, currentDirectory, how = {}){
     {
         return [fixed];
     }
-    const first = `${imagePath.slice(0, imagePath.lastIndexOf('\\') + 1)}${name}`;
     /** @param {string} directory */
     const inside = directory=>`${directory.replace(/[\\/]+$/, '')}\\${name}`;
+    if (how.only)
+    {
+        return how.only.map(inside);
+    }
+    const first = `${imagePath.slice(0, imagePath.lastIndexOf('\\') + 1)}${name}`;
     const places = [how.from ? inside(how.from) : first,
         ...how.ours ? [] : SYSTEM_LIBRARY_DIRECTORIES.map(directory=>directory + name)];
     for (const directory of [currentDirectory, ...how.path ?? []])
@@ -2371,6 +2377,31 @@ export function libraryCandidates(name, imagePath, currentDirectory, how = {}){
         }
     }
     return places;
+}
+
+/**
+ * Where LoadLibraryEx looks under its LOAD_LIBRARY_SEARCH_* flags, in the
+ * order its documentation gives: the loading library's own directory
+ * (LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR, for that library's imports), the
+ * program's, the ones AddDllDirectory and SetDllDirectory named, and the
+ * system directory. Nothing else is looked in - not the current directory,
+ * not PATH. Undefined for the standard search.
+ *
+ * @param {import('./layers/win32/kernel32/modules.js').LibrarySearch | null | undefined} search
+ * @param {string} imagePath
+ * @returns {string[] | undefined}
+ */
+export function searchedDirectories(search, imagePath){
+    if (!search)
+    {
+        return undefined;
+    }
+    return [
+        ...search.from ? [search.from] : [],
+        ...search.application ? [startDirectoryOf(imagePath)] : [],
+        ...search.user,
+        ...search.system ? [SYSTEM_LIBRARY_DIRECTORIES[0]] : [],
+    ];
 }
 
 /**
@@ -5024,10 +5055,11 @@ async function buildApp(options){
      * Every file a path given to LoadLibrary can name, as `pathKey`s: the one
      * it fixes, or each place a relative one is searched for in.
      *
-     * @param {string} path
+     * @param {string} path @param {string[]} [only]  A LoadLibraryEx search's places.
      */
-    const placesNamed = path=>libraryCandidates(path, options.imagePath ?? 'C:\\app.exe',
-        core.api('filesystem').currentDirectory()).map(pathKey);
+    const placesNamed = (path, only = undefined)=>libraryCandidates(path,
+        options.imagePath ?? 'C:\\app.exe', core.api('filesystem').currentDirectory(), { only })
+        .map(pathKey);
 
     /** @param {string | null} name */
     const findModule = name=>{
@@ -5047,10 +5079,12 @@ async function buildApp(options){
      * native image of a mixed assembly, beside the assembly itself -- is
      * loaded as a module of its own.
      *
-     * @param {string} name @param {any} module
+     * @param {string} name @param {any} module @param {string[]} [only]  A
+     *     LoadLibraryEx search's places.
      */
-    const answersPath = (name, module)=>!/[\\/]/.test(name) || !module?.fromFile || !module.path
-        || placesNamed(name).includes(pathKey(module.path));
+    const answersPath = (name, module, only = undefined)=>!/[\\/]/.test(name)
+        || !module?.fromFile || !module.path
+        || placesNamed(name, only).includes(pathKey(module.path));
 
     /**
      * Takes a module's name off the bare-name index when it is the one there,
@@ -6277,8 +6311,12 @@ async function buildApp(options){
                 },
                 imagePath: ()=>options.imagePath ?? 'C:\\app.exe',
                 /** @param {string} name */
-                /** @param {string} name @param {number} [flags] */
-                load: (name, flags)=>loadLibraryAtRuntime(name, flags),
+                /**
+                 * @param {string} name @param {number} [flags]
+                 * @param {import('./layers/win32/kernel32/modules.js').LibrarySearch | null} [search]
+                 */
+                load: (name, flags, search)=>loadLibraryAtRuntime(name, flags, undefined, 0,
+                    search),
                 /** @param {string} name */
                 loadError: name=>loadErrors.get(withLibraryExtension(name).toLowerCase()
                     .replace(/\.dll$/, '')) ?? null,
@@ -7402,13 +7440,18 @@ async function buildApp(options){
      *     as another's dependency: by then the processor is someone else's.
      * @param {number} [importer]  The base of the library whose import this is:
      *     its own activation context is looked in first.
+     * @param {import('./layers/win32/kernel32/modules.js').LibrarySearch | null} [search]
+     *     LoadLibraryEx's LOAD_LIBRARY_SEARCH_* flags, the places looked in
+     *     instead of the standard search: for the library and, as Windows
+     *     does, for its imports.
      * @returns {number | Promise<number>}
      */
-    const loadLibraryAtRuntime = (requested, flags = 0, thread = undefined, importer = 0)=>{
+    const loadLibraryAtRuntime = (requested, flags = 0, thread, importer = 0, search = null)=>{
         const name = withLibraryExtension(requested);
+        const only = searchedDirectories(search, options.imagePath ?? 'C:\\app.exe');
         if ((flags & LOAD_AS_DATA) !== 0)
         {
-            return loadAsData(name, flags);
+            return loadAsData(name, flags, only);
         }
         // Read now, before anything is awaited: this is the thread whose
         // LoadLibrary call is being answered, and it is the one whose stack the
@@ -7446,7 +7489,7 @@ async function buildApp(options){
         // re-mapping and re-binding a megabyte of library is most of what the
         // machine then does with its time.
         const named = findModule(name);
-        const loaded = answersPath(name, named) ? named : null;
+        const loaded = answersPath(name, named, only) ? named : null;
         const searched = searchesBesideProgram(isKnownDll(name), Boolean(loaded?.fromFile));
         // A bare name an activation context redirects is that assembly's
         // file -- or the engine's own, when the engine answers it -- and is
@@ -7466,7 +7509,7 @@ async function buildApp(options){
                 : libraryCandidates(name, options.imagePath ?? 'C:\\app.exe',
                     filesystem.currentDirectory(), {
                         ours: loaded !== null, from: importing?.searchFrom,
-                        path: pathDirectories(pathValue),
+                        path: pathDirectories(pathValue), only,
                     });
         if (candidates.length > 0)
         {
@@ -7646,7 +7689,8 @@ async function buildApp(options){
                             if (findModule(dependency.dll) === null)
                             {
                                 const got = await loadLibraryAtRuntime(dependency.dll, 0, asked,
-                                    base);
+                                    base, search && { ...search, from: search.loadDirectory
+                                        ? path.slice(0, path.lastIndexOf('\\')) : undefined });
                                 if (got === 0)
                                 {
                                     absent.push(dependency.dll);
@@ -7754,7 +7798,11 @@ async function buildApp(options){
                 })();
             }
         }
-        const table = faceFor(name, redirected) ?? loaded;
+        // Under a LoadLibraryEx search, the engine's own library is the system
+        // directory's: found only where that is searched, or when it is a
+        // KnownDLL or already loaded, which Windows finds by name first.
+        const table = faceFor(name, redirected) ?? (!search || search.system
+            || isKnownDll(name) || loaded?.loaded !== false ? loaded : null);
         if (table)
         {
             markLoaded(table);
@@ -7829,10 +7877,12 @@ async function buildApp(options){
      *
      * @param {string} name
      * @param {number} flags
+     * @param {string[]} [only]  A LoadLibraryEx search's places (`searchedDirectories`).
      * @returns {number | Promise<number>}
      */
-    const loadAsData = (name, flags)=>{
-        const loaded = findModule(name);
+    const loadAsData = (name, flags, only = undefined)=>{
+        const named = findModule(name);
+        const loaded = answersPath(name, named, only) ? named : null;
         if (loaded && loaded.loaded !== false)
         {
             loaded.references = (loaded.references ?? 0) + 1;
@@ -7851,7 +7901,7 @@ async function buildApp(options){
             return handle;
         };
         const wanted = libraryCandidates(name, options.imagePath ?? 'C:\\app.exe',
-            filesystem.currentDirectory())
+            filesystem.currentDirectory(), { only })
             .find(candidate=>{
                 try
                 {
