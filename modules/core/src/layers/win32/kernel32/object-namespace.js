@@ -69,8 +69,11 @@ const BOOT = [
     ['Global', '\\BaseNamedObjects'],
     ['Local', `\\Sessions\\${SESSION}\\BaseNamedObjects`],
     ['Session', '\\Sessions\\BNOLINKS'],
+    // The DOS devices: \?? is the caller's view of the global ones, and
+    // GLOBALROOT in them names the root, its target empty.
     ['\\GLOBAL??', null],
-    ['\\??', null],
+    ['\\GLOBAL??\\GLOBALROOT', ''],
+    ['\\??', '\\GLOBAL??'],
     ['\\DosDevices', '\\??'],
     ['\\Device', null],
     ['\\KernelObjects', null],
@@ -162,7 +165,8 @@ export function createObjectNamespace(host){
                 {
                     return { status: STATUS.OBJECT_NAME_NOT_FOUND };
                 }
-                const target = held.object.target;
+                // An empty target is the root (GLOBALROOT's).
+                const target = held.object.target === '' ? '\\' : held.object.target;
                 if (!target.startsWith('\\'))
                 {
                     return { status: STATUS.OBJECT_PATH_NOT_FOUND };

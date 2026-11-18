@@ -52,6 +52,7 @@ import { HANDLE_ENTRIES, createHandleNatives } from './handles.js';
 import { createDebugFunctions } from './debug.js';
 import { createProcessFunctions } from './process.js';
 import { STATUS, toDosError } from './status.js';
+import { probed } from './probe.js';
 import { nativeNameOf } from '../kernel32/object-attributes.js';
 import { INTERACTIVE_SESSION } from '../kernel32/teb.js';
 import { REGISTRY_NATIVES, UNLOAD_KEY } from '../advapi32/functions.js';
@@ -339,41 +340,6 @@ function createUserInfoFunctions(kernel32, writeMemory){
                 return 1;
             },
         },
-    };
-}
-
-/** @param {unknown} error */
-const unreachable = error=>/** @type {{ code?: string }} */ (error)?.code === 'GUEST_ACCESS';
-
-/**
- * A native call's handler, a guest pointer it could not reach answered as the
- * kernel answers it: STATUS_ACCESS_VIOLATION, the call returning.
- *
- * @param {Function} handler
- * @returns {Function}
- */
-function probed(handler){
-    return (/** @type {any[]} */ ...args)=>{
-        try
-        {
-            const answer = handler(...args);
-            return typeof answer?.then === 'function'
-                ? answer.catch((/** @type {unknown} */ error)=>{
-                    if (unreachable(error))
-                    {
-                        return STATUS.ACCESS_VIOLATION;
-                    }
-                    throw error;
-                })
-                : answer;
-        }
-        catch (e){
-            if (unreachable(e))
-            {
-                return STATUS.ACCESS_VIOLATION;
-            }
-            throw e;
-        }
     };
 }
 
@@ -1137,7 +1103,8 @@ export function createNtdllFunctions(host){
     // where the same pointer handed to a user-mode Rtl function faults.
     // An entry another library's table owns (a kernel32 entry ntdll exports
     // under its own name, advapi32's registry and token calls) is that table's
-    // own and stays the same entry. The native calls kernel32's tables carry
+    // own and stays the same entry; the registry's and the token calls are
+    // probed where they are made (`probe.js`). The native calls kernel32's tables carry
     // (NtReadFile, NtWriteFile, the APC calls) are ntdll's alone, and probed
     // as every other one is: NtWriteFile of a NULL buffer answers
     // STATUS_ACCESS_VIOLATION, as Wine's ntdll:file asks.

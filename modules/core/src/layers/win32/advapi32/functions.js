@@ -29,6 +29,8 @@ import {
     HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, HKEY_USERS,
 } from './registry.js';
 import { STATUS } from '../ntdll/status.js';
+import { probedNatives } from '../ntdll/probe.js';
+import { readObjectAttributes } from '../kernel32/object-attributes.js';
 import { USER_NAME } from './tokens.js';
 import { createNamedSecurityFunctions } from './named-security.js';
 import { createSecurityFunctions } from './security.js';
@@ -541,8 +543,20 @@ export function createRegistryFunctions(host){
          * @returns {{ base: any, path: string } | number}
          */
         const namedBy = attributes=>{
-            const root = readDword(attributes + 4);
-            const path = counted(readDword(attributes + 8));
+            // The structure is checked as every native call checks it; a
+            // name the key calls are not handed is read through the null
+            // pointer, as Windows' registry reads it.
+            const given = readObjectAttributes(host.readMemory, attributes);
+            if (given?.invalid)
+            {
+                return given.invalid;
+            }
+            if (given === null || given.name === null)
+            {
+                return STATUS.ACCESS_VIOLATION;
+            }
+            const root = given.root;
+            const path = given.name;
             if (root !== 0)
             {
                 const base = keyOf(root);
@@ -733,7 +747,7 @@ export function createRegistryFunctions(host){
         };
 
         return {
-            entries: {
+            entries: probedNatives({
                 /** NTSTATUS NtOpenKey(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES) */
                 NtOpenKey: {
                     argBytes: 12,
@@ -846,7 +860,7 @@ export function createRegistryFunctions(host){
                             length, needed) : STATUS.NO_MORE_ENTRIES;
                     }),
                 },
-            },
+            }),
             /**
              * NtClose of a key: closed as RegCloseKey closes it. A predefined
              * root is no handle here; anything else is not this table's.

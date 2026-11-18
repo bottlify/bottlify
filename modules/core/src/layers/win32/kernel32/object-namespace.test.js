@@ -119,6 +119,8 @@ test('a Win32 name is kept under itself, through either BaseNamedObjects and the
     assert.equal(m.key('\\Sessions\\1\\BaseNamedObjects\\x'), 'x');
     assert.equal(m.key('\\BaseNamedObjects\\Local\\x'), 'x');
     assert.equal(m.key('\\BaseNamedObjects\\Session\\1\\x'), 'x', 'through BNOLINKS');
+    assert.equal(m.key('\\??\\GLOBALROOT\\BaseNamedObjects\\x'), 'x',
+        'GLOBALROOT\'s empty target is the root');
     assert.equal(m.key('\\BASENamedObjects\\x'), STATUS_OBJECT_PATH_NOT_FOUND,
         'a directory is found as it is spelt');
     assert.equal(m.key('\\BASENamedObjects\\x', 0, OBJ_CASE_INSENSITIVE), 'x');
