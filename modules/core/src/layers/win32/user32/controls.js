@@ -391,6 +391,8 @@ const LB_GETITEMHEIGHT = 0x01a1;
 const LB_GETLISTBOXINFO = 0x01b2;
 const LB_FINDSTRINGEXACT = 0x01a2;
 const LB_ERR = -1;
+/** The list box messages run from LB_ADDSTRING to this one. */
+const LB_LAST = 0x01b5;
 const LBN_SELCHANGE = 1;
 const LBN_DBLCLK = 2;
 const LBN_SETFOCUS = 4;
@@ -468,6 +470,18 @@ const COMBO_NOTICES = Object.freeze({ update: CBN_EDITUPDATE, change: CBN_EDITCH
     overflow: null });
 /** The drop button at the right of a combo box, as wide as a scroll bar. */
 const COMBO_BUTTON = 16;
+const CB_SETITEMHEIGHT = 0x0153;
+const CB_GETITEMHEIGHT = 0x0154;
+const CB_GETDROPPEDWIDTH = 0x015f;
+const CB_GETCOMBOBOXINFO = 0x0164;
+/** The id a combo box gives its list, as Windows gives it. */
+const COMBO_LIST_ID = 1000;
+/** A combo box's list: a list box that tells the combo box, not its parent. */
+const LBS_COMBOBOX = 0x8000;
+const LBS_NOINTEGRALHEIGHT = 0x0100;
+const SW_HIDE = 0;
+const WM_WINDOWPOSCHANGING = 0x0046;
+const SWP_NOSIZE = 0x0001;
 
 /** Scroll bar styles, messages and the codes a WM_VSCROLL carries. */
 const SBS_VERT = 0x0001;
@@ -672,11 +686,14 @@ export const imagePlace = (record, rect, shape)=>{
  *           Where its client area is on the screen.
  * @property {(className: string, rect: { x: number, y: number, width: number,
  *     height: number }, owner: number, exStyle: number, style: number,
- *     thread?: unknown) => number | Promise<number>} [popup]
- *           A window of a system class, made by name on the screen: a combo
- *           box's dropped list. Absent, the list does not drop.
+ *     thread?: unknown, id?: number) => number | Promise<number>} [popup]
+ *           A window of a system class, made by name: a combo box's list,
+ *           a popup on the screen or a child (WS_CHILD) in its parent with
+ *           the control id `id`. Absent, a combo box has no list window.
  * @property {(hwnd: number, command: number) => number | Promise<number>} [show]
  * @property {(hwnd: number) => number | Promise<number>} [destroy]
+ * @property {(hwnd: number, address: number) => number} [comboBoxInfo]
+ *           GetComboBoxInfo, which CB_GETCOMBOBOXINFO answers with.
  * @property {(hwnd: number, thread?: unknown) => number | Promise<number>} setFocus
  * @property {() => number} focus
  * @property {(hwnd: number) => void} setCapture
@@ -822,7 +839,8 @@ export function thumbValue(rect, vertical, held, start){
  *         paintScrollBar: (hdc: number, rect: Rect, vertical: boolean,
  *             held: ScrollBarState) => void,
  *         scrollHit: (rect: Rect, vertical: boolean, held: ScrollBarState,
- *             x: number, y: number) => number },
+ *             x: number, y: number) => number,
+ *         comboWindows: (combo: any) => { edit: number, list: number } },
  *     toolkit: ControlToolkit }}
  */
 export function createControlProcedures(host){
@@ -3061,9 +3079,17 @@ export function createControlProcedures(host){
      * @returns {{ items: ListItem[], current: number, caret: number, anchor: number,
      *     multi: boolean, top: number, itemHeight?: number,
      *     droppedHeight?: number, droppedWidth?: number, dropped?: number, hot?: number,
-     *     fieldHeight?: number, grab?: number, bars?: number }}
+     *     fieldHeight?: number, fieldItem?: number, grab?: number, bars?: number }}
      */
     const listState = record=>{
+        // A combo box's items are its list window's, as on Windows, where
+        // the combo box hands its CB_ messages to that list box.
+        const list = record.className === 'ComboBox'
+            ? host.live(stateOf(record).listWindow ?? 0) : null;
+        if (list)
+        {
+            return listState(list);
+        }
         const state = stateOf(record);
         state.items ??= [];
         state.current ??= -1;
@@ -3350,7 +3376,7 @@ export function createControlProcedures(host){
 
     /** The item height, which is the text height. @param {any} record @param {number} hdc */
     const itemHeight = (record, hdc)=>{
-        const state = stateOf(record);
+        const state = listState(record);
         return state.itemHeight ?? /** @type {Drawing} */ (host.draw).measure(hdc, 'M').height;
     };
 
@@ -3677,8 +3703,8 @@ export function createControlProcedures(host){
 
     /**
      * A simple combo box's two parts, in its client area: the field at the
-     * top, as tall as a dropdown combo box's, and under it the list, which
-     * is always shown -- its rows inside its sunken edge.
+     * top, as tall as a dropdown combo box's, and under it its list window,
+     * which is always shown.
      *
      * @param {any} record
      */
@@ -3686,8 +3712,70 @@ export function createControlProcedures(host){
         const size = host.clientSize(record);
         const bottom = Math.min(size.height, listState(record).fieldHeight ?? 21);
         const list = { left: 0, top: bottom, right: size.width, bottom: size.height };
-        return { field: { left: 0, top: 0, right: size.width, bottom }, list,
-            rows: shrink(list, 2) };
+        return { field: { left: 0, top: 0, right: size.width, bottom }, list };
+    };
+
+    /** A combo box's list window, live, or null. @param {any} combo */
+    const listOf = combo=>host.live(stateOf(combo).listWindow ?? 0);
+
+    /**
+     * The windows a combo box is made of, as GetComboBoxInfo names them:
+     * its edit, zero for a drop-down list, and its list.
+     *
+     * @param {any} combo
+     */
+    const comboWindows = combo=>({ edit: 0, list: listOf(combo)?.hwnd ?? 0 });
+
+    /**
+     * Puts a simple combo box's list window under its field, in the rest of
+     * the combo box's client area.
+     *
+     * @param {any} combo
+     */
+    const placeSimpleList = combo=>{
+        const list = listOf(combo);
+        if (!list || (combo.style & CBS_TYPEMASK) !== CBS_SIMPLE || !host.move)
+        {
+            return 0;
+        }
+        const { list: rect } = simpleParts(combo);
+        return host.move(list.hwnd, rect.left, rect.top, rect.right - rect.left,
+            Math.max(0, rect.bottom - rect.top));
+    };
+
+    /**
+     * Makes a combo box's list window, which lives as long as the combo box:
+     * a simple combo box's is a child under its field, shown; a drop-down
+     * one's a popup over every window, hidden until it drops. Its style says
+     * what the combo box's says of its items, and LBS_COMBOBOX that it
+     * answers to the combo box. The combo box's items are kept in it.
+     *
+     * @param {any} combo @param {unknown} [thread]
+     */
+    const makeComboList = (combo, thread)=>{
+        if (!host.popup)
+        {
+            return 0;
+        }
+        const simple = (combo.style & CBS_TYPEMASK) === CBS_SIMPLE;
+        const style = (LBS_COMBOBOX | LBS_NOINTEGRALHEIGHT
+            | ((combo.style & CBS_SORT) !== 0 ? LBS_SORT : 0)
+            | (combo.style & CBS_OWNERDRAW)
+            | ((combo.style & CBS_HASSTRINGS) !== 0 ? LBS_HASSTRINGS : 0)
+            | (simple ? WS_CHILD | WS_VISIBLE : WS_POPUP | WS_BORDER)) >>> 0;
+        const rect = { x: 0, y: 0, width: combo.width, height: 0 };
+        return after(host.popup('ComboLBox', rect, simple ? combo.hwnd : combo.parent || combo.hwnd,
+            simple ? 0 : WS_EX_TOPMOST | WS_EX_TOOLWINDOW, style, thread,
+            simple ? COMBO_LIST_ID : 0), hwnd=>{
+            const list = hwnd !== 0 ? host.live(hwnd) : null;
+            if (list)
+            {
+                stateOf(list).combo = combo.hwnd;
+                list.font = combo.font;
+                stateOf(combo).listWindow = hwnd;
+            }
+            return 0;
+        });
     };
 
     /**
@@ -3705,11 +3793,6 @@ export function createControlProcedures(host){
         const box = parts ? parts.field : rect;
         draw.fill(hdc, box, color(disabled(record) ? COLOR_3DFACE : COLOR_WINDOW));
         sunkenEdge(hdc, box);
-        if (parts && parts.list.bottom > parts.list.top)
-        {
-            sunkenEdge(hdc, parts.list);
-            paintDropped(record, hdc, parts.rows, state.current);
-        }
         const button = { left: box.right - 2 - (parts ? 0 : COMBO_BUTTON), top: box.top + 2,
             right: box.right - 2, bottom: box.bottom - 2 };
         if (!parts)
@@ -3805,6 +3888,9 @@ export function createControlProcedures(host){
      * takes both off the window as the combo box is made, and fits the field
      * again to every font it is given.
      *
+     * The field's item is its text's height and two rows more, or what
+     * CB_SETITEMHEIGHT(-1) made it; the field is six rows taller.
+     *
      * @param {any} record @param {boolean} creating
      */
     const fitComboField = (record, creating)=>{
@@ -3824,11 +3910,12 @@ export function createControlProcedures(host){
         // A simple combo box keeps its height: its list is under the field.
         if ((record.style & CBS_TYPEMASK) === CBS_SIMPLE)
         {
-            listState(record).fieldHeight = rows + 8;
+            listState(record).fieldHeight = (listState(record).fieldItem ?? rows + 2) + 6;
             host.invalidate(record);
-            return;
+            return placeSimpleList(record);
         }
-        record.height = rows + 8;
+        record.height = (listState(record).fieldItem ?? rows + 2) + 6;
+        return 0;
     };
 
     /**
@@ -3849,8 +3936,8 @@ export function createControlProcedures(host){
     };
 
     /**
-     * Drops a combo box's list: a popup of the ComboLBox class under the
-     * field, over every window, which takes the mouse until it closes and
+     * Drops a combo box's list: its list window, moved under the field and
+     * shown over every window, which takes the mouse until it closes and
      * never the activation -- the dialog keeps it, and the combo box the
      * focus and the keys. CBN_DROPDOWN goes first, so a parent that fills
      * the list late fills it in time.
@@ -3859,8 +3946,9 @@ export function createControlProcedures(host){
      */
     const dropList = (combo, thread)=>{
         const state = listState(combo);
+        const list = listOf(combo);
         if ((state.dropped ?? 0) !== 0 || (combo.style & CBS_TYPEMASK) === CBS_SIMPLE
-            || !host.popup || !host.clientOrigin || disabled(combo))
+            || !list || !host.move || !host.clientOrigin || disabled(combo))
         {
             return 0;
         }
@@ -3870,25 +3958,14 @@ export function createControlProcedures(host){
             const size = host.clientSize(combo);
             state.hot = state.current;
             state.top = Math.max(0, Math.min(state.current, state.items.length - rows));
-            const rect = { x: origin.x, y: origin.y + size.height,
-                width: Math.max(size.width, state.droppedWidth ?? 0), height: rows * row + 2 };
-            return after(/** @type {any} */ (host.popup)('ComboLBox', rect,
-                combo.parent || combo.hwnd, WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
-                WS_POPUP | WS_BORDER, thread), (/** @type {number} */ hwnd)=>{
-                const list = hwnd !== 0 ? host.live(hwnd) : null;
-                if (!list)
-                {
-                    return 0;
-                }
-                stateOf(list).combo = combo.hwnd;
-                list.font = combo.font;
-                state.dropped = hwnd;
-                host.invalidate(combo);
-                return after(host.show?.(hwnd, SW_SHOWNA) ?? 0, ()=>{
-                    host.setCapture(hwnd);
-                    return 0;
-                });
-            });
+            state.dropped = list.hwnd;
+            host.invalidate(combo);
+            return after(/** @type {any} */ (host.move)(list.hwnd, origin.x,
+                origin.y + size.height, Math.max(size.width, state.droppedWidth ?? 0),
+                rows * row + 2), ()=>after(host.show?.(list.hwnd, SW_SHOWNA) ?? 0, ()=>{
+                host.setCapture(list.hwnd);
+                return 0;
+            }));
         });
     };
 
@@ -3913,7 +3990,7 @@ export function createControlProcedures(host){
             host.releaseCapture();
         }
         const hot = state.hot ?? -1;
-        return after(host.destroy?.(hwnd) ?? 0, ()=>{
+        return after(host.show?.(hwnd, SW_HIDE) ?? 0, ()=>{
             host.invalidate(combo);
             const changed = accept && hot >= 0 && hot < state.items.length && hot !== state.current;
             if (changed)
@@ -3976,21 +4053,27 @@ export function createControlProcedures(host){
     const scrollDropped = (combo, top, visible)=>{
         const state = listState(combo);
         state.top = Math.max(0, Math.min(top, state.items.length - visible));
-        // A simple combo box's list is in the combo box itself.
-        host.invalidate(host.live(state.dropped ?? 0) ?? combo);
+        host.invalidate(listOf(combo) ?? combo);
     };
 
     /**
-     * The rows a simple combo box's list shows, and how tall each is.
+     * The rows a simple combo box's list shows, how tall each is, and where
+     * they are in its list window: inside its sunken edge.
      *
      * @param {any} combo
      */
     const simpleRows = combo=>{
-        const { hdc } = host.contextOn(combo);
+        const list = listOf(combo);
+        if (!list)
+        {
+            return { row: 16, visible: 1, rows: { left: 0, top: 0, right: 0, bottom: 0 } };
+        }
+        const { hdc } = host.contextOn(list);
         const row = hdc !== 0 ? itemHeight(combo, hdc) : 16;
-        host.endPaint(combo, hdc);
-        const { rows } = simpleParts(combo);
-        return { row, visible: Math.max(1, Math.floor((rows.bottom - rows.top) / row)) };
+        host.endPaint(list, hdc);
+        const size = host.clientSize(list);
+        const rows = shrink({ left: 0, top: 0, right: size.width, bottom: size.height }, 2);
+        return { row, visible: Math.max(1, Math.floor((rows.bottom - rows.top) / row)), rows };
     };
 
     /**
@@ -4018,15 +4101,16 @@ export function createControlProcedures(host){
      * A press, a move with the thumb held, or a release in a simple combo
      * box's list: a row is chosen as the field's text and CBN_SELCHANGE
      * said, a double-click on one says CBN_DBLCLK, and the list's scroll bar
-     * scrolls it -- by its arrows, its track, and its thumb dragged.
+     * scrolls it -- by its arrows, its track, and its thumb dragged. The
+     * point is in the list window.
      *
-     * @param {any} combo @param {ControlMessage} message @param {unknown} [thread]
+     * @param {any} combo @param {any} list @param {ControlMessage} message
+     * @param {unknown} [thread]
      */
-    const simpleListMouse = (combo, message, thread)=>{
+    const simpleListMouse = (combo, list, message, thread)=>{
         const state = listState(combo);
         const point = pointOf(message.lParam);
-        const { rows } = simpleParts(combo);
-        const { row, visible } = simpleRows(combo);
+        const { row, visible, rows } = simpleRows(combo);
         const bar = { left: rows.right - ARROW_LENGTH, top: rows.top, right: rows.right,
             bottom: rows.bottom };
         const held = { min: 0, max: Math.max(0, state.items.length - 1), page: visible,
@@ -4053,7 +4137,7 @@ export function createControlProcedures(host){
             if (hit === SB_THUMBTRACK)
             {
                 state.grab = point.y - bar.top - (thumbOf(bar, true, held).thumb?.start ?? 0);
-                host.setCapture(combo.hwnd);
+                host.setCapture(list.hwnd);
                 return 0;
             }
             scrollDropped(combo, state.top + (hit === SB_LINEUP ? -1 : hit === SB_LINEDOWN ? 1
@@ -4078,21 +4162,57 @@ export function createControlProcedures(host){
     };
 
     /**
-     * The ComboLBox: the list a combo box drops. It holds the mouse while it
-     * is open: the pointer over a row lights it, a press outside closes it
-     * with nothing chosen, and a release on a row chooses that row -- the
-     * press that dropped it may be held into the list and let go there.
+     * The ComboLBox: a combo box's list window, a list box that holds its
+     * items and answers the LB_ messages. A drop-down one holds the mouse
+     * while it is open: the pointer over a row lights it, a press outside
+     * closes it with nothing chosen, and a release on a row chooses that
+     * row -- the press that dropped it may be held into the list and let go
+     * there. A simple combo box's is always shown under its field.
      *
      * @param {any} record @param {ControlMessage} message @param {unknown} [thread]
      */
     const comboListProc = (record, message, thread)=>{
         const own = stateOf(record);
         const combo = host.live(own.combo ?? 0);
+        if (message.message >= LB_ADDSTRING && message.message <= LB_LAST)
+        {
+            return after(listBoxMessage(record, message, thread), answer=>{
+                if (combo)
+                {
+                    host.invalidate(combo);
+                }
+                return answer;
+            });
+        }
         if (!combo)
         {
             return common(record, message, thread);
         }
         const state = listState(combo);
+        if ((combo.style & CBS_TYPEMASK) === CBS_SIMPLE)
+        {
+            switch (message.message){
+                case WM_PAINT:
+                    return painting(record, (hdc, rect)=>{
+                        sunkenEdge(hdc, rect);
+                        paintDropped(combo, hdc, shrink(rect, 2), state.current);
+                    });
+                case WM_ERASEBKGND:
+                    return 1;
+                case WM_LBUTTONDOWN:
+                case WM_LBUTTONDBLCLK:
+                    return after(host.setFocus(combo.hwnd, thread),
+                        ()=>simpleListMouse(combo, record, message, thread));
+                case WM_MOUSEMOVE:
+                case WM_LBUTTONUP:
+                    return simpleListMouse(combo, record, message, thread);
+                case WM_MOUSEWHEEL:
+                    return host.send(combo.hwnd, message.message, message.wParam,
+                        message.lParam, thread);
+                default:
+                    return common(record, message, thread);
+            }
+        }
         switch (message.message){
             case WM_MOUSEACTIVATE:
                 return MA_NOACTIVATE;
@@ -4191,17 +4311,43 @@ export function createControlProcedures(host){
             {
                 record.title = state.items[state.current]?.text ?? '';
             }
+            if (simple)
+            {
+                host.invalidate(listOf(record) ?? record);
+            }
             return answer ?? CB_ERR;
         }
         switch (message.message){
             case WM_CREATE:
-                fitComboField(record, true);
+                return after(makeComboList(record, thread), ()=>after(fitComboField(record, true),
+                    ()=>common(record, message, thread)));
+            case WM_SETFONT: {
+                const list = listOf(record);
+                if (list)
+                {
+                    list.font = message.wParam >>> 0;
+                }
+                // A new font sizes the field's item afresh.
+                listState(record).fieldItem = undefined;
+                return after(common(record, message, thread), answer=>after(
+                    fitComboField(record, false), ()=>answer));
+            }
+            case WM_SIZE:
+                return after(placeSimpleList(record), ()=>common(record, message, thread));
+            case WM_WINDOWPOSCHANGING: {
+                // A drop-down combo box stays as tall as its field, whatever
+                // height it is given: that height is how far it drops, never
+                // less than the field (Wine's combo test, test_changesize).
+                const pos = message.lParam >>> 0;
+                const pointer = host.pointerSize ?? 4;
+                if (!simple && pos !== 0 && (readU32(pos + 2 * pointer + 16) & SWP_NOSIZE) === 0)
+                {
+                    const asked = readU32(pos + 2 * pointer + 12) | 0;
+                    state.droppedHeight = Math.max(asked, record.height);
+                    writeU32(pos + 2 * pointer + 12, record.height);
+                }
                 return common(record, message, thread);
-            case WM_SETFONT:
-                return after(common(record, message, thread), answer=>{
-                    fitComboField(record, false);
-                    return answer;
-                });
+            }
             case WM_PAINT:
                 return painting(record, (hdc, rect)=>{
                     paintCombo(record, hdc, rect);
@@ -4221,7 +4367,10 @@ export function createControlProcedures(host){
                 return after(closeList(record, false, thread),
                     ()=>notify(record, CBN_KILLFOCUS, thread));
             case WM_DESTROY:
-                return after(closeList(record, false, thread), ()=>common(record, message, thread));
+                // A simple combo box's list is its child and goes with it.
+                return after(closeList(record, false, thread), ()=>after(
+                    !simple && listOf(record) ? host.destroy?.(stateOf(record).listWindow) ?? 0 : 0,
+                    ()=>common(record, message, thread)));
             case WM_MOUSEWHEEL: {
                 if (simple)
                 {
@@ -4237,10 +4386,6 @@ export function createControlProcedures(host){
                 scrollDropped(record, state.top + wheelRows(message.wParam), rows);
                 return 0;
             }
-            case WM_MOUSEMOVE:
-            case WM_LBUTTONUP:
-                return simple ? simpleListMouse(record, message, thread)
-                    : common(record, message, thread);
             case WM_SYSKEYDOWN: {
                 const key = message.wParam & 0xff;
                 if (key !== VK_DOWN && key !== VK_UP)
@@ -4254,14 +4399,8 @@ export function createControlProcedures(host){
             case WM_LBUTTONDBLCLK: {
                 // A click in the field of an editable combo puts the caret
                 // where it landed, as a click in an edit does; one on the
-                // drop button, or anywhere on a dropdown list, drops the list;
-                // one in a simple combo box's list is the list's.
+                // drop button, or anywhere on a dropdown list, drops the list.
                 const point = pointOf(message.lParam);
-                if (simple && point.y >= simpleParts(record).field.bottom)
-                {
-                    return after(host.setFocus(record.hwnd, thread),
-                        ()=>simpleListMouse(record, message, thread));
-                }
                 if (editable && (simple
                     || point.x < host.clientSize(record).width - COMBO_BUTTON - 2))
                 {
@@ -4422,8 +4561,52 @@ export function createControlProcedures(host){
                 }
                 return 0;
             case CB_SETDROPPEDWIDTH:
-            case CB_GETDROPPEDCONTROLRECT:
-                return 0;
+                // A width wider than nothing is kept; the list is never
+                // narrower than the combo box.
+                if ((message.wParam | 0) > 0)
+                {
+                    state.droppedWidth = message.wParam | 0;
+                }
+                return Math.max(state.droppedWidth ?? 0, record.width);
+            case CB_GETDROPPEDWIDTH:
+                return Math.max(state.droppedWidth ?? 0, record.width);
+            case CB_GETDROPPEDCONTROLRECT: {
+                // Where the combo box is on the screen as it is dropped: its
+                // field and its list under it.
+                if ((message.lParam >>> 0) === 0 || !host.clientOrigin)
+                {
+                    return CB_ERR;
+                }
+                const origin = host.clientOrigin(record);
+                const height = simple ? record.height
+                    : Math.max(record.height, state.droppedHeight ?? 0);
+                writeRect(message.lParam, { left: origin.x, top: origin.y,
+                    right: origin.x + Math.max(state.droppedWidth ?? 0, record.width),
+                    bottom: origin.y + height });
+                return 1;
+            }
+            case CB_GETITEMHEIGHT:
+                if ((message.wParam | 0) === -1)
+                {
+                    return host.clientSize(record).height - 6;
+                }
+                return listOf(record) ? host.send(stateOf(record).listWindow, LB_GETITEMHEIGHT,
+                    message.wParam, 0, thread) : CB_ERR;
+            case CB_SETITEMHEIGHT:
+                if ((message.wParam | 0) === -1)
+                {
+                    const height = message.lParam & 0xffff;
+                    if (height === 0 || height > 255)
+                    {
+                        return CB_ERR;
+                    }
+                    state.fieldItem = height;
+                    return after(fitComboField(record, false), ()=>0);
+                }
+                return listOf(record) ? host.send(stateOf(record).listWindow, LB_SETITEMHEIGHT,
+                    message.wParam, message.lParam, thread) : CB_ERR;
+            case CB_GETCOMBOBOXINFO:
+                return host.comboBoxInfo?.(record.hwnd, message.lParam) ?? 0;
             default:
                 return common(record, message, thread);
         }
@@ -5011,7 +5194,8 @@ export function createControlProcedures(host){
             ScrollBar: scrollBarProc,
             '#32770': dialogProc,
         },
-        helpers: { dialogProc, markDefault, defaultControlColors, paintScrollBar, scrollHit },
+        helpers: { dialogProc, markDefault, defaultControlColors, paintScrollBar, scrollHit,
+            comboWindows },
         // The drawing and messaging the classes above share, handed out whole
         // so the common controls paint and tell their parent with the same
         // helpers: one look, and a change to it is one change.

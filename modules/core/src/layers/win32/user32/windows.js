@@ -6859,7 +6859,7 @@ export function createWindowFunctions(host){
         // A window of a system class a control makes for itself -- a combo
         // box's dropped list -- by name, as a program's CreateWindowEx
         // names one; the name lives in guest memory for the call.
-        popup: (className, rect, owner, exStyle, style, thread)=>{
+        popup: (className, rect, owner, exStyle, style, thread, id = 0)=>{
             const name = (host.allocate?.(className.length + 1) ?? 0) >>> 0;
             if (name === 0)
             {
@@ -6868,13 +6868,15 @@ export function createWindowFunctions(host){
             host.writeMemory(name, Uint8Array.from([...className].map(c=>c.charCodeAt(0))));
             host.writeMemory(name + className.length, new Uint8Array(1));
             return andThen(createWindow([exStyle, name, 0, style, rect.x, rect.y, rect.width,
-                rect.height, owner, 0, 0, 0], false, thread), hwnd=>{
+                rect.height, owner, id, 0, 0], false, thread), hwnd=>{
                 host.release?.(name);
                 return hwnd >>> 0;
             });
         },
         show: (hwnd, command)=>/** @type {any} */ (table).ShowWindow.handler([hwnd, command]),
         destroy: hwnd=>/** @type {any} */ (table).DestroyWindow.handler([hwnd]),
+        comboBoxInfo: (hwnd, address)=>/** @type {any} */ (table).GetComboBoxInfo
+            .handler([hwnd, address]),
         setFocus,
         focus: focusWindow,
         setCapture: hwnd=>{
@@ -8269,7 +8271,7 @@ export function createWindowFunctions(host){
                 capture: ()=>captured, setCapture, releaseCapture, colors: systemColors,
                 heldByCaller, lowLevelHook, winEvent, procAs, procBehind, entryReads,
                 send, sendAcross, callProcedure, geometry, windowFromPoint, askedFromPoint,
-                isChild, repaint,
+                isChild, repaint, comboWindows: controls.helpers.comboWindows,
                 appear, beforeChange, afterChange, eraseShown, wholeOnScreen, moveBits, dragging,
                 dragMove,
                 /** @param {(handle: number) => any} decode */
