@@ -3824,6 +3824,10 @@ export function createWin32Module(){
                     ...createFileFunctions({
                         pointerSize,
                         divergence: config?.divergence,
+                        // Asked when called: the table is assembled by then.
+                        environmentVariable: name=>Object.entries(/** @type {any} */ (
+                            libraries['KERNEL32.dll'])?.[ENVIRONMENT_NOW]?.() ?? {})
+                            .find(([key])=>key.toUpperCase() === name.toUpperCase())?.[1],
                         openRefused: record=>{
                             refusedOpens.push(record);
                             if (refusedOpens.length > REFUSED_OPENS_KEPT)
