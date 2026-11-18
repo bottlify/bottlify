@@ -17,6 +17,10 @@ import { createThreadInfoFunctions } from './thread-info.js';
 import { createProcessPolicyFunctions } from './process-policy.js';
 import { askChild, threadArg, threadEnd } from './cross-process.js';
 import { SYNCHRONIZE, allows } from './access.js';
+import {
+    EXTENDED_AT, FLOAT_SAVE_AT, extendedImage, floatSaveArea, hasFpuBlock, restoreExtended,
+    restoreFloatSave,
+} from './fpu-context.js';
 
 /**
  * What the export binding hands an entry that is guest code rather than a
@@ -570,11 +574,22 @@ export function createSyncFunctions(host){
                     values[name] = view.getUint32(offset, true);
                 }
             }
-            if ((flags & CONTEXT_FLOATING_POINT) === CONTEXT_FLOATING_POINT
-                || (flags & CONTEXT_EXTENDED_REGISTERS) === CONTEXT_EXTENDED_REGISTERS)
+            const extended = (flags & CONTEXT_EXTENDED_REGISTERS) === CONTEXT_EXTENDED_REGISTERS;
+            const x87 = (flags & CONTEXT_FLOATING_POINT) === CONTEXT_FLOATING_POINT;
+            if ((extended || x87) && !hasFpuBlock(thread.context))
             {
                 host.divergence?.('SetThreadContext',
                     'the floating-point registers of a context are not put back');
+            }
+            else if (extended)
+            {
+                // The whole of it, the x87 registers with the SSE state.
+                restoreExtended(thread.context, bytes.subarray(EXTENDED_AT, EXTENDED_AT + 512));
+            }
+            else if (x87)
+            {
+                restoreFloatSave(thread.context,
+                    bytes.subarray(FLOAT_SAVE_AT, FLOAT_SAVE_AT + 112));
             }
         }
         else
@@ -625,11 +640,13 @@ export function createSyncFunctions(host){
     };
 
     /**
-     * Writes the groups of a CONTEXT its ContextFlags name, and nothing else.
+     * Writes the groups of a CONTEXT its ContextFlags name, and nothing else;
+     * the floating-point ones from a stopped thread's state block.
      *
      * @param {number} at @param {Record<string, number>} registers
+     * @param {any} [context]  The stopped thread's.
      */
-    const writeThreadContext = (at, registers)=>{
+    const writeThreadContext = (at, registers, context)=>{
         const bytes = host.readMemory(at, CONTEXT_BYTES).slice();
         const view = new DataView(bytes.buffer);
         const flags = view.getUint32(0, true);
@@ -660,6 +677,17 @@ export function createSyncFunctions(host){
             put(0xc0, registers.eflags ?? 0x202);
             put(0xc4, registers.esp);
             put(0xc8, SELECTORS.DATA);
+        }
+        if (hasFpuBlock(context))
+        {
+            if ((flags & CONTEXT_FLOATING_POINT) === CONTEXT_FLOATING_POINT)
+            {
+                bytes.set(floatSaveArea(context), FLOAT_SAVE_AT);
+            }
+            if ((flags & CONTEXT_EXTENDED_REGISTERS) === CONTEXT_EXTENDED_REGISTERS)
+            {
+                bytes.set(extendedImage(context), EXTENDED_AT);
+            }
         }
         host.writeMemory(at, bytes);
     };
@@ -1508,7 +1536,8 @@ export function createSyncFunctions(host){
                         return 1;
                     }
                     writeThreadContext(out >>> 0,
-                        own ? host.registers?.() ?? {} : stoppedRegisters(thread));
+                        own ? host.registers?.() ?? {} : stoppedRegisters(thread),
+                        own ? undefined : thread.context);
                     return 1;
                 };
                 // Windows answers for a suspended thread once it has stopped:
@@ -1540,7 +1569,7 @@ export function createSyncFunctions(host){
          * place a stopped thread's continuation is decided. A thread running
          * on another executor is brought back first, as GetThreadContext
          * does. The calling thread's own context is refused, as before.
-         * The x87 state of a 32-bit context is not put back, and that is said.
+         * A 32-bit context's x87 and SSE state goes back with the rest (`fpu-context.js`).
          */
         SetThreadContext: {
             argBytes: 8,

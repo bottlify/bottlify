@@ -1186,6 +1186,62 @@ test('SetThreadContext puts its groups where the thread next runs: a stopped one
     assert.equal(/** @type {any} */ (waiting).resumeRegisters.ebx, 0x55);
 });
 
+test("a stopped thread's x87 and SSE state is read into its CONTEXT and put back from it",
+    ()=>{
+        // A .NET runtime suspends a thread for a collection, takes its context
+        // whole, and puts it back once the collection is over - the
+        // floating-point groups too, which it restores itself. Read as
+        // nothing, the record put back whatever it held before.
+        const host = /** @type {any} */ (fakeHost());
+        host.kernel.scheduleResume = ()=>{};
+        const fns = createSyncFunctions(host);
+        const layout = { x87: 64, x87Top: 192, x87Empty: 193, x87Control: 194, x87Status: 196,
+            x87Exact: 198, xmm: 208, mxcsr: 336 };
+        const block = new Uint8Array(512);
+        const state = new DataView(block.buffer);
+        block[layout.x87Top] = 7;
+        block[layout.x87Empty] = 0x7f;
+        state.setUint16(layout.x87Control, 0x27f, true);
+        state.setFloat64(layout.x87 + 7 * 16, 1.5, true);
+        block.fill(0xab, layout.xmm, layout.xmm + 16);
+        state.setUint32(layout.mxcsr, 0x9fc0, true);
+        const other = host.threads.second;
+        other.context = { reg32: Int32Array.of(0, 0, 0, 0, 0x6000, 0, 0, 0), eip: 0x402000,
+            flags: 0x202, block, layout };
+        host.register(0x20, 'thread', other);
+        const at = 0x400;
+        const view = new DataView(host.bytes.buffer);
+        host.bytes.fill(0xcc, at, at + 0x2cc);
+        const CONTEXT_FLOATING_POINT = 0x10008;
+        const CONTEXT_EXTENDED_REGISTERS = 0x10020;
+        view.setUint32(at, CONTEXT_FLOATING_POINT | CONTEXT_EXTENDED_REGISTERS, true);
+        assert.equal(fns.GetThreadContext.handler([0x20, at]), 1);
+        // 1.5 is 0x3fff c000000000000000, ST(0) the register at the top.
+        /** The high mantissa word and the exponent of the value at `offset`. @param {number} offset */
+        const highOf = offset=>[view.getUint32(at + offset + 4, true),
+            view.getUint16(at + offset + 8, true)];
+        assert.deepEqual(highOf(0xcc + 32),
+            [0xc0000000, 0x3fff], "FXSAVE's ST(0)");
+        assert.equal(view.getUint16(at + 0xcc + 2, true) >>> 11 & 7, 7, 'its TOP');
+        assert.equal(view.getUint32(at + 0xcc + 24, true), 0x9fc0, 'MXCSR');
+        assert.equal(host.bytes[at + 0xcc + 160], 0xab, 'XMM0');
+        assert.deepEqual(highOf(0x1c + 28),
+            [0xc0000000, 0x3fff], "FLOATING_SAVE_AREA's ST(0)");
+        assert.equal(view.getUint32(at + 0x1c + 8, true) & 0xffff, 0x3fff,
+            'the tag word: R7 valid, the rest empty');
+
+        // A collector's stub ran with other values; the record puts them back.
+        block.fill(0, layout.x87, layout.mxcsr + 4);
+        block[layout.x87Top] = 0;
+        block[layout.x87Empty] = 0xff;
+        view.setUint32(at, 0x10000 | 0x20, true);
+        assert.equal(fns.SetThreadContext.handler([0x20, at]), 1);
+        assert.equal(state.getFloat64(layout.x87 + 7 * 16, true), 1.5);
+        assert.deepEqual([block[layout.x87Top], block[layout.x87Empty]], [7, 0x7f]);
+        assert.equal(state.getUint32(layout.mxcsr, true), 0x9fc0);
+        assert.equal(block[layout.xmm], 0xab);
+    });
+
 test('GetThreadContext of a thread still running on another executor answers once it has'
     + ' stopped, with where it stopped', async()=>{
     const host = /** @type {any} */ (fakeHost());
