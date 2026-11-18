@@ -6855,6 +6855,8 @@ export function createWindowFunctions(host){
         },
         move: (hwnd, x, y, width, height)=>/** @type {any} */ (table).MoveWindow
             .handler([hwnd, x, y, width, height, 1]),
+        place: (hwnd, after, x, y, width, height, flags, thread)=>placeWindow([hwnd, after, x, y,
+            width, height, flags], thread ?? host.callerThread?.()),
         clientOrigin: record=>geometry.clientOrigin(record),
         // A window of a system class a control makes for itself -- a combo
         // box's dropped list -- by name, as a program's CreateWindowEx

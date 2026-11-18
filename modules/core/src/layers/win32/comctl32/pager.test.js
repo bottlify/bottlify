@@ -19,6 +19,7 @@ const setupBars = ()=>setupWith({ createGdiDrawing, createScreen, ...surfaces })
 
 /** A Unicode buffer the program's notification points at. */
 const WIDE = OUT + 0x100;
+const WM_CHILDACTIVATE = 0x0022;
 /** A string of the parent's own. */
 const ANSWER = OUT + 0x300;
 
@@ -161,13 +162,17 @@ test('PGM_SETCHILD asks the parent how wide the child is and puts it at minus th
                 ctx.memory.put32s(address + 16, [500]);
             }
         }, PGS_HORZ);
-        context.memory.putString(OUT, 'Button');
+        // A child of the program's own class, so what it is sent is heard.
+        context.memory.putString(OUT, 'parent');
         const child = await context.fns.CreateWindowExA.handler([0, OUT, 0, 0x50000000,
             0, 0, 30, 30, hwnd, 1, HINSTANCE, 0]);
         await context.send([hwnd, PGM_SETCHILD, 0, child]);
         assert.ok(context.sent.some(message=>message.message === WM_NOTIFY
             && context.memory.i32(message.lParam + 8) === PGN_CALCSIZE));
-        await context.pump();
+        // Placed inside the message that asked, and told it is the active
+        // child, as Windows' pager places it with SetWindowPos (set_child_seq).
+        assert.ok(context.sent.some(message=>message.hwnd === child
+            && message.message === WM_CHILDACTIVATE), 'WM_CHILDACTIVATE to the child');
         const width = context.clientSize(hwnd).width;
         const placed = ()=>{
             const rect = context.windowRect(child);
@@ -176,12 +181,10 @@ test('PGM_SETCHILD asks the parent how wide the child is and puts it at minus th
         };
         assert.deepEqual(placed(), [0, 500]);
         await context.send([hwnd, PGM_SETPOS, 0, 100]);
-        await context.pump();
         assert.equal(await context.send([hwnd, PGM_GETPOS, 0, 0]), 100);
         assert.deepEqual(placed(), [-100, 500]);
         // Not past the end.
         await context.send([hwnd, PGM_SETPOS, 0, 1000]);
-        await context.pump();
         assert.equal(await context.send([hwnd, PGM_GETPOS, 0, 0]), 500 - width);
     });
 

@@ -687,6 +687,11 @@ export const imagePlace = (record, rect, shape)=>{
  * @property {(hwnd: number, x: number, y: number, width: number, height: number)
  *     => number | Promise<number>} [move]
  *           MoveWindow, for a control that places itself in its parent.
+ * @property {(hwnd: number, after: number, x: number, y: number, width: number,
+ *     height: number, flags: number, thread?: unknown) => number | Promise<number>} [place]
+ *           SetWindowPos with its flags, on the thread named: a frame
+ *           recalculated (SWP_FRAMECHANGED), a child moved without
+ *           SWP_NOACTIVATE told WM_CHILDACTIVATE, as Windows' controls do.
  * @property {(record: any) => { x: number, y: number }} [clientOrigin]
  *           Where its client area is on the screen.
  * @property {(className: string, rect: { x: number, y: number, width: number,

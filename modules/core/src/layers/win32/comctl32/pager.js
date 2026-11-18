@@ -42,6 +42,11 @@ export const PGS_HORZ = 0x0001;
 
 /** Messages, off PGM_FIRST. */
 const PGM_FIRST = 0x1400;
+const SWP_NOSIZE = 0x0001;
+const SWP_NOMOVE = 0x0002;
+const SWP_NOZORDER = 0x0004;
+const SWP_NOACTIVATE = 0x0010;
+const SWP_FRAMECHANGED = 0x0020;
 export const PGM_SETCHILD = PGM_FIRST + 1;
 export const PGM_RECALCSIZE = PGM_FIRST + 2;
 export const PGM_FORWARDMOUSE = PGM_FIRST + 3;
@@ -58,7 +63,6 @@ export const PGM_GETBUTTONSTATE = PGM_FIRST + 12;
  * The pager's own message, posted to itself: place the child. Past the
  * pager messages Windows numbers.
  */
-const PGM_PLACECHILD = PGM_FIRST + 0xff;
 
 /** What the pager tells its parent. */
 export const PGN_CALCSIZE = -902;
@@ -604,35 +608,36 @@ export function createPagerProcedure(host, tk){
     };
 
     /**
-     * Lays the pager out again: its frame recalculated - which is where it
-     * asks its parent for the child's length - and the child placed by
-     * PGM_PLACECHILD, posted to itself (roadmap/decisions.md, A267).
+     * Lays the pager out again, as Windows' does: its frame recalculated
+     * with SWP_FRAMECHANGED - WM_NCCALCSIZE, where it asks its parent for
+     * the child's length - then the child placed (Wine's pager test,
+     * set_child_seq).
      *
-     * @param {any} record
+     * @param {any} record @param {unknown} [thread]
      */
-    const layout = record=>{
+    const layout = (record, thread)=>{
         const held = state(record);
-        if (held.child === 0 || !host.move)
+        if (held.child === 0 || !host.place)
         {
             return 0;
         }
-        return after(host.move(record.hwnd, record.x, record.y, record.width, record.height),
-            ()=>{
-                host.post({ hwnd: record.hwnd, message: PGM_PLACECHILD, wParam: 0, lParam: 0 });
-                return 0;
-            });
+        return after(host.place(record.hwnd, 0, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE
+            | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED, thread),
+        ()=>placeChild(record, thread));
     };
 
     /**
      * The child at minus the scroll position, as thick as the pager and as
      * long as its parent said, or the pager when that is longer.
      *
-     * @param {any} record
+     * A child moved without SWP_NOACTIVATE, which tells it WM_CHILDACTIVATE.
+     *
+     * @param {any} record @param {unknown} [thread]
      */
-    const placeChild = record=>{
+    const placeChild = (record, thread)=>{
         const held = state(record);
         const child = held.child !== 0 ? host.live(held.child) : null;
-        if (!child || !host.move)
+        if (!child || !host.place)
         {
             return 0;
         }
@@ -640,9 +645,9 @@ export function createPagerProcedure(host, tk){
         const client = host.clientSize(record);
         const room = across ? client.width : client.height;
         held.pos = Math.max(0, Math.min(held.pos, held.extent - room));
-        return host.move(held.child, across ? -held.pos : 0, across ? 0 : -held.pos,
+        return host.place(held.child, 0, across ? -held.pos : 0, across ? 0 : -held.pos,
             across ? Math.max(held.extent, room) : client.width,
-            across ? client.height : Math.max(held.extent, room));
+            across ? client.height : Math.max(held.extent, room), SWP_NOZORDER, thread);
     };
 
     /**
@@ -689,12 +694,11 @@ export function createPagerProcedure(host, tk){
             case PGM_SETCHILD:
                 held.child = lParam;
                 held.pos = 0;
-                return after(layout(record), ()=>0);
+                return after(layout(record, thread), ()=>0);
             case PGM_RECALCSIZE:
-                return after(layout(record), ()=>0);
-            case PGM_PLACECHILD:
+                return after(layout(record, thread), ()=>0);
             case WM_SIZE:
-                return after(placeChild(record), ()=>0);
+                return after(placeChild(record, thread), ()=>0);
             case PGM_SETPOS: {
                 const pos = Math.max(0, lParam | 0);
                 if (pos === held.pos)
@@ -702,7 +706,7 @@ export function createPagerProcedure(host, tk){
                     return 0;
                 }
                 held.pos = pos;
-                return after(layout(record), ()=>0);
+                return after(layout(record, thread), ()=>0);
             }
             case PGM_GETPOS:
                 return held.pos;

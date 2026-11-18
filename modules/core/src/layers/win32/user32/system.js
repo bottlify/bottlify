@@ -1628,21 +1628,20 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             ? host.activate?.(record.hwnd, { thread }) ?? 0 : 0));
         const handsOn = topLevel && wasShown && !isShown && host.active?.() === record.hwnd;
         // A child placed without SWP_NOACTIVATE is told it is the active
-        // child, shown or not (user32's message tests, WmShowChildSeq_2 and
-        // _4): an MDI child becomes the client's active one this way when its
-        // program brings it to the top.
+        // child, shown or not, before it hears WM_WINDOWPOSCHANGED (user32's
+        // message tests, WmShowChildSeq_2 and _4; comctl32's pager test,
+        // set_child_seq): an MDI child becomes the client's active one this
+        // way when its program brings it to the top.
+        const childActivated = andThen(activated, ()=>((flags
+            & (SWP_NOACTIVATE | SWP_HIDEWINDOW)) === 0
+            && (record.style & (WS_CHILD | WS_POPUP)) === WS_CHILD
+            ? host.send(record.hwnd, WM_CHILDACTIVATE, 0, 0, thread) : 0));
         // EVENT_OBJECT_LOCATIONCHANGE once it has heard where it went.
-        const located = andThen(andThen(activated, ()=>changed(restacked)), ()=>(moved || sized
-            ? host.winEvent?.(EVENT_OBJECT_LOCATIONCHANGE, record.hwnd, OBJID_WINDOW, thread) ?? 0
-            : 0));
+        const located = andThen(andThen(childActivated, ()=>changed(restacked)), ()=>(moved
+            || sized ? host.winEvent?.(EVENT_OBJECT_LOCATIONCHANGE, record.hwnd, OBJID_WINDOW,
+                thread) ?? 0 : 0));
         const told = andThen(located,
             ()=>(handsOn ? host.activateOther?.(record, thread) ?? 0 : 0));
-        if ((flags & (SWP_NOACTIVATE | SWP_HIDEWINDOW)) === 0
-            && (record.style & (WS_CHILD | WS_POPUP)) === WS_CHILD)
-        {
-            return andThen(told, ()=>andThen(host.send(record.hwnd, WM_CHILDACTIVATE, 0, 0,
-                thread), ()=>1));
-        }
         return andThen(told, ()=>1);
     };
 

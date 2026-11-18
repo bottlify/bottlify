@@ -2461,3 +2461,6 @@ PGM_RECALCSIZE recalculate the frame at once and post the pager its own PGM_PLAC
 the child in place from the message loop. Removed when `ControlHost` moves a window with
 SetWindowPos's flags: the child is then placed at once, inside the message that asked.
 *2026-11-18.*
+*Removed 2026-11-18:* `ControlHost.place` is SetWindowPos with its flags and the caller's thread;
+the pager recalculates its frame with SWP_FRAMECHANGED and places its child at once, which hears
+WM_CHILDACTIVATE, inside the message that asked. No PGM_PLACECHILD is posted.
