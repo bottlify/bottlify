@@ -1210,19 +1210,6 @@ export function createProcessPolicyFunctions(host){
             },
         },
 
-        /**
-         * BOOL DebugActiveProcess(DWORD dwProcessId)
-         *
-         * There is no debugging interface to attach through: no process id
-         * is ERROR_INVALID_PARAMETER, any other is refused as a process the
-         * caller may not debug.
-         */
-        DebugActiveProcess: {
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([id])=>fail((id >>> 0) === 0 ? ERROR_INVALID_PARAMETER : ERROR_ACCESS_DENIED),
-        },
-
         /** HANDLE PowerCreateRequest(PREASON_CONTEXT Context) */
         PowerCreateRequest: {
             argBytes: 4,

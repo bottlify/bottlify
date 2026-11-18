@@ -22,6 +22,8 @@
  * @property {(report: { code: number, string: { address: number, length: number,
  *     unicode: boolean } }) => Promise<number>} [report]  This process's debugger, when
  *     its parent debugs it: its words go there too, the thread waiting until heard.
+ * @property {() => boolean} [debugged]  Whether a debugger hears this process now;
+ *     absent, whenever `report` is given.
  * @property {() => boolean} [beingDebugged]  The process block's BeingDebugged, which
  *     IsDebuggerPresent reads.
  */
@@ -43,7 +45,7 @@ export function createDebugFunctions(host){
      * @param {number} address @param {number} length @param {boolean} unicode
      * @returns {number | Promise<number>}
      */
-    const tell = (address, length, unicode)=>(host.report
+    const tell = (address, length, unicode)=>(host.report && (host.debugged?.() ?? true)
         ? host.report({ code: OUTPUT_DEBUG_STRING_EVENT,
             string: { address, length, unicode } }).then(()=>0)
         : 0);

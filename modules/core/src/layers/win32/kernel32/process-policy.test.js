@@ -295,10 +295,6 @@ test('the handle count, debugging, power and memory notifications', ()=>{
     assert.equal(view.getUint32(0x2000, true), 7, 'and nothing is written');
     assert.equal(call('CheckRemoteDebuggerPresent', CURRENT_PROCESS, 0), 0);
     assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER);
-    assert.equal(call('DebugActiveProcess', 0x2a0), 0);
-    assert.equal(errors.at(-1), ERROR_ACCESS_DENIED);
-    assert.equal(call('DebugActiveProcess', 0), 0);
-    assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER);
     assert.equal(call('CancelSynchronousIo', CURRENT_THREAD), 0);
     assert.equal(errors.at(-1), ERROR_NOT_FOUND);
 

@@ -4783,7 +4783,7 @@ const TRACED_KEPT = 200;
  *     terminate?: (request: any, code: number) => boolean,
  *     askChild?: (request: any, call: any) => Promise<any> | null,
  *     debugger?: { report: (report: import('./layers/win32/kernel32/debug-events.js')
- *         .DebugReport) => Promise<number> },
+ *         .DebugReport) => Promise<number>, debugged?: () => boolean },
  *     suspended?: boolean,
  *     othersRunning?: () => boolean,
  *     com?: { table: any, process: unknown },
@@ -4813,6 +4813,12 @@ async function buildApp(options){
     // the last frame of the process it replaced stays on the canvas until this
     // one has something to show.
     const runPresenter = options.graphics?.presenter ?? null;
+    /**
+     * This process's debugger while one hears it: from its start, or since
+     * one attached (`debug-events.js`); null otherwise.
+     */
+    const debuggerNow = ()=>(options.debugger && (options.debugger.debugged?.() ?? true)
+        ? options.debugger : null);
 
     // The address space above the program: the system modules first, then the
     // libraries a game brought with it, and the heap above all of them with
@@ -5044,7 +5050,7 @@ async function buildApp(options){
         // mark is made inside a lookup that cannot wait (`debug-events.js`).
         if (debugStarted)
         {
-            options.debugger?.report({ code: DEBUG_EVENT.LOAD_DLL,
+            debuggerNow()?.report({ code: DEBUG_EVENT.LOAD_DLL,
                 threadId: kernel.currentThread()?.id >>> 0, base: module.base });
         }
         for (const imported of SYSTEM_IMPORTS[moduleKeyOf(module.name)] ?? [])
@@ -7411,7 +7417,7 @@ async function buildApp(options){
             const told = tellNotified(LDR_DLL_NOTIFICATION_REASON_UNLOADED, held, thread);
             // Its debugger hears of it before it is unmapped, the thread
             // waiting for the answer.
-            const debugged = options.debugger?.report({ code: DEBUG_EVENT.UNLOAD_DLL,
+            const debugged = debuggerNow()?.report({ code: DEBUG_EVENT.UNLOAD_DLL,
                 threadId: thread?.id >>> 0, base: held.base });
             const before = told && debugged ? told.then(()=>debugged) : told ?? debugged;
             return before ? before.then(forget) : forget();
@@ -7875,7 +7881,7 @@ async function buildApp(options){
                     // is mapped and bound and before any of its code runs.
                     await tellNotified(LDR_DLL_NOTIFICATION_REASON_LOADED, held, asked);
                     // And its debugger, when its parent debugs this process.
-                    await options.debugger?.report({ code: DEBUG_EVENT.LOAD_DLL,
+                    await debuggerNow()?.report({ code: DEBUG_EVENT.LOAD_DLL,
                         threadId: asked?.id >>> 0, base });
 
                     // Its TLS callbacks, then its DllMain, lpvReserved NULL as
@@ -8547,7 +8553,7 @@ async function buildApp(options){
     // (`debug-events.js`), as Windows' loader does: the process, every library
     // mapped with it, then the loader's breakpoint - an int3 of its own, not
     // DbgBreakPoint - each waited on until the debugger continues it.
-    const debugStart = options.debugger && !long ? bridge.register('<debug start>', {
+    const debugStart = debuggerNow() && !long ? bridge.register('<debug start>', {
         argBytes: 0,
         handler: async()=>{
             const report = /** @type {NonNullable<typeof options.debugger>} */ (
@@ -8671,7 +8677,7 @@ async function buildApp(options){
     });
     threadBlocks = process;
     // What IsDebuggerPresent reads: a debuggee's process block says so.
-    if (options.debugger)
+    if (debuggerNow())
     {
         memory.writeBytes(process.peb + blockLayouts(pointerSize).peb.BEING_DEBUGGED,
             new Uint8Array([1]));
@@ -13505,9 +13511,11 @@ export async function createApp(options){
                         suspended: request.suspended === true,
                         startedBeside: true,
                         ...request.environment ? { environment: request.environment } : {},
-                        // Debugged by its parent, it reports to it here.
-                        ...request.debugged ? { debugger: { report: (/** @type {any} */ report)=>
-                            parent.debugEvent(request, report) } } : {},
+                        // Its parent's ear: heard while its parent debugs it, from
+                        // its start or since it attached (`debug-events.js`).
+                        debugger: { report: (/** @type {any} */ report)=>
+                            parent.debugEvent(request, report),
+                        debugged: ()=>Boolean(request.debugged) },
                         audio: sound.options,
                     });
                     sound.announce(child);

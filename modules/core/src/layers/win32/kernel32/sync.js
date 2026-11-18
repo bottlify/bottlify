@@ -96,8 +96,6 @@ const ERROR_GEN_FAILURE = 31;
 /** What GetThreadSelectorEntry answers for a selector it holds nothing for. */
 const ERROR_NOACCESS = 998;
 const ERROR_INVALID_THREAD_ID = 1444;
-/** The pseudo-handle for the running process. */
-const OWN_PROCESS = 0xffffffff;
 
 /** The CONTEXT groups GetThreadContext fills, and the size of the record. */
 const CONTEXT_CONTROL = 0x10001;
@@ -814,40 +812,6 @@ export function createSyncFunctions(host){
                     (thread?.exitCode ?? null) !== null, thread?.cpuMs ?? 0);
             },
         }),
-
-        /**
-         * BOOL DebugBreakProcess(HANDLE Process)
-         *
-         * On Windows the target gets a thread that breaks only if a debugger
-         * is attached and otherwise just ends, and the call succeeds either
-         * way. Neither this process nor a child it does not debug has one,
-         * so nothing happens and the call succeeds; a child it debugs would
-         * report a breakpoint, which the debug events here do not carry, and
-         * that is said. A handle that is no process is refused.
-         */
-        DebugBreakProcess: {
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([handle])=>{
-                if ((handle >>> 0) === OWN_PROCESS)
-                {
-                    return 1;
-                }
-                const plain = untagged(handle);
-                const child = kernel.handles.typeOf?.(plain) === 'process' ? object(plain) : null;
-                if (!child)
-                {
-                    host.setLastError?.(ERROR_INVALID_HANDLE);
-                    return 0;
-                }
-                if (child.debugged)
-                {
-                    host.divergence?.('DebugBreakProcess',
-                        'a debugged child\'s breakpoint is not reported as a debug event');
-                }
-                return 1;
-            },
-        },
 
         /**
          * VOID ReinitializeCriticalSection(LPCRITICAL_SECTION lpCriticalSection):

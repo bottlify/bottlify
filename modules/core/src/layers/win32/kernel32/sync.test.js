@@ -1340,28 +1340,6 @@ test('GetThreadSelectorEntry describes the flat selectors and the thread block b
     assert.equal(fns.GetThreadSelectorEntry.handler([0xfffffffe, 0xdeadbeef, at]), 0);
 });
 
-test('DebugBreakProcess succeeds on any process and says a debugged child\'s breakpoint', ()=>{
-    const host = fakeHost();
-    const kernel = /** @type {any} */ (host.kernel);
-    const debugged = { id: 0x300, debugged: { events: [], current: null } };
-    const plain = { id: 0x310, debugged: null };
-    kernel.processes = { STILL_ACTIVE: 259, all: ()=>[debugged, plain] };
-    /** @type {string[]} */
-    const said = [];
-    const fns = /** @type {any} */ (createSyncFunctions({ ...host, kernel,
-        divergence: (/** @type {string} */ api)=>said.push(api) }));
-    host.register(0x50, 'process', debugged);
-    host.register(0x54, 'process', plain);
-    host.register(0x58, 'event', { kind: 'event' });
-    assert.equal(fns.DebugBreakProcess.argBytes, 4);
-    assert.equal(fns.DebugBreakProcess.handler([0xffffffff]), 1, 'no debugger: nothing happens');
-    assert.equal(fns.DebugBreakProcess.handler([0x54]), 1);
-    assert.equal(fns.DebugBreakProcess.handler([0x50]), 1);
-    assert.deepEqual(said, ['DebugBreakProcess'], 'the debugged child\'s breakpoint is said');
-    assert.equal(fns.DebugBreakProcess.handler([0x58]), 0, 'an event is no process');
-    assert.equal(host.errors.at(-1), 6);
-});
-
 test('ReinitializeCriticalSection makes a section new again, as InitializeCriticalSection does',
     ()=>{
         const host = fakeHost();

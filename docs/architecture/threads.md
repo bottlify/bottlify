@@ -118,7 +118,10 @@ thread waits on an exception's answer the exception's context is its context, so
 `GetThreadContext` and `SetThreadContext` read and change the context it goes on from
 ([`kernel32/debug-events.js`](../../modules/core/src/layers/win32/kernel32/debug-events.js)). A
 library of the engine's loaded after the start and a thread made are told without the thread
-waiting. The engine
+waiting. A child run beside its parent always carries its parent's ear and is heard only while
+its record says it is debugged, so `DebugActiveProcess` attaches by marking it and asking it, as
+a cross-process call no program can name, to tell what it already is and break in on a thread of
+its own. The engine
 thread then runs no program and is the system (what it builds before any process starts is in
 section 4), and what the page asks of the program it asks the program's thread.
 

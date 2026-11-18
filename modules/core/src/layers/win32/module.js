@@ -11,7 +11,7 @@ import { createFiberLocalStorage } from './kernel32/fls.js';
 import { createNamedObjects, createRemoteNamedObjects } from './kernel32/named-objects.js';
 import { createRegistryService } from './advapi32/registry-service.js';
 import { createDebugFunctions } from './kernel32/debug.js';
-import { DEBUG_EVENT, createDebuggerFunctions } from './kernel32/debug-events.js';
+import { DEBUG_EVENT, attachEvents, createDebuggerFunctions } from './kernel32/debug-events.js';
 import {
     ALIGNMENT_64, GLOBAL_MEMORY, GUARD_PAGES, PAGE_STATE, TABLES, createHeapAllocator,
     createHeapFunctions,
@@ -36,7 +36,7 @@ import {
     defaultEnvironment, machineArchitecture, sessionEnvironment,
 } from './kernel32/environment.js';
 import { createThreadPool } from './kernel32/pool.js';
-import { serveCall } from './kernel32/cross-process.js';
+import { DEBUG_ATTACH, DEBUG_BREAK, serveCall } from './kernel32/cross-process.js';
 import { CURRENT_PROCESS, createProcessTarget } from './kernel32/process-target.js';
 import { reportedVersion, windowsVersion } from './kernel32/versions.js';
 import { createSystemFunctions, imageBits } from './kernel32/system.js';
@@ -398,6 +398,8 @@ const d3dx10Libraries = (d3dx9, host)=>{
 const AVRT_TASK_HANDLE = 0x41565254;
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_PARAMETER = 87;
+/** What a call the process cannot make here answers. */
+const ERROR_NOT_SUPPORTED = 50;
 /** Every right a token has, which a service asks of the user's token for its programs. */
 const TOKEN_ALL_ACCESS = 0x000f01ff;
 
@@ -577,6 +579,14 @@ export function createWin32Module(){
             // 64-bit processes always do: a 32-bit process on it runs under
             // WOW64 (`roadmap/x64.md`).
             const machine64 = config?.machine === 'amd64' || pointerSize === 8;
+            /**
+             * This process's debugger while one hears it: from its start, or
+             * since one attached (`debug-events.js`); null otherwise.
+             *
+             * @returns {{ report: (report: any) => Promise<number> } | null}
+             */
+            const debuggerNow = ()=>(config?.debugger && (config.debugger.debugged?.() ?? true)
+                ? config.debugger : null);
             // The thread and process blocks a handler reads, at that width.
             const blocks = blockLayouts(pointerSize);
 
@@ -611,10 +621,69 @@ export function createWin32Module(){
                 activation.loaderApi.inherit(thread?.tebAddress ?? 0);
                 // Told to the debugger as it is made, without the creator
                 // waiting for the answer (`debug-events.js`).
-                config?.debugger?.report({ code: DEBUG_EVENT.CREATE_THREAD,
+                debuggerNow()?.report({ code: DEBUG_EVENT.CREATE_THREAD,
                     threadId: thread?.id >>> 0,
                     start: (thread?.start ?? thread?.entry ?? 0) >>> 0 });
             };
+            /**
+             * A debugger's break into this process: a thread of its own that
+             * runs DbgBreakPoint, whose breakpoint the debugger hears from it
+             * (DebugBreakProcess, and the last of an attach).
+             *
+             * @returns {number}
+             */
+            const breakIn = ()=>{
+                const kernel32 = libraries['KERNEL32.dll'];
+                const at = modules.find('ntdll.dll')?.addressOf?.('DbgBreakPoint') ?? 0;
+                const made = at === 0 ? 0
+                    : kernel32.CreateThread.handler([0, 0, at, 0, 0, 0]) >>> 0;
+                if (made === 0)
+                {
+                    kernel32.SetLastError.handler([ERROR_NOT_SUPPORTED]);
+                    return 0;
+                }
+                kernel32.CloseHandle.handler([made]);
+                return 1;
+            };
+            /**
+             * A debugger has attached to this process (DebugActiveProcess): it
+             * is told what the process already is (`attachEvents`), the process
+             * block says it is debugged, and it breaks in. Only a process its
+             * debugger hears - one run beside it - can be attached to.
+             *
+             * @returns {number}
+             */
+            const debugAttached = ()=>{
+                const kernel32 = libraries['KERNEL32.dll'];
+                const ear = debuggerNow();
+                const first = kernel.threads()[0];
+                if (!ear || !first)
+                {
+                    kernel32.SetLastError.handler([ERROR_NOT_SUPPORTED]);
+                    return 0;
+                }
+                const { teb, peb, pointer } = blockLayouts(pointerSize);
+                const block = new DataView(readMemory((first.tebAddress ?? 0) + teb.PEB, pointer)
+                    .slice().buffer).getUint32(0, true);
+                if (block !== 0)
+                {
+                    writeMemory(block + peb.BEING_DEBUGGED, Uint8Array.of(1));
+                }
+                const image = /** @type {any} */ (modules.find(null));
+                const listed = /** @type {any[]} */ (modules.list?.() ?? []);
+                for (const report of attachEvents({
+                    mainThreadId: (config?.mainThreadId ?? first.id) >>> 0,
+                    image: { base: image?.base >>> 0, start: (image?.entryPoint ?? 0) >>> 0 },
+                    ntdll: /** @type {any} */ (modules.find('ntdll.dll'))?.base >>> 0,
+                    libraries: listed.map(module=>module.base >>> 0),
+                    threads: kernel.threads().map((/** @type {any} */ thread)=>thread.id >>> 0),
+                }))
+                {
+                    ear.report(report);
+                }
+                return breakIn();
+            };
+
             /**
              * The string values of an environment key in the registry: the
              * machine's or the user's, as a session's block is built from them.
@@ -1248,7 +1317,7 @@ export function createWin32Module(){
                 }
                 // A debuggee's thread ending tells its debugger first and
                 // waits for the answer (`debug-events.js`).
-                const debugged = others && !heard ? config?.debugger?.report({
+                const debugged = others && !heard ? debuggerNow()?.report({
                     code: DEBUG_EVENT.EXIT_THREAD, threadId: thread.id >>> 0,
                     exitCode: code >>> 0 }) : null;
                 if (debugged)
@@ -2322,7 +2391,7 @@ export function createWin32Module(){
                 trace: text=>trace(text),
                 // Its debugger, when its parent debugs it (`debug-events.js`).
                 ...config?.debugger ? { debugReport: (/** @type {any} */ report)=>
-                    config.debugger.report(report) } : {},
+                    config.debugger.report(report), debugged: ()=>debuggerNow() !== null } : {},
                 // What Windows does once nothing handled an exception and the
                 // last-chance filter declined it: the process ends, with the
                 // exception's code as its exit code.
@@ -3371,6 +3440,10 @@ export function createWin32Module(){
                 park: (/** @type {any} */ thread)=>bridge.park(thread),
                 divergence: config?.divergence,
                 windows,
+                processId,
+                askChild,
+                debugged: ()=>debuggerNow() !== null,
+                breakIn,
             });
             // The libraries this build implements, standing in the system
             // folder for a setup that looks before it loads -- kernel32's
@@ -3484,7 +3557,8 @@ export function createWin32Module(){
                         // Told to its debugger too, when its parent debugs it.
                         ...config?.debugger ? { report: (/** @type {any} */ report)=>
                             config.debugger.report({ ...report,
-                                threadId: kernel.currentThread()?.id >>> 0 }) } : {},
+                                threadId: kernel.currentThread()?.id >>> 0 }),
+                        debugged: ()=>debuggerNow() !== null } : {},
                     }),
                     ...debuggerSide.functions,
                     ...createHeapFunctions({
@@ -3611,7 +3685,7 @@ export function createWin32Module(){
                     ...createSyncFunctions({
                         pointerSize,
                         processId,
-                        debugged: ()=>Boolean(config?.debugger),
+                        debugged: ()=>debuggerNow() !== null,
                         windows,
                         kernel,
                         namedObjects,
@@ -7083,7 +7157,9 @@ export function createWin32Module(){
                 answerCall: (/** @type {any} */ call)=>kernel.outside(()=>serveCall(call, {
                     table: /** @type {any} */ ({ ...libraries['KERNEL32.dll'],
                         NtQueryInformationProcess:
-                            libraries['ntdll.dll']?.NtQueryInformationProcess }),
+                            libraries['ntdll.dll']?.NtQueryInformationProcess,
+                        [DEBUG_ATTACH]: { handler: debugAttached },
+                        [DEBUG_BREAK]: { handler: breakIn } }),
                     allocate: bytes=>allocator.allocate(bytes),
                     free: address=>{
                         allocator.free(address);
