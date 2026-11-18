@@ -49,6 +49,11 @@ flowchart TB
   mixers do. A voice does not play past what has been written: if the program is late, silence plays,
   not the previous lap again. If the wait lasts longer than max(250 ms, one lap of the buffer), the
   voice stops waiting and goes on round.
+- **Effects** (`SetFX`) are DMOs made through COM and run in place, in the guest, over a copy of
+  what the program wrote: over a span when it is unlocked and over the whole buffer at Play. The
+  voice and the mix then play that copy (`effectedWindow`), the program's samples left as they
+  are. The standard effects are `dsound/effects.js`; they keep their parameters and change
+  nothing yet (`roadmap/decisions.md` A262).
 - **waveOut** is one track per device. `waveOutWrite` copies the block at once, and `WOM_DONE`
   arrives when the AudioWorklet has finished reading it.
 - **MP3 for Miles.** In place of the program's own `Mp3dec.asi`, our provider runs, attached through

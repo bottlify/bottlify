@@ -6,6 +6,7 @@
 
 import { createMp3AcmCodec } from './asi/mp3acm.js';
 import { createDirectSound } from './dsound/seam.js';
+import { registerStandardEffects } from './dsound/effects.js';
 import { registerDirectMusic } from './dmusic/classes.js';
 import { DSBSTATUS_PLAYING } from './dsound/buffers.js';
 import { createMixer } from './output/mixer.js';
@@ -200,7 +201,21 @@ export function createAudioModule(){
                     ?? ((/** @type {number} */ entry, /** @type {number[]} */ args,
                         /** @type {any} */ thread)=>bridge.callGuest({ entry, args, thread })),
                 callerThread: config?.callerThread ?? (()=>bridge.callerThread()),
+                // A buffer's effects are made through COM, as a program would
+                // make them, so its own registered effect is found too.
+                createInstance: config?.createInstance ?? win32?.createInstance,
             });
+            // The standard effects SetFX names, for COM to find.
+            if (com)
+            {
+                registerStandardEffects(com, {
+                    /** @param {number} address @param {number} length */
+                    readMemory: (address, length)=>memory.readBytes(address, length),
+                    /** @param {number} address @param {Uint8Array} bytes */
+                    writeMemory: (address, bytes)=>memory.writeBytes(address, bytes),
+                    divergence: config?.divergence,
+                }, config?.pointerSize === 8 ? 8 : 4);
+            }
 
             // What decodes behind the provider. The library asks for its samples
             // in a call and holds a lock while it asks, so a decoder that answers
@@ -461,7 +476,8 @@ export function createAudioModule(){
                             const copy = (from, count)=>{
                                 if (count > 0)
                                 {
-                                    voice.write(from, memory.window(buffer.address + from, count));
+                                    voice.write(from, buffer.effectedWindow(from, count)
+                                        ?? memory.window(buffer.address + from, count));
                                 }
                             };
                             buffer.attachDevice(voice, copy);
@@ -538,7 +554,8 @@ export function createAudioModule(){
                         // synchronously within this call, so a second copy here
                         // first -- what `readBytes` used to hand over -- bought
                         // nothing.
-                        track.write(memory.window(buffer.address + range.from, range.bytes));
+                        track.write(buffer.effectedWindow(range.from, range.bytes)
+                            ?? memory.window(buffer.address + range.from, range.bytes));
                     }
                 }
                 // Drops whatever was just released above from the seam's own

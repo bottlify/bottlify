@@ -2402,3 +2402,15 @@ instruction. A command naming any other program is not run, said. It is where an
 runs no guest code leaves a COM server's registration (A67, and DirectX's setup): the library's
 own DllRegisterServer writes what it writes. Revisit when a setup is found that leaves another
 program in RunOnce, or a registration that must run in a process of its own. *2026-11-17.*
+
+**A262. Temporary: DirectSound's standard effects keep their parameters and pass the sound through
+unchanged.** SetFX makes each effect a buffer names through COM, gives it the buffer's format in
+and out, tells it of a discontinuity at every Play and runs it in place over what the buffer
+holds, so a program's own DMO is heard as Windows plays it; the nine standard effects (gargle,
+chorus, flanger, echo, distortion, compressor, parametric equalizer, I3DL2 and Waves reverb) are
+those classes, with every parameter, range, preset and quality Windows answers, and their
+Process changes nothing, said once an effect. An effect runs over a span when the program
+unlocks it and over the whole buffer at Play, rather than as the play cursor reaches each part,
+so an effect with a tail (an echo, a reverb) would hear the buffer in the order it was written.
+Removed when the standard effects process sound, which is when this order matters too.
+*2026-11-18.*
