@@ -2549,7 +2549,12 @@ export function stackLow(e, below){
     e.b.localSet(Local.addr);
     if (e.guest !== null)
     {
-        e.b.localGet(rsp).i64const(-(2n ** 32n)).op(I64.and).localSet(e.guest.high);
+        // Inside the window, as the low half is inside its 4 GiB: an rsp a program moved
+        // past the window reads and writes there, untested, rather than leaving wasm's
+        // bounds.
+        e.b.localGet(rsp)
+            .i64const(BigInt(/** @type {number} */ (e.layout.window) - 1) & -(2n ** 32n))
+            .op(I64.and).localSet(e.guest.high);
     }
 }
 

@@ -580,9 +580,9 @@ export function prepareModule(m, layout, features, memory = {},
     {
         context.precise = true;
     }
-    // A loose stack's access takes rsp's low half for its address, which a wide
-    // window's stack past 4 GiB is not.
-    else if (looseStacks && undoLog !== true && layout.window === undefined)
+    // A loose stack's access takes rsp's low half for its address and, over a wide
+    // window, rsp's high half with it (`stackLow`).
+    else if (looseStacks && undoLog !== true)
     {
         context.looseStacks = true;
     }
