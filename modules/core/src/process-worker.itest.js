@@ -443,7 +443,7 @@ test('where processes run at once, the run\'s own program runs in a worker of it
     assert.equal(output.join(''), 'Hello from Bottlify\r\n');
     assert.deepEqual(started.map(event=>[event.image, event.worker]), [['C:\\hello.exe', true]],
         'the program started in a worker of its own');
-    assert.equal(new TextDecoder().decode(app.files.read('C:\\note.txt')), 'kept',
+    assert.deepEqual(await app.files.read('C:\\note.txt'), new TextEncoder().encode('kept'),
         'the session\'s files are on the run\'s volume, here');
     assert.ok(app.registry().root, 'the registry is the run\'s, here');
     const tables = app.diagnostics();

@@ -6,7 +6,7 @@
 
 /**
  * A Direct3D 9 program built by `make-pe.mjs`, for the tests that play its
- * device on the graphics worker: a 64x32 window and a device on it, a 128x128
+ * device on the graphics worker: a shown 64x32 window and a device on it, a 128x128
  * texture locked, filled, unlocked, drawn with and presented once a frame,
  * then ExitProcess(0). The texture is 64 KiB, the least the recording lends
  * (`remote/lending.js`, `LEND_LEAST`): a smaller one is copied.
@@ -82,7 +82,8 @@ export function texturedFrames(frames){
                 0xc7, 0x05, ...u32(at('wndclass') + 36), ...u32(at('className')),
                 ...push(at('wndclass')), 0xff, 0x15, ...u32(iat('RegisterClassA')),
                 ...push(0), ...push(0), ...push(0), ...push(0), ...push(32), ...push(64),
-                ...push(0), ...push(0), ...push(0x00cf0000), ...push(at('className')),
+                // WS_VISIBLE: a present into a hidden window is not shown.
+                ...push(0), ...push(0), ...push(0x10cf0000), ...push(at('className')),
                 ...push(at('className')), ...push(0), 0xff, 0x15, ...u32(iat('CreateWindowExA')),
                 0xa3, ...u32(at('present') + 28), //        present.hDeviceWindow = hWnd
                 0x89, 0xc7, //                              mov edi, eax
