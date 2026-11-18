@@ -90,6 +90,8 @@ export const STATUS = Object.freeze({
     PIPE_DISCONNECTED: 0xc00000b0,
     PIPE_LISTENING: 0xc00000b3,
     PIPE_CLOSING: 0xc00000b1,
+    /** A pipe whose instances are all made: no other is to be had. */
+    INSTANCE_NOT_AVAILABLE: 0xc00000ab,
     CANCELLED: 0xc0000120,
     /** A success: a create with OBJ_OPENIF opened an object its name held already. */
     OBJECT_NAME_EXISTS: 0x40000000,
@@ -140,6 +142,7 @@ const ERROR = Object.freeze({
     NO_SYSTEM_RESOURCES: 1450,
     BROKEN_PIPE: 109,
     NO_DATA: 232,
+    PIPE_BUSY: 231,
     PIPE_NOT_CONNECTED: 233,
     PIPE_LISTENING: 536,
     OPERATION_ABORTED: 995,
@@ -211,6 +214,7 @@ const TO_DOS_ERROR = new Map([
     [STATUS.PIPE_DISCONNECTED, ERROR.PIPE_NOT_CONNECTED],
     [STATUS.PIPE_LISTENING, ERROR.PIPE_LISTENING],
     [STATUS.PIPE_CLOSING, ERROR.NO_DATA],
+    [STATUS.INSTANCE_NOT_AVAILABLE, ERROR.PIPE_BUSY],
     [STATUS.CANCELLED, ERROR.OPERATION_ABORTED],
 ]);
 

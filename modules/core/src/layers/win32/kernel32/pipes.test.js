@@ -330,9 +330,17 @@ test('creation refuses a bad name, a busy pipe and a second first instance', ()=
     p.server(PIPE_ACCESS_DUPLEX, 0, 2);
     assert.equal(p.server(PIPE_ACCESS_DUPLEX, 0, 2) >>> 0, 0xffffffff);
     assert.equal(p.error(), ERROR_PIPE_BUSY, 'a third instance of two');
+    // The count refuses first: a first instance asked of a full pipe is busy
+    // (ntdll's om test, NtCreateNamedPipeFile with FILE_CREATE, which
+    // FILE_FLAG_FIRST_PIPE_INSTANCE is spelt as).
     assert.equal(p.server(PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE, 0, 2) >>> 0,
         0xffffffff);
-    assert.equal(p.error(), ERROR_ACCESS_DENIED);
+    assert.equal(p.error(), ERROR_PIPE_BUSY);
+    const roomy = processOn(new Map());
+    roomy.server(PIPE_ACCESS_DUPLEX, 0, 2);
+    assert.equal(roomy.server(PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE, 0, 2) >>> 0,
+        0xffffffff);
+    assert.equal(roomy.error(), ERROR_ACCESS_DENIED, 'a first instance of a pipe already there');
 
     const q = processOn(new Map());
     assert.equal(q.client(), -ERROR_FILE_NOT_FOUND);
@@ -653,3 +661,58 @@ test('a handle opened without FILE_FLAG_OVERLAPPED reads as a synchronous call, 
             'the status and the count in the OVERLAPPED');
         assert.equal(p.text(1), 'x');
     });
+
+test('NtCreateNamedPipeFile makes the instance CreateNamedPipe makes, by its native name', ()=>{
+    const STATUS_SUCCESS = 0;
+    const STATUS_INSTANCE_NOT_AVAILABLE = 0xc00000ab;
+    const STATUS_OBJECT_NAME_NOT_FOUND = 0xc0000034;
+    const STATUS_OBJECT_PATH_NOT_FOUND = 0xc000003a;
+    const FILE_OPEN = 1;
+    const FILE_CREATE = 2;
+    const FILE_SYNCHRONOUS_IO_NONALERT = 0x20;
+    const OUT = 0x800;
+    const IOSB = 0x810;
+    const ATTRIBUTES = 0x820;
+    const STRING = 0x840;
+    const TEXT = 0x880;
+    const TIMEOUT = 0x8f0;
+    const p = processOn(new Map());
+    const create = /** @type {any} */ (p.fns.CreateNamedPipeW).natives.NtCreateNamedPipeFile;
+    /** @param {string} name */
+    const attributes = name=>{
+        p.putWide(TEXT, name);
+        p.view.setUint16(STRING, name.length * 2, true);
+        p.view.setUint16(STRING + 2, name.length * 2 + 2, true);
+        p.view.setUint32(STRING + 4, TEXT, true);
+        p.view.setUint32(ATTRIBUTES, 24, true);
+        p.view.setUint32(ATTRIBUTES + 8, STRING, true);
+        return ATTRIBUTES;
+    };
+    // -10000 hundred-nanosecond units: a millisecond.
+    p.view.setBigInt64(TIMEOUT, -10000n, true);
+    /** @param {string} name @param {number} disposition @param {number} [options] */
+    const make = (name, disposition, options = 0)=>{
+        p.view.setUint32(OUT, 0xdeadbeef, true);
+        return create.handler([OUT, RW, attributes(name), IOSB, 3, disposition, options, 0, 0,
+            0, 1, 256, 256, TIMEOUT]) >>> 0;
+    };
+
+    assert.equal(make('\\??\\PIPE\\test\\pipe', FILE_OPEN), STATUS_OBJECT_NAME_NOT_FOUND,
+        'FILE_OPEN asks for a pipe already there');
+    assert.equal(p.u32(OUT), 0, 'a refused call leaves no handle');
+    assert.equal(make('\\??\\PIPE\\test\\pipe', FILE_CREATE, FILE_SYNCHRONOUS_IO_NONALERT),
+        STATUS_SUCCESS);
+    const server = p.u32(OUT);
+    const entry = p.handles.get(server);
+    assert.equal(entry?.type, 'pipe');
+    assert.deepEqual([p.u32(IOSB), p.u32(IOSB + 4)], [STATUS_SUCCESS, 2], 'FILE_CREATED');
+    assert.equal(entry?.object.overlapped, false, 'a synchronous option makes a synchronous end');
+    assert.equal(make('\\??\\PIPE\\TEST\\PIPE', FILE_CREATE), STATUS_INSTANCE_NOT_AVAILABLE,
+        'the one instance is made, in any case of the name');
+    assert.equal(make('\\Device\\NamedPipe\\test\\pipe', FILE_CREATE),
+        STATUS_INSTANCE_NOT_AVAILABLE, 'the device\'s own name is the same pipe');
+    assert.equal(make('\\??\\C:\\pipe', FILE_CREATE), STATUS_OBJECT_PATH_NOT_FOUND);
+
+    const opened = p.pipes.open('\\\\.\\pipe\\test\\pipe', GENERIC_READ, 0);
+    assert.ok('handle' in opened, 'CreateFile finds it by the Win32 name');
+});
