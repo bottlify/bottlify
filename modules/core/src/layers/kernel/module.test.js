@@ -147,6 +147,9 @@ test('the stack pointer leaves room for the pops a returning thread makes', asyn
     const top = region.base + region.size;
     assert.ok(thread.stackTop <= top - 16, 'at least two frames of headroom');
     assert.ok(thread.stackTop > region.base, 'and still inside the stack');
+    // The thread block's StackBase is the stack's top, a page boundary, as
+    // a program finding its stack from the address of a local reads it.
+    assert.equal(thread.stackBase, top, 'its base is the region\'s top, not the first frame');
 });
 
 test('each thread gets a stack of its own, registered like any other memory', async()=>{
@@ -170,6 +173,7 @@ test('the first thread may bring its own stack', async()=>{
 
     assert.equal(memory.regions.length, 0, 'nothing was allocated for it');
     assert.equal(thread.stackTop, 0x00280000 - 16);
+    assert.equal(thread.stackBase, 0x00280000);
 });
 
 /**

@@ -6381,7 +6381,8 @@ async function buildApp(options){
                 }
                 giveBackBlocks();
                 holdBlock(thread, threadBlocks.createThreadBlock({
-                    id: thread.id, stackBase: thread.stackTop, stackLimit: thread.stackLimit,
+                    id: thread.id, stackBase: thread.stackBase ?? thread.stackTop,
+                    stackLimit: thread.stackLimit,
                     locals: threadLocals(),
                 }));
             },
