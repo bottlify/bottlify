@@ -25,6 +25,9 @@ function machine(){
     const asked = [];
     /** @type {any[]} */
     const loads = [];
+    /** @type {Map<number, any>} */
+    const registered = new Map();
+    let cookies = 0;
     /** @param {number} at */
     const wideAt = at=>{
         let text = '';
@@ -85,6 +88,13 @@ function machine(){
             return at;
         },
         free: ()=>true,
+        notifications: {
+            register: (callback, context)=>{
+                registered.set(++cookies, { callback, context });
+                return cookies;
+            },
+            unregister: cookie=>registered.delete(cookie),
+        },
     });
     /** A counted string at NAME over TEXT. @param {string} text @param {number} unit */
     const counted = (text, unit = 2)=>{
@@ -105,7 +115,7 @@ function machine(){
     };
     /** @param {string} name @param {number[]} args */
     const call = (name, ...args)=>table[name].handler(args);
-    return { view, call, counted, asked, loads, wideAt };
+    return { view, call, counted, asked, loads, wideAt, registered };
 }
 
 test('a loaded module by its name, its count left alone; one not loaded is not found', ()=>{
@@ -166,6 +176,19 @@ test('LdrGetDllPath answers the search\'s directories in a block RtlReleasePath 
     assert.equal(view.getUint32(OUT + 4, true), 0, 'the unknown out NULL');
     assert.equal(call('RtlReleasePath', view.getUint32(OUT, true)), 0);
     assert.equal(call('LdrGetDllPath', 0, 0, 0, OUT + 4), STATUS.INVALID_PARAMETER);
+});
+
+test('a DLL notification is registered by its callback and context and taken back once', ()=>{
+    const { view, call, registered } = machine();
+    assert.equal(call('LdrRegisterDllNotification', 0, 0x401000, 0x1234, OUT), STATUS.SUCCESS);
+    const cookie = view.getUint32(OUT, true);
+    assert.deepEqual(registered.get(cookie), { callback: 0x401000, context: 0x1234 });
+    assert.equal(call('LdrRegisterDllNotification', 1, 0x401000, 0, OUT),
+        STATUS.INVALID_PARAMETER, 'flags must be zero');
+    assert.equal(call('LdrRegisterDllNotification', 0, 0, 0, OUT), STATUS.INVALID_PARAMETER);
+    assert.equal(call('LdrUnregisterDllNotification', cookie), STATUS.SUCCESS);
+    assert.equal(call('LdrUnregisterDllNotification', cookie), STATUS.DLL_NOT_FOUND,
+        'a cookie already taken back');
 });
 
 test('an export by name or ordinal, and the status each miss is', ()=>{

@@ -6397,6 +6397,7 @@ export function createWin32Module(){
                 readWideString,
                 kernel32: libraries['KERNEL32.dll'],
                 pool: threadPool.native,
+                dllNotifications: modules.dllNotifications,
                 crt: libraries['msvcrt.dll'],
                 teb: ()=>kernel.currentThread()?.tebAddress ?? 0,
                 currentThread: ()=>kernel.currentThread(),

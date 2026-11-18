@@ -54,13 +54,17 @@ export const LOADER_ENTRIES = ['GetModuleHandleExW', 'LoadLibraryW', 'LoadLibrar
  * @property {Record<string, { handler: Function }>} kernel32
  * @property {(bytes: number) => number} allocate
  * @property {(address: number) => boolean} free
+ * @property {{ register: (callback: number, context: number) => number,
+ *     unregister: (cookie: number) => boolean }} [notifications]  The loader's
+ *     LdrRegisterDllNotification callbacks; absent, the two calls are not exported.
  */
 
 /**
  * @param {LoaderHost} host
  * @returns {Record<string, { argBytes: number, handler: Function }>}
  */
-export function createLoaderFunctions({ readMemory, writeMemory, kernel32, allocate, free }){
+export function createLoaderFunctions({ readMemory, writeMemory, kernel32, allocate, free,
+    notifications }){
     /** How many times the loader lock was taken: each a cookie of its own. */
     let locks = 0;
     /** @param {number} address */
@@ -297,6 +301,40 @@ export function createLoaderFunctions({ readMemory, writeMemory, kernel32, alloc
                 return STATUS.SUCCESS;
             },
         },
+
+        ...notifications ? {
+            /**
+             * NTSTATUS LdrRegisterDllNotification(ULONG Flags,
+             *     PLDR_DLL_NOTIFICATION_FUNCTION Callback, PVOID Context, PVOID *Cookie)
+             *
+             * The callback is told of every library loaded after its mapping
+             * and before its DllMain, and of every one unloaded after its
+             * DllMain, with the context; the cookie takes it back. Flags must
+             * be zero.
+             */
+            LdrRegisterDllNotification: {
+                argBytes: 16,
+                /** @param {number[]} args */
+                handler: ([flags, callback, context, cookie])=>{
+                    if (flags !== 0 || (callback >>> 0) === 0 || (cookie >>> 0) === 0)
+                    {
+                        return STATUS.INVALID_PARAMETER;
+                    }
+                    setU32(cookie >>> 0, notifications.register(callback, context));
+                    return STATUS.SUCCESS;
+                },
+            },
+            /**
+             * NTSTATUS LdrUnregisterDllNotification(PVOID Cookie): a cookie
+             * not handed out, or already taken back, is STATUS_DLL_NOT_FOUND.
+             */
+            LdrUnregisterDllNotification: {
+                argBytes: 4,
+                /** @param {number[]} args */
+                handler: ([cookie])=>(notifications.unregister(cookie)
+                    ? STATUS.SUCCESS : STATUS.DLL_NOT_FOUND),
+            },
+        } : {},
 
         /** void RtlReleasePath(PWSTR Path): what LdrGetDllPath handed out. */
         RtlReleasePath: {

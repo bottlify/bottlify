@@ -41,7 +41,7 @@ import { jumpBytes, relocatablePrefix } from './layers/loader/internal/hooks.js'
 import { mangledCall } from './layers/loader/internal/mangling.js';
 import { mapImage } from './layers/loader/internal/image.js';
 import { imagePlacementOf, installedHeaders } from './layers/loader/internal/synth.js';
-import { createProcessBlocks, TEB, TEB64 } from './layers/win32/kernel32/teb.js';
+import { blockLayouts, createProcessBlocks, TEB, TEB64 } from './layers/win32/kernel32/teb.js';
 import { KUSER, KUSER_REGION, SHARED_USER_DATA, createSharedUserData, sharedPageAt }
     from './layers/win32/kernel32/shared-data.js';
 import { supportedOsOf, windowsVersion } from './layers/win32/kernel32/versions.js';
@@ -2623,6 +2623,10 @@ export function resourceLookup(main, byBase, dataFiles = new Map(), readMemory, 
  */
 const LIBRARY_ALIGN = 0x10000;
 
+/** What an LdrRegisterDllNotification callback is told: a library loaded, or unloaded. */
+const LDR_DLL_NOTIFICATION_REASON_LOADED = 1;
+const LDR_DLL_NOTIFICATION_REASON_UNLOADED = 2;
+
 /** LoadLibraryEx's flags: mapped with nothing resolved or run, or loaded as data. */
 const DONT_RESOLVE_DLL_REFERENCES = 0x1;
 const LOAD_LIBRARY_AS_DATAFILE = 0x2;
@@ -2988,6 +2992,10 @@ export const WHOLE_READ_BYTES = HEAP_POOLS.blockCache / 4;
  * of a hundred megabytes -- was fetched, let go down to the pool and missed
  * again, for ever.
  *
+ * Opened as the loader opens an image: for reading, sharing reading and
+ * deletion, so a file a program holds open to delete on close - a library it
+ * wrote out to load - is read, and one it holds open for writing is refused.
+ *
  * @param {any} filesystem
  * @param {any} blocks
  * @param {string} path
@@ -2998,7 +3006,7 @@ export async function readWholeFile(filesystem, blocks, path, piece = WHOLE_READ
     let handle;
     try
     {
-        handle = filesystem.open(path, { create: false });
+        handle = filesystem.open(path, { shareDelete: true });
     }
     catch {
         return null;
@@ -5173,9 +5181,33 @@ async function buildApp(options){
      *     removeThreadLocal: (slot: number) => void,
      *     addModule: (module: import('./layers/win32/kernel32/teb.js').LoadedModule) => number,
      *     removeModule: (base: number) => void,
+     *     entryOf: (base: number) => number,
      * } | null}
      */
     let threadBlocks = null;
+    /**
+     * The callbacks LdrRegisterDllNotification registered, by their cookie, in
+     * the order registered (`tellNotified`).
+     *
+     * @type {Map<number, { callback: number, context: number }>}
+     */
+    const notifications = new Map();
+    let nextNotificationCookie = 1;
+    /** What ntdll's LdrRegisterDllNotification and LdrUnregisterDllNotification act on. */
+    const dllNotifications = {
+        get size(){
+            return notifications.size;
+        },
+        values: ()=>notifications.values(),
+        /** @param {number} callback @param {number} context */
+        register: (callback, context)=>{
+            const cookie = nextNotificationCookie++;
+            notifications.set(cookie, { callback: callback >>> 0, context: context >>> 0 });
+            return cookie;
+        },
+        /** @param {number} cookie */
+        unregister: cookie=>notifications.delete(cookie >>> 0),
+    };
     /**
      * What a thread made after the process's first is given a copy of: every
      * image's thread-local block, at the image's index, as the loader does
@@ -6310,7 +6342,7 @@ async function buildApp(options){
                     return null;
                 },
                 imagePath: ()=>options.imagePath ?? 'C:\\app.exe',
-                /** @param {string} name */
+                dllNotifications,
                 /**
                  * @param {string} name @param {number} [flags]
                  * @param {import('./layers/win32/kernel32/modules.js').LibrarySearch | null} [search]
@@ -7283,6 +7315,50 @@ async function buildApp(options){
     };
 
     /**
+     * Tells every callback LdrRegisterDllNotification registered that a
+     * library came or went (`reason`: 1 loaded, 2 unloaded), in the order
+     * they were registered, on `thread`: with an LDR_DLL_NOTIFICATION_DATA
+     * naming it by its loader entry's two names, its base and its size.
+     * Windows tells them after a library is mapped and before its DllMain,
+     * and after its DllMain on the way out, before it is unmapped.
+     *
+     * @param {number} reason @param {any} held @param {any} thread
+     * @returns {Promise<void> | void}
+     */
+    const tellNotified = (reason, held, thread)=>{
+        const entry = threadBlocks?.entryOf(held.base) ?? 0;
+        if (dllNotifications.size === 0 || entry === 0)
+        {
+            return;
+        }
+        const pointer = processBits === 64 ? 8 : 4;
+        const layout = blockLayouts(pointer).entry;
+        const data = win32.heap().allocate(pointer * 5);
+        const fields = [0, entry + layout.FULL_DLL_NAME, entry + layout.BASE_DLL_NAME,
+            held.base, held.size ?? 0];
+        fields.forEach((value, at)=>{
+            memory.writeU32(data + at * pointer, value >>> 0);
+            if (pointer === 8)
+            {
+                memory.writeU32(data + at * pointer + 4, 0);
+            }
+        });
+        return (async()=>{
+            try
+            {
+                for (const { callback, context } of [...dllNotifications.values()])
+                {
+                    await bridge.callGuest({ entry: callback, args: [reason, data, context], thread });
+                }
+            }
+            finally
+            {
+                win32.heap().free(data);
+            }
+        })();
+    };
+
+    /**
      * FreeLibrary: gives back one of the references LoadLibrary took on a
      * library the program loaded by name. The last one tells its TLS
      * callbacks and then its DllMain of the detach, on the thread that asked
@@ -7305,6 +7381,11 @@ async function buildApp(options){
             return 1;
         }
         const unload = ()=>{
+            const told = tellNotified(LDR_DLL_NOTIFICATION_REASON_UNLOADED, held,
+                kernel.currentThread());
+            return told ? told.then(forget) : forget();
+        };
+        const forget = ()=>{
             const local = threadLocalImages.get(held.base);
             if (local)
             {
@@ -7574,15 +7655,19 @@ async function buildApp(options){
                         mapped = loader.map(file, { base, name: region, bits: processBits });
                     }
                     catch (e){
-                        if (/** @type {any} */ (e)?.code !== 'MACHINE_MEMORY')
+                        const code = /** @type {any} */ (e)?.code;
+                        if (code !== 'MACHINE_MEMORY' && code !== 'BAD_EXE_FORMAT')
                         {
                             throw e;
                         }
-                        // The machine's memory full: the load fails, as Windows
-                        // fails a view it cannot commit, and the program goes on
-                        // with the error to read. Thrown, it ended the process.
+                        // The machine's memory full, or a file no image can be
+                        // laid out of: the load fails, as Windows fails a view
+                        // it cannot commit or an invalid image, and the program
+                        // goes on with the error to read. Thrown, it ended the
+                        // process.
                         librarySpace.giveBack(base);
-                        loadErrors.set(key, ERROR_NOT_ENOUGH_MEMORY);
+                        loadErrors.set(key, code === 'MACHINE_MEMORY' ? ERROR_NOT_ENOUGH_MEMORY
+                            : ERROR_BAD_EXE_FORMAT);
                         events.emit('library-missing', {
                             name, path: wanted, reason: /** @type {Error} */ (e).message,
                         });
@@ -7754,6 +7839,10 @@ async function buildApp(options){
                         base, sizeOfImage: image.sizeOfImage,
                         timeDateStamp: image.timeDateStamp,
                     });
+
+                    // The callbacks LdrRegisterDllNotification registered, after it
+                    // is mapped and bound and before any of its code runs.
+                    await tellNotified(LDR_DLL_NOTIFICATION_REASON_LOADED, held, asked);
 
                     // Its TLS callbacks, then its DllMain, lpvReserved NULL as
                     // for any library loaded by name. On the thread that asked

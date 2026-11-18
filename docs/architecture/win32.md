@@ -189,6 +189,10 @@ flowchart TD
   `system32`'s. `LdrGetDllPath` answers that list. Static imports are looked up the same way, without the current folder. For
   a name the engine has a table for, the system directories are skipped: a copy an installer put
   there would be a second library of the name in the process beside the engine's.
+- **A file that is no image** (a section or relocation past the image's end) fails `LoadLibrary`
+  with `ERROR_BAD_EXE_FORMAT`; a library file is read sharing reading and deletion, as Windows'
+  loader opens it. `LdrRegisterDllNotification`'s callbacks hear of every library read off the
+  volume after it is mapped and before its `DllMain`, and on unload after it.
 - **A DLL already loaded** is handed back with its count raised. A bare name finds the first module
   of that name; a path finds only the module read from that file, so a second file of a loaded
   module's name is a module of its own (the .NET Framework loads a mixed assembly's native image

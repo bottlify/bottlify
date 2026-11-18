@@ -188,6 +188,8 @@ const NAMED_KINDS = new Set(['event', 'mutex', 'semaphore', 'timer', 'mapping'])
  * @property {Record<string, Entry>} kernel32  The assembled KERNEL32.dll table.
  * @property {import('./pool.js').PoolDeletions} [pool]  The thread pool's deletions,
  *           answered as statuses.
+ * @property {import('./loader.js').LoaderHost['notifications']} [dllNotifications]  The
+ *           loader's LdrRegisterDllNotification callbacks.
  * @property {Record<string, Entry>} crt       The assembled msvcrt.dll table.
  * @property {() => number} teb  The running thread's block.
  * @property {() => any} [currentThread]
@@ -565,7 +567,8 @@ export function createNtdllFunctions(host){
 
         ...(LOADER_ENTRIES.every(name=>kernel32[name])
             ? createLoaderFunctions({ readMemory: host.readMemory,
-                writeMemory: host.writeMemory, kernel32, allocate, free })
+                writeMemory: host.writeMemory, kernel32, allocate, free,
+                notifications: host.dllNotifications })
             : {}),
 
         ...(['GetEnvironmentStringsW', 'SetEnvironmentVariableW'].every(name=>kernel32[name])

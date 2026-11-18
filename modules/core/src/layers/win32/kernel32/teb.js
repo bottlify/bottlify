@@ -656,6 +656,13 @@ export function createProcessBlocks(options){
         ldr,
         addModule,
         removeModule,
+        /**
+         * A loaded module's LDR_DATA_TABLE_ENTRY, by its base; zero for one
+         * not on the lists.
+         *
+         * @param {number} base
+         */
+        entryOf: base=>entries.get(base >>> 0) ?? 0,
 
         /**
          * A block for one thread, with its own thread-local array and its own
