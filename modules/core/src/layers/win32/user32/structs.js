@@ -222,7 +222,10 @@ export function putFields(view, base, layouts, layout, values){
         if (layouts.pointerSize === 8 && Object.hasOwn(WIDE, name))
         {
             const signed = WIDE[/** @type {keyof typeof WIDE} */ (name)] === 'signed';
-            view.setUint32(at + 4, signed && (value | 0) < 0 ? 0xffffffff : 0, true);
+            // An address past 4 GiB - an image a 64-bit program keeps at its
+            // own base there - is held whole and goes back whole.
+            view.setUint32(at + 4, value >= 2 ** 32 ? Math.floor(value / 2 ** 32) >>> 0
+                : signed && (value | 0) < 0 ? 0xffffffff : 0, true);
         }
     }
 }
@@ -297,6 +300,9 @@ export function writeU32s(memory, address, values){
  * @property {number} iconSm      Zero for the classic form, which has no such field.
  */
 
+/** @param {Record<string, number>} layout  whether it is a class structure at 64 bits */
+const wide64 = layout=>layout === WNDCLASSA64 || layout === WNDCLASSEXA64;
+
 /**
  * Reads either form of the class structure. The layout decides which fields
  * exist; everything past that is the same set of values, which is why the two
@@ -310,17 +316,25 @@ export function writeU32s(memory, address, values){
 export function readWindowClass(memory, address, layout){
     /** @param {number} offset */
     const field = offset=>readU32(memory, address + offset);
+    /**
+     * An address field, whole in a 64-bit structure: a procedure or a name in
+     * an image past 4 GiB is not its low dword.
+     *
+     * @param {number} offset
+     */
+    const address64 = offset=>(wide64(layout)
+        ? field(offset) + readU32(memory, address + offset + 4) * 2 ** 32 : field(offset));
     return {
         style: field(layout.style),
-        wndProc: field(layout.lpfnWndProc),
+        wndProc: address64(layout.lpfnWndProc),
         classExtra: field(layout.cbClsExtra) | 0,
         windowExtra: field(layout.cbWndExtra) | 0,
         instance: field(layout.hInstance),
         icon: field(layout.hIcon),
         cursor: field(layout.hCursor),
         background: field(layout.hbrBackground),
-        menuName: field(layout.lpszMenuName),
-        className: field(layout.lpszClassName),
+        menuName: address64(layout.lpszMenuName),
+        className: address64(layout.lpszClassName),
         iconSm: 'hIconSm' in layout ? field(layout.hIconSm) : 0,
     };
 }

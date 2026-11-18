@@ -26,10 +26,15 @@ const FIXTURE = new URL('../test/fixtures/window64.exe', import.meta.url);
 
 /** What fails today: the program's checks by name, or 'ran' for a run that did not end. */
 const FAILING = new Map([
-    ['GetClassInfoExA writes it back', 'the class\'s lpfnWndProc and lpszClassName past 4 GiB come'
-        + ' back as their low dwords (user32 classes, a pointer kept as one dword)'],
-    ['ran', 'the window\'s creation calls its procedure past 4 GiB and the program never'
-        + ' returns from CreateWindowEx (a callback reaches the low alias, audit b6)'],
+    ['GetClassInfoExA writes it back', 'the class\'s hInstance comes back as its low dword: a class'
+        + ' keeps the instance it was registered by, and is found by, as a dword (user32 classes)'],
+    ['WM_NCCREATE\'s CREATESTRUCT', 'lpCreateParams past 4 GiB is CreateWindowExA\'s argument'
+        + ' as its low dword (a pointer argument taken whole: board X4b)'],
+    ['WM_CREATE\'s CREATESTRUCT', 'the same lpCreateParams'],
+    ['GWLP_USERDATA keeps a pointer', 'SetWindowLongPtrA\'s value and GetWindowLongPtrA\'s answer'
+        + ' past 4 GiB are their low dwords (a LONG_PTR taken and answered whole: board X4b)'],
+    ['GWLP_WNDPROC is the procedure', 'GetWindowLongPtrA answers the procedure as a dword (X4b)'],
+    ['the class\'s longs', 'GetClassLongPtrA answers the procedure as a dword (X4b)'],
 ]);
 
 /**

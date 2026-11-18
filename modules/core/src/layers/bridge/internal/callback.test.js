@@ -507,7 +507,10 @@ test('a 64-bit routine is handed a negative argument sign-extended, any other ze
         made.placeLongCall(()=>0x9000);
         made.call({ thread: thread('main'), entry: 0x402000,
             args: [0x40, 0x0400, 0x80000001, -1], stackAtRest: 0x2ff000 });
-        const frameBase = resumed[0].esp;
+        // The thread starts a quadword below the frame, on the routine it pops.
+        const frameBase = resumed[0].esp + 8;
+        assert.deepEqual([written.get(frameBase - 8), written.get(frameBase - 4)], [0x402000, 0],
+            'the routine, whole, below the frame');
         /** @param {number} at */
         const quad = at=>[written.get(frameBase + at), written.get(frameBase + at + 4)];
         assert.deepEqual(quad(16), [0x80000001, 0], 'R8, a WPARAM');
@@ -543,7 +546,7 @@ test('a 64-bit routine is handed a quadword whole: an argument that came into th
     made.call({ thread: thread('main'), entry: 0x402000,
         args: [0x40, 0x9000_0000 | 0, 0x9000_0000n, 0x1_2345_6780n, 0x8000_0000n | 1n],
         stackAtRest: 0x2ff000 });
-    const frameBase = resumed[0].esp;
+    const frameBase = resumed[0].esp + 8;
     /** @param {number} at */
     const quad = at=>[written.get(frameBase + at), written.get(frameBase + at + 4)];
     assert.deepEqual(quad(8), [0x90000000, 0xffffffff], 'RDX: a negative number, by its sign');

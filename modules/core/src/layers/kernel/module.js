@@ -224,6 +224,21 @@ export function createKernelModule(){
                     state.resumeLog.shift();
                 }
             };
+            // A stub's return address, a quadword in a 64-bit process: whole,
+            // where the caller is an image past 4 GiB, and the park loop's put
+            // over it whole, not over its low dword alone.
+            /** @param {number} esp */
+            const readReturn = esp=>(cpu.bits?.() === 64
+                ? (memory.readU32(esp) >>> 0) + (memory.readU32(esp + 4) >>> 0) * 2 ** 32
+                : memory.readU32(esp));
+            /** @param {number} esp @param {number} address */
+            const writeReturn = (esp, address)=>{
+                memory.writeU32(esp, address >>> 0);
+                if (cpu.bits?.() === 64)
+                {
+                    memory.writeU32(esp + 4, Math.floor(address / 2 ** 32));
+                }
+            };
             /**
              * A thread held or parked in its call goes nowhere from it: its turn
              * ends at the call. Run on, it took its stub's `ret` into the park
@@ -570,8 +585,8 @@ export function createKernelModule(){
                  */
                 holdThread(){
                     const esp = cpu.readReg32('esp');
-                    const returnAddress = memory.readU32(esp);
-                    memory.writeU32(esp, cpu.parkAddress());
+                    const returnAddress = readReturn(esp);
+                    writeReturn(esp, cpu.parkAddress());
                     noteResume(`hold ${state.scheduler.current()?.name}`
                         + `@0x${(returnAddress >>> 0).toString(16)}`);
                     endTurnAtCall();
@@ -591,11 +606,12 @@ export function createKernelModule(){
                  */
                 parkThread(thread, restingStack){
                     const esp = cpu.readReg32('esp');
-                    thread.parkedReturn = memory.readU32(esp);
-                    noteResume(`park ${thread.name}@0x${(thread.parkedReturn >>> 0).toString(16)}`);
+                    thread.parkedReturn = readReturn(esp);
+                    noteResume(`park ${thread.name}@0x${(thread.parkedReturn >= 2 ** 32
+                        ? thread.parkedReturn : thread.parkedReturn >>> 0).toString(16)}`);
                     thread.resumeStack = restingStack;
                     thread.parkedInStub = true;
-                    memory.writeU32(esp, cpu.parkAddress());
+                    writeReturn(esp, cpu.parkAddress());
                     endTurnAtCall();
                 },
 

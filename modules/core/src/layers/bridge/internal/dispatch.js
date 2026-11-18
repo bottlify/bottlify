@@ -1073,6 +1073,15 @@ class Dispatcher {
     }
 
     /**
+     * The quadword return address at RSP, whole.
+     *
+     * @param {number} rsp
+     */
+    longReturn(rsp){
+        return (this.memory.readU32(rsp) >>> 0) + (this.memory.readU32(rsp + 4) >>> 0) * 2 ** 32;
+    }
+
+    /**
      * An x86-64 call's arguments, as the x64 convention passes them: the first
      * four in RCX, RDX, R8 and R9 -- RDX as the stub kept it, in R11, before
      * the trap spent DX -- and the rest on the stack past the return address
@@ -1084,7 +1093,8 @@ class Dispatcher {
      * `floats`) is read whole into the dwords the 32-bit signature has it in.
      *
      * @param {Entry} entry @param {number} rsp
-     * @returns {number} the return address at RSP
+     * @returns {number} the return address at RSP, whole: a caller in an image
+     *     past 4 GiB is not its low dword
      */
     readLongCall(entry, rsp){
         const args = entry.args;
@@ -1109,7 +1119,7 @@ class Dispatcher {
                     high[i] = this.memory.readU32(at + 4) >>> 0;
                 }
             }
-            return this.memory.readU32(rsp);
+            return this.longReturn(rsp);
         }
         // An argument the signature counts as two dwords is one slot here,
         // both its halves: the slots after it come one earlier. A float or a
@@ -1161,7 +1171,7 @@ class Dispatcher {
                 }
             }
         }
-        return this.memory.readU32(rsp);
+        return this.longReturn(rsp);
     }
 
     /**

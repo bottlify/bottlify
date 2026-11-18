@@ -67,6 +67,7 @@ import { DESKTOP_WINDOW, HWND_BROADCAST, createWindowDirectory } from './directo
 import { createClassRegistry } from './classes.js';
 import { boundsOf, subtractFromArea } from '../gdi32/rects.js';
 import { areaOf } from '../gdi32/regions.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** @typedef {import('../gdi32/rects.js').Rect} Rect */
 
@@ -1400,7 +1401,7 @@ export function createWindowFunctions(host){
      */
     const callProcedure = (address, message, thread, unicode = undefined)=>{
         host.trace?.(message);
-        const procedure = procedures.get(address >>> 0);
+        const procedure = procedures.get(wholeAddress(address));
         const record = windows.get(message.hwnd >>> 0);
         if (procedure)
         {
@@ -1420,10 +1421,10 @@ export function createWindowFunctions(host){
         // A window's own procedure reads text in the encoding it was set in; a
         // procedure named by its address, as CallWindowProc names one, is
         // handed the message as it came.
-        const reads = unicode ?? (record && (address >>> 0) === record.wndProc
+        const reads = unicode ?? (record && (wholeAddress(address)) === record.wndProc
             ? procReads(record) : message.unicode === true);
         return translated(host, message, reads,
-            text=>watchDispatch(host, text, host.dispatch(address >>> 0, text, thread)),
+            text=>watchDispatch(host, text, host.dispatch(wholeAddress(address), text, thread)),
             record?.style);
     };
 
