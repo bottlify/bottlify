@@ -13,7 +13,7 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'stdcall',
         params: ['u32'],
         returns: 'u32',
-        uses: ['u32', 'host'],
+        uses: ['u32', 'host', 'pointerBytes'],
         host: 36,
         code: Uint8Array.of(
             0x8b, 0x44, 0x24, 0x04, 0x8b, 0x50, 0x04, 0x85, 0xd2, 0x74, 0x18, 0x8b,
@@ -26,7 +26,7 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'stdcall',
         params: ['u32'],
         returns: 'u32',
-        uses: ['u32', 'host'],
+        uses: ['u32', 'host', 'pointerBytes'],
         host: 18,
         code: Uint8Array.of(
             0x8b, 0x44, 0x24, 0x04, 0x8b, 0x50, 0x04, 0x85, 0xd2, 0x74, 0x06, 0x8b,
@@ -37,7 +37,7 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'stdcall',
         params: ['u32'],
         returns: 'u32',
-        uses: ['u32', 'host'],
+        uses: ['u32', 'host', 'pointerBytes'],
         host: 20,
         code: Uint8Array.of(
             0x8b, 0x44, 0x24, 0x04, 0x8b, 0x40, 0x04, 0x85, 0xc0, 0x74, 0x08, 0xb8,
@@ -48,7 +48,7 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'stdcall',
         params: ['u32', 'u32'],
         returns: 'u32',
-        uses: ['u32', 'host'],
+        uses: ['u32', 'host', 'pointerBytes'],
         host: 36,
         code: Uint8Array.of(
             0x8b, 0x44, 0x24, 0x04, 0x8b, 0x50, 0x04, 0x85, 0xd2, 0x74, 0x18, 0x8b,
@@ -61,7 +61,7 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'stdcall',
         params: ['u32', 'u32', 'u32', 'u32'],
         returns: 'u32',
-        uses: ['u32', 'setU32', 'host'],
+        uses: ['u32', 'setU32', 'host', 'pointerBytes'],
         host: 214,
         code: Uint8Array.of(
             0x53, 0x56, 0x57, 0x55, 0x83, 0xec, 0x04, 0x8b, 0x5c, 0x24, 0x1c, 0x8b,

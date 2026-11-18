@@ -111,10 +111,10 @@ export const TRANSFORMS_7 = (0x7e | 0xff << 16) >>> 0;
  * @param {number} at @param {number} trap @param {boolean} [version7]
  * @returns {Uint8Array}
  */
-export function getTransformCode(at, trap, version7 = false){
+export function getTransformCode(at, trap, version7 = false, width = I386){
     return routine(at, trap, [
-        ...getterPrologue(),
-        [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
+        ...getterPrologue(width),
+        width.arg(EAX, 1),                                       // mov eax, [esp+8]
         [0x3d, ...dword(WORLD_SLOT)],                            // cmp eax, 24
         { jcc: 0x72, to: 'low' },                                // jb low
         ...(version7 ? [] : [
@@ -131,7 +131,8 @@ export function getTransformCode(at, trap, version7 = false){
         [0x0f, 0xa3, 0xc2],                                      // bt edx, eax
         { jcc: 0x73, to: 'slow' },                               // jnc slow
         { label: 'slot' },
-        [0x8b, 0x54, 0x24, 0x0c],                                // mov edx, [esp+12]
+        ...width.highZero(2, 'slow'),
+        width.arg(EDX, 2),                                       // mov edx, [esp+12]
         [0x85, 0xd2],                                            // test edx, edx
         { jcc: 0x74, to: 'slow' },                               // jz slow
         [0x56],                                                  // push esi
@@ -145,8 +146,8 @@ export function getTransformCode(at, trap, version7 = false){
         [0x5f],                                                  // pop edi
         [0x5e],                                                  // pop esi
         [0x31, 0xc0],                                            // xor eax, eax
-        [0xc2, 0x0c, 0x00],                                      // ret 12
-    ]);
+        width.ret(3),                                       // ret 12
+    ], {}, width);
 }
 
 /**
@@ -183,28 +184,29 @@ export function getTransformCode(at, trap, version7 = false){
  * @param {number} types  The version's stage state types below 32, a bit each.
  * @returns {Uint8Array}
  */
-export function getTextureStageStateCode(at, trap, types){
+export function getTextureStageStateCode(at, trap, types, width = I386){
     return routine(at, trap, [
-        ...getterPrologue(),
-        [0x8b, 0x44, 0x24, 0x0c],                                // mov eax, [esp+12]
+        ...getterPrologue(width),
+        width.arg(EAX, 2),                                       // mov eax, [esp+12]
         [0x3d, ...dword(SHADOW.STAGE_STATE_STRIDE)],             // cmp eax, 32
         { jcc: 0x73, to: 'slow' },                               // jae slow
         [0xba, ...dword(types)],                                 // mov edx, imm32
         [0x0f, 0xa3, 0xc2],                                      // bt edx, eax
         { jcc: 0x73, to: 'slow' },                               // jnc slow
-        [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
+        width.arg(EAX, 1),                                       // mov eax, [esp+8]
         [0x3d, ...dword(SHADOW.STAGE_COUNT)],                    // cmp eax, 8
         { jcc: 0x73, to: 'slow' },                               // jae slow
         [0xc1, 0xe0, 0x05],                                      // shl eax, 5
-        [0x03, 0x44, 0x24, 0x0c],                                // add eax, [esp+12]
-        [0x8b, 0x54, 0x24, 0x10],                                // mov edx, [esp+16]
+        width.argOp([0x03], EAX, 2),                             // add eax, [esp+12]
+        ...width.highZero(3, 'slow'),
+        width.arg(EDX, 3),                                       // mov edx, [esp+16]
         [0x85, 0xd2],                                            // test edx, edx
         { jcc: 0x74, to: 'slow' },                               // jz slow
         [0x8b, 0x84, 0x81, ...dword(SHADOW.STAGE_STATES)],       // mov eax, [ecx+eax*4+disp]
         [0x89, 0x02],                                            // mov [edx], eax
         [0x31, 0xc0],                                            // xor eax, eax
-        [0xc2, 0x10, 0x00],                                      // ret 16
-    ]);
+        width.ret(4),                                       // ret 16
+    ], {}, width);
 }
 
 /**
@@ -231,10 +233,11 @@ export function getTextureStageStateCode(at, trap, types){
  * @param {number} at @param {number} trap
  * @returns {Uint8Array}
  */
-export function getViewportCode(at, trap){
+export function getViewportCode(at, trap, width = I386){
     return routine(at, trap, [
-        ...getterPrologue(),
-        [0x8b, 0x54, 0x24, 0x08],                                // mov edx, [esp+8]
+        ...getterPrologue(width),
+        ...width.highZero(1, 'slow'),
+        width.arg(EDX, 1),                                       // mov edx, [esp+8]
         [0x85, 0xd2],                                            // test edx, edx
         { jcc: 0x74, to: 'slow' },                               // jz slow
         [0x56, 0x57],                                            // push esi; push edi
@@ -244,8 +247,8 @@ export function getViewportCode(at, trap){
         [0xf3, 0xa5],                                            // rep movsd
         [0x5f, 0x5e],                                            // pop edi; pop esi
         [0x31, 0xc0],                                            // xor eax, eax
-        [0xc2, 0x08, 0x00],                                      // ret 8
-    ]);
+        width.ret(2),                                       // ret 8
+    ], {}, width);
 }
 
 /**
@@ -281,19 +284,20 @@ export const shaderMirror = which=>Object.freeze([
  * @param {number} at @param {number} trap @param {0 | 1} which  vertex, pixel
  * @returns {Uint8Array}
  */
-export function getShaderCode(at, trap, which){
+export function getShaderCode(at, trap, which, width = I386){
     return routine(at, trap, [
-        ...getterPrologue(),
+        ...getterPrologue(width),
         [0x83, 0xb9, ...dword(SHADOW.SHADERS_VALID), 0x00],      // cmp dword [ecx+disp], 0
         { jcc: 0x74, to: 'slow' },                               // je slow
-        [0x8b, 0x54, 0x24, 0x08],                                // mov edx, [esp+8]
+        ...width.highZero(1, 'slow'),
+        width.arg(EDX, 1),                                       // mov edx, [esp+8]
         [0x85, 0xd2],                                            // test edx, edx
         { jcc: 0x74, to: 'slow' },                               // jz slow
         [0x8b, 0x81, ...dword(SHADOW.SHADERS + 4 * which)],      // mov eax, [ecx+disp]
         [0x89, 0x02],                                            // mov [edx], eax
         [0x31, 0xc0],                                            // xor eax, eax
-        [0xc2, 0x08, 0x00],                                      // ret 8
-    ]);
+        width.ret(2),                                       // ret 8
+    ], {}, width);
 }
 
 /** D3DERR_NOTFOUND: no depth surface is set. */
@@ -358,21 +362,22 @@ const D3DERR_NOTFOUND = 0x88760866;
  *     target; whether the call names the target by index (Direct3D 9's)
  * @returns {Uint8Array}
  */
-export function getTargetCode(at, trap, { depth, indexed }){
-    const out = indexed ? 0x0c : 0x08;
+export function getTargetCode(at, trap, { depth, indexed }, width = I386){
+    const out = indexed ? 2 : 1;
     const popped = indexed ? 12 : 8;
     const pair = SHADOW.TARGETS + (depth ? 8 : 0);
     return routine(at, trap, [
-        ...prologue('early'),
+        ...prologue('early', undefined, width),
         { jcc: 0xeb, to: 'body' },                               // jmp body
         { label: 'early' },
         { jcc: 0xeb, to: 'slow', near: true },                   // jmp slow
         { label: 'body' },
         ...(indexed ? [
-            [0x83, 0x7c, 0x24, 0x08, 0x00],                      // cmp dword [esp+8], 0
+            [...width.argOp([0x83], 7, 1), 0x00],                // cmp dword [esp+8], 0
             { jcc: 0x75, to: 'slow', near: true },               // jne slow
         ] : []),
-        [0x8b, 0x54, 0x24, out],                                 // mov edx, [esp+out]
+        ...width.highZero(out, 'slow'),
+        width.arg(EDX, out),                                     // mov edx, [esp+out]
         [0x85, 0xd2],                                            // test edx, edx
         { jcc: 0x74, to: 'slow', near: true },                   // jz slow
         ...takeHeld(ECX, 'slow'),
@@ -395,24 +400,24 @@ export function getTargetCode(at, trap, { depth, indexed }){
         [0x8b, 0x81, ...dword(pair)],                            // mov eax, [ecx+disp]
         [0x5b],                                                  // pop ebx
         letHeldGo(ECX),                                          // mov dword [ecx+HELD], 0
-        [0x8b, 0x54, 0x24, out],                                 // mov edx, [esp+out]
-        [0x89, 0x02],                                            // mov [edx], eax
+        width.arg(EDX, out),                                     // mov edx, [esp+out]
+        width.storePointer(EDX, EAX, 0),                         // mov [edx], eax
         [0x31, 0xc0],                                            // xor eax, eax
-        [0xc2, popped, 0x00],                                    // ret n
+        width.ret(popped / 4),                                   // ret n
         ...(depth ? [
             { label: 'none' },
             [0x5b],                                              // pop ebx
             letHeldGo(ECX),                                      // mov dword [ecx+HELD], 0
-            [0x8b, 0x54, 0x24, out],                             // mov edx, [esp+out]
-            [0xc7, 0x02, ...dword(0)],                           // mov dword [edx], 0
+            width.arg(EDX, out),                                 // mov edx, [esp+out]
+            [...(width.word === 8 ? [0x48] : []), 0xc7, 0x02, ...dword(0)], // mov [edx], 0
             [0xb8, ...dword(D3DERR_NOTFOUND)],                   // mov eax, D3DERR_NOTFOUND
-            [0xc2, popped, 0x00],                                // ret n
+            width.ret(popped / 4),                               // ret n
         ] : []),
         { label: 'busy' },
         [0x5b],                                                  // pop ebx
         { label: 'held' },
         letHeldGo(ECX),                                          // mov dword [ecx+HELD], 0
-    ]);
+    ], {}, width);
 }
 
 /**
@@ -437,10 +442,11 @@ export function getTargetCode(at, trap, { depth, indexed }){
  * @param {number} at @param {number} trap
  * @returns {Uint8Array}
  */
-export function getSurfaceDescCode(at, trap){
+export function getSurfaceDescCode(at, trap, width = I386){
     return routine(at, trap, [
-        ...prologue(),
-        [0x8b, 0x54, 0x24, 0x08],                                // mov edx, [esp+8]
+        ...prologue('slow', undefined, width),
+        ...width.highZero(1, 'slow'),
+        width.arg(EDX, 1),                                       // mov edx, [esp+8]
         [0x85, 0xd2],                                            // test edx, edx
         { jcc: 0x74, to: 'slow' },                               // jz slow
         [0x56, 0x57],                                            // push esi; push edi
@@ -450,8 +456,8 @@ export function getSurfaceDescCode(at, trap){
         [0xf3, 0xa5],                                            // rep movsd
         [0x5f, 0x5e],                                            // pop edi; pop esi
         [0x31, 0xc0],                                            // xor eax, eax
-        [0xc2, 0x08, 0x00],                                      // ret 8
-    ]);
+        width.ret(2),                                       // ret 8
+    ], {}, width);
 }
 
 /** The sampler state types a device answers for: D3DSAMP_ADDRESSU (1) to DMAPOFFSET (13). */
@@ -486,28 +492,29 @@ const SAMPLER_STATE_TYPES = 0x3ffe;
  * @param {number} at @param {number} trap
  * @returns {Uint8Array}
  */
-export function getSamplerStateCode(at, trap){
+export function getSamplerStateCode(at, trap, width = I386){
     return routine(at, trap, [
-        ...getterPrologue(),
-        [0x8b, 0x44, 0x24, 0x0c],                                // mov eax, [esp+12]
+        ...getterPrologue(width),
+        width.arg(EAX, 2),                                       // mov eax, [esp+12]
         [0x3d, ...dword(SHADOW.SAMPLER_STATE_STRIDE)],           // cmp eax, 16
         { jcc: 0x73, to: 'slow' },                               // jae slow
         [0xba, ...dword(SAMPLER_STATE_TYPES)],                   // mov edx, imm32
         [0x0f, 0xa3, 0xc2],                                      // bt edx, eax
         { jcc: 0x73, to: 'slow' },                               // jnc slow
-        [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
+        width.arg(EAX, 1),                                       // mov eax, [esp+8]
         [0x3d, ...dword(SHADOW.SAMPLER_COUNT)],                  // cmp eax, 16
         { jcc: 0x73, to: 'slow' },                               // jae slow
         [0xc1, 0xe0, 0x04],                                      // shl eax, 4
-        [0x03, 0x44, 0x24, 0x0c],                                // add eax, [esp+12]
-        [0x8b, 0x54, 0x24, 0x10],                                // mov edx, [esp+16]
+        width.argOp([0x03], EAX, 2),                             // add eax, [esp+12]
+        ...width.highZero(3, 'slow'),
+        width.arg(EDX, 3),                                       // mov edx, [esp+16]
         [0x85, 0xd2],                                            // test edx, edx
         { jcc: 0x74, to: 'slow' },                               // jz slow
         [0x8b, 0x84, 0x81, ...dword(SHADOW.SAMPLER_STATES)],     // mov eax, [ecx+eax*4+disp]
         [0x89, 0x02],                                            // mov [edx], eax
         [0x31, 0xc0],                                            // xor eax, eax
-        [0xc2, 0x10, 0x00],                                      // ret 16
-    ]);
+        width.ret(4),                                       // ret 16
+    ], {}, width);
 }
 
 /**
@@ -550,10 +557,10 @@ export function getSamplerStateCode(at, trap){
  * @param {number} at @param {number} trap
  * @returns {Uint8Array}
  */
-export function getSurfaceLevelCode(at, trap){
+export function getSurfaceLevelCode(at, trap, width = I386){
     return routine(at, trap, [
-        ...prologue(),
-        [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
+        ...prologue('slow', undefined, width),
+        width.arg(EAX, 1),                                       // mov eax, [esp+8]
         [0x3b, 0x41, TEXTURE.LEVEL_COUNT],                       // cmp eax, [ecx+4]
         { jcc: 0x73, to: 'invalid' },                            // jae invalid
         [0x3d, ...dword(TEXTURE.LEVEL_SLOTS)],                   // cmp eax, 16
@@ -564,15 +571,16 @@ export function getSurfaceLevelCode(at, trap){
         [0x8b, 0x49, TEXTURE.COUNT],                             // mov ecx, [ecx+8]
         [0x85, 0xc9],                                            // test ecx, ecx
         { jcc: 0x74, to: 'slow' },                               // jz slow
-        [0x8b, 0x44, 0x24, 0x0c],                                // mov eax, [esp+12]
+        ...width.highZero(2, 'slow'),
+        width.arg(EAX, 2),                                       // mov eax, [esp+12]
         [0x85, 0xc0],                                            // test eax, eax
         { jcc: 0x74, to: 'slow' },                               // jz slow
-        [0x89, 0x10],                                            // mov [eax], edx
+        width.storePointer(EAX, EDX, 0),                         // mov [eax], edx
         [0xf0, 0xff, 0x01],                                      // lock inc dword [ecx]
         [0x31, 0xc0],                                            // xor eax, eax
-        [0xc2, 0x0c, 0x00],                                      // ret 12
-        ...invalidTail(12),
-    ]);
+        width.ret(3),                                       // ret 12
+        ...invalidTail(12, width),
+    ], {}, width);
 }
 
 /**
@@ -614,10 +622,10 @@ export function getSurfaceLevelCode(at, trap){
  * @param {number} at @param {number} trap
  * @returns {Uint8Array}
  */
-export function getLevelDescCode(at, trap){
+export function getLevelDescCode(at, trap, width = I386){
     return routine(at, trap, [
-        ...prologue(),
-        [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
+        ...prologue('slow', undefined, width),
+        width.arg(EAX, 1),                                       // mov eax, [esp+8]
         [0x3b, 0x41, TEXTURE.LEVEL_COUNT],                       // cmp eax, [ecx+4]
         { jcc: 0x73, to: 'invalid' },                            // jae invalid
         [0x3d, ...dword(TEXTURE.LEVEL_SLOTS)],                   // cmp eax, 16
@@ -625,12 +633,13 @@ export function getLevelDescCode(at, trap){
         [0x8b, 0x94, 0x81, ...dword(TEXTURE.LEVELS)],            // mov edx, [ecx+eax*4+disp]
         [0x85, 0xd2],                                            // test edx, edx
         { jcc: 0x74, to: 'slow' },                               // jz slow
-        [0x8b, 0x52, 0x04],                                      // mov edx, [edx+4]
+        width.blockOf(EDX, EDX),                                 // mov edx, [edx+4]
         [0x85, 0xd2],                                            // test edx, edx
         { jcc: 0x74, to: 'slow' },                               // jz slow
         [0xf7, 0x02, ...dword(FLAG_SLOW_PATH)],                  // test dword [edx], 1
         { jcc: 0x75, to: 'slow' },                               // jnz slow
-        [0x8b, 0x44, 0x24, 0x0c],                                // mov eax, [esp+12]
+        ...width.highZero(2, 'slow'),
+        width.arg(EAX, 2),                                       // mov eax, [esp+12]
         [0x85, 0xc0],                                            // test eax, eax
         { jcc: 0x74, to: 'slow' },                               // jz slow
         [0x56, 0x57],                                            // push esi; push edi
@@ -640,8 +649,8 @@ export function getLevelDescCode(at, trap){
         [0xf3, 0xa5],                                            // rep movsd
         [0x5f, 0x5e],                                            // pop edi; pop esi
         [0x31, 0xc0],                                            // xor eax, eax
-        [0xc2, 0x0c, 0x00],                                      // ret 12
-        ...invalidTail(12),
-    ]);
+        width.ret(3),                                       // ret 12
+        ...invalidTail(12, width),
+    ], {}, width);
 }
 

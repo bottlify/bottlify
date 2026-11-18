@@ -2686,7 +2686,8 @@ test('the guest\'s TestCooperativeLevel answers as the host\'s, a lost device le
     const HANDED = 0xffffffff;
     // What the functions read of it: the rest of the guest's helpers are not theirs.
     const guest = /** @type {any} */ ({
-        u32: (/** @type {number} */ at)=>h.box.memory.readU32(at), host: ()=>HANDED });
+        u32: (/** @type {number} */ at)=>h.box.memory.readU32(at), host: ()=>HANDED,
+        pointerBytes: 4 });
     // The block is placed at the device's first entry.
     assert.equal(h.box.trap(device, 'TestCooperativeLevel', []), 0);
     assert.equal(inGuest.TestCooperativeLevel(guest, device) >>> 0, 0);
