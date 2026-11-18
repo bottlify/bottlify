@@ -33,12 +33,15 @@
  * furthest from the program's own.
  *
  *     node tools/translator/run-count.mjs --qemu DIR [--root DIR]... [--bits 32|64|both]
- *         [--warm N] [--iters N] [--jobs N] [workload...]
+ *         [--warm N] [--iters N] [--jobs N] [--window 8|16] [workload...]
  *         [--arm64 NODE [--sysroot DIR] [--lib DIR] [--node-flags 'FLAG...']]
  *
  * Workloads are the micro images' names (`str`, `tree`, `calls512-order`, ...), all of
  * them by default; 32-bit runs the x87 builds, 64-bit the x64 twins. DIR as emit-count's.
  *
+ * `--window GIB` runs the 64-bit workloads over a wide window of that many GiB (cork's
+ * `wideLayout`: the RAM a `memory64` memory of its own), against the 4 GiB layout without it:
+ * what memory64 costs, read from two runs of one tree.
  * `--arm64 NODE` counts an arm64 host instead: NODE, an arm64 build of node, runs under
  * DIR's `qemu-aarch64` (built with plugins as the other), its loader and libc from
  * `--sysroot` (`/usr/aarch64-linux-gnu`), further libraries from `--lib`. The module cork
@@ -58,7 +61,7 @@ const ENTRY_VECTOR = 0x7000;
 const optionsOf = argv=>{
     const options = { roots: /** @type {string[]} */ ([]), bits: 'both', warm: 100, iters: 20,
         jobs: Math.max(1, availableParallelism() - 1), qemu: process.env.QEMU_PLUGIN_DIR ?? '',
-        inner: false, names: /** @type {string[]} */ ([]),
+        inner: false, names: /** @type {string[]} */ ([]), window: 0,
         target: /** @type {import('../lib/qemu-count.mjs').Target} */ ({}) };
     for (let i = 0; i < argv.length; i++)
     {
@@ -75,9 +78,11 @@ const optionsOf = argv=>{
         {
             options[/** @type {'qemu' | 'bits'} */ (name.slice(2))] = argv[++i];
         }
-        else if (name === '--warm' || name === '--iters' || name === '--jobs')
+        else if (name === '--warm' || name === '--iters' || name === '--jobs'
+            || name === '--window')
         {
-            options[/** @type {'warm' | 'iters' | 'jobs'} */ (name.slice(2))] = Number(argv[++i]);
+            options[/** @type {'warm' | 'iters' | 'jobs' | 'window'} */ (name.slice(2))]
+                = Number(argv[++i]);
         }
         else if (takeTarget(options.target, argv, i) > 0)
         {
@@ -103,9 +108,9 @@ const optionsOf = argv=>{
  * One workload's iterations, inside QEMU.
  *
  * @param {string} root @param {string} name @param {number} bits @param {number} warm
- * @param {number} iters
+ * @param {number} iters @param {number} window  GiB of a wide window, 0 for 4 GiB
  */
-const inner = async(root, name, bits, warm, iters)=>{
+const inner = async(root, name, bits, warm, iters, window)=>{
     const { createCorkHost } = await import(`${root}/modules/core/src/layers/cpu/internal/cork-host.js`);
     const engine = await import(`${root}/modules/cork/src/index.js`);
     const image = readFileSync(bits === 64
@@ -116,7 +121,8 @@ const inner = async(root, name, bits, warm, iters)=>{
     const host = createCorkHost({ engine, memorySize: 16 << 20, trapPort: 0xb077,
         entryVector: ENTRY_VECTOR, initialStack: 0x800000,
         cork: { clock: 'virtual', worker: false, wasmInterpreterAfter: 0 },
-        ...bits === 64 ? { bits } : {} });
+        ...bits === 64 ? { bits } : {},
+        ...bits === 64 && window > 0 ? { window: window * 2 ** 30 } : {} });
     host.writePhysical(IMAGE_BASE, new Uint8Array(image));
     const vector = new Uint8Array(4);
     new DataView(vector.buffer).setUint32(0, IMAGE_BASE, true);
@@ -158,7 +164,8 @@ const options = optionsOf(process.argv.slice(2));
 if (options.inner)
 {
     const [name, bits] = options.names;
-    await inner(options.roots[0], name, Number(bits), options.warm, options.iters);
+    await inner(options.roots[0], name, Number(bits), options.warm, options.iters,
+        options.window);
 }
 else
 {
@@ -177,7 +184,8 @@ else
             const { root, name, bits } = jobs[next++];
             const { marks, out } = await runCounted(options.qemu, [fileURLToPath(import.meta.url),
                 '--inner', '--root', root, '--warm', String(options.warm), '--iters',
-                String(options.iters), name, String(bits)], {}, options.target);
+                String(options.iters), '--window', String(options.window), name, String(bits)], {},
+            options.target);
             if (marks.length !== 2)
             {
                 throw new Error(`run-count: ${name}-${bits} on ${root} gave ${marks.length} marks`);
@@ -188,7 +196,8 @@ else
         }
     };
     await Promise.all(Array.from({ length: Math.min(options.jobs, jobs.length) }, one));
-    console.log(`instructions an iteration (${options.warm} warm, ${options.iters} counted), `
+    console.log(`instructions an iteration (${options.warm} warm, ${options.iters} counted${
+        options.window > 0 ? `, 64-bit over a ${options.window} GiB window` : ''}), `
         + `in square brackets a guest instruction's cost in them, arms: ${
             options.roots.join(', ')}`);
     /** @type {{ name: string, cost: number }[]} the last arm's workloads by a guest instruction's cost */

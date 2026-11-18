@@ -352,7 +352,12 @@ export function createCorkHost(config){
         ...(long ? { bits } : {}),
         ...(long && wideWindow !== undefined ? { window: wideWindow, codeBase } : {}),
         ...(corkConfig?.hashSlots ? { hashSlots: corkConfig.hashSlots } : {}) };
-    let own = ownLayout(layoutOptions);
+    // Long mode's RAM may reach the whole 4 GiB only in a memory that grows,
+    // which keeps the window's last page from it (`longLayout`): the layout the
+    // tables are sized by is laid out short of it until that is known.
+    const wholeWindow = long && wideWindow === undefined && memorySize > 2 ** 32 - 4096;
+    let own = ownLayout(wholeWindow ? { ...layoutOptions, ramSize: 2 ** 32 - 4096 }
+        : layoutOptions);
     const blockSize = long ? engine.STATE_BLOCK_SIZE_64 : STATE_BLOCK_SIZE;
     // The guest's addresses the state page and the wasm interpreter's statics
     // past it hold: closed to the program for good. Its first page stays open,
@@ -387,8 +392,9 @@ export function createCorkHost(config){
     // `memorySize`, and the memory holding only the RAM the guest has been given,
     // grown as it is given more (`growTo`) -- where a memory of the whole RAM was
     // committed by every process at its start. Only over shared memory, whose
-    // growth leaves every view taken as it was; a 32-bit process; a RAM a power
-    // of two; an engine that knows the layout (`WRAP_SLACK`).
+    // growth leaves every view taken as it was; a RAM a power
+    // of two; an engine that knows the layout (`WRAP_SLACK`). Long mode's 4 GiB
+    // layout too, not a wide window's, whose RAM is a memory of its own.
     const area = config.engineArea;
     // Where the other executors' pages lie apart from the first's (`others`), the
     // first's range holds its tables and the record they share; otherwise all
@@ -397,7 +403,7 @@ export function createCorkHost(config){
     const othersBytes = (executors - 1) * executorPages * 65536;
     const areaBytes = Math.ceil(past / 65536) * 65536 + sharedPages * 65536
         + (apart ? 0 : othersBytes);
-    const growing = area !== undefined && shared && !long
+    const growing = area !== undefined && shared && wideWindow === undefined
         && typeof engine.WRAP_SLACK === 'number' && (memorySize & memorySize - 1) === 0
         && area.at % 0x100000 === 0 && area.at >= 0x100000 && areaBytes <= area.span
         && area.at + areaBytes <= memorySize
@@ -414,13 +420,23 @@ export function createCorkHost(config){
     {
         own = ownLayout({ ...layoutOptions, tablesAt: area.at, ramFloor });
     }
+    else if (wholeWindow)
+    {
+        throw new Error('cpu: long mode\'s whole 4 GiB is RAM only in a memory that grows'
+            + ' (`engineArea`)');
+    }
     /** The engine's range inside the guest's space, empty where it has none. */
     const engineArea = growing ? { from: area.at, to: area.at + areaBytes } : { from: 0, to: 0 };
     /** The other executors' pages where they lie apart from the first's, empty otherwise. */
     const othersArea = growing && apart ? { from: apart.at, to: apart.at + othersBytes }
         : { from: 0, to: 0 };
+    // Long mode's last page of the 4 GiB window, which a growing layout counts
+    // as RAM (`longLayout`): kept from the guest, so a store window crossing
+    // 4 GiB still faults by its flag alone.
+    const windowEnd = long && wideWindow === undefined && memorySize === 2 ** 32
+        ? { from: 2 ** 32 - 4096, to: 2 ** 32 } : { from: 0, to: 0 };
     /** Every guest range the engine holds, in address order: closed to the program. */
-    const engineRanges = [enginePages, engineArea, othersArea]
+    const engineRanges = [enginePages, engineArea, othersArea, windowEnd]
         .filter(range=>range.to > range.from).sort((a, b)=>a.from - b.from);
     // Every field from the start of a state block, as the block's views read
     // it: the same on every executor, whose blocks a thread's context moves

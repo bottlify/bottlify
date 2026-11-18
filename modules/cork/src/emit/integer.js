@@ -35,7 +35,7 @@ import { I32, I64, Kind, MASKS, SIGN_BITS, widthCode } from './flags.js';
 import { CallStack, Exit, Local, STATE_PARAMS, keepsFlags } from './region.js';
 import {
     checkAccess, emitStaleExit, looseStackStore, noteStore, operandValues, readsOnly, stackAccess,
-    windowAddress,
+    stackLow, windowAddress,
     wrapsRead, wrapMask, ramAlways, ram, ramAt, registersChanged,
 } from './memory.js';
 import { CALL_STRIDE, Mechanism, Tables, pageFlagsAt } from '../runtime/layout.js';
@@ -2867,7 +2867,7 @@ export function push(e, size, pushValue){
         if (e.context.looseStacks === true)
         {
             // Untested as esp's pushes are (`stackAccess`).
-            b.localGet(rsp).op(I64.wrap).i32const(size).op(I32.sub).localSet(Local.addr);
+            stackLow(e, size);
         }
         else
         {

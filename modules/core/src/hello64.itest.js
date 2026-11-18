@@ -43,6 +43,24 @@ test('an x86-64 console program prints its line and exits with 0', { timeout: 12
     ].sort());
 });
 
+test('given 4 GiB, a 64-bit process\'s memory reaches 4 GiB and grows to it as a 32-bit'
+    + ' one\'s does, rather than being cut to 2 GiB', { timeout: 120000 }, async t=>{
+    const app = await createApp({ executable: new Uint8Array(await readFile(FIXTURE)),
+        memorySize: 2 ** 32 });
+    t.after(()=>app.dispose());
+    /** @type {string[]} */
+    const output = [];
+    app.attachLog((/** @type {number} */ _handle, /** @type {string} */ text)=>output.push(text));
+    const code = await app.run({ timeoutMs: 100000 });
+    assert.equal(output.join(''), 'hello from x64, fib(25)=75025\n');
+    assert.equal(code, 0);
+    const cpu = app.diagnostics().find((/** @type {any} */ layer)=>layer.name === 'cpu');
+    const { ceiling, held, growing } = cpu.metrics.guestMemory;
+    assert.equal(ceiling, 2 ** 32, 'the RAM asked for, not 2 GiB');
+    assert.equal(growing, true);
+    assert.ok(held < 2 ** 31, `the memory holds ${held} bytes: what the program was given`);
+});
+
 test('fed every slice, as a program that presents frames is, a 64-bit process\'s regions are'
     + ' formed by the runtime the 32-bit code runs on', { timeout: 120000 }, async t=>{
     const app = await createApp({ executable: new Uint8Array(await readFile(FIXTURE)),

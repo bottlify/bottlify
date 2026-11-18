@@ -2499,7 +2499,7 @@ export function stackAccess(e, size){
         // stack is loose, its accesses tested no more than esp's are at 32
         // bits: rsp's low half addresses it, and an rsp a program moved past
         // the 4 GiB window reads there rather than faulting.
-        e.b.localGet(registerLocal(e, 4)).op(I64.wrap).localSet(Local.addr);
+        stackLow(e, 0);
     }
     else if (e.width.bits === 64)
     {
@@ -2515,6 +2515,28 @@ export function stackAccess(e, size){
         return;
     }
     checkAccess(e, size, { window: e.width.bits === 64 });
+}
+
+/**
+ * Long mode's untested stack address, rsp less `below`, into `addr` as its low
+ * half - and, over a wide window, rsp's high half into the one every guest
+ * access takes (`Body.guest`): the last access before it may have left another
+ * there (a store through a pointer past 4 GiB, then a `ret` reading below it).
+ *
+ * @param {E} e @param {number} below
+ */
+export function stackLow(e, below){
+    const rsp = registerLocal(e, 4);
+    e.b.localGet(rsp).op(I64.wrap);
+    if (below !== 0)
+    {
+        e.b.i32const(below).op(I32.sub);
+    }
+    e.b.localSet(Local.addr);
+    if (e.guest !== null)
+    {
+        e.b.localGet(rsp).i64const(-(2n ** 32n)).op(I64.and).localSet(e.guest.high);
+    }
 }
 
 /**

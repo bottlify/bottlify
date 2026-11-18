@@ -232,7 +232,7 @@ From `emit-count.mjs --qemu <qemu 8.2.2 built with plugins> --root <1851609d> --
 
 ### What does translated code cost to run, to the instruction an iteration and for each of the guest's own instructions, workload by workload and arm against arm?
 
-[`translator/run-count.mjs`](translator/run-count.mjs): `node tools/translator/run-count.mjs --qemu DIR [--root DIR]... [--bits 32|64|both] [--warm N] [--iters N] [--arm64 NODE [--sysroot DIR] [--lib DIR] [--node-flags FLAGS]] [workload...]`
+[`translator/run-count.mjs`](translator/run-count.mjs): `node tools/translator/run-count.mjs --qemu DIR [--root DIR]... [--bits 32|64|both] [--warm N] [--iters N] [--window 8|16] [--arm64 NODE [--sysroot DIR] [--lib DIR] [--node-flags FLAGS]] [workload...]`
 
 ```
 instructions an iteration (100 warm, 20 counted), in square brackets a guest instruction's cost in them, arms: <657107ac>, <657107ac>

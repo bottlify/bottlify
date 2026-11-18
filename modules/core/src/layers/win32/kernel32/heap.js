@@ -364,6 +364,9 @@ const binOf = size=>(size < SMALL_LIMIT
     ? size >>> 3
     : SMALL_CLASSES + (31 - Math.clz32(size)) - (31 - Math.clz32(SMALL_LIMIT)));
 
+/** The class from which a span is taken lowest first (`fit`): spans of 256 MiB and more. */
+const LOWEST_FROM_BIN = binOf(2 ** 28);
+
 /**
  * What VirtualQuery answers for an arena page no reservation holds: free to
  * the end of the free run it begins (a whole page of it), or the heap's own
@@ -767,9 +770,27 @@ export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT, 
         for (; bin < BINS; bin++)
         {
             const candidates = bins[bin];
-            if (candidates.length > 0)
+            if (candidates.length > 0 && bin < LOWEST_FROM_BIN)
             {
                 return candidates[candidates.length - 1];
+            }
+            if (candidates.length > 0)
+            {
+                // Of spans 256 MiB and more, which are few, the lowest, as Windows
+                // hands address space out from the bottom: a heap past 2 GiB is two
+                // spans of one class either side of the system's shared page, and
+                // the one above it was the one made last - every allocation of the
+                // engine's own went past 2 GiB, where a 64-bit process's code
+                // reaches no counter through a disp32.
+                let lowest = candidates[0];
+                for (let i = 1; i < candidates.length; i++)
+                {
+                    if (candidates[i].base < lowest.base)
+                    {
+                        lowest = candidates[i];
+                    }
+                }
+                return lowest;
             }
         }
         return null;

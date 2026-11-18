@@ -77,3 +77,29 @@ test('code past 4 GiB: seeded programs and loops as interpreted', ifRoom(()=>{
         assert.ok(stats.translated > stats.interpreted, JSON.stringify(stats));
     }
 }));
+
+test('a store through a pointer past 4 GiB, then the stack below it: each access takes its own'
+    + ' address\'s high half', ifRoom(()=>{
+    // The stack in the code's area, below 4 GiB; rdi in the data's, 4 GiB past its place.
+    const regs = [...CORPUS.cases[0].regs];
+    regs[4] = (CORPUS.codeAt + CORPUS.codeSize - 0x200).toString(16);
+    regs[7] = (CORPUS.dataAt + 0x400).toString(16);
+    // lea r8, [rip+exit]; mov [rsp], r8; mov [rsp+0x20], rdi; mov rdx, [rsp+0x20];
+    // mov [rdx], eax; then ret - or push rax; mov [rdx], eax; pop rcx; ret.
+    // Or a read through it: mov ecx, [rdx]; mov [rsp+8], ecx; ret.
+    const cases = [
+        '4c8d05110000004c89042448897c2420488b5424208902c3',
+        '4c8d05150000004c89042448897c2420488b542420890250890259c3',
+        '4c8d05150000004c89042448897c2420488b5424208b0a894c2408c3',
+    ].map((code, i)=>({ ...CORPUS.cases[0], text: `high store, stack ${i}`, code, regs }));
+    for (const config of [{}, { looseStacks: true }, { precise: false, looseStacks: true }])
+    {
+        for (const budget of [7, 100000])
+        {
+            const { failures, exits } = compare(cases, { budget, config, window: 2 ** 33,
+                high: 2 ** 32 });
+            assert.deepEqual(failures, [], `${JSON.stringify(config)}, budget ${budget}`);
+            assert.equal(exits, cases.length);
+        }
+    }
+}));

@@ -237,8 +237,9 @@ everyone's. The page flags are `INACCESSIBLE`, `HAS_CODE`, `VOLATILE`, `CLOSED`,
 
 An x86-64 program (a PE32+ image) runs on the same translator and runtime at a 64-bit width: the
 sixteen 64-bit registers live in the state block, and its memory is a 4 GiB window, every page
-below 4 GiB and an image whose base is above it relocated down. A 64-bit process runs on one
-executor. A run whose first program is 64-bit, or whose `memorySize` is past 2 GiB, is a 64-bit
+below 4 GiB and an image whose base is above it relocated down; over shared memory it grows as
+the program is given more, as a 32-bit process's does, up to the whole 4 GiB with `memorySize`
+4 GiB (the window's last page kept from it). A 64-bit process runs on one executor. A run whose first program is 64-bit, or whose `memorySize` is past 2 GiB, is a 64-bit
 Windows (`machine: 'amd64'`, [API](../core/api.md#what-runs)), where a 32-bit child runs under
 WOW64. What the Windows layer has at 64 bits is in
 [the limits](../core/limits/README.md#programs).

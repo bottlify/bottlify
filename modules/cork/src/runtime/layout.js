@@ -283,7 +283,7 @@ export function ownLayout({ ramSize, hashSlots = Tables.HASH_SLOTS, processors =
     {
         throw new Error(`cork: tables at ${tablesAt}, not a page boundary`);
     }
-    if (ramFloor !== undefined && (bits !== 32 || ramBase !== 0
+    if (ramFloor !== undefined && ((bits !== 32 && window !== WINDOW) || ramBase !== 0
         || (ramSize & ramSize - 1) !== 0 || (ramFloor & ramFloor - 1) !== 0
         || ramFloor > ramSize || ramFloor < 2 * PAGE))
     {
@@ -306,7 +306,8 @@ export function ownLayout({ ramSize, hashSlots = Tables.HASH_SLOTS, processors =
         {
             throw new Error('cork: long mode runs on one executor so far');
         }
-        return window === WINDOW ? longLayout(state, ramBase, ramSize, hashSlots)
+        return window === WINDOW
+            ? longLayout(state, ramBase, ramSize, hashSlots, tablesAt, ramFloor)
             : wideLayout(window, ramSize, hashSlots, codeBase);
     }
     const fields = {
@@ -368,14 +369,20 @@ export function ownLayout({ ramSize, hashSlots = Tables.HASH_SLOTS, processors =
  * XMM registers and FS's and GS's bases as quadwords; the counter, the call
  * profile and `origin` past them, `nanFirst` past the block.
  *
+ * A growing one (`tablesAt`, `ramFloor`) is laid out as the 32-bit one is:
+ * the tables inside the guest's space, the RAM held up to a power of two read
+ * from the wrap word; its ceiling may be the whole window, 4 GiB, where the
+ * host keeps the window's last page from the guest (an engine range) rather
+ * than the layout leaving it out of RAM.
+ *
  * @param {number} state @param {number} ramBase @param {number} ramSize
- * @param {number} hashSlots
+ * @param {number} hashSlots @param {number} [tablesAt] @param {number} [ramFloor]
  * @returns {import('../../../core/src/layers/cpu/engine.js').StateLayout}
  */
-function longLayout(state, ramBase, ramSize, hashSlots){
+function longLayout(state, ramBase, ramSize, hashSlots, tablesAt, ramFloor){
     // The last page of the 4 GiB window is never RAM: translated code finds a
     // store window that crosses 4 GiB by that page's INACCESSIBLE flag alone.
-    if (ramSize > 2 ** 32 - 4096)
+    if (ramSize > (ramFloor === undefined ? 2 ** 32 - 4096 : 2 ** 32))
     {
         throw new RangeError('cork: long mode\'s RAM leaves the last page of 4 GiB');
     }
@@ -404,7 +411,8 @@ function longLayout(state, ramBase, ramSize, hashSlots){
         // and carry in as dwords, result and operands as quadwords.
         flagRecord: state + 768,
         nanFirst: state + STATE_BLOCK_SIZE_64,
-        tables: ramBase + ramSize,
+        tables: tablesAt ?? ramBase + ramSize,
+        ...ramFloor === undefined ? {} : { ramFloor, wrap: state + WRAP_WORD },
         hashShift: 32 - Math.log2(hashSlots),
     };
     return { ...fields, id: layoutId(fields) };
