@@ -11,26 +11,37 @@
  * (pool.js), so each is its call with the arguments in ntdll's order and
  * the answer as a status. One pool means a wait registered here is
  * unregistered through UnregisterWait, and a timer made here fires on the
- * same threads as one made through CreateTimerQueueTimer.
+ * same threads as one made through CreateTimerQueueTimer. The deletions are
+ * the pool's own, answering statuses (`PoolDeletions`): one that waits for
+ * the callbacks wakes its caller with its answer, which no translation
+ * here could reach.
  */
 
 import { STATUS } from './status.js';
 
 /** The kernel32 calls these are made of. */
 export const POOL_ENTRIES = ['QueueUserWorkItem', 'RegisterWaitForSingleObject',
-    'UnregisterWaitEx', 'CreateTimerQueue', 'CreateTimerQueueTimer', 'DeleteTimerQueueTimer',
-    'DeleteTimerQueueEx', 'ChangeTimerQueueTimer', 'GetLastError'];
+    'CreateTimerQueue', 'CreateTimerQueueTimer', 'ChangeTimerQueueTimer', 'GetLastError'];
 
 const ERROR_INVALID_HANDLE = 6;
-/** What DeleteTimerQueueTimer and its kin leave when callbacks still run. */
-const ERROR_IO_PENDING = 997;
 
 /**
- * @param {{ kernel32: Record<string, { handler: Function }>,
+ * The pool's deletions, answered as statuses by the pool itself: a deletion
+ * that waits for the callbacks parks its caller, and the caller is woken
+ * with its answer, which kernel32's would give as TRUE.
+ *
+ * @typedef {Object} PoolDeletions
+ * @property {(wait: number, event: number) => any} deregisterWait
+ * @property {(timer: number, event: number) => any} deleteTimer
+ * @property {(queue: number, event: number) => any} deleteTimerQueue
+ */
+
+/**
+ * @param {{ kernel32: Record<string, { handler: Function }>, deletions: PoolDeletions,
  *     writeMemory: (address: number, bytes: Uint8Array) => void }} host
  * @returns {Record<string, { argBytes: number, handler: Function }>}
  */
-export function createPoolFunctions({ kernel32, writeMemory }){
+export function createPoolFunctions({ kernel32, deletions, writeMemory }){
     /**
      * A kernel32 answer as a status: nonzero is success; zero is the status
      * its last error is made from.
@@ -44,12 +55,8 @@ export function createPoolFunctions({ kernel32, writeMemory }){
             {
                 return STATUS.SUCCESS;
             }
-            switch (kernel32.GetLastError.handler([]))
-            {
-                case ERROR_INVALID_HANDLE: return STATUS.INVALID_HANDLE;
-                case ERROR_IO_PENDING: return STATUS.PENDING;
-                default: return STATUS.INVALID_PARAMETER;
-            }
+            return kernel32.GetLastError.handler([]) === ERROR_INVALID_HANDLE
+                ? STATUS.INVALID_HANDLE : STATUS.INVALID_PARAMETER;
         };
         return typeof answer?.then === 'function' ? answer.then(of) : of(answer);
     };
@@ -76,13 +83,14 @@ export function createPoolFunctions({ kernel32, writeMemory }){
         /** NTSTATUS RtlDeregisterWait(HANDLE WaitHandle): no event, returning at once. */
         RtlDeregisterWait: {
             argBytes: 4,
-            handler: (/** @type {number[]} */ [wait])=>call('UnregisterWaitEx', [wait, 0]),
+            handler: (/** @type {number[]} */ [wait])=>deletions.deregisterWait(wait, 0),
         },
 
         /** NTSTATUS RtlDeregisterWaitEx(HANDLE WaitHandle, HANDLE CompletionEvent) */
         RtlDeregisterWaitEx: {
             argBytes: 8,
-            handler: (/** @type {number[]} */ args)=>call('UnregisterWaitEx', args),
+            handler: (/** @type {number[]} */ [wait, event])=>
+                deletions.deregisterWait(wait, event),
         },
 
         /** NTSTATUS RtlCreateTimerQueue(PHANDLE NewTimerQueue) */
@@ -124,13 +132,15 @@ export function createPoolFunctions({ kernel32, writeMemory }){
         /** NTSTATUS RtlDeleteTimer(HANDLE TimerQueue, HANDLE Timer, HANDLE CompletionEvent) */
         RtlDeleteTimer: {
             argBytes: 12,
-            handler: (/** @type {number[]} */ args)=>call('DeleteTimerQueueTimer', args),
+            handler: (/** @type {number[]} */ [, timer, event])=>
+                deletions.deleteTimer(timer, event),
         },
 
         /** NTSTATUS RtlDeleteTimerQueueEx(HANDLE TimerQueue, HANDLE CompletionEvent) */
         RtlDeleteTimerQueueEx: {
             argBytes: 8,
-            handler: (/** @type {number[]} */ args)=>call('DeleteTimerQueueEx', args),
+            handler: (/** @type {number[]} */ [queue, event])=>
+                deletions.deleteTimerQueue(queue, event),
         },
     };
 }

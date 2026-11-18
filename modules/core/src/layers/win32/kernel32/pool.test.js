@@ -345,6 +345,24 @@ test('INVALID_HANDLE_VALUE waits for the callback, and wakes the deleter with TR
     assert.deepEqual(m.woken.at(-1), { thread: m.main, result: 1 });
 });
 
+test('ntdll\'s deletions answer statuses, and wake a deleter that waited with STATUS_SUCCESS', ()=>{
+    const m = machine();
+    const queue = m.fns.CreateTimerQueue.handler();
+    const busy = m.timer(queue, 0x402000, 2, 0, 0, 0);
+    const [worker] = m.created;
+    assert.equal(m.ask(worker), RUN);
+
+    assert.equal(m.pool.native.deleteTimer(busy, 0), 0x103, 'STATUS_PENDING');
+    assert.deepEqual(m.errors, [], 'and no last error');
+    assert.equal(m.pool.native.deleteTimer(busy, 0), 0xc000000d, 'gone: STATUS_INVALID_PARAMETER');
+    assert.equal(m.pool.native.deleteTimerQueue(0x9999, 0), 0xc0000008,
+        'STATUS_INVALID_HANDLE');
+    assert.equal(m.pool.native.deleteTimerQueue(queue, INVALID_HANDLE_VALUE), PARKED,
+        'the deleted timer\'s callback still runs');
+    m.ask(worker);
+    assert.deepEqual(m.woken.at(-1), { thread: m.main, result: 0 }, 'STATUS_SUCCESS, not TRUE');
+});
+
 test('a callback deleting its own timer does not wait for itself', ()=>{
     const m = machine();
     const queue = m.fns.CreateTimerQueue.handler();
@@ -457,6 +475,7 @@ test('a registered wait hands its callback to the pool on each answer, until unr
             },
             block: ()=>{},
             wake: ()=>true,
+            alert: ()=>false,
         },
         register: (name, fn)=>{
             traps[name] = fn;
@@ -483,6 +502,9 @@ test('a registered wait hands its callback to the pool on each answer, until unr
 
     assert.equal(traps['<registered-wait>'].handler([handle]), 0x102);
     assert.deepEqual(waited, [[OBJECT, 250]], 'it waits on the object for the time asked');
+    assert.equal(traps['<registered-wait-done>'].handler([handle, 0xc0]), 1,
+        'routines queued to the wait thread ended its wait: it waits on, calling nothing');
+    assert.equal(created.filter(options=>options.name === 'thread pool').length, 0);
     assert.equal(traps['<registered-wait-done>'].handler([handle, 0x102]), 1, 'and again after');
     const worker = created.find(options=>options.name === 'thread pool');
     assert.ok(worker, 'the callback goes to a pool thread');
@@ -520,15 +542,21 @@ test('an unregistered wait keeps its handle until its thread has left its loop',
     const traps = {};
     /** @type {any[]} */
     const created = [];
+    /** @type {[string, number][]} */
+    const alerted = [];
     const pool = createThreadPool({
         kernel: {
             currentThread: ()=>({ name: 'main' }),
             createThread: (/** @type {any} */ options)=>{
                 created.push(options);
-                return { name: options.name };
+                return { name: `${options.name} ${options.parameter}` };
             },
             block: ()=>{},
             wake: ()=>true,
+            alert: (/** @type {any} */ thread, /** @type {number} */ result)=>{
+                alerted.push([thread.name, result]);
+                return true;
+            },
         },
         register: (name, fn)=>{
             traps[name] = fn;
@@ -549,6 +577,10 @@ test('an unregistered wait keeps its handle until its thread has left its loop',
         8]);
     assert.equal(traps['<registered-wait>'].handler([first]), PARKED, 'its thread blocks');
     assert.equal(fns.UnregisterWait.handler([first]), 1, 'nothing of it is running');
+    // Left in its wait, it would take the next signal of a semaphore or an
+    // auto-reset event from whoever waits on the object next.
+    assert.deepEqual(alerted, [[`registered wait ${first}`, 0x80]],
+        'its thread is taken out of its wait, answered WAIT_ABANDONED');
     assert.deepEqual(freed, [], 'but its thread may still come back with its handle');
 
     const second = fns.RegisterWaitForSingleObjectEx.handler([0x44, 0x402000, 2, 0xffffffff,
@@ -585,6 +617,7 @@ test('WT_EXECUTEINWAITTHREAD callbacks run one after another on the one wait thr
             },
             block: ()=>{},
             wake: ()=>true,
+            alert: ()=>false,
         },
         register: (name, fn)=>{
             traps[name] = fn;

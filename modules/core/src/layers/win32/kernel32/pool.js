@@ -73,6 +73,15 @@ const ERROR_NOT_ENOUGH_MEMORY = 8;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_IO_PENDING = 997;
 
+/** The same answers as ntdll's statuses. */
+const STATUS_SUCCESS = 0;
+const STATUS_PENDING = 0x103;
+const STATUS_INVALID_HANDLE = 0xc0000008;
+const STATUS_INVALID_PARAMETER = 0xc000000d;
+
+/** What an alertable wait answers when routines queued to its thread ended it. */
+const WAIT_IO_COMPLETION = 0xc0;
+
 /**
  * The loop, as x86. `fetch` is the trap and `at` is where these bytes will be,
  * because the call to the trap is relative.
@@ -186,8 +195,11 @@ export function waitLoopCode(wait, after, at){
  * @property {(thread: any) => any} park  Stops a thread inside a trap.
  * @property {(code: number) => void} setLastError
  * @property {(handle: number, milliseconds: number) => any} [waitFor]
- *           WaitForSingleObject, from inside a trap: its answer, or the park
- *           that answers it later. Absent, no wait can be registered.
+ *           WaitForSingleObjectEx, alertable, from inside a trap: its answer,
+ *           or the park that answers it later. Alertable, because a wait
+ *           thread runs the routines queued to it, and because unregistering
+ *           takes the thread out of its wait (`kernel.alert`). Absent, no
+ *           wait can be registered.
  * @property {() => number} [threadReturn]  Where a thread that returns ends.
  * @property {() => number} [threadStart]
  *           Where a pool thread begins, as CreateThread's do: the libraries
@@ -210,6 +222,7 @@ export function waitLoopCode(wait, after, at){
  * @property {any} [thread]  blocked in a deletion that waits
  * @property {any} [event]   a kernel event to set
  * @property {number} until  finished once no more than this many are outstanding
+ * @property {number} [answer]  what the blocked thread's call answers when it is woken
  */
 
 /**
@@ -237,8 +250,20 @@ export function waitLoopCode(wait, after, at){
 /**
  * @typedef {Owner & { handle: number, object: number, callback: number, context: number,
  *     timeout: number, once: boolean, inWaitThread: boolean, cancelled: boolean,
- *     left: boolean, owner?: Owner, argsFor?: (result: number) => number[] }} Wait
+ *     left: boolean, thread?: any, owner?: Owner,
+ *     argsFor?: (result: number) => number[] }} Wait
  *     `left`: its thread is out of its loop, and asks for it by its handle no more.
+ */
+
+/**
+ * What a deletion answers, in its caller's terms: kernel32's BOOL and last
+ * error, or ntdll's status. `done` is also what a caller that waited for the
+ * callbacks is woken with.
+ *
+ * @typedef {Object} Answers
+ * @property {number} done
+ * @property {() => number} pending  callbacks still run and nobody waits for them
+ * @property {(error: number) => number} refused  a Win32 error, said the caller's way
  */
 
 /**
@@ -319,7 +344,7 @@ export function createThreadPool(host){
             waiters.splice(waiters.indexOf(waiter), 1);
             if (waiter.thread)
             {
-                kernel.wake(waiter.thread, 1);
+                kernel.wake(waiter.thread, waiter.answer ?? 1);
             }
             if (waiter.event)
             {
@@ -451,18 +476,19 @@ export function createThreadPool(host){
      *
      * @param {Owner} owner @param {number} event @param {number} own
      *     the caller's own callback, when it is one of the owner's
+     * @param {Answers} [answers]  kernel32's unless the caller is ntdll
      * @returns {number | any}
      */
-    const complete = (owner, event, own)=>{
+    const complete = (owner, event, own, answers = boolAnswers)=>{
         const handle = event >>> 0;
         if (handle === INVALID_HANDLE_VALUE)
         {
             if (owner.outstanding <= own)
             {
-                return 1;
+                return answers.done;
             }
             const thread = kernel.currentThread();
-            owner.waiters.push({ thread, until: own });
+            owner.waiters.push({ thread, until: own, answer: answers.done });
             kernel.block(thread, 'a thread pool deletion');
             return host.park(thread);
         }
@@ -476,7 +502,7 @@ export function createThreadPool(host){
                     kernel.setEvent(signal);
                 }
             }
-            return 1;
+            return answers.done;
         }
         if (handle !== 0)
         {
@@ -486,8 +512,7 @@ export function createThreadPool(host){
                 owner.waiters.push({ event: signal, until: 0 });
             }
         }
-        host.setLastError(ERROR_IO_PENDING);
-        return 0;
+        return answers.pending();
     };
 
     /** A closed work object with nothing outstanding is given back. @param {number} handle */
@@ -523,6 +548,16 @@ export function createThreadPool(host){
     const fail = code=>{
         host.setLastError(code);
         return 0;
+    };
+
+    /** @type {Answers} */
+    const boolAnswers = { done: 1, pending: ()=>fail(ERROR_IO_PENDING), refused: fail };
+    /** @type {Answers} */
+    const statusAnswers = {
+        done: STATUS_SUCCESS,
+        pending: ()=>STATUS_PENDING,
+        refused: error=>(error === ERROR_INVALID_HANDLE ? STATUS_INVALID_HANDLE
+            : STATUS_INVALID_PARAMETER),
     };
 
     /**
@@ -695,24 +730,30 @@ export function createThreadPool(host){
         return timer;
     };
 
-    /** @param {number} timerHandle @param {number} event */
-    const deleteTimer = (timerHandle, event)=>{
+    /**
+     * @param {number} timerHandle @param {number} event
+     * @param {Answers} [answers]
+     */
+    const deleteTimer = (timerHandle, event, answers = boolAnswers)=>{
         const timer = timers.get(timerHandle >>> 0);
         if (!timer)
         {
-            return fail(ERROR_INVALID_PARAMETER);
+            return answers.refused(ERROR_INVALID_PARAMETER);
         }
         const own = running()?.owner === timer ? 1 : 0;
         cancel(timer);
-        return complete(timer, event, own);
+        return complete(timer, event, own, answers);
     };
 
-    /** @param {number} queueHandle @param {number} event */
-    const deleteQueue = (queueHandle, event)=>{
+    /**
+     * @param {number} queueHandle @param {number} event
+     * @param {Answers} [answers]
+     */
+    const deleteQueue = (queueHandle, event, answers = boolAnswers)=>{
         const queue = queues.get(queueHandle >>> 0);
         if (!queue)
         {
-            return fail(ERROR_INVALID_HANDLE);
+            return answers.refused(ERROR_INVALID_HANDLE);
         }
         queues.delete(queue.handle);
         queue.deleting = true;
@@ -726,7 +767,7 @@ export function createThreadPool(host){
             }
         }
         recount(queue);
-        const answer = complete(queue, event, own);
+        const answer = complete(queue, event, own, answers);
         recount(queue);
         return answer;
     };
@@ -772,6 +813,11 @@ export function createThreadPool(host){
         if (!wait)
         {
             return 0;
+        }
+        if (result === WAIT_IO_COMPLETION && !wait.cancelled)
+        {
+            // Routines queued to the wait thread ran: it waits on.
+            return 1;
         }
         if (wait.cancelled || result !== WAIT_OBJECT_0 && result !== WAIT_ABANDONED
             && result !== WAIT_TIMEOUT)
@@ -834,31 +880,39 @@ export function createThreadPool(host){
             return ERROR_NOT_ENOUGH_MEMORY;
         }
         host.threadBlock?.(thread);
+        wait.thread = thread;
         waits.set(handle, wait);
         return wait;
     };
 
     /**
-     * No more callbacks: the wait's thread stops at its next answer.
-     * ponytail: one blocked on an object never signalled stays blocked; wake
-     * it once the kernel can withdraw a thread from a wait.
+     * No more callbacks: the wait's thread stops at its next answer, and one
+     * blocked on its object is taken out of the wait now. Left there, it
+     * would take the next signal for a wait nobody has any more -- a
+     * semaphore's count, an auto-reset event -- from whoever waits on the
+     * object next.
      *
      * @param {number} waitHandle @param {number} event
+     * @param {Answers} [answers]
      */
-    const unregisterWait = (waitHandle, event)=>{
+    const unregisterWait = (waitHandle, event, answers = boolAnswers)=>{
         const wait = waits.get(waitHandle >>> 0);
         if (!wait || wait.cancelled)
         {
-            return fail(ERROR_INVALID_HANDLE);
+            return answers.refused(ERROR_INVALID_HANDLE);
         }
         wait.cancelled = true;
+        if (!wait.left && wait.thread)
+        {
+            kernel.alert(wait.thread, WAIT_ABANDONED);
+        }
         const own = running()?.owner === wait ? 1 : 0;
         // Its own callback on the wait thread is the only one of it that can
         // be running there, so nothing is left pending (Wine's kernel32
         // test_RegisterWaitForSingleObject); one on the pool's is pending, as
         // a timer's own callback deleting it is.
-        const answer = own === 1 && wait.inWaitThread && (event >>> 0) === 0 ? 1
-            : complete(wait, event, own);
+        const answer = own === 1 && wait.inWaitThread && (event >>> 0) === 0 ? answers.done
+            : complete(wait, event, own, answers);
         forget(wait);
         return answer;
     };
@@ -973,6 +1027,19 @@ export function createThreadPool(host){
             waits: waits.size,
             fired,
         }),
+
+        /**
+         * The deletions as ntdll answers them: a status, and a caller that
+         * waits for the callbacks woken with STATUS_SUCCESS.
+         */
+        native: {
+            /** @param {number} wait @param {number} event */
+            deregisterWait: (wait, event)=>unregisterWait(wait, event, statusAnswers),
+            /** @param {number} timer @param {number} event */
+            deleteTimer: (timer, event)=>deleteTimer(timer, event, statusAnswers),
+            /** @param {number} queue @param {number} event */
+            deleteTimerQueue: (queue, event)=>deleteQueue(queue, event, statusAnswers),
+        },
 
         table: {
             /** HANDLE CreateTimerQueue(void) */

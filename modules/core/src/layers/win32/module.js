@@ -2894,6 +2894,32 @@ export function createWin32Module(){
                 currentDirectory: ()=>filesystem.currentDirectory(),
             });
 
+            // The thread pool: timer queues, registered waits, work items and
+            // the thread pool API, on threads of its own; ntdll's pool calls
+            // are its, answered as statuses (`native`).
+            const threadPool = createThreadPool({
+                kernel,
+                // A timer's due time and a wait's time-out are read
+                // from the caller's FILETIME, against the wall clock.
+                readMemory,
+                wallClock: ()=>kernel.clock.wallClock(),
+                register: (name, fn)=>bridge.register(name, fn),
+                /** @param {number} bytes */
+                allocate: bytes=>heap.allocate(bytes),
+                /** @param {number} bytes */
+                allocateCode: bytes=>heap.allocateCode(bytes),
+                /** @param {number} address */
+                free: address=>heap.free(address),
+                writeMemory,
+                threadBlock: threadMade,
+                park: (/** @type {any} */ thread)=>bridge.park(thread),
+                setLastError: setError,
+                waitFor: (handle, milliseconds)=>libraries['KERNEL32.dll']
+                    .WaitForSingleObjectEx.handler([handle, milliseconds, 1]),
+                threadReturn: ()=>threadReturnAddress(),
+                threadStart: ()=>threadCalls.start(),
+            });
+
             // Routines queued to a thread and run by it when it waits alertably:
             // the waits themselves are the ordinary ones, looked up when called.
             const apcs = createApcs({
@@ -3337,28 +3363,7 @@ export function createWin32Module(){
                     }),
                     ...fiberStorage.table,
                     ...apcs.table,
-                    ...createThreadPool({
-                        kernel,
-                        // A timer's due time and a wait's time-out are read
-                        // from the caller's FILETIME, against the wall clock.
-                        readMemory,
-                        wallClock: ()=>kernel.clock.wallClock(),
-                        register: (name, fn)=>bridge.register(name, fn),
-                        /** @param {number} bytes */
-                        allocate: bytes=>heap.allocate(bytes),
-                        /** @param {number} bytes */
-                        allocateCode: bytes=>heap.allocateCode(bytes),
-                        /** @param {number} address */
-                        free: address=>heap.free(address),
-                        writeMemory,
-                        threadBlock: threadMade,
-                        park: (/** @type {any} */ thread)=>bridge.park(thread),
-                        setLastError: setError,
-                        waitFor: (handle, milliseconds)=>libraries['KERNEL32.dll']
-                            .WaitForSingleObject.handler([handle, milliseconds]),
-                        threadReturn: ()=>threadReturnAddress(),
-                        threadStart: ()=>threadCalls.start(),
-                    }).table,
+                    ...threadPool.table,
                     ...createDebugFunctions({
                         readCString,
                         readWideString,
@@ -6334,6 +6339,7 @@ export function createWin32Module(){
                 readCString,
                 readWideString,
                 kernel32: libraries['KERNEL32.dll'],
+                pool: threadPool.native,
                 crt: libraries['msvcrt.dll'],
                 teb: ()=>kernel.currentThread()?.tebAddress ?? 0,
                 currentThread: ()=>kernel.currentThread(),

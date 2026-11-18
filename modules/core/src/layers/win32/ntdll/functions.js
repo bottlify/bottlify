@@ -186,6 +186,8 @@ const NAMED_KINDS = new Set(['event', 'mutex', 'semaphore', 'timer', 'mapping'])
  * @property {(address: number, maxLength: number) => string} readCString
  * @property {(address: number, maxLength: number) => string} readWideString
  * @property {Record<string, Entry>} kernel32  The assembled KERNEL32.dll table.
+ * @property {import('./pool.js').PoolDeletions} [pool]  The thread pool's deletions,
+ *           answered as statuses.
  * @property {Record<string, Entry>} crt       The assembled msvcrt.dll table.
  * @property {() => number} teb  The running thread's block.
  * @property {() => any} [currentThread]
@@ -556,8 +558,9 @@ export function createNtdllFunctions(host){
 
         ...time.table,
 
-        ...(POOL_ENTRIES.every(name=>kernel32[name])
-            ? createPoolFunctions({ kernel32, writeMemory: host.writeMemory })
+        ...(host.pool && POOL_ENTRIES.every(name=>kernel32[name])
+            ? createPoolFunctions({ kernel32, deletions: host.pool,
+                writeMemory: host.writeMemory })
             : {}),
 
         ...(LOADER_ENTRIES.every(name=>kernel32[name])
