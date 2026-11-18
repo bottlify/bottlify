@@ -1421,6 +1421,53 @@ test('a buffer bound as a shader resource is storage, read through a uniform of 
         'format, first element, element count, element size');
     });
 
+test('buffer views that say the same read one uniform, however many a program makes', async()=>{
+    const h = harness();
+    const { device } = h;
+    bindTriangle(h, TRIANGLE, [0, 0, 1, 1]);
+    /** @type {{ resource?: any }} */
+    const data = {};
+    assert.equal(device.CreateBuffer({
+        ByteWidth: 48, Usage: D3D10_USAGE.DEFAULT, BindFlags: D3D10_BIND.SHADER_RESOURCE,
+        CPUAccessFlags: 0, MiscFlags: 0,
+    }, { pSysMem: floatBytes([0, 0, 0, 0, 1, 0, 0, 1, 0, 1, 0, 1]) }, data), S_OK);
+    /** @type {{ shader?: any }} */
+    const ps = {};
+    assert.equal(device.CreatePixelShader(assemble({
+        kind: SHADER_KIND.PIXEL,
+        outputs: [{ name: 'SV_TARGET', systemValue: SYSTEM_VALUE.TARGET, register: 0 }],
+        instructions: [
+            dclResource(0, RESOURCE_DIMENSION.BUFFER, RETURN_TYPE.FLOAT),
+            dclOutput(o(0)),
+            ld(o(0), lu(0), t(0)),
+            ret(),
+        ],
+    }), ps), S_OK);
+    device.PSSetShader(ps.shader);
+    /** @param {number} first */
+    const drawThrough = first=>{
+        /** @type {{ view?: any }} */
+        const view = {};
+        assert.equal(device.CreateShaderResourceView(data.resource, {
+            Format: DXGI_FORMAT.R32G32B32A32_FLOAT, ViewDimension: 1, ElementOffset: first,
+            ElementWidth: 2,
+        }, view), S_OK);
+        device.PSSetShaderResources(0, [view.view]);
+        device.Draw(3, 0);
+    };
+    const uniforms = ()=>h.gpu.of('createBuffer').filter((/** @type {any} */ call)=>
+        String(call.descriptor.label).startsWith('d3d10:buffer-view')).length;
+    drawThrough(1);
+    drawThrough(1);
+    drawThrough(1);
+    await h.present();
+    assert.equal(uniforms(), 1, 'three views of one description');
+    drawThrough(0);
+    await h.present();
+    assert.equal(uniforms(), 2, 'and one more for another');
+    assert.deepEqual(h.divergences, []);
+});
+
 test('a buffer view in a format with no decoding reads zeros and says so', async()=>{
     const h = harness();
     const { device } = h;
