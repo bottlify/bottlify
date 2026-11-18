@@ -17,7 +17,8 @@
  * NotTrueTypeFont, and by name it is a family not found, as GDI+ answers.
  */
 
-import { FF_MODERN, FF_ROMAN, designCell, faceNamed } from '../gdi32/faces.js';
+import { FACES, FF_MODERN, FF_ROMAN, designCell, faceNamed, fontFamilies }
+    from '../gdi32/faces.js';
 
 /** GpStatus (gdiplustypes.h). */
 const Ok = 0;
@@ -98,6 +99,7 @@ const outlineFace = name=>{
  * @property {(address: number) => void} free
  * @property {(address: number) => string} [readWideString]
  * @property {(name: string, args: number[]) => number} [gdi32]
+ * @property {(path: string) => Promise<Uint8Array | null> | Uint8Array | null} [readFile]
  */
 
 /**
@@ -110,6 +112,17 @@ const outlineFace = name=>{
 export function createFontFunctions({ host, handle, putPointer, isGraphics }){
     /** @type {Map<number, string>} each family: its face */
     const families = new Map();
+    /**
+     * Each font collection: the families a private one was given; the
+     * installed one, made once, lists the outline faces there are.
+     *
+     * @type {Map<number, { installed: boolean, names: string[] }>}
+     */
+    const collections = new Map();
+    let installed = 0;
+    /** The installed outline faces, by name: each a face of its own, not a substitute. */
+    const installedNames = ()=>FACES.filter(f=>!f.substitute && designCell(f.name) !== null)
+        .map(f=>f.name).sort((a, b)=>a.localeCompare(b));
     /** @type {Map<number, { face: string, size: number, style: number, unit: number }>} */
     const fonts = new Map();
 
@@ -256,7 +269,7 @@ export function createFontFunctions({ host, handle, putPointer, isGraphics }){
             : newFamily(face, out)),
     });
 
-    return {
+    const functions = {
         /**
          * Status GdipCreateFontFamilyFromName(const WCHAR *name,
          *   GpFontCollection *collection, GpFontFamily **family)
@@ -267,12 +280,20 @@ export function createFontFunctions({ host, handle, putPointer, isGraphics }){
         GdipCreateFontFamilyFromName: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([name, , out])=>{
+            handler: ([name, collection, out])=>{
                 if ((name >>> 0) === 0 || (out >>> 0) === 0 || !host.readWideString)
                 {
                     return InvalidParameter;
                 }
-                const face = outlineFace(host.readWideString(name >>> 0));
+                const wanted = host.readWideString(name >>> 0);
+                const own = collections.get(collection >>> 0);
+                const added = own && !own.installed ? own.names.find(n=>n.toLowerCase()
+                    === wanted.toLowerCase()) : undefined;
+                if (added)
+                {
+                    return newFamily(added, out);
+                }
+                const face = outlineFace(wanted);
                 return face === null || face === 'bitmap' ? FontFamilyNotFound
                     : newFamily(face, out);
             },
@@ -563,33 +584,175 @@ export function createFontFunctions({ host, handle, putPointer, isGraphics }){
             handler: ([font, , out])=>toLogfont(font, out, false),
         },
 
-        /** Status GdipGetDpiX(GpGraphics *graphics, REAL *dpi) */
-        GdipGetDpiX: {
-            argBytes: 8,
+        /**
+         * Status GdipNewInstalledFontCollection(GpFontCollection **collection)
+         *
+         * The one installed collection, the same each time.
+         */
+        GdipNewInstalledFontCollection: {
+            argBytes: 4,
             /** @param {number[]} args */
-            handler: ([target, out])=>{
-                if (!isGraphics(target >>> 0) || (out >>> 0) === 0)
+            handler: ([out])=>{
+                if ((out >>> 0) === 0)
                 {
                     return InvalidParameter;
                 }
-                putFloat(out, DPI);
+                if (installed === 0)
+                {
+                    installed = handle();
+                    collections.set(installed, { installed: true, names: [] });
+                }
+                putPointer(out, installed);
                 return Ok;
             },
         },
 
-        /** Status GdipGetDpiY(GpGraphics *graphics, REAL *dpi) */
-        GdipGetDpiY: {
-            argBytes: 8,
+        /** Status GdipNewPrivateFontCollection(GpFontCollection **collection) */
+        GdipNewPrivateFontCollection: {
+            argBytes: 4,
             /** @param {number[]} args */
-            handler: ([target, out])=>{
-                if (!isGraphics(target >>> 0) || (out >>> 0) === 0)
+            handler: ([out])=>{
+                if ((out >>> 0) === 0)
                 {
                     return InvalidParameter;
                 }
-                putFloat(out, DPI);
+                const made = handle();
+                collections.set(made, { installed: false, names: [] });
+                putPointer(out, made);
+                return Ok;
+            },
+        },
+
+        /** Status GdipDeletePrivateFontCollection(GpFontCollection **collection) */
+        GdipDeletePrivateFontCollection: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([at])=>{
+                if ((at >>> 0) === 0)
+                {
+                    return InvalidParameter;
+                }
+                const collection = new DataView(host.readMemory(at >>> 0, 4).slice().buffer)
+                    .getUint32(0, true);
+                const held = collections.get(collection);
+                if (!held || held.installed)
+                {
+                    return InvalidParameter;
+                }
+                collections.delete(collection);
+                putPointer(at, 0);
+                return Ok;
+            },
+        },
+
+        /** Status GdipGetFontCollectionFamilyCount(GpFontCollection *collection, INT *count) */
+        GdipGetFontCollectionFamilyCount: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([collection, out])=>{
+                const held = collections.get(collection >>> 0);
+                if (!held || (out >>> 0) === 0)
+                {
+                    return InvalidParameter;
+                }
+                putU32(out, (held.installed ? installedNames() : held.names).length);
+                return Ok;
+            },
+        },
+
+        /**
+         * Status GdipGetFontCollectionFamilyList(GpFontCollection *collection, INT sought,
+         *   GpFontFamily *families[], INT *found)
+         *
+         * A family of each, up to the number sought.
+         */
+        GdipGetFontCollectionFamilyList: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([collection, sought, out, found])=>{
+                const held = collections.get(collection >>> 0);
+                if (!held || (out >>> 0) === 0 || (found >>> 0) === 0)
+                {
+                    return InvalidParameter;
+                }
+                const names = (held.installed ? installedNames() : held.names)
+                    .slice(0, Math.max(0, sought | 0));
+                names.forEach((name, i)=>{
+                    const made = handle();
+                    families.set(made, name);
+                    putPointer((out >>> 0) + i * 4, made);
+                });
+                putU32(found, names.length);
+                return Ok;
+            },
+        },
+
+        /**
+         * Status GdipPrivateAddFontFile(GpFontCollection *collection, const WCHAR *filename)
+         *
+         * The families the file holds; a file that is not a font is FileNotFound.
+         */
+        GdipPrivateAddFontFile: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: async([collection, name])=>{
+                const held = collections.get(collection >>> 0);
+                if (!held || held.installed || (name >>> 0) === 0 || !host.readWideString
+                    || !host.readFile)
+                {
+                    return InvalidParameter;
+                }
+                const bytes = await host.readFile(host.readWideString(name >>> 0));
+                const added = bytes ? fontFamilies(bytes) : [];
+                if (added.length === 0)
+                {
+                    return 10;
+                }
+                for (const family of added)
+                {
+                    if (!held.names.includes(family))
+                    {
+                        held.names.push(family);
+                    }
+                }
+                return Ok;
+            },
+        },
+
+        /**
+         * Status GdipPrivateAddMemoryFont(GpFontCollection *collection, const void *memory,
+         *   INT length)
+         */
+        GdipPrivateAddMemoryFont: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([collection, memory, length])=>{
+                const held = collections.get(collection >>> 0);
+                if (!held || held.installed || (memory >>> 0) === 0 || (length | 0) <= 0)
+                {
+                    return InvalidParameter;
+                }
+                const added = fontFamilies(host.readMemory(memory >>> 0, length | 0).slice());
+                if (added.length === 0)
+                {
+                    return 1;
+                }
+                for (const family of added)
+                {
+                    if (!held.names.includes(family))
+                    {
+                        held.names.push(family);
+                    }
+                }
                 return Ok;
             },
         },
     };
+    return {
+        functions,
+        /** A font's face, size, style and unit. @param {number} at */
+        font: at=>fonts.get(at >>> 0),
+        /** A family's face. @param {number} at */
+        family: at=>families.get(at >>> 0),
+    };
 }
-

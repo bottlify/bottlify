@@ -124,6 +124,10 @@ libraries Wine recreates from it and writes their names, less Wine's own and the
 runtimes, into `modules/core/src/layers/loader/internal/windows-libraries.js` -- names only, which
 Windows' own files establish; the list is Wine's work of finding them.
 
+Wine's `dlls/gdiplus/tests/brush.c` is used the same way for the pixels of GDI+'s 53 hatch styles:
+the 8x8 cells in `modules/core/src/layers/win32/gdiplus/raster.js` (`HATCHES`) are Windows' own
+output as that test records it - data about what Windows draws, not code.
+
 What is not taken: no code, no test structure, no helper, no assertion text, no ordering. Every
 test in this repository is written independently, against this project's own conventions.
 

@@ -2410,3 +2410,11 @@ The documentation today has both "Always returns FALSE"; it does not say from wh
 XP's own documentation of the time described them as the versions they name. Wine's tests do not
 ask. OS_HOME is always no, OS_WIN2000PRO answers as OS_PROFESSIONAL, which the documentation
 sends it to. *2026-11-17.*
+
+**A263. GDI+ encodes BMP and PNG only, a PNG's data in stored deflate blocks.**
+GDI+ lists BMP, JPEG, GIF, TIFF and PNG encoders. This engine has no encoder of its own for JPEG,
+GIF or TIFF, so GdipGetImageEncoders lists BMP and PNG, the two `gdiplus/codecs.js` writes; a save
+asked of another encoder is UnknownImageFormat, as for an encoder GDI+ does not have. A PNG's IDAT
+is stored, not compressed: a valid file every reader opens, larger than Windows' own. BMP keeps an
+indexed, 24 or 32-bit image's depth and writes the rest as 32 bits. Revisit when a program is found
+saving JPEG or reading back the size of what it saved. *2026-11-17.*
