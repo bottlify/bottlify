@@ -119,7 +119,9 @@ test('a mounted drive is fixed and an unmounted one has no root', ()=>{
     assert.equal(fns.GetDriveTypeA.handler([0x220]), DRIVE_NO_ROOT_DIR);
 });
 
-test('the byte-count form says the whole volume, which the cluster form clamps', ()=>{
+test('both forms say the whole volume, and its size wrapped to 32 bits is still room', ()=>{
+    // Wine's drive.c: GetDiskFreeSpace's product is never less than
+    // GetDiskFreeSpaceEx's total on Windows NT.
     const { fns, bytes } = setup(['C']);
     plant(bytes, 0x200, 'C:' + String.fromCharCode(92));
     assert.equal(fns.GetDiskFreeSpaceA.handler([0x200, 0x100, 0x104, 0x108, 0x10c]), 1);
@@ -128,12 +130,18 @@ test('the byte-count form says the whole volume, which the cluster form clamps',
     assert.equal(fns.GetDiskFreeSpaceExA.handler([0x200, 0x110, 0x118, 0x120]), 1);
     /** @param {number} at */
     const qword = at=>dword(bytes, at) + dword(bytes, at + 4) * 0x1_0000_0000;
-    assert.equal(qword(0x118), 32 * 1024 * 1024 * 1024, 'the whole volume');
-    assert.equal(qword(0x110), 24 * 1024 * 1024 * 1024, 'and what is free of it');
+    const GIB = 1024 * 1024 * 1024;
+    assert.equal(qword(0x118), 33.5 * GIB, 'the whole volume');
+    assert.equal(qword(0x110), 25.5 * GIB, 'and what is free of it');
     assert.equal(qword(0x120), qword(0x110), 'which with one user is what is available');
-    assert.ok(qword(0x118) > dword(bytes, 0x10c) * cluster,
-        'more than the cluster call can say, which is clamped rather than wrapped');
-    assert.equal(dword(bytes, 0x10c) * cluster, 0x1_0000_0000 - cluster, 'to just under 2^32');
+    assert.equal(dword(bytes, 0x10c) * cluster, qword(0x118), 'the cluster call says as much');
+    assert.equal(dword(bytes, 0x108) * cluster, qword(0x110));
+    for (const at of [0x108, 0x10c])
+    {
+        // A program of the era multiplies the four in 32 bits, signed.
+        const wrapped = Math.imul(dword(bytes, at), cluster);
+        assert.ok(wrapped >= GIB, 'wrapped, still a gigabyte and more');
+    }
 
     plant(bytes, 0x220, 'Q:' + String.fromCharCode(92));
     assert.equal(fns.GetDiskFreeSpaceExA.handler([0x220, 0x110, 0x118, 0x120]), 0,
@@ -154,23 +162,6 @@ test('both spellings of GetDriveType agree', ()=>{
     bytes[0x307] = 0;
 
     assert.equal(fns.GetDriveTypeW.handler([0x300]), fns.GetDriveTypeA.handler([0x200]));
-});
-
-test('the free-space figures multiply without wrapping', ()=>{
-    // The documented way to get a byte count out of this is to multiply all
-    // four, and a caller doing that on 32-bit values must not overflow.
-    const { fns, bytes } = setup(['C']);
-    plant(bytes, 0x200, 'C:' + String.fromCharCode(92));
-
-    assert.equal(fns.GetDiskFreeSpaceA.handler([0x200, 0x100, 0x104, 0x108, 0x10c]), 1);
-    const sectors = dword(bytes, 0x100);
-    const bytesPerSector = dword(bytes, 0x104);
-    const free = dword(bytes, 0x108);
-    const total = dword(bytes, 0x10c);
-
-    assert.ok(free <= total);
-    assert.ok(total * sectors * bytesPerSector <= 0xffffffff,
-        'the product stays inside what a caller can hold');
 });
 
 test('GetComputerName reports the length it wrote, and the length it needed', ()=>{
@@ -311,7 +302,7 @@ test('a directory written in the file or device namespace names its drive', ()=>
     plant(bytes, 0x200, `${bs}${bs}?${bs}C:${bs}Program Files${bs}Steam${bs}`);
     assert.equal(fns.GetDiskFreeSpaceExA.handler([0x200, 0x110, 0x118, 0x120]), 1);
     assert.equal(dword(bytes, 0x118) + dword(bytes, 0x11c) * 0x1_0000_0000,
-        32 * 1024 * 1024 * 1024);
+        33.5 * 1024 * 1024 * 1024);
     plant(bytes, 0x200, `${bs}${bs}.${bs}C:${bs}`);
     assert.equal(fns.GetDiskFreeSpaceExA.handler([0x200, 0x110, 0x118, 0x120]), 1);
     plant(bytes, 0x200, `${bs}${bs}?${bs}Q:${bs}`);
@@ -340,7 +331,7 @@ test('the wide free-space calls answer what the A calls answer', ()=>{
     assert.equal(fns.GetDiskFreeSpaceExW.argBytes, 16);
     assert.equal(fns.GetDiskFreeSpaceExW.handler([0x300, 0, 0x118, 0]), 1);
     assert.equal(dword(bytes, 0x118) + dword(bytes, 0x11c) * 0x1_0000_0000,
-        32 * 1024 * 1024 * 1024);
+        33.5 * 1024 * 1024 * 1024);
 });
 
 test('QueryDosDevice names the device behind a drive letter, and lists every drive for none', ()=>{
