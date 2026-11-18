@@ -203,4 +203,12 @@ export function createKit(host){
  *
  * @param {number} argBytes @param {(args: number[]) => any} handler
  */
-export const fn = (argBytes, handler)=>({ argBytes, handler });
+/**
+ * An export: its 32-bit argument bytes, its handler, and the arguments that
+ * are not a dword by value (`floats`: a REAL, which an x86-64 caller passes
+ * in an XMM register), for the bridge to read back into that layout.
+ *
+ * @param {number} argBytes @param {(args: number[]) => any} handler
+ * @param {{ floats?: Record<number, 'f32' | 'f64'> }} [wide]
+ */
+export const fn = (argBytes, handler, wide = {})=>({ argBytes, handler, ...wide });

@@ -180,7 +180,7 @@ export function createStringFormatFunctions(kit){
             format.tabFirst = offset;
             format.tabs = kit.f32s(tabs, count | 0);
             return Ok;
-        })),
+        }), { floats: { 1: 'f32' } }),
         /**
          * Status GdipGetStringFormatTabStops(const GpStringFormat *format, INT count,
          *   REAL *firstTabOffset, REAL *tabStops)

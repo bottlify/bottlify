@@ -1309,10 +1309,13 @@ export function createSeh64(host){
              * the range is looked up. The out-of-process DLL is a debugger's.
              */
             RtlInstallFunctionTableCallback: {
-                argBytes: 24,
+                // The identifier and the base are DWORD64s: two dwords each in
+                // the layout every handler reads.
+                argBytes: 32,
+                quadwords: [0, 2],
                 /** @param {number[]} args */
-                handler: ([id, base, length, callback, context])=>(unwinder.install(id >>> 0,
-                    base >>> 0, length >>> 0, callback >>> 0, context >>> 0) ? 1 : 0),
+                handler: ([id, , base, , length, callback, context])=>(unwinder.install(
+                    id >>> 0, base >>> 0, length >>> 0, callback >>> 0, context >>> 0) ? 1 : 0),
             },
 
             /**

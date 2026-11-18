@@ -142,9 +142,13 @@ export function createMatrixFunctions(kit){
     const functions = {
         /** Status GdipCreateMatrix(GpMatrix **matrix) */
         GdipCreateMatrix: fn(4, ([out])=>make([...IDENTITY], out)),
-        /** Status GdipCreateMatrix2(REAL m11, m12, m21, m22, dx, dy, GpMatrix **matrix) */
-        GdipCreateMatrix2: fn(28, ([a, b, c, d, e, f, out])=>
-            make(/** @type {Elements} */ ([a, b, c, d, e, f].map(kit.real)), out)),
+        /**
+         * Status GdipCreateMatrix2(REAL m11, REAL m12, REAL m21, REAL m22, REAL dx, REAL dy,
+         *     GpMatrix **matrix)
+         */
+        GdipCreateMatrix2: { floats: { 0: 'f32', 1: 'f32', 2: 'f32', 3: 'f32' },
+            ...fn(28, ([a, b, c, d, e, f, out])=>
+                make(/** @type {Elements} */ ([a, b, c, d, e, f].map(kit.real)), out)) },
         /** Status GdipCreateMatrix3(const GpRectF *rect, const GpPointF *pt, GpMatrix **matrix) */
         GdipCreateMatrix3: fn(12, ([rect, points, out])=>{
             if ((rect >>> 0) === 0 || (points >>> 0) === 0 || (out >>> 0) === 0)
@@ -179,7 +183,7 @@ export function createMatrixFunctions(kit){
             }
             held.m = single(values.slice(0, 6).map(kit.real));
             return Ok;
-        }),
+        }, { floats: { 1: 'f32' } }),
         /** Status GdipGetMatrixElements(const GpMatrix *matrix, REAL *out) */
         GdipGetMatrixElements: fn(8, ([matrix, out])=>{
             const held = get(matrix);
@@ -190,7 +194,9 @@ export function createMatrixFunctions(kit){
             kit.putF32s(out, held.m);
             return Ok;
         }),
-        /** Status GdipMultiplyMatrix(GpMatrix *matrix, const GpMatrix *matrix2, GpMatrixOrder order) */
+        /**
+         * Status GdipMultiplyMatrix(GpMatrix *matrix, const GpMatrix *matrix2, GpMatrixOrder order)
+         */
         GdipMultiplyMatrix: fn(12, ([matrix, other, order])=>{
             const held = get(matrix);
             const by = get(other);
@@ -210,7 +216,7 @@ export function createMatrixFunctions(kit){
             }
             held.m = combine(held.m, [1, 0, 0, 1, kit.real(dx), kit.real(dy)], order >>> 0);
             return Ok;
-        }),
+        }, { floats: { 1: 'f32', 2: 'f32' } }),
         /** Status GdipScaleMatrix(GpMatrix *matrix, REAL sx, REAL sy, GpMatrixOrder order) */
         GdipScaleMatrix: fn(16, ([matrix, sx, sy, order])=>{
             const held = get(matrix);
@@ -220,7 +226,7 @@ export function createMatrixFunctions(kit){
             }
             held.m = combine(held.m, [kit.real(sx), 0, 0, kit.real(sy), 0, 0], order >>> 0);
             return Ok;
-        }),
+        }, { floats: { 1: 'f32', 2: 'f32' } }),
         /** Status GdipRotateMatrix(GpMatrix *matrix, REAL angle, GpMatrixOrder order) */
         GdipRotateMatrix: fn(12, ([matrix, angle, order])=>{
             const held = get(matrix);
@@ -230,8 +236,10 @@ export function createMatrixFunctions(kit){
             }
             held.m = combine(held.m, rotation(kit.real(angle)), order >>> 0);
             return Ok;
-        }),
-        /** Status GdipShearMatrix(GpMatrix *matrix, REAL shearX, REAL shearY, GpMatrixOrder order) */
+        }, { floats: { 1: 'f32' } }),
+        /**
+         * Status GdipShearMatrix(GpMatrix *matrix, REAL shearX, REAL shearY, GpMatrixOrder order)
+         */
         GdipShearMatrix: fn(16, ([matrix, sx, sy, order])=>{
             const held = get(matrix);
             if (!held || (order >>> 0) > MatrixOrderAppend)
@@ -240,7 +248,7 @@ export function createMatrixFunctions(kit){
             }
             held.m = combine(held.m, [1, kit.real(sy), kit.real(sx), 1, 0, 0], order >>> 0);
             return Ok;
-        }),
+        }, { floats: { 1: 'f32', 2: 'f32' } }),
         /** Status GdipInvertMatrix(GpMatrix *matrix): InvalidParameter for one with no inverse. */
         GdipInvertMatrix: fn(4, ([matrix])=>{
             const held = get(matrix);

@@ -114,7 +114,9 @@ export function createPathIteratorFunctions(kit, paths){
     };
 
     const functions = {
-        /** Status GdipCreatePathIter(GpPathIterator **iterator, GpPath *path): a copy of the path. */
+        /**
+         * Status GdipCreatePathIter(GpPathIterator **iterator, GpPath *path): a copy of the path.
+         */
         GdipCreatePathIter: fn(8, ([out, at])=>{
             if ((out >>> 0) === 0)
             {
@@ -264,7 +266,9 @@ export function createPathIteratorFunctions(kit, paths){
             kit.putI32(end, to);
             return Ok;
         })),
-        /** Status GdipPathIterNextMarker(GpPathIterator *iterator, INT *count, INT *start, INT *end) */
+        /**
+         * Status GdipPathIterNextMarker(GpPathIterator *iterator, INT *count, INT *start, INT *end)
+         */
         GdipPathIterNextMarker: fn(16, onIterator((it, [count, start, end])=>{
             if ([count, start, end].some(at=>(at >>> 0) === 0))
             {

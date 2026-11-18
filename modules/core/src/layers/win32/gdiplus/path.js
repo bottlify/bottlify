@@ -745,7 +745,9 @@ export function createPathFunctions(kit, matrices){
         return Ok;
     };
 
-    /** @param {Path} path @param {number} address @param {number} count @param {boolean} integers */
+    /**
+     * @param {Path} path @param {number} address @param {number} count @param {boolean} integers
+     */
     const getPoints = (path, address, count, integers)=>{
         if ((address >>> 0) === 0 || (count | 0) <= 0)
         {
@@ -854,10 +856,10 @@ export function createPathFunctions(kit, matrices){
             kit.add('path', emptyPath(fill >>> 0), out);
             return Ok;
         }),
-        /** Status GdipCreatePath2(const GpPointF*, const BYTE*, INT, GpFillMode, GpPath**) */
+        /** Status GdipCreatePath2(const GpPointF*, const BYTE*, INT, IN GpFillMode, GpPath**) */
         GdipCreatePath2: fn(20, ([points, types, count, fill, out])=>
             createFrom(points, types, count, fill >>> 0, out, false)),
-        /** Status GdipCreatePath2I(const GpPoint*, const BYTE*, INT, GpFillMode, GpPath**) */
+        /** Status GdipCreatePath2I(const GpPoint*, const BYTE*, INT, IN GpFillMode, GpPath**) */
         GdipCreatePath2I: fn(20, ([points, types, count, fill, out])=>
             createFrom(points, types, count, fill >>> 0, out, true)),
         /** Status GdipClonePath(GpPath *path, GpPath **clone) */
@@ -1066,7 +1068,7 @@ export function createPathFunctions(kit, matrices){
             path.points = m ? flat.points.map(point=>apply(m, point)) : flat.points;
             path.types = flat.types;
             return Ok;
-        })),
+        }), { floats: { 2: 'f32' } }),
         /**
          * Status GdipWarpPath(GpPath *path, GpMatrix *matrix, const GpPointF *points, INT count,
          *   REAL srcx, REAL srcy, REAL srcwidth, REAL srcheight, WarpMode mode, REAL flatness)
@@ -1124,7 +1126,7 @@ export function createPathFunctions(kit, matrices){
             Object.assign(path, widen(moved, Math.max(held.width, 1), held.dashStyle, held.dashes,
                 Math.max(kit.real(flatness), 0.05)));
             return Ok;
-        })),
+        }), { floats: { 3: 'f32' } }),
         /** Status GdipGetPathWorldBounds(GpPath*, GpRectF*, const GpMatrix*, const GpPen*) */
         GdipGetPathWorldBounds: fn(16, onPath((path, [out, matrix, pen])=>
             worldBounds(path, out, matrix, pen, false))),
@@ -1133,14 +1135,19 @@ export function createPathFunctions(kit, matrices){
             worldBounds(path, out, matrix, pen, true))),
         /** Status GdipIsVisiblePathPoint(GpPath*, REAL x, REAL y, GpGraphics*, BOOL*) */
         GdipIsVisiblePathPoint: fn(20, onPath((path, [x, y, , out])=>
-            visible(path, kit.real(x), kit.real(y), out))),
+            visible(path, kit.real(x), kit.real(y), out)), { floats: { 1: 'f32', 2: 'f32' } }),
         /** Status GdipIsVisiblePathPointI(GpPath*, INT x, INT y, GpGraphics*, BOOL*) */
         GdipIsVisiblePathPointI: fn(20, onPath((path, [x, y, , out])=>
             visible(path, x | 0, y | 0, out))),
-        /** Status GdipIsOutlineVisiblePathPoint(GpPath*, REAL x, REAL y, GpPen*, GpGraphics*, BOOL*) */
+        /**
+         * Status GdipIsOutlineVisiblePathPoint(GpPath*, REAL x, REAL y, GpPen*, GpGraphics*, BOOL*)
+         */
         GdipIsOutlineVisiblePathPoint: fn(24, onPath((path, [x, y, pen, , out])=>
-            outlineVisible(path, kit.real(x), kit.real(y), pen, out))),
-        /** Status GdipIsOutlineVisiblePathPointI(GpPath*, INT x, INT y, GpPen*, GpGraphics*, BOOL*) */
+            outlineVisible(path, kit.real(x), kit.real(y), pen, out)),
+        { floats: { 1: 'f32', 2: 'f32' } }),
+        /**
+         * Status GdipIsOutlineVisiblePathPointI(GpPath*, INT x, INT y, GpPen*, GpGraphics*, BOOL*)
+         */
         GdipIsOutlineVisiblePathPointI: fn(24, onPath((path, [x, y, pen, , out])=>
             outlineVisible(path, x | 0, y | 0, pen, out))),
 
@@ -1149,7 +1156,7 @@ export function createPathFunctions(kit, matrices){
             const [x1, y1, x2, y2] = reals(args);
             addLines(path, [[x1, y1], [x2, y2]]);
             return Ok;
-        })),
+        }), { floats: { 1: 'f32', 2: 'f32', 3: 'f32' } }),
         /** Status GdipAddPathLineI(GpPath *path, INT x1, INT y1, INT x2, INT y2) */
         GdipAddPathLineI: fn(20, onPath((path, args)=>{
             const [x1, y1, x2, y2] = ints(args);
@@ -1176,12 +1183,17 @@ export function createPathFunctions(kit, matrices){
             addLines(path, points);
             return Ok;
         })),
-        /** Status GdipAddPathBezier(GpPath *path, REAL x1, y1, x2, y2, x3, y3, x4, y4) */
+        /**
+         * Status GdipAddPathBezier(GpPath *path, REAL x1, REAL y1, REAL x2, REAL y2, REAL x3,
+         *     REAL y3, REAL x4, REAL y4)
+         */
         GdipAddPathBezier: fn(36, onPath((path, args)=>{
             const v = reals(args);
             addBeziers(path, [[v[0], v[1]], [v[2], v[3]], [v[4], v[5]], [v[6], v[7]]]);
             return Ok;
-        })),
+        }),
+        { floats: { 1: 'f32', 2: 'f32', 3: 'f32', 4: 'f32', 5: 'f32', 6: 'f32', 7: 'f32',
+            8: 'f32' } }),
         /** Status GdipAddPathBezierI(GpPath *path, INT x1 ... y4) */
         GdipAddPathBezierI: fn(36, onPath((path, args)=>{
             const v = ints(args);
@@ -1208,21 +1220,29 @@ export function createPathFunctions(kit, matrices){
             addBeziers(path, points);
             return Ok;
         })),
-        /** Status GdipAddPathArc(GpPath*, REAL x, y, width, height, startAngle, sweepAngle) */
+        /**
+         * Status GdipAddPathArc(GpPath*, REAL x, REAL y, REAL width, REAL height, REAL startAngle,
+         *     REAL sweepAngle)
+         */
         GdipAddPathArc: fn(28, onPath((path, args)=>{
             const v = reals(args);
             return arc(path, v.slice(0, 4), v[4], v[5]);
-        })),
-        /** Status GdipAddPathArcI(GpPath*, INT x, y, width, height, REAL start, REAL sweep) */
+        }), { floats: { 1: 'f32', 2: 'f32', 3: 'f32', 4: 'f32', 5: 'f32', 6: 'f32' } }),
+        /**
+         * Status GdipAddPathArcI(GpPath*, INT x, INT y, INT width, INT height, REAL start,
+         *     REAL sweep)
+         */
         GdipAddPathArcI: fn(28, onPath((path, args)=>
             arc(path, ints(args.slice(0, 4)), kit.real(args[4]), kit.real(args[5])))),
-        /** Status GdipAddPathEllipse(GpPath*, REAL x, y, width, height) */
-        GdipAddPathEllipse: fn(20, onPath((path, args)=>ellipse(path, reals(args)))),
-        /** Status GdipAddPathEllipseI(GpPath*, INT x, y, width, height) */
+        /** Status GdipAddPathEllipse(GpPath*, REAL x, REAL y, REAL width, REAL height) */
+        GdipAddPathEllipse: fn(20, onPath((path, args)=>ellipse(path, reals(args))),
+            { floats: { 1: 'f32', 2: 'f32', 3: 'f32', 4: 'f32' } }),
+        /** Status GdipAddPathEllipseI(GpPath*, INT x, INT y, INT width, INT height) */
         GdipAddPathEllipseI: fn(20, onPath((path, args)=>ellipse(path, ints(args)))),
-        /** Status GdipAddPathRectangle(GpPath*, REAL x, y, width, height) */
-        GdipAddPathRectangle: fn(20, onPath((path, args)=>rectangle(path, reals(args)))),
-        /** Status GdipAddPathRectangleI(GpPath*, INT x, y, width, height) */
+        /** Status GdipAddPathRectangle(GpPath*, REAL x, REAL y, REAL width, REAL height) */
+        GdipAddPathRectangle: fn(20, onPath((path, args)=>rectangle(path, reals(args))),
+            { floats: { 1: 'f32', 2: 'f32', 3: 'f32', 4: 'f32' } }),
+        /** Status GdipAddPathRectangleI(GpPath*, INT x, INT y, INT width, INT height) */
         GdipAddPathRectangleI: fn(20, onPath((path, args)=>rectangle(path, ints(args)))),
         /** Status GdipAddPathRectangles(GpPath*, const GpRectF *rects, INT count) */
         GdipAddPathRectangles: fn(12, onPath((path, [at, count])=>{
@@ -1254,12 +1274,18 @@ export function createPathFunctions(kit, matrices){
             const points = pointsOf(at, count, true, 3);
             return points ? polygon(path, points) : InvalidParameter;
         })),
-        /** Status GdipAddPathPie(GpPath*, REAL x, y, width, height, startAngle, sweepAngle) */
+        /**
+         * Status GdipAddPathPie(GpPath*, REAL x, REAL y, REAL width, REAL height, REAL startAngle,
+         *     REAL sweepAngle)
+         */
         GdipAddPathPie: fn(28, onPath((path, args)=>{
             const v = reals(args);
             return pie(path, v.slice(0, 4), v[4], v[5]);
-        })),
-        /** Status GdipAddPathPieI(GpPath*, INT x, y, width, height, REAL start, REAL sweep) */
+        }), { floats: { 1: 'f32', 2: 'f32', 3: 'f32', 4: 'f32', 5: 'f32', 6: 'f32' } }),
+        /**
+         * Status GdipAddPathPieI(GpPath*, INT x, INT y, INT width, INT height, REAL start,
+         *     REAL sweep)
+         */
         GdipAddPathPieI: fn(28, onPath((path, args)=>
             pie(path, ints(args.slice(0, 4)), kit.real(args[4]), kit.real(args[5])))),
         /** Status GdipAddPathCurve(GpPath*, const GpPointF *points, INT count): tension 0.5. */
@@ -1276,12 +1302,12 @@ export function createPathFunctions(kit, matrices){
         GdipAddPathCurve2: fn(16, onPath((path, [at, count, tension])=>{
             const points = pointsOf(at, count, false, 2);
             return points ? curve(path, points, kit.real(tension)) : InvalidParameter;
-        })),
+        }), { floats: { 3: 'f32' } }),
         /** Status GdipAddPathCurve2I(GpPath*, const GpPoint *points, INT count, REAL tension) */
         GdipAddPathCurve2I: fn(16, onPath((path, [at, count, tension])=>{
             const points = pointsOf(at, count, true, 2);
             return points ? curve(path, points, kit.real(tension)) : InvalidParameter;
-        })),
+        }), { floats: { 3: 'f32' } }),
         /**
          * Status GdipAddPathCurve3(GpPath*, const GpPointF *points, INT count, INT offset,
          *   INT numberOfSegments, REAL tension)
@@ -1297,7 +1323,7 @@ export function createPathFunctions(kit, matrices){
             }
             return curve(path, points, kit.real(tension), offset | 0, segments | 0);
         })),
-        /** Status GdipAddPathCurve3I(GpPath*, const GpPoint*, INT, INT, INT, REAL) */
+        /** Status GdipAddPathCurve3I(GpPath*, const GpPoint*, INT, IN INT, IN INT, IN REAL) */
         GdipAddPathCurve3I: fn(24, onPath((path, [at, count, offset, segments, tension])=>{
             const points = pointsOf(at, count, true, 2);
             if (!points || (segments | 0) <= 0 || (offset | 0) < 0
@@ -1321,12 +1347,12 @@ export function createPathFunctions(kit, matrices){
         GdipAddPathClosedCurve2: fn(16, onPath((path, [at, count, tension])=>{
             const points = pointsOf(at, count, false, 3);
             return points ? closedCurve(path, points, kit.real(tension)) : InvalidParameter;
-        })),
+        }), { floats: { 3: 'f32' } }),
         /** Status GdipAddPathClosedCurve2I(GpPath*, const GpPoint*, INT count, REAL tension) */
         GdipAddPathClosedCurve2I: fn(16, onPath((path, [at, count, tension])=>{
             const points = pointsOf(at, count, true, 3);
             return points ? closedCurve(path, points, kit.real(tension)) : InvalidParameter;
-        })),
+        }), { floats: { 3: 'f32' } }),
         /**
          * Status GdipAddPathPath(GpPath *path, const GpPath *added, BOOL connect)
          *

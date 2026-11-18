@@ -260,7 +260,9 @@ export function createBrushFunctions(kit, { matrices, paths, images }){
             brush.color = color >>> 0;
             return Ok;
         })),
-        /** Status GdipCreateHatchBrush(GpHatchStyle style, ARGB fore, ARGB back, GpHatch **brush) */
+        /**
+         * Status GdipCreateHatchBrush(GpHatchStyle style, ARGB fore, ARGB back, GpHatch **brush)
+         */
         GdipCreateHatchBrush: fn(16, ([style, fore, back, out])=>{
             if ((style >>> 0) > HATCH_STYLE_LAST)
             {
@@ -319,16 +321,30 @@ export function createBrushFunctions(kit, { matrices, paths, images }){
 
         /** Status GdipCreateTexture(GpImage *image, GpWrapMode wrap, GpTexture **texture) */
         GdipCreateTexture: fn(12, ([image, wrap, out])=>texture(image, wrap >>> 0, null, out)),
-        /** Status GdipCreateTexture2(GpImage*, GpWrapMode, REAL x, y, width, height, GpTexture**) */
+        /**
+         * Status GdipCreateTexture2(GpImage*, GpWrapMode, REAL x, REAL y, REAL width, REAL height,
+         *     GpTexture**)
+         */
         GdipCreateTexture2: fn(28, ([image, wrap, ...rest])=>
-            texture(image, wrap >>> 0, rest.slice(0, 4).map(kit.real), rest[4])),
-        /** Status GdipCreateTexture2I(GpImage*, GpWrapMode, INT x, y, width, height, GpTexture**) */
+            texture(image, wrap >>> 0, rest.slice(0, 4).map(kit.real), rest[4]),
+        { floats: { 2: 'f32', 3: 'f32', 4: 'f32', 5: 'f32' } }),
+        /**
+         * Status GdipCreateTexture2I(GpImage*, GpWrapMode, INT x, INT y, INT width, INT height,
+         *     GpTexture**)
+         */
         GdipCreateTexture2I: fn(28, ([image, wrap, ...rest])=>
             texture(image, wrap >>> 0, rest.slice(0, 4).map(value=>value | 0), rest[4])),
-        /** Status GdipCreateTextureIA(GpImage*, GpImageAttributes*, REAL x, y, w, h, GpTexture**) */
+        /**
+         * Status GdipCreateTextureIA(GpImage*, GpImageAttributes*, REAL x, REAL y, REAL w, REAL h,
+         *     GpTexture**)
+         */
         GdipCreateTextureIA: fn(28, ([image, , ...rest])=>
-            texture(image, WrapModeTile, rest.slice(0, 4).map(kit.real), rest[4])),
-        /** Status GdipCreateTextureIAI(GpImage*, GpImageAttributes*, INT x, y, w, h, GpTexture**) */
+            texture(image, WrapModeTile, rest.slice(0, 4).map(kit.real), rest[4]),
+        { floats: { 2: 'f32', 3: 'f32', 4: 'f32', 5: 'f32' } }),
+        /**
+         * Status GdipCreateTextureIAI(GpImage*, GpImageAttributes*, INT x, INT y, INT w, INT h,
+         *     GpTexture**)
+         */
         GdipCreateTextureIAI: fn(28, ([image, , ...rest])=>
             texture(image, WrapModeTile, rest.slice(0, 4).map(value=>value | 0), rest[4])),
         /** Status GdipGetTextureImage(GpTexture *brush, GpImage **image): a copy of it. */
@@ -393,7 +409,10 @@ export function createBrushFunctions(kit, { matrices, paths, images }){
             return lineBrush([x, y, width, height].map(Math.fround), c1, c2, wrap >>> 0,
                 (x2 - x1) / length, (y2 - y1) / length, out);
         }),
-        /** Status GdipCreateLineBrushI(const GpPoint*, const GpPoint*, ARGB, ARGB, GpWrapMode, ...) */
+        /**
+         * Status GdipCreateLineBrushI(const GpPoint*, const GpPoint*, ARGB, ARG ARGB,
+         *     ARG GpWrapMode, ...)
+         */
         GdipCreateLineBrushI: fn(24, ([p1, p2, c1, c2, wrap, out])=>{
             if ((p1 >>> 0) === 0 || (p2 >>> 0) === 0)
             {
@@ -431,7 +450,10 @@ export function createBrushFunctions(kit, { matrices, paths, images }){
          */
         GdipCreateLineBrushFromRect: fn(24, ([rect, c1, c2, mode, wrap, out])=>
             fromRectMode(rect, false, c1, c2, mode, wrap, out)),
-        /** Status GdipCreateLineBrushFromRectI(const GpRect*, ARGB, ARGB, mode, wrap, ...) */
+        /**
+         * Status GdipCreateLineBrushFromRectI(const GpRect*, ARGB, ARG ARGB, ARG mode, ARG wrap,
+         *     ...)
+         */
         GdipCreateLineBrushFromRectI: fn(24, ([rect, c1, c2, mode, wrap, out])=>
             fromRectMode(rect, true, c1, c2, mode, wrap, out)),
         /**
@@ -439,7 +461,8 @@ export function createBrushFunctions(kit, { matrices, paths, images }){
          *   REAL angle, BOOL isAngleScalable, GpWrapMode wrap, GpLineGradient **brush)
          */
         GdipCreateLineBrushFromRectWithAngle: fn(28, ([rect, c1, c2, angle, scalable, wrap, out])=>
-            fromRectAngle(rect, false, c1, c2, kit.real(angle), scalable !== 0, wrap, out)),
+            fromRectAngle(rect, false, c1, c2, kit.real(angle), scalable !== 0, wrap, out),
+        { floats: { 3: 'f32' } }),
         /** Status GdipCreateLineBrushFromRectWithAngleI(const GpRect*, ...) */
         GdipCreateLineBrushFromRectWithAngleI: fn(28, ([rect, c1, c2, angle, scalable, wrap, out])=>
             fromRectAngle(rect, true, c1, c2, kit.real(angle), scalable !== 0, wrap, out)),
@@ -516,7 +539,9 @@ export function createBrushFunctions(kit, { matrices, paths, images }){
             kit.putI32(out, /** @type {number[]} */ (brush.factors).length);
             return Ok;
         })),
-        /** Status GdipGetLineBlend(GpLineGradient *brush, REAL *factors, REAL *positions, INT count) */
+        /**
+         * Status GdipGetLineBlend(GpLineGradient *brush, REAL *factors, REAL *positions, INT count)
+         */
         GdipGetLineBlend: fn(16, onBrush(LINE, (brush, [factors, positions, count])=>{
             const held = /** @type {number[]} */ (brush.factors);
             if ((factors >>> 0) === 0 || (positions >>> 0) === 0 || (count | 0) <= 0)
@@ -531,7 +556,9 @@ export function createBrushFunctions(kit, { matrices, paths, images }){
                 held.length, false);
             return Ok;
         })),
-        /** Status GdipSetLineBlend(GpLineGradient*, const REAL *factors, const REAL *positions, INT) */
+        /**
+         * Status GdipSetLineBlend(GpLineGradient*, const REAL *factors, const REAL *positions, INT)
+         */
         GdipSetLineBlend: fn(16, onBrush(LINE, (brush, [factors, positions, count])=>{
             const blend = readBlend(factors, positions, count, 1, false);
             if (!blend)
@@ -564,7 +591,7 @@ export function createBrushFunctions(kit, { matrices, paths, images }){
                 [brush.factors, brush.positions] = [[0, peak, 0], [0, at, 1]];
             }
             return Ok;
-        })),
+        }), { floats: { 1: 'f32', 2: 'f32' } }),
         /**
          * Status GdipSetLineSigmaBlend(GpLineGradient *brush, REAL focus, REAL scale)
          *
@@ -572,7 +599,8 @@ export function createBrushFunctions(kit, { matrices, paths, images }){
          * share sampled either side of it.
          */
         GdipSetLineSigmaBlend: fn(12, onBrush(LINE, (brush, [focus, scale])=>
-            sigmaBlend(brush, kit.real(focus), kit.real(scale)))),
+            sigmaBlend(brush, kit.real(focus), kit.real(scale))),
+        { floats: { 1: 'f32', 2: 'f32' } }),
         /** Status GdipGetLinePresetBlendCount(GpLineGradient *brush, INT *count) */
         GdipGetLinePresetBlendCount: fn(8, onBrush(LINE, (brush, [out])=>{
             if ((out >>> 0) === 0)
@@ -582,7 +610,9 @@ export function createBrushFunctions(kit, { matrices, paths, images }){
             kit.putI32(out, /** @type {number[]} */ (brush.presetColors).length);
             return Ok;
         })),
-        /** Status GdipGetLinePresetBlend(GpLineGradient*, ARGB *colors, REAL *positions, INT count) */
+        /**
+         * Status GdipGetLinePresetBlend(GpLineGradient*, ARGB *colors, REAL *positions, INT count)
+         */
         GdipGetLinePresetBlend: fn(16, onBrush(LINE, (brush, [colors, positions, count])=>
             getPreset(brush, colors, positions, count | 0, InvalidParameter))),
         /** Status GdipSetLinePresetBlend(GpLineGradient*, const ARGB*, const REAL*, INT count) */
@@ -602,15 +632,20 @@ export function createBrushFunctions(kit, { matrices, paths, images }){
         /** Status GdipMultiplyLineTransform(GpLineGradient*, const GpMatrix*, GpMatrixOrder) */
         GdipMultiplyLineTransform: fn(12, onBrush(LINE, (brush, [matrix, order])=>
             multiplyTransform(brush, matrix, order))),
-        /** Status GdipTranslateLineTransform(GpLineGradient*, REAL dx, REAL dy, GpMatrixOrder) */
+        /**
+         * Status GdipTranslateLineTransform(GpLineGradient*, REAL dx, REAL dy, REAL GpMatrixOrder)
+         */
         GdipTranslateLineTransform: fn(16, onBrush(LINE, (brush, [dx, dy, order])=>
-            applyTransform(brush, [1, 0, 0, 1, kit.real(dx), kit.real(dy)], order))),
-        /** Status GdipScaleLineTransform(GpLineGradient*, REAL sx, REAL sy, GpMatrixOrder) */
+            applyTransform(brush, [1, 0, 0, 1, kit.real(dx), kit.real(dy)], order)),
+        { floats: { 1: 'f32', 2: 'f32', 3: 'f32' } }),
+        /** Status GdipScaleLineTransform(GpLineGradient*, REAL sx, REAL sy, REAL GpMatrixOrder) */
         GdipScaleLineTransform: fn(16, onBrush(LINE, (brush, [sx, sy, order])=>
-            applyTransform(brush, [kit.real(sx), 0, 0, kit.real(sy), 0, 0], order))),
-        /** Status GdipRotateLineTransform(GpLineGradient*, REAL angle, GpMatrixOrder) */
+            applyTransform(brush, [kit.real(sx), 0, 0, kit.real(sy), 0, 0], order)),
+        { floats: { 1: 'f32', 2: 'f32', 3: 'f32' } }),
+        /** Status GdipRotateLineTransform(GpLineGradient*, REAL angle, REAL GpMatrixOrder) */
         GdipRotateLineTransform: fn(12, onBrush(LINE, (brush, [angle, order])=>
-            applyTransform(brush, rotation(kit.real(angle)), order))),
+            applyTransform(brush, rotation(kit.real(angle)), order)),
+        { floats: { 1: 'f32', 2: 'f32' } }),
 
         /** Status GdipGetTextureTransform(GpTexture *brush, GpMatrix *matrix) */
         GdipGetTextureTransform: fn(8, onBrush(TEXTURE, (brush, [matrix])=>
@@ -627,17 +662,25 @@ export function createBrushFunctions(kit, { matrices, paths, images }){
         /** Status GdipMultiplyTextureTransform(GpTexture*, const GpMatrix*, GpMatrixOrder) */
         GdipMultiplyTextureTransform: fn(12, onBrush(TEXTURE, (brush, [matrix, order])=>
             multiplyTransform(brush, matrix, order))),
-        /** Status GdipTranslateTextureTransform(GpTexture*, REAL dx, REAL dy, GpMatrixOrder) */
+        /**
+         * Status GdipTranslateTextureTransform(GpTexture*, REAL dx, REAL dy, REAL GpMatrixOrder)
+         */
         GdipTranslateTextureTransform: fn(16, onBrush(TEXTURE, (brush, [dx, dy, order])=>
-            applyTransform(brush, [1, 0, 0, 1, kit.real(dx), kit.real(dy)], order))),
-        /** Status GdipScaleTextureTransform(GpTexture*, REAL sx, REAL sy, GpMatrixOrder) */
+            applyTransform(brush, [1, 0, 0, 1, kit.real(dx), kit.real(dy)], order)),
+        { floats: { 1: 'f32', 2: 'f32', 3: 'f32' } }),
+        /** Status GdipScaleTextureTransform(GpTexture*, REAL sx, REAL sy, REAL GpMatrixOrder) */
         GdipScaleTextureTransform: fn(16, onBrush(TEXTURE, (brush, [sx, sy, order])=>
-            applyTransform(brush, [kit.real(sx), 0, 0, kit.real(sy), 0, 0], order))),
-        /** Status GdipRotateTextureTransform(GpTexture*, REAL angle, GpMatrixOrder) */
+            applyTransform(brush, [kit.real(sx), 0, 0, kit.real(sy), 0, 0], order)),
+        { floats: { 1: 'f32', 2: 'f32', 3: 'f32' } }),
+        /** Status GdipRotateTextureTransform(GpTexture*, REAL angle, REAL GpMatrixOrder) */
         GdipRotateTextureTransform: fn(12, onBrush(TEXTURE, (brush, [angle, order])=>
-            applyTransform(brush, rotation(kit.real(angle)), order))),
+            applyTransform(brush, rotation(kit.real(angle)), order)),
+        { floats: { 1: 'f32', 2: 'f32' } }),
 
-        /** Status GdipCreatePathGradient(const GpPointF *points, INT count, GpWrapMode, GpPathGradient**) */
+        /**
+         * Status GdipCreatePathGradient(const GpPointF *points, INT count, INT GpWrapMode,
+         *     GpPathGradient**)
+         */
         GdipCreatePathGradient: fn(16, ([points, count, wrap, out])=>{
             if ((points >>> 0) === 0 || (out >>> 0) === 0)
             {
@@ -649,7 +692,7 @@ export function createBrushFunctions(kit, { matrices, paths, images }){
             }
             return pathGradient(kit.points(points, count | 0), wrap >>> 0, out);
         }),
-        /** Status GdipCreatePathGradientI(const GpPoint *points, INT count, GpWrapMode, ...) */
+        /** Status GdipCreatePathGradientI(const GpPoint *points, INT count, INT GpWrapMode, ...) */
         GdipCreatePathGradientI: fn(16, ([points, count, wrap, out])=>{
             if ((points >>> 0) === 0 || (out >>> 0) === 0)
             {
@@ -847,7 +890,7 @@ export function createBrushFunctions(kit, { matrices, paths, images }){
         GdipSetPathGradientFocusScales: fn(12, onBrush(PATH, (brush, [x, y])=>{
             brush.focus = [kit.real(x), kit.real(y)];
             return Ok;
-        })),
+        }), { floats: { 1: 'f32', 2: 'f32' } }),
         /** Status GdipGetPathGradientBlendCount(GpPathGradient *brush, INT *count) */
         GdipGetPathGradientBlendCount: fn(8, onBrush(PATH, (brush, [out])=>{
             if ((out >>> 0) === 0)
@@ -890,10 +933,11 @@ export function createBrushFunctions(kit, { matrices, paths, images }){
             [brush.factors, brush.positions] = at === 0 ? [[peak, 0], [0, 1]]
                 : at === 1 ? [[0, peak], [0, 1]] : [[0, peak, 0], [0, at, 1]];
             return Ok;
-        })),
+        }), { floats: { 1: 'f32', 2: 'f32' } }),
         /** Status GdipSetPathGradientSigmaBlend(GpPathGradient *brush, REAL focus, REAL scale) */
         GdipSetPathGradientSigmaBlend: fn(12, onBrush(PATH, (brush, [focus, scale])=>
-            sigmaBlend(brush, kit.real(focus), kit.real(scale)))),
+            sigmaBlend(brush, kit.real(focus), kit.real(scale))),
+        { floats: { 1: 'f32', 2: 'f32' } }),
         /** Status GdipGetPathGradientPresetBlendCount(GpPathGradient *brush, INT *count) */
         GdipGetPathGradientPresetBlendCount: fn(8, onBrush(PATH, (brush, [out])=>{
             if ((out >>> 0) === 0)
@@ -924,15 +968,20 @@ export function createBrushFunctions(kit, { matrices, paths, images }){
         /** Status GdipMultiplyPathGradientTransform(GpPathGradient*, const GpMatrix*, order) */
         GdipMultiplyPathGradientTransform: fn(12, onBrush(PATH, (brush, [matrix, order])=>
             multiplyTransform(brush, matrix, order))),
-        /** Status GdipTranslatePathGradientTransform(GpPathGradient*, REAL dx, REAL dy, order) */
+        /**
+         * Status GdipTranslatePathGradientTransform(GpPathGradient*, REAL dx, REAL dy, REAL order)
+         */
         GdipTranslatePathGradientTransform: fn(16, onBrush(PATH, (brush, [dx, dy, order])=>
-            applyTransform(brush, [1, 0, 0, 1, kit.real(dx), kit.real(dy)], order))),
-        /** Status GdipScalePathGradientTransform(GpPathGradient*, REAL sx, REAL sy, order) */
+            applyTransform(brush, [1, 0, 0, 1, kit.real(dx), kit.real(dy)], order)),
+        { floats: { 1: 'f32', 2: 'f32', 3: 'f32' } }),
+        /** Status GdipScalePathGradientTransform(GpPathGradient*, REAL sx, REAL sy, REAL order) */
         GdipScalePathGradientTransform: fn(16, onBrush(PATH, (brush, [sx, sy, order])=>
-            applyTransform(brush, [kit.real(sx), 0, 0, kit.real(sy), 0, 0], order))),
-        /** Status GdipRotatePathGradientTransform(GpPathGradient*, REAL angle, order) */
+            applyTransform(brush, [kit.real(sx), 0, 0, kit.real(sy), 0, 0], order)),
+        { floats: { 1: 'f32', 2: 'f32', 3: 'f32' } }),
+        /** Status GdipRotatePathGradientTransform(GpPathGradient*, REAL angle, REAL order) */
         GdipRotatePathGradientTransform: fn(12, onBrush(PATH, (brush, [angle, order])=>
-            applyTransform(brush, rotation(kit.real(angle)), order))),
+            applyTransform(brush, rotation(kit.real(angle)), order)),
+        { floats: { 1: 'f32', 2: 'f32' } }),
     };
 
     /**
@@ -1045,7 +1094,10 @@ export function createBrushFunctions(kit, { matrices, paths, images }){
         return Ok;
     }
 
-    /** A brush's new transform, which must have an inverse. @param {Brush} brush @param {number} matrix */
+    /**
+     * A brush's new transform,
+     *     which must have an inverse. @param {Brush} brush @param {number} matrix
+     */
     function setTransform(brush, matrix){
         const m = matrices.elements(matrix);
         if (!m || !invert(m))

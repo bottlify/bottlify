@@ -139,7 +139,9 @@ export function createImageAttributesFunctions(kit){
                 { length: ColorAdjustTypeCount }, none), wrap: 4, colour: 0, clamp: false }), out);
             return Ok;
         }),
-        /** Status GdipCloneImageAttributes(GpImageAttributes *attributes, GpImageAttributes **clone) */
+        /**
+         * Status GdipCloneImageAttributes(GpImageAttributes *attributes, GpImageAttributes **clone)
+         */
         GdipCloneImageAttributes: fn(8, ([at, out])=>{
             const attributes = get(at);
             if (!attributes || (out >>> 0) === 0)
@@ -170,14 +172,20 @@ export function createImageAttributesFunctions(kit){
         }, a=>{
             a.matrix = null;
         }),
-        /** Status GdipSetImageAttributesThreshold(GpImageAttributes *, ColorAdjustType, BOOL, REAL) */
+        /**
+         * Status GdipSetImageAttributesThreshold(GpImageAttributes *, ColorAdjustType,
+         *     ColorAdjustTyp BOOL, ColorAdjustTyp REAL)
+         */
         GdipSetImageAttributesThreshold: setting(16, (a, [threshold])=>{
             a.threshold = kit.real(threshold);
             return Ok;
         }, a=>{
             a.threshold = null;
         }),
-        /** Status GdipSetImageAttributesGamma(GpImageAttributes *, ColorAdjustType, BOOL, REAL) */
+        /**
+         * Status GdipSetImageAttributesGamma(GpImageAttributes *, ColorAdjustType,
+         *     ColorAdjustTyp BOOL, ColorAdjustTyp REAL)
+         */
         GdipSetImageAttributesGamma: setting(16, (a, [gamma])=>{
             const value = kit.real(gamma);
             if (!(value > 0))

@@ -54,7 +54,9 @@ const PixelOffsetModeHalf = 4;
 const PixelOffsetModeHighQuality = 2;
 const CompositingModeSourceCopy = 1;
 
-/** The colour a bitmap's DC starts filled with, to tell what GDI drew: COLORREF 0x0c0b0d, as GDI+'s. */
+/**
+ * The colour a bitmap's DC starts filled with, to tell what GDI drew: COLORREF 0x0c0b0d, as GDI+'s.
+ */
 const DC_KEY = 0x0d0b0c;
 
 /** The ROP BitBlt copies with. */
@@ -810,7 +812,12 @@ export function createGraphicsFunctions(kit, deps){
         return [dw / sw, 0, 0, dh / sh, dx - sx * dw / sw, dy - sy * dh / sh];
     };
 
-    /** A setter of a hint in [low, high]. @param {keyof State} key @param {number} low @param {number} high @param {(v: number) => number} [map] */
+    /**
+     * A setter of a hint in [low, high].
+     *
+     * @param {keyof State} key @param {number} low @param {number} high
+     * @param {(v: number) => number} [map]
+     */
     const setter = (key, low, high, map = v=>v)=>fn(8, onGraphics((g, [value])=>{
         if ((value | 0) < low || (value | 0) > high)
         {
@@ -1141,7 +1148,7 @@ export function createGraphicsFunctions(kit, deps){
             }
             g.state.pageScale = value;
             return Ok;
-        })),
+        }), { floats: { 1: 'f32' } }),
         /** Status GdipGetPageScale(GpGraphics *graphics, REAL *scale) */
         GdipGetPageScale: fn(8, onGraphics((g, [out])=>{
             if ((out >>> 0) === 0)
@@ -1180,22 +1187,26 @@ export function createGraphicsFunctions(kit, deps){
             const m = matrices.elements(matrix);
             return m && invert(m) ? m : null;
         }),
-        /** Status GdipTranslateWorldTransform(GpGraphics *, REAL dx, REAL dy, MatrixOrder) */
-        GdipTranslateWorldTransform: worldOp(16, ([dx, dy])=>[1, 0, 0, 1, kit.real(dx),
-            kit.real(dy)]),
-        /** Status GdipScaleWorldTransform(GpGraphics *, REAL sx, REAL sy, MatrixOrder) */
-        GdipScaleWorldTransform: worldOp(16, ([sx, sy])=>{
+        /** Status GdipTranslateWorldTransform(GpGraphics *, REAL dx, REAL dy, REAL MatrixOrder) */
+        GdipTranslateWorldTransform: { ...worldOp(16, ([dx, dy])=>[1, 0, 0, 1, kit.real(dx),
+            kit.real(dy)]), floats: { 1: 'f32', 2: 'f32', 3: 'f32' } },
+        /** Status GdipScaleWorldTransform(GpGraphics *, REAL sx, REAL sy, REAL MatrixOrder) */
+        GdipScaleWorldTransform: { ...worldOp(16, ([sx, sy])=>{
             const [x, y] = [kit.real(sx), kit.real(sy)];
             return x === 0 || y === 0 ? null : [x, 0, 0, y, 0, 0];
-        }),
-        /** Status GdipRotateWorldTransform(GpGraphics *, REAL angle, MatrixOrder) */
-        GdipRotateWorldTransform: worldOp(12, ([angle])=>rotation(kit.real(angle))),
+        }), floats: { 1: 'f32', 2: 'f32', 3: 'f32' } },
+        /** Status GdipRotateWorldTransform(GpGraphics *, REAL angle, REAL MatrixOrder) */
+        GdipRotateWorldTransform: { ...worldOp(12, ([angle])=>rotation(kit.real(angle))),
+            floats: { 1: 'f32', 2: 'f32' } },
         /**
          * Status GdipTransformPoints(GpGraphics *graphics, GpCoordinateSpace dest,
          *   GpCoordinateSpace source, GpPointF *points, INT count)
          */
         GdipTransformPoints: transformPoints(false),
-        /** Status GdipTransformPointsI(GpGraphics *, GpCoordinateSpace, GpCoordinateSpace, GpPoint *, INT) */
+        /**
+         * Status GdipTransformPointsI(GpGraphics *, GpCoordinateSpace,
+         *     GpCoordinateSpac GpCoordinateSpace, GpPoint *, INT)
+         */
         GdipTransformPointsI: transformPoints(true),
         /**
          * Status GdipSetSmoothingMode(GpGraphics *graphics, SmoothingMode mode)
@@ -1313,10 +1324,13 @@ export function createGraphicsFunctions(kit, deps){
         })),
         /** Status GdipEndContainer(GpGraphics *graphics, GraphicsContainer state) */
         GdipEndContainer: fn(8, onGraphics((g, [token])=>pop(g, token, true))),
-        /** Status GdipSetClipRect(GpGraphics *, REAL x, REAL y, REAL w, REAL h, CombineMode) */
+        /**
+         * Status GdipSetClipRect(GpGraphics *, REAL x, REAL y, REAL w, REAL h, REAL CombineMode)
+         */
         GdipSetClipRect: fn(24, onGraphics((g, [x, y, w, h, mode])=>clipWith(g,
-            rectNode([x, y, w, h].map(kit.real)), mode))),
-        /** Status GdipSetClipRectI(GpGraphics *, INT x, INT y, INT w, INT h, CombineMode) */
+            rectNode([x, y, w, h].map(kit.real)), mode)),
+        { floats: { 1: 'f32', 2: 'f32', 3: 'f32' } }),
+        /** Status GdipSetClipRectI(GpGraphics *, INT x, INT y, INT w, INT h, INT CombineMode) */
         GdipSetClipRectI: fn(24, onGraphics((g, [x, y, w, h, mode])=>clipWith(g,
             rectNode([x, y, w, h].map(v=>v | 0)), mode))),
         /** Status GdipSetClipPath(GpGraphics *graphics, GpPath *path, CombineMode mode) */
@@ -1369,7 +1383,7 @@ export function createGraphicsFunctions(kit, deps){
             g.state.clip = transformNode(g.state.clip, [1, 0, 0, 1, x * m[0] + y * m[2],
                 x * m[1] + y * m[3]]);
             return Ok;
-        })),
+        }), { floats: { 1: 'f32', 2: 'f32' } }),
         /** Status GdipTranslateClipI(GpGraphics *graphics, INT dx, INT dy) */
         GdipTranslateClipI: fn(12, onGraphics((g, [dx, dy])=>{
             const m = deviceOf(g);
@@ -1436,7 +1450,7 @@ export function createGraphicsFunctions(kit, deps){
         })),
         /** Status GdipIsVisiblePoint(GpGraphics *graphics, REAL x, REAL y, BOOL *result) */
         GdipIsVisiblePoint: fn(16, onGraphics((g, [x, y, out])=>isVisiblePoint(g, kit.real(x),
-            kit.real(y), out))),
+            kit.real(y), out)), { floats: { 1: 'f32', 2: 'f32' } }),
         /** Status GdipIsVisiblePointI(GpGraphics *graphics, INT x, INT y, BOOL *result) */
         GdipIsVisiblePointI: fn(16, onGraphics((g, [x, y, out])=>isVisiblePoint(g, x | 0, y | 0,
             out))),
@@ -1449,7 +1463,7 @@ export function createGraphicsFunctions(kit, deps){
             const shape = transformNode(rectNode([x, y, w, h].map(kit.real)), deviceOf(g));
             kit.putBool(out, (combineAreas(visibleArea(g), areaOf(shape), 1) ?? []).length > 0);
             return Ok;
-        })),
+        }), { floats: { 1: 'f32', 2: 'f32', 3: 'f32' } }),
         /** Status GdipIsVisibleRectI(GpGraphics *, INT x, INT y, INT w, INT h, BOOL *) */
         GdipIsVisibleRectI: fn(24, onGraphics((g, [x, y, w, h, out])=>{
             if ((out >>> 0) === 0)
@@ -1481,19 +1495,28 @@ export function createGraphicsFunctions(kit, deps){
             return Ok;
         })),
         /** Status GdipDrawLine(GpGraphics *, GpPen *, REAL x1, REAL y1, REAL x2, REAL y2) */
-        GdipDrawLine: draw(24, 'GdipAddPathLine', 'GdipDrawLine'),
+        GdipDrawLine: { ...draw(24, 'GdipAddPathLine', 'GdipDrawLine'),
+            floats: { 2: 'f32', 3: 'f32' } },
         /** Status GdipDrawLineI(GpGraphics *, GpPen *, INT x1, INT y1, INT x2, INT y2) */
         GdipDrawLineI: draw(24, 'GdipAddPathLineI', 'GdipDrawLineI'),
         /** Status GdipDrawLines(GpGraphics *, GpPen *, const GpPointF *, INT count) */
         GdipDrawLines: draw(16, 'GdipAddPathLine2', 'GdipDrawLines'),
         /** Status GdipDrawLinesI(GpGraphics *, GpPen *, const GpPoint *, INT count) */
         GdipDrawLinesI: draw(16, 'GdipAddPathLine2I', 'GdipDrawLinesI'),
-        /** Status GdipDrawArc(GpGraphics *, GpPen *, REAL x, y, w, h, start, sweep) */
-        GdipDrawArc: draw(32, 'GdipAddPathArc', 'GdipDrawArc'),
-        /** Status GdipDrawArcI(GpGraphics *, GpPen *, INT x, y, w, h, REAL start, sweep) */
+        /**
+         * Status GdipDrawArc(GpGraphics *, GpPen *, REAL x, REAL y, REAL w, REAL h, REAL start,
+         *     REAL sweep)
+         */
+        GdipDrawArc: { ...draw(32, 'GdipAddPathArc', 'GdipDrawArc'),
+            floats: { 2: 'f32', 3: 'f32' } },
+        /**
+         * Status GdipDrawArcI(GpGraphics *, GpPen *, INT x, INT y, INT w, INT h, REAL start,
+         *     REAL sweep)
+         */
         GdipDrawArcI: draw(32, 'GdipAddPathArcI', 'GdipDrawArcI'),
         /** Status GdipDrawBezier(GpGraphics *, GpPen *, REAL x1 .. y4) */
-        GdipDrawBezier: draw(40, 'GdipAddPathBezier', 'GdipDrawBezier'),
+        GdipDrawBezier: { ...draw(40, 'GdipAddPathBezier', 'GdipDrawBezier'),
+            floats: { 2: 'f32' } },
         /** Status GdipDrawBezierI(GpGraphics *, GpPen *, INT x1 .. y4) */
         GdipDrawBezierI: draw(40, 'GdipAddPathBezierI', 'GdipDrawBezierI'),
         /** Status GdipDrawBeziers(GpGraphics *, GpPen *, const GpPointF *, INT count) */
@@ -1508,33 +1531,50 @@ export function createGraphicsFunctions(kit, deps){
         GdipDrawCurve2: draw(20, 'GdipAddPathCurve2', 'GdipDrawCurve2'),
         /** Status GdipDrawCurve2I(GpGraphics *, GpPen *, const GpPoint *, INT, REAL tension) */
         GdipDrawCurve2I: draw(20, 'GdipAddPathCurve2I', 'GdipDrawCurve2I'),
-        /** Status GdipDrawCurve3(GpGraphics *, GpPen *, points, count, offset, segments, tension) */
+        /**
+         * Status GdipDrawCurve3(GpGraphics *, GpPen *, points, point count, point offset,
+         *     point segments, point tension)
+         */
         GdipDrawCurve3: draw(28, 'GdipAddPathCurve3', 'GdipDrawCurve3'),
-        /** Status GdipDrawCurve3I(GpGraphics *, GpPen *, points, count, offset, segments, tension) */
+        /**
+         * Status GdipDrawCurve3I(GpGraphics *, GpPen *, points, point count, point offset,
+         *     point segments, point tension)
+         */
         GdipDrawCurve3I: draw(28, 'GdipAddPathCurve3I', 'GdipDrawCurve3I'),
         /** Status GdipDrawClosedCurve(GpGraphics *, GpPen *, const GpPointF *, INT count) */
         GdipDrawClosedCurve: draw(16, 'GdipAddPathClosedCurve', 'GdipDrawClosedCurve'),
         /** Status GdipDrawClosedCurveI(GpGraphics *, GpPen *, const GpPoint *, INT count) */
         GdipDrawClosedCurveI: draw(16, 'GdipAddPathClosedCurveI', 'GdipDrawClosedCurveI'),
-        /** Status GdipDrawClosedCurve2(GpGraphics *, GpPen *, points, count, REAL tension) */
+        /** Status GdipDrawClosedCurve2(GpGraphics *, GpPen *, points, point count, REAL tension) */
         GdipDrawClosedCurve2: draw(20, 'GdipAddPathClosedCurve2', 'GdipDrawClosedCurve2'),
-        /** Status GdipDrawClosedCurve2I(GpGraphics *, GpPen *, points, count, REAL tension) */
+        /**
+         * Status GdipDrawClosedCurve2I(GpGraphics *, GpPen *, points, point count, REAL tension)
+         */
         GdipDrawClosedCurve2I: draw(20, 'GdipAddPathClosedCurve2I', 'GdipDrawClosedCurve2I'),
-        /** Status GdipDrawEllipse(GpGraphics *, GpPen *, REAL x, y, w, h) */
-        GdipDrawEllipse: draw(24, 'GdipAddPathEllipse', 'GdipDrawEllipse'),
-        /** Status GdipDrawEllipseI(GpGraphics *, GpPen *, INT x, y, w, h) */
+        /** Status GdipDrawEllipse(GpGraphics *, GpPen *, REAL x, REAL y, REAL w, REAL h) */
+        GdipDrawEllipse: { ...draw(24, 'GdipAddPathEllipse', 'GdipDrawEllipse'),
+            floats: { 2: 'f32', 3: 'f32' } },
+        /** Status GdipDrawEllipseI(GpGraphics *, GpPen *, INT x, INT y, INT w, INT h) */
         GdipDrawEllipseI: draw(24, 'GdipAddPathEllipseI', 'GdipDrawEllipseI'),
-        /** Status GdipDrawPie(GpGraphics *, GpPen *, REAL x, y, w, h, start, sweep) */
-        GdipDrawPie: draw(32, 'GdipAddPathPie', 'GdipDrawPie'),
-        /** Status GdipDrawPieI(GpGraphics *, GpPen *, INT x, y, w, h, REAL start, sweep) */
+        /**
+         * Status GdipDrawPie(GpGraphics *, GpPen *, REAL x, REAL y, REAL w, REAL h, REAL start,
+         *     REAL sweep)
+         */
+        GdipDrawPie: { ...draw(32, 'GdipAddPathPie', 'GdipDrawPie'),
+            floats: { 2: 'f32', 3: 'f32' } },
+        /**
+         * Status GdipDrawPieI(GpGraphics *, GpPen *, INT x, INT y, INT w, INT h, REAL start,
+         *     REAL sweep)
+         */
         GdipDrawPieI: draw(32, 'GdipAddPathPieI', 'GdipDrawPieI'),
         /** Status GdipDrawPolygon(GpGraphics *, GpPen *, const GpPointF *, INT count) */
         GdipDrawPolygon: draw(16, 'GdipAddPathPolygon', 'GdipDrawPolygon'),
         /** Status GdipDrawPolygonI(GpGraphics *, GpPen *, const GpPoint *, INT count) */
         GdipDrawPolygonI: draw(16, 'GdipAddPathPolygonI', 'GdipDrawPolygonI'),
-        /** Status GdipDrawRectangle(GpGraphics *, GpPen *, REAL x, y, w, h) */
-        GdipDrawRectangle: draw(24, 'GdipAddPathRectangle', 'GdipDrawRectangle'),
-        /** Status GdipDrawRectangleI(GpGraphics *, GpPen *, INT x, y, w, h) */
+        /** Status GdipDrawRectangle(GpGraphics *, GpPen *, REAL x, REAL y, REAL w, REAL h) */
+        GdipDrawRectangle: { ...draw(24, 'GdipAddPathRectangle', 'GdipDrawRectangle'),
+            floats: { 2: 'f32', 3: 'f32' } },
+        /** Status GdipDrawRectangleI(GpGraphics *, GpPen *, INT x, INT y, INT w, INT h) */
         GdipDrawRectangleI: draw(24, 'GdipAddPathRectangleI', 'GdipDrawRectangleI'),
         /** Status GdipDrawRectangles(GpGraphics *, GpPen *, const GpRectF *, INT count) */
         GdipDrawRectangles: draw(16, 'GdipAddPathRectangles', 'GdipDrawRectangles'),
@@ -1552,26 +1592,35 @@ export function createGraphicsFunctions(kit, deps){
             const path = paths.get(at);
             return brush && path ? fillPath(g, brush, path, 'GdipFillPath') : InvalidParameter;
         })),
-        /** Status GdipFillRectangle(GpGraphics *, GpBrush *, REAL x, y, w, h) */
-        GdipFillRectangle: fillShape(24, 'GdipAddPathRectangle', 'GdipFillRectangle'),
-        /** Status GdipFillRectangleI(GpGraphics *, GpBrush *, INT x, y, w, h) */
+        /** Status GdipFillRectangle(GpGraphics *, GpBrush *, REAL x, REAL y, REAL w, REAL h) */
+        GdipFillRectangle: { ...fillShape(24, 'GdipAddPathRectangle', 'GdipFillRectangle'),
+            floats: { 2: 'f32', 3: 'f32' } },
+        /** Status GdipFillRectangleI(GpGraphics *, GpBrush *, INT x, INT y, INT w, INT h) */
         GdipFillRectangleI: fillShape(24, 'GdipAddPathRectangleI', 'GdipFillRectangleI'),
         /** Status GdipFillRectangles(GpGraphics *, GpBrush *, const GpRectF *, INT count) */
         GdipFillRectangles: fillRects(false),
         /** Status GdipFillRectanglesI(GpGraphics *, GpBrush *, const GpRect *, INT count) */
         GdipFillRectanglesI: fillRects(true),
-        /** Status GdipFillEllipse(GpGraphics *, GpBrush *, REAL x, y, w, h) */
-        GdipFillEllipse: fillShape(24, 'GdipAddPathEllipse', 'GdipFillEllipse'),
-        /** Status GdipFillEllipseI(GpGraphics *, GpBrush *, INT x, y, w, h) */
+        /** Status GdipFillEllipse(GpGraphics *, GpBrush *, REAL x, REAL y, REAL w, REAL h) */
+        GdipFillEllipse: { ...fillShape(24, 'GdipAddPathEllipse', 'GdipFillEllipse'),
+            floats: { 2: 'f32', 3: 'f32' } },
+        /** Status GdipFillEllipseI(GpGraphics *, GpBrush *, INT x, INT y, INT w, INT h) */
         GdipFillEllipseI: fillShape(24, 'GdipAddPathEllipseI', 'GdipFillEllipseI'),
-        /** Status GdipFillPie(GpGraphics *, GpBrush *, REAL x, y, w, h, start, sweep) */
-        GdipFillPie: fillShape(32, 'GdipAddPathPie', 'GdipFillPie'),
-        /** Status GdipFillPieI(GpGraphics *, GpBrush *, INT x, y, w, h, REAL start, sweep) */
+        /**
+         * Status GdipFillPie(GpGraphics *, GpBrush *, REAL x, REAL y, REAL w, REAL h, REAL start,
+         *     REAL sweep)
+         */
+        GdipFillPie: { ...fillShape(32, 'GdipAddPathPie', 'GdipFillPie'),
+            floats: { 2: 'f32', 3: 'f32' } },
+        /**
+         * Status GdipFillPieI(GpGraphics *, GpBrush *, INT x, INT y, INT w, INT h, REAL start,
+         *     REAL sweep)
+         */
         GdipFillPieI: fillShape(32, 'GdipAddPathPieI', 'GdipFillPieI'),
-        /** Status GdipFillPolygon(GpGraphics *, GpBrush *, const GpPointF *, INT, GpFillMode) */
+        /** Status GdipFillPolygon(GpGraphics *, GpBrush *, const GpPointF *, INT, IN GpFillMode) */
         GdipFillPolygon: fillShape(20, 'GdipAddPathPolygon', 'GdipFillPolygon',
             args=>args[args.length - 1] >>> 0),
-        /** Status GdipFillPolygonI(GpGraphics *, GpBrush *, const GpPoint *, INT, GpFillMode) */
+        /** Status GdipFillPolygonI(GpGraphics *, GpBrush *, const GpPoint *, INT, IN GpFillMode) */
         GdipFillPolygonI: fillShape(20, 'GdipAddPathPolygonI', 'GdipFillPolygonI',
             args=>args[args.length - 1] >>> 0),
         /** Status GdipFillPolygon2(GpGraphics *, GpBrush *, const GpPointF *, INT count) */
@@ -1588,7 +1637,10 @@ export function createGraphicsFunctions(kit, deps){
          */
         GdipFillClosedCurve2: fillShape(24, 'GdipAddPathClosedCurve2', 'GdipFillClosedCurve2',
             args=>args[args.length - 1] >>> 0),
-        /** Status GdipFillClosedCurve2I(GpGraphics *, GpBrush *, const GpPoint *, INT, REAL, GpFillMode) */
+        /**
+         * Status GdipFillClosedCurve2I(GpGraphics *, GpBrush *, const GpPoint *, INT, IN REAL,
+         *     IN GpFillMode)
+         */
         GdipFillClosedCurve2I: fillShape(24, 'GdipAddPathClosedCurve2I', 'GdipFillClosedCurve2I',
             args=>args[args.length - 1] >>> 0),
         /** Status GdipFillRegion(GpGraphics *graphics, GpBrush *brush, GpRegion *region) */
@@ -1615,7 +1667,7 @@ export function createGraphicsFunctions(kit, deps){
             const image = images.get(at);
             return corners && image ? drawImage(g, at, corners, [0, 0, image.width, image.height],
                 Unit.Pixel, 0) : InvalidParameter;
-        })),
+        }), { floats: { 2: 'f32', 3: 'f32' } }),
         /** Status GdipDrawImageI(GpGraphics *graphics, GpImage *image, INT x, INT y) */
         GdipDrawImageI: fn(16, onGraphics((g, [at, x, y])=>{
             const corners = naturalCorners(g, at, x | 0, y | 0);
@@ -1623,15 +1675,15 @@ export function createGraphicsFunctions(kit, deps){
             return corners && image ? drawImage(g, at, corners, [0, 0, image.width, image.height],
                 Unit.Pixel, 0) : InvalidParameter;
         })),
-        /** Status GdipDrawImageRect(GpGraphics *, GpImage *, REAL x, y, w, h) */
+        /** Status GdipDrawImageRect(GpGraphics *, GpImage *, REAL x, REAL y, REAL w, REAL h) */
         GdipDrawImageRect: fn(24, onGraphics((g, [at, ...rect])=>{
             const image = images.get(at);
             const [x, y, w, h] = rect.map(kit.real);
             return image ? drawImage(g, at, [[x, y], [x + w, y], [x, y + h]],
                 [0, 0, image.width, image.height], Unit.Pixel, 0)
                 : InvalidParameter;
-        })),
-        /** Status GdipDrawImageRectI(GpGraphics *, GpImage *, INT x, y, w, h) */
+        }), { floats: { 2: 'f32', 3: 'f32', 4: 'f32', 5: 'f32' } }),
+        /** Status GdipDrawImageRectI(GpGraphics *, GpImage *, INT x, INT y, INT w, INT h) */
         GdipDrawImageRectI: fn(24, onGraphics((g, [at, ...rect])=>{
             const image = images.get(at);
             const [x, y, w, h] = rect.map(v=>v | 0);
@@ -1668,8 +1720,10 @@ export function createGraphicsFunctions(kit, deps){
             const [px, py] = [kit.real(x), kit.real(y)];
             return drawImage(g, at, [[px, py], [px + source[2], py], [px, py + source[3]]],
                 source, rest[4] >>> 0, 0);
-        })),
-        /** Status GdipDrawImagePointRectI(GpGraphics *, GpImage *, INT x, INT y, INT src.., GpUnit) */
+        }), { floats: { 2: 'f32', 3: 'f32' } }),
+        /**
+         * Status GdipDrawImagePointRectI(GpGraphics *, GpImage *, INT x, INT y, INT src.., GpUnit)
+         */
         GdipDrawImagePointRectI: fn(36, onGraphics((g, [at, x, y, ...rest])=>{
             const source = rest.slice(0, 4).map(v=>v | 0);
             return drawImage(g, at, [[x | 0, y | 0], [(x | 0) + source[2], y | 0],
@@ -1684,7 +1738,7 @@ export function createGraphicsFunctions(kit, deps){
             const [x, y, w, h, ...source] = rest.slice(0, 8).map(kit.real);
             return drawImage(g, at, [[x, y], [x + w, y], [x, y + h]], source, rest[8] >>> 0,
                 rest[9]);
-        })),
+        }), { floats: { 2: 'f32' } }),
         /** Status GdipDrawImageRectRectI(GpGraphics *, GpImage *, INT dst.., INT src.., ...) */
         GdipDrawImageRectRectI: fn(56, onGraphics((g, [at, ...rest])=>{
             const [x, y, w, h, ...source] = rest.slice(0, 8).map(v=>v | 0);
@@ -1704,7 +1758,10 @@ export function createGraphicsFunctions(kit, deps){
             return drawImage(g, at, cornersAt(points, 3, false), rest.slice(0, 4).map(kit.real),
                 rest[4] >>> 0, rest[5]);
         })),
-        /** Status GdipDrawImagePointsRectI(GpGraphics *, GpImage *, const GpPoint *, INT, INT src.., ...) */
+        /**
+         * Status GdipDrawImagePointsRectI(GpGraphics *, GpImage *, const GpPoint *, INT, INT src..,
+         *     ...)
+         */
         GdipDrawImagePointsRectI: fn(48, onGraphics((g, [at, points, count, ...rest])=>{
             if ((points >>> 0) === 0 || (count | 0) !== 3)
             {

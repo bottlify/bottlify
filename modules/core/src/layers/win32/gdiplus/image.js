@@ -1005,7 +1005,8 @@ export function createImageFunctions(kit, host){
          */
         GdipCloneBitmapArea: fn(28, ([x, y, width, height, format, source, out])=>
             functions.GdipCloneBitmapAreaI.handler([kit.real(x), kit.real(y), kit.real(width),
-                kit.real(height)].map(v=>Math.round(v)).concat([format, source, out]))),
+                kit.real(height)].map(v=>Math.round(v)).concat([format, source, out])),
+        { floats: { 0: 'f32', 1: 'f32', 2: 'f32', 3: 'f32' } }),
         /**
          * Status GdipCloneBitmapAreaI(INT x, INT y, INT width, INT height,
          *   PixelFormat format, GpBitmap *source, GpBitmap **bitmap)
@@ -1135,7 +1136,7 @@ export function createImageFunctions(kit, host){
             image.dpiX = dpiX;
             image.dpiY = dpiY;
             return Ok;
-        })),
+        }), { floats: { 1: 'f32', 2: 'f32' } }),
         /**
          * Status GdipGetImagePaletteSize(GpImage *image, INT *size)
          *

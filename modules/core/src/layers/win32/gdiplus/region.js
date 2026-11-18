@@ -669,7 +669,7 @@ export function createRegionFunctions(kit, deps){
         GdipTranslateRegion: fn(12, onRegion((region, [dx, dy])=>{
             region.node = transformNode(region.node, [1, 0, 0, 1, kit.real(dx), kit.real(dy)]);
             return Ok;
-        })),
+        }), { floats: { 1: 'f32', 2: 'f32' } }),
         /** Status GdipTranslateRegionI(GpRegion *region, INT dx, INT dy) */
         GdipTranslateRegionI: fn(12, onRegion((region, [dx, dy])=>{
             region.node = transformNode(region.node, [1, 0, 0, 1, dx | 0, dy | 0]);
@@ -766,8 +766,10 @@ export function createRegionFunctions(kit, deps){
             }
             kit.putBool(out, contains(region.node, kit.real(x), kit.real(y)));
             return Ok;
-        })),
-        /** Status GdipIsVisibleRegionPointI(GpRegion *region, INT x, INT y, GpGraphics *, BOOL *) */
+        }), { floats: { 1: 'f32', 2: 'f32' } }),
+        /**
+         * Status GdipIsVisibleRegionPointI(GpRegion *region, INT x, INT y, GpGraphics *, BOOL *)
+         */
         GdipIsVisibleRegionPointI: fn(20, onRegion((region, [x, y, , out])=>{
             if ((out >>> 0) === 0)
             {
@@ -790,7 +792,7 @@ export function createRegionFunctions(kit, deps){
             kit.putBool(out, (combineAreas(areaOf(region.node), areaOf(rect), RGN_AND) ?? [])
                 .length > 0);
             return Ok;
-        })),
+        }), { floats: { 1: 'f32', 2: 'f32', 3: 'f32' } }),
         /** Status GdipIsVisibleRegionRectI(GpRegion *region, INT x, INT y, INT w, INT h, ...) */
         GdipIsVisibleRegionRectI: fn(28, onRegion((region, [x, y, w, h, , out])=>{
             if ((out >>> 0) === 0)

@@ -145,7 +145,9 @@ export function createFontFunctions({ host, handle, putPointer, isGraphics }){
         putPointer(out, made);
         return Ok;
     };
-    /** @param {{ face: string, size: number, style: number, unit: number }} font @param {number} out */
+    /**
+     * @param {{ face: string, size: number, style: number, unit: number }} font @param {number} out
+     */
     const newFont = (font, out)=>{
         const made = handle();
         fonts.set(made, { ...font });
@@ -324,7 +326,9 @@ export function createFontFunctions({ host, handle, putPointer, isGraphics }){
             handler: ([family])=>(families.delete(family >>> 0) ? Ok : InvalidParameter),
         },
 
-        /** Status GdipGetFamilyName(GpFontFamily *family, WCHAR name[LF_FACESIZE], LANGID language) */
+        /**
+         * Status GdipGetFamilyName(GpFontFamily *family, WCHAR name[LF_FACESIZE], LANGID language)
+         */
         GdipGetFamilyName: {
             argBytes: 12,
             /** @param {number[]} args */
@@ -368,7 +372,9 @@ export function createFontFunctions({ host, handle, putPointer, isGraphics }){
         GdipGetCellAscent: familyMetric('ascent'),
         /** Status GdipGetCellDescent(GpFontFamily *family, INT style, UINT16 *descent) */
         GdipGetCellDescent: familyMetric('descent'),
-        /** Status GdipGetLineSpacing(GpFontFamily *family, INT style, UINT16 *spacing): the cell. */
+        /**
+         * Status GdipGetLineSpacing(GpFontFamily *family, INT style, UINT16 *spacing): the cell.
+         */
         GdipGetLineSpacing: familyMetric('spacing'),
 
         /**

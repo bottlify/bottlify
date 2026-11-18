@@ -139,7 +139,9 @@ export function createPenFunctions(kit, { matrices, paths, brushes }){
         return Ok;
     };
 
-    /** @param {Pen} pen @param {import('./matrix.js').Elements | number[]} m @param {number} order */
+    /**
+     * @param {Pen} pen @param {import('./matrix.js').Elements | number[]} m @param {number} order
+     */
     const applyTransform = (pen, m, order)=>{
         if ((order >>> 0) > MatrixOrderAppend)
         {
@@ -175,12 +177,12 @@ export function createPenFunctions(kit, { matrices, paths, brushes }){
         /** Status GdipCreatePen1(ARGB color, REAL width, GpUnit unit, GpPen **pen) */
         GdipCreatePen1: fn(16, ([color, width, unit, result])=>
             makePen({ type: BrushTypeSolidColor, color: color >>> 0 }, kit.real(width), unit >>> 0,
-                result)),
+                result), { floats: { 1: 'f32' } }),
         /** Status GdipCreatePen2(GpBrush *brush, REAL width, GpUnit unit, GpPen **pen) */
         GdipCreatePen2: fn(16, ([brush, width, unit, result])=>{
             const copy = brushes.copy(brush);
             return copy ? makePen(copy, kit.real(width), unit >>> 0, result) : InvalidParameter;
-        }),
+        }, { floats: { 1: 'f32' } }),
         /** Status GdipClonePen(GpPen *pen, GpPen **clone) */
         GdipClonePen: fn(8, onPen((pen, [result])=>{
             if ((result >>> 0) === 0)
@@ -198,7 +200,7 @@ export function createPenFunctions(kit, { matrices, paths, brushes }){
         GdipSetPenWidth: fn(8, onPen((pen, [width])=>{
             pen.width = kit.real(width);
             return Ok;
-        })),
+        }), { floats: { 1: 'f32' } }),
         /** Status GdipGetPenUnit(GpPen *pen, GpUnit *unit) */
         GdipGetPenUnit: fn(8, onPen((pen, [at])=>out(at, ()=>kit.putU32(at, pen.unit)))),
         /** Status GdipGetPenColor(GpPen *pen, ARGB *color): a solid pen's alone. */
@@ -288,7 +290,7 @@ export function createPenFunctions(kit, { matrices, paths, brushes }){
         GdipSetPenDashOffset: fn(8, onPen((pen, [offset])=>{
             pen.dashOffset = kit.real(offset);
             return Ok;
-        })),
+        }), { floats: { 1: 'f32' } }),
         /** Status GdipGetPenDashCap197819(GpPen *pen, GpDashCap *cap) */
         GdipGetPenDashCap197819: fn(8, onPen((pen, [at])=>
             out(at, ()=>kit.putU32(at, pen.dashCap)))),
@@ -313,7 +315,10 @@ export function createPenFunctions(kit, { matrices, paths, brushes }){
             pen.customEnd = null;
             return Ok;
         })),
-        /** Status GdipSetPenLineCap197819(GpPen *pen, GpLineCap start, GpLineCap end, GpDashCap dash) */
+        /**
+         * Status GdipSetPenLineCap197819(GpPen *pen, GpLineCap start, GpLineCap end,
+         *     GpDashCap dash)
+         */
         GdipSetPenLineCap197819: fn(16, onPen((pen, [start, end, dash])=>{
             [pen.startCap, pen.endCap, pen.dashCap] = [start >>> 0, end >>> 0, dash >>> 0];
             pen.customStart = null;
@@ -334,7 +339,7 @@ export function createPenFunctions(kit, { matrices, paths, brushes }){
         GdipSetPenMiterLimit: fn(8, onPen((pen, [limit])=>{
             pen.miterLimit = kit.real(limit);
             return Ok;
-        })),
+        }), { floats: { 1: 'f32' } }),
         /** Status GdipGetPenMode(GpPen *pen, GpPenAlignment *mode) */
         GdipGetPenMode: fn(8, onPen((pen, [at])=>out(at, ()=>kit.putU32(at, pen.alignment)))),
         /** Status GdipSetPenMode(GpPen *pen, GpPenAlignment mode) */
@@ -398,7 +403,9 @@ export function createPenFunctions(kit, { matrices, paths, brushes }){
             pen.transform = [...IDENTITY];
             return Ok;
         })),
-        /** Status GdipMultiplyPenTransform(GpPen *pen, const GpMatrix *matrix, GpMatrixOrder order) */
+        /**
+         * Status GdipMultiplyPenTransform(GpPen *pen, const GpMatrix *matrix, GpMatrixOrder order)
+         */
         GdipMultiplyPenTransform: fn(12, onPen((pen, [matrix, order])=>{
             if ((matrix >>> 0) === 0)
             {
@@ -409,13 +416,15 @@ export function createPenFunctions(kit, { matrices, paths, brushes }){
         })),
         /** Status GdipTranslatePenTransform(GpPen *pen, REAL dx, REAL dy, GpMatrixOrder order) */
         GdipTranslatePenTransform: fn(16, onPen((pen, [dx, dy, order])=>
-            applyTransform(pen, [1, 0, 0, 1, kit.real(dx), kit.real(dy)], order))),
+            applyTransform(pen, [1, 0, 0, 1, kit.real(dx), kit.real(dy)], order)),
+        { floats: { 1: 'f32', 2: 'f32' } }),
         /** Status GdipScalePenTransform(GpPen *pen, REAL sx, REAL sy, GpMatrixOrder order) */
         GdipScalePenTransform: fn(16, onPen((pen, [sx, sy, order])=>
-            applyTransform(pen, [kit.real(sx), 0, 0, kit.real(sy), 0, 0], order))),
+            applyTransform(pen, [kit.real(sx), 0, 0, kit.real(sy), 0, 0], order)),
+        { floats: { 1: 'f32', 2: 'f32' } }),
         /** Status GdipRotatePenTransform(GpPen *pen, REAL angle, GpMatrixOrder order) */
         GdipRotatePenTransform: fn(12, onPen((pen, [angle, order])=>
-            applyTransform(pen, rotation(kit.real(angle)), order))),
+            applyTransform(pen, rotation(kit.real(angle)), order)), { floats: { 1: 'f32' } }),
         /** Status GdipGetPenCustomStartCap(GpPen *pen, GpCustomLineCap **cap): a copy, or none. */
         GdipGetPenCustomStartCap: fn(8, onPen((pen, [at])=>out(at, ()=>kit.putPointer(at,
             pen.customStart ? kit.add('cap', copyCap(pen.customStart)) : 0)))),
@@ -452,21 +461,24 @@ export function createPenFunctions(kit, { matrices, paths, brushes }){
          * A stroke path, when there is one, is the cap and the fill path is
          * not used.
          */
-        GdipCreateCustomLineCap: fn(20, ([fillAt, strokeAt, base, inset, result])=>{
-            const fill = (fillAt >>> 0) === 0 ? null : paths.get(fillAt);
-            const stroke = (strokeAt >>> 0) === 0 ? null : paths.get(strokeAt);
-            if ((result >>> 0) === 0 || (!fill && !stroke) || fill === undefined
+        GdipCreateCustomLineCap: { floats: { 3: 'f32' },
+            ...fn(20, ([fillAt, strokeAt, base, inset, result])=>{
+                const fill = (fillAt >>> 0) === 0 ? null : paths.get(fillAt);
+                const stroke = (strokeAt >>> 0) === 0 ? null : paths.get(strokeAt);
+                if ((result >>> 0) === 0 || (!fill && !stroke) || fill === undefined
                 || stroke === undefined)
-            {
-                return InvalidParameter;
-            }
-            kit.add('cap', /** @type {Cap} */ ({ type: CustomLineCapTypeDefault,
-                fill: stroke ? null : fill && clonePath(fill), stroke: stroke && clonePath(stroke),
-                base: BASE_CAPS.has(base >>> 0) ? base >>> 0 : LineCapFlat, inset: kit.real(inset),
-                startCap: LineCapFlat, endCap: LineCapFlat, join: LineJoinMiter, scale: 1 }),
-            result);
-            return Ok;
-        }),
+                {
+                    return InvalidParameter;
+                }
+                kit.add('cap', /** @type {Cap} */ ({ type: CustomLineCapTypeDefault,
+                    fill: stroke ? null : fill && clonePath(fill),
+                    stroke: stroke && clonePath(stroke),
+                    base: BASE_CAPS.has(base >>> 0) ? base >>> 0 : LineCapFlat,
+                    inset: kit.real(inset),
+                    startCap: LineCapFlat, endCap: LineCapFlat, join: LineJoinMiter, scale: 1 }),
+                result);
+                return Ok;
+            }) },
         /** Status GdipCloneCustomLineCap(GpCustomLineCap *cap, GpCustomLineCap **clone) */
         GdipCloneCustomLineCap: fn(8, onCap((cap, [result])=>out(result, ()=>
             kit.add('cap', copyCap(cap), result)))),
@@ -477,7 +489,9 @@ export function createPenFunctions(kit, { matrices, paths, brushes }){
         /** Status GdipGetCustomLineCapBaseCap(GpCustomLineCap *cap, GpLineCap *base) */
         GdipGetCustomLineCapBaseCap: fn(8, onCap((cap, [at])=>
             out(at, ()=>kit.putU32(at, cap.base)))),
-        /** Status GdipSetCustomLineCapBaseCap(GpCustomLineCap *cap, GpLineCap base): a plain cap. */
+        /**
+         * Status GdipSetCustomLineCapBaseCap(GpCustomLineCap *cap, GpLineCap base): a plain cap.
+         */
         GdipSetCustomLineCapBaseCap: fn(8, onCap((cap, [base])=>{
             if (!BASE_CAPS.has(base >>> 0))
             {
@@ -493,7 +507,7 @@ export function createPenFunctions(kit, { matrices, paths, brushes }){
         GdipSetCustomLineCapBaseInset: fn(8, onCap((cap, [inset])=>{
             cap.inset = kit.real(inset);
             return Ok;
-        })),
+        }), { floats: { 1: 'f32' } }),
         /** Status GdipGetCustomLineCapStrokeJoin(GpCustomLineCap *cap, GpLineJoin *join) */
         GdipGetCustomLineCapStrokeJoin: fn(8, onCap((cap, [at])=>
             out(at, ()=>kit.putU32(at, cap.join)))),
@@ -506,7 +520,9 @@ export function createPenFunctions(kit, { matrices, paths, brushes }){
             cap.join = join >>> 0;
             return Ok;
         })),
-        /** Status GdipGetCustomLineCapStrokeCaps(GpCustomLineCap*, GpLineCap *start, GpLineCap *end) */
+        /**
+         * Status GdipGetCustomLineCapStrokeCaps(GpCustomLineCap*, GpLineCap *start, GpLineCap *end)
+         */
         GdipGetCustomLineCapStrokeCaps: fn(12, onCap((cap, [start, end])=>{
             if ((start >>> 0) === 0 || (end >>> 0) === 0)
             {
@@ -516,7 +532,9 @@ export function createPenFunctions(kit, { matrices, paths, brushes }){
             kit.putU32(end, cap.endCap);
             return Ok;
         })),
-        /** Status GdipSetCustomLineCapStrokeCaps(GpCustomLineCap*, GpLineCap start, GpLineCap end) */
+        /**
+         * Status GdipSetCustomLineCapStrokeCaps(GpCustomLineCap*, GpLineCap start, GpLineCap end)
+         */
         GdipSetCustomLineCapStrokeCaps: fn(12, onCap((cap, [start, end])=>{
             if (!BASE_CAPS.has(start >>> 0) || !BASE_CAPS.has(end >>> 0))
             {
@@ -532,23 +550,27 @@ export function createPenFunctions(kit, { matrices, paths, brushes }){
         GdipSetCustomLineCapWidthScale: fn(8, onCap((cap, [scale])=>{
             cap.scale = kit.real(scale);
             return Ok;
-        })),
+        }), { floats: { 1: 'f32' } }),
 
-        /** Status GdipCreateAdjustableArrowCap(REAL height, REAL width, BOOL isFilled, GpAdjustableArrowCap **cap) */
-        GdipCreateAdjustableArrowCap: fn(16, ([height, width, filled, result])=>{
-            if ((result >>> 0) === 0)
-            {
-                return InvalidParameter;
-            }
-            /** @type {Cap} */
-            const cap = { type: CustomLineCapTypeAdjustableArrow, fill: null, stroke: null,
-                base: LineCapTriangle, inset: 0, startCap: LineCapFlat, endCap: LineCapFlat,
-                join: LineJoinMiter, scale: 1, height: kit.real(height), width: kit.real(width),
-                middle: 0, filled: filled !== 0 };
-            shapeArrow(cap);
-            kit.add('cap', cap, result);
-            return Ok;
-        }),
+        /**
+         * Status GdipCreateAdjustableArrowCap(REAL height, REAL width, BOOL isFilled,
+         *     GpAdjustableArrowCap **cap)
+         */
+        GdipCreateAdjustableArrowCap: { floats: { 0: 'f32', 1: 'f32' },
+            ...fn(16, ([height, width, filled, result])=>{
+                if ((result >>> 0) === 0)
+                {
+                    return InvalidParameter;
+                }
+                /** @type {Cap} */
+                const cap = { type: CustomLineCapTypeAdjustableArrow, fill: null, stroke: null,
+                    base: LineCapTriangle, inset: 0, startCap: LineCapFlat, endCap: LineCapFlat,
+                    join: LineJoinMiter, scale: 1, height: kit.real(height), width: kit.real(width),
+                    middle: 0, filled: filled !== 0 };
+                shapeArrow(cap);
+                kit.add('cap', cap, result);
+                return Ok;
+            }) },
         /** Status GdipGetAdjustableArrowCapHeight(GpAdjustableArrowCap *cap, REAL *height) */
         GdipGetAdjustableArrowCapHeight: fn(8, onCap((cap, [at])=>out(at, ()=>
             kit.putF32(at, /** @type {number} */ (cap.height))), true)),
@@ -557,7 +579,7 @@ export function createPenFunctions(kit, { matrices, paths, brushes }){
             cap.height = kit.real(height);
             shapeArrow(cap);
             return Ok;
-        }, true)),
+        }, true), { floats: { 1: 'f32' } }),
         /** Status GdipGetAdjustableArrowCapWidth(GpAdjustableArrowCap *cap, REAL *width) */
         GdipGetAdjustableArrowCapWidth: fn(8, onCap((cap, [at])=>out(at, ()=>
             kit.putF32(at, /** @type {number} */ (cap.width))), true)),
@@ -566,7 +588,7 @@ export function createPenFunctions(kit, { matrices, paths, brushes }){
             cap.width = kit.real(width);
             shapeArrow(cap);
             return Ok;
-        }, true)),
+        }, true), { floats: { 1: 'f32' } }),
         /** Status GdipGetAdjustableArrowCapMiddleInset(GpAdjustableArrowCap *cap, REAL *inset) */
         GdipGetAdjustableArrowCapMiddleInset: fn(8, onCap((cap, [at])=>out(at, ()=>
             kit.putF32(at, /** @type {number} */ (cap.middle))), true)),
@@ -575,7 +597,7 @@ export function createPenFunctions(kit, { matrices, paths, brushes }){
             cap.middle = kit.real(inset);
             shapeArrow(cap);
             return Ok;
-        }, true)),
+        }, true), { floats: { 1: 'f32' } }),
         /** Status GdipGetAdjustableArrowCapFillState(GpAdjustableArrowCap *cap, BOOL *filled) */
         GdipGetAdjustableArrowCapFillState: fn(8, onCap((cap, [at])=>out(at, ()=>
             kit.putBool(at, cap.filled === true)), true)),
