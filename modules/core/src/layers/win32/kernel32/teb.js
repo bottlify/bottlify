@@ -54,6 +54,8 @@ export const TEB = Object.freeze({
     TLS_SLOTS: 0xe10,
     /** The thread's error mode, in ntdll's bits (RTL_SEM_*). */
     HARD_ERROR_MODE: 0xf28,
+    /** GuaranteedStackBytes: what SetThreadStackGuarantee keeps for an overflow's handler. */
+    GUARANTEED_STACK_BYTES: 0xf78,
     /** FlsSlots: the running fiber's fibre-local values (fls.js), null until one is set. */
     FLS_SLOTS: 0xfb4,
     /** SameTebFlags, a WORD: HasFiberData (`HAS_FIBER_DATA`) among them. */
@@ -209,6 +211,7 @@ export const TEB64 = Object.freeze({
     DEALLOCATION_STACK: 0x1478,
     TLS_SLOTS: 0x1480,
     HARD_ERROR_MODE: 0x16b0,
+    GUARANTEED_STACK_BYTES: 0x1748,
     FLS_SLOTS: 0x17c8,
     SAME_TEB_FLAGS: 0x17ee,
     // Past TlsSlots (0x1480) and TlsLinks, the fields a program reads.
