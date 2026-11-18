@@ -209,14 +209,57 @@ test('expanding replaces the variables it knows and leaves the rest as written',
     assert.equal(host.readAnsi(0x200), 'C:\\TEMP\\x %NOSUCH% 100%');
 });
 
-test('expanding into a buffer too small writes nothing and still says what is needed', ()=>{
+test('the A form fits only with a byte to spare, and leaves a buffer too small empty', ()=>{
+    // Wine's environ test, test_ExpandEnvironmentStringsA: "Long long value"
+    // (15) needs 17 bytes of room, answers 16 in them and 17 in 16.
     const host = fakeHost();
     const fns = createEnvironmentFunctions(host);
-    host.plant(0x100, '%TEMP%');
+    host.plant(0x100, 'Long long value');
 
-    assert.equal(fns.ExpandEnvironmentStringsA.handler([0x100, 0, 0]), 8);
-    assert.equal(fns.ExpandEnvironmentStringsA.handler([0x100, 0x200, 7]), 8);
-    assert.equal(host.bytes[0x200], 0xaa);
+    assert.equal(fns.ExpandEnvironmentStringsA.handler([0x100, 0, 0]), 17);
+    host.plant(0x200, 'abcdefghijklmnopqrstuv');
+    assert.equal(fns.ExpandEnvironmentStringsA.handler([0x100, 0x200, 16]), 17);
+    assert.equal(host.readAnsi(0x200), '', 'its first byte a terminator');
+    host.plant(0x200, 'abcdefghijklmnopqrstuv');
+    assert.equal(fns.ExpandEnvironmentStringsA.handler([0x100, 0x200, 0]), 17);
+    assert.equal(host.readAnsi(0x200), '', 'even at a size of 0');
+    assert.equal(fns.ExpandEnvironmentStringsA.handler([0x100, 0x200, 17]), 16);
+    assert.equal(host.readAnsi(0x200), 'Long long value');
+    assert.deepEqual(host.errors, [], 'the last error untouched');
+});
+
+test('the W form copies text while a character of room stays, and a value whole or not', ()=>{
+    // Wine's environ test, test_ExpandEnvironmentStringsW, with TVAR=WINE.
+    const host = fakeHost();
+    const fns = createEnvironmentFunctions(host);
+    /** @param {number} address @param {string} text */
+    const plantWide = (address, text)=>{
+        [...text, '\0'].forEach((unit, at)=>{
+            host.bytes[address + at * 2] = unit.charCodeAt(0) & 0xff;
+            host.bytes[address + at * 2 + 1] = unit.charCodeAt(0) >> 8;
+        });
+    };
+    plantWide(0x80, 'TVAR');
+    plantWide(0x90, 'WINE');
+    assert.equal(fns.SetEnvironmentVariableW.handler([0x80, 0x90]), 1);
+    /** @param {string} input @param {number} size */
+    const expand = (input, size)=>{
+        plantWide(0x100, input);
+        plantWide(0x300, 'abcdefghijklmnopqrstuv');
+        const count = fns.ExpandEnvironmentStringsW.handler([0x100, 0x300, size]);
+        return [count, host.readWideString(0x300, 64)];
+    };
+    assert.deepEqual(expand('Long long value', 2), [16, 'Lbcdefghijklmnopqrstuv'],
+        'text cut a character short of the room, unterminated');
+    assert.deepEqual(expand('Long long value', 16), [16, 'Long long value']);
+    assert.deepEqual(expand('%TVAR% long long', 0), [15, 'abcdefghijklmnopqrstuv']);
+    assert.deepEqual(expand('%TVAR% long long', 4), [15, ''], 'a value that does not fit');
+    assert.deepEqual(expand('%TVAR% long long', 5), [15, 'WINE'], 'a value with its terminator');
+    assert.deepEqual(expand('%TVAR% long long', 7), [15, 'WINE lghijklmnopqrstuv']);
+    assert.deepEqual(expand('%TVAR%%TVAR% long', 9), [14, 'WINEWINE']);
+    assert.deepEqual(expand('%TVAR2% long long', 8), [18, '%TVAR2%hijklmnopqrstuv'],
+        'an unset variable is text');
+    assert.deepEqual(expand('%TVAR long long', 17), [16, '%TVAR long long']);
 });
 
 test('setting a variable is visible to the next reader', ()=>{
@@ -443,10 +486,6 @@ test('the wide forms answer the windows directory and expand as the A forms do',
     assert.equal(fns.ExpandEnvironmentStringsW.argBytes, 12);
     const expanded = 'C:\\TEMP\\\u3042 %NOSUCH%';
     assert.equal(fns.ExpandEnvironmentStringsW.handler([0x100, 0, 0]), expanded.length + 1);
-    host.bytes.fill(0xaa, 0x300, 0x380);
-    assert.equal(fns.ExpandEnvironmentStringsW.handler([0x100, 0x300, expanded.length]),
-        expanded.length + 1);
-    assert.equal(host.bytes[0x300], 0xaa, 'a buffer too small gets nothing');
     assert.equal(fns.ExpandEnvironmentStringsW.handler([0x100, 0x300, 64]), expanded.length + 1);
     assert.equal(host.readWideString(0x300, 64), expanded);
 });
