@@ -312,6 +312,8 @@ const MAX_PROGID = 255;
  * @property {import('./storage.js').StorageFiles} [files]
  *           The volume, for a docfile. Absent, no storage opens.
  * @property {(entry: number, args: number[], thread?: unknown) => Promise<number>} [call]
+ * @property {() => number} [now]  the machine's wall clock in ms (the kernel's), which
+ *     the time stamps of the running object table read; the host's own clock where none is given
  *           A stdcall into guest code, for an object a program saves to a
  *           stream: its GetClassID and Save are the program's. The thread
  *           names whose call a second, awaited-after call answers.
@@ -2087,7 +2089,7 @@ export function createOleFunctions(host){
 
     /** Now, as a FILETIME's two words: when an object was registered or noted changed. */
     const fileTimeNow = ()=>{
-        const ticks = (BigInt(Date.now()) + 11644473600000n) * 10000n;
+        const ticks = (BigInt(Math.floor((host.now ?? Date.now)())) + 11644473600000n) * 10000n;
         return [Number(ticks & 0xffffffffn), Number(ticks >> 32n)];
     };
 

@@ -1942,3 +1942,15 @@ test('CoGetObject calls back as its caller, whichever thread runs while it waits
     assert.ok(threads.every(thread=>thread === first),
         `every call the caller's: ${threads.map(thread=>(thread === first ? 'first' : 'other'))}`);
 });
+
+test('CoFileTimeNow reads the machine\'s wall clock, as GetSystemTimeAsFileTime does', ()=>{
+    const host = /** @type {any} */ (fakeHost());
+    // 2026-01-01T00:00:00Z: 13 410 547 200 000 ms after the FILETIME epoch.
+    host.now = ()=>Date.UTC(2026, 0, 1);
+    const fns = createOleFunctions(host);
+    const out = 0x6000;
+    assert.equal(fns.CoFileTimeNow.handler([out]), 0);
+    const view = new DataView(host.readMemory(out, 8).slice().buffer);
+    const ticks = view.getBigUint64(0, true);
+    assert.equal(ticks, (BigInt(Date.UTC(2026, 0, 1)) + 11644473600000n) * 10000n);
+});

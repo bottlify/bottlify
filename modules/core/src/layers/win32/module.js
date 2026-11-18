@@ -5814,6 +5814,7 @@ export function createWin32Module(){
                     readMemory,
                     writeMemory,
                     pointerSize,
+                    now: ()=>kernel.clock.wallClock(),
                     // Another library's export, as it is when called -- the
                     // clipboard, accelerators and the GDI deletions a medium's
                     // release makes are user32's, gdi32's and kernel32's. The
