@@ -151,6 +151,10 @@ export const EXECUTORS_WAIT_MS = 4;
  * slice of a program that calls the host in a loop lasts many milliseconds:
  * one waiting for its next frame by reading the clock between calls saw it
  * stand still for the whole slice, and drew its frames only at slice ends.
+ * Another executor's crossings answered here count alike: its thread's slice
+ * is as long, and while its asks keep coming no turn here ends to move the
+ * clock (a .NET game's loop asking for a message between frames, 170 thousand
+ * times a second, drew ten frames a second for sixty).
  */
 const CROSSINGS_PER_CLOCK = 64;
 
@@ -1479,6 +1483,16 @@ export function createScheduler(options){
         mostAtOnce = Math.max(mostAtOnce, placed.size + (inSlice ? 1 : 0));
     };
 
+    let crossingsUnclocked = 0;
+    /** A crossing into the host, this executor's thread's or another's: the clock's move is due every so many. */
+    const clockCrossing = ()=>{
+        if (++crossingsUnclocked >= CROSSINGS_PER_CLOCK)
+        {
+            crossingsUnclocked = 0;
+            options.refreshClock?.();
+        }
+    };
+
     /**
      * Answers what the other executors raised -- with the raising thread as
      * the current one, so a wait blocks it, a wake that outranks it ends its
@@ -1510,6 +1524,7 @@ export function createScheduler(options){
                 const ended = remote.step((/** @type {() => void} */ reply)=>{
                     sharedTime.crossings++;
                     on.thread.crossings++;
+                    clockCrossing();
                     const was = current;
                     const wasInSlice = inSlice;
                     if (wasInSlice)
@@ -2103,16 +2118,11 @@ export function createScheduler(options){
      * device's, which the host waits 200 ms for and then breaks, every time a
      * renderer here met another thread's call there.
      */
-    let crossingsUnclocked = 0;
     cpu.beforeTrap?.((/** @type {boolean | undefined} */ crossing)=>{
         if (current !== null && crossing !== false && !answering)
         {
             current.crossings++;
-            if (++crossingsUnclocked >= CROSSINGS_PER_CLOCK)
-            {
-                crossingsUnclocked = 0;
-                options.refreshClock?.();
-            }
+            clockCrossing();
         }
         if (placed.size === 0)
         {
