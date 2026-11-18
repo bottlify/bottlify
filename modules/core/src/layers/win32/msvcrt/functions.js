@@ -39,6 +39,8 @@ import * as inGuest from './inguest.js';
 import { COMPILED } from './inguest.x86.js';
 import * as inGuestFloat from './inguest-float.js';
 import { COMPILED as FLOAT_CODE } from './inguest-float.x86.js';
+import * as inGuest64 from './inguest-int64.js';
+import { COMPILED as INT64_CODE } from './inguest-int64.x86.js';
 import * as inGuestPrint from './inguest-print.js';
 import { COMPILED as PRINT_CODE } from './inguest-print.x86.js';
 import * as inGuestRtti from './inguest-rtti.js';
@@ -1655,10 +1657,10 @@ export function createMsvcrtFunctions(host){
                  * __int64 _atoi64(const char *text)
                  *
                  * Whitespace, a sign and decimal digits; a value past 64 bits
-                 * is clamped as `_strtoi64` clamps it.
+                 * is clamped as `_strtoi64` clamps it. In the guest
+                 * (`inguest-int64.js`), which hands this handler the clamp.
                  */
-                _atoi64: {
-                    convention: 'cdecl',
+                _atoi64: guestEntry(inGuest64._atoi64, INT64_CODE._atoi64, host, {
                     argBytes: 4,
                     /** @param {number[]} args */
                     handler: ([text])=>{
@@ -1676,7 +1678,7 @@ export function createMsvcrtFunctions(host){
                         host.setRegisters?.({ edx: Number(bits >> 32n) });
                         return Number(bits & 0xffffffffn);
                     },
-                },
+                }),
             }
             : {}),
         ...(host.threads ? createThreadFunctions({

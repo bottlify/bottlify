@@ -79,10 +79,10 @@ const SAVED = { ebx: 0x11111111, esi: 0x22222222, edi: 0x33333333, ebp: 0x444444
  * @property {(memory: Uint8Array, fn: number, args: number[]) => number} [call]
  *     Its JavaScript stand-in.
  * @property {(memory: Uint8Array, args: number[], x87: number[])
- *     => number | { st0: number }} [host]
+ *     => number | bigint | { st0: number }} [host]
  *     The host's handler a function hands a call to, over the case's memory,
- *     with the x87 arguments (the last in ST0) as the call left them: EAX, or
- *     a double that replaces them in ST0.
+ *     with the x87 arguments (the last in ST0) as the call left them: EAX, an
+ *     i64's EDX:EAX as a bigint, or a double that replaces them in ST0.
  */
 
 /** One machine per piece of code run by `runCode`, its translations kept. */
@@ -283,7 +283,7 @@ export function equivalence(compiled, sources, model, long){
         const words = input.stack ?? [];
         // The words as the 32-bit stack has them: a double's two, low first.
         let next = 0;
-        const args = fn.params.map((type, i)=>(type === 'f64'
+        const args = fn.params.map((type, i)=>(type === 'f64' || type === 'i64'
             ? BigInt(words[next++] >>> 0) | BigInt(words[next++] >>> 0) << 32n
             : argumentOf(words[next++] ?? 0, i)));
         const floats = fn.params.map(type=>type === 'f64' || type === 'f32');
@@ -344,7 +344,7 @@ export function equivalence(compiled, sources, model, long){
                 const bits = i < 4 && (type === 'f64' || type === 'f32')
                     ? new DataView(xmm[i].buffer, xmm[i].byteOffset).getBigUint64(0, true)
                     : BigInt(args[i] ?? 0n);
-                return type === 'f64'
+                return type === 'f64' || type === 'i64'
                     ? [Number(BigInt.asUintN(32, bits)), Number(BigInt.asUintN(32, bits >> 32n))]
                     : [Number(BigInt.asUintN(32, bits))];
             });
@@ -353,10 +353,11 @@ export function equivalence(compiled, sources, model, long){
             // extended by its sign, an unsigned dword and a pointer by zeros, a
             // double's or a float's answer in XMM0.
             return {
-                rax: typeof answer !== 'number' ? 0n : wholeAnswer(fn.returns, answer),
+                rax: typeof answer === 'bigint' ? BigInt.asUintN(64, answer)
+                    : typeof answer !== 'number' ? 0n : wholeAnswer(fn.returns, answer),
                 rsp: BigInt(STACK_64 + 8), kept, given, df,
                 data: memory.slice(DATA, DATA + data.length), handedOver: true,
-                ...typeof answer === 'number' ? {} : { xmm0: fn.returns === 'f32'
+                ...typeof answer !== 'object' ? {} : { xmm0: fn.returns === 'f32'
                     ? Math.fround(answer.st0) : answer.st0 },
             };
         }
@@ -485,7 +486,7 @@ export function equivalence(compiled, sources, model, long){
         view.setUint8(m.layout.x87Top, top);
         view.setUint8(m.layout.x87Empty, empty);
         const before = fn.host === undefined ? null : m.read(DATA, span);
-        const slots = fn.params.reduce((sum, type)=>sum + (type === 'f64' ? 2
+        const slots = fn.params.reduce((sum, type)=>sum + (type === 'f64' || type === 'i64' ? 2
             : type === 'x87' ? 0 : 1), 0);
         const exit = m.runProgram(CODE);
         assert.equal(exit.kind, 3, `${name} halts at its return (${JSON.stringify(exit)})`);
@@ -573,8 +574,11 @@ export function equivalence(compiled, sources, model, long){
         // The trap returns as the export does: a stdcall one pops the arguments.
         const popped = compiledOf(name).convention !== 'cdecl' ? slots * 4 : 0;
         return {
-            eax: typeof answer === 'number' ? answer >>> 0 : 0, edx: 0, esp: frame + 4 + popped,
-            st: typeof answer === 'number' ? [] : [answer.st0], saved: SAVED, df: false,
+            eax: typeof answer === 'bigint' ? Number(BigInt.asUintN(32, answer))
+                : typeof answer === 'number' ? answer >>> 0 : 0,
+            edx: typeof answer === 'bigint' ? Number(BigInt.asUintN(32, answer >> 32n)) : 0,
+            esp: frame + 4 + popped,
+            st: typeof answer === 'object' ? [answer.st0] : [], saved: SAVED, df: false,
             control: input.control ?? 0x37f, status: (input.status ?? 0) & 0xc7ff,
             mxcsr: input.mxcsr ?? 0x1f80,
             data: memory.slice(DATA, DATA + data.length), handedOver: true,
@@ -671,6 +675,11 @@ export function equivalence(compiled, sources, model, long){
                 handedOver = true;
                 const onStack = compiledOf(name).params.filter(type=>type === 'x87').length;
                 const answer = host(memory, args, st.slice(0, onStack).reverse());
+                if (typeof answer === 'bigint')
+                {
+                    edx = Number(BigInt.asUintN(32, answer >> 32n));
+                    return Number(BigInt.asUintN(32, answer));
+                }
                 if (typeof answer === 'number')
                 {
                     return answer;
@@ -714,7 +723,7 @@ export function equivalence(compiled, sources, model, long){
             assert.deepEqual(x86.saved, SAVED, `${what}: EBX, ESI, EDI and EBP kept`);
             // A thiscall function's `this` came in ECX, not in a slot of the caller's.
             const popped = fn.convention !== 'cdecl'
-                ? fn.params.reduce((sum, type)=>sum + (type === 'f64' ? 8
+                ? fn.params.reduce((sum, type)=>sum + (type === 'f64' || type === 'i64' ? 8
                     : type === 'x87' ? 0 : 4), 0) - (fn.convention === 'thiscall' ? 4 : 0)
                 : 0;
             assert.equal(x86.esp, STACK + 4 + popped, `${what}: ESP past the return address`);

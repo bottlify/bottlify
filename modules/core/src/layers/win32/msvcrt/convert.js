@@ -30,6 +30,8 @@ import { pointerWidth } from '../common/pointers.js';
 import { decimalToExtended, extendedDigits } from './ldouble.js';
 import * as inGuestFloat from './inguest-float.js';
 import { COMPILED as FLOAT_CODE } from './inguest-float.x86.js';
+import * as inGuest64 from './inguest-int64.js';
+import { COMPILED as INT64_CODE } from './inguest-int64.x86.js';
 
 /** A double as the first argument, which a 64-bit caller passes in XMM0. */
 const DOUBLE_FIRST = Object.freeze({ 0: /** @type {'f64'} */ ('f64') });
@@ -738,7 +740,8 @@ export function createConversionFunctions(host){
     });
 
     const { readMemory, writeMemory } = host;
-    const entryHost = { readMemory, writeMemory, pointerSize: host.pointerSize };
+    const entryHost = { readMemory, writeMemory, pointerSize: host.pointerSize,
+        ...host.setRegisters ? { setRegisters: host.setRegisters } : {} };
     const table = {
         /**
          * int $I10_OUTPUT(_LDOUBLE value, int precision, int flags, I10_OUTPUT_data *out)
@@ -812,8 +815,15 @@ export function createConversionFunctions(host){
          * unsigned __int64 _strtoui64: strtol and strtoul in 64 bits, the
          * high half in EDX; out of range clamped with ERANGE.
          */
-        _strtoi64: strtoInteger(12, toInt64, int64Limit, false, true),
-        _strtoui64: strtoInteger(12, toUint64, uint64Limit, false, true),
+        // An i64 answered in the JavaScript sets EDX through `setRegisters`.
+        _strtoi64: readMemory && host.setRegisters
+            ? guestEntry(inGuest64._strtoi64, INT64_CODE._strtoi64, entryHost,
+                strtoInteger(12, toInt64, int64Limit, false, true))
+            : strtoInteger(12, toInt64, int64Limit, false, true),
+        _strtoui64: readMemory && host.setRegisters
+            ? guestEntry(inGuest64._strtoui64, INT64_CODE._strtoui64, entryHost,
+                strtoInteger(12, toUint64, uint64Limit, false, true))
+            : strtoInteger(12, toUint64, uint64Limit, false, true),
 
         strtol: readMemory
             ? guestEntry(inGuest.strtol, COMPILED.strtol, entryHost, strtol)
@@ -879,16 +889,20 @@ export function createConversionFunctions(host){
             toText(1, false)) : toText(1, false),
 
         /** char *_ui64toa(unsigned __int64 value, char *buffer, int radix) */
-        _ui64toa: toText(2, false),
+        _ui64toa: readMemory ? guestEntry(inGuest64._ui64toa, INT64_CODE._ui64toa, entryHost,
+            toText(2, false)) : toText(2, false),
 
         /** char *_i64toa(__int64 value, char *buffer, int radix) */
-        _i64toa: toText(2, true),
+        _i64toa: readMemory ? guestEntry(inGuest64._i64toa, INT64_CODE._i64toa, entryHost,
+            toText(2, true)) : toText(2, true),
 
         /** wchar_t *_ui64tow(unsigned __int64 value, wchar_t *buffer, int radix) */
-        _ui64tow: toText(2, false, true),
+        _ui64tow: readMemory ? guestEntry(inGuest64._ui64tow, INT64_CODE._ui64tow, entryHost,
+            toText(2, false, true)) : toText(2, false, true),
 
         /** wchar_t *_i64tow(__int64 value, wchar_t *buffer, int radix) */
-        _i64tow: toText(2, true, true),
+        _i64tow: readMemory ? guestEntry(inGuest64._i64tow, INT64_CODE._i64tow, entryHost,
+            toText(2, true, true)) : toText(2, true, true),
 
         /** int abs(int value) -- in the guest */
         abs: guestEntry(inGuest.abs, COMPILED.abs, {}),
