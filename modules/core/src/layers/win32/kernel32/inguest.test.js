@@ -179,3 +179,18 @@ test('the gate: with its guest path, each conversion answers every call as the h
     }
     assert.ok(inGuest > 400, `the guest path answered ${inGuest} of the calls`);
 });
+
+test('a 64-bit process places each conversion\'s x86-64 (`long`), its trap filled in', ()=>{
+    const { fns } = machine(true);
+    /** @type {number[]} */
+    const traps = [];
+    const builder = { register: ()=>0x7000_0000,
+        jump: (/** @type {number} */ at)=>{ traps.push(at); } };
+    for (const name of ['MultiByteToWideChar', 'WideCharToMultiByte'])
+    {
+        const fn = /** @type {any} */ (fns[name]);
+        assert.equal(typeof fn.long, 'function', `${name}: x86-64 code`);
+        const code = fn.long(builder);
+        assert.notDeepEqual(code, fn.code(builder), `${name}: the x86-64, not the i386`);
+    }
+});
