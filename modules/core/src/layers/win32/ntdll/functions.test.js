@@ -585,7 +585,8 @@ test('the processors\' performance records add up to GetSystemTimes\' times', ()
                 .setBigUint64(at, times[field], true));
             return 1;
         } } };
-    const fns = createNtdllFunctions({ ...host, kernel32, processors: { count: ()=>4 } });
+    const processors = /** @type {any} */ ({ count: ()=>4 });
+    const fns = createNtdllFunctions({ ...host, kernel32, processors });
     assert.equal(fns.NtQuerySystemInformation.handler([8, 0x100, 48 * 4, 0]), STATUS.SUCCESS);
     const view = new DataView(host.bytes.buffer);
     for (const [field, whole] of times.entries())

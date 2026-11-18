@@ -20,7 +20,8 @@ test('CT_CTYPE1 is the category Windows\' table follows, defined characters mark
     assert.deepEqual(typesOf([0x2c2, 0x2e5, 0x322, 0x482, 0x6de, 0xffe0, 0xffe9, 0x2153]),
         Array(8).fill(0x200), 'symbols and marks past the first 256: defined, nothing more');
     assert.deepEqual(typesOf([0x2b0, 0x2160, 0x600, 0xad, 0x1f88, 0x294, 0x903]),
-        [0x300, 0x300, 0x220, 0x230, 0x303, 0x300, 0x200], 'Lm, Nl, Cf, the soft hyphen, Lt, Lo, Mc');
+        [0x300, 0x300, 0x220, 0x230, 0x303, 0x300, 0x200],
+        'Lm, Nl, Cf, the soft hyphen, Lt, Lo, Mc');
     assert.deepEqual(typesOf([0x5f, 0x2d, 0x28, 0x29, 0xab, 0xbb, 0x21]), Array(7).fill(0x210));
     for (const code of [0x24, 0x2b, 0x3c, 0x3e, 0x5e, 0x60, 0x7c, 0x7e, 0xa2, 0xbe, 0xd7, 0xf7])
     {
@@ -35,7 +36,7 @@ test('CT_CTYPE1 is the category Windows\' table follows, defined characters mark
     assert.deepEqual(typesOf([0x2028, 0x2029]), [0x208, 0x208], 'Zl and Zp: spaces, not blanks');
     assert.deepEqual(typesOf([0xe31, 0xe34, 0xe4e, 0x1885]), Array(4).fill(0x300),
         'Thai and Mongolian marks are letters');
-    assert.equal(stringType(CT_CTYPE1, 0x41) & 0x80, 0x80, 'A is a hex digit');
+    assert.equal(Number(stringType(CT_CTYPE1, 0x41)) & 0x80, 0x80, 'A is a hex digit');
 });
 
 test('CT_CTYPE3 marks surrogates and the one kashida', ()=>{
@@ -47,8 +48,8 @@ test('CT_CTYPE3 marks surrogates and the one kashida', ()=>{
             code === 0x640 ? 0x200 : 0, `${code.toString(16)}`);
     }
     assert.equal(stringType(CT_CTYPE3, 0x41), 0x8040, 'A: alphabetic, half width');
-    assert.equal(stringType(CT_CTYPE3, 0x4e00) & 0x180, 0x180, 'an ideograph, full width');
-    assert.equal(stringType(CT_CTYPE3, 0x30a2) & 0x10, 0x10, 'katakana');
+    assert.equal(Number(stringType(CT_CTYPE3, 0x4e00)) & 0x180, 0x180, 'an ideograph, full');
+    assert.equal(Number(stringType(CT_CTYPE3, 0x30a2)) & 0x10, 0x10, 'katakana');
 });
 
 test('CT_CTYPE2 is the bidirectional class', ()=>{
