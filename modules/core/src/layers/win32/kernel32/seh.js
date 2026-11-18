@@ -741,6 +741,12 @@ export function createSeh(host){
      *        it was called: the processor's registers are somebody else's by
      *        then, and a record carved below them lands on another stack.
      * @param {any} [options.thread]  Whose frames these are, for the same reason.
+     * @param {Record<string, number>} [options.shown]  The registers the
+     *        handlers' context shows, where they are not the ones the record
+     *        is carved below: RtlUnwind's caller as it stands once the call
+     *        returns.
+     * @returns {Promise<{ unwound: boolean, context: number }>}  `context`:
+     *        where the handlers' context lies, which they may have changed.
      */
     const unwind = async(targetFrame, address, options = {})=>{
         const asked = options.thread ?? host.currentThread?.();
@@ -765,14 +771,14 @@ export function createSeh(host){
                 address,
             });
         }
-        writeContext(at.context, registers);
+        writeContext(at.context, options.shown ?? registers);
 
         // A target that is not on the chain is the program's mistake, and
         // taking every frame off on the way to not finding it would destroy
         // state the program still has. Nothing is unwound.
         if (!everything && !frames.some(({ frame })=>frame === target))
         {
-            return { unwound: false };
+            return { unwound: false, context: at.context };
         }
 
         const teb = tebOf(asked);
@@ -808,7 +814,7 @@ export function createSeh(host){
                 writeU32(teb, next);
             }
         }
-        return { unwound: reached && !damaged };
+        return { unwound: reached && !damaged, context: at.context };
     };
 
     /**
@@ -1051,13 +1057,26 @@ export function createSeh(host){
             /**
              * VOID RtlUnwind(PVOID TargetFrame, PVOID TargetIp,
              *                PEXCEPTION_RECORD ExceptionRecord, PVOID ReturnValue)
+             *
+             * The handlers are shown the caller's context as it stands once
+             * the call returns - its return address, its stack past the four
+             * arguments, ReturnValue in Eax - and the call returns what Eax
+             * holds when they are done: a handler that changes it changes the
+             * answer (Wine's exception test, test_unwind). TargetIp is not
+             * where the caller goes on: the call returns to it as any does.
              */
             RtlUnwind: {
                 argBytes: 16,
                 /** @param {number[]} args */
-                handler: ([targetFrame, targetIp, record, returnValue])=>
-                    unwind(targetFrame >>> 0, targetIp >>> 0, { record: record >>> 0 })
-                        .then(()=>returnValue >>> 0),
+                handler: ([targetFrame, , record, returnValue])=>{
+                    const registers = host.registers();
+                    const esp = registers.esp >>> 0;
+                    const caller = { ...registers, eip: readU32(esp),
+                        esp: esp + 4 + 16 >>> 0, eax: returnValue >>> 0 };
+                    return unwind(targetFrame >>> 0, caller.eip,
+                        { record: record >>> 0, registers, shown: caller })
+                        .then(({ context })=>readU32(context + CONTEXT.EAX));
+                },
             },
 
             /**

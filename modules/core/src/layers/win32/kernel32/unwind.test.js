@@ -278,3 +278,58 @@ test('a table added at run time is searched like an image\'s', ()=>{
     assert.ok(unwinder.remove(base + 0x2000));
     assert.equal(unwinder.lookup(base + 0x50), null, 'gone once removed');
 });
+
+test('a range a JIT installs a callback for is looked up through the callback', async()=>{
+    // RtlInstallFunctionTableCallback, as .NET's and Mono's JITs describe the
+    // code they make: the routine is asked with the address and its context
+    // and answers a RUNTIME_FUNCTION relative to the range's base.
+    const m = machine();
+    const base = 0x150000;
+    const entry = 0x160000;
+    m.putD(entry, 0x100);
+    m.putD(entry + 4, 0x200);
+    m.putD(entry + 8, 0x300);
+    /** @type {number[][]} */
+    const asked = [];
+    const unwinder = createUnwinder({ ...m.host(), callGuest: async(callback, args)=>{
+        asked.push([callback, ...args]);
+        return args[0] >= base + 0x100 && args[0] < base + 0x200 ? entry : 0;
+    } });
+    assert.equal(unwinder.install(0x150002, base, 0x1000, 0x7000, 0x8000), false,
+        'an identifier without its low two bits set is refused');
+    assert.equal(unwinder.install(0x150003, base, 0x1000, 0x7000, 0x8000), true);
+    assert.equal(unwinder.known(base + 0x180), true, 'the range is code the walk knows');
+    assert.equal(unwinder.lookup(base + 0x180), null, 'not without asking the callback');
+
+    const found = await unwinder.resolve(base + 0x180);
+    assert.deepEqual([found?.begin, found?.end, found?.unwindInfo],
+        [base + 0x100, base + 0x200, base + 0x300]);
+    assert.deepEqual(asked, [[0x7000, base + 0x180, 0x8000]]);
+    assert.equal(await unwinder.resolve(base + 0x800), null, 'the callback answering NULL');
+    assert.equal(await unwinder.resolve(0x41000), null, 'outside the range it is not asked');
+    assert.equal(asked.length, 2);
+
+    assert.equal(unwinder.remove(0x150003), true, 'RtlDeleteFunctionTable by the identifier');
+    assert.equal(unwinder.known(base + 0x180), false);
+});
+
+test('a growable table is searched by its entries in use, as the program grows it', async()=>{
+    const m = machine();
+    const base = 0x170000;
+    const table = 0x180000;
+    [[0x10, 0x20, 0x90], [0x30, 0x40, 0xa0]].forEach(([begin, end, info], index)=>{
+        m.putD(table + index * 12, begin);
+        m.putD(table + index * 12 + 4, end);
+        m.putD(table + index * 12 + 8, info);
+    });
+    const unwinder = createUnwinder(m.host());
+    const handle = unwinder.addGrowable(table, 1, 2, base, base + 0x1000);
+    assert.equal((await unwinder.resolve(base + 0x18))?.begin, base + 0x10);
+    assert.equal(unwinder.lookup(base + 0x38), null, 'the second entry is not in use yet');
+    unwinder.grow(handle, 2);
+    assert.equal(unwinder.lookup(base + 0x38)?.unwindInfo, base + 0xa0);
+    unwinder.grow(handle, 3);
+    assert.equal(unwinder.lookup(base + 0x38)?.begin, base + 0x30, 'past the maximum: unchanged');
+    unwinder.deleteGrowable(handle);
+    assert.equal(unwinder.lookup(base + 0x18), null);
+});

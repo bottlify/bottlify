@@ -29,6 +29,7 @@ function machine(returns){
         currentThread: ()=>null,
         unwinder: {
             lookup: ()=>null,
+            resolve: async()=>null,
             known: (/** @type {number} */ rip)=>rip >= 0x400000 && rip < 0x500000,
             /** A leaf: the return address off the top of its stack. @param {any} context */
             unwindLeaf: context=>{
@@ -42,19 +43,21 @@ function machine(returns){
 }
 
 test('a 64-bit RtlCaptureStackBackTrace walks the frames up, skipping and capturing as asked',
-    ()=>{
+    async()=>{
         const { seh, view } = machine([0x401000, 0x402000, 0x403000, 0]);
         const capture = seh.table.RtlCaptureStackBackTrace;
-        assert.equal(capture.handler([0, 8, 0x9000, 0x9100]), 3, 'up to the frame that ends it');
+        assert.equal(await capture.handler([0, 8, 0x9000, 0x9100]), 3,
+            'up to the frame that ends it');
         assert.deepEqual([0, 8, 16].map(at=>Number(view.getBigUint64(0x9000 + at, true))),
             [0x401000, 0x402000, 0x403000], 'the return addresses as quadwords');
         assert.equal(view.getUint32(0x9100, true), 0x401000 + 0x402000 + 0x403000, 'the hash');
-        assert.equal(capture.handler([1, 1, 0x9000, 0]), 1, 'one frame skipped, one captured');
+        assert.equal(await capture.handler([1, 1, 0x9000, 0]), 1,
+            'one frame skipped, one captured');
         assert.equal(Number(view.getBigUint64(0x9000, true)), 0x402000);
-        assert.equal(capture.handler([0, 8, 0, 0]), 0, 'no array to fill');
+        assert.equal(await capture.handler([0, 8, 0, 0]), 0, 'no array to fill');
     });
 
-test('a walk stops at an address no image holds', ()=>{
+test('a walk stops at an address no image holds', async()=>{
     const { seh } = machine([0x401000, 0x12345678, 0x403000]);
-    assert.equal(seh.table.RtlCaptureStackBackTrace.handler([0, 8, 0x9000, 0]), 2);
+    assert.equal(await seh.table.RtlCaptureStackBackTrace.handler([0, 8, 0x9000, 0]), 2);
 });

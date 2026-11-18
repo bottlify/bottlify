@@ -2267,6 +2267,10 @@ export function createWin32Module(){
                     readMemory,
                     /** @param {number} address */
                     imageOf: address=>modules.imageOf?.(address) ?? null,
+                    // A JIT's lookup callback, called on the thread whose
+                    // exception is being dispatched.
+                    /** @param {number} entry @param {number[]} args */
+                    callGuest: (entry, args)=>Promise.resolve(bridge.callGuest({ entry, args })),
                 })
                 : null;
             /** @type {ReturnType<typeof createSeh64> | null} */
@@ -6240,9 +6244,21 @@ export function createWin32Module(){
             {
                 for (const name of ['RtlLookupFunctionEntry', 'RtlVirtualUnwind', 'RtlUnwindEx',
                     'RtlCaptureContext', 'RtlAddFunctionTable', 'RtlDeleteFunctionTable',
-                    'RtlPcToFileHeader'])
+                    'RtlPcToFileHeader', 'RtlInstallFunctionTableCallback'])
                 {
                     libraries['ntdll.dll'][name] = /** @type {any} */ (seh64.table)[name];
+                }
+                // The growable tables are ntdll's alone, from Windows 8 on: a
+                // JIT that finds none installs a callback range instead.
+                const growable = ['RtlAddGrowableFunctionTable', 'RtlGrowFunctionTable',
+                    'RtlDeleteGrowableFunctionTable'];
+                for (const name of growable)
+                {
+                    if (windows.major > 6 || (windows.major === 6 && windows.minor >= 2))
+                    {
+                        libraries['ntdll.dll'][name] = /** @type {any} */ (seh64.table)[name];
+                    }
+                    delete libraries['KERNEL32.dll'][name];
                 }
             }
 

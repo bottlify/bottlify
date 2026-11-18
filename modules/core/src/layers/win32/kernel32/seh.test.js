@@ -818,3 +818,28 @@ test('the last-chance trace reads nothing below a small register, and never fail
             'the filter answered');
         assert.ok(said.some(line=>line.includes('eax=0x3')), said.join('\n'));
     });
+
+test('RtlUnwind shows the caller\'s context and answers the Eax its handlers leave', async()=>{
+    // Wine's exception test, test_unwind: the handlers see Eip at the return
+    // from RtlUnwind and ReturnValue in Eax; one that adds to Eax changes
+    // what the call returns.
+    const m = machine({ answer: (_entry, args)=>{
+        m.put(args[2] + CONTEXT.EAX, m.get(args[2] + CONTEXT.EAX) + 1);
+        return Disposition.CONTINUE_SEARCH;
+    } });
+    const frames = m.registerFrames([0x51000, 0x52000]);
+    m.put(STACK, 0x401234);
+    const answer = await /** @type {any} */ (m.seh.table).RtlUnwind
+        .handler([frames[1], 0x401999, 0, 0xdead0000]);
+
+    assert.equal(answer >>> 0, 0xdead0001, 'one handler ran, and its Eax is the answer');
+    const [{ args: [record, , context] }] = m.called;
+    assert.equal(m.get(context + CONTEXT.EIP), 0x401234, 'the return address, not the trap');
+    assert.equal(m.get(context + CONTEXT.ESP), STACK + 4 + 16, 'past the four arguments');
+    assert.equal(m.get(record + RECORD.CODE), STATUS.UNWIND);
+    assert.equal(m.get(record + RECORD.ADDRESS), 0x401234);
+
+    const none = await /** @type {any} */ (m.seh.table).RtlUnwind
+        .handler([frames[1], 0, 0, 0xdead0000]);
+    assert.equal(none >>> 0, 0xdead0000, 'with no frame left to unwind, ReturnValue as given');
+});
