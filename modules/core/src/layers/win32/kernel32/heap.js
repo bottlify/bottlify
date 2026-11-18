@@ -20,7 +20,7 @@
  */
 
 import { pointerArg } from '../common/pointers.js';
-import { createGlobalMemory } from './moveable.js';
+import { createGlobalMemory, MOVEABLE_USER_FLAGS } from './moveable.js';
 import { IMAGE_ALLOCATION_PROTECT, imageLayout } from './image-protection.js';
 import { askChild } from './cross-process.js';
 import { PROCESS_QUERY_INFORMATION, PROCESS_VM_OPERATION } from './process-target.js';
@@ -28,7 +28,8 @@ import { guestEntry } from '../msvcrt/guest-code.js';
 import * as inGuest from './inguest.js';
 import { COMPILED } from './inguest.x86.js';
 import {
-    globalAllocCode, globalFreeCode, heapAllocCode, heapFreeCode, heapReAllocCode, heapSizeCode,
+    CONTROL, globalAllocCode, globalFreeCode, heapAllocCode, heapFreeCode, heapReAllocCode,
+    heapSizeCode,
 } from './guest-heap.js';
 import {
     bindLong, globalAllocLongCode, globalFreeLongCode, heapAllocLongCode, heapFreeLongCode,
@@ -121,7 +122,19 @@ const HEAP_COMPATIBILITY_INFORMATION = 0;
 const HEAP_ENABLE_TERMINATION_ON_CORRUPTION = 1;
 const LOW_FRAGMENTATION_HEAP = 2;
 
+/**
+ * PROCESS_HEAP_ENTRY at 32 bits, and its flags: the union is the region's
+ * committed and uncommitted sizes and first and last block, or a moveable
+ * block's handle.
+ */
+const HEAP_ENTRY = Object.freeze({ lpData: 0, cbData: 4, cbOverhead: 8, wFlags: 10, union: 12,
+    SIZE: 28 });
+const PROCESS_HEAP_REGION = 0x1;
+const PROCESS_HEAP_ENTRY_BUSY = 0x4;
+const PROCESS_HEAP_ENTRY_MOVEABLE = 0x10;
+
 /** Codes this surface reports. */
+const ERROR_SUCCESS = 0;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_ACCESS_DENIED = 5;
@@ -341,6 +354,29 @@ export const GUARD_PAGES = Symbol('guard pages');
 
 /** @param {number} value @param {number} to */
 const roundUp = (value, to)=>Math.ceil(value / to) * to;
+
+/**
+ * Where `value` is in an ascending list, or where it would go.
+ *
+ * @param {number[]} list @param {number} value
+ */
+const sortedIndex = (list, value)=>{
+    let low = 0;
+    let high = list.length;
+    while (low < high)
+    {
+        const middle = (low + high) >>> 1;
+        if (list[middle] < value)
+        {
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    return low;
+};
 
 /**
  * @typedef {Object} HeapBlock
@@ -1889,6 +1925,13 @@ export function createHeapFunctions(host){
      */
     const userInfo = new Map();
 
+    /**
+     * Each heap's blocks by address as its HeapWalk began.
+     *
+     * @type {Map<number, number[]>}
+     */
+    const walks = new Map();
+
     const globals = createGlobalMemory({
         allocate: bytes=>allocator.allocate(bytes, { owner: processHeap }),
         free: address=>{
@@ -1896,6 +1939,14 @@ export function createHeapFunctions(host){
             return allocator.free(address);
         },
         block: address=>allocator.block(address),
+        readable: address=>{
+            if (address >= spaceTop())
+            {
+                return false;
+            }
+            const [, , , , state, protect] = regionAnswer(address);
+            return state === MEM_COMMIT && (protect & (PAGE_NOACCESS | PAGE_GUARD)) === 0;
+        },
         reallocate: (block, wanted, how)=>{
             const moved = reallocate(block, wanted, how);
             const info = userInfo.get(block.address);
@@ -2719,6 +2770,7 @@ export function createHeapFunctions(host){
                 heaps.delete(heap);
                 unserialized.delete(heap);
                 lowFragmentation.delete(heap);
+                walks.delete(heap);
                 return 1;
             },
         },
@@ -2764,20 +2816,30 @@ export function createHeapFunctions(host){
             handler: ([handle, flags, pointer, bytes])=>{
                 const heap = handle >>> 0;
                 const address = pointer >>> 0;
+                // No block to resize is no failure of memory: Windows answers
+                // NULL and clears the last error (Wine's heap test).
+                if (address === 0)
+                {
+                    host.setLastError(ERROR_SUCCESS);
+                    return 0;
+                }
                 const block = blockOf(heap, address);
                 if (!block)
                 {
                     return 0;
                 }
-                if (!fits(heap, bytes >>> 0, block.size))
+                const moved = fits(heap, bytes >>> 0, block.size)
+                    ? reallocate(block, bytes >>> 0, {
+                        zeroTail: (flags & HEAP_ZERO_MEMORY) !== 0,
+                        mayMove: (flags & HEAP_REALLOC_IN_PLACE_ONLY) === 0,
+                    })
+                    : 0;
+                // Grown nowhere, in place or not: STATUS_NO_MEMORY's error.
+                if (moved === 0)
                 {
                     host.setLastError(ERROR_NOT_ENOUGH_MEMORY);
-                    return 0;
                 }
-                return reallocate(block, bytes >>> 0, {
-                    zeroTail: (flags & HEAP_ZERO_MEMORY) !== 0,
-                    mayMove: (flags & HEAP_REALLOC_IN_PLACE_ONLY) === 0,
-                });
+                return moved;
             },
             ...routine('reAlloc'),
         },
@@ -3257,16 +3319,102 @@ export function createHeapFunctions(host){
         /**
          * BOOL HeapWalk(HANDLE hHeap, LPPROCESS_HEAP_ENTRY lpEntry)
          *
-         * Not implemented, and it says so with the code that ends a walk. A
-         * caller loops until this returns FALSE and then checks the error; told
-         * there are no more items it stops cleanly, where any other failure
-         * would have it report a corrupt heap.
+         * The heap as one region, its control block, and then each of its
+         * busy blocks by address: the heaps share the process's arena rather
+         * than each holding reservations of its own (decisions.md A272), so
+         * there is no free block or uncommitted range that is a heap's to
+         * report. A walk starts at a NULL lpData and goes on from the entry
+         * it was handed back; it ends with ERROR_NO_MORE_ITEMS, and an entry
+         * that is none of the heap's is ERROR_INVALID_PARAMETER.
          */
         HeapWalk: {
             argBytes: 8,
-            handler: ()=>{
-                host.setLastError(ERROR_NO_MORE_ITEMS);
-                return 0;
+            /** @param {number[]} args */
+            handler: ([handle, entry])=>{
+                const heap = handle >>> 0;
+                const at = entry >>> 0;
+                if (!heaps.has(heap))
+                {
+                    host.setLastError(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                if (at === 0)
+                {
+                    host.setLastError(ERROR_NOACCESS);
+                    return 0;
+                }
+                if ((host.pointerSize ?? 4) === 8)
+                {
+                    // PROCESS_HEAP_ENTRY's 64-bit layout waits for that width's
+                    // work; a walk that finds nothing ends cleanly.
+                    host.setLastError(ERROR_NO_MORE_ITEMS);
+                    return 0;
+                }
+                const previous = readDword(at + HEAP_ENTRY.lpData);
+                // The blocks are listed once, as the walk starts, and each step
+                // finds its place in that list: a walk of n blocks is not n sorts.
+                if (previous === 0 || !walks.has(heap))
+                {
+                    walks.set(heap, allocator.owned(heap)
+                        .sort((/** @type {number} */ x, /** @type {number} */ y)=>x - y));
+                }
+                const blocks = /** @type {number[]} */ (walks.get(heap));
+                const regionSize = guestHeap?.isHeap(heap) ? CONTROL.SIZE
+                    : bounded.has(heap) ? FIXED_HEAP_HANDLE : 0;
+                const write = (/** @type {number[]} */ fields)=>{
+                    const data = new Uint8Array(HEAP_ENTRY.SIZE);
+                    const view = new DataView(data.buffer);
+                    const [lpData, cbData, cbOverhead, flags, ...union] = fields;
+                    view.setUint32(HEAP_ENTRY.lpData, lpData, true);
+                    view.setUint32(HEAP_ENTRY.cbData, cbData, true);
+                    view.setUint8(HEAP_ENTRY.cbOverhead, cbOverhead);
+                    view.setUint16(HEAP_ENTRY.wFlags, flags, true);
+                    union.forEach((value, i)=>
+                        view.setUint32(HEAP_ENTRY.union + i * 4, value, true));
+                    host.writeMemory(at, data);
+                    return 1;
+                };
+                if (previous === 0)
+                {
+                    const last = blocks.at(-1);
+                    const end = last === undefined ? heap + regionSize
+                        : last + (allocator.block(last)?.size ?? 0);
+                    const first = blocks[0] ?? heap + regionSize;
+                    let used = 0;
+                    for (const address of blocks)
+                    {
+                        used += allocator.block(address)?.size ?? 0;
+                    }
+                    return write([heap, regionSize, 0, PROCESS_HEAP_REGION,
+                        regionSize + used, 0, first, end]);
+                }
+                let index = previous === heap ? 0 : sortedIndex(blocks, previous);
+                if (previous !== heap && blocks[index] !== previous)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                index += previous === heap ? 0 : 1;
+                // A block freed since the walk began is passed over.
+                while (index < blocks.length && blockOf(heap, blocks[index]) === null)
+                {
+                    index++;
+                }
+                const next = blocks[index];
+                if (next === undefined)
+                {
+                    walks.delete(heap);
+                    host.setLastError(ERROR_NO_MORE_ITEMS);
+                    return 0;
+                }
+                const size = allocator.block(next)?.size ?? 0;
+                const info = userInfo.get(next);
+                const moveable = info !== undefined && (info.flags & MOVEABLE_USER_FLAGS) !== 0;
+                // A block's header, and the bytes its size was rounded up by.
+                const overhead = BLOCK_HEADER + roundUp(size, ALIGNMENT) - size;
+                return write([next, size, overhead,
+                    PROCESS_HEAP_ENTRY_BUSY | (moveable ? PROCESS_HEAP_ENTRY_MOVEABLE : 0),
+                    moveable ? info.value : 0, 0, 0, 0]);
             },
         },
 
