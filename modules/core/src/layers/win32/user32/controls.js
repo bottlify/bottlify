@@ -34,6 +34,7 @@ import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { createTabWalk } from './tabwalk.js';
 import { directoryItems } from './dlgdir.js';
 import { createButtonV6 } from './button-v6.js';
+import { translated } from './unicode.js';
 
 /** Messages the controls answer. */
 export const WM_CREATE = 0x0001;
@@ -213,6 +214,8 @@ const SS_ENHMETAFILE = 0x0f;
 
 /** The window styles a dialog's Tab order is read from. */
 const WS_TABSTOP = 0x00010000;
+/** A dialog that is a page inside another (a property sheet's). */
+const DS_CONTROL = 0x0400;
 const WS_DISABLED = 0x08000000;
 const WS_VISIBLE = 0x10000000;
 const WS_MINIMIZE = 0x20000000;
@@ -543,6 +546,8 @@ const MAX_TEXT = 1 << 16;
  * @property {number} message
  * @property {number} wParam
  * @property {number} lParam
+ * @property {boolean} [unicode]  its text wide; the dialog class's procedure
+ *     takes a message in its window's encoding, every other one in ANSI
  */
 
 /** SetBkMode's mode in which text is drawn over the context's background colour. */
@@ -1520,6 +1525,14 @@ export function createControlProcedures(host){
                     {
                         state.check = wanted;
                         host.invalidate(record);
+                    }
+                    // A radio button checked is the one Tab reaches in its
+                    // group, and one unchecked is not (dialog.c test_focus:
+                    // the dialog's first tab stop is the group's checked one).
+                    if (RADIO_KINDS.has(kind))
+                    {
+                        record.style = (wanted === BST_UNCHECKED ? record.style & ~WS_TABSTOP
+                            : record.style | WS_TABSTOP) >>> 0;
                     }
                 }
                 return 0;
@@ -4673,9 +4686,21 @@ export function createControlProcedures(host){
         {
             return 0;
         }
-        const first = host.children(dialog).find(child=>(child.style
-            & (WS_TABSTOP | WS_VISIBLE | WS_DISABLED)) === (WS_TABSTOP | WS_VISIBLE));
+        const first = firstFocus(dialog);
         return first ? giveFocus(dialog, first, thread) : 0;
+    };
+
+    /**
+     * Where a dialog's focus goes when nothing says otherwise: its first
+     * visible, enabled control that stops the Tab key or, where none does,
+     * its first visible, enabled control - a label (dialog.c test_focus).
+     *
+     * @param {any} dialog @returns {any | null}
+     */
+    const firstFocus = dialog=>{
+        const reachable = host.children(dialog).filter(child=>
+            (child.style & (WS_VISIBLE | WS_DISABLED)) === WS_VISIBLE);
+        return reachable.find(child=>(child.style & WS_TABSTOP) !== 0) ?? reachable[0] ?? null;
     };
 
     /**
@@ -4803,6 +4828,17 @@ export function createControlProcedures(host){
     };
 
     /**
+     * DefDlgProc's own work, which reads the ANSI page: a wide message reaches
+     * it converted, and a text it fills goes back wide.
+     *
+     * @param {any} record @param {ControlMessage & { unicode?: boolean }} message
+     * @param {unknown} [thread]
+     */
+    const byDefault = (record, message, thread)=>(message.unicode === true
+        ? translated(host, message, false, ansi=>defDlgProc(record, ansi, thread), record.style)
+        : defDlgProc(record, message, thread));
+
+    /**
      * The dialog class: every message goes to the program's own dialog
      * procedure first, and to DefDlgProc when that one answers FALSE.
      *
@@ -4813,7 +4849,7 @@ export function createControlProcedures(host){
             ? record.extra.getUint32(DWLP_DLGPROC, true) : 0;
         if (dlgProc === 0 || stateOf(record).inDlgProc === message.message)
         {
-            return defDlgProc(record, message, thread);
+            return byDefault(record, message, thread);
         }
         const state = stateOf(record);
         // A dialog procedure that sends its own window the same message it
@@ -4821,21 +4857,31 @@ export function createControlProcedures(host){
         // default, not itself again.
         const previous = state.inDlgProc;
         state.inDlgProc = message.message;
-        // The dialog procedure reads text in the encoding its dialog was made
-        // in: DialogBoxParamW's is a wide one.
-        const reads = record.unicode === true;
+        // The dialog procedure hears the message as it came - in the
+        // window's encoding through the window, in the caller's through
+        // DefDlgProcA/W - whatever encoding it was set in: no text is
+        // converted for it (dialog.c test_aw_conversion_dlgproc).
+        const reads = message.unicode === true;
         return after(host.callProcedure(dlgProc, message, thread, reads), handled=>{
             state.inDlgProc = previous;
             if ((handled | 0) === 0)
             {
-                return defDlgProc(record, message, thread);
+                return byDefault(record, message, thread);
             }
             if (message.message === WM_INITDIALOG)
             {
                 // TRUE from WM_INITDIALOG means "give the focus to the
-                // control you chose", the first tab stop.
-                const first = message.wParam >>> 0;
-                return first !== 0 ? after(host.setFocus(first, thread), ()=>1) : 1;
+                // first tab stop" - as the procedure left the controls, so a
+                // radio button it checked is the one - or, with none, to the
+                // first control; an edit's text selected on the way in. A
+                // DS_CONTROL page its template leaves hidden takes no focus
+                // (dialog.c test_focus).
+                if ((record.style & DS_CONTROL) !== 0 && record.templateVisible === false)
+                {
+                    return 1;
+                }
+                const target = firstFocus(record);
+                return target ? after(giveFocus(record, target, thread), ()=>1) : 1;
             }
             return ANSWERED_DIRECTLY.has(message.message)
                 ? handled >>> 0
