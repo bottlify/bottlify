@@ -3894,12 +3894,21 @@ export function createWin32Module(){
                         // Without it LoadLibrary can only answer for what is
                         // already mapped, and a program asking for a library it
                         // ships is told the module does not exist.
-                        /** @param {string} name @param {number} [flags] */
-                        load: (name, flags)=>modules.load?.(name, flags) ?? 0,
+                        /**
+                         * @param {string} name @param {number} [flags]
+                         * @param {import('./kernel32/modules.js').LibrarySearch | null} [search]
+                         * @returns {number | Promise<number>}
+                         */
+                        load: (name, flags, search)=>(search ? modules.load?.(name, flags, search)
+                            : modules.load?.(name, flags)) ?? 0,
                         /** @param {string} name */
                         loadError: name=>modules.loadError?.(name) ?? null,
                         /** @param {number} handle */
                         dataFile: handle=>modules.dataFile?.(handle) ?? null,
+                        // Asked when called: the table is assembled by then.
+                        environmentVariable: name=>Object.entries(/** @type {any} */ (
+                            libraries['KERNEL32.dll'])?.[ENVIRONMENT_NOW]?.() ?? {})
+                            .find(([key])=>key.toUpperCase() === name.toUpperCase())?.[1],
                         /** @param {any} asked */
                         resolved: asked=>modules.resolved?.(asked),
                         exitThread: code=>libraries['KERNEL32.dll'].ExitThread.handler([code]),
@@ -6411,6 +6420,7 @@ export function createWin32Module(){
                 readWideString,
                 kernel32: libraries['KERNEL32.dll'],
                 pool: threadPool.native,
+                dllNotifications: modules.dllNotifications,
                 crt: libraries['msvcrt.dll'],
                 teb: ()=>kernel.currentThread()?.tebAddress ?? 0,
                 currentThread: ()=>kernel.currentThread(),

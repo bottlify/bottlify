@@ -241,6 +241,8 @@ const ALL_ACCESS = 0x001fffff;
 const CURRENT_PROCESS = 0xffffffff;
 /** The first argument was refused. */
 const STATUS_INVALID_PARAMETER_1 = 0xc00000ef;
+/** The most modules a walk of the loader's list visits: more than any process loads. */
+const MAX_MODULES = 0x10000;
 /** The most a child is asked to write back for one query: no class is larger. */
 const MAX_ASKED = 0x10000;
 const CURRENT_THREAD = 0xfffffffe;
@@ -374,7 +376,8 @@ export function systemProcessInformation(processes, base){
 export function createQueryFunctions(host){
     const machine = host.version ?? windowsVersion();
     const processors = host.processors ?? createProcessors();
-    const { pointer: pointerBytes, teb: TEB, peb: PEB } = blockLayouts(host.pointerSize);
+    const { pointer: pointerBytes, teb: TEB, peb: PEB, ldr: LDR, entry: ENTRY }
+        = blockLayouts(host.pointerSize);
 
     /** @param {number} at */
     const readU32 = at=>{
@@ -529,6 +532,44 @@ export function createQueryFunctions(host){
          * Windows 10's default, the LongPathsEnabled value unset, is FALSE.
          */
         RtlAreLongPathsEnabled: { argBytes: 0, handler: ()=>0 },
+
+        /**
+         * NTSTATUS LdrFindEntryForAddress(PVOID Address, PLDR_DATA_TABLE_ENTRY *Entry)
+         *
+         * The loaded module whose image holds the address, as its entry in
+         * PEB->Ldr's load-order list; none, STATUS_NO_MORE_ENTRIES.
+         */
+        LdrFindEntryForAddress: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([address, out])=>{
+                const block = peb();
+                if (block === 0 || (out >>> 0) === 0)
+                {
+                    return STATUS.INVALID_PARAMETER;
+                }
+                const head = readU32(block + PEB.LDR) + LDR.IN_LOAD_ORDER_MODULE_LIST;
+                const wanted = address >>> 0;
+                // Bounded by what a process can hold, so a list a program broke
+                // into a loop is not walked for ever.
+                for (let link = readU32(head), seen = 0; link !== head && link !== 0
+                    && seen < MAX_MODULES; link = readU32(link), seen++)
+                {
+                    const entry = link - ENTRY.IN_LOAD_ORDER_LINKS;
+                    const base = readU32(entry + ENTRY.DLL_BASE);
+                    if (wanted >= base && wanted - base < readU32(entry + ENTRY.SIZE_OF_IMAGE))
+                    {
+                        writeU32If(out >>> 0, entry);
+                        if (pointerBytes === 8)
+                        {
+                            writeU32If((out >>> 0) + 4, 0);
+                        }
+                        return STATUS.SUCCESS;
+                    }
+                }
+                return STATUS.NO_MORE_ENTRIES;
+            },
+        },
 
         /**
          * NTSTATUS RtlGetVersion(PRTL_OSVERSIONINFOW lpVersionInformation)

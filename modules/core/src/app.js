@@ -41,7 +41,7 @@ import { jumpBytes, relocatablePrefix } from './layers/loader/internal/hooks.js'
 import { mangledCall } from './layers/loader/internal/mangling.js';
 import { mapImage } from './layers/loader/internal/image.js';
 import { imagePlacementOf, installedHeaders } from './layers/loader/internal/synth.js';
-import { createProcessBlocks, TEB, TEB64 } from './layers/win32/kernel32/teb.js';
+import { blockLayouts, createProcessBlocks, TEB, TEB64 } from './layers/win32/kernel32/teb.js';
 import { KUSER, KUSER_REGION, SHARED_USER_DATA, createSharedUserData, sharedPageAt }
     from './layers/win32/kernel32/shared-data.js';
 import { supportedOsOf, windowsVersion } from './layers/win32/kernel32/versions.js';
@@ -2263,25 +2263,40 @@ export function startDirectoryOf(imagePath){
 }
 
 /**
- * Where a LoadLibrary at run time actually looks.
+ * The one place a library name fixes, or null when the name is searched for.
  *
- * A name that already says where it is, is where it is. Windows searches for a
- * bare name and takes a qualified one as given, and a program that has worked
- * out an absolute path -- a runtime loading its own plug-ins out of a directory
- * beside the executable, say -- passes one. Prefixing it again asks for
- * C:\App\C:\App\..., which is not there, and the plug-in is reported missing
- * while sitting exactly where it was asked for.
+ * A name that already says where it is, is where it is: a full path, a path
+ * from the root of the current drive, one from the current directory of a
+ * drive (`C:plugins\x.dll`) and one that starts at the current directory
+ * (`.\x.dll`, `..\x.dll`). Prefixing one again asks for C:\App\C:\App\...,
+ * which is not there, and the library is reported missing while sitting
+ * exactly where it was asked for. Any other name - a bare one, or a relative
+ * one with a directory in it (`plugins\x.dll`) - is searched for, each place
+ * of the search taking the name after it, as LoadLibrary's documentation
+ * says of a relative path.
  *
- * @param {string} name        What the guest passed to LoadLibrary.
- * @param {string} imagePath   The running executable, whose directory is searched.
+ * @param {string} name
+ * @param {string} [currentDirectory]  The process's, which a drive-relative or
+ *     dot-relative name starts from.
+ * @returns {string | null}
  */
-export function resolveLibraryPath(name, imagePath){
-    const qualified = /^[A-Za-z]:[\\/]/.test(name) || /^[\\/]/.test(name);
-    if (qualified)
+export function fixedLibraryPath(name, currentDirectory){
+    if (/^[A-Za-z]:[\\/]/.test(name) || /^[\\/]/.test(name))
     {
         return name;
     }
-    return `${imagePath.slice(0, imagePath.lastIndexOf('\\') + 1)}${name}`;
+    const here = currentDirectory?.replace(/[\\/]+$/, '');
+    const drive = /^([A-Za-z]):(.*)$/.exec(name);
+    if (drive)
+    {
+        const onDrive = here && here[0].toLowerCase() === drive[1].toLowerCase();
+        return `${onDrive ? here : `${drive[1]}:`}\\${drive[2]}`;
+    }
+    if (/^\.\.?[\\/]/.test(name) && here)
+    {
+        return `${here}\\${name}`;
+    }
+    return null;
 }
 
 /**
@@ -2317,8 +2332,8 @@ const SYSTEM_DIRECTORY = 'WINDOWS\\system32';
  * installer puts a library it brought and then loads by bare name -- then the
  * current directory, where XP's safe search mode puts it: a setup that changes
  * to a folder of its disc and loads a helper there by bare name finds it. A
- * name with a directory in it names its one place and is looked for nowhere
- * else.
+ * name that fixes its place (`fixedLibraryPath`) is looked for nowhere else; a
+ * relative one with a directory in it is searched for as a bare one is.
  *
  * `ours` drops the system directories: for a name the engine's own table
  * already answers, the system's copy is the engine's, and a runtime an
@@ -2328,23 +2343,29 @@ const SYSTEM_DIRECTORY = 'WINDOWS\\system32';
  *
  * `from` replaces the program's directory with a library's own, as
  * LOAD_WITH_ALTERED_SEARCH_PATH has Windows search for that library's imports;
- * `path` is the directories of the process's PATH, searched last.
+ * `path` is the directories of the process's PATH, searched last. `only` is
+ * the whole search instead, the directories LoadLibraryEx's
+ * LOAD_LIBRARY_SEARCH_* flags allow (`searchedDirectories`).
  *
  * @param {string} name
  * @param {string} imagePath
  * @param {string} [currentDirectory]
- * @param {{ ours?: boolean, from?: string, path?: string[] }} [how]
+ * @param {{ ours?: boolean, from?: string, path?: string[], only?: string[] }} [how]
  * @returns {string[]}
  */
 export function libraryCandidates(name, imagePath, currentDirectory, how = {}){
-    const first = resolveLibraryPath(name, imagePath);
-    if (first !== `${imagePath.slice(0, imagePath.lastIndexOf('\\') + 1)}${name}`
-        || /[\\/]/.test(name))
+    const fixed = fixedLibraryPath(name, currentDirectory);
+    if (fixed !== null)
     {
-        return [first];
+        return [fixed];
     }
     /** @param {string} directory */
     const inside = directory=>`${directory.replace(/[\\/]+$/, '')}\\${name}`;
+    if (how.only)
+    {
+        return how.only.map(inside);
+    }
+    const first = `${imagePath.slice(0, imagePath.lastIndexOf('\\') + 1)}${name}`;
     const places = [how.from ? inside(how.from) : first,
         ...how.ours ? [] : SYSTEM_LIBRARY_DIRECTORIES.map(directory=>directory + name)];
     for (const directory of [currentDirectory, ...how.path ?? []])
@@ -2356,6 +2377,31 @@ export function libraryCandidates(name, imagePath, currentDirectory, how = {}){
         }
     }
     return places;
+}
+
+/**
+ * Where LoadLibraryEx looks under its LOAD_LIBRARY_SEARCH_* flags, in the
+ * order its documentation gives: the loading library's own directory
+ * (LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR, for that library's imports), the
+ * program's, the ones AddDllDirectory and SetDllDirectory named, and the
+ * system directory. Nothing else is looked in - not the current directory,
+ * not PATH. Undefined for the standard search.
+ *
+ * @param {import('./layers/win32/kernel32/modules.js').LibrarySearch | null | undefined} search
+ * @param {string} imagePath
+ * @returns {string[] | undefined}
+ */
+export function searchedDirectories(search, imagePath){
+    if (!search)
+    {
+        return undefined;
+    }
+    return [
+        ...search.from ? [search.from] : [],
+        ...search.application ? [startDirectoryOf(imagePath)] : [],
+        ...search.user,
+        ...search.system ? [SYSTEM_LIBRARY_DIRECTORIES[0]] : [],
+    ];
 }
 
 /**
@@ -2576,6 +2622,10 @@ export function resourceLookup(main, byBase, dataFiles = new Map(), readMemory, 
  * the machine was given, and a wrong guess maps a library outside guest RAM.
  */
 const LIBRARY_ALIGN = 0x10000;
+
+/** What an LdrRegisterDllNotification callback is told: a library loaded, or unloaded. */
+const LDR_DLL_NOTIFICATION_REASON_LOADED = 1;
+const LDR_DLL_NOTIFICATION_REASON_UNLOADED = 2;
 
 /** LoadLibraryEx's flags: mapped with nothing resolved or run, or loaded as data. */
 const DONT_RESOLVE_DLL_REFERENCES = 0x1;
@@ -2942,6 +2992,10 @@ export const WHOLE_READ_BYTES = HEAP_POOLS.blockCache / 4;
  * of a hundred megabytes -- was fetched, let go down to the pool and missed
  * again, for ever.
  *
+ * Opened as the loader opens an image: for reading, sharing reading and
+ * deletion, so a file a program holds open to delete on close - a library it
+ * wrote out to load - is read, and one it holds open for writing is refused.
+ *
  * @param {any} filesystem
  * @param {any} blocks
  * @param {string} path
@@ -2952,7 +3006,7 @@ export async function readWholeFile(filesystem, blocks, path, piece = WHOLE_READ
     let handle;
     try
     {
-        handle = filesystem.open(path, { create: false });
+        handle = filesystem.open(path, { shareDelete: true });
     }
     catch {
         return null;
@@ -4994,16 +5048,26 @@ async function buildApp(options){
      * @param {string} path
      */
     const moduleAtPath = path=>{
-        const wanted = pathKey(resolveLibraryPath(path, options.imagePath ?? 'C:\\app.exe'));
+        const wanted = placesNamed(path);
         for (const module of byBase.values())
         {
-            if (module.fromFile && module.path && pathKey(module.path) === wanted)
+            if (module.fromFile && module.path && wanted.includes(pathKey(module.path)))
             {
                 return module;
             }
         }
         return null;
     };
+
+    /**
+     * Every file a path given to LoadLibrary can name, as `pathKey`s: the one
+     * it fixes, or each place a relative one is searched for in.
+     *
+     * @param {string} path @param {string[]} [only]  A LoadLibraryEx search's places.
+     */
+    const placesNamed = (path, only = undefined)=>libraryCandidates(path,
+        options.imagePath ?? 'C:\\app.exe', core.api('filesystem').currentDirectory(), { only })
+        .map(pathKey);
 
     /** @param {string | null} name */
     const findModule = name=>{
@@ -5023,11 +5087,12 @@ async function buildApp(options){
      * native image of a mixed assembly, beside the assembly itself -- is
      * loaded as a module of its own.
      *
-     * @param {string} name @param {any} module
+     * @param {string} name @param {any} module @param {string[]} [only]  A
+     *     LoadLibraryEx search's places.
      */
-    const answersPath = (name, module)=>!/[\\/]/.test(name) || !module?.fromFile || !module.path
-        || pathKey(module.path)
-            === pathKey(resolveLibraryPath(name, options.imagePath ?? 'C:\\app.exe'));
+    const answersPath = (name, module, only = undefined)=>!/[\\/]/.test(name)
+        || !module?.fromFile || !module.path
+        || placesNamed(name, only).includes(pathKey(module.path));
 
     /**
      * Takes a module's name off the bare-name index when it is the one there,
@@ -5116,9 +5181,33 @@ async function buildApp(options){
      *     removeThreadLocal: (slot: number) => void,
      *     addModule: (module: import('./layers/win32/kernel32/teb.js').LoadedModule) => number,
      *     removeModule: (base: number) => void,
+     *     entryOf: (base: number) => number,
      * } | null}
      */
     let threadBlocks = null;
+    /**
+     * The callbacks LdrRegisterDllNotification registered, by their cookie, in
+     * the order registered (`tellNotified`).
+     *
+     * @type {Map<number, { callback: number, context: number }>}
+     */
+    const notifications = new Map();
+    let nextNotificationCookie = 1;
+    /** What ntdll's LdrRegisterDllNotification and LdrUnregisterDllNotification act on. */
+    const dllNotifications = {
+        get size(){
+            return notifications.size;
+        },
+        values: ()=>notifications.values(),
+        /** @param {number} callback @param {number} context */
+        register: (callback, context)=>{
+            const cookie = nextNotificationCookie++;
+            notifications.set(cookie, { callback: callback >>> 0, context: context >>> 0 });
+            return cookie;
+        },
+        /** @param {number} cookie */
+        unregister: cookie=>notifications.delete(cookie >>> 0),
+    };
     /**
      * What a thread made after the process's first is given a copy of: every
      * image's thread-local block, at the image's index, as the loader does
@@ -6253,9 +6342,13 @@ async function buildApp(options){
                     return null;
                 },
                 imagePath: ()=>options.imagePath ?? 'C:\\app.exe',
-                /** @param {string} name */
-                /** @param {string} name @param {number} [flags] */
-                load: (name, flags)=>loadLibraryAtRuntime(name, flags),
+                dllNotifications,
+                /**
+                 * @param {string} name @param {number} [flags]
+                 * @param {import('./layers/win32/kernel32/modules.js').LibrarySearch | null} [search]
+                 */
+                load: (name, flags, search)=>loadLibraryAtRuntime(name, flags, undefined, 0,
+                    search),
                 /** @param {string} name */
                 loadError: name=>loadErrors.get(withLibraryExtension(name).toLowerCase()
                     .replace(/\.dll$/, '')) ?? null,
@@ -7222,6 +7315,50 @@ async function buildApp(options){
     };
 
     /**
+     * Tells every callback LdrRegisterDllNotification registered that a
+     * library came or went (`reason`: 1 loaded, 2 unloaded), in the order
+     * they were registered, on `thread`: with an LDR_DLL_NOTIFICATION_DATA
+     * naming it by its loader entry's two names, its base and its size.
+     * Windows tells them after a library is mapped and before its DllMain,
+     * and after its DllMain on the way out, before it is unmapped.
+     *
+     * @param {number} reason @param {any} held @param {any} thread
+     * @returns {Promise<void> | void}
+     */
+    const tellNotified = (reason, held, thread)=>{
+        const entry = threadBlocks?.entryOf(held.base) ?? 0;
+        if (dllNotifications.size === 0 || entry === 0)
+        {
+            return;
+        }
+        const pointer = processBits === 64 ? 8 : 4;
+        const layout = blockLayouts(pointer).entry;
+        const data = win32.heap().allocate(pointer * 5);
+        const fields = [0, entry + layout.FULL_DLL_NAME, entry + layout.BASE_DLL_NAME,
+            held.base, held.size ?? 0];
+        fields.forEach((value, at)=>{
+            memory.writeU32(data + at * pointer, value >>> 0);
+            if (pointer === 8)
+            {
+                memory.writeU32(data + at * pointer + 4, 0);
+            }
+        });
+        return (async()=>{
+            try
+            {
+                for (const { callback, context } of [...dllNotifications.values()])
+                {
+                    await bridge.callGuest({ entry: callback, args: [reason, data, context], thread });
+                }
+            }
+            finally
+            {
+                win32.heap().free(data);
+            }
+        })();
+    };
+
+    /**
      * FreeLibrary: gives back one of the references LoadLibrary took on a
      * library the program loaded by name. The last one tells its TLS
      * callbacks and then its DllMain of the detach, on the thread that asked
@@ -7244,6 +7381,11 @@ async function buildApp(options){
             return 1;
         }
         const unload = ()=>{
+            const told = tellNotified(LDR_DLL_NOTIFICATION_REASON_UNLOADED, held,
+                kernel.currentThread());
+            return told ? told.then(forget) : forget();
+        };
+        const forget = ()=>{
             const local = threadLocalImages.get(held.base);
             if (local)
             {
@@ -7379,13 +7521,18 @@ async function buildApp(options){
      *     as another's dependency: by then the processor is someone else's.
      * @param {number} [importer]  The base of the library whose import this is:
      *     its own activation context is looked in first.
+     * @param {import('./layers/win32/kernel32/modules.js').LibrarySearch | null} [search]
+     *     LoadLibraryEx's LOAD_LIBRARY_SEARCH_* flags, the places looked in
+     *     instead of the standard search: for the library and, as Windows
+     *     does, for its imports.
      * @returns {number | Promise<number>}
      */
-    const loadLibraryAtRuntime = (requested, flags = 0, thread = undefined, importer = 0)=>{
+    const loadLibraryAtRuntime = (requested, flags = 0, thread, importer = 0, search = null)=>{
         const name = withLibraryExtension(requested);
+        const only = searchedDirectories(search, options.imagePath ?? 'C:\\app.exe');
         if ((flags & LOAD_AS_DATA) !== 0)
         {
-            return loadAsData(name, flags);
+            return loadAsData(name, flags, only);
         }
         // Read now, before anything is awaited: this is the thread whose
         // LoadLibrary call is being answered, and it is the one whose stack the
@@ -7423,7 +7570,7 @@ async function buildApp(options){
         // re-mapping and re-binding a megabyte of library is most of what the
         // machine then does with its time.
         const named = findModule(name);
-        const loaded = answersPath(name, named) ? named : null;
+        const loaded = answersPath(name, named, only) ? named : null;
         const searched = searchesBesideProgram(isKnownDll(name), Boolean(loaded?.fromFile));
         // A bare name an activation context redirects is that assembly's
         // file -- or the engine's own, when the engine answers it -- and is
@@ -7443,7 +7590,7 @@ async function buildApp(options){
                 : libraryCandidates(name, options.imagePath ?? 'C:\\app.exe',
                     filesystem.currentDirectory(), {
                         ours: loaded !== null, from: importing?.searchFrom,
-                        path: pathDirectories(pathValue),
+                        path: pathDirectories(pathValue), only,
                     });
         if (candidates.length > 0)
         {
@@ -7508,15 +7655,19 @@ async function buildApp(options){
                         mapped = loader.map(file, { base, name: region, bits: processBits });
                     }
                     catch (e){
-                        if (/** @type {any} */ (e)?.code !== 'MACHINE_MEMORY')
+                        const code = /** @type {any} */ (e)?.code;
+                        if (code !== 'MACHINE_MEMORY' && code !== 'BAD_EXE_FORMAT')
                         {
                             throw e;
                         }
-                        // The machine's memory full: the load fails, as Windows
-                        // fails a view it cannot commit, and the program goes on
-                        // with the error to read. Thrown, it ended the process.
+                        // The machine's memory full, or a file no image can be
+                        // laid out of: the load fails, as Windows fails a view
+                        // it cannot commit or an invalid image, and the program
+                        // goes on with the error to read. Thrown, it ended the
+                        // process.
                         librarySpace.giveBack(base);
-                        loadErrors.set(key, ERROR_NOT_ENOUGH_MEMORY);
+                        loadErrors.set(key, code === 'MACHINE_MEMORY' ? ERROR_NOT_ENOUGH_MEMORY
+                            : ERROR_BAD_EXE_FORMAT);
                         events.emit('library-missing', {
                             name, path: wanted, reason: /** @type {Error} */ (e).message,
                         });
@@ -7623,7 +7774,8 @@ async function buildApp(options){
                             if (findModule(dependency.dll) === null)
                             {
                                 const got = await loadLibraryAtRuntime(dependency.dll, 0, asked,
-                                    base);
+                                    base, search && { ...search, from: search.loadDirectory
+                                        ? path.slice(0, path.lastIndexOf('\\')) : undefined });
                                 if (got === 0)
                                 {
                                     absent.push(dependency.dll);
@@ -7688,6 +7840,10 @@ async function buildApp(options){
                         timeDateStamp: image.timeDateStamp,
                     });
 
+                    // The callbacks LdrRegisterDllNotification registered, after it
+                    // is mapped and bound and before any of its code runs.
+                    await tellNotified(LDR_DLL_NOTIFICATION_REASON_LOADED, held, asked);
+
                     // Its TLS callbacks, then its DllMain, lpvReserved NULL as
                     // for any library loaded by name. On the thread that asked
                     // for the library, which by now is not the one on the
@@ -7731,7 +7887,11 @@ async function buildApp(options){
                 })();
             }
         }
-        const table = faceFor(name, redirected) ?? loaded;
+        // Under a LoadLibraryEx search, the engine's own library is the system
+        // directory's: found only where that is searched, or when it is a
+        // KnownDLL or already loaded, which Windows finds by name first.
+        const table = faceFor(name, redirected) ?? (!search || search.system
+            || isKnownDll(name) || loaded?.loaded !== false ? loaded : null);
         if (table)
         {
             markLoaded(table);
@@ -7806,10 +7966,12 @@ async function buildApp(options){
      *
      * @param {string} name
      * @param {number} flags
+     * @param {string[]} [only]  A LoadLibraryEx search's places (`searchedDirectories`).
      * @returns {number | Promise<number>}
      */
-    const loadAsData = (name, flags)=>{
-        const loaded = findModule(name);
+    const loadAsData = (name, flags, only = undefined)=>{
+        const named = findModule(name);
+        const loaded = answersPath(name, named, only) ? named : null;
         if (loaded && loaded.loaded !== false)
         {
             loaded.references = (loaded.references ?? 0) + 1;
@@ -7828,7 +7990,7 @@ async function buildApp(options){
             return handle;
         };
         const wanted = libraryCandidates(name, options.imagePath ?? 'C:\\app.exe',
-            filesystem.currentDirectory())
+            filesystem.currentDirectory(), { only })
             .find(candidate=>{
                 try
                 {
