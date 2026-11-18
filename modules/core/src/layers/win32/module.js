@@ -12,7 +12,7 @@ import { createNamedObjects, createRemoteNamedObjects } from './kernel32/named-o
 import { createRegistryService } from './advapi32/registry-service.js';
 import { createDebugFunctions } from './kernel32/debug.js';
 import {
-    ALIGNMENT_64, GLOBAL_MEMORY, TABLES, createHeapAllocator, createHeapFunctions,
+    ALIGNMENT_64, GLOBAL_MEMORY, PAGE_STATE, TABLES, createHeapAllocator, createHeapFunctions,
 } from './kernel32/heap.js';
 import { createProcessFunctions, createThreadState, PERFORMANCE_FREQUENCY }
     from './kernel32/process.js';
@@ -3726,6 +3726,11 @@ export function createWin32Module(){
                         systemTimeMs: ()=>kernel.clock.wallClock(),
                         /** @param {number} address */
                         regionAt: address=>memory.find(address) ?? null,
+                        // The pages as VirtualQuery answers them (heap.js), read
+                        // when asked: kernel32's table is still being built.
+                        /** @param {number} address */
+                        pageState: address=>/** @type {any} */ (libraries['KERNEL32.dll'])[
+                            PAGE_STATE](address),
                         /** @param {number} bytes */
                         allocate: bytes=>allocator.allocate(bytes),
                         park: ()=>bridge.park(),

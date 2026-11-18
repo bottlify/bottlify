@@ -306,6 +306,12 @@ export const TABLES = Symbol('tables');
  */
 export const HEAP_USER_INFO = Symbol('heap user info');
 export const GLOBAL_MEMORY = Symbol('global memory');
+/**
+ * VirtualQuery's state and protection of a page, for the calls that ask the
+ * same question of the same pages - IsBadWritePtr - without a buffer in the
+ * guest. Carried under a symbol, so no export is made of it.
+ */
+export const PAGE_STATE = Symbol('page state');
 
 /** @param {number} value @param {number} to */
 const roundUp = (value, to)=>Math.ceil(value / to) * to;
@@ -3490,6 +3496,11 @@ export function createHeapFunctions(host){
             return info ?? { value: undefined, flags: 0 };
         },
         [GLOBAL_MEMORY]: globals,
+        /** @param {number} address @returns {{ state: number, protect: number }} */
+        [PAGE_STATE]: address=>{
+            const answer = regionAnswer(address);
+            return { state: answer[4], protect: answer[5] };
+        },
         /** LPVOID VirtualAllocEx(HANDLE, LPVOID, SIZE_T, DWORD, DWORD) */
         VirtualAllocEx: inProcess('VirtualAlloc', 20),
         /**
