@@ -580,15 +580,16 @@ export function prepareModule(m, layout, features, memory = {},
     {
         context.precise = true;
     }
-    // A loose stack's access takes rsp's low half for its address, which a wide
-    // window's stack past 4 GiB is not.
-    else if (looseStacks && undoLog !== true && layout.window === undefined)
+    // A loose stack's access takes rsp's low half for its address and, over a wide
+    // window, rsp's high half with it (`stackLow`).
+    else if (looseStacks && undoLog !== true)
     {
         context.looseStacks = true;
     }
-    // A wide window tests every read: a read wrapped into RAM, or folded off a
-    // wrapped sum, reckons with RAM the size of its 32-bit address.
-    if (checkReads || layout.window !== undefined)
+    // A wide window's reads go untested as 4 GiB's do: each takes its whole address,
+    // the registers' quadword sum wrapped into the window (`windowed`), not the
+    // 32-bit one a read wrapped into RAM takes in 4 GiB.
+    if (checkReads)
     {
         context.checkReads = true;
     }
