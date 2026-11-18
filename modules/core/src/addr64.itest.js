@@ -28,11 +28,7 @@ const FIXTURE = new URL('../test/fixtures/addr64.exe', import.meta.url);
  *
  * @type {Map<string, string>}
  */
-const FAILING = new Map([
-    ['a thread\'s parameter past 4 GiB', 'the bridge hands a handler an argument\'s low dword'
-        + ' and the thread starts with it (callback.js, dispatch.js readLongCall)'],
-    ['lpCreateParams past 4 GiB', 'the bridge hands CreateWindowEx the parameter\'s low dword'],
-]);
+const FAILING = new Map();
 
 test('a 64-bit program\'s addresses past 2 GiB and values past 4 GiB come back whole',
     { timeout: 300000 }, async t=>{

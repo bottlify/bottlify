@@ -662,6 +662,45 @@ export function checkReturns(text){
     return found;
 }
 
+/**
+ * Each spec of `text` that declares arguments taken whole (`addresses: [..]`,
+ * the bridge's `readLongCall`), with whether each dword it names is one the
+ * signature above it has an address in (`pointersOf`): a dword that is none -
+ * an int, a handle, half of a quadword - would be handed over joined to
+ * whatever the caller left in its register's upper half.
+ *
+ * @param {string} text
+ * @returns {{ name: string, line: number, problem: string | null }[]}
+ */
+export function checkAddresses(text){
+    const found = [];
+    const comment = /\/\*\*\s*(?:\r?\n\s*\*)?\s*(?:[A-Za-z_]\w*\s+)+?\**\s*(\w+)\s*\(/g;
+    for (const match of text.matchAll(comment))
+    {
+        const end = text.indexOf('*/', match.index);
+        const next = text.indexOf('/**', end);
+        const spec = text.slice(end + 2, next < 0 ? text.length : next);
+        const declared = /\baddresses\s*:\s*\[([^\]]*)\]/.exec(spec);
+        if (end < 0 || !declared)
+        {
+            continue;
+        }
+        const params = paramsAfter(text,
+            Object.assign([match[0], '', match[1]], { index: match.index }));
+        const shift = /invoke\s*:|name\s*:\s*['"]/.test(spec) ? 1 : 0;
+        const has = params === null ? null
+            : new Set(pointersOf(params, { addresses: true }).map(word=>word + shift));
+        const named = declared[1].split(',').map(each=>each.trim()).filter(Boolean).map(Number);
+        const stray = has === null ? named : named.filter(word=>!has.has(word));
+        found.push({ name: match[1], line: line0(text, match.index) + 1,
+            problem: has === null ? 'declares addresses under a signature that does not close'
+                : stray.length > 0 ? `addresses names dword ${stray.join(', ')}, which the`
+                    + ` signature has no address in (it has them in ${[...has].join(', ')})`
+                    : null });
+    }
+    return found;
+}
+
 /** @param {string} text @param {number | undefined} at */
 const line0 = (text, at)=>text.slice(0, at).split('\n').length - 1;
 
@@ -755,6 +794,19 @@ if (isMain(import.meta.url))
             }
         }
     }
+    let whole = 0;
+    for (const file of sources(src))
+    {
+        const where = relative(ROOT, file).replace(/\\/g, '/');
+        for (const one of checkAddresses(readFileSync(file, 'utf8')))
+        {
+            whole++;
+            if (one.problem)
+            {
+                failures.push(`${where}:${one.line} ${one.name}: ${one.problem}`);
+            }
+        }
+    }
     if (failures.length > 0)
     {
         console.error(`check-wide-arguments: ${failures.length} of ${checked} signatures with a`
@@ -766,5 +818,6 @@ if (isMain(import.meta.url))
         process.exit(1);
     }
     console.log(`check-wide-arguments: ${checked} signatures with a wide argument, each declared;`
-        + ` ${results} results, the ${addresses} addresses among them declared`);
+        + ` ${results} results, the ${addresses} addresses among them declared;`
+        + ` ${whole} specs take arguments whole, each an address of its signature`);
 }

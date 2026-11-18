@@ -1329,7 +1329,7 @@ export function createWindowFunctions(host){
      * @param {boolean} reader  whether the call reading it is the wide one
      */
     const procAs = (address, unicode, reader)=>{
-        const ansi = ansiEntries.get(address >>> 0) ?? address >>> 0;
+        const ansi = ansiEntries.get(wholeAddress(address)) ?? wholeAddress(address);
         const wide = wideEntries.get(ansi);
         if (wide !== undefined)
         {
@@ -3221,7 +3221,7 @@ export function createWindowFunctions(host){
      * @param {boolean} wide @param {boolean} extended
      */
     const classInfo = (instance, className, out, wide, extended)=>{
-        const cls = classOf(className, wide, instance >>> 0, 'info');
+        const cls = classOf(className, wide, wholeAddress(instance), 'info');
         if (!cls)
         {
             host.setLastError?.(ERROR_CLASS_DOES_NOT_EXIST);
@@ -3233,7 +3233,8 @@ export function createWindowFunctions(host){
         }
         // lpszClassName is what the caller asked by, a name or an atom.
         const reported = { ...procRead(cls, wide),
-            instance: classes.reportedInstance(cls, instance >>> 0), className: className >>> 0 };
+            instance: classes.reportedInstance(cls, instance),
+            className: wholeAddress(className) };
         writeWindowClass(host, out >>> 0, reported, L, extended ? L.WNDCLASSEXA : undefined);
         return cls.atom || 1;
     };
@@ -3532,11 +3533,13 @@ export function createWindowFunctions(host){
         {
             return at + 8 <= record.extra.byteLength ? record.extra.getBigUint64(at, true) : 0n;
         }
-        const low = readLong(record, index, unicode) >>> 0;
+        const value = readLong(record, index, unicode);
         if (at === GWL_WNDPROC || at === GWL_HINSTANCE)
         {
-            return BigInt(low);
+            // Whole: an image a 64-bit program keeps at its own base past 4 GiB.
+            return BigInt(wholeAddress(value));
         }
+        const low = value >>> 0;
         const high = record.longHigh?.get(at);
         return high !== undefined ? BigInt(high) << 32n | BigInt(low)
             : BigInt.asUintN(64, BigInt(low | 0));
@@ -4354,7 +4357,7 @@ export function createWindowFunctions(host){
     const makeWindowFor = (args, unicode = false, caller = undefined)=>{
         const [exStyle, className, windowName, style, x, y, width, height, parent, menu, instance]
             = args;
-        const cls = classOf(className, unicode, instance >>> 0, 'create');
+        const cls = classOf(className, unicode, wholeAddress(instance), 'create');
         if (!cls)
         {
             host.setLastError?.(ERROR_CANNOT_FIND_WND_CLASS);
@@ -4397,7 +4400,7 @@ export function createWindowFunctions(host){
             // A window made on the desktop is a top-level window, which is
             // what a parent of zero already says.
             parent: desktop !== null && (parent >>> 0) === desktop.hwnd ? 0 : parent >>> 0,
-            instance: instance >>> 0,
+            instance: wholeAddress(instance),
             // For a child window hMenu is its control id; for any other --
             // an owned popup included, and WS_CHILD | WS_POPUP, which is a
             // popup -- it is a menu handle, which the menu bookkeeping hangs
@@ -4484,7 +4487,7 @@ export function createWindowFunctions(host){
         const thread = caller ?? host.callerThread?.();
         // Kept for a procedure on this side that reads it (the MDI client's
         // CLIENTCREATESTRUCT), which is handed no CREATESTRUCT.
-        record.createParams = (params ?? 0) >>> 0;
+        record.createParams = wholeAddress(params ?? 0);
         // The CBT hook sees the styles asked for, the window edge already
         // following the frame; the procedure, from WM_NCCREATE on, sees the
         // window as the window manager has settled it.
@@ -8566,15 +8569,19 @@ export function createWindowFunctions(host){
         /** BOOL UnregisterClassA(LPCSTR lpClassName, HINSTANCE hInstance) */
         UnregisterClassA: {
             argBytes: 8,
+            addresses: [1],
             /** @param {number[]} args */
-            handler: ([className, instance])=>unregister(className, false, instance >>> 0),
+            handler: ([className, instance])=>unregister(className, false,
+                wholeAddress(instance)),
         },
 
         /** BOOL UnregisterClassW(LPCWSTR lpClassName, HINSTANCE hInstance) */
         UnregisterClassW: {
             argBytes: 8,
+            addresses: [1],
             /** @param {number[]} args */
-            handler: ([className, instance])=>unregister(className, true, instance >>> 0),
+            handler: ([className, instance])=>unregister(className, true,
+                wholeAddress(instance)),
         },
 
         /**
@@ -8584,6 +8591,7 @@ export function createWindowFunctions(host){
          */
         GetClassInfoA: {
             argBytes: 12,
+            addresses: [0, 1],
             /** @param {number[]} args */
             handler: ([instance, className, out])=>classInfo(instance, className, out, false,
                 false),
@@ -8598,6 +8606,7 @@ export function createWindowFunctions(host){
          */
         GetClassInfoW: {
             argBytes: 12,
+            addresses: [0, 1],
             /** @param {number[]} args */
             handler: ([instance, className, out])=>classInfo(instance, className, out, true,
                 false),
@@ -8606,6 +8615,7 @@ export function createWindowFunctions(host){
         /** BOOL GetClassInfoExW(HINSTANCE, LPCWSTR lpClassName, LPWNDCLASSEXW) */
         GetClassInfoExW: {
             argBytes: 12,
+            addresses: [0, 1],
             /** @param {number[]} args */
             handler: ([instance, className, out])=>classInfo(instance, className, out, true,
                 true),
@@ -8620,6 +8630,7 @@ export function createWindowFunctions(host){
          */
         GetClassInfoExA: {
             argBytes: 12,
+            addresses: [0, 1],
             /** @param {number[]} args */
             handler: ([instance, className, out])=>classInfo(instance, className, out, false,
                 true),
@@ -8686,12 +8697,17 @@ export function createWindowFunctions(host){
          */
         CreateWindowExA: {
             argBytes: 48,
+            addresses: [1, 2, 10, 11],
             /** @param {number[]} args */
             handler: args=>createWindow(args),
         },
 
         /**
-         * HWND CreateWindowA(...) -- the same call without the extended style.
+         * HWND CreateWindowA(LPCSTR lpClassName, LPCSTR lpWindowName, DWORD dwStyle,
+         *   int X, int Y, int nWidth, int nHeight, HWND hWndParent, HMENU hMenu,
+         *   HINSTANCE hInstance, LPVOID lpParam)
+         *
+         * The same call without the extended style.
          *
          * The SDK makes this a macro over CreateWindowExA rather than an export,
          * so an import table will not name it; it costs one line to answer if
@@ -8699,17 +8715,22 @@ export function createWindowFunctions(host){
          */
         CreateWindowA: {
             argBytes: 44,
+            addresses: [0, 1, 9, 10],
             /** @param {number[]} args */
             handler: args=>createWindow([0, ...args]),
         },
 
         /**
          * HWND CreateWindowExW(DWORD dwExStyle, LPCWSTR lpClassName,
-         *   LPCWSTR lpWindowName, ...) -- the same call with wide names, whose
-         *   WM_NCCREATE and WM_CREATE carry a CREATESTRUCTW.
+         *   LPCWSTR lpWindowName, DWORD dwStyle, int X, int Y, int nWidth, int nHeight,
+         *   HWND hWndParent, HMENU hMenu, HINSTANCE hInstance, LPVOID lpParam)
+         *
+         * The same call with wide names, whose WM_NCCREATE and WM_CREATE carry
+         * a CREATESTRUCTW.
          */
         CreateWindowExW: {
             argBytes: 48,
+            addresses: [1, 2, 10, 11],
             /** @param {number[]} args */
             handler: args=>createWindow(args, true),
         },
@@ -8724,6 +8745,7 @@ export function createWindowFunctions(host){
          */
         CreateMDIWindowA: {
             argBytes: 40,
+            addresses: [0, 1, 8, 9],
             /** @param {number[]} args */
             handler: ([className, title, style, x, y, width, height, parent, instance, lParam])=>
                 createWindow([WS_EX_MDICHILD, className, title, style, x, y, width, height,
@@ -8732,15 +8754,23 @@ export function createWindowFunctions(host){
 
         CreateMDIWindowW: {
             argBytes: 40,
+            addresses: [0, 1, 8, 9],
             /** @param {number[]} args */
             handler: ([className, title, style, x, y, width, height, parent, instance, lParam])=>
                 createWindow([WS_EX_MDICHILD, className, title, style, x, y, width, height,
                     parent, 0, instance, lParam], true),
         },
 
-        /** HWND CreateWindowW(...), without the extended style. */
+        /**
+         * HWND CreateWindowW(LPCWSTR lpClassName, LPCWSTR lpWindowName, DWORD dwStyle,
+         *   int X, int Y, int nWidth, int nHeight, HWND hWndParent, HMENU hMenu,
+         *   HINSTANCE hInstance, LPVOID lpParam)
+         *
+         * Without the extended style.
+         */
         CreateWindowW: {
             argBytes: 44,
+            addresses: [0, 1, 9, 10],
             /** @param {number[]} args */
             handler: args=>createWindow([0, ...args], true),
         },

@@ -329,7 +329,7 @@ export function readWindowClass(memory, address, layout){
         wndProc: address64(layout.lpfnWndProc),
         classExtra: field(layout.cbClsExtra) | 0,
         windowExtra: field(layout.cbWndExtra) | 0,
-        instance: field(layout.hInstance),
+        instance: address64(layout.hInstance),
         icon: field(layout.hIcon),
         cursor: field(layout.hCursor),
         background: field(layout.hbrBackground),

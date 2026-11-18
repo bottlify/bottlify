@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    checkReturns, checkText, layoutOf, pointersOf, resultOf, returnsPointer,
+    checkAddresses, checkReturns, checkText, layoutOf, pointersOf, resultOf, returnsPointer,
 } from './check-wide-arguments.mjs';
 
 test('a signature is laid out as the 32-bit stack has it', ()=>{
@@ -121,4 +121,20 @@ test('an address result by a P typedef, an address handle, a later line, an ordi
 test('the gate tries only addresses: a size is wide but no address', ()=>{
     assert.deepEqual(pointersOf('LPVOID at, SIZE_T size', { addresses: true }), [0]);
     assert.deepEqual(pointersOf('ULONG_PTR key, void *p', { addresses: true }), [1]);
+});
+
+test('an argument a spec takes whole is an address of its signature', ()=>{
+    const problem = (/** @type {string} */ text)=>checkAddresses(text).map(one=>one.problem);
+    const head = '/** HANDLE CreateThread(LPSECURITY_ATTRIBUTES sa, SIZE_T stack,'
+        + ' LPTHREAD_START_ROUTINE start, LPVOID parameter, DWORD flags, LPDWORD id) */\n'
+        + 'CreateThread: { argBytes: 24, ';
+    assert.deepEqual(problem(`${head}addresses: [2, 3], handler: ()=>0 },`), [null]);
+    assert.match(String(problem(`${head}addresses: [1, 3], handler: ()=>0 },`)[0]),
+        /names dword 1/, 'a size is no address');
+    assert.match(String(problem(`${head}addresses: [4], handler: ()=>0 },`)[0]),
+        /names dword 4/, 'nor a DWORD');
+    assert.deepEqual(problem(`${head}handler: ()=>0 },`), [], 'a spec that declares none');
+    // A COM method's dwords count its interface pointer first.
+    assert.deepEqual(problem('/** HRESULT Advise(IUnknown *sink, DWORD *cookie) */\n'
+        + '{ name: \'Advise\', argBytes: 12, addresses: [1], invoke: ()=>0 },'), [null]);
 });

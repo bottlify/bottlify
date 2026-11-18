@@ -1634,6 +1634,16 @@ export function createCpuModule(){
                 },
 
                 /**
+                 * Registers of a saved 64-bit context set whole: a thread's
+                 * parameter or start routine past 4 GiB, which the dword view
+                 * (`reg32`) cannot carry.
+                 *
+                 * @param {any} context
+                 * @param {import('./internal/context.js').LongRegisters} long
+                 */
+                setContextLong: (context, long)=>setContextLong(context, long),
+
+                /**
                  * A thread's stack: the translator stores through esp untested while
                  * no translated code lies on one (cork's `looseStacks`).
                  *

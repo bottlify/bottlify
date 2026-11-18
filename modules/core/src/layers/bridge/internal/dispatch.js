@@ -41,6 +41,13 @@ import { isDriven } from './drive.js';
  *     one among its first four in the XMM register of its position, and
  *     `readLongCall` reads it from there into the dwords the 32-bit signature
  *     has it in -- a double's two, low first.
+ * @property {number[]} [addresses]  The dwords that carry an address a
+ *     64-bit caller may keep past 4 GiB and the handler takes whole - an
+ *     image's instance, a parameter handed on to a callback: `readLongCall`
+ *     gives such an argument as low + high * 2^32 where its high half names
+ *     an address (not zero, below 2^21), and as its dword otherwise, so a
+ *     process in 4 GiB sees what it always saw. A handler that declares one
+ *     must not cut it with `>>> 0` or `| 0`.
  * @property {string} [returns]  The answer is an address or an unsigned
  *     size (a pointer, an HMODULE, a SIZE_T): a 64-bit caller finds it in RAX
  *     zero-extended. Every other dword answer is sign-extended there, as a
@@ -126,6 +133,7 @@ import { isDriven } from './drive.js';
  *     `TRAP_SAMPLE` calls on average (`dispatch`).
  * @property {number} sampledCalls  How many of them were timed.
  * @property {number[] | null} quadwords  Of `fn`, checked; null for none.
+ * @property {number[] | null} addresses  Of `fn`, checked; null for none.
  * @property {boolean} zeroExtends  `fn.returns` is 'pointer': RAX takes the answer zero-extended.
  * @property {LongSlot[] | null} longSlots  Where each x64 slot's argument goes
  *     in `args`, for a function with quadwords or floating-point arguments;
@@ -329,6 +337,32 @@ const longSlotsOf = (count, quadwords, floats, structs = null)=>{
 const chainCounts = chains=>[...chains].flatMap(([first, below])=>[...below].map(
     ([second, count])=>/** @type {[string, number]} */ ([first === 0 ? ''
         : `0x${first.toString(16)}${second === 0 ? '' : `<0x${second.toString(16)}`}`, count])));
+
+/** The high halves an address can have: user space ends below 2^53 (and Windows' below 2^47). */
+const ADDRESS_HIGH = 2 ** 21;
+
+/**
+ * Makes each declared address argument whole where its high half names an
+ * address past 4 GiB (`Entry.addresses`): any other - zero, a sign's ones, an
+ * integer's leftover - leaves the dword as every handler has always had it.
+ *
+ * @param {number[] | null} addresses @param {any[]} args @param {number[]} high
+ */
+const wholeAddresses = (addresses, args, high)=>{
+    if (addresses === null)
+    {
+        return;
+    }
+    for (let i = 0; i < addresses.length; i++)
+    {
+        const at = addresses[i];
+        const upper = high[at];
+        if (upper !== 0 && upper < ADDRESS_HIGH)
+        {
+            args[at] = upper * 2 ** 32 + (args[at] >>> 0);
+        }
+    }
+};
 
 /**
  * A call's argument array, made to hold each word as a value from the start.
@@ -1119,6 +1153,7 @@ class Dispatcher {
                     high[i] = this.memory.readU32(at + 4) >>> 0;
                 }
             }
+            wholeAddresses(entry.addresses, args, high);
             return this.longReturn(rsp);
         }
         // An argument the signature counts as two dwords is one slot here,
@@ -1171,6 +1206,7 @@ class Dispatcher {
                 }
             }
         }
+        wholeAddresses(entry.addresses, args, high);
         return this.longReturn(rsp);
     }
 
@@ -1805,6 +1841,14 @@ class Dispatcher {
                     + ' is not among its arguments');
             }
         }
+        const addresses = fn.addresses !== undefined && fn.addresses.length > 0
+            ? [...fn.addresses] : null;
+        if (addresses?.some(at=>!Number.isInteger(at) || at < 0 || at >= words
+            || quadwords?.includes(at) || quadwords?.includes(at - 1) || floats?.[at]))
+        {
+            throw new Error(`bridge: ${fn.name}'s addresses ${addresses.join(', ')} are not dwords`
+                + ' of its arguments that hold one value each');
+        }
         this.functions[id] = {
             fn,
             name: fn.name,
@@ -1827,6 +1871,7 @@ class Dispatcher {
                 ? { calls: 0, handled: 0, fellThrough: 0, mismatches: 0, ms: 0 } : null,
             readsError: this.errorReader && fn.lastError !== false,
             quadwords,
+            addresses,
             zeroExtends: zeroExtendsOf(fn),
             longSlots: quadwords || floats || structs
                 ? longSlotsOf(words, quadwords, floats, structs) : null,

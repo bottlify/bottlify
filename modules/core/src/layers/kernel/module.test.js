@@ -866,3 +866,34 @@ test('a 64-bit thread parked or held keeps a return past 4 GiB whole, and the pa
         assert.equal(kernel.holdThread(), 0x140001202);
         assert.equal(memory.words.get(0x2ffed4), 0);
     });
+
+test('a 64-bit thread starts with a parameter and a routine past 4 GiB whole', async()=>{
+    // RCX and RDX of the new thread: the dword view of its context carries
+    // their low halves, so the whole values are set through the context's own
+    // quadwords - and only where there is a high half to set.
+    const memory = { ...fakeMemory(), writeBytes: ()=>{} };
+    /** @type {{ gpr: bigint[] }[]} */
+    const set = [];
+    const kernel = await kernelModule.create(
+        { stacks: { base: STACK_BASE, size: STACK_SIZE } },
+        /** @type {any} */ ({
+            /** @param {string} name */
+            requireApi: name=>(name === 'cpu' ? {
+                ...fakeCpu(), bits: ()=>64,
+                /** @param {any} state */
+                newContext: state=>({ ...state, reg32: new Array(8).fill(0) }),
+                /** @param {any} context @param {{ gpr: bigint[] }} long */
+                setContextLong: (context, long)=>set.push(long),
+            } : memory),
+            provide: ()=>{},
+        }),
+    );
+    const high = kernel.createThread({ entry: 0x402000, start: 0x140001740,
+        parameter: 0x140003010 });
+    assert.deepEqual([high.context.reg32[1], high.context.reg32[2]], [0x40003010, 0x40001740]);
+    assert.equal(set.length, 1);
+    assert.deepEqual([set[0].gpr[1], set[0].gpr[2]], [0x140003010n, 0x140001740n]);
+    assert.equal(0 in set[0].gpr, false, 'no other register is touched');
+    kernel.createThread({ entry: 0x402000, start: 0x401000, parameter: 0x90000000 });
+    assert.equal(set.length, 1, 'a thread below 4 GiB starts as it always did');
+});

@@ -1942,6 +1942,27 @@ test('a 64-bit caller finds an address zero-extended in RAX, any other dword sig
     assert.equal(r.get('rax'), 0x1000n);
 });
 
+test('an argument declared an address is handed whole where its high half names one', ()=>{
+    // CreateThread's start routine and parameter in an image a 64-bit program
+    // keeps past 4 GiB: whole to a handler that declares them. Any other high
+    // half - none, a sign's ones, what a caller left above an int - leaves the
+    // dword every handler has always had, and so does an undeclared argument.
+    const { dispatcher } = longMachine({ rcx: 0x140001740n, r11: 0xffffffff_fffffffen,
+        r8: 0xdeadbeef_00000007n, r9: 0x140003010n });
+    /** @type {number[][]} */
+    const seen = [];
+    dispatcher.register(1, { name: 'X!Start', ...STDCALL, argBytes: 16, addresses: [0, 1, 2],
+        /** @param {number[]} args */
+        handler: args=>(seen.push(args.slice()), 0) });
+    dispatcher.dispatch(1);
+    assert.deepEqual(seen, [[0x140001740, -2, 7, 0x40003010]]);
+    assert.throws(()=>dispatcher.register(2, { name: 'X!Wide', ...STDCALL, argBytes: 12,
+        quadwords: [1], addresses: [2], handler: ()=>0 }), /addresses/,
+    'half of a quadword is no address');
+    assert.throws(()=>dispatcher.register(3, { name: 'X!Past', ...STDCALL, argBytes: 8,
+        addresses: [2], handler: ()=>0 }), /addresses/, 'nor a dword past the arguments');
+});
+
 test('a quadword argument is one x64 slot, split into the two dwords the handler reads', ()=>{
     // _lseeki64(int fd, __int64 offset, int origin): four dwords to a 32-bit
     // handler, three arguments to an x86-64 caller -- RCX, RDX and R8.

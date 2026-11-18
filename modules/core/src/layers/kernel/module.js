@@ -526,6 +526,16 @@ export function createKernelModule(){
                     {
                         thread.context.reg32[1] = parameter | 0;
                         thread.context.reg32[2] = (start ?? 0) | 0;
+                        const routine = start ?? 0;
+                        if (parameter >= 2 ** 32 || routine >= 2 ** 32)
+                        {
+                            // Whole: a parameter or a start routine a 64-bit
+                            // program keeps past 4 GiB is not its low dword.
+                            const gpr = /** @type {bigint[]} */ ([]);
+                            gpr[1] = BigInt(parameter >= 2 ** 32 ? parameter : parameter >>> 0);
+                            gpr[2] = BigInt(routine >= 2 ** 32 ? routine : routine >>> 0);
+                            cpu.setContextLong?.(thread.context, { gpr });
+                        }
                     }
                     thread.handle = state.handles.open('thread', thread);
                     if (start !== undefined)

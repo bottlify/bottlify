@@ -13,6 +13,7 @@ import { STATUS, toDosError } from '../ntdll/status.js';
 import { FILETIME_EPOCH_MS, dueInMs, readLargeInteger } from './due-time.js';
 import { createSyncNatives } from './sync-natives.js';
 import { overlappedLayout } from '../common/overlapped.js';
+import { wholeAddress } from '../common/pointers.js';
 import { EVENT_SLOTS, EVENT_WORD_SLOTS, MUTEX_SLOTS, SEMAPHORE_SLOTS, eventStateCode,
     releaseMutexCode, waitOneCode } from './wait-one.js';
 import { COMPILED as SEMAPHORE_CODE } from './semaphore-guest.x86.js';
@@ -1046,6 +1047,7 @@ export function createThreadingFunctions(host){
         /** HANDLE CreateThread(LPSECURITY_ATTRIBUTES, SIZE_T, LPTHREAD_START_ROUTINE, LPVOID, DWORD, LPDWORD) */
         CreateThread: {
             argBytes: 24,
+            addresses: [2, 3],
             /** @param {number[]} args */
             handler: ([, stackSize, start, parameter, flags, threadIdOut])=>{
                 // The size is the stack's commit unless the caller says it is
@@ -1056,12 +1058,12 @@ export function createThreadingFunctions(host){
                 // its start routine runs.
                 const begin = host.threadStart?.() ?? 0;
                 const thread = kernel.createThread({
-                    entry: begin || start >>> 0,
-                    ...begin === 0 ? {} : { start: start >>> 0 },
+                    entry: begin || wholeAddress(start),
+                    ...begin === 0 ? {} : { start: wholeAddress(start) },
                     ...reservation
                         ? { stackReserve: stackSize >>> 0 }
                         : { stackSize: stackSize >>> 0 },
-                    parameter: parameter >>> 0,
+                    parameter: wholeAddress(parameter),
                     // Returning from the start routine is how most threads end,
                     // and it means exactly what calling ExitThread with the
                     // same value means. Somewhere has to notice; this is where

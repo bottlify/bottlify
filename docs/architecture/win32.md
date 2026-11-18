@@ -71,6 +71,12 @@ a VARIANT (a pointer to the caller's copy there). `IStream::Seek` is
 runs `tools/checks/check-wide-arguments.mjs`, which holds each entry to the signature comment
 above it.
 
+A dword argument reaches the handler as its slot's low half. An address the handler hands on or
+keeps rather than reads - a module's instance, a parameter for a thread or a window procedure -
+says so with `addresses`, the dwords that carry one, and is handed over whole when a 64-bit
+program keeps it past 4 GiB (`CreateThread` is `{ argBytes: 24, addresses: [2, 3] }`). The same
+check holds each of those dwords to an address of the signature.
+
 ## One call, from the program to JS and back
 
 ```mermaid

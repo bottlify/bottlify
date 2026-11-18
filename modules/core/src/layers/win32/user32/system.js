@@ -61,6 +61,7 @@ import { ANY_WINDOW, threadIdOf } from './messages.js';
 import { DISPLAY_DEVICE_NAME, VIDEO_ADAPTER_NAME } from '../devices.js';
 import { createRefusals } from '../common/refusal.js';
 import { charactersOf, readToTerminator } from '../common/scan-windows.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** GetSystemMetrics indices this build has a real answer for. */
 /** How many argument slots a `va_list` is read for, since it carries no count. */
@@ -1874,7 +1875,8 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
 
     /**
      * A pointer-sized class long of a 64-bit process: eight of the class's
-     * extra bytes whole, or a field sign-extended from its dword.
+     * extra bytes whole, or a field: an address whole, any other
+     * sign-extended from its dword.
      *
      * @param {any} cls @param {number} index
      * @param {boolean} [unicode]  Read through the wide call, as `readClassLong`.
@@ -1887,7 +1889,11 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             cls.extra ??= new DataView(new ArrayBuffer(Math.max(cls.classExtra, 0)));
             return at + 8 <= cls.extra.byteLength ? cls.extra.getBigUint64(at, true) : 0n;
         }
-        return BigInt.asUintN(64, BigInt(readClassLong(cls, index, unicode) | 0));
+        const value = readClassLong(cls, index, unicode);
+        // A procedure, a module and a menu's name are addresses, whole and
+        // zero-extended; a handle or a count widens by its sign, as RAX does.
+        return at === GCL_WNDPROC || at === GCL_HMODULE || at === GCL_MENUNAME
+            ? BigInt(wholeAddress(value)) : BigInt.asUintN(64, BigInt(value | 0));
     };
 
     /**
