@@ -83,8 +83,9 @@ const lay = (write, { flags = 0, held = 0, ringBytes = RING_BYTES,
  * A call made on both machines; what each left.
  *
  * @param {string} name @param {number[]} args  without `this`, each a dword
- * @param {{ state?: Parameters<typeof lay>[1], high?: number }} [given]
- *     high: an argument the 64-bit call passes with its upper half set
+ * @param {{ state?: Parameters<typeof lay>[1], high?: number, far?: number }} [given]
+ *     high: an argument the 64-bit call passes with its upper half set; far: a pointer
+ *     argument (1-based) the 64-bit call passes past 4 GiB, what it points at moved with it
  */
 const both = (name, args, { state, high = -1, far = -1 } = {})=>{
     const m32 = createTestMachine({ ramSize: 1 << 22 });
