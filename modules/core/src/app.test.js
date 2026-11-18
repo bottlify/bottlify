@@ -14,7 +14,7 @@ import assert from 'node:assert/strict';
 import {
     createMacrotask, groupBlocks, idleWait, inParallel, pacedYield, pageIsHidden,
     withReadAhead, withWindow, refetchedIn, windowFor, NEAR_ROUND_TRIP_MS, READ_AHEAD_BYTES,
-    resolveLibraryPath, startDirectoryOf, libraryCandidates, withLibraryExtension, timedWait,
+    fixedLibraryPath, startDirectoryOf, libraryCandidates, withLibraryExtension, timedWait,
     pathDirectories, divergenceReporter,
     pagePacing,
     PAGE_YIELD_MS,
@@ -348,25 +348,35 @@ test('a program starts in its own directory, and at the root the backslash stays
     assert.equal(startDirectoryOf('C:/App/Game.exe'), 'C:/App');
 });
 
-test('a bare library name is looked for beside the executable', ()=>{
-    assert.equal(resolveLibraryPath('Storm.dll', IMAGE), 'C:\\App\\Storm.dll');
+test('a bare library name fixes no place: it is searched for', ()=>{
+    assert.equal(fixedLibraryPath('Storm.dll', 'C:\\App'), null);
 });
 
 test('a name that already says where it is, is taken as given', ()=>{
     // Prefixing a qualified name again asks for C:\\App\\C:\\App\\..., which is not
     // there -- and the library is reported missing while sitting exactly where
     // it was asked for.
-    assert.equal(resolveLibraryPath('C:\\App\\Storm.dll', IMAGE), 'C:\\App\\Storm.dll');
-    assert.equal(resolveLibraryPath('D:\\Other\\Plug.dll', IMAGE), 'D:\\Other\\Plug.dll');
-    assert.equal(resolveLibraryPath('C:/App/Storm.dll', IMAGE), 'C:/App/Storm.dll',
+    assert.equal(fixedLibraryPath('C:\\App\\Storm.dll'), 'C:\\App\\Storm.dll');
+    assert.equal(fixedLibraryPath('D:\\Other\\Plug.dll'), 'D:\\Other\\Plug.dll');
+    assert.equal(fixedLibraryPath('C:/App/Storm.dll'), 'C:/App/Storm.dll',
         'a program is free to use forward slashes, and Windows accepts them');
-    assert.equal(resolveLibraryPath('\\App\\Storm.dll', IMAGE), '\\App\\Storm.dll',
+    assert.equal(fixedLibraryPath('\\App\\Storm.dll'), '\\App\\Storm.dll',
         'root-relative is qualified too');
 });
 
-test('a relative name with a directory in it still searches beside the executable', ()=>{
-    assert.equal(resolveLibraryPath('plugins\\Sound.dll', IMAGE),
-        'C:\\App\\plugins\\Sound.dll');
+test('a drive-relative or dot-relative name starts at the current directory', ()=>{
+    assert.equal(fixedLibraryPath('C:1\\x.dll', 'C:\\Temp\\'), 'C:\\Temp\\1\\x.dll',
+        'the current directory of its own drive');
+    assert.equal(fixedLibraryPath('D:x.dll', 'C:\\Temp'), 'D:\\x.dll',
+        'another drive\'s root, the only current directory known there');
+    assert.equal(fixedLibraryPath('.\\x.dll', 'C:\\Temp'), 'C:\\Temp\\.\\x.dll');
+    assert.equal(fixedLibraryPath('..\\x.dll', 'C:\\Temp'), 'C:\\Temp\\..\\x.dll');
+});
+
+test('a relative name with a directory in it is searched for as a bare one is', ()=>{
+    // LoadLibrary("1\\x.dll") with the current directory holding 1\x.dll
+    // finds it there, after the program's and the system's directories.
+    assert.equal(fixedLibraryPath('plugins\\Sound.dll', 'C:\\Temp'), null);
 });
 
 test('a resource is addressed relative to the module its instance names', ()=>{
@@ -567,8 +577,12 @@ test('a bare name is looked for beside the executable, then where the system kee
     ]);
     assert.deepEqual(libraryCandidates('C:\\Other\\x.dll', IMAGE), ['C:\\Other\\x.dll'],
         'a qualified name has one place');
-    assert.deepEqual(libraryCandidates('plugins\\Sound.dll', IMAGE),
-        ['C:\\App\\plugins\\Sound.dll'], 'and so does one with a directory in it');
+    assert.deepEqual(libraryCandidates('plugins\\Sound.dll', IMAGE, 'C:\\Temp'), [
+        'C:\\App\\plugins\\Sound.dll', 'C:\\WINDOWS\\system32\\plugins\\Sound.dll',
+        'C:\\WINDOWS\\plugins\\Sound.dll', 'C:\\Temp\\plugins\\Sound.dll',
+    ], 'a relative one with a directory in it is searched for, each place taking it after');
+    assert.deepEqual(libraryCandidates('C:1\\x.dll', IMAGE, 'C:\\Temp'), ['C:\\Temp\\1\\x.dll'],
+        'a drive-relative one has one place');
     // A setup that changes to a folder of its disc loads a helper there by
     // bare name: the current directory, after the system ones.
     assert.deepEqual(libraryCandidates('dsetup.dll', IMAGE, 'D:\\DirectX').at(-1),

@@ -2263,25 +2263,40 @@ export function startDirectoryOf(imagePath){
 }
 
 /**
- * Where a LoadLibrary at run time actually looks.
+ * The one place a library name fixes, or null when the name is searched for.
  *
- * A name that already says where it is, is where it is. Windows searches for a
- * bare name and takes a qualified one as given, and a program that has worked
- * out an absolute path -- a runtime loading its own plug-ins out of a directory
- * beside the executable, say -- passes one. Prefixing it again asks for
- * C:\App\C:\App\..., which is not there, and the plug-in is reported missing
- * while sitting exactly where it was asked for.
+ * A name that already says where it is, is where it is: a full path, a path
+ * from the root of the current drive, one from the current directory of a
+ * drive (`C:plugins\x.dll`) and one that starts at the current directory
+ * (`.\x.dll`, `..\x.dll`). Prefixing one again asks for C:\App\C:\App\...,
+ * which is not there, and the library is reported missing while sitting
+ * exactly where it was asked for. Any other name - a bare one, or a relative
+ * one with a directory in it (`plugins\x.dll`) - is searched for, each place
+ * of the search taking the name after it, as LoadLibrary's documentation
+ * says of a relative path.
  *
- * @param {string} name        What the guest passed to LoadLibrary.
- * @param {string} imagePath   The running executable, whose directory is searched.
+ * @param {string} name
+ * @param {string} [currentDirectory]  The process's, which a drive-relative or
+ *     dot-relative name starts from.
+ * @returns {string | null}
  */
-export function resolveLibraryPath(name, imagePath){
-    const qualified = /^[A-Za-z]:[\\/]/.test(name) || /^[\\/]/.test(name);
-    if (qualified)
+export function fixedLibraryPath(name, currentDirectory){
+    if (/^[A-Za-z]:[\\/]/.test(name) || /^[\\/]/.test(name))
     {
         return name;
     }
-    return `${imagePath.slice(0, imagePath.lastIndexOf('\\') + 1)}${name}`;
+    const here = currentDirectory?.replace(/[\\/]+$/, '');
+    const drive = /^([A-Za-z]):(.*)$/.exec(name);
+    if (drive)
+    {
+        const onDrive = here && here[0].toLowerCase() === drive[1].toLowerCase();
+        return `${onDrive ? here : `${drive[1]}:`}\\${drive[2]}`;
+    }
+    if (/^\.\.?[\\/]/.test(name) && here)
+    {
+        return `${here}\\${name}`;
+    }
+    return null;
 }
 
 /**
@@ -2317,8 +2332,8 @@ const SYSTEM_DIRECTORY = 'WINDOWS\\system32';
  * installer puts a library it brought and then loads by bare name -- then the
  * current directory, where XP's safe search mode puts it: a setup that changes
  * to a folder of its disc and loads a helper there by bare name finds it. A
- * name with a directory in it names its one place and is looked for nowhere
- * else.
+ * name that fixes its place (`fixedLibraryPath`) is looked for nowhere else; a
+ * relative one with a directory in it is searched for as a bare one is.
  *
  * `ours` drops the system directories: for a name the engine's own table
  * already answers, the system's copy is the engine's, and a runtime an
@@ -2337,12 +2352,12 @@ const SYSTEM_DIRECTORY = 'WINDOWS\\system32';
  * @returns {string[]}
  */
 export function libraryCandidates(name, imagePath, currentDirectory, how = {}){
-    const first = resolveLibraryPath(name, imagePath);
-    if (first !== `${imagePath.slice(0, imagePath.lastIndexOf('\\') + 1)}${name}`
-        || /[\\/]/.test(name))
+    const fixed = fixedLibraryPath(name, currentDirectory);
+    if (fixed !== null)
     {
-        return [first];
+        return [fixed];
     }
+    const first = `${imagePath.slice(0, imagePath.lastIndexOf('\\') + 1)}${name}`;
     /** @param {string} directory */
     const inside = directory=>`${directory.replace(/[\\/]+$/, '')}\\${name}`;
     const places = [how.from ? inside(how.from) : first,
@@ -4994,16 +5009,25 @@ async function buildApp(options){
      * @param {string} path
      */
     const moduleAtPath = path=>{
-        const wanted = pathKey(resolveLibraryPath(path, options.imagePath ?? 'C:\\app.exe'));
+        const wanted = placesNamed(path);
         for (const module of byBase.values())
         {
-            if (module.fromFile && module.path && pathKey(module.path) === wanted)
+            if (module.fromFile && module.path && wanted.includes(pathKey(module.path)))
             {
                 return module;
             }
         }
         return null;
     };
+
+    /**
+     * Every file a path given to LoadLibrary can name, as `pathKey`s: the one
+     * it fixes, or each place a relative one is searched for in.
+     *
+     * @param {string} path
+     */
+    const placesNamed = path=>libraryCandidates(path, options.imagePath ?? 'C:\\app.exe',
+        core.api('filesystem').currentDirectory()).map(pathKey);
 
     /** @param {string | null} name */
     const findModule = name=>{
@@ -5026,8 +5050,7 @@ async function buildApp(options){
      * @param {string} name @param {any} module
      */
     const answersPath = (name, module)=>!/[\\/]/.test(name) || !module?.fromFile || !module.path
-        || pathKey(module.path)
-            === pathKey(resolveLibraryPath(name, options.imagePath ?? 'C:\\app.exe'));
+        || placesNamed(name).includes(pathKey(module.path));
 
     /**
      * Takes a module's name off the bare-name index when it is the one there,

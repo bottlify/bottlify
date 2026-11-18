@@ -180,7 +180,9 @@ flowchart TD
   with none set ends the process with 0xC0000417 and an error naming the call; msvcrt.dll answers
   EINVAL alone (decisions.md A255, `msvcrt/invalid-parameter.js`).
 - **Where `LoadLibrary` looks:** the `.exe` folder, then `C:\WINDOWS\system32\`, `C:\WINDOWS\` and
-  the current folder. Static imports are looked up the same way, without the current folder. For
+  the current folder. A relative name with a folder in it (`plugins\x.dll`) is looked for under
+  each of those in turn; a full path, one from a drive's current folder (`C:x.dll`) or one that
+  starts with `.\` or `..\` names one file. Static imports are looked up the same way, without the current folder. For
   a name the engine has a table for, the system directories are skipped: a copy an installer put
   there would be a second library of the name in the process beside the engine's.
 - **A DLL already loaded** is handed back with its count raised. A bare name finds the first module
