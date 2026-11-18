@@ -682,6 +682,7 @@ export function createNtdllFunctions(host){
                 teb: host.teb,
                 allocate,
                 free,
+                processes: host.processes,
             })
             : {}),
 

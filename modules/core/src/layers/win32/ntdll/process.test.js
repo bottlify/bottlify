@@ -35,6 +35,8 @@ function setup(){
     const freed = [];
     /** @type {any[]} */
     const created = [];
+    /** @type {number[]} */
+    const resumed = [];
     let tableSize = 0;
     /** @param {number} address */
     const wideAt = address=>{
@@ -53,6 +55,7 @@ function setup(){
             return 0;
         } },
         ResumeThread: { handler: (/** @type {number[]} */ [handle])=>{
+            resumed.push(handle);
             if (handle === 0x10)
             {
                 return 2;
@@ -146,7 +149,7 @@ function setup(){
         return at;
     };
     return {
-        bytes, view, fns, freed, created, counted, wideAt,
+        bytes, view, fns, freed, created, resumed, counted, wideAt,
         lastError: ()=>lastError,
         /** @param {number} size */
         setTableSize: size=>{
@@ -315,4 +318,115 @@ test('RtlCreateUserProcess is CreateProcessW over the parameters, its thread sus
         [missing, 0, parameters, 0, 0, 0, 0, 0, 0, INFO]), STATUS_OBJECT_NAME_NOT_FOUND);
     assert.equal(lastError(), 0x77);
     assert.equal(fns.RtlCreateUserProcess.argBytes, 40);
+});
+
+test('NtCreateUserProcess makes the child its attribute list names, suspended when asked', ()=>{
+    const { bytes, view, fns, counted, created, resumed, lastError } = setup();
+    const PATH = 0x900;
+    const path = '\\??\\C:\\game\\child.exe';
+    const image = counted(STRING, path);
+    assert.equal(fns.RtlCreateProcessParametersEx.handler(
+        [OUT, image, 0, 0, 0, 0, 0, 0, 0, 0, 1]), STATUS_SUCCESS);
+    const parameters = view.getUint32(OUT, true);
+    // PS_ATTRIBUTE_LIST: the image's name by pointer, then where the client
+    // id goes; each attribute four dwords after the list's TotalLength.
+    const LIST = 0xa00;
+    const CLIENT = 0xb00;
+    for (let i = 0; i < path.length; i++)
+    {
+        view.setUint16(PATH + i * 2, path.charCodeAt(i), true);
+    }
+    [36, 0x20005, path.length * 2, PATH, 0, 0x10003, 8, CLIENT, 0].forEach((value, at)=>
+        view.setUint32(LIST + at * 4, value, true));
+    const INFO = 0xc00;
+    view.setUint32(INFO, 0x48, true);
+    const PROCESS = 0xd00;
+    const THREAD = 0xd04;
+    const call = (/** @type {number} */ threadFlags, /** @type {number} */ processFlags = 0)=>
+        fns.NtCreateUserProcess.handler([PROCESS, THREAD, 0x1fffff, 0x1fffff, 0, 0,
+            processFlags, threadFlags, parameters, INFO, LIST]);
+
+    assert.equal(call(0x1 | 0x4), 0xc000000d,
+        'a new process\'s first thread is not hidden from a debugger');
+    assert.equal(created.length, 0);
+
+    assert.equal(call(0x1), STATUS_SUCCESS);
+    assert.deepEqual(created[0], {
+        application: 'C:\\game\\child.exe', line: path, inherit: 0, flags: 0x4,
+        environment: 0, folder: null, startupSize: 68,
+    }, 'the parameters\' command line, the image without its \\??\\');
+    assert.deepEqual([view.getUint32(PROCESS, true), view.getUint32(THREAD, true)],
+        [0x50, 0x54]);
+    assert.deepEqual([view.getUint32(CLIENT, true), view.getUint32(CLIENT + 4, true)],
+        [0x1004, 0x1008], 'the client id where the attribute asks');
+    assert.equal(view.getUint32(INFO + 4, true), 6, 'PsCreateSuccess');
+    assert.deepEqual(resumed, [], 'left suspended');
+
+    assert.equal(call(0, 0x4), STATUS_SUCCESS);
+    assert.equal(created[1].inherit, 1, 'PROCESS_CREATE_FLAGS_INHERIT_HANDLES');
+    assert.deepEqual(resumed, [0x54], 'not asked to stay suspended, it runs');
+
+    view.setUint32(LIST, 4, true);
+    assert.equal(call(0x1), 0xc000000d, 'no image named');
+    assert.equal(lastError(), 0x77);
+    assert.equal(fns.NtCreateUserProcess.argBytes, 44);
+    void bytes;
+});
+
+test('NtTerminateProcess with no handle ends the other threads, then the process', ()=>{
+    /** @type {any[][]} */
+    const calls = [];
+    let lastError = 0x77;
+    /** @param {string} name @param {(args: number[]) => number} answer */
+    const entry = (name, answer)=>({ handler: (/** @type {number[]} */ args)=>{
+        calls.push([name, ...args]);
+        return answer(args);
+    } });
+    const kernel32 = {
+        GetLastError: { handler: ()=>lastError },
+        SetLastError: { handler: (/** @type {number[]} */ [code])=>{
+            lastError = code;
+            return 0;
+        } },
+        GetCurrentThreadId: entry('GetCurrentThreadId', ()=>7),
+        OpenThread: entry('OpenThread', ([, , id])=>0x100 + id),
+        TerminateThread: entry('TerminateThread', ()=>1),
+        CloseHandle: entry('CloseHandle', ()=>1),
+        TerminateProcess: entry('TerminateProcess', ([handle])=>{
+            if (handle === 0x66)
+            {
+                lastError = 6;
+                return 0;
+            }
+            return 1;
+        }),
+    };
+    const fns = /** @type {Record<string, any>} */ (createProcessFunctions({
+        readMemory: ()=>new Uint8Array(4),
+        writeMemory: ()=>{},
+        kernel32,
+        teb: ()=>0,
+        allocate: ()=>0,
+        free: ()=>true,
+        processes: ()=>[{ id: 1, threads: [5, 7, 9] }, { id: 2, threads: [11] }],
+    }));
+    const terminations = ()=>calls.filter(([name])=>name !== 'GetCurrentThreadId');
+
+    assert.equal(fns.NtTerminateProcess.handler([0, 0xdead]), STATUS_SUCCESS, 'it returns');
+    assert.deepEqual(terminations(), [
+        ['OpenThread', 1, 0, 5], ['TerminateThread', 0x105, 0xdead], ['CloseHandle', 0x105],
+        ['OpenThread', 1, 0, 9], ['TerminateThread', 0x109, 0xdead], ['CloseHandle', 0x109],
+    ], 'every thread of this process but the caller, none of another\'s');
+    calls.length = 0;
+    fns.NtTerminateProcess.handler([0, 2]);
+    assert.deepEqual(terminations(), [['TerminateProcess', 0xffffffff, 0xdead]],
+        'the caller was the last: the process ends with the status kept the first time');
+
+    calls.length = 0;
+    assert.equal(fns.NtTerminateProcess.handler([0x44, 3]), STATUS_SUCCESS,
+        'a process handle: TerminateProcess');
+    assert.deepEqual(calls, [['TerminateProcess', 0x44, 3]]);
+    assert.equal(fns.NtTerminateProcess.handler([0x66, 3]), STATUS_INVALID_HANDLE);
+    assert.equal(lastError, 0x77, 'the last error left alone');
+    assert.equal(fns.NtTerminateProcess.argBytes, 8);
 });

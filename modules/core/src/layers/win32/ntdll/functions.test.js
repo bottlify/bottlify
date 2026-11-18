@@ -493,7 +493,7 @@ test('the debugging calls are in the table, and the process calls only over kern
     const full = /** @type {Record<string, any>} */ (createNtdllFunctions(host));
     for (const name of ['NtResumeThread', 'ZwResumeThread', 'NtOpenProcess', 'ZwOpenProcess',
         'RtlFindMessage', 'RtlCreateProcessParameters', 'RtlDestroyProcessParameters',
-        'RtlCreateUserProcess'])
+        'RtlCreateUserProcess', 'NtCreateUserProcess', 'ZwCreateUserProcess'])
     {
         assert.equal(typeof full[name]?.handler, 'function', name);
     }

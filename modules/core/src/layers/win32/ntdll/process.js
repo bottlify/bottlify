@@ -59,6 +59,31 @@ const PROCESS_INFORMATION = Object.freeze({
     SIZE: 0x44,
 });
 
+/**
+ * A child made, or the status that refused it.
+ *
+ * @typedef {{ process: number, thread: number, processId: number, threadId: number }
+ *     | { status: number }} Spawned
+ */
+
+/** PS_ATTRIBUTE_LIST on 32-bit: TotalLength, then PS_ATTRIBUTEs of four dwords each. */
+const ATTRIBUTE_LIST_HEADER = 4;
+const ATTRIBUTE_SIZE = 16;
+/** The attributes read: the image's name, by pointer; where the client id goes. */
+const PS_ATTRIBUTE_IMAGE_NAME = 0x20005;
+const PS_ATTRIBUTE_CLIENT_ID = 0x10003;
+/** PS_CREATE_INFO's State, and the state that says the process was made. */
+const CREATE_INFO_STATE = 4;
+const PS_CREATE_SUCCESS = 6;
+/** NtCreateUserProcess's flags this reads. */
+const PROCESS_CREATE_FLAGS_INHERIT_HANDLES = 0x4;
+const THREAD_CREATE_FLAGS_CREATE_SUSPENDED = 0x1;
+const THREAD_CREATE_FLAGS_HIDE_FROM_DEBUGGER = 0x4;
+
+/** GetCurrentProcess's pseudo-handle; OpenThread's right to end a thread. */
+const CURRENT_PROCESS = 0xffffffff;
+const THREAD_TERMINATE = 0x1;
+
 /** CreateProcess's flags: the first thread waits, the environment is wide. */
 const CREATE_SUSPENDED = 0x4;
 const CREATE_UNICODE_ENVIRONMENT = 0x400;
@@ -92,6 +117,9 @@ const DOS_DEVICES = '\\??\\';
  * @property {() => number} teb
  * @property {(bytes: number) => number} allocate  The process heap.
  * @property {(address: number) => boolean} free
+ * @property {() => { id: number, threads: number[] }[]} [processes]
+ *           This process first, its threads by id: the ones NtTerminateProcess
+ *           with no handle ends.
  */
 
 /** @param {string} text @returns {Uint8Array} UTF-16, unterminated. */
@@ -102,6 +130,9 @@ const utf16 = text=>new Uint8Array(Uint16Array.from(text, c=>c.charCodeAt(0)).bu
  */
 export function createProcessFunctions(host){
     const { kernel32 } = host;
+    /** The exit code an earlier NtTerminateProcess with no handle kept, or null. */
+    /** @type {number | null} */
+    let ending = null;
 
     /** @param {number} address */
     const readU32 = address=>{
@@ -267,6 +298,85 @@ export function createProcessFunctions(host){
         return STATUS.SUCCESS;
     };
 
+    /**
+     * A PS_ATTRIBUTE_LIST's attributes by kind: each one's size and value
+     * (an address for the attributes passed by pointer). The list's
+     * TotalLength says how many there are.
+     *
+     * @param {number} list
+     * @returns {Map<number, { size: number, value: number }>}
+     */
+    const attributeList = list=>{
+        const total = readU32(list);
+        /** @type {Map<number, { size: number, value: number }>} */
+        const found = new Map();
+        for (let at = ATTRIBUTE_LIST_HEADER; at + ATTRIBUTE_SIZE <= total; at += ATTRIBUTE_SIZE)
+        {
+            found.set(readU32(list + at), {
+                size: readU32(list + at + 4), value: readU32(list + at + 8) });
+        }
+        return found;
+    };
+
+    /**
+     * The child CreateProcessW makes of an image and a parameters block -
+     * its command line, directory and environment - with its first thread
+     * suspended: its handles and client id, or the status its refusal is
+     * made from. The image information is left to the child, whose image is
+     * not mapped until it takes this process's place.
+     *
+     * @param {string} named  the image, a DOS path with or without `\??\`
+     * @param {number} parameters @param {boolean} inherit
+     * @returns {Spawned | Promise<Spawned>}
+     */
+    const spawn = (named, parameters, inherit)=>{
+        const create = kernel32.CreateProcessW;
+        if (!create)
+        {
+            return { status: STATUS.NOT_IMPLEMENTED };
+        }
+        const path = named.startsWith(DOS_DEVICES) ? named.slice(DOS_DEVICES.length) : named;
+        const commandLine = parameter(parameters, PARAMETERS.CommandLine) ?? '';
+        const directory = parameter(parameters, PARAMETERS.CurrentDirectory) ?? '';
+        const environment = readU32(parameters + PARAMETERS.Environment);
+
+        const application = heapString(path);
+        const line = heapString(commandLine);
+        const folder = directory === '' ? 0 : heapString(directory);
+        const scratch = host.allocate(STARTUPINFO_SIZE + 16) >>> 0;
+        const held = [application, line, folder, scratch].filter(at=>at !== 0);
+        const release = ()=>held.forEach(at=>host.free(at));
+        if (application === 0 || line === 0 || scratch === 0)
+        {
+            release();
+            return { status: STATUS.NO_MEMORY };
+        }
+        const startup = new Uint8Array(STARTUPINFO_SIZE + 16);
+        new DataView(startup.buffer).setUint32(0, STARTUPINFO_SIZE, true);
+        host.writeMemory(scratch, startup);
+        const before = kernel32.GetLastError?.handler([]) ?? 0;
+        const created = create.handler([application, line, 0, 0,
+            inherit ? 1 : 0,
+            CREATE_SUSPENDED | (environment !== 0 ? CREATE_UNICODE_ENVIRONMENT : 0),
+            environment, folder, scratch, scratch + STARTUPINFO_SIZE]);
+        /** @param {number} result @returns {Spawned} */
+        const settle = result=>{
+            const information = scratch + STARTUPINFO_SIZE;
+            const error = kernel32.GetLastError?.handler([]) ?? 0;
+            kernel32.SetLastError?.handler([before]);
+            if ((result >>> 0) === 0)
+            {
+                release();
+                return { status: ERROR_TO_STATUS.get(error) ?? STATUS.UNSUCCESSFUL };
+            }
+            const child = { process: readU32(information), thread: readU32(information + 4),
+                processId: readU32(information + 8), threadId: readU32(information + 12) };
+            release();
+            return child;
+        };
+        return created instanceof Promise ? created.then(settle) : settle(created);
+    };
+
     return {
         /**
          * NTSTATUS NtResumeThread(HANDLE ThreadHandle, PULONG SuspendCount)
@@ -317,6 +427,55 @@ export function createProcessFunctions(host){
                     return STATUS.SUCCESS;
                 };
                 return result instanceof Promise ? result.then(settle) : settle(result);
+            },
+        },
+
+        /**
+         * NTSTATUS NtTerminateProcess(HANDLE ProcessHandle, NTSTATUS ExitStatus)
+         *
+         * A process handle is TerminateProcess's, as a status. No handle at
+         * all is the first half of a process ending itself, as ExitProcess
+         * does before the libraries are told: every thread but the caller
+         * ends, and the call returns, the status kept as the process's exit
+         * code. Asked again with no handle, the caller is the last thread
+         * and the process ends with the status kept the first time; with its
+         * own handle, it ends with the status given then.
+         */
+        NtTerminateProcess: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, code])=>{
+                if ((handle >>> 0) !== 0)
+                {
+                    const { result, error } = quietly('TerminateProcess', [handle, code]);
+                    if (typeof result !== 'number')
+                    {
+                        // This process, ended: nothing returns.
+                        return result;
+                    }
+                    return (result >>> 0) !== 0 ? STATUS.SUCCESS
+                        : ERROR_TO_STATUS.get(error) ?? STATUS.UNSUCCESSFUL;
+                }
+                if (ending !== null)
+                {
+                    return quietly('TerminateProcess', [CURRENT_PROCESS, ending]).result;
+                }
+                ending = code >>> 0;
+                const caller = quietly('GetCurrentThreadId', []).result >>> 0;
+                for (const id of host.processes?.()[0]?.threads ?? [])
+                {
+                    if ((id >>> 0) === caller)
+                    {
+                        continue;
+                    }
+                    const thread = quietly('OpenThread', [THREAD_TERMINATE, 0, id]).result >>> 0;
+                    if (thread !== 0)
+                    {
+                        quietly('TerminateThread', [thread, ending]);
+                        quietly('CloseHandle', [thread]);
+                    }
+                }
+                return STATUS.SUCCESS;
             },
         },
 
@@ -507,61 +666,96 @@ export function createProcessFunctions(host){
                 {
                     return STATUS.INVALID_PARAMETER;
                 }
-                if (!kernel32.CreateProcessW)
-                {
-                    return STATUS.NOT_IMPLEMENTED;
-                }
-                const named = counted(image) ?? '';
-                const path = named.startsWith(DOS_DEVICES)
-                    ? named.slice(DOS_DEVICES.length) : named;
-                const commandLine = parameter(parameters, PARAMETERS.CommandLine) ?? '';
-                const directory = parameter(parameters, PARAMETERS.CurrentDirectory) ?? '';
-                const environment = readU32(parameters + PARAMETERS.Environment);
-
-                const application = heapString(path);
-                const line = heapString(commandLine);
-                const folder = directory === '' ? 0 : heapString(directory);
-                const scratch = host.allocate(STARTUPINFO_SIZE + 16) >>> 0;
-                const held = [application, line, folder, scratch].filter(at=>at !== 0);
-                const release = ()=>held.forEach(at=>host.free(at));
-                if (application === 0 || line === 0 || scratch === 0)
-                {
-                    release();
-                    return STATUS.NO_MEMORY;
-                }
-                const startup = new Uint8Array(STARTUPINFO_SIZE + 16);
-                new DataView(startup.buffer).setUint32(0, STARTUPINFO_SIZE, true);
-                host.writeMemory(scratch, startup);
-                const before = kernel32.GetLastError?.handler([]) ?? 0;
-                const created = kernel32.CreateProcessW.handler([application, line, 0, 0,
-                    (inherit & 0xff) !== 0 ? 1 : 0,
-                    CREATE_SUSPENDED | (environment !== 0 ? CREATE_UNICODE_ENVIRONMENT : 0),
-                    environment, folder, scratch, scratch + STARTUPINFO_SIZE]);
-                const settle = (/** @type {number} */ result)=>{
-                    const processInformation = scratch + STARTUPINFO_SIZE;
-                    const error = kernel32.GetLastError?.handler([]) ?? 0;
-                    kernel32.SetLastError?.handler([before]);
-                    if ((result >>> 0) === 0)
+                const made = spawn(counted(image) ?? '', parameters, (inherit & 0xff) !== 0);
+                /** @param {Spawned} child */
+                const settle = child=>{
+                    if ('status' in child)
                     {
-                        release();
-                        return ERROR_TO_STATUS.get(error) ?? STATUS.UNSUCCESSFUL;
+                        return child.status;
                     }
                     const answer = new Uint8Array(PROCESS_INFORMATION.SIZE);
                     const view = new DataView(answer.buffer);
                     view.setUint32(PROCESS_INFORMATION.Size, PROCESS_INFORMATION.SIZE, true);
-                    view.setUint32(PROCESS_INFORMATION.ProcessHandle,
-                        readU32(processInformation), true);
-                    view.setUint32(PROCESS_INFORMATION.ThreadHandle,
-                        readU32(processInformation + 4), true);
-                    view.setUint32(PROCESS_INFORMATION.UniqueProcess,
-                        readU32(processInformation + 8), true);
-                    view.setUint32(PROCESS_INFORMATION.UniqueThread,
-                        readU32(processInformation + 12), true);
+                    view.setUint32(PROCESS_INFORMATION.ProcessHandle, child.process, true);
+                    view.setUint32(PROCESS_INFORMATION.ThreadHandle, child.thread, true);
+                    view.setUint32(PROCESS_INFORMATION.UniqueProcess, child.processId, true);
+                    view.setUint32(PROCESS_INFORMATION.UniqueThread, child.threadId, true);
                     host.writeMemory(information >>> 0, answer);
-                    release();
                     return STATUS.SUCCESS;
                 };
-                return created instanceof Promise ? created.then(settle) : settle(created);
+                return made instanceof Promise ? made.then(settle) : settle(made);
+            },
+        },
+
+        /**
+         * NTSTATUS NtCreateUserProcess(PHANDLE ProcessHandle, PHANDLE ThreadHandle,
+         *   ACCESS_MASK ProcessDesiredAccess, ACCESS_MASK ThreadDesiredAccess,
+         *   POBJECT_ATTRIBUTES ProcessObjectAttributes,
+         *   POBJECT_ATTRIBUTES ThreadObjectAttributes, ULONG ProcessFlags,
+         *   ULONG ThreadFlags, PRTL_USER_PROCESS_PARAMETERS ProcessParameters,
+         *   PPS_CREATE_INFO CreateInfo, PPS_ATTRIBUTE_LIST AttributeList)
+         *
+         * The process RtlCreateUserProcess makes, its image named by the
+         * attribute list's PS_ATTRIBUTE_IMAGE_NAME, its first thread left
+         * suspended only when THREAD_CREATE_FLAGS_CREATE_SUSPENDED asks. A
+         * new process's first thread cannot be hidden from a debugger:
+         * THREAD_CREATE_FLAGS_HIDE_FROM_DEBUGGER is refused. The client id is
+         * written where PS_ATTRIBUTE_CLIENT_ID asks for it, and the create
+         * info says the creation succeeded; the other attributes, and the
+         * access asked for, are the system's to honour and change nothing
+         * here (the handles carry every right).
+         */
+        NtCreateUserProcess: {
+            argBytes: 44,
+            /** @param {number[]} args */
+            handler: ([processOut, threadOut, , , , , processFlags, threadFlags, parameters,
+                createInfo, attributes])=>{
+                if ((processOut >>> 0) === 0 || (threadOut >>> 0) === 0
+                    || (parameters >>> 0) === 0 || (attributes >>> 0) === 0
+                    || ((threadFlags >>> 0) & THREAD_CREATE_FLAGS_HIDE_FROM_DEBUGGER) !== 0)
+                {
+                    return STATUS.INVALID_PARAMETER;
+                }
+                const list = attributeList(attributes >>> 0);
+                const imageName = list.get(PS_ATTRIBUTE_IMAGE_NAME);
+                if (!imageName)
+                {
+                    return STATUS.INVALID_PARAMETER;
+                }
+                const units = host.readMemory(imageName.value, imageName.size & ~1).slice();
+                const image = String.fromCharCode(
+                    ...new Uint16Array(units.buffer, 0, units.length >> 1));
+                const made = spawn(image, parameters >>> 0,
+                    ((processFlags >>> 0) & PROCESS_CREATE_FLAGS_INHERIT_HANDLES) !== 0);
+                /** @param {Spawned} child */
+                const settle = child=>{
+                    if ('status' in child)
+                    {
+                        return child.status;
+                    }
+                    writeU32(processOut, child.process);
+                    writeU32(threadOut, child.thread);
+                    const client = list.get(PS_ATTRIBUTE_CLIENT_ID);
+                    if (client && client.size >= 8)
+                    {
+                        writeU32(client.value, child.processId);
+                        writeU32(client.value + 4, child.threadId);
+                    }
+                    if ((createInfo >>> 0) !== 0)
+                    {
+                        writeU32(createInfo + CREATE_INFO_STATE, PS_CREATE_SUCCESS);
+                    }
+                    if (((threadFlags >>> 0) & THREAD_CREATE_FLAGS_CREATE_SUSPENDED) === 0)
+                    {
+                        const resumed = quietly('ResumeThread', [child.thread]).result;
+                        if (resumed instanceof Promise)
+                        {
+                            return resumed.then(()=>STATUS.SUCCESS);
+                        }
+                    }
+                    return STATUS.SUCCESS;
+                };
+                return made instanceof Promise ? made.then(settle) : settle(made);
             },
         },
     };
