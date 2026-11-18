@@ -889,6 +889,18 @@ test("a thread's preferred UI languages are its own: the ones known kept, the re
         [MUI_LANGUAGE_NAME | MUI_UI_FALLBACK, COUNT, 0, SIZE]), 1);
     assert.equal(view.getUint32(COUNT, true), 1, "and is then given the user's");
 
+    // Any specific locale the machine has, not only the interface's own
+    // (locale.c test_GetThreadPreferredUILanguages).
+    plantList('fr-BE\0en-US\0fr-BE\0en-GB\0');
+    view.setUint32(COUNT, 0xdeadbeef, true);
+    assert.equal(fns.SetThreadPreferredUILanguages.handler([MUI_LANGUAGE_NAME, LIST, COUNT]), 1);
+    assert.equal(view.getUint32(COUNT, true), 3, 'each once');
+    assert.equal(threadList(), 'fr-BE\0en-US\0en-GB\0\0');
+    assert.equal(fns.GetThreadUILanguage.handler(), 0x080c, 'the first is the thread\'s');
+    plantList('en-GB\0en-US\0fr-FR\0fr-BE\0de-DE\0de-AT\0it-IT\0');
+    assert.equal(fns.SetThreadPreferredUILanguages.handler([MUI_LANGUAGE_NAME, LIST, COUNT]), 1);
+    assert.equal(view.getUint32(COUNT, true), 5, 'five at most');
+
     plantList('xx-YY\0en-US\0en-US\0');
     view.setUint32(COUNT, 0xdeadbeef, true);
     assert.equal(fns.SetThreadPreferredUILanguages.handler([MUI_LANGUAGE_NAME, LIST, COUNT]), 1);
@@ -1016,6 +1028,8 @@ test('FoldStringW folds digits, the compatibility zone and ligatures, and refuse
         return host.readWide(0x300, length - 1);
     };
     assert.equal(fold(0x80, '٣²①９\u{1d7ce}x'), '32190x', 'MAP_FOLDDIGITS');
+    assert.equal(fold(0x80, '\u{10107}\u{1010f}\u{10320}\u{10321}\u{10322}'), '1915\u{10322}',
+        'the digits past the basic plane, and no more of them');
     assert.equal(fold(0x10, 'Ｗineϋǰ ª'), 'Wineϋǰ a',
         'MAP_FOLDCZONE');
     assert.equal(fold(0x2000, 'ÆßﬃǄ'), 'AEssffiDŽ',
@@ -1499,6 +1513,11 @@ test('ResolveLocaleName finds the best specific locale, the invariant one for no
     host.plantWide(0x200, 'de-DE');
     assert.equal(fns.ResolveLocaleName.handler([0x200, 0x300, 3]), 0);
     assert.equal(host.errors.at(-1), ERROR_INSUFFICIENT_BUFFER);
+    assert.equal(host.readWide(0x300, 3), 'de\0', 'as much as fits, terminated');
+    host.plantWide(0x200, '!x-sys-default-locale');
+    assert.equal(fns.ResolveLocaleName.handler([0x200, 0x300, 85]), 6,
+        'LOCALE_NAME_SYSTEM_DEFAULT is the system\'s');
+    assert.equal(host.readWide(0x300, 5), 'en-US');
 });
 
 test('EnumSystemLocalesEx hands out names with their kind and the lParam', async()=>{

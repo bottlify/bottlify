@@ -358,6 +358,8 @@ const OTHER_DIGITS = [
     [0x2460, 1, 9], [0x2474, 1, 9], [0x2488, 1, 9], [0x24ea, 0, 0], [0x24f5, 1, 9],
     [0x24ff, 0, 0], [0x2776, 1, 9], [0x2780, 1, 9], [0x278a, 1, 9], [0x3007, 0, 0],
     [0x3021, 1, 9], [0x1369, 1, 9],
+    // Past the basic plane: the Aegean numbers one to nine, Old Italic's one and five.
+    [0x10107, 1, 9], [0x10320, 1, 1], [0x10321, 5, 5],
 ];
 
 /**
@@ -1553,19 +1555,30 @@ export function createLocaleFunctions(host){
         return fresh;
     };
 
-    /** @param {number} id @param {number} flags */
+    /**
+     * A language as the preferred-UI-language calls write it: its LANGID in
+     * four hex digits, or its locale's name.
+     *
+     * @param {number} id @param {number} flags
+     */
     const languageText = (id, flags)=>((flags & MUI_LANGUAGE_ID) !== 0
-        ? id.toString(16).toUpperCase().padStart(4, '0') : LANGUAGE_NAMES.get(id) ?? '');
+        ? id.toString(16).toUpperCase().padStart(4, '0')
+        : LANGUAGE_NAMES.get(id) ?? localeByLcid(id)?.name ?? '');
 
-    /** @param {string} text @param {number} flags @returns {number} 0 for none known */
+    /**
+     * The LANGID a language is named by, or 0 for none: a specific locale
+     * this machine has, by its LANGID or its name. A thread may prefer any of
+     * them; which ones the machine shows its own interface in is the
+     * system's and the user's list (`LANGUAGE_NAMES`).
+     *
+     * @param {string} text @param {number} flags
+     * @returns {number}
+     */
     const languageOf = (text, flags)=>{
-        if ((flags & MUI_LANGUAGE_ID) !== 0)
-        {
-            const id = /^[0-9a-f]{1,4}$/i.test(text) ? parseInt(text, 16) : 0;
-            return LANGUAGE_NAMES.has(id) ? id : 0;
-        }
-        const name = text.toLowerCase();
-        return [...LANGUAGE_NAMES].find(([, known])=>known.toLowerCase() === name)?.[0] ?? 0;
+        const found = (flags & MUI_LANGUAGE_ID) !== 0
+            ? /^[0-9a-f]{1,4}$/i.test(text) ? localeByLcid(parseInt(text, 16)) : null
+            : localeByName(text);
+        return found && !found.neutral ? found.lcid & 0xffff : 0;
     };
 
     const BOTH_NAMINGS = MUI_LANGUAGE_ID | MUI_LANGUAGE_NAME;
@@ -3197,20 +3210,28 @@ export function createLocaleFunctions(host){
          *     int cchLocaleName)
          *
          * The best specific locale's name with its terminator, or the room it
-         * needs with no buffer; too little room is ERROR_INSUFFICIENT_BUFFER.
+         * needs with no buffer; LOCALE_NAME_SYSTEM_DEFAULT is the system's.
+         * Too little room is ERROR_INSUFFICIENT_BUFFER, as much of the name
+         * as fits written, terminated.
          */
         ResolveLocaleName: {
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([name, buffer, room])=>{
-                const resolved = (name >>> 0) === 0 ? MACHINE_LOCALE.name
-                    : resolvedName(readWideSpan(name >>> 0, -1));
+                const asked = (name >>> 0) === 0 ? null : readWideSpan(name >>> 0, -1);
+                const resolved = asked === null
+                    || asked.toLowerCase() === '!x-sys-default-locale'
+                    ? MACHINE_LOCALE.name : resolvedName(asked);
                 if ((buffer >>> 0) === 0)
                 {
                     return resolved.length + 1;
                 }
                 if ((room | 0) < resolved.length + 1)
                 {
+                    if ((room | 0) > 0)
+                    {
+                        writeWide(buffer >>> 0, `${resolved.slice(0, (room | 0) - 1)}\0`);
+                    }
                     return refuse(ERROR_INSUFFICIENT_BUFFER);
                 }
                 writeWide(buffer >>> 0, `${resolved}\0`);
