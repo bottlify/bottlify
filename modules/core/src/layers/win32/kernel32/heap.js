@@ -33,6 +33,7 @@ import {
     bindLong, globalAllocLongCode, globalFreeLongCode, heapAllocLongCode, heapFreeLongCode,
     heapReAllocLongCode, heapSizeLongCode,
 } from './guest-heap-long.js';
+import { createPageRuns } from './page-runs.js';
 
 /** Flags the guest passes; the rest of HeapAlloc's flags do not change behaviour here. */
 const HEAP_ZERO_MEMORY = 0x00000008;
@@ -1340,20 +1341,21 @@ export function createHeapFunctions(host){
 
     /**
      * The pages of each reservation protected PAGE_NOACCESS, committed or not:
-     * a commit with that protection, or VirtualProtect to it.
+     * a commit with that protection, or VirtualProtect to it; in runs.
      *
-     * @type {Map<number, Set<number>>}
+     * @type {Map<number, ReturnType<typeof createPageRuns<true>>>}
      */
     const unreadable = new Map();
 
     /**
      * What each reservation was given, as VirtualQuery answers it: the
      * protection it was reserved with (AllocationProtect) and each committed
-     * page's, as its last commit or VirtualProtect set it. Only NOACCESS is
-     * enforced (`unreadable`); the rest is what the program asked and reads
-     * back.
+     * page's, as its last commit or VirtualProtect set it, in runs (`page-runs.js`).
+     * Only NOACCESS is enforced (`unreadable`); the rest is what the program
+     * asked and reads back.
      *
-     * @type {Map<number, { allocation: number, pages: Map<number, number> }>}
+     * @type {Map<number, { allocation: number,
+     *     pages: ReturnType<typeof createPageRuns<number>> }>}
      */
     const protections = new Map();
 
@@ -1454,12 +1456,9 @@ export function createHeapFunctions(host){
                 host.pageAccess(start, end - start, true);
             }
         }
-        for (const page of unreadable.get(reservation) ?? [])
+        for (const run of unreadable.get(reservation)?.within(from, to) ?? [])
         {
-            if (page >= from && page < to)
-            {
-                host.pageAccess(page, PAGE_SIZE, false);
-            }
+            host.pageAccess(run.from, run.to - run.from, false);
         }
     };
 
@@ -1471,36 +1470,19 @@ export function createHeapFunctions(host){
      * @param {number} protection
      */
     const noteProtection = (reservation, from, to, protection)=>{
-        const kept = protections.get(reservation)?.pages;
-        if (kept)
-        {
-            for (let page = from; page < to; page += PAGE_SIZE)
-            {
-                kept.set(page, protection);
-            }
-        }
+        protections.get(reservation)?.pages.set(from, to, protection);
         let pages = unreadable.get(reservation);
         if ((protection & 0xff) === PAGE_NOACCESS)
         {
             if (!pages)
             {
-                pages = new Set();
+                pages = createPageRuns();
                 unreadable.set(reservation, pages);
             }
-            for (let page = from; page < to; page += PAGE_SIZE)
-            {
-                pages.add(page);
-            }
+            pages.set(from, to, true);
             return;
         }
-        if (!pages)
-        {
-            return;
-        }
-        for (let page = from; page < to; page += PAGE_SIZE)
-        {
-            pages.delete(page);
-        }
+        pages?.clear(from, to);
     };
 
     /**
@@ -1700,11 +1682,7 @@ export function createHeapFunctions(host){
                 // The run of committed pages that share this one's protection.
                 const protection = kept?.pages.get(page) ?? allocation;
                 const runEnd = Math.min(inside.to, end);
-                let to = page + PAGE_SIZE;
-                while (to < runEnd && (kept?.pages.get(to) ?? allocation) === protection)
-                {
-                    to += PAGE_SIZE;
-                }
+                const to = kept ? kept.pages.extent(page, runEnd, allocation) : runEnd;
                 return [page, block.address, allocation, to - page, MEM_COMMIT, protection,
                     MEM_PRIVATE];
             }
@@ -2028,7 +2006,7 @@ export function createHeapFunctions(host){
             decommitted.delete(start);
             committed.set(start, []);
             unreadable.delete(start);
-            protections.set(start, { allocation: protection, pages: new Map() });
+            protections.set(start, { allocation: protection, pages: createPageRuns() });
             // Committed with it, the whole of what was reserved: from
             // the granule's start, which is the address answered, not
             // from the page asked for -- a program writes from the
@@ -2168,7 +2146,7 @@ export function createHeapFunctions(host){
         decommitted.delete(address);
         committed.set(address, []);
         unreadable.delete(address);
-        protections.set(address, { allocation: protection, pages: new Map() });
+        protections.set(address, { allocation: protection, pages: createPageRuns() });
         if ((kind & MEM_COMMIT) !== 0)
         {
             markCommitted(address, address, address + rounded, true);
@@ -2619,14 +2597,7 @@ export function createHeapFunctions(host){
                 }
                 giveBack(block.address, Math.max(page, block.address), to);
                 markCommitted(block.address, Math.max(page, block.address), to, false);
-                const pages = protections.get(block.address)?.pages;
-                if (pages)
-                {
-                    for (let at = Math.max(page, block.address); at < to; at += PAGE_SIZE)
-                    {
-                        pages.delete(at);
-                    }
-                }
+                protections.get(block.address)?.pages.clear(Math.max(page, block.address), to);
                 settleAccess(block.address, Math.max(page, block.address), to);
                 return 1;
             },
@@ -3064,7 +3035,7 @@ export function createHeapFunctions(host){
                 }
                 const kept = block?.owner === VIRTUAL ? protections.get(block.address) : undefined;
                 const was = block?.owner === VIRTUAL
-                    && unreadable.get(block.address)?.has(first) === true;
+                    && unreadable.get(block.address)?.get(first) === true;
                 writeDword(oldProtect >>> 0, kept?.pages.get(first)
                     ?? (was ? PAGE_NOACCESS
                         : block?.owner === TABLES ? PAGE_READWRITE : PAGE_EXECUTE_READWRITE));
