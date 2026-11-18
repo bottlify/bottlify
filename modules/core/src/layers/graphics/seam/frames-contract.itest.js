@@ -1267,10 +1267,10 @@ export async function play(version, guestCode, steps, worker = false, bits = 32)
                         run(calls.indexed(type, 0, 0, 1));
                     }
                 }
-                run(calls.device('DrawPrimitiveUP', [D3DPT_TRIANGLELIST, 1, USER,
+                run(calls.device('DrawPrimitiveUP', [D3DPT_TRIANGLELIST, 1, { at: USER },
                     FORMATS[0].stride]));
                 run(calls.device('DrawIndexedPrimitiveUP', [D3DPT_TRIANGLELIST, 0, 3, 1,
-                    USER_INDICES, D3DFMT_INDEX16, USER, FORMATS[0].stride]));
+                    { at: USER_INDICES }, D3DFMT_INDEX16, { at: USER }, FORMATS[0].stride]));
             }
         }
         run(calls.device('SetViewport', [{ words: [4, 4, 16, 16, 0, ONE] }]));
@@ -1417,7 +1417,7 @@ export async function play(version, guestCode, steps, worker = false, bits = 32)
             // From the program's memory in the first format, then the
             // buffer's own again where the draw unbound it.
             calls.stream(0).forEach(call=>run(call));
-            run(calls.device('DrawPrimitiveUP', [D3DPT_TRIANGLELIST, 1, USER,
+            run(calls.device('DrawPrimitiveUP', [D3DPT_TRIANGLELIST, 1, { at: USER },
                 FORMATS[0].stride]));
             calls.stream(stream).forEach(call=>run(call));
         }
@@ -1479,7 +1479,7 @@ export async function play(version, guestCode, steps, worker = false, bits = 32)
         {
             calls.stream(0).forEach(call=>run(call));
             run(calls.device('DrawIndexedPrimitiveUP', [D3DPT_TRIANGLELIST, 0, 3, 1,
-                USER_INDICES, D3DFMT_INDEX16, USER, FORMATS[0].stride]));
+                { at: USER_INDICES }, D3DFMT_INDEX16, { at: USER }, FORMATS[0].stride]));
             calls.stream(stream).forEach(call=>run(call));
         }
         else if (step.kind === 'target')

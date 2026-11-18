@@ -103,7 +103,12 @@ function allFor(width){
     commands('Direct3D 9', D3D9_COMMANDS, d3d9Slot);
     commands('Direct3D 8', D3D8_COMMANDS.COMMANDS, D3D8_COMMANDS.commandSlot);
     commands('Direct3D 7', D3D7_COMMANDS.COMMANDS, D3D7_COMMANDS.commandSlot);
-    commands('OpenGL', GL_COMMANDS.COMMANDS, GL_COMMANDS.commandSlot, { thread: true });
+    // OpenGL's are functions reading a 32-bit thread's TEB (`threadPrologue`), refused for
+    // x86-64; last, so a 64-bit list lines up with the 32-bit one entry by entry.
+    if (width.bits === 32)
+    {
+        commands('OpenGL', GL_COMMANDS.COMMANDS, GL_COMMANDS.commandSlot, { thread: true });
+    }
     return routines;
 }
 

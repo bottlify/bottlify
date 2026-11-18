@@ -281,7 +281,9 @@ export const D3D8 = {
  * `{ guid }` the address of those sixteen bytes, a `{ words }` of those.
  *
  * @typedef {{ on: string, kind: string, method: string,
- *     args: (number | string | { guid: string } | { words: number[] })[] }} Call
+ *     args: (number | string | { guid: string } | { words: number[] } | { at: number })[] }} Call
+ *     `{ at }` an address of the program's own memory passed as a pointer: in a
+ *     64-bit process its upper half is zero, where a number's is a pattern
  */
 
 /**
@@ -612,6 +614,10 @@ export function machine(version, guestCode, options = {}){
             if (typeof arg === 'number')
             {
                 return arg >>> 0;
+            }
+            if (typeof arg === 'object' && 'at' in arg)
+            {
+                return arg.at >>> 0;
             }
             if (typeof arg === 'object')
             {
