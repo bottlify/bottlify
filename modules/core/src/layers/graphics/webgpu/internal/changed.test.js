@@ -350,3 +350,15 @@ test('written spans with page marks are those of a set asked page by page, over 
             }
         }
     });
+
+test('written spans end at the buffer\'s end when a draw names bytes past it', ()=>{
+    // MinIndex and NumVertices may reach past a buffer, and its last page is
+    // the next data's too: a span past the end was copied past the end of the
+    // buffer's copy, and the device that played the frame stopped for good.
+    const base = 0x400100;
+    const length = 60;
+    const one = pagesWatch(base, length);
+    const marked = { watch: one.watch, dirty: pageMarksOf(base, length, false) };
+    one.write(base >>> 12);
+    assert.deepEqual(writtenSpans(marked, base, length, 0, 120), [0, 60]);
+});

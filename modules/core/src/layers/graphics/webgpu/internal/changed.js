@@ -298,10 +298,13 @@ const holdsPage = (base, length, page, low, high)=>Math.max(0, page * 4096 - bas
  * @param {{ watch: { take: (address: number, length: number) => number[] },
  *     dirty: PageMarks }} tracked
  * @param {number} base @param {number} length  the buffer's
- * @param {number} from @param {number} to  within it
+ * @param {number} from @param {number} reach  what a draw names of it, which may run past
+ *     its end (MinIndex and NumVertices as the program gave them): cut there, since
+ *     the buffer's last page is often the next data's too
  * @returns {number[]}  start and end (exclusive) of each span, flat, in the buffer
  */
-export function writtenSpans(tracked, base, length, from, to){
+export function writtenSpans(tracked, base, length, from, reach){
+    const to = Math.min(reach, length);
     if (to <= from)
     {
         return [];
