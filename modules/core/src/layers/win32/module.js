@@ -1177,10 +1177,17 @@ export function createWin32Module(){
                 // Its running fiber's fibre-local values are called back
                 // first, on the thread, as a C runtime frees a thread's data in
                 // that callback (`kernel32/fls.js`); not for the process's end.
+                // Its own call has returned by now, so each is called as the
+                // loader calls a DllMain below: on the thread's resting stack.
                 const fibreLocal = others ? fiberStorage.current() : 0;
                 if (fibreLocal !== 0)
                 {
-                    return Promise.resolve().then(()=>fiberStorage.release(fibreLocal))
+                    const teb = thread.tebAddress >>> 0;
+                    return Promise.resolve().then(()=>fiberStorage.release(fibreLocal, { teb,
+                        call: (entry, args)=>callGuarded({ entry, args, thread, failed: 0,
+                            report: exception=>config?.divergence?.('FlsCallback',
+                                `exception 0x${exception} freeing a thread's fibre-local`
+                                + ' values at its end, taken by the loader') }) }))
                         .then(()=>tellAndEnd(thread, code, others) ?? 0);
                 }
                 return tellAndEnd(thread, code, others);
@@ -3068,8 +3075,8 @@ export function createWin32Module(){
                     return at;
                 },
                 free: address=>heap.free(address),
-                call: (entry, args)=>bridge.callGuest({ entry, args,
-                    thread: bridge.callerThread() }),
+                callerThread: ()=>bridge.callerThread(),
+                call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
                 setLastError: setError,
                 allocateCode: bytes=>heap.allocateCode(bytes),
                 writeMemory,
