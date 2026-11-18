@@ -253,6 +253,8 @@ const hex = value=>`0x${(value >>> 0).toString(16)}`;
  * @property {(report: import('./debug-events.js').DebugReport) => Promise<number>}
  *     [debugReport]  This process's debugger, when its parent debugs it: told of an
  *     exception first and again once nothing handled it, answering how to go on.
+ * @property {() => boolean} [debugged]  Whether a debugger hears this process now:
+ *     from its start, or since one attached; absent, whenever `debugReport` is given.
  *           Ends the process for an exception nothing handled, with the
  *           exception's code as its exit code -- what Windows does once the
  *           last-chance filter has had its say.
@@ -681,18 +683,28 @@ export function createSeh(host){
         };
     };
 
+    /** Whether a debugger hears this process now. */
+    const debugging = ()=>Boolean(host.debugReport) && (host.debugged?.() ?? true);
+
     /**
      * Tells this process's debugger of an exception, the thread stopped until
      * it answers: meanwhile the context the exception carries is the thread's
      * (`debugStop`), which the debugger reads and may change. Null when no
      * debugger debugs this process.
      *
-     * @param {{ code: number, flags?: number, address: number, parameters?: number[] }} what
+     * A breakpoint the processor raised (`trap`, an int3's length) shows its
+     * debugger the thread past the instruction, as Windows' does - the
+     * address is the int3's, Eip the next - and goes on from there when
+     * continued; declined, the handlers see Eip at the int3 again.
+     *
+     * @param {{ code: number, flags?: number, address: number, parameters?: number[],
+     *     trap?: number }} what
      * @param {any} thread @param {number} context @param {boolean} firstChance
      * @returns {Promise<number | null>}
      */
     const toDebugger = async(what, thread, context, firstChance)=>{
-        if (!host.debugReport)
+        const report = host.debugReport;
+        if (!report || !debugging())
         {
             return null;
         }
@@ -700,12 +712,22 @@ export function createSeh(host){
         {
             thread.debugStop = context;
         }
+        const past = what.trap ?? 0;
+        if (past !== 0)
+        {
+            writeU32(context + CONTEXT.EIP, readU32(context + CONTEXT.EIP) + past);
+        }
         try
         {
-            return await host.debugReport({ code: DEBUG_EVENT.EXCEPTION,
+            const answer = await report({ code: DEBUG_EVENT.EXCEPTION,
                 threadId: (thread?.id ?? 0) >>> 0, exception: {
                     code: what.code >>> 0, flags: what.flags ?? 0, address: what.address >>> 0,
                     parameters: what.parameters ?? [], firstChance } });
+            if (past !== 0 && answer !== DBG_CONTINUE)
+            {
+                writeU32(context + CONTEXT.EIP, readU32(context + CONTEXT.EIP) - past);
+            }
+            return answer;
         }
         finally
         {
@@ -721,8 +743,9 @@ export function createSeh(host){
      * exception or the chain runs out.
      *
      * @param {{ code: number, flags?: number, address: number, parameters?: number[],
-     *     raisedFrom?: number, call?: string }} what  `raisedFrom` the return address of
-     *     RaiseException's caller, `call` the host function it was met in
+     *     raisedFrom?: number, call?: string, trap?: number }} what  `raisedFrom` the
+     *     return address of RaiseException's caller, `call` the host function it was
+     *     met in, `trap` an int3's length (`toDebugger`)
      * @param {Record<string, number>} [given]  The registers at the exception,
      *        when they are not the processor's right now -- a fault is
      *        reported from a stub that has already moved the stack and spent
@@ -986,7 +1009,7 @@ export function createSeh(host){
         // A debuggee's unhandled exception is its debugger's second chance,
         // and the program's own filter is not asked, as Windows'
         // UnhandledExceptionFilter declines when a debugger is attached.
-        if (host.debugReport)
+        if (debugging())
         {
             if (await toDebugger(what, at.asked, at.context, false) === DBG_CONTINUE)
             {
@@ -1161,7 +1184,10 @@ export function createSeh(host){
                     fault.vector === 13 ? 0xffffffff : (fault.address ?? 0) >>> 0]
                 : fault.vector === DEBUG_SERVICE
                     ? [registers.eax >>> 0, registers.ecx >>> 0, registers.edx >>> 0] : [];
-            const result = await dispatch({ code, address: registers.eip, parameters }, registers);
+            // An int3 the debugger continues goes on past it (`toDebugger`).
+            const trap = fault.vector === 3 ? 1 : 0;
+            const result = await dispatch({ code, address: registers.eip, parameters,
+                ...trap ? { trap } : {} }, registers);
             if (result.handled)
             {
                 return result;
@@ -1170,7 +1196,7 @@ export function createSeh(host){
             // filter of its own ends with the fault reported rather than with
             // an exit code, since the report is the only account of it; a
             // debuggee's debugger has its second chance first.
-            if (topLevelFilter === 0 && !host.debugReport)
+            if (topLevelFilter === 0 && !debugging())
             {
                 return { handled: false };
             }

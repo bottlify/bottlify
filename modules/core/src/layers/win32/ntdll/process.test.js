@@ -243,28 +243,38 @@ test('RtlCreateProcessParameters builds the block with offsets, the image as the
         counted(0x4400, 'C:\\game\\');
         bytes.copyWithin(own + 0x24, 0x4400, 0x4408);
         view.setUint32(own + 0x48, 0x6000, true);
+        bytes.set(new Uint8Array(Uint16Array.from('A=1\0\0', c=>c.charCodeAt(0)).buffer), 0x6000);
 
         const image = counted(STRING, 'C:\\game\\child.exe');
         assert.equal(fns.RtlCreateProcessParameters.handler(
             [OUT, image, 0, 0, 0, 0, 0, 0, 0, 0]), STATUS_SUCCESS);
         const block = view.getUint32(OUT, true);
-        const total = view.getUint32(block, true);
-        assert.equal(view.getUint32(block + 4, true), total, 'Length is the whole block');
+        const size = view.getUint32(block + 4, true);
+        assert.equal(view.getUint32(block, true), size, 'AllocationSize is Size');
         assert.equal(view.getUint32(block + 8, true), 0, 'not normalised: offsets');
         /** @param {number} field */
         const text = field=>{
             const length = view.getUint16(block + field, true);
             const offset = view.getUint32(block + field + 4, true);
-            assert.ok(offset >= 0x290 && offset + length <= total, `0x${field.toString(16)}`);
+            assert.ok(offset >= 0x298 && offset + length <= size && offset % 4 === 0,
+                `0x${field.toString(16)}`);
             return String.fromCharCode(...new Uint16Array(
                 bytes.slice(block + offset, block + offset + length).buffer));
         };
         assert.equal(text(0x38), 'C:\\game\\child.exe');
+        assert.equal(view.getUint16(block + 0x3a, true), 36, 'the image\'s own room');
         assert.equal(text(0x40), 'C:\\game\\child.exe', 'the command line is the image');
         assert.equal(text(0x24), 'C:\\game\\', 'the directory the process has');
         assert.equal(view.getUint16(block + 0x26, true), 520, 'a directory has MAX_PATH');
         assert.equal(text(0x70), '');
-        assert.equal(view.getUint32(block + 0x48, true), 0x6000, 'the environment it has');
+        assert.equal(view.getUint16(block + 0x72, true), 2, 'an empty title: room for its end');
+        assert.equal(view.getUint16(block + 0x8a, true), 0, 'no runtime data: no room');
+        assert.equal(view.getUint32(block + 0x8c, true), 0, 'and no buffer');
+        assert.equal(view.getUint32(block + 0x48, true), block + size,
+            'the environment copied after the strings');
+        assert.equal(String.fromCharCode(...new Uint16Array(
+            bytes.slice(block + size, block + size + 6).buffer)), 'A=1');
+        assert.equal(view.getUint32(block + 0x290, true), 12, 'EnvironmentSize: what is left');
 
         assert.equal(fns.RtlDestroyProcessParameters.handler([block]), STATUS_SUCCESS);
         assert.deepEqual(freed, [block]);
@@ -308,8 +318,9 @@ test('RtlCreateUserProcess is CreateProcessW over the parameters, its thread sus
         [name, 0, parameters, 0, 0, 0, 1, 0, 0, INFO]), STATUS_SUCCESS);
     assert.deepEqual(created[0], {
         application: 'C:\\game\\child.exe', line: '"C:\\game\\child.exe" -x', inherit: 1,
-        flags: 0x404, environment: 0x6000, folder: null, startupSize: 68,
-    });
+        flags: 0x404, environment: view.getUint32(parameters + 0x48, true), folder: null,
+        startupSize: 68,
+    }, 'the environment the parameters copied');
     assert.deepEqual([0, 4, 8, 12, 16].map(at=>view.getUint32(INFO + at, true)),
         [0x44, 0x50, 0x54, 0x1004, 0x1008], 'the size, both handles and the client id');
 
@@ -352,8 +363,8 @@ test('NtCreateUserProcess makes the child its attribute list names, suspended wh
 
     assert.equal(call(0x1), STATUS_SUCCESS);
     assert.deepEqual(created[0], {
-        application: 'C:\\game\\child.exe', line: path, inherit: 0, flags: 0x4,
-        environment: 0, folder: null, startupSize: 68,
+        application: 'C:\\game\\child.exe', line: path, inherit: 0, flags: 0x404,
+        environment: view.getUint32(parameters + 0x48, true), folder: null, startupSize: 68,
     }, 'the parameters\' command line, the image without its \\??\\');
     assert.deepEqual([view.getUint32(PROCESS, true), view.getUint32(THREAD, true)],
         [0x50, 0x54]);

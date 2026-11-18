@@ -1257,7 +1257,7 @@ test('a wait on a pseudo-handle is a wait on the running object, which is not si
 
     // A timeout on a duplicate of the running thread expires while it runs.
     assert.equal(
-        fns.DuplicateHandle.handler([0xffffffff, 0xfffffffe, 0xffffffff, 0x300, 0, 0, 0]), 1);
+        fns.DuplicateHandle.handler([0xffffffff, 0xfffffffe, 0xffffffff, 0x300, 0, 0, 2]), 1);
     const duplicate = writtenU32(written, 0x300);
     assert.equal(fns.WaitForSingleObject.handler([duplicate, 100]), PARKED);
     kernel.advance(100);
@@ -1698,4 +1698,26 @@ test('CompareObjectHandles says whether two handles name one object', ()=>{
     assert.equal(fns.CompareObjectHandles.handler([event, copy]), 1);
     assert.equal(fns.CompareObjectHandles.handler([event, other]), 0);
     assert.equal(fns.CompareObjectHandles.handler([0x9999, 0x9999]), 0, 'no object at all');
+});
+
+test('a duplicate carries the rights asked for, none for 0, the source\'s with SAME_ACCESS', ()=>{
+    // DuplicateHandle's dwDesiredAccess is ignored only with
+    // DUPLICATE_SAME_ACCESS; 0 without it is a handle with no rights (Wine's
+    // kernel32 virtual.c: MapViewOfFile through such a duplicate is refused).
+    const { fns, kernel, written } = setup();
+    const event = fns.CreateEventA.handler([0, 1, 0, 0]);
+    assert.equal(fns.DuplicateHandle.handler([0xffffffff, event, 0xffffffff, 0x300, 0, 0, 0]), 1);
+    assert.equal(kernel.handles.access(writtenU32(written, 0x300)), 0);
+    assert.equal(fns.DuplicateHandle.handler(
+        [0xffffffff, event, 0xffffffff, 0x304, 0x80000000, 0, 0]), 1);
+    const read = writtenU32(written, 0x304);
+    assert.equal(kernel.handles.access(read), 0x20001, 'GENERIC_READ: READ_CONTROL | QUERY_STATE');
+    assert.equal(fns.DuplicateHandle.handler([0xffffffff, read, 0xffffffff, 0x308, 0, 0, 2]), 1);
+    assert.equal(kernel.handles.access(writtenU32(written, 0x308)), 0x20001,
+        'DUPLICATE_SAME_ACCESS: the source\'s rights, the asked ignored');
+    assert.equal(fns.DuplicateHandle.handler([0xffffffff, event, 0xffffffff, 0x30c, 0, 0, 2]), 1);
+    assert.equal(kernel.handles.access(writtenU32(written, 0x30c)), null,
+        'a handle with every right duplicates with every right');
+    assert.equal(fns.SetEvent.handler([writtenU32(written, 0x300)]), 0,
+        'no EVENT_MODIFY_STATE on the duplicate with none');
 });

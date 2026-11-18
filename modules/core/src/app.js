@@ -42,7 +42,7 @@ import { mangledCall } from './layers/loader/internal/mangling.js';
 import { mapImage } from './layers/loader/internal/image.js';
 import { imagePlacementOf, installedHeaders } from './layers/loader/internal/synth.js';
 import { blockLayouts, createProcessBlocks, TEB, TEB64 } from './layers/win32/kernel32/teb.js';
-import { DBG_CONTINUE, DEBUG_EVENT } from './layers/win32/kernel32/debug-events.js';
+import { DEBUG_EVENT } from './layers/win32/kernel32/debug-events.js';
 import { KUSER, KUSER_REGION, SHARED_USER_DATA, createSharedUserData, sharedPageAt }
     from './layers/win32/kernel32/shared-data.js';
 import { supportedOsOf, windowsVersion } from './layers/win32/kernel32/versions.js';
@@ -4785,7 +4785,7 @@ const TRACED_KEPT = 200;
  *     terminate?: (request: any, code: number) => boolean,
  *     askChild?: (request: any, call: any) => Promise<any> | null,
  *     debugger?: { report: (report: import('./layers/win32/kernel32/debug-events.js')
- *         .DebugReport) => Promise<number> },
+ *         .DebugReport) => Promise<number>, debugged?: () => boolean },
  *     suspended?: boolean,
  *     othersRunning?: () => boolean,
  *     com?: { table: any, process: unknown },
@@ -4815,6 +4815,12 @@ async function buildApp(options){
     // the last frame of the process it replaced stays on the canvas until this
     // one has something to show.
     const runPresenter = options.graphics?.presenter ?? null;
+    /**
+     * This process's debugger while one hears it: from its start, or since
+     * one attached (`debug-events.js`); null otherwise.
+     */
+    const debuggerNow = ()=>(options.debugger && (options.debugger.debugged?.() ?? true)
+        ? options.debugger : null);
 
     // The address space above the program: the system modules first, then the
     // libraries a game brought with it, and the heap above all of them with
@@ -5046,7 +5052,7 @@ async function buildApp(options){
         // mark is made inside a lookup that cannot wait (`debug-events.js`).
         if (debugStarted)
         {
-            options.debugger?.report({ code: DEBUG_EVENT.LOAD_DLL,
+            debuggerNow()?.report({ code: DEBUG_EVENT.LOAD_DLL,
                 threadId: kernel.currentThread()?.id >>> 0, base: module.base });
         }
         for (const imported of SYSTEM_IMPORTS[moduleKeyOf(module.name)] ?? [])
@@ -7413,7 +7419,7 @@ async function buildApp(options){
             const told = tellNotified(LDR_DLL_NOTIFICATION_REASON_UNLOADED, held, thread);
             // Its debugger hears of it before it is unmapped, the thread
             // waiting for the answer.
-            const debugged = options.debugger?.report({ code: DEBUG_EVENT.UNLOAD_DLL,
+            const debugged = debuggerNow()?.report({ code: DEBUG_EVENT.UNLOAD_DLL,
                 threadId: thread?.id >>> 0, base: held.base });
             const before = told && debugged ? told.then(()=>debugged) : told ?? debugged;
             return before ? before.then(forget) : forget();
@@ -7879,7 +7885,7 @@ async function buildApp(options){
                     // is mapped and bound and before any of its code runs.
                     await tellNotified(LDR_DLL_NOTIFICATION_REASON_LOADED, held, asked);
                     // And its debugger, when its parent debugs this process.
-                    await options.debugger?.report({ code: DEBUG_EVENT.LOAD_DLL,
+                    await debuggerNow()?.report({ code: DEBUG_EVENT.LOAD_DLL,
                         threadId: asked?.id >>> 0, base });
 
                     // Its TLS callbacks, then its DllMain, lpvReserved NULL as
@@ -8583,7 +8589,7 @@ async function buildApp(options){
     // (`debug-events.js`), as Windows' loader does: the process, every library
     // mapped with it, then the loader's breakpoint - an int3 of its own, not
     // DbgBreakPoint - each waited on until the debugger continues it.
-    const debugStart = options.debugger && !long ? bridge.register('<debug start>', {
+    const debugStart = debuggerNow() && !long ? bridge.register('<debug start>', {
         argBytes: 0,
         handler: async()=>{
             const report = /** @type {NonNullable<typeof options.debugger>} */ (
@@ -8707,7 +8713,7 @@ async function buildApp(options){
     });
     threadBlocks = process;
     // What IsDebuggerPresent reads: a debuggee's process block says so.
-    if (options.debugger)
+    if (debuggerNow())
     {
         memory.writeBytes(process.peb + blockLayouts(pointerSize).peb.BEING_DEBUGGED,
             new Uint8Array([1]));
@@ -12835,10 +12841,9 @@ export async function createApp(options){
      *
      * @param {{ readImage: (path: string) => Promise<Uint8Array | null>,
      *     sound: () => ({ options: any, giveBack: () => void } | null),
-     *     server?: boolean, debugEvent?: ((report: any) => Promise<number>) | null }} from
-     *     `server` for one COM started, whose code is no run's
-     *     its parent, as the run reaches it: where its image is read, the
-     *     sound it lends, and where it reports when its parent debugs it
+     *     server?: boolean }} from  `server` for one COM started, whose code is no run's
+     *     its parent, as the run reaches it: where its image is read, and the
+     *     sound it lends
      * @param {any} request
      * @param {{ link: ReturnType<typeof openLink> | null, code: number | null,
      *     opened?: () => void }} [reach]
@@ -12940,12 +12945,6 @@ export async function createApp(options){
                     terminateBeside({ id }, code),
                 ask: (/** @type {number} */ id, /** @type {any} */ call)=>
                     askBeside({ id }, call),
-            },
-            // What it reports to the parent that debugs it, answered with the
-            // status the debugger continues it with (`debug-events.js`).
-            debug: {
-                report: (/** @type {any} */ report)=>(from.debugEvent
-                    ? from.debugEvent(report) : DBG_CONTINUE),
             },
             // The parent's open files the child writes its output and error
             // into: one position, the parent's, which the child's writes move.
@@ -13104,7 +13103,6 @@ export async function createApp(options){
                         startup: request.startup ?? null,
                         parentProcessId: request.parentId ?? 0,
                         suspended: request.suspended === true,
-                        ...from.debugEvent ? { debugged: true } : {},
                         ...request.parentId ? { startedBeside: true } : {},
                         ...request.environment ? { environment: request.environment } : {},
                         processId: request.id,
@@ -13448,8 +13446,6 @@ export async function createApp(options){
             startAcross({
                 readImage: path=>parent.readImage(path),
                 sound: ()=>(shared ? lendSound(parent) : null),
-                debugEvent: request.debugged ? (/** @type {any} */ report)=>
-                    parent.debugEvent(request, report) : null,
             }, request, code=>parent.childExited(request, code));
             return;
         }
@@ -13551,9 +13547,11 @@ export async function createApp(options){
                         suspended: request.suspended === true,
                         startedBeside: true,
                         ...request.environment ? { environment: request.environment } : {},
-                        // Debugged by its parent, it reports to it here.
-                        ...request.debugged ? { debugger: { report: (/** @type {any} */ report)=>
-                            parent.debugEvent(request, report) } } : {},
+                        // Its parent's ear: heard while its parent debugs it, from
+                        // its start or since it attached (`debug-events.js`).
+                        debugger: { report: (/** @type {any} */ report)=>
+                            parent.debugEvent(request, report),
+                        debugged: ()=>Boolean(request.debugged) },
                         audio: sound.options,
                     });
                     sound.announce(child);

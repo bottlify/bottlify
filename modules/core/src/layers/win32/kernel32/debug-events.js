@@ -19,7 +19,8 @@
  * reported here when its parent hears of it, and needs no answer.
  */
 
-import { childThread } from './cross-process.js';
+import { DEBUG_ATTACH, DEBUG_BREAK, askChild, childThread } from './cross-process.js';
+import { untagged } from './handle-tags.js';
 
 /** dwDebugEventCode (winbase.h). */
 export const DEBUG_EVENT = /** @type {const} */ ({
@@ -48,6 +49,9 @@ const EXCEPTION_RECORD_SIZE = 80;
 const EXCEPTION_MAXIMUM_PARAMETERS = 15;
 
 const INFINITE = 0xffffffff;
+/** GetCurrentProcess()'s pseudo-handle. */
+const OWN_PROCESS = 0xffffffff;
+const ERROR_ACCESS_DENIED = 5;
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_SEM_TIMEOUT = 121;
@@ -94,6 +98,29 @@ export function debuggeeFor(flags){
 }
 
 /**
+ * What a process a debugger attaches to tells it at once, as Windows' kernel
+ * makes it up for a process already running: its creation on its first
+ * thread, ntdll, a creation for each of its other threads, then each library
+ * it has loaded (DebugActiveProcess, `debugger.c`'s process_attach_events).
+ *
+ * @param {{ mainThreadId: number, image: { base: number, start: number },
+ *     ntdll: number, libraries: number[], threads: number[] }} process
+ *     `libraries` the bases of the rest, `threads` the ids of the others
+ * @returns {DebugReport[]}
+ */
+export function attachEvents({ mainThreadId, image, ntdll, libraries, threads }){
+    const threadId = mainThreadId >>> 0;
+    return [
+        { code: DEBUG_EVENT.CREATE_PROCESS, threadId, base: image.base, start: image.start },
+        ...ntdll ? [{ code: DEBUG_EVENT.LOAD_DLL, threadId, base: ntdll }] : [],
+        ...threads.filter(id=>(id >>> 0) !== threadId).map(id=>(
+            { code: DEBUG_EVENT.CREATE_THREAD, threadId: id >>> 0 })),
+        ...libraries.filter(base=>base !== ntdll && base !== image.base).map(base=>(
+            { code: DEBUG_EVENT.LOAD_DLL, threadId, base })),
+    ];
+}
+
+/**
  * The 32-bit CONTEXT's groups by flag, as the byte ranges each fills.
  * Copying a group is copying its range: what a debugger's SetThreadContext
  * on a thread stopped at an exception does to the context the thread goes on
@@ -135,6 +162,12 @@ export function mergeContextGroups(into, given){
  * @property {(thread: any) => Promise<number> | number} park
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {{ major: number, build: number }} [windows]
+ * @property {number} [processId]  This process's id.
+ * @property {import('./cross-process.js').AskHost['askChild']} [askChild]
+ *           A call made in a child, where the debugger reaches it.
+ * @property {() => boolean} [debugged]  Whether a debugger hears this process now.
+ * @property {() => number} [breakIn]  This process breaks into its own debugger:
+ *           a thread of its own runs DbgBreakPoint.
  */
 
 /**
@@ -156,6 +189,20 @@ export function createDebuggerFunctions(host){
             host.setLastErrorFor?.(thread, ERROR_SEM_TIMEOUT);
         }
     });
+
+    /** @param {number} id @returns {any} the child of that id the kernel knows */
+    const processOf = id=>(kernel.processes?.all() ?? []).find(
+        (/** @type {any} */ made)=>(made.id >>> 0) === (id >>> 0)) ?? null;
+
+    /**
+     * A call made in a child, answered on the calling thread; null where the
+     * child cannot be asked.
+     *
+     * @param {any} child @param {string} call
+     */
+    const ask = (child, call)=>(host.setLastErrorFor ? askChild({ askChild: host.askChild,
+        writeMemory: host.writeMemory, currentThread: host.currentThread,
+        setLastErrorFor: host.setLastErrorFor }, child, { call, args: [] }, []) : null);
 
     /** @returns {any[]} */
     const debuggees = ()=>(kernel.processes?.all() ?? []).filter(
@@ -373,6 +420,87 @@ export function createDebuggerFunctions(host){
                     answer(value);
                     serve();
                     return 1;
+                },
+            },
+
+            /**
+             * BOOL DebugActiveProcess(DWORD dwProcessId)
+             *
+             * Attaches to a running process: it is debugged from now, tells
+             * at once what it already is (`attachEvents`) and breaks in on a
+             * thread of its own. Only a child the debugger hears can be
+             * attached to - one run beside it; another, as the caller itself,
+             * is refused as one it may not debug, and an id naming no process
+             * is a bad parameter.
+             */
+            DebugActiveProcess: {
+                argBytes: 4,
+                /** @param {number[]} args */
+                handler: ([id])=>{
+                    if ((id >>> 0) !== 0 && (id >>> 0) === (host.processId ?? 0) >>> 0)
+                    {
+                        host.setLastError?.(ERROR_ACCESS_DENIED);
+                        return 0;
+                    }
+                    const child = (id >>> 0) === 0 ? null : processOf(id);
+                    if (!child)
+                    {
+                        host.setLastError?.(ERROR_INVALID_PARAMETER);
+                        return 0;
+                    }
+                    if (child.debugged || kernel.processes?.finished?.(child))
+                    {
+                        host.setLastError?.(ERROR_ACCESS_DENIED);
+                        return 0;
+                    }
+                    child.debugged = { events: [], current: null, onlyThis: true,
+                        killOnExit: true };
+                    const asked = ask(child, DEBUG_ATTACH);
+                    if (asked === null)
+                    {
+                        child.debugged = null;
+                        host.setLastError?.(ERROR_ACCESS_DENIED);
+                        return 0;
+                    }
+                    return asked.then(result=>{
+                        if (result === 0)
+                        {
+                            child.debugged = null;
+                        }
+                        return result;
+                    });
+                },
+            },
+
+            /**
+             * BOOL DebugBreakProcess(HANDLE Process)
+             *
+             * The process breaks into its debugger on a thread of its own, at
+             * DbgBreakPoint. Without a debugger Windows' thread ends doing
+             * nothing, and the call succeeds either way; a handle that is no
+             * process is refused.
+             */
+            DebugBreakProcess: {
+                argBytes: 4,
+                /** @param {number[]} args */
+                handler: ([handle])=>{
+                    if ((handle >>> 0) === OWN_PROCESS)
+                    {
+                        return host.debugged?.() ? host.breakIn?.() ?? 1 : 1;
+                    }
+                    const plain = untagged(handle >>> 0);
+                    const child = kernel.handles.typeOf?.(plain) === 'process'
+                        ? kernel.handles.resolve(plain) : null;
+                    if (!child)
+                    {
+                        host.setLastError?.(ERROR_INVALID_HANDLE);
+                        return 0;
+                    }
+                    if (child.current)
+                    {
+                        return host.debugged?.() ? host.breakIn?.() ?? 1 : 1;
+                    }
+                    return child.debugged ? ask(child, DEBUG_BREAK) ?? 1 : 1;
                 },
             },
 

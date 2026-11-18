@@ -8,7 +8,7 @@ import { encodeAnsi } from './locale.js';
 import { FILE_OBJECT_KINDS, isStandardHandle, untagged } from './handle-tags.js';
 import { TAKEN } from './named-objects.js';
 import { askChild, childThread, threadEnd } from './cross-process.js';
-import { MODIFY_STATE, SYNCHRONIZE, allows, grantedAccess } from './access.js';
+import { MODIFY_STATE, SYNCHRONIZE, allows, duplicateAccess, grantedAccess } from './access.js';
 import { STATUS, toDosError } from '../ntdll/status.js';
 import { FILETIME_EPOCH_MS, dueInMs, readLargeInteger } from './due-time.js';
 import { createSyncNatives } from './sync-natives.js';
@@ -98,8 +98,9 @@ const STACK_SIZE_PARAM_IS_A_RESERVATION = 0x00010000;
 /** CreateThread's flag for a thread that waits for ResumeThread before it first runs. */
 const CREATE_SUSPENDED = 0x4;
 
-/** DuplicateHandle's one option that changes what it does. */
+/** DuplicateHandle's options: close the source, and give the copy the source's rights. */
 const DUPLICATE_CLOSE_SOURCE = 0x00000001;
+const DUPLICATE_SAME_ACCESS = 0x00000002;
 
 /**
  * @typedef {Object} ThreadingHost
@@ -154,7 +155,9 @@ const DUPLICATE_CLOSE_SOURCE = 0x00000001;
  *           module list.
  * @property {(handle: number) => string | null} [handleType]
  * @property {(process: number) => ({ typeOf: (handle: number) => string | null,
- *     resolve: (handle: number) => any, open: (type: string, object: any) => number,
+ *     resolve: (handle: number) => any,
+ *     open: (type: string, object: any, access?: number | null) => number,
+ *     access?: (handle: number) => number | null,
  *     close: (handle: number) => any } | null)} [processTable]
  *     The handle table of another process of the run on this thread, by its
  *     id: where DuplicateHandle puts a duplicate for it, or takes one from it.
@@ -1430,11 +1433,15 @@ export function createThreadingFunctions(host){
          * it is sent. The duplicate is then in that process's table, under a
          * number of its own. A process the run cannot reach (in a worker of
          * its own) is taken for this one.
+         *
+         * The copy carries the source's rights with DUPLICATE_SAME_ACCESS and
+         * what was asked without it - nothing at all for 0 (`duplicateAccess`).
          */
         DuplicateHandle: {
             argBytes: 28,
             /** @param {number[]} args */
-            handler: ([sourceProcess, source, targetProcess, target, , inherit, options])=>{
+            handler: ([sourceProcess, source, targetProcess, target, desired, inherit, options])=>{
+                const same = (options >>> 0 & DUPLICATE_SAME_ACCESS) !== 0;
                 /** The table a process handle names, or null for this process's own. */
                 const tableOf = (/** @type {number} */ process)=>{
                     const record = (process >>> 0) === CURRENT_PROCESS ? null
@@ -1453,8 +1460,16 @@ export function createThreadingFunctions(host){
                         host.setLastError(ERROR_INVALID_HANDLE);
                         return 0;
                     }
+                    const rights = duplicateAccess(foreignKind, desired,
+                        from.access?.(source >>> 0) ?? null, same);
+                    if ('error' in rights)
+                    {
+                        host.setLastError(rights.error);
+                        return 0;
+                    }
                     host.namedObjects.reference(foreign);
-                    const taken = (into ?? kernel.handles).open(foreignKind, foreign);
+                    const taken = (into ?? kernel.handles).open(foreignKind, foreign,
+                        rights.granted);
                     if ((options >>> 0 & DUPLICATE_CLOSE_SOURCE) !== 0)
                     {
                         from.close(source >>> 0);
@@ -1477,6 +1492,14 @@ export function createThreadingFunctions(host){
                         : ERROR_INVALID_HANDLE);
                     return 0;
                 }
+                const rights = duplicateAccess(kind, desired,
+                    pseudo(source) ? null
+                        : kernel.handles.access?.(untagged(source >>> 0)) ?? null, same);
+                if ('error' in rights)
+                {
+                    host.setLastError(rights.error);
+                    return 0;
+                }
                 // A no-op on anything unnamed, and on a named object this is
                 // the reference CloseHandle will one day take back off -- a
                 // duplicate onto a mutex is a real handle onto it, the same
@@ -1494,7 +1517,7 @@ export function createThreadingFunctions(host){
                 {
                     held.retain();
                 }
-                const duplicate = (into ?? kernel.handles).open(kind, held);
+                const duplicate = (into ?? kernel.handles).open(kind, held, rights.granted);
                 if (!into)
                 {
                     handleFlags.set(duplicate, inherit !== 0 ? HANDLE_FLAG_INHERIT : 0);

@@ -34,13 +34,14 @@ const DBG_EXCEPTION_NOT_HANDLED = 0x80010001;
  * event with DBG_CONTINUE. It exits with the counts packed: CREATE_PROCESS in
  * bits 0-3, EXCEPTION 4-7, OUTPUT_DEBUG_STRING 8-11, LOAD_DLL (up to 15)
  * 12-15, and the child's exit code's low byte in 16-23; 0xee when a wait
- * fails.
+ * fails. With `attach` it starts the child undebugged and attaches to it
+ * (DebugActiveProcess) once it runs.
  *
- * @param {number} answer
+ * @param {number} answer @param {boolean} [attach]
  */
-const debuggerOf = answer=>buildExe({
+const debuggerOf = (answer, attach = false)=>buildExe({
     imports: { 'KERNEL32.dll': ['CreateProcessA', 'WaitForDebugEvent', 'ContinueDebugEvent',
-        'ExitProcess'] },
+        'Sleep', 'DebugActiveProcess', 'ExitProcess'] },
     data: {
         command: ansi('C:\\child.exe'),
         startup: [...u32(68), ...new Array(64).fill(0)],
@@ -51,9 +52,15 @@ const debuggerOf = answer=>buildExe({
     codeSize: 0x100,
     code: ({ iat, at })=>assemble([
         0x68, ...u32(at('info')), 0x68, ...u32(at('startup')),
-        0x6a, 0, 0x6a, 0, 0x6a, DEBUG_PROCESS, 0x6a, 0, 0x6a, 0, 0x6a, 0,
+        0x6a, 0, 0x6a, 0, 0x6a, attach ? 0 : DEBUG_PROCESS, 0x6a, 0, 0x6a, 0, 0x6a, 0,
         0x68, ...u32(at('command')), 0x6a, 0,
         0xff, 0x15, ...u32(iat('CreateProcessA')),
+        ...attach ? [
+            0x6a, 50, 0xff, 0x15, ...u32(iat('Sleep')), //  Sleep(50): the child runs
+            0xff, 0x35, ...u32(at('info') + 8), //          push dwProcessId
+            0xff, 0x15, ...u32(iat('DebugActiveProcess')),
+            0x85, 0xc0, { jump: /** @type {const} */ ('jz'), to: 'refused' },
+        ] : [],
         { label: 'loop' },
         0x6a, 0xff, 0x68, ...u32(at('event')), //       push INFINITE; push event
         0xff, 0x15, ...u32(iat('WaitForDebugEvent')),
@@ -81,6 +88,8 @@ const debuggerOf = answer=>buildExe({
         0x50, 0xff, 0x15, ...u32(iat('ExitProcess')),
         { label: 'fail' },
         0x68, ...u32(0xee), 0xff, 0x15, ...u32(iat('ExitProcess')),
+        { label: 'refused' },
+        0x68, ...u32(0xdd), 0xff, 0x15, ...u32(iat('ExitProcess')),
     ]),
 });
 
@@ -94,6 +103,19 @@ const talking = buildExe({
     ],
 });
 
+/**
+ * Sleep(3000), then ExitProcess(7): running while a debugger attaches. A
+ * thread made in a sleeping process from outside runs only once its sleeper
+ * wakes or the run turns, so the sleep outlasts that.
+ */
+const sleeping = buildExe({
+    imports: { 'KERNEL32.dll': ['Sleep', 'ExitProcess'] },
+    code: ({ iat })=>[
+        0x68, ...u32(3000), 0xff, 0x15, ...u32(iat('Sleep')),
+        0x6a, 7, 0xff, 0x15, ...u32(iat('ExitProcess')),
+    ],
+});
+
 /** An undefined instruction, no handler of its own, then ExitProcess(7). */
 const faulting = buildExe({
     imports: { 'KERNEL32.dll': ['ExitProcess'] },
@@ -103,10 +125,18 @@ const faulting = buildExe({
     ],
 });
 
-/** @param {Uint8Array} executable @param {Uint8Array} child */
-async function run(executable, child){
-    const app = await createApp({ executable, imagePath: 'C:\\debugger.exe',
+/**
+ * @param {Uint8Array} executable @param {Uint8Array} child
+ * @param {import('../../../mode.js').Concurrency} [concurrency]  above one, the debugger runs in a worker and
+ *     its child beside it there
+ * @param {[string, boolean][]} [started]  each process started: its image,
+ *     and whether in a worker of its own
+ */
+async function run(executable, child, concurrency = 1, started = []){
+    const app = await createApp({ executable, imagePath: 'C:\\debugger.exe', concurrency,
         files: [{ path: 'C:\\child.exe', bytes: child }] });
+    app.on('process-started', (/** @type {any} */ event)=>
+        started.push([event.image, event.worker === true]));
     try
     {
         return (await app.run({ timeoutMs: 60_000 })) >>> 0;
@@ -136,4 +166,30 @@ test('an exception the debugger and the child decline is reported twice and ends
         const heard = unpack(await run(debuggerOf(DBG_EXCEPTION_NOT_HANDLED), faulting));
         assert.equal(heard.exceptions, 3, 'the breakpoint, then the first and the second chance');
         assert.equal(heard.exit, 0x1d, 'ended with STATUS_ILLEGAL_INSTRUCTION (its low byte)');
+    });
+
+test('a debugger in a worker hears its child, started beside it there, the same way',
+    { timeout: 120_000 }, async()=>{
+        /** @type {[string, boolean][]} */
+        const started = [];
+        const heard = unpack(await run(debuggerOf(DBG_EXCEPTION_NOT_HANDLED), talking, 2,
+            started));
+        assert.deepEqual(started, [['C:\\debugger.exe', true], ['C:\\child.exe', false]],
+            'the debugger in a worker, its child beside it');
+        assert.equal(heard.created, 1, 'CREATE_PROCESS_DEBUG_EVENT');
+        assert.ok(heard.libraries >= 2, `a LOAD_DLL for each library mapped: ${heard.libraries}`);
+        assert.equal(heard.exceptions, 1, 'the loader\'s breakpoint');
+        assert.equal(heard.said, 1, 'OUTPUT_DEBUG_STRING_EVENT');
+        assert.equal(heard.exit, 7, 'EXIT_PROCESS_DEBUG_EVENT with its code');
+    });
+
+test('a debugger that attaches to its running child hears what it is, its break-in and its exit',
+    { timeout: 120_000 }, async()=>{
+        const code = await run(debuggerOf(DBG_CONTINUE, true), sleeping);
+        assert.notEqual(code, 0xdd, 'DebugActiveProcess succeeded');
+        const heard = unpack(code);
+        assert.equal(heard.created, 1, 'CREATE_PROCESS_DEBUG_EVENT, made up for a process running');
+        assert.ok(heard.libraries >= 2, `a LOAD_DLL for each library it has: ${heard.libraries}`);
+        assert.equal(heard.exceptions, 1, 'the breakpoint of the thread it breaks in on');
+        assert.equal(heard.exit, 7, 'EXIT_PROCESS_DEBUG_EVENT with its code');
     });

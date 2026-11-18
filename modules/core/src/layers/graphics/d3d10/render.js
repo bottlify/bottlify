@@ -607,8 +607,16 @@ export function createRenderer(services){
     const backings = new WeakMap();
     /** @type {WeakMap<object, any>} view -> GPU texture view */
     const views = new WeakMap();
-    /** @type {WeakMap<object, any>} buffer view -> the uniform describing it */
-    const bufferViews = new WeakMap();
+    /**
+     * The uniforms describing buffer views, by what they say (format, first
+     * element, element count, element size): written once and never again, so
+     * every view saying the same reads one. A uniform to a view was a GPU
+     * buffer of sixteen bytes for each view a program made, and one that makes
+     * views by the frame held tens of thousands of them.
+     *
+     * @type {Map<string, any>}
+     */
+    const bufferViews = new Map();
     /** @type {WeakMap<object, any>} sampler state -> GPU sampler */
     const samplers = new WeakMap();
     /** The same states as point samplers, for the depth a shader reads. @type {WeakMap<object, any>} */
@@ -1971,7 +1979,10 @@ export function createRenderer(services){
      * @param {any} view @param {any} desc
      */
     const viewUniformOf = (view, desc)=>{
-        let uniform = bufferViews.get(view);
+        const elementBytes = desc.elementBytes ?? FORMAT_INFO[desc.Format]?.bytesPerPixel ?? 4;
+        const said = `${desc.Format}:${desc.ElementOffset ?? 0}:${desc.ElementWidth ?? 0}`
+            + `:${elementBytes}`;
+        let uniform = bufferViews.get(said);
         if (!uniform)
         {
             uniform = backend.createDynamicBuffer({
@@ -1984,10 +1995,9 @@ export function createRenderer(services){
             words.setUint32(0, desc.Format, true);
             words.setUint32(4, desc.ElementOffset ?? 0, true);
             words.setUint32(8, desc.ElementWidth ?? 0, true);
-            words.setUint32(12, desc.elementBytes ?? FORMAT_INFO[desc.Format]?.bytesPerPixel ?? 4,
-                true);
+            words.setUint32(12, elementBytes, true);
             uniform.unlock(lock);
-            bufferViews.set(view, uniform);
+            bufferViews.set(said, uniform);
         }
         return uniform.gpu;
     };

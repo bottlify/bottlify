@@ -126,3 +126,28 @@ test('a block made the process\'s replaces every variable, and the old ones come
     assert.equal(call('RtlSetCurrentEnvironment', 0, 0), STATUS.SUCCESS);
     assert.equal(store.size, 0, 'no block, no variables');
 });
+
+test('an expansion that does not fit is written as far as it goes, and stops there', ()=>{
+    const { view, call, putWide, getWide } = machine();
+    // TEMP is C:\TEMP: seven characters.
+    /** @param {string} source @param {number} count */
+    const expanded = (source, count)=>{
+        putWide(TEXT, source);
+        putWide(OUT, 'abcdefghijklmnopqrstuv');
+        const status = call('RtlExpandEnvironmentStrings', 0, TEXT, source.length, OUT, count,
+            WHERE);
+        return { status, text: getWide(OUT), length: view.getUint32(WHERE, true) };
+    };
+    assert.deepEqual(expanded('Long value', 3),
+        { status: STATUS.BUFFER_TOO_SMALL, text: 'Locdefghijklmnopqrstuv', length: 11 },
+        'text: one place kept for a terminator, none written');
+    assert.equal(expanded('%TEMP% x', 4).text, '', 'a value that does not fit: a terminator alone');
+    assert.equal(expanded('%TEMP% x', 8).text, 'C:\\TEMP', 'a value that fits: terminated');
+    assert.equal(expanded('%TEMP% x', 9).text, 'C:\\TEMP ijklmnopqrstuv',
+        'text after it written over the terminator, none of its own');
+    assert.equal(expanded('%TEMP% %TEMP%', 12).text, 'C:\\TEMP ',
+        'a second value that does not fit ends the writing');
+    assert.deepEqual(expanded('%TEMP% x', 10), { status: STATUS.SUCCESS, text: 'C:\\TEMP x',
+        length: 10 });
+    assert.equal(expanded('%NONE% x', 2).text, '%bcdefghijklmnopqrstuv', 'no variable: text');
+});

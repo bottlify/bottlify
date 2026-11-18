@@ -6,10 +6,12 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DBG_CONTINUE, DBG_EXCEPTION_NOT_HANDLED, DEBUG_EVENT, createDebuggerFunctions,
-    debuggeeFor, mergeContextGroups } from './debug-events.js';
+import { DBG_CONTINUE, DBG_EXCEPTION_NOT_HANDLED, DEBUG_EVENT, attachEvents,
+    createDebuggerFunctions, debuggeeFor, mergeContextGroups } from './debug-events.js';
+import { DEBUG_ATTACH, DEBUG_BREAK } from './cross-process.js';
 
 const PARKED = 'parked';
+const ERROR_ACCESS_DENIED = 5;
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_SEM_TIMEOUT = 121;
@@ -21,7 +23,7 @@ const ERROR_SEM_TIMEOUT = 121;
  * @param {any[]} children
  * @param {any} [extra]
  */
-function debuggerOf(children, extra = {}){
+function debuggerOf(children, extra = {}, table = new Map()){
     const bytes = new Uint8Array(0x1000);
     const view = new DataView(bytes.buffer);
     /** @type {number[]} */
@@ -42,7 +44,9 @@ function debuggerOf(children, extra = {}){
         handles: { open: (/** @type {string} */ type, /** @type {any} */ object)=>{
             opened.push({ type, object });
             return 0x100 + opened.length * 4;
-        } },
+        },
+        typeOf: (/** @type {number} */ handle)=>table.get(handle)?.[0] ?? null,
+        resolve: (/** @type {number} */ handle)=>table.get(handle)?.[1] ?? null },
         block: (/** @type {any} */ who, /** @type {string} */ why, /** @type {any} */ timed)=>
             blocked.push({ who, timed }),
         wake: (/** @type {any} */ who, /** @type {number} */ value)=>woken.push([who, value]),
@@ -233,4 +237,82 @@ test('a debugger\'s SetThreadContext replaces only the groups the record names',
     new DataView(given.buffer).setUint32(0, 0x10017, true); // INTEGER|CONTROL|SEGMENTS|DEBUG
     mergeContextGroups(into, given);
     assert.deepEqual([into[0xb0], into[0x04], into[0x8c], into[0x1c]], [0x22, 0x22, 0x22, 0x11]);
+});
+
+test('a process attached to tells what it already is: itself, ntdll, its threads, its libraries',
+    ()=>{
+        assert.deepEqual(attachEvents({ mainThreadId: 8, image: { base: 0x400000, start: 0x401000 },
+            ntdll: 0x7c900000, libraries: [0x400000, 0x7c900000, 0x7c800000, 0x10000000],
+            threads: [8, 12, 16] }), [
+            { code: DEBUG_EVENT.CREATE_PROCESS, threadId: 8, base: 0x400000, start: 0x401000 },
+            { code: DEBUG_EVENT.LOAD_DLL, threadId: 8, base: 0x7c900000 },
+            { code: DEBUG_EVENT.CREATE_THREAD, threadId: 12 },
+            { code: DEBUG_EVENT.CREATE_THREAD, threadId: 16 },
+            { code: DEBUG_EVENT.LOAD_DLL, threadId: 8, base: 0x7c800000 },
+            { code: DEBUG_EVENT.LOAD_DLL, threadId: 8, base: 0x10000000 },
+        ], 'ntdll before the threads, as Vista and later report it; the image is no library');
+    });
+
+test('DebugActiveProcess attaches to a child it can reach, and refuses itself and no process',
+    async()=>{
+        const running = /** @type {{ id: number, threadId: number, debugged: any }} */ (
+            { id: 0x300, threadId: 0x304, debugged: null });
+        /** @type {[any, any][]} */
+        const asked = [];
+        const answers = [{ result: 1, error: null }, { result: 0, error: 50 }];
+        const { fns, errors, errorsFor } = debuggerOf([running], {
+            processId: 0x200,
+            askChild: (/** @type {any} */ record, /** @type {any} */ call)=>{
+                asked.push([record, call.call]);
+                return Promise.resolve({ ...answers.shift(), outs: [] });
+            },
+        });
+        assert.equal(fns.DebugActiveProcess.handler([0]), 0);
+        assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER);
+        assert.equal(fns.DebugActiveProcess.handler([0x200]), 0, 'not the caller itself');
+        assert.equal(errors.at(-1), ERROR_ACCESS_DENIED);
+        assert.equal(fns.DebugActiveProcess.handler([0x999]), 0);
+        assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER, 'no process of that id');
+
+        assert.equal(await fns.DebugActiveProcess.handler([0x300]), 1);
+        assert.deepEqual(asked, [[running, DEBUG_ATTACH]], 'the child is told it is attached to');
+        assert.equal(running.debugged?.onlyThis, true, 'it alone, not its children');
+        assert.equal(fns.DebugActiveProcess.handler([0x300]), 0, 'one debugger at a time');
+        assert.equal(errors.at(-1), ERROR_ACCESS_DENIED);
+
+        // A child that cannot be heard (in a worker of its own) refuses it.
+        running.debugged = null;
+        assert.equal(await fns.DebugActiveProcess.handler([0x300]), 0);
+        assert.equal(running.debugged, null, 'and is not debugged');
+        assert.deepEqual(errorsFor.at(-1)?.[1], 50);
+    });
+
+test('DebugBreakProcess breaks into a debugged process and does nothing to another', async()=>{
+    const debugged = { id: 0x300, debugged: debuggeeFor(1) };
+    const plain = { id: 0x310, debugged: null };
+    const own = { id: 0x200, current: true };
+    /** @type {string[]} */
+    const asked = [];
+    let broke = 0;
+    let debuggedHere = false;
+    const { fns, errors } = debuggerOf([debugged, plain], {
+        askChild: (/** @type {any} */ _record, /** @type {any} */ call)=>{
+            asked.push(call.call);
+            return Promise.resolve({ result: 1, error: null, outs: [] });
+        },
+        debugged: ()=>debuggedHere,
+        breakIn: ()=>++broke,
+    }, new Map([[0x50, ['process', debugged]], [0x54, ['process', plain]],
+        [0x58, ['event', {}]], [0x5c, ['process', own]]]));
+    assert.equal(fns.DebugBreakProcess.handler([0xffffffff]), 1, 'no debugger: nothing happens');
+    assert.equal(fns.DebugBreakProcess.handler([0x5c]), 1);
+    assert.equal(broke, 0);
+    debuggedHere = true;
+    assert.equal(fns.DebugBreakProcess.handler([0xffffffff]), 1);
+    assert.equal(broke, 1, 'a debuggee breaks into its own debugger');
+    assert.equal(fns.DebugBreakProcess.handler([0x54]), 1);
+    assert.equal(await fns.DebugBreakProcess.handler([0x50]), 1);
+    assert.deepEqual(asked, [DEBUG_BREAK], 'only the debugged child is asked');
+    assert.equal(fns.DebugBreakProcess.handler([0x58]), 0, 'an event is no process');
+    assert.equal(errors.at(-1), ERROR_INVALID_HANDLE);
 });

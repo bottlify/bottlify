@@ -77,6 +77,10 @@ const KINDS = {
     process: { own: 0xffff, read: READ_CONTROL | 0x0410, write: READ_CONTROL | 0x0bea,
         execute: READ_CONTROL | SYNCHRONIZE | 0x1001,
         implied: [[0x0400, 0x1000], [0x0200, 0x2000]] },
+    // A section's: QUERY, MAP_WRITE, MAP_READ, MAP_EXECUTE and EXTEND_SIZE,
+    // FILE_MAP_* by another name; a section has no SYNCHRONIZE of its own.
+    mapping: { own: 0x001f, read: READ_CONTROL | 0x0005, write: READ_CONTROL | 0x0002,
+        execute: READ_CONTROL | 0x0008 },
 };
 
 /**
@@ -116,6 +120,25 @@ export function grantedAccess(kind, desired){
         granted |= (granted & right) !== 0 ? lesser : 0;
     }
     return { granted: (granted >>> 0) === all ? null : granted >>> 0 };
+}
+
+/**
+ * What a duplicate of a handle is granted (DuplicateHandle, NtDuplicateObject):
+ * with DUPLICATE_SAME_ACCESS the source handle's rights; otherwise what was
+ * asked, its generic rights mapped to the kind's own - and asking for nothing
+ * is a handle with no rights at all, not a refusal as an open by name is.
+ *
+ * @param {string} kind @param {number} desired
+ * @param {number | null} source  the source handle's rights
+ * @param {boolean} same  DUPLICATE_SAME_ACCESS
+ * @returns {{ granted: number | null } | { error: number }}
+ */
+export function duplicateAccess(kind, desired, source, same){
+    if (same)
+    {
+        return { granted: source };
+    }
+    return (desired >>> 0) === 0 ? { granted: 0 } : grantedAccess(kind, desired);
 }
 
 /**
