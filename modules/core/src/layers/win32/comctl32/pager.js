@@ -75,6 +75,8 @@ export const NFR_ANSI = 1;
 export const NFR_UNICODE = 2;
 
 const WM_SIZE = 0x0005;
+const WM_SETFONT = 0x0030;
+const WM_GETFONT = 0x0031;
 const WM_NCCALCSIZE = 0x0083;
 const CLR_DEFAULT = 0xff000000;
 /** The scroll buttons' default size: what PGM_GETBUTTONSIZE answers until it is set. */
@@ -730,6 +732,11 @@ export function createPagerProcedure(host, tk){
                 return PGF_INVISIBLE;
             case PGM_FORWARDMOUSE:
                 return 0;
+            // A pager keeps no font: WM_GETFONT answers none whatever it was
+            // given (Wine's comctl32 misc test, test_WM_SETFONT).
+            case WM_SETFONT:
+            case WM_GETFONT:
+                return host.defWindowProc(record, message, thread);
             default:
                 return tk.common(record, message, thread);
         }

@@ -184,3 +184,9 @@ test('PGM_SETCHILD asks the parent how wide the child is and puts it at minus th
         await context.pump();
         assert.equal(await context.send([hwnd, PGM_GETPOS, 0, 0]), 500 - width);
     });
+
+test('a pager keeps no font', async()=>{
+    const { context, hwnd } = await pagerOn(NFR_UNICODE);
+    await context.send([hwnd, 0x0030, 0x1d0, 0]);
+    assert.equal(await context.send([hwnd, 0x0031, 0, 0]), 0);
+});
