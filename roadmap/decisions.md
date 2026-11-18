@@ -2441,3 +2441,12 @@ level and its normalized scalar to the endpoint ("a nonlinear, audio-tapered cur
 common HD Audio codec's speakers. The scalar is 10^(dB/20), 0 at the floor and 1 at 0 dB, and it
 is the gain every stream to the endpoint plays at, times its session's and its own.
 *2026-11-18.*
+
+**A266. Temporary: an outline system face with no font file here advances at any size by its
+hinted widths at one size, scaled.** Tahoma's and Microsoft Sans Serif's widths are known only at
+the 11-pixel em of an 8-point dialog (their `hdmx`); at another em each ANSI character's advance is
+that width times the em over 11, rounded, as GDI rounds a TrueType advance at its pixel size. A
+hinted width carries its own rounding, so a scaled one may be a pixel off Windows', where one
+fixed pitch for every character - the estimate before - made a string of wide letters a third too
+narrow. Where a font engine draws, its own widths answer. Removed when the engine carries these
+faces' design widths (their `hmtx`). *2026-11-18.*

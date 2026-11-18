@@ -74,6 +74,10 @@ event, an error. Neither stops the program.
 - The common controls' window classes are there without comctl32 being loaded: a program that
   makes one, or asks GetClassInfo for it, does not load comctl32, where Windows' user32 loads it
   to register the class, so GetModuleHandle("comctl32") stays 0 until the program loads it.
+- Where no font engine draws (node, a page without a canvas), a string's width in Tahoma or
+  Microsoft Sans Serif at a size other than 8 points is its 8-point hinted widths scaled to the
+  em, and may be a pixel a character off Windows' (`roadmap/decisions.md` A266); other faces with
+  no file here measure at one fixed pitch.
 - An import nothing implements returns 0 when its argument size is known (a decorated name, a cdecl
   library, a library the program brought). Otherwise the program stops with `unimplemented import`
   and the function's name.

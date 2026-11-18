@@ -28,7 +28,7 @@ import { createFontResources } from './font-resources.js';
 import {
     DEFAULT_EM_HEIGHT, DESCENT_RATIO, FACES, FF_MODERN, FF_ROMAN, FF_SWISS, FIXED_PITCH,
     INTERNAL_LEADING_RATIO, VARIABLE_PITCH, faceNamed, fontFamilies,
-    outlineCell, rasterFace, rasterRealization, windowsMetrics,
+    outlineCell, rasterFace, rasterRealization, scaledAdvances, windowsMetrics,
 } from './faces.js';
 import { ANSI_PAGE, OEM_PAGE, decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { DISPLAY_DEVICE_NAME } from '../devices.js';
@@ -2063,7 +2063,7 @@ export function createGdiFunctions(host){
             }).reduce((sum, advance)=>sum + advance, 0);
         }
         const pitch = metricsOf(font).aveCharWidth;
-        const windows = windowsMetrics(font)?.advances;
+        const windows = windowsMetrics(font)?.advances ?? scaledAdvances(font);
         return windows ? Array.from(text, character=>{
             const code = character.charCodeAt(0);
             return code >= 0x20 && code <= 0xff ? windows[code - 0x20] : pitch;
