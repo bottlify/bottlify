@@ -29,6 +29,8 @@ import { STATUS } from '../ntdll/status.js';
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
 const ERROR_ACCESS_DENIED = 5;
+/** GetExitCodeProcess's answer for a process that runs. */
+const STILL_ACTIVE = 0x103;
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_BAD_LENGTH = 24;
 const ERROR_INVALID_PARAMETER = 87;
@@ -156,6 +158,8 @@ const HANDLE_PROBE = 1 << 20;
  * @property {number} [pointerSize]
  * @property {(handle: number) => any} threadOf  A thread by handle, the pseudo-handle its own.
  * @property {(handle: number, type?: string) => any} objectOf  A kernel object by handle, or null.
+ * @property {(process: any, code: number) => any} [terminateProcess]  A process ended as
+ *     TerminateProcess ends it, null for this one (which does not return: its answer is the park).
  * @property {number} [processId]  This process's id, which a job's id list names.
  * @property {ReturnType<typeof import('./named-objects.js').createNamedObjects>} [namedObjects]
  *     the run's one namespace, where a job made by name is found again
@@ -301,13 +305,25 @@ export function createProcessPolicyFunctions(host){
     // ---- Job objects -----------------------------------------------------
 
     /**
+     * A job: the processes ever assigned to it (`total` of them), and the
+     * event a wait on it waits for, set once TerminateJobObject has ended
+     * them and never reset, as Windows' job object is.
+     *
      * @typedef {{ kind: 'job', name: string | null, processes: Set<any>, terminated: boolean,
-     *     extended: Uint8Array, kept: Map<number, Uint8Array> }} Job
+     *     total: number, waitable: any, extended: Uint8Array, kept: Map<number, Uint8Array> }} Job
      */
     /** @param {number} handle @returns {Job | null} */
     const jobOf = handle=>host.objectOf(handle >>> 0, 'job');
     /** Every job made, a closed one let go when it is next looked through. @type {Set<Job>} */
     const jobs = new Set();
+
+    /**
+     * Whether a process a job holds is still running: this one is.
+     *
+     * @param {any} process
+     */
+    const running = process=>process === SELF
+        || !(process.completed || (process.exitCode ?? STILL_ACTIVE) !== STILL_ACTIVE);
 
     /**
      * The jobs holding a process that a handle still names: a job whose
@@ -366,6 +382,8 @@ export function createProcessPolicyFunctions(host){
         }
         /** @type {Job} */
         const job = found ?? { kind: 'job', name, processes: new Set(), terminated: false,
+            total: 0, waitable: kernel.createEvent({ manualReset: true, signalled: false,
+                name: name ?? 'job' }),
             extended: new Uint8Array(EXTENDED_LIMIT_BYTES), kept: new Map() };
         jobs.add(job);
         host.namedObjects?.remember(name, 'job', job, found !== null, ()=>{});
@@ -442,8 +460,8 @@ export function createProcessPolicyFunctions(host){
         }
     };
 
-    /** The ids of the processes a job holds, this one's as its own. @param {Job} job */
-    const jobProcessIds = job=>[...job.processes].map(process=>(process === SELF
+    /** The ids of the processes a job holds that run, this one's as its own. @param {Job} job */
+    const jobProcessIds = job=>[...job.processes].filter(running).map(process=>(process === SELF
         ? host.processId ?? 0 : process.id ?? 0) >>> 0);
 
     /**
@@ -700,11 +718,17 @@ export function createProcessPolicyFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                if (job.terminated)
+                // A process that has ended joins nothing; a job that was
+                // terminated still takes new ones, and stays signalled.
+                if (!running(process))
                 {
                     return fail(ERROR_ACCESS_DENIED);
                 }
-                job.processes.add(process);
+                if (!job.processes.has(process))
+                {
+                    job.processes.add(process);
+                    job.total++;
+                }
                 return 1;
             },
         },
@@ -799,8 +823,9 @@ export function createProcessPolicyFunctions(host){
                     case JOB.BASIC_AND_IO_ACCOUNTING: {
                         answer = new Uint8Array(type === JOB.BASIC_ACCOUNTING ? 48 : 96);
                         const view = new DataView(answer.buffer);
-                        view.setUint32(36, job.processes.size, true);
-                        view.setUint32(40, job.processes.size, true);
+                        // TotalProcesses, then ActiveProcesses.
+                        view.setUint32(36, job.total, true);
+                        view.setUint32(40, [...job.processes].filter(running).length, true);
                         break;
                     }
                     case JOB.BASIC_PROCESS_ID_LIST: {
@@ -844,20 +869,31 @@ export function createProcessPolicyFunctions(host){
         /**
          * BOOL TerminateJobObject(HANDLE hJob, UINT uExitCode)
          *
-         * The job takes no more processes. The ones it holds are not ended:
-         * a child runs where its driver runs it, and ending it is
-         * TerminateProcess's, by its own handle.
+         * Every process the job holds that still runs is ended with the code,
+         * as TerminateProcess ends it, and the job is signalled for good. This
+         * process, if the job holds it, is ended last: the call does not
+         * return to it.
          */
         TerminateJobObject: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([handle])=>{
+            handler: ([handle, code])=>{
                 const job = jobOf(handle);
                 if (!job)
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
                 job.terminated = true;
+                const ending = [...job.processes].filter(running);
+                for (const process of ending.filter(each=>each !== SELF))
+                {
+                    host.terminateProcess?.(process, code >>> 0);
+                }
+                kernel.setEvent(job.waitable);
+                if (ending.includes(SELF))
+                {
+                    return host.terminateProcess?.(null, code >>> 0) ?? 1;
+                }
                 return 1;
             },
         },

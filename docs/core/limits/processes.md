@@ -68,7 +68,9 @@
   `PROCESS_VM_WRITE` or `PROCESS_QUERY_INFORMATION` as on Windows, and a handle it opens to its own
   id is this process to them. Other handles a process creates, and every
   other kind, have every right. A job and a completion port made by name share the one namespace
-  of named objects. Not exported, as on Windows 7: the
+  of named objects. `TerminateJobObject` ends every process of the job with its code, as
+  `TerminateProcess` does, and leaves the job signalled for good; a process that has ended joins
+  no job, and a job's accounting counts the processes ever assigned and those still running. Not exported, as on Windows 7: the
   synchronization barrier, `GetProcessInformation` and job objects.
 - In `compatible` mode a child's sound is mixed into its parent's output (the engine's mixer has
   no arena to lend it a table on), and goes on after a parent that exits first.

@@ -41,12 +41,18 @@ function machine(given = {}){
     const thread = { tebAddress: 0x100, cpuMs: 2 };
     view.setUint32(0x104, 0x9000, true);
     view.setUint32(0x108, 0x8000, true);
+    /** @type {any} */
     const child = { id: 0x2a0 };
+    /** @type {any[]} */
+    const ended = [];
     const childHandle = handles.open('process', child);
     const threadHandle = handles.open('thread', thread);
     const kernel = {
         handles,
         createEvent: (/** @type {any} */ options)=>({ kind: 'event', ...options }),
+        setEvent: (/** @type {any} */ event)=>{
+            event.signalled = true;
+        },
         processCpuMs: ()=>5,
         flushProcessWrites,
     };
@@ -73,6 +79,15 @@ function machine(given = {}){
             },
             processId: 0x100,
             namedObjects,
+            // Each process ended, in order: a child takes the code as its exit.
+            terminateProcess: (process, code)=>{
+                ended.push(process);
+                if (process)
+                {
+                    process.exitCode = code;
+                }
+                return 1;
+            },
             setRegisters,
             divergence,
             processors,
@@ -80,7 +95,8 @@ function machine(given = {}){
     /** @param {string} name @param {...number} args */
     const call = (name, ...args)=>(name === 'NtContinue'
         ? /** @type {any} */ (fns.RtlCaptureContext).natives.NtContinue : fns[name]).handler(args);
-    return { bytes, view, errors, handles, call, fns, childHandle, threadHandle, thread };
+    return { bytes, view, errors, handles, call, fns, childHandle, threadHandle, thread, child,
+        ended };
 }
 
 test('RtlCaptureContext is the caller\'s registers as it will be on return', ()=>{
@@ -152,7 +168,7 @@ test('RtlCaptureStackBackTrace walks the frame chain within the thread\'s stack'
 });
 
 test('a job holds processes, keeps its limits and reads them back', ()=>{
-    const { view, call, errors, childHandle } = machine();
+    const { view, call, errors, childHandle, handles, child, ended } = machine();
     const job = call('CreateJobObjectW', 0, 0);
     assert.notEqual(job, 0);
     assert.equal(call('IsProcessInJob', CURRENT_PROCESS, 0, 0x2000), 1);
@@ -185,9 +201,21 @@ test('a job holds processes, keeps its limits and reads them back', ()=>{
 
     assert.equal(call('SetInformationJobObject', job, 99, 0x2100, 4), 0);
     assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER);
-    assert.equal(call('TerminateJobObject', job, 1), 1);
+    // Wine's process test_TerminateJobObject and test_WaitForJobObject.
+    const waitable = handles.resolve(job, 'job').waitable;
+    assert.equal(waitable.signalled, false, 'a job is not signalled while it runs');
+    assert.equal(call('TerminateJobObject', job, 123), 1);
+    assert.deepEqual(ended, [child, null], 'the child ended, this process last');
+    assert.equal(child.exitCode, 123);
+    assert.equal(waitable.signalled, true, 'signalled for good');
+    assert.equal(call('QueryInformationJobObject', job, 1, 0x2700, 48, 0), 1);
+    assert.deepEqual([36, 40].map(at=>view.getUint32(0x2700 + at, true)), [2, 1],
+        'two ever assigned, this process alone still running');
     assert.equal(call('AssignProcessToJobObject', job, childHandle), 0);
-    assert.equal(errors.at(-1), ERROR_ACCESS_DENIED, 'a terminated job takes no more');
+    assert.equal(errors.at(-1), ERROR_ACCESS_DENIED, 'a process that has ended joins nothing');
+    const another = handles.open('process', { id: 0x2b0 });
+    assert.equal(call('AssignProcessToJobObject', job, another), 1,
+        'a terminated job still takes a running process');
     assert.equal(call('AssignProcessToJobObject', 0x12340, childHandle), 0);
     assert.equal(errors.at(-1), ERROR_INVALID_HANDLE);
 });

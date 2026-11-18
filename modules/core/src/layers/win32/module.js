@@ -35,7 +35,7 @@ import {
 } from './kernel32/environment.js';
 import { createThreadPool } from './kernel32/pool.js';
 import { serveCall } from './kernel32/cross-process.js';
-import { createProcessTarget } from './kernel32/process-target.js';
+import { CURRENT_PROCESS, createProcessTarget } from './kernel32/process-target.js';
 import { reportedVersion, windowsVersion } from './kernel32/versions.js';
 import { createSystemFunctions, imageBits } from './kernel32/system.js';
 import { createActivationContexts } from './kernel32/actctx.js';
@@ -3580,6 +3580,25 @@ export function createWin32Module(){
                             .map(name=>[name, cpuRegisters.read(name)])),
                         setRegisters,
                         divergence: config?.divergence,
+                        // A job's processes ended as TerminateProcess ends one:
+                        // through a handle of the moment, or this process's own.
+                        terminateProcess: (process, code)=>{
+                            const terminate = /** @type {any} */ (libraries['KERNEL32.dll'])
+                                .TerminateProcess;
+                            if (process === null)
+                            {
+                                return terminate.handler([CURRENT_PROCESS, code]);
+                            }
+                            const handle = kernel.handles.open('process', process);
+                            try
+                            {
+                                return terminate.handler([handle, code]);
+                            }
+                            finally
+                            {
+                                kernel.handles.close(handle);
+                            }
+                        },
                     }),
                     ...conversionsInGuest(createLocaleFunctions({
                         readMemory, writeMemory, stringLength,

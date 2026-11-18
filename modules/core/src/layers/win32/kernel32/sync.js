@@ -139,6 +139,8 @@ const FILETIME_EPOCH_MS = 11644473600000;
  * @property {ReturnType<typeof import('./named-objects.js').createNamedObjects>} [namedObjects]
  *           the run's one namespace, where a job made by name is found again
  * @property {any} kernel                        The kernel layer's API.
+ * @property {(process: any, code: number) => any} [terminateProcess]  A job's process ended
+ *           as TerminateProcess ends it, null for this one (`process-policy.js`).
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, expected: number, value: number) => number} [compareExchangeU32]
@@ -820,6 +822,7 @@ export function createSyncFunctions(host){
             threadOf,
             objectOf: object,
             processors,
+            terminateProcess: host.terminateProcess,
         }),
         ...createThreadInfoFunctions({
             kernel,
@@ -1200,7 +1203,8 @@ export function createSyncFunctions(host){
                     objects.push(kind === 'process' ? target.exited
                         : kind === 'process-thread'
                             ? threadEnd({ kernel, askChild: host.askChild }, target)
-                            : FILE_OBJECT_KINDS.has(kind ?? '') ? alwaysReady() : target);
+                            : FILE_OBJECT_KINDS.has(kind ?? '') ? alwaysReady()
+                                : target.waitable ?? target);
                     indices.push(at);
                 }
 

@@ -1366,11 +1366,14 @@ export function createThreadingFunctions(host){
                         ? undefined
                         : { deadline: kernel.clock.virtualTime() + wait, result: WAIT_TIMEOUT }));
                 }
+                // An object the kernel does not wait on itself - a job - is
+                // waited on as the event it carries.
+                const signal = target.waitable ?? target;
                 if (wait === 0)
                 {
-                    return kernel.poll(target, thread) ?? WAIT_TIMEOUT;
+                    return kernel.poll(signal, thread) ?? WAIT_TIMEOUT;
                 }
-                return settle(kernel.wait(target, thread, wait === INFINITE
+                return settle(kernel.wait(signal, thread, wait === INFINITE
                     ? undefined
                     : { deadline: kernel.clock.virtualTime() + wait, result: WAIT_TIMEOUT }));
             },
