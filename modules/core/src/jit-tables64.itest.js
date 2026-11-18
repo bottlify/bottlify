@@ -37,7 +37,8 @@ test('a JIT\'s callback range is looked up through its callback', { timeout: 600
             /** @type {number[]} */
             const main = [];
             /** @param {number[]} op @param {number} to  a RIP-relative operand */
-            const rip = (op, to)=>main.push(...op, ...u32(to - (code(main.length) + op.length + 4)));
+            const rip = (op, to)=>main.push(...op,
+                ...u32(to - (code(main.length) + op.length + 4)));
             main.push(0x48, 0x83, 0xec, 0x38); // sub rsp, 56
             rip([0x48, 0x8d, 0x15], code(RANGE)); // lea rdx, [range]
             main.push(0x48, 0x8d, 0x4a, 0x03); // lea rcx, [rdx + 3]: the identifier
@@ -52,7 +53,8 @@ test('a JIT\'s callback range is looked up through its callback', { timeout: 600
             main.push(0x45, 0x31, 0xc0); // xor r8d, r8d
             rip([0xff, 0x15], iat('RtlLookupFunctionEntry'));
             rip([0x48, 0x8d, 0x0d], at('entry')); // lea rcx, [entry]
-            main.push(0x48, 0x39, 0xc8, 0x75, 0x03, 0x83, 0xcb, 0x02); // cmp rax, rcx; jne +3; or ebx, 2
+            // cmp rax, rcx; jne +3; or ebx, 2
+            main.push(0x48, 0x39, 0xc8, 0x75, 0x03, 0x83, 0xcb, 0x02);
             rip([0x48, 0x8d, 0x0d], code(RANGE + 8)); // lea rcx, [range + 8]
             rip([0x48, 0x3b, 0x0d], at('seen')); // cmp rcx, [seen]
             main.push(0x75, 0x03, 0x83, 0xcb, 0x04); // jne +3; or ebx, 4
