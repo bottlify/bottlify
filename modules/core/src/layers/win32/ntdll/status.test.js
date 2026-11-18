@@ -85,6 +85,7 @@ test('every status translated here answers what Wine\'s ntdll error tests expect
     const rows = [
         [STATUS.SUCCESS, 0],
         [STATUS.PENDING, 997],
+        [STATUS.DATATYPE_MISALIGNMENT, 998],
         [STATUS.BUFFER_OVERFLOW, 234],
         [STATUS.NO_MORE_FILES, 18],
         [STATUS.NO_MORE_ENTRIES, 259],
