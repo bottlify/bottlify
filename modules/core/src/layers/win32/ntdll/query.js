@@ -78,6 +78,25 @@ const SYSTEM_BASIC_INFORMATION = 0;
 /** SystemBasicInformation, SystemEmulationBasicInformation, SystemNativeBasicInformation. */
 const BASIC_CLASSES = new Set([SYSTEM_BASIC_INFORMATION, 62, 114]);
 const SYSTEM_PROCESS_INFORMATION = 5;
+/**
+ * The handles open in the system, as a 32-bit process reads them:
+ * SYSTEM_HANDLE_INFORMATION (a ULONG count, then 16-byte entries: owner's id,
+ * object type, flags, the handle's value in a USHORT, the object, the granted
+ * access) and SYSTEM_HANDLE_INFORMATION_EX (two pointer-wide words, then
+ * 28-byte entries: object, owner, value, access, a back-trace index, the type
+ * index, attributes and a reserved word).
+ */
+const SYSTEM_HANDLE_INFORMATION = 16;
+const SYSTEM_EXTENDED_HANDLE_INFORMATION = 64;
+const HANDLE_ENTRY = Object.freeze({ HEADER: 4, SIZE: 16 });
+const HANDLE_ENTRY_EX = Object.freeze({ HEADER: 8, SIZE: 28 });
+/**
+ * Where an object's address is said to be: the system's half of the address
+ * space, eight bytes apart, as a kernel pool's are. Nothing in the process can
+ * reach one; a program compares them to tell whether two handles name one
+ * object.
+ */
+const OBJECT_ADDRESS_BASE = 0x80800000;
 /** The class NtSetSystemInformation takes here, and its structure's size on 32-bit Windows. */
 const SYSTEM_FILECACHE_INFORMATION = 21;
 const SYSTEM_FILECACHE_SIZE = 36;
@@ -214,6 +233,17 @@ const KERNEL_TYPE_OF = Object.freeze({
 });
 
 /**
+ * A type's index, as ObjectTypesInformation numbers it: from two, a type the
+ * list does not carry after the last of them.
+ *
+ * @param {string} name
+ */
+function typeIndexOf(name){
+    const index = OBJECT_TYPE_NAMES.indexOf(name);
+    return (index < 0 ? OBJECT_TYPE_NAMES.length : index) + 2;
+}
+
+/**
  * OBJECT_TYPE_INFORMATION for one type at a guest address, its name after it.
  *
  * @param {string} name @param {number} at
@@ -225,8 +255,7 @@ function objectType(name, at){
     view.setUint16(OBJECT_TYPE.NAME_LENGTH, name.length * 2, true);
     view.setUint16(OBJECT_TYPE.NAME_MAXIMUM, (name.length + 1) * 2, true);
     view.setUint32(OBJECT_TYPE.NAME_BUFFER, (at + OBJECT_TYPE.SIZE) >>> 0, true);
-    const index = OBJECT_TYPE_NAMES.indexOf(name);
-    struct[OBJECT_TYPE.TYPE_INDEX] = (index < 0 ? OBJECT_TYPE_NAMES.length : index) + 2;
+    struct[OBJECT_TYPE.TYPE_INDEX] = typeIndexOf(name);
     for (let i = 0; i < name.length; i++)
     {
         view.setUint16(OBJECT_TYPE.SIZE + i * 2, name.charCodeAt(i), true);
@@ -294,6 +323,9 @@ const NORMAL_BASE_PRIORITY = 8;
  * @property {(record: any, call: import('../kernel32/cross-process.js').CrossCall)
  *     => Promise<import('../kernel32/cross-process.js').CrossAnswer | null> | null} [askChild]
  *           A call made in a child, answered there.
+ * @property {() => OpenHandle[]} [openHandles]  The handles this process holds,
+ *           what SystemHandleInformation lists; without it the class is unknown.
+ * @property {number} [processId]  This process's id, the owner of its handles.
  * @property {Record<number, SystemClass>} [systemClasses]  More classes of
  *           NtQuerySystemInformation, answered by the family whose state they
  *           read (the clock's and the zone's in time.js).
@@ -311,6 +343,51 @@ const NORMAL_BASE_PRIORITY = 8;
 /**
  * @typedef {{ id: number, parent: number, path: string, threads: number[] }} SystemProcess
  */
+
+/**
+ * @typedef {{ handle: number, type: string, object: any, access: number | null }} OpenHandle
+ */
+
+/**
+ * The SYSTEM_HANDLE_INFORMATION (`extended` false) or
+ * SYSTEM_HANDLE_INFORMATION_EX table of a process's handles that name kernel
+ * objects: a find handle, an icon or a hook is none on Windows and is not
+ * listed. `addressOf` gives each object the address it is said to be at.
+ *
+ * @param {OpenHandle[]} handles @param {number} owner
+ * @param {(object: any) => number} addressOf @param {boolean} extended
+ * @returns {Uint8Array}
+ */
+export function systemHandleInformation(handles, owner, addressOf, extended){
+    const listed = handles.filter(each=>KERNEL_TYPE_OF[each.type] !== undefined);
+    const { HEADER, SIZE } = extended ? HANDLE_ENTRY_EX : HANDLE_ENTRY;
+    const bytes = new Uint8Array(HEADER + listed.length * SIZE);
+    const view = new DataView(bytes.buffer);
+    view.setUint32(0, listed.length, true);
+    listed.forEach((each, index)=>{
+        const at = HEADER + index * SIZE;
+        const type = typeIndexOf(KERNEL_TYPE_OF[each.type]);
+        const access = (each.access ?? ALL_ACCESS) >>> 0;
+        const object = addressOf(each.object) >>> 0;
+        if (extended)
+        {
+            view.setUint32(at, object, true);
+            view.setUint32(at + 4, owner >>> 0, true);
+            view.setUint32(at + 8, each.handle >>> 0, true);
+            view.setUint32(at + 12, access, true);
+            view.setUint16(at + 18, type, true);
+        }
+        else
+        {
+            view.setUint32(at, owner >>> 0, true);
+            bytes[at + 4] = type;
+            view.setUint16(at + 6, each.handle & 0xffff, true);
+            view.setUint32(at + 8, object, true);
+            view.setUint32(at + 12, access, true);
+        }
+    });
+    return bytes;
+}
 
 /**
  * The SYSTEM_PROCESS_INFORMATION chain for these processes, behind the idle
@@ -378,6 +455,25 @@ export function createQueryFunctions(host){
     const processors = host.processors ?? createProcessors();
     const { pointer: pointerBytes, teb: TEB, peb: PEB, ldr: LDR, entry: ENTRY }
         = blockLayouts(host.pointerSize);
+
+    /** The address each object is said to be at, given as it is first asked. */
+    const objectAddresses = new WeakMap();
+    let nextObjectAddress = OBJECT_ADDRESS_BASE;
+    /** @param {any} object */
+    const addressOf = object=>{
+        if (object === null || (typeof object !== 'object' && typeof object !== 'function'))
+        {
+            return 0;
+        }
+        let address = objectAddresses.get(object);
+        if (address === undefined)
+        {
+            address = nextObjectAddress;
+            nextObjectAddress += 8;
+            objectAddresses.set(object, address);
+        }
+        return address;
+    };
 
     /** @param {number} at */
     const readU32 = at=>{
@@ -684,6 +780,12 @@ export function createQueryFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([infoClass, buffer, length, returnLength])=>{
+                // The kernel probes the buffer for a ULONG's alignment before it
+                // reads the class: a misaligned one is refused, nothing written.
+                if ((length >>> 0) !== 0 && (buffer & 3) !== 0)
+                {
+                    return STATUS.DATATYPE_MISALIGNMENT;
+                }
                 if ((infoClass >>> 0) === SYSTEM_PROCESS_INFORMATION && host.processes)
                 {
                     // What the Toolhelp snapshot is built on. A process walker
@@ -696,6 +798,26 @@ export function createQueryFunctions(host){
                         return STATUS.INFO_LENGTH_MISMATCH;
                     }
                     host.writeMemory(buffer >>> 0, chain);
+                    return STATUS.SUCCESS;
+                }
+                const extended = (infoClass >>> 0) === SYSTEM_EXTENDED_HANDLE_INFORMATION;
+                if ((extended || (infoClass >>> 0) === SYSTEM_HANDLE_INFORMATION)
+                    && host.openHandles && pointerBytes === 4)
+                {
+                    // Every handle at once, its length told when it does not
+                    // fit: a caller allocates what it was told and asks again.
+                    const table = systemHandleInformation(host.openHandles(),
+                        host.processId ?? 0, addressOf, extended);
+                    writeU32If(returnLength >>> 0, table.length);
+                    if ((length >>> 0) < table.length)
+                    {
+                        return STATUS.INFO_LENGTH_MISMATCH;
+                    }
+                    if ((buffer >>> 0) === 0)
+                    {
+                        return STATUS.ACCESS_VIOLATION;
+                    }
+                    host.writeMemory(buffer >>> 0, table);
                     return STATUS.SUCCESS;
                 }
                 const other = host.systemClasses?.[infoClass >>> 0];

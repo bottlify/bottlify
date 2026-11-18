@@ -178,6 +178,23 @@ test('the kernel debugger is absent and the system range starts at 2 GiB', ()=>{
         STATUS.ACCESS_VIOLATION, 'nowhere to put it');
 });
 
+test('SystemProcessorBrandString is CPUID\'s 48 bytes and a terminator', ()=>{
+    const host = fakeHost();
+    const fns = createNtdllFunctions({ ...host, processorName: 'Test CPU @ 1.00GHz' });
+    const view = new DataView(host.bytes.buffer);
+    view.setUint32(0x180, 0xdeadbeef, true);
+    assert.equal(fns.NtQuerySystemInformation.handler([105, 0x100, 48, 0x180]),
+        STATUS.INFO_LENGTH_MISMATCH);
+    assert.equal(view.getUint32(0x180, true), 49);
+    assert.equal(fns.NtQuerySystemInformation.handler([105, 0x100, 64, 0x180]), STATUS.SUCCESS);
+    assert.equal(view.getUint32(0x180, true), 49);
+    assert.equal(String.fromCharCode(...host.bytes.subarray(0x100, 0x112)), 'Test CPU @ 1.00GHz');
+    assert.deepEqual([...host.bytes.subarray(0x112, 0x131)], new Array(31).fill(0),
+        'padded with NULs to 48 and terminated');
+    assert.equal(fns.NtQuerySystemInformation.handler([105, 0x101, 64, 0x180]),
+        STATUS.DATATYPE_MISALIGNMENT);
+});
+
 test('unwinding is the walk kernel32 already drives', ()=>{
     // There is one handler chain per thread and it lives in the thread block. A
     // second dispatcher walking it would call handlers the first had already

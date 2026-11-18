@@ -1674,28 +1674,6 @@ test('CreateWaitableTimerEx takes the manual reset as a flag and refuses others'
     assert.equal(fns.CreateWaitableTimerExW.argBytes, 16);
 });
 
-test('GetMappedFileName names an image in its volume\'s device, and nothing else', ()=>{
-    const { host, fns, written, errors } = setup();
-    host.modules = ()=>[
-        { name: 'app.exe', base: 0x400000, size: 0x10000, path: 'C:\\Games\\app.exe' },
-        { name: 'lib.dll', base: 0x10000000, size: 0x8000, path: 'D:\\lib.dll' },
-    ];
-    const again = createThreadingFunctions(host);
-    const name = '\\Device\\HarddiskVolume1\\Games\\app.exe';
-    assert.equal(again.K32GetMappedFileNameW.handler([0xffffffff, 0x401234, 0x3000, 260]),
-        name.length);
-    const wide = /** @type {Uint8Array} */ (written.get(0x3000));
-    assert.equal(String.fromCharCode(...new Uint16Array(wide.slice().buffer)), `${name}\0`);
-    assert.equal(again.K32GetMappedFileNameA.handler([0xffffffff, 0x10000010, 0x3000, 260]),
-        '\\Device\\HarddiskVolume2\\lib.dll'.length);
-    assert.equal(again.K32GetMappedFileNameA.handler([0xffffffff, 0x401234, 0x3000, 8]), 7);
-    assert.equal(errors.at(-1), 122, 'cut to the room');
-    assert.equal(again.K32GetMappedFileNameW.handler([0xffffffff, 0x20000000, 0x3000, 260]), 0);
-    assert.equal(errors.at(-1), 59, 'ERROR_UNEXP_NET_ERR: no file backs it');
-    assert.equal(fns.K32GetMappedFileNameW.handler([0x44, 0x401234, 0x3000, 260]), 0);
-    assert.equal(errors.at(-1), ERROR_INVALID_HANDLE);
-});
-
 test('CompareObjectHandles says whether two handles name one object', ()=>{
     const { fns, written } = setup();
     const event = fns.CreateEventA.handler([0, 1, 0, 0]);

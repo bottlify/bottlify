@@ -52,11 +52,13 @@ function setup(answers = {}, lastError = 0, more = {}){
             FlushInstructionCache: recorder('FlushInstructionCache', 1),
             GetWriteWatch: recorder('GetWriteWatch', 0),
             ResetWriteWatch: recorder('ResetWriteWatch', 0),
+            ...answers.K32GetMappedFileNameW
+                ? { K32GetMappedFileNameW: recorder('K32GetMappedFileNameW', 0) } : {},
             GetLastError: { argBytes: 0, handler: ()=>lastError },
         },
         ...more,
     });
-    return { fns, view, calls };
+    return { fns, view, calls, memory };
 }
 
 test('NtAllocateVirtualMemory reads the base and size through pointers and writes back pages',
@@ -196,3 +198,36 @@ test('a call answered later by another process answers its status then, from its
         assert.equal(await partial.fns.NtReadVirtualMemory.handler([0x44, 0, 0, 0, 0]),
             STATUS_PARTIAL_COPY);
     });
+
+test('MemoryMappedFilenameInformation is the mapped file\'s name after its UNICODE_STRING', ()=>{
+    const name = '\\Device\\HarddiskVolume1\\Windows\\System32\\ntdll.dll';
+    const { fns, view, memory } = setup({ K32GetMappedFileNameW: (/** @type {number[]} */ [
+        , , buffer])=>{
+        for (let i = 0; i < name.length; i++)
+        {
+            view.setUint16(buffer + i * 2, name.charCodeAt(i), true);
+        }
+        return name.length;
+    } });
+    const needed = 8 + name.length * 2 + 2;
+    view.setUint32(0x200, 0xcccccccc, true);
+    assert.equal(fns.NtQueryVirtualMemory.handler([SELF, 0x7000, 2, 0x200, 0x18, 0x1f0]),
+        0x80000005, 'STATUS_BUFFER_OVERFLOW');
+    assert.equal(view.getUint32(0x1f0, true), needed, 'the length it needs');
+    assert.equal(view.getUint32(0x200, true), 0xcccccccc, 'nothing written');
+
+    assert.equal(fns.NtQueryVirtualMemory.handler([SELF, 0x7000, 2, 0x200, 0x400, 0x1f0]), 0);
+    assert.equal(view.getUint16(0x200, true), name.length * 2, 'Length');
+    assert.equal(view.getUint16(0x202, true), name.length * 2 + 2, 'MaximumLength');
+    assert.equal(view.getUint32(0x204, true), 0x208, 'Buffer, right after it');
+    assert.equal(new TextDecoder('utf-16le').decode(memory.subarray(0x208,
+        0x208 + name.length * 2)), name);
+    assert.equal(view.getUint16(0x208 + name.length * 2, true), 0, 'terminated');
+    assert.equal(view.getUint32(0x1f0, true), needed);
+});
+
+test('MemoryMappedFilenameInformation of memory no file backs is STATUS_INVALID_ADDRESS', ()=>{
+    const { fns } = setup({ K32GetMappedFileNameW: ()=>0 }, 1240);
+    assert.equal(fns.NtQueryVirtualMemory.handler([SELF, 0x7000, 2, 0x200, 0x400, 0]),
+        0xc0000141);
+});

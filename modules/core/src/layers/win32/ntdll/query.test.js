@@ -568,3 +568,63 @@ test('NtQueryObject names a file under its volume device, an unnamed object noth
     assert.deepEqual([host.view.getUint32(BUFFER, true), host.view.getUint32(BUFFER + 4, true)],
         [0, 0], 'no name: an empty string, no buffer');
 });
+
+test('SystemHandleInformation lists the process\'s kernel objects and tells its length', ()=>{
+    const host = fakeHost();
+    const event = {};
+    const handles = [
+        { handle: 0x40, type: 'event', object: event, access: 0x1f0003 },
+        { handle: 0x44, type: 'find', object: {}, access: null },
+        { handle: 0x48, type: 'event', object: event, access: null },
+        { handle: 0x4c, type: 'file', object: {}, access: 0x120089 },
+    ];
+    const fns = createQueryFunctions({ ...host, openHandles: ()=>handles, processId: 0x1234 });
+    const query = (/** @type {number} */ infoClass, /** @type {number} */ length)=>
+        fns.NtQuerySystemInformation.handler([infoClass, BUFFER, length, RETURN_LENGTH]);
+    const { view } = host;
+
+    // One entry's room is not three entries': the length is told, nothing written.
+    view.setUint32(BUFFER, 0xdeadbeef, true);
+    assert.equal(query(16, 20), STATUS.INFO_LENGTH_MISMATCH);
+    assert.equal(view.getUint32(RETURN_LENGTH, true), 4 + 3 * 16, 'the find handle is no object');
+    assert.equal(view.getUint32(BUFFER, true), 0xdeadbeef);
+
+    assert.equal(query(16, 4 + 3 * 16), STATUS.SUCCESS);
+    assert.equal(view.getUint32(BUFFER, true), 3, 'the count');
+    const entry = (/** @type {number} */ index)=>BUFFER + 4 + index * 16;
+    assert.equal(view.getUint32(entry(0), true), 0x1234, 'the owner');
+    assert.equal(host.bytes[entry(0) + 4], 10, 'Event is the ninth type, numbered from two');
+    assert.equal(view.getUint16(entry(0) + 6, true), 0x40, 'the handle');
+    assert.equal(view.getUint32(entry(0) + 12, true), 0x1f0003, 'the access granted');
+    assert.equal(view.getUint32(entry(1) + 12, true), 0x1fffff, 'all of it, none narrowed');
+    assert.ok(view.getUint32(entry(0) + 8, true) >= 0x80000000, 'an address the system\'s');
+    assert.equal(view.getUint32(entry(1) + 8, true), view.getUint32(entry(0) + 8, true),
+        'two handles of one object name one address');
+    assert.notEqual(view.getUint32(entry(2) + 8, true), view.getUint32(entry(0) + 8, true));
+    assert.equal(host.bytes[entry(2) + 4], 29, 'File');
+    const fileObject = view.getUint32(entry(2) + 8, true);
+
+    // The extended table: two words, then 28-byte entries.
+    assert.equal(query(64, 8), STATUS.INFO_LENGTH_MISMATCH);
+    assert.equal(view.getUint32(RETURN_LENGTH, true), 8 + 3 * 28);
+    assert.equal(query(64, 8 + 3 * 28), STATUS.SUCCESS);
+    assert.equal(view.getUint32(BUFFER, true), 3);
+    const wide = (/** @type {number} */ index)=>BUFFER + 8 + index * 28;
+    assert.equal(view.getUint32(wide(2), true), fileObject,
+        'the object at the address the short table gave it');
+    assert.equal(view.getUint32(wide(2) + 4, true), 0x1234);
+    assert.equal(view.getUint32(wide(2) + 8, true), 0x4c);
+    assert.equal(view.getUint32(wide(2) + 12, true), 0x120089);
+    assert.equal(view.getUint16(wide(2) + 18, true), 29);
+});
+
+test('NtQuerySystemInformation refuses a buffer off a ULONG\'s alignment, writing nothing', ()=>{
+    const host = fakeHost();
+    const fns = createQueryFunctions(host);
+    host.view.setUint32(RETURN_LENGTH, 0xdeadbeef, true);
+    assert.equal(fns.NtQuerySystemInformation.handler([0, BUFFER + 1, 44, RETURN_LENGTH]),
+        STATUS.DATATYPE_MISALIGNMENT);
+    assert.equal(host.view.getUint32(RETURN_LENGTH, true), 0xdeadbeef);
+    assert.equal(fns.NtQuerySystemInformation.handler([0, BUFFER + 1, 0, RETURN_LENGTH]),
+        STATUS.INFO_LENGTH_MISMATCH, 'no length, no buffer to probe');
+});

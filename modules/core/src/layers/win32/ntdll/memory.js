@@ -24,13 +24,24 @@ const PAGE = 0x1000;
 /** GetCurrentProcess()'s pseudo-handle, the one process whose write watches are kept. */
 const CURRENT_PROCESS = 0xffffffff;
 
-/** VirtualQuery's MEMORY_BASIC_INFORMATION, the one information class kept. */
+/** VirtualQuery's MEMORY_BASIC_INFORMATION. */
 const MEMORY_BASIC_INFORMATION = 0;
+/**
+ * MemoryMappedFilenameInformation: the file an image or a view was mapped
+ * from, a UNICODE_STRING whose characters follow it, terminated.
+ */
+const MEMORY_MAPPED_FILENAME_INFORMATION = 2;
+/** A 32-bit UNICODE_STRING: two USHORT lengths and a pointer. */
+const UNICODE_STRING_SIZE = 8;
+/** The longest name read back, in characters: a path past it is cut, and said. */
+const NAME_ROOM = 1024;
 
 /** The statuses these answer beyond the shared table's. */
 const STATUS_CONFLICTING_ADDRESSES = 0xc0000018;
 const STATUS_MEMORY_NOT_ALLOCATED = 0xc00000a0;
 const STATUS_PARTIAL_COPY = 0x8000000d;
+const STATUS_BUFFER_OVERFLOW = 0x80000005;
+const STATUS_INVALID_ADDRESS = 0xc0000141;
 
 /** The last errors kernel32's calls set, and the status each stands for. */
 const FROM_LAST_ERROR = new Map([
@@ -59,6 +70,7 @@ const ERROR_INVALID_ADDRESS = 487;
  *           running.
  * @property {number} [pointerSize]  8 in a 64-bit process, whose PVOID and
  *           SIZE_T out-parameters and MEMORY_BASIC_INFORMATION are wider.
+ * @property {(api: string, detail: string) => void} [divergence]
  */
 
 /** The kernel32 entries these are built over. */
@@ -127,6 +139,56 @@ export function createMemoryFunctions(host){
         const at = scratch;
         return settled(kernel32.VirtualQueryEx.handler([process, base, at, BASIC.SIZE]),
             wrote=>(wrote ? read32(at + BASIC.RegionSize) : PAGE));
+    };
+
+    let nameScratch = 0;
+    /**
+     * MemoryMappedFilenameInformation at an address: the name of the file
+     * K32GetMappedFileNameW gives, in a UNICODE_STRING whose characters follow
+     * it. A buffer it does not fit is left alone, the length it needs told
+     * (STATUS_BUFFER_OVERFLOW); memory no file backs has none
+     * (STATUS_INVALID_ADDRESS).
+     *
+     * @param {number} process @param {number} base @param {number} buffer
+     * @param {number} length @param {number} returned
+     */
+    const mappedFileName = (process, base, buffer, length, returned)=>{
+        nameScratch ||= host.allocate(NAME_ROOM * 2);
+        if (nameScratch === 0)
+        {
+            return STATUS.NO_MEMORY;
+        }
+        const at = nameScratch;
+        return settled(kernel32.K32GetMappedFileNameW.handler([process, base, at, NAME_ROOM]),
+            (count, error)=>{
+                if ((count >>> 0) === 0)
+                {
+                    return error() === 87 ? STATUS.INVALID_PARAMETER : STATUS_INVALID_ADDRESS;
+                }
+                if ((count >>> 0) >= NAME_ROOM - 1)
+                {
+                    host.divergence?.('NtQueryVirtualMemory', `a mapped file's name past ${
+                        NAME_ROOM - 1} characters is cut`);
+                }
+                const characters = host.readMemory(at, (count >>> 0) * 2);
+                const needed = UNICODE_STRING_SIZE + characters.length + 2;
+                if ((returned >>> 0) !== 0)
+                {
+                    write32(returned, needed);
+                }
+                if ((length >>> 0) < needed)
+                {
+                    return STATUS_BUFFER_OVERFLOW;
+                }
+                const answer = new Uint8Array(needed);
+                const view = new DataView(answer.buffer);
+                view.setUint16(0, characters.length, true);
+                view.setUint16(2, characters.length + 2, true);
+                view.setUint32(4, (buffer + UNICODE_STRING_SIZE) >>> 0, true);
+                answer.set(characters, UNICODE_STRING_SIZE);
+                host.writeMemory(buffer >>> 0, answer);
+                return STATUS.SUCCESS;
+            });
     };
 
     /**
@@ -268,6 +330,11 @@ export function createMemoryFunctions(host){
             argBytes: 24,
             /** @param {number[]} args */
             handler: ([process, base, infoClass, buffer, length, returned])=>{
+                if (infoClass === MEMORY_MAPPED_FILENAME_INFORMATION && pointer === 4
+                    && kernel32.K32GetMappedFileNameW)
+                {
+                    return mappedFileName(process, base, buffer, length, returned);
+                }
                 if (infoClass !== MEMORY_BASIC_INFORMATION)
                 {
                     return STATUS.INVALID_INFO_CLASS;
