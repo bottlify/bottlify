@@ -5467,6 +5467,8 @@ export function createWin32Module(){
                                 // the instance its tool names.
                                 loadString: (instance, id)=>modules.loadString?.(instance, id)
                                     ?? null,
+                                setBkMode: (hdc, mode)=>libraries['GDI32.dll']?.SetBkMode
+                                    ?.handler([hdc, mode]) ?? 0,
                                 // A control that subclasses another window -- an
                                 // up-down control its buddy -- does it with
                                 // comctl32's own SetWindowSubclass.
