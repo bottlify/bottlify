@@ -667,6 +667,39 @@ test('a thread pool work runs once a submission, and a wait for it waits for its
     assert.ok(m.freed.includes(pool));
 });
 
+test('an environment\'s FinalizationCallback runs on the same thread after each callback', ()=>{
+    // Wine's msvcp140_atomic_wait test, test_threadpool_work: the callback,
+    // then the finalization, both with the work's instance and context; a
+    // version 3 environment with an invalid CallbackPriority is refused.
+    const m = machine();
+    const environment = 0x6000;
+    const view = new DataView(m.memory.buffer);
+    m.memory.fill(0, environment, environment + 40);
+    view.setUint32(environment, 1, true); // Version
+    view.setUint32(environment + 24, 0x404000, true); // FinalizationCallback
+    const work = m.fns.CreateThreadpoolWork.handler([0x403000, 0xcafe, environment]);
+    assert.notEqual(work, 0);
+    m.fns.SubmitThreadpoolWork.handler([work]);
+    assert.equal(m.ask(m.created[0]), RUN);
+    assert.equal(m.record(m.created[0]).entry, 0x403000, 'the callback first');
+    assert.equal(m.ask(m.created[0]), RUN, 'then, on the same thread, the finalization');
+    const { entry, args } = m.record(m.created[0]);
+    assert.equal(entry, 0x404000);
+    assert.equal(args[1], 0xcafe, 'with the context');
+    assert.notEqual(args[0], 0, 'and the instance');
+    assert.equal(m.fns.WaitForThreadpoolWorkCallbacks.handler([work, 0]), PARKED,
+        'the callback is not done until its finalization is');
+    m.ask(m.created[0]);
+    assert.deepEqual(m.woken.at(-1), { thread: m.main, result: 1 });
+
+    view.setUint32(environment, 3, true); // Version 3
+    view.setUint32(environment + 32, 1, true); // TP_CALLBACK_PRIORITY_NORMAL
+    assert.notEqual(m.fns.CreateThreadpoolWork.handler([0x403000, 0, environment]), 0);
+    view.setUint32(environment + 32, 3, true); // TP_CALLBACK_PRIORITY_INVALID
+    assert.equal(m.fns.CreateThreadpoolWork.handler([0x403000, 0, environment]), 0);
+    assert.equal(m.errors.at(-1), 87, 'ERROR_INVALID_PARAMETER');
+});
+
 test('cancelling pending submissions leaves only the ones running to wait for', ()=>{
     const m = machine();
     const work = m.fns.CreateThreadpoolWork.handler([0x403000, 1, 0]);
