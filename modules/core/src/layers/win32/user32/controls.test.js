@@ -1813,7 +1813,7 @@ test('a combo box\'s list is a window of its own for the combo box\'s whole life
         'on the screen, from the field');
     assert.deepEqual([right - left, bottom - top], [150, 120], 'as wide and tall as it drops');
     // Moved to another height, it stays as tall as its field and drops that
-    // far, never less than the field.
+    // far; a height no taller than the field leaves how far it drops.
     /** @param {number} height */
     const moveTo = height=>{
         context.fns.MoveWindow.handler([dropdown, 8, 60, 100, height, 1]);
@@ -1823,7 +1823,7 @@ test('a combo box\'s list is a window of its own for the combo box\'s whole life
         return [client, context.memory.u32(OUT + 12) - context.memory.u32(OUT + 4)];
     };
     assert.deepEqual(moveTo(200), [26, 200]);
-    assert.deepEqual(moveTo(10), [26, 26]);
+    assert.deepEqual(moveTo(10), [26, 200]);
 
     // A simple combo box's list is its child, shown under the field.
     const simple = make(0x0001);
@@ -1897,6 +1897,64 @@ test('an editable combo box\'s field is an Edit child that has the focus and han
         assert.equal(context.memory.readCString(OUT, 16), 'One',
             'the combo box\'s text is the edit\'s');
     });
+
+test('an owner-drawn combo box is as tall as its parent measures, whatever its font',
+    async()=>{
+        const WM_MEASUREITEM = 0x002c;
+        const CB_GETITEMHEIGHT = 0x0154;
+        const CBS_OWNERDRAWFIXED = 0x0010;
+        const WM_SETFONT = 0x0030;
+        /** @type {number[]} */
+        const asked = [];
+        /** @type {any} */
+        let context = null;
+        context = setup({ reply: message=>{
+            if (message.message === WM_MEASUREITEM)
+            {
+                // The field (item -1) 18 rows tall, a list row 20.
+                const item = context.memory.u32(message.lParam + 8) | 0;
+                asked.push(item);
+                context.memory.writeMemory(message.lParam + 16,
+                    new Uint8Array([item === -1 ? 18 : 20, 0, 0, 0]));
+                return 1;
+            }
+            return message.message === WM_INITDIALOG ? 1 : 0;
+        } });
+        const dialog = await openDialog(context);
+        context.memory.putString(TEXT, 'ComboBox');
+        const combo = context.fns.CreateWindowExA.handler([0, TEXT, 0,
+            WS_CHILD | WS_VISIBLE | 0x0003 | CBS_OWNERDRAWFIXED, 8, 60, 100, 120, dialog, 500,
+            HINSTANCE, 0]);
+        assert.deepEqual(asked, [-1, 0], 'the field, then a list row');
+        /** @returns {number} */
+        const height = ()=>{
+            context.fns.GetClientRect.handler([combo, OUT]);
+            return context.memory.u32(OUT + 12);
+        };
+        assert.equal(height(), 24);
+        assert.equal(context.fns.SendMessageA.handler([combo, CB_GETITEMHEIGHT, 0, 0]), 20);
+        context.fns.SendMessageA.handler([combo, WM_SETFONT, 0, 0]);
+        assert.equal(height(), 24, 'a new font leaves what the parent measured');
+    });
+
+test('an editable combo box\'s field empties with no selection and with no items', async()=>{
+    const CB_RESETCONTENT = 0x014b;
+    const context = setup();
+    const dialog = await openDialog(context);
+    context.memory.putString(TEXT, 'ComboBox');
+    const combo = context.fns.CreateWindowExA.handler([0, TEXT, 0,
+        WS_CHILD | WS_VISIBLE | 0x0002, 8, 60, 100, 120, dialog, 500, HINSTANCE, 0]);
+    context.memory.putString(TEXT, 'One');
+    context.fns.SendMessageA.handler([combo, CB_ADDSTRING, 0, TEXT]);
+    const field = ()=>context.fns.GetWindowTextA.handler([combo, OUT, 16]);
+    context.fns.SendMessageA.handler([combo, CB_SETCURSEL, 0, 0]);
+    assert.equal(field(), 3);
+    assert.equal(context.fns.SendMessageA.handler([combo, CB_SETCURSEL, -1, 0]), -1);
+    assert.equal(field(), 0, 'no selection, no text');
+    context.fns.SendMessageA.handler([combo, CB_SETCURSEL, 0, 0]);
+    context.fns.SendMessageA.handler([combo, CB_RESETCONTENT, 0, 0]);
+    assert.equal(field(), 0, 'no items, no text');
+});
 
 test('an editable combo box in focus shows its text with a caret, not a field of blue', async()=>{
     // A self-extractor's destination box, typed into, was one block of the

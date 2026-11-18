@@ -128,6 +128,8 @@ const BS_OWNERDRAW = 0x0b;
  * bytes -- with the kinds of control, the reasons to draw and the states.
  */
 const WM_DRAWITEM = 0x002b;
+const WM_MEASUREITEM = 0x002c;
+const ODT_COMBOBOX = 3;
 const DRAWITEMSTRUCT_SIZE = 48;
 const ODT_BUTTON = 4;
 const ODT_STATIC = 5;
@@ -409,6 +411,7 @@ const CBS_SIMPLE = 0x0001;
 const CBS_DROPDOWN = 0x0002;
 const CBS_SORT = 0x0100;
 const CBS_OWNERDRAW = 0x0030;
+const CBS_OWNERDRAWFIXED = 0x0010;
 const CBS_HASSTRINGS = 0x0200;
 const CB_GETEDITSEL = 0x0140;
 const CB_LIMITTEXT = 0x0141;
@@ -4023,14 +4026,7 @@ export function createControlProcedures(host){
             record.style = (record.style & ~(WS_VSCROLL | WS_HSCROLL)) >>> 0;
             listState(record).droppedHeight = record.height;
         }
-        // The system font's thirteen rows where nothing can be measured.
-        let rows = 13;
-        if (host.draw)
-        {
-            const { hdc } = host.contextOn(record);
-            rows = (hdc !== 0 ? host.draw.measure(hdc, 'M')?.height : null) ?? rows;
-            host.endPaint(record, hdc);
-        }
+        const rows = fontRows(record);
         // A simple combo box keeps its height: its list is under the field.
         if ((record.style & CBS_TYPEMASK) === CBS_SIMPLE)
         {
@@ -4040,6 +4036,76 @@ export function createControlProcedures(host){
         }
         record.height = (listState(record).fieldItem ?? rows + 2) + 6;
         return placeComboChildren(record);
+    };
+
+    /**
+     * How tall a window's font is: the system font's thirteen rows where
+     * nothing can be measured.
+     *
+     * @param {any} record
+     */
+    const fontRows = record=>{
+        if (!host.draw)
+        {
+            return 13;
+        }
+        const { hdc } = host.contextOn(record);
+        const rows = (hdc !== 0 ? host.draw.measure(hdc, 'M')?.height : null) ?? 13;
+        host.endPaint(record, hdc);
+        return rows;
+    };
+
+    /**
+     * Asks an owner-draw combo box's parent how tall an item is:
+     * WM_MEASUREITEM with a MEASUREITEMSTRUCT that starts at the height the
+     * combo box would give it, item -1 the field's. A build with no heap has
+     * nowhere to put the structure, and that height stands.
+     *
+     * @param {any} combo @param {number} item @param {number} rows
+     * @param {unknown} [thread]
+     * @returns {number | Promise<number>}
+     */
+    const measureItem = (combo, item, rows, thread)=>{
+        const size = (host.pointerSize ?? 4) === 8 ? 32 : 24;
+        const at = combo.parent && host.allocate ? host.allocate(size) : 0;
+        if (at === 0)
+        {
+            return rows;
+        }
+        const bytes = new Uint8Array(size);
+        const view = new DataView(bytes.buffer);
+        [ODT_COMBOBOX, combo.id, item, 0, rows].forEach((value, index)=>
+            view.setUint32(index * 4, value >>> 0, true));
+        host.writeMemory(at, bytes);
+        return after(host.send(combo.parent, WM_MEASUREITEM, combo.id, at, thread), ()=>{
+            const height = readU32(at + 16);
+            host.release?.(at);
+            return height;
+        });
+    };
+
+    /**
+     * An owner-draw combo box's heights, which its parent decides: its
+     * field's, kept whatever font it is later given, and a fixed one's
+     * list rows.
+     *
+     * @param {any} combo @param {unknown} [thread]
+     */
+    const measureCombo = (combo, thread)=>{
+        if ((combo.style & CBS_OWNERDRAW) === 0)
+        {
+            return 0;
+        }
+        // The field is two rows taller than its text, a list row as tall.
+        const rows = fontRows(combo);
+        return after(measureItem(combo, -1, rows + 2, thread), field=>{
+            listState(combo).fieldItem = field;
+            return (combo.style & CBS_OWNERDRAW) === CBS_OWNERDRAWFIXED
+                ? after(measureItem(combo, 0, rows, thread), row=>{
+                    listState(combo).itemHeight = row;
+                    return 0;
+                }) : 0;
+        });
     };
 
     /**
@@ -4430,12 +4496,13 @@ export function createControlProcedures(host){
             {
                 host.invalidate(listOf(record) ?? record);
             }
-            // A selection set by the program shows in the field.
-            if ((asList === LB_SETCURSEL || asList === LB_SELECTSTRING) && answer !== LB_ERR)
-            {
-                return after(showItem(record, state.current, thread), ()=>answer);
-            }
-            return answer ?? CB_ERR;
+            // A selection set by the program shows in the field - none, an
+            // empty one (CB_SETCURSEL -1) - and the field empties with the list.
+            const showsItem = asList === LB_RESETCONTENT
+                || (asList === LB_SETCURSEL && state.current === (message.wParam | 0))
+                || (asList === LB_SELECTSTRING && answer !== LB_ERR);
+            return after(showsItem ? showItem(record, state.current, thread) : 0,
+                ()=>answer ?? CB_ERR);
         }
         if (message.message >= WM_CTLCOLORMSGBOX && message.message <= WM_CTLCOLORSTATIC)
         {
@@ -4447,15 +4514,20 @@ export function createControlProcedures(host){
         switch (message.message){
             case WM_CREATE:
                 return after(makeComboList(record, thread), ()=>after(makeComboEdit(record, thread),
-                    ()=>after(fitComboField(record, true), ()=>common(record, message, thread))));
+                    ()=>after(measureCombo(record, thread), ()=>after(fitComboField(record, true),
+                        ()=>common(record, message, thread)))));
             case WM_SETFONT: {
                 const list = listOf(record);
                 if (list)
                 {
                     list.font = message.wParam >>> 0;
                 }
-                // A new font sizes the field's item afresh.
-                listState(record).fieldItem = undefined;
+                // A new font sizes the field's item afresh, but for an owner
+                // drawn one, whose parent measured it.
+                if ((record.style & CBS_OWNERDRAW) === 0)
+                {
+                    listState(record).fieldItem = undefined;
+                }
                 return after(edit ? host.send(edit.hwnd, WM_SETFONT, message.wParam, 0, thread) : 0,
                     ()=>after(common(record, message, thread), answer=>after(
                         fitComboField(record, false), ()=>answer)));
@@ -4464,14 +4536,18 @@ export function createControlProcedures(host){
                 return after(placeComboChildren(record), ()=>common(record, message, thread));
             case WM_WINDOWPOSCHANGING: {
                 // A drop-down combo box stays as tall as its field, whatever
-                // height it is given: that height is how far it drops, never
-                // less than the field (Wine's combo test, test_changesize).
+                // height it is given; a taller one is how far it drops, and
+                // one no taller than the field, a dialog laid out again,
+                // leaves that as it was (Wine's combo test, test_changesize).
                 const pos = message.lParam >>> 0;
                 const pointer = host.pointerSize ?? 4;
                 if (!simple && pos !== 0 && (readU32(pos + 2 * pointer + 16) & SWP_NOSIZE) === 0)
                 {
                     const asked = readU32(pos + 2 * pointer + 12) | 0;
-                    state.droppedHeight = Math.max(asked, record.height);
+                    if (asked > record.height)
+                    {
+                        state.droppedHeight = asked;
+                    }
                     writeU32(pos + 2 * pointer + 12, record.height);
                 }
                 return common(record, message, thread);
