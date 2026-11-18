@@ -31,7 +31,10 @@ function setup(){
     const calls = [];
     /** @type {number[]} */
     const freed = [];
+    /** The thread on the processor; a callback lets another run (`switching`). */
+    const threads = { running: 'caller', switching: false, on: /** @type {unknown[]} */ ([]) };
     const storage = createFiberLocalStorage({
+        callerThread: ()=>threads.running,
         readPointer: at=>words.get(at) ?? 0,
         writePointer: (at, value)=>{
             words.set(at, value);
@@ -45,14 +48,19 @@ function setup(){
         free: at=>{
             freed.push(at);
         },
-        call: async(entry, args)=>{
+        call: async(entry, args, thread)=>{
             calls.push([entry, args]);
+            threads.on.push(thread);
+            if (threads.switching)
+            {
+                threads.running = 'another';
+            }
         },
         setLastError: code=>{
             errors.push(code);
         },
     });
-    return { storage, fns: storage.table, words, errors, calls, freed };
+    return { storage, fns: storage.table, words, errors, calls, freed, threads };
 }
 
 test('index 0 is none, 1 to 127 are handed out lowest first, 128 is refused', ()=>{
@@ -109,6 +117,48 @@ test('FlsFree calls back every block, a fiber\'s end its own block, a null value
         assert.equal(await fns.FlsFree.handler([nulled]), 1);
         assert.equal(calls.length, 1, 'a null value is not called back');
         assert.equal(fns.FlsAlloc.handler([0]), index, 'the freed index is handed out again');
+    });
+
+test('a thread\'s block let go at its end leaves FlsSlots pointing at nothing', async()=>{
+    // The libraries hear DLL_THREAD_DETACH after the callbacks, and a C
+    // runtime's DllMain asks FlsGetValue then: with FlsSlots still at the freed
+    // block it read the heap's own links as its thread data and freed them,
+    // and the heap was corrupt from the first worker that ended.
+    const { storage, fns, words, freed, errors } = setup();
+    const index = fns.FlsAlloc.handler([0x401000]);
+    assert.equal(fns.FlsSetValue.handler([index, 0x1587]), 1);
+    const block = words.get(TEB_AT + TEB.FLS_SLOTS) ?? 0;
+    await storage.release(block);
+    assert.deepEqual(freed, [block]);
+    assert.equal(words.get(TEB_AT + TEB.FLS_SLOTS) ?? 0, 0, 'FlsSlots let go with it');
+    assert.equal(fns.FlsGetValue.handler([index]), 0, 'read as no value');
+    assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER);
+});
+
+test('every callback of one call runs on the thread that made it, whoever runs after the first',
+    async()=>{
+        // A callback lets the scheduler run another thread; asked again after it,
+        // "the caller" was that one, and the next callback's frame went onto a
+        // stack a live thread was using.
+        const { storage, fns, words, threads } = setup();
+        const index = fns.FlsAlloc.handler([0x401000]);
+        assert.equal(fns.FlsSetValue.handler([index, 0x11]), 1);
+        const first = words.get(TEB_AT + TEB.FLS_SLOTS) ?? 0;
+        words.set(TEB_AT + TEB.FLS_SLOTS, 0);
+        assert.equal(fns.FlsSetValue.handler([index, 0x22]), 1);
+        threads.switching = true;
+        assert.equal(await fns.FlsFree.handler([index]), 1);
+        assert.deepEqual(threads.on, ['caller', 'caller'], 'FlsFree, over two blocks');
+
+        threads.running = 'caller';
+        threads.on.length = 0;
+        const again = fns.FlsAlloc.handler([0x402000]);
+        words.set(TEB_AT + TEB.FLS_SLOTS, first);
+        assert.equal(fns.FlsSetValue.handler([again, 0x33]), 1);
+        const other = fns.FlsAlloc.handler([0x403000]);
+        assert.equal(fns.FlsSetValue.handler([other, 0x44]), 1);
+        await storage.release(first);
+        assert.deepEqual(threads.on, ['caller', 'caller'], 'a block\'s release, over two values');
     });
 
 test('the fast paths hand index 0, one past 127 and a missing block to the host', ()=>{

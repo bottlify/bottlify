@@ -134,8 +134,10 @@ export function flsSetValueLongCode(){
  * @property {() => number} teb  The calling thread's block.
  * @property {(bytes: number) => number} allocate  Guest memory, zeroed, or 0.
  * @property {(address: number) => void} free
- * @property {(entry: number, args: number[]) => unknown} call
- *           A guest routine called on the calling thread: a callback.
+ * @property {() => unknown} callerThread  The thread whose call is being answered,
+ *           asked once, before any callback: after the first, another may be running.
+ * @property {(entry: number, args: number[], thread: unknown) => unknown} call
+ *           A guest routine called on that thread: a callback.
  * @property {(code: number) => void} setLastError
  * @property {(bytes: number) => number} [allocateCode]
  *           Room for the i386 fast paths; absent, the exports stay host calls.
@@ -165,12 +167,24 @@ export function createFiberLocalStorage(host){
     const inRange = index=>index >= 1 && index < FLS_SLOTS;
 
     /**
+     * How the call being answered calls its callbacks: on its own thread,
+     * named now, before the first callback lets another thread run.
+     *
+     * @returns {(entry: number, args: number[]) => unknown}
+     */
+    const callerCalls = ()=>{
+        const thread = host.callerThread();
+        return (entry, args)=>host.call(entry, args, thread);
+    };
+
+    /**
      * Each value of `block` with a callback, the callback called and the
      * value cleared: what a block's end, or an index's, does.
      *
      * @param {number} block @param {number[]} indexes
+     * @param {(entry: number, args: number[]) => unknown} call
      */
-    const callBack = async(block, indexes)=>{
+    const callBack = async(block, indexes, call)=>{
         for (const index of indexes)
         {
             const value = host.readPointer(block + slot(index));
@@ -182,7 +196,7 @@ export function createFiberLocalStorage(host){
             host.writePointer(block + slot(index), 0);
             if (callback !== 0)
             {
-                await host.call(callback, [value]);
+                await call(callback, [value]);
             }
         }
     };
@@ -192,14 +206,27 @@ export function createFiberLocalStorage(host){
      * is deleted, a thread's running one when the thread ends.
      *
      * @param {number} block
+     * @param {{ call?: (entry: number, args: number[]) => unknown, teb?: number }} [ending]
+     *     A thread's end: how its callbacks are called (it has no call of its own left
+     *     to answer, so as the loader calls a DllMain) and its thread block, named by
+     *     the caller since another thread may be running once they have been
      * @returns {Promise<void>}
      */
-    const release = async block=>{
+    const release = async(block, ending = {})=>{
         if (block === 0 || !blocks.has(block))
         {
             return;
         }
-        await callBack(block, [...allocated.keys()].sort((a, b)=>a - b));
+        const teb = ending.teb ?? host.teb() >>> 0;
+        await callBack(block, [...allocated.keys()].sort((a, b)=>a - b),
+            ending.call ?? callerCalls());
+        // The libraries hear of a thread's end after this, and a C runtime asks
+        // FlsGetValue in its DllMain: FlsSlots left at the freed block would hand
+        // it the heap's own links as its data, to free.
+        if (teb !== 0 && host.readPointer(teb + slotsAt) === block)
+        {
+            host.writePointer(teb + slotsAt, 0);
+        }
         blocks.delete(block);
         host.free(block);
     };
@@ -266,10 +293,11 @@ export function createFiberLocalStorage(host){
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
+                const call = callerCalls();
                 return (async()=>{
                     for (const block of [...blocks])
                     {
-                        await callBack(block, [at]);
+                        await callBack(block, [at], call);
                     }
                     allocated.delete(at);
                     return 1;
@@ -311,7 +339,7 @@ export function createFiberLocalStorage(host){
                     host.setLastError(ERROR_NOT_ENOUGH_MEMORY);
                     return 0;
                 }
-                host.writePointer(block + slot(at), value >>> 0);
+                host.writePointer(block + slot(at), value);
                 return 1;
             },
         },
@@ -361,6 +389,7 @@ export function createFiberLocalStorage(host){
          * Lets a fiber's or an ended thread's block go, its values called back.
          *
          * @param {number} block
+         * @param {{ call?: (entry: number, args: number[]) => unknown, teb?: number }} [ending]
          */
         release,
         /** Where FlsSlots is in this process's thread block. */
