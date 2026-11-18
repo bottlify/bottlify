@@ -1540,13 +1540,20 @@ export function createProcessFunctions(host){
         /**
          * VOID GetSystemTimePreciseAsFileTime(LPFILETIME lpSystemTimeAsFileTime)
          *
-         * The same time at the best resolution the system has, which is the
-         * one clock here: GetSystemTimeAsFileTime's answer.
+         * The same time at the best resolution the system has: the guest's
+         * wall clock to the hundred nanoseconds it carries, where
+         * GetSystemTimeAsFileTime's moves a millisecond at a time - a caller
+         * spinning until the precise time changes sees it change by less than
+         * a millisecond, as on Windows.
          */
         GetSystemTimePreciseAsFileTime: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: args=>table.GetSystemTimeAsFileTime.handler(args),
+            handler: ([pointer])=>{
+                writeU64(pointer >>> 0, BigInt(Math.floor(host.systemTimeMs() * 10_000))
+                    + FILETIME_EPOCH_MS * 10_000n);
+                return 0;
+            },
         },
 
         /**
@@ -1599,7 +1606,7 @@ export function createProcessFunctions(host){
          * BOOL QueryUnbiasedInterruptTime(PULONGLONG), and the Precise form
          * (which returns nothing): the time since boot in 100-nanosecond
          * units, with no suspended time to leave out -- this machine is never
-         * suspended.
+         * suspended. No place to write it is ERROR_INVALID_PARAMETER.
          */
         QueryUnbiasedInterruptTime: {
             argBytes: 4,
@@ -1607,6 +1614,7 @@ export function createProcessFunctions(host){
             handler: ([pointer])=>{
                 if ((pointer >>> 0) === 0)
                 {
+                    setError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
                 writeU64(pointer >>> 0, BigInt(Math.floor(host.now() * 10_000)));
