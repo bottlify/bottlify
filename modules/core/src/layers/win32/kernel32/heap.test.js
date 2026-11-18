@@ -9,7 +9,8 @@ import { createWriteClock } from '../../cpu/internal/write-clock.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    TABLES, arenaRegion, createAddressIndex, createHeapAllocator, createHeapFunctions,
+    GUARD_PAGES, TABLES, arenaRegion, createAddressIndex, createHeapAllocator,
+    createHeapFunctions,
 } from './heap.js';
 
 const HEAP_ZERO_MEMORY = 0x8;
@@ -1428,6 +1429,100 @@ function arenaQuery(){
     };
     return { fns, query, memory: { view } };
 }
+
+test('a guard page is closed to the processor until its first touch takes the guard away', ()=>{
+    // Wine's kernel32:virtual (test_guard_page): PAGE_GUARD reads back until
+    // the page is touched, a touch takes it away for good, VirtualLock over
+    // it fails once with STATUS_GUARD_PAGE_VIOLATION, and a stack commits
+    // its next guard page below the one it touched.
+    /** @type {[number, number, boolean][]} */
+    const access = [];
+    /** @type {number[]} */
+    const errors = [];
+    const host = {
+        ...fakeHost(RESERVING_ARENA),
+        setLastError: (/** @type {number} */ code)=>errors.push(code),
+        /** @param {number} address @param {number} length @param {boolean} open */
+        pageAccess: (address, length, open)=>{
+            if (length > 0)
+            {
+                access.push([address, length, open]);
+            }
+            return true;
+        },
+    };
+    const fns = createHeapFunctions(host);
+    const guard = /** @type {any} */ (fns)[GUARD_PAGES];
+    const base = fns.VirtualAlloc.handler([0, 0x4000, MEM_RESERVE, 4]);
+    assert.equal(fns.VirtualAlloc.handler([base + 0x3000, 0x1000, MEM_COMMIT, 0x104]),
+        base + 0x3000);
+    assert.deepEqual(access.at(-1), [base + 0x3000, 0x1000, false], 'closed, guarded');
+    assert.equal(guard.touch(base + 0x2000), false, 'a reserved page has no guard');
+    assert.equal(guard.touch(base + 0x3abc), true);
+    assert.deepEqual(access.at(-1), [base + 0x3000, 0x1000, true], 'opened by the touch');
+    assert.equal(guard.touch(base + 0x3abc), false, 'once');
+    const old = 0x100;
+    assert.equal(fns.VirtualProtect.handler([base + 0x3000, 0x1000, 4, old]), 1);
+    assert.equal(new DataView(host.bytes.buffer).getUint32(old, true), 4, 'the guard gone');
+
+    assert.equal(guard.commitGuard(base + 0x2000), true, 'the stack\'s next guard page');
+    assert.deepEqual(access.at(-1), [base + 0x2000, 0x1000, false]);
+    assert.equal(fns.VirtualLock.handler([base + 0x2000, 0x2000]), 0);
+    assert.equal(errors.at(-1), 0x80000001, 'STATUS_GUARD_PAGE_VIOLATION');
+    assert.equal(fns.VirtualLock.handler([base + 0x2000, 0x2000]), 1, 'the guard is gone');
+    assert.equal(guard.touch(base + 0x2000), false);
+});
+
+test('a view\'s pages take a protection within what the view was mapped for', ()=>{
+    // Wine's kernel32:virtual (test_mapping): VirtualQuery answers a view
+    // with the protection it was mapped with until VirtualProtect gives a
+    // page another, which must be within the view's access (else
+    // ERROR_INVALID_PARAMETER), a run split where it changes; a commit over
+    // it only makes its pages copy-on-write, anything else is
+    // ERROR_ACCESS_DENIED; PAGE_NOACCESS closes a page to the processor.
+    /** @type {number[]} */
+    const errors = [];
+    /** @type {[number, number, boolean][]} */
+    const access = [];
+    const view = { base: 0x80000, length: 0x2000, writable: false, protect: 0x02,
+        rights: 0x04, pages: new Map() };
+    const host = {
+        ...fakeHost({ base: 0x10000, size: 0x40000 }),
+        setLastError: (/** @type {number} */ code)=>errors.push(code),
+        viewAt: (/** @type {number} */ at)=>(at >= 0x80000 && at < 0x82000 ? view : null),
+        /** @param {number} address @param {number} length @param {boolean} open */
+        pageAccess: (address, length, open)=>{
+            access.push([address, length, open]);
+            return true;
+        },
+    };
+    const fns = createHeapFunctions(host);
+    const data = new DataView(host.bytes.buffer);
+    /** @param {number} at */
+    const query = at=>{
+        assert.equal(fns.VirtualQuery.handler([at, 0x100, MBI.SIZE]), MBI.SIZE);
+        return [MBI.AllocationProtect, MBI.RegionSize, MBI.State, MBI.Protect, MBI.Type]
+            .map(field=>data.getUint32(0x100 + field, true));
+    };
+    assert.deepEqual(query(0x80000), [0x02, 0x2000, MEM_COMMIT, 0x02, 0x40000]);
+    assert.equal(fns.VirtualProtect.handler([0x81000, 1, 0x04, 0x200]), 0, 'not writable');
+    assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER);
+    assert.equal(fns.VirtualProtect.handler([0x81000, 1, 0x08, 0x200]), 1, 'its own copy');
+    assert.equal(data.getUint32(0x200, true), 0x02, 'the old protection');
+    assert.deepEqual(query(0x80000), [0x02, 0x1000, MEM_COMMIT, 0x02, 0x40000]);
+    assert.deepEqual(query(0x81000), [0x02, 0x1000, MEM_COMMIT, 0x08, 0x40000]);
+    assert.equal(fns.VirtualProtect.handler([0x80000, 1, PAGE_NOACCESS, 0x200]), 1);
+    assert.deepEqual(access.at(-1), [0x80000, 0x1000, false], 'closed');
+    assert.equal(fns.VirtualProtect.handler([0x80000, 0x3000, PAGE_NOACCESS, 0x200]), 0,
+        'past the view');
+
+    assert.equal(fns.VirtualAlloc.handler([0x80000, 0x1000, MEM_COMMIT, 0x02]), 0);
+    assert.equal(errors.at(-1), 5, 'ERROR_ACCESS_DENIED');
+    assert.equal(fns.VirtualAlloc.handler([0x80010, 0xff0, MEM_COMMIT, 0x08]), 0x80000);
+    assert.deepEqual(access.at(-1), [0x80000, 0x1000, true], 'opened');
+    assert.equal(fns.VirtualAlloc.handler([0x80000, 0x1000, MEM_COMMIT, 0x80]), 0,
+        'not executable');
+});
 
 test('VirtualQuery inside a reservation answers the reservation, page by page as committed',
     ()=>{

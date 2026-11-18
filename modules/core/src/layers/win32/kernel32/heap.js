@@ -35,6 +35,7 @@ import {
     heapReAllocLongCode, heapSizeLongCode,
 } from './guest-heap-long.js';
 import { createPageRuns } from './page-runs.js';
+import { protectionRights } from './view-rights.js';
 
 /** Flags the guest passes; the rest of HeapAlloc's flags do not change behaviour here. */
 const HEAP_ZERO_MEMORY = 0x00000008;
@@ -129,6 +130,7 @@ const ERROR_INSUFFICIENT_BUFFER = 122;
 const ERROR_NOACCESS = 998;
 /** What VirtualAlloc reports for an address outside anything it reserved. */
 const ERROR_INVALID_ADDRESS = 487;
+const ERROR_ACCESS_DENIED = 5;
 const ERROR_NO_MORE_ITEMS = 259;
 const ERROR_NOT_ENOUGH_MEMORY = 8;
 
@@ -148,6 +150,9 @@ const HEAP_SUMMARY_SIZE = 20;
  * protection and restores it must get something true both times.
  */
 const PAGE_NOACCESS = 0x01;
+const PAGE_GUARD = 0x100;
+/** A guard page's touch, which VirtualLock answers as its error. */
+const STATUS_GUARD_PAGE_VIOLATION = 0x80000001;
 const PAGE_EXECUTE_READWRITE = 0x40;
 /** A page's base protections, of which a protection names exactly one. */
 const PAGE_BASES = [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80];
@@ -326,6 +331,14 @@ export const GLOBAL_MEMORY = Symbol('global memory');
  * guest. Carried under a symbol, so no export is made of it.
  */
 export const PAGE_STATE = Symbol('page state');
+/**
+ * The guard pages of the reservations, for the exception dispatch: `touch`
+ * takes a committed page's PAGE_GUARD away, as the processor's first touch of
+ * it does on Windows, and says whether it had one; `commitGuard` commits a
+ * page of a reservation PAGE_READWRITE | PAGE_GUARD, where a stack grows its
+ * next guard page.
+ */
+export const GUARD_PAGES = Symbol('guard pages');
 
 /** @param {number} value @param {number} to */
 const roundUp = (value, to)=>Math.ceil(value / to) * to;
@@ -1075,6 +1088,18 @@ export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT, 
 }
 
 /**
+ * A view of a section, as mapping.js records it for VirtualQuery: its length,
+ * whether it writes through, the protection it was mapped with (`protect`),
+ * the FILE_MAP_* rights its section allows a page of it (`rights`), and each
+ * page VirtualProtect has given another protection (`pages`); an image's
+ * view its sections instead.
+ *
+ * @typedef {{ length: number, writable: boolean, protect?: number, rights?: number,
+ *     pages?: Map<number, number>,
+ *     sections?: { start: number, end: number, protect: number }[] }} ViewRegion
+ */
+
+/**
  * @typedef {Object} HeapHost
  * @property {{ base: number, size: number }} arena   Guest bytes to allocate out of.
  * @property {(end: number) => boolean} [reach]  Grows the guest's memory to hold `end`
@@ -1099,11 +1124,11 @@ export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT, 
  * @property {() => any} [currentThread]
  * @property {(thread: any, code: number) => void} [setLastErrorFor]
  * @property {(address: number) => { base: number, size: number, kind?: string } | null} [regionAt]
- * @property {(address: number) => { base: number, length: number, writable: boolean,
- *     sections?: { start: number, end: number, protect: number }[] } | null}
+ * @property {(address: number) => ViewRegion & { base: number } | null}
  *     [viewAt]  The view of a section an address is in (mapping.js): VirtualQuery answers
  *     its pages as Windows does, MEM_MAPPED and as long as the view; an image's view
  *     MEM_IMAGE, each of its sections (RVAs, end exclusive) with its own protection.
+ *     VirtualProtect and a commit change a plain view's pages (`pages`).
  *           The memory layer's region map, when the assembling caller wired one.
  *           A region of kind `image` is answered as MEM_IMAGE.
  *           Without it VirtualQuery knows only the arena.
@@ -1354,8 +1379,9 @@ export function createHeapFunctions(host){
     const committed = new Map();
 
     /**
-     * The pages of each reservation protected PAGE_NOACCESS, committed or not:
-     * a commit with that protection, or VirtualProtect to it; in runs.
+     * The pages of each reservation the processor is to refuse, committed or
+     * not: those protected PAGE_NOACCESS, and those carrying PAGE_GUARD until
+     * their first touch (`GUARD_PAGES`); in runs.
      *
      * @type {Map<number, ReturnType<typeof createPageRuns<true>>>}
      */
@@ -1365,8 +1391,8 @@ export function createHeapFunctions(host){
      * What each reservation was given, as VirtualQuery answers it: the
      * protection it was reserved with (AllocationProtect) and each committed
      * page's, as its last commit or VirtualProtect set it, in runs (`page-runs.js`).
-     * Only NOACCESS is enforced (`unreadable`); the rest is what the program
-     * asked and reads back.
+     * Only NOACCESS and PAGE_GUARD are enforced (`unreadable`); the rest is
+     * what the program asked and reads back.
      *
      * @type {Map<number, { allocation: number,
      *     pages: ReturnType<typeof createPageRuns<number>> }>}
@@ -1489,7 +1515,7 @@ export function createHeapFunctions(host){
 
     /**
      * Notes the protection [from, to) of a reservation was given: PAGE_NOACCESS
-     * closes the pages, anything else leaves them to their commit.
+     * and PAGE_GUARD close the pages, anything else leaves them to their commit.
      *
      * @param {number} reservation @param {number} from @param {number} to
      * @param {number} protection
@@ -1497,7 +1523,7 @@ export function createHeapFunctions(host){
     const noteProtection = (reservation, from, to, protection)=>{
         protections.get(reservation)?.pages.set(from, to, protection);
         let pages = unreadable.get(reservation);
-        if ((protection & 0xff) === PAGE_NOACCESS)
+        if ((protection & 0xff) === PAGE_NOACCESS || (protection & PAGE_GUARD) !== 0)
         {
             if (!pages)
             {
@@ -1752,10 +1778,19 @@ export function createHeapFunctions(host){
         }
         if (view)
         {
-            const end = (view.base + view.length + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
-            const protection = view.writable ? PAGE_READWRITE_VIEW : PAGE_READONLY_VIEW;
-            return [page, view.base, protection, (end >>> 0) - page, MEM_COMMIT, protection,
-                MEM_MAPPED];
+            // Each page has the protection the view was mapped with until
+            // VirtualProtect gives it another; a run is the pages that share one.
+            const end = ((view.base + view.length + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1)) >>> 0;
+            const mapped = view.protect
+                ?? (view.writable ? PAGE_READWRITE_VIEW : PAGE_READONLY_VIEW);
+            const protectionOf = (/** @type {number} */ where)=>view.pages?.get(where) ?? mapped;
+            const protection = protectionOf(page);
+            let to = page + PAGE_SIZE;
+            while (to < end && protectionOf(to) === protection)
+            {
+                to += PAGE_SIZE;
+            }
+            return [page, view.base, mapped, to - page, MEM_COMMIT, protection, MEM_MAPPED];
         }
         const image = imageAt(page);
         if (image)
@@ -2010,6 +2045,95 @@ export function createHeapFunctions(host){
     };
 
     /**
+     * Gives [from, to) of a view of a section `protection`, as VirtualProtect
+     * does: within the view, and no more than the section allows (its
+     * `rights`), else ERROR_INVALID_PARAMETER; the old protection of the first
+     * page written to `oldProtect`, a PAGE_NOACCESS page closed to the
+     * processor and any other open.
+     *
+     * @param {ViewRegion & { base: number }} view
+     * @param {number} from @param {number} to @param {number} protection
+     * @param {number} oldProtect
+     * @returns {boolean}
+     */
+    const protectView = (view, from, to, protection, oldProtect)=>{
+        const end = roundUp(to, PAGE_SIZE);
+        if (end > view.base + roundUp(view.length, PAGE_SIZE) || !imageProtection(protection)
+            || (protectionRights(protection) & (view.rights ?? 0)) !== protectionRights(protection))
+        {
+            host.setLastError(ERROR_INVALID_PARAMETER);
+            return false;
+        }
+        writeDword(oldProtect, view.pages?.get(from) ?? view.protect ?? PAGE_READWRITE_VIEW);
+        settleView(view, from, end, protection);
+        return true;
+    };
+
+    /**
+     * VirtualAlloc's MEM_COMMIT over a view: its pages are committed already,
+     * and the one commit Windows takes of them makes them copy-on-write
+     * (PAGE_WRITECOPY, or PAGE_EXECUTE_WRITECOPY where the view executes);
+     * any other protection, or one the view's access does not reach, is
+     * ERROR_ACCESS_DENIED.
+     *
+     * @param {ViewRegion & { base: number }} view
+     * @param {number} from @param {number} to @param {number} protection
+     * @returns {boolean}
+     */
+    const commitView = (view, from, to, protection)=>{
+        const end = roundUp(to, PAGE_SIZE);
+        if (end > view.base + roundUp(view.length, PAGE_SIZE))
+        {
+            host.setLastError(ERROR_INVALID_ADDRESS);
+            return false;
+        }
+        if (!PAGE_WRITECOPIES.includes(protection)
+            || (protectionRights(protection) & (view.rights ?? 0)) !== protectionRights(protection))
+        {
+            host.setLastError(ERROR_ACCESS_DENIED);
+            return false;
+        }
+        settleView(view, from, end, protection);
+        return true;
+    };
+
+    /**
+     * @param {ViewRegion & { base: number }} view
+     * @param {number} from @param {number} end @param {number} protection
+     */
+    const settleView = (view, from, end, protection)=>{
+        for (let page = from; page < end; page += PAGE_SIZE)
+        {
+            view.pages?.set(page, protection);
+        }
+        host.pageAccess?.(from, end - from, (protection & 0xff) !== PAGE_NOACCESS);
+    };
+
+    /**
+     * The touch of a guard page: a committed page of a reservation carrying
+     * PAGE_GUARD loses it, and with it the processor's refusal, as the first
+     * touch of one does on Windows. False for a page with no guard.
+     *
+     * @param {number} address
+     * @returns {boolean}
+     */
+    const touchGuard = address=>{
+        const page = (address & ~(PAGE_SIZE - 1)) >>> 0;
+        const block = allocator.blockContaining(page);
+        const protection = block?.owner === VIRTUAL
+            ? protections.get(block.address)?.pages.get(page) : undefined;
+        if (!block || protection === undefined || (protection & PAGE_GUARD) === 0
+                || !(committed.get(block.address) ?? [])
+                    .some(range=>range.from <= page && range.to > page))
+        {
+            return false;
+        }
+        noteProtection(block.address, page, page + PAGE_SIZE, protection & ~PAGE_GUARD);
+        settleAccess(block.address, page, page + PAGE_SIZE);
+        return true;
+    };
+
+    /**
      * VirtualAlloc's body, and VirtualAlloc2's: `where` is the address
      * requirements of a new reservation -- an alignment past the allocation
      * granularity, and the lowest and highest address it may take -- or null.
@@ -2025,6 +2149,15 @@ export function createHeapFunctions(host){
         const requested = pointer >>> 0;
         const protection = protect >>> 0;
         const acting = kind & (MEM_COMMIT | MEM_RESERVE | MEM_RESET);
+        const view = acting === MEM_COMMIT && requested !== 0 && size !== 0
+            ? host.viewAt?.(requested) ?? null : null;
+        if (view && !view.sections && view.pages)
+        {
+            // A view's pages are committed already: committing them again is
+            // asking for their own copies (`commitView`).
+            const first = (requested & ~(PAGE_SIZE - 1)) >>> 0;
+            return commitView(view, first, requested + size, protection) ? first : 0;
+        }
         // A protection is asked of a reservation as of a commit, and a reset
         // takes any: it changes none.
         if ((kind & ~ALLOCATION_TYPES) !== 0 || acting === 0
@@ -3178,9 +3311,10 @@ export function createHeapFunctions(host){
          * BOOL VirtualProtect(LPVOID lpAddress, SIZE_T dwSize, DWORD flNewProtect,
          *                     PDWORD lpflOldProtect)
          *
-         * PAGE_NOACCESS is the one protection enforced, on a reservation's pages
-         * and where the processor faults a closed page: a program that closes
-         * pages to catch the touch of them gets its fault. Every other request
+         * PAGE_NOACCESS and PAGE_GUARD are the protections enforced, on a
+         * reservation's pages and where the processor faults a closed page: a
+         * program that closes pages to catch the touch of them gets its fault
+         * (a guard page once, `GUARD_PAGES`). Every other request
          * is already satisfied -- a page that is open is readable, writable and
          * executable -- so a runtime making its generated code executable gets
          * what it asked for.
@@ -3227,6 +3361,12 @@ export function createHeapFunctions(host){
                         host.setLastError(ERROR_INVALID_ADDRESS);
                         return 0;
                     }
+                }
+                const view = block?.owner === VIRTUAL ? null : host.viewAt?.(first) ?? null;
+                if (view && !view.sections && view.pages)
+                {
+                    return protectView(view, first, (address >>> 0) + (size >>> 0),
+                        protect >>> 0, oldProtect >>> 0) ? 1 : 0;
                 }
                 const image = block?.owner === VIRTUAL ? null : imageAt(first);
                 if (image)
@@ -3414,12 +3554,33 @@ export function createHeapFunctions(host){
          *
          * Locking pages into the working set is a promise about paging, and
          * there is no paging here -- guest memory is one buffer that is always
-         * present. The promise therefore already holds.
+         * present. The promise therefore already holds, except over a guard
+         * page: locking touches it, which takes its guard away and fails the
+         * call with STATUS_GUARD_PAGE_VIOLATION as its error, so that a second
+         * call succeeds.
          */
         VirtualLock: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([address, size])=>address !== 0 && (size >>> 0) !== 0 ? 1 : 0,
+            handler: ([address, size])=>{
+                if (address === 0 || (size >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const end = roundUp((address >>> 0) + (size >>> 0), PAGE_SIZE);
+                let guarded = false;
+                for (let page = (address & ~(PAGE_SIZE - 1)) >>> 0; page < end;
+                    page += PAGE_SIZE)
+                {
+                    guarded = touchGuard(page) || guarded;
+                }
+                if (guarded)
+                {
+                    host.setLastError(STATUS_GUARD_PAGE_VIOLATION);
+                    return 0;
+                }
+                return 1;
+            },
         },
 
         /** BOOL VirtualUnlock(LPVOID lpAddress, SIZE_T dwSize) */
@@ -3691,6 +3852,12 @@ export function createHeapFunctions(host){
             return info ?? { value: undefined, flags: 0 };
         },
         [GLOBAL_MEMORY]: globals,
+        [GUARD_PAGES]: {
+            touch: touchGuard,
+            /** @param {number} page @returns {boolean} */
+            commitGuard: page=>virtualAlloc(page, PAGE_SIZE, MEM_COMMIT,
+                PAGE_READWRITE | PAGE_GUARD, null) !== 0,
+        },
         /** @param {number} address @returns {{ state: number, protect: number }} */
         [PAGE_STATE]: address=>{
             const answer = regionAnswer(address);

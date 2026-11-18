@@ -7,12 +7,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createMappingFunctions } from './mapping.js';
+import { protectionRights, sectionRights, viewProtection } from './view-rights.js';
 import { createNamedObjects } from './named-objects.js';
 import { buildExe } from '../../../../../../tools/fixtures/make-pe.mjs';
 
 const INVALID_HANDLE_VALUE = 0xffffffff;
 const PAGE_READWRITE = 0x04;
 const PAGE_READONLY = 0x02;
+const FILE_MAP_COPY = 0x0001;
 const FILE_MAP_WRITE = 0x0002;
 const FILE_MAP_READ = 0x0004;
 
@@ -226,6 +228,34 @@ test('a read-only view is not written back', ()=>{
     assert.equal(file.data[0], 1, 'the file kept what it had');
 });
 
+test('a view asks no more of its section than the section\'s protection allows', ()=>{
+    // Wine's kernel32:virtual (test_mapping): writing needs a read-write
+    // section, executing an executable one, and anything else reads; a view
+    // past that is ERROR_ACCESS_DENIED. Its pages start with the protection
+    // its access names, and VirtualProtect gives them one within the
+    // section's (heap.js).
+    assert.deepEqual([0x02, 0x04, 0x08, 0x20, 0x40, 0x80].map(sectionRights),
+        [0x05, 0x07, 0x05, 0x2d, 0x2f, 0x2d]);
+    assert.equal(sectionRights(0x01), 0, 'PAGE_NOACCESS allows nothing');
+    assert.deepEqual([0, 1, 2, 3, 4, 5, 6, 0x20, 0x21, 0x22, 0x24].map(viewProtection),
+        [0x01, 0x08, 0x04, 0x04, 0x02, 0x02, 0x04, 0x01, 0x80, 0x40, 0x20]);
+    assert.deepEqual([0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80].map(protectionRights),
+        [0, 4, 6, 4, 8, 12, 14, 12]);
+
+    const { fns, errors, fileHandle } = setup();
+    const readOnly = fns.CreateFileMappingA.handler([fileHandle, 0, 0x02, 0, 8, 0]);
+    assert.equal(fns.MapViewOfFile.handler([readOnly, FILE_MAP_WRITE, 0, 0, 8]), 0);
+    assert.equal(errors.at(-1), 5, 'ERROR_ACCESS_DENIED');
+    assert.equal(fns.MapViewOfFile.handler([readOnly, 0x20 | 4, 0, 0, 8]), 0, 'not executable');
+    assert.notEqual(fns.MapViewOfFile.handler([readOnly, 0, 0, 0, 8]), 0, 'nothing asked reads');
+    assert.notEqual(fns.MapViewOfFile.handler([readOnly, FILE_MAP_COPY, 0, 0, 8]), 0);
+    for (const refused of [0x01, 0x10, 0])
+    {
+        assert.equal(fns.CreateFileMappingA.handler([fileHandle, 0, refused, 0, 8, 0]), 0);
+        assert.equal(errors.at(-1), 87, `ERROR_INVALID_PARAMETER for 0x${refused.toString(16)}`);
+    }
+});
+
 test('a copy-on-write view is written in memory and never reaches its file', ()=>{
     // PAGE_WRITECOPY and PAGE_EXECUTE_WRITECOPY give the process its own copy
     // of each page it writes; the file, which may be open for reading alone,
@@ -234,7 +264,9 @@ test('a copy-on-write view is written in memory and never reaches its file', ()=
     {
         const { fns, bytes, file, fileHandle } = setup();
         const mapping = fns.CreateFileMappingA.handler([fileHandle, 0, page, 0, 8, 0]);
-        const view = fns.MapViewOfFile.handler([mapping, FILE_MAP_WRITE, 0, 0, 8]);
+        assert.equal(fns.MapViewOfFile.handler([mapping, FILE_MAP_WRITE, 0, 0, 8]), 0,
+            'a copy-on-write section is never written through');
+        const view = fns.MapViewOfFile.handler([mapping, FILE_MAP_COPY, 0, 0, 8]);
         assert.notEqual(view, 0);
         bytes[view] = 0x77;
         assert.equal(fns.FlushViewOfFile.handler([view, 0]), 1);

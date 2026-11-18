@@ -9,6 +9,7 @@ import { nameToWalk, readObjectAttributes } from './object-attributes.js';
 import { STATUS, toDosError } from '../ntdll/status.js';
 import { mapImage } from '../../loader/internal/image.js';
 import { relocateImage } from '../../loader/internal/pe.js';
+import { sectionRights, viewProtection, viewRights } from './view-rights.js';
 
 /**
  * How far a name a program hands these is read: whole, as Windows reads it, up to
@@ -82,17 +83,47 @@ const SECTION_INFORMATION_SIZES = [16, 48];
 /** GetCurrentProcess(): the one process a view is mapped into here. */
 const CURRENT_PROCESS = 0xffffffff;
 
-/** dwDesiredAccess for MapViewOfFile. */
+/** dwDesiredAccess for MapViewOfFile: a section's own rights, SECTION_* by another name. */
+const FILE_MAP_COPY = 0x0001;
 const FILE_MAP_WRITE = 0x0002;
 const FILE_MAP_READ = 0x0004;
+const FILE_MAP_EXECUTE = 0x0020;
 const FILE_MAP_ALL_ACCESS = 0xf001f;
+/**
+ * The rights a view asks of its section: FILE_MAP_COPY is SECTION_QUERY, which
+ * every one has, and SECTION_MAP_EXECUTE alone maps nothing executable -
+ * FILE_MAP_EXECUTE does - so neither is asked.
+ */
+const VIEW_RIGHTS = FILE_MAP_WRITE | FILE_MAP_READ | FILE_MAP_EXECUTE;
+
+/** A file handle's rights an executable section asks of it. */
+const FILE_EXECUTE = 0x0020;
+const GENERIC_EXECUTE = 0x20000000;
+const GENERIC_ALL = 0x10000000;
+
+/** The PAGE_* protections a section may be made with. */
+const SECTION_PAGES = [0x02, 0x04, 0x08, 0x20, 0x40, 0x80];
+
+/**
+ * The access a page protection maps a view with, NtMapViewOfSection's
+ * Win32Protect turned into MapViewOfFile's dwDesiredAccess.
+ *
+ * @param {number} page
+ */
+const accessFor = page=>{
+    const base = page & PAGE_MASK;
+    const execute = base >= 0x10 ? FILE_MAP_EXECUTE : 0;
+    return execute | ([0x04, 0x40].includes(base) ? FILE_MAP_WRITE | FILE_MAP_READ
+        : [0x02, 0x20].includes(base) ? FILE_MAP_READ
+            : [0x08, 0x80].includes(base) ? FILE_MAP_COPY : 0);
+};
 
 /**
  * A mapping object: the file it is over (null for the page file's), whether a
  * view of it can be written back, its size, and its SEC_* attributes.
  *
  * @typedef {{ node: any, writable: boolean, size: number, attributes: number,
- *     writesFile?: boolean,
+ *     writesFile?: boolean, protect?: number,
  *     image?: { bytes: Uint8Array, image: import('../../loader/internal/pe.js').PeImage } }}
  *     Section
  *     `writesFile`: its views' writes reach the file, as a copy-on-write one's do not.
@@ -181,9 +212,11 @@ const pageRound = bytes=>Math.ceil(bytes / PAGE_SIZE) * PAGE_SIZE;
  *     process: number }} [sharedViews]
  *           The run's agreement between views of one page-file section, and
  *           this process's name in it (`shared-views.js`).
- * @property {Map<number, { length: number, writable: boolean,
- *     sections?: { start: number, end: number, protect: number }[] }>} [viewRegions]
- *           Every view of this process by its address, for VirtualQuery.
+ * @property {Map<number, import('./heap.js').ViewRegion>} [viewRegions]
+ *           Every view of this process by its address, for VirtualQuery and
+ *           VirtualProtect.
+ * @property {(handle: number) => number | null} [handleAccess]  The rights a handle
+ *           was granted (a section's, FILE_MAP_*), which a view asks within.
  * @property {{ views: number, waited: number, failed: number }} [metrics]
  *           Counted in place: views mapped, views that waited for their
  *           bytes, views whose bytes never came.
@@ -316,6 +349,10 @@ export function createMappingFunctions(host){
             // would not fit in the address space it is mapped into.
             return { status: STATUS.SECTION_TOO_BIG };
         }
+        if (!SECTION_PAGES.includes(page))
+        {
+            return { status: STATUS.INVALID_PAGE_PROTECTION };
+        }
         const writable = WRITABLE_PAGES.includes(page);
         const asked = sizeLow >>> 0;
         if (!node)
@@ -325,7 +362,7 @@ export function createMappingFunctions(host){
             return (flags & SEC_IMAGE) !== 0 ? { status: STATUS.INVALID_FILE_FOR_SECTION }
                 : asked === 0 ? { status: STATUS.INVALID_PARAMETER }
                     : { node, writable, size: pageRound(asked),
-                        attributes: (committing || SEC_COMMIT) | caching };
+                        attributes: (committing || SEC_COMMIT) | caching, protect: page };
         }
         const length = host.files.size?.(node) ?? 0;
         if ((flags & SEC_IMAGE) !== 0)
@@ -351,7 +388,7 @@ export function createMappingFunctions(host){
                     return { status: STATUS.INVALID_IMAGE_FORMAT };
                 }
                 return { node, writable: false, size: laid.bytes.length,
-                    attributes: SEC_FILE | SEC_IMAGE, image: laid };
+                    attributes: SEC_FILE | SEC_IMAGE, image: laid, protect: page };
             });
         }
         if (asked === 0 && length === 0)
@@ -366,7 +403,7 @@ export function createMappingFunctions(host){
         // A size of zero over a file means the file's own size, which is
         // how a program maps a file whole without asking first.
         return { node, writable, size: asked || length, attributes: SEC_FILE | caching,
-            writesFile: FILE_WRITING_PAGES.includes(page) };
+            writesFile: FILE_WRITING_PAGES.includes(page), protect: page };
     };
 
     /** @param {Section} section */
@@ -439,8 +476,15 @@ export function createMappingFunctions(host){
             {
                 return fail(ERROR_INVALID_HANDLE);
             }
-            // A directory has no bytes to map.
-            if (opened?.directory)
+            // A directory has no bytes to map; a section asks no more of its
+            // file than its handle was opened for: writing for a read-write
+            // one, executing for an executable one.
+            const page = protect & PAGE_MASK;
+            const fileRights = opened ? host.handleAccess?.(file) ?? null : null;
+            if (opened?.directory || (opened && opened.write === false
+                    && FILE_WRITING_PAGES.includes(page))
+                || (fileRights !== null && [0x20, 0x40, 0x80].includes(page)
+                    && (fileRights & (FILE_EXECUTE | GENERIC_EXECUTE | GENERIC_ALL)) === 0))
             {
                 return fail(ERROR_ACCESS_DENIED);
             }
@@ -710,21 +754,20 @@ export function createMappingFunctions(host){
                 {
                     return STATUS.INVALID_VIEW_SIZE;
                 }
-                const access = WRITABLE_PAGES.includes(page & PAGE_MASK) ? FILE_MAP_WRITE
-                    : FILE_MAP_READ;
-                return settle(table.MapViewOfFile.handler([handle, access, 0, offset, length]),
-                    /** @param {number} address */
-                    address=>{
-                        if (address === 0)
-                        {
-                            return section.image && !section.image.image.relocatable
-                                ? STATUS.CONFLICTING_ADDRESSES : STATUS.NO_MEMORY;
-                        }
-                        writeDword(base >>> 0, address);
-                        writeDword(sizeAt >>> 0, pageRound(length));
-                        return section.image && address !== section.image.image.imageBase
-                            ? STATUS.IMAGE_NOT_AT_BASE : STATUS.SUCCESS;
-                    });
+                return settle(table.MapViewOfFile.handler([handle, accessFor(page), 0, offset,
+                    length]),
+                /** @param {number} address */
+                address=>{
+                    if (address === 0)
+                    {
+                        return section.image && !section.image.image.relocatable
+                            ? STATUS.CONFLICTING_ADDRESSES : STATUS.NO_MEMORY;
+                    }
+                    writeDword(base >>> 0, address);
+                    writeDword(sizeAt >>> 0, pageRound(length));
+                    return section.image && address !== section.image.image.imageBase
+                        ? STATUS.IMAGE_NOT_AT_BASE : STATUS.SUCCESS;
+                });
             },
         },
 
@@ -779,6 +822,16 @@ export function createMappingFunctions(host){
                 if (!mapping)
                 {
                     return fail(ERROR_INVALID_HANDLE);
+                }
+                // A view asks for no more than its section's protection allows
+                // and its handle was granted; asking for nothing is reading.
+                const needs = ((access >>> 0) & VIEW_RIGHTS) || FILE_MAP_READ;
+                const granted = host.handleAccess?.(handle) ?? FILE_MAP_ALL_ACCESS;
+                const rights = sectionRights(mapping.protect ?? 0x04)
+                    & (granted | FILE_MAP_EXECUTE);
+                if ((needs & rights) !== needs)
+                {
+                    return fail(ERROR_ACCESS_DENIED);
                 }
                 const offset = offsetLow >>> 0;
                 const wanted = (length >>> 0) || Math.max(mapping.size - offset, 0);
@@ -852,6 +905,9 @@ export function createMappingFunctions(host){
                     }) ?? null;
                     views.set(address, view);
                     host.viewRegions?.set(address, { length: wanted, writable,
+                        protect: viewProtection(access >>> 0),
+                        rights: viewRights(access >>> 0, mapping.protect ?? 0x04),
+                        pages: new Map(),
                         ...mapping.image && offset === 0
                             ? { sections: imageSections(mapping.image.image) } : {} });
                     if (metrics)

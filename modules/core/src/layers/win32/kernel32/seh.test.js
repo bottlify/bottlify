@@ -458,6 +458,53 @@ test('a processor fault becomes an exception a program can handle', async()=>{
     assert.equal(m.get(record + RECORD.INFORMATION), 1, 'error code bit 1 says it was a write');
 });
 
+test('a guard page touched inside the stack grows it, elsewhere it is the program\'s', async()=>{
+    // Windows answers a stack's guard page itself: the page becomes the
+    // committed limit, the one below the next guard, and the touch runs
+    // again; with no room left above the reservation's bottom it is
+    // STATUS_STACK_OVERFLOW, and a guard page anywhere else is
+    // STATUS_GUARD_PAGE_VIOLATION with the access and address.
+    const m = machine({ answer: ()=>Disposition.CONTINUE_EXECUTION });
+    m.registerFrames([0x51000]);
+    /** @type {Set<number>} */
+    const guarded = new Set([0x3f000, 0x31000, 0x60000]);
+    /** @type {number[]} */
+    const committed = [];
+    const seh = createSeh({ ...m.host, guardPages: {
+        touch: (/** @type {number} */ address)=>guarded.delete(address & ~0xfff),
+        commitGuard: (/** @type {number} */ page)=>{
+            committed.push(page);
+            guarded.add(page);
+            return true;
+        },
+    } });
+    m.put(TEB + 4, 0x40000);
+    m.put(TEB + 0xe0c, 0x30000);
+    const at = { ...m.registers(), eip: 0x401500 };
+
+    const grown = await seh.onFault({ vector: 14, eip: 0x401500, errorCode: 2,
+        address: 0x3fffc }, at);
+    assert.deepEqual(grown, { handled: true, registers: at }, 'the touch runs again');
+    assert.deepEqual(committed, [0x3e000]);
+    assert.equal(m.get(TEB + 8), 0x3f000, 'StackLimit');
+    assert.equal(m.called.length, 0, 'no handler sees it');
+
+    assert.equal((await seh.onFault({ vector: 14, eip: 0x401500, errorCode: 2,
+        address: 0x31010 }, at)).handled, true);
+    assert.deepEqual(committed, [0x3e000], 'no page left above the bottom');
+    assert.equal(m.get(m.called[0].args[0] + RECORD.CODE), STATUS.STACK_OVERFLOW);
+
+    await seh.onFault({ vector: 14, eip: 0x401500, errorCode: 0, address: 0x60008 }, at);
+    const record = m.called[1].args[0];
+    assert.equal(m.get(record + RECORD.CODE), STATUS.GUARD_PAGE_VIOLATION);
+    assert.deepEqual([m.get(record + RECORD.INFORMATION), m.get(record + RECORD.INFORMATION + 4)],
+        [0, 0x60008]);
+
+    await seh.onFault({ vector: 14, eip: 0x401500, errorCode: 0, address: 0x60008 }, at);
+    assert.equal(m.get(m.called[2].args[0] + RECORD.CODE), STATUS.ACCESS_VIOLATION,
+        'the guard went with the first touch');
+});
+
 test('an instruction the processor refused is traced with its bytes', async()=>{
     // UD2 a protection raises on purpose and an opcode the translator lacks
     // both arrive as vector 6; only the bytes tell them apart.

@@ -38,6 +38,7 @@
  */
 
 import { privilegedAt, storeMachineStatus } from './machine-status.js';
+import { TEB } from './teb.js';
 import {
     CONTEXT_EXTENDED_REGISTERS, CONTEXT_FLOATING_POINT, floatGroupsOf, writeFloatGroups,
 } from './fpu-context.js';
@@ -150,6 +151,7 @@ export const STATUS = Object.freeze({
     ILLEGAL_INSTRUCTION: 0xc000001d,
     INTEGER_DIVIDE_BY_ZERO: 0xc0000094,
     PRIVILEGED_INSTRUCTION: 0xc0000096,
+    GUARD_PAGE_VIOLATION: 0x80000001,
     BREAKPOINT: 0x80000003,
     SINGLE_STEP: 0x80000004,
     FLOAT_DIVIDE_BY_ZERO: 0xc000008e,
@@ -198,6 +200,8 @@ const SILENT_SERVICES = new Set([1, 3, 4]);
  */
 const SCRATCH = RECORD.SIZE + CONTEXT.SIZE + 0x20;
 
+const PAGE_SIZE = 0x1000;
+
 /** How much of the stack above esp the last-chance trace shows, in bytes. */
 const STACK_TRACED = 0x1000;
 
@@ -238,6 +242,10 @@ const hex = value=>`0x${(value >>> 0).toString(16)}`;
  * @property {() => any} [currentThread]
  * @property {import('./fpu-context.js').FloatState | null} [float]  The processor's
  *           images of a thread's x87 and SSE state, which a context carries.
+ * @property {{ touch: (address: number) => boolean,
+ *     commitGuard: (page: number) => boolean }} [guardPages]  The reservations'
+ *           guard pages (heap.js `GUARD_PAGES`): a refused touch of one takes
+ *           its guard away, and a stack grows by committing its next one.
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {(text: string) => void} [trace]
  * @property {(what: { code: number, address: number }) => void} [terminate]
@@ -275,6 +283,38 @@ export function createSeh(host){
 
     /** The last top-level filter a program installed. */
     let topLevelFilter = 0;
+
+    /**
+     * A refused touch of a guard page, as Windows answers it before any
+     * handler sees it: the page loses its guard; one inside the running
+     * thread's stack reservation (DeallocationStack to StackBase) becomes the
+     * stack's committed limit and the page below it the next guard page, and
+     * the touch runs again ('grown'), unless no page would be left between
+     * that guard and the reservation's bottom ('overflow',
+     * STATUS_STACK_OVERFLOW); anywhere else the touch is
+     * STATUS_GUARD_PAGE_VIOLATION ('guard'). Null for a page with no guard.
+     *
+     * @param {number} address
+     * @returns {'grown' | 'overflow' | 'guard' | null}
+     */
+    const guardTouched = address=>{
+        if (!host.guardPages?.touch(address))
+        {
+            return null;
+        }
+        const teb = host.teb() >>> 0;
+        const top = teb === 0 ? 0 : readU32(teb + TEB.STACK_BASE);
+        const bottom = teb === 0 ? 0 : readU32(teb + TEB.DEALLOCATION_STACK);
+        if (address < bottom || address >= top)
+        {
+            return 'guard';
+        }
+        const page = (address & ~(PAGE_SIZE - 1)) >>> 0;
+        writeU32(teb + TEB.STACK_LIMIT, page);
+        const next = page - PAGE_SIZE;
+        return next >= bottom + PAGE_SIZE && host.guardPages.commitGuard(next)
+            ? 'grown' : 'overflow';
+    };
 
     /**
      * Writes an exception record where a handler will look for it.
@@ -1040,8 +1080,17 @@ export function createSeh(host){
             {
                 return { handled: true, registers: { ...registers, eip: registers.eip + 1 >>> 0 } };
             }
+            const guarded = fault.vector === 14 && fault.address !== undefined
+                ? guardTouched(fault.address >>> 0) : null;
+            if (guarded === 'grown')
+            {
+                return { handled: true, registers };
+            }
             const code = privileged ? STATUS.PRIVILEGED_INSTRUCTION
-                : VECTOR_TO_STATUS[/** @type {keyof typeof VECTOR_TO_STATUS} */ (fault.vector)];
+                : guarded === 'overflow' ? STATUS.STACK_OVERFLOW
+                    : guarded === 'guard' ? STATUS.GUARD_PAGE_VIOLATION
+                        : VECTOR_TO_STATUS[/** @type {keyof typeof VECTOR_TO_STATUS} */ (
+                            fault.vector)];
             if (code === undefined)
             {
                 return { handled: false };
@@ -1050,7 +1099,7 @@ export function createSeh(host){
             // what address, because a handler is allowed to read them -- one
             // that commits the page it was refused and goes on reads both. A
             // protection fault has no address to give, and says so with -1.
-            const parameters = code === STATUS.ACCESS_VIOLATION
+            const parameters = fault.vector === 14 || code === STATUS.ACCESS_VIOLATION
                 ? [(fault.errorCode ?? 0) & 2 ? 1 : 0,
                     fault.vector === 13 ? 0xffffffff : (fault.address ?? 0) >>> 0]
                 : fault.vector === DEBUG_SERVICE
