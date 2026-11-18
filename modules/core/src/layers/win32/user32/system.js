@@ -60,6 +60,7 @@ import { LOGFONTA, LOGFONTW_SIZE, logFontBytes, readLogFont, readLogFontW } from
 import { ANY_WINDOW, threadIdOf } from './messages.js';
 import { DISPLAY_DEVICE_NAME, VIDEO_ADAPTER_NAME } from '../devices.js';
 import { createRefusals } from '../common/refusal.js';
+import { afterWait } from './after-wait.js';
 import { charactersOf, readToTerminator } from '../common/scan-windows.js';
 
 /** GetSystemMetrics indices this build has a real answer for. */
@@ -3656,10 +3657,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
         }
     };
 
-    /** @param {any} value @param {(answer: any) => any} then */
-    const andThen = (value, then)=>(typeof value?.then === 'function'
-        ? value.then(then)
-        : then(value));
+    const andThen = afterWait(host);
 
     /**
      * ChildWindowFromPoint, both spellings: the topmost child whose rectangle

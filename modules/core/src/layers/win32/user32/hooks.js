@@ -29,6 +29,7 @@
  */
 
 import { threadIdOf } from './messages.js';
+import { afterWait } from './after-wait.js';
 
 export const WINEVENT_OUTOFCONTEXT = 0x0000;
 export const WINEVENT_SKIPOWNTHREAD = 0x0001;
@@ -79,9 +80,7 @@ export function createWinEventHooks(host, { windowThread, later }){
     const hooks = [];
     const processId = host.processId ?? 0x1000;
 
-    /** @param {unknown} value @param {() => any} then */
-    const andThen = (value, then)=>(typeof (/** @type {any} */ (value))?.then === 'function'
-        ? /** @type {Promise<unknown>} */ (value).then(then) : then());
+    const andThen = afterWait(host);
 
     /**
      * Whether a hook takes an event of this number reported from this thread.
