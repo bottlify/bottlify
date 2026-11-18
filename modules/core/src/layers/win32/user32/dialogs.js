@@ -49,7 +49,7 @@ import { ANY_WINDOW, WM_QUIT, threadIdOf } from './messages.js';
 import { readMessage, readRect, userLayouts, writeMessage, writeRect } from './structs.js';
 import { WS_CAPTION, WS_VISIBLE, frameOf } from './frame.js';
 import { createTabWalk } from './tabwalk.js';
-import { readText, translated, writeText } from './unicode.js';
+import { readText, writeText } from './unicode.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 import {
     DLGC_BUTTON, DLGC_DEFPUSHBUTTON, DLGC_HASSETSEL, DLGC_WANTALLKEYS,
@@ -291,8 +291,10 @@ const MAX_RESOURCE_NAME = 256;
  *           SendMessage as a program calls it: to another thread's window it
  *           waits for that thread to take it.
  * @property {(record: any, message: { hwnd: number, message: number, wParam: number,
- *     lParam: number }, thread?: unknown) => number | Promise<number>} defDlgProc
- *           The dialog class's procedure: DWLP_DLGPROC first, then the default.
+ *     lParam: number, unicode?: boolean }, thread?: unknown)
+ *     => number | Promise<number>} defDlgProc
+ *           The dialog class's procedure: DWLP_DLGPROC first, then the default;
+ *           the message in the encoding its text is in.
  * @property {() => number} focus
  * @property {(hwnd: number, thread?: unknown) => number | Promise<number>} setFocus
  * @property {(hwnd: number, thread?: unknown) => number | Promise<number>} [show]
@@ -749,6 +751,10 @@ export function createDialogFunctions(options){
         // the first message and the dialog's first control.
         const build = ()=>{
             dialog.extra.setUint32(DWLP_DLGPROC, dialogFunc >>> 0, true);
+            // Of the encoding of the call that made the dialog, which
+            // Get/SetWindowLong(DWLP_DLGPROC) read and change as a window
+            // procedure's.
+            dialog.dlgProcUnicode = unicode === true;
             /** @type {any[]} */
             const controls = [];
             /**
@@ -1376,8 +1382,9 @@ export function createDialogFunctions(options){
         /**
          * LRESULT DefDlgProcW(HWND hDlg, UINT Msg, WPARAM wParam, LPARAM lParam)
          *
-         * The default reads the ANSI page, so a wide message reaches it
-         * converted, and a text it fills comes back wide.
+         * The dialog procedure hears the message as it was given, whatever
+         * it reads; the default after it reads the ANSI page, so a wide text
+         * reaches it converted and one it fills comes back wide.
          */
         DefDlgProcW: {
             argBytes: 16,
@@ -1388,11 +1395,10 @@ export function createDialogFunctions(options){
                 {
                     return 0;
                 }
-                const thread = host.callerThread?.();
-                return translated(host, {
+                return host.defDlgProc(record, {
                     hwnd: hwnd >>> 0, message: message >>> 0, wParam: wParam >>> 0,
                     lParam: lParam >>> 0, unicode: true,
-                }, false, ansi=>host.defDlgProc(record, ansi, thread));
+                }, host.callerThread?.());
             },
         },
 

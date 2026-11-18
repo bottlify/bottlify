@@ -40,7 +40,8 @@ import {
 } from './frame.js';
 import {
     COLOR_3DDKSHADOW, COLOR_3DFACE, COLOR_3DHILIGHT, COLOR_3DSHADOW, COLOR_BTNTEXT,
-    DLGWINDOWEXTRA, HTCLIENT, HTNOWHERE, HTTRANSPARENT, SB_LINEDOWN, SB_ENDSCROLL, SB_LINEUP,
+    DLGWINDOWEXTRA, DWLP_DLGPROC, HTCLIENT, HTNOWHERE, HTTRANSPARENT, SB_LINEDOWN, SB_ENDSCROLL,
+    SB_LINEUP,
     SB_THUMBPOSITION, SB_THUMBTRACK, WM_LBUTTONUP, thumbOf, thumbValue,
     SB_PAGEDOWN, SB_PAGEUP, WM_CTLCOLORBTN, WM_CTLCOLORDLG, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX,
     WM_CTLCOLORSCROLLBAR, WM_CTLCOLORSTATIC, WM_ERASEBKGND, WM_GETTEXT,
@@ -1305,9 +1306,13 @@ export function createWindowFunctions(host){
             // processor: a procedure on this side that sends to guest code
             // and goes on afterwards is past an await by then.
             const on = thread ?? host.callerThread?.();
-            // The procedures on this side read the ANSI page.
-            return record ? translated(host, message, false,
-                ansi=>watchDispatch(host, ansi, procedure(record, ansi, on)), record.style) : 0;
+            // The procedures on this side read the ANSI page, save the dialog
+            // class's: it is DefDlgProcA or DefDlgProcW by the window's kind,
+            // and hands the dialog procedure the message as the window took
+            // it (`controls.js` dialogProc).
+            const reads = procedure === controlProcedures['#32770'] && record?.unicode === true;
+            return record ? translated(host, message, reads,
+                text=>watchDispatch(host, text, procedure(record, text, on)), record.style) : 0;
         }
         // A window's own procedure reads text in the encoding it was set in; a
         // procedure named by its address, as CallWindowProc names one, is
@@ -3385,6 +3390,12 @@ export function createWindowFunctions(host){
                 break;
         }
         const at = index | 0;
+        // A dialog's procedure, as its window procedure is: a handle to a
+        // reader of the other encoding (dialog.c test_aw_conversion_dlgproc).
+        if (at === DWLP_DLGPROC && record.dlgProcUnicode !== undefined)
+        {
+            return procAs(record.extra.getUint32(at, true), record.dlgProcUnicode, unicode);
+        }
         // Anything outside the extra bytes the class asked for is not this
         // window's storage, and reading it would be reading somebody else's.
         return at >= 0 && at + 4 <= record.extra.byteLength ? record.extra.getUint32(at, true) : 0;
@@ -3522,6 +3533,15 @@ export function createWindowFunctions(host){
                 break;
         }
         const at = index | 0;
+        if (at === DWLP_DLGPROC && record.dlgProcUnicode !== undefined)
+        {
+            // Set through one encoding, the dialog procedure is of it; a
+            // handle sets the procedure behind it, of the encoding it stands for.
+            const behind = procBehind(value);
+            record.extra.setUint32(at, (behind ? behind.address : value) >>> 0, true);
+            record.dlgProcUnicode = behind ? behind.unicode : unicode;
+            return;
+        }
         if (at >= 0 && at + 4 <= record.extra.byteLength)
         {
             record.extra.setUint32(at, value >>> 0, true);
@@ -8702,8 +8722,11 @@ export function createWindowFunctions(host){
          * BOOL SetWindowTextW(HWND hWnd, LPCWSTR lpString)
          *
          * A wide WM_SETTEXT, which reaches an ANSI procedure converted to the
-         * ANSI page, as SendMessageW's would; the answer is the message's, so
-         * a text that could not be converted is a failure.
+         * ANSI page, as SendMessageW's would. Like SetWindowTextA it answers
+         * TRUE whatever the procedure answered (a dialog's procedure that
+         * handles it answers 0 through DWLP_MSGRESULT; dialog.c
+         * test_aw_conversion_dlgproc); only a text that cannot be converted,
+         * for want of a heap to put it in, fails.
          */
         SetWindowTextW: {
             argBytes: 8,
@@ -8714,8 +8737,16 @@ export function createWindowFunctions(host){
                 {
                     return 0;
                 }
+                const own = procedures.get(record.wndProc);
+                const readsWide = own
+                    ? own === controlProcedures['#32770'] && record.unicode === true
+                    : procReads(record);
+                if (!readsWide && !host.allocate && (string >>> 0) !== 0)
+                {
+                    return 0;
+                }
                 return andThen(sendAcross(record.hwnd, WM_SETTEXT, 0, string >>> 0,
-                    host.callerThread?.(), true), (/** @type {number | null} */ set)=>(set ? 1 : 0));
+                    host.callerThread?.(), true), ()=>1);
             },
         },
 

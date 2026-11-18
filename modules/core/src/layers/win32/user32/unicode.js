@@ -61,11 +61,17 @@ const ITEM_STRING_IN = new Set([LB_ADDSTRING, LB_INSERTSTRING, LB_SELECTSTRING, 
 /** An edit's replacement text, and the line it copies out. */
 const EM_REPLACESEL = 0x00c2;
 const EM_GETLINE = 0x00c4;
+const LB_ADDFILE = 0x0196;
+/** The section or device a broadcast names (lParam). */
+const WM_WININICHANGE = 0x001a;
+const WM_DEVMODECHANGE = 0x001b;
 /**
  * The messages whose lParam is a string whatever the window keeps: a path,
- * an edit's replacement text.
+ * a file to add, an edit's replacement text, the section or device a
+ * broadcast names.
  */
-const PATH_IN = new Set([LB_DIR, CB_DIR, EM_REPLACESEL]);
+const PATH_IN = new Set([LB_DIR, CB_DIR, LB_ADDFILE, EM_REPLACESEL, WM_WININICHANGE,
+    WM_DEVMODECHANGE]);
 /** The messages that fill a buffer with an item's string, and the length each is asked. */
 const ITEM_STRING_OUT = new Map([[LB_GETTEXT, LB_GETTEXTLEN], [CB_GETLBTEXT, CB_GETLBTEXTLEN]]);
 const LBS_OWNERDRAW = 0x0030;

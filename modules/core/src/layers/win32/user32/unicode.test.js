@@ -135,6 +135,23 @@ test('WM_GETTEXT answers the wide caller in its own buffer, in characters', ()=>
     assert.equal(m.lent.size, 0);
 });
 
+test('a broadcast\'s section and a file to add cross converted, as a path does', ()=>{
+    // dialog.c test_aw_conversion_dlgproc: WM_WININICHANGE, WM_DEVMODECHANGE
+    // and LB_ADDFILE carry a string in lParam like LB_DIR.
+    const m = memory();
+    m.writeMemory(0x100, textBytes('intl', true));
+    for (const kind of [0x001a, 0x001b, 0x0196])
+    {
+        let read = '';
+        translated(m, { hwnd: 1, message: kind, wParam: 0, lParam: 0x100, unicode: true },
+            false, got=>{
+                read = m.readCString(got.lParam, 100);
+                return 0;
+            });
+        assert.equal(read, 'intl', `message 0x${kind.toString(16)}`);
+    }
+});
+
 test('an edit\'s replacement text and the line it copies out cross converted', ()=>{
     // A self-extractor wrote each line of its log into a wide rich edit with
     // EM_REPLACESEL; the edit read the wide text as ANSI and showed the

@@ -1810,6 +1810,63 @@ test('a dialog made through the wide call is a Unicode window, its procedure rea
     assert.equal(fns.DialogBoxParamW.argBytes, 20);
 });
 
+test('a dialog procedure hears a text as the window took it, whatever encoding it is of', ()=>{
+    // dialog.c test_aw_conversion_dlgproc: SendMessageA to a wide dialog
+    // reaches its procedure as a wide copy; DefDlgProcA/W pass the caller's
+    // pointer through untouched; GetWindowLong(DWLP_DLGPROC) is the
+    // procedure to a reader of its encoding and a handle to the other.
+    const WM_SETTEXT = 0x000c;
+    const DWLP_DLGPROC = 4;
+    const OTHER_PROC = 0x402100;
+    /** @type {{ lParam: number, unicode: boolean }[]} */
+    const heard = [];
+    let heap = 0x13000;
+    const context = setup({
+        allocate: (/** @type {number} */ size)=>{
+            heap += size + 15 & ~15;
+            return heap - (size + 15 & ~15);
+        },
+        dispatch: (wndProc, message)=>{
+            if ((wndProc === DIALOGPROC || wndProc === OTHER_PROC)
+                && message.message === WM_SETTEXT)
+            {
+                heard.push({ lParam: message.lParam, unicode: message.unicode === true });
+            }
+            return 0;
+        },
+    });
+    const { memory, fns } = context;
+    putTemplate(memory, [{ id: 100, x: 4, y: 8, cx: 20, cy: 6, title: 'OK' }]);
+    const dialog = fns.CreateDialogIndirectParamW.handler(
+        [HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]);
+    memory.putString(0x3000, 'Text');
+    memory.writeMemory(0x3100, new Uint8Array(Buffer.from('Text\0', 'utf16le')));
+
+    fns.SendMessageA.handler([dialog, WM_SETTEXT, 0, 0x3000]);
+    assert.equal(heard.length, 1);
+    assert.ok(heard[0].unicode && heard[0].lParam !== 0x3000, 'a wide copy of the ANSI text');
+    fns.SendMessageW.handler([dialog, WM_SETTEXT, 0, 0x3100]);
+    assert.deepEqual(heard[1], { lParam: 0x3100, unicode: true }, 'the wide text as it came');
+    fns.DefDlgProcA.handler([dialog, WM_SETTEXT, 0, 0x3000]);
+    assert.deepEqual(heard[2], { lParam: 0x3000, unicode: false }, 'DefDlgProcA: untouched');
+    fns.DefDlgProcW.handler([dialog, WM_SETTEXT, 0, 0x3100]);
+    assert.deepEqual(heard[3], { lParam: 0x3100, unicode: true }, 'DefDlgProcW: untouched');
+
+    assert.equal(fns.GetWindowLongW.handler([dialog, DWLP_DLGPROC]), DIALOGPROC);
+    const handle = fns.GetWindowLongA.handler([dialog, DWLP_DLGPROC]);
+    assert.notEqual(handle, DIALOGPROC, 'a handle to an ANSI reader of a wide procedure');
+    fns.SetWindowLongA.handler([dialog, DWLP_DLGPROC, OTHER_PROC]);
+    assert.equal(fns.GetWindowLongA.handler([dialog, DWLP_DLGPROC]), OTHER_PROC);
+    assert.notEqual(fns.GetWindowLongW.handler([dialog, DWLP_DLGPROC]), OTHER_PROC);
+    assert.equal(fns.IsWindowUnicode.handler([dialog]), 1, 'the window stays wide');
+    fns.SetWindowLongA.handler([dialog, DWLP_DLGPROC, handle]);
+    assert.equal(fns.GetWindowLongW.handler([dialog, DWLP_DLGPROC]), DIALOGPROC,
+        'a handle sets the procedure behind it');
+
+    // The procedure answered 0 to each: SetWindowTextW is TRUE all the same.
+    assert.equal(fns.SetWindowTextW.handler([dialog, 0x3100]), 1);
+});
+
 test('IsDlgButtonChecked asks the one button, and answers what it says', ()=>{
     const BM_GETCHECK = 0x00f0;
     /** @type {number[]} */
