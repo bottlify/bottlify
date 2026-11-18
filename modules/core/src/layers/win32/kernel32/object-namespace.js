@@ -92,6 +92,24 @@ export const keyIn = (directory, name)=>(WIN32_DIRECTORY.test(directory) ? name
     : directory === '\\' ? `\\${name}` : `${directory}\\${name}`);
 
 /**
+ * The name a key stands for in a directory, keyIn's other way: null for a key
+ * of anything else. A Win32 directory's names are the keys with no backslash,
+ * less the run's own entries (a pipe's, kept under `pipe:`).
+ *
+ * @param {string} directory @param {string} key
+ * @returns {string | null}
+ */
+export const nameIn = (directory, key)=>{
+    if (WIN32_DIRECTORY.test(directory))
+    {
+        return key.includes('\\') || key.startsWith('pipe:') ? null : key;
+    }
+    const prefix = directory === '\\' ? '\\' : `${directory}\\`;
+    return key.startsWith(prefix) && key.length > prefix.length
+        && !key.slice(prefix.length).includes('\\') ? key.slice(prefix.length) : null;
+};
+
+/**
  * Makes the boot namespace in a table that has not got it.
  *
  * @param {Map<string, { kind: string, object: any, refs: number }>} table

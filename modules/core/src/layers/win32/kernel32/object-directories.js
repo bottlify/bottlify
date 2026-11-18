@@ -18,10 +18,14 @@
 
 import { STATUS } from '../ntdll/status.js';
 import { nameToWalk, readObjectAttributes, OBJ_OPENIF } from './object-attributes.js';
-import { DIRECTORY, SYMBOLIC_LINK } from './object-namespace.js';
+import { DIRECTORY, SYMBOLIC_LINK, TYPE_NAMES } from './object-namespace.js';
 import { grantedAccess } from './access.js';
 
 const STATUS_BUFFER_TOO_SMALL = STATUS.BUFFER_TOO_SMALL;
+/** A query that wrote what fitted and has more to give. */
+const STATUS_MORE_ENTRIES = 0x00000105;
+/** DIRECTORY_BASIC_INFORMATION: two UNICODE_STRINGs, a 32-bit process's. */
+const ENTRY_BYTES = 16;
 
 /**
  * @typedef {Object} DirectoryNativesHost
@@ -185,6 +189,102 @@ export function createDirectoryNatives(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([out, access, attributes])=>open(DIRECTORY, out, access, attributes),
+        },
+
+        /**
+         * NTSTATUS NtQueryDirectoryObject(HANDLE, PVOID Buffer, ULONG Length,
+         *   BOOLEAN ReturnSingleEntry, BOOLEAN RestartScan, PULONG Context,
+         *   PULONG ReturnLength)
+         *
+         * The names a directory holds from the context on (from the first
+         * where the scan restarts), in the order they were made: an array of
+         * DIRECTORY_BASIC_INFORMATION closed by an empty entry, the names and
+         * their types' names after it. As many as fit are written, the
+         * context moved past them and STATUS_MORE_ENTRIES answered when some
+         * did not; a single entry that does not fit is STATUS_BUFFER_TOO_SMALL
+         * and moves nothing. No entry left is STATUS_NO_MORE_ENTRIES, the
+         * closing entry's size answered and that entry cleared where it fits.
+         */
+        NtQueryDirectoryObject: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: ([handle, buffer, length, single, restart, context, returned])=>{
+                const kind = kernel.handles.typeOf(handle >>> 0);
+                if (kind === null)
+                {
+                    return STATUS.INVALID_HANDLE;
+                }
+                if (kind !== DIRECTORY)
+                {
+                    return STATUS.OBJECT_TYPE_MISMATCH;
+                }
+                if ((context >>> 0) === 0)
+                {
+                    return STATUS.ACCESS_VIOLATION;
+                }
+                const { path } = kernel.handles.resolve(handle >>> 0);
+                const start = (restart & 0xff) !== 0 ? 0 : readDword(context);
+                const left = namedObjects.list(path)
+                    .filter(entry=>TYPE_NAMES.has(entry.kind)).slice(start);
+                const room = length >>> 0;
+                /** @param {number} needed */
+                const answer = needed=>{
+                    if ((returned >>> 0) !== 0)
+                    {
+                        writeDword(returned, needed);
+                    }
+                };
+                /** @param {number} count  the entries' strings' bytes, by how many are taken */
+                const bytesFor = count=>(count + 1) * ENTRY_BYTES + left.slice(0, count)
+                    .reduce((sum, entry)=>sum + (entry.name.length + 1) * 2
+                        + (/** @type {string} */ (TYPE_NAMES.get(entry.kind)).length + 1) * 2, 0);
+                if (left.length === 0)
+                {
+                    if (room >= ENTRY_BYTES)
+                    {
+                        host.writeMemory(buffer >>> 0, new Uint8Array(ENTRY_BYTES));
+                    }
+                    answer(ENTRY_BYTES);
+                    return STATUS.NO_MORE_ENTRIES;
+                }
+                const wanted = (single & 0xff) !== 0 ? 1 : left.length;
+                let taken = wanted;
+                while (taken > 0 && bytesFor(taken) > room)
+                {
+                    taken--;
+                }
+                if (taken === 0 && wanted === 1)
+                {
+                    answer(bytesFor(1));
+                    return STATUS_BUFFER_TOO_SMALL;
+                }
+                const size = bytesFor(taken);
+                const bytes = new Uint8Array(size);
+                const view = new DataView(bytes.buffer);
+                let text = (taken + 1) * ENTRY_BYTES;
+                /** @param {number} at @param {string} value */
+                const string = (at, value)=>{
+                    view.setUint16(at, value.length * 2, true);
+                    view.setUint16(at + 2, value.length * 2 + 2, true);
+                    view.setUint32(at + 4, (buffer >>> 0) + text, true);
+                    for (let unit = 0; unit < value.length; unit++)
+                    {
+                        view.setUint16(text + unit * 2, value.charCodeAt(unit), true);
+                    }
+                    text += (value.length + 1) * 2;
+                };
+                left.slice(0, taken).forEach((entry, at)=>{
+                    string(at * ENTRY_BYTES, entry.name);
+                    string(at * ENTRY_BYTES + 8, /** @type {string} */ (TYPE_NAMES.get(entry.kind)));
+                });
+                if (room >= ENTRY_BYTES)
+                {
+                    host.writeMemory(buffer >>> 0, bytes.subarray(0, Math.min(size, room)));
+                }
+                writeDword(context, start + taken);
+                answer(size);
+                return taken < left.length && wanted > 1 ? STATUS_MORE_ENTRIES : STATUS.SUCCESS;
+            },
         },
 
         /**

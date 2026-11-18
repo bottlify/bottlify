@@ -90,6 +90,27 @@ function machine(table = new Map()){
             [...target].forEach((ch, i)=>view.setUint16(0x310 + i * 2, ch.charCodeAt(0), true));
             return call('NtCreateSymbolicLinkObject', OUT, 1, at, 0x300);
         },
+        /**
+         * NtQueryDirectoryObject into 0x1000, its context at 0x30.
+         *
+         * @param {number} handle @param {number} room @param {boolean} single
+         * @param {boolean} restart
+         */
+        query: (handle, room, single, restart)=>{
+            view.setUint32(0x24, 0xdeadbeef, true);
+            const status = call('NtQueryDirectoryObject', handle, 0x1000, room, single ? 1 : 0,
+                restart ? 1 : 0, 0x30, 0x24);
+            /** @param {number} at */
+            const text = at=>{
+                const length = view.getUint16(at, true);
+                const from = view.getUint32(at + 4, true);
+                return String.fromCharCode(...new Uint16Array(bytes.slice(from, from + length)
+                    .buffer));
+            };
+            return { status, context: view.getUint32(0x30, true),
+                size: view.getUint32(0x24, true), name: (/** @type {number} */ n)=>text(0x1000 + n * 16),
+                type: (/** @type {number} */ n)=>text(0x1000 + n * 16 + 8) };
+        },
         /** @param {string} name @param {number} [root] */
         openLink: (name, root)=>call('NtOpenSymbolicLinkObject', OUT, 1,
             attributes(name, root)),
@@ -199,4 +220,33 @@ test('a directory made by one process is found by another over the run\'s table'
     const second = machine(table);
     assert.equal(first.dir('\\BaseNamedObjects\\shared-dir'), STATUS_SUCCESS);
     assert.equal(second.openDir('\\BaseNamedObjects\\shared-dir'), STATUS_SUCCESS);
+});
+
+test('a directory\'s names are listed in the order they were made, as many as fit', ()=>{
+    const STATUS_MORE_ENTRIES = 0x105;
+    const STATUS_NO_MORE_ENTRIES = 0x8000001a;
+    const m = machine();
+    assert.equal(m.dir('\\BaseNamedObjects\\winetest'), STATUS_SUCCESS);
+    const dir = m.out();
+    let read = m.query(dir, 200, true, true);
+    assert.deepEqual([read.status, read.size], [STATUS_NO_MORE_ENTRIES, 16]);
+    m.named.remember('\\BaseNamedObjects\\winetest\\Telamon', 'mutex', {}, false, ()=>{});
+    m.named.remember('\\BaseNamedObjects\\winetest\\Oileus', 'mutex', {}, false, ()=>{});
+    read = m.query(dir, 200, true, true);
+    assert.deepEqual([read.status, read.context, read.name(0), read.type(0)],
+        [STATUS_SUCCESS, 1, 'Telamon', 'Mutant']);
+    const one = read.size;
+    read = m.query(dir, one - 1, true, true);
+    assert.deepEqual([read.status, read.size], [STATUS_BUFFER_TOO_SMALL, one]);
+    read = m.query(dir, 200, false, true);
+    assert.deepEqual([read.status, read.context, read.name(1)], [STATUS_SUCCESS, 2, 'Oileus']);
+    read = m.query(dir, read.size - 1, false, true);
+    assert.deepEqual([read.status, read.context, read.name(0)],
+        [STATUS_MORE_ENTRIES, 1, 'Telamon'], 'as many as fit');
+    read = m.query(dir, 16, false, true);
+    assert.deepEqual([read.status, read.context, read.size], [STATUS_MORE_ENTRIES, 0, 16]);
+    m.view.setUint32(0x30, 1, true);
+    read = m.query(dir, 200, false, false);
+    assert.deepEqual([read.status, read.context, read.name(0)], [STATUS_SUCCESS, 2, 'Oileus'],
+        'from the context on');
 });

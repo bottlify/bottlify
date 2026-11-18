@@ -25,7 +25,7 @@
  * at all, just carried into the process that took its place.
  */
 
-import { DIRECTORY, SYMBOLIC_LINK, bootNamespace, createObjectNamespace }
+import { DIRECTORY, SYMBOLIC_LINK, bootNamespace, createObjectNamespace, nameIn }
     from './object-namespace.js';
 
 /** What a create reports when the name was already taken. */
@@ -122,6 +122,27 @@ export function createNamedObjects({ table = new Map(), handles } = {}){
                 return STATUS_OBJECT_TYPE_MISMATCH;
             }
             return place.held ? at(place.key, true)?.key ?? place.key : place.key;
+        },
+
+        /**
+         * The names a directory holds, in the order they were made, each with
+         * its kind (NtQueryDirectoryObject).
+         *
+         * @param {string} directory  the directory's path
+         * @returns {{ name: string, kind: string }[]}
+         */
+        list(directory){
+            /** @type {{ name: string, kind: string }[]} */
+            const found = [];
+            for (const [key, held] of table)
+            {
+                const name = nameIn(directory, key);
+                if (name !== null)
+                {
+                    found.push({ name, kind: held.kind });
+                }
+            }
+            return found;
         },
 
         /**
@@ -329,6 +350,7 @@ export function createRemoteNamedObjects({ objects, kernel, handles }){
     return {
         keyOf: own.keyOf,
         place: own.place,
+        list: own.list,
         /** @param {string | null} name @param {string} kind */
         existing(name, kind){
             if (!across(kind))
