@@ -2503,7 +2503,8 @@ names live in its session's `\Sessions\1\BaseNamedObjects` and `Global\` names i
 `\BaseNamedObjects`, two directories with names of their own. The object namespace
 (`kernel32/object-namespace.js`) has both directories and the links between them (Global, Local,
 Session, `\Sessions\BNOLINKS`), but keeps the names of either under the name alone, as kernel32
-always kept Win32 names: an object made in one is found through the other. Every program here runs
+always kept Win32 names: an object made in one is found through the other, and kernel32's
+`Global\X`, `Local\X` and `Session\1\X` are the one name `X`. Every program here runs
 in the one interactive session, so a name a service in session 0 and a program in session 1 would
 each have to themselves does not arise. Revisit when a bottle runs a service in a session of its
 own. *2026-11-18.*

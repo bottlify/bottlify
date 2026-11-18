@@ -142,6 +142,9 @@ threads held is abandoned to the next waiter, and an object another process stil
 state and nothing of the gone process - not its memory, its scheduler or its link
 ([`core/src/system-objects.js`](../../modules/core/src/system-objects.js),
 [`kernel32/named-objects.js`](../../modules/core/src/layers/win32/kernel32/named-objects.js)).
+A name is one key in that table whatever its spelling: kernel32's `Global\X`, `Local\X` and a
+native call's `\BaseNamedObjects\X` take the object namespace's one walk to the same object
+(decisions.md A271).
 The engine thread answers a process thread across a link: two rings in shared memory, one each
 way, with a doorbell word per side ([`core/src/system/link.js`](../../modules/core/src/system/link.js), values encoded by `codec.js`). The
 process thread blocks on its doorbell for each answer and answers what it is asked meanwhile (the
