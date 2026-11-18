@@ -135,21 +135,19 @@ const accessFor = page=>{
  * A view of an image section: the image laid out at its own base, moved to
  * `address` - its fixups applied and its header's ImageBase made `address` -
  * as Windows' loader moves an image it cannot place at its base (one
- * mechanism with the loader's own images, `relocateImage`). Null when the
- * image has to be at its base and is not: it carries no relocations.
+ * mechanism with the loader's own images, `relocateImage`). An image that
+ * carries no relocations is mapped there as it lies, nothing fixed up, as
+ * Windows maps a section's view and answers STATUS_IMAGE_NOT_AT_BASE: the
+ * view is the program's to read, and only a loader would refuse to run it.
  *
  * @param {{ bytes: Uint8Array, image: import('../../loader/internal/pe.js').PeImage }} laid
  * @param {number} address
- * @returns {Uint8Array | null}
+ * @returns {Uint8Array}
  */
 export function imageViewAt(laid, address){
-    if (address === laid.image.imageBase)
+    if (address === laid.image.imageBase || !laid.image.relocatable)
     {
         return laid.bytes.slice();
-    }
-    if (!laid.image.relocatable)
-    {
-        return null;
     }
     const bytes = laid.bytes.slice();
     relocateImage(bytes, laid.image, address);
@@ -760,8 +758,7 @@ export function createMappingFunctions(host){
                 address=>{
                     if (address === 0)
                     {
-                        return section.image && !section.image.image.relocatable
-                            ? STATUS.CONFLICTING_ADDRESSES : STATUS.NO_MEMORY;
+                        return STATUS.NO_MEMORY;
                     }
                     writeDword(base >>> 0, address);
                     writeDword(sizeAt >>> 0, pageRound(length));
@@ -928,14 +925,8 @@ export function createMappingFunctions(host){
                 if (mapping.image)
                 {
                     // Held as a view of the file is, and given back at its unmap.
-                    // The image moved to where its view starts, or refused
-                    // there when it carries no fixups to move it with.
+                    // The image moved to where its view starts.
                     const image = imageViewAt(mapping.image, address - offset);
-                    if (!image)
-                    {
-                        host.release(address);
-                        return fail(ERROR_INVALID_ADDRESS);
-                    }
                     host.files.retain(mapping.node);
                     return deliver(image.subarray(offset, offset + wanted));
                 }

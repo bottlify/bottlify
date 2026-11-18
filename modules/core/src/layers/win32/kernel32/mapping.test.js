@@ -574,19 +574,27 @@ test('an image linked for ASLR is moved even where its base is free, as Windows 
     assert.equal(imageBaseOf(bytes, view), view);
 });
 
-test('an image without fixups whose base is out of reach is not mapped', ()=>{
+test('an image without fixups whose base is taken is mapped elsewhere as it lies', ()=>{
+    // Windows maps the view where there is room, nothing fixed up, and
+    // NtMapViewOfSection answers STATUS_IMAGE_NOT_AT_BASE (Wine's
+    // kernel32:loader test_image_mapping); MapViewOfFile takes that as success.
     const at = setup();
-    const { fns, file, fileHandle, errors } = at;
-    const ERROR_INVALID_ADDRESS = 487;
+    const { fns, bytes, file, fileHandle } = at;
+    const STATUS_IMAGE_NOT_AT_BASE = 0x40000003;
     file.data = imageAt(0x79720000, false);
     const mapping = fns.CreateFileMappingA.handler(
         [fileHandle, 0, PAGE_READONLY | SEC_IMAGE, 0, 0, 0]);
-    assert.equal(fns.MapViewOfFile.handler([mapping, FILE_MAP_READ, 0, 0, 0]), 0);
-    assert.equal(errors.at(-1), ERROR_INVALID_ADDRESS);
-    const STATUS_CONFLICTING_ADDRESSES = 0xc0000018;
+    const view = fns.MapViewOfFile.handler([mapping, FILE_MAP_READ, 0, 0, 0]);
+    assert.notEqual(view, 0);
+    assert.notEqual(view, 0x79720000);
+    assert.equal(dword(bytes, pointerAt(view)), 0x79720000 + 0x1000, 'nothing fixed up');
+    assert.equal(imageBaseOf(bytes, view), 0x79720000, 'the header names its own base');
+    at.bytes.fill(0, 0x200, 0x204);
+    at.bytes.fill(0, 0x210, 0x214);
     assert.equal(fns.CreateFileMappingW.natives.NtMapViewOfSection.handler(
         [mapping, CURRENT_PROCESS, 0x200, 0, 0, 0, 0x210, 1, 0, PAGE_READONLY]),
-    STATUS_CONFLICTING_ADDRESSES);
+    STATUS_IMAGE_NOT_AT_BASE);
+    assert.notEqual(dword(bytes, 0x200), 0);
 });
 
 test('a fresh page-file view reads zeroes, whatever the memory it is given held before', ()=>{
