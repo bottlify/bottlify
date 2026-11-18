@@ -40,6 +40,7 @@ import { mountPointsOf, onVolume } from './drives.js';
 import { MOUNT_MANAGER, mountManagerControl } from './mountmgr.js';
 import { isMailslotName } from './mailslots.js';
 import { isPipeName } from './pipes.js';
+import { isNameInExpression } from './name-expression.js';
 
 /** Codes this surface reports through the last-error slot. */
 const ERROR_SUCCESS = 0;
@@ -3988,16 +3989,25 @@ export function createFileFunctions(host){
                     pattern += String.fromCharCode(raw[at] | raw[at + 1] << 8);
                 }
             }
-            directory.listing = { pattern, entries: files.list(directory.path, pattern), next: 0,
-                first: true };
+            // The mask is a native expression, matched as the system matches
+            // it (`name-expression.js`), and every folder but a drive's root
+            // holds "." and ".." first.
+            const holder = files.stat(directory.path);
+            const dots = /^[A-Za-z]:\\?$/.test(directory.path) || !holder ? []
+                : ['.', '..'].map(dot=>({ ...holder, name: dot, isDirectory: true, size: 0 }));
+            const entries = [...dots, ...files.list(directory.path, '*') ?? []]
+                .filter(entry=>isNameInExpression(pattern === '' ? '*' : pattern, entry.name));
+            directory.listing = { pattern, entries, next: 0, first: true };
         }
         const listing = directory.listing;
         const first = listing.first;
         listing.first = false;
         if (listing.next >= listing.entries.length)
         {
-            return { status: first ? STATUS_NO_SUCH_FILE : STATUS_NO_MORE_FILES,
-                reported: false };
+            // STATUS_NO_MORE_FILES is a warning, and a warning completes the
+            // call: its status block is written. An error leaves it alone.
+            return first ? { status: STATUS_NO_SUCH_FILE, reported: false }
+                : { status: report(block, STATUS_NO_MORE_FILES, 0), reported: true };
         }
         const bytes = new Uint8Array(length);
         const view = new DataView(bytes.buffer);
