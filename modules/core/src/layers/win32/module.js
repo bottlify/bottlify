@@ -4007,6 +4007,13 @@ export function createWin32Module(){
                         // `_environ`, the time zone's -- are rewritten where the
                         // loader placed them.
                         addressOf: name=>crtImage()?.addressOf?.(name) ?? 0,
+                        // Every runtime placed shows the descriptors in its
+                        // `__pioinfo`, laid out as its export says.
+                        ioinfo: ()=>CRT_IMAGES.flatMap(name=>{
+                            const at = modules.find(name)?.addressOf?.('__pioinfo') ?? 0;
+                            const layout = libraries[name]?.__pioinfo?.layout;
+                            return at !== 0 && layout ? [{ at, layout }] : [];
+                        }),
                         // The runtime's copy of the environment starts as the
                         // variables kernel32 starts the process with.
                         environment: startingEnvironment,

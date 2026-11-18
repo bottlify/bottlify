@@ -50,7 +50,8 @@ import { createThreadFunctions } from './threads.js';
 import { createSortFunctions } from './sort.js';
 import { createRestartableFunctions } from './mbstate.js';
 import { createGlobals, EINVAL, ERANGE } from './globals.js';
-import { createDescriptors, createIoFunctions, O_BINARY } from './io.js';
+import { IOINFO_EXPORT, O_BINARY, createDescriptors, createIoFunctions, ioinfoExport }
+    from './io.js';
 import { withPipes } from './pipes.js';
 import { createEnvironment } from './environ.js';
 import { createMultiBytePage } from './mbcs.js';
@@ -247,6 +248,9 @@ const seededCode = (made, long, argBytes, handler)=>({
  *           before it is: a table a program reads in place, `_mbctype`, is
  *           rewritten there when the call that changes it comes. Absent, the
  *           table stays as it was placed.
+ * @property {() => { at: number, layout: import('./io.js').IoinfoLayout }[]} [ioinfo]
+ *           Each placed runtime's `__pioinfo` and its layout, which the
+ *           descriptors are written into as they change.
  * @property {(values: Record<string, number>) => void} [setRegisters]
  *           Registers a call answers in besides EAX: EDX, for the high half
  *           of an __int64. Absent, the calls answering one stay unexported.
@@ -1145,7 +1149,7 @@ export function createMsvcrtFunctions(host){
             files, write: host.write, errno, fmode: ()=>globals.get('fmode'),
             handles: host.handles,
             writeMemory: host.writeMemory,
-            ioinfo: ()=>host.addressOf?.('__pioinfo') ?? 0,
+            ...host.ioinfo ? { ioinfo: host.ioinfo } : {},
         })
         : null;
 
@@ -1229,6 +1233,12 @@ export function createMsvcrtFunctions(host){
             exitProcess: host.exitProcess,
             report: host.divergence,
         },
+        // The runtimes over this table export `__pioinfo` in their own
+        // layout, over the same descriptors.
+        ...descriptors ? {
+            [IOINFO_EXPORT]: (/** @type {import('./io.js').IoinfoLayout} */ layout)=>
+                ioinfoExport(descriptors, layout),
+        } : {},
         [PRINT_STYLE]: {
             /**
              * @template T
