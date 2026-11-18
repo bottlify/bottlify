@@ -128,10 +128,12 @@ test('a toolbar is a class a program creates by name, and takes MFC\'s set-up: t
     context.memory.put32s(ITEM, [0, more]);
     assert.equal(context.send([hwnd, TB_ADDBITMAP, 2, ITEM]), 3);
 
-    // Side by side from the left, two pixels down; a separator as wide as its iBitmap.
-    assert.deepEqual(itemRect(context, hwnd, 0), { found: 1, rect: [0, 2, 23, 24] });
-    assert.deepEqual(itemRect(context, hwnd, 1), { found: 1, rect: [23, 2, 29, 24] });
-    assert.deepEqual(itemRect(context, hwnd, 3), { found: 1, rect: [52, 2, 75, 24] });
+    // Side by side from the left - at the top: a flat toolbar sized again by
+    // TB_SETBITMAPSIZE has no top margin (Wine's test_sizes) - and a
+    // separator as wide as its iBitmap.
+    assert.deepEqual(itemRect(context, hwnd, 0), { found: 1, rect: [0, 0, 23, 22] });
+    assert.deepEqual(itemRect(context, hwnd, 1), { found: 1, rect: [23, 0, 29, 22] });
+    assert.deepEqual(itemRect(context, hwnd, 3), { found: 1, rect: [52, 0, 75, 22] });
     assert.equal(itemRect(context, hwnd, 4).found, 0, 'no fifth button');
 
     context.memory.bytes.fill(0xcc, OUT, OUT + 20);
@@ -324,5 +326,7 @@ test('TB_LOADIMAGES takes a standard strip by its IDB_ number, as TB_ADDBITMAP d
     assert.equal(context.send([hwnd, TB_LOADIMAGES, 4, 0xffffffff]), 0);
     assert.equal(context.send([hwnd, TB_LOADIMAGES, 9, 0xffffffff]), 12, 'after the twelve');
     const list = context.send([hwnd, TB_GETIMAGELIST, 0, 0]);
-    assert.equal(context.lists.ImageList_GetImageCount.handler([list]), 17);
+    // The 24-pixel strip makes the list 24 pixels square again: the twelve
+    // 16-pixel images are eight at that width, and its own five follow.
+    assert.equal(context.lists.ImageList_GetImageCount.handler([list]), 8 + 5);
 });

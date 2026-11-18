@@ -37,6 +37,7 @@ import { WM_CREATE, WM_SETFOCUS, WM_KILLFOCUS, WM_SETFONT, WM_KEYDOWN, WM_GETTEX
     from '../user32/controls.js';
 import { notifyWindow } from './notify.js';
 import { encodeAnsi } from '../kernel32/locale.js';
+import { readText as readString, writeText as writeString } from './strings.js';
 
 /** The class name a program creates the control by. */
 export const COMBOBOXEX_CLASS = 'ComboBoxEx32';
@@ -217,55 +218,14 @@ export function createComboBoxExProcedure(host, tk, images, subclassing){
     };
 
     /** @param {number} address @param {boolean} wide */
-    const readText = (address, wide)=>{
-        if (!wide)
-        {
-            return host.readCString(address >>> 0, 0x10000);
-        }
-        let text = '';
-        for (let at = address >>> 0; text.length < 0x10000; at += 64)
-        {
-            const view = new DataView(host.readMemory(at, 64).buffer);
-            for (let unit = 0; unit < 32; unit++)
-            {
-                const code = view.getUint16(unit * 2, true);
-                if (code === 0)
-                {
-                    return text;
-                }
-                text += String.fromCharCode(code);
-            }
-        }
-        return text;
-    };
+    const readText = (address, wide)=>readString(host, address, wide, 0x10000);
 
     /**
      * Text into a caller's buffer of `room` characters, cut to fit and ended.
      *
      * @param {number} address @param {number} room @param {string} text @param {boolean} wide
-     * @returns {number} the characters written, the end left out
      */
-    const writeText = (address, room, text, wide)=>{
-        if (address === 0 || room <= 0)
-        {
-            return 0;
-        }
-        const kept = text.slice(0, room - 1);
-        if (wide)
-        {
-            const bytes = new Uint8Array((kept.length + 1) * 2);
-            for (let at = 0; at < kept.length; at++)
-            {
-                bytes[at * 2] = kept.charCodeAt(at) & 0xff;
-                bytes[at * 2 + 1] = kept.charCodeAt(at) >>> 8;
-            }
-            host.writeMemory(address, bytes);
-            return kept.length;
-        }
-        const bytes = encodeAnsi(kept).slice(0, room - 1);
-        host.writeMemory(address, Uint8Array.from([...bytes, 0]));
-        return bytes.length;
-    };
+    const writeText = (address, room, text, wide)=>writeString(host, address, text, wide, room);
 
     /** @param {any} record */
     const state = record=>{
