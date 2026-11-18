@@ -27,7 +27,7 @@ import { SKIP_THREAD_ATTACH, TEB } from '../kernel32/teb.js';
 /** RT_MESSAGETABLE's resource name: a module has one table, and it is number one. */
 const MESSAGE_TABLE_NAME = 1;
 
-/** RTL_USER_PROCESS_PARAMETERS on 32-bit Windows XP, as far as these calls read and write it. */
+/** RTL_USER_PROCESS_PARAMETERS on 32-bit Windows 7, as far as these calls read and write it. */
 const PARAMETERS = Object.freeze({
     MaximumLength: 0x00,
     Length: 0x04,
@@ -41,11 +41,16 @@ const PARAMETERS = Object.freeze({
     DesktopInfo: 0x78,
     ShellInfo: 0x80,
     RuntimeData: 0x88,
-    SIZE: 0x290,
+    EnvironmentSize: 0x290,
+    EnvironmentVersion: 0x294,
+    SIZE: 0x298,
 });
 
 /** The block's pointers are pointers, not offsets from its start. */
 const PROCESS_PARAMS_FLAG_NORMALIZED = 0x1;
+
+/** The most an environment block is read for, in UTF-16 units. */
+const ENVIRONMENT_LIMIT = 0x100000;
 
 /** The room a current directory is given, whatever its length: MAX_PATH characters. */
 const CURRENT_DIRECTORY_ROOM = 260 * 2;
@@ -263,9 +268,66 @@ export function createProcessFunctions(host){
     };
 
     /**
+     * A UNICODE_STRING as a string to copy: its text and the room it was
+     * given (MaximumLength), or null for none passed.
+     *
+     * @param {number} pointer @param {number} [base]
+     * @returns {{ text: string, room: number } | null}
+     */
+    const source = (pointer, base = 0)=>{
+        const text = counted(pointer, base);
+        return text === null ? null : { text, room: readU16(pointer + 2) };
+    };
+
+    /**
+     * An environment block's bytes, its closing empty entry included: the
+     * one at `block`, or where it is NULL the process's own - kernel32's,
+     * which holds the variables as they are now, else the block its
+     * parameters name.
+     *
+     * @param {number} block @param {number} own  the process's parameters, or 0
+     */
+    const environmentBytes = (block, own)=>{
+        const current = block === 0 && kernel32.GetEnvironmentStringsW
+            ? kernel32.GetEnvironmentStringsW.handler([]) >>> 0 : 0;
+        const from = block !== 0 ? block
+            : current !== 0 ? current : own !== 0 ? readU32(own + PARAMETERS.Environment) : 0;
+        if (from === 0)
+        {
+            return Uint8Array.of(0, 0, 0, 0);
+        }
+        let units = 0;
+        for (let previous = 1; units < ENVIRONMENT_LIMIT; units++)
+        {
+            const unit = readU16(from + units * 2);
+            if (unit === 0 && previous === 0)
+            {
+                units++;
+                break;
+            }
+            previous = unit;
+        }
+        const bytes = host.readMemory(from, Math.max(units, 2) * 2).slice();
+        if (current !== 0)
+        {
+            kernel32.FreeEnvironmentStringsW?.handler([current]);
+        }
+        return bytes;
+    };
+
+    /**
      * RtlCreateProcessParameters' and RtlCreateProcessParametersEx's block: one
-     * allocation in the process heap, the fixed part, then each string
-     * terminated and four-aligned. Its pointers are offsets from the block -
+     * allocation in the process heap, as Windows lays it out. The fixed part,
+     * then each string at the next four-byte boundary in the room its source
+     * was given (its MaximumLength, terminated when there is room for it; a
+     * string with no room has no buffer); the current directory's room is
+     * always MAX_PATH characters. The current directory and the DLL path, not
+     * passed, are this process's; the command line the image; the
+     * window title, desktop and shell information an empty string with room
+     * for its terminator; the runtime data none. Size is where the strings
+     * end; the environment, the one passed or this process's, is copied
+     * after them in the same allocation, and EnvironmentSize is what the
+     * allocation holds from there. Its pointers are offsets from the block -
      * the form the system hands back - unless `normalized` asks for them as
      * addresses.
      *
@@ -279,28 +341,40 @@ export function createProcessFunctions(host){
             return STATUS.INVALID_PARAMETER;
         }
         const own = ownParameters();
-        const imagePath = counted(image) ?? '';
-        /** @type {[number, string, number][]} field, text, room */
+        const flags = own ? readU32(own + PARAMETERS.Flags) : 0;
+        const ownBase = (flags & PROCESS_PARAMS_FLAG_NORMALIZED) !== 0 ? 0 : own;
+        /** @param {number} field */
+        const inherited = field=>(own ? source(own + field, ownBase) : null);
+        const imagePath = source(image) ?? { text: '', room: 2 };
+        const empty = { text: '', room: 2 };
+        const ownDirectory = inherited(PARAMETERS.CurrentDirectory);
+        /** @type {[number, { text: string, room: number }][]} */
         const strings = [
-            [PARAMETERS.CurrentDirectory, counted(directory)
-                ?? (own ? parameter(own, PARAMETERS.CurrentDirectory) : null) ?? '',
-            CURRENT_DIRECTORY_ROOM],
-            [PARAMETERS.DllPath, counted(dllPath)
-                ?? (own ? parameter(own, PARAMETERS.DllPath) : null) ?? '', 0],
-            [PARAMETERS.ImagePathName, imagePath, 0],
-            [PARAMETERS.CommandLine, counted(commandLine) ?? imagePath, 0],
-            [PARAMETERS.WindowTitle, counted(title) ?? '', 0],
-            [PARAMETERS.DesktopInfo, counted(desktop) ?? '', 0],
-            [PARAMETERS.ShellInfo, counted(shell) ?? '', 0],
-            [PARAMETERS.RuntimeData, counted(runtime) ?? '', 0],
+            [PARAMETERS.CurrentDirectory, { text: (source(directory) ?? ownDirectory)?.text ?? '',
+                room: CURRENT_DIRECTORY_ROOM }],
+            [PARAMETERS.DllPath, source(dllPath) ?? inherited(PARAMETERS.DllPath)
+                ?? { text: '', room: 0 }],
+            [PARAMETERS.ImagePathName, imagePath],
+            [PARAMETERS.CommandLine, source(commandLine) ?? imagePath],
+            [PARAMETERS.WindowTitle, source(title) ?? empty],
+            [PARAMETERS.DesktopInfo, source(desktop) ?? empty],
+            [PARAMETERS.ShellInfo, source(shell) ?? empty],
+            [PARAMETERS.RuntimeData, source(runtime) ?? { text: '', room: 0 }],
         ];
-        const roomOf = (/** @type {string} */ text, /** @type {number} */ least)=>
-            (Math.max(text.length * 2 + 2, least) + 3) & ~3;
-        let total = PARAMETERS.SIZE;
-        for (const [, text, least] of strings)
+        /** @type {number[]} */
+        const places = [];
+        /** @type {number} */
+        let cursor = PARAMETERS.SIZE;
+        for (const [, { text, room }] of strings)
         {
-            total += roomOf(text, least);
+            const fitted = Math.max(room, text.length * 2);
+            cursor = (cursor + 3) & ~3;
+            places.push(cursor);
+            cursor += fitted;
         }
+        const size = (cursor + 3) & ~3;
+        const environmentCopy = environmentBytes(environment >>> 0, own);
+        const total = (size + environmentCopy.length + 3) & ~3;
         const block = host.allocate(total) >>> 0;
         if (block === 0)
         {
@@ -308,21 +382,23 @@ export function createProcessFunctions(host){
         }
         const bytes = new Uint8Array(total);
         const view = new DataView(bytes.buffer);
-        view.setUint32(PARAMETERS.MaximumLength, total, true);
-        view.setUint32(PARAMETERS.Length, total, true);
+        view.setUint32(PARAMETERS.MaximumLength, size, true);
+        view.setUint32(PARAMETERS.Length, size, true);
         view.setUint32(PARAMETERS.Flags, normalized ? PROCESS_PARAMS_FLAG_NORMALIZED : 0, true);
-        view.setUint32(PARAMETERS.Environment, (environment >>> 0) !== 0 ? environment
-            : own ? readU32(own + PARAMETERS.Environment) : 0, true);
-        let cursor = PARAMETERS.SIZE;
-        for (const [field, text, least] of strings)
-        {
-            const room = roomOf(text, least);
+        strings.forEach(([field, { text, room }], index)=>{
+            const fitted = Math.max(room, text.length * 2);
             view.setUint16(field, text.length * 2, true);
-            view.setUint16(field + 2, room, true);
-            view.setUint32(field + 4, normalized ? block + cursor : cursor, true);
-            bytes.set(utf16(text), cursor);
-            cursor += room;
-        }
+            view.setUint16(field + 2, fitted, true);
+            if (fitted === 0)
+            {
+                return;
+            }
+            view.setUint32(field + 4, normalized ? block + places[index] : places[index], true);
+            bytes.set(utf16(text), places[index]);
+        });
+        bytes.set(environmentCopy, size);
+        view.setUint32(PARAMETERS.Environment, block + size, true);
+        view.setUint32(PARAMETERS.EnvironmentSize, total - size, true);
         host.writeMemory(block, bytes);
         writeU32(out, block);
         return STATUS.SUCCESS;

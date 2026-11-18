@@ -273,6 +273,29 @@ const CURRENT_PROCESS = 0xffffffff;
 const STATUS_INVALID_PARAMETER_1 = 0xc00000ef;
 /** The most modules a walk of the loader's list visits: more than any process loads. */
 const MAX_MODULES = 0x10000;
+
+/**
+ * The entries of PEB->Ldr's load-order list, first to last: every walk of
+ * the loader's list goes through this one, bounded by what a process can
+ * hold, so a list a program broke into a loop is not walked for ever.
+ *
+ * @param {(address: number) => number} readU32
+ * @param {number} peb  the process block, zero for none yet
+ * @param {{ peb: { LDR: number }, ldr: { IN_LOAD_ORDER_MODULE_LIST: number },
+ *     entry: { IN_LOAD_ORDER_LINKS: number } }} layout  `blockLayouts`'s
+ */
+export function* loadOrder(readU32, peb, layout){
+    if (peb === 0)
+    {
+        return;
+    }
+    const head = readU32(peb + layout.peb.LDR) + layout.ldr.IN_LOAD_ORDER_MODULE_LIST;
+    for (let link = readU32(head), seen = 0; link !== head && link !== 0 && seen < MAX_MODULES;
+        link = readU32(link), seen++)
+    {
+        yield link - layout.entry.IN_LOAD_ORDER_LINKS;
+    }
+}
 /** The most a child is asked to write back for one query: no class is larger. */
 const MAX_ASKED = 0x10000;
 const CURRENT_THREAD = 0xfffffffe;
@@ -457,8 +480,8 @@ export function systemProcessInformation(processes, base){
 export function createQueryFunctions(host){
     const machine = host.version ?? windowsVersion();
     const processors = host.processors ?? createProcessors();
-    const { pointer: pointerBytes, teb: TEB, peb: PEB, ldr: LDR, entry: ENTRY }
-        = blockLayouts(host.pointerSize);
+    const layout = blockLayouts(host.pointerSize);
+    const { pointer: pointerBytes, teb: TEB, peb: PEB, entry: ENTRY } = layout;
 
     /** The address each object is said to be at, given as it is first asked. */
     const objectAddresses = new WeakMap();
@@ -648,14 +671,9 @@ export function createQueryFunctions(host){
                 {
                     return STATUS.INVALID_PARAMETER;
                 }
-                const head = readU32(block + PEB.LDR) + LDR.IN_LOAD_ORDER_MODULE_LIST;
                 const wanted = address >>> 0;
-                // Bounded by what a process can hold, so a list a program broke
-                // into a loop is not walked for ever.
-                for (let link = readU32(head), seen = 0; link !== head && link !== 0
-                    && seen < MAX_MODULES; link = readU32(link), seen++)
+                for (const entry of loadOrder(readU32, block, layout))
                 {
-                    const entry = link - ENTRY.IN_LOAD_ORDER_LINKS;
                     const base = readU32(entry + ENTRY.DLL_BASE);
                     if (wanted >= base && wanted - base < readU32(entry + ENTRY.SIZE_OF_IMAGE))
                     {
@@ -1128,39 +1146,15 @@ export function createQueryFunctions(host){
         /**
          * NTSTATUS NtOpenThread(PHANDLE Thread, ACCESS_MASK Access,
          *                       POBJECT_ATTRIBUTES Attributes, PCLIENT_ID Client)
-         * PRTL_DEBUG_INFORMATION RtlCreateQueryDebugBuffer(ULONG Size, BOOLEAN EventPair)
-         * NTSTATUS RtlDestroyQueryDebugBuffer(PRTL_DEBUG_INFORMATION Buffer)
-         * NTSTATUS RtlQueryProcessDebugInformation(ULONG Pid, ULONG Flags,
-         *                                          PRTL_DEBUG_INFORMATION Buffer)
          *
          * What a crash reporter or a debugger front end asks for. No thread
-         * is opened by id and no process snapshot is kept, so each is refused
-         * as an unsupported request and says so; the program that asked for a
-         * diagnostic goes on without it.
+         * is opened by id, so it is refused as an unsupported request and
+         * says so; the program that asked for a diagnostic goes on without it.
          */
         NtOpenThread: {
             argBytes: 16,
             handler: ()=>{
                 host.divergence?.('NtOpenThread', 'a thread cannot be opened by id; refused');
-                return STATUS.NOT_IMPLEMENTED;
-            },
-        },
-        RtlCreateQueryDebugBuffer: {
-            argBytes: 8,
-            handler: ()=>{
-                host.divergence?.('RtlCreateQueryDebugBuffer', 'no debug buffer; NULL answered');
-                return 0;
-            },
-        },
-        RtlDestroyQueryDebugBuffer: {
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([buffer])=>(buffer === 0 ? STATUS.INVALID_PARAMETER : STATUS.SUCCESS),
-        },
-        RtlQueryProcessDebugInformation: {
-            argBytes: 12,
-            handler: ()=>{
-                host.divergence?.('RtlQueryProcessDebugInformation', 'refused');
                 return STATUS.NOT_IMPLEMENTED;
             },
         },

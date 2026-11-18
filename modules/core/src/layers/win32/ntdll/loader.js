@@ -22,6 +22,7 @@ const STATUS_PROCEDURE_NOT_FOUND = 0xc000007a;
 const STATUS_ORDINAL_NOT_FOUND = 0xc0000138;
 const STATUS_INVALID_PARAMETER_1 = 0xc00000ef;
 const STATUS_INVALID_PARAMETER_2 = 0xc00000f0;
+const STATUS_INVALID_PARAMETER_3 = 0xc00000f1;
 
 /** GetModuleHandleEx's flags. */
 const GET_MODULE_HANDLE_EX_PIN = 0x1;
@@ -402,6 +403,16 @@ export function createLoaderFunctions({
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([flags, disposition, cookie])=>{
+                // Both answers are cleared before anything is judged, a
+                // refusal's included.
+                if ((disposition >>> 0) !== 0)
+                {
+                    setU32(disposition >>> 0, 0);
+                }
+                if ((cookie >>> 0) !== 0)
+                {
+                    setU32(cookie >>> 0, 0);
+                }
                 if (((flags >>> 0) & ~(LDR_LOCK_RAISE_ON_ERRORS | LDR_LOCK_TRY_ONLY)) !== 0)
                 {
                     return STATUS_INVALID_PARAMETER_1;
@@ -412,7 +423,7 @@ export function createLoaderFunctions({
                 }
                 if ((cookie >>> 0) === 0)
                 {
-                    return STATUS.INVALID_PARAMETER;
+                    return STATUS_INVALID_PARAMETER_3;
                 }
                 if ((disposition >>> 0) !== 0)
                 {
