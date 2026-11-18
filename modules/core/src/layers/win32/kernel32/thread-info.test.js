@@ -23,6 +23,8 @@ const CURRENT_THREAD = 0xfffffffe;
 /** HRESULT_FROM_NT(STATUS_SUCCESS): the facility bit, on success too. */
 const DONE = 0x10000000;
 const THREAD_HANDLE = 0x40;
+/** The same thread, opened with THREAD_QUERY_LIMITED_INFORMATION alone. */
+const LIMITED_HANDLE = 0x44;
 
 /** Guest memory from 0x1000 to 0x4000; anything else is unmapped. */
 function setup({ processors: count = 4 } = {}){
@@ -45,7 +47,10 @@ function setup({ processors: count = 4 } = {}){
     const kernel = {
         handles: {
             /** @param {number} handle */
-            resolve: handle=>(handle === THREAD_HANDLE ? other : null),
+            resolve: handle=>(handle === THREAD_HANDLE || handle === LIMITED_HANDLE ? other
+                : null),
+            /** @param {number} handle */
+            access: handle=>(handle === LIMITED_HANDLE ? 0x800 : null),
         },
         threads: ()=>threads,
         clock: { virtualTime: ()=>0 },
@@ -293,4 +298,19 @@ test('SetThreadStackGuarantee keeps whole pages in the thread block, only grows,
     assert.deepEqual(guarantee(2000), [1, 8192, 8192]);
     assert.deepEqual(guarantee(10000), [1, 8192, 12288]);
     assert.deepEqual(guarantee(12288), [1, 12288, 12288]);
+});
+
+test('a handle with the limited query right reads only the classes anyone may read', ()=>{
+    // Wine's kernel32 test_thread_info: every other class is
+    // STATUS_ACCESS_DENIED through such a handle.
+    const { natives } = setup();
+    const query = natives.NtQueryInformationThread.handler;
+    assert.equal(query([LIMITED_HANDLE, THREAD_INFO.BASIC, 0x1000, 28, 0]), STATUS_SUCCESS);
+    assert.equal(query([LIMITED_HANDLE, THREAD_INFO.PRIORITY_BOOST, 0x1000, 4, 0]),
+        STATUS_SUCCESS);
+    assert.equal(query([LIMITED_HANDLE, THREAD_INFO.HIDE_FROM_DEBUGGER, 0x1000, 1, 0]),
+        0xc0000022, 'STATUS_ACCESS_DENIED');
+    assert.equal(query([LIMITED_HANDLE, THREAD_INFO.GROUP, 0x1000, 12, 0]), 0xc0000022);
+    assert.equal(query([THREAD_HANDLE, THREAD_INFO.HIDE_FROM_DEBUGGER, 0x1000, 1, 0]),
+        STATUS_SUCCESS, 'every right');
 });

@@ -1888,13 +1888,23 @@ export function createThreadingFunctions(host){
         OpenThread: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([, inherit, id])=>{
+            handler: ([desired, inherit, id])=>{
                 const wanted = id >>> 0;
                 const own = (kernel.threads?.() ?? []).find((/** @type {any} */ thread)=>
                     (thread.id >>> 0) === wanted && thread.state !== 'terminated');
                 if (own)
                 {
-                    return inheritIf(kernel.handles.open('thread', own), inherit !== 0);
+                    // The handle carries the rights asked for: a wait on it
+                    // needs SYNCHRONIZE, a query of its information
+                    // THREAD_QUERY_INFORMATION or the limited form.
+                    const access = grantedAccess('thread', desired);
+                    if ('error' in access)
+                    {
+                        host.setLastError(access.error);
+                        return 0;
+                    }
+                    return inheritIf(kernel.handles.open('thread', own, access.granted),
+                        inherit !== 0);
                 }
                 const child = (kernel.processes?.all() ?? []).find((/** @type {any} */ made)=>
                     (made.threadId >>> 0) === wanted || made.threads?.has(wanted));

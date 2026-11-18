@@ -16,6 +16,7 @@
  */
 
 import { TEB, TEB64 } from './teb.js';
+import { THREAD_QUERY_INFORMATION, THREAD_QUERY_LIMITED_INFORMATION, allows } from './access.js';
 
 /** THREADINFOCLASS values answered here. */
 export const THREAD_INFO = Object.freeze({
@@ -29,8 +30,14 @@ export const THREAD_INFO = Object.freeze({
     NAME: 38,
 });
 
+/** The classes a handle with THREAD_QUERY_LIMITED_INFORMATION alone may read. */
+/** @type {Set<number>} */
+const LIMITED_CLASSES = new Set([THREAD_INFO.BASIC, THREAD_INFO.TIMES,
+    THREAD_INFO.AM_I_LAST_THREAD, THREAD_INFO.PRIORITY_BOOST, THREAD_INFO.NAME]);
+
 /** NTSTATUS codes these calls answer. */
 const STATUS_SUCCESS = 0;
+const STATUS_ACCESS_DENIED = 0xc0000022;
 const STATUS_INVALID_INFO_CLASS = 0xc0000003;
 const STATUS_INFO_LENGTH_MISMATCH = 0xc0000004;
 const STATUS_ACCESS_VIOLATION = 0xc0000005;
@@ -256,6 +263,15 @@ export function createThreadInfoFunctions(host){
         {
             return STATUS_INVALID_HANDLE;
         }
+        // The limited right reads the classes anyone may read; the others
+        // need THREAD_QUERY_INFORMATION.
+        const granted = (handle >>> 0) === CURRENT_THREAD ? null
+            : kernel.handles.access?.(handle >>> 0) ?? null;
+        if (!allows(granted, LIMITED_CLASSES.has(infoClass >>> 0)
+            ? THREAD_QUERY_LIMITED_INFORMATION : THREAD_QUERY_INFORMATION))
+        {
+            return STATUS_ACCESS_DENIED;
+        }
         if ((infoClass >>> 0) === THREAD_INFO.NAME)
         {
             return queryName(thread, at >>> 0, length >>> 0, returned >>> 0);
@@ -271,6 +287,7 @@ export function createThreadInfoFunctions(host){
                 `information class ${infoClass >>> 0} is not answered`);
             return STATUS_INVALID_INFO_CLASS;
         }
+
         if ((length >>> 0) !== size)
         {
             return STATUS_INFO_LENGTH_MISMATCH;

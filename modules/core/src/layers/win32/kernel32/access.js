@@ -28,14 +28,23 @@ const GENERIC_EXECUTE = 0x20000000;
 const GENERIC_WRITE = 0x40000000;
 const GENERIC_READ = 0x80000000;
 
+/** A thread's own rights, and the ones a query or a change of its information needs. */
+const THREAD_RIGHTS = 0xffff;
+export const THREAD_SET_INFORMATION = 0x0020;
+export const THREAD_QUERY_INFORMATION = 0x0040;
+export const THREAD_SET_LIMITED_INFORMATION = 0x0400;
+export const THREAD_QUERY_LIMITED_INFORMATION = 0x0800;
+
 const ERROR_ACCESS_DENIED = 5;
 const ERROR_PRIVILEGE_NOT_HELD = 1314;
 
 /**
  * Each kind's own rights, and what its generic rights stand for (winnt.h's
- * MUTANT_*, EVENT_*, SEMAPHORE_*, TIMER_* and the objects' generic mappings).
+ * MUTANT_*, EVENT_*, SEMAPHORE_*, TIMER_*, THREAD_* and the objects' generic
+ * mappings); `implied`, a right that carries a lesser one with it.
  *
- * @type {Record<string, { own: number, read: number, write: number, execute: number }>}
+ * @type {Record<string, { own: number, read: number, write: number, execute: number,
+ *     implied?: [number, number][] }>}
  */
 const KINDS = {
     mutex: { own: QUERY_STATE, read: READ_CONTROL | QUERY_STATE, write: READ_CONTROL,
@@ -46,6 +55,14 @@ const KINDS = {
         write: READ_CONTROL | MODIFY_STATE, execute: READ_CONTROL | SYNCHRONIZE },
     timer: { own: QUERY_STATE | MODIFY_STATE, read: READ_CONTROL | QUERY_STATE,
         write: READ_CONTROL | MODIFY_STATE, execute: READ_CONTROL | SYNCHRONIZE },
+    // THREAD_TERMINATE and on, the low word. Read is GET_CONTEXT and
+    // QUERY_INFORMATION; write TERMINATE, SUSPEND_RESUME, SET_CONTEXT and
+    // SET_INFORMATION; QUERY_INFORMATION and SET_INFORMATION carry their
+    // limited forms with them.
+    thread: { own: THREAD_RIGHTS, read: READ_CONTROL | 0x0048, write: READ_CONTROL | 0x0033,
+        execute: READ_CONTROL | SYNCHRONIZE,
+        implied: [[THREAD_QUERY_INFORMATION, THREAD_QUERY_LIMITED_INFORMATION],
+            [THREAD_SET_INFORMATION, THREAD_SET_LIMITED_INFORMATION]] },
 };
 
 /**
@@ -77,9 +94,13 @@ export function grantedAccess(kind, desired){
     {
         return { granted: null };
     }
-    const granted = (asked & all) | ((asked & GENERIC_READ) ? rights.read : 0)
+    let granted = (asked & all) | ((asked & GENERIC_READ) ? rights.read : 0)
         | ((asked & GENERIC_WRITE) ? rights.write : 0)
         | ((asked & GENERIC_EXECUTE) ? rights.execute : 0);
+    for (const [right, lesser] of rights.implied ?? [])
+    {
+        granted |= (granted & right) !== 0 ? lesser : 0;
+    }
     return { granted: (granted >>> 0) === all ? null : granted >>> 0 };
 }
 

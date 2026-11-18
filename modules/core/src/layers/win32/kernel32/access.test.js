@@ -38,3 +38,15 @@ test('generic rights are the kind\'s own, and a wait needs SYNCHRONIZE', ()=>{
         'GENERIC_WRITE: READ_CONTROL and EVENT_MODIFY_STATE');
     assert.equal(allows(null, SYNCHRONIZE), true);
 });
+
+test('a thread\'s rights: generic ones mapped, and a query right carries its limited form', ()=>{
+    assert.deepEqual(grantedAccess('thread', 0x1fffff), { granted: null }, 'THREAD_ALL_ACCESS');
+    assert.deepEqual(grantedAccess('thread', 0x800), { granted: 0x800 },
+        'THREAD_QUERY_LIMITED_INFORMATION alone');
+    assert.deepEqual(grantedAccess('thread', 0x40), { granted: 0x840 },
+        'THREAD_QUERY_INFORMATION is granted THREAD_QUERY_LIMITED_INFORMATION too');
+    assert.deepEqual(grantedAccess('thread', 0x20), { granted: 0x420 });
+    const read = grantedAccess('thread', 0x80000000);
+    assert.deepEqual(read, { granted: 0x20848 }, 'GENERIC_READ: the context and the information');
+    assert.ok('granted' in read && !allows(read.granted, SYNCHRONIZE));
+});
