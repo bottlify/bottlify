@@ -130,7 +130,6 @@ const ERROR_INSUFFICIENT_BUFFER = 122;
 const ERROR_NOACCESS = 998;
 /** What VirtualAlloc reports for an address outside anything it reserved. */
 const ERROR_INVALID_ADDRESS = 487;
-const ERROR_ACCESS_DENIED = 5;
 const ERROR_NO_MORE_ITEMS = 259;
 const ERROR_NOT_ENOUGH_MEMORY = 8;
 
