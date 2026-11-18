@@ -1083,6 +1083,9 @@ export function createMsvcrtFunctions(host){
     // whichever function fails and read through the address `_errno` hands out.
     const globals = createGlobals({
         allocate, readMemory: host.readMemory, writeMemory: host.writeMemory,
+        // The two a start-up reads and writes by the name it imported.
+        placed: name=>(name === 'fmode' || name === 'commode'
+            ? host.addressOf?.(`_${name}`) ?? 0 : 0),
     });
 
     // Where a runtime with an invalid-parameter handler hears what its
@@ -1693,6 +1696,7 @@ export function createMsvcrtFunctions(host){
                         writeMemory: host.writeMemory,
                         closeHandle: host.closeHandle,
                         currentThreadId: ()=>host.currentThread?.()?.id ?? 0,
+                        long: host.pointerSize === 8,
                     },
                 }
                 : {},

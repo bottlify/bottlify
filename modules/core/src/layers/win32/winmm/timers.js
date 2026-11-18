@@ -89,6 +89,49 @@ export function timerLoopCode(stub, at){
 }
 
 /**
+ * The same loop for an x86-64 process: the five arguments in its convention
+ * (RCX, RDX, R8, R9 and the fifth above the callee's home space), the stack a
+ * multiple of 16 at each call, every address below 4 GiB.
+ *
+ *           sub rsp, 0x38
+ *     loop: call stub
+ *           cmp eax, 0x1000
+ *           jb loop
+ *           mov ecx, [rax+4]       ; uTimerID
+ *           mov edx, [rax+8]       ; uMsg
+ *           mov r8d, [rax+12]      ; dwUser
+ *           mov r9d, [rax+16]      ; dw1
+ *           mov r10d, [rax+20]     ; dw2
+ *           mov [rsp+0x20], r10
+ *           mov eax, [rax]
+ *           call rax
+ *           jmp loop
+ *
+ * @param {number} stub
+ * @param {number} at
+ * @returns {Uint8Array}
+ */
+export function longTimerLoopCode(stub, at){
+    const relative = (stub - (at + 9)) | 0;
+    return new Uint8Array([
+        0x48, 0x83, 0xec, 0x38,
+        0xe8, relative & 0xff, relative >>> 8 & 0xff,
+        relative >>> 16 & 0xff, relative >>> 24 & 0xff,
+        ...CMP_LOWEST,
+        0x72, 0xf4,
+        0x8b, 0x48, 0x04,
+        0x8b, 0x50, 0x08,
+        0x44, 0x8b, 0x40, 0x0c,
+        0x44, 0x8b, 0x48, 0x10,
+        0x44, 0x8b, 0x50, 0x14,
+        0x4c, 0x89, 0x54, 0x24, 0x20,
+        0x8b, 0x00,
+        0xff, 0xd0,
+        0xeb, 0xd7,
+    ]);
+}
+
+/**
  * @typedef {Object} TimerDeps
  * @property {(bytes: number) => number} allocate
  *           Guest memory the processor may execute and the host may write.
@@ -106,6 +149,7 @@ export function timerLoopCode(stub, at){
  * @property {() => number} now  Guest milliseconds.
  * @property {(handle: number) => void} setEvent
  * @property {(handle: number) => void} pulseEvent
+ * @property {boolean} [long]  The process is an x86-64 one: the loop in its convention.
  */
 
 /**
@@ -258,8 +302,8 @@ export function createTimerService(deps){
     const start = ()=>{
         record = deps.allocate(RECORD.SIZE);
         const stub = deps.register('<mm-timers>', { argBytes: 0, handler: fetch });
-        const code = deps.allocate(31);
-        deps.writeMemory(code, timerLoopCode(stub, code));
+        const code = deps.allocate(48);
+        deps.writeMemory(code, (deps.long ? longTimerLoopCode : timerLoopCode)(stub, code));
         thread = deps.createThread({ entry: code, name: 'winmm-timer' });
         // Windows runs the multimedia timer thread time-critical: a callback
         // that refills a sound buffer is due at its tick, not after whatever

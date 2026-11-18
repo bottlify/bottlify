@@ -5610,6 +5610,8 @@ async function buildApp(options){
         input: {
             publishInterface: (/** @type {any} */ object, /** @type {string} */ iid)=>
                 core.api('bridge').publishInterface(object, iid),
+            // A 64-bit process's DirectInput structures and out pointers.
+            ...long ? { pointerSize: 8 } : {},
             /** @param {boolean} held */
             mouseHeld: held=>{
                 mouseHeld = held;

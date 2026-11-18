@@ -642,6 +642,11 @@ export function createHeapFunctions(host){
         '??_U@YAPAXI@Z': newAllocator,  // operator new[](unsigned int)
         '??3@YAXPAX@Z': deallocator, // operator delete(void *)
         '??_V@YAXPAX@Z': deallocator, // operator delete[](void *)
+        // And as a 64-bit compiler names them: a size is an unsigned __int64.
+        '??2@YAPEAX_K@Z': newAllocator,
+        '??_U@YAPEAX_K@Z': newAllocator,
+        '??3@YAXPEAX@Z': deallocator,
+        '??_V@YAXPEAX@Z': deallocator,
 
         /**
          * _PNH _set_new_handler(_PNH handler), by its C++ name, and

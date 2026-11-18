@@ -232,6 +232,7 @@ export function registerValues(constant, values){
  * @typedef {Object} ConstantTableHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {4 | 8} [pointerSize]  8 in a 64-bit process.
  * @property {{ publish: (object: any, interfaceId: string) => number }} [vtables]
  * @property {{ allocate: (bytes: number) => number, free: (address: number) => any }} [heap]
  * @property {(call: { entry: number, args: number[], thread?: any })
@@ -259,7 +260,9 @@ export function createConstantTableObjects(host){
     // frame, for every constant: an answer put together from arrays made per
     // field was most of what the engine thread collected. The bytes go out
     // through these, which writeMemory copies at once.
-    const descBytes = new Uint8Array(48);
+    /** A pointer's bytes in the calling process. */
+    const POINTER = host.pointerSize === 8 ? 8 : 4;
+    const descBytes = new Uint8Array(64);
     const descWords = new DataView(descBytes.buffer);
     /** @param {number[]} values @returns {Uint8Array} */
     const words = values=>{
@@ -359,6 +362,20 @@ export function createConstantTableObjects(host){
             ? 4 * constant.elements
             : 4 * Math.max(constant.rows, 1) * Math.max(constant.columns, 1) * constant.elements,
         constant.defaultAt];
+
+    /**
+     * D3DXCONSTANT_DESC as the caller lays it out: in a 64-bit process the name
+     * and the default value are quadword pointers, the ten counts between them
+     * where they were.
+     *
+     * @param {Constant} constant @returns {number[]}
+     */
+    const descOut = constant=>{
+        const desc = descOf(constant);
+        return POINTER === 8 ? [desc[0], 0, ...desc.slice(1, 11), desc[11], 0] : desc;
+    };
+    /** A pointer's words in the calling process. @param {number} value */
+    const pointerWords = value=>(POINTER === 8 ? [value, 0] : [value]);
 
     /**
      * An element's handle, kept in its array's record as well, where the
@@ -524,7 +541,7 @@ export function createConstantTableObjects(host){
         }
         host.writeMemory(data, new Uint8Array(scratch.buffer, 0, count * 16));
         const slot = SETTERS[constant.set][table.pixel ? 1 : 0];
-        return { call: { entry: u32(u32(device) + slot * 4),
+        return { call: { entry: u32(u32(device) + slot * POINTER),
             args: [device >>> 0, constant.index, data, count] }, data };
     };
 
@@ -683,7 +700,7 @@ export function createConstantTableObjects(host){
         }
         host.writeMemory(data, new Uint8Array(bytes.buffer, 0, count * 16));
         const slot = SETTERS[constant.set][table.pixel ? 1 : 0];
-        const entry = u32(u32(device) + slot * 4);
+        const entry = u32(u32(device) + slot * POINTER);
         const free = ()=>host.heap?.free(data);
         return host.callGuest({ entry, args: [device >>> 0, constant.index, data, count],
             ...(thread === undefined ? {} : { thread }) })
@@ -807,8 +824,8 @@ export function createConstantTableObjects(host){
                     return D3DERR_INVALIDCALL;
                 }
                 const table = tableOf(object);
-                host.writeMemory(out >>> 0, words([table.creatorAt, table.version,
-                    table.constants.length]));
+                host.writeMemory(out >>> 0, words([...pointerWords(table.creatorAt),
+                    table.version, table.constants.length]));
                 return D3D_OK;
             } },
             /** HRESULT GetConstantDesc(D3DXHANDLE, D3DXCONSTANT_DESC *pDesc, UINT *pCount) */
@@ -820,7 +837,7 @@ export function createConstantTableObjects(host){
                 }
                 if ((out >>> 0) !== 0)
                 {
-                    host.writeMemory(out >>> 0, words(descOf(constant)));
+                    host.writeMemory(out >>> 0, words(descOut(constant)));
                 }
                 if ((countAt >>> 0) !== 0)
                 {
@@ -917,7 +934,8 @@ export function createConstantTableObjects(host){
                 { length: count >>> 0 }, (__, i)=>matrix(constant, at + i * 64, false)).flat()),
             /** HRESULT SetMatrixPointerArray(device, handle, const D3DXMATRIX **, UINT Count) */
             setter('SetMatrixPointerArray', 20, (_, constant, [at, count])=>Array.from(
-                { length: count >>> 0 }, (__, i)=>matrix(constant, u32(at + i * 4), false)).flat()),
+                { length: count >>> 0 }, (__, i)=>matrix(constant, u32(at + i * POINTER),
+                    false)).flat()),
             /** HRESULT SetMatrixTranspose(device, handle, const D3DXMATRIX *pMatrix) */
             setter('SetMatrixTranspose', 16, (_, constant, [at])=>matrix(constant, at, true)),
             /** HRESULT SetMatrixTransposeArray(device, handle, const D3DXMATRIX *, UINT Count) */
@@ -925,7 +943,8 @@ export function createConstantTableObjects(host){
                 { length: count >>> 0 }, (__, i)=>matrix(constant, at + i * 64, true)).flat()),
             /** HRESULT SetMatrixTransposePointerArray(device, handle, const D3DXMATRIX **, UINT Count) */
             setter('SetMatrixTransposePointerArray', 20, (_, constant, [at, count])=>Array.from(
-                { length: count >>> 0 }, (__, i)=>matrix(constant, u32(at + i * 4), true)).flat()),
+                { length: count >>> 0 }, (__, i)=>matrix(constant, u32(at + i * POINTER),
+                    true)).flat()),
         ]),
     };
 
@@ -992,7 +1011,7 @@ export function createConstantTableObjects(host){
             object.release();
             return E_OUTOFMEMORY;
         }
-        host.writeMemory(out >>> 0, dword(pointer));
+        host.writeMemory(out >>> 0, words(pointerWords(pointer)));
         return D3D_OK;
     };
 
@@ -1013,7 +1032,7 @@ export function createConstantTableObjects(host){
                 {
                     return D3DERR_INVALIDCALL;
                 }
-                host.writeMemory(out >>> 0, new Uint8Array(4));
+                host.writeMemory(out >>> 0, new Uint8Array(POINTER));
                 if (!host.heap || !host.vtables)
                 {
                     return D3DERR_INVALIDCALL;

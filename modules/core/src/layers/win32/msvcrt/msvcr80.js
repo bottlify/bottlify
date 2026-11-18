@@ -391,6 +391,8 @@ export function createMsvcr80Functions(crt, host){
 
         /** void _crt_debugger_hook(int reserved): a debugger's breakpoint; none is attached. */
         _crt_debugger_hook: { convention: 'cdecl', argBytes: 4, handler: ()=>0 },
+        /** The same under the name Visual C++ 2005's own objects import. */
+        __crt_debugger_hook: { convention: 'cdecl', argBytes: 4, handler: ()=>0 },
 
         /** void *_malloc_crt(size_t size): the runtime's own blocks, from its own heap. */
         _malloc_crt: crt.malloc,
@@ -413,6 +415,7 @@ export function createMsvcr80Functions(crt, host){
 
         /** void type_info::_type_info_dtor_internal_method(void) -- the destructor's body. */
         '?_type_info_dtor_internal_method@type_info@@QAEXXZ': crt['??1type_info@@UAE@XZ'],
+        '?_type_info_dtor_internal_method@type_info@@QEAAXXZ': crt['??1type_info@@UAE@XZ'],
 
         /**
          * int __CppXcptFilter(unsigned long code, struct _EXCEPTION_POINTERS *pointers)
@@ -483,6 +486,14 @@ export function createMsvcr80Functions(crt, host){
         '??1exception@std@@UAE@XZ': crt['??1exception@@UAE@XZ'],
         '??4exception@std@@QAEAAV01@ABV01@@Z': crt['??4exception@@QAEAAV0@ABV0@@Z'],
         '?what@exception@std@@UBEPBDXZ': crt['?what@exception@@UBEPBDXZ'],
+        // And as a 64-bit compiler names the same members.
+        '??0exception@std@@QEAA@AEBQEBD@Z': crt['??0exception@@QAE@ABQBD@Z'],
+        '??0exception@std@@QEAA@AEBQEBDH@Z': crt['??0exception@@QAE@ABQBDH@Z'],
+        '??0exception@std@@QEAA@AEBV01@@Z': crt['??0exception@@QAE@ABV0@@Z'],
+        '??0exception@std@@QEAA@XZ': crt['??0exception@@QAE@XZ'],
+        '??1exception@std@@UEAA@XZ': crt['??1exception@@UAE@XZ'],
+        '??4exception@std@@QEAAAEAV01@AEBV01@@Z': crt['??4exception@@QAEAAV0@ABV0@@Z'],
+        '?what@exception@std@@UEBAPEBDXZ': crt['?what@exception@@UBEPBDXZ'],
     };
     // Every export a call of this runtime: what its functions refuse reaches
     // its handler, where msvcrt.dll's same function answers EINVAL alone.

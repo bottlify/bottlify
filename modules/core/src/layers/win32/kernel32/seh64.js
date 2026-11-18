@@ -999,6 +999,25 @@ export function createSeh64(host){
         return context;
     };
 
+    /**
+     * The walk a dispatcher context the program's handler was handed
+     * belongs to, for a runtime handler it hands the frame on to; with the
+     * floor moved below where that handler stands now. Null for a
+     * dispatcher context this dispatcher did not make.
+     *
+     * @param {number} address
+     */
+    const dispatcherContextAt = address=>{
+        const found = dispatching.get(address >>> 0);
+        if (!found)
+        {
+            return null;
+        }
+        const { pass } = found;
+        const floor = Math.min(pass.floor, floorBelow(stackOf(captureContext())));
+        return { ...found, pass: passFor(pass.record, pass.faultContext, pass.thread, floor) };
+    };
+
     return {
         dispatch,
         unwindEx,
@@ -1021,24 +1040,7 @@ export function createSeh64(host){
                 .then(result=>result.continuation ?? 0);
         },
 
-        /**
-         * The walk a dispatcher context the program's handler was handed
-         * belongs to, for a runtime handler it hands the frame on to; with the
-         * floor moved below where that handler stands now. Null for a
-         * dispatcher context this dispatcher did not make.
-         *
-         * @param {number} address
-         */
-        dispatcherContextAt(address){
-            const found = dispatching.get(address >>> 0);
-            if (!found)
-            {
-                return null;
-            }
-            const { pass } = found;
-            const floor = Math.min(pass.floor, floorBelow(stackOf(captureContext())));
-            return { ...found, pass: passFor(pass.record, pass.faultContext, pass.thread, floor) };
-        },
+        dispatcherContextAt,
 
         /** @param {number} vector */
         claims: vector=>Object.hasOwn(VECTOR_TO_STATUS, vector),
@@ -1267,13 +1269,33 @@ export function createSeh64(host){
              * EXCEPTION_DISPOSITION __C_specific_handler(...)
              *
              * The C language handler named in a function's unwind data. The
-             * dispatcher interprets its scope table directly rather than
-             * running it, so a direct call -- which is not how it is reached --
-             * only says the search goes on.
+             * dispatcher interprets a frame's scope table itself where the
+             * frame names this handler. A frame compiled with a stack cookie
+             * names its image's own `__GSHandlerCheck_SEH` instead, which
+             * checks the cookie and calls this with the dispatcher context it
+             * was given: the frame's scopes are then taken here, from the
+             * handler data that context holds, as the walk's own would be.
+             * Called with any other context, the search goes on.
              */
             __C_specific_handler: {
                 argBytes: 32, lastError: false,
-                handler: ()=>Disposition.CONTINUE_SEARCH,
+                /** @param {number[]} args */
+                handler: ([, , , dispatcher])=>{
+                    const found = dispatcherContextAt(dispatcher >>> 0);
+                    if (!found)
+                    {
+                        return Disposition.CONTINUE_SEARCH;
+                    }
+                    const visit = { ...found.visit, handlerData:
+                        readU32((dispatcher >>> 0) + DISPATCHER64.HANDLER_DATA) };
+                    if (found.unwinding)
+                    {
+                        return scopeTable.unwind(visit, found.pass, found.unwinding)
+                            .then(()=>Disposition.CONTINUE_SEARCH);
+                    }
+                    return scopeTable.search(visit, found.pass)
+                        .then(continuation=>continuation ?? Disposition.CONTINUE_SEARCH);
+                },
             },
 
             /**

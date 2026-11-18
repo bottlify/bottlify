@@ -660,6 +660,14 @@ export function createStartupFunctions(host){
         _adjust_fdiv: { data: ()=>new Uint8Array(4) },
 
         /**
+         * int _fmode, _commode: the default translation mode and commit flag, the cells
+         * `__p__fmode` and `__p__commode` answer (`globals.js`); a start-up built for the
+         * DLL imports them by name and writes its own defaults there.
+         */
+        _fmode: { data: ()=>new Uint8Array(4) },
+        _commode: { data: ()=>new Uint8Array(4) },
+
+        /**
          * unsigned _osver, _winver, _winmajor, _winminor, _osplatform
          *
          * The runtime's copy of the system version, which a start-up and a

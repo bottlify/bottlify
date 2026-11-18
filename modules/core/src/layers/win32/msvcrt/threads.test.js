@@ -139,3 +139,46 @@ test('_beginthread starts in the runtime\'s start routine, and _endthread closes
     fns._endthread.handler([]);
     assert.deepEqual(closed, [handle], 'a thread the runtime did not make keeps its handle');
 });
+
+test('an x86-64 process\'s _beginthread starts in a routine of its own convention: the block'
+    + ' in RCX, the stack aligned for the call', ()=>{
+    // The 32-bit routine's bytes, run as x86-64 code, call through a quadword
+    // read off the block's dwords: a 64-bit program's first runtime thread
+    // jumped to address zero.
+    const memory = fakeMemory();
+    /** @type {any[]} */
+    const started = [];
+    const fns = /** @type {Record<string, any>} */ (createThreadFunctions({
+        start: request=>{
+            started.push(request);
+            memory.writeMemory(request.threadIdOut, Uint8Array.of(0x41, 0, 0, 0));
+            return 0x204;
+        },
+        exit: ()=>0,
+        runtime: {
+            endthread: ()=>0x7f001234,
+            allocate: bytes=>memory.allocate(bytes),
+            free: ()=>{},
+            allocateCode: bytes=>memory.allocate(bytes),
+            readMemory: memory.readMemory,
+            writeMemory: memory.writeMemory,
+            closeHandle: ()=>{},
+            currentThreadId: ()=>0,
+            long: true,
+        },
+    }));
+    fns._beginthread.handler([0x401000, 0, 0x1234]);
+    const [request] = started;
+    assert.deepEqual([...memory.bytes.subarray(request.entry, request.entry + 22)], [
+        0x48, 0x83, 0xec, 0x28,         // sub rsp, 40
+        0x48, 0x89, 0xc8,               // mov rax, rcx
+        0x8b, 0x48, 0x04,               // mov ecx, [rax+4]
+        0x8b, 0x00,                     // mov eax, [rax]
+        0xff, 0xd0,                     // call rax
+        0xb8, 0x34, 0x12, 0x00, 0x7f,   // mov eax, _endthread
+        0xff, 0xd0,                     // call rax
+        0xcc,
+    ]);
+    assert.equal(memory.u32(request.parameter), 0x401000);
+    assert.equal(memory.u32(request.parameter + 4), 0x1234);
+});

@@ -2294,7 +2294,7 @@ export function x87AfterCall(e, next, top){
     e.openGuard('moved', EMPTY);
     e.exitAt(next, Exit.UNTRANSLATED);
     e.close();
-    const need = x.needs[/** @type {number} */ (e.labels.get(next))];
+    const need = x.needs[/** @type {number} */ (e.labels.get(e.wayAt(next)))];
     if (need)
     {
         // As the entry's test (`x87EntryCheck`): held is 0 in the mask, empty 1.
@@ -2308,7 +2308,7 @@ export function x87AfterCall(e, next, top){
         e.exitAt(next, Exit.UNTRANSLATED, SHAPE);
         e.close();
     }
-    if (x.precisionIn?.[/** @type {number} */ (e.labels.get(next))] === true)
+    if (x.precisionIn?.[/** @type {number} */ (e.labels.get(e.wayAt(next)))] === true)
     {
         // The callee may have set the control word; the code after the call
         // does not test it (`planPrecision`).

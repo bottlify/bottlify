@@ -73,7 +73,7 @@ function shader(constants, types){
     return new Uint8Array([...head, ...bytes, ...end]);
 }
 
-/** @param {Uint8Array} [code] @param {{ drive?: boolean }} [options] */
+/** @param {Uint8Array} [code] @param {{ drive?: boolean, pointerSize?: 4 | 8 }} [options] */
 function machine(code = shader(), options = {}){
     const memory = new Uint8Array(0x10000);
     const view = new DataView(memory.buffer);
@@ -85,11 +85,13 @@ function machine(code = shader(), options = {}){
     // A device whose vtable's slot n holds n, so a call names its method.
     const DEVICE = 0x100;
     view.setUint32(DEVICE, 0x200, true);
+    const pointer = options.pointerSize ?? 4;
     for (let slot = 0; slot < 120; slot++)
     {
-        view.setUint32(0x200 + slot * 4, slot, true);
+        view.setUint32(0x200 + slot * pointer, slot, true);
     }
     const tables = createConstantTables({
+        ...options.pointerSize ? { pointerSize: options.pointerSize } : {},
         readMemory: (address, length)=>memory.subarray(address, address + length),
         writeMemory: (address, bytes)=>memory.set(bytes, address),
         heap: { allocate: bytes=>{
@@ -358,3 +360,43 @@ test('the gate: the table\'s methods in the guest answer and call the device as 
             `the guest answered its own: ${plan.length - guest.handed}`);
         assert.deepEqual({ ...guest, handed: 0 }, { ...host, handed: 0 });
     });
+
+test('a 64-bit process gets its table, the table\'s description and a constant\'s in quadword'
+    + ' pointers, and the device\'s methods from quadword slots', async()=>{
+    // D3DXCONSTANTTABLE_DESC: LPCSTR Creator at 0, Version at 8, Constants at 12.
+    // D3DXCONSTANT_DESC: LPCSTR Name at 0, ten counts from 8, LPCVOID DefaultValue at 48.
+    const m = machine(shader(), { pointerSize: 8 });
+    m.memory.fill(0xcc, 0x50, 0x100);
+    assert.equal(m.tables.D3DXGetShaderConstantTable.handler([0x1000, 0x50]), 0);
+    assert.deepEqual([m.view.getUint32(0x50, true), m.view.getUint32(0x54, true)], [0x300, 0],
+        'the interface pointer, whole');
+    assert.equal(m.view.getUint32(0x58, true), 0xcccccccc, 'and nothing after it');
+    const [table] = m.published;
+    const methods = table.interfaceFor('{AB3C758F-093E-4356-B762-4DB18F1B3A01}').methods;
+    /** @param {string} name @param {number[]} args */
+    const call = (name, ...args)=>methods.find((/** @type {any} */ one)=>one.name === name)
+        .invoke(table, args);
+
+    assert.equal(call('GetDesc', 0x60), 0);
+    const creator = m.view.getUint32(0x60, true);
+    assert.equal(new TextDecoder().decode(m.memory.subarray(creator, creator + 13)),
+        'test compiler');
+    assert.deepEqual([4, 8, 12, 16].map(at=>m.view.getUint32(0x60 + at, true)),
+        [0, 0xfffe0300, 4, 0xcccccccc]);
+
+    const lights = call('GetConstantByName', 0, m.put('Lights'));
+    assert.equal(call('GetConstantDesc', lights, 0x80, 0x70), 0);
+    const desc = Array.from({ length: 15 }, (_, i)=>m.view.getUint32(0x80 + i * 4, true));
+    assert.equal(new TextDecoder().decode(m.memory.subarray(desc[0], desc[0] + 6)), 'Lights');
+    assert.deepEqual(desc.slice(1, 12), [0, 2, 5, 2, 1, 3, 1, 4, 2, 0, 32],
+        'the name\'s high half, then FLOAT4 c5, two registers, two vectors, 32 bytes');
+    assert.notEqual(desc[12], 0, 'the default value');
+    assert.deepEqual(desc.slice(13), [0, 0xcccccccc], 'its high half, and no byte past 56');
+
+    new Float32Array(m.memory.buffer, 0x2000, 16).set(Array.from({ length: 16 }, (_, i)=>i));
+    new DataView(m.memory.buffer).setBigUint64(0x2100, 0x2000n, true);
+    new DataView(m.memory.buffer).setBigUint64(0x2108, 0x2000n, true);
+    assert.equal(await call('SetMatrixPointerArray', m.DEVICE, m.put('WorldViewProj'), 0x2100,
+        1), 0);
+    assert.equal(m.calls[0].slot, 94, 'SetVertexShaderConstantF, read from the quadword slot');
+});

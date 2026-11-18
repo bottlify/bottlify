@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createTimerService, timerLoopCode } from './timers.js';
+import { createTimerService, longTimerLoopCode, timerLoopCode } from './timers.js';
 
 const PARKED = Object.freeze({ parked: true });
 
@@ -83,6 +83,21 @@ test('the loop is the bytes it says it is, and a wake below a record address ask
     assert.deepEqual([...code.slice(5, 12)], [0x3d, 0x00, 0x10, 0x00, 0x00, 0x72, 0xf4],
         'cmp eax, 0x1000; jb loop');
     assert.deepEqual([...code.slice(29)], [0xeb, 0xe1], 'jmp loop');
+});
+
+test('a 64-bit process\'s loop passes the five arguments in registers and above the home'
+    + ' space', ()=>{
+    // sub rsp,0x38; loop: call stub; cmp eax,0x1000; jb loop; mov ecx,[rax+4];
+    // mov edx,[rax+8]; mov r8d,[rax+12]; mov r9d,[rax+16]; mov r10d,[rax+20];
+    // mov [rsp+0x20],r10; mov eax,[rax]; call rax; jmp loop
+    const code = longTimerLoopCode(0x900, 0x200);
+    assert.equal(Buffer.from(code).toString('hex'), ['4883ec38', 'e8f7060000', '3d00100000',
+        '72f4', '8b4804', '8b5008', '448b400c', '448b4810', '448b5014', '4c89542420',
+        '8b00', 'ffd0', 'ebd7'].join(''));
+    // The call lands on the stub, and both jumps on the call.
+    assert.equal(0x200 + 9 + new DataView(code.buffer).getInt32(5, true), 0x900);
+    assert.equal(16 + new Int8Array(code.buffer)[15], 4);
+    assert.equal(code.length + new Int8Array(code.buffer)[code.length - 1], 4);
 });
 
 test('a periodic timer makes the thread, fires on its period, re-armed from its due time', ()=>{

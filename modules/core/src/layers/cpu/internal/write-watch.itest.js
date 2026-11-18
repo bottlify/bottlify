@@ -81,8 +81,12 @@ function program(next){
     const forms = 3 + next(6);
     for (let form = 0; form < forms; form++)
     {
-        switch (next(12))
+        switch (next(13))
         {
+            case 12:
+                // push edx; lock cmpxchg8b [ebx+d]; pop edx (the rounds' count, which it takes)
+                body.push(0x52, 0xf0, 0x0f, 0xc7, 0x8b, ...u32(at(8)), 0x5a);
+                break;
             case 0: body.push(0x89, 0x83, ...u32(at(4))); break; // mov [ebx+d], eax
             case 1: body.push(0x88, 0x83, ...u32(at(1))); break; // mov [ebx+d], al
             case 2: body.push(0x66, 0x89, 0x83, ...u32(at(2))); break; // mov [ebx+d], ax

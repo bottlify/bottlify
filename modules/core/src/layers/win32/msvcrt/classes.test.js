@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { UNIVERSAL_CXX, createClassFunctions } from './classes.js';
+import { UNIVERSAL_CXX, createClassFunctions, longName } from './classes.js';
 import { createCxxFunctions } from './cxx.js';
 import { guestEntry } from './guest-code.js';
 import { __RTDynamicCast } from './inguest-rtti.js';
@@ -18,7 +18,8 @@ import { fakeMemory } from './harness.test.js';
  * loader places them -- each at its own address, a vtable's entry part way
  * in, every pointer filled in -- and the runtime's casts beside it.
  */
-function build(){
+/** @param {4 | 8} [pointerSize] */
+function build(pointerSize){
     const memory = fakeMemory();
     /** @type {number[]} */
     const freed = [];
@@ -34,6 +35,7 @@ function build(){
             return true;
         },
         addressOf: name=>addresses.get(name) ?? null,
+        ...pointerSize ? { pointerSize } : {},
         callGuest: async(_entry, [bytes])=>memory.allocate(bytes),
     });
     const variables = Object.entries(table).filter(([, entry])=>entry.data);
@@ -285,4 +287,64 @@ test('__std_type_info_* compare, hash and name a type by its decorated name', ()
     call('__std_type_info_destroy_list', [list]);
     assert.deepEqual(freed, [name - 4]);
     assert.equal(memory.u32(list), 0, 'which is empty after');
+});
+
+test('a 64-bit process imports the members under its compiler\'s names', ()=>{
+    // The names 64-bit programs were seen to import (Visual C++ 2005's and
+    // msvcrt's), beside the 32-bit ones they are made from.
+    for (const [from, to] of [
+        ['??0exception@@QAE@ABQBD@Z', '??0exception@@QEAA@AEBQEBD@Z'],
+        ['??0exception@@QAE@ABQBDH@Z', '??0exception@@QEAA@AEBQEBDH@Z'],
+        ['??0exception@@QAE@ABV0@@Z', '??0exception@@QEAA@AEBV0@@Z'],
+        ['??0exception@@QAE@XZ', '??0exception@@QEAA@XZ'],
+        ['??1exception@@UAE@XZ', '??1exception@@UEAA@XZ'],
+        ['?what@exception@@UBEPBDXZ', '?what@exception@@UEBAPEBDXZ'],
+        ['??1type_info@@UAE@XZ', '??1type_info@@UEAA@XZ'],
+        ['??4exception@@QAEAAV0@ABV0@@Z', '??4exception@@QEAAAEAV0@AEBV0@@Z'],
+        ['??_Eexception@@UAEPAXI@Z', '??_Eexception@@UEAAPEAXI@Z'],
+        ['?before@type_info@@QBEHABV1@@Z', '?before@type_info@@QEBAHAEBV1@@Z'],
+        ['??0bad_cast@@AAE@PBQBD@Z', '??0bad_cast@@AEAA@PEBQEBD@Z'],
+        ['??0bad_typeid@@QAE@PBD@Z', '??0bad_typeid@@QEAA@PEBD@Z'],
+        ['__unDName', '__unDName'], ['??_7exception@@6B@', '??_7exception@@6B@'],
+    ])
+    {
+        assert.equal(longName(from), to);
+    }
+    const { table } = build(8);
+    assert.ok(table['??0exception@@QEAA@AEBQEBD@Z'] && table['??1type_info@@UEAA@XZ']);
+    assert.equal(build().table['??0exception@@QEAA@AEBQEBD@Z'], undefined,
+        'and a 32-bit process has none of them');
+});
+
+test('a 64-bit exception: the vtable and the message are quadwords, the flag after them', ()=>{
+    // class exception { void *vtable; const char *_m_what; int _m_doFree; }: 24 bytes.
+    const { memory, call, addresses, freed, table } = build(8);
+    const message = memory.put('An exception name');
+    const reference = memory.allocate(8);
+    memory.setU32(reference, message);
+    memory.setU32(reference + 4, 0);
+    const e = memory.allocate(32);
+    memory.bytes.fill(0xcc, e, e + 32);
+    assert.equal(call('??0exception@@QEAA@AEBQEBD@Z', [e, reference]), e);
+    assert.deepEqual([memory.u32(e), memory.u32(e + 4)],
+        [addresses.get('??_7exception@@6B@'), 0], 'the vtable, whole');
+    assert.equal(memory.text(memory.u32(e + 8)), 'An exception name');
+    assert.deepEqual([memory.u32(e + 12), memory.u32(e + 16), memory.u32(e + 24)],
+        [0, 1, 0xcccccccc], 'the message\'s high half, owned, and no byte past 24');
+    assert.equal(call('?what@exception@@UEBAPEBDXZ', [e]), memory.u32(e + 8));
+
+    // The vtable: quadword slots, the deleting destructor then what().
+    const vtable = /** @type {number} */ (addresses.get('??_7exception@@6B@'));
+    assert.equal(table['??_7exception@@6B@'].entry, 8);
+    assert.equal(memory.u32(vtable), addresses.get('??_Eexception@@UEAAPEAXI@Z'));
+    assert.equal(memory.u32(vtable + 8), addresses.get('?what@exception@@UEBAPEBDXZ'));
+    assert.equal(memory.u32(vtable - 8), 0, 'no locator: see rttiOf');
+
+    const copy = memory.allocate(24);
+    call('??0exception@@QEAA@AEBV0@@Z', [copy, e]);
+    const owned = memory.u32(copy + 8);
+    assert.notEqual(owned, memory.u32(e + 8));
+    call('??1exception@@UEAA@XZ', [copy]);
+    assert.deepEqual(freed, [owned]);
+    assert.equal(memory.u32(copy + 16), 0);
 });

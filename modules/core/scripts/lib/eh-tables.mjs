@@ -460,7 +460,7 @@ export function toFrameHandler4(text){
 
 /**
  * Names `handler` as the language handler of every frame of the procedures
- * whose names contain `marker`, in place of the runtime's C++ handler.
+ * whose names contain `marker`, in place of the runtime's C or C++ handler.
  *
  * @param {string} text @param {string} marker @param {string} handler
  * @returns {string}
@@ -473,13 +473,13 @@ export function throughGuestHandler(text, marker, handler){
         if (proc.handlerLine >= 0 && proc.name.includes(marker))
         {
             lines[proc.handlerLine] = lines[proc.handlerLine]
-                .replace(/__CxxFrameHandler[34]\b/, handler);
+                .replace(/__CxxFrameHandler[34]\b|__C_specific_handler\b/, handler);
             changed++;
         }
     }
     if (changed === 0)
     {
-        throw new Error(`no frame of a procedure named like ${marker} has a C++ handler`);
+        throw new Error(`no frame of a procedure named like ${marker} has the runtime's handler`);
     }
     return lines.join('\n');
 }

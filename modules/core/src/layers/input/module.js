@@ -88,6 +88,7 @@ export function createInputModule(){
                 // order wrongly against everything else it knows the time of.
                 now: config?.now ?? (()=>Date.now()),
                 publishInterface: config?.publishInterface ?? (()=>0),
+                pointerSize: config?.pointerSize === 8 ? 8 : 4,
                 divergence: config?.divergence,
                 signal: config?.signal,
                 mouseHeld: config?.mouseHeld,

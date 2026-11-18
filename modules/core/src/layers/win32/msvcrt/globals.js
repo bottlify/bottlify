@@ -38,6 +38,8 @@ export const EILSEQ = 42;
  * @property {(bytes: number) => number} allocate
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {(name: string) => number} [placed]  Where the runtime's data already holds
+ *     the variable, or 0: one the DLL exports by name (`_fmode`, `_commode`) is that cell.
  */
 
 /**
@@ -75,10 +77,14 @@ export function createGlobals(host){
             }
             // Room for a pointer of either width, the high half zero: the
             // environment's cells (`environ.js`) hold a `char **` here.
-            const address = host.allocate(8);
-            if (address !== 0)
+            const exported = host.placed?.(name) ?? 0;
+            const address = exported || host.allocate(8);
+            if (address !== 0 && exported === 0)
             {
                 host.writeMemory(address + 4, new Uint8Array(4));
+            }
+            if (address !== 0)
+            {
                 store(address, values.get(name) ?? initial);
             }
             addresses.set(name, address);

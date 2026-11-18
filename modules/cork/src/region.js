@@ -495,6 +495,348 @@ export function inlineReturns(region){
     return out;
 }
 
+/**
+ * Past every guest address (48 bits in long mode): a copy of a block (`sited`)
+ * is keyed by its address and so many of these as its copy's number, so each
+ * key is an integer and the address what is left of it (`guestOf`).
+ */
+export const SITE = 2 ** 48;
+
+/** The most copies a region's callees are given, each key an integer below 2^53. */
+const SITES = 31;
+
+/** The most blocks the copies of a region's callees come to in all. */
+export const SITE_BLOCKS = 24;
+
+/**
+ * The guest address of a block's key: the key itself, or a copy's less its
+ * copy's number (`sited`).
+ *
+ * @param {number} key
+ */
+export const guestOf = key=>(key < SITE ? key : key % SITE);
+
+/**
+ * The region with the callees formed into it copied for its calls inside
+ * loops, for an emitter. Formed in once, a callee joins the ways of every
+ * call of it -- its `ret` goes to each one's return address -- so a call
+ * inside a loop and one elsewhere made the loop one with a way into its
+ * middle through the callee, and no loop of the function's to emit as one.
+ * A call in a loop (`inLoops`) of a callee other calls go to takes a copy of
+ * it: the callee's blocks as its own branches reach them (`calleeBlocks`),
+ * keyed past `SITE`, and with them a copy of each callee they call in turn,
+ * all of it or none -- a callee left shared between a copy and its original
+ * joins the loop to the original's caller as before. The calls in the
+ * tightest loops come first (`innermostLoops`), while `room` blocks last: a
+ * loop inside another turns the more. The call's target and
+ * the ways among a copy's blocks are its keys, every other address is as it
+ * was, and the instructions are the callee's own. A copy has no entry from
+ * outside: the blocks at the addresses stay the region's entries, for the
+ * calls with no copy, the last one where each could have had its own.
+ *
+ * A callee stays one for all where it holds its caller or the region's
+ * entry, calls itself or is called by a callee of its own -- its `ret` goes
+ * several ways in a copy as well -- or holds a switch, whose table names
+ * addresses; and where `room` blocks would not hold the copies.
+ *
+ * The region itself is not written: the blocks changed are new objects.
+ *
+ * @param {Region} region
+ * @param {number} [room]  the most blocks copied in all
+ * @returns {Region}  the same region where nothing was copied
+ */
+export function sited(region, room = SITE_BLOCKS){
+    /** @type {Map<number, Block>} */
+    const byKey = new Map(region.blocks.map(block=>[block.start, block]));
+    /** @param {Block} block  the callees its call returns from to a block of the region */
+    const formedIn = block=>(byKey.has(block.exit.next)
+        ? calleesOf(block.exit).filter(callee=>byKey.has(callee)) : []);
+    /** @type {Map<number, number[]>} by callee, the blocks that call it */
+    const callers = new Map();
+    for (const block of region.blocks)
+    {
+        for (const callee of formedIn(block))
+        {
+            callers.set(callee, [...callers.get(callee) ?? [], block.start]);
+        }
+    }
+    if (![...callers.values()].some(sites=>sites.length > 1))
+    {
+        return region;
+    }
+    /** @type {Map<number, number[]>} */
+    const bodies = new Map();
+    /** @param {number} callee */
+    const bodyOf = callee=>{
+        const body = bodies.get(callee) ?? calleeBlocks(byKey, callee);
+        bodies.set(callee, body);
+        return body;
+    };
+    const looped = innermostLoops(region.blocks, byKey);
+    // A callee only a call in a loop goes to runs in that loop, its own calls with it.
+    for (const work = [...looped.keys()]; work.length > 0;)
+    {
+        const at = /** @type {number} */ (work.pop());
+        const size = /** @type {number} */ (looped.get(at));
+        for (const callee of formedIn(/** @type {Block} */ (byKey.get(at))))
+        {
+            for (const start of callers.get(callee)?.length === 1 ? bodyOf(callee) : [])
+            {
+                if ((looped.get(start) ?? Infinity) > size)
+                {
+                    looped.set(start, size);
+                    work.push(start);
+                }
+            }
+        }
+    }
+    /**
+     * The callees a copy of `callee` is made of, itself first: null where it may have none.
+     *
+     * @param {number} callee @param {number[]} above  the callees it is copied under
+     * @returns {number[] | null}
+     */
+    const whole = (callee, above)=>{
+        const body = bodyOf(callee);
+        const out = [callee];
+        for (const start of body)
+        {
+            const block = /** @type {Block} */ (byKey.get(start));
+            if (start === region.entry || block.exit.table !== undefined)
+            {
+                return null;
+            }
+            for (const inner of formedIn(block))
+            {
+                const more = body.includes(inner) || above.includes(inner) ? null
+                    : whole(inner, [...above, callee]);
+                if (more === null)
+                {
+                    return null;
+                }
+                out.push(...more);
+            }
+        }
+        return out;
+    };
+    /** @type {Block[]} */
+    const blocks = [...region.blocks];
+    let copies = 0;
+    let left = room;
+    /**
+     * A copy of `callee`, with its callees' in turn (`whole` found them), onto `blocks`.
+     *
+     * @param {number} callee
+     * @returns {number} the key of its first block
+     */
+    const copyOf = callee=>{
+        const shift = ++copies * SITE;
+        const inside = new Set(bodyOf(callee));
+        /** @param {number} address */
+        const keyed = address=>(inside.has(address) ? address + shift : address);
+        for (const start of [...inside].sort((a, b)=>a - b))
+        {
+            const block = /** @type {Block} */ (byKey.get(start));
+            const inner = formedIn(block);
+            blocks.push({ ...block, start: start + shift, end: block.end + shift,
+                exit: { ...block.exit, next: keyed(block.exit.next),
+                    targets: block.exit.targets.map(target=>(
+                        inner.includes(target) ? copyOf(target) : keyed(target))) } });
+        }
+        return callee + shift;
+    };
+    /** @type {Map<number, number>} by callee, the calls of it with no copy of their own */
+    const sharing = new Map([...callers].map(([callee, sites])=>[callee, sites.length]));
+    // The tightest loops first: the room goes to the code that turns most.
+    const sites = [...region.blocks.entries()].filter(([, site])=>looped.has(site.start))
+        .sort(([a, one], [b, other])=>/** @type {number} */ (looped.get(one.start))
+            - /** @type {number} */ (looped.get(other.start)) || a - b);
+    for (const [at, site] of sites)
+    {
+        /** @type {number[] | null} */
+        let targets = null;
+        for (const callee of formedIn(site))
+        {
+            if (sharing.get(callee) === 1)
+            {
+                // The only call of it, or the last without a copy: the callee's own blocks.
+                continue;
+            }
+            const parts = bodyOf(callee).includes(site.start) ? null : whole(callee, []);
+            const size = parts?.reduce((sum, part)=>sum + bodyOf(part).length, 0) ?? 0;
+            if (parts === null || size > left || copies + parts.length > SITES)
+            {
+                continue;
+            }
+            left -= size;
+            sharing.set(callee, /** @type {number} */ (sharing.get(callee)) - 1);
+            targets ??= [...site.exit.targets];
+            targets[targets.indexOf(callee)] = copyOf(callee);
+        }
+        if (targets !== null)
+        {
+            blocks[at] = { ...site, exit: { ...site.exit, targets } };
+        }
+    }
+    return copies === 0 ? region : { ...region, blocks };
+}
+
+/**
+ * The blocks of a region that are in a loop of their function's own, each
+ * with the size in blocks of the innermost loop that holds it. A loop is a
+ * set of blocks that come back to one another by the branches and, past a
+ * call or a trap, where it comes back -- never through a callee formed in,
+ * whose `ret` is no way on; the loops inside one are those of its blocks
+ * without its head, the block entered from outside it.
+ *
+ * @param {Block[]} blocks @param {Map<number, Block>} byKey
+ * @returns {Map<number, number>}  by start
+ */
+function innermostLoops(blocks, byKey){
+    /** @type {Map<number, number>} */
+    const out = new Map();
+    /** @type {Map<number, number[]>} */
+    const ways = new Map(blocks.map(block=>[block.start,
+        waysOn(block).filter(to=>byKey.has(to))]));
+    /** @param {Set<number>} among  the loops of these blocks, by the ways among them */
+    const within = among=>{
+        for (const loop of components(among, ways))
+        {
+            for (const at of loop)
+            {
+                out.set(at, loop.length);
+            }
+            // The head: a block of the loop something outside it goes to, the lowest
+            // such, or its lowest block.
+            const inside = new Set(loop);
+            const entered = new Set();
+            for (const [from, to] of ways)
+            {
+                for (const one of inside.has(from) ? [] : to)
+                {
+                    entered.add(one);
+                }
+            }
+            const heads = loop.filter(at=>entered.has(at));
+            inside.delete(Math.min(...(heads.length > 0 ? heads : loop)));
+            within(inside);
+        }
+    };
+    within(new Set(ways.keys()));
+    return out;
+}
+
+/**
+ * The strongly connected components of `among` by `ways` that are loops: of
+ * more than one block, or one block that goes to itself.
+ *
+ * @param {Set<number>} among @param {Map<number, number[]>} ways
+ * @returns {number[][]}
+ */
+function components(among, ways){
+    /** @type {Map<number, number>} */
+    const order = new Map();
+    /** @type {Map<number, number>} */
+    const low = new Map();
+    /** @type {number[]} */
+    const stack = [];
+    const open = new Set();
+    /** @type {number[][]} */
+    const out = [];
+    /** @param {number} at */
+    const visit = at=>{
+        order.set(at, order.size);
+        low.set(at, order.size - 1);
+        stack.push(at);
+        open.add(at);
+        let onItself = false;
+        for (const to of /** @type {number[]} */ (ways.get(at)))
+        {
+            onItself ||= to === at;
+            if (!among.has(to))
+            {
+                continue;
+            }
+            if (!order.has(to))
+            {
+                visit(to);
+                low.set(at, Math.min(/** @type {number} */ (low.get(at)),
+                    /** @type {number} */ (low.get(to))));
+            }
+            else if (open.has(to))
+            {
+                low.set(at, Math.min(/** @type {number} */ (low.get(at)),
+                    /** @type {number} */ (order.get(to))));
+            }
+        }
+        if (low.get(at) === order.get(at))
+        {
+            const component = stack.splice(stack.lastIndexOf(at));
+            for (const one of component)
+            {
+                open.delete(one);
+            }
+            if (component.length > 1 || onItself)
+            {
+                out.push(component);
+            }
+        }
+    };
+    for (const at of among)
+    {
+        if (!order.has(at))
+        {
+            visit(at);
+        }
+    }
+    return out;
+}
+
+/**
+ * Where a block goes on in its own function: its branches' targets, a
+ * switch's cases, and past a call or a trap where that comes back.
+ *
+ * @param {Block} block
+ * @returns {number[]}
+ */
+function waysOn(block){
+    const { kind, targets, next, table } = block.exit;
+    if (kind === 'fallthrough' || kind === 'jcc' || kind === 'loop')
+    {
+        return [...targets, next];
+    }
+    if (kind === 'jump' || kind === 'indirect' && table !== undefined)
+    {
+        return targets;
+    }
+    return kind === 'trap' || kind === 'call'
+        || block.instructions[block.instructions.length - 1]?.op === 'call' ? [next] : [];
+}
+
+/**
+ * The blocks of a callee formed into a region, as its own branches reach them
+ * from its start: past its calls and traps where they come back, never into
+ * a call's callee.
+ *
+ * @param {Map<number, Block>} byKey @param {number} callee
+ * @returns {number[]}  their keys
+ */
+function calleeBlocks(byKey, callee){
+    const seen = new Set();
+    const work = [callee];
+    while (work.length > 0)
+    {
+        const at = /** @type {number} */ (work.pop());
+        const reached = byKey.get(at);
+        if (reached !== undefined && !seen.has(at))
+        {
+            seen.add(at);
+            work.push(...waysOn(reached));
+        }
+    }
+    return [...seen];
+}
+
 /** The most entries a switch's table is read for. */
 const SWITCH_ENTRIES = 1024;
 

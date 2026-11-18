@@ -51,6 +51,8 @@
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(handle: number) => void} closeHandle
  * @property {() => number} currentThreadId
+ * @property {boolean} [long]  The process is an x86-64 one: the start routine in its
+ *           convention (`longStartRoutine`).
  */
 
 /**
@@ -65,6 +67,21 @@
  */
 const startRoutine = endthread=>Uint8Array.of(
     0x8b, 0x44, 0x24, 0x04, 0xff, 0x70, 0x04, 0xff, 0x10, 0x83, 0xc4, 0x04,
+    0xb8, endthread & 0xff, endthread >>> 8 & 0xff, endthread >>> 16 & 0xff, endthread >>> 24,
+    0xff, 0xd0, 0xcc);
+
+/**
+ * The same for an x86-64 process: the block in RCX, the stack eight past a
+ * multiple of 16 as a function is entered; the routine and its argument are
+ * the block's dwords, every address below 4 GiB.
+ *
+ *   sub rsp, 40; mov rax, rcx; mov ecx, [rax+4]; mov eax, [rax]; call rax
+ *   mov eax, _endthread; call rax; int3
+ *
+ * @param {number} endthread
+ */
+const longStartRoutine = endthread=>Uint8Array.of(
+    0x48, 0x83, 0xec, 0x28, 0x48, 0x89, 0xc8, 0x8b, 0x48, 0x04, 0x8b, 0x00, 0xff, 0xd0,
     0xb8, endthread & 0xff, endthread >>> 8 & 0xff, endthread >>> 16 & 0xff, endthread >>> 24,
     0xff, 0xd0, 0xcc);
 
@@ -86,7 +103,7 @@ export function createThreadFunctions(seam){
         const endthread = runtime?.endthread() ?? 0;
         if (start === 0 && runtime && endthread !== 0)
         {
-            const code = startRoutine(endthread);
+            const code = (runtime.long ? longStartRoutine : startRoutine)(endthread);
             start = runtime.allocateCode(code.length);
             if (start !== 0)
             {

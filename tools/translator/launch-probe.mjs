@@ -606,8 +606,11 @@ async function main(){
     // The tools-side reader takes a path and does its own reading; the engine's
     // takes a range fetcher. Both are used here, over the same file: this one to
     // lift the executable out, the engine's to serve the game its own files.
+    // A `--file` put at the executable's own path is the executable: a build of
+    // the game the bundle does not hold (its 64-bit one) beside the bundle's files.
+    const given = files.find(file=>file.path.toLowerCase().endsWith(wanted.toLowerCase()));
     const bundle = await openBundle(path);
-    const executable = await bundle.read(wanted);
+    const executable = given?.bytes ?? await bundle.read(wanted);
     await bundle.close();
     console.log(`  entry image: ${executable.length} bytes\n`);
 
