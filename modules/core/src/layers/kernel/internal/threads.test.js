@@ -97,6 +97,32 @@ test('a slice that calls the host in a loop moves the guest clock as it goes', (
     assert.equal(refreshed, 10, 'an ask from another executor is no crossing of this thread');
 });
 
+test('another executor\'s thread calling the host in a loop moves the guest clock as it goes', ()=>{
+    // Its asks keep this executor answering: no turn here ends, and the clock
+    // moved only between turns stood still for the thread's whole slice.
+    const { cpu } = twoExecutors();
+    let refreshed = 0;
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000,
+        refreshClock: ()=>refreshed++ });
+    sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
+    sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'worker' });
+    const [remote] = cpu.executors();
+    let calls = 0;
+    remote.step = /** @type {any} */ ((/** @type {(reply: () => void) => void} */ around)=>{
+        for (; calls < 640; calls++)
+        {
+            around(()=>{});
+        }
+        return null;
+    });
+    for (let turn = 0; turn < 4; turn++)
+    {
+        sched.runOnce();
+    }
+    assert.equal(calls, 640, 'the other executor\'s crossings were answered');
+    assert.equal(refreshed, 10, 'once every 64 of them');
+});
+
 test('a created thread is ready but does not take the CPU', ()=>{
     const { cpu, sched } = scheduler();
     const thread = sched.create({ entry: 0x1000, stackTop: 0x2000, tebAddress: 0x7000 });
