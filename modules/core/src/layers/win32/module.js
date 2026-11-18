@@ -739,8 +739,10 @@ export function createWin32Module(){
                         return null;
                     }
                 },
-                open: (/** @type {string} */ type, /** @type {any} */ object)=>
-                    kernel.handles.open(type, object),
+                open: (/** @type {string} */ type, /** @type {any} */ object,
+                    /** @type {number | null} */ access = null)=>
+                    kernel.handles.open(type, object, access),
+                access: (/** @type {number} */ handle)=>kernel.handles.access(handle),
                 close: (/** @type {number} */ handle)=>kernel.handles.close(handle),
             };
             system?.processTables?.set(processId, table);
