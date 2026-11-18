@@ -27,14 +27,19 @@ import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { LONG } from '../build-guest-code.mjs';
 import { CALLBACK, DATA, doubleWords, equivalence, random } from './equivalence.mjs';
+import { SHAPED_INPUTS } from './shaped-inputs.mjs';
 
 const SRC = fileURLToPath(new URL('../../src/', import.meta.url));
 
 /**
  * The modules with x86-64 code, each with its source, its i386 and its x86-64.
  *
+ * and the inputs of each function whose arguments only agree in a shape of
+ * their own (`shaped-inputs.mjs`).
+ *
  * @returns {Promise<{ path: string, sources: Record<string, unknown>,
- *     i386: Record<string, any>, long: Record<string, any>, refused: Record<string, string> }[]>}
+ *     i386: Record<string, any>, long: Record<string, any>, refused: Record<string, string>,
+ *     shaped: Record<string, import('./shaped-inputs.mjs').ShapedInput> }[]>}
  */
 async function modules(){
     return Promise.all([...LONG.keys()].map(async path=>{
@@ -42,7 +47,8 @@ async function modules(){
             path.replace(/\.js$/, suffix))).href;
         const { COMPILED: long, REFUSED: refused } = await import(at('.x64.js'));
         const { COMPILED: i386 } = await import(at('.x86.js'));
-        return { path, sources: await import(at('.js')), i386, long, refused };
+        const shaped = SHAPED_INPUTS[path] ?? {};
+        return { path, sources: await import(at('.js')), i386, long, refused, shaped };
     }));
 }
 
@@ -141,6 +147,31 @@ function area(next){
         }
     }
     return { bytes, twins };
+}
+
+/** The bytes of the structures past the area (`structures`). */
+const STRUCTURES = 0x400;
+
+/**
+ * Structures past the area: eight-byte slots, each a small count or a
+ * pointer into the area or to another structure, its upper half zero -- what
+ * an object's members read their counts and their text's address from, which
+ * the area's text never holds: a count made of text bytes is never small.
+ * From a generator of their own, so the area's inputs stay what they were.
+ *
+ * @param {() => number} aside
+ * @returns {Uint8Array}  sixteen structures of 64 bytes, at DATA + AREA
+ */
+function structures(aside){
+    const bytes = new Uint8Array(STRUCTURES);
+    const view = new DataView(bytes.buffer);
+    for (let slot = 0; slot < STRUCTURES / 8; slot++)
+    {
+        const pick = aside() % 4;
+        view.setUint32(slot * 8, pick === 0 ? DATA + aside() % (AREA - 0x100)
+            : pick === 1 ? DATA + AREA + (aside() % (STRUCTURES / 64)) * 64 : aside() % 24, true);
+    }
+    return bytes;
 }
 
 /** Values past which 32-bit code wraps, signs flip or counts end. */
@@ -343,7 +374,7 @@ test('every function of the 64-bit modules is x86-64 code or refused with a reas
 });
 
 test('each function\'s x86-64 answers as its JavaScript, on inputs of every shape', async()=>{
-    for (const { path, sources, i386, long } of await modules())
+    for (const { path, sources, i386, long, shaped } of await modules())
     {
         const { sameAt64 } = equivalence(i386, sources, undefined, long);
         Object.keys(long).forEach((name, index)=>{
@@ -354,9 +385,14 @@ test('each function\'s x86-64 answers as its JavaScript, on inputs of every shap
             }
             const next = random(0x64 + index);
             // A few areas, each input in one of them.
-            const objects = OBJECT_MODULES.has(path);
-            const areas = Array.from({ length: 8 }, ()=>(objects ? objectArea : area)(next));
-            const argumentsFor = objects ? objectArgumentsOf : argumentsOf;
+            const objectModule = OBJECT_MODULES.has(path);
+            const areas = Array.from({ length: 8 }, ()=>(objectModule ? objectArea : area)(next));
+            const argumentsFor = objectModule ? objectArgumentsOf : argumentsOf;
+            // One call in six has a pointer into the area replaced by a
+            // structure's: its own generator, so every other call is the
+            // input it was.
+            const aside = random(0x5eed + index);
+            const objects = structures(aside);
             let ran = 0;
             let handed = 0;
             let tried = 0;
@@ -364,18 +400,37 @@ test('each function\'s x86-64 answers as its JavaScript, on inputs of every shap
             // counts finds fewer of them in bounds than one of a character.
             for (; tried < 4000 && ran < 200; tried++)
             {
-                const { bytes, twins } = areas[next() % areas.length];
-                const stack = wordsOf(next, fn.params, argumentsFor(next, fn.params.length, twins));
-                // A function that names no memory is run with none.
-                const memory = /** @type {[number, Uint8Array][]} */ (fn.uses.some((
-                    /** @type {string} */ use)=>use !== 'host') ? [[DATA, bytes]] : []);
                 const host = (/** @type {Uint8Array} */ _, /** @type {number[]} */ args)=>
                     (args[0] ^ 0x5eed) | 0;
+                if (shaped[name])
+                {
+                    const input = shaped[name](next);
+                    handed += sameAt64(name, { stack: input.stack, memory: input.memory },
+                        { host }, input.bounds).handedOver ? 1 : 0;
+                    ran++;
+                    continue;
+                }
+                const { bytes, twins } = areas[next() % areas.length];
+                const given = argumentsFor(next, fn.params.length, twins);
+                const pointers = given.flatMap((value, i)=>(value >= DATA && value < DATA + AREA
+                    ? [i] : []));
+                // A module of objects lays its own out in the area (`objectArea`): no swap there.
+                const object = !objectModule && pointers.length > 0 && aside() % 6 === 0;
+                if (object)
+                {
+                    given[pointers[aside() % pointers.length]] = DATA + AREA
+                        + (aside() % (STRUCTURES / 64)) * 64;
+                }
+                const stack = wordsOf(next, fn.params, given);
+                // A function that names no memory is run with none.
+                const memory = /** @type {[number, Uint8Array][]} */ (fn.uses.some((
+                    /** @type {string} */ use)=>use !== 'host')
+                    ? [[DATA, bytes], ...object ? [[DATA + AREA, objects]] : []] : []);
                 try
                 {
                     // Within the area: what lies past it is the machine's, not the input's.
-                    handed += sameAt64(name, { stack, memory }, { host }, [DATA, DATA + AREA])
-                        .handedOver ? 1 : 0;
+                    handed += sameAt64(name, { stack, memory }, { host },
+                        [DATA, DATA + AREA + (object ? STRUCTURES : 0)]).handedOver ? 1 : 0;
                     ran++;
                 }
                 catch (e){

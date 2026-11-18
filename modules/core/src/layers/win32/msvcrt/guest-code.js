@@ -35,6 +35,10 @@ import { COMPILED as PRINT } from './inguest-print.x86.js';
 import { COMPILED as PRINT_LONG } from './inguest-print.x64.js';
 import { COMPILED as FLOAT } from './inguest-float.x86.js';
 import { COMPILED as FLOAT_LONG } from './inguest-float.x64.js';
+import { COMPILED as STRING } from './inguest-string.x86.js';
+import { COMPILED as STRING_LONG } from './inguest-string.x64.js';
+import { COMPILED as RTTI } from './inguest-rtti.x86.js';
+import { COMPILED as RTTI_LONG } from './inguest-rtti.x64.js';
 import { setSingle } from './float.js';
 
 /**
@@ -46,7 +50,7 @@ import { setSingle } from './float.js';
 const LONG_CODE = new Map();
 /** @type {[Record<string, CompiledGuestCode>, Record<string, CompiledGuestCode>][]} */
 const PAIRS = [[RUNTIME, RUNTIME_LONG], [MATH, MATH_LONG], [PRINT, PRINT_LONG],
-    [FLOAT, FLOAT_LONG]];
+    [FLOAT, FLOAT_LONG], [STRING, STRING_LONG], [RTTI, RTTI_LONG]];
 for (const [i386, long] of PAIRS)
 {
     for (const [name, compiled] of Object.entries(long))

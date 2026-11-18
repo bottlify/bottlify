@@ -55,7 +55,7 @@ its place in the source rather than approximated. The full rules are in the head
 A 64-bit process runs no i386. For the modules `LONG` names in
 [`../build-guest-code.mjs`](../build-guest-code.mjs), the same source is also compiled to
 x86-64 under the x64 convention (`compileModule(text, { bits: 64 })`), into a module beside
-the i386 one: `inguest.js` into `inguest.x64.js` (and `inguest-math.js` into `inguest-math.x64.js`), whose `COMPILED` has the code and whose
+the i386 one: `inguest.js` into `inguest.x64.js` (and so `inguest-math.js`, `inguest-print.js`, `inguest-float.js`, `inguest-string.js` and `inguest-rtti.js`), whose `COMPILED` has the code and whose
 `REFUSED` names each function with none and why.
 
 - **Convention**: the arguments in RCX, RDX, R8 and R9 and the stack past the 32 bytes of home
@@ -96,7 +96,10 @@ the i386 one: `inguest.js` into `inguest.x64.js` (and `inguest-math.js` into `in
   and 8 in the x86-64, a constant of each (and the process's in the handler): a pointer the source
   writes, or a slot it steps by, is laid out by it, and an `if` or a `?:` comparing it keeps only
   the way it takes: a source may take the x87's words and use them only where
-  `pointerBytes === 4`, which the x86-64 never compiles.
+  `pointerBytes === 4`, which the x86-64 never compiles. An offset that differs by width is
+  arithmetic on it (`const atSize = pointerBytes + 16`), which folds into the displacement as
+  a literal does; a `?:` choosing between two constants is a value, kept in a slot and added,
+  so it makes the i386 dearer than it was.
 - **Refused at 64 bits**: x87 arguments, a use of the x87's control and status words, an `i64` result, more
   than four doubles at once, and a function `LONG` names for a pointer its source lays out as four
   bytes. Each stays a trap into its handler there.
@@ -117,6 +120,8 @@ for the tests: `equivalence` runs every case through the x86-64 too where there 
 | [`model.mjs`](model.mjs) | the x87's model of a module under single precision, the reference there |
 | [`compile.test.js`](compile.test.js) | the compiler's own tests |
 | [`long.test.js`](long.test.js) | the gate of the committed x86-64: every function against its JavaScript |
+| [`shaped-inputs.mjs`](shaped-inputs.mjs) | the gate's inputs for a function whose arguments agree only in a shape of their own (a C++ object and the delta it is held by), which its random text, counts and pointers never meet |
+| [`class-graph.mjs`](class-graph.mjs) | a class hierarchy laid out as Visual C++ lays out its RTTI, 32-bit or 64-bit, for what reads it |
 | `../build-guest-code.mjs` | compiles every `@guestCode` module under `src/` |
 
 At run time `guestEntry` in `src/layers/win32/msvcrt/guest-code.js` binds the two: an export

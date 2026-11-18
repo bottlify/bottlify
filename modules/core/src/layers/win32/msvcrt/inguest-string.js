@@ -19,6 +19,16 @@
  *        the capacity is 16 or more
  *   +20  the length
  *   +24  the capacity, the terminator not counted: 15 while inline
+ *
+ * and in a 64-bit process, where the pointer and the two counts are eight
+ * bytes: a first word the handler (`msvcp80.js`) clears as it makes a string,
+ * the buffer at +8, the length at +24 and the capacity at +32, forty bytes in
+ * all. Each member takes its offsets by `pointerBytes` (the buffer one
+ * pointer in, the length 16 bytes past it, the capacity a pointer past
+ * that). It reads a count's low half, and writes the upper half as well only
+ * where it makes the object, which held nothing before: a string of four
+ * billion characters is none these members take, and the pointer's upper
+ * half is zero for any text in the guest's memory.
  */
 
 /** @typedef {import('./guest-code.js').Guest} Guest */
@@ -27,6 +37,10 @@
 export const STRING_BUFFER = 4;
 export const STRING_SIZE = 20;
 export const STRING_RESERVED = 24;
+/** The same three in a 64-bit process. */
+export const STRING_BUFFER_64 = 8;
+export const STRING_SIZE_64 = 24;
+export const STRING_RESERVED_64 = 32;
 /** The inline buffer's capacity: sixteen bytes, the terminator among them. */
 export const STRING_INLINE = 15;
 
@@ -37,10 +51,20 @@ export const STRING_INLINE = 15;
  * @param {Guest} guest @param {u32} self
  * @returns {u32}
  */
-export function stringConstruct({ setU8, setU32 }, self){
-    setU32(self + STRING_RESERVED, STRING_INLINE);
-    setU32(self + STRING_SIZE, 0);
-    setU8(self + STRING_BUFFER, 0);
+export function stringConstruct({ setU8, setU32, pointerBytes }, self){
+    const atBuffer = pointerBytes;
+    const atSize = pointerBytes + 16;
+    const atReserved = pointerBytes * 2 + 16;
+    setU32(self + atReserved, STRING_INLINE);
+    setU32(self + atSize, 0);
+    if (pointerBytes === 8)
+    {
+        setU32(self, 0);
+        setU32(self + 4, 0);
+        setU32(self + atReserved + 4, 0);
+        setU32(self + atSize + 4, 0);
+    }
+    setU8(self + atBuffer, 0);
     return self;
 }
 
@@ -53,7 +77,10 @@ export function stringConstruct({ setU8, setU32 }, self){
  * @param {Guest} guest @param {u32} self @param {u32} text
  * @returns {u32}
  */
-export function stringFromText({ u8, setU32, copyUp, host }, self, text){
+export function stringFromText({ u8, setU32, copyUp, host, pointerBytes }, self, text){
+    const atBuffer = pointerBytes;
+    const atSize = pointerBytes + 16;
+    const atReserved = pointerBytes * 2 + 16;
     /** @type {u32} */
     let length = 0;
     while (u8(text + length) !== 0)
@@ -64,9 +91,16 @@ export function stringFromText({ u8, setU32, copyUp, host }, self, text){
             return host();
         }
     }
-    copyUp(self + STRING_BUFFER, text, length + 1);
-    setU32(self + STRING_SIZE, length);
-    setU32(self + STRING_RESERVED, STRING_INLINE);
+    copyUp(self + atBuffer, text, length + 1);
+    setU32(self + atSize, length);
+    setU32(self + atReserved, STRING_INLINE);
+    if (pointerBytes === 8)
+    {
+        setU32(self, 0);
+        setU32(self + 4, 0);
+        setU32(self + atSize + 4, 0);
+        setU32(self + atReserved + 4, 0);
+    }
     return self;
 }
 
@@ -79,17 +113,27 @@ export function stringFromText({ u8, setU32, copyUp, host }, self, text){
  * @param {Guest} guest @param {u32} self @param {u32} other
  * @returns {u32}
  */
-export function stringCopy({ u32, setU32, copyUp, host }, self, other){
-    const length = u32(other + STRING_SIZE);
+export function stringCopy({ u32, setU32, copyUp, host, pointerBytes }, self, other){
+    const atBuffer = pointerBytes;
+    const atSize = pointerBytes + 16;
+    const atReserved = pointerBytes * 2 + 16;
+    const length = u32(other + atSize);
     if (length > STRING_INLINE)
     {
         return host();
     }
-    const from = u32(other + STRING_RESERVED) > STRING_INLINE
-        ? u32(other + STRING_BUFFER) : (other + STRING_BUFFER) >>> 0;
-    copyUp(self + STRING_BUFFER, from, length + 1);
-    setU32(self + STRING_SIZE, length);
-    setU32(self + STRING_RESERVED, STRING_INLINE);
+    const from = u32(other + atReserved) > STRING_INLINE
+        ? u32(other + atBuffer) : (other + atBuffer) >>> 0;
+    copyUp(self + atBuffer, from, length + 1);
+    setU32(self + atSize, length);
+    setU32(self + atReserved, STRING_INLINE);
+    if (pointerBytes === 8)
+    {
+        setU32(self, 0);
+        setU32(self + 4, 0);
+        setU32(self + atSize + 4, 0);
+        setU32(self + atReserved + 4, 0);
+    }
     return self;
 }
 
@@ -103,14 +147,17 @@ export function stringCopy({ u32, setU32, copyUp, host }, self, other){
  * @param {Guest} guest @param {u32} self
  * @returns {u32}  Nothing a caller reads: zero.
  */
-export function stringDestroy({ u32, setU8, setU32, host }, self){
-    if (u32(self + STRING_RESERVED) > STRING_INLINE)
+export function stringDestroy({ u32, setU8, setU32, host, pointerBytes }, self){
+    const atBuffer = pointerBytes;
+    const atSize = pointerBytes + 16;
+    const atReserved = pointerBytes * 2 + 16;
+    if (u32(self + atReserved) > STRING_INLINE)
     {
         return host();
     }
-    setU32(self + STRING_RESERVED, STRING_INLINE);
-    setU32(self + STRING_SIZE, 0);
-    setU8(self + STRING_BUFFER, 0);
+    setU32(self + atReserved, STRING_INLINE);
+    setU32(self + atSize, 0);
+    setU8(self + atBuffer, 0);
     return 0;
 }
 
@@ -122,9 +169,11 @@ export function stringDestroy({ u32, setU8, setU32, host }, self){
  * @param {Guest} guest @param {u32} self
  * @returns {u32}
  */
-export function stringText({ u32 }, self){
-    return u32(self + STRING_RESERVED) > STRING_INLINE
-        ? u32(self + STRING_BUFFER) : (self + STRING_BUFFER) >>> 0;
+export function stringText({ u32, pointerBytes }, self){
+    const atBuffer = pointerBytes;
+    const atReserved = pointerBytes * 2 + 16;
+    return u32(self + atReserved) > STRING_INLINE
+        ? u32(self + atBuffer) : (self + atBuffer) >>> 0;
 }
 
 /**
@@ -134,9 +183,11 @@ export function stringText({ u32 }, self){
  * @param {Guest} guest @param {u32} self @param {u32} index
  * @returns {u32}
  */
-export function stringAt({ u32 }, self, index){
-    const text = u32(self + STRING_RESERVED) > STRING_INLINE
-        ? u32(self + STRING_BUFFER) : (self + STRING_BUFFER) >>> 0;
+export function stringAt({ u32, pointerBytes }, self, index){
+    const atBuffer = pointerBytes;
+    const atReserved = pointerBytes * 2 + 16;
+    const text = u32(self + atReserved) > STRING_INLINE
+        ? u32(self + atBuffer) : (self + atBuffer) >>> 0;
     return (text + index) >>> 0;
 }
 
@@ -147,8 +198,9 @@ export function stringAt({ u32 }, self, index){
  * @param {Guest} guest @param {u32} self
  * @returns {u32}
  */
-export function stringSize({ u32 }, self){
-    return u32(self + STRING_SIZE);
+export function stringSize({ u32, pointerBytes }, self){
+    const atSize = pointerBytes + 16;
+    return u32(self + atSize);
 }
 
 /**
@@ -160,18 +212,21 @@ export function stringSize({ u32 }, self){
  * @param {Guest} guest @param {u32} self @param {u32} c
  * @returns {u32}
  */
-export function stringAppendChar({ u32, setU8, setU32, host }, self, c){
-    const length = u32(self + STRING_SIZE);
-    const reserved = u32(self + STRING_RESERVED);
+export function stringAppendChar({ u32, setU8, setU32, host, pointerBytes }, self, c){
+    const atBuffer = pointerBytes;
+    const atSize = pointerBytes + 16;
+    const atReserved = pointerBytes * 2 + 16;
+    const length = u32(self + atSize);
+    const reserved = u32(self + atReserved);
     if (length >= reserved)
     {
         return host();
     }
     const text = reserved > STRING_INLINE
-        ? u32(self + STRING_BUFFER) : (self + STRING_BUFFER) >>> 0;
+        ? u32(self + atBuffer) : (self + atBuffer) >>> 0;
     setU8(text + length, c & 0xff);
     setU8(text + length + 1, 0);
-    setU32(self + STRING_SIZE, length + 1);
+    setU32(self + atSize, length + 1);
     return self;
 }
 
@@ -185,20 +240,23 @@ export function stringAppendChar({ u32, setU8, setU32, host }, self, c){
  * @param {Guest} guest @param {u32} self @param {u32} count
  * @returns {u32}  Nothing a caller reads: zero.
  */
-export function stringResize({ u32, setU8, setU32, host }, self, count){
-    const reserved = u32(self + STRING_RESERVED);
+export function stringResize({ u32, setU8, setU32, host, pointerBytes }, self, count){
+    const atBuffer = pointerBytes;
+    const atSize = pointerBytes + 16;
+    const atReserved = pointerBytes * 2 + 16;
+    const reserved = u32(self + atReserved);
     if (count > reserved)
     {
         return host();
     }
     const text = reserved > STRING_INLINE
-        ? u32(self + STRING_BUFFER) : (self + STRING_BUFFER) >>> 0;
-    for (let at = u32(self + STRING_SIZE); at < count; at++)
+        ? u32(self + atBuffer) : (self + atBuffer) >>> 0;
+    for (let at = u32(self + atSize); at < count; at++)
     {
         setU8(text + at, 0);
     }
     setU8(text + count, 0);
-    setU32(self + STRING_SIZE, count);
+    setU32(self + atSize, count);
     return 0;
 }
 
@@ -213,9 +271,11 @@ export function stringResize({ u32, setU8, setU32, host }, self, count){
  * @param {Guest} guest @param {u32} self @param {u32} count
  * @returns {u32}  Nothing a caller reads: zero.
  */
-export function stringReserve({ u32, host }, self, count){
-    const reserved = u32(self + STRING_RESERVED);
-    if (count < u32(self + STRING_SIZE) || count === reserved)
+export function stringReserve({ u32, host, pointerBytes }, self, count){
+    const atSize = pointerBytes + 16;
+    const atReserved = pointerBytes * 2 + 16;
+    const reserved = u32(self + atReserved);
+    if (count < u32(self + atSize) || count === reserved)
     {
         return 0;
     }
