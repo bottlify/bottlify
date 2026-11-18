@@ -2620,6 +2620,19 @@ export function createWin32Module(){
                 // A session is named after the program, as the object manager names it.
                 program: ()=>nativePathOf(modules.imagePath()) ?? modules.imagePath(),
                 processId: ()=>processId,
+                // An endpoint activated as DirectSound or DirectShow's renderer is
+                // made through CoCreateInstance, loading its library, and
+                // initialized through its own vtable.
+                createInstance: (clsid, iid, out)=>lent(/** @type {Uint8Array} */ (parseGuid(clsid)),
+                    at=>libraries['ole32.dll'].CoCreateInstance.handler([at, 0, 1, iid, out])),
+                callMethod: (object, slot, args)=>{
+                    /** @param {number} at */
+                    const pointerAt = at=>memory.readU32(at) + (pointerSize === 8
+                        ? memory.readU32(at + 4) * 2 ** 32 : 0);
+                    const entry = pointerAt(pointerAt(object) + slot * pointerSize);
+                    return bridge.callGuest({ entry, args: [object, ...args],
+                        thread: bridge.callerThread() });
+                },
             });
 
             // DirectPlay's session and lobby objects, which a program makes

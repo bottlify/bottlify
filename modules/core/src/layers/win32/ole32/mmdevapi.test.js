@@ -6,7 +6,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createComRegistry } from './objects.js';
+import { IID_IUNKNOWN, createComRegistry } from './objects.js';
+import { formatGuid } from './guid.js';
 import {
     CLSID_MMDEVICE_ENUMERATOR, E_NOTFOUND, IID_IMMDEVICE, IID_IMMDEVICE_COLLECTION,
     IID_IMMDEVICE_ENUMERATOR, IID_IPROPERTY_STORE, registerMmDevApiClasses,
@@ -20,8 +21,12 @@ const OUT = 0x100;
 const KEY = 0x200;
 const VARIANT = 0x300;
 
-/** @param {4 | 8} [pointerSize] */
-function setup(pointerSize = 4){
+/**
+ * @param {4 | 8} [pointerSize]
+ * @param {{ createInstance?: any, callMethod?: any }} [com]  Another library's
+ *     objects, for an endpoint activated as one.
+ */
+function setup(pointerSize = 4, com = {}){
     const bytes = new Uint8Array(0x10000);
     const view = new DataView(bytes.buffer);
     /** @type {string[]} */
@@ -54,7 +59,8 @@ function setup(pointerSize = 4){
                 return nextPointer;
             },
         },
-        heap: { allocate: size=>(nextBlock += size + 16) - size - 16 },
+        heap: { allocate: size=>(nextBlock += size + 16) - size - 16, free: ()=>{} },
+        ...com,
         readMemory: (address, length)=>bytes.subarray(address, address + length),
         writeMemory: (address, data)=>bytes.set(data, address),
         readWideString: address=>wideAt(address),
@@ -64,7 +70,7 @@ function setup(pointerSize = 4){
     const object = /** @type {any} */ (registry.create(CLSID_MMDEVICE_ENUMERATOR));
     const face = object.interfaceFor(IID_IMMDEVICE_ENUMERATOR);
     return {
-        view, reported, wideAt,
+        view, reported, wideAt, registry, object, bytes,
         /** @param {string} name @param {number[]} args */
         enumerator: (name, args)=>face.methods.find((/** @type {any} */ m)=>m.name === name)
             .invoke(object, args),
@@ -77,6 +83,8 @@ function setup(pointerSize = 4){
         },
         /** @param {number} pointer */
         interfaceAt: pointer=>records.get(pointer).id,
+        /** @param {number} pointer */
+        recordAt: pointer=>records.get(pointer),
         /** A PROPERTYKEY at KEY. @param {number[]} words the GUID's four dwords @param {number} pid */
         key(words, pid){
             words.forEach((word, index)=>view.setUint32(KEY + index * 4, word, true));
@@ -138,7 +146,7 @@ test('the endpoints listed by flow, and found again by their id', ()=>{
     assert.equal(s.view.getUint32(OUT, true), 0, 'no capture endpoint');
 });
 
-test('the property store names the speakers and the engine\'s float mix format', ()=>{
+test('the property store names the speakers and the device\'s format', ()=>{
     const s = setup();
     s.enumerator('GetDefaultAudioEndpoint', [0, 0, OUT]);
     const device = s.view.getUint32(OUT, true);
@@ -154,8 +162,11 @@ test('the property store names the speakers and the engine\'s float mix format',
     assert.equal(s.view.getUint16(VARIANT, true), 65, 'VT_BLOB');
     assert.equal(s.view.getUint32(VARIANT + 8, true), 40, 'a WAVEFORMATEXTENSIBLE');
     const format = s.view.getUint32(VARIANT + 12, true);
+    // The device's own format, 16-bit PCM (Wine's propstore test, as Windows
+    // answers it); the engine mixes in float (GetMixFormat).
     assert.deepEqual([0, 2, 4, 14].map(at=>at === 4 ? s.view.getUint32(format + at, true)
-        : s.view.getUint16(format + at, true)), [0xfffe, 2, 48000, 32]);
+        : s.view.getUint16(format + at, true)), [0xfffe, 2, 48000, 16]);
+    assert.equal(s.view.getUint8(format + 24), 1, 'KSDATAFORMAT_SUBTYPE_PCM');
 
     assert.equal(s.call(store, 'GetValue', [s.key([1, 2, 3, 4], 5), VARIANT]), S_OK);
     assert.equal(s.view.getUint16(VARIANT, true), 0, 'a key not kept is VT_EMPTY');
@@ -205,3 +216,145 @@ test('an endpoint activates an audio client; another interface is E_NOINTERFACE,
     assert.equal(s.call(device, 'Activate', [KEY, 0x17, 0, OUT]), E_NOINTERFACE);
     assert.equal(s.reported.length, 1);
 });
+
+test('the enumerator is one per process, holding a reference of its own, and is its IUnknown',
+    ()=>{
+        // Wine's mmdevenum test: AddRef after CoCreateInstance answers 3, a
+        // second CoCreateInstance gives the same pointer, and QueryInterface
+        // for IUnknown answers the pointer it was asked through.
+        const s = setup();
+        assert.equal(s.object.refCount, 2, 'the class\'s and the caller\'s');
+        assert.equal(s.registry.create(CLSID_MMDEVICE_ENUMERATOR), s.object);
+        assert.equal(s.object.interfaceFor(IID_IUNKNOWN).sharedWith, IID_IMMDEVICE_ENUMERATOR);
+        assert.equal(s.enumerator('EnumAudioEndpoints', [0, 1, OUT]), S_OK);
+        const collection = s.recordAt(s.view.getUint32(OUT, true)).object;
+        assert.equal(collection.interfaceFor(IID_IUNKNOWN).sharedWith, IID_IMMDEVICE_COLLECTION,
+            'and a collection its own');
+    });
+
+test('the enumerator refuses as Windows does: a malformed id, a bad flow, notifications', ()=>{
+    const s = setup();
+    /** @param {string} text */
+    const wide = text=>{
+        [...`${text}\0`].forEach((unit, at)=>s.view.setUint16(0x600 + at * 2,
+            unit.charCodeAt(0), true));
+        return 0x600;
+    };
+    assert.equal(s.enumerator('GetDevice', [wide('notadevice'), OUT]), E_INVALIDARG);
+    assert.equal(s.enumerator('GetDevice',
+        [wide('{0.0.0.00000000}.{00000000-0000-0000-0000-000000000001}'), OUT]), E_NOTFOUND);
+    s.view.setUint32(OUT, 0x12345678, true);
+    assert.equal(s.enumerator('EnumAudioEndpoints', [0xffff, 0xf, OUT]), E_INVALIDARG);
+    assert.equal(s.view.getUint32(OUT, true), 0, 'the collection pointer cleared');
+
+    // A client registered twice is unregistered twice.
+    const client = 0x7000;
+    assert.equal(s.enumerator('RegisterEndpointNotificationCallback', [client]), S_OK);
+    assert.equal(s.enumerator('RegisterEndpointNotificationCallback', [client]), S_OK);
+    assert.equal(s.enumerator('UnregisterEndpointNotificationCallback', [0xdeadbeef]),
+        E_NOTFOUND);
+    assert.equal(s.enumerator('UnregisterEndpointNotificationCallback', [client]), S_OK);
+    assert.equal(s.enumerator('UnregisterEndpointNotificationCallback', [client]), S_OK);
+    assert.equal(s.enumerator('UnregisterEndpointNotificationCallback', [client]), E_NOTFOUND);
+});
+
+test('the property store lists its keys, answers its device interface, refuses a bad access', ()=>{
+    // Wine's propstore test: GetAt walks what GetCount says, DeviceDesc among
+    // them; the device interface key is a string; access 3 is refused with
+    // the out pointer left alone.
+    const s = setup();
+    s.enumerator('GetDefaultAudioEndpoint', [0, 0, OUT]);
+    const device = s.view.getUint32(OUT, true);
+    s.view.setUint32(OUT, 0, true);
+    assert.equal(s.call(device, 'OpenPropertyStore', [3, OUT]), E_INVALIDARG);
+    assert.equal(s.view.getUint32(OUT, true), 0, 'untouched');
+    assert.equal(s.call(device, 'OpenPropertyStore', [2, OUT]), S_OK);
+    const store = s.view.getUint32(OUT, true);
+    assert.equal(s.call(store, 'GetCount', [OUT]), S_OK);
+    const count = s.view.getUint32(OUT, true);
+    /** @type {string[]} */
+    const keys = [];
+    for (let at = 0; at < count; at++)
+    {
+        assert.equal(s.call(store, 'GetAt', [at, KEY]), S_OK, `key ${at}`);
+        const pid = s.view.getUint32(KEY + 16, true);
+        keys.push(`${formatGuid(s.bytes.slice(KEY, KEY + 16))} ${pid}`);
+    }
+    assert.equal(s.call(store, 'GetAt', [count, KEY]), E_INVALIDARG, 'past the last');
+    assert.ok(keys.includes('{A45C254E-DF1C-4EFD-8020-67D146A850E0} 2'), 'DeviceDesc');
+    assert.ok(keys.includes('{A45C254E-DF1C-4EFD-8020-67D146A850E0} 14'), 'FriendlyName');
+
+    assert.equal(s.call(store, 'GetValue',
+        [s.key([0x233164c8, 0x4c7d1b2c, 0x71b668bc, 0x67257a68], 1), VARIANT]), S_OK);
+    assert.equal(s.view.getUint16(VARIANT, true), 31, 'VT_LPWSTR');
+    assert.match(s.wideAt(s.view.getUint32(VARIANT + 8, true)), /^\\\\\?\\SWD#MMDEVAPI#\{0\.0\.0\./);
+});
+
+test('the endpoint is activated as its volume, and as DirectSound on its device', async()=>{
+    /** @type {any[]} */
+    const calls = [];
+    let initialize = 0;
+    const s = setup(4, {
+        /** @param {string} clsid @param {number} iid @param {number} out */
+        createInstance: (clsid, iid, out)=>
+        {
+            calls.push(['create', clsid]);
+            new DataView(s.bytes.buffer).setUint32(out, 0x9990, true);
+            return 0;
+        },
+        /** @param {number} object @param {number} slot @param {number[]} args */
+        callMethod: (object, slot, args)=>
+        {
+            calls.push(['call', object, slot, slot === 10
+                ? formatGuid(s.bytes.slice(args[0], args[0] + 16)) : null]);
+            return slot === 10 ? initialize : 0;
+        },
+    });
+    s.enumerator('GetDefaultAudioEndpoint', [0, 0, OUT]);
+    const device = s.view.getUint32(OUT, true);
+    /** @param {string} guid */
+    const iid = guid=>{
+        s.bytes.set(/** @type {Uint8Array} */ (parseGuidBytes(guid)), 0x500);
+        return 0x500;
+    };
+
+    assert.equal(s.call(device, 'Activate',
+        [iid('{5CDF2C82-841E-4546-9722-0CF74078229A}'), 1, 0, OUT]), S_OK);
+    assert.equal(s.interfaceAt(s.view.getUint32(OUT, true)),
+        '{5CDF2C82-841E-4546-9722-0CF74078229A}', 'IAudioEndpointVolume');
+
+    assert.equal(await s.call(device, 'Activate',
+        [iid('{C50A7E93-F395-4834-9EF6-7FA99DE50966}'), 1, 0, OUT]), S_OK);
+    assert.deepEqual(calls, [['create', '{3901CC3F-84B5-4FA4-BA35-AA8172B8A09B}'],
+        ['call', 0x9990, 10, SOUND_DEVICE_GUID]], 'DirectSound8, initialized on the device');
+    assert.equal(s.view.getUint32(OUT, true), 0x9990);
+
+    calls.length = 0;
+    initialize = 0x88780078 | 0;
+    assert.equal(await s.call(device, 'Activate',
+        [iid('{279AFA83-4981-11CE-A521-0020AF0BE560}'), 1, 0, OUT]), initialize);
+    assert.deepEqual(calls.map(call=>call[2] ?? call[0]), ['create', 10, 2],
+        'one that fails to initialize is released');
+    assert.equal(s.view.getUint32(OUT, true), 0, 'and not handed out');
+
+    calls.length = 0;
+    assert.equal(await s.call(device, 'Activate',
+        [iid('{56A86895-0AD4-11CE-B03A-0020AF0BA770}'), 1, 0, OUT]), S_OK);
+    assert.deepEqual(calls, [['create', '{79376820-07D0-11CF-A24D-0020AFD79767}']],
+        'IBaseFilter: the DirectSound renderer, nothing to initialize');
+});
+
+/** A GUID's sixteen bytes. @param {string} text */
+function parseGuidBytes(text){
+    const hex = text.replace(/[{}-]/g, '');
+    const bytes = new Uint8Array(16);
+    const view = new DataView(bytes.buffer);
+    view.setUint32(0, parseInt(hex.slice(0, 8), 16), true);
+    view.setUint16(4, parseInt(hex.slice(8, 12), 16), true);
+    view.setUint16(6, parseInt(hex.slice(12, 16), 16), true);
+    for (let at = 0; at < 8; at++)
+    {
+        bytes[8 + at] = parseInt(hex.slice(16 + at * 2, 18 + at * 2), 16);
+    }
+    return bytes;
+}

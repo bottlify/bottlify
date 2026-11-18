@@ -2434,3 +2434,10 @@ unlocks it and over the whole buffer at Play, rather than as the play cursor rea
 so an effect with a tail (an echo, a reverb) would hear the buffer in the order it was written.
 Removed when the standard effects process sound, which is when this order matters too.
 *2026-11-18.*
+
+**A265. An audio endpoint's volume runs from -65.25 dB to 0 dB in steps of 0.75 dB, and its scalar
+is the amplitude a level gives.** IAudioEndpointVolume leaves the range and the curve between a
+level and its normalized scalar to the endpoint ("a nonlinear, audio-tapered curve"); these are a
+common HD Audio codec's speakers. The scalar is 10^(dB/20), 0 at the floor and 1 at 0 dB, and it
+is the gain every stream to the endpoint plays at, times its session's and its own.
+*2026-11-18.*
