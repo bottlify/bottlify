@@ -186,16 +186,10 @@ const COUNT_CODE_64 = {
  *        interface has a slot for and no implementation of, which answers E_NOTIMPL
  */
 export function createVtables({ memory, register, heap, long = ()=>false, unimplemented }){
-    /** A pointer's width now, and a pointer written at it. */
+    /** A pointer's width now, and a pointer written at it, whole (the memory layer's). */
     const wordSize = ()=>(long() ? LONG_WORD : WORD);
     /** @param {number} at @param {number} value */
-    const writeWord = (at, value)=>{
-        memory.writeU32(at, value >>> 0);
-        if (long())
-        {
-            memory.writeU32(at + 4, 0);
-        }
-    };
+    const writeWord = (at, value)=>memory.writePointer(at, value, wordSize());
     /** One entry per object; inside it, one interface pointer per interface. */
     const published = new WeakMap();
     /**

@@ -32,6 +32,7 @@ import { playedAtOnce } from '../remote/direct3d.js';
 import { playedDirect3D10, recordedDirect3D10 } from '../remote/d3d10.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
+import { withPointers } from '../../memory/pointers.fixture.js';
 
 /** @param {[string, number][]} slots @param {string} name */
 const slot = (slots, name)=>{
@@ -62,7 +63,7 @@ function seamed(options = {}){
         next += (size + 16) & ~15;
         return at;
     };
-    const memory = {
+    const memory = withPointers({
         /** @param {number} address @param {number} length */
         readBytes: (address, length)=>bytes.slice(address, address + length),
         /** @param {number} address @param {Uint8Array} value */
@@ -75,7 +76,7 @@ function seamed(options = {}){
         writeU32: (address, value)=>{
             new DataView(bytes.buffer).setUint32(address, value >>> 0, true);
         },
-    };
+    });
     /** @type {Map<number, any>} */
     const registered = new Map();
     let nextTrap = 1;
@@ -100,7 +101,7 @@ function seamed(options = {}){
     const divergences = [];
     const seam = createDirect3D10Seam({
         publisher,
-        memory: { readMemory: memory.readBytes, writeMemory: memory.writeBytes },
+        memory: withPointers({ readMemory: memory.readBytes, writeMemory: memory.writeBytes }),
         allocate,
         root: factoryOptions=>{
             const drawing = {

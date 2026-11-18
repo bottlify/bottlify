@@ -26,6 +26,7 @@ import {
 import {
     WAVEFORMATEX, DSBUFFERDESC, DS_OK, IID_IDirectSoundNotify,
 } from './dsound/seam.js';
+import { withPointers } from '../memory/pointers.fixture.js';
 
 /** DSBCAPS_CTRLFREQUENCY, CTRLPAN and CTRLVOLUME together. */
 const DSBCAPS_CTRLDEFAULT = 0x000000e0;
@@ -58,14 +59,14 @@ function fixture(){
     const byPointer = new Map();
     let nextPointer = 0x10000;
 
-    const memory = {
+    const memory = withPointers({
         /** @param {number} address @param {number} length */
         readBytes: (address, length)=>bytes.subarray(address, address + length),
         /** @param {number} address @param {number} length */
         window: (address, length)=>bytes.subarray(address, address + length),
         /** @param {number} address @param {Uint8Array} data */
         writeBytes: (address, data)=>bytes.set(data, address),
-    };
+    });
 
     return {
         bytes,

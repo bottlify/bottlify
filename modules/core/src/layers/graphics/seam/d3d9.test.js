@@ -54,6 +54,7 @@ import { D3DDECLTYPE, D3DDECLUSAGE } from '../d3d9/declaration.js';
 import { END_TOKEN, SHADER_KIND, versionToken } from '../d3d9/shader.js';
 import { displayModes, refreshOf } from '../../win32/user32/display.js';
 import { createSystemFunctions } from '../../win32/user32/system.js';
+import { withPointers } from '../../memory/pointers.fixture.js';
 
 const D3D_OK = 0;
 const D3DERR_INVALIDCALL = 0x8876086c;
@@ -106,7 +107,7 @@ function machine(){
         where.bytes.set(value, where.at);
     };
 
-    const memory = {
+    const memory = withPointers({
         readBytes,
         writeBytes,
         /** @param {number} address */
@@ -118,7 +119,7 @@ function machine(){
         writeU32: (address, value)=>writeBytes(address, new Uint8Array([
             value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff,
         ])),
-    };
+    });
 
     /** @type {Map<number, any>} */
     const registered = new Map();
@@ -153,7 +154,7 @@ function machine(){
         memory,
         /** The first four megabytes, as words: what a side sharing guest memory writes into. */
         words: new Int32Array(low.buffer),
-        services: { readMemory: readBytes, writeMemory: writeBytes },
+        services: withPointers({ readMemory: readBytes, writeMemory: writeBytes }),
         /** @param {any} object @param {string} id */
         publishInterface: (object, id)=>vtables.publish(object, id),
 

@@ -782,7 +782,8 @@ export function createPublisher({ publishInterface }){
  * DirectInput and the devices behind it.
  *
  * @param {Object} deps
- * @param {any} deps.memory   readMemory/writeMemory over guest memory.
+ * @param {any} deps.memory   readMemory/writeMemory over guest memory, and writePointer
+ *     (the memory layer's, a pointer of 4 or 8 bytes whole).
  * @param {() => number} deps.now  The guest's clock, in milliseconds.
  * @param {(object: any, interfaceId: string) => number} deps.publishInterface
  * @param {(event: number) => void} [deps.signal]
@@ -1033,10 +1034,9 @@ export function createDirectInput(
     };
     /** An interface or any other pointer written out, whole. */
     const writePointer = (/** @type {number} */ address, /** @type {number} */ value)=>{
-        writeU32(address, value);
-        if (pointerSize === 8 && (address >>> 0) !== 0)
+        if ((address >>> 0) !== 0)
         {
-            writeU32((address >>> 0) + 4, 0);
+            memory.writePointer(address, value, pointerSize === 8 ? 8 : 4);
         }
     };
 

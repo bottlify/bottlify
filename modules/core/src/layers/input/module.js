@@ -82,6 +82,9 @@ export function createInputModule(){
                     readMemory: (address, length)=>memory.readBytes(address, length),
                     /** @param {number} address @param {Uint8Array} bytes */
                     writeMemory: (address, bytes)=>memory.writeBytes(address, bytes),
+                    /** @param {number} address @param {number} value @param {4 | 8} bytes */
+                    writePointer: (address, value, bytes)=>memory.writePointer(address, value,
+                        bytes),
                 },
                 // The guest's clock, for the same reason the sound layer takes one:
                 // an event timestamped from a second clock is one a program can

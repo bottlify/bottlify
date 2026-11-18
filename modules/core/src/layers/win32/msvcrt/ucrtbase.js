@@ -41,6 +41,7 @@ import { guestEntry } from './guest-code.js';
 import * as inGuestPrint from './inguest-print.js';
 import { COMPILED as PRINT_CODE } from './inguest-print.x86.js';
 import { createUcrtMathFunctions } from './ucrt-math.js';
+import { pointerIo } from '../common/pointers.js';
 
 const EINVAL = 22;
 const ERANGE = 34;
@@ -101,16 +102,10 @@ export function createUcrtbaseFunctions(crt, host){
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
         host.writeMemory(address >>> 0, bytes);
     };
-    /** A pointer's bytes: four, or eight in a 64-bit process, every address below 4 GiB. */
+    /** A pointer's bytes: four, or eight in a 64-bit process. */
     const pointer = host.pointerSize ?? 4;
-    /** @param {number} address */
-    const readPointer = readU32;
-    /** @param {number} address @param {number} value */
-    const writePointer = (address, value)=>{
-        const bytes = new Uint8Array(pointer);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(address >>> 0, bytes);
-    };
+    /** A pointer read and written whole. */
+    const { read: readPointer, write: writePointer } = pointerIo(host, pointer);
     /** The calling thread's errno, set. @param {number} code */
     const fail = code=>{
         writeU32(crt._errno.handler([]), code);

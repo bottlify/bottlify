@@ -291,3 +291,93 @@ test('the reader and the charge slot are lent while the instance is open', async
     assert.equal(memory.reader(), null);
     assert.equal(memory.chargeSlot(), null);
 });
+
+/**
+ * A machine whose RAM is sparse pages anywhere below 2^53, as a wide window's
+ * is past 4 GiB, and a small shared RAM whose view the fast paths take.
+ */
+function wideMachine(){
+    /** @type {Map<number, Uint8Array>} */
+    const pages = new Map();
+    const page = (/** @type {number} */ at)=>{
+        const key = Math.floor(at / 4096);
+        let bytes = pages.get(key);
+        if (!bytes)
+        {
+            bytes = new Uint8Array(4096);
+            pages.set(key, bytes);
+        }
+        return bytes;
+    };
+    const ram = new Uint8Array(new SharedArrayBuffer(0x4000));
+    return {
+        ram,
+        cpu: {
+            /** @param {number} address @param {number} length */
+            readPhysical: (address, length)=>Uint8Array.from({ length },
+                (_, i)=>(address + i < ram.length ? ram[address + i]
+                    : page(address + i)[(address + i) % 4096])),
+            /** @param {number} address @param {Uint8Array} data */
+            writePhysical: (address, data)=>data.forEach((byte, i)=>{
+                if (address + i < ram.length)
+                {
+                    ram[address + i] = byte;
+                    return;
+                }
+                page(address + i)[(address + i) % 4096] = byte;
+            }),
+            /** @param {number} address */
+            readU32: address=>new DataView(Uint8Array.from({ length: 4 },
+                (_, i)=>(address + i < ram.length ? ram[address + i]
+                    : page(address + i)[(address + i) % 4096])).buffer).getUint32(0, true),
+            ramView: ()=>ram,
+        },
+    };
+}
+
+test('a pointer is read and written whole, past 4 GiB too, its upper half never kept', async()=>{
+    const machine = wideMachine();
+    const memory = await open({}, machine.cpu);
+    const high = 2 ** 32 + 0x10000;
+    memory.register({ name: 'low', base: 0x1000, size: 0x1000, kind: 'thunk-data', access: 'rw' });
+    memory.register({ name: 'high', base: high, size: 0x1000, kind: 'thunk-data', access: 'rw' });
+    for (const at of [0x1000, high])
+    {
+        memory.writeU32(at + 4, 0xdeadbeef);
+        memory.writePointer(at, 0x1_2345_6788, 8);
+        assert.equal(memory.readPointer(at, 8), 0x1_2345_6788, `whole at ${at.toString(16)}`);
+        assert.equal(memory.readU32(at + 4), 1, 'the upper dword is the value\'s');
+        memory.writePointer(at, 0x40_0000, 8);
+        assert.equal(memory.readU32(at + 4), 0, 'below 4 GiB the upper dword is zero, written');
+        memory.writePointer(at + 8, -0x1000, 4);
+        assert.equal(memory.readPointer(at + 8, 4), 0xfffff000, 'a signed dword names its address');
+        memory.writeU32(at + 16, 0xcafe);
+        memory.writePointer(at + 12, 0x5555, 4);
+        assert.equal(memory.readU32(at + 16), 0xcafe, 'four bytes in a 32-bit process, no more');
+    }
+    assert.throws(()=>memory.writePointer(0x1000, 1, /** @type {any} */ (6)), /4 or 8 bytes/);
+    await memoryModule.dispose();
+});
+
+test('a word past 4 GiB is never taken from the shared word `>>>` wraps it onto', async()=>{
+    const machine = wideMachine();
+    const memory = await open({}, machine.cpu);
+    const high = 2 ** 32 + 0x10;
+    memory.register({ name: 'low', base: 0, size: 0x4000, kind: 'thunk-data', access: 'rw' });
+    memory.register({ name: 'high', base: 2 ** 32, size: 0x1000, kind: 'thunk-data',
+        access: 'rw' });
+    memory.writeU32(0x10, 0x11111111);
+    memory.writeU32(high, 0x22222222);
+    assert.equal(memory.wordsOver(high, 4), null, 'no view over the RAM reaches it');
+    // Twice: the second read finds the span validated and takes the fast path.
+    assert.equal(memory.readU32(high), 0x22222222);
+    assert.equal(memory.readU32(high), 0x22222222, 'the fast path keeps the whole address');
+    assert.equal(memory.loadU32(high), 0x22222222);
+    assert.equal(memory.compareExchangeU32(high, 0x22222222, 0x33333333), 0x22222222);
+    assert.equal(memory.readU32(high), 0x33333333);
+    assert.equal(memory.readU32(0x10), 0x11111111, 'the low word it aliases is untouched');
+    assert.equal(memory.compareExchangeU64(high, 0x33333333n, 0x44n), 0x33333333n);
+    assert.equal(memory.readU32(0x10), 0x11111111);
+    assert.equal(memory.readU32(high), 0x44);
+    await memoryModule.dispose();
+});

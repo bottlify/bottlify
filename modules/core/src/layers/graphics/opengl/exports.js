@@ -1007,8 +1007,9 @@ export function createOpengl(services){
         {
             if (wide)
             {
-                view.setUint32(index * 8, values[index] >>> 0, true);
-                view.setUint32(index * 8 + 4, 0, true);
+                // A pointer-sized answer, whole: its upper half its own.
+                const value = values[index];
+                view.setBigUint64(index * 8, BigInt(value < 0 ? value >>> 0 : value), true);
             }
             else if (as === 'word' || as === 'pointer')
             {

@@ -35,6 +35,7 @@ import { SOUND_DEVICE_GUID } from '../devices.js';
 import { IID_IUNKNOWN } from './objects.js';
 import { parseGuid } from './guid.js';
 import { IID_IAUDIO_ENDPOINT_VOLUME, createEndpointVolume } from './endpoint-volume.js';
+import { pointerIo } from '../common/pointers.js';
 
 export const CLSID_MMDEVICE_ENUMERATOR = '{BCDE0395-E52F-467C-8E3D-C4579291692E}';
 export const IID_IMMDEVICE_ENUMERATOR = '{A95664D2-9614-4F35-A746-DE8DB63617E6}';
@@ -209,11 +210,7 @@ export function registerMmDevApiClasses(host){
     const writeU32 = (address, value)=>host.writeMemory(address >>> 0,
         new Uint8Array(Uint32Array.of(value >>> 0).buffer));
     /** An interface or a block written to an out pointer, whole. @param {number} at @param {number} value */
-    const writePointer = (at, value)=>{
-        const bytes = new Uint8Array(pointerSize);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(at >>> 0, bytes);
-    };
+    const writePointer = pointerIo(host, pointerSize).write;
     /** A string in task memory, its terminator after it; 0 when none is left. @param {string} text */
     const taskString = text=>{
         const at = host.heap.allocate(text.length * 2 + 2);

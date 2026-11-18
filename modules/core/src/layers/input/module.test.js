@@ -12,6 +12,7 @@ import { createMessageQueue, ANY_WINDOW } from '../win32/user32/messages.js';
 import { createStubApi } from '../../system/stub.js';
 import { writeGuid } from '../win32/ole32/guid.js';
 import { IID_IDirectInput8A, GUID_SysMouse } from './dinput/seam.js';
+import { withPointers } from '../memory/pointers.fixture.js';
 
 const HWND = 0x40;
 
@@ -25,12 +26,12 @@ const HWND = 0x40;
 async function open({ win32, config } = {}){
     const queue = createMessageQueue();
     const bytes = new Uint8Array(0x1000);
-    const memory = {
+    const memory = withPointers({
         /** @param {number} address @param {number} length */
         readBytes: (address, length)=>bytes.subarray(address, address + length),
         /** @param {number} address @param {Uint8Array} data */
         writeBytes: (address, data)=>bytes.set(data, address),
-    };
+    });
     const apis = /** @type {Record<string, any>} */ ({
         memory,
         bridge: {},

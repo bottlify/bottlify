@@ -25,6 +25,7 @@ import {
     DIPROP_BUFFERSIZE, DIDEVCAPS,
 } from './seam.js';
 import { KEY_DOWN, DIMOUSE_OFS } from './devices.js';
+import { withPointers } from '../../memory/pointers.fixture.js';
 
 const DIERR_INVALIDPARAM = 0x80070057 | 0;
 const DIERR_NOTACQUIRED = 0x8007000c | 0;
@@ -184,7 +185,7 @@ function fixture({ windows, foreground, mouseHeld, rawInput, pointerSize } = {})
     let threadRequests = 0;
     let arena = 0x80000;
     const dinput = createDirectInput({
-        memory,
+        memory: withPointers(memory),
         now: time.now,
         publishInterface: (object, id)=>bridge.publishInterface(object, id),
         signal: event=>signalled.push(event),
@@ -1682,7 +1683,7 @@ function guestMachine(){
     let nextTrap = 1;
     let heapNext = 0x8000;
     const vtables = createVtables({
-        memory: {
+        memory: withPointers({
             /** @param {number} at @param {number} length */
             readBytes: (at, length)=>memory.bytes.slice(at, at + length),
             /** @param {number} at @param {Uint8Array} value */
@@ -1691,7 +1692,7 @@ function guestMachine(){
             readU32: at=>memory.u32(at),
             /** @param {number} at @param {number} value */
             writeU32: (at, value)=>memory.setU32(at, value),
-        },
+        }),
         /** @param {string} name @param {any} fn */
         register: (name, fn)=>{
             const trap = nextTrap++;
@@ -1709,7 +1710,7 @@ function guestMachine(){
     });
 
     const dinput = createDirectInput({
-        memory,
+        memory: withPointers(memory),
         now: ()=>5000,
         publishInterface: (object, id)=>vtables.publish(object, id),
     });

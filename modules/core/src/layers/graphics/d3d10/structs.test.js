@@ -13,17 +13,18 @@ import {
     readSampleDesc, readSwapChainDesc, readU32, readViewDesc, writeModeDesc, writeSampleDesc,
     writeSwapChainDesc, writeU32, writeViewDesc,
 } from './structs.js';
+import { withPointers } from '../../memory/pointers.fixture.js';
 
 /** @param {number} [size] */
 function createMemory(size = 0x400){
     const bytes = new Uint8Array(size);
-    return {
+    return withPointers({
         bytes,
         /** @param {number} address @param {number} length */
         readMemory: (address, length)=>bytes.subarray(address, address + length),
         /** @param {number} address @param {Uint8Array} source */
         writeMemory: (address, source)=>bytes.set(source, address),
-    };
+    });
 }
 
 test('the sample description is two counts and nothing else', ()=>{

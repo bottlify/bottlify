@@ -677,7 +677,8 @@ export function createPublisher({ publishInterface }){
  * The DirectSound library and everything behind it.
  *
  * @param {Object} deps
- * @param {any} deps.memory   readMemory/writeMemory over guest memory.
+ * @param {any} deps.memory   readMemory/writeMemory over guest memory, and writePointer
+ *     (the memory layer's, a pointer of 4 or 8 bytes whole).
  * @param {(bytes: number) => number} deps.allocate  Guest memory for a buffer's samples.
  * @param {() => number} deps.now   The guest's clock, in milliseconds.
  * @param {(object: any, interfaceId: string) => number} deps.publishInterface
@@ -737,17 +738,16 @@ export function createDirectSound({
         ]));
     };
     /**
-     * An interface or a sample address into a pointer-sized out parameter. A
-     * 64-bit process's every page is below 4 GiB, so the high half is zero,
-     * and it is written: a caller's slot holds whatever its stack held.
+     * An interface or a sample address into a pointer-sized out parameter,
+     * whole, by the memory layer's writer: a 64-bit caller's slot holds
+     * whatever its stack held, so the upper half is written too.
      *
      * @param {number} address @param {number} value
      */
     const writePointer = (address, value)=>{
-        writeU32(address, value);
-        if (long && (address >>> 0) !== 0)
+        if ((address >>> 0) !== 0)
         {
-            writeU32((address >>> 0) + 4, 0);
+            memory.writePointer(address, value, long ? 8 : 4);
         }
     };
 
@@ -1008,11 +1008,8 @@ export function createDirectSound({
      */
     const andThen = (value, next)=>(value instanceof Promise ? value.then(next) : next(value));
 
-    /** @param {number} address */
-    const readPointer = address=>{
-        const low = readU32(address);
-        return long ? low + readU32(address + 4) * 2 ** 32 : low;
-    };
+    /** A pointer whole, by the memory layer's reader. @param {number} address */
+    const readPointer = address=>memory.readPointer(address, long ? 8 : 4);
 
     /**
      * Calls a method of a guest object - an effect the program or the engine

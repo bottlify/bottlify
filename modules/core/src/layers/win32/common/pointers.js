@@ -9,9 +9,11 @@
  * and with it every pointer-sized field a handler lays out -- `char **`
  * arrays, a FILE's `_ptr`, a `SIZE_T`, a `DWORD_PTR` mask.
  *
- * A 64-bit process runs in a 4 GiB window, so a pointer's value is a number
- * either way: an 8-byte write leaves the high half zero, an 8-byte read keeps
- * the low half, which is the whole address.
+ * A pointer is a number either way, whole up to 2^53: an 8-byte write puts its
+ * upper dword in (zero for an address below 4 GiB), an 8-byte read takes it
+ * back. This is the codec for a block put together in a buffer before it is
+ * written; a single pointer written into guest memory in place goes through
+ * the memory layer's `writePointer`, whose rule is the same.
  */
 
 /**
@@ -43,15 +45,20 @@ export function pointerWidth(size = 4){
     /** @type {(view: DataView, offset: number, value: number) => void} */
     const set = size === 8
         ? (view, offset, value)=>{
-            view.setUint32(offset, value >>> 0, true);
-            view.setUint32(offset + 4, 0, true);
+            const whole = value < 0 ? value >>> 0 : value;
+            view.setUint32(offset, whole % 2 ** 32, true);
+            view.setUint32(offset + 4, Math.floor(whole / 2 ** 32), true);
         }
         : (view, offset, value)=>view.setUint32(offset, value >>> 0, true);
+    /** @type {(view: DataView, offset: number) => number} */
+    const get = size === 8
+        ? (view, offset)=>view.getUint32(offset, true) + view.getUint32(offset + 4, true) * 2 ** 32
+        : (view, offset)=>view.getUint32(offset, true);
     /** @type {PointerWidth} */
     const width = {
         size,
         set,
-        get: (view, offset)=>view.getUint32(offset, true),
+        get,
         bytes: value=>{
             const bytes = new Uint8Array(size);
             set(new DataView(bytes.buffer), 0, value);
@@ -79,3 +86,26 @@ export function pointerWidth(size = 4){
  */
 export const pointerArg = (args, index)=>(args.high?.[index] ?? 0) * 2 ** 32
     + (args[index] >>> 0);
+
+/**
+ * A pointer of a host's width read and written in guest memory, whole, through
+ * the host's own `readMemory` and `writeMemory`: what a library given those two
+ * and a pointer size uses for every pointer-sized field it reads or answers
+ * through, rather than a dword of its own and a zero beside it.
+ *
+ * @param {{ readMemory: (address: number, length: number) => Uint8Array,
+ *     writeMemory: (address: number, bytes: Uint8Array) => void }} host
+ * @param {number} [size]  4 or 8
+ * @returns {{ read: (address: number) => number,
+ *     write: (address: number, value: number) => void }}
+ */
+export function pointerIo(host, size = 4){
+    const width = pointerWidth(size);
+    return {
+        read: address=>{
+            const bytes = host.readMemory(address, width.size);
+            return width.get(new DataView(bytes.buffer, bytes.byteOffset, width.size), 0);
+        },
+        write: (address, value)=>host.writeMemory(address, width.bytes(value)),
+    };
+}
