@@ -354,7 +354,8 @@ test('a job made by name is the one OpenJobObject and NtOpenJobObject find', ()=
     assert.equal(handles.resolve(call('CreateJobObjectW', 0, 0x3000)), handles.resolve(job),
         'the same name opens the same job');
     assert.equal(errors.at(-1), 183, 'ERROR_ALREADY_EXISTS');
-    assert.equal(handles.resolve(call('OpenJobObjectW', 0x1f001f, 0, 0x3000)), handles.resolve(job));
+    assert.equal(handles.resolve(call('OpenJobObjectW', 0x1f001f, 0, 0x3000)),
+        handles.resolve(job));
     assert.equal(call('OpenJobObjectW', 0x1f001f, 0, wide(0x3100, 'none')), 0);
     assert.equal(errors.at(-1), 2, 'ERROR_FILE_NOT_FOUND');
 
