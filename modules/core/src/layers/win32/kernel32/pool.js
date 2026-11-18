@@ -51,6 +51,12 @@ const INFINITE = 0xffffffff;
 /** Milliseconds between 1601 and 1970, what a FILETIME counts from. */
 const FILETIME_EPOCH_MS = 11644473600000;
 
+/** TP_CALLBACK_ENVIRON_V3's fields this reads, 32-bit, and its size. */
+const ENVIRONMENT = Object.freeze({ FINALIZATION: 24, PRIORITY: 32 });
+const ENVIRONMENT_V3_SIZE = 40;
+/** The last of TP_CALLBACK_PRIORITY's high, normal and low. */
+const TP_CALLBACK_PRIORITY_LOW = 2;
+
 /** Flags of CreateTimerQueueTimer: a timer that fires once whatever its period. */
 const WT_EXECUTEONLYONCE = 0x00000008;
 /** A registered wait's callback runs on the wait thread rather than the pool's. */
@@ -196,6 +202,7 @@ export function waitLoopCode(wait, after, at){
  * @property {number} entry
  * @property {number[]} args
  * @property {Owner} owner
+ * @property {boolean} [finalizing]  the owner's FinalizationCallback, after its callback
  */
 
 /**
@@ -212,6 +219,9 @@ export function waitLoopCode(wait, after, at){
  * @property {number} outstanding  handed to the pool and not yet returned
  * @property {Waiter[]} waiters
  * @property {() => void} [settled]  told each time one returns
+ * @property {number} [finalization]  its environment's FinalizationCallback, called on the
+ *     same thread once each of its callbacks returns, with its instance and context
+ * @property {number} [instance] @property {number} [context]
  */
 
 /**
@@ -349,6 +359,15 @@ export function createThreadPool(host){
             const done = worker.job;
             worker.job = null;
             ran++;
+            // The environment's FinalizationCallback, on the same thread
+            // once the callback returned; the callback is done after it.
+            const { owner } = done;
+            if (!done.finalizing && owner.finalization)
+            {
+                give(worker, { entry: owner.finalization,
+                    args: [owner.instance ?? 0, owner.context ?? 0], owner, finalizing: true });
+                return RUN;
+            }
             settle(done);
         }
         const next = lane.backlog.shift();
@@ -504,6 +523,30 @@ export function createThreadPool(host){
     const fail = code=>{
         host.setLastError(code);
         return 0;
+    };
+
+    /**
+     * A TP_CALLBACK_ENVIRON's FinalizationCallback, or why it is refused: a
+     * version 3 environment whose CallbackPriority is none of high, normal
+     * and low is ERROR_INVALID_PARAMETER. Version 1's layout is version 3's
+     * first eight dwords.
+     *
+     * @param {number} environment
+     * @returns {{ finalization: number } | { refused: number }}
+     */
+    const environmentOf = environment=>{
+        if ((environment >>> 0) === 0 || !host.readMemory)
+        {
+            return { finalization: 0 };
+        }
+        const read = host.readMemory(environment >>> 0, ENVIRONMENT_V3_SIZE);
+        const view = new DataView(read.buffer, read.byteOffset, read.byteLength);
+        if (view.getUint32(0, true) >= 3
+            && view.getUint32(ENVIRONMENT.PRIORITY, true) > TP_CALLBACK_PRIORITY_LOW)
+        {
+            return { refused: ERROR_INVALID_PARAMETER };
+        }
+        return { finalization: view.getUint32(ENVIRONMENT.FINALIZATION, true) };
     };
 
     /** @type {Map<number, Queue>} */
@@ -1159,10 +1202,15 @@ export function createThreadPool(host){
             CreateThreadpoolWork: {
                 argBytes: 12,
                 /** @param {number[]} args */
-                handler: ([callback, context])=>{
+                handler: ([callback, context, environment])=>{
                     if ((callback >>> 0) === 0)
                     {
                         return fail(ERROR_INVALID_PARAMETER);
+                    }
+                    const env = environmentOf(environment);
+                    if ('refused' in env)
+                    {
+                        return fail(env.refused);
                     }
                     const handle = host.allocate(8);
                     if (handle === 0)
@@ -1171,7 +1219,7 @@ export function createThreadPool(host){
                     }
                     works.set(handle, { callback: callback >>> 0, context: context >>> 0,
                         instance: handle + 4, closed: false, outstanding: 0, waiters: [],
-                        settled: ()=>forgetWork(handle) });
+                        finalization: env.finalization, settled: ()=>forgetWork(handle) });
                     return handle;
                 },
             },
@@ -1260,10 +1308,15 @@ export function createThreadPool(host){
             CreateThreadpoolTimer: {
                 argBytes: 12,
                 /** @param {number[]} args */
-                handler: ([callback, context])=>{
+                handler: ([callback, context, environment])=>{
                     if ((callback >>> 0) === 0)
                     {
                         return fail(ERROR_INVALID_PARAMETER);
+                    }
+                    const env = environmentOf(environment);
+                    if ('refused' in env)
+                    {
+                        return fail(env.refused);
                     }
                     const handle = host.allocate(8);
                     if (handle === 0)
@@ -1271,6 +1324,7 @@ export function createThreadPool(host){
                         return fail(ERROR_NOT_ENOUGH_MEMORY);
                     }
                     poolTimers.set(handle, { callback: callback >>> 0, context: context >>> 0,
+                        finalization: env.finalization,
                         instance: handle + 4, closed: false, armed: false, outstanding: 0,
                         waiters: [], settled: ()=>forgetPooled(poolTimers, handle),
                         clock: kernel.createTimer({ name: 'thread pool timer' }) });
@@ -1345,10 +1399,15 @@ export function createThreadPool(host){
             CreateThreadpoolWait: {
                 argBytes: 12,
                 /** @param {number[]} args */
-                handler: ([callback, context])=>{
+                handler: ([callback, context, environment])=>{
                     if ((callback >>> 0) === 0)
                     {
                         return fail(ERROR_INVALID_PARAMETER);
+                    }
+                    const env = environmentOf(environment);
+                    if ('refused' in env)
+                    {
+                        return fail(env.refused);
                     }
                     const handle = host.allocate(8);
                     if (handle === 0)
@@ -1356,6 +1415,7 @@ export function createThreadPool(host){
                         return fail(ERROR_NOT_ENOUGH_MEMORY);
                     }
                     poolWaits.set(handle, { callback: callback >>> 0, context: context >>> 0,
+                        finalization: env.finalization,
                         instance: handle + 4, closed: false, registered: null, outstanding: 0,
                         waiters: [], settled: ()=>forgetPooled(poolWaits, handle) });
                     return handle;

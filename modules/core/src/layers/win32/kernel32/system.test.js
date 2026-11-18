@@ -517,6 +517,28 @@ test('a write pointer is bad where a region without write access covers any of i
     assert.equal(fns.IsBadReadPtr.handler([0x402, 1]), 0, 'readable all the same');
 });
 
+test('a write pointer is bad on a page VirtualQuery answers without write access', ()=>{
+    // Wine's concrt140, msvcp110 and msvcp120 tests: a runtime's read-only
+    // data export (byte_reverse_table, in .rdata) is not writable.
+    const host = fakeHost(0x5000);
+    /** @type {Record<number, { state: number, protect: number }>} */
+    const pages = {
+        0x0000: { state: 0x1000, protect: 0x04 }, // committed, PAGE_READWRITE
+        0x1000: { state: 0x1000, protect: 0x02 }, // PAGE_READONLY: an image's .rdata
+        0x2000: { state: 0x1000, protect: 0x80 }, // PAGE_EXECUTE_WRITECOPY
+        0x3000: { state: 0x1000, protect: 0x104 }, // a guard page
+        0x4000: { state: 0x2000, protect: 0 }, // reserved
+    };
+    const fns = createSystemFunctions({ ...host,
+        pageState: (/** @type {number} */ address)=>pages[address - address % 0x1000] });
+    assert.equal(fns.IsBadWritePtr.handler([0x100, 16]), 0, 'read-write');
+    assert.equal(fns.IsBadWritePtr.handler([0x1010, 256]), 1, 'read-only');
+    assert.equal(fns.IsBadWritePtr.handler([0x0ff0, 0x20]), 1, 'runs into read-only');
+    assert.equal(fns.IsBadWritePtr.handler([0x2000, 16]), 0, 'write-copy');
+    assert.equal(fns.IsBadWritePtr.handler([0x3000, 16]), 1, 'a guard page trips');
+    assert.equal(fns.IsBadWritePtr.handler([0x4000, 16]), 1, 'reserved, not committed');
+});
+
 test('a string pointer is bad when its terminator is not in mapped memory', ()=>{
     const host = fakeHost();
     const fns = createSystemFunctions(host);
