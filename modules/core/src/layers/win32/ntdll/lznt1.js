@@ -134,17 +134,86 @@ export function compress(data){
 }
 
 /**
- * Decompresses a stream into at most `room` bytes.
+ * One chunk decoded, at most `room` bytes of it, or null for a chunk that
+ * cannot be read.
+ *
+ * @param {Uint8Array} input @param {number} from @param {number} end  the chunk's body
+ * @param {boolean} compressed @param {number} room
+ */
+function decodeChunk(input, from, end, compressed, room){
+    if (!compressed)
+    {
+        return input.slice(from, Math.min(end, from + room));
+    }
+    const out = new Uint8Array(Math.min(room, CHUNK));
+    let written = 0;
+    let at = from;
+    while (at < end && written < out.length)
+    {
+        const flags = input[at++];
+        for (let bit = 0; bit < 8 && at < end && written < out.length; bit++)
+        {
+            if ((flags & (1 << bit)) === 0)
+            {
+                out[written++] = input[at++];
+                continue;
+            }
+            if (at + 2 > end)
+            {
+                return null;
+            }
+            const token = input[at] | input[at + 1] << 8;
+            at += 2;
+            if (written === 0)
+            {
+                return null;
+            }
+            const { lengthMask, shift } = split(written);
+            const distance = (token >>> shift) + 1;
+            if (distance > written)
+            {
+                return null;
+            }
+            const length = (token & lengthMask) + MIN_MATCH;
+            for (let copied = 0; copied < length && written < out.length; copied++)
+            {
+                out[written] = out[written - distance];
+                written++;
+            }
+        }
+    }
+    return out.subarray(0, written);
+}
+
+/**
+ * Decompresses a stream into at most `room` bytes, from `offset` on.
+ *
+ * The stream must hold a whole first chunk, however little is asked of it;
+ * the chunks are read until the room is full, a zero header or the input
+ * ends. A fragment (`fragment`) is read as RtlDecompressFragment reads it:
+ * whole chunks before the offset are passed over, though each must be
+ * complete; the chunk the offset falls in counts from it, and an offset past
+ * the end of that chunk's data reads the rest of its 4096 bytes as zeros; a
+ * stored chunk read must be a whole one, 4096 bytes, as [MS-XCA] has every
+ * chunk but the last.
  *
  * @param {Uint8Array} input
  * @param {number} room
+ * @param {number} [offset]
+ * @param {boolean} [fragment]
  * @returns {{ bytes: Uint8Array } | { bad: true }}  bad: a chunk that cannot be read
  */
-export function decompress(input, room){
+export function decompress(input, room, offset = 0, fragment = offset > 0){
     const out = new Uint8Array(room);
     let written = 0;
     let at = 0;
-    while (at + 2 <= input.length && written < room)
+    let chunk = 0;
+    const first = Math.floor(offset / CHUNK);
+    if (input.length < 2)
+    {
+        return { bad: true };
+    }
+    while (at + 2 <= input.length)
     {
         const header = input[at] | input[at + 1] << 8;
         if (header === 0)
@@ -153,56 +222,39 @@ export function decompress(input, room){
         }
         const stored = (header & 0xfff) + MIN_MATCH - 2;
         at += 2;
-        if (at + stored > input.length)
+        const end = at + stored;
+        if (end > input.length)
         {
             return { bad: true };
         }
-        const end = at + stored;
-        const chunkStart = written;
-        if ((header & COMPRESSED) === 0)
+        if (written >= room)
         {
-            const take = Math.min(stored, room - written);
-            out.set(input.subarray(at, at + take), written);
-            written += take;
+            break;
+        }
+        if (chunk < first)
+        {
             at = end;
+            chunk++;
             continue;
         }
-        while (at < end && written < room)
+        const compressed = (header & COMPRESSED) !== 0;
+        if (fragment && !compressed && stored !== CHUNK)
         {
-            const flags = input[at++];
-            for (let bit = 0; bit < 8 && at < end && written < room; bit++)
-            {
-                if ((flags & (1 << bit)) === 0)
-                {
-                    out[written++] = input[at++];
-                    continue;
-                }
-                if (at + 2 > end)
-                {
-                    return { bad: true };
-                }
-                const token = input[at] | input[at + 1] << 8;
-                at += 2;
-                const position = written - chunkStart;
-                if (position === 0)
-                {
-                    return { bad: true };
-                }
-                const { lengthMask, shift } = split(position);
-                const distance = (token >>> shift) + 1;
-                if (distance > position)
-                {
-                    return { bad: true };
-                }
-                const length = (token & lengthMask) + MIN_MATCH;
-                for (let copied = 0; copied < length && written < room; copied++)
-                {
-                    out[written] = out[written - distance];
-                    written++;
-                }
-            }
+            return { bad: true };
         }
+        const within = chunk === first ? offset % CHUNK : 0;
+        const decoded = decodeChunk(input, at, end, compressed, within + room - written);
+        if (decoded === null)
+        {
+            return { bad: true };
+        }
+        const piece = within > decoded.length
+            ? new Uint8Array(CHUNK - within) : decoded.subarray(within);
+        const take = Math.min(piece.length, room - written);
+        out.set(piece.subarray(0, take), written);
+        written += take;
         at = end;
+        chunk++;
     }
     return { bytes: out.subarray(0, written) };
 }
@@ -251,24 +303,24 @@ export function createCompressionFunctions(host){
         : host.readMemory(address >>> 0, length >>> 0).slice());
 
     /**
-     * Decompresses into the caller's buffer, skipping `skip` bytes of the
-     * output first: RtlDecompressBuffer's and RtlDecompressFragment's body.
+     * Decompresses into the caller's buffer: RtlDecompressBuffer's body, and
+     * RtlDecompressFragment's (`fragment`, from `offset` on).
      *
      * @param {number[]} args  format, out, room, input, inputLength
-     * @param {number} skip @param {number} final
+     * @param {number} offset @param {boolean} fragment @param {number} final
      */
-    const decompressInto = ([format, out, room, input, length], skip, final)=>{
+    const decompressInto = ([format, out, room, input, length], offset, fragment, final)=>{
         const refusal = refused(format & 0xffff);
         if (refusal !== null)
         {
             return refusal;
         }
-        const result = decompress(read(input, length), (room >>> 0) + skip);
+        const result = decompress(read(input, length), room >>> 0, offset, fragment);
         if ('bad' in result)
         {
             return STATUS_BAD_COMPRESSION_BUFFER;
         }
-        const bytes = result.bytes.subarray(Math.min(skip, result.bytes.length));
+        const { bytes } = result;
         if (bytes.length > 0)
         {
             host.writeMemory(out >>> 0, bytes);
@@ -340,14 +392,14 @@ export function createCompressionFunctions(host){
         RtlDecompressBuffer: {
             argBytes: 24,
             /** @param {number[]} args */
-            handler: args=>decompressInto(args, 0, args[5]),
+            handler: args=>decompressInto(args, 0, false, args[5]),
         },
 
         /** RtlDecompressBuffer with a work space it does not need here. */
         RtlDecompressBufferEx: {
             argBytes: 28,
             /** @param {number[]} args */
-            handler: args=>decompressInto(args, 0, args[5]),
+            handler: args=>decompressInto(args, 0, false, args[5]),
         },
 
         /**
@@ -361,7 +413,7 @@ export function createCompressionFunctions(host){
         RtlDecompressFragment: {
             argBytes: 32,
             /** @param {number[]} args */
-            handler: args=>decompressInto(args, args[5] >>> 0, args[6]),
+            handler: args=>decompressInto(args, args[5] >>> 0, true, args[6]),
         },
     };
 }
