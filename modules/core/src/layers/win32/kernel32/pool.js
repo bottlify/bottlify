@@ -81,6 +81,11 @@ const STATUS_INVALID_PARAMETER = 0xc000000d;
 
 /** What an alertable wait answers when routines queued to its thread ended it. */
 const WAIT_IO_COMPLETION = 0xc0;
+/** The most objects one wait for any of them takes. */
+const MAXIMUM_WAIT_OBJECTS = 64;
+/** The pseudo-handles of the process and the thread, always there to wait on. */
+const CURRENT_PROCESS = 0xffffffff;
+const CURRENT_THREAD = 0xfffffffe;
 
 /**
  * The loop, as x86. `fetch` is the trap and `at` is where these bytes will be,
@@ -194,12 +199,13 @@ export function waitLoopCode(wait, after, at){
  *           Gives a pool thread its environment block, as CreateThread's are.
  * @property {(thread: any) => any} park  Stops a thread inside a trap.
  * @property {(code: number) => void} setLastError
- * @property {(handle: number, milliseconds: number) => any} [waitFor]
- *           WaitForSingleObjectEx, alertable, from inside a trap: its answer,
- *           or the park that answers it later. Alertable, because a wait
- *           thread runs the routines queued to it, and because unregistering
- *           takes the thread out of its wait (`kernel.alert`). Absent, no
- *           wait can be registered.
+ * @property {(count: number, handles: number, milliseconds: number) => any} [waitFor]
+ *           WaitForMultipleObjectsEx for any of them, alertable, from inside a
+ *           trap: its answer, or the park that answers it later. Alertable,
+ *           because a wait thread runs the routines queued to it, and because
+ *           a wait added to or taken from it starts its wait again
+ *           (`kernel.alert`). Absent, no wait can be registered.
+ * @property {(api: string, detail: string) => void} [divergence]
  * @property {() => number} [threadReturn]  Where a thread that returns ends.
  * @property {() => number} [threadStart]
  *           Where a pool thread begins, as CreateThread's do: the libraries
@@ -249,10 +255,11 @@ export function waitLoopCode(wait, after, at){
 
 /**
  * @typedef {Owner & { handle: number, object: number, callback: number, context: number,
- *     timeout: number, once: boolean, inWaitThread: boolean, cancelled: boolean,
- *     left: boolean, thread?: any, owner?: Owner,
+ *     timeout: number, deadline: number, once: boolean, inWaitThread: boolean,
+ *     cancelled: boolean, spent: boolean, home?: any, owner?: Owner,
  *     argsFor?: (result: number) => number[] }} Wait
- *     `left`: its thread is out of its loop, and asks for it by its handle no more.
+ *     `deadline`: when its time runs out, in guest milliseconds; `spent`: a wait
+ *     that fires once has fired; `home`: the wait thread it is on, while it is.
  */
 
 /**
@@ -777,74 +784,196 @@ export function createThreadPool(host){
     let waitLoop = 0;
 
     /**
-     * A wait unregistered is let go once its callbacks have returned and its
-     * thread has left its loop. Its handle is an address, which the next
-     * registration may be given: freed while the thread still waited, the
-     * thread woke into the new wait and ran its callback as its own.
+     * A thread that waits on the objects of many registered waits at once,
+     * as Windows' wait threads do: one wait for any of them, the time-out the
+     * nearest of theirs. A thread for every wait cost a stack each, and a
+     * program registering hundreds of waits ran out of room for threads.
+     *
+     * @typedef {Object} WaitThread
+     * @property {number} id  the thread's parameter, the address its loop asks by
+     * @property {any} thread
+     * @property {number} handles  where the objects are written for the wait
+     * @property {Wait[]} waits  in the order they were registered
+     * @property {Wait[][]} asked  the waits the wait under way was asked for, by object in
+ *     its order: two waits on one object are one entry, which fires the first of them
+     * @property {boolean} leaving  out of waits, its loop ending
+     */
+
+    /** @type {Map<number, WaitThread>} */
+    const waitThreads = new Map();
+
+    /**
+     * A wait unregistered is let go once its callbacks have returned. The
+     * thread that waited for it holds the wait itself, not its handle, so the
+     * handle may go to the next registration at once.
      *
      * @param {Wait} wait
      */
     const forget = wait=>{
-        if (wait.cancelled && wait.left && wait.outstanding === 0
-            && waits.get(wait.handle) === wait)
+        if (wait.cancelled && wait.outstanding === 0 && waits.get(wait.handle) === wait)
         {
             waits.delete(wait.handle);
             host.free?.(wait.handle);
         }
     };
 
-    /** The wait's thread asks: the wait on its object, or abandoned once unregistered. */
-    const waitStep = (/** @type {number[]} */ [handle])=>{
-        const wait = waits.get(handle >>> 0);
-        return wait && !wait.cancelled
-            ? /** @type {NonNullable<ThreadPoolHost['waitFor']>} */ (host.waitFor)(
-                wait.object, wait.timeout)
-            : WAIT_ABANDONED;
+    /**
+     * The wait leaves its thread, which is told so: blocked, it is taken out
+     * of its wait and waits again for what is left. Left in its wait, it
+     * would take the next signal for a wait nobody has any more -- a
+     * semaphore's count, an auto-reset event -- from whoever waits on the
+     * object next.
+     *
+     * @param {Wait} wait
+     */
+    const detach = wait=>{
+        const home = wait.home;
+        wait.home = undefined;
+        if (!home)
+        {
+            return;
+        }
+        home.waits.splice(home.waits.indexOf(wait), 1);
+        kernel.alert(home.thread, WAIT_IO_COMPLETION);
+    };
+
+    /** @param {Wait} wait */
+    const deadlineOf = wait=>(wait.timeout === INFINITE ? Infinity
+        : kernel.clock.virtualTime() + wait.timeout);
+
+    /**
+     * The wait thread asks: a wait for any of its waits' objects, alertable,
+     * until the nearest time-out.
+     */
+    const waitStep = (/** @type {number[]} */ [id])=>{
+        const home = /** @type {WaitThread} */ (waitThreads.get(id >>> 0));
+        /** @type {Map<number, Wait[]>} */
+        const byObject = new Map();
+        for (const wait of home.waits)
+        {
+            byObject.set(wait.object, [...byObject.get(wait.object) ?? [], wait]);
+        }
+        home.asked = [...byObject.values()];
+        const now = kernel.clock.virtualTime();
+        const nearest = Math.min(...home.waits.map(wait=>wait.deadline));
+        const bytes = new Uint8Array(home.asked.length * 4);
+        const view = new DataView(bytes.buffer);
+        home.asked.forEach(([wait], index)=>view.setUint32(index * 4, wait.object, true));
+        host.writeMemory(home.handles, bytes);
+        return /** @type {NonNullable<ThreadPoolHost['waitFor']>} */ (host.waitFor)(
+            home.asked.length, home.handles,
+            nearest === Infinity ? INFINITE : Math.max(0, Math.ceil(nearest - now)));
     };
 
     /**
-     * The wait answered: the callback handed to the pool -- the object
-     * signalled or abandoned FALSE, the time out TRUE, as its TimerOrWaitFired
-     * says -- and whether to wait again.
+     * A wait fired: its callback handed to the pool, with the object
+     * signalled or abandoned FALSE and the time out TRUE, as its
+     * TimerOrWaitFired says. One that fires once leaves its thread; any
+     * other waits again from now.
+     *
+     * @param {Wait} wait @param {number} result
      */
-    const waitDone = (/** @type {number[]} */ [handle, answer])=>{
-        const wait = waits.get(handle >>> 0);
-        const result = answer >>> 0;
-        if (!wait)
-        {
-            return 0;
-        }
-        if (result === WAIT_IO_COMPLETION && !wait.cancelled)
-        {
-            // Routines queued to the wait thread ran: it waits on.
-            return 1;
-        }
-        if (wait.cancelled || result !== WAIT_OBJECT_0 && result !== WAIT_ABANDONED
-            && result !== WAIT_TIMEOUT)
-        {
-            wait.left = true;
-            forget(wait);
-            return 0;
-        }
+    const fireWait = (wait, result)=>{
         dispatch({ entry: wait.callback,
             args: wait.argsFor?.(result) ?? [wait.context, result === WAIT_TIMEOUT ? 1 : 0],
             owner: wait.owner ?? wait },
         wait.inWaitThread ? waitLane : poolLane);
-        wait.left = wait.once;
-        return wait.once ? 0 : 1;
+        if (wait.once)
+        {
+            wait.spent = true;
+            const home = wait.home;
+            wait.home = undefined;
+            home?.waits.splice(home.waits.indexOf(wait), 1);
+        }
+        else
+        {
+            wait.deadline = deadlineOf(wait);
+        }
     };
 
     /**
-     * A wait with a thread of its own, its callback run on the pool's.
-     *
-     * @param {number} object @param {number} callback @param {number} context
-     * @param {number} timeout @param {number} flags
-     * @returns {Wait | number}  the wait, or the error that refused it
+     * The wait answered: the wait whose object came fired, or every wait
+     * whose time ran out; routines queued to the thread, or a wait added or
+     * removed, end it with nothing to fire. The thread goes on while it has
+     * waits, and ends once it has none.
      */
-    const registerWait = (object, callback, context, timeout, flags)=>{
-        if (!host.waitFor || (callback >>> 0) === 0)
+    const waitDone = (/** @type {number[]} */ [id, answer])=>{
+        const home = /** @type {WaitThread} */ (waitThreads.get(id >>> 0));
+        const result = answer >>> 0;
+        const live = (/** @type {Wait | undefined} */ wait)=>
+            wait !== undefined && !wait.cancelled && wait.home === home;
+        if (result < home.asked.length || (result >= WAIT_ABANDONED
+            && result < WAIT_ABANDONED + home.asked.length))
         {
-            return ERROR_INVALID_PARAMETER;
+            const wait = home.asked[result & 0x7f].find(live);
+            if (wait)
+            {
+                fireWait(wait, result < WAIT_ABANDONED ? WAIT_OBJECT_0 : WAIT_ABANDONED);
+            }
+        }
+        else if (result === WAIT_TIMEOUT)
+        {
+            const now = kernel.clock.virtualTime();
+            for (const wait of home.asked.flat().filter(each=>live(each) && each.deadline <= now))
+            {
+                fireWait(wait, WAIT_TIMEOUT);
+            }
+        }
+        else if (result !== WAIT_IO_COMPLETION)
+        {
+            // An object closed under a wait: the wait for all of them fails.
+            // The waits whose objects are gone can never fire; they are said
+            // and dropped, and the others wait on.
+            for (const wait of home.asked.flat()
+                .filter(each=>live(each) && !eventOrObject(each.object)))
+            {
+                host.divergence?.('RegisterWaitForSingleObject',
+                    `the object 0x${wait.object.toString(16)} was closed under its wait,`
+                    + ' which will never fire');
+                wait.home = undefined;
+                home.waits.splice(home.waits.indexOf(wait), 1);
+            }
+        }
+        if (home.waits.length === 0)
+        {
+            home.leaving = true;
+            waitThreads.delete(home.id);
+            host.free?.(home.handles);
+            host.free?.(home.id);
+            return 0;
+        }
+        return 1;
+    };
+
+    /** Whether a handle still names something a thread can wait on. @param {number} handle */
+    const eventOrObject = handle=>{
+        if (handle === CURRENT_PROCESS || handle === CURRENT_THREAD)
+        {
+            return true;
+        }
+        try
+        {
+            return kernel.handles.resolve(handle) !== null;
+        }
+        catch (e){
+            void e;
+            return false;
+        }
+    };
+
+    /**
+     * A wait thread with room for one more wait, made when every one is
+     * full.
+     *
+     * @returns {WaitThread | null}
+     */
+    const waitThreadWithRoom = ()=>{
+        for (const home of waitThreads.values())
+        {
+            if (!home.leaving && home.waits.length < MAXIMUM_WAIT_OBJECTS)
+            {
+                return home;
+            }
         }
         if (waitLoop === 0)
         {
@@ -855,42 +984,74 @@ export function createThreadPool(host){
             const at = (host.allocateCode ?? host.allocate)(size);
             if (at === 0)
             {
-                return ERROR_NOT_ENOUGH_MEMORY;
+                return null;
             }
             host.writeMemory(at, waitLoopCode(step, done, at));
             waitLoop = at;
+        }
+        const id = host.allocate(4);
+        const handles = id === 0 ? 0 : host.allocate(MAXIMUM_WAIT_OBJECTS * 4);
+        if (handles === 0)
+        {
+            host.free?.(id);
+            return null;
+        }
+        const thread = makeThread({ entry: waitLoop, parameter: id,
+            name: 'registered waits', returnTo: host.threadReturn?.() });
+        if (!thread)
+        {
+            host.free?.(handles);
+            host.free?.(id);
+            return null;
+        }
+        host.threadBlock?.(thread);
+        /** @type {WaitThread} */
+        const home = { id, thread, handles, waits: [], asked: [], leaving: false };
+        waitThreads.set(id, home);
+        return home;
+    };
+
+    /**
+     * A wait on one of the wait threads, its callback run on the pool's.
+     *
+     * @param {number} object @param {number} callback @param {number} context
+     * @param {number} timeout @param {number} flags
+     * @returns {Wait | number}  the wait, or the error that refused it
+     */
+    const registerWait = (object, callback, context, timeout, flags)=>{
+        if (!host.waitFor || (callback >>> 0) === 0)
+        {
+            return ERROR_INVALID_PARAMETER;
         }
         const handle = host.allocate(4);
         if (handle === 0)
         {
             return ERROR_NOT_ENOUGH_MEMORY;
         }
-        /** @type {Wait} */
-        const wait = { handle, object: object >>> 0, callback: callback >>> 0,
-            context: context >>> 0, timeout: timeout >>> 0,
-            once: (flags & WT_EXECUTEONLYONCE) !== 0,
-            inWaitThread: (flags & WT_EXECUTEINWAITTHREAD) !== 0, cancelled: false, left: false,
-            outstanding: 0, waiters: [] };
-        wait.settled = ()=>forget(wait);
-        const thread = makeThread({ entry: waitLoop, parameter: handle,
-            name: 'registered wait', returnTo: host.threadReturn?.() });
-        if (!thread)
+        const home = waitThreadWithRoom();
+        if (!home)
         {
             host.free?.(handle);
             return ERROR_NOT_ENOUGH_MEMORY;
         }
-        host.threadBlock?.(thread);
-        wait.thread = thread;
+        /** @type {Wait} */
+        const wait = { handle, object: object >>> 0, callback: callback >>> 0,
+            context: context >>> 0, timeout: timeout >>> 0, deadline: Infinity,
+            once: (flags & WT_EXECUTEONLYONCE) !== 0,
+            inWaitThread: (flags & WT_EXECUTEINWAITTHREAD) !== 0, cancelled: false,
+            spent: false, outstanding: 0, waiters: [] };
+        wait.deadline = deadlineOf(wait);
+        wait.settled = ()=>forget(wait);
+        wait.home = home;
+        home.waits.push(wait);
         waits.set(handle, wait);
+        // Waiting already, the thread starts its wait again with this one in it.
+        kernel.alert(home.thread, WAIT_IO_COMPLETION);
         return wait;
     };
 
     /**
-     * No more callbacks: the wait's thread stops at its next answer, and one
-     * blocked on its object is taken out of the wait now. Left there, it
-     * would take the next signal for a wait nobody has any more -- a
-     * semaphore's count, an auto-reset event -- from whoever waits on the
-     * object next.
+     * No more callbacks: the wait leaves its thread (`detach`).
      *
      * @param {number} waitHandle @param {number} event
      * @param {Answers} [answers]
@@ -902,10 +1063,7 @@ export function createThreadPool(host){
             return answers.refused(ERROR_INVALID_HANDLE);
         }
         wait.cancelled = true;
-        if (!wait.left && wait.thread)
-        {
-            kernel.alert(wait.thread, WAIT_ABANDONED);
-        }
+        detach(wait);
         const own = running()?.owner === wait ? 1 : 0;
         // Its own callback on the wait thread is the only one of it that can
         // be running there, so nothing is left pending (Wine's kernel32
@@ -984,6 +1142,7 @@ export function createThreadPool(host){
         if (registered && !registered.cancelled)
         {
             registered.cancelled = true;
+            detach(registered);
             forget(registered);
         }
         if (wait)

@@ -2914,8 +2914,9 @@ export function createWin32Module(){
                 threadBlock: threadMade,
                 park: (/** @type {any} */ thread)=>bridge.park(thread),
                 setLastError: setError,
-                waitFor: (handle, milliseconds)=>libraries['KERNEL32.dll']
-                    .WaitForSingleObjectEx.handler([handle, milliseconds, 1]),
+                waitFor: (count, objects, milliseconds)=>libraries['KERNEL32.dll']
+                    .WaitForMultipleObjectsEx.handler([count, objects, 0, milliseconds, 1]),
+                divergence: config?.divergence,
                 threadReturn: ()=>threadReturnAddress(),
                 threadStart: ()=>threadCalls.start(),
             });
