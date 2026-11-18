@@ -132,6 +132,27 @@ test('a relative path follows the current directory of its drive', async()=>{
     await filesystemModule.dispose();
 });
 
+test('the current directory is held open: not removed or renamed until another is current',
+    async()=>{
+        const fs = await volume();
+        fs.createDirectory('C:\\Held');
+        fs.createDirectory('D:\\Remembered');
+        fs.setCurrentDirectory('D:\\Remembered');
+        fs.setCurrentDirectory('C:\\Held');
+
+        assert.throws(()=>fs.removeDirectory('c:\\held'), { code: 'SHARING_VIOLATION' });
+        assert.throws(()=>fs.mayRemove('C:\\HELD'), { code: 'SHARING_VIOLATION' });
+        assert.throws(()=>fs.rename('C:\\Held', 'C:\\Moved'), { code: 'SHARING_VIOLATION' });
+        assert.ok(fs.stat('C:\\Held')?.directory, 'and nothing moved on the way');
+        fs.removeDirectory('D:\\Remembered');
+        assert.equal(fs.stat('D:\\Remembered'), null, 'another drive\'s is only remembered');
+
+        fs.setCurrentDirectory('C:\\');
+        fs.removeDirectory('C:\\Held');
+        assert.equal(fs.stat('C:\\Held'), null);
+        await filesystemModule.dispose();
+    });
+
 test('drives do not see each other', async()=>{
     const fs = await volume();
 

@@ -1025,6 +1025,15 @@ export function createFileFunctions(host){
     };
 
     /**
+     * Whether the last name of a path holds a wildcard: no file or directory
+     * can be called that, so whatever would make, open, remove or rename one
+     * answers ERROR_INVALID_NAME before looking anything up.
+     *
+     * @param {string} path
+     */
+    const wildcardName = path=>/[*?]/.test(path.slice(path.lastIndexOf(SEPARATOR) + 1));
+
+    /**
      * Fails a call with a code, returning whatever that function's failure
      * value is. Everything that fails here does both, and doing only one of
      * them is the bug this exists to make impossible.
@@ -1430,8 +1439,7 @@ export function createFileFunctions(host){
         {
             return missing(source);
         }
-        // A name cannot hold a wildcard.
-        if (/[*?]/.test(destination.slice(destination.lastIndexOf('\\') + 1)))
+        if (wildcardName(destination))
         {
             return ERROR_INVALID_NAME;
         }
@@ -1456,7 +1464,7 @@ export function createFileFunctions(host){
         }
         // A file is renamed as it is deleted: an open that does not share
         // deletion keeps its name.
-        if (!moving.isDirectory && files.removalRefused?.(source) === 'SHARING_VIOLATION')
+        if (files.removalRefused?.(source) === 'SHARING_VIOLATION')
         {
             return ERROR_SHARING_VIOLATION;
         }
@@ -1989,6 +1997,10 @@ export function createFileFunctions(host){
     };
     const createDirectory = oneName(8, ([name, attributes], text)=>{
         const path = text.path(name);
+        if (wildcardName(path))
+        {
+            return fail(ERROR_INVALID_NAME);
+        }
         if (files.stat(path)?.exists)
         {
             return fail(ERROR_ALREADY_EXISTS);
@@ -2005,6 +2017,10 @@ export function createFileFunctions(host){
 
     const removeDirectory = oneName(4, ([name], text)=>{
         const path = text.path(name);
+        if (wildcardName(path))
+        {
+            return fail(ERROR_INVALID_NAME);
+        }
         const entry = files.stat(path);
         if (!entry || !entry.exists)
         {
@@ -2013,6 +2029,12 @@ export function createFileFunctions(host){
         if (!entry.isDirectory)
         {
             return fail(ERROR_DIRECTORY);
+        }
+        // The current directory is held open, and so is a directory opened
+        // without sharing deletion.
+        if (files.removalRefused?.(path) === 'SHARING_VIOLATION')
+        {
+            return fail(ERROR_SHARING_VIOLATION);
         }
         return files.remove(path)
             ? 1 : fail(onReadOnlyMedia(path) ? ERROR_WRITE_PROTECT : ERROR_DIR_NOT_EMPTY);
@@ -2062,9 +2084,13 @@ export function createFileFunctions(host){
     const setCurrentDirectory = oneName(4, ([name], text)=>{
         const path = text.path(name);
         const entry = files.stat(path);
-        if (!entry || !entry.exists || !entry.isDirectory)
+        if (!entry || !entry.exists)
         {
-            return fail(ERROR_PATH_NOT_FOUND);
+            return fail(missing(path));
+        }
+        if (!entry.isDirectory)
+        {
+            return fail(ERROR_DIRECTORY);
         }
         files.setCurrentDirectory(path);
         return 1;
@@ -2249,8 +2275,7 @@ export function createFileFunctions(host){
      * @param {number} [flags]  CreateFile's, FILE_FLAG_BACKUP_SEMANTICS read.
      */
     const nameRefusal = (raw, path, creating, flags = 0)=>{
-        const last = path.slice(path.lastIndexOf(SEPARATOR) + 1);
-        if (/[*?]/.test(last))
+        if (wildcardName(path))
         {
             return ERROR_INVALID_NAME;
         }

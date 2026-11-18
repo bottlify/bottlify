@@ -23,6 +23,7 @@ const ERROR_INVALID_PARAMETER = 87;
 const ERROR_NEGATIVE_SEEK = 131;
 const ERROR_ALREADY_EXISTS = 183;
 const ERROR_FILENAME_EXCED_RANGE = 206;
+const ERROR_DIRECTORY = 267;
 const ERROR_NOT_SUPPORTED = 50;
 
 /** What the old file family answers with when it fails. */
@@ -877,7 +878,23 @@ test('directories are made one level at a time and removed only when empty', ()=
     files.put('C:\\GAME\\DATA\\A.DAT', 'a');
     assert.equal(fns.RemoveDirectoryA.handler([at(NAME, 'C:\\GAME\\DATA')]), 0);
     files.nodes.delete('C:\\GAME\\DATA\\A.DAT');
+
+    // What the volume refuses to remove - the current directory, held open -
+    // is a sharing violation, not a directory that is not empty.
+    Object.assign(files, { removalRefused: ()=>'SHARING_VIOLATION' });
+    assert.equal(fns.RemoveDirectoryA.handler([at(NAME, 'C:\\GAME\\DATA')]), 0);
+    assert.equal(error.code, ERROR_SHARING_VIOLATION);
+    Object.assign(files, { removalRefused: ()=>null });
     assert.equal(fns.RemoveDirectoryA.handler([at(NAME, 'C:\\GAME\\DATA')]), 1);
+
+    // No directory is called by a wildcard, so none is made or looked for.
+    for (const name of ['C:\\GAME\\DATA?', 'C:\\GAME\\DATA*'])
+    {
+        assert.equal(fns.CreateDirectoryA.handler([at(NAME, name), 0]), 0);
+        assert.equal(error.code, ERROR_INVALID_NAME);
+        assert.equal(fns.RemoveDirectoryA.handler([at(NAME, name)]), 0);
+        assert.equal(error.code, ERROR_INVALID_NAME);
+    }
 });
 
 test('attributes say what a path is, and 0xffffffff says it is not there', ()=>{
@@ -1033,8 +1050,14 @@ test('the current directory is read and set through the same two-call protocol',
     assert.equal(fns.GetCurrentDirectoryA.handler([0x40, OUT_TEXT]), 'C:\\GAME'.length);
     assert.equal(memory.string(OUT_TEXT), 'C:\\GAME');
 
+    // Not there is told apart as everywhere else: the last name, or the way to it.
     assert.equal(fns.SetCurrentDirectoryA.handler([at(NAME, 'C:\\NOWHERE')]), 0);
+    assert.equal(error.code, ERROR_FILE_NOT_FOUND);
+    assert.equal(fns.SetCurrentDirectoryA.handler([at(NAME, 'C:\\NOWHERE\\SUB')]), 0);
     assert.equal(error.code, ERROR_PATH_NOT_FOUND);
+    files.put('C:\\GAME\\FILE.DAT', 'a file');
+    assert.equal(fns.SetCurrentDirectoryA.handler([at(NAME, 'C:\\GAME\\FILE.DAT')]), 0);
+    assert.equal(error.code, ERROR_DIRECTORY);
 
     files.mkdir('C:\\GAME\\DATA');
     assert.equal(fns.SetCurrentDirectoryA.handler([at(NAME, 'DATA')]), 1);
