@@ -108,7 +108,17 @@ turns with its parent on the parent's thread. A call a parent makes in its child
 (`VirtualAllocEx`, `ReadProcessMemory`, `SuspendThread` on its thread and the like) is sent to the
 child and made there with its own kernel32, between its turns, whichever way it runs
 ([`kernel32/cross-process.js`](../../modules/core/src/layers/win32/kernel32/cross-process.js)); only
-bytes cross. The engine
+bytes cross. The other way, a child its parent started with `DEBUG_PROCESS` reports its debug
+events to the parent as values - its start (the process, every library mapped with it, the loader's
+breakpoint), a library loaded or unloaded, a thread made or ended, `OutputDebugString`, an exception
+first and, unhandled, again - and the reporting thread waits for the status `ContinueDebugEvent`
+answers: called directly when the child runs on the parent's thread, across its link (`debug`)
+from a worker; a child its parent debugs is always started where its parent can hear it. While a
+thread waits on an exception's answer the exception's context is its context, so a debugger's
+`GetThreadContext` and `SetThreadContext` read and change the context it goes on from
+([`kernel32/debug-events.js`](../../modules/core/src/layers/win32/kernel32/debug-events.js)). A
+library of the engine's loaded after the start and a thread made are told without the thread
+waiting. The engine
 thread then runs no program and is the system (what it builds before any process starts is in
 section 4), and what the page asks of the program it asks the program's thread.
 

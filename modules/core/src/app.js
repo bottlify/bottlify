@@ -42,6 +42,7 @@ import { mangledCall } from './layers/loader/internal/mangling.js';
 import { mapImage } from './layers/loader/internal/image.js';
 import { imagePlacementOf, installedHeaders } from './layers/loader/internal/synth.js';
 import { blockLayouts, createProcessBlocks, TEB, TEB64 } from './layers/win32/kernel32/teb.js';
+import { DBG_CONTINUE, DEBUG_EVENT } from './layers/win32/kernel32/debug-events.js';
 import { KUSER, KUSER_REGION, SHARED_USER_DATA, createSharedUserData, sharedPageAt }
     from './layers/win32/kernel32/shared-data.js';
 import { supportedOsOf, windowsVersion } from './layers/win32/kernel32/versions.js';
@@ -2624,6 +2625,8 @@ export function resourceLookup(main, byBase, dataFiles = new Map(), readMemory, 
 const LIBRARY_ALIGN = 0x10000;
 
 /** What an LdrRegisterDllNotification callback is told: a library loaded, or unloaded. */
+/** What int3 raises (winnt.h's EXCEPTION_BREAKPOINT, STATUS_BREAKPOINT). */
+const EXCEPTION_BREAKPOINT = 0x80000003;
 const LDR_DLL_NOTIFICATION_REASON_LOADED = 1;
 const LDR_DLL_NOTIFICATION_REASON_UNLOADED = 2;
 
@@ -4779,6 +4782,8 @@ const TRACED_KEPT = 200;
  *     beside?: (request: any) => void,
  *     terminate?: (request: any, code: number) => boolean,
  *     askChild?: (request: any, call: any) => Promise<any> | null,
+ *     debugger?: { report: (report: import('./layers/win32/kernel32/debug-events.js')
+ *         .DebugReport) => Promise<number> },
  *     suspended?: boolean,
  *     othersRunning?: () => boolean,
  *     com?: { table: any, process: unknown },
@@ -5015,6 +5020,8 @@ async function buildApp(options){
     let loaderLock = 0;
     /** @type {any} */
     let mainModule = null;
+    /** Whether a debuggee's start is told: a library loaded after is told as it loads. */
+    let debugStarted = false;
 
     /**
      * Marks a module the process has loaded, with what it brings in, for
@@ -5032,6 +5039,14 @@ async function buildApp(options){
         }
         module.loaded = true;
         threadBlocks?.addModule(module);
+        // A library of the engine's loaded once the process runs is told to
+        // its debugger as it is marked, without waiting for the answer: the
+        // mark is made inside a lookup that cannot wait (`debug-events.js`).
+        if (debugStarted)
+        {
+            options.debugger?.report({ code: DEBUG_EVENT.LOAD_DLL,
+                threadId: kernel.currentThread()?.id >>> 0, base: module.base });
+        }
         for (const imported of SYSTEM_IMPORTS[moduleKeyOf(module.name)] ?? [])
         {
             markLoaded(byName.get(imported) ?? null);
@@ -6472,6 +6487,8 @@ async function buildApp(options){
             // child the run does not have.
             askChild: (/** @type {any} */ request, /** @type {any} */ call)=>
                 options.askChild?.(request, call) ?? null,
+            // Its parent's ear when the parent debugs it (`debug-events.js`).
+            debugger: options.debugger ?? null,
             /** @param {any} thread */
             threadBlock: thread=>{
                 if (!threadBlocks)
@@ -7382,9 +7399,14 @@ async function buildApp(options){
             return 1;
         }
         const unload = ()=>{
-            const told = tellNotified(LDR_DLL_NOTIFICATION_REASON_UNLOADED, held,
-                kernel.currentThread());
-            return told ? told.then(forget) : forget();
+            const thread = kernel.currentThread();
+            const told = tellNotified(LDR_DLL_NOTIFICATION_REASON_UNLOADED, held, thread);
+            // Its debugger hears of it before it is unmapped, the thread
+            // waiting for the answer.
+            const debugged = options.debugger?.report({ code: DEBUG_EVENT.UNLOAD_DLL,
+                threadId: thread?.id >>> 0, base: held.base });
+            const before = told && debugged ? told.then(()=>debugged) : told ?? debugged;
+            return before ? before.then(forget) : forget();
         };
         const forget = ()=>{
             const local = threadLocalImages.get(held.base);
@@ -7844,6 +7866,9 @@ async function buildApp(options){
                     // The callbacks LdrRegisterDllNotification registered, after it
                     // is mapped and bound and before any of its code runs.
                     await tellNotified(LDR_DLL_NOTIFICATION_REASON_LOADED, held, asked);
+                    // And its debugger, when its parent debugs this process.
+                    await options.debugger?.report({ code: DEBUG_EVENT.LOAD_DLL,
+                        threadId: asked?.id >>> 0, base });
 
                     // Its TLS callbacks, then its DllMain, lpvReserved NULL as
                     // for any library loaded by name. On the thread that asked
@@ -8510,8 +8535,36 @@ async function buildApp(options){
     // A session is a logon: its first process runs the RunOnce pass before
     // anything of its own, as Explorer does before the desktop is the user's
     // (an installation leaves a library's registration there for it).
-    const prelude = options.parentProcessId
-        ? 0 : findModule(PROGRAMS_LIBRARY)?.addressOf(RUN_ONCE_ROUTINE) ?? 0;
+    // A child its parent debugs reports its start before anything of it runs
+    // (`debug-events.js`), as Windows' loader does: the process, every library
+    // mapped with it, then the loader's breakpoint - an int3 of its own, not
+    // DbgBreakPoint - each waited on until the debugger continues it.
+    const debugStart = options.debugger && !long ? bridge.register('<debug start>', {
+        argBytes: 0,
+        handler: async()=>{
+            const report = /** @type {NonNullable<typeof options.debugger>} */ (
+                options.debugger).report;
+            const threadId = kernel.currentThread()?.id >>> 0;
+            await report({ code: DEBUG_EVENT.CREATE_PROCESS, threadId, base: image.base,
+                start: image.entryPoint });
+            for (const held of byBase.values())
+            {
+                if (held !== mainModule && held.loaded !== false)
+                {
+                    await report({ code: DEBUG_EVENT.LOAD_DLL, threadId, base: held.base });
+                }
+            }
+            const breakpoint = allocateFromHeap(1);
+            memory.writeBytes(breakpoint, new Uint8Array([0xcc]));
+            debugStarted = true;
+            await report({ code: DEBUG_EVENT.EXCEPTION, threadId, exception: {
+                code: EXCEPTION_BREAKPOINT, flags: 0, address: breakpoint, parameters: [0],
+                firstChance: true } });
+            return 0;
+        },
+    }) : 0;
+    const prelude = debugStart || (options.parentProcessId
+        ? 0 : findModule(PROGRAMS_LIBRARY)?.addressOf(RUN_ONCE_ROUTINE) ?? 0);
     const startup = synthesiseProcessInit({
         libraries: withTls.filter(held=>held !== mainModule || held.tls),
         entryPoint: image.entryPoint,
@@ -8609,6 +8662,12 @@ async function buildApp(options){
             } : held),
     });
     threadBlocks = process;
+    // What IsDebuggerPresent reads: a debuggee's process block says so.
+    if (options.debugger)
+    {
+        memory.writeBytes(process.peb + blockLayouts(pointerSize).peb.BEING_DEBUGGED,
+            new Uint8Array([1]));
+    }
 
     // The page every NT process reads at 0x7FFE0000 without a call: the same
     // version as every other road, and the clocks GetTickCount answers with.
@@ -10178,6 +10237,17 @@ async function buildApp(options){
         childExited(/** @type {any} */ request, /** @type {number} */ code){
             win32.childExited(request, code);
         },
+
+        /**
+         * An event a child this process debugs reported, answered once the
+         * debugger continues it (`debug-events.js`).
+         *
+         * @param {any} request
+         * @param {import('./layers/win32/kernel32/debug-events.js').DebugReport} report
+         * @returns {Promise<number>}
+         */
+        debugEvent: (/** @type {any} */ request, /** @type {any} */ report)=>
+            win32.debugEvent(request, report),
 
         /**
          * Ends this process from outside, as its parent's TerminateProcess
@@ -12721,9 +12791,10 @@ export async function createApp(options){
      *
      * @param {{ readImage: (path: string) => Promise<Uint8Array | null>,
      *     sound: () => ({ options: any, giveBack: () => void } | null),
-     *     server?: boolean }} from  `server` for one COM started, whose code is no run's
-     *     its parent, as the run reaches it: where its image is read, and the
-     *     sound it lends
+     *     server?: boolean, debugEvent?: ((report: any) => Promise<number>) | null }} from
+     *     `server` for one COM started, whose code is no run's
+     *     its parent, as the run reaches it: where its image is read, the
+     *     sound it lends, and where it reports when its parent debugs it
      * @param {any} request
      * @param {{ link: ReturnType<typeof openLink> | null, code: number | null,
      *     opened?: () => void }} [reach]
@@ -12825,6 +12896,12 @@ export async function createApp(options){
                     terminateBeside({ id }, code),
                 ask: (/** @type {number} */ id, /** @type {any} */ call)=>
                     askBeside({ id }, call),
+            },
+            // What it reports to the parent that debugs it, answered with the
+            // status the debugger continues it with (`debug-events.js`).
+            debug: {
+                report: (/** @type {any} */ report)=>(from.debugEvent
+                    ? from.debugEvent(report) : DBG_CONTINUE),
             },
             // The parent's open files the child writes its output and error
             // into: one position, the parent's, which the child's writes move.
@@ -12983,6 +13060,7 @@ export async function createApp(options){
                         startup: request.startup ?? null,
                         parentProcessId: request.parentId ?? 0,
                         suspended: request.suspended === true,
+                        ...from.debugEvent ? { debugged: true } : {},
                         ...request.parentId ? { startedBeside: true } : {},
                         ...request.environment ? { environment: request.environment } : {},
                         processId: request.id,
@@ -13326,6 +13404,8 @@ export async function createApp(options){
             startAcross({
                 readImage: path=>parent.readImage(path),
                 sound: ()=>(shared ? lendSound(parent) : null),
+                debugEvent: request.debugged ? (/** @type {any} */ report)=>
+                    parent.debugEvent(request, report) : null,
             }, request, code=>parent.childExited(request, code));
             return;
         }
@@ -13334,7 +13414,8 @@ export async function createApp(options){
         // plays into is this process's to lend, and to take back when the
         // run says the child has gone.
         const processesAcross = options.system?.processes;
-        if (processesAcross)
+        // A child it debugs stays beside it, where its events reach it.
+        if (processesAcross && !request.debugged)
         {
             const sound = shared ? lendSound(parent) : null;
             // Known before it is asked for: the run may ask for the position of
@@ -13426,6 +13507,9 @@ export async function createApp(options){
                         suspended: request.suspended === true,
                         startedBeside: true,
                         ...request.environment ? { environment: request.environment } : {},
+                        // Debugged by its parent, it reports to it here.
+                        ...request.debugged ? { debugger: { report: (/** @type {any} */ report)=>
+                            parent.debugEvent(request, report) } } : {},
                         audio: sound.options,
                     });
                     sound.announce(child);

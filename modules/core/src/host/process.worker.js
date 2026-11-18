@@ -253,6 +253,10 @@ export async function serveProcess(start){
             ...options,
             spareMemories: memories,
             standardFiles: standardFilesOf(options.standardFiles, ask),
+            // Debugged by its parent, it reports across the link and waits for
+            // the answer (`debug-events.js`).
+            ...options.debugged ? { debugger: { report: (/** @type {any} */ report)=>
+                link.call('debug', 'report', [report]) } } : {},
             graphics: { ...options.graphics, worker: graphics ? portEnd(graphics) : undefined,
                 display: display ? sendFrames(display) : undefined },
             system,

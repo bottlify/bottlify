@@ -37,6 +37,7 @@
  *   handler run backwards. The context keeps the flags the fault had.
  */
 
+import { DBG_CONTINUE, DEBUG_EVENT } from './debug-events.js';
 import { privilegedAt, storeMachineStatus } from './machine-status.js';
 import {
     CONTEXT_EXTENDED_REGISTERS, CONTEXT_FLOATING_POINT, floatGroupsOf, writeFloatGroups,
@@ -241,6 +242,9 @@ const hex = value=>`0x${(value >>> 0).toString(16)}`;
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {(text: string) => void} [trace]
  * @property {(what: { code: number, address: number }) => void} [terminate]
+ * @property {(report: import('./debug-events.js').DebugReport) => Promise<number>}
+ *     [debugReport]  This process's debugger, when its parent debugs it: told of an
+ *     exception first and again once nothing handled it, answering how to go on.
  *           Ends the process for an exception nothing handled, with the
  *           exception's code as its exit code -- what Windows does once the
  *           last-chance filter has had its say.
@@ -638,6 +642,41 @@ export function createSeh(host){
     };
 
     /**
+     * Tells this process's debugger of an exception, the thread stopped until
+     * it answers: meanwhile the context the exception carries is the thread's
+     * (`debugStop`), which the debugger reads and may change. Null when no
+     * debugger debugs this process.
+     *
+     * @param {{ code: number, flags?: number, address: number, parameters?: number[] }} what
+     * @param {any} thread @param {number} context @param {boolean} firstChance
+     * @returns {Promise<number | null>}
+     */
+    const toDebugger = async(what, thread, context, firstChance)=>{
+        if (!host.debugReport)
+        {
+            return null;
+        }
+        if (thread)
+        {
+            thread.debugStop = context;
+        }
+        try
+        {
+            return await host.debugReport({ code: DEBUG_EVENT.EXCEPTION,
+                threadId: (thread?.id ?? 0) >>> 0, exception: {
+                    code: what.code >>> 0, flags: what.flags ?? 0, address: what.address >>> 0,
+                    parameters: what.parameters ?? [], firstChance } });
+        }
+        finally
+        {
+            if (thread)
+            {
+                thread.debugStop = null;
+            }
+        }
+    };
+
+    /**
      * Walks the chain, calling every handler in order until one takes the
      * exception or the chain runs out.
      *
@@ -675,6 +714,14 @@ export function createSeh(host){
 
         // The vectored handlers first, the whole process's, in their order,
         // each handed EXCEPTION_POINTERS below the record.
+        // A debuggee's debugger hears of it before any handler, and may
+        // take it: continued with DBG_CONTINUE, the thread goes on from the
+        // context as the debugger left it.
+        if (await toDebugger(what, asked, at.context, true) === DBG_CONTINUE)
+        {
+            return { handled: true, registers: continuation(at.context, flags, asked) };
+        }
+
         const pointers = (at.top - 8) >>> 0;
         writeU32(pointers, at.record);
         writeU32(pointers + 4, at.context);
@@ -896,7 +943,17 @@ export function createSeh(host){
      * @returns {Promise<{ handled: boolean, registers?: Record<string, number> }>}
      */
     const lastChance = async(what, at)=>{
-        if (topLevelFilter !== 0)
+        // A debuggee's unhandled exception is its debugger's second chance,
+        // and the program's own filter is not asked, as Windows'
+        // UnhandledExceptionFilter declines when a debugger is attached.
+        if (host.debugReport)
+        {
+            if (await toDebugger(what, at.asked, at.context, false) === DBG_CONTINUE)
+            {
+                return { handled: true, registers: continuation(at.context, at.flags, at.asked) };
+            }
+        }
+        else if (topLevelFilter !== 0)
         {
             const pointers = (at.top - 8) >>> 0;
             writeU32(pointers, at.record);
@@ -1062,8 +1119,9 @@ export function createSeh(host){
             }
             // The last chance, as for a raise -- except that a program with no
             // filter of its own ends with the fault reported rather than with
-            // an exit code, since the report is the only account of it.
-            if (topLevelFilter === 0)
+            // an exit code, since the report is the only account of it; a
+            // debuggee's debugger has its second chance first.
+            if (topLevelFilter === 0 && !host.debugReport)
             {
                 return { handled: false };
             }

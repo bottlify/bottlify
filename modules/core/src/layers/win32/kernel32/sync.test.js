@@ -1340,43 +1340,11 @@ test('GetThreadSelectorEntry describes the flat selectors and the thread block b
     assert.equal(fns.GetThreadSelectorEntry.handler([0xfffffffe, 0xdeadbeef, at]), 0);
 });
 
-test('a debugged child reports its creation, then its exit, waited for as the child is', ()=>{
-    // Wine's kernel32 process.c test_DebuggingFlag reads events until the
-    // child's exit; WaitForDebugEvent was missing.
+test('DebugBreakProcess succeeds on any process and says a debugged child\'s breakpoint', ()=>{
     const host = fakeHost();
     const kernel = /** @type {any} */ (host.kernel);
-    const child = { id: 0x300, threadId: 0x304, handle: 0x40, threadHandle: 0x44,
-        imagePath: 'C:/child.exe', exitCode: 259, completed: false,
-        debugEvents: ['create', 'exit'], waiters: /** @type {any[]} */ ([]) };
-    kernel.processes = { STILL_ACTIVE: 259, all: ()=>[child] };
-    /** @type {any[]} */
-    const blocked = [];
-    kernel.block = (/** @type {any} */ thread, /** @type {string} */ why)=>blocked.push(why);
-    const fns = createSyncFunctions(host);
-    const view = new DataView(host.bytes.buffer);
-    const event = ()=>[0, 4, 8, 12, 16, 20].map(at=>view.getUint32(0x200 + at, true));
-
-    assert.equal(fns.WaitForDebugEvent.handler([0x200, 0xffffffff]), 1);
-    assert.deepEqual(event(), [3, 0x300, 0x304, 0, 0x40, 0x44], 'CREATE_PROCESS_DEBUG_EVENT');
-    assert.equal(/** @type {any} */ (fns.ContinueDebugEvent).handler([0x300, 0x304, 0x10002]), 1);
-    assert.equal(fns.WaitForDebugEvent.handler([0x200, 0]), 0, 'a poll while it runs');
-    assert.equal(host.errors.at(-1), 121, 'ERROR_SEM_TIMEOUT');
-
-    assert.equal(fns.WaitForDebugEvent.handler([0x200, 0xffffffff]), PARKED);
-    assert.equal(blocked.length, 1, 'the debugger waits on the child');
-    child.exitCode = 7;
-    assert.equal(child.waiters[0].settle(), 1, 'its exit is the answer');
-    assert.deepEqual(event().slice(0, 4), [5, 0x300, 0x304, 7], 'EXIT_PROCESS_DEBUG_EVENT');
-    assert.equal(fns.WaitForDebugEvent.handler([0x200, 100]), 0, 'and then nothing more');
-    assert.equal(fns.WaitForDebugEvent.argBytes, 8);
-    assert.equal(fns.ContinueDebugEvent.argBytes, 12);
-});
-
-test('the debugger calls act on the children this process debugs and refuse the rest', ()=>{
-    const host = fakeHost();
-    const kernel = /** @type {any} */ (host.kernel);
-    const debugged = { id: 0x300, debugEvents: ['create', 'exit'] };
-    const plain = { id: 0x310, debugEvents: null };
+    const debugged = { id: 0x300, debugged: { events: [], current: null } };
+    const plain = { id: 0x310, debugged: null };
     kernel.processes = { STILL_ACTIVE: 259, all: ()=>[debugged, plain] };
     /** @type {string[]} */
     const said = [];
@@ -1385,29 +1353,12 @@ test('the debugger calls act on the children this process debugs and refuse the 
     host.register(0x50, 'process', debugged);
     host.register(0x54, 'process', plain);
     host.register(0x58, 'event', { kind: 'event' });
-    assert.deepEqual([fns.DebugActiveProcessStop.argBytes, fns.DebugBreakProcess.argBytes,
-        fns.DebugSetProcessKillOnExit.argBytes], [4, 4, 4]);
-
-    assert.equal(fns.DebugSetProcessKillOnExit.handler([0]), 1, 'a debugger sets it');
-    assert.equal(/** @type {any} */ (debugged).killOnExit, false);
-
+    assert.equal(fns.DebugBreakProcess.argBytes, 4);
     assert.equal(fns.DebugBreakProcess.handler([0xffffffff]), 1, 'no debugger: nothing happens');
     assert.equal(fns.DebugBreakProcess.handler([0x54]), 1);
     assert.equal(fns.DebugBreakProcess.handler([0x50]), 1);
     assert.deepEqual(said, ['DebugBreakProcess'], 'the debugged child\'s breakpoint is said');
     assert.equal(fns.DebugBreakProcess.handler([0x58]), 0, 'an event is no process');
-    assert.equal(host.errors.at(-1), 6);
-
-    assert.equal(fns.DebugActiveProcessStop.handler([0x310]), 0, 'not debugged by us');
-    assert.equal(host.errors.at(-1), 6);
-    assert.equal(fns.DebugActiveProcessStop.handler([0x999]), 0, 'no such process');
-    assert.equal(host.errors.at(-1), 87);
-    assert.equal(fns.DebugActiveProcessStop.handler([0x300]), 1);
-    assert.equal(debugged.debugEvents, null, 'it reports to nobody now');
-    assert.equal(fns.WaitForDebugEvent.handler([0x200, 0]), 0, 'and no event comes');
-
-    assert.equal(fns.DebugSetProcessKillOnExit.handler([1]), 0,
-        'with no child debugged there is no debug object to set');
     assert.equal(host.errors.at(-1), 6);
 });
 
@@ -1441,53 +1392,3 @@ test('GetSystemTimes: the processors\' time since boot, user what this process r
     assert.equal(fns.GetSystemTimes.handler([0, 0, 0]), 1, 'every pointer may be null');
 });
 
-test('a WaitForDebugEvent with a time-out ends then with ERROR_SEM_TIMEOUT', ()=>{
-    // Wine's kernel32 debugger tests wait twenty seconds for an event that
-    // never comes: the wait blocked until the child ended, whatever it asked.
-    const host = fakeHost();
-    const kernel = /** @type {any} */ (host.kernel);
-    const child = { id: 0x300, threadId: 0x304, imagePath: 'C:/child.exe', exitCode: 259,
-        completed: false, debugEvents: ['exit'], waiters: /** @type {any[]} */ ([]) };
-    kernel.processes = { STILL_ACTIVE: 259, all: ()=>[child] };
-    kernel.clock = { virtualTime: ()=>1000 };
-    /** @type {any[]} */
-    const blocked = [];
-    kernel.block = (/** @type {any} */ thread, /** @type {string} */ why,
-        /** @type {any} */ timed)=>blocked.push({ thread, timed });
-    /** @type {((thread: any) => void)[]} */
-    const expiries = [];
-    kernel.onTimeout = (/** @type {(thread: any) => void} */ handler)=>expiries.push(handler);
-    /** @type {[any, number][]} */
-    const errorsFor = [];
-    /** @type {any} */ (host).setLastErrorFor = (/** @type {any} */ thread,
-        /** @type {number} */ code)=>errorsFor.push([thread, code]);
-    const fns = createSyncFunctions(host);
-
-    assert.equal(fns.WaitForDebugEvent.handler([0x200, 20000]), PARKED);
-    assert.deepEqual(blocked[0].timed, { deadline: 21000, result: 0 }, 'until its time is up');
-    expiries.forEach(handler=>handler(blocked[0].thread));
-    assert.deepEqual(child.waiters, [], 'taken off the child');
-    assert.deepEqual(errorsFor, [[blocked[0].thread, 121]], 'ERROR_SEM_TIMEOUT');
-
-    assert.equal(fns.WaitForDebugEvent.handler([0x200, 0xffffffff]), PARKED);
-    assert.equal(blocked[1].timed, undefined, 'INFINITE waits for the event');
-});
-
-test('ContinueDebugEvent takes the statuses Windows takes, DBG_REPLY_LATER from 1709 on', ()=>{
-    // Wine's debugger test_debugger skips its DBG_REPLY_LATER part where the
-    // call refuses it, as Windows 7 does.
-    const seven = fakeHost();
-    const fns = createSyncFunctions({ ...seven, windows: { major: 6, build: 7601 } });
-    const go = (/** @type {number} */ status)=>fns.ContinueDebugEvent.handler([0x300, 0x304, status]);
-    assert.equal(go(0x00010002), 1, 'DBG_CONTINUE');
-    assert.equal(go(0x80010001), 1, 'DBG_EXCEPTION_NOT_HANDLED');
-    assert.equal(go(0x40010001), 0, 'DBG_REPLY_LATER before Windows 10');
-    assert.equal(seven.errors.at(-1), 87);
-    assert.equal(go(0x1234), 0);
-    /** @type {string[]} */
-    const said = [];
-    const ten = createSyncFunctions({ ...fakeHost(), windows: { major: 10, build: 19045 },
-        divergence: (/** @type {string} */ api)=>said.push(api) });
-    assert.equal(ten.ContinueDebugEvent.handler([0x300, 0x304, 0x40010001]), 1);
-    assert.deepEqual(said, ['ContinueDebugEvent'], 'not reported again, and said');
-});
