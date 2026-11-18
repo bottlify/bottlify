@@ -1682,6 +1682,31 @@ test('GetWriteWatch in a 64-bit process writes its PVOID array and ULONG_PTR cou
     assert.equal(view.getUint32(0x184, true), 0xaaaaaaaa, 'and only a DWORD');
 });
 
+test('a 64-bit process\'s SIZE_T past 4 GiB is refused whole, not taken by its low half', ()=>{
+    // The bridge hands a 64-bit argument's low dword and its high one beside it (`args.high`):
+    // VirtualAlloc(4 GiB + 64 KiB) was a 64 KiB reservation, HeapAlloc of 4 GiB + 16 a block of 16.
+    /** @type {number[]} */
+    const errors = [];
+    const host = { ...fakeHost(RESERVING_ARENA), pointerSize: 8,
+        setLastError: (/** @type {number} */ code)=>errors.push(code) };
+    const fns = createHeapFunctions(host);
+    /** @param {number[]} words @param {number} at @returns {number[] & { high: number[] }} */
+    const wide = (words, at)=>Object.assign(words, { high: words.map((_, i)=>(i === at ? 1 : 0)) });
+    const MEM_RESERVE_COMMIT = 0x3000;
+    assert.equal(fns.VirtualAlloc.handler(wide([0, 0x10000, MEM_RESERVE_COMMIT, 0x04], 1)), 0);
+    assert.equal(errors.at(-1), 8, 'ERROR_NOT_ENOUGH_MEMORY');
+    const heap = fns.GetProcessHeap.handler();
+    assert.equal(fns.HeapAlloc.handler(wide([heap, 0, 16], 2)), 0, 'HeapAlloc');
+    const block = fns.HeapAlloc.handler([heap, 0, 16]);
+    assert.notEqual(block, 0);
+    assert.equal(fns.HeapReAlloc.handler(wide([heap, 0, block, 32], 3)), 0, 'HeapReAlloc');
+    assert.equal(fns.HeapSize.handler([heap, 0, block]), 16, 'the block left as it was');
+    const base = fns.VirtualAlloc.handler([0, 0x10000, MEM_RESERVE_COMMIT, 0x04]);
+    assert.notEqual(base, 0);
+    assert.equal(fns.VirtualFree.handler(wide([base, 0x1000, MEM_DECOMMIT], 1)), 0, 'VirtualFree');
+    assert.equal(errors.at(-1), 87, 'ERROR_INVALID_PARAMETER');
+});
+
 test('GetWriteWatch over the write clock: every page written since its last report or reset '
     + 'is told, against a model of Windows, in seeded runs', ()=>{
     // A collector's background marking (the .NET runtime's) rescans what
