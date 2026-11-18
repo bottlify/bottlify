@@ -306,6 +306,7 @@ export function createCpuModule(){
              * read them, and only them, never a different instance's.
              *
              * @type {{ host: any, thunks: any, running: boolean, tableWritten: boolean,
+             *          memorySize: number,
              *          worstInterpreted: number, worstInterpretedAt: number,
              *          interpretedBefore: number, lastFault: any, disposed: boolean,
              *          samples: ReturnType<typeof createSampleTable>,
@@ -331,6 +332,8 @@ export function createCpuModule(){
              */
             const state = {
                 host: null, thunks: null, running: false, tableWritten: false, nudge: null,
+                // The guest RAM's ceiling, set with the settings below.
+                memorySize: 0,
                 // The translations' store the run gave, for its figures.
                 store: null,
                 worstInterpreted: 0, worstInterpretedAt: 0, interpretedBefore: 0,
@@ -510,6 +513,7 @@ export function createCpuModule(){
                     codeBase: config.codeBase ?? 0,
                     ...config.hostAlias ? { hostAlias: config.hostAlias } : {} } : {}),
             };
+            state.memorySize = settings.memorySize;
             if (settings.bits === 64)
             {
                 settings.executors = 1;
@@ -1770,6 +1774,11 @@ export function createCpuModule(){
                     // the run holds it now, and the grows refused this process; null
                     // where the run has none (`machineMemory`).
                     machineMemory: instance.host?.machineMemory?.() ?? null,
+                    // The guest's memory: the RAM it may reach, what the memory holds of
+                    // it now, and whether it grows as the guest is given more.
+                    guestMemory: instance.host?.ramHeld ? { ceiling: instance.memorySize,
+                        held: instance.host.ramHeld(), growing: instance.host.growing?.() === true }
+                        : null,
                     running: instance.running,
                     instructions: retiredEverywhere(instance),
                     traps: instance.thunks ? instance.thunks.size : 0,

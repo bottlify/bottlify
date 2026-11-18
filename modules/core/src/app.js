@@ -1673,22 +1673,24 @@ const LARGE_ADDRESS_TOP = 0xfffe0000;
  * space and only the other executors' pages are cut out (`others`): the memory
  * holds the RAM up to the first range from the start, as with one executor, and
  * reaches the others' when one opens -- a process whose threads open none (most
- * of a run's helpers) never does, where every process started at 512 MiB. None
- * for a 64-bit process, a RAM that is not a power of two, or an image of the
- * program's own lying where the range would.
+ * of a run's helpers) never does, where every process started at 512 MiB. A
+ * 64-bit process's 4 GiB layout takes one as a 32-bit one does (`longLayout`);
+ * a wide window's (`wide`), whose RAM is a memory of its own, none. None for a
+ * RAM that is not a power of two, or an image of the program's own lying where
+ * the range would.
  *
- * @param {{ long: boolean, memorySize: number, moduleBase: number, stackPoolStart: number,
+ * @param {{ wide: boolean, memorySize: number, moduleBase: number, stackPoolStart: number,
  *     heapStart: number, executors: number,
  *     image: { imageBase: number, sizeOfImage: number } }} what
  * @returns {{ at: number, span: number, inHeap: boolean, cut?: true,
  *     others?: { at: number, span: number } } | undefined}
  */
-export function engineAreaFor({ long, memorySize, moduleBase, stackPoolStart, heapStart,
+export function engineAreaFor({ wide, memorySize, moduleBase, stackPoolStart, heapStart,
     executors, image })
 {
     const MIB = 0x100000;
     const span = (20 * Math.max(1, executors) + 8) * MIB;
-    if (long || memorySize < 2 ** 28 || 2 ** Math.round(Math.log2(memorySize)) !== memorySize)
+    if (wide || memorySize < 2 ** 28 || 2 ** Math.round(Math.log2(memorySize)) !== memorySize)
     {
         return undefined;
     }
@@ -4792,7 +4794,8 @@ async function buildApp(options){
         && typeof SharedArrayBuffer === 'function'
         && /** @type {any} */ (globalThis).crossOriginIsolated !== false;
     /** @param {number} size */
-    const areaFor = size=>(mayGrow ? engineAreaFor({ long, memorySize: size,
+    const areaFor = size=>(mayGrow ? engineAreaFor({ wide: programLoaded.wide !== undefined,
+        memorySize: size,
         moduleBase: MODULE_BASE, stackPoolStart: STACK_POOL_START, heapStart: HEAP_START,
         executors: options.cpu?.cores ?? 1, image: mainImage }) : undefined);
     // Past 2 GiB the RAM is all of wasm's 4 GiB, which only a memory that grows
