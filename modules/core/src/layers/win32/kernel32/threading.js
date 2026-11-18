@@ -774,6 +774,32 @@ export function createThreadingFunctions(host){
             }
             return handle;
         },
+        /**
+         * A keyed event: always signalled to a wait on its handle, its pairings
+         * of waiters and releasers by key kept beside it (`sync-natives.js`).
+         *
+         * @param {string | null} name @param {number} sd @param {boolean} inherit
+         * @param {number | null} granted
+         */
+        keyedEvent: (name, sd, inherit, granted)=>{
+            const found = existing(name, 'keyedevent');
+            if (found === TAKEN)
+            {
+                host.setLastError(ERROR_INVALID_HANDLE);
+                return 0;
+            }
+            const keyed = found ?? Object.assign(kernel.createEvent({
+                manualReset: true, signalled: true, name: name ?? 'keyed event',
+            }), { keyed: { waiting: [], releasing: [] } });
+            keepDescriptor(sd, keyed, found);
+            remember(name, 'keyedevent', keyed, found !== null);
+            const handle = inheritIf(kernel.handles.open('keyedevent', keyed, granted), inherit);
+            if (name === null)
+            {
+                keyed.name = `#${handle.toString(16)}`;
+            }
+            return handle;
+        },
         /** @param {string | null} name @param {boolean} manual @param {number} sd @param {boolean} inherit */
         timer: (name, manual, sd, inherit)=>{
             const found = existing(name, 'timer');

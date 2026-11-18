@@ -16,6 +16,9 @@ export const SYNCHRONIZE = 0x00100000;
 /** The query and modify rights of an event, a semaphore and a waitable timer. */
 export const QUERY_STATE = 0x0001;
 export const MODIFY_STATE = 0x0002;
+/** A keyed event's two rights: to wait on a key, and to release one. */
+export const KEYEDEVENT_WAIT = 0x0001;
+export const KEYEDEVENT_WAKE = 0x0002;
 
 /** DELETE, READ_CONTROL, WRITE_DAC, WRITE_OWNER and SYNCHRONIZE. */
 const STANDARD_RIGHTS_ALL = 0x001f0000;
@@ -40,7 +43,7 @@ const ERROR_PRIVILEGE_NOT_HELD = 1314;
 
 /**
  * Each kind's own rights, and what its generic rights stand for (winnt.h's
- * MUTANT_*, EVENT_*, SEMAPHORE_*, TIMER_*, THREAD_* and the objects' generic
+ * MUTANT_*, EVENT_*, SEMAPHORE_*, TIMER_*, KEYEDEVENT_*, THREAD_* and the objects' generic
  * mappings); `implied`, a right that carries a lesser one with it.
  *
  * @type {Record<string, { own: number, read: number, write: number, execute: number,
@@ -55,6 +58,9 @@ const KINDS = {
         write: READ_CONTROL | MODIFY_STATE, execute: READ_CONTROL | SYNCHRONIZE },
     timer: { own: QUERY_STATE | MODIFY_STATE, read: READ_CONTROL | QUERY_STATE,
         write: READ_CONTROL | MODIFY_STATE, execute: READ_CONTROL | SYNCHRONIZE },
+    // KEYEDEVENT_ALL_ACCESS has no SYNCHRONIZE: a wait on the handle needs it asked.
+    keyedevent: { own: KEYEDEVENT_WAIT | KEYEDEVENT_WAKE, read: READ_CONTROL | KEYEDEVENT_WAIT,
+        write: READ_CONTROL | KEYEDEVENT_WAKE, execute: READ_CONTROL },
     // THREAD_TERMINATE and on, the low word. Read is GET_CONTEXT and
     // QUERY_INFORMATION; write TERMINATE, SUSPEND_RESUME, SET_CONTEXT and
     // SET_INFORMATION; QUERY_INFORMATION and SET_INFORMATION carry their
