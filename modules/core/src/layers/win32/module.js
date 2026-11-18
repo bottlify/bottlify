@@ -7068,6 +7068,10 @@ export function createWin32Module(){
                 status: Object.keys(held).length > 0 ? 'ready' : 'created',
                 metrics: {
                     libraries: counts,
+                    // An assembly's own version of a library is an image of its
+                    // own beside system32's of the same name, so a count of the
+                    // images is the libraries and these.
+                    faces: current ? Object.keys(current.faces()) : [],
                     implemented: Object.values(held)
                         .reduce((total, table)=>total + Object.keys(table).length, 0),
                     ioCompletionWaits: current ? current.ioCompletionWaits() : [],
