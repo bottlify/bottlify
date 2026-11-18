@@ -13,7 +13,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { HIGH, LOW, raxOf, sameAnswer, writeDifferences } from './check-wide-addresses.mjs';
+import {
+    HIGH, LOW, mangledPointers, raxOf, sameAnswer, writeDifferences,
+} from './check-wide-addresses.mjs';
 
 test('RAX is a dword sign-extended, a bigint whole, nothing for no number', ()=>{
     assert.equal(raxOf(0x100000), 0x100000n);
@@ -61,4 +63,25 @@ test('what a call did not write is not its own, however the windows had parted',
     const highBefore = Uint8Array.of(2, 0, 0, 0);
     assert.deepEqual(writeDifferences(lowBefore, Uint8Array.from(lowBefore), highBefore,
         Uint8Array.from(highBefore), LOW, HIGH), []);
+});
+
+test('an address may point anywhere in its own window, a value is judged by its low dword', ()=>{
+    // Two arenas parted by a call before: each answer inside its own window is right.
+    assert.equal(sameAnswer(0x156040n, 0x90160000n, LOW, HIGH, 'address'), true);
+    // Zero-extension's fault: an address sign-extended past 2 GiB.
+    assert.equal(sameAnswer(0x110000n, 0xffffffff90110000n, LOW, HIGH, 'address'), false);
+    // An int computed from an address: sign-extended by its type, as Windows does.
+    assert.equal(sameAnswer(0x110000n, 0xffffffff90110000n, LOW, HIGH, 'value'), true);
+    assert.equal(sameAnswer(5n, 5n, LOW, HIGH, 'value'), true);
+    assert.equal(sameAnswer(5n, 6n, LOW, HIGH, 'value'), false);
+});
+
+test('an MSVC name says which of its arguments are addresses', ()=>{
+    assert.deepEqual(mangledPointers('??2@YAPAXI@Z'), [], 'operator new(unsigned int)');
+    assert.deepEqual(mangledPointers('??2@YAPEAX_K@Z'), [], 'operator new(unsigned __int64)');
+    assert.deepEqual(mangledPointers('??3@YAXPAX@Z'), [0], 'operator delete(void *)');
+    assert.deepEqual(mangledPointers('??3@YAXPEAX@Z'), [0]);
+    assert.equal(mangledPointers('?f@@YAXVclass@@@Z'), null, 'a class is not read');
+    assert.equal(mangledPointers('??0exception@@QAE@XZ'), null, 'a member is not read');
+    assert.equal(mangledPointers('GetProcessHeap'), null);
 });

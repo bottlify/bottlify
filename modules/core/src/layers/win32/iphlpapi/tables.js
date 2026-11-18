@@ -1351,6 +1351,7 @@ export function createIphlpapiTables(host, model){
 
         /** PCHAR if_indextoname(NET_IFINDEX InterfaceIndex, PCHAR InterfaceName) */
         if_indextoname: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([index, name])=>{

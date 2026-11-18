@@ -1990,8 +1990,11 @@ export function createHeapFunctions(host){
             long: builder=>{
                 const [name, make] = longRoutines[which];
                 const placement = guestHeap.placement();
+                // The trap is the export's as the bridge must read it: its
+                // answer an address widened with zeros where the export's is.
                 return bindLong(builder, placement === null ? null : make(placement), {
                     argBytes: table[name].argBytes,
+                    returns: /** @type {{ returns?: string }} */ (table[name]).returns,
                     /** @param {number[]} args */
                     handler: args=>table[name].handler(args),
                 });
@@ -2268,6 +2271,7 @@ export function createHeapFunctions(host){
     const table = {
         /** HANDLE GetProcessHeap(VOID) */
         GetProcessHeap: {
+            returns: 'pointer',
             argBytes: 0,
             handler: ()=>processHeap,
             // mov eax, fs:[0x30]; mov eax, [eax + 0x18]; ret -- PEB->ProcessHeap,
@@ -2280,6 +2284,7 @@ export function createHeapFunctions(host){
 
         /** HANDLE HeapCreate(DWORD flOptions, SIZE_T dwInitialSize, SIZE_T dwMaximumSize) */
         HeapCreate: {
+            returns: 'pointer',
             argBytes: 12,
             /** @param {number[]} [args] */
             handler: ([options, initial, maximum] = [0, 0, 0])=>{
@@ -2516,7 +2521,6 @@ export function createHeapFunctions(host){
 
         /** SIZE_T HeapSize(HANDLE hHeap, DWORD dwFlags, LPCVOID lpMem) */
         HeapSize: {
-            returns: 'pointer',
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([handle, , pointer])=>{
@@ -2795,6 +2799,7 @@ export function createHeapFunctions(host){
          * HGLOBAL GlobalAlloc(UINT uFlags, SIZE_T dwBytes)
          */
         GlobalAlloc: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([flags, bytes])=>globals.global.allocate(flags >>> 0, bytes >>> 0),
@@ -2850,6 +2855,7 @@ export function createHeapFunctions(host){
          * BOOL GlobalUnWire(HGLOBAL), VOID GlobalUnfix(HGLOBAL)
          */
         GlobalWire: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([handle])=>globals.global.lock(handle >>> 0),
@@ -2878,7 +2884,6 @@ export function createHeapFunctions(host){
 
         /** SIZE_T GlobalSize(HGLOBAL hMem) */
         GlobalSize: {
-            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([handle])=>globals.global.size(handle >>> 0),
@@ -2988,7 +2993,6 @@ export function createHeapFunctions(host){
          * Zero would mean the heap is full, which it is not.
          */
         HeapCompact: {
-            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([handle])=>{
@@ -3180,7 +3184,6 @@ export function createHeapFunctions(host){
          * reserve it there.
          */
         VirtualQuery: {
-            returns: 'pointer',
             argBytes: 12,
             /** @param {number[]} args */
             handler: args=>{
@@ -3582,7 +3585,7 @@ export function createHeapFunctions(host){
         /** BOOL VirtualProtectEx(HANDLE, LPVOID, SIZE_T, DWORD, PDWORD) */
         VirtualProtectEx: inProcess('VirtualProtect', 20),
         /** SIZE_T VirtualQueryEx(HANDLE, LPCVOID, PMEMORY_BASIC_INFORMATION, SIZE_T) */
-        VirtualQueryEx: { ...inProcess('VirtualQuery', 16), returns: 'pointer' },
+        VirtualQueryEx: { ...inProcess('VirtualQuery', 16) },
         /** HLOCAL LocalReAlloc(HLOCAL hMem, SIZE_T uBytes, UINT uFlags) */
         LocalReAlloc: {
             returns: 'pointer',
@@ -3612,7 +3615,6 @@ export function createHeapFunctions(host){
          * the number is only measured.
          */
         GlobalCompact: {
-            returns: 'pointer',
             argBytes: 4,
             handler: ()=>table.HeapCompact.handler([processHeap, 0]),
         },

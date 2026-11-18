@@ -233,6 +233,7 @@ export function createWin9xFunctions(host){
                 ? pointer >>> 0 : mapSL.handler()),
         },
         MapSLFix: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>(((pointer >>> 0) & SELECTOR_MASK) === 0

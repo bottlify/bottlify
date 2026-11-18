@@ -116,8 +116,8 @@ export function createAvifilFunctions(host){
          *
          * No decompressor to open one with: NULL, and NULL is not a frame object.
          */
-        AVIStreamGetFrameOpen: { argBytes: 8, handler: ()=>0 },
-        AVIStreamGetFrame: { argBytes: 8, handler: ()=>0 },
+        AVIStreamGetFrameOpen: { returns: 'pointer', argBytes: 8, handler: ()=>0 },
+        AVIStreamGetFrame: { returns: 'pointer', argBytes: 8, handler: ()=>0 },
         AVIStreamGetFrameClose: { argBytes: 4, handler: ()=>AVIERR_BADHANDLE },
 
         /**

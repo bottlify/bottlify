@@ -1124,7 +1124,6 @@ export function createSystemFunctions(host){
          * would use them allocates ordinary pages.
          */
         GetLargePageMinimum: {
-            returns: 'pointer',
             argBytes: 0,
             handler: ()=>0,
         },

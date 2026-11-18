@@ -602,7 +602,6 @@ export function createClassFunctions(host){
          * width of a size_t: the same type hashes the same in every module.
          */
         __std_type_info_hash: {
-            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 4,
             /** @param {number[]} args */

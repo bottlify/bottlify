@@ -7646,7 +7646,6 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
          * replaced. No input here carries any of its own.
          */
         GetMessageExtraInfo: {
-            returns: 'pointer',
             argBytes: 0,
             handler: ()=>messageExtraInfo,
         },

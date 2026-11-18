@@ -992,7 +992,6 @@ export function createUcrtbaseFunctions(crt, host){
          * holds.
          */
         fread_s: {
-            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 20,
             /** @param {number[]} args */
@@ -1033,7 +1032,6 @@ export function createUcrtbaseFunctions(crt, host){
          *     locale's.
          */
         _Wcsftime: {
-            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 20,
             /** @param {number[]} args */

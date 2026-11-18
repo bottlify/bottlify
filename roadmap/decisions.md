@@ -2491,3 +2491,13 @@ through a pointer it was handed, a stray triangle, a click - only on an arm64 ho
 executors, never with one executor or on x86. kernel32/sleep-zero.itest.js hands a token with plain
 movs and runs on one executor only on such a host.
 *2026-11-18, the owner's ruling.*
+
+**A270. A 64-bit handler's `size_t` / `SIZE_T` result is sign-extended into RAX.** Handlers answer
+in dwords, and the C runtime's sizes carry their errors as `(size_t)-1` and `(size_t)-2` (mbrtowc's
+INCOMPLETE, wcstombs' failure): only a sign-extension makes those the quadword a 64-bit caller
+compares against. So a size is no address to the bridge (`check-wide-arguments.mjs` refuses
+`returns: 'pointer'` over one). The cost: a host size of 2 GiB or more comes back wrong unless its
+handler answers a quadword. Pointer-sized integers (`ULONG_PTR`, `UINT_PTR`, `DWORD_PTR`,
+`uintptr_t`, `WPARAM`) are decided by meaning: GetClassLongPtr's value may be an address and is
+declared one.
+*2026-11-18.*

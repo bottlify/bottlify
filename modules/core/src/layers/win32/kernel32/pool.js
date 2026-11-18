@@ -977,6 +977,7 @@ export function createThreadPool(host){
         table: {
             /** HANDLE CreateTimerQueue(void) */
             CreateTimerQueue: {
+                returns: 'pointer',
                 argBytes: 0,
                 handler: ()=>{
                     const handle = host.allocate(4);
@@ -1178,6 +1179,7 @@ export function createThreadPool(host){
              * process's here, whose threads every callback shares.
              */
             CreateThreadpool: {
+                returns: 'pointer',
                 argBytes: 4,
                 handler: ()=>{
                     const pool = host.allocate(4);
@@ -1200,6 +1202,7 @@ export function createThreadPool(host){
              * its instance, its context and the work.
              */
             CreateThreadpoolWork: {
+                returns: 'pointer',
                 argBytes: 12,
                 /** @param {number[]} args */
                 handler: ([callback, context, environment])=>{
@@ -1306,6 +1309,7 @@ export function createThreadPool(host){
              *     PTP_CALLBACK_ENVIRON pcbe)
              */
             CreateThreadpoolTimer: {
+                returns: 'pointer',
                 argBytes: 12,
                 /** @param {number[]} args */
                 handler: ([callback, context, environment])=>{
@@ -1397,6 +1401,7 @@ export function createThreadPool(host){
              *     PTP_CALLBACK_ENVIRON pcbe)
              */
             CreateThreadpoolWait: {
+                returns: 'pointer',
                 argBytes: 12,
                 /** @param {number[]} args */
                 handler: ([callback, context, environment])=>{

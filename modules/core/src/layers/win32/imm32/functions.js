@@ -131,7 +131,7 @@ export function createImmFunctions(host){
          */
         ImmLockIMC: { returns: 'pointer', argBytes: 4, handler: ()=>0 },
         ImmUnlockIMC: { argBytes: 4, handler: ()=>0 },
-        ImmLockIMCC: { argBytes: 4, handler: ()=>0 },
+        ImmLockIMCC: { returns: 'pointer', argBytes: 4, handler: ()=>0 },
         ImmUnlockIMCC: { argBytes: 4, handler: ()=>0 },
 
         /**

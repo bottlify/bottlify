@@ -144,7 +144,7 @@ export function createD3dx10Functions(host, version, profile = D3DX10_PROFILE){
             { name: 'GetBufferPointer', returns: 'pointer', argBytes: 4,
                 invoke: (/** @type {any} */ object)=>object.state.data },
             /** SIZE_T GetBufferSize() */
-            { name: 'GetBufferSize', returns: 'pointer', argBytes: 4,
+            { name: 'GetBufferSize', argBytes: 4,
                 invoke: (/** @type {any} */ object)=>object.state.size },
         ],
     };

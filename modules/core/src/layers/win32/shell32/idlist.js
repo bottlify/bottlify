@@ -143,6 +143,7 @@ export function createIdListFunctions(host){
 
         /** PUIDLIST_RELATIVE ILGetNext(PCUIDLIST_RELATIVE pidl): NULL past the last item. */
         ILGetNext: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([list])=>{
@@ -161,6 +162,7 @@ export function createIdListFunctions(host){
          * The last item, or the list itself when it is empty.
          */
         ILFindLastID: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([list])=>((list >>> 0) === 0 ? 0 : walk(list).items.at(-1) ?? list >>> 0),
@@ -254,6 +256,7 @@ export function createIdListFunctions(host){
          * empty parent, its terminator for the same list.
          */
         ILFindChild: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([parent, child])=>{

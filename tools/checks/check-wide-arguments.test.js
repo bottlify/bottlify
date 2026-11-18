@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    checkReturns, checkText, layoutOf, pointersOf, returnsPointer,
+    checkReturns, checkText, layoutOf, pointersOf, resultOf, returnsPointer,
 } from './check-wide-arguments.mjs';
 
 test('a signature is laid out as the 32-bit stack has it', ()=>{
@@ -76,4 +76,49 @@ test('a spec answering an address says so, and one answering none does not', ()=
     'a spec named by a constant is that constant');
     assert.deepEqual(problem('/** void *Prose(int) is what it would be */\nconst x = 1;'), [],
         'a comment over no spec');
+});
+
+test('a size result is sign-extended, a pointer-sized integer either way (A270)', ()=>{
+    const problem = (/** @type {string} */ text)=>checkReturns(text).map(one=>one.problem);
+    const mbrtowc = '/** size_t mbrtowc(wchar_t *dest, const char *s, size_t n, mbstate_t *ps) */\n';
+    assert.match(String(problem(
+        `${mbrtowc}mbrtowc: { returns: 'pointer', argBytes: 16, handler: ()=>0xfffffffe },`)[0]),
+    /no address/, '(size_t)-2 answered as a dword must come back as -2');
+    assert.deepEqual(problem(`${mbrtowc}mbrtowc: { argBytes: 16, handler: ()=>0 },`), [null]);
+    assert.equal(resultOf('SIZE_T'), 'value');
+    assert.equal(resultOf('size_t *'), 'address');
+    for (const type of ['ULONG_PTR', 'UINT_PTR', 'DWORD_PTR', 'uintptr_t', 'WPARAM'])
+    {
+        assert.equal(resultOf(type), 'either', type);
+        const head = `/** ${type} GetClassLongPtrA(HWND hWnd, int nIndex) */\nGetClassLongPtrA: { `;
+        assert.deepEqual(problem(`${head}returns: 'pointer', argBytes: 8, handler: ()=>0 },`),
+            [null]);
+        assert.deepEqual(problem(`${head}argBytes: 8, handler: ()=>0 },`), [null]);
+    }
+});
+
+test('an address result by a P typedef, an address handle, a later line, an ordinal key', ()=>{
+    const problem = (/** @type {string} */ text)=>checkReturns(text).map(one=>one.problem);
+    assert.equal(resultOf('PSID_IDENTIFIER_AUTHORITY'), 'address');
+    assert.equal(resultOf('PTP_POOL'), 'address');
+    for (const type of ['POINT', 'LPARAM', 'PDH_STATUS'])
+    {
+        assert.equal(resultOf(type), 'value', type);
+    }
+    assert.match(String(problem('/** HANDLE GetProcessHeap(void) */\n'
+        + 'GetProcessHeap: { argBytes: 0, handler: ()=>0 },')[0]), /without returns/,
+    'a heap handle is its base');
+    assert.match(String(problem('/**\n * Why it answers what it does.\n'
+        + ' * PDWORD GetSidSubAuthority(PSID sid, DWORD n)\n */\n'
+        + 'GetSidSubAuthority: { argBytes: 8, handler: ()=>0 },')[0]), /without returns/,
+    'the signature on a later line of its comment');
+    const ordinal = checkReturns('/** LPVOID Alloc(DWORD cb) - #71 */\n'
+        + '\'#71\': { argBytes: 4, handler: ()=>0 },');
+    assert.match(String(ordinal[0]?.problem), /without returns/, 'a spec under a quoted key');
+    assert.equal(ordinal[0]?.key, '#71');
+});
+
+test('the gate tries only addresses: a size is wide but no address', ()=>{
+    assert.deepEqual(pointersOf('LPVOID at, SIZE_T size', { addresses: true }), [0]);
+    assert.deepEqual(pointersOf('ULONG_PTR key, void *p', { addresses: true }), [1]);
 });

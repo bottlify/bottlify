@@ -91,6 +91,7 @@ export function createHandleTableFunctions(host){
          * table is full or there is no memory for it.
          */
         RtlAllocateHandle: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([table, index])=>{

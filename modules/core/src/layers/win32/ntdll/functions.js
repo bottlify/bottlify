@@ -891,6 +891,7 @@ export function createNtdllFunctions(host){
          * they carry the PE signature; NULL for anything else.
          */
         RtlImageNtHeader: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([base])=>{
@@ -914,6 +915,7 @@ export function createNtdllFunctions(host){
 
         /** PPEB RtlGetCurrentPeb(void): where the running thread's block says it is. */
         RtlGetCurrentPeb: {
+            returns: 'pointer',
             argBytes: 0,
             handler: ()=>{
                 const teb = host.teb();
@@ -986,7 +988,6 @@ export function createNtdllFunctions(host){
          * every equality test it makes comes out backwards.
          */
         RtlCompareMemory: {
-            returns: 'pointer',
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([left, right, length])=>{
@@ -1009,7 +1010,6 @@ export function createNtdllFunctions(host){
          * length past the last whole ULONG is not looked at.
          */
         RtlCompareMemoryUlong: {
-            returns: 'pointer',
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([source, length, pattern])=>{

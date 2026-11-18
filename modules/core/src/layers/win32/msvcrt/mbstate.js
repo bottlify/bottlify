@@ -182,7 +182,7 @@ export function createRestartableFunctions(host){
                 return INCOMPLETE;
             }
             return host.readMemory(string >>> 0, 1)[0] === 0 ? 0 : 1;
-        }), returns: 'pointer' },
+        }) },
 
         /**
          * size_t mbrtowc(wchar_t *dest, const char *s, size_t count, mbstate_t *state)
@@ -205,7 +205,7 @@ export function createRestartableFunctions(host){
                 writeUnits(destination, [byte]);
             }
             return byte === 0 ? 0 : 1;
-        }), returns: 'pointer' },
+        }) },
 
         /**
          * size_t wcrtomb(char *dest, wchar_t c, mbstate_t *state): the byte
@@ -225,7 +225,7 @@ export function createRestartableFunctions(host){
             }
             host.writeMemory(destination >>> 0, Uint8Array.of(c & 0xff));
             return 1;
-        }), returns: 'pointer' },
+        }) },
 
         /**
          * errno_t wcrtomb_s(size_t *length, char *dest, size_t size, wchar_t c,
@@ -267,7 +267,7 @@ export function createRestartableFunctions(host){
             }
             return restartable(destination, source, count, narrowUnits(readU32(source)), 1,
                 writeUnits);
-        }), returns: 'pointer' },
+        }) },
 
         /**
          * size_t wcsrtombs(char *dest, const wchar_t **src, size_t count, mbstate_t *state)
@@ -291,7 +291,7 @@ export function createRestartableFunctions(host){
             }
             return restartable(destination, source, count, units, 2,
                 (at, bytes)=>host.writeMemory(at >>> 0, Uint8Array.from(bytes)));
-        }), returns: 'pointer' },
+        }) },
 
         /**
          * errno_t mbsrtowcs_s(size_t *converted, wchar_t *dest, size_t size,

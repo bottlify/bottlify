@@ -435,10 +435,10 @@ export function createDataStructureFunctions(host){
 
     return {
         /** HDPA DPA_Create(int cpGrow) */
-        DPA_Create: { argBytes: 4, handler: (/** @type {number[]} */ [grow])=>createDpa(grow, 0) },
+        DPA_Create: { returns: 'pointer', argBytes: 4, handler: (/** @type {number[]} */ [grow])=>createDpa(grow, 0) },
 
         /** HDPA DPA_CreateEx(int cpGrow, HANDLE hheap) */
-        DPA_CreateEx: { argBytes: 8, handler: (/** @type {number[]} */ [grow, heap])=>
+        DPA_CreateEx: { returns: 'pointer', argBytes: 8, handler: (/** @type {number[]} */ [grow, heap])=>
             createDpa(grow, heap) },
 
         /** BOOL DPA_Destroy(HDPA hdpa) */
@@ -454,6 +454,7 @@ export function createDataStructureFunctions(host){
 
         /** HDPA DPA_Clone(const HDPA hdpaSource, HDPA hdpaNew) - into hdpaNew, or a new one. */
         DPA_Clone: {
+            returns: 'pointer',
             argBytes: 8,
             handler: (/** @type {number[]} */ [source, into])=>{
                 if (source >>> 0 === 0)
@@ -865,6 +866,7 @@ export function createDataStructureFunctions(host){
 
         /** HDSA DSA_Create(int cbItem, int cItemGrow) */
         DSA_Create: {
+            returns: 'pointer',
             argBytes: 8,
             handler: (/** @type {number[]} */ [size, grow])=>{
                 if ((size | 0) <= 0)
@@ -1042,6 +1044,7 @@ export function createDataStructureFunctions(host){
 
         /** LPVOID Alloc(DWORD cb) - #71: zeroed, from LocalAlloc as the library's own memory is. */
         '#71': {
+            returns: 'pointer',
             argBytes: 4,
             handler: (/** @type {number[]} */ [bytes])=>kernel('LocalAlloc', [LMEM_ZEROINIT,
                 bytes >>> 0]) >>> 0,
@@ -1049,6 +1052,7 @@ export function createDataStructureFunctions(host){
 
         /** LPVOID ReAlloc(LPVOID lpSrc, DWORD cb) - #72: NULL is a new block; the growth zeroed. */
         '#72': {
+            returns: 'pointer',
             argBytes: 8,
             handler: (/** @type {number[]} */ [block, bytes])=>(block >>> 0 === 0
                 ? kernel('LocalAlloc', [LMEM_ZEROINIT, bytes >>> 0])

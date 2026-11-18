@@ -209,6 +209,22 @@ export function createDbghelpFunctions(host){
     };
 
     /**
+     * SymLoadModule64's answer: the DWORD64 base it was given (its dwords at
+     * 4 and 5), whole; 0 and ERROR_MOD_NOT_FOUND for none.
+     *
+     * @param {number[]} args
+     */
+    const loadedAt = args=>{
+        const [low, high] = [args[4] >>> 0, args[5] >>> 0];
+        if (low === 0 && high === 0)
+        {
+            return fail(0, ERROR_MOD_NOT_FOUND);
+        }
+        host.setRegisters?.({ edx: high });
+        return low;
+    };
+
+    /**
      * One frame a call along the EBP chain, in the layout given. The first
      * call reports the frame the caller filled in from the context; each later
      * one steps to the caller's frame. The walk ends, FALSE, where the chain
@@ -372,28 +388,23 @@ export function createDbghelpFunctions(host){
          * DWORD64 SymLoadModuleExW(HANDLE hProcess, HANDLE hFile, PCWSTR ImageName,
          *     PCWSTR ModuleName, DWORD64 BaseOfDll, DWORD DllSize, PMODLOAD_DATA Data,
          *     DWORD Flags), and SymLoadModuleEx and SymLoadModule64 beside it: the base,
-         *     as SymLoadModule answers.
+         *     as SymLoadModule answers, whole - the high half for EDX, a 64-bit
+         *     caller's RAX past 2 GiB.
          */
         SymLoadModuleExW: {
             argBytes: 36,
             quadwords: [4],
-            /** @param {number[]} args */
-            handler: ([, , , , base])=>((base >>> 0) !== 0 ? base >>> 0
-                : fail(0, ERROR_MOD_NOT_FOUND)),
+            handler: loadedAt,
         },
         SymLoadModuleEx: {
             argBytes: 36,
             quadwords: [4],
-            /** @param {number[]} args */
-            handler: ([, , , , base])=>((base >>> 0) !== 0 ? base >>> 0
-                : fail(0, ERROR_MOD_NOT_FOUND)),
+            handler: loadedAt,
         },
         SymLoadModule64: {
             argBytes: 28,
             quadwords: [4],
-            /** @param {number[]} args */
-            handler: ([, , , , base])=>((base >>> 0) !== 0 ? base >>> 0
-                : fail(0, ERROR_MOD_NOT_FOUND)),
+            handler: loadedAt,
         },
         /** BOOL SymUnloadModule64(HANDLE hProcess, DWORD64 BaseOfDll) */
         SymUnloadModule64: { argBytes: 12, quadwords: [1], handler: ()=>1 },
