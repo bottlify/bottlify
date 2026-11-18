@@ -682,29 +682,36 @@ export function queryPerformanceFrequencyCode(at, trap, frequency = Number(PERFO
  * 16.8 million calls a run, four of every five crossings into the host; on
  * another executor each waited for the process's executor to answer.
  *
+ * SleepEx(0, FALSE) is the same call (its page: not alertable, it is Sleep) and
+ * answers zero, which eax then holds: a .NET runtime yields with it, thousands
+ * of times a second in a game's frame. An alertable one is the host's, which
+ * has the thread's queued routines to run.
+ *
  *     mov eax, [esp+4]        ; dwMilliseconds
- *     test eax, eax
+ *     test eax, eax           ; SleepEx: or eax, [esp+8], bAlertable
  *     jnz slow
  *     cmp dword [word], 0     ; threads ready with no executor
  *     jne slow
- *     ret 4
+ *     ret 4                   ; SleepEx: ret 8
  *   slow:
  *     jmp trap
  *
  * @param {number} at    Where the code lands, for the jump to the trap.
- * @param {number} trap  The host's Sleep.
+ * @param {number} trap  The host's Sleep, or its SleepEx.
  * @param {number} word  The kernel's count of threads waiting to run.
+ * @param {boolean} [ex]  SleepEx's two arguments rather than Sleep's one.
  */
-export function sleepCode(at, trap, word){
-    const slow = 20;
+export function sleepCode(at, trap, word, ex = false){
+    const test = ex ? [0x0b, 0x44, 0x24, 0x08] : [0x85, 0xc0];
+    const slow = 18 + test.length;
     return new Uint8Array([
         0x8b, 0x44, 0x24, 0x04,                                      // mov eax, [esp+4]
-        0x85, 0xc0,                                                  // test eax, eax
-        0x75, slow - 8,                                              // jnz slow
+        ...test,
+        0x75, slow - 6 - test.length,                                // jnz slow
         0x83, 0x3d, ...dword(word), 0x00,                            // cmp dword [word], 0
-        0x75, slow - 17,                                             // jne slow
-        0xc2, 0x04, 0x00,                                            // ret 4
-        // slow: (20)
+        0x75, 3,                                                     // jne slow
+        0xc2, ex ? 0x08 : 0x04, 0x00,                                // ret
+        // slow:
         0xe9, ...dword(trap - (at + slow + 5)),                      // jmp trap
     ]);
 }
@@ -1059,35 +1066,45 @@ export function createProcessFunctions(host){
         return clocks;
     };
 
-    /** Where Sleep's guest code went, once placed. @type {number | null} */
-    let sleepAt = null;
+    /** Where Sleep's guest code went, and SleepEx's, once placed. @type {Map<string, number>} */
+    const sleepAt = new Map();
+    /** The word of the kernel's both read, once asked for. @type {number | null} */
+    let readyWord = null;
     /**
-     * Sleep's guest code and the word of the kernel's it reads, placed on the
-     * first bind (`sleepCode`).
+     * Sleep's guest code, or SleepEx's, and the word of the kernel's it reads,
+     * placed on the first bind (`sleepCode`).
      *
      * @param {import('./sync.js').GuestBuilder} builder
+     * @param {{ argBytes: number, handler: (args: number[]) => any } | null} [ex]  SleepEx's
+     *     entry, which is another module's (the alertable waits'); absent, Sleep
      */
-    const placedSleep = builder=>{
-        if (sleepAt !== null)
+    const placedSleep = (builder, ex = null)=>{
+        const name = ex ? 'KERNEL32.dll!SleepEx' : 'KERNEL32.dll!Sleep';
+        const already = sleepAt.get(name);
+        if (already !== undefined)
         {
-            return sleepAt;
+            return already;
         }
-        const trap = builder.register('KERNEL32.dll!Sleep', {
-            argBytes: table.Sleep.argBytes,
+        const entry = ex ?? table.Sleep;
+        const trap = builder.register(name, {
+            argBytes: entry.argBytes,
             /** @param {number[]} args */
-            handler: args=>table.Sleep.handler(args),
+            handler: args=>entry.handler(args),
         });
         const allocate = host.allocateCode ?? host.allocate;
         if (!host.allocate || !allocate || !host.readyWord)
         {
-            sleepAt = trap;
+            sleepAt.set(name, trap);
             return trap;
         }
-        const word = host.allocate(4);
-        const at = allocate(sleepCode(0, trap, word).length);
-        host.writeMemory(at, sleepCode(at, trap, word));
-        host.readyWord(word);
-        sleepAt = at;
+        if (readyWord === null)
+        {
+            readyWord = host.allocate(4);
+            host.readyWord(readyWord);
+        }
+        const at = allocate(sleepCode(0, trap, readyWord, ex !== null).length);
+        host.writeMemory(at, sleepCode(at, trap, readyWord, ex !== null));
+        sleepAt.set(name, at);
         return at;
     };
 
@@ -1647,6 +1664,13 @@ export function createProcessFunctions(host){
                 ? {
                     /** @param {import('./sync.js').GuestBuilder} builder */
                     guest: builder=>placedSleep(builder),
+                    /**
+                     * SleepEx's, for the entry the alertable waits made.
+                     *
+                     * @param {import('./sync.js').GuestBuilder} builder
+                     * @param {{ argBytes: number, handler: (args: number[]) => any }} entry
+                     */
+                    guestEx: (builder, entry)=>placedSleep(builder, entry),
                 }
                 : {},
         },
