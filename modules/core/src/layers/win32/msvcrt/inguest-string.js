@@ -33,6 +33,7 @@
 
 /** @typedef {import('./guest-code.js').Guest} Guest */
 /** @typedef {import('./guest-code.js').u32} u32 */
+/** @typedef {import('./guest-code.js').ptr} ptr */
 
 export const STRING_BUFFER = 4;
 export const STRING_SIZE = 20;
@@ -49,7 +50,7 @@ export const STRING_INLINE = 15;
  *
  * @guestCode thiscall
  * @param {Guest} guest @param {u32} self
- * @returns {u32}
+ * @returns {ptr}
  */
 export function stringConstruct({ setU8, setU32, pointerBytes }, self){
     const atBuffer = pointerBytes;
@@ -75,7 +76,7 @@ export function stringConstruct({ setU8, setU32, pointerBytes }, self){
  *
  * @guestCode thiscall
  * @param {Guest} guest @param {u32} self @param {u32} text
- * @returns {u32}
+ * @returns {ptr}
  */
 export function stringFromText({ u8, setU32, copyUp, host, pointerBytes }, self, text){
     const atBuffer = pointerBytes;
@@ -111,7 +112,7 @@ export function stringFromText({ u8, setU32, copyUp, host, pointerBytes }, self,
  *
  * @guestCode thiscall
  * @param {Guest} guest @param {u32} self @param {u32} other
- * @returns {u32}
+ * @returns {ptr}
  */
 export function stringCopy({ u32, setU32, copyUp, host, pointerBytes }, self, other){
     const atBuffer = pointerBytes;
@@ -167,7 +168,7 @@ export function stringDestroy({ u32, setU8, setU32, host, pointerBytes }, self){
  *
  * @guestCode thiscall
  * @param {Guest} guest @param {u32} self
- * @returns {u32}
+ * @returns {ptr}
  */
 export function stringText({ u32, pointerBytes }, self){
     const atBuffer = pointerBytes;
@@ -181,7 +182,7 @@ export function stringText({ u32, pointerBytes }, self){
  *
  * @guestCode thiscall
  * @param {Guest} guest @param {u32} self @param {u32} index
- * @returns {u32}
+ * @returns {ptr}
  */
 export function stringAt({ u32, pointerBytes }, self, index){
     const atBuffer = pointerBytes;
@@ -210,7 +211,7 @@ export function stringSize({ u32, pointerBytes }, self){
  *
  * @guestCode thiscall
  * @param {Guest} guest @param {u32} self @param {u32} c
- * @returns {u32}
+ * @returns {ptr}
  */
 export function stringAppendChar({ u32, setU8, setU32, host, pointerBytes }, self, c){
     const atBuffer = pointerBytes;

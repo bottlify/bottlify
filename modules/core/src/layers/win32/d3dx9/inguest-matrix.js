@@ -29,6 +29,7 @@
 
 /** @typedef {import('../msvcrt/guest-code.js').Guest} Guest */
 /** @typedef {import('../msvcrt/guest-code.js').u32} u32 */
+/** @typedef {import('../msvcrt/guest-code.js').ptr} ptr */
 /** @typedef {import('../msvcrt/guest-code.js').f32} f32 */
 /** @typedef {import('../msvcrt/guest-code.js').f64} f64 */
 
@@ -93,7 +94,7 @@ export function D3DXMatrixDeterminant({ f32 }, m){
  *
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {u32} a @param {u32} b
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXMatrixMultiplyTranspose({ f32, setF32 }, out, a, b){
     const m00 = f32(a) * f32(b) + f32(a + 4) * f32(b + 16)
@@ -153,7 +154,7 @@ export function D3DXMatrixMultiplyTranspose({ f32, setF32 }, out, a, b){
  *
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {u32} x @param {u32} y @param {u32} z
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXMatrixScaling({ setU32 }, out, x, y, z){
     setU32(out, x);
@@ -180,7 +181,7 @@ export function D3DXMatrixScaling({ setU32 }, out, x, y, z){
  *
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {f32} angle
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXMatrixRotationX({ setU32, setF32 }, out, angle){
     const a = turn(angle);
@@ -210,7 +211,7 @@ export function D3DXMatrixRotationX({ setU32, setF32 }, out, angle){
  *
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {f32} angle
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXMatrixRotationY({ setU32, setF32 }, out, angle){
     const a = turn(angle);
@@ -240,7 +241,7 @@ export function D3DXMatrixRotationY({ setU32, setF32 }, out, angle){
  *
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {f32} angle
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXMatrixRotationZ({ setU32, setF32 }, out, angle){
     const a = turn(angle);
@@ -271,7 +272,7 @@ export function D3DXMatrixRotationZ({ setU32, setF32 }, out, angle){
  *
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {u32} v @param {f32} angle
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXMatrixRotationAxis({ f32, setU32, setF32 }, out, v, angle){
     const vx = f32(v);
@@ -311,7 +312,7 @@ export function D3DXMatrixRotationAxis({ f32, setU32, setF32 }, out, v, angle){
  *
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {f32} yaw @param {f32} pitch @param {f32} roll
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXMatrixRotationYawPitchRoll({ setU32, setF32 }, out, yaw, pitch, roll){
     const y = turn(yaw);
@@ -347,7 +348,7 @@ export function D3DXMatrixRotationYawPitchRoll({ setU32, setF32 }, out, yaw, pit
  *
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {u32} q
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXMatrixRotationQuaternion({ f32, setU32, setF32 }, out, q){
     const x = f32(q);
@@ -380,7 +381,7 @@ export function D3DXMatrixRotationQuaternion({ f32, setU32, setF32 }, out, q){
  *
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {u32} eye @param {u32} at @param {u32} up
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXMatrixLookAtLH({ f32, setU32, setF32 }, out, eye, at, up){
     const ex = f32(eye);
@@ -432,7 +433,7 @@ export function D3DXMatrixLookAtLH({ f32, setU32, setF32 }, out, eye, at, up){
  *
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {u32} eye @param {u32} at @param {u32} up
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXMatrixLookAtRH({ f32, setU32, setF32 }, out, eye, at, up){
     const ex = f32(eye);
@@ -485,7 +486,7 @@ export function D3DXMatrixLookAtRH({ f32, setU32, setF32 }, out, eye, at, up){
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {f32} fovy @param {f32} aspect @param {f32} zn
  * @param {f32} zf
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXMatrixPerspectiveFovLH({ setU32, setF32 }, out, fovy, aspect, zn, zf){
     const yScale = 1 / Math.tan(turn(fovy / 2));
@@ -515,7 +516,7 @@ export function D3DXMatrixPerspectiveFovLH({ setU32, setF32 }, out, fovy, aspect
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {f32} fovy @param {f32} aspect @param {f32} zn
  * @param {f32} zf
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXMatrixPerspectiveFovRH({ setU32, setF32 }, out, fovy, aspect, zn, zf){
     const yScale = 1 / Math.tan(turn(fovy / 2));
@@ -544,7 +545,7 @@ export function D3DXMatrixPerspectiveFovRH({ setU32, setF32 }, out, fovy, aspect
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {f32} w @param {f32} h @param {f32} zn
  * @param {f32} zf
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXMatrixPerspectiveRH({ setU32, setF32 }, out, w, h, zn, zf){
     setF32(out, 2 * zn / w);
@@ -573,7 +574,7 @@ export function D3DXMatrixPerspectiveRH({ setU32, setF32 }, out, w, h, zn, zf){
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {f32} l @param {f32} r @param {f32} b
  * @param {f32} t @param {f32} zn @param {f32} zf
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXMatrixPerspectiveOffCenterLH({ setU32, setF32 }, out, l, r, b, t, zn, zf){
     setF32(out, 2 * zn / (r - l));
@@ -602,7 +603,7 @@ export function D3DXMatrixPerspectiveOffCenterLH({ setU32, setF32 }, out, l, r, 
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {f32} l @param {f32} r @param {f32} b
  * @param {f32} t @param {f32} zn @param {f32} zf
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXMatrixPerspectiveOffCenterRH({ setU32, setF32 }, out, l, r, b, t, zn, zf){
     setF32(out, 2 * zn / (r - l));
@@ -630,7 +631,7 @@ export function D3DXMatrixPerspectiveOffCenterRH({ setU32, setF32 }, out, l, r, 
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {f32} w @param {f32} h @param {f32} zn
  * @param {f32} zf
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXMatrixOrthoRH({ setU32, setF32 }, out, w, h, zn, zf){
     setF32(out, 2 / w);
@@ -659,7 +660,7 @@ export function D3DXMatrixOrthoRH({ setU32, setF32 }, out, w, h, zn, zf){
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {f32} l @param {f32} r @param {f32} b
  * @param {f32} t @param {f32} zn @param {f32} zf
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXMatrixOrthoOffCenterLH({ setU32, setF32 }, out, l, r, b, t, zn, zf){
     setF32(out, 2 / (r - l));
@@ -688,7 +689,7 @@ export function D3DXMatrixOrthoOffCenterLH({ setU32, setF32 }, out, l, r, b, t, 
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {f32} l @param {f32} r @param {f32} b
  * @param {f32} t @param {f32} zn @param {f32} zf
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXMatrixOrthoOffCenterRH({ setU32, setF32 }, out, l, r, b, t, zn, zf){
     setF32(out, 2 / (r - l));
@@ -716,7 +717,7 @@ export function D3DXMatrixOrthoOffCenterRH({ setU32, setF32 }, out, l, r, b, t, 
  *
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {u32} plane
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXMatrixReflect({ f32, setU32, setF32 }, out, plane){
     const pa = f32(plane);
@@ -754,7 +755,7 @@ export function D3DXMatrixReflect({ f32, setU32, setF32 }, out, plane){
  *
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {u32} light @param {u32} plane
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXMatrixShadow({ f32, setF32 }, out, light, plane){
     const lx = f32(light);
@@ -800,7 +801,7 @@ export function D3DXMatrixShadow({ f32, setF32 }, out, light, plane){
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {f32} scaling @param {u32} center
  * @param {u32} rotation @param {u32} translation
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXMatrixAffineTransformation({ f32, setU32, setF32 }, out, scaling, center,
     rotation, translation)
@@ -897,7 +898,7 @@ export function D3DXMatrixAffineTransformation({ f32, setU32, setF32 }, out, sca
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {u32} scalingCenter @param {u32} scalingRotation
  * @param {u32} scaling @param {u32} rotationCenter @param {u32} rotation @param {u32} translation
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXMatrixTransformation({ f32, setU32, setF32 }, out, scalingCenter,
     scalingRotation, scaling, rotationCenter, rotation, translation)
@@ -1056,7 +1057,7 @@ export function D3DXMatrixTransformation({ f32, setU32, setF32 }, out, scalingCe
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {f32} scaling @param {u32} center
  * @param {f32} angle @param {u32} translation
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXMatrixAffineTransformation2D({ f32, setU32, setF32 }, out, scaling, center,
     angle, translation)
@@ -1109,7 +1110,7 @@ export function D3DXMatrixAffineTransformation2D({ f32, setU32, setF32 }, out, s
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {u32} scalingCenter @param {f32} scalingRotation
  * @param {u32} scaling @param {u32} rotationCenter @param {f32} rotation @param {u32} translation
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXMatrixTransformation2D({ f32, setU32, setF32 }, out, scalingCenter,
     scalingRotation, scaling, rotationCenter, rotation, translation)
@@ -1193,7 +1194,7 @@ export function D3DXMatrixTransformation2D({ f32, setU32, setF32 }, out, scaling
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} scale @param {u32} rotation @param {u32} translation
  * @param {u32} m
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXMatrixDecompose({ f32, u32, setU32, setF32 }, scale, rotation, translation, m){
     const e0 = f32(m);

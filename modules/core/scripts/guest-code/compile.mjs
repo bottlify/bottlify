@@ -30,6 +30,8 @@
  * slot it pushed with the caller's arguments. The types:
  *
  *   i32, u32  a 32-bit stack slot, signed or unsigned; EAX as a result
+ *   ptr       a result only, for now: a pointer, a u32 in the i386 and the
+ *             whole of RAX at 64 bits
  *   f64       a double: two stack slots; ST0 as a result
  *   f32       a float: one stack slot; ST0 as a result, a value a float holds
  *   x87       a double the caller left on the x87 stack (the last such
@@ -156,7 +158,9 @@
  * under the x64 convention, whatever its tag names: the first four arguments
  * in RCX, RDX, R8 and R9, the rest on the stack past the 32 bytes of home
  * space the caller leaves, the caller taking them down; the result in RAX,
- * an i32 or u32 extended by its sign, as the bridge's trap answers one. The
+ * an i32 extended by its sign, a u32 (a size_t, a DWORD) and a pointer by
+ * zeros - the whole value a Win64 caller of a size_t or a pointer reads, as
+ * the bridge's trap answers each by the type declared. The
  * code keeps to the same 32-bit integers, over R8 to R11 as well: an
  * operation on a low half zero-extends into the whole register, so a
  * register the code computed holds an address as it is, and an address of
@@ -222,7 +226,7 @@ import {
  */
 
 /** @typedef {'i32' | 'u32' | 'f64' | 'f32' | 'x87'} ParamType */
-/** @typedef {'i32' | 'u32' | 'f64' | 'f32' | 'i64' | 'void'} ReturnType */
+/** @typedef {'i32' | 'u32' | 'ptr' | 'f64' | 'f32' | 'i64' | 'void'} ReturnType */
 
 /**
  * @typedef {Object} CompiledFunction
@@ -371,7 +375,7 @@ const TABLE_KINDS = /** @type {const} */ ([
 ]);
 
 const PARAM_TYPES = new Set(['i32', 'u32', 'f64', 'f32', 'x87']);
-const RETURN_TYPES = new Set(['i32', 'u32', 'f64', 'f32', 'i64', 'void']);
+const RETURN_TYPES = new Set(['i32', 'u32', 'ptr', 'f64', 'f32', 'i64', 'void']);
 
 /** Rounding control for Math.floor, Math.ceil and Math.trunc, in the control word's high byte. */
 const ROUNDING = /** @type {Record<string, number>} */ ({ floor: 0x04, ceil: 0x08, trunc: 0x0c });
@@ -802,6 +806,8 @@ class FunctionCompiler {
         this.helpers = new Set();
         /** @type {ReturnType} */
         this.returns = 'void';
+        /** @type {ReturnType} */
+        this.declaredReturns = 'void';
         this.epilogue = this.a.fresh('epilogue');
         /** Where `return host()` goes: the frame taken down, then the jump. */
         this.toHost = this.a.fresh('host');
@@ -1041,10 +1047,13 @@ class FunctionCompiler {
         const returned = /@returns?\s+\{(\w+)\}/.exec(doc)?.[1] ?? 'void';
         if (!RETURN_TYPES.has(returned))
         {
-            this.fail(node, `${name}: @returns {${returned}} is not i32, u32, f64, f32, i64 `
+            this.fail(node, `${name}: @returns {${returned}} is not i32, u32, ptr, f64, f32, i64 `
                 + 'or void');
         }
-        this.returns = /** @type {ReturnType} */ (returned);
+        // A pointer is an unsigned dword in the body (the i386's EAX), answered
+        // whole in RAX at 64 bits; the record keeps what the source declared.
+        this.declaredReturns = /** @type {ReturnType} */ (returned);
+        this.returns = /** @type {ReturnType} */ (returned === 'ptr' ? 'u32' : returned);
 
         const params = [...node.params];
         /** @type {string[]} */
@@ -1317,7 +1326,7 @@ class FunctionCompiler {
         }));
         const code = out.finish(tables);
         return {
-            name, convention, params: types, returns: this.returns, uses, code,
+            name, convention, params: types, returns: this.declaredReturns, uses, code,
             ...this.hostUsed ? { host: /** @type {number} */ (out.offsets.get('hostJump')) } : {},
             ...placedTables(out.placed),
         };
@@ -1456,9 +1465,12 @@ class FunctionCompiler {
         };
         out.label(this.epilogue);
         takeDown();
-        if (this.returns === 'i32' || this.returns === 'u32')
+        if (this.returns === 'i32')
         {
-            // cdqe: the answer the trap gives, a dword extended by its sign.
+            // cdqe: a signed dword extended by its sign. An unsigned one (a
+            // size_t, a DWORD) and a pointer are RAX as the move that made EAX
+            // left it, zero-extended, which is the whole value the Win64 caller
+            // of a size_t or a pointer reads.
             out.emit(0x48, 0x98);
         }
         out.emit(0xc3);
@@ -1500,7 +1512,7 @@ class FunctionCompiler {
             throw new Error(`guest code: ${name}'s x86-64 holds an x87 instruction`);
         }
         return {
-            name, convention, params: types, returns: this.returns, uses, code,
+            name, convention, params: types, returns: this.declaredReturns, uses, code,
             ...this.hostUsed ? { host: /** @type {number} */ (out.offsets.get('hostJump')) } : {},
             ...placedTables(out.placed),
             // No stack moved and nothing the caller keeps changed: what an
@@ -4524,7 +4536,7 @@ class FunctionCompiler {
         }
         if (callee.convention === 'thiscall' || callee.params.some(type=>type !== 'i32'
             && type !== 'u32') || (callee.returns !== 'i32' && callee.returns !== 'u32'
-            && callee.returns !== 'void'))
+            && callee.returns !== 'ptr' && callee.returns !== 'void'))
         {
             this.fail(node, `${name} takes and answers integers, cdecl or stdcall`);
         }
@@ -4559,7 +4571,7 @@ class FunctionCompiler {
         {
             this.longCall(given, null, ()=>void a.call(`fn:${name}`));
             this.callees.add(name);
-            return { where: 'eax', type: callee.returns === 'u32' ? 'u32' : 'i32' };
+            return { where: 'eax', type: callee.returns === 'i32' ? 'i32' : 'u32' };
         }
         const bytes = given.length * 4;
         if (bytes > 0)
@@ -4581,7 +4593,7 @@ class FunctionCompiler {
         }
         this.grew(-bytes);
         this.callees.add(name);
-        return { where: 'eax', type: callee.returns === 'u32' ? 'u32' : 'i32' };
+        return { where: 'eax', type: callee.returns === 'i32' ? 'i32' : 'u32' };
     }
 
     /** @param {any} node @param {number} count */

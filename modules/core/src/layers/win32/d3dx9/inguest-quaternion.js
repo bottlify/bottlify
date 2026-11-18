@@ -28,6 +28,7 @@
 
 /** @typedef {import('../msvcrt/guest-code.js').Guest} Guest */
 /** @typedef {import('../msvcrt/guest-code.js').u32} u32 */
+/** @typedef {import('../msvcrt/guest-code.js').ptr} ptr */
 /** @typedef {import('../msvcrt/guest-code.js').f32} f32 */
 /** @typedef {import('../msvcrt/guest-code.js').f64} f64 */
 
@@ -73,7 +74,7 @@ const mulW = (ax, ay, az, aw, bx, by, bz, bw)=>bw * aw - bx * ax - by * ay - bz 
  *
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {u32} a @param {u32} b
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXQuaternionMultiply({ f32, setF32 }, out, a, b){
     const ax = f32(a);
@@ -101,7 +102,7 @@ export function D3DXQuaternionMultiply({ f32, setF32 }, out, a, b){
  *
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {u32} q
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXQuaternionNormalize({ f32, setF32 }, out, q){
     const qx = f32(q);
@@ -122,7 +123,7 @@ export function D3DXQuaternionNormalize({ f32, setF32 }, out, q){
  *
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {u32} q
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXQuaternionInverse({ f32, setF32 }, out, q){
     const qx = f32(q);
@@ -142,7 +143,7 @@ export function D3DXQuaternionInverse({ f32, setF32 }, out, q){
  *
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {u32} q
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXQuaternionLn({ f32, setU32, setF32 }, out, q){
     const qx = f32(q);
@@ -162,7 +163,7 @@ export function D3DXQuaternionLn({ f32, setU32, setF32 }, out, q){
  *
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {u32} q
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXQuaternionExp({ f32, setF32 }, out, q){
     const qx = f32(q);
@@ -185,7 +186,7 @@ export function D3DXQuaternionExp({ f32, setF32 }, out, q){
  *
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {u32} v @param {f32} angle
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXQuaternionRotationAxis({ f32, setF32 }, out, v, angle){
     const vx = f32(v);
@@ -209,7 +210,7 @@ export function D3DXQuaternionRotationAxis({ f32, setF32 }, out, v, angle){
  *
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {f32} yaw @param {f32} pitch @param {f32} roll
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXQuaternionRotationYawPitchRoll({ setF32 }, out, yaw, pitch, roll){
     const y = turn(yaw / 2);
@@ -238,7 +239,7 @@ export function D3DXQuaternionRotationYawPitchRoll({ setF32 }, out, yaw, pitch, 
  *
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {u32} m
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXQuaternionRotationMatrix({ f32, setF32 }, out, m){
     const m00 = f32(m);
@@ -317,7 +318,7 @@ export function D3DXQuaternionToAxisAngle({ f32, u32, setU32, setF32 }, q, axis,
  *
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {u32} q1 @param {u32} q2 @param {f32} t
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXQuaternionSlerp({ f32, setF32 }, out, q1, q2, t){
     const ax = f32(q1);
@@ -369,7 +370,7 @@ export function D3DXQuaternionSlerp({ f32, setF32 }, out, q1, q2, t){
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {u32} q1 @param {u32} a @param {u32} b
  * @param {u32} c @param {f32} t
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXQuaternionSquad({ f32, setF32 }, out, q1, a, b, c, t){
     const px = f32(q1);
@@ -481,7 +482,7 @@ export function D3DXQuaternionSquad({ f32, setF32 }, out, q1, a, b, c, t){
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {u32} q1 @param {u32} q2 @param {u32} q3
  * @param {f32} f @param {f32} g
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXQuaternionBaryCentric({ f32, setF32 }, out, q1, q2, q3, f, g){
     const px = f32(q1);

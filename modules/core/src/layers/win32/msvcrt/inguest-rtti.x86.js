@@ -12,7 +12,7 @@ export const COMPILED = /** @type {const} */ ({
     __RTDynamicCast: {
         convention: 'cdecl',
         params: ['u32', 'i32', 'u32', 'u32'],
-        returns: 'u32',
+        returns: 'ptr',
         uses: ['u8', 'u32', 'i32', 'pointerBytes'],
         code: Uint8Array.of(
             0x53, 0x56, 0x57, 0x55, 0x83, 0xec, 0x2c, 0x8b, 0x54, 0x24, 0x4c, 0x8b,

@@ -107,7 +107,8 @@ const FLOAT_BIT_HELPERS = {
 };
 
 /** @typedef {number} i32  A signed 32-bit stack slot, or EAX. */
-/** @typedef {number} u32  An unsigned 32-bit stack slot, or EAX. */
+/** @typedef {number} u32  An unsigned 32-bit stack slot, or EAX (zero-extended into RAX at 64 bits). */
+/** @typedef {number} ptr  A pointer: a u32 in the i386, the whole of RAX at 64 bits. */
 /** @typedef {number} f64  A double: two stack slots, or ST0 as a result. */
 /** @typedef {number} f32  A float: one stack slot, or ST0 as a result. */
 /** @typedef {number} x87  A double the caller left on the x87 stack, which the callee pops. */
@@ -119,7 +120,7 @@ const FLOAT_BIT_HELPERS = {
  * @typedef {Object} CompiledGuestCode
  * @property {'cdecl' | 'stdcall' | 'thiscall'} convention
  * @property {readonly ('i32' | 'u32' | 'f64' | 'f32' | 'x87')[]} params
- * @property {'i32' | 'u32' | 'f64' | 'f32' | 'i64' | 'void'} returns
+ * @property {'i32' | 'u32' | 'ptr' | 'f64' | 'f32' | 'i64' | 'void'} returns
  * @property {readonly string[]} uses   The guest's helpers the source takes.
  * @property {Uint8Array} code
  * @property {number} [host]  Where the jump to the trap into the host's handler

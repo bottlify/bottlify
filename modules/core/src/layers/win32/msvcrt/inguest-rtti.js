@@ -30,6 +30,7 @@
 /** @typedef {import('./guest-code.js').Guest} Guest */
 /** @typedef {import('./guest-code.js').i32} i32 */
 /** @typedef {import('./guest-code.js').u32} u32 */
+/** @typedef {import('./guest-code.js').ptr} ptr */
 
 /** The complete object locator: this subobject's offset in the complete object, its hierarchy. */
 const LOCATOR_OFFSET = 4;
@@ -65,7 +66,7 @@ const NAME_LIMIT = 512;
  *
  * @guestCode cdecl
  * @param {Guest} guest @param {u32} object @param {i32} delta @param {u32} from @param {u32} to
- * @returns {u32}
+ * @returns {ptr}
  */
 export function __RTDynamicCast({ u8, u32, i32, pointerBytes }, object, delta, from, to){
     if (object === 0)
