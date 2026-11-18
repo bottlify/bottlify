@@ -124,6 +124,14 @@ libraries Wine recreates from it and writes their names, less Wine's own and the
 runtimes, into `modules/core/src/layers/loader/internal/windows-libraries.js` -- names only, which
 Windows' own files establish; the list is Wine's work of finding them.
 
+Wine's `dlls/gdiplus/tests/brush.c` is used the same way for the pixels of GDI+'s 53 hatch styles:
+the 8x8 cells in `modules/core/src/layers/win32/gdiplus/raster.js` (`HATCHES`) are Windows' own
+output as that test records it - data about what Windows draws, not code. Its
+`dlls/comctl32/tests/imagelist.c` is used so for the colour tables a list of four and of eight
+bits a pixel starts with (`DEFAULT_COLORS_4`, `DEFAULT_COLORS_8` in
+`modules/core/src/layers/win32/comctl32/imagelist.js`): the colours Windows reports, as the
+test's failures print them.
+
 What is not taken: no code, no test structure, no helper, no assertion text, no ordering. Every
 test in this repository is written independently, against this project's own conventions.
 
@@ -196,6 +204,20 @@ Joliet specification.
   `WINDOWS_ZONES` table, as the key and zone names alone; the rules of each zone are not copied
   but read at run time from the platform's own zone data
 - License: Unicode License v3 (https://www.unicode.org/license.txt)
+
+## Locales' three-letter codes: Windows' language abbreviations, CLDR's ISO codes
+
+- Sources: .NET's culture table, `src/libraries/System.Private.CoreLib/src/System/Globalization/IcuLocaleData.cs`
+  (https://github.com/dotnet/runtime), its `ThreeLetterWindowsLanguageName` column: the
+  LOCALE_SABBREVLANGNAME Windows gives each locale; and the Unicode Common Locale Data Repository
+  (https://github.com/unicode-org/cldr), `common/supplemental/supplementalData.xml` (each
+  territory's ISO 3166 alpha-3 code) and `common/supplemental/supplementalMetadata.xml` (each
+  language's ISO 639-2 code, from its "overlong" aliases)
+- Location in this repository: `modules/core/src/layers/win32/kernel32/locale-codes.js`, the
+  three code tables, for the locales and regions the engine's locale table has
+- Licenses: .NET's under the MIT License (Copyright (c) .NET Foundation and Contributors,
+  https://github.com/dotnet/runtime/blob/main/LICENSE.TXT); CLDR's under the Unicode License v3
+  (https://www.unicode.org/license.txt)
 
 ## The LZMA specification: used as a specification
 

@@ -277,10 +277,9 @@ const COPY_CHUNK = 1 << 20;
 const COPY_FILE_FAIL_IF_EXISTS = 0x1;
 
 /**
- * What GetTempPathA answers. Windows derives it from the environment; there is
- * one process and no environment block worth consulting, so one directory is
- * chosen and always the same one. The trailing separator is part of the
- * contract -- callers concatenate a file name onto it directly.
+ * The machine's scratch directory: what TMP and TEMP name in the environment
+ * a process starts with (environment.js), and GetTempPath's answer where the
+ * environment cannot be read.
  */
 const TEMP_PATH = 'C:\\WINDOWS\\TEMP\\';
 /** The two system directories a search with no path of its own ends in. */
@@ -501,6 +500,8 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write', 'p
  *           Keeps the SECURITY_ATTRIBUTES' descriptor CreateFile or CreateDirectory
  *           was given as the new object's security. A no-op when absent.
  * @property {(code: number) => void} setLastError
+ * @property {(name: string) => string | undefined} [environmentVariable]
+ *           The process's variable of that name, any case, as it stands now.
  * @property {(api: string, detail: string, severity?: 'loss') => void} [divergence]
  * @property {(record: { path: string, error: number, access: number, share: number,
  *     disposition: number, flags: number }) => void} [openRefused]  told of every open
@@ -1025,6 +1026,15 @@ export function createFileFunctions(host){
     };
 
     /**
+     * Whether the last name of a path holds a wildcard: no file or directory
+     * can be called that, so whatever would make, open, remove or rename one
+     * answers ERROR_INVALID_NAME before looking anything up.
+     *
+     * @param {string} path
+     */
+    const wildcardName = path=>/[*?]/.test(path.slice(path.lastIndexOf(SEPARATOR) + 1));
+
+    /**
      * Fails a call with a code, returning whatever that function's failure
      * value is. Everything that fails here does both, and doing only one of
      * them is the bug this exists to make impossible.
@@ -1430,8 +1440,7 @@ export function createFileFunctions(host){
         {
             return missing(source);
         }
-        // A name cannot hold a wildcard.
-        if (/[*?]/.test(destination.slice(destination.lastIndexOf('\\') + 1)))
+        if (wildcardName(destination))
         {
             return ERROR_INVALID_NAME;
         }
@@ -1456,7 +1465,7 @@ export function createFileFunctions(host){
         }
         // A file is renamed as it is deleted: an open that does not share
         // deletion keeps its name.
-        if (!moving.isDirectory && files.removalRefused?.(source) === 'SHARING_VIOLATION')
+        if (files.removalRefused?.(source) === 'SHARING_VIOLATION')
         {
             return ERROR_SHARING_VIOLATION;
         }
@@ -1538,10 +1547,33 @@ export function createFileFunctions(host){
     const tempName = (base, stem, number)=>
         `${base}${stem}${number.toString(16).toUpperCase()}.tmp`;
 
+    /**
+     * GetTempPath's answer: the first of TMP, TEMP and USERPROFILE that is
+     * set, else the Windows directory, as a full path with its separator -
+     * so "C:" is that drive's current directory - read when asked, since a
+     * program sets TMP to move its own scratch files.
+     */
+    const tempPath = ()=>{
+        if (!host.environmentVariable)
+        {
+            return TEMP_PATH;
+        }
+        const named = ['TMP', 'TEMP', 'USERPROFILE']
+            .map(name=>host.environmentVariable?.(name) ?? '').find(value=>value !== '');
+        const full = fullPath(named ?? WINDOWS_DIRECTORY);
+        return full.endsWith(SEPARATOR) ? full : full + SEPARATOR;
+    };
+
     const getTempFileName = bothForms(16, ([directory, prefix, unique, out], text)=>{
-        const folder = (directory >>> 0) === 0 ? TEMP_PATH : text.path(directory);
+        const folder = (directory >>> 0) === 0 ? tempPath() : text.path(directory);
         const stem = text.raw(prefix).slice(0, 3);
         const base = folder.endsWith(SEPARATOR) ? folder : folder + SEPARATOR;
+        // The directory must be there, whether a file is made in it or only
+        // a name built.
+        if (!files.stat(fullPath(folder))?.isDirectory)
+        {
+            return fail(ERROR_DIRECTORY, 0);
+        }
 
         let number = (unique >>> 0) & 0xffff;
         let path = '';
@@ -1989,6 +2021,10 @@ export function createFileFunctions(host){
     };
     const createDirectory = oneName(8, ([name, attributes], text)=>{
         const path = text.path(name);
+        if (wildcardName(path))
+        {
+            return fail(ERROR_INVALID_NAME);
+        }
         if (files.stat(path)?.exists)
         {
             return fail(ERROR_ALREADY_EXISTS);
@@ -2005,6 +2041,10 @@ export function createFileFunctions(host){
 
     const removeDirectory = oneName(4, ([name], text)=>{
         const path = text.path(name);
+        if (wildcardName(path))
+        {
+            return fail(ERROR_INVALID_NAME);
+        }
         const entry = files.stat(path);
         if (!entry || !entry.exists)
         {
@@ -2014,11 +2054,33 @@ export function createFileFunctions(host){
         {
             return fail(ERROR_DIRECTORY);
         }
+        // The current directory is held open, and so is a directory opened
+        // without sharing deletion.
+        if (files.removalRefused?.(path) === 'SHARING_VIOLATION')
+        {
+            return fail(ERROR_SHARING_VIOLATION);
+        }
         return files.remove(path)
             ? 1 : fail(onReadOnlyMedia(path) ? ERROR_WRITE_PROTECT : ERROR_DIR_NOT_EMPTY);
     });
 
+    /**
+     * A pipe's name, answered as Windows' attribute query answers it: by
+     * opening the name (`pipes.query`) - a normal file while an instance
+     * listened, ERROR_PIPE_BUSY while none does.
+     *
+     * @param {number} name @param {any} text
+     * @returns {number | null}  the error, 0, or null for a name that is no pipe's
+     */
+    const pipeQuery = (name, text)=>(name !== 0 && host.pipes && isPipeName(text.raw(name))
+        ? host.pipes.query(text.raw(name)) : null);
+
     const getFileAttributes = oneName(4, ([name], text)=>{
+        const piped = pipeQuery(name, text);
+        if (piped !== null)
+        {
+            return piped === 0 ? FILE_ATTRIBUTE_NORMAL : fail(piped, INVALID_FILE_ATTRIBUTES);
+        }
         const path = text.path(name);
         const entry = files.stat(path);
         if (!entry || !entry.exists)
@@ -2033,6 +2095,18 @@ export function createFileFunctions(host){
         if ((level >>> 0) !== GET_FILE_EX_INFO_STANDARD)
         {
             return fail(ERROR_INVALID_PARAMETER);
+        }
+        const piped = pipeQuery(name, text);
+        if (piped !== null)
+        {
+            if (piped !== 0)
+            {
+                return fail(piped);
+            }
+            const data = new Uint8Array(WIN32_FILE_ATTRIBUTE_DATA_SIZE);
+            new DataView(data.buffer).setUint32(0, FILE_ATTRIBUTE_NORMAL, true);
+            host.writeMemory(out >>> 0, data);
+            return 1;
         }
         const path = text.path(name);
         const entry = files.stat(path);
@@ -2062,9 +2136,13 @@ export function createFileFunctions(host){
     const setCurrentDirectory = oneName(4, ([name], text)=>{
         const path = text.path(name);
         const entry = files.stat(path);
-        if (!entry || !entry.exists || !entry.isDirectory)
+        if (!entry || !entry.exists)
         {
-            return fail(ERROR_PATH_NOT_FOUND);
+            return fail(missing(path));
+        }
+        if (!entry.isDirectory)
+        {
+            return fail(ERROR_DIRECTORY);
         }
         files.setCurrentDirectory(path);
         return 1;
@@ -2075,9 +2153,10 @@ export function createFileFunctions(host){
 
     const getFullPathName = oneName(16, ([name, size, buffer, filePart], text)=>{
         const asked = text.raw(name);
+        // No name, NULL or empty, is no name at all, as Windows from 7 says.
         if (asked === '')
         {
-            return fail(ERROR_INVALID_PARAMETER);
+            return fail(ERROR_INVALID_NAME);
         }
         // A path in the Win32 file namespace is already as full as it gets, and
         // is handed back as written: that namespace turns all parsing off.
@@ -2161,7 +2240,15 @@ export function createFileFunctions(host){
      * @param {boolean} long
      */
     const pathForm = long=>oneName(12, ([name, buffer, size], text)=>{
+        if ((name >>> 0) === 0)
+        {
+            return fail(ERROR_INVALID_PARAMETER);
+        }
         const path = text.path(name);
+        if (wildcardName(path))
+        {
+            return fail(ERROR_INVALID_NAME);
+        }
         if (!files.stat(path)?.exists)
         {
             return fail(missing(path));
@@ -2249,8 +2336,7 @@ export function createFileFunctions(host){
      * @param {number} [flags]  CreateFile's, FILE_FLAG_BACKUP_SEMANTICS read.
      */
     const nameRefusal = (raw, path, creating, flags = 0)=>{
-        const last = path.slice(path.lastIndexOf(SEPARATOR) + 1);
-        if (/[*?]/.test(last))
+        if (wildcardName(path))
         {
             return ERROR_INVALID_NAME;
         }
@@ -4867,7 +4953,7 @@ export function createFileFunctions(host){
         GetTempPathA: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([size, buffer])=>writeStringTo(buffer >>> 0, size, TEMP_PATH),
+            handler: ([size, buffer])=>writeStringTo(buffer >>> 0, size, tempPath()),
         },
 
         /**
@@ -4887,7 +4973,7 @@ export function createFileFunctions(host){
                 {
                     host.writeMemory(buffer >>> 0, new Uint8Array(count * 2));
                 }
-                return writeWideStringTo(buffer >>> 0, size, TEMP_PATH);
+                return writeWideStringTo(buffer >>> 0, size, tempPath());
             },
         },
 

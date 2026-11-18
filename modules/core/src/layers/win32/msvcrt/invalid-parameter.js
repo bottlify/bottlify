@@ -44,6 +44,9 @@ export const INVALID_CRUNTIME_PARAMETER = 0xc0000417;
  *     => (args: number[]) => any} within
  *     `run` as a call through `runtime`'s export `name`: an EINVAL it sets
  *     reaches that runtime's handler before the answer is returned.
+ * @property {() => string | null} runtime
+ *     The library whose export the call under way came through, or null for
+ *     msvcrt.dll's own: each runtime keeps its own errno, as Windows' do.
  */
 
 /**
@@ -66,9 +69,10 @@ export const INVALID_PARAMETERS = Symbol('invalid parameters');
 
 /** @returns {InvalidParameterWatch} */
 export function createInvalidParameterWatch(){
-    /** @type {{ pending: boolean } | null} */
+    /** @type {{ pending: boolean, runtime: InvalidParameterRuntime } | null} */
     let current = null;
     return {
+        runtime: ()=>current?.runtime.library ?? null,
         note: code=>{
             if (code === EINVAL && current)
             {
@@ -83,7 +87,7 @@ export function createInvalidParameterWatch(){
                 return run(args);
             }
             const outer = current;
-            const call = { pending: false };
+            const call = { pending: false, runtime };
             current = call;
             let answer;
             try

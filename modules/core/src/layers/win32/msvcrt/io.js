@@ -69,14 +69,33 @@ const STANDARD_HANDLES = [HANDLE_STDIN, HANDLE_STDOUT, HANDLE_STDERR];
 const INVALID_HANDLE_VALUE = -1;
 
 /**
- * `__pioinfo`, msvcrt.dll's table of descriptors as a program reads it in
- * place: a pointer per block of 32, then the first block, each entry 36 bytes
- * -- the handle, `wxflag`, three bytes of lookahead, `exflag` and a critical
- * section.
+ * `__pioinfo`, a runtime's table of descriptors as a program reads it in
+ * place: a pointer per block of 32, then the first block. An entry starts
+ * with the handle, `wxflag`, three bytes of lookahead, a flag word and a
+ * critical section - msvcrt.dll's ends there, 36 bytes, its flag word the
+ * Unicode translation (`exflag`); MSVCR80.dll's goes on to 64 bytes, its flag
+ * word only whether the lock was made, the translation in the byte after the
+ * lock: `textmode` in its low seven bits (0 ANSI, 1 UTF-8, 2 UTF-16) and
+ * `unicode`, opened with `_O_WTEXT`, in its top one (Wine's msvcr80
+ * test_ioinfo_flags).
  */
 const IOINFO = Object.freeze({
-    BLOCK: 32, SIZE: 36, BLOCKS: MAX_DESCRIPTORS / 32, HANDLE: 0, WXFLAG: 4, EXFLAG: 8,
+    BLOCK: 32, BLOCKS: MAX_DESCRIPTORS / 32, HANDLE: 0, WXFLAG: 4, EXFLAG: 8,
 });
+
+/** @typedef {{ size: number, textmode: number | null }} IoinfoLayout */
+
+/** Where a runtime over msvcrt's table finds `__pioinfo` made in its own layout. */
+export const IOINFO_EXPORT = Symbol('ioinfo export');
+
+/** The two layouts of an entry. */
+export const IOINFO_LAYOUTS = Object.freeze({
+    msvcrt: Object.freeze(/** @type {IoinfoLayout} */ ({ size: 36, textmode: null })),
+    msvcr80: Object.freeze(/** @type {IoinfoLayout} */ ({ size: 64, textmode: 36 })),
+});
+const TEXTMODE_UTF8 = 1;
+const TEXTMODE_UTF16 = 2;
+const TM_UNICODE = 0x80;
 /** `wxflag`'s bits: open, a pipe, not inherited, appending, a character device, text mode. */
 const WX_OPEN = 0x01;
 const WX_PIPE = 0x08;
@@ -311,15 +330,32 @@ const onConsole = (handle, settings)=>{
  * @property {FileHandles} [handles]
  *           Where a descriptor's file becomes a handle and a handle a
  *           descriptor. Absent, neither is asked for.
- * @property {() => number} [ioinfo]  Where `__pioinfo` is, 0 before the
- *           runtime's image is placed; each change to a descriptor of the
- *           first block is written there.
+ * @property {() => { at: number, layout: IoinfoLayout }[]} [ioinfo]
+ *           Where each runtime's `__pioinfo` is that has been placed, and its
+ *           layout; each change to a descriptor of the first block is
+ *           written there.
  * @property {(address: number, bytes: Uint8Array) => void} [writeMemory]
  */
 
 /**
  * @typedef {ReturnType<typeof createDescriptors>} Descriptors
  */
+
+/**
+ * ioinfo *__pioinfo[]
+ *
+ * Data: the runtime's descriptors as a program reads them in place, its
+ * first pointer to the block that follows it, in the runtime's layout - which
+ * the export carries, so the descriptors are written into each runtime's
+ * table the way that runtime's program reads it.
+ *
+ * @param {Descriptors} descriptors @param {IoinfoLayout} layout
+ */
+export const ioinfoExport = (descriptors, layout)=>({
+    data: ()=>descriptors.ioinfoBytes(layout),
+    pointers: [{ at: 0, to: '__pioinfo', offset: IOINFO.BLOCKS * 4 }],
+    layout,
+});
 
 /**
  * The descriptor table, shared by the low-level calls and the streams.
@@ -334,49 +370,73 @@ export function createDescriptors(host){
     table.set(1, onConsole(HANDLE_STDOUT, { text: true }));
     table.set(2, onConsole(HANDLE_STDERR, { text: true }));
 
-    /** Each number's `exflag`, kept past its descriptor's close. @type {Map<number, number>} */
-    const exflags = new Map();
+    /**
+     * Each number's `exflag` and MSVCR80's `textmode` byte, kept past its
+     * descriptor's close: a number in the map has been opened.
+     *
+     * @type {Map<number, { exflag: number, textmode: number }>}
+     */
+    const kept = new Map();
 
     /**
-     * A descriptor's `__pioinfo` entry, its handle, `wxflag` and `exflag`: a number not
-     * open has no handle. A file's handle is made only when one is asked
+     * A descriptor's `__pioinfo` entry up to its lock - its handle, `wxflag`
+     * and flag word - and in MSVCR80's layout its `textmode` byte: a number
+     * not open has no handle. A file's handle is made only when one is asked
      * for, so until then the entry holds none, though `wxflag` says it is
      * open.
      *
-     * @param {number} fd
+     * @param {number} fd @param {IoinfoLayout} layout
+     * @returns {{ head: Uint8Array, textmode: number | null }}
      */
-    const entryOf = fd=>{
+    const entryOf = (fd, layout)=>{
         const descriptor = table.get(fd);
-        const bytes = new Uint8Array(IOINFO.EXFLAG + 4);
-        const view = new DataView(bytes.buffer);
+        const head = new Uint8Array(IOINFO.EXFLAG + 4);
+        const view = new DataView(head.buffer);
         view.setInt32(IOINFO.HANDLE, descriptor?.handle || INVALID_HANDLE_VALUE, true);
         if (descriptor)
         {
             const unicode = descriptor.unicode ?? 0;
-            exflags.set(fd, EF_CRIT_INIT | (unicode === O_U8TEXT ? EF_UTF8 : 0)
-                | (unicode === O_U16TEXT || unicode === O_WTEXT ? EF_UTF16 : 0)
-                | (unicode === O_WTEXT ? EF_UNK_UNICODE : 0));
+            kept.set(fd, {
+                exflag: EF_CRIT_INIT | (unicode === O_U8TEXT ? EF_UTF8 : 0)
+                    | (unicode === O_U16TEXT || unicode === O_WTEXT ? EF_UTF16 : 0)
+                    | (unicode === O_WTEXT ? EF_UNK_UNICODE : 0),
+                textmode: (unicode === O_U8TEXT ? TEXTMODE_UTF8 : 0)
+                    | (unicode === O_U16TEXT || unicode === O_WTEXT ? TEXTMODE_UTF16 : 0)
+                    | (unicode === O_WTEXT ? TM_UNICODE : 0),
+            });
         }
-        view.setInt32(IOINFO.EXFLAG, exflags.get(fd) ?? 0, true);
-        bytes[IOINFO.WXFLAG] = !descriptor ? 0 : WX_OPEN | (descriptor.append ? WX_APPEND : 0)
+        const entry = kept.get(fd);
+        view.setInt32(IOINFO.EXFLAG,
+            layout.textmode === null ? entry?.exflag ?? 0 : entry === undefined ? 0 : 1, true);
+        head[IOINFO.WXFLAG] = !descriptor ? 0 : WX_OPEN | (descriptor.append ? WX_APPEND : 0)
             | (descriptor.console !== undefined ? WX_TTY : 0) | (descriptor.text ? WX_TEXT : 0)
             | (descriptor.node instanceof Pipe ? WX_PIPE : 0)
             | (descriptor.inherit === false ? WX_DONTINHERIT : 0);
-        return bytes;
+        return { head, textmode: layout.textmode === null ? null : entry?.textmode ?? 0 };
     };
 
     /**
-     * Writes a descriptor's entry where the program reads it.
-     * ponytail: the first block only, the one msvcrt.dll starts with; the
+     * Writes a descriptor's entry where each runtime's program reads it,
+     * the lock between left as the runtime's.
+     * ponytail: the first block only, the one a runtime starts with; the
      * next are made as descriptors past 31 are opened, when one is read.
      *
      * @param {number} fd
      */
     const mirror = fd=>{
-        const at = host.ioinfo?.() ?? 0;
-        if (at !== 0 && fd >= 0 && fd < IOINFO.BLOCK)
+        if (fd < 0 || fd >= IOINFO.BLOCK)
         {
-            host.writeMemory?.(at + IOINFO.BLOCKS * 4 + fd * IOINFO.SIZE, entryOf(fd));
+            return;
+        }
+        for (const { at, layout } of host.ioinfo?.() ?? [])
+        {
+            const entry = at + IOINFO.BLOCKS * 4 + fd * layout.size;
+            const { head, textmode } = entryOf(fd, layout);
+            host.writeMemory?.(entry, head);
+            if (textmode !== null && layout.textmode !== null)
+            {
+                host.writeMemory?.(entry + layout.textmode, Uint8Array.of(textmode));
+            }
         }
     };
 
@@ -761,11 +821,18 @@ export function createDescriptors(host){
          * `__pioinfo` as the image starts with it: the first block's pointer,
          * filled by the loader, and the block with every descriptor open now.
          */
-        ioinfoBytes(){
-            const bytes = new Uint8Array(IOINFO.BLOCKS * 4 + IOINFO.BLOCK * IOINFO.SIZE);
+        /** @param {IoinfoLayout} layout */
+        ioinfoBytes(layout){
+            const bytes = new Uint8Array(IOINFO.BLOCKS * 4 + IOINFO.BLOCK * layout.size);
             for (let fd = 0; fd < IOINFO.BLOCK; fd++)
             {
-                bytes.set(entryOf(fd), IOINFO.BLOCKS * 4 + fd * IOINFO.SIZE);
+                const entry = IOINFO.BLOCKS * 4 + fd * layout.size;
+                const { head, textmode } = entryOf(fd, layout);
+                bytes.set(head, entry);
+                if (textmode !== null && layout.textmode !== null)
+                {
+                    bytes[entry + layout.textmode] = textmode;
+                }
             }
             return bytes;
         },
@@ -1334,17 +1401,8 @@ export function createIoFunctions(host, descriptors){
         _dup2: cdecl(8, ([fd, onto])=>(descriptors.duplicate(fd, onto) < 0 ? -1 : 0)),
     };
 
-    /**
-     * ioinfo *__pioinfo[]
-     *
-     * Data: the runtime's descriptors as a program reads them in place, its
-     * first pointer to the block that follows it.
-     */
     const ioinfo = {
-        __pioinfo: {
-            data: ()=>descriptors.ioinfoBytes(),
-            pointers: [{ at: 0, to: '__pioinfo', offset: IOINFO.BLOCKS * 4 }],
-        },
+        __pioinfo: ioinfoExport(descriptors, IOINFO_LAYOUTS.msvcrt),
         /**
          * ioinfo __badioinfo
          *
@@ -1353,7 +1411,7 @@ export function createIoFunctions(host, descriptors){
          */
         __badioinfo: {
             data: ()=>{
-                const bytes = new Uint8Array(IOINFO.SIZE);
+                const bytes = new Uint8Array(IOINFO_LAYOUTS.msvcrt.size);
                 new DataView(bytes.buffer).setInt32(IOINFO.HANDLE, -1, true);
                 bytes[IOINFO.WXFLAG] = WX_TEXT;
                 return bytes;

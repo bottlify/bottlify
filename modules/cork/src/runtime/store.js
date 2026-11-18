@@ -45,7 +45,7 @@ export function createStore(state){
         guestBytes, read, readBytes, settings, sharedMemory, sharesStore
     } = /** @type {import('./state.js').Base} */ (state);
     const { batchInstances, checkedAt, counts, formableFrom, inFlight, precisionAt, precisionFlags,
-        precisionOf, regions, sharedModule, stamp, storeTrace, stubPage, trace,
+        precisionOf, regions, sharedModule, stamp, stubPage, trace,
         translatable } = rt;
     // The store is opened (a directory store reads its index) while the host
     // is still starting, so it can answer the first batch's lookups at once.
@@ -563,7 +563,7 @@ export function createStore(state){
         else
         {
             counts.cacheMisses++;
-            trace(storeTrace.missed, one);
+            trace('missed', one);
         }
     };
 

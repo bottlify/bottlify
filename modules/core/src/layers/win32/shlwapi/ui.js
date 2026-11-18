@@ -36,14 +36,19 @@ const S_OK = 0;
 const PLATFORM_INTEGRATED = 3;
 
 /**
- * IsOS's questions a workstation of NT 5 or later says yes to, by the version
- * it needs: the rest - Windows 9x's, the servers', terminal and embedded
- * editions, a domain, WOW64 - are no here.
+ * IsOS's questions a workstation says yes to, by the versions that do:
+ * NT always, 2000 and later from 2000, a Professional (OS_PROFESSIONAL, and
+ * OS_WIN2000PRO, which the documentation sends to it) from 2000. NT 4 and
+ * later and XP and later are yes on XP and no from Vista on, where the
+ * documentation has both always FALSE (decisions.md A262). The rest -
+ * Windows 9x's, the servers', terminal and embedded editions, Home, a domain,
+ * WOW64 - are no here.
  *
- * @type {ReadonlyMap<number, number>}  OS_* -> the least version, major * 0x100 + minor
+ * @type {ReadonlyMap<number, [number, number]>}  OS_* -> [from, before], each
+ *     major * 0x100 + minor
  */
-const OS_YES = new Map([[1, 0x400], [3, 0x400], [7, 0x500], [8, 0x500], [18, 0x501],
-    [20, 0x500]]);
+const OS_YES = new Map([[1, [0x400, Infinity]], [3, [0x400, 0x600]], [7, [0x500, Infinity]],
+    [8, [0x500, Infinity]], [18, [0x501, 0x600]], [20, [0x500, Infinity]]]);
 
 /**
  * @typedef {Object} UiHost
@@ -410,21 +415,20 @@ export function createUiFunctions(host, { A, W }){
          * BOOL IsOS(DWORD feature)
          *
          * The questions an NT workstation of the machine's version says yes
-         * to: NT, NT 4 and later, 2000 and later, a workstation (2000
-         * Professional and later, Professional), XP and later.
+         * to (`OS_YES`).
          */
         IsOS: {
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([feature])=>{
-                const least = OS_YES.get(feature >>> 0);
-                if (least === undefined)
+                const span = OS_YES.get(feature >>> 0);
+                if (span === undefined)
                 {
                     return 0;
                 }
                 const version = kernel32('GetVersion', []) >>> 0;
                 const running = (version & 0xff) * 0x100 + (version >>> 8 & 0xff);
-                return running >= least ? 1 : 0;
+                return running >= span[0] && running < span[1] ? 1 : 0;
             },
         },
 

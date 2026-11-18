@@ -502,12 +502,14 @@ const directoryOf = path=>path.slice(0, path.lastIndexOf('\\') + 1);
 
 /**
  * The window classes Common Controls 6 registers, each under its versioned
- * name: the user controls it carries its own of, and its own. A window made
- * by one of these names under a context holding the assembly is of version
- * 6's class (`loaderApi.windowClass`).
+ * name: the user controls it carries its own of - the scroll bar among them,
+ * which is why a superclass of ScrollBar made under the assembly keeps its
+ * own name for RealGetWindowClass (Wine's comctl32 misc test) - and its own.
+ * A window made by one of these names under a context holding the assembly
+ * is of version 6's class (`loaderApi.windowClass`).
  */
 const COMMON_CONTROLS_6_CLASSES = Object.freeze(['Button', 'ComboBox', 'ComboLBox', 'Edit',
-    'ListBox', 'Static', 'ComboBoxEx32', 'msctls_hotkey32', 'msctls_progress32',
+    'ListBox', 'ScrollBar', 'Static', 'ComboBoxEx32', 'msctls_hotkey32', 'msctls_progress32',
     'msctls_statusbar32', 'msctls_trackbar32', 'msctls_updown32', 'NativeFontCtl',
     'ReBarWindow32', 'SysAnimate32', 'SysDateTimePick32', 'SysHeader32', 'SysIPAddress32',
     'SysLink', 'SysListView32', 'SysMonthCal32', 'SysPager', 'SysTabControl32', 'SysTreeView32',
@@ -2308,6 +2310,20 @@ export function createActivationContexts(host){
         activate: (handle, teb)=>(handle === 0 || !contextOf(handle) ? 0 : activate(handle, teb)),
         /** @param {number} cookie @param {number} teb */
         deactivate: (cookie, teb)=>cookie !== 0 && deactivate(cookie, teb) === 'done',
+        /**
+         * A new thread starts with the context its creator has active, as
+         * CreateThread gives it on Windows (Wine's fiber test, a thread made
+         * from a fiber).
+         *
+         * @param {number} teb  the new thread's block
+         */
+        inherit(teb){
+            const active = activeContext();
+            if (active && teb !== 0)
+            {
+                activate(active.handle, teb);
+            }
+        },
         /** Whether there is a process default, for a report. */
         hasProcessDefault: ()=>processDefault !== null,
     };

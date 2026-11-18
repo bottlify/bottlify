@@ -43,6 +43,8 @@ export const TEB = Object.freeze({
     TLS_POINTER: 0x2c,
     PEB: 0x30,
     LAST_ERROR: 0x34,
+    /** ActivationContextStackPointer: the thread's (a fiber's own) stack of contexts. */
+    ACTIVATION_STACK: 0x1a8,
     /**
      * DeallocationStack: the bottom of the stack's reservation, below the
      * committed StackLimit on Windows; GetCurrentThreadStackLimits' low end.
@@ -52,8 +54,22 @@ export const TEB = Object.freeze({
     TLS_SLOTS: 0xe10,
     /** The thread's error mode, in ntdll's bits (RTL_SEM_*). */
     HARD_ERROR_MODE: 0xf28,
+    /** GuaranteedStackBytes: what SetThreadStackGuarantee keeps for an overflow's handler. */
+    GUARANTEED_STACK_BYTES: 0xf78,
+    /** FlsSlots: the running fiber's fibre-local values (fls.js), null until one is set. */
+    FLS_SLOTS: 0xfb4,
+    /** SameTebFlags, a WORD: HasFiberData (`HAS_FIBER_DATA`) among them. */
+    SAME_TEB_FLAGS: 0xfca,
     SIZE: 0x1000,
 });
+
+/** SameTebFlags' HasFiberData: the thread runs fibers, FiberData is the current one. */
+export const HAS_FIBER_DATA = 0x0004;
+/**
+ * What NT_TIB's FiberData (its Version, the union's other half) holds for a
+ * thread that runs no fiber, as Windows starts every thread.
+ */
+export const NO_FIBER = 0x1e00;
 
 /**
  * The session every process here runs in: the interactive user's, the one
@@ -191,9 +207,13 @@ export const TEB64 = Object.freeze({
     TLS_POINTER: 0x58,
     PEB: 0x60,
     LAST_ERROR: 0x68,
+    ACTIVATION_STACK: 0x2c8,
     DEALLOCATION_STACK: 0x1478,
     TLS_SLOTS: 0x1480,
     HARD_ERROR_MODE: 0x16b0,
+    GUARANTEED_STACK_BYTES: 0x1748,
+    FLS_SLOTS: 0x17c8,
+    SAME_TEB_FLAGS: 0x17ee,
     // Past TlsSlots (0x1480) and TlsLinks, the fields a program reads.
     SIZE: 0x1840,
 });
@@ -714,6 +734,7 @@ export function createProcessBlocks(options){
             }
             writePointer(teb + tebFields.STACK_BASE, stackBase);
             writePointer(teb + tebFields.STACK_LIMIT, stackLimit);
+            writePointer(teb + tebFields.FIBER_DATA, NO_FIBER);
             // The whole stack is committed here, so its reservation begins
             // where its limit is.
             writePointer(teb + tebFields.DEALLOCATION_STACK, stackLimit);

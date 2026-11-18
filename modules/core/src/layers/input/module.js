@@ -92,6 +92,15 @@ export function createInputModule(){
                 divergence: config?.divergence,
                 signal: config?.signal,
                 mouseHeld: config?.mouseHeld,
+                // DirectInput 8 registers the device it holds for raw input,
+                // as a program then sees with GetRegisteredRawInputDevices.
+                rawInput: {
+                    claim: (/** @type {number} */ usage, /** @type {number} */ flags)=>
+                        /** @type {any} */ (win32).claimRawInput?.(usage, flags,
+                            bridge.callerThread()) ?? 0,
+                    release: (/** @type {number} */ usage)=>
+                        /** @type {any} */ (win32).releaseRawInput?.(usage),
+                },
                 // Where a mouse in absolute mode starts when it is taken: the
                 // cursor, as the router keeps it. Made below; asked only later.
                 cursor: ()=>router?.cursor() ?? null,

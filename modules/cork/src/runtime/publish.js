@@ -45,7 +45,7 @@ export function createPublish(state){
         placedOf,
         precisionFlags, precisionJob, precisionOf, recordAt, recordOf, refused, refusedWhy,
         regions, relaxedFlagReads, roundedKeys, shapeOf, share, sourcesChanged, stackCodeSeen,
-        stackPages, stamp, storeKey, storeModule, storeTrace, storeVersionFor, throughStack, trace,
+        stackPages, stamp, storeKey, storeModule, storeVersionFor, throughStack, trace,
         uncoverKeys, unpublish, watched } = rt;
     // The milliseconds emitted on this thread, read on every build: what a
     // host's pool takes as a want for a worker (`translatedHere`). The
@@ -507,7 +507,7 @@ export function createPublish(state){
             if (store !== null)
             {
                 const storeAt = clock();
-                trace(storeTrace.put, metas[i]);
+                trace('put', metas[i]);
                 store.put(storeKey(metas[i]), packRegion({ ...result.region,
                     module: new Uint8Array(0), moduleKey: key, shape: shapeOf(metas[i]) },
                 cacheVersion),

@@ -1969,40 +1969,6 @@ export function createProcessFunctions(host){
             guest: builder=>placed(builder).tlsSetValue,
         },
 
-        // Fibre-local storage is thread-local storage on a machine with no
-        // fibres, which is this one: a fibre is a thread the program schedules
-        // itself, and without one there is exactly one fibre per thread. A C
-        // runtime looks these up at run time and falls back to the Tls pair
-        // when they are absent -- but it looks them up on every start, and a
-        // fallback path is a path fewer programs have exercised.
-        //
-        // The callback FlsAlloc takes is not called. It runs when a fibre ends,
-        // and nothing here ends one.
-        /** DWORD FlsAlloc(PFLS_CALLBACK_FUNCTION lpCallback) */
-        FlsAlloc: { argBytes: 4, handler: ()=>table.TlsAlloc.handler([]) },
-        /** BOOL FlsFree(DWORD dwFlsIndex) */
-        FlsFree: {
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: args=>table.TlsFree.handler(args),
-        },
-        /** PVOID FlsGetValue(DWORD dwFlsIndex) */
-        FlsGetValue: {
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: args=>table.TlsGetValue.handler(args),
-            /** @param {import('./sync.js').GuestBuilder} builder */
-            guest: builder=>placed(builder).tlsGetValue,
-        },
-        /** BOOL FlsSetValue(DWORD dwFlsIndex, PVOID lpFlsData) */
-        FlsSetValue: {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: args=>table.TlsSetValue.handler(args),
-            /** @param {import('./sync.js').GuestBuilder} builder */
-            guest: builder=>placed(builder).tlsSetValue,
-        },
-
         /**
          * PVOID EncodePointer(PVOID Ptr) / PVOID DecodePointer(PVOID Ptr)
          *
@@ -2060,9 +2026,6 @@ export function createProcessFunctions(host){
     Object.assign(table.GetCurrentThreadId, { long: getCurrentThreadIdLongCode });
     Object.assign(table.TlsGetValue, { long: longWithTrap('TlsGetValue', tlsGetValueLongCode) });
     Object.assign(table.TlsSetValue, { long: longWithTrap('TlsSetValue', tlsSetValueLongCode) });
-    // A fibre slot is a thread-local slot here (FlsAlloc is TlsAlloc).
-    Object.assign(table.FlsGetValue, { long: longWithTrap('FlsGetValue', tlsGetValueLongCode) });
-    Object.assign(table.FlsSetValue, { long: longWithTrap('FlsSetValue', tlsSetValueLongCode) });
     for (const name of ['EncodePointer', 'DecodePointer', 'EncodeSystemPointer',
         'DecodeSystemPointer'])
     {

@@ -15,7 +15,7 @@
  */
 
 import { TB_ADDBITMAP, TB_ADDBUTTONSA, TB_BUTTONSTRUCTSIZE, TB_SETBITMAPSIZE,
-    TB_SETBUTTONSIZE, TOOLBAR_CLASS } from './toolbar.js';
+    TOOLBAR_CLASS } from './toolbar.js';
 import { createRefusals } from '../common/refusal.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 import { after } from '../user32/controls.js';
@@ -159,15 +159,18 @@ export function createHelperFunctions(host){
                         new DataView(table.buffer).setUint32(4, bitmapId >>> 0, true);
                         host.writeMemory(block + name.length, table);
                         const steps = [send(TB_BUTTONSTRUCTSIZE, structSize >>> 0, 0)];
-                        if ((bitmapX | 0) > 0 && (bitmapY | 0) > 0)
+                        // Each pair is used when neither side is zero, -1 a
+                        // side left as it is; the buttons' pair sizes the
+                        // images too, and the buttons are those and their
+                        // padding (Wine's toolbar test, test_createtoolbarex,
+                        // records Windows answering so).
+                        for (const [x, y] of [[bitmapX, bitmapY], [buttonX, buttonY]])
                         {
-                            steps.push(send(TB_SETBITMAPSIZE, 0,
-                                ((bitmapY & 0xffff) << 16 | bitmapX & 0xffff) >>> 0));
-                        }
-                        if ((buttonX | 0) > 0 && (buttonY | 0) > 0)
-                        {
-                            steps.push(send(TB_SETBUTTONSIZE, 0,
-                                ((buttonY & 0xffff) << 16 | buttonX & 0xffff) >>> 0));
+                            if ((x | 0) !== 0 && (y | 0) !== 0)
+                            {
+                                steps.push(send(TB_SETBITMAPSIZE, 0,
+                                    ((y & 0xffff) << 16 | x & 0xffff) >>> 0));
+                            }
                         }
                         if ((bitmaps | 0) > 0)
                         {

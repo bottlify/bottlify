@@ -537,8 +537,7 @@ test('the adapter answers what it can make, from the tables that make it', ()=>{
     // An HMONITOR, not an HRESULT: the one user32 names for every window, so
     // it goes straight into GetMonitorInfo (Wine's d3d8 device.c requires
     // !!monitor). An adapter that does not exist has none.
-    const user32 = createSystemFunctions({ host: {}, live: ()=>null, windows: new Map(),
-        classes: new Map() });
+    const user32 = createSystemFunctions({ host: {}, live: ()=>null, windows: new Map() });
     assert.equal(ask('GetAdapterMonitor', [0]), user32.MonitorFromWindow.handler([0, 1]));
     assert.notEqual(ask('GetAdapterMonitor', [0]), 0);
     assert.equal(ask('GetAdapterMonitor', [1]), 0);

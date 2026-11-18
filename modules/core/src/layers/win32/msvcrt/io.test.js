@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createDescriptors, createIoFunctions } from './io.js';
+import { IOINFO_LAYOUTS, createDescriptors, createIoFunctions, ioinfoExport } from './io.js';
 import { fakeHandles, fakeMemory, fakeVolume } from './harness.test.js';
 
 const O_RDONLY = 0x0000;
@@ -847,7 +847,8 @@ test('__pioinfo holds each descriptor of its first block as a program reads it i
     const TABLE = 0x80000;
     let placed = 0;
     const descriptors = createDescriptors({
-        files, handles, errno: ()=>{}, writeMemory: memory.writeMemory, ioinfo: ()=>placed,
+        files, handles, errno: ()=>{}, writeMemory: memory.writeMemory,
+        ioinfo: ()=>(placed === 0 ? [] : [{ at: placed, layout: IOINFO_LAYOUTS.msvcrt }]),
     });
     const fns = /** @type {Record<string, any>} */ (createIoFunctions({ ...memory, files },
         descriptors));
@@ -887,6 +888,55 @@ test('__pioinfo holds each descriptor of its first block as a program reads it i
     assert.equal(exflag(unicode + 4), 0, 'a number never opened');
     const utf8 = fns._open.handler([memory.put('C:\\game\\info.tst'), O_RDONLY | O_U8TEXT, 0]);
     assert.equal(exflag(utf8), 0x01 | 0x04);
+});
+
+test('MSVCR80\'s __pioinfo is 64-byte entries: the lock made, then textmode and unicode', ()=>{
+    // Wine's msvcr80 test_ioinfo_flags: the word at 8 is 1 once a number
+    // was opened, and the byte at 36 holds `textmode` (0 ANSI, 1 UTF-8,
+    // 2 UTF-16) under `unicode`, set by _O_WTEXT; both kept past the close.
+    const WX_OPEN = 0x01;
+    const WX_TEXT = 0x80;
+    const memory = fakeMemory();
+    const files = fakeVolume({ 'C:\\game\\info.tst': new Uint8Array(0) },
+        { directories: ['C:\\', 'C:\\game'] });
+    const handles = fakeHandles(files);
+    const [OLD, NEW] = [0x80000, 0x90000];
+    const tables = [{ at: OLD, layout: IOINFO_LAYOUTS.msvcrt },
+        { at: NEW, layout: IOINFO_LAYOUTS.msvcr80 }];
+    const descriptors = createDescriptors({
+        files, handles, errno: ()=>{}, writeMemory: memory.writeMemory, ioinfo: ()=>tables,
+    });
+    const fns = /** @type {Record<string, any>} */ (createIoFunctions({ ...memory, files },
+        descriptors));
+    const later = ioinfoExport(descriptors, IOINFO_LAYOUTS.msvcr80);
+    assert.equal(later.data().length, 256 + 32 * 64);
+    memory.writeMemory(OLD, fns.__pioinfo.data());
+    memory.writeMemory(NEW, later.data());
+    const view = new DataView(memory.bytes.buffer);
+    /** @param {number} fd */
+    const entry = fd=>{
+        const at = NEW + 256 + fd * 64;
+        return { handle: view.getInt32(at, true), wxflag: memory.bytes[at + 4],
+            lock: view.getInt32(at + 8, true), mode: memory.bytes[at + 36] };
+    };
+    const open = (/** @type {number} */ flags)=>fns._open.handler(
+        [memory.put('C:\\game\\info.tst'), O_CREAT | O_TRUNC | O_WRONLY | flags, 0]);
+
+    const wtext = open(O_WTEXT);
+    const handle = fns._get_osfhandle.handler([wtext]);
+    assert.deepEqual(entry(wtext), { handle, wxflag: WX_OPEN | WX_TEXT, lock: 1, mode: 0x80 | 2 });
+    assert.equal(view.getInt32(OLD + 256 + wtext * 36, true), handle, 'msvcrt\'s table too');
+    assert.equal(fns._close.handler([wtext]), 0);
+    assert.deepEqual(entry(wtext),
+        { handle: INVALID_HANDLE_VALUE, wxflag: 0, lock: 1, mode: 0x82 });
+    assert.deepEqual(entry(wtext + 4),
+        { handle: INVALID_HANDLE_VALUE, wxflag: 0, lock: 0, mode: 0 });
+    const text = open(O_TEXT);
+    assert.deepEqual([entry(text).wxflag, entry(text).lock, entry(text).mode],
+        [WX_OPEN | WX_TEXT, 1, 0]);
+    assert.equal(fns._close.handler([text]), 0);
+    const utf8 = open(O_U8TEXT);
+    assert.deepEqual([entry(utf8).lock, entry(utf8).mode], [1, 1]);
 });
 
 test('_wopen, _sopen and _wsopen open as _open does, the share flag ignored', ()=>{

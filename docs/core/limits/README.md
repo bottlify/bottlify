@@ -55,20 +55,35 @@ event, an error. Neither stops the program.
   page is not drawn and has no document; each address not drawn is said once as a loss. The
   InternetExplorer application object is not there.
 - A library Windows carries in its system directory and the engine does not recreate (in Wine's
-  list of them, `loader/internal/windows-libraries.js`) is missing, not absent: a program that
+  list of them, `loader/internal/windows-libraries.js`, from the Windows that first carries it,
+  `libraries-since.js`) is missing, not absent: a program that
   imports one still starts, and fails where it calls in. A static import of a library in no list
   and on no volume ends the process at its start with STATUS_DLL_NOT_FOUND (0xC0000135), as on
   Windows (`roadmap/decisions.md` A256).
 - Common Controls 6 is bound where a manifest asks for it (`roadmap/decisions.md` A257), but of the
-  exports only it has, GetWindowSubclass is there and TaskDialog, TaskDialogIndirect,
-  DrawShadowText, LoadIconMetric, LoadIconWithScaleDown, DPA_GetSize, DSA_Clone, DSA_GetSize,
-  ImageList_CoCreateInstance, ImageList_WriteEx, HIMAGELIST_QueryInterface and DllInstall are not.
+  exports only it has, GetWindowSubclass, HIMAGELIST_QueryInterface, ImageList_CoCreateInstance and
+  ImageList_WriteEx are there and TaskDialog, TaskDialogIndirect, DrawShadowText, LoadIconMetric,
+  LoadIconWithScaleDown, DPA_GetSize, DSA_Clone, DSA_GetSize and DllInstall are not. An image
+  list is the IImageList its handle points at in both libraries; of IImageList2's own methods only
+  Resize and Initialize are there, the rest answer E_NOTIMPL and say so.
   Version 6's button keeps what its BCM_ messages set (image list, text margin, split part,
   command-link note) and answers BCM_GETIDEALSIZE by its own layout - the text in its font, the
   image where the style puts it, its frame - which holds the content but is not Windows' pixel
   for pixel. No button draws the image BM_SETIMAGE gives it, and version 6's draws neither the
-  split part, the image list nor the note. A program's own class
-  that its manifest versions is not registered by the versioned name.
+  split part, the image list nor the note.
+- The month calendar (`SysMonthCal32`) shows only its month view: a click on a title's month or
+  year offers no menu or spinner, MCM_SETCURRENTVIEW takes only MCMV_MONTH, MCN_VIEWCHANGE is not
+  sent, and "today" is the clock when the calendar was made, not moved on at midnight.
+- The extended combo box (`ComboBoxEx32`) keeps its items' images, indents and values, but its
+  combo box's list shows only their text, in the ANSI code page: user32's combo box draws an
+  owner-drawn item's string itself rather than asking its parent with WM_DRAWITEM.
+- The common controls' window classes are there without comctl32 being loaded: a program that
+  makes one, or asks GetClassInfo for it, does not load comctl32, where Windows' user32 loads it
+  to register the class, so GetModuleHandle("comctl32") stays 0 until the program loads it.
+- Where no font engine draws (node, a page without a canvas), a string's width in Tahoma or
+  Microsoft Sans Serif at a size other than 8 points is its 8-point hinted widths scaled to the
+  em, and may be a pixel a character off Windows' (`roadmap/decisions.md` A266); other faces with
+  no file here measure at one fixed pitch.
 - An import nothing implements returns 0 when its argument size is known (a decorated name, a cdecl
   library, a library the program brought). Otherwise the program stops with `unimplemented import`
   and the function's name.
@@ -87,6 +102,12 @@ event, an error. Neither stops the program.
 - 64 voices play at once.
 - DirectSound 3D keeps every parameter but does not position the sound: a 3D buffer plays as with
   3D processing off.
+- A DirectSound buffer's effects (SetFX) are made and driven as on Windows - a program's own DMO
+  runs over what it plays - but the standard ones (echo, chorus, reverb, the equalizer and the
+  rest) keep their parameters and pass the sound through unchanged, said once each
+  (`roadmap/decisions.md` A264). Effects run over a span when it is unlocked and over the whole
+  buffer at Play, not as the cursor reaches it. A buffer whose last reference goes does not
+  release its effects: a program's own DMO keeps one reference more than on Windows.
 - No capture: recording answers `DSERR_NODRIVER`.
 - WASAPI (`IMMDevice::Activate` for `IAudioClient`) plays in shared mode only, as XAudio2's
   redistributable and FMOD do on Vista and later: exclusive mode answers
@@ -94,7 +115,13 @@ event, an error. Neither stops the program.
   loopback stream is refused. Session notifications are kept and never sent: nothing outside the
   program changes its session.
   The enumerator is there from Vista on; on XP it is not registered, so a program that would play
-  to an endpoint plays through DirectSound, as on XP.
+  to an endpoint plays through DirectSound, as on XP. The endpoint is activated as IAudioClient,
+  IAudioSessionManager, IAudioEndpointVolume (its master and channel levels and mute, which every
+  stream plays at; -65.25 to 0 dB, `roadmap/decisions.md` A265; change notifications kept and not
+  sent), and as DirectSound or DirectShow's DirectSound renderer, made through COM; IAudioClient2
+  and 3, IDeviceTopology and spatial audio are not, and answer E_NOINTERFACE. DirectShow's
+  renderer is made without quartz.dll being loaded as a module, as the engine's built-in classes
+  are.
 - Media Foundation describes media and decodes none (`roadmap/decisions.md` A238): `mfplat`'s
   attributes, media types, memory buffers, samples and events are there, and `propsys`'s
   PROPVARIANT conversions, but no source, decoder, transform or work queue. A source reader
@@ -112,6 +139,12 @@ event, an error. Neither stops the program.
 
 - Only keyboard, mouse and gamepads reach the program. The page's focus, visibility and lifecycle
   never do.
+- A mouse or keyboard DirectInput 8 holds is registered for raw input to its hidden `DIEmWin`
+  window as on Windows, over the program's own registration, which is gone once the device is let
+  go of. The registration is what a program reads back; the device's own reading does not go
+  through WM_INPUT. An earlier DirectInput registers nothing, as on Windows.
+- DirectInput's BuildActionMap answers no dwCRC, and a key pressed with no scan code is not kept
+  as byte 0 of the keyboard's state.
 
 ## Accessibility
 

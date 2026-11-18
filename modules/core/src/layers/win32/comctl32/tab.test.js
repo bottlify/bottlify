@@ -824,7 +824,7 @@ test('a tab that is not fixed is its label and padding wide, at least six averag
     context.insert(hwnd, 0, { text: 'A rather long label' });
     context.insert(hwnd, 1, { text: 'x' });
     const label = context.measure(hwnd, 'A rather long label');
-    const least = context.measure(hwnd, 'x').width * 6 + 12;
+    const least = context.measure(hwnd, 'x').average * 6 + 12;
     const wide = context.itemRect(hwnd, 0);
     assert.equal(wide.right - wide.left, Math.max(least, label.width + 12));
     assert.equal(wide.bottom - wide.top, context.measure(hwnd, 'M').height + 5);
@@ -867,11 +867,17 @@ test('removing an image takes the tabs that showed it to none and moves the late
         context.send([hwnd, TCM_GETITEMA, index, OUT]);
         return context.memory.i32(OUT + TCITEM.iImage);
     });
+    // The image goes out of the tab's list too (Wine's tab test_removeimage).
+    const list = context.lists.ImageList_Create.handler([16, 16, 0x20, 3, 0]);
+    context.lists.ImageList_SetImageCount.handler([list, 3]);
+    context.send([hwnd, TCM_SETIMAGELIST, 0, list]);
     assert.deepEqual(images(), [0, 1, 2]);
     context.send([hwnd, TCM_REMOVEIMAGE, 1, 0]);
     assert.deepEqual(images(), [0, -1, 1]);
+    assert.equal(context.lists.ImageList_GetImageCount.handler([list]), 2);
     context.send([hwnd, TCM_REMOVEIMAGE, 0, 0]);
     assert.deepEqual(images(), [-1, -1, 0]);
+    assert.equal(context.lists.ImageList_GetImageCount.handler([list]), 1);
 });
 
 test('a hit test names the tab under a point, and a click chooses it through the parent',
@@ -1000,7 +1006,7 @@ test('with an image list a tab is its label, its image and three paddings wide, 
                 text ? { text: label, image: index } : { image: index }));
             context.send([hwnd, TCM_SETMINTABWIDTH, 0, minimum]);
             const label = text ? context.measure(hwnd, 'Tab 1').width : 0;
-            const least = context.measure(hwnd, 'x').width * 6 + 12;
+            const least = context.measure(hwnd, 'x').average * 6 + 12;
             /** @param {number} width @param {number} height */
             const sized = (width, height)=>{
                 context.send([hwnd, TCM_SETITEMSIZE, 0, height << 16 | width]);

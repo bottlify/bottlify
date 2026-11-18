@@ -317,7 +317,92 @@ export function createEnvironmentFunctions(host){
      *
      * @param {string} text
      */
-    const expand = text=>text.replace(/%([^%]*)%/g, (whole, name)=>variables.get(name) ?? whole);
+    const expand = text=>expandPieces(text).map(piece=>piece.text).join('');
+
+    /**
+     * The expansion in the pieces ExpandEnvironmentStrings writes it in:
+     * runs of text (an unset `%NAME%` among them, percent signs and all) and
+     * the values of the variables that are set.
+     *
+     * @param {string} text
+     * @returns {{ text: string, value: boolean }[]}
+     */
+    const expandPieces = text=>{
+        /** @type {{ text: string, value: boolean }[]} */
+        const pieces = [];
+        /** @param {string} piece @param {boolean} value */
+        const add = (piece, value)=>{
+            const last = pieces[pieces.length - 1];
+            if (!value && last && !last.value)
+            {
+                last.text += piece;
+            }
+            else if (piece.length > 0 || value)
+            {
+                pieces.push({ text: piece, value });
+            }
+        };
+        let at = 0;
+        for (const found of text.matchAll(/%([^%]*)%/g))
+        {
+            add(text.slice(at, found.index), false);
+            const value = variables.get(found[1]);
+            add(value ?? found[0], value !== undefined);
+            at = (found.index ?? 0) + found[0].length;
+        }
+        add(text.slice(at), false);
+        return pieces;
+    };
+
+    /**
+     * What ExpandEnvironmentStringsW leaves in a buffer of `size` characters,
+     * as the units it writes and where: text is copied while a character of
+     * room stays for the terminator, and a run that does not fit is cut there
+     * and ends the copy, unterminated; a variable's value goes in whole with
+     * its terminator when it fits and leaves only a terminator when it does
+     * not, which ends the copy too. All of it fitted, it is terminated (Wine's
+     * environ test, test_ExpandEnvironmentStringsW, as Windows answers).
+     *
+     * @param {{ text: string, value: boolean }[]} pieces @param {number} size
+     * @returns {{ at: number, units: string }[]}
+     */
+    const placeExpansion = (pieces, size)=>{
+        /** @type {{ at: number, units: string }[]} */
+        const writes = [];
+        let at = 0;
+        let room = size;
+        for (const piece of pieces)
+        {
+            if (piece.value)
+            {
+                if (piece.text.length >= room)
+                {
+                    if (room > 0)
+                    {
+                        writes.push({ at, units: '\0' });
+                    }
+                    return writes;
+                }
+                writes.push({ at, units: `${piece.text}\0` });
+            }
+            else
+            {
+                const copied = Math.max(0, Math.min(piece.text.length, room - 1));
+                writes.push({ at, units: piece.text.slice(0, copied) });
+                if (copied < piece.text.length)
+                {
+                    return writes;
+                }
+            }
+            at += piece.text.length;
+            room -= piece.text.length;
+        }
+        if (room > 0)
+        {
+            writes.push({ at, units: '\0' });
+        }
+        return writes;
+    };
 
     /**
      * The wide twin of reportPath. Counted in characters in both forms, so only
@@ -507,22 +592,31 @@ export function createEnvironmentFunctions(host){
          * DWORD ExpandEnvironmentStringsA(LPCSTR lpSrc, LPSTR lpDst, DWORD nSize)
          *
          * A `%NAME%` whose variable does not exist is left as it was, percent
-         * signs included; an unpaired `%` is ordinary text. The count is the
-         * whole answer including its terminator whether or not it fitted, and
-         * a buffer too small gets nothing: a caller sizes from a first call
-         * with no buffer and asks again.
+         * signs included; an unpaired `%` is ordinary text. The expansion fits
+         * only with a byte to spare beyond its terminator: then it is written
+         * and the count is its bytes with the terminator; otherwise the buffer
+         * is left empty - its first byte a terminator, even at a size of 0 -
+         * and the count is one more (Wine's environ test, as Windows answers).
+         * The last error is left as it was.
          */
         ExpandEnvironmentStringsA: {
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([source, destination, size])=>{
-                const expanded = (source >>> 0) === 0 ? ''
-                    : expand(host.readCString(source >>> 0, 0x8000));
-                if ((size >>> 0) >= expanded.length + 1 && (destination >>> 0) !== 0)
+                const expanded = encodeAnsi((source >>> 0) === 0 ? ''
+                    : expand(host.readCString(source >>> 0, 0x8000)));
+                if ((size >>> 0) >= expanded.length + 2 && (destination >>> 0) !== 0)
                 {
-                    reportPath(expanded, destination, size);
+                    const bytes = new Uint8Array(expanded.length + 1);
+                    bytes.set(expanded);
+                    host.writeMemory(destination >>> 0, bytes);
+                    return expanded.length + 1;
                 }
-                return expanded.length + 1;
+                if ((destination >>> 0) !== 0)
+                {
+                    host.writeMemory(destination >>> 0, Uint8Array.of(0));
+                }
+                return expanded.length + 2;
             },
         },
 
@@ -530,19 +624,32 @@ export function createEnvironmentFunctions(host){
          * DWORD ExpandEnvironmentStringsW(LPCWSTR lpSrc, LPWSTR lpDst, DWORD nSize)
          *
          * The A form's expansion, from the same variables, in UTF-16; nSize and
-         * the count are in characters.
+         * the count are in characters. The count is the whole expansion with
+         * its terminator, fitted or not; a buffer too small holds as much as
+         * Windows copies into it (`placeExpansion`). The last error is left
+         * as it was.
          */
         ExpandEnvironmentStringsW: {
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([source, destination, size])=>{
-                const expanded = (source >>> 0) === 0 ? ''
-                    : expand(host.readWideString(source >>> 0, 0x8000));
-                if ((size >>> 0) >= expanded.length + 1 && (destination >>> 0) !== 0)
+                const pieces = (source >>> 0) === 0 ? []
+                    : expandPieces(host.readWideString(source >>> 0, 0x8000));
+                const length = pieces.reduce((sum, piece)=>sum + piece.text.length, 0);
+                if ((destination >>> 0) !== 0)
                 {
-                    reportWidePath(expanded, destination, size);
+                    for (const { at, units } of placeExpansion(pieces, size >>> 0))
+                    {
+                        const bytes = new Uint8Array(units.length * 2);
+                        for (let index = 0; index < units.length; index++)
+                        {
+                            bytes[index * 2] = units.charCodeAt(index) & 0xff;
+                            bytes[index * 2 + 1] = units.charCodeAt(index) >> 8;
+                        }
+                        host.writeMemory((destination >>> 0) + at * 2, bytes);
+                    }
                 }
-                return expanded.length + 1;
+                return length + 1;
             },
         },
 

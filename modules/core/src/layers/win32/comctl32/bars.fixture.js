@@ -163,8 +163,17 @@ export function setupBars(gdiEngine){
     };
     /** Every message the parent's procedure was sent. @type {any[]} */
     const sent = [];
+    /**
+     * What the parent's procedure does with a message before DefWindowProc:
+     * an answer, or undefined to leave it to DefWindowProc.
+     *
+     * @type {((message: any) => number | undefined) | null}
+     */
+    let parentAnswers = null;
     /** @type {string[]} */
     const divergences = [];
+    /** The host the window manager hands the controls: how a window's record is found. @type {any} */
+    let controls = null;
     /** The bitmap resources a module holds, by id. @type {Map<number, number>} */
     const resources = new Map();
     let heapNext = HEAP;
@@ -221,6 +230,11 @@ export function setupBars(gdiEngine){
         screen: SCREEN,
         dispatch: (wndProc, message)=>{
             sent.push({ ...message });
+            const answer = parentAnswers?.(message);
+            if (answer !== undefined)
+            {
+                return answer;
+            }
             return table.DefWindowProcA.handler(
                 [message.hwnd, message.message, message.wParam, message.lParam]);
         },
@@ -252,6 +266,7 @@ export function setupBars(gdiEngine){
         release: ()=>{},
         divergence: (api, detail)=>divergences.push(`${api}: ${detail}`),
         registerControls: (controlHost, toolkit, register)=>{
+            controls = controlHost;
             for (const definition of createCommonControls(controlHost, toolkit, imageLists, {
                 loadBitmap: (instance, id)=>(instance === HINSTANCE
                     ? resources.get(id) ?? 0 : 0),
@@ -357,7 +372,16 @@ export function setupBars(gdiEngine){
         return desktop.read(point.x, point.y);
     };
 
-    return { memory, desktop, fns: table, send, pump, sent, divergences, resources,
+    /** @param {(message: any) => number | undefined} answers */
+    const answerParent = answers=>{
+        parentAnswers = answers;
+    };
+
+    /** A window's record, as the controls see it. @param {number} hwnd */
+    const recordOf = hwnd=>controls?.live(hwnd) ?? null;
+
+    return { memory, desktop, fns: table, send, pump, sent, divergences, resources, answerParent,
+        recordOf,
         makeParent, control, bitmap, windowRect, clientSize, toScreen, pixel, gdi32, gdi,
         lists: imageLists.functions };
 }

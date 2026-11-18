@@ -956,6 +956,40 @@ export function createNamedPipes(host){
     };
 
     /**
+     * A query of a pipe's name - GetFileAttributes, as a program's stat of
+     * it: Windows opens the name to answer, so it takes an instance that
+     * listens and lets it go at once, which leaves that instance with its
+     * client gone, not listening, until the server disconnects it. An error
+     * when no instance listens or there is no such pipe, as CreateFile's.
+     *
+     * @param {string} name
+     * @returns {number}  ERROR_SUCCESS or why not
+     */
+    const query = name=>{
+        if (host.remote)
+        {
+            return ERROR_FILE_NOT_FOUND;
+        }
+        const pipe = pipeAt(keyOf(name));
+        if (!pipe)
+        {
+            return ERROR_FILE_NOT_FOUND;
+        }
+        const instance = [...pipe.instances].find(one=>one.state === 'listening');
+        if (!instance)
+        {
+            return ERROR_PIPE_BUSY;
+        }
+        const client = makeEnd(instance, 'client', false, false);
+        instance.client = client;
+        instance.state = 'connected';
+        instance.clientProcess = host.processId ?? 0;
+        connected(instance);
+        closeEnd(client);
+        return ERROR_SUCCESS;
+    };
+
+    /**
      * Starts a read on an end the call has already found.
      *
      * @param {End} end @param {number} handle @param {number} buffer @param {number} length
@@ -1673,6 +1707,7 @@ export function createNamedPipes(host){
         read,
         write,
         open,
+        query,
         cancel,
         closed,
 

@@ -817,6 +817,7 @@ export function createSyncFunctions(host){
         ...createThreadInfoFunctions({
             kernel,
             processors,
+            pointerSize: host.pointerSize,
             readMemory: host.readMemory,
             writeMemory: host.writeMemory,
             currentThread: host.currentThread,

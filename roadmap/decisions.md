@@ -2344,7 +2344,9 @@ where it calls in. Which libraries Windows carries is knowledge, not code: Wine'
 libraries it recreates, less what is Wine's alone and the redistributable runtimes a program
 brings itself (`tools/generators/windows-libraries.mjs`), with every `api-ms-win-` and
 `ext-ms-win-` set. A delay-loaded library fails on its first call on Windows and is not refused
-at the start. The refusal is said as `libraries-not-found`, an error. *2026-11-15.*
+at the start. The refusal is said as `libraries-not-found`, an error. A library a later Windows first
+carries (`loader/internal/libraries-since.js`: XAudio2 2.8 and XInput 1.4 from 8, XAudio2 2.9 and
+Direct3D 12 from 10) is found nowhere on an earlier one. *2026-11-15, the later Windows 2026-11-17.*
 
 **A257. comctl32 is two libraries of one implementation: system32's 5.82, and Common Controls 6
 where a program's activation context holds that assembly.** As on Windows, the context decides at
@@ -2406,3 +2408,59 @@ starts a process for the pass. It is where an install that
 runs no guest code leaves a COM server's registration (A67, and DirectX's setup): the library's
 own DllRegisterServer writes what it writes. Revisit when a setup is found that leaves another
 program in RunOnce, or a registration that must run in a process of its own. *2026-11-17.*
+
+**A262. IsOS answers OS_NT4ORGREATER and OS_XPORGREATER yes on Windows XP and no from Vista on.**
+The documentation today has both "Always returns FALSE"; it does not say from which Windows, and
+XP's own documentation of the time described them as the versions they name. Wine's tests do not
+ask. OS_HOME is always no, OS_WIN2000PRO answers as OS_PROFESSIONAL, which the documentation
+sends it to. *2026-11-17.*
+
+**A263. GDI+ encodes BMP and PNG only, a PNG's data in stored deflate blocks.**
+GDI+ lists BMP, JPEG, GIF, TIFF and PNG encoders. This engine has no encoder of its own for JPEG,
+GIF or TIFF, so GdipGetImageEncoders lists BMP and PNG, the two `gdiplus/codecs.js` writes; a save
+asked of another encoder is UnknownImageFormat, as for an encoder GDI+ does not have. A PNG's IDAT
+is stored, not compressed: a valid file every reader opens, larger than Windows' own. BMP keeps an
+indexed, 24 or 32-bit image's depth and writes the rest as 32 bits. Revisit when a program is found
+saving JPEG or reading back the size of what it saved. *2026-11-17.*
+
+**A264. Temporary: DirectSound's standard effects keep their parameters and pass the sound through
+unchanged.** SetFX makes each effect a buffer names through COM, gives it the buffer's format in
+and out, tells it of a discontinuity at every Play and runs it in place over what the buffer
+holds, so a program's own DMO is heard as Windows plays it; the nine standard effects (gargle,
+chorus, flanger, echo, distortion, compressor, parametric equalizer, I3DL2 and Waves reverb) are
+those classes, with every parameter, range, preset and quality Windows answers, and their
+Process changes nothing, said once an effect. An effect runs over a span when the program
+unlocks it and over the whole buffer at Play, rather than as the play cursor reaches each part,
+so an effect with a tail (an echo, a reverb) would hear the buffer in the order it was written.
+Removed when the standard effects process sound, which is when this order matters too.
+*2026-11-18.*
+
+**A265. An audio endpoint's volume runs from -65.25 dB to 0 dB in steps of 0.75 dB, and its scalar
+is the amplitude a level gives.** IAudioEndpointVolume leaves the range and the curve between a
+level and its normalized scalar to the endpoint ("a nonlinear, audio-tapered curve"); these are a
+common HD Audio codec's speakers. The scalar is 10^(dB/20), 0 at the floor and 1 at 0 dB, and it
+is the gain every stream to the endpoint plays at, times its session's and its own.
+*2026-11-18.*
+
+**A266. Temporary: an outline system face with no font file here advances at any size by its
+hinted widths at one size, scaled.** Tahoma's and Microsoft Sans Serif's widths are known only at
+the 11-pixel em of an 8-point dialog (their `hdmx`); at another em each ANSI character's advance is
+that width times the em over 11, rounded, as GDI rounds a TrueType advance at its pixel size. A
+hinted width carries its own rounding, so a scaled one may be a pixel off Windows', where one
+fixed pitch for every character - the estimate before - made a string of wide letters a third too
+narrow. Where a font engine draws, its own widths answer. Removed when the engine carries these
+faces' design widths (their `hmtx`). *2026-11-18.*
+
+**A267. Temporary: a pager places its child when the program next takes its messages.** Windows'
+pager recalculates its frame with SWP_FRAMECHANGED - WM_NCCALCSIZE, where it asks its parent
+PGN_CALCSIZE, then WM_WINDOWPOSCHANGED though nothing moved - and moves its child with SetWindowPos,
+which sends the child WM_CHILDACTIVATE (Wine's pager test, set_child_seq). A control here moves a
+window only through the window manager's MoveWindow (`ControlHost.move`), which says neither; the
+child moved at once hears its messages out of Windows' order. So PGM_SETCHILD, PGM_SETPOS and
+PGM_RECALCSIZE recalculate the frame at once and post the pager its own PGM_PLACECHILD, which puts
+the child in place from the message loop. Removed when `ControlHost` moves a window with
+SetWindowPos's flags: the child is then placed at once, inside the message that asked.
+*2026-11-18.*
+*Removed 2026-11-18:* `ControlHost.place` is SetWindowPos with its flags and the caller's thread;
+the pager recalculates its frame with SWP_FRAMECHANGED and places its child at once, which hears
+WM_CHILDACTIVATE, inside the message that asked. No PGM_PLACECHILD is posted.

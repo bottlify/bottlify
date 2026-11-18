@@ -269,6 +269,38 @@ export function createEnvironment(host){
         return 0;
     };
 
+    /**
+     * `_dupenv_s` and `_wdupenv_s`: the value and its terminator copied to the
+     * heap, the length in characters with the terminator; a variable not set
+     * is a null copy and a length of none.
+     *
+     * @param {1 | 2} unit
+     */
+    const dupenv = unit=>({
+        convention: 'cdecl',
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [buffer, length, name])=>{
+            if ((buffer >>> 0) === 0 || (name >>> 0) === 0)
+            {
+                host.errno(EINVAL);
+                return EINVAL;
+            }
+            const index = unit === 1 ? find(readNarrow(name)) : find(readWide(name), true);
+            const value = index < 0 ? null : start()[index].value;
+            const bytes = value === null ? null
+                : unit === 1 ? encodeAnsi(`${value}\0`) : wideBytes(value);
+            const copy = bytes ? place(bytes) : 0;
+            writePointer(buffer, copy);
+            if ((length >>> 0) !== 0)
+            {
+                writePointer(length,
+                    copy === 0 ? 0 : /** @type {Uint8Array} */ (bytes).length / unit);
+            }
+            return 0;
+        },
+    });
+
     /** @param {string} text */
     const wideBytes = text=>{
         const bytes = new Uint8Array((text.length + 1) * 2);
@@ -434,27 +466,15 @@ export function createEnvironment(host){
          * The value on the heap, for the caller to free; null and a length of
          * none for a variable not set.
          */
-        _dupenv_s: {
-            convention: 'cdecl',
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([buffer, length, name])=>{
-                if ((buffer >>> 0) === 0 || (name >>> 0) === 0)
-                {
-                    host.errno(EINVAL);
-                    return EINVAL;
-                }
-                const index = find(readNarrow(name));
-                const bytes = index < 0 ? null : encodeAnsi(`${start()[index].value}\0`);
-                const copy = bytes ? place(bytes) : 0;
-                writePointer(buffer, copy);
-                if ((length >>> 0) !== 0)
-                {
-                    writeU32(length, copy === 0 ? 0 : /** @type {Uint8Array} */ (bytes).length);
-                }
-                return 0;
-            },
-        },
+        _dupenv_s: dupenv(1),
+
+        /**
+         * errno_t _wdupenv_s(wchar_t **buffer, size_t *length, const wchar_t *name)
+         *
+         * _dupenv_s in wide characters, the length counted in them (Wine's
+         * msvcr80 test_wdupenv_s).
+         */
+        _wdupenv_s: dupenv(2),
 
         /** char ***__p__environ(void) */
         __p__environ: accessor('_environ'),

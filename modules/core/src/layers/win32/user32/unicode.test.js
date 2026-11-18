@@ -135,6 +135,39 @@ test('WM_GETTEXT answers the wide caller in its own buffer, in characters', ()=>
     assert.equal(m.lent.size, 0);
 });
 
+test('WM_GETTEXT copies back only as many characters as the procedure answers', ()=>{
+    // dialog.c test_aw_conversion_dlgproc: a dialog procedure that filled
+    // the buffer and answered through DWLP_MSGRESULT (0) leaves the caller
+    // an empty text, its buffer past the terminator untouched.
+    const m = memory();
+    m.writeMemory(0x400, new Uint8Array(8).fill(0x41));
+    const answer = translated(m, { hwnd: 1, message: WM_GETTEXT, wParam: 8, lParam: 0x400 },
+        true, got=>{
+            writeText(m, got.lParam, 'WndText', got.wParam, true);
+            return 0;
+        });
+    assert.equal(answer, 0);
+    assert.deepEqual([...m.bytes.subarray(0x400, 0x402)], [0, 0x41]);
+    assert.equal(m.lent.size, 0);
+});
+
+test('a broadcast\'s section and a file to add cross converted, as a path does', ()=>{
+    // dialog.c test_aw_conversion_dlgproc: WM_WININICHANGE, WM_DEVMODECHANGE
+    // and LB_ADDFILE carry a string in lParam like LB_DIR.
+    const m = memory();
+    m.writeMemory(0x100, textBytes('intl', true));
+    for (const kind of [0x001a, 0x001b, 0x0196])
+    {
+        let read = '';
+        translated(m, { hwnd: 1, message: kind, wParam: 0, lParam: 0x100, unicode: true },
+            false, got=>{
+                read = m.readCString(got.lParam, 100);
+                return 0;
+            });
+        assert.equal(read, 'intl', `message 0x${kind.toString(16)}`);
+    }
+});
+
 test('an edit\'s replacement text and the line it copies out cross converted', ()=>{
     // A self-extractor wrote each line of its log into a wide rich edit with
     // EM_REPLACESEL; the edit read the wide text as ANSI and showed the

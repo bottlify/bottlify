@@ -18,7 +18,7 @@
 
 import { guestEntry } from './guest-code.js';
 import { LATER_HEAP } from './heap.js';
-import { settle } from './io.js';
+import { IOINFO_EXPORT, IOINFO_LAYOUTS, settle } from './io.js';
 import { INVALID_CRUNTIME_PARAMETER, INVALID_PARAMETERS, createInvalidParameterRuntime,
     watchedExports } from './invalid-parameter.js';
 import * as inGuest from './inguest.js';
@@ -182,6 +182,11 @@ export function createMsvcr80Functions(crt, host){
         ...crt,
         // The heap functions this runtime added: _recalloc, the aligned ones'.
         .../** @type {any} */ (crt)[LATER_HEAP] ?? {},
+        // `__pioinfo` in this runtime's layout, over msvcrt's descriptors:
+        // a program built against it reads `textmode` past the lock.
+        ...(/** @type {any} */ (crt)[IOINFO_EXPORT]
+            ? { __pioinfo: /** @type {any} */ (crt)[IOINFO_EXPORT](IOINFO_LAYOUTS.msvcr80) }
+            : {}),
 
         _encode_pointer: encode,
         _decode_pointer: encode,

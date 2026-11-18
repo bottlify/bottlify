@@ -184,6 +184,26 @@ test('the wide names make, rename and remove the same entries', ()=>{
     assert.equal(table._wunlink.handler([0]), -1, 'no path');
 });
 
+test('a removal leaves the last error DeleteFile and RemoveDirectory leave', ()=>{
+    // Wine's msvcp140 test_Unlink: msvcp140's _Unlink reads its code from
+    // the last error after the universal runtime's _wremove.
+    const memory = fakeMemory();
+    const files = fakeVolume(['C:\\game', 'C:\\game\\data.mpq', 'C:\\game\\saves',
+        'C:\\game\\saves\\one.sav']);
+    /** @type {number[]} */
+    const last = [];
+    const table = /** @type {Record<string, any>} */ (createPathFunctions({
+        ...memory, files, errno: ()=>{}, setLastError: code=>last.push(code),
+    }));
+    table._wremove.handler([memory.putWide('C:\\game\\none.txt')]);
+    table._wremove.handler([memory.putWide('C:\\game\\gone\\none.txt')]);
+    files.remove = ()=>false;
+    table._wremove.handler([memory.putWide('C:\\game\\saves')]);
+    table._rmdir.handler([memory.put('C:\\game\\saves')]);
+    assert.deepEqual(last, [2, 3, 5, 145],
+        'not found, no folder on the way, a folder to DeleteFile, a folder not empty');
+});
+
 test('a failing operation says why in errno, as each one documents', ()=>{
     const memory = fakeMemory();
     const files = fakeVolume(['C:\\game', 'C:\\game\\data.mpq', 'C:\\game\\saves']);

@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createDescriptors, createIoFunctions } from './io.js';
+import { IOINFO_LAYOUTS, createDescriptors, createIoFunctions } from './io.js';
 import { withPipes } from './pipes.js';
 import { fakeMemory, fakeVolume } from './harness.test.js';
 
@@ -96,7 +96,7 @@ test('the pipe flags its ends in __pioinfo, and is let go when both ends close',
     const [reader, writer] = pipe(O_BINARY | O_NOINHERIT);
     // The first block's entries, 36 bytes each past the 64 block pointers;
     // `wxflag` is the byte at 4: open, a pipe, not inherited.
-    const wxflag = (/** @type {number} */ fd)=>descriptors.ioinfoBytes()[64 * 4 + fd * 36 + 4];
+    const wxflag = (/** @type {number} */ fd)=>descriptors.ioinfoBytes(IOINFO_LAYOUTS.msvcrt)[64 * 4 + fd * 36 + 4];
     assert.equal(wxflag(reader), 0x01 | 0x08 | 0x10);
     assert.equal(wxflag(writer), 0x01 | 0x08 | 0x10);
     write(writer, 'abc');

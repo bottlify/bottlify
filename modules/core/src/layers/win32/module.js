@@ -7,11 +7,12 @@
 import { createConsoleFunctions, HANDLE_STDOUT, HANDLE_STDERR } from './kernel32/console.js';
 import { createThreadingFunctions } from './kernel32/threading.js';
 import { createFiberFunctions } from './kernel32/fibers.js';
+import { createFiberLocalStorage } from './kernel32/fls.js';
 import { createNamedObjects, createRemoteNamedObjects } from './kernel32/named-objects.js';
 import { createRegistryService } from './advapi32/registry-service.js';
 import { createDebugFunctions } from './kernel32/debug.js';
 import {
-    ALIGNMENT_64, GLOBAL_MEMORY, TABLES, createHeapAllocator, createHeapFunctions,
+    ALIGNMENT_64, GLOBAL_MEMORY, PAGE_STATE, TABLES, createHeapAllocator, createHeapFunctions,
 } from './kernel32/heap.js';
 import { createProcessFunctions, createThreadState, PERFORMANCE_FREQUENCY }
     from './kernel32/process.js';
@@ -200,6 +201,8 @@ import { refreshOf } from './user32/display.js';
 /** RT_MESSAGETABLE, and MESSAGE_RESOURCE_ENTRY's flag for UTF-16 text. */
 const RT_MESSAGETABLE = 11;
 const MESSAGE_RESOURCE_UNICODE = 0x0001;
+/** GetLocaleInfo's LCID for the user's own locale. */
+const LOCALE_USER_DEFAULT = 0x0400;
 
 /**
  * A MESSAGE_RESOURCE_ENTRY's text: its length (the header's four bytes
@@ -599,6 +602,8 @@ export function createWin32Module(){
             const threadMade = thread=>{
                 processors.adopt(thread);
                 config?.threadBlock?.(thread);
+                // Its block made, the creator's active context goes on it.
+                activation.loaderApi.inherit(thread?.tebAddress ?? 0);
             };
             /**
              * The string values of an environment key in the registry: the
@@ -787,6 +792,9 @@ export function createWin32Module(){
              *     cover: (hwnd: number) => void, active: () => number, deactivated: () => boolean,
              *     deactivations: () => number,
              *     rawInput: (report: import('./user32/rawinput.js').RawInputEvent) => void,
+             *     claimRawInput?: (usage: number, flags: number, thread?: unknown)
+             *         => number | Promise<number>,
+             *     releaseRawInput?: (usage: number) => void,
              *     modalLoop: import('./user32/windows.js').WindowService['modalLoop'],
              *     painting: () => boolean, refreshContext?: (hdc: number) => void,
              *     surfaceOf?: (hwnd: number) => { hwnd: number, rect: any } | null,
@@ -1166,6 +1174,24 @@ export function createWin32Module(){
             const endThread = (thread, code)=>{
                 const others = kernel.threads().some((/** @type {any} */ other)=>
                     other !== thread && other.state !== 'terminated');
+                // Its running fiber's fibre-local values are called back
+                // first, on the thread, as a C runtime frees a thread's data in
+                // that callback (`kernel32/fls.js`); not for the process's end.
+                const fibreLocal = others ? fiberStorage.current() : 0;
+                if (fibreLocal !== 0)
+                {
+                    return Promise.resolve().then(()=>fiberStorage.release(fibreLocal))
+                        .then(()=>tellAndEnd(thread, code, others) ?? 0);
+                }
+                return tellAndEnd(thread, code, others);
+            };
+            /**
+             * endThread's rest, once the fibre-local values are called back.
+             *
+             * @param {any} thread @param {number} code @param {boolean} others
+             * @returns {Promise<number> | null}
+             */
+            const tellAndEnd = (thread, code, others)=>{
                 if (!others && exitCode === null)
                 {
                     // On this thread, which goes on standing while they are told.
@@ -2273,6 +2299,10 @@ export function createWin32Module(){
                     readMemory,
                     /** @param {number} address */
                     imageOf: address=>modules.imageOf?.(address) ?? null,
+                    // A JIT's lookup callback, called on the thread whose
+                    // exception is being dispatched.
+                    /** @param {number} entry @param {number[]} args */
+                    callGuest: (entry, args)=>Promise.resolve(bridge.callGuest({ entry, args })),
                 })
                 : null;
             /** @type {ReturnType<typeof createSeh64> | null} */
@@ -2618,6 +2648,19 @@ export function createWin32Module(){
                 // A session is named after the program, as the object manager names it.
                 program: ()=>nativePathOf(modules.imagePath()) ?? modules.imagePath(),
                 processId: ()=>processId,
+                // An endpoint activated as DirectSound or DirectShow's renderer is
+                // made through CoCreateInstance, loading its library, and
+                // initialized through its own vtable.
+                createInstance: (clsid, iid, out)=>lent(/** @type {Uint8Array} */ (parseGuid(clsid)),
+                    at=>libraries['ole32.dll'].CoCreateInstance.handler([at, 0, 1, iid, out])),
+                callMethod: (object, slot, args)=>{
+                    /** @param {number} at */
+                    const pointerAt = at=>memory.readU32(at) + (pointerSize === 8
+                        ? memory.readU32(at + 4) * 2 ** 32 : 0);
+                    const entry = pointerAt(pointerAt(object) + slot * pointerSize);
+                    return bridge.callGuest({ entry, args: [object, ...args],
+                        thread: bridge.callerThread() });
+                },
             });
 
             // DirectPlay's session and lobby objects, which a program makes
@@ -2970,9 +3013,17 @@ export function createWin32Module(){
             // and what its tab control draws from.
             const imageLists = createImageLists({
                 readMemory, writeMemory, divergence: config?.divergence,
+                // A list is the IImageList its handle points at.
+                vtables: comVtables,
                 gdi32: name=>libraries['GDI32.dll']?.[name],
                 user32: name=>libraries['USER32.dll']?.[name],
                 bitmapSize: bitmap=>gdi.bitmapSize(bitmap),
+                // A list's image is a DIB section at its depth, described to
+                // gdi32 in guest memory.
+                allocate: bytes=>heap.allocate(bytes),
+                release: address=>heap.free(address),
+                // comctl32's own module, whose standard strips a list loads.
+                ownInstance: ()=>/** @type {any} */ (modules.find('comctl32.dll'))?.base ?? 0,
             });
 
             /** The runtime's heap: HeapCreate's, the first time malloc needs it. */
@@ -2992,6 +3043,37 @@ export function createWin32Module(){
                 answered ??= new Set(Object.keys(libraries).map(name=>name.toLowerCase()));
                 return answered;
             };
+
+            // Fibre-local storage: each fiber's values, called back as a
+            // fiber or a thread ends (`kernel32/fls.js`).
+            const fiberStorage = createFiberLocalStorage({
+                pointerSize,
+                readPointer: address=>(pointerSize === 8
+                    ? memory.readU32(address) + memory.readU32(address + 4) * 2 ** 32
+                    : memory.readU32(address)),
+                writePointer: (address, value)=>{
+                    memory.writeU32(address, value % 2 ** 32 >>> 0);
+                    if (pointerSize === 8)
+                    {
+                        memory.writeU32(address + 4, Math.floor(value / 2 ** 32));
+                    }
+                },
+                teb: ()=>kernel.currentThread()?.tebAddress ?? 0,
+                allocate: bytes=>{
+                    const at = heap.allocate(bytes);
+                    if (at !== 0)
+                    {
+                        writeMemory(at, new Uint8Array(bytes));
+                    }
+                    return at;
+                },
+                free: address=>heap.free(address),
+                call: (entry, args)=>bridge.callGuest({ entry, args,
+                    thread: bridge.callerThread() }),
+                setLastError: setError,
+                allocateCode: bytes=>heap.allocateCode(bytes),
+                writeMemory,
+            });
 
             // Activation contexts: built from manifests on the volume and in
             // the modules, answered from guest memory (`actctx.js`).
@@ -3244,7 +3326,9 @@ export function createWin32Module(){
                         threadReturn: ()=>threadReturnAddress(),
                         exitThread: code=>libraries['KERNEL32.dll'].ExitThread.handler([code]),
                         setLastError: setError,
+                        storage: fiberStorage,
                     }),
+                    ...fiberStorage.table,
                     ...apcs.table,
                     ...createThreadPool({
                         kernel,
@@ -3655,6 +3739,11 @@ export function createWin32Module(){
                         systemTimeMs: ()=>kernel.clock.wallClock(),
                         /** @param {number} address */
                         regionAt: address=>memory.find(address) ?? null,
+                        // The pages as VirtualQuery answers them (heap.js), read
+                        // when asked: kernel32's table is still being built.
+                        /** @param {number} address */
+                        pageState: address=>/** @type {any} */ (libraries['KERNEL32.dll'])[
+                            PAGE_STATE](address),
                         /** @param {number} bytes */
                         allocate: bytes=>allocator.allocate(bytes),
                         park: ()=>bridge.park(),
@@ -3755,6 +3844,10 @@ export function createWin32Module(){
                     ...createFileFunctions({
                         pointerSize,
                         divergence: config?.divergence,
+                        // Asked when called: the table is assembled by then.
+                        environmentVariable: name=>Object.entries(/** @type {any} */ (
+                            libraries['KERNEL32.dll'])?.[ENVIRONMENT_NOW]?.() ?? {})
+                            .find(([key])=>key.toUpperCase() === name.toUpperCase())?.[1],
                         openRefused: record=>{
                             refusedOpens.push(record);
                             if (refusedOpens.length > REFUSED_OPENS_KEPT)
@@ -3848,6 +3941,7 @@ export function createWin32Module(){
                         fillMemory,
                         readCString,
                         scanCString,
+                        setLastError: setError,
                         // The `va_list` window stops at the end of its region: a
                         // thread formatting from just below its stack's top is
                         // entitled to, and reading off the end is the host's bug.
@@ -3923,6 +4017,13 @@ export function createWin32Module(){
                         // `_environ`, the time zone's -- are rewritten where the
                         // loader placed them.
                         addressOf: name=>crtImage()?.addressOf?.(name) ?? 0,
+                        // Every runtime placed shows the descriptors in its
+                        // `__pioinfo`, laid out as its export says.
+                        ioinfo: ()=>CRT_IMAGES.flatMap(name=>{
+                            const at = modules.find(name)?.addressOf?.('__pioinfo') ?? 0;
+                            const layout = libraries[name]?.__pioinfo?.layout;
+                            return at !== 0 && layout ? [{ at, layout }] : [];
+                        }),
                         // The runtime's copy of the environment starts as the
                         // variables kernel32 starts the process with.
                         environment: startingEnvironment,
@@ -4354,7 +4455,27 @@ export function createWin32Module(){
                     free: address=>allocator.free(address),
                     readWideString: address=>readWideString(address, 0x8000),
                     readFile: readVolumeFile,
+                    writeFile: (path, bytes)=>{
+                        const node = volume.open(path,
+                            { read: false, write: true, create: true, truncate: true });
+                        if (!node)
+                        {
+                            return false;
+                        }
+                        try
+                        {
+                            return volume.write(node, 0, bytes) === bytes.length;
+                        }
+                        finally
+                        {
+                            volume.close(node);
+                        }
+                    },
                     gdi32: (name, args)=>libraries['GDI32.dll'][name].handler(args) >>> 0,
+                    user32: (name, args)=>libraries['USER32.dll'][name].handler(args) >>> 0,
+                    // A program's IStream, called on the thread that called GDI+.
+                    callGuest: (entry, args)=>bridge.callGuest({ entry, args,
+                        thread: kernel.currentThread() }),
                     procAddress: async name=>{
                         const at = heap.allocate(64);
                         try
@@ -5412,6 +5533,9 @@ export function createWin32Module(){
                     // program with Common Controls 6 in its manifest makes
                     // version 6's Button (`actctx.js`).
                     windowClass: name=>activation.loaderApi.windowClass(name),
+                    // A class's module is told apart by its handle: the
+                    // program's own, user32's and any other loaded one.
+                    moduleHandle: name=>/** @type {any} */ (modules.find(name))?.base ?? 0,
                     // A version 6 button's image list, by comctl32's measure.
                     imageListSize: himl=>imageLists.sizeOf(himl),
                     // The common controls are built-in classes of the window
@@ -5427,6 +5551,27 @@ export function createWin32Module(){
                                 // the instance its tool names.
                                 loadString: (instance, id)=>modules.loadString?.(instance, id)
                                     ?? null,
+                                setBkMode: (hdc, mode)=>libraries['GDI32.dll']?.SetBkMode
+                                    ?.handler([hdc, mode]) ?? 0,
+                                // A month calendar's today is GetLocalTime's
+                                // clock, its names and first day the user's
+                                // locale's, as GetLocaleInfoW answers them.
+                                localTime: ()=>kernel.clock.wallClock(),
+                                localeText: type=>{
+                                    const length = 128;
+                                    const at = heap.allocate(length * 2);
+                                    try
+                                    {
+                                        const written = libraries['KERNEL32.dll']?.GetLocaleInfoW
+                                            ?.handler([LOCALE_USER_DEFAULT, type, at, length]) ?? 0;
+                                        return written > 1 ? new TextDecoder('utf-16le')
+                                            .decode(readMemory(at, (written - 1) * 2)) : null;
+                                    }
+                                    finally
+                                    {
+                                        heap.free(at);
+                                    }
+                                },
                                 // A control that subclasses another window -- an
                                 // up-down control its buddy -- does it with
                                 // comctl32's own SetWindowSubclass.
@@ -6228,9 +6373,21 @@ export function createWin32Module(){
             {
                 for (const name of ['RtlLookupFunctionEntry', 'RtlVirtualUnwind', 'RtlUnwindEx',
                     'RtlCaptureContext', 'RtlAddFunctionTable', 'RtlDeleteFunctionTable',
-                    'RtlPcToFileHeader'])
+                    'RtlPcToFileHeader', 'RtlInstallFunctionTableCallback'])
                 {
                     libraries['ntdll.dll'][name] = /** @type {any} */ (seh64.table)[name];
+                }
+                // The growable tables are ntdll's alone, from Windows 8 on: a
+                // JIT that finds none installs a callback range instead.
+                const growable = ['RtlAddGrowableFunctionTable', 'RtlGrowFunctionTable',
+                    'RtlDeleteGrowableFunctionTable'];
+                for (const name of growable)
+                {
+                    if (windows.major > 6 || (windows.major === 6 && windows.minor >= 2))
+                    {
+                        libraries['ntdll.dll'][name] = /** @type {any} */ (seh64.table)[name];
+                    }
+                    delete libraries['KERNEL32.dll'][name];
                 }
             }
 
@@ -6559,6 +6716,19 @@ export function createWin32Module(){
                 com: ()=>com,
 
                 /**
+                 * CoCreateInstance as a program calls it, guest pointers in and
+                 * the HRESULT out: how another layer makes an object a class
+                 * names, the program's own registered class included (a
+                 * DirectSound buffer's effects).
+                 *
+                 * @param {number} clsid @param {number} outer @param {number} context
+                 * @param {number} iid @param {number} out
+                 * @returns {number | Promise<number>}
+                 */
+                createInstance: (clsid, outer, context, iid, out)=>libraries['ole32.dll']
+                    .CoCreateInstance.handler([clsid, outer, context, iid, out]),
+
+                /**
                  * Installs a driver in the Audio Compression Manager: a codec another
                  * layer implements, found by a program that enumerates the drivers as
                  * it finds Windows' own.
@@ -6716,6 +6886,18 @@ export function createWin32Module(){
                  * @param {import('./user32/rawinput.js').RawInputEvent} report
                  */
                 rawInput: report=>windowService.rawInput(report),
+
+                /**
+                 * DirectInput 8 taking the mouse (usage 2) or the keyboard (6):
+                 * the device registered for raw input to its hidden window, as
+                 * the program's GetRegisteredRawInputDevices then sees it.
+                 *
+                 * @param {number} usage @param {number} flags @param {unknown} [thread]
+                 */
+                claimRawInput: (usage, flags, thread)=>
+                    windowService.claimRawInput?.(usage, flags, thread) ?? 0,
+                /** @param {number} usage */
+                releaseRawInput: usage=>windowService.releaseRawInput?.(usage),
 
                 /**
                  * A call its parent makes in this process (`cross-process.js`),

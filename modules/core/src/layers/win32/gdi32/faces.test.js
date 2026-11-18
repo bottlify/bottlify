@@ -7,7 +7,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    fontFaces, fontFamilies, outlineCell, rasterFace, rasterRealization, windowsMetrics,
+    fontFaces, fontFamilies, outlineCell, rasterFace, rasterRealization, scaledAdvances,
+    windowsMetrics,
 } from './faces.js';
 
 /**
@@ -172,6 +173,33 @@ test('the dialog faces advance as Windows draws them, so a line breaks where Win
             'C:\\Program Files\\Rockstar Games\\Max Payne 2 Demo'), 350);
         assert.equal(windowsMetrics({ faceName: 'Arial', height: 13, weight: 400 }), null);
     });
+
+test('an outline face known at one em advances proportionally at every other', ()=>{
+    // Tahoma's widths are known at 11 pixels (its hdmx at 8 points): "W" 10,
+    // "i" 2, "x" 6. A cell of 20 is a 17-pixel em (Wine's test_height_selection
+    // gives Tahoma 20 an internal leading of 3), each advance scaled to it and
+    // rounded: "WWWW" is 60 pixels, where one fixed pitch made it 36 and a
+    // button sized to it was narrower than its text (comctl32 button.c's
+    // ideal size in Tahoma 20).
+    /** @param {number} height @param {string} text */
+    const width = (height, text)=>{
+        const advances = scaledAdvances({ faceName: 'Tahoma', height, weight: 400 });
+        assert.ok(advances, String(height));
+        return Array.from(text, character=>advances[character.charCodeAt(0) - 0x20])
+            .reduce((sum, advance)=>sum + advance, 0);
+    };
+    assert.equal(width(20, 'WWWW'), 60);
+    assert.equal(width(20, 'i'), 3, '2 * 17 / 11, rounded');
+    assert.equal(width(-11, 'WWWW'), 40, 'the em it was measured at is the table itself');
+    assert.equal(width(-22, 'x'), 12);
+    assert.equal(scaledAdvances({ faceName: 'Tahoma', height: 20, weight: 700 }), null,
+        'bold Tahoma is a face of its own');
+    assert.equal(scaledAdvances({ faceName: 'MS Sans Serif', height: 20, weight: 400 }), null,
+        'a bitmap face is realised, not scaled');
+    assert.equal(scaledAdvances({ faceName: 'Arial', height: 20, weight: 400 }), null);
+    assert.equal(scaledAdvances({ faceName: 'Microsoft Sans Serif', height: 20, weight: 400 }),
+        null, 'a cell whose em cannot be told');
+});
 
 test('a bitmap face is realised at one of its sizes, a whole number of times over', ()=>{
     // Wine's test_bitmap_font_metrics and test_bitmap_font: a bitmap face is

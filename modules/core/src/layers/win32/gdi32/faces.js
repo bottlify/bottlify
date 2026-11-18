@@ -166,6 +166,45 @@ export function windowsMetrics(font){
 }
 
 /**
+ * The em, in pixels, the dialog tables' outline faces were measured at: their
+ * `hdmx` widths at 8 points on a 96 DPI display.
+ */
+const MEASURED_EM = 11;
+
+/**
+ * Each ANSI character's advance for an outline face of any size whose widths
+ * are known at one em - Tahoma's and Microsoft Sans Serif's, measured at 11
+ * pixels - scaled to the font's em and rounded, as GDI rounds a TrueType
+ * glyph's advance at its pixel size (decisions.md A266: the hinted widths at
+ * one size stand in for the face's design widths, which this engine does not
+ * carry). The em is the requested height for a negative one and the cell less
+ * its internal leading for a positive one where the face's cell is known.
+ * Null for a bitmap face, a bold one, an em that cannot be told, or a face
+ * whose widths are not known.
+ *
+ * @param {{ faceName: string, height: number, weight: number }} font
+ * @returns {number[] | null}  advances, 0x20 to 0xFF
+ */
+export function scaledAdvances(font){
+    const named = faceNamed(font.faceName ?? '');
+    const resolved = (named?.substitute ?? named?.name ?? '').toLowerCase();
+    const measured = DIALOG_8PT.get(resolved);
+    if (!measured || rasterFace(font.faceName ?? '') || (font.weight || 400) >= 600)
+    {
+        return null;
+    }
+    const requested = font.height | 0;
+    const cell = requested > 0 ? outlineCell(font) : null;
+    const em = requested < 0 ? -requested
+        : cell ? cell.height - cell.internalLeading : 0;
+    if (em <= 0)
+    {
+        return null;
+    }
+    return Array.from(measured.advances, advance=>Math.round(advance * em / MEASURED_EM));
+}
+
+/**
  * An outline face's vertical extent, from its own tables: the em square
  * ('head' unitsPerEm) and the cell Windows measures it by, OS/2's
  * usWinAscent and usWinDescent; and where the face has a 'VDMX' that holds

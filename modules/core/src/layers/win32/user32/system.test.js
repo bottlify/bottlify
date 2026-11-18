@@ -4033,10 +4033,11 @@ test('BroadcastSystemMessage sends to every top-level window, and a query can be
 
     assert.equal(fns.BroadcastSystemMessageA.handler([BSF_QUERY | BSF_POSTMESSAGE, 0, WM_APP,
         0, 0]), 0);
-    assert.deepEqual(errors, [87]);
+    assert.equal(errors.at(-1), 87);
+    errors.length = 0;
     assert.equal(fns.BroadcastSystemMessageExA.handler([0x80000000, 0, WM_APP, 0, 0, 0]), 0,
         'a flag Windows does not know');
-    assert.deepEqual(errors, [87, 87]);
+    assert.deepEqual(errors, [87]);
 
     // SendNotifyMessage to each: a window of this thread is answered before
     // the call returns, unlike a post.

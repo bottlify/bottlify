@@ -428,6 +428,26 @@ export function createFilesystemModule(){
             };
 
             /**
+             * Refuses to remove or rename the process's current directory. A
+             * Win32 process holds it open, without sharing deletion, from the
+             * moment it becomes current until another one does, so Windows
+             * answers its RemoveDirectory or MoveFile with a sharing violation.
+             * Only the current drive's: another drive's is remembered, not held.
+             *
+             * @param {{ drive: string, key: string }} where @param {string} path
+             */
+            const mustNotBeCurrent = (where, path)=>{
+                const drive = state.directories.drive();
+                const held = state.directories.directoryOf(drive).join('\\');
+                if (where.drive === drive
+                    && where.key === `${foldName(drive)}:${foldName(held)}`)
+                {
+                    throw fsError(ErrorCode.SHARING_VIOLATION,
+                        `"${path}" is the current directory, held open`);
+                }
+            };
+
+            /**
              * Whether this instance is still open. A call that was in flight when
              * the machine was disposed must not find the volume gone: after
              * disposal every method answers the way it would for a file that is
@@ -850,8 +870,9 @@ export function createFilesystemModule(){
                     {
                         return;
                     }
-                    const { tree, components } = locate(path);
-                    tree.removeDirectory(components);
+                    const where = locate(path);
+                    mustNotBeCurrent(where, path);
+                    where.tree.removeDirectory(where.components);
                 },
 
                 /** @param {string} path */
@@ -878,7 +899,9 @@ export function createFilesystemModule(){
                 mayRemove(path){
                     if (live())
                     {
-                        state.files.mayRemove(locate(path).key, path);
+                        const where = locate(path);
+                        mustNotBeCurrent(where, path);
+                        state.files.mayRemove(where.key, path);
                     }
                 },
 
@@ -1157,6 +1180,8 @@ export function createFilesystemModule(){
 
                     if (entry.directory)
                     {
+                        // Refused before a child moves, not by the last step.
+                        mustNotBeCurrent(locate(from), from);
                         // Into its own subtree it would never finish: each
                         // name moved makes another under the one being moved.
                         // Windows refuses it.

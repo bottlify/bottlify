@@ -214,6 +214,8 @@ const NMHEADER_ITEM = 12;
 
 /** NM_CUSTOMDRAW: NMLVCUSTOMDRAW after its NMHDR, the stages, item states and answers. */
 const NM_CUSTOMDRAW = -12;
+/** SetBkMode's TRANSPARENT. */
+const TRANSPARENT = 1;
 const CUSTOMDRAW = Object.freeze({ dwDrawStage: 12, hdc: 16, rc: 20, dwItemSpec: 36,
     uItemState: 40, lItemlParam: 44, clrText: 48, clrTextBk: 52, iSubItem: 56, SIZE: 104 });
 const CDDS_PREPAINT = 0x00001;
@@ -280,8 +282,9 @@ const VK_CONTROL = 0x11;
  *
  * @param {import('../user32/controls.js').ControlHost} host
  * @param {any} tk  The drawing helpers the system classes share.
+ * @param {(hdc: number, mode: number) => number} [setBkMode]  gdi32's.
  */
-export function createListViewProcedure(host, tk){
+export function createListViewProcedure(host, tk, setBkMode){
     let toldEdit = false;
     /** @param {string} what */
     const notHere = what=>{
@@ -1528,6 +1531,11 @@ export function createListViewProcedure(host, tk){
         {
             draw.fill(hdc, rect, held.background);
         }
+        // The items are painted, and their custom draw told, with the
+        // context's background mode TRANSPARENT, whatever the text's
+        // background colour: the list fills a background itself (Wine's
+        // listview test_customdraw_background sees it at every stage).
+        setBkMode?.(hdc, TRANSPARENT);
         const wants = await customDraw(record, CDDS_PREPAINT, hdc, rect, {}, thread);
         if (wants & CDRF_SKIPDEFAULT)
         {

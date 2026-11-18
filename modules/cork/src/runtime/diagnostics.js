@@ -396,7 +396,9 @@ export function createDiagnostics(state){
 
     /** @type {{ put: string[], missed: string[] }} */
     const storeTrace = { put: [], missed: [] };
-    /** @param {string[]} list
+    // The other parts name the list rather than hold it: a property they read keeps
+    // its name in a production bundle, which drops the instrument only from here.
+    /** @param {'put' | 'missed'} list
      * @param {{ region: { entry: number, hash: string, blocks?: { start: number, end: number }[] },
      *     entryTop: number }} one */
     const trace = (list, one)=>{
@@ -404,7 +406,8 @@ export function createDiagnostics(state){
         {
             const spans = one.region.blocks
                 ?.map(block=>`${block.start.toString(16)}-${block.end.toString(16)}`);
-            list.push(`${one.region.entry.toString(16)}:${one.region.hash}:${one.entryTop}`
+            storeTrace[list].push(
+                `${one.region.entry.toString(16)}:${one.region.hash}:${one.entryTop}`
                 + (spans ? `:${spans.join(',')}` : ''));
         }
     };
@@ -727,7 +730,6 @@ export function createDiagnostics(state){
         refused,
         refusedWhy,
         relaxedFlagReads,
-        storeTrace,
         trace,
         interpretedAt,
         forcedStep,

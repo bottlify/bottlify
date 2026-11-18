@@ -31,6 +31,7 @@ import { DIR_EXCEPTION, DIR_EXPORT, parseExportDirectory, parsePe, readExports, 
     from './layers/loader/internal/pe.js';
 import { planDependencies } from './layers/loader/internal/dependencies.js';
 import { WINDOWS_LIBRARIES } from './layers/loader/internal/windows-libraries.js';
+import { LIBRARIES_SINCE } from './layers/loader/internal/libraries-since.js';
 import { STATUS } from './layers/win32/ntdll/status.js';
 import {
     findResource, listResources, loadString, RT_STRING, stringInBundle,
@@ -3049,15 +3050,23 @@ export function placeLibrary(image, { next, floor, limit, holder, claim }){
 
 /**
  * Whether Windows itself carries a library: one in system32
- * (`WINDOWS_LIBRARIES`), or an API set, which the system's schema resolves by
+ * (`WINDOWS_LIBRARIES`) of the Windows this is, no later one's
+ * (`LIBRARIES_SINCE`), or an API set, which the system's schema resolves by
  * name and no program brings.
  *
  * @param {string} name
+ * @param {{ major: number, minor: number }} [windows]  the machine's; none, any
  */
-export function isWindowsLibrary(name){
+export function isWindowsLibrary(name, windows){
     const lower = name.toLowerCase();
-    return WINDOWS_LIBRARIES.has(lower.includes('.') ? lower : `${lower}.dll`)
-        || /^(api|ext)-ms-win-/.test(lower);
+    const file = lower.includes('.') ? lower : `${lower}.dll`;
+    const since = LIBRARIES_SINCE.get(file);
+    if (since && windows && (windows.major < since[0]
+        || (windows.major === since[0] && windows.minor < since[1])))
+    {
+        return false;
+    }
+    return WINDOWS_LIBRARIES.has(file) || /^(api|ext)-ms-win-/.test(lower);
 }
 
 /**
@@ -3125,7 +3134,7 @@ export async function mapShippedLibraries(options){
             Math.max(imagePath.lastIndexOf('\\'), imagePath.lastIndexOf('/')) + 1),
         isSystem,
         isKnownDll,
-        isWindowsLibrary,
+        isWindowsLibrary: (/** @type {string} */ name)=>isWindowsLibrary(name, options.windows),
         // A file the program brought is read from beside it; a file it did not
         // bring is looked for in the system directories the engine fills, which
         // is where the runtime a title links against actually lives. Only when
@@ -7955,6 +7964,7 @@ async function buildApp(options){
         },
         executable: options.executable,
         bits: processBits,
+        windows: windowsVersion(options.windows),
         imagePath: options.imagePath ?? 'C:\\app.exe',
         filesystem, loader, blocks, events,
         isSystem: (/** @type {string} */ name)=>findModule(name) !== null,

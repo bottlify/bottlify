@@ -243,7 +243,9 @@ export function validateFormat(format, compatible){
  * The endpoint's audio clients, made by IMMDevice::Activate.
  *
  * @param {AudioClientHost} host
- * @param {{ id: string, rate: number, channels: number, mixFormat: () => Uint8Array }} endpoint
+ * @param {{ id: string, rate: number, channels: number, mixFormat: () => Uint8Array,
+ *     gain?: (channel: number) => number }} endpoint  `gain`: the endpoint's own volume
+ *     of a channel (IAudioEndpointVolume), which every stream to it plays at
  */
 export function createAudioClients(host, endpoint){
     /** @param {number} at @param {number} value */
@@ -333,9 +335,10 @@ export function createAudioClients(host, endpoint){
         }
         const session = stream.session;
         track.gain = session.muted ? 0 : session.volume;
-        const left = (stream.volumes[0] ?? 1) * (session.channels[0] ?? 1);
+        const endpointGain = endpoint.gain ?? (()=>1);
+        const left = (stream.volumes[0] ?? 1) * (session.channels[0] ?? 1) * endpointGain(0);
         const right = (stream.volumes[1] ?? stream.volumes[0] ?? 1)
-            * (session.channels[1] ?? session.channels[0] ?? 1);
+            * (session.channels[1] ?? session.channels[0] ?? 1) * endpointGain(1);
         track.balance = [left, right];
     };
 
@@ -1298,6 +1301,13 @@ export function createAudioClients(host, endpoint){
     };
 
     return {
+        /** Every stream's track played at the volumes again: the endpoint's changed. */
+        refreshVolumes(){
+            for (const session of sessions.values())
+            {
+                session.streams.forEach(applyVolume);
+            }
+        },
         /**
          * The endpoint's session manager written to `out`.
          *

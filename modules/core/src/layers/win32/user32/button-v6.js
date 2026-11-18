@@ -237,9 +237,7 @@ export function createButtonV6(env){
      * The image the button shows and how it stands to the text: an image
      * list's first image by its alignment, else BM_SETIMAGE's - shown only by
      * a push button, a command link or one styled BS_BITMAP or BS_ICON -
-     * beside the text, or
-     * above or below it when the style centres it and puts it at the top or
-     * bottom.
+     * beside the text, or above or below it.
      *
      * @param {any} record @param {any} state
      * @returns {{ width: number, height: number, place: 'side' | 'stacked' | 'alone' } | null}
@@ -264,9 +262,13 @@ export function createButtonV6(env){
         {
             return null;
         }
+        // Above or below the text when the style puts it at the top or the
+        // bottom and does not push it to a side (Wine's button test,
+        // test_bcm_get_ideal_size): left or right alone keeps it beside.
         const vertical = record.style & BS_VCENTER;
-        const stacked = (record.style & BS_CENTER) === BS_CENTER
-            && (vertical === BS_TOP || vertical === BS_BOTTOM);
+        const horizontal = record.style & BS_CENTER;
+        const stacked = (vertical === BS_TOP || vertical === BS_BOTTOM)
+            && (horizontal === 0 || horizontal === BS_CENTER);
         return { width: size.width, height: size.height, place: stacked ? 'stacked' : 'side' };
     };
 

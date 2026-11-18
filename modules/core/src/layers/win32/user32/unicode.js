@@ -61,11 +61,17 @@ const ITEM_STRING_IN = new Set([LB_ADDSTRING, LB_INSERTSTRING, LB_SELECTSTRING, 
 /** An edit's replacement text, and the line it copies out. */
 const EM_REPLACESEL = 0x00c2;
 const EM_GETLINE = 0x00c4;
+const LB_ADDFILE = 0x0196;
+/** The section or device a broadcast names (lParam). */
+const WM_WININICHANGE = 0x001a;
+const WM_DEVMODECHANGE = 0x001b;
 /**
  * The messages whose lParam is a string whatever the window keeps: a path,
- * an edit's replacement text.
+ * a file to add, an edit's replacement text, the section or device a
+ * broadcast names.
  */
-const PATH_IN = new Set([LB_DIR, CB_DIR, EM_REPLACESEL]);
+const PATH_IN = new Set([LB_DIR, CB_DIR, LB_ADDFILE, EM_REPLACESEL, WM_WININICHANGE,
+    WM_DEVMODECHANGE]);
 /** The messages that fill a buffer with an item's string, and the length each is asked. */
 const ITEM_STRING_OUT = new Map([[LB_GETTEXT, LB_GETTEXTLEN], [CB_GETLBTEXT, CB_GETLBTEXTLEN]]);
 const LBS_OWNERDRAW = 0x0030;
@@ -271,13 +277,19 @@ export function translated(memory, message, toUnicode, call, style = undefined){
                 return 0;
             }
             // Room for the characters in the procedure's encoding; a character
-            // of the ANSI page is never more than two bytes. What it wrote is
-            // read back up to its terminator, and the answer is the count of
+            // of the ANSI page is never more than two bytes. As many
+            // characters as the procedure answers it wrote are read back, up
+            // to a terminator - a procedure that answers 0 has written
+            // nothing, whatever the buffer holds (dialog.c
+            // test_aw_conversion_dlgproc) - and the answer is the count of
             // characters the caller's buffer took.
             const size = room * 2 + 2;
             return lending(memory, size, ()=>new Uint8Array(size),
-                into=>andThen(call({ ...converted, lParam: into }), ()=>writeText(memory,
-                    message.lParam, readText(memory, into, toUnicode, room), room, fromUnicode)));
+                into=>andThen(call({ ...converted, lParam: into }), answer=>{
+                    const count = Math.max(0, Math.min(answer | 0, toUnicode ? room : room * 2));
+                    const text = count === 0 ? '' : readText(memory, into, toUnicode, count);
+                    return writeText(memory, message.lParam, text, room, fromUnicode);
+                }));
         }
         case EM_GETLINE:
         {

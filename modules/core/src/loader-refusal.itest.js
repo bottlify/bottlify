@@ -69,6 +69,18 @@ test('a library Windows carries and the engine does not recreate lets the progra
         assert.equal(await app.run({ timeoutMs: 30_000 }), 7);
     });
 
+test('a library a later Windows brings is found nowhere on an earlier one',
+    { timeout: 60_000 }, async t=>{
+        // xaudio2_8.dll came with Windows 8: on Windows 7 a program that
+        // imports it does not start; on Windows 10 the gap is the engine's.
+        const seven = await createApp({ executable: importing('xaudio2_8.dll'), windows: 'win7' });
+        t.after(()=>seven.dispose());
+        assert.equal((await seven.run({ timeoutMs: 30_000 })) >>> 0, STATUS_DLL_NOT_FOUND);
+        const ten = await createApp({ executable: importing('xaudio2_8.dll'), windows: 'win10' });
+        t.after(()=>ten.dispose());
+        assert.equal(await ten.run({ timeoutMs: 30_000 }), 7);
+    });
+
 test('a child whose static import is found nowhere is started and ends with STATUS_DLL_NOT_FOUND',
     { timeout: 60_000 }, async t=>{
         // CreateProcess succeeds, as on Windows; the parent reads the child's

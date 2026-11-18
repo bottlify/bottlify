@@ -65,6 +65,7 @@ import { charactersOf, readToTerminator } from '../common/scan-windows.js';
 /** GetSystemMetrics indices this build has a real answer for. */
 /** How many argument slots a `va_list` is read for, since it carries no count. */
 const VA_LIST_SLOTS = 64;
+const ERROR_INSUFFICIENT_BUFFER = 122;
 
 /** The list box message GetListBoxInfo is. */
 const LB_GETLISTBOXINFO = 0x01b2;
@@ -884,7 +885,8 @@ const WS_EX_CONTEXTHELP = 0x00000400;
 /** TITLEBARINFO: cbSize, rcTitleBar, rgstate[6] (the bar, a reserved slot, four buttons). */
 const TITLEBARINFO_SIZE = 44;
 /** COMBOBOXINFO: cbSize, rcItem, rcButton, stateButton, hwndCombo, hwndItem, hwndList. */
-const COMBOBOXINFO_SIZE = 52;
+/** COMBOBOXINFO by pointer size: its three window handles end it. */
+const COMBOBOXINFO_SIZE = { 4: 52, 8: 64 };
 const TITLEBARINFO_RGSTATE = 20;
 const STATE_SYSTEM_UNAVAILABLE = 0x00000001;
 const STATE_SYSTEM_INVISIBLE = 0x00008000;
@@ -1014,7 +1016,6 @@ const SW_SHOWNA = 8;
  * @param {any} options.host
  * @param {(hwnd: number) => any | null} options.live
  * @param {Map<number, any>} options.windows
- * @param {Map<string, any>} options.classes  Registered classes, by name.
  * @param {(hwnd: number) => ({ processId: number, threadId: number, className: string,
  *     title: string, parent?: number, owner?: number, style?: number } | null)}
  *     [options.elsewhere]
@@ -1022,7 +1023,7 @@ const SW_SHOWNA = 8;
  * @param {{ register: (name: string) => number, registeredName: (id: number) => string | null }}
  *     [options.names]  The run's registered messages and clipboard formats.
  */
-export function createSystemFunctions({ host, live, windows, classes, elsewhere = ()=>null,
+export function createSystemFunctions({ host, live, windows, elsewhere = ()=>null,
     names = createWindowDirectory() })
 {
     /** The structures at the process's width (`structs.js`). */
@@ -1070,8 +1071,6 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
 
     const refuse = createRefusals(host);
 
-    /** Whether GetComboBoxInfo has said it names no edit or list window. */
-    let comboWindowsSaid = false;
     // Ids handed to a timer with no window, kept clear of the small numbers a
     // program picks for its own.
     let nextTimerId = 0x1000;
@@ -1329,15 +1328,18 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         // that subclassed one calls it through here with its address. An
         // address is called as a procedure of the call's own encoding; a
         // handle names one of the other, and the message is converted on
-        // its way (class.c test_wndproc_handles).
+        // its way (class.c test_wndproc_handles). A system class's entry is
+        // run as it is, in its own encoding, whichever call names it.
         const behind = host.procBehind?.(previous) ?? null;
+        /** @type {boolean} */
+        const reads = behind ? behind.unicode : host.entryReads?.(previous) ?? unicode;
         return host.callProcedure(behind ? behind.address : previous >>> 0, {
             hwnd: hwnd >>> 0,
             message: message >>> 0,
             wParam: wParam >>> 0,
             lParam: lParam >>> 0,
-            ...unicode ? { unicode } : {},
-        }, host.callerThread?.(), behind ? behind.unicode : unicode);
+            ...(behind ? unicode : reads) ? { unicode: true } : {},
+        }, host.callerThread?.(), reads);
     };
 
     /**
@@ -1552,9 +1554,11 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             record.style = (record.style & ~WS_VISIBLE) >>> 0;
         }
         let restacked = false;
-        // HWND_TOPMOST and HWND_NOTOPMOST put a top-level window in the
-        // band above the others or out of it, which WS_EX_TOPMOST says.
-        const band = (record.style & WS_CHILD) !== 0 || (flags & SWP_NOZORDER) !== 0 ? null
+        // HWND_TOPMOST and HWND_NOTOPMOST put a top-level window - one on
+        // the desktop, WS_CHILD of it or not - in the band above the others
+        // or out of it, which WS_EX_TOPMOST says.
+        const inside = (record.style & WS_CHILD) !== 0 && record.parent !== 0;
+        const band = inside || (flags & SWP_NOZORDER) !== 0 ? null
             : (after >>> 0) === HWND_TOPMOST ? true : (after >>> 0) === HWND_NOTOPMOST ? false
                 : null;
         if (band !== null && ((record.exStyle & WS_EX_TOPMOST) !== 0) !== band)
@@ -1563,7 +1567,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 : record.exStyle & ~WS_EX_TOPMOST) >>> 0;
             restacked = true;
         }
-        if ((flags & SWP_NOZORDER) === 0 && (record.style & WS_CHILD) !== 0)
+        if ((flags & SWP_NOZORDER) === 0 && inside)
         {
             restacked = host.restack(record, after >>> 0, false) !== false;
         }
@@ -1626,21 +1630,20 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             ? host.activate?.(record.hwnd, { thread }) ?? 0 : 0));
         const handsOn = topLevel && wasShown && !isShown && host.active?.() === record.hwnd;
         // A child placed without SWP_NOACTIVATE is told it is the active
-        // child, shown or not (user32's message tests, WmShowChildSeq_2 and
-        // _4): an MDI child becomes the client's active one this way when its
-        // program brings it to the top.
+        // child, shown or not, before it hears WM_WINDOWPOSCHANGED (user32's
+        // message tests, WmShowChildSeq_2 and _4; comctl32's pager test,
+        // set_child_seq): an MDI child becomes the client's active one this
+        // way when its program brings it to the top.
+        const childActivated = andThen(activated, ()=>((flags
+            & (SWP_NOACTIVATE | SWP_HIDEWINDOW)) === 0
+            && (record.style & (WS_CHILD | WS_POPUP)) === WS_CHILD
+            ? host.send(record.hwnd, WM_CHILDACTIVATE, 0, 0, thread) : 0));
         // EVENT_OBJECT_LOCATIONCHANGE once it has heard where it went.
-        const located = andThen(andThen(activated, ()=>changed(restacked)), ()=>(moved || sized
-            ? host.winEvent?.(EVENT_OBJECT_LOCATIONCHANGE, record.hwnd, OBJID_WINDOW, thread) ?? 0
-            : 0));
+        const located = andThen(andThen(childActivated, ()=>changed(restacked)), ()=>(moved
+            || sized ? host.winEvent?.(EVENT_OBJECT_LOCATIONCHANGE, record.hwnd, OBJID_WINDOW,
+                thread) ?? 0 : 0));
         const told = andThen(located,
             ()=>(handsOn ? host.activateOther?.(record, thread) ?? 0 : 0));
-        if ((flags & (SWP_NOACTIVATE | SWP_HIDEWINDOW)) === 0
-            && (record.style & (WS_CHILD | WS_POPUP)) === WS_CHILD)
-        {
-            return andThen(told, ()=>andThen(host.send(record.hwnd, WM_CHILDACTIVATE, 0, 0,
-                thread), ()=>1));
-        }
         return andThen(told, ()=>1);
     };
 
@@ -1807,10 +1810,26 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             : decodeAnsi(new Uint8Array([code & 0xff]))) ? 1 : 0),
     });
 
+    /**
+     * Whether a class long setter is asked for the atom, which is the
+     * class's name and is not set: ERROR_INVALID_PARAMETER, and nothing
+     * answered.
+     *
+     * @param {number} index
+     */
+    const atomRefused = index=>{
+        if ((index | 0) !== GCW_ATOM)
+        {
+            return false;
+        }
+        host.setLastError?.(ERROR_INVALID_PARAMETER);
+        return true;
+    };
+
     /** @param {number} hwnd @returns {any | null} the class a window was made from */
     const classOfWindow = hwnd=>{
         const record = live(hwnd);
-        return record ? classes.get(record.className) ?? null : null;
+        return record?.cls ?? null;
     };
 
     /**
@@ -1880,7 +1899,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
      */
     const setClassLongPtr = (hwnd, index, low, high, unicode)=>{
         const cls = classOfWindow(hwnd);
-        if (!cls)
+        if (!cls || atomRefused(index))
         {
             return 0n;
         }
@@ -3727,15 +3746,27 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         return names.registeredName(format);
     };
 
-    /** GetClassName in either width. @param {number[]} args @param {boolean} wide */
-    const writeClassName = ([hwnd, out, maxCount], wide)=>{
+    /**
+     * GetClassName in either width, or RealGetWindowClass's (`real`): the
+     * class a built-in procedure marked the window with, else its own; no
+     * room is ERROR_INSUFFICIENT_BUFFER there.
+     *
+     * @param {number[]} args @param {boolean} wide @param {boolean} [real]
+     */
+    const writeClassName = ([hwnd, out, maxCount], wide, real = false)=>{
         const record = live(hwnd) ?? elsewhere(hwnd);
         const room = maxCount | 0;
+        if (real && record && room <= 0)
+        {
+            host.setLastError?.(ERROR_INSUFFICIENT_BUFFER);
+            return 0;
+        }
         if (!record || (out >>> 0) === 0 || room <= 0)
         {
             return 0;
         }
-        return (wide ? writeWideString : writeString)(out >>> 0, record.className, room);
+        return (wide ? writeWideString : writeString)(out >>> 0,
+            real ? record.realClass ?? record.className : record.className, room);
     };
 
     /** A power notification's handle let go. @param {number} handle */
@@ -4493,11 +4524,12 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
          * BOOL GetComboBoxInfo(HWND hwndCombo, PCOMBOBOXINFO pcbi)
          *
          * A combo box's field and drop-down button, in its client
-         * coordinates, the button's state -- invisible for CBS_SIMPLE, which
-         * has none -- and its windows. This build's combo box is one window,
-         * its field and list drawn in it, so it names no edit and no list
-         * window of its own. Any other window is no combo box, and a cbSize
-         * that is not the structure's is refused.
+         * coordinates, the button's state - invisible for CBS_SIMPLE, which
+         * has none - and its windows: itself, its edit and its list. Any
+         * other window is no combo box, and a cbSize that is not the
+         * structure's is refused. Read from the combo box, not asked of it
+         * with CB_GETCOMBOBOXINFO: Windows sends nothing to a combo box of
+         * the caller's own thread (Wine's combo test, test_combo_info).
          */
         GetComboBoxInfo: {
             argBytes: 8,
@@ -4505,35 +4537,27 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             handler: ([hwnd, info])=>{
                 const CBS_TYPEMASK = 0x3;
                 const CBS_SIMPLE = 0x1;
-                const COMBO_BUTTON = 16;
                 const record = live(hwnd);
-                if (!record || String(record.className).toLowerCase() !== 'combobox')
+                if (!record || String(record.className).toLowerCase() !== 'combobox'
+                    || !host.comboInfo)
                 {
                     return 0;
                 }
-                if ((info >>> 0) === 0 || readU32(info) !== COMBOBOXINFO_SIZE)
+                const pointer = host.pointerSize === 8 ? 8 : 4;
+                if ((info >>> 0) === 0 || readU32(info) !== COMBOBOXINFO_SIZE[pointer])
                 {
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                const client = host.geometry.clientRect(record);
-                const width = client.right - client.left;
-                const height = client.bottom - client.top;
                 const simple = (record.style & CBS_TYPEMASK) === CBS_SIMPLE;
-                const button = simple ? { left: 0, top: 0, right: 0, bottom: 0 }
-                    : { left: width - 2 - COMBO_BUTTON, top: 2, right: width - 2,
-                        bottom: height - 2 };
-                writeRect(host, info + 4, { left: 3, top: 3,
-                    right: (simple ? width : button.left) - 2, bottom: height - 3 });
-                writeRect(host, info + 20, button);
-                writeU32s(host, info + 36,
-                    [simple ? STATE_SYSTEM_INVISIBLE : 0, record.hwnd, 0, 0]);
-                if (!comboWindowsSaid)
-                {
-                    comboWindowsSaid = true;
-                    host.divergence?.('GetComboBoxInfo', 'the combo box is one window: no edit'
-                        + ' and no list window are named');
-                }
+                const parts = host.comboInfo(record);
+                writeRect(host, info + 4, parts.item);
+                writeRect(host, info + 20, parts.button);
+                writeU32s(host, info + 36, [simple ? STATE_SYSTEM_INVISIBLE : 0]);
+                [record.hwnd, parts.edit, parts.list].forEach((handle, index)=>{
+                    writeU32s(host, info + 40 + index * pointer,
+                        pointer === 8 ? [handle >>> 0, 0] : [handle >>> 0]);
+                });
                 return 1;
             },
         },
@@ -6983,7 +7007,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             /** @param {number[]} args */
             handler: ([hwnd, index, value])=>{
                 const cls = classOfWindow(hwnd);
-                if (!cls)
+                if (!cls || atomRefused(index))
                 {
                     return 0;
                 }
@@ -7054,7 +7078,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             /** @param {number[]} args */
             handler: ([hwnd, index, value])=>{
                 const cls = classOfWindow(hwnd);
-                if (!cls)
+                if (!cls || atomRefused(index))
                 {
                     return 0;
                 }
@@ -7081,19 +7105,20 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         /**
          * UINT RealGetWindowClassA/W(HWND, LPSTR/LPWSTR, UINT)
          *
-         * The class a window was made with: a superclass of a system class
-         * would answer the system class it is built on, and no window here is
-         * made on one, so it is the class name.
+         * The built-in class a window's messages were handled by - a
+         * superclass of Button answers Button once Button's procedure has seen
+         * the message that marks it (windows.js `REAL_CLASSES`) - else the
+         * class it was made of.
          */
         RealGetWindowClassA: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: args=>writeClassName(args, false),
+            handler: args=>writeClassName(args, false, true),
         },
         RealGetWindowClassW: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: args=>writeClassName(args, true),
+            handler: args=>writeClassName(args, true, true),
         },
 
         /**
@@ -7123,9 +7148,17 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                 }
                 // A change is announced, as Windows announces it: a control
                 // greys itself on WM_ENABLE, and a program watches for it.
+                // A window disabled while it has the keyboard focus loses it
+                // first, to no window (Wine's dialog.c test_DisabledDialogTest
+                // sees Windows leave the focus nowhere). The focus is the
+                // input state's, so only a thread sharing it takes it away;
+                // another thread's disabling leaves it (win.c test_enablewindow).
                 const WM_ENABLE = 0x000a;
-                return andThen(sendMessage(hwnd, WM_ENABLE, disable ? 0 : 1, 0),
-                    ()=>(wasDisabled ? 1 : 0));
+                const losing = disable && (host.focus?.() ?? 0) === (hwnd >>> 0)
+                    && callerHolds(hwnd >>> 0) !== 0
+                    ? host.setFocus(0, host.callerThread?.()) : 0;
+                return andThen(losing, ()=>andThen(sendMessage(hwnd, WM_ENABLE,
+                    disable ? 0 : 1, 0), ()=>(wasDisabled ? 1 : 0)));
             },
         },
 

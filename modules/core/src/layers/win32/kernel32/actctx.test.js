@@ -612,7 +612,7 @@ test('Common Controls 6 redirects its window classes to their versioned names', 
         { versioned: '6.0.2600.2180!Button', major: 6 }, 'as the manifest spells it, any case');
     assert.deepEqual(t.loaderApi.windowClass('SysLink'),
         { versioned: '6.0.2600.2180!SysLink', major: 6 });
-    assert.equal(t.loaderApi.windowClass('ScrollBar'), null, 'user32\'s alone');
+    assert.equal(t.loaderApi.windowClass('MDIClient'), null, 'user32\'s alone');
 
     const data = 0x700;
     t.view.setUint32(data, 64, true);

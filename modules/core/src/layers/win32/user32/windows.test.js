@@ -431,16 +431,16 @@ function putClass(memory, options = {}){
  * @param {any} fns
  * @param {ReturnType<typeof fakeMemory>} memory
  * @param {{ className?: number, style?: number, parent?: number, menu?: number,
- *   x?: number, y?: number, width?: number, height?: number }} [options]
+ *   x?: number, y?: number, width?: number, height?: number, instance?: number }} [options]
  */
 function createWindow(fns, memory, options = {}){
     const {
         className = CLASS_NAME, style = 0, parent = 0, menu = 0,
-        x = 10, y = 20, width = 300, height = 200,
+        x = 10, y = 20, width = 300, height = 200, instance = HINSTANCE,
     } = options;
     memory.putString(TITLE, 'Main');
     return fns.CreateWindowExA.handler(
-        [0, className, TITLE, style, x, y, width, height, parent, menu, HINSTANCE, 0]);
+        [0, className, TITLE, style, x, y, width, height, parent, menu, instance, 0]);
 }
 
 /**
@@ -501,7 +501,7 @@ test('RegisterClassExA reads the shifted offsets, and checks cbSize', ()=>{
     // Read it back through the classic structure: if the Ex offsets were wrong,
     // the window procedure would come back as the style or the extra count.
     memory.fill(TEXT_BUFFER, WNDCLASSA.SIZE / 4);
-    assert.equal(fns.GetClassInfoA.handler([HINSTANCE, CLASS_NAME, TEXT_BUFFER]), 1);
+    assert.notEqual(fns.GetClassInfoA.handler([HINSTANCE, CLASS_NAME, TEXT_BUFFER]), 0);
     assert.equal(memory.u32(TEXT_BUFFER + WNDCLASSA.lpfnWndProc), WNDPROC);
     assert.equal(memory.u32(TEXT_BUFFER + WNDCLASSA.cbWndExtra), 16);
 
@@ -517,7 +517,7 @@ test('GetClassInfoA fills WNDCLASSA at the documented offsets', ()=>{
     fns.RegisterClassA.handler([CLASS_STRUCT]);
 
     memory.fill(TEXT_BUFFER, WNDCLASSA.SIZE / 4);
-    assert.equal(fns.GetClassInfoA.handler([HINSTANCE, CLASS_NAME, TEXT_BUFFER]), 1);
+    assert.notEqual(fns.GetClassInfoA.handler([HINSTANCE, CLASS_NAME, TEXT_BUFFER]), 0);
 
     assert.equal(memory.u32(TEXT_BUFFER + WNDCLASSA.style), 0x0003);
     assert.equal(memory.u32(TEXT_BUFFER + WNDCLASSA.lpfnWndProc), WNDPROC);
@@ -540,7 +540,7 @@ test('GetClassInfoExA fills the extended structure behind the caller\'s cbSize',
 
     memory.fill(TEXT_BUFFER, WNDCLASSEXA.SIZE / 4);
     memory.putU32s(TEXT_BUFFER + WNDCLASSEXA.cbSize, [WNDCLASSEXA.SIZE]);
-    assert.equal(fns.GetClassInfoExA.handler([HINSTANCE, CLASS_NAME, TEXT_BUFFER]), 1);
+    assert.notEqual(fns.GetClassInfoExA.handler([HINSTANCE, CLASS_NAME, TEXT_BUFFER]), 0);
     assert.equal(memory.u32(TEXT_BUFFER + WNDCLASSEXA.cbSize), WNDCLASSEXA.SIZE, 'left alone');
     assert.equal(memory.u32(TEXT_BUFFER + WNDCLASSEXA.lpfnWndProc), WNDPROC);
     assert.equal(memory.u32(TEXT_BUFFER + WNDCLASSEXA.cbWndExtra), 8);
@@ -558,7 +558,7 @@ test('a class Windows\' own libraries register is there though no control draws 
     {
         memory.putString(CLASS_NAME, name);
         memory.fill(TEXT_BUFFER, WNDCLASSEXA.SIZE / 4);
-        assert.equal(fns.GetClassInfoExA.handler([0, CLASS_NAME, TEXT_BUFFER]), 1, name);
+        assert.notEqual(fns.GetClassInfoExA.handler([0, CLASS_NAME, TEXT_BUFFER]), 0, name);
         assert.notEqual(memory.u32(TEXT_BUFFER + WNDCLASSEXA.lpfnWndProc), 0,
             `${name}: a procedure to subclass`);
         assert.notEqual(createWindow(fns, memory, { className: CLASS_NAME }), 0,
@@ -584,7 +584,7 @@ test('under a context holding Common Controls 6 a class name makes version 6\'s 
     const procedureOf = name=>{
         memory.putString(CLASS_NAME, name);
         memory.fill(TEXT_BUFFER, WNDCLASSEXA.SIZE / 4);
-        assert.equal(fns.GetClassInfoExA.handler([0, CLASS_NAME, TEXT_BUFFER]), 1, name);
+        assert.notEqual(fns.GetClassInfoExA.handler([0, CLASS_NAME, TEXT_BUFFER]), 0, name);
         return memory.u32(TEXT_BUFFER + WNDCLASSEXA.lpfnWndProc);
     };
     /** @param {string} name */
@@ -620,13 +620,110 @@ test('under a context holding Common Controls 6 a class name makes version 6\'s 
     assert.equal(make('SysLink'), 0);
 });
 
+test('RealGetWindowClass names the built-in class whose procedure made the window', ()=>{
+    // Wine's class test (test_RealGetWindowClass): a program's class built
+    // on Button's procedure reports Button once that procedure has seen
+    // WM_NCCREATE; its own class otherwise, and no room is refused.
+    let stubs = 0x7f000000;
+    const { memory, fns, errors } = setup({ registerProcedure: ()=>(stubs += 16) });
+    memory.putString(CLASS_NAME, 'Button');
+    assert.notEqual(fns.GetClassInfoA.handler([0, CLASS_NAME, TEXT_BUFFER]), 0);
+    const button = memory.u32(TEXT_BUFFER + 4);
+    putClass(memory, { name: 'WineTest Class', wndProc: button });
+    assert.notEqual(fns.RegisterClassA.handler([CLASS_STRUCT]), 0);
+    const hwnd = createWindow(fns, memory, { className: CLASS_NAME });
+    assert.notEqual(hwnd, 0);
+    assert.equal(fns.RealGetWindowClassA.handler([hwnd, TEXT_BUFFER, 64]), 6);
+    assert.equal(memory.readCString(TEXT_BUFFER, 64), 'Button');
+    assert.equal(fns.GetClassNameA.handler([hwnd, TEXT_BUFFER, 64]), 14);
+    assert.equal(memory.readCString(TEXT_BUFFER, 64), 'WineTest Class');
+    assert.equal(fns.RealGetWindowClassA.handler([hwnd, TEXT_BUFFER, 0]), 0);
+    assert.equal(errors.at(-1), 122, 'ERROR_INSUFFICIENT_BUFFER');
+
+    putClass(memory, { name: 'Own' });
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const own = createWindow(fns, memory, { className: CLASS_NAME });
+    assert.equal(fns.RealGetWindowClassA.handler([own, TEXT_BUFFER, 64]), 3);
+    assert.equal(memory.readCString(TEXT_BUFFER, 64), 'Own');
+});
+
+test('a class\'s atom is its name in the table clipboard formats share, freed with the class', ()=>{
+    // Wine's class test (test_actctx_classes' check_atom_name): two
+    // registrations of a name have one atom, and the last unregistered
+    // frees it.
+    const { memory, fns } = setup();
+    putClass(memory, { name: 'WineTestClass' });
+    const atom = fns.RegisterClassA.handler([CLASS_STRUCT]);
+    assert.ok(atom >= 0xc000);
+    assert.equal(fns.GetClipboardFormatNameA.handler([atom, TEXT_BUFFER, 64]), 13);
+    assert.equal(memory.readCString(TEXT_BUFFER, 64), 'WineTestClass');
+    assert.equal(fns.UnregisterClassA.handler([CLASS_NAME, HINSTANCE]), 1);
+    assert.equal(fns.GetClipboardFormatNameA.handler([atom, TEXT_BUFFER, 64]), 0, 'freed');
+    const message = fns.RegisterWindowMessageA.handler([CLASS_NAME]);
+    assert.notEqual(message, atom, 'a freed number is not given again');
+});
+
+test('a local class is its module\'s: two modules may each have one of a name', ()=>{
+    // Wine's class test (test_instances), as Windows answers it.
+    const OTHER = 0x10000000;
+    const GCLP_HMODULE = -16;
+    const { memory, fns, errors } = setup();
+    putClass(memory, { name: '__test__' });
+    assert.notEqual(fns.RegisterClassA.handler([CLASS_STRUCT]), 0);
+    assert.equal(fns.RegisterClassA.handler([CLASS_STRUCT]), 0, 'the same module twice');
+    assert.equal(errors.at(-1), 1410, 'ERROR_CLASS_ALREADY_EXISTS');
+    memory.putU32s(CLASS_STRUCT + 16, [OTHER]);
+    assert.notEqual(fns.RegisterClassA.handler([CLASS_STRUCT]), 0, 'another module may');
+
+    /** @param {number} instance */
+    const made = instance=>createWindow(fns, memory, { className: CLASS_NAME, instance });
+    assert.equal(fns.GetClassLongA.handler([made(OTHER | 0x1234), GCLP_HMODULE]), OTHER,
+        'a module is its handle\'s high word');
+    assert.equal(fns.GetClassLongA.handler([made(HINSTANCE), GCLP_HMODULE]), HINSTANCE);
+    assert.equal(fns.GetClassLongA.handler([made(0), GCLP_HMODULE]), OTHER,
+        'none takes the newest');
+    assert.equal(fns.UnregisterClassA.handler([CLASS_NAME, OTHER]), 0, 'its windows still stand');
+    assert.equal(errors.at(-1), 1412, 'ERROR_CLASS_HAS_WINDOWS');
+    assert.equal(fns.GetClassInfoA.handler([0, CLASS_NAME, TEXT_BUFFER]), 0,
+        'no module is user32\'s, which has none of them');
+    assert.equal(errors.at(-1), 1411, 'ERROR_CLASS_DOES_NOT_EXIST');
+});
+
+test('a class registered under a context that names it is its versioned class', ()=>{
+    // Wine's class test (test_actctx_classes): registered while the context
+    // is active, the class is "4.3.2.1!WineTestClass", found by its base
+    // name only while the context holds it, by its versioned name always,
+    // and known by the name it was registered by.
+    const context = { active: true };
+    const { memory, fns } = setup({ windowClass: (/** @type {string} */ name)=>(context.active
+        && name.toLowerCase() === 'winetestclass'
+        ? { versioned: '4.3.2.1!WineTestClass', major: 4 } : null) });
+    putClass(memory, { name: 'WineTestClass' });
+    const atom = fns.RegisterClassA.handler([CLASS_STRUCT]);
+    assert.notEqual(atom, 0);
+    assert.equal(fns.GetClassInfoA.handler([HINSTANCE, CLASS_NAME, TEXT_BUFFER]), atom);
+    const hwnd = createWindow(fns, memory, { className: CLASS_NAME });
+    assert.equal(fns.GetClassNameA.handler([hwnd, TEXT_BUFFER, 64]), 13);
+    assert.equal(memory.readCString(TEXT_BUFFER, 64), 'WineTestClass');
+    fns.DestroyWindow.handler([hwnd]);
+
+    context.active = false;
+    assert.equal(fns.GetClassInfoA.handler([HINSTANCE, CLASS_NAME, TEXT_BUFFER]), 0,
+        'the base name finds nothing without the context');
+    assert.equal(fns.GetClassInfoA.handler([HINSTANCE, atom, TEXT_BUFFER]), 0, 'nor its atom');
+    memory.putString(CLASS_NAME, '4.3.2.1!WineTestClass');
+    assert.equal(fns.GetClassInfoA.handler([HINSTANCE, CLASS_NAME, TEXT_BUFFER]), atom,
+        'the versioned name does');
+    assert.equal(fns.UnregisterClassA.handler([CLASS_NAME, HINSTANCE]), 1);
+});
+
 test('a program\'s class registered by a versioned name is found by it', ()=>{
     // Wine's user32 class test (test_actctx_classes): a manifest's own
     // window class, registered by its versioned name outside the context.
     const { memory, fns } = setup();
     putClass(memory, { name: '1.2.3.4!wndClass' });
     assert.notEqual(fns.RegisterClassA.handler([CLASS_STRUCT]), 0);
-    assert.equal(fns.GetClassInfoA.handler([HINSTANCE, CLASS_NAME, TEXT_BUFFER]), 1);
+    assert.notEqual(fns.GetClassInfoA.handler([HINSTANCE, CLASS_NAME, TEXT_BUFFER]), 0);
     assert.equal(memory.u32(TEXT_BUFFER + 4), WNDPROC);
     assert.notEqual(createWindow(fns, memory, { className: CLASS_NAME }), 0);
 });
@@ -649,7 +746,8 @@ test('a class is also known by the atom registration returned', ()=>{
     // Programs pass the atom straight back where a name is declared.
     const hwnd = createWindow(fns, memory, { className: atom });
     assert.ok(hwnd > 0);
-    assert.equal(fns.GetClassInfoA.handler([HINSTANCE, atom, TEXT_BUFFER]), 1);
+    assert.equal(fns.GetClassInfoA.handler([HINSTANCE, atom, TEXT_BUFFER]), atom,
+        'GetClassInfo answers the class atom');
 });
 
 test('UnregisterClassA waits until the last window of the class is gone', ()=>{
@@ -1211,6 +1309,67 @@ test('SetWindowLongA answers with the value it replaced', ()=>{
     assert.equal(fns.GetWindowLongA.handler([hwnd, GWL_USERDATA]), 0xdeadbeef);
     assert.equal(fns.SetWindowLongA.handler([hwnd, GWL_USERDATA, 1]), 0xdeadbeef,
         'code that restores what it changed needs the old value back');
+});
+
+test('SetWindowLong of a style asks WM_STYLECHANGING, which may change it, then tells'
+    + ' WM_STYLECHANGED', ()=>{
+    // MSDN, WM_STYLECHANGING: sent when SetWindowLong is about to change
+    // a style, with a STYLESTRUCT whose styleNew the window may change;
+    // WM_STYLECHANGED after, with the old and the new.
+    const [WM_STYLECHANGING, WM_STYLECHANGED, GWL_EXSTYLE] = [0x7c, 0x7d, -20];
+    const WS_BORDER = 0x00800000;
+    /** @type {{ message: number, wParam: number, old: number, asked: number }[]} */
+    const seen = [];
+    const { fns, memory, hwnd, released } = withWindow({
+        heap: true,
+        reply: (/** @type {any} */ message)=>{
+            if (message.message === WM_STYLECHANGING || message.message === WM_STYLECHANGED)
+            {
+                seen.push({ message: message.message, wParam: message.wParam,
+                    old: memory.u32(message.lParam), asked: memory.u32(message.lParam + 4) });
+                if (message.message === WM_STYLECHANGING && message.wParam === GWL_STYLE >>> 0)
+                {
+                    // The procedure takes the border off whatever it is given.
+                    memory.putU32s(message.lParam + 4,
+                        [(memory.u32(message.lParam + 4) & ~WS_BORDER) >>> 0]);
+                }
+                return 0;
+            }
+            // WM_NCCREATE answered nonzero, so the window is made.
+            return 1;
+        },
+    });
+    const before = fns.GetWindowLongA.handler([hwnd, GWL_STYLE]) >>> 0;
+
+    assert.equal(fns.SetWindowLongA.handler([hwnd, GWL_STYLE, before | WS_BORDER | 0x4]) >>> 0,
+        before, 'answers the style it replaced');
+    const after = fns.GetWindowLongA.handler([hwnd, GWL_STYLE]) >>> 0;
+    assert.equal(after, ((before | 0x4) & ~WS_BORDER) >>> 0,
+        'what WM_STYLECHANGING left is what it gets');
+    assert.deepEqual(seen, [
+        { message: WM_STYLECHANGING, wParam: GWL_STYLE >>> 0, old: before,
+            asked: (before | WS_BORDER | 0x4) >>> 0 },
+        { message: WM_STYLECHANGED, wParam: GWL_STYLE >>> 0, old: before, asked: after },
+    ]);
+    assert.ok(released.length > 0, 'the STYLESTRUCT is given back');
+
+    seen.length = 0;
+    fns.SetWindowLongA.handler([hwnd, GWL_EXSTYLE, 0x200]);
+    assert.deepEqual(seen.map(s=>[s.message, s.wParam]),
+        [[WM_STYLECHANGING, GWL_EXSTYLE >>> 0], [WM_STYLECHANGED, GWL_EXSTYLE >>> 0]]);
+
+    seen.length = 0;
+    fns.SetWindowLongA.handler([hwnd, GWL_USERDATA, 7]);
+    assert.equal(seen.length, 0, 'only a style is asked about');
+
+    // A minimized window stays so whatever style it is given, and is told so.
+    const WS_MINIMIZE = 0x20000000;
+    fns.SetWindowLongA.handler([hwnd, GWL_STYLE, after | WS_MINIMIZE]);
+    seen.length = 0;
+    fns.SetWindowLongA.handler([hwnd, GWL_STYLE, after]);
+    assert.equal(fns.GetWindowLongA.handler([hwnd, GWL_STYLE]) >>> 0,
+        (after | WS_MINIMIZE) >>> 0);
+    assert.equal(seen.at(-1)?.asked, (after | WS_MINIMIZE) >>> 0);
 });
 
 test('SetLayeredWindowAttributes records what GetLayeredWindowAttributes reads back', async()=>{
@@ -6137,12 +6296,12 @@ test('a class is unregistered by its wide name, and not while a window of it is 
 test('GetClassInfoW reports the class by the wide name it was asked by', ()=>{
     const { fns, memory } = withWindow();
     putWide(memory, WIDE_CLASS, 'MAINWND');
-    assert.equal(fns.GetClassInfoW.handler([HINSTANCE, WIDE_CLASS, 0x10800]), 1);
+    assert.notEqual(fns.GetClassInfoW.handler([HINSTANCE, WIDE_CLASS, 0x10800]), 0);
     // Registered through the ANSI form, its procedure reads ANSI: the wide
     // call answers its handle, the ANSI one its address.
     assert.equal(memory.u32(0x10800 + WNDCLASSA.lpfnWndProc) >>> 16, 0xffff);
     assert.equal(memory.u32(0x10800 + WNDCLASSA.lpszClassName), WIDE_CLASS);
-    assert.equal(fns.GetClassInfoA.handler([HINSTANCE, CLASS_NAME, 0x10800]), 1);
+    assert.notEqual(fns.GetClassInfoA.handler([HINSTANCE, CLASS_NAME, 0x10800]), 0);
     assert.equal(memory.u32(0x10800 + WNDCLASSA.lpfnWndProc), WNDPROC);
 });
 
@@ -7905,4 +8064,110 @@ test('a mode change does not wait for ever on a window whose thread takes no mes
     await tick();
     await tick();
     assert.equal(await answer, 0, 'DISP_CHANGE_SUCCESSFUL, then');
+});
+
+test('CallMsgFilter shows the message to the thread\'s WH_MSGFILTER hooks; nonzero takes it', ()=>{
+    /** @type {number[][]} */
+    const heard = [];
+    let answer = 0;
+    const { fns } = setup({ hookReply: (entry, args)=>{
+        heard.push([entry, ...args]);
+        return answer;
+    } });
+    const WH_MSGFILTER = -1;
+    assert.equal(fns.CallMsgFilterA.handler([MSG_BUFFER, 0]), 0, 'no hook: not taken');
+    assert.notEqual(fns.SetWindowsHookExA.handler([WH_MSGFILTER, HOOK_PROC, HINSTANCE, 0]), 0);
+    assert.equal(fns.CallMsgFilterA.handler([MSG_BUFFER, 2]), 0);
+    assert.deepEqual(heard, [[HOOK_PROC, 2, 0, MSG_BUFFER]], 'code, 0 and the MSG');
+    answer = 1;
+    assert.equal(fns.CallMsgFilterW.handler([MSG_BUFFER, 0]), 1, 'a hook took it');
+});
+
+test('a window disabled while it has the focus leaves the focus nowhere', ()=>{
+    const { fns, hwnd, memory } = withWindow();
+    const child = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE, parent: hwnd });
+    fns.SetFocus.handler([child]);
+    assert.equal(fns.GetFocus.handler(), child);
+    fns.EnableWindow.handler([child, 0]);
+    assert.equal(fns.GetFocus.handler(), 0, 'Wine\'s dialog.c test_DisabledDialogTest');
+    fns.EnableWindow.handler([child, 1]);
+    assert.equal(fns.GetFocus.handler(), 0, 'and enabling gives nothing back');
+});
+
+test('the system classes carry the styles Windows registers them with', ()=>{
+    // Wine's class test, test_styles: GetClassInfo of each built-in class,
+    // and the atom-named ones a program can ask about by name.
+    const { memory, fns } = setup();
+    /** @param {string} name */
+    const styleOf = name=>{
+        memory.putString(CLASS_NAME, name);
+        assert.notEqual(fns.GetClassInfoA.handler([0, CLASS_NAME, TEXT_BUFFER]), 0, name);
+        return memory.u32(TEXT_BUFFER);
+    };
+    assert.equal(styleOf('Button'), 0x8b, 'CS_PARENTDC | CS_DBLCLKS | CS_HREDRAW | CS_VREDRAW');
+    assert.equal(styleOf('Edit'), 0x88, 'CS_PARENTDC | CS_DBLCLKS');
+    assert.equal(styleOf('ComboLBox'), 0x808, 'CS_SAVEBITS | CS_DBLCLKS');
+    assert.equal(styleOf('MDIClient'), 0);
+    assert.equal(styleOf('#32768'), 0x20808, 'the menu: CS_DROPSHADOW | CS_SAVEBITS | CS_DBLCLKS');
+    assert.equal(styleOf('#32769'), 0x8, 'the desktop');
+    assert.equal(styleOf('#32770'), 0x808, 'the dialog');
+    assert.equal(styleOf('#32772'), 0, 'the icon title');
+});
+
+test('a built-in procedure has an ANSI and a wide entry, each run in its own encoding', ()=>{
+    // Wine's class test, test_builtinproc: a procedure GetWindowLongPtrA and
+    // W answer is called directly by either CallWindowProc, so each entry
+    // writes its own encoding whichever call named it.
+    let stubs = 0x7f000000;
+    const { memory, fns } = setup({ registerProcedure: ()=>(stubs += 16), heap: true });
+    const GWLP_WNDPROC = -4;
+    /** @param {number} address */
+    const isHandle = address=>((address >>> 0) & 0xffff0000) >>> 0 === 0xffff0000;
+    const wide = [0x4d, 0, 0x61, 0, 0x69, 0, 0x6e, 0, 0, 0];
+    const ansi = [0x4d, 0x61, 0x69, 0x6e, 0];
+    /** @param {number} length */
+    const text = length=>[...memory.readMemory(TEXT_BUFFER, length)];
+
+    memory.putString(CLASS_NAME, 'Button');
+    const button = createWindow(fns, memory, { className: CLASS_NAME });
+    const procA = fns.GetWindowLongA.handler([button, GWLP_WNDPROC]);
+    const procW = fns.GetWindowLongW.handler([button, GWLP_WNDPROC]);
+    assert.notEqual(procA, procW, 'two entries');
+    assert.ok(!isHandle(procA) && !isHandle(procW), 'neither a handle');
+    memory.fill(TEXT_BUFFER, 16);
+    fns.CallWindowProcA.handler([procW, button, WM_GETTEXT, 120, TEXT_BUFFER]);
+    assert.deepEqual(text(10), wide, 'the wide entry writes wide text to an ANSI call');
+    memory.fill(TEXT_BUFFER, 16);
+    fns.CallWindowProcW.handler([procA, button, WM_GETTEXT, 120, TEXT_BUFFER]);
+    assert.deepEqual(text(5), ansi, 'the ANSI entry writes ANSI text to a wide call');
+
+    // An edit keeps its window's encoding: the other call's read is a handle.
+    memory.putString(CLASS_NAME, 'Edit');
+    const edit = createWindow(fns, memory, { className: CLASS_NAME });
+    assert.ok(!isHandle(fns.GetWindowLongA.handler([edit, GWLP_WNDPROC])));
+    const handle = fns.GetWindowLongW.handler([edit, GWLP_WNDPROC]);
+    assert.ok(isHandle(handle), 'an ANSI edit read through GetWindowLongW');
+    memory.fill(TEXT_BUFFER, 16);
+    fns.CallWindowProcA.handler([handle, edit, WM_GETTEXT, 120, TEXT_BUFFER]);
+    assert.deepEqual(text(5), ansi);
+    assert.ok(!isHandle(fns.GetClassLongW.handler([edit, -24])),
+        'its class answers the entry itself');
+});
+
+test('another thread disabling a window leaves its focus where it was', ()=>{
+    // The focus is the input state's: a thread not sharing it does not take
+    // it away (Wine's win.c test_enablewindow, enablewindow_thread).
+    const maker = { id: 1, name: 'maker' };
+    const another = { id: 2, name: 'another' };
+    const caller = { current: /** @type {unknown} */ (maker) };
+    const { fns, memory } = setup({ caller });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const hwnd = createWindow(fns, memory, { style: WS_VISIBLE });
+    fns.SetFocus.handler([hwnd]);
+    assert.equal(fns.GetFocus.handler(), hwnd);
+    caller.current = another;
+    fns.EnableWindow.handler([hwnd, 0]);
+    caller.current = maker;
+    assert.equal(fns.GetFocus.handler(), hwnd);
 });

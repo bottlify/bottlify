@@ -28,7 +28,7 @@ import { createFontResources } from './font-resources.js';
 import {
     DEFAULT_EM_HEIGHT, DESCENT_RATIO, FACES, FF_MODERN, FF_ROMAN, FF_SWISS, FIXED_PITCH,
     INTERNAL_LEADING_RATIO, VARIABLE_PITCH, faceNamed, fontFamilies,
-    outlineCell, rasterFace, rasterRealization, windowsMetrics,
+    outlineCell, rasterFace, rasterRealization, scaledAdvances, windowsMetrics,
 } from './faces.js';
 import { ANSI_PAGE, OEM_PAGE, decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { DISPLAY_DEVICE_NAME } from '../devices.js';
@@ -2063,7 +2063,7 @@ export function createGdiFunctions(host){
             }).reduce((sum, advance)=>sum + advance, 0);
         }
         const pitch = metricsOf(font).aveCharWidth;
-        const windows = windowsMetrics(font)?.advances;
+        const windows = windowsMetrics(font)?.advances ?? scaledAdvances(font);
         return windows ? Array.from(text, character=>{
             const code = character.charCodeAt(0);
             return code >= 0x20 && code <= 0xff ? windows[code - 0x20] : pitch;
@@ -6113,16 +6113,18 @@ export function createGdiFunctions(host){
             averageWidth: (/** @type {number} */ hdc)=>averageWidthOf(dcOf(hdc) ?? { font: 0 }),
 
             /**
-             * How much room a string takes in the context's font.
+             * How much room a string takes in the context's font, with the
+             * font's line height, ascent and average character width
+             * (TEXTMETRIC's tmAveCharWidth).
              *
              * @param {number} hdc @param {string} text
-             * @returns {{ width: number, height: number, ascent: number }}
+             * @returns {{ width: number, height: number, ascent: number, average: number }}
              */
             measure(hdc, text){
                 const dc = dcOf(hdc) ?? { font: 0 };
                 const metrics = currentMetrics(dc);
                 return { width: extentOf(dc, text), height: metrics.height,
-                    ascent: metrics.ascent };
+                    ascent: metrics.ascent, average: metrics.aveCharWidth };
             },
 
             /**

@@ -39,6 +39,10 @@ import {
     SOUND_ADAPTER_NAME, SOUND_DEVICE_GUID, SOUND_DEVICE_INTERFACE,
 } from '../../win32/devices.js';
 import { parseGuid } from '../../win32/ole32/guid.js';
+import {
+    FORMAT_WaveFormatEx, IID_IMediaObject, IID_IMediaObjectInPlace, MEDIASUBTYPE_IEEE_FLOAT,
+    MEDIASUBTYPE_PCM, MEDIATYPE_Audio,
+} from './effects.js';
 
 export const DS_OK = 0;
 const DS_UNCERTIFIED = 1;
@@ -376,6 +380,22 @@ export const IKSPROPERTYSET_SLOTS = /** @type {[string, number][]} */ ([
 /** HRESULT_FROM_WIN32(ERROR_NOT_FOUND): a property set this device does not have. */
 const E_PROP_ID_UNSUPPORTED = 0x80070490;
 
+/** An effect's place in a buffer's chain (DSFXR_*), as SetFX reports it. */
+const DSFXR_PRESENT = 0;
+const DSFXR_LOCSOFTWARE = 2;
+const DSFXR_UNKNOWN = 5;
+const DSERR_OBJECTNOTFOUND = 0x88781161 | 0;
+/** GetObjectInPath's "any object on the path". */
+const GUID_All_Objects = '{AA114DE5-C262-4169-A1C8-23D698CC73B5}';
+const CLSCTX_INPROC_SERVER = 1;
+/** The vtable slots an effect is driven through. */
+const SLOT_QUERY_INTERFACE = 0;
+const SLOT_RELEASE = 2;
+const SLOT_SET_INPUT_TYPE = 8;
+const SLOT_SET_OUTPUT_TYPE = 9;
+const SLOT_DISCONTINUITY = 17;
+const SLOT_PROCESS = 3;
+
 /** dsconf.h's DSPROPSETID_DirectSoundDevice, the private object's one property set. */
 const DSPROPSETID_DirectSoundDevice = '{84624F82-25EC-11D1-A4D8-00C04FC28ACA}';
 /** KSPROPERTY_SUPPORT_GET: every property of that set is read, none written. */
@@ -680,10 +700,15 @@ export function createPublisher({ publishInterface }){
  * @param {4 | 8} [deps.pointerSize]  8 for a 64-bit process: its descriptors
  *        and notification arrays in their 64-bit layouts, and every pointer an
  *        out parameter takes written whole.
+ * @param {(clsid: number, outer: number, context: number, iid: number, out: number)
+ *     => number | Promise<number>} [deps.createInstance]
+ *        CoCreateInstance as a program calls it, guest pointers in: how a
+ *        buffer's SetFX makes the effects it names, the program's own
+ *        registered class included.
  */
 export function createDirectSound({
     memory, allocate, now, publishInterface, signal, callGuest, callerThread, divergence, mtaUsage,
-    pointerSize = 4,
+    pointerSize = 4, createInstance,
 })
 {
     const publisher = createPublisher({ publishInterface });
@@ -973,7 +998,260 @@ export function createDirectSound({
     const hasControl = (buffer, flag)=>(buffer.capabilities & flag) !== 0
         && !(buffer.primary && flag === DSBCAPS_CTRLFREQUENCY);
 
-    /** @type {Record<string, (target: any, args: number[]) => number>} */
+    /**
+     * A value now or a promise of one, the next step run on it either way:
+     * a buffer with no effects answers in the call, as it always has.
+     *
+     * @template T, U
+     * @param {T | Promise<T>} value @param {(value: T) => U | Promise<U>} next
+     * @returns {U | Promise<U>}
+     */
+    const andThen = (value, next)=>(value instanceof Promise ? value.then(next) : next(value));
+
+    /** @param {number} address */
+    const readPointer = address=>{
+        const low = readU32(address);
+        return long ? low + readU32(address + 4) * 2 ** 32 : low;
+    };
+
+    /**
+     * Calls a method of a guest object - an effect the program or the engine
+     * made - through its vtable.
+     *
+     * @param {number} object @param {number} slot @param {number[]} args
+     * @param {unknown} thread
+     * @returns {Promise<number>}
+     */
+    const callMethod = async(object, slot, args, thread)=>{
+        const entry = readPointer(readPointer(object) + slot * pointerSize);
+        return (await /** @type {NonNullable<typeof callGuest>} */ (callGuest)(entry,
+            [object, ...args], thread)) | 0;
+    };
+
+    /**
+     * Each buffer's effects, in the chain's order: the class it was made by,
+     * its IMediaObject and its IMediaObjectInPlace (0 where it has none).
+     *
+     * @type {WeakMap<any, { clsid: string, object: number, inPlace: number }[]>}
+     */
+    const effectsOf = new WeakMap();
+    /**
+     * Guest memory a buffer's effects are driven with, made once: a class
+     * and interface id and an out pointer, a DMO_MEDIA_TYPE and its
+     * WAVEFORMATEX, then room for the whole buffer, which an effect runs
+     * over in place.
+     *
+     * @type {WeakMap<any, number>}
+     */
+    const scratchOf = new WeakMap();
+    const SCRATCH_CLSID = 0;
+    const SCRATCH_IID = 16;
+    const SCRATCH_OUT = 32;
+    const SCRATCH_TYPE = 48;
+    const SCRATCH_FORMAT = 144;
+    const SCRATCH_DATA = 176;
+    /** Effects that could not run over a span, said once each. @type {Set<string>} */
+    const effectSaid = new Set();
+
+    /** @param {any} buffer */
+    const scratchFor = buffer=>{
+        let at = scratchOf.get(buffer);
+        if (at === undefined)
+        {
+            at = allocate(SCRATCH_DATA + buffer.bytes);
+            scratchOf.set(buffer, at);
+        }
+        return at;
+    };
+
+    /**
+     * The buffer's format as a DMO_MEDIA_TYPE: PCM (or float) audio, its
+     * WAVEFORMATEX, a sample the size of a frame going in and of a byte
+     * coming out, as DirectSound hands it to an effect.
+     *
+     * @param {any} buffer @param {number} at  the scratch block @param {number} sampleSize
+     */
+    const writeMediaType = (buffer, at, sampleSize)=>{
+        const format = buffer.format;
+        const wave = new DataView(new ArrayBuffer(18));
+        wave.setUint16(0, format.float ? WAVE_FORMAT_IEEE_FLOAT : WAVE_FORMAT_PCM, true);
+        wave.setUint16(2, format.channels, true);
+        wave.setUint32(4, format.sampleRate, true);
+        wave.setUint32(8, format.sampleRate * format.blockAlign, true);
+        wave.setUint16(12, format.blockAlign, true);
+        wave.setUint16(14, format.bitsPerSample, true);
+        memory.writeMemory(at + SCRATCH_FORMAT, new Uint8Array(wave.buffer));
+        const type = new Uint8Array(long ? 88 : 72);
+        type.set(/** @type {Uint8Array} */ (parseGuid(MEDIATYPE_Audio)), 0);
+        type.set(/** @type {Uint8Array} */ (parseGuid(format.float
+            ? MEDIASUBTYPE_IEEE_FLOAT : MEDIASUBTYPE_PCM)), 16);
+        const view = new DataView(type.buffer);
+        view.setUint32(32, 1, true);
+        view.setUint32(40, sampleSize, true);
+        type.set(/** @type {Uint8Array} */ (parseGuid(FORMAT_WaveFormatEx)), 44);
+        view.setUint32(long ? 72 : 64, 18, true);
+        view.setUint32(long ? 80 : 68, at + SCRATCH_FORMAT, true);
+        memory.writeMemory(at + SCRATCH_TYPE, type);
+    };
+
+    /**
+     * Lets a chain go: each effect's interfaces released, as the buffer
+     * holds them.
+     *
+     * @param {{ object: number, inPlace: number }[]} chain @param {unknown} thread
+     */
+    const releaseEffects = async(chain, thread)=>{
+        for (const effect of chain)
+        {
+            if (effect.inPlace !== 0)
+            {
+                await callMethod(effect.inPlace, SLOT_RELEASE, [], thread);
+            }
+            await callMethod(effect.object, SLOT_RELEASE, [], thread);
+        }
+    };
+
+    /**
+     * SetFX's work once its arguments are checked.
+     *
+     * @param {any} buffer @param {number} count @param {number} descriptions
+     * @param {number} results
+     */
+    const setEffects = async(buffer, count, descriptions, results)=>{
+        const thread = callerThread?.();
+        await releaseEffects(effectsOf.get(buffer) ?? [], thread);
+        effectsOf.delete(buffer);
+        buffer.clearEffected?.();
+        if (count === 0)
+        {
+            return DS_OK;
+        }
+        const at = scratchFor(buffer);
+        const descriptionSize = long ? 40 : 32;
+        /** @type {{ clsid: string, object: number, inPlace: number }[]} */
+        const made = [];
+        let failure = DS_OK;
+        for (let index = 0; index < count; index++)
+        {
+            const clsid = memory.readMemory(descriptions + index * descriptionSize + 8, 16);
+            memory.writeMemory(at + SCRATCH_CLSID, clsid);
+            memory.writeMemory(at + SCRATCH_IID,
+                /** @type {Uint8Array} */ (parseGuid(IID_IMediaObject)));
+            memory.writeMemory(at + SCRATCH_OUT, new Uint8Array(8));
+            const created = await /** @type {NonNullable<typeof createInstance>} */ (
+                createInstance)(at + SCRATCH_CLSID, 0, CLSCTX_INPROC_SERVER, at + SCRATCH_IID,
+                at + SCRATCH_OUT) | 0;
+            if (created < 0)
+            {
+                failure = created;
+                break;
+            }
+            const object = readPointer(at + SCRATCH_OUT);
+            writeMediaType(buffer, at, buffer.format.blockAlign);
+            let answer = await callMethod(object, SLOT_SET_INPUT_TYPE, [0, at + SCRATCH_TYPE, 0],
+                thread);
+            if (answer >= 0)
+            {
+                writeMediaType(buffer, at, 1);
+                answer = await callMethod(object, SLOT_SET_OUTPUT_TYPE,
+                    [0, at + SCRATCH_TYPE, 0], thread);
+            }
+            if (answer < 0)
+            {
+                await callMethod(object, SLOT_RELEASE, [], thread);
+                failure = answer;
+                break;
+            }
+            memory.writeMemory(at + SCRATCH_IID,
+                /** @type {Uint8Array} */ (parseGuid(IID_IMediaObjectInPlace)));
+            memory.writeMemory(at + SCRATCH_OUT, new Uint8Array(8));
+            const asked = await callMethod(object, SLOT_QUERY_INTERFACE,
+                [at + SCRATCH_IID, at + SCRATCH_OUT], thread);
+            const inPlace = asked >= 0 ? readPointer(at + SCRATCH_OUT) : 0;
+            const name = readGuid(memory, at + SCRATCH_CLSID);
+            if (inPlace === 0)
+            {
+                divergence?.('IDirectSoundBuffer8::SetFX',
+                    `effect ${name} has no IMediaObjectInPlace and is not run`);
+            }
+            made.push({ clsid: name, object, inPlace });
+        }
+        if (failure < 0)
+        {
+            await releaseEffects(made, thread);
+            if (results !== 0)
+            {
+                for (let index = 0; index < count; index++)
+                {
+                    writeU32(results + index * 4,
+                        index < made.length ? DSFXR_PRESENT : DSFXR_UNKNOWN);
+                }
+            }
+            return failure;
+        }
+        effectsOf.set(buffer, made);
+        if (results !== 0)
+        {
+            for (let index = 0; index < count; index++)
+            {
+                writeU32(results + index * 4, DSFXR_LOCSOFTWARE);
+            }
+        }
+        return DS_OK;
+    };
+
+    /**
+     * Runs a buffer's effects over spans of it, in the chain's order, each
+     * in place on a copy: what is heard of those spans is what they make of
+     * the program's samples, which stay as the program wrote them.
+     *
+     * @param {any} buffer @param {{ from: number, length: number }[]} spans
+     * @param {unknown} thread
+     */
+    const runEffects = async(buffer, spans, thread)=>{
+        const chain = effectsOf.get(buffer) ?? [];
+        const data = scratchFor(buffer) + SCRATCH_DATA;
+        for (const { from, length } of spans)
+        {
+            if (length <= 0)
+            {
+                continue;
+            }
+            memory.writeMemory(data, memory.readMemory(buffer.address + from, length));
+            for (const effect of chain)
+            {
+                if (effect.inPlace === 0)
+                {
+                    continue;
+                }
+                const answer = await callMethod(effect.inPlace, SLOT_PROCESS,
+                    long ? [length, data, 0, 0] : [length, data, 0, 0, 0], thread);
+                if (answer < 0 && !effectSaid.has(effect.clsid))
+                {
+                    effectSaid.add(effect.clsid);
+                    divergence?.('IMediaObjectInPlace::Process', `effect ${effect.clsid} refused`
+                        + ` a span (0x${(answer >>> 0).toString(16)}); it is heard as written`);
+                }
+            }
+            buffer.setEffected?.(from, memory.readMemory(data, length));
+        }
+    };
+
+    /**
+     * What Play owes a buffer's effects: each told the stream starts again,
+     * then run over the whole buffer.
+     *
+     * @param {any} buffer @param {unknown} thread
+     */
+    const startEffects = async(buffer, thread)=>{
+        for (const effect of effectsOf.get(buffer) ?? [])
+        {
+            await callMethod(effect.object, SLOT_DISCONTINUITY, [0], thread);
+        }
+        await runEffects(buffer, [{ from: 0, length: buffer.bytes }], thread);
+    };
+
+    /** @type {Record<string, (target: any, args: number[]) => number | Promise<number>>} */
     const bufferMethods = {
         /** HRESULT GetCurrentPosition(LPDWORD play, LPDWORD write) */
         GetCurrentPosition(buffer, [play, write]){
@@ -1016,9 +1294,15 @@ export function createDirectSound({
         Play(buffer, [, , flags]){
             calls.Play = (calls.Play || 0) + 1;
             record(`b${buffers.indexOf(buffer)} Play loop=${(flags >>> 0) & 1} n=${buffer.bytes}`);
-            buffer.play(flags >>> 0);
-            bufferMethods.AcquireResources(buffer, []);
-            return DS_OK;
+            const start = ()=>{
+                buffer.play(flags >>> 0);
+                bufferMethods.AcquireResources(buffer, []);
+                return DS_OK;
+            };
+            // Each effect is told the stream starts again, and runs over what
+            // the buffer holds before it is heard.
+            return (effectsOf.get(buffer)?.length ?? 0) > 0
+                ? andThen(startEffects(buffer, callerThread?.()), start) : start();
         },
 
         /** HRESULT Stop(void) */
@@ -1075,11 +1359,23 @@ export function createDirectSound({
         },
 
         /** HRESULT Unlock(LPVOID p1, DWORD n1, LPVOID p2, DWORD n2) */
-        Unlock(buffer, [p1, , p2]){
+        Unlock(buffer, [p1, n1, p2, n2]){
             record(`b${buffers.indexOf(buffer)} Unlock`);
-            // A range is named by its pointer; the sizes are not looked at.
-            return buffer.unlock([p1 >>> 0, p2 >>> 0].filter(at=>at !== 0))
-                ? DS_OK : DSERR_INVALIDPARAM;
+            // A range is named by its pointer; the sizes are not looked at,
+            // save by the effects, which run over what was written.
+            if (!buffer.unlock([p1 >>> 0, p2 >>> 0].filter(at=>at !== 0)))
+            {
+                return DSERR_INVALIDPARAM;
+            }
+            if ((effectsOf.get(buffer)?.length ?? 0) === 0)
+            {
+                return DS_OK;
+            }
+            const spans = [[p1 >>> 0, n1 >>> 0], [p2 >>> 0, n2 >>> 0]]
+                .filter(([at, length])=>at !== 0 && length > 0)
+                .map(([at, length])=>({ from: at - buffer.address,
+                    length: Math.min(length, buffer.bytes - (at - buffer.address)) }));
+            return andThen(runEffects(buffer, spans, callerThread?.()), ()=>DS_OK);
         },
 
         /** HRESULT GetCaps(LPDSBCAPS caps) */
@@ -1231,9 +1527,13 @@ export function createDirectSound({
          * HRESULT SetFX(DWORD count, LPDSEFFECTDESC effects, LPDWORD results)
          *
          * Effects are a control like volume and pan, and a buffer created
-         * without it refuses them as it would refuse either. With it, the
-         * arguments are checked and clearing a chain that was never set is
-         * done; setting one answers E_NOTIMPL, because no effect is hosted.
+         * without it refuses them as it would refuse either; a locked or
+         * playing buffer keeps the chain it has. The chain given replaces the
+         * one there: each effect made through COM as a DMO and given the
+         * buffer's format in and out. One that cannot be made or refuses the
+         * format fails the whole call with its answer, and the buffer is left
+         * with no effects, as on Windows; the results say which were made
+         * (DSFXR_PRESENT) and which not (DSFXR_UNKNOWN).
          */
         SetFX(buffer, [count, effects, results]){
             if ((buffer.capabilities & DSBCAPS_CTRLFX) === 0)
@@ -1252,7 +1552,41 @@ export function createDirectSound({
             {
                 return DSERR_INVALIDCALL;
             }
-            return (count >>> 0) === 0 ? DS_OK : DSERR_UNSUPPORTED;
+            if (!createInstance || !callGuest)
+            {
+                return (count >>> 0) === 0 ? DS_OK : DSERR_UNSUPPORTED;
+            }
+            return setEffects(buffer, count >>> 0, effects >>> 0, results >>> 0);
+        },
+
+        /**
+         * HRESULT GetObjectInPath(REFGUID object, DWORD index, REFGUID iid,
+         *     LPVOID *out)
+         *
+         * An effect on the buffer's chain, by its class (or any, with
+         * GUID_All_Objects) and its place among those that match, asked for
+         * one of its interfaces.
+         */
+        GetObjectInPath(buffer, [object, index, iid, out]){
+            if ((out >>> 0) === 0 || (object >>> 0) === 0 || (iid >>> 0) === 0)
+            {
+                return DSERR_INVALIDPARAM;
+            }
+            const wanted = readGuid(memory, object >>> 0);
+            const found = (effectsOf.get(buffer) ?? []).filter((/** @type {any} */ effect)=>
+                wanted === GUID_All_Objects || effect.clsid === wanted)[index >>> 0];
+            if (!found)
+            {
+                return DSERR_OBJECTNOTFOUND;
+            }
+            return andThen(callMethod(found.object, SLOT_QUERY_INTERFACE,
+                [iid >>> 0, out >>> 0], callerThread?.()), hr=>{
+                if (hr < 0)
+                {
+                    writePointer(out, 0);
+                }
+                return hr;
+            });
         },
 
         /**

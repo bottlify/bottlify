@@ -116,6 +116,9 @@ const WALK_LIMIT = 4096;
  */
 const FLOOR_GAP = 0x100;
 
+/** What RtlAddGrowableFunctionTable answers for a table it cannot hold. */
+const STATUS_INVALID_PARAMETER = 0xc000000d;
+
 /**
  * Where a funclet the dispatcher called stands, once its frame has been
  * undone: the return into the call the bridge built, a few quadwords below
@@ -463,10 +466,10 @@ export function createSeh64(host){
      * @param {UnwindContext} context @param {any} thread @param {number} type
      *     UNW_FLAG.EHANDLER for the exception pass, UHANDLER for the unwind.
      * @param {Map<string, any>} memo
-     * @returns {{ visit?: FrameVisit, nested?: NestedCall } | null}
+     * @returns {Promise<{ visit?: FrameVisit, nested?: NestedCall } | null>}
      */
-    const step = (context, thread, type, memo)=>{
-        const fn = unwinder.lookup(context.rip);
+    const step = async(context, thread, type, memo)=>{
+        const fn = await unwinder.resolve(context.rip);
         if (fn)
         {
             const frameContext = copyContext(context);
@@ -574,7 +577,7 @@ export function createSeh64(host){
         const list = nestedOf(pass.thread);
         for (let guard = 0; guard < WALK_LIMIT; guard++)
         {
-            const taken = step(context, pass.thread, UNW_FLAG.UHANDLER, memo);
+            const taken = await step(context, pass.thread, UNW_FLAG.UHANDLER, memo);
             if (!taken)
             {
                 break;
@@ -867,7 +870,7 @@ export function createSeh64(host){
             {
                 frames.push(probe.rip >>> 0);
                 const at = { rip: probe.rip >>> 0, stack: stackOf(probe) };
-                if (!step(probe, thread, UNW_FLAG.NHANDLER, new Map())
+                if (!await step(probe, thread, UNW_FLAG.NHANDLER, new Map())
                     || (probe.rip >>> 0) === at.rip && stackOf(probe) === at.stack)
                 {
                     break;
@@ -878,7 +881,7 @@ export function createSeh64(host){
         for (let guard = 0; guard < WALK_LIMIT; guard++)
         {
             const before = { rip: context.rip >>> 0, stack: stackOf(context) };
-            const taken = step(context, thread, UNW_FLAG.EHANDLER, memo);
+            const taken = await step(context, thread, UNW_FLAG.EHANDLER, memo);
             if (!taken)
             {
                 break;
@@ -1107,7 +1110,7 @@ export function createSeh64(host){
             RtlCaptureStackBackTrace: {
                 argBytes: 16,
                 /** @param {number[]} args */
-                handler: ([skip, wanted, out, hash])=>{
+                handler: async([skip, wanted, out, hash])=>{
                     if ((out >>> 0) === 0)
                     {
                         return 0;
@@ -1123,7 +1126,7 @@ export function createSeh64(host){
                         {
                             frames.push(context.rip);
                         }
-                        const fn = unwinder.lookup(context.rip);
+                        const fn = await unwinder.resolve(context.rip);
                         if (fn)
                         {
                             unwinder.virtualUnwind(0, fn, context.rip, context);
@@ -1181,16 +1184,20 @@ export function createSeh64(host){
                 argBytes: 12,
                 /** @param {number[]} args */
                 handler: ([pc, imageBaseOut])=>{
+                    /** @param {FunctionEntry | null} fn */
+                    const answer = fn=>{
+                        if (fn && (imageBaseOut >>> 0) !== 0)
+                        {
+                            writeQuad(imageBaseOut >>> 0, fn.imageBase);
+                        }
+                        return fn ? fn.entry >>> 0 : 0;
+                    };
+                    // Answered at once from a table; a JIT's range waits on
+                    // its callback, and an answer that waited is a number.
                     const fn = unwinder.lookup(pc >>> 0);
-                    if (!fn)
-                    {
-                        return 0n;
-                    }
-                    if ((imageBaseOut >>> 0) !== 0)
-                    {
-                        writeQuad(imageBaseOut >>> 0, fn.imageBase);
-                    }
-                    return BigInt(fn.entry >>> 0);
+                    return fn || !unwinder.asksCallback(pc >>> 0)
+                        ? BigInt(answer(fn))
+                        : unwinder.resolve(pc >>> 0).then(answer);
                 },
             },
 
@@ -1302,11 +1309,76 @@ export function createSeh64(host){
                     (unwinder.add(table >>> 0, count >>> 0, base >>> 0) ? 1 : 0),
             },
 
-            /** BOOLEAN RtlDeleteFunctionTable(PRUNTIME_FUNCTION FunctionTable) */
+            /**
+             * BOOLEAN RtlDeleteFunctionTable(PRUNTIME_FUNCTION FunctionTable)
+             *
+             * A table RtlAddFunctionTable added, or a callback range by the
+             * identifier it was installed with.
+             */
             RtlDeleteFunctionTable: {
                 argBytes: 4,
                 /** @param {number[]} args */
                 handler: ([table])=>(unwinder.remove(table >>> 0) ? 1 : 0),
+            },
+
+            /**
+             * BOOLEAN RtlInstallFunctionTableCallback(DWORD64 TableIdentifier,
+             *     DWORD64 BaseAddress, DWORD Length, PGET_RUNTIME_FUNCTION_CALLBACK
+             *     Callback, PVOID Context, PCWSTR OutOfProcessCallbackDll)
+             *
+             * How a JIT - .NET's, Mono's - describes the code it makes: the
+             * callback is asked for a function's entry whenever an address in
+             * the range is looked up. The out-of-process DLL is a debugger's.
+             */
+            RtlInstallFunctionTableCallback: {
+                // The identifier and the base are DWORD64s: two dwords each in
+                // the layout every handler reads.
+                argBytes: 32,
+                quadwords: [0, 2],
+                /** @param {number[]} args */
+                handler: ([id, , base, , length, callback, context])=>(unwinder.install(
+                    id >>> 0, base >>> 0, length >>> 0, callback >>> 0, context >>> 0) ? 1 : 0),
+            },
+
+            /**
+             * DWORD RtlAddGrowableFunctionTable(PVOID *DynamicTable,
+             *     PRUNTIME_FUNCTION FunctionTable, DWORD EntryCount,
+             *     DWORD MaximumEntryCount, ULONG_PTR RangeBase, ULONG_PTR RangeEnd)
+             *
+             * A table the program grows in place: Windows 8 and later.
+             */
+            RtlAddGrowableFunctionTable: {
+                argBytes: 24,
+                /** @param {number[]} args */
+                handler: ([out, table, count, max, base, end])=>{
+                    if ((out >>> 0) === 0 || (table >>> 0) === 0 || (count >>> 0) > (max >>> 0))
+                    {
+                        return STATUS_INVALID_PARAMETER;
+                    }
+                    writeQuad(out >>> 0, unwinder.addGrowable(table >>> 0, count >>> 0,
+                        max >>> 0, base >>> 0, end >>> 0));
+                    return 0;
+                },
+            },
+
+            /** VOID RtlGrowFunctionTable(PVOID DynamicTable, DWORD NewEntryCount) */
+            RtlGrowFunctionTable: {
+                argBytes: 8,
+                /** @param {number[]} args */
+                handler: ([handle, count])=>{
+                    unwinder.grow(handle >>> 0, count >>> 0);
+                    return 0;
+                },
+            },
+
+            /** VOID RtlDeleteGrowableFunctionTable(PVOID DynamicTable) */
+            RtlDeleteGrowableFunctionTable: {
+                argBytes: 4,
+                /** @param {number[]} args */
+                handler: ([handle])=>{
+                    unwinder.deleteGrowable(handle >>> 0);
+                    return 0;
+                },
             },
 
             /**

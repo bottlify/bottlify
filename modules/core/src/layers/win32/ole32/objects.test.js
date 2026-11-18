@@ -53,6 +53,28 @@ test('a class is found under either case of its GUID', ()=>{
     assert.ok(registry.create(CLSID_TEST));
 });
 
+test('a class of one object per process hands out that object, keeping a reference of its own',
+    ()=>{
+        // MMDevAPI's enumerator: CoCreateInstance twice gives one pointer, and
+        // the count after the first is two (Wine's mmdevenum test).
+        const registry = createComRegistry();
+        let made = 0;
+        registry.registerClass(CLSID_TEST, ()=>{
+            made++;
+            return definition();
+        }, { single: true });
+        const first = /** @type {any} */ (registry.create(CLSID_TEST));
+        assert.equal(first.refCount, 2, 'its own and the caller\'s');
+        const second = registry.create(CLSID_TEST);
+        assert.equal(second, first);
+        assert.equal(first.refCount, 3);
+        assert.equal(made, 1);
+        first.release();
+        first.release();
+        assert.equal(first.destroyed, false, 'its own reference keeps it');
+        assert.equal(registry.createAggregated(CLSID_TEST, { outer: 1, call: async()=>0 }), false);
+    });
+
 test('an unregistered class produces nothing', ()=>{
     const registry = setup();
     assert.equal(registry.isRegistered(IID_ABSENT), false);

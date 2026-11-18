@@ -11,7 +11,9 @@ import * as surfaces from '../../graphics/gdi/surface.js';
 import { createScreen } from '../../graphics/gdi/screen.js';
 import { setupBars as setupWith, OUT, TEXT } from './bars.fixture.js';
 import {
-    TRACKBAR_CLASS, TBS_VERT, TBS_NOTICKS, TBS_FIXEDLENGTH,
+    TRACKBAR_CLASS, TBS_VERT, TBS_NOTICKS, TBS_FIXEDLENGTH, TBS_AUTOTICKS, TBS_ENABLESELRANGE,
+    TBM_SETTICFREQ, TBM_GETTICPOS, TBM_GETPTICS, TBM_SETSELSTART, TBM_SETSELEND, TBM_SETBUDDY,
+    TBM_GETBUDDY,
     TBM_GETPOS, TBM_GETRANGEMIN, TBM_GETRANGEMAX, TBM_SETPOS, TBM_SETRANGE, TBM_SETRANGEMIN,
     TBM_SETRANGEMAX, TBM_SETPAGESIZE, TBM_GETPAGESIZE, TBM_SETLINESIZE, TBM_GETLINESIZE,
     TBM_SETTIC, TBM_GETTIC, TBM_GETNUMTICS, TBM_CLEARTICS, TBM_SETSEL, TBM_GETSELSTART,
@@ -74,7 +76,7 @@ test('a toolkit that superclasses the trackbar finds it by name with GetClassInf
         context.memory.putString(TEXT, name);
         context.memory.bytes.fill(0, OUT, OUT + WNDCLASSEX_SIZE);
         context.memory.put32s(OUT, [WNDCLASSEX_SIZE]);
-        assert.equal(context.fns.GetClassInfoExA.handler([0, TEXT, OUT]), 1, name);
+        assert.notEqual(context.fns.GetClassInfoExA.handler([0, TEXT, OUT]), 0, name);
         assert.notEqual(context.memory.u32(OUT + WNDCLASSEX_WNDPROC), 0,
             'with a procedure a superclass can call');
     }
@@ -144,13 +146,96 @@ test('tics: one inside the range is kept in order, one outside is refused, '
 test('a selection is two signed words, and clears to nothing', async()=>{
     const context = setupBars();
     await context.makeParent();
-    const bar = await context.control(TRACKBAR_CLASS, 0, [10, 10, 200, 30]);
+    const bar = await context.control(TRACKBAR_CLASS, TBS_ENABLESELRANGE, [10, 10, 200, 30]);
     context.send([bar, TBM_SETSEL, 1, point(10, 70)]);
     assert.equal(context.send([bar, TBM_GETSELSTART, 0, 0]), 10);
     assert.equal(context.send([bar, TBM_GETSELEND, 0, 0]), 70);
     context.send([bar, TBM_CLEARSEL, 1, 0]);
     assert.equal(context.send([bar, TBM_GETSELSTART, 0, 0]), 0);
     assert.equal(context.send([bar, TBM_GETSELEND, 0, 0]), 0);
+});
+
+test('a selection is kept only with TBS_ENABLESELRANGE, its ends held as Windows holds them',
+    async()=>{
+        const context = setupBars();
+        await context.makeParent();
+        const plain = await context.control(TRACKBAR_CLASS, 0, [10, 10, 200, 30]);
+        context.send([plain, TBM_SETSEL, 1, point(0, 10)]);
+        assert.equal(context.send([plain, TBM_GETSELEND, 0, 0]), 0, 'ignored');
+        const bar = await context.control(TRACKBAR_CLASS, TBS_ENABLESELRANGE, [10, 50, 200, 30]);
+        context.send([bar, TBM_SETRANGEMIN, 0, 5]);
+        context.send([bar, TBM_SETRANGEMAX, 0, 10]);
+        context.send([bar, TBM_SETSEL, 1, point(0, 20)]);
+        assert.deepEqual([context.send([bar, TBM_GETSELSTART, 0, 0]),
+            context.send([bar, TBM_GETSELEND, 0, 0])], [5, 10], 'SETSEL keeps both in range');
+        context.send([bar, TBM_SETSELEND, 1, 4]);
+        assert.equal(context.send([bar, TBM_GETSELEND, 0, 0]), 4, 'the end may go below');
+        context.send([bar, TBM_SETSELSTART, 1, 0]);
+        assert.equal(context.send([bar, TBM_GETSELSTART, 0, 0]), 5, 'the start may not');
+        context.send([bar, TBM_SETSELSTART, 1, 20]);
+        assert.equal(context.send([bar, TBM_GETSELSTART, 0, 0]), 20, 'but may go above');
+    });
+
+test('the page is a fifth of the range until one is set, and -1 has the fifth back', async()=>{
+    const context = setupBars();
+    await context.makeParent();
+    const bar = await context.control(TRACKBAR_CLASS, 0, [10, 10, 200, 30]);
+    context.send([bar, TBM_SETRANGE, 0, point(0, 65)]);
+    assert.equal(context.send([bar, TBM_GETPAGESIZE, 0, 0]), 13);
+    assert.equal(context.send([bar, TBM_SETPAGESIZE, 0, 10]), 13, 'the page in effect before');
+    context.send([bar, TBM_SETRANGE, 0, point(0, 30)]);
+    assert.equal(context.send([bar, TBM_GETPAGESIZE, 0, 0]), 10, 'a set page stays');
+    assert.equal(context.send([bar, TBM_SETPAGESIZE, 0, -1]), 10);
+    assert.equal(context.send([bar, TBM_GETPAGESIZE, 0, 0]), 6);
+    assert.equal(context.send([bar, TBM_SETPAGESIZE, 0, -2]), 6);
+    assert.equal(context.send([bar, TBM_GETPAGESIZE, 0, 0]), -2, 'only -1 is the default');
+});
+
+test('an auto-ticked bar makes its tics when the range or frequency changes', async()=>{
+    const context = setupBars();
+    await context.makeParent();
+    const bar = await context.control(TRACKBAR_CLASS, TBS_AUTOTICKS, [10, 10, 200, 30]);
+    assert.equal(context.send([bar, TBM_GETNUMTICS, 0, 0]), 2, 'none yet, only the ends');
+    assert.equal(context.send([bar, TBM_GETTICPOS, 0, 0]), -1);
+    context.send([bar, TBM_SETRANGE, 1, point(1, 6)]);
+    assert.equal(context.send([bar, TBM_GETNUMTICS, 0, 0]), 6);
+    assert.equal(context.send([bar, TBM_GETTIC, 0, 0]), 2);
+    assert.ok(context.send([bar, TBM_GETTICPOS, 0, 0]) > 0);
+    const array = context.send([bar, TBM_GETPTICS, 0, 0]);
+    assert.notEqual(array, 0);
+    assert.deepEqual([0, 1, 2, 3].map(at=>context.memory.u32(array + at * 4)), [2, 3, 4, 5]);
+    context.send([bar, TBM_SETTICFREQ, 2, 0]);
+    assert.equal(context.send([bar, TBM_GETNUMTICS, 0, 0]), 4, '3 and 5, and the ends');
+});
+
+test('the thumb stays where it was until a redraw places it', async()=>{
+    const context = setupBars();
+    await context.makeParent();
+    const bar = await context.control(TRACKBAR_CLASS, 0, [10, 10, 200, 30]);
+    const left = ()=>{
+        context.send([bar, TBM_GETTHUMBRECT, 0, OUT]);
+        return context.memory.u32(OUT);
+    };
+    const first = left();
+    context.send([bar, TBM_SETPOS, 0, 50]);
+    assert.equal(left(), first, 'no redraw: the thumb did not move');
+    context.send([bar, TBM_SETPOS, 1, 60]);
+    assert.ok(left() > first, 'a redraw placed it');
+    context.send([bar, TBM_SETRANGE, 0, point(0, 1000)]);
+    assert.ok(left() > first, 'a range set without a redraw leaves it');
+    context.send([bar, TBM_SETTICFREQ, 1, 0]);
+    assert.equal(left() < first + 20, true, 'a frequency set places it again');
+});
+
+test('a buddy is kept per end and the one before answered', async()=>{
+    const context = setupBars();
+    await context.makeParent();
+    const bar = await context.control(TRACKBAR_CLASS, 0, [10, 10, 200, 30]);
+    assert.equal(context.send([bar, TBM_SETBUDDY, 0, 0x1234]), 0);
+    assert.equal(context.send([bar, TBM_SETBUDDY, 0, 0x1234]), 0x1234);
+    assert.equal(context.send([bar, TBM_SETBUDDY, 1, 0x5678]), 0);
+    assert.equal(context.send([bar, TBM_GETBUDDY, 0, 0]), 0x1234);
+    assert.equal(context.send([bar, TBM_GETBUDDY, 1, 0]), 0x5678);
 });
 
 test('the keys move the position, then tell the parent; a key let go ends the track',
