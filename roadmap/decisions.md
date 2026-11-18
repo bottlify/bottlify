@@ -2344,7 +2344,9 @@ where it calls in. Which libraries Windows carries is knowledge, not code: Wine'
 libraries it recreates, less what is Wine's alone and the redistributable runtimes a program
 brings itself (`tools/generators/windows-libraries.mjs`), with every `api-ms-win-` and
 `ext-ms-win-` set. A delay-loaded library fails on its first call on Windows and is not refused
-at the start. The refusal is said as `libraries-not-found`, an error. *2026-11-15.*
+at the start. The refusal is said as `libraries-not-found`, an error. A library a later Windows first
+carries (`loader/internal/libraries-since.js`: XAudio2 2.8 and XInput 1.4 from 8, XAudio2 2.9 and
+Direct3D 12 from 10) is found nowhere on an earlier one. *2026-11-15, the later Windows 2026-11-17.*
 
 **A257. comctl32 is two libraries of one implementation: system32's 5.82, and Common Controls 6
 where a program's activation context holds that assembly.** As on Windows, the context decides at

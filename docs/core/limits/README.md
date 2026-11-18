@@ -55,7 +55,8 @@ event, an error. Neither stops the program.
   page is not drawn and has no document; each address not drawn is said once as a loss. The
   InternetExplorer application object is not there.
 - A library Windows carries in its system directory and the engine does not recreate (in Wine's
-  list of them, `loader/internal/windows-libraries.js`) is missing, not absent: a program that
+  list of them, `loader/internal/windows-libraries.js`, from the Windows that first carries it,
+  `libraries-since.js`) is missing, not absent: a program that
   imports one still starts, and fails where it calls in. A static import of a library in no list
   and on no volume ends the process at its start with STATUS_DLL_NOT_FOUND (0xC0000135), as on
   Windows (`roadmap/decisions.md` A256).
