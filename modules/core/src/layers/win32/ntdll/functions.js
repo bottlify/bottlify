@@ -250,7 +250,7 @@ const alias = (table, names)=>Object.fromEntries(
  * them -- a host that assembled no processes -- leaves those unexported.
  */
 const PROCESS_ENTRIES = ['ResumeThread', 'OpenProcess', 'FindResourceExW', 'LoadResource',
-    'SizeofResource'];
+    'SizeofResource', 'OpenThread', 'GetProcessId', 'GetThreadId'];
 
 /** Where a thread block keeps its process's block. */
 const TEB_PEB = 0x30;
