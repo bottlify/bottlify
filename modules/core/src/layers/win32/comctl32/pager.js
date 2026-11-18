@@ -11,9 +11,8 @@
  * with PGS_HORZ, down otherwise. PGM_SETCHILD names the child; the pager
  * asks its parent how long the child is (PGN_CALCSIZE, the child's own size
  * the default) and puts the child at minus the scroll position, as tall
- * (or wide) as the pager, when the program next takes its messages
- * (roadmap/decisions.md, A267). PGM_SETPOS scrolls, within the child's
- * length.
+ * (or wide) as the pager, at once, with SetWindowPos (A267 is withdrawn).
+ * PGM_SETPOS scrolls, within the child's length.
  *
  * What the child tells its parent goes through the pager to the pager's
  * parent. The pager asks its parent at creation whether it wants Unicode
