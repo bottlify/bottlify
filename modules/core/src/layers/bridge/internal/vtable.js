@@ -63,9 +63,11 @@ const LONG_WORD = 8;
  * @property {string} name
  * @property {number} argBytes            Counting the interface pointer.
  * @property {Function} [invoke]          Called as (object, args) with `this` removed.
- * @property {(builder: GuestSlotBuilder) => number} [guest]
+ * @property {((builder: GuestSlotBuilder) => number) & { wide?: boolean }} [guest]
  *           Guest code for the slot instead of a trap: given the method's own
  *           trap to fall back to, answers the address the slot should hold.
+ *           i386 code unless the builder says it is `wide`: one that builds
+ *           its code for the process's width, which a 64-bit process takes too.
  * @property {(call: number[]) => number | undefined} [inPlace]
  *           What a call the host makes to the slot from driven steps is
  *           answered with in place, with no entry into the guest
@@ -145,7 +147,8 @@ const COUNT_CODE = {
  *        `allocateTable` the method tables, on pages of data rather than code.
  * @param {() => boolean} [deps.long]  Whether the process is a 64-bit one, asked
  *        when a table is laid out: its slots are eight bytes, and the methods
- *        and counts that run in the guest, which are i386 code, are traps there.
+ *        and counts that run in the guest are traps there unless built for
+ *        its width (a `wide` guest builder).
  * @param {(label: string) => void} [deps.unimplemented]  told of a call to a method an
  *        interface has a slot for and no implementation of, which answers E_NOTIMPL
  */
@@ -193,10 +196,17 @@ export function createVtables({ memory, register, heap, long = ()=>false, unimpl
     const byShape = new Map();
 
     /**
+     * Whether a method's slot is guest code in this process: a 64-bit one
+     * runs no i386, so only a builder that builds for its width.
+     *
+     * @param {InterfaceMethod} method
+     */
+    const runsInGuest = method=>Boolean(method.guest && (!long() || method.guest.wide));
+    /**
      * @param {string} interfaceId @param {InterfaceMethod[]} table
      * @returns {string | null}
      */
-    const shapeOf = (interfaceId, table)=>(table.some(method=>method.guest) && !long()
+    const shapeOf = (interfaceId, table)=>(table.some(method=>runsInGuest(method))
         ? null
         : `${interfaceId}|${table.map(method=>`${method.argBytes}:${method.builtin ?? ''}:${
             method.floats ? JSON.stringify(method.floats) : ''}:${
@@ -338,7 +348,7 @@ export function createVtables({ memory, register, heap, long = ()=>false, unimpl
                 const trap = register(`${interfaceId}::${method.name}`, fn);
                 // A method that runs in the guest keeps its trap: that is
                 // what its code falls back to for the cases it does not take.
-                if (method.guest && !long())
+                if (method.guest && runsInGuest(method))
                 {
                     const at = method.guest({ trap, register });
                     if (method.inPlace)

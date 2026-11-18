@@ -11,7 +11,7 @@
  */
 
 import {
-    ECX, dword, getterPrologue, invalidTail, letHeldGo, prologue, routine, takeHeld,
+    EAX, ECX, EDX, I386, dword, getterPrologue, invalidTail, letHeldGo, prologue, routine, takeHeld,
 } from './assemble.js';
 import { FLAG_SLOW_PATH, SHADOW, SURFACE, TEXTURE, WORLD_SLOT, WORLD_TYPE } from '../block.js';
 
@@ -38,25 +38,26 @@ import { FLAG_SLOW_PATH, SHADOW, SURFACE, TEXTURE, WORLD_SLOT, WORLD_TYPE } from
  *   slow:
  *     jmp trap
  *
- * @param {number} at @param {number} trap
+ * @param {number} at @param {number} trap @param {import('./assemble.js').Width} [width]
  * @returns {Uint8Array}
  */
-export function getRenderStateCode(at, trap){
+export function getRenderStateCode(at, trap, width = I386){
     return routine(at, trap, [
-        ...getterPrologue(),
-        [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
+        ...getterPrologue(width),
+        width.arg(EAX, 1),                                       // mov eax, [esp+8]
         [0x3d, ...dword(SHADOW.RENDER_STATE_COUNT)],             // cmp eax, 256
         { jcc: 0x73, to: 'slow' },                               // jae slow
         [0x0f, 0xa3, 0x81, ...dword(SHADOW.RENDER_STATE_VALID)], // bt [ecx+disp], eax
         { jcc: 0x73, to: 'slow' },                               // jnc slow
-        [0x8b, 0x54, 0x24, 0x0c],                                // mov edx, [esp+12]
+        ...width.highZero(2, 'slow'),                            // (64 bits: value below 4 GiB)
+        width.arg(EDX, 2),                                       // mov edx, [esp+12]
         [0x85, 0xd2],                                            // test edx, edx
         { jcc: 0x74, to: 'slow' },                               // jz slow
         [0x8b, 0x84, 0x81, ...dword(SHADOW.RENDER_STATES)],      // mov eax, [ecx+eax*4+disp]
         [0x89, 0x02],                                            // mov [edx], eax
         [0x31, 0xc0],                                            // xor eax, eax
-        [0xc2, 12, 0x00],                                        // ret 12
-    ]);
+        width.ret(3),                                            // ret 12
+    ], {}, width);
 }
 
 /** The transform types below WORLD a device answers for: VIEW, PROJECTION, TEXTURE0..7. */

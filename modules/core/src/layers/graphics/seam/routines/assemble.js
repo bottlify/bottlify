@@ -89,6 +89,87 @@ export function assemble(parts){
 const jump = (from, to)=>[0xe9, ...dword((to - (from + 5)) | 0)];
 
 /**
+ * `op reg, [esp+disp]` or `op [esp+disp], reg` (the ModR/M form of `opcode`,
+ * `reg` a ModR/M register number or an opcode extension): a byte of
+ * displacement where it fits. In long mode the same bytes address [rsp+disp].
+ *
+ * @param {number[]} opcode @param {number} reg @param {number} disp
+ */
+const onStack = (opcode, reg, disp)=>(disp < 0x80
+    ? [...opcode, 0x44 | reg << 3, 0x24, disp]
+    : [...opcode, 0x84 | reg << 3, 0x24, ...dword(disp)]);
+
+/**
+ * What a routine's code depends on the process's width for, so that one
+ * source builds a routine for a 32-bit process and a 64-bit one alike.
+ *
+ * In a 32-bit process a method is stdcall: its arguments on the stack past
+ * the return address, `this` first, popped by `ret n`. In a 64-bit one the
+ * first four are in RCX, RDX, R8 and R9 and the rest past 32 bytes of home
+ * space the caller leaves for them. The routine's first act there is to put
+ * the four into their home slots (`entry`), after which argument `i` is at
+ * [rsp + 8 + 8i] as it is at [esp + 4 + 4i] in the i386, the four registers
+ * free; the slow way puts them back (`reload`) before the jump to the trap,
+ * which reads the call as it came. What a routine keeps in its registers it
+ * keeps in their low halves: a 32-bit operation zero-extends, so an address
+ * made of them is the guest address below 4 GiB, and an argument that is a
+ * pointer is the routine's only where its upper half is zero (`highZero`).
+ *
+ * An interface pointer's block is the word after the method table's: [this+4]
+ * and [this+8] (`createVtables`), and a pointer a routine writes out is that
+ * wide (`storePointer`).
+ *
+ * @typedef {Object} Width
+ * @property {32 | 64} bits
+ * @property {4 | 8} word  a pointer's bytes
+ * @property {(reg: number, index: number, pushed?: number) => number[]} arg
+ *     `mov reg, argument` - its low half - with `pushed` words pushed since the entry
+ * @property {(opcode: number[], reg: number, index: number, pushed?: number) => number[]} argOp
+ *     the ModR/M form of `opcode` with the argument's slot as its memory operand
+ * @property {(index: number, slow: string, pushed?: number) => any[]} highZero
+ *     to `slow` where an argument's upper half is not zero: nothing in a 32-bit process
+ * @property {(dst: number, src: number) => number[]} blockOf  `mov dst, [src+word]`
+ * @property {(base: number, src: number, disp: number) => number[]} storePointer
+ *     `mov [base+disp], src` as a pointer, the upper half zero
+ * @property {(args: number) => number[]} ret  the return of a method of `args` arguments
+ * @property {() => number[]} entry @property {() => number[]} reload
+ */
+
+/** @type {Width} */
+export const I386 = Object.freeze({
+    bits: /** @type {32} */ (32),
+    word: /** @type {4} */ (4),
+    arg: (reg, index, pushed = 0)=>onStack([0x8b], reg, 4 * (1 + index + pushed)),
+    argOp: (opcode, reg, index, pushed = 0)=>onStack(opcode, reg, 4 * (1 + index + pushed)),
+    highZero: ()=>[],
+    blockOf: (dst, src)=>[0x8b, 0x40 | dst << 3 | src, 4],
+    storePointer: (base, src, disp)=>[0x89, 0x80 | src << 3 | base, ...dword(disp)],
+    ret: args=>[0xc2, 4 * args, 0x00],
+    entry: ()=>[],
+    reload: ()=>[],
+});
+
+/** The four argument registers' home slots: mov [rsp+8], rcx .. mov [rsp+32], r9. */
+const HOMES = [[0x48, 1, 8], [0x48, 2, 16], [0x4c, 0, 24], [0x4c, 1, 32]];
+
+/** @type {Width} */
+export const X64 = Object.freeze({
+    bits: /** @type {64} */ (64),
+    word: /** @type {8} */ (8),
+    arg: (reg, index, pushed = 0)=>onStack([0x8b], reg, 8 * (1 + index + pushed)),
+    argOp: (opcode, reg, index, pushed = 0)=>onStack(opcode, reg, 8 * (1 + index + pushed)),
+    highZero: (index, slow, pushed = 0)=>[
+        [...onStack([0x83], 7, 8 * (1 + index + pushed) + 4), 0x00], // cmp dword [rsp+d+4], 0
+        { jcc: 0x75, to: slow, near: true },                         // jne slow
+    ],
+    blockOf: (dst, src)=>[0x8b, 0x40 | dst << 3 | src, 8],
+    storePointer: (base, src, disp)=>[0x48, 0x89, 0x80 | src << 3 | base, ...dword(disp)],
+    ret: ()=>[0xc3],
+    entry: ()=>HOMES.flatMap(([rex, reg, disp])=>onStack([rex, 0x89], reg, disp)),
+    reload: ()=>HOMES.flatMap(([rex, reg, disp])=>onStack([rex, 0x8b], reg, disp)),
+});
+
+/**
  * What every routine starts with: the object's block into ECX, and the two
  * cases that are the host's whatever the call -- no block, or the host's flag.
  *
@@ -100,11 +181,12 @@ const jump = (from, to)=>[0xe9, ...dword((to - (from + 5)) | 0)];
  *     jnz slow
  *
  * @param {string} [slow]  The label those two cases go to.
+ * @param {number} [flags] @param {Width} [width]
  * @returns {(number[] | { jcc: number, to: string })[]}
  */
-export const prologue = (slow = 'slow', flags = FLAG_SLOW_PATH)=>[
-    [0x8b, 0x4c, 0x24, 0x04],                                // mov ecx, [esp+4]
-    [0x8b, 0x49, 0x04],                                      // mov ecx, [ecx+4]
+export const prologue = (slow = 'slow', flags = FLAG_SLOW_PATH, width = I386)=>[
+    width.arg(ECX, 0),                                       // mov ecx, [esp+4]
+    width.blockOf(ECX, ECX),                                 // mov ecx, [ecx+4]
     [0x85, 0xc9],                                            // test ecx, ecx
     { jcc: 0x74, to: slow },                                 // jz slow
     [0xf7, 0x01, ...dword(flags)],                           // test dword [ecx], flags
@@ -171,12 +253,14 @@ export const takeHeld = (base, busy)=>{
 export const letHeldGo = base=>[0xf0, 0x83, 0xa0 | base, ...dword(SHADOW.HELD), 0x00];
 
 /** ModR/M register numbers. */
+export const EAX = 0;
 export const ECX = 1;
 export const EDX = 2;
 export const EBX = 3;
 
 /** A getter's prologue: a block the ring may have made stale is the host's too. */
-export const getterPrologue = ()=>prologue('slow', FLAG_SLOW_PATH | FLAG_STALE);
+/** @param {Width} [width] */
+export const getterPrologue = (width = I386)=>prologue('slow', FLAG_SLOW_PATH | FLAG_STALE, width);
 
 /**
  * The prologue of a function rather than a method: the block is the calling
@@ -256,20 +340,23 @@ export const dirtyPrologue = (kind, slow)=>[
 export const TEB_GL_CONTEXT = 0xbf0;
 
 /**
- * A routine's bytes: its body, then a jump for each of `exits` -- a label the
- * body branches to, and the address outside it the label goes on to -- and
- * last the jump to the trap its slow label lands on.
+ * A routine's bytes: its entry (`Width`), its body, then a jump for each of
+ * `exits` -- a label the body branches to, and the address outside it the
+ * label goes on to -- and last the jump to the trap its slow label lands on,
+ * the argument registers put back first in a 64-bit process.
  *
  * @param {number} at @param {number} trap
  * @param {(number[] | { label: string } | { jcc: number, to: string, near?: boolean })[]} parts
  * @param {Record<string, number>} [exits]
+ * @param {Width} [width]
  */
-export const routine = (at, trap, parts, exits = {})=>{
+export const routine = (at, trap, parts, exits = {}, width = I386)=>{
     const names = Object.keys(exits);
-    const body = assemble([...parts,
-        ...names.flatMap(name=>[{ label: name }, [0xe9, 0, 0, 0, 0]]), { label: 'slow' }]);
+    const reload = width.reload();
+    const body = assemble([width.entry(), ...parts,
+        ...names.flatMap(name=>[{ label: name }, [0xe9, 0, 0, 0, 0]]), { label: 'slow' }, reload]);
     names.forEach((name, i)=>{
-        const from = body.length - (names.length - i) * 5;
+        const from = body.length - reload.length - (names.length - i) * 5;
         body.set(jump(at + from, exits[name]), from);
     });
     return new Uint8Array([...body, ...jump(at + body.length, trap)]);
@@ -283,12 +370,12 @@ export const routine = (at, trap, parts, exits = {})=>{
  *     mov eax, D3DERR_INVALIDCALL
  *     ret n
  *
- * @param {number} popped
+ * @param {number} popped  the bytes a 32-bit process's method pops @param {Width} [width]
  * @returns {(number[] | { label: string })[]}
  */
-export const invalidTail = popped=>[
+export const invalidTail = (popped, width = I386)=>[
     { label: 'invalid' },
     [0xb8, ...dword(D3DERR_INVALIDCALL)],                        // mov eax, D3DERR_INVALIDCALL
-    [0xc2, popped, 0x00],                                        // ret n
+    width.ret(popped / 4),                                       // ret n
 ];
 

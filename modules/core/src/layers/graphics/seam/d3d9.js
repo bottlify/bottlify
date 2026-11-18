@@ -91,6 +91,7 @@ import {
     getLevelDescCode, getRenderStateCode, getTargetCode, getSamplerStateCode, getSurfaceDescCode,
     getSurfaceLevelCode, getTextureStageStateCode, getTransformCode, getViewportCode,
 } from './routines/getters.js';
+import { I386, X64 } from './routines/assemble.js';
 import {
     lockCode, moveCopyCode, unlockCode, lockLevelCode, unlockLevelCode,
 } from './routines/locks.js';
@@ -297,6 +298,18 @@ export function createDirect3D9Seam(
     const deviceGroup = name=>(GUEST_GETTERS.has(name) ? 'getters' : 'ring');
     const fields = createFields(memory);
     const long = pointerSize === 8;
+    /** What the guest routines are built for: the process's width (`routines/assemble.js`). */
+    const routineWidth = long ? X64 : I386;
+    /**
+     * A guest builder whose routine is built for `routineWidth`, which a 64-bit
+     * process takes as a 32-bit one does (`createVtables`); every other one
+     * stays a trap there.
+     *
+     * @template {Function} F
+     * @param {F} build
+     * @returns {F & { wide: true }}
+     */
+    const builtWide = build=>Object.assign(build, { wide: /** @type {true} */ (true) });
     /**
      * An interface, an address or a handle written to an out parameter: in a
      * 64-bit process the parameter is eight bytes and its high half is
@@ -3151,7 +3164,8 @@ export function createDirect3D9Seam(
     /** @type {Record<string, (builder: { trap: number }) => number>} */
     const deviceGuests = guestsBut(deviceGroup, allocate
         ? {
-            GetRenderState: ({ trap })=>placeCode(at=>getRenderStateCode(at, trap)),
+            GetRenderState: builtWide(({ trap })=>placeCode(at=>getRenderStateCode(at, trap,
+                routineWidth))),
             GetTransform: ({ trap })=>placeCode(at=>getTransformCode(at, trap)),
             GetTextureStageState: ({ trap })=>placeCode(at=>getTextureStageStateCode(at, trap,
                 STAGE_STATE_TYPES_9)),

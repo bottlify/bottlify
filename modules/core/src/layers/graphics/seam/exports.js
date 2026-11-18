@@ -253,7 +253,11 @@ export function createGraphicsLibraries(
         } },
 )
 {
+    // A 64-bit process runs no i386: of the guest code here only Direct3D 9's
+    // is built for its width, routine by routine (`routines/assemble.js`,
+    // `Width`), and every other routine and count is a trap there.
     const guestCode = guestCodeAsked && pointerSize === 4;
+    const guestCode9 = guestCodeAsked;
     const publisher = shared ?? createPublisher({
         publishInterface, unpublishInterface, currentThread,
         cells: guestCode && !guestTraps.includes('counts') && allocate && memory?.readU32
@@ -406,8 +410,8 @@ export function createGraphicsLibraries(
         publisher, memory, screen, divergence, cursor, placeCursor, cursorAt, resolution,
         windowClientSize, windowShown, gdi, now, devicePublished: pointer=>vtableDecoy(pointer),
         focus, callGuest, currentThread,
-        waitUntil, presented, refresh, phases, allocate: guestAllocate,
-        allocateCode: guestAllocateCode,
+        waitUntil, presented, refresh, phases, allocate: guestCode9 ? allocate : undefined,
+        allocateCode: guestCode9 ? allocateCode : undefined,
         traps: new Set(guestTraps), ringBytes, pointerSize, floatResult,
         identity: ()=>graphics.adapter?.() ?? null,
     }));
