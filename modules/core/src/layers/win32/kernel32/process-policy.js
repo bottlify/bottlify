@@ -20,6 +20,7 @@
 import { blockLayouts } from './teb.js';
 import { SELECTORS } from './seh.js';
 import { floatGroupsOf } from './fpu-context.js';
+import { debugGroupOf, setDebugRegisters } from './debug-registers.js';
 import { PROCESSOR } from './processor.js';
 
 const ERROR_ACCESS_DENIED = 5;
@@ -419,8 +420,9 @@ export function createProcessPolicyFunctions(host){
      * EIP, EFLAGS, ESP; integer: the rest), every other register is
      * left as the call found it. A runtime that unwinds by itself
      * (Mono's) captures a context, unwinds to it and continues here. A
-     * null context is refused; the floating-point state a context holds
-     * is not put back, and that is said.
+     * null context is refused. The floating-point groups go back with the
+     * rest (said where there is nothing to take them), and the debug
+     * registers become the thread's (`debug-registers.js`).
      */
     const ntContinue = {
         argBytes: 8,
@@ -445,7 +447,13 @@ export function createProcessPolicyFunctions(host){
             // The floating-point groups go back with the rest, as Windows
             // continues from the whole record.
             // On the calling thread, whose call this is: its own registers now.
-            const groups = floatGroupsOf(host.readMemory(at, CONTEXT_BYTES), flags);
+            const bytes = host.readMemory(at, CONTEXT_BYTES);
+            const debug = debugGroupOf(bytes, flags);
+            if (debug !== null)
+            {
+                setDebugRegisters(host.currentThread(), debug, host.divergence, 'NtContinue');
+            }
+            const groups = floatGroupsOf(bytes, flags);
             if (groups !== null && host.float?.restore(null, groups) !== true)
             {
                 host.divergence?.('NtContinue',
