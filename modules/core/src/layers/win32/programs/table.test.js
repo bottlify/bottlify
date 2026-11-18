@@ -12,6 +12,7 @@ import { createProgramFunctions } from './functions.js';
 import { parsePe, readImports } from '../../loader/internal/pe.js';
 import { synthesiseProgram } from '../../loader/internal/synth.js';
 import { rewriteResources } from '../kernel32/resource-update.js';
+import { runWinver } from './winver.js';
 
 test('a program is one of the system folder\'s, however its path is spelled', ()=>{
     assert.equal(systemProgramAt('C:\\WINDOWS\\system32\\msiexec.exe'), 'msiexec');
@@ -20,6 +21,8 @@ test('a program is one of the system folder\'s, however its path is spelled', ()
     // A setup's custom actions register performance counters through them (A246).
     assert.equal(systemProgramAt('C:\\WINDOWS\\system32\\lodctr.exe'), 'lodctr');
     assert.equal(systemProgramAt('C:\\WINDOWS\\system32\\unlodctr.exe'), 'unlodctr');
+    // The one program every Windows has: a child to suspend, query and end.
+    assert.equal(systemProgramAt('C:\\WINDOWS\\system32\\winver.exe'), 'winver');
     assert.equal(systemProgramAt('C:\\App\\msiexec.exe'), null, 'only there');
     assert.equal(systemProgramAt('C:\\WINDOWS\\system32\\sub\\msiexec.exe'), null);
     assert.equal(systemProgramAt('C:\\WINDOWS\\system32\\calc.exe'), null);
@@ -153,4 +156,16 @@ test('lodctr and unlodctr answer success and register nothing (A246)', async()=>
         assert.equal(await program?.run(/** @type {any} */ ({ commandLine: `"${name}" /M:x.man` })), 0,
             name);
     }
+});
+
+test('winver is the shell\'s about box with the system\'s name, and exits with 0', async()=>{
+    /** @type {any[]} */
+    const calls = [];
+    const context = /** @type {any} */ ({
+        wide: (/** @type {string} */ text)=>(calls.push(['wide', text]), 0x5000),
+        call: async(/** @type {string} */ library, /** @type {string} */ name,
+            /** @type {number[]} */ args)=>(calls.push([library, name, args]), 1),
+    });
+    assert.equal(await runWinver(context), 0);
+    assert.deepEqual(calls, [['wide', 'Windows'], ['SHELL32.dll', 'ShellAboutW', [0, 0x5000, 0, 0]]]);
 });

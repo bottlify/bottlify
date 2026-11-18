@@ -6,7 +6,8 @@
 
 /**
  * The programs Windows keeps in its system folder and this engine provides
- * itself: msiexec, rundll32, regsvr32, reg, regedit, lodctr and unlodctr.
+ * itself: msiexec, rundll32, regsvr32, reg, regedit, lodctr, unlodctr, notepad
+ * and winver.
  *
  * Installers, bootstrappers and uninstall strings start them by name -- `MsiExec.exe
  * /X{GUID}`, `rundll32 setupapi,InstallHinfSection ...`, `regsvr32 /s x.dll` --
@@ -35,6 +36,7 @@ import { runNotepad } from './notepad.js';
 import { runDxsetup } from './dxsetup.js';
 import { runFrameworkSetup } from './netfx.js';
 import { runLodctr } from './lodctr.js';
+import { runWinver } from './winver.js';
 
 /** Where the programs are: GetSystemDirectory's answer. */
 export const SYSTEM_DIRECTORY = 'C:\\WINDOWS\\system32';
@@ -66,6 +68,7 @@ export const SYSTEM_PROGRAMS = new Map([
     ['unlodctr.exe', { routine: 'unlodctr', run: runLodctr }],
     ['notepad.exe', { routine: 'notepad', run: runNotepad,
         directories: [WINDOWS_DIRECTORY, SYSTEM_DIRECTORY] }],
+    ['winver.exe', { routine: 'winver', run: runWinver }],
 ]);
 
 /**
