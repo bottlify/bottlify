@@ -56,6 +56,12 @@ export const LONG = new Map([
         GetConstantDesc: 'D3DXCONSTANT_DESC holds two pointers (Name, DefaultValue), laid out '
             + 'for 64 bits apart from the record\'s twelve dwords the source copies',
     }],
+    ['layers/win32/d3dx9/effect-setters.js', {
+        SetFloat: 'the float a FLOAT by value, the third argument, which x86-64 passes in '
+            + 'XMM2 where its bits are read as an integer argument',
+        SetValue: 'a texture parameter\'s value is its pointers, eight bytes each at 64 bits, '
+            + 'copied as given into words laid out for four',
+    }],
     ['layers/win32/d3dx9/inguest.js', {}],
     ['layers/win32/d3dx9/inguest-matrix.js', {}],
     ['layers/win32/d3dx9/inguest-vector.js', {}],

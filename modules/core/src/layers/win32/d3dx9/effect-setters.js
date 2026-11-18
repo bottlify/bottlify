@@ -21,7 +21,8 @@
  * is handed to the host's setter unchanged (`return host()`), which answers
  * it as before; nothing is written before it goes.
  *
- * The interface's state word (`[this + 4]`) is the effect's block
+ * The interface's state word (`[this + 4]`, `[this + 8]` in a 64-bit process:
+ * `pointerBytes`, as an array of matrix pointers steps) is the effect's block
  * (`EFFECT_BLOCK`): whether a parameter block is being recorded, the bounds
  * of the arena the handles are in, and the clock. A handle is taken as one
  * only within those bounds and on a record's boundary, so a name the program
@@ -61,8 +62,8 @@ const PC_STRUCT = 5;
  * @param {Guest} guest @param {u32} self @param {u32} h @param {u32} m
  * @returns {u32}
  */
-export function SetMatrix({ u32, setU32, callStd, host }, self, h, m){
-    const block = u32(self + 4);
+export function SetMatrix({ u32, setU32, callStd, host, pointerBytes }, self, h, m){
+    const block = u32(self + pointerBytes);
     if (block === 0 || u32(block) !== 0)
     {
         return host();
@@ -117,8 +118,8 @@ export function SetMatrix({ u32, setU32, callStd, host }, self, h, m){
  * @param {Guest} guest @param {u32} self @param {u32} h @param {u32} m
  * @returns {u32}
  */
-export function SetMatrixTranspose({ u32, setU32, callStd, host }, self, h, m){
-    const block = u32(self + 4);
+export function SetMatrixTranspose({ u32, setU32, callStd, host, pointerBytes }, self, h, m){
+    const block = u32(self + pointerBytes);
     if (block === 0 || u32(block) !== 0)
     {
         return host();
@@ -173,8 +174,8 @@ export function SetMatrixTranspose({ u32, setU32, callStd, host }, self, h, m){
  * @param {Guest} guest @param {u32} self @param {u32} h @param {u32} v
  * @returns {u32}
  */
-export function SetVector({ u32, setU32, callStd, host }, self, h, v){
-    const block = u32(self + 4);
+export function SetVector({ u32, setU32, callStd, host, pointerBytes }, self, h, v){
+    const block = u32(self + pointerBytes);
     if (block === 0 || u32(block) !== 0)
     {
         return host();
@@ -222,8 +223,8 @@ export function SetVector({ u32, setU32, callStd, host }, self, h, v){
  * @param {Guest} guest @param {u32} self @param {u32} h @param {u32} v @param {u32} count
  * @returns {u32}
  */
-export function SetVectorArray({ u32, setU32, callStd, host }, self, h, v, count){
-    const block = u32(self + 4);
+export function SetVectorArray({ u32, setU32, callStd, host, pointerBytes }, self, h, v, count){
+    const block = u32(self + pointerBytes);
     if (block === 0 || u32(block) !== 0)
     {
         return host();
@@ -271,8 +272,8 @@ export function SetVectorArray({ u32, setU32, callStd, host }, self, h, v, count
  * @param {Guest} guest @param {u32} self @param {u32} h @param {u32} f
  * @returns {u32}
  */
-export function SetFloat({ u32, setU32, callStd, host }, self, h, f){
-    const block = u32(self + 4);
+export function SetFloat({ u32, setU32, callStd, host, pointerBytes }, self, h, f){
+    const block = u32(self + pointerBytes);
     if (block === 0 || u32(block) !== 0)
     {
         return host();
@@ -307,8 +308,8 @@ export function SetFloat({ u32, setU32, callStd, host }, self, h, f){
  * @param {Guest} guest @param {u32} self @param {u32} h @param {u32} n
  * @returns {u32}
  */
-export function SetInt({ u32, setU32, callStd, host }, self, h, n){
-    const block = u32(self + 4);
+export function SetInt({ u32, setU32, callStd, host, pointerBytes }, self, h, n){
+    const block = u32(self + pointerBytes);
     if (block === 0 || u32(block) !== 0)
     {
         return host();
@@ -343,8 +344,8 @@ export function SetInt({ u32, setU32, callStd, host }, self, h, n){
  * @param {Guest} guest @param {u32} self @param {u32} h @param {u32} b
  * @returns {u32}
  */
-export function SetBool({ u32, setU32, callStd, host }, self, h, b){
-    const block = u32(self + 4);
+export function SetBool({ u32, setU32, callStd, host, pointerBytes }, self, h, b){
+    const block = u32(self + pointerBytes);
     if (block === 0 || u32(block) !== 0)
     {
         return host();
@@ -380,8 +381,8 @@ export function SetBool({ u32, setU32, callStd, host }, self, h, b){
  * @param {Guest} guest @param {u32} self @param {u32} h @param {u32} texture
  * @returns {u32}
  */
-export function SetTexture({ u32, setU32, callStd, host }, self, h, texture){
-    const block = u32(self + 4);
+export function SetTexture({ u32, setU32, callStd, host, pointerBytes }, self, h, texture){
+    const block = u32(self + pointerBytes);
     if (block === 0 || u32(block) !== 0)
     {
         return host();
@@ -418,8 +419,8 @@ export function SetTexture({ u32, setU32, callStd, host }, self, h, texture){
  * @param {Guest} guest @param {u32} self @param {u32} h @param {u32} data @param {u32} bytes
  * @returns {u32}
  */
-export function SetValue({ u32, setU32, callStd, host }, self, h, data, bytes){
-    const block = u32(self + 4);
+export function SetValue({ u32, setU32, callStd, host, pointerBytes }, self, h, data, bytes){
+    const block = u32(self + pointerBytes);
     if (block === 0 || u32(block) !== 0)
     {
         return host();
@@ -470,8 +471,8 @@ export function SetValue({ u32, setU32, callStd, host }, self, h, data, bytes){
  * @param {Guest} guest @param {u32} self @param {u32} h @param {u32} n @param {u32} count
  * @returns {u32}
  */
-export function SetIntArray({ u32, setU32, callStd, host }, self, h, n, count){
-    const block = u32(self + 4);
+export function SetIntArray({ u32, setU32, callStd, host, pointerBytes }, self, h, n, count){
+    const block = u32(self + pointerBytes);
     if (block === 0 || u32(block) !== 0)
     {
         return host();
@@ -513,8 +514,8 @@ export function SetIntArray({ u32, setU32, callStd, host }, self, h, n, count){
  * @param {Guest} guest @param {u32} self @param {u32} h @param {u32} f @param {u32} count
  * @returns {u32}
  */
-export function SetFloatArray({ u32, setU32, callStd, host }, self, h, f, count){
-    const block = u32(self + 4);
+export function SetFloatArray({ u32, setU32, callStd, host, pointerBytes }, self, h, f, count){
+    const block = u32(self + pointerBytes);
     if (block === 0 || u32(block) !== 0)
     {
         return host();
@@ -556,8 +557,8 @@ export function SetFloatArray({ u32, setU32, callStd, host }, self, h, f, count)
  * @param {Guest} guest @param {u32} self @param {u32} h @param {u32} b @param {u32} count
  * @returns {u32}
  */
-export function SetBoolArray({ u32, setU32, callStd, host }, self, h, b, count){
-    const block = u32(self + 4);
+export function SetBoolArray({ u32, setU32, callStd, host, pointerBytes }, self, h, b, count){
+    const block = u32(self + pointerBytes);
     if (block === 0 || u32(block) !== 0)
     {
         return host();
@@ -600,8 +601,8 @@ export function SetBoolArray({ u32, setU32, callStd, host }, self, h, b, count){
  * @param {Guest} guest @param {u32} self @param {u32} h @param {u32} m @param {u32} count
  * @returns {u32}
  */
-export function SetMatrixArray({ u32, setU32, callStd, host }, self, h, m, count){
-    const block = u32(self + 4);
+export function SetMatrixArray({ u32, setU32, callStd, host, pointerBytes }, self, h, m, count){
+    const block = u32(self + pointerBytes);
     if (block === 0 || u32(block) !== 0)
     {
         return host();
@@ -656,8 +657,10 @@ export function SetMatrixArray({ u32, setU32, callStd, host }, self, h, m, count
  * @param {Guest} guest @param {u32} self @param {u32} h @param {u32} m @param {u32} count
  * @returns {u32}
  */
-export function SetMatrixTransposeArray({ u32, setU32, callStd, host }, self, h, m, count){
-    const block = u32(self + 4);
+export function SetMatrixTransposeArray({ u32, setU32, callStd, host, pointerBytes }, self, h, m,
+    count)
+{
+    const block = u32(self + pointerBytes);
     if (block === 0 || u32(block) !== 0)
     {
         return host();
@@ -713,8 +716,10 @@ export function SetMatrixTransposeArray({ u32, setU32, callStd, host }, self, h,
  * @param {Guest} guest @param {u32} self @param {u32} h @param {u32} m @param {u32} count
  * @returns {u32}
  */
-export function SetMatrixPointerArray({ u32, setU32, callStd, host }, self, h, m, count){
-    const block = u32(self + 4);
+export function SetMatrixPointerArray({ u32, setU32, callStd, host, pointerBytes }, self, h, m,
+    count)
+{
+    const block = u32(self + pointerBytes);
     if (block === 0 || u32(block) !== 0)
     {
         return host();
@@ -743,7 +748,7 @@ export function SetMatrixPointerArray({ u32, setU32, callStd, host }, self, h, m
     }
     for (let e = 0; e < (count | 0); e++)
     {
-        if (u32(m + e * 4) === 0)
+        if (u32(m + e * pointerBytes) === 0)
         {
             return host();
         }
@@ -751,7 +756,7 @@ export function SetMatrixPointerArray({ u32, setU32, callStd, host }, self, h, m
     let to = u32(p + 24);
     for (let e = 0; e < (count | 0); e++)
     {
-        const from = u32(m + e * 4);
+        const from = u32(m + e * pointerBytes);
         for (let r = 0; r < (rows | 0); r++)
         {
             for (let c = 0; c < (columns | 0); c++)
@@ -776,8 +781,10 @@ export function SetMatrixPointerArray({ u32, setU32, callStd, host }, self, h, m
  * @param {Guest} guest @param {u32} self @param {u32} h @param {u32} m @param {u32} count
  * @returns {u32}
  */
-export function SetMatrixTransposePointerArray({ u32, setU32, callStd, host }, self, h, m, count){
-    const block = u32(self + 4);
+export function SetMatrixTransposePointerArray({ u32, setU32, callStd, host, pointerBytes },
+    self, h, m, count)
+{
+    const block = u32(self + pointerBytes);
     if (block === 0 || u32(block) !== 0)
     {
         return host();
@@ -806,7 +813,7 @@ export function SetMatrixTransposePointerArray({ u32, setU32, callStd, host }, s
     }
     for (let e = 0; e < (count | 0); e++)
     {
-        if (u32(m + e * 4) === 0)
+        if (u32(m + e * pointerBytes) === 0)
         {
             return host();
         }
@@ -814,7 +821,7 @@ export function SetMatrixTransposePointerArray({ u32, setU32, callStd, host }, s
     let to = u32(p + 24);
     for (let e = 0; e < (count | 0); e++)
     {
-        const from = u32(m + e * 4);
+        const from = u32(m + e * pointerBytes);
         for (let r = 0; r < (rows | 0); r++)
         {
             for (let c = 0; c < (columns | 0); c++)

@@ -15,11 +15,13 @@
 
 import { test } from 'node:test';
 import { COMPILED } from './effect-setters.x86.js';
+import { COMPILED as LONG } from './effect-setters.x64.js';
 import * as sources from './effect-setters.js';
 import { DATA, equivalence, random } from '../../../../scripts/guest-code/equivalence.mjs';
 import { nameHash } from './effect.js';
 
 const { same } = equivalence(COMPILED, sources);
+const { sameAt64 } = equivalence(COMPILED, sources, undefined, /** @type {any} */ (LONG));
 /**
  * Where Resolve's code is, the block's RESOLVE pointing there: a page of its
  * own, since it is longer than the machine's callback room and code on the
@@ -60,14 +62,16 @@ const POINTERS = DATA + 0x4100;
  * random.
  *
  * @param {() => number} next
+ * @param {4 | 8} [pointer]  the process's pointer: the block the word that far past the
+ *     interface, the pointer-array setters' pointers that wide
  * @returns {Uint8Array}
  */
-function layout(next){
+function layout(next, pointer = 4){
     const bytes = new Uint8Array(0x4400);
     const view = new DataView(bytes.buffer);
     const put = (/** @type {number} */ at, /** @type {number} */ value)=>
         view.setUint32(at - DATA, value >>> 0, true);
-    put(SELF + 4, BLOCK);
+    put(SELF + pointer, BLOCK);
     put(BLOCK, next() % 6 === 0 ? 1 : 0);
     put(BLOCK + 4, ARENA);
     put(BLOCK + 8, RECORDS * 32);
@@ -91,7 +95,7 @@ function layout(next){
     }
     for (let k = 0; k < 8; k++)
     {
-        put(POINTERS + 4 * k, next() % 8 === 0 ? 0 : INPUT + 16 * (next() % 8));
+        put(POINTERS + pointer * k, next() % 8 === 0 ? 0 : INPUT + 16 * (next() % 8));
     }
     // The table, as effect.js's nameTable lays it out, or none; and where Resolve is.
     const names = [...KNOWN, ...UNKNOWN];
@@ -154,6 +158,40 @@ test('the setters in the guest answer, write and date as their JavaScript', ()=>
         for (const name of ['SetMatrixPointerArray', 'SetMatrixTransposePointerArray'])
         {
             same(name, { stack: [SELF, h, pointers, next() % 9], memory }, HANDED);
+        }
+    }
+});
+
+test('the setters in a 64-bit process answer, write and date as their JavaScript', ()=>{
+    const next = random(64);
+    for (let round = 0; round < 400; round++)
+    {
+        // Resolve's x86-64 where the block points, as a 64-bit process places it.
+        const memory = /** @type {[number, Uint8Array][]} */ ([[DATA, layout(next, 8)],
+            [RESOLVE, LONG.Resolve.code]]);
+        const h = handleOf(next);
+        const pointer = next() % 8 === 0 ? 0 : INPUT;
+        const count = next() % 8;
+        const word = next();
+        sameAt64('SetMatrix', { stack: [SELF, h, pointer], memory }, HANDED);
+        sameAt64('SetMatrixTranspose', { stack: [SELF, h, pointer], memory }, HANDED);
+        sameAt64('SetVector', { stack: [SELF, h, pointer], memory }, HANDED);
+        sameAt64('SetVectorArray', { stack: [SELF, h, pointer, count], memory }, HANDED);
+        sameAt64('SetInt', { stack: [SELF, h, word], memory }, HANDED);
+        sameAt64('SetBool', { stack: [SELF, h, word], memory }, HANDED);
+        sameAt64('SetTexture', { stack: [SELF, h, word], memory }, HANDED);
+        for (const name of ['SetIntArray', 'SetFloatArray', 'SetBoolArray'])
+        {
+            sameAt64(name, { stack: [SELF, h, pointer, next() % 48], memory }, HANDED);
+        }
+        for (const name of ['SetMatrixArray', 'SetMatrixTransposeArray'])
+        {
+            sameAt64(name, { stack: [SELF, h, pointer, next() % 4], memory }, HANDED);
+        }
+        const pointers = next() % 8 === 0 ? 0 : POINTERS;
+        for (const name of ['SetMatrixPointerArray', 'SetMatrixTransposePointerArray'])
+        {
+            sameAt64(name, { stack: [SELF, h, pointers, next() % 9], memory }, HANDED);
         }
     }
 });

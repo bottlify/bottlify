@@ -14,6 +14,9 @@ import { assembleShader } from './shader-asm.js';
 import { EFFECT_BLOCK, HANDLE } from './effect.js';
 import { FX_2_0 } from './effect-binary.js';
 import * as sources from './effect-setters.js';
+import { COMPILED as SETTERS_32 } from './effect-setters.x86.js';
+import { COMPILED as SETTERS_64 } from './effect-setters.x64.js';
+import { COMPILED as COMMIT_32 } from './effect-commit.x86.js';
 import * as commitSource from './effect-commit.js';
 import { execute } from './d3d9-machine.fixture.js';
 
@@ -447,6 +450,58 @@ test('the vtables are in the header\'s order, each slot popping its own argument
         ['GetLiteral', 2], ['CompileEffect', 3], ['CompileShader', 6]]);
     assert.equal(latest.poolInterface.id, IID_ID3DXEFFECTPOOL);
     assert.deepEqual(latest.poolInterface.methods, []);
+});
+
+test('each width places its own setters\' code; a 64-bit process commits, and sets a float or'
+    + ' a value, on the host', ()=>{
+    /** @param {4 | 8} pointerSize */
+    const methodsAt = pointerSize=>{
+        const memory = new Uint8Array(1 << 16);
+        let next = 0x1000;
+        const host = { pointerSize, readMemory: (/** @type {number} */ at,
+            /** @type {number} */ length)=>memory.slice(at, at + length),
+        writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>{
+            memory.set(bytes, at);
+        },
+        heap: { allocate: (/** @type {number} */ bytes)=>{
+            const at = next;
+            next += (bytes + 15) & ~15;
+            return at;
+        }, free: ()=>{} } };
+        const helpers = { giveBuffer: ()=>0, includer: ()=>async()=>null, macrosAt: ()=>[],
+            publishConstantTable: ()=>0 };
+        const methods = /** @type {any[]} */ (createEffects(host, helpers).effectInterface.methods);
+        return { memory, named: (/** @type {string} */ name)=>methods.find(m=>m.name === name) };
+    };
+    const SETTERS = ['SetMatrix', 'SetVector', 'SetInt', 'SetBool', 'SetTexture',
+        'SetFloatArray', 'SetMatrixPointerArray'];
+    for (const [pointerSize, compiled] of /** @type {const} */ ([[4, SETTERS_32],
+        [8, SETTERS_64]]))
+    {
+        const { memory, named } = methodsAt(pointerSize);
+        for (const name of SETTERS)
+        {
+            const slot = named(name).guest;
+            assert.equal(slot?.wide, true, `${name} at ${pointerSize}: a guest slot`);
+            const at = slot({ trap: 0x7000 });
+            const { code, host } = /** @type {Record<string, any>} */ (compiled)[name];
+            assert.deepEqual([...memory.subarray(at, at + host - 1)],
+                [...code.subarray(0, host - 1)], `${name} at ${pointerSize}: its code`);
+        }
+        const narrow = pointerSize === 8 ? ['SetFloat', 'SetValue', 'CommitChanges', 'BeginPass']
+            : [];
+        for (const name of narrow)
+        {
+            assert.equal(named(name).guest, undefined, `${name} at 8: the trap`);
+        }
+        if (pointerSize === 4)
+        {
+            const at = named('CommitChanges').guest({ trap: 0x7000 });
+            assert.deepEqual([...memory.subarray(at, at + 8)],
+                [.../** @type {any} */ (COMMIT_32).CommitChanges.code.subarray(0, 8)],
+                'CommitChanges at 4: its code');
+        }
+    }
 });
 
 // ---- making one -----------------------------------------------------------------------
@@ -1676,7 +1731,7 @@ test('the setters in the guest answer, write and date what the host\'s do: rando
     const resolveAt = g.u32(effectB.guestState() + EFFECT_BLOCK.RESOLVE);
     assert.notEqual(resolveAt, 0, 'the effect\'s block names Resolve');
     const helpers = { u32: g.u32, setU32: (/** @type {number} */ at, /** @type {number} */ v)=>
-        g.view.setUint32(at, v >>> 0, true), host: ()=>HOST,
+        g.view.setUint32(at, v >>> 0, true), host: ()=>HOST, pointerBytes: 4,
     callStd: (/** @type {number} */ fn, /** @type {number[]} */ ...args)=>{
         assert.equal(fn, resolveAt, 'a setter calls Resolve alone');
         return /** @type {any} */ (sources).Resolve({ u8: (/** @type {number} */ at)=>
@@ -1768,7 +1823,7 @@ test('a parameter made after nine thousand others still has a record the guest\'
         g.view.setUint32(self + 4, effect.guestState(), true);
         const HOST = Symbol('host');
         const helpers = { u32: g.u32, setU32: (/** @type {number} */ at, /** @type {number} */ v)=>
-            g.view.setUint32(at, v >>> 0, true), host: ()=>HOST, callStd: ()=>0 };
+            g.view.setUint32(at, v >>> 0, true), host: ()=>HOST, callStd: ()=>0, pointerBytes: 4 };
         const last = await g.handle(fx, 'last');
         const value = g.heap.allocate(4);
         g.view.setFloat32(value, 2.5, true);
@@ -1813,7 +1868,7 @@ test('an arena of records goes back to the heap with the last effect that names 
             g.view.setUint32(self + 4, blockOf(fx), true);
             const helpers = { u32: g.u32, setU32: (/** @type {number} */ at,
                 /** @type {number} */ v)=>g.view.setUint32(at, v >>> 0, true),
-            host: ()=>-1, callStd: ()=>0 };
+            host: ()=>-1, callStd: ()=>0, pointerBytes: 4 };
             return /** @type {any} */ (sources).SetFloat(helpers, self, await g.handle(fx, 'x'),
                 0x40200000);
         };
