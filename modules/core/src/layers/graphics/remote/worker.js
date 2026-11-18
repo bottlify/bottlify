@@ -80,7 +80,7 @@ import { createCapture } from './capture.js';
 import { createReceiver, sharedNow } from './channel.js';
 import { createBorrower } from './lending.js';
 import { playedDirect3D } from './direct3d.js';
-import { storeCount as storeCountIn } from '../seam/shadow.js';
+import { storeCount as storeCountIn } from '../seam/block.js';
 import { playedOpengl } from './opengl.js';
 import { playedDirect3D7 } from './d3d7.js';
 import { playedDirect3D10 } from './d3d10.js';

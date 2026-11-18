@@ -22,7 +22,7 @@
  */
 
 import { IDIRECT3DDEVICE8_SLOTS } from '../seam/vtables.js';
-import { DRAW, SHADOW } from '../seam/shadow.js';
+import { DRAW, SHADOW } from '../seam/block.js';
 import { D3DERR_INVALIDCALL, D3DFVF_RESERVED0, D3DUSAGE } from './constants.js';
 import { lightFromDwords } from '../seam/structs.js';
 import { vertexCountOf } from './render.js';

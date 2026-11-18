@@ -18,7 +18,7 @@ import { readFile } from 'node:fs/promises';
 import { COMPILED } from './inguest.x86.js';
 import * as sources from './inguest.js';
 import { DATA, equivalence, random } from '../../../../scripts/guest-code/equivalence.mjs';
-import { FLAG_SLOW_PATH, QUERY, SHADOW } from './shadow.js';
+import { FLAG_SLOW_PATH, QUERY, SHADOW } from './block.js';
 
 const { same } = equivalence(COMPILED, sources);
 const HANDED = { host: ()=>0x8876086c };

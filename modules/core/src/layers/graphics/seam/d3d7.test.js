@@ -34,7 +34,7 @@ import {
     D3DDEVICEDESC7, D3DPRIMCAPS, D3DRECT, D3DVERTEXBUFFERDESC, D3DVIEWPORT7,
 } from './structs.js';
 import { guidBytes } from './d3d7.js';
-import { COMMAND, DRAW, FLAG_STALE, SHADOW, VERTEX_BUFFER7 } from './shadow.js';
+import { COMMAND, DRAW, FLAG_STALE, SHADOW, VERTEX_BUFFER7 } from './block.js';
 import { D3D7_COMMANDS } from '../d3d7/commands.js';
 import { createDirectDraw } from '../ddraw/objects.js';
 import { DDSURFACEDESC2, writeSurfaceDesc } from '../ddraw/structs.js';

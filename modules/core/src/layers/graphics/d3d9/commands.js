@@ -16,7 +16,7 @@ import { IDIRECT3DDEVICE9_SLOTS } from './interfaces.js';
 import {
     BUFFER_COMMANDS, BUFFER_SLOTS, SHARED_COMMANDS, TEXTURE_COMMANDS, TEXTURE_SLOTS, commandSet,
 } from '../d3d8/commands.js';
-import { DRAW } from '../seam/shadow.js';
+import { DRAW } from '../seam/block.js';
 import { D3DERR_INVALIDCALL } from './constants.js';
 
 /** D3DUSAGE_RENDERTARGET and D3DUSAGE_DEPTHSTENCIL. */

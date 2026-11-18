@@ -33,8 +33,10 @@ import { createDirectDraw } from '../ddraw/objects.js';
 import { DDSCAPS_3DDEVICE, DDSCAPS_OFFSCREENPLAIN, DDSCL_NORMAL, DDSD_CAPS, DDSD_HEIGHT,
     DDSD_WIDTH } from '../ddraw/constants.js';
 import { COMMAND_MIRRORS } from './d3d7.js';
-import { BUFFER, SHADOW, VERTEX_BUFFER7, commandCode, createShadow, lock7Code, settledAfter,
-    unlockCode } from './shadow.js';
+import { createShadow, settledAfter } from './shadow.js';
+import { BUFFER, SHADOW, VERTEX_BUFFER7 } from './block.js';
+import { commandCode } from './routines/command.js';
+import { lock7Code, unlockCode } from './routines/locks.js';
 
 const PROGRAM = 0x8000;
 const LOCK = 0x9000;

@@ -78,14 +78,22 @@ import { queryAs, readGuid } from './guid.js';
 import { cursorMoved } from './d3d8.js';
 import { D3D_PRIVATE_DATA, createPrivateData } from './privatedata.js';
 import {
+    createShadow, settledAfter, HOST_MIRRORS, appendCommand, guestWords, createLevelLocks,
+    levelIndex,
+} from './shadow.js';
+import { compiledAt, POLLS_BETWEEN, QUERY, COUNT_STATE } from './block.js';
+import {
     DRAWABLE_MIRRORS, RENDER_STATE_MIRROR, SAMPLER_STATE_MIRROR, TRANSFORM_MIRROR,
     DEPTH_STENCIL_MIRROR, RENDER_TARGET_MIRROR, VIEWPORT_GUARD_9, VIEWPORT_MIRROR, commandCode,
-    STRETCH_GUARD, compiledAt, createShadow, getLevelDescCode, getRenderStateCode, getTargetCode,
-    getSamplerStateCode, getSurfaceDescCode, getSurfaceLevelCode, getTextureStageStateCode,
-    getTransformCode, getViewportCode, lockCode, moveCopyCode, settledAfter, stageStateMirror,
-    unlockCode, HOST_MIRRORS, POLLS_BETWEEN, QUERY, COUNT_STATE, appendCommand, guestWords,
-    createLevelLocks, levelIndex, lockLevelCode, unlockLevelCode,
-} from './shadow.js';
+    STRETCH_GUARD, stageStateMirror,
+} from './routines/command.js';
+import {
+    getLevelDescCode, getRenderStateCode, getTargetCode, getSamplerStateCode, getSurfaceDescCode,
+    getSurfaceLevelCode, getTextureStageStateCode, getTransformCode, getViewportCode,
+} from './routines/getters.js';
+import {
+    lockCode, moveCopyCode, unlockCode, lockLevelCode, unlockLevelCode,
+} from './routines/locks.js';
 import { COMPILED as IN_GUEST } from './inguest.x86.js';
 import { D3DTSS9 } from '../d3d9/samplerstates.js';
 import { COMMANDS, commandObjects, commandSlot } from '../d3d9/commands.js';

@@ -22,13 +22,16 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createCommandReader } from './shadow.js';
+import { COMMAND, SHADOW } from './block.js';
+import { commandCode } from './routines/command.js';
 import {
-    COMMAND, SHADOW, commandCode, createCommandReader, getLevelDescCode, getRenderStateCode,
-    getSamplerStateCode,
-    getShaderCode, getSurfaceDescCode, getSurfaceLevelCode, getTargetCode, getTextureStageStateCode,
-    getTransformCode, getViewportCode, lock7Code, lockCode, lockLevelCode, moveCopyCode,
-    unlockCode, unlockLevelCode,
-} from './shadow.js';
+    getLevelDescCode, getRenderStateCode, getSamplerStateCode, getShaderCode, getSurfaceDescCode,
+    getSurfaceLevelCode, getTargetCode, getTextureStageStateCode, getTransformCode, getViewportCode,
+} from './routines/getters.js';
+import {
+    lock7Code, lockCode, lockLevelCode, moveCopyCode, unlockCode, unlockLevelCode,
+} from './routines/locks.js';
 import { COMMANDS as D3D9_COMMANDS, commandSlot as d3d9Slot } from '../d3d9/commands.js';
 import { D3D8_COMMANDS } from '../d3d8/commands.js';
 import { D3D7_COMMANDS } from '../d3d7/commands.js';

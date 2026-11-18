@@ -22,7 +22,7 @@ import { COMPILED as compiled } from './d3d10-inguest.x86.js';
 const COMPILED = compiled;
 import * as sources from './d3d10-inguest.js';
 import { DATA, equivalence, random } from '../../../../scripts/guest-code/equivalence.mjs';
-import { FLAG_SLOW_PATH, SHADOW } from './shadow.js';
+import { FLAG_SLOW_PATH, SHADOW } from './block.js';
 import { ID3D10DEVICE_SLOTS } from './d3d10.js';
 import { BUFFER10 } from './d3d10-ring.js';
 import { D3D10_COMMANDS } from '../d3d10/commands.js';

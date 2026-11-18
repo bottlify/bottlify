@@ -19,8 +19,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import * as cork from '../../../../../cork/src/index.js';
-import { HELD_GUEST, HELD_HOST, SHADOW, SURFACE, appendCommand, usagesOf, commandCode }
-    from './shadow.js';
+import { appendCommand } from './shadow.js';
+import { HELD_GUEST, HELD_HOST, SHADOW, SURFACE } from './block.js';
+import { usagesOf, commandCode } from './routines/command.js';
 import { COMMANDS, commandSlot } from '../d3d9/commands.js';
 import { D3D8_COMMANDS } from '../d3d8/commands.js';
 import { COMMAND_MIRRORS as MIRRORS_9, HOST_COMMAND_MIRRORS as HOST_9 } from './d3d9.js';

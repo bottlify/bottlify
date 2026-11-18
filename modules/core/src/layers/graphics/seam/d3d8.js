@@ -63,17 +63,22 @@ import { D3D_PRIVATE_DATA, createPrivateData } from './privatedata.js';
 import { declarationLength } from '../d3d8/declaration.js';
 import { functionLength } from '../../win32/common/shader-tokens.js';
 import {
-    DRAWABLE_MIRRORS, RENDER_STATE_MIRROR, TRANSFORM_MIRROR, VIEWPORT_GUARD_8, VIEWPORT_MIRROR,
-    commandCode, compiledAt, createShadow, settledAfter, depthStencilMirror, renderTargetMirror,
-    COPY_GUARD_8,
-    getLevelDescCode, getRenderStateCode, getSurfaceDescCode, getSurfaceLevelCode,
-    getTextureStageStateCode,
-    getTransformCode,
-    getViewportCode, lockCode, moveCopyCode, stageStateMirror, unlockCode, HOST_MIRRORS,
-    appendCommand,
-    getShaderCode, getTargetCode, shaderMirror,
-    guestWords, createLevelLocks, levelIndex, lockLevelCode, unlockLevelCode,
+    createShadow, settledAfter, HOST_MIRRORS, appendCommand, guestWords, createLevelLocks,
+    levelIndex,
 } from './shadow.js';
+import { compiledAt } from './block.js';
+import {
+    DRAWABLE_MIRRORS, RENDER_STATE_MIRROR, TRANSFORM_MIRROR, VIEWPORT_GUARD_8, VIEWPORT_MIRROR,
+    commandCode, depthStencilMirror, renderTargetMirror, COPY_GUARD_8, stageStateMirror,
+} from './routines/command.js';
+import {
+    getLevelDescCode, getRenderStateCode, getSurfaceDescCode, getSurfaceLevelCode,
+    getTextureStageStateCode, getTransformCode, getViewportCode, getShaderCode, getTargetCode,
+    shaderMirror,
+} from './routines/getters.js';
+import {
+    lockCode, moveCopyCode, unlockCode, lockLevelCode, unlockLevelCode,
+} from './routines/locks.js';
 import { COMPILED as IN_GUEST } from './inguest.x86.js';
 import { D3D8_COMMANDS, materialOf } from '../d3d8/commands.js';
 import { D3DTSS } from '../d3d8/constants.js';

@@ -48,7 +48,7 @@ import {
 } from './structs-legacy.js';
 import { D3DPRIMCAPS, D3DVERTEXBUFFERDESC } from './structs.js';
 import { guidBytes } from './d3d7.js';
-import { SHADOW } from './shadow.js';
+import { SHADOW } from './block.js';
 import { createDirectDraw } from '../ddraw/objects.js';
 import { DDSURFACEDESC, DDSURFACEDESC2, readSurfaceDesc, writeSurfaceDesc }
     from '../ddraw/structs.js';

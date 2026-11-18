@@ -62,9 +62,9 @@ import { debugEntryPoints } from './exports-debug.js';
 import { compressedDigest, imageDigests, imageTimes, keptImages } from './context-textures.js';
 import { imageBytes, unpackImage } from './texture.js';
 import { packImage } from './context-pixels.js';
-import {
-    COMMAND_RING_BYTES, TEB_GL_CONTEXT, createCommandReader, placeCommandRing,
-} from '../seam/shadow.js';
+import { createCommandReader, placeCommandRing } from '../seam/shadow.js';
+import { TEB_GL_CONTEXT } from '../seam/routines/assemble.js';
+import { COMMAND_RING_BYTES } from '../seam/block.js';
 import { readToTerminator } from '../../win32/common/scan-windows.js';
 
 /** A page: the block and the ring each take pages of their own. */

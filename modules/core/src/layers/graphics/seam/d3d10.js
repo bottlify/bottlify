@@ -27,7 +27,7 @@
  */
 
 import { describe as describeSlots } from './vtables.js';
-import { compiledAt } from './shadow.js';
+import { compiledAt } from './block.js';
 import { createDeviceRing } from './d3d10-ring.js';
 import { createDirect3D11Seam } from './d3d11.js';
 import { COMPILED } from './d3d10-inguest.x86.js';

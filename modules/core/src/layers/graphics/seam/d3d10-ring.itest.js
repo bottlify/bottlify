@@ -36,7 +36,7 @@ import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { createDirect3D10 } from '../d3d10/root.js';
 import { playedAtOnce } from '../remote/direct3d.js';
 import { playedDirect3D10, recordedDirect3D10 } from '../remote/d3d10.js';
-import { COMMAND_RING_BYTES } from './shadow.js';
+import { COMMAND_RING_BYTES } from './block.js';
 import { COMPILED } from './d3d10-inguest.x86.js';
 
 /** @type {Record<string, any>} */

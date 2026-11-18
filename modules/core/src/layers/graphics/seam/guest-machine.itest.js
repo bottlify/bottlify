@@ -23,7 +23,7 @@ import { createGraphicsLibraries } from './exports.js';
 import { createBackend } from '../webgpu/backend.js';
 import { playedAtOnce, playedDirect3D, recordedDirect3D } from '../remote/direct3d.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
-import { COMMAND_RING_BYTES, SHADOW } from './shadow.js';
+import { COMMAND_RING_BYTES, SHADOW } from './block.js';
 import { guidBytes } from './d3d7.js';
 import {
     IDIRECT3D8_SLOTS, IDIRECT3D9_SLOTS, IDIRECT3DBASETEXTURE8_SLOTS, IDIRECT3DCUBETEXTURE8_SLOTS,

@@ -46,7 +46,7 @@ import {
 } from './constants.js';
 import { DEVICE_DESCRIPTIONS } from './caps.js';
 import { D3D7_COMMANDS } from './commands.js';
-import { DRAW } from '../seam/shadow.js';
+import { DRAW } from '../seam/block.js';
 import { D3DCLEAR, D3DLOCK, D3DFMT_INDEX, D3DTSS } from '../d3d8/constants.js';
 import { createDefaultRenderStates } from '../d3d8/renderstates.js';
 import { createDefaultStageStates } from '../d3d8/stagestates.js';

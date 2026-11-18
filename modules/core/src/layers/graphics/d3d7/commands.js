@@ -20,7 +20,7 @@
 
 import { IDIRECT3DDEVICE7_SLOTS } from '../seam/vtables.js';
 import { SHARED_COMMANDS, commandSet } from '../d3d8/commands.js';
-import { DRAW } from '../seam/shadow.js';
+import { DRAW } from '../seam/block.js';
 import { decodeFvf } from '../webgpu/internal/vertexformat.js';
 import { D3DDP_DONOTCLIP } from './constants.js';
 

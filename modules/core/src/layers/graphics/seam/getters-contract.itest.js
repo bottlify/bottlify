@@ -35,7 +35,7 @@ import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import * as cork from '../../../../../cork/src/index.js';
 import { createVtables } from '../../bridge/internal/vtable.js';
 import { createGraphicsLibraries } from './exports.js';
-import { COMMAND_RING_BYTES } from './shadow.js';
+import { COMMAND_RING_BYTES } from './block.js';
 import { IID_IDirect3DDevice8, IID_IDirect3DTexture8 } from './iids.js';
 import {
     IDIRECT3D8_SLOTS, IDIRECT3D9_SLOTS, IDIRECT3DDEVICE8_SLOTS, IDIRECT3DSURFACE8_SLOTS,

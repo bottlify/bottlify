@@ -30,9 +30,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import * as cork from '../../../../../cork/src/index.js';
-import {
-    commandCode, createLevelLocks, createShadow, lockLevelCode, settledAfter, unlockLevelCode,
-} from './shadow.js';
+import { createLevelLocks, createShadow, settledAfter } from './shadow.js';
+import { commandCode } from './routines/command.js';
+import { lockLevelCode, unlockLevelCode } from './routines/locks.js';
 import { COMMAND_MIRRORS as MIRRORS_8 } from './d3d8.js';
 import { COMMAND_MIRRORS as MIRRORS_9 } from './d3d9.js';
 import { D3D8_COMMANDS } from '../d3d8/commands.js';

@@ -38,7 +38,7 @@ import { createLegacyDirect3DSeam } from './d3dlegacy.js';
 import { IID_IDirectDraw7, IID_IDirectDrawClipper } from './iids.js';
 import { createFields, D3DCAPS8 } from './structs.js';
 import { GL_COMMANDS } from '../opengl/commands.js';
-import { commandCode } from './shadow.js';
+import { commandCode } from './routines/command.js';
 import { createShaderValidator } from './shader-validator.js';
 import { createFocusWindows } from './focus.js';
 import { DEVICE_STATE } from '../d3d9/device.js';

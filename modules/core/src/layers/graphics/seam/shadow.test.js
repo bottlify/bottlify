@@ -6,16 +6,20 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createCommandReader, createShadow } from './shadow.js';
 import {
     BUFFER, COMMAND, COMMAND_RING_BYTES, FLAG_SLOW_PATH, FLAG_STALE, HELD_GUEST, HELD_HOST, LEVEL,
-    LOCK_IN_PLACE, SHADOW, SURFACE, TEXTURE,
-    createCommandReader, createShadow, getRenderStateCode,
-    getSurfaceLevelCode, getTextureStageStateCode, getTransformCode, lockCode, transformSlot,
-    transformType, unlockCode,
-} from './shadow.js';
+    LOCK_IN_PLACE, SHADOW, SURFACE, TEXTURE, transformSlot, transformType,
+} from './block.js';
+import {
+    getRenderStateCode, getSurfaceLevelCode, getTextureStageStateCode, getTransformCode,
+} from './routines/getters.js';
+import { lockCode, unlockCode } from './routines/locks.js';
 import { D3DTSS } from '../d3d8/constants.js';
 import { createDirect3D9 } from '../d3d9/device.js';
-import { D3DFMT as D3DFMT9, D3DRS as D3DRS9, D3DSWAPEFFECT as D3DSWAPEFFECT9 } from '../d3d9/constants.js';
+import {
+    D3DFMT as D3DFMT9, D3DRS as D3DRS9, D3DSWAPEFFECT as D3DSWAPEFFECT9,
+} from '../d3d9/constants.js';
 import { D3DTSS9 } from '../d3d9/samplerstates.js';
 
 /** Direct3D 8's stage state types, a bit each. */

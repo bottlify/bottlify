@@ -24,7 +24,7 @@ import { createCountCells, createPublisher } from './com.js';
 import { createDirect3D9Seam } from './d3d9.js';
 import {
     BUFFER, DRAW, FLAG_STALE, POLLS_BETWEEN, SHADOW, SURFACE, storeCount, transformSlot,
-} from './shadow.js';
+} from './block.js';
 import * as guestCode from './inguest.js';
 import { FPU_SETUP } from './fpu.js';
 import { commandSlot } from '../d3d9/commands.js';

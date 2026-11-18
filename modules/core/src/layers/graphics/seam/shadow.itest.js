@@ -21,11 +21,12 @@ import assert from 'node:assert/strict';
 import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import { runToHalt } from '../../cpu/internal/halt.fixture.js';
 import * as cork from '../../../../../cork/src/index.js';
+import { BUFFER, FLAG_SLOW_PATH, HELD_GUEST, LOCK_IN_PLACE, SHADOW, TEXTURE } from './block.js';
 import {
-    BUFFER, FLAG_SLOW_PATH, HELD_GUEST, LOCK_IN_PLACE, SHADOW, TEXTURE, getRenderStateCode,
-    getSurfaceLevelCode, getTargetCode, getTextureStageStateCode, getTransformCode, lockCode,
-    unlockCode,
-} from './shadow.js';
+    getRenderStateCode, getSurfaceLevelCode, getTargetCode, getTextureStageStateCode,
+    getTransformCode,
+} from './routines/getters.js';
+import { lockCode, unlockCode } from './routines/locks.js';
 import { D3DERR_INVALIDCALL, D3DTSS } from '../d3d8/constants.js';
 
 /** Direct3D 8's stage state types, a bit each: what the stage-state getter answers. */

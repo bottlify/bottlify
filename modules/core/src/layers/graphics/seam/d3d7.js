@@ -42,12 +42,16 @@ import { createDirect3D7 } from '../d3d7/device.js';
 import { D3D7_COMMANDS, clippedBy } from '../d3d7/commands.js';
 import { D3DTSS_ADDRESS, D3DTSS_MAX } from '../d3d7/constants.js';
 import { createDefaultStageStates } from '../d3d8/stagestates.js';
+import { createShadow, settledAfter } from './shadow.js';
+import { BUFFER, COMMAND, VERTEX_BUFFER7 } from './block.js';
 import {
-    BUFFER, COMMAND, DRAWABLE_MIRRORS, RENDER_STATE_MIRROR, TRANSFORM_MIRROR_7, VERTEX_BUFFER7,
-    VIEWPORT_GUARD_8,
-    VIEWPORT_MIRROR, commandCode, createShadow, getRenderStateCode, getTextureStageStateCode,
-    getTransformCode, getViewportCode, lock7Code, settledAfter, stageStateMirror, unlockCode,
-} from './shadow.js';
+    DRAWABLE_MIRRORS, RENDER_STATE_MIRROR, TRANSFORM_MIRROR_7, VIEWPORT_GUARD_8, VIEWPORT_MIRROR,
+    commandCode, stageStateMirror,
+} from './routines/command.js';
+import {
+    getRenderStateCode, getTextureStageStateCode, getTransformCode, getViewportCode,
+} from './routines/getters.js';
+import { lock7Code, unlockCode } from './routines/locks.js';
 
 /**
  * The stage states Direct3D 7 takes, as a mask: those a stage has, through

@@ -25,12 +25,14 @@
  */
 
 import { MODE_64, decode } from '../../modules/cork/src/decode/decoder.js';
+import { commandCode } from '../../modules/core/src/layers/graphics/seam/routines/command.js';
 import {
-    commandCode, getRenderStateCode, getSamplerStateCode, getShaderCode, getSurfaceDescCode,
-    getSurfaceLevelCode, getTargetCode, getTextureStageStateCode, getTransformCode,
-    getViewportCode, lock7Code, lockCode, lockLevelCode, moveCopyCode, unlockCode,
-    unlockLevelCode,
-} from '../../modules/core/src/layers/graphics/seam/shadow.js';
+    getRenderStateCode, getSamplerStateCode, getShaderCode, getSurfaceDescCode, getSurfaceLevelCode,
+    getTargetCode, getTextureStageStateCode, getTransformCode, getViewportCode,
+} from '../../modules/core/src/layers/graphics/seam/routines/getters.js';
+import {
+    lock7Code, lockCode, lockLevelCode, moveCopyCode, unlockCode, unlockLevelCode,
+} from '../../modules/core/src/layers/graphics/seam/routines/locks.js';
 import { COMMANDS as D3D9_COMMANDS, commandSlot as d3d9Slot }
     from '../../modules/core/src/layers/graphics/d3d9/commands.js';
 import { D3D8_COMMANDS } from '../../modules/core/src/layers/graphics/d3d8/commands.js';

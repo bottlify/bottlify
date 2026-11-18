@@ -26,7 +26,7 @@ import { createVtables } from '../../bridge/internal/vtable.js';
 import { createCountCells, createPublisher } from './com.js';
 import { createGraphicsLibraries } from './exports.js';
 import { ADAPTER_GUID, describeAdapter } from './adapter.js';
-import { BUFFER, SHADOW, SURFACE, TEXTURE } from './shadow.js';
+import { BUFFER, SHADOW, SURFACE, TEXTURE } from './block.js';
 import * as inGuest from './inguest.js';
 import { FPU_SETUP } from './fpu.js';
 import { cursorMoved } from './d3d8.js';

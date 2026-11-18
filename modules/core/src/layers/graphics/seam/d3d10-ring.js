@@ -18,9 +18,8 @@
  * object.
  */
 
-import {
-    COMMAND_RING_BYTES, FLAG_SLOW_PATH, HELD_HOST, SHADOW, createCommandReader, placeCommandRing,
-} from './shadow.js';
+import { createCommandReader, placeCommandRing } from './shadow.js';
+import { COMMAND_RING_BYTES, FLAG_SLOW_PATH, HELD_HOST, SHADOW } from './block.js';
 import { D3D10_COMMANDS } from '../d3d10/commands.js';
 
 const PAGE = 4096;

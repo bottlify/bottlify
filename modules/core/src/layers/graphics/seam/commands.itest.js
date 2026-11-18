@@ -20,11 +20,15 @@ import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import { runToHalt } from '../../cpu/internal/halt.fixture.js';
 import * as cork from '../../../../../cork/src/index.js';
 import {
-    BUFFER, COMMAND, FLAG_DRAW_STALE, FLAG_SLOW_PATH, FLAG_STALE, RENDER_STATE_MIRROR,
-    SAMPLER_STATE_MIRROR, SHADOW,
-    SURFACE, TRANSFORM_MIRROR, VIEWPORT_MIRROR, commandCode, getRenderStateCode,
-    getSamplerStateCode, getSurfaceDescCode, getViewportCode, lockCode,
-} from './shadow.js';
+    BUFFER, COMMAND, FLAG_DRAW_STALE, FLAG_SLOW_PATH, FLAG_STALE, SHADOW, SURFACE,
+} from './block.js';
+import {
+    RENDER_STATE_MIRROR, SAMPLER_STATE_MIRROR, TRANSFORM_MIRROR, VIEWPORT_MIRROR, commandCode,
+} from './routines/command.js';
+import {
+    getRenderStateCode, getSamplerStateCode, getSurfaceDescCode, getViewportCode,
+} from './routines/getters.js';
+import { lockCode } from './routines/locks.js';
 import { COMMANDS, commandSlot, runCommands } from '../d3d9/commands.js';
 
 const PROGRAM = 0x8000;
