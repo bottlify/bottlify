@@ -947,7 +947,7 @@ test('resuming a child\'s first thread is asked of the child, where it runs', as
     };
     /** @type {any[]} */
     const errors = [];
-    host.setLastErrorFor = (/** @type {any} */ thread, /** @type {number} */ code)=>
+    /** @type {any} */ (host).setLastErrorFor = (/** @type {any} */ thread, /** @type {number} */ code)=>
         errors.push({ thread, code });
     const fns = createSyncFunctions(host);
     const child = { imagePath: 'C:\\App\\child.exe', threadId: 0x2c };
@@ -1459,8 +1459,8 @@ test('a WaitForDebugEvent with a time-out ends then with ERROR_SEM_TIMEOUT', ()=
     kernel.onTimeout = (/** @type {(thread: any) => void} */ handler)=>expiries.push(handler);
     /** @type {[any, number][]} */
     const errorsFor = [];
-    host.setLastErrorFor = (/** @type {any} */ thread, /** @type {number} */ code)=>
-        errorsFor.push([thread, code]);
+    /** @type {any} */ (host).setLastErrorFor = (/** @type {any} */ thread,
+        /** @type {number} */ code)=>errorsFor.push([thread, code]);
     const fns = createSyncFunctions(host);
 
     assert.equal(fns.WaitForDebugEvent.handler([0x200, 20000]), PARKED);
