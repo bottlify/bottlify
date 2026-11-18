@@ -183,8 +183,17 @@ async function run(executable, cores){
 }
 
 test('two threads spinning on Sleep(0) for a token hand it alike with the guest\'s Sleep and the'
-    + ' host\'s, on one executor and on three', { timeout: 300_000 }, async()=>{
-    for (const cores of [1, 3])
+    + ' host\'s, on one executor and on three', { timeout: 300_000 }, async t=>{
+    // The token is handed with plain movs, which x86 keeps in order (TSO). A host that reorders
+    // plain stores to shared memory (arm64) keeps no such order between executors, by decision
+    // A269: there the test runs on one executor only.
+    const ordered = process.arch === 'x64' || process.arch === 'ia32';
+    if (!ordered)
+    {
+        t.diagnostic(`three executors not run on ${process.arch}: a plain-mov handoff needs TSO`
+            + ' (A269)');
+    }
+    for (const cores of ordered ? [1, 3] : [1])
     {
         const host = await run(tokenProgram(true), cores);
         assert.equal(host.code, expected, `${cores} executor(s), the host's SleepEx`);

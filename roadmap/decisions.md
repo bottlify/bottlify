@@ -2476,3 +2476,18 @@ for the pages the routines are placed on (RtlAddFunctionTable / a growable table
 code arena gives the routines an unwind entry each - a push of a register saved is UWOP_PUSH_NONVOL
 - or the routines keep their values in RAX, R10 and R11 at 64 bits and push nothing.
 *2026-11-18.*
+
+**A269. A program's plain loads and stores keep no x86 order between executors on a host that
+reorders them (arm64).** x86 is TSO: one thread's stores are seen by another in the order made, and
+programs hand data over with plain movs - a spinlock let go with `mov [lock], 0`, a `volatile` flag
+after the data it guards. Wasm's plain accesses to shared memory have no such order, and an arm64
+host reorders them; a translated program on several executors there may see a flag before the data.
+The engine's own routines and every `lock`-prefixed or `xchg` access of the program are atomics and
+keep their order (`check-lock-release`). Turning every integer access into an atomic (the removed
+`ordered` variant) cost 13 % of machine code on arm64, and no program was found to need it: the
+flicker it was made for in Call of Duty 4 was a thread's missing static TLS. So nothing is done
+until a program shows the bug: what it looks like is rare corruption - a worker reading garbage
+through a pointer it was handed, a stray triangle, a click - only on an arm64 host with several
+executors, never with one executor or on x86. kernel32/sleep-zero.itest.js hands a token with plain
+movs and runs on one executor only on such a host.
+*2026-11-18, the owner's ruling.*
