@@ -15,6 +15,7 @@ import { ALTERNATE_SORTS, LOCALES, lcidOfName, localeByLcid, localeByName } from
 import { renderDate, renderTime } from './datetime-format.js';
 import { forwarded } from '../common/pointers.js';
 import { compareText, isSymbol, sortKey } from './collation.js';
+import { stringType } from './string-types.js';
 import { LCMAP_LINGUISTIC_CASING, LCMAP_SORTKEY, LCMAP_TITLECASE, mapText, validMapFlags }
     from './lcmap.js';
 import { DAYS, GENITIVE, HEX_TYPES, LCTYPE, MONTHS, isNumberType, localeValues }
@@ -102,18 +103,6 @@ const MB_ERR_INVALID_CHARS = 0x8;
 
 /** sizeof(CPINFO): MaxCharSize, DefaultChar[2], LeadByte[12]. */
 const CPINFO_SIZE = 18;
-
-/** What GetStringType reports. Only CT_CTYPE1 is answered. */
-const CT_CTYPE1 = 1;
-const C1_UPPER = 0x0001;
-const C1_LOWER = 0x0002;
-const C1_DIGIT = 0x0004;
-const C1_SPACE = 0x0008;
-const C1_PUNCT = 0x0010;
-const C1_CNTRL = 0x0020;
-const C1_BLANK = 0x0040;
-const C1_XDIGIT = 0x0080;
-const C1_ALPHA = 0x0100;
 
 /**
  * The sixteen positions where Windows-1252 is not Latin-1.
@@ -370,6 +359,8 @@ const OTHER_DIGITS = [
     [0x2460, 1, 9], [0x2474, 1, 9], [0x2488, 1, 9], [0x24ea, 0, 0], [0x24f5, 1, 9],
     [0x24ff, 0, 0], [0x2776, 1, 9], [0x2780, 1, 9], [0x278a, 1, 9], [0x3007, 0, 0],
     [0x3021, 1, 9], [0x1369, 1, 9],
+    // Past the basic plane: the Aegean numbers one to nine, Old Italic's one and five.
+    [0x10107, 1, 9], [0x10320, 1, 1], [0x10321, 5, 5],
 ];
 
 /**
@@ -768,49 +759,6 @@ export const mapCaseAnsi = (bytes, upper)=>{
         mapped[at] = changed.length === 1 && !usedDefault ? encoded[0] : bytes[at];
     }
     return mapped;
-};
-
-/** @param {number} code */
-const characterType = code=>{
-    const character = String.fromCharCode(code);
-    let type = 0;
-    if (/\p{Lu}/u.test(character))
-    {
-        type |= C1_UPPER | C1_ALPHA;
-    }
-    if (/\p{Ll}/u.test(character))
-    {
-        type |= C1_LOWER | C1_ALPHA;
-    }
-    if (/\p{L}/u.test(character))
-    {
-        type |= C1_ALPHA;
-    }
-    if (code >= 0x30 && code <= 0x39)
-    {
-        type |= C1_DIGIT | C1_XDIGIT;
-    }
-    if (/[a-fA-F]/.test(character))
-    {
-        type |= C1_XDIGIT;
-    }
-    if (/\s/.test(character))
-    {
-        type |= C1_SPACE;
-    }
-    if (code === 0x20 || code === 0x09)
-    {
-        type |= C1_BLANK;
-    }
-    if (code < 0x20 || code === 0x7f)
-    {
-        type |= C1_CNTRL;
-    }
-    if (/[!-/:-@[-`{-~]/.test(character))
-    {
-        type |= C1_PUNCT;
-    }
-    return type;
 };
 
 /**
@@ -1608,19 +1556,30 @@ export function createLocaleFunctions(host){
         return fresh;
     };
 
-    /** @param {number} id @param {number} flags */
+    /**
+     * A language as the preferred-UI-language calls write it: its LANGID in
+     * four hex digits, or its locale's name.
+     *
+     * @param {number} id @param {number} flags
+     */
     const languageText = (id, flags)=>((flags & MUI_LANGUAGE_ID) !== 0
-        ? id.toString(16).toUpperCase().padStart(4, '0') : LANGUAGE_NAMES.get(id) ?? '');
+        ? id.toString(16).toUpperCase().padStart(4, '0')
+        : LANGUAGE_NAMES.get(id) ?? localeByLcid(id)?.name ?? '');
 
-    /** @param {string} text @param {number} flags @returns {number} 0 for none known */
+    /**
+     * The LANGID a language is named by, or 0 for none: a specific locale
+     * this machine has, by its LANGID or its name. A thread may prefer any of
+     * them; which ones the machine shows its own interface in is the
+     * system's and the user's list (`LANGUAGE_NAMES`).
+     *
+     * @param {string} text @param {number} flags
+     * @returns {number}
+     */
     const languageOf = (text, flags)=>{
-        if ((flags & MUI_LANGUAGE_ID) !== 0)
-        {
-            const id = /^[0-9a-f]{1,4}$/i.test(text) ? parseInt(text, 16) : 0;
-            return LANGUAGE_NAMES.has(id) ? id : 0;
-        }
-        const name = text.toLowerCase();
-        return [...LANGUAGE_NAMES].find(([, known])=>known.toLowerCase() === name)?.[0] ?? 0;
+        const found = (flags & MUI_LANGUAGE_ID) !== 0
+            ? /^[0-9a-f]{1,4}$/i.test(text) ? localeByLcid(parseInt(text, 16)) : null
+            : localeByName(text);
+        return found && !found.neutral ? found.lcid & 0xffff : 0;
     };
 
     const BOTH_NAMINGS = MUI_LANGUAGE_ID | MUI_LANGUAGE_NAME;
@@ -1940,7 +1899,10 @@ export function createLocaleFunctions(host){
             const folded = fold(wide ? readWide(source >>> 0, span.length)
                 : decodeSingleByte(host.readMemory(source >>> 0, span.length), ANSI_CODE_PAGE),
             asked);
-            const bytes = wide ? null : encodeSingleByte(folded, ANSI_CODE_PAGE).bytes;
+            // Back to the ANSI page as WideCharToMultiByte with no flags writes
+            // it: with best fit, so a decomposed accent is its spacing form.
+            const bytes = wide ? null
+                : encodeSingleByte(folded, ANSI_CODE_PAGE, DEFAULT_CHAR, true).bytes;
             const length = bytes ? bytes.length : folded.length;
             if ((room | 0) === 0)
             {
@@ -2922,7 +2884,8 @@ export function createLocaleFunctions(host){
             /** @param {number[]} args */
             handler: ([locale, infoType, source, count, types])=>{
                 void locale;
-                if ((infoType >>> 0) !== CT_CTYPE1 || (source >>> 0) === 0 || (types >>> 0) === 0)
+                if (stringType(infoType >>> 0, 0) === null || (source >>> 0) === 0
+                    || (types >>> 0) === 0)
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
@@ -2934,7 +2897,8 @@ export function createLocaleFunctions(host){
                 const view = new DataView(out.buffer);
                 for (let at = 0; at < text.length; at++)
                 {
-                    view.setUint16(at * 2, characterType(text.charCodeAt(at)), true);
+                    view.setUint16(at * 2, /** @type {number} */ (stringType(infoType >>> 0,
+                        text.charCodeAt(at))), true);
                 }
                 host.writeMemory(types >>> 0, out);
                 return 1;
@@ -2952,7 +2916,8 @@ export function createLocaleFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([infoType, source, count, types])=>{
-                if ((infoType >>> 0) !== CT_CTYPE1 || (source >>> 0) === 0 || (types >>> 0) === 0)
+                if (stringType(infoType >>> 0, 0) === null || (source >>> 0) === 0
+                    || (types >>> 0) === 0)
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
@@ -2963,7 +2928,8 @@ export function createLocaleFunctions(host){
                 const view = new DataView(out.buffer);
                 for (let at = 0; at < text.length; at++)
                 {
-                    view.setUint16(at * 2, characterType(text.charCodeAt(at)), true);
+                    view.setUint16(at * 2, /** @type {number} */ (stringType(infoType >>> 0,
+                        text.charCodeAt(at))), true);
                 }
                 host.writeMemory(types >>> 0, out);
                 return 1;
@@ -3251,20 +3217,28 @@ export function createLocaleFunctions(host){
          *     int cchLocaleName)
          *
          * The best specific locale's name with its terminator, or the room it
-         * needs with no buffer; too little room is ERROR_INSUFFICIENT_BUFFER.
+         * needs with no buffer; LOCALE_NAME_SYSTEM_DEFAULT is the system's.
+         * Too little room is ERROR_INSUFFICIENT_BUFFER, as much of the name
+         * as fits written, terminated.
          */
         ResolveLocaleName: {
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([name, buffer, room])=>{
-                const resolved = (name >>> 0) === 0 ? MACHINE_LOCALE.name
-                    : resolvedName(readWideSpan(name >>> 0, -1));
+                const asked = (name >>> 0) === 0 ? null : readWideSpan(name >>> 0, -1);
+                const resolved = asked === null
+                    || asked.toLowerCase() === '!x-sys-default-locale'
+                    ? MACHINE_LOCALE.name : resolvedName(asked);
                 if ((buffer >>> 0) === 0)
                 {
                     return resolved.length + 1;
                 }
                 if ((room | 0) < resolved.length + 1)
                 {
+                    if ((room | 0) > 0)
+                    {
+                        writeWide(buffer >>> 0, `${resolved.slice(0, (room | 0) - 1)}\0`);
+                    }
                     return refuse(ERROR_INSUFFICIENT_BUFFER);
                 }
                 writeWide(buffer >>> 0, `${resolved}\0`);

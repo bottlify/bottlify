@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createLoaderFunctions } from './loader.js';
 import { STATUS } from './status.js';
+import { DLL_SEARCH_PATH } from '../kernel32/modules.js';
 
 const NAME = 0x100;
 const TEXT = 0x200;
@@ -22,6 +23,11 @@ function machine(){
     let lastError = 0;
     /** @type {{ flags: number, name: string }[]} */
     const asked = [];
+    /** @type {any[]} */
+    const loads = [];
+    /** @type {Map<number, any>} */
+    const registered = new Map();
+    let cookies = 0;
     /** @param {number} at */
     const wideAt = at=>{
         let text = '';
@@ -48,8 +54,17 @@ function machine(){
             view.setUint32(out, found ? 0x10000000 : 0, true);
             return found ? 1 : 0;
         } },
-        LoadLibraryW: { handler: (/** @type {number[]} */ [name])=>
-            Promise.resolve(wideAt(name) === 'late.dll' ? 0x20000000 : 0) },
+        LoadLibraryW: { handler: (/** @type {number[]} */ [name])=>{
+            loads.push(wideAt(name));
+            return Promise.resolve(['late.dll', 'D:\\Two\\x.dll'].includes(wideAt(name))
+                ? 0x20000000 : 0);
+        } },
+        LoadLibraryExW: { handler: (/** @type {number[]} */ [name, , flags])=>{
+            loads.push([wideAt(name), flags]);
+            return 0;
+        } },
+        [DLL_SEARCH_PATH]: (/** @type {string} */ module, /** @type {number} */ flags)=>
+            [`for ${module}`, flags.toString(16)],
         GetProcAddress: { handler: (/** @type {number[]} */ [, name])=>{
             if (name < 0x10000)
             {
@@ -73,6 +88,13 @@ function machine(){
             return at;
         },
         free: ()=>true,
+        notifications: {
+            register: (callback, context)=>{
+                registered.set(++cookies, { callback, context });
+                return cookies;
+            },
+            unregister: cookie=>registered.delete(cookie),
+        },
     });
     /** A counted string at NAME over TEXT. @param {string} text @param {number} unit */
     const counted = (text, unit = 2)=>{
@@ -93,7 +115,7 @@ function machine(){
     };
     /** @param {string} name @param {number[]} args */
     const call = (name, ...args)=>table[name].handler(args);
-    return { view, call, counted, asked };
+    return { view, call, counted, asked, loads, wideAt, registered };
 }
 
 test('a loaded module by its name, its count left alone; one not loaded is not found', ()=>{
@@ -116,6 +138,57 @@ test('a load that waits, and one that finds nothing', async()=>{
     assert.equal(view.getUint32(OUT, true), 0x20000000);
     counted('none.dll');
     assert.equal(await call('LdrLoadDll', 0, 0, NAME, OUT), STATUS.DLL_NOT_FOUND);
+});
+
+test('a search path is the directories looked in alone; low bit set, it is search flags', async()=>{
+    const { view, call, counted, loads } = machine();
+    const PATH = 0x400;
+    const path = 'C:\\One;D:\\Two\\';
+    for (let i = 0; i < path.length; i++)
+    {
+        view.setUint16(PATH + i * 2, path.charCodeAt(i), true);
+    }
+    counted('x.dll');
+    view.setUint32(OUT, 0xdeadbeef, true);
+    assert.equal(await call('LdrLoadDll', PATH, 0, NAME, OUT), STATUS.SUCCESS);
+    assert.deepEqual(loads.splice(0), ['C:\\One\\x.dll', 'D:\\Two\\x.dll'], 'in order');
+    assert.equal(view.getUint32(OUT, true), 0x20000000);
+    view.setUint32(OUT, 0xdeadbeef, true);
+    assert.equal(await call('LdrLoadDll', 0x801, 0, NAME, OUT), STATUS.DLL_NOT_FOUND);
+    assert.deepEqual(loads.splice(0), [['x.dll', 0x800]], 'LoadLibraryEx\'s flags');
+    assert.equal(view.getUint32(OUT, true), 0xdeadbeef, 'a failed load leaves the out alone');
+    counted('C:\\Full\\x.dll');
+    await call('LdrLoadDll', PATH, 0, NAME, OUT);
+    assert.deepEqual(loads.splice(0), ['C:\\Full\\x.dll'], 'a full path is not searched for');
+});
+
+test('LdrGetDllPath answers the search\'s directories in a block RtlReleasePath gives back', ()=>{
+    const { view, call, wideAt } = machine();
+    const MODULE = 0x400;
+    const module = 'C:\\Lib\\a.dll';
+    for (let i = 0; i < module.length; i++)
+    {
+        view.setUint16(MODULE + i * 2, module.charCodeAt(i), true);
+    }
+    view.setUint32(OUT + 4, 0xdeadbeef, true);
+    assert.equal(call('LdrGetDllPath', MODULE, 0x800, OUT, OUT + 4), STATUS.SUCCESS);
+    assert.equal(wideAt(view.getUint32(OUT, true)), 'for C:\\Lib\\a.dll;800');
+    assert.equal(view.getUint32(OUT + 4, true), 0, 'the unknown out NULL');
+    assert.equal(call('RtlReleasePath', view.getUint32(OUT, true)), 0);
+    assert.equal(call('LdrGetDllPath', 0, 0, 0, OUT + 4), STATUS.INVALID_PARAMETER);
+});
+
+test('a DLL notification is registered by its callback and context and taken back once', ()=>{
+    const { view, call, registered } = machine();
+    assert.equal(call('LdrRegisterDllNotification', 0, 0x401000, 0x1234, OUT), STATUS.SUCCESS);
+    const cookie = view.getUint32(OUT, true);
+    assert.deepEqual(registered.get(cookie), { callback: 0x401000, context: 0x1234 });
+    assert.equal(call('LdrRegisterDllNotification', 1, 0x401000, 0, OUT),
+        STATUS.INVALID_PARAMETER, 'flags must be zero');
+    assert.equal(call('LdrRegisterDllNotification', 0, 0, 0, OUT), STATUS.INVALID_PARAMETER);
+    assert.equal(call('LdrUnregisterDllNotification', cookie), STATUS.SUCCESS);
+    assert.equal(call('LdrUnregisterDllNotification', cookie), STATUS.DLL_NOT_FOUND,
+        'a cookie already taken back');
 });
 
 test('an export by name or ordinal, and the status each miss is', ()=>{

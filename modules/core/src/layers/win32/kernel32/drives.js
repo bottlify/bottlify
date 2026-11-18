@@ -97,27 +97,28 @@ const FIRST_VOLUME_FIND = 0x7f3e0000;
  * The geometry claimed, and the reason for these particular numbers.
  *
  * 512-byte sectors and 8 to a cluster is an ordinary volume of the era. The
- * volume itself is thirty-two gigabytes with twenty-four free: nothing here has
- * a size of its own, a program of the era installs into a fraction of that, so
- * a figure this large refuses no installation and is still a disk such a
- * program could have seen.
+ * volume itself is thirty-three and a half gigabytes with twenty-five and a
+ * half free: nothing here has a size of its own, a program of the era installs
+ * into a fraction of that, so a figure this large refuses no installation and
+ * is still a disk such a program could have seen.
  *
- * The cluster call cannot say that much. The documented way to get a byte
- * count out of it is to multiply all four values on 32-bit arithmetic, and a
- * product at or past 2^32 wraps -- to zero, which reads as a full disk. So it
- * reports the volume as the consumer line of Windows reported a large one:
- * clamped so the product stays below 2^32, two gigabytes at most. The byte
- * call has the room and says the whole of it.
+ * The cluster call answers the whole volume, as Windows NT's does (kernel32's
+ * drive.c: its product is never less than GetDiskFreeSpaceEx's total). The
+ * documented way to get a byte count out of it is to multiply all four values,
+ * and a program of the Windows 9x era does that on 32-bit arithmetic, where a
+ * product past 2^32 wraps: a size that is a whole number of 4 GiB wraps to
+ * zero, which reads as a full disk, and one past 2 GiB beyond it to a negative
+ * number. So each size is one and a half gigabytes past a multiple of four:
+ * wrapped, signed or not, it is still room to install in (decisions.md A270).
  */
 const BYTES_PER_SECTOR = 512;
 const SECTORS_PER_CLUSTER = 8;
 const CLUSTER_BYTES = BYTES_PER_SECTOR * SECTORS_PER_CLUSTER;
-const VOLUME_BYTES = 32 * 1024 * 1024 * 1024;
-const FREE_BYTES = 24 * 1024 * 1024 * 1024;
-/** The most clusters the cluster call may report: a product just under 2^32. */
-const CLUSTER_CAP = 0x1_0000_0000 / CLUSTER_BYTES - 1;
-const TOTAL_CLUSTERS = Math.min(VOLUME_BYTES / CLUSTER_BYTES, CLUSTER_CAP);
-const FREE_CLUSTERS = Math.min(FREE_BYTES / CLUSTER_BYTES, CLUSTER_CAP);
+const GIB = 1024 * 1024 * 1024;
+const VOLUME_BYTES = 33.5 * GIB;
+const FREE_BYTES = 25.5 * GIB;
+const TOTAL_CLUSTERS = VOLUME_BYTES / CLUSTER_BYTES;
+const FREE_CLUSTERS = FREE_BYTES / CLUSTER_BYTES;
 
 /** What the volume calls itself. */
 const VOLUME_LABEL = 'Bottlify';
@@ -378,8 +379,7 @@ export function createDriveFunctions(host){
     };
 
     /**
-     * GetDiskFreeSpace in either spelling: the volume in clusters, clamped so
-     * that the four figures multiplied stay under 2^32.
+     * GetDiskFreeSpace in either spelling: the volume in clusters.
      *
      * @param {(address: number) => string} readPath
      */

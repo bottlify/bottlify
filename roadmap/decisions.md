@@ -2475,6 +2475,26 @@ SetWindowPos's flags: the child is then placed at once, inside the message that 
 the pager recalculates its frame with SWP_FRAMECHANGED and places its child at once, which hears
 WM_CHILDACTIVATE, inside the message that asked. No PGM_PLACECHILD is posted.
 
+**A269. GetStringType's second and third types come from the Unicode properties the platform knows.**
+Windows answers CT_CTYPE2 (the bidirectional class) and CT_CTYPE3 (marks, symbols, kana, width,
+ideographs, kashida, surrogates) from a table of its own that its documentation does not list. A
+RegExp knows the categories, scripts, Diacritic, Ideographic and Alphabetic but not the Bidi_Class
+or the East Asian width, so `kernel32/string-types.js` derives them: right to left for the Hebrew,
+Arabic, Syriac, Thaana and N'Ko scripts, the numbers and separators of the bidirectional algorithm
+by their characters, half width for ASCII and the half-width forms, full width for the full-width
+forms, kana and CJK; C3_VOWELMARK and C3_LEXICAL are never set. CT_CTYPE1 follows the category as
+Windows' table does, with the departures the conformance tests pin written as exceptions. Revisit
+when a program is found switching on a CT_CTYPE2 or CT_CTYPE3 bit this answers otherwise. *2026-11-18.*
+
+**A270. The volume is 33.5 GiB with 25.5 GiB free, each size chosen to survive a 32-bit product.**
+Nothing behind drive C: has a size of its own, so the engine names one. GetDiskFreeSpace answers the
+whole volume, as Windows NT does (its product is never less than GetDiskFreeSpaceEx's total), and a
+program of the Windows 9x era multiplies its four figures in 32 bits: a size that is a whole number
+of 4 GiB wraps to zero and reads as a full disk, one 2 GiB past it to a negative number. Each size is
+therefore 1.5 GiB past a multiple of 4 GiB (`kernel32/drives.js`), so the wrapped product, signed or
+not, is still room to install in. Revisit when a bottle carries a quota of its own to report.
+*2026-11-18.*
+
 **A271. Temporary: a device's guest routines built for x86-64 change RBX, RSI and RDI without
 unwind data.** A 64-bit program's frames are unwound by the function table of the image they run in
 (RUNTIME_FUNCTION and its UNWIND_INFO); code with no entry is taken for a leaf: its return address at
@@ -2487,7 +2507,7 @@ left them. Removed when the routines use only RAX, RCX, RDX and R8 to R11 at 64 
 for `rep movs`), or the code arena gives each an unwind entry that says where it keeps them.
 *2026-11-18, narrowed the same day: the routines no longer push.*
 
-**A269. A program's plain loads and stores keep no x86 order between executors on a host that
+**A272. A program's plain loads and stores keep no x86 order between executors on a host that
 reorders them (arm64).** x86 is TSO: one thread's stores are seen by another in the order made, and
 programs hand data over with plain movs - a spinlock let go with `mov [lock], 0`, a `volatile` flag
 after the data it guards. Wasm's plain accesses to shared memory have no such order, and an arm64
@@ -2502,7 +2522,7 @@ executors, never with one executor or on x86. kernel32/sleep-zero.itest.js hands
 movs and runs on one executor only on such a host.
 *2026-11-18, the owner's ruling.*
 
-**A270. A 64-bit handler's `size_t` / `SIZE_T` result is sign-extended into RAX.** Handlers answer
+**A273. A 64-bit handler's `size_t` / `SIZE_T` result is sign-extended into RAX.** Handlers answer
 in dwords, and the C runtime's sizes carry their errors as `(size_t)-1` and `(size_t)-2` (mbrtowc's
 INCOMPLETE, wcstombs' failure): only a sign-extension makes those the quadword a 64-bit caller
 compares against. So a size is no address to the bridge (`check-wide-arguments.mjs` refuses

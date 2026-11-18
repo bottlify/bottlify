@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createIoCompletionPorts } from './iocp.js';
 import { createFileFunctions } from './files.js';
+import { createNamedObjects } from './named-objects.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_INVALID_HANDLE = 6;
@@ -188,7 +189,8 @@ function fakeKernel(){
 
 /**
  * @param {{ synchronous?: (handle: number) => boolean,
- *     alertably?: (alertable: boolean, wait: () => any, answer?: () => number) => any }} [extra]
+ *     alertably?: (alertable: boolean, wait: () => any, answer?: () => number) => any,
+ *     namedObjects?: any }} [extra]
  */
 function setup(extra = {}){
     const memory = fakeMemory();
@@ -395,6 +397,19 @@ test('an operation that failed posts all the same, and its packet answers FALSE'
     assert.equal(memory.dword(OUT_OVERLAPPED), OVERLAPPED);
     assert.equal(ports.completed(file, 4, OVERLAPPED, 0, { port: true }), false,
         'a completion mode that skips the port');
+});
+
+test('a file bound to a thread pool I/O object hands it its completions, not a port', ()=>{
+    const { ports, memory } = setup();
+    /** @type {any[]} */
+    const taken = [];
+    assert.equal(ports.bindSink(0x40, packet=>taken.push(packet)), true);
+    assert.equal(ports.completed(0x40, 8, OVERLAPPED, 0xc0000120), true);
+    assert.deepEqual(taken, [{ transferred: 8, key: 0, overlapped: OVERLAPPED,
+        status: 0xc0000120, error: 995 }]);
+    assert.equal(memory.dword(OVERLAPPED + 4), 8, 'the OVERLAPPED finished as ever');
+    assert.equal(ports.bindSink(0x40, null), true);
+    assert.equal(ports.completed(0x40, 8, OVERLAPPED), false, 'let go');
 });
 
 test('an operation on a handle bound to nothing posts nothing, and is not an error', ()=>{
@@ -702,4 +717,36 @@ test('an alertable dequeue takes queued packets at once, and only a wait is the 
     assert.equal(fns.GetQueuedCompletionStatus.handler([port, OUT_BYTES, OUT_KEY, OUT_OVERLAPPED,
         0]), 1, 'the packet waits on the port');
     assert.equal(memory.dword(OUT_BYTES), 9);
+});
+
+test('a port made by name is opened again by it; another name, or none, finds nothing', ()=>{
+    const namedObjects = createNamedObjects();
+    const { memory, kernel, fns } = setup({ namedObjects });
+    const natives = /** @type {any} */ (fns.CreateIoCompletionPort).natives;
+    const view = new DataView(memory.bytes.buffer);
+    /** An OBJECT_ATTRIBUTES at 0x800 naming `name`. @param {string} name */
+    const attributes = name=>{
+        view.setUint32(0x800, 24, true);
+        view.setUint32(0x804, 0, true);
+        view.setUint32(0x808, 0x820, true);
+        view.setUint32(0x80c, 0, true);
+        view.setUint16(0x820, name.length * 2, true);
+        view.setUint32(0x824, 0x840, true);
+        [...name].forEach((c, i)=>view.setUint16(0x840 + i * 2, c.charCodeAt(0), true));
+        return 0x800;
+    };
+    const name = '\\Sessions\\1\\BaseNamedObjects\\port';
+    assert.equal(natives.NtCreateIoCompletion.handler([0x900, 0, attributes(name), 0]), 0);
+    const made = memory.dword(0x900);
+    assert.equal(natives.NtCreateIoCompletion.handler([0x904, 0, attributes(name), 0]) >>> 0,
+        0xc0000035, 'STATUS_OBJECT_NAME_COLLISION');
+    assert.equal(natives.NtOpenIoCompletion.handler([0x904, 0, attributes(name)]), 0);
+    assert.equal(kernel.handles.resolve(memory.dword(0x904)), kernel.handles.resolve(made),
+        'the same port');
+    assert.equal(namedObjects.nameOf(kernel.handles.resolve(made)), 'port');
+    assert.equal(natives.NtOpenIoCompletion.handler([0x904, 0,
+        attributes('\\Sessions\\1\\BaseNamedObjects\\none')]) >>> 0, 0xc0000034,
+    'STATUS_OBJECT_NAME_NOT_FOUND');
+    assert.equal(natives.NtOpenIoCompletion.handler([0x904, 0,
+        attributes('\\Elsewhere\\port')]) >>> 0, 0xc000003a, 'STATUS_OBJECT_PATH_NOT_FOUND');
 });

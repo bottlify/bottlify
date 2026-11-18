@@ -5,7 +5,7 @@
  */
 
 import { createConsoleFunctions, HANDLE_STDOUT, HANDLE_STDERR } from './kernel32/console.js';
-import { createThreadingFunctions } from './kernel32/threading.js';
+import { createThreadingFunctions, listProcesses } from './kernel32/threading.js';
 import { createFiberFunctions } from './kernel32/fibers.js';
 import { createFiberLocalStorage } from './kernel32/fls.js';
 import { createNamedObjects, createRemoteNamedObjects } from './kernel32/named-objects.js';
@@ -16,7 +16,7 @@ import {
 } from './kernel32/heap.js';
 import { createProcessFunctions, createThreadState, PERFORMANCE_FREQUENCY }
     from './kernel32/process.js';
-import { blockLayouts } from './kernel32/teb.js';
+import { SKIP_THREAD_ATTACH, blockLayouts } from './kernel32/teb.js';
 import { createModuleFunctions } from './kernel32/modules.js';
 import { createFileFunctions, withSystemLibraries } from './kernel32/files.js';
 import { createRichEditControls } from './riched/richedit.js';
@@ -204,6 +204,8 @@ const RT_MESSAGETABLE = 11;
 const MESSAGE_RESOURCE_UNICODE = 0x0001;
 /** GetLocaleInfo's LCID for the user's own locale. */
 const LOCALE_USER_DEFAULT = 0x0400;
+/** HeapAlloc's flag for a block that starts zeroed. */
+const HEAP_ZERO_MEMORY = 0x8;
 
 /**
  * A MESSAGE_RESOURCE_ENTRY's text: its length (the header's four bytes
@@ -857,6 +859,14 @@ export function createWin32Module(){
             };
             const idle = config?.idle ?? (()=>Promise.resolve());
             /**
+             * The processes a Toolhelp snapshot and SystemProcessInformation
+             * list, one list for both (`listProcesses`).
+             *
+             * @returns {import('./ntdll/query.js').SystemProcess[]}
+             */
+            const runProcesses = ()=>listProcesses(kernel, { id: processId,
+                parent: (config?.parentProcessId ?? 0) >>> 0, path: modules.imagePath() });
+            /**
              * nvapi under its name: the library a program links for it starts
              * the driver's interface, and loads it again at every call while
              * that fails.
@@ -1164,7 +1174,13 @@ export function createWin32Module(){
                 allocate: bytes=>heap.allocate(bytes),
                 allocateCode: bytes=>heap.allocateCode(bytes),
                 writeMemory: (address, bytes)=>memory.writeBytes(address, bytes),
-                images: ()=>modules.threadCalls?.() ?? [],
+                // None for a thread whose block says SkipThreadAttach: the
+                // list is asked for on the thread itself, at its start and end.
+                images: ()=>{
+                    const teb = kernel.currentThread()?.tebAddress >>> 0;
+                    return teb !== 0 && (memory.readU16(teb + blocks.teb.SAME_TEB_FLAGS)
+                        & SKIP_THREAD_ATTACH) !== 0 ? [] : modules.threadCalls?.() ?? [];
+                },
                 loaderLock: ()=>{
                     const address = modules.loaderLock?.() ?? 0;
                     const enter = kernel32Export('EnterCriticalSection');
@@ -1318,6 +1334,7 @@ export function createWin32Module(){
             const ports = createIoCompletionPorts({
                 pointerSize,
                 kernel,
+                namedObjects,
                 divergence: config?.divergence,
                 readMemory,
                 writeMemory,
@@ -2912,6 +2929,69 @@ export function createWin32Module(){
                 currentDirectory: ()=>filesystem.currentDirectory(),
             });
 
+            // The thread pool: timer queues, registered waits, work items and
+            // the thread pool API, on threads of its own; ntdll's pool calls
+            // are its, answered as statuses (`native`).
+            const threadPool = createThreadPool({
+                kernel,
+                // A timer's due time and a wait's time-out are read
+                // from the caller's FILETIME, against the wall clock.
+                readMemory,
+                wallClock: ()=>kernel.clock.wallClock(),
+                register: (name, fn)=>bridge.register(name, fn),
+                /** @param {number} bytes */
+                allocate: bytes=>heap.allocate(bytes),
+                /** @param {number} bytes */
+                allocateCode: bytes=>heap.allocateCode(bytes),
+                /** @param {number} address */
+                free: address=>heap.free(address),
+                // The objects a program is handed, where Windows makes them.
+                processHeap: {
+                    /** @param {number} bytes */
+                    allocate: bytes=>{
+                        const kernel32 = libraries['KERNEL32.dll'];
+                        return kernel32.HeapAlloc.handler([kernel32.GetProcessHeap.handler([]),
+                            HEAP_ZERO_MEMORY, bytes >>> 0]) >>> 0;
+                    },
+                    /** @param {number} address */
+                    free: address=>{
+                        const kernel32 = libraries['KERNEL32.dll'];
+                        kernel32.HeapFree.handler([kernel32.GetProcessHeap.handler([]), 0,
+                            address >>> 0]);
+                    },
+                },
+                writeMemory,
+                threadBlock: threadMade,
+                park: (/** @type {any} */ thread)=>bridge.park(thread),
+                setLastError: setError,
+                waitFor: (count, objects, milliseconds)=>libraries['KERNEL32.dll']
+                    .WaitForMultipleObjectsEx.handler([count, objects, 0, milliseconds, 1]),
+                divergence: config?.divergence,
+                threadReturn: ()=>threadReturnAddress(),
+                threadStart: ()=>threadCalls.start(),
+                // What a callback asks to be done once it returns, by the
+                // kernel32 call that does it, on the pool thread it ran on.
+                call: (name, args)=>libraries['KERNEL32.dll'][name].handler(args),
+                callGuest: call=>bridge.callGuest(call),
+                // A thread pool I/O object takes its file's completions as a
+                // port would.
+                bindIo: (file, taker)=>ports.bindSink(file, taker),
+                imageStack: ()=>{
+                    // The program's own stack sizes, from its optional header:
+                    // SizeOfStackReserve and SizeOfStackCommit, 4 bytes each
+                    // in PE32 and 8 in PE32+ (where they fit in the low half).
+                    const base = libraries['KERNEL32.dll'].GetModuleHandleW.handler([0]) >>> 0;
+                    if (base === 0)
+                    {
+                        return null;
+                    }
+                    const optional = base + memory.readU32(base + 0x3c) + 24;
+                    const wide = (memory.readU32(optional) & 0xffff) === 0x20b;
+                    return { reserve: memory.readU32(optional + 72),
+                        commit: memory.readU32(optional + (wide ? 80 : 76)) };
+                },
+            });
+
             // Routines queued to a thread and run by it when it waits alertably:
             // the waits themselves are the ordinary ones, looked up when called.
             const apcs = createApcs({
@@ -3279,6 +3359,7 @@ export function createWin32Module(){
                     ...createThreadingFunctions({
                         pointerSize,
                         kernel,
+                        processes: runProcesses,
                         pipes,
                         handleFlags,
                         // A thread made in a child, and one waited on there.
@@ -3348,28 +3429,7 @@ export function createWin32Module(){
                     }),
                     ...fiberStorage.table,
                     ...apcs.table,
-                    ...createThreadPool({
-                        kernel,
-                        // A timer's due time and a wait's time-out are read
-                        // from the caller's FILETIME, against the wall clock.
-                        readMemory,
-                        wallClock: ()=>kernel.clock.wallClock(),
-                        register: (name, fn)=>bridge.register(name, fn),
-                        /** @param {number} bytes */
-                        allocate: bytes=>heap.allocate(bytes),
-                        /** @param {number} bytes */
-                        allocateCode: bytes=>heap.allocateCode(bytes),
-                        /** @param {number} address */
-                        free: address=>heap.free(address),
-                        writeMemory,
-                        threadBlock: threadMade,
-                        park: (/** @type {any} */ thread)=>bridge.park(thread),
-                        setLastError: setError,
-                        waitFor: (handle, milliseconds)=>libraries['KERNEL32.dll']
-                            .WaitForSingleObject.handler([handle, milliseconds]),
-                        threadReturn: ()=>threadReturnAddress(),
-                        threadStart: ()=>threadCalls.start(),
-                    }).table,
+                    ...threadPool.table,
                     ...createDebugFunctions({
                         readCString,
                         readWideString,
@@ -3500,6 +3560,7 @@ export function createWin32Module(){
                         pointerSize,
                         processId,
                         kernel,
+                        namedObjects,
                         float: floatStates,
                         processors,
                         // A child's first thread, reached where the child runs.
@@ -3570,6 +3631,7 @@ export function createWin32Module(){
                         readWideString,
                         files: volume,
                         setLastError: setError,
+                        registry: hive,
                     }),
                     ...createDriveFunctions({
                         readCString, readWideString, readMemory, writeMemory,
@@ -3843,12 +3905,21 @@ export function createWin32Module(){
                         // Without it LoadLibrary can only answer for what is
                         // already mapped, and a program asking for a library it
                         // ships is told the module does not exist.
-                        /** @param {string} name @param {number} [flags] */
-                        load: (name, flags)=>modules.load?.(name, flags) ?? 0,
+                        /**
+                         * @param {string} name @param {number} [flags]
+                         * @param {import('./kernel32/modules.js').LibrarySearch | null} [search]
+                         * @returns {number | Promise<number>}
+                         */
+                        load: (name, flags, search)=>(search ? modules.load?.(name, flags, search)
+                            : modules.load?.(name, flags)) ?? 0,
                         /** @param {string} name */
                         loadError: name=>modules.loadError?.(name) ?? null,
                         /** @param {number} handle */
                         dataFile: handle=>modules.dataFile?.(handle) ?? null,
+                        // Asked when called: the table is assembled by then.
+                        environmentVariable: name=>Object.entries(/** @type {any} */ (
+                            libraries['KERNEL32.dll'])?.[ENVIRONMENT_NOW]?.() ?? {})
+                            .find(([key])=>key.toUpperCase() === name.toUpperCase())?.[1],
                         /** @param {any} asked */
                         resolved: asked=>modules.resolved?.(asked),
                         exitThread: code=>libraries['KERNEL32.dll'].ExitThread.handler([code]),
@@ -6379,6 +6450,8 @@ export function createWin32Module(){
                 readCString,
                 readWideString,
                 kernel32: libraries['KERNEL32.dll'],
+                pool: threadPool.native,
+                dllNotifications: modules.dllNotifications,
                 crt: libraries['msvcrt.dll'],
                 teb: ()=>kernel.currentThread()?.tebAddress ?? 0,
                 currentThread: ()=>kernel.currentThread(),
@@ -6387,6 +6460,7 @@ export function createWin32Module(){
                 setRegisters,
                 windows,
                 handleType: (/** @type {number} */ handle)=>kernel.handles.typeOf(handle),
+                handleAccess: (/** @type {number} */ handle)=>kernel.handles.access(handle),
                 // The name the run's namespace keeps for the object a handle opens.
                 namedObjectName: (/** @type {number} */ handle)=>
                     runObjects.nameOf(kernel.handles.resolve(handle)),
@@ -6394,24 +6468,7 @@ export function createWin32Module(){
                     (kernel.handles.typeOf(handle) === 'process'
                         ? kernel.handles.resolve(handle, 'process') : null),
                 askChild,
-                // The processes a Toolhelp snapshot lists: this one and the
-                // children it started that are still running.
-                processes: ()=>[
-                    {
-                        id: processId, parent: (config?.parentProcessId ?? 0) >>> 0,
-                        path: modules.imagePath(),
-                        threads: (kernel.threads?.() ?? [])
-                            .filter((/** @type {any} */ thread)=>thread.state !== 'terminated')
-                            .map((/** @type {any} */ thread)=>thread.id >>> 0),
-                    },
-                    ...(kernel.processes?.all() ?? [])
-                        .filter((/** @type {any} */ child)=>!child.completed
-                            && child.exitCode === kernel.processes.STILL_ACTIVE)
-                        .map((/** @type {any} */ child)=>({
-                            id: child.id >>> 0, parent: processId,
-                            path: String(child.imagePath ?? ''), threads: [child.threadId >>> 0],
-                        })),
-                ],
+                processes: runProcesses,
                 divergence: config?.divergence,
                 advapi32: libraries['ADVAPI32.dll'],
                 processors,

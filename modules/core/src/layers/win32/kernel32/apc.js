@@ -58,6 +58,15 @@ const QUEUE_USER_APC_FLAGS_SPECIAL_USER_APC = 1;
 const STATUS_SUCCESS = 0;
 const STATUS_UNSUCCESSFUL = 0xc0000001;
 const STATUS_INVALID_HANDLE = 0xc0000008;
+const STATUS_ACCESS_VIOLATION = 0xc0000005;
+const STATUS_INVALID_PARAMETER = 0xc000000d;
+const STATUS_INVALID_PARAMETER_2 = 0xc00000f0;
+const STATUS_OBJECT_TYPE_MISMATCH = 0xc0000024;
+/** MEMORY_RESERVE_TYPE: a user APC's reserve, and an I/O completion's. */
+const MEMORY_RESERVE_USER_APC = 0;
+const MEMORY_RESERVE_IO_COMPLETION = 1;
+/** The pseudo-handle for the calling process. */
+const CURRENT_PROCESS = 0xffffffff;
 
 /**
  * @typedef {Object} ApcHost
@@ -80,9 +89,15 @@ export function createApcs(host){
     const { kernel } = host;
 
     /**
+     * A queued routine; `taken` is told when it is delivered (a reserve
+     * object it was queued with is free again).
+     *
+     * @typedef {{ routine: number, args: (number | bigint)[], taken?: () => void }} Queued
+     */
+    /**
      * What each thread has queued, oldest first.
      *
-     * @type {WeakMap<object, { routine: number, args: (number | bigint)[] }[]>}
+     * @type {WeakMap<object, Queued[]>}
      */
     const queues = new WeakMap();
     /** @param {any} thread */
@@ -114,10 +129,11 @@ export function createApcs(host){
         thread.apcAnswer = undefined;
         while (queue.length > 0)
         {
-            const { routine, args } = /** @type {{ routine: number, args: any[] }} */
-                (queue.shift());
+            const { routine, args, taken } = /** @type {Queued} */ (queue.shift());
             delivered++;
-            await host.callGuest({ entry: routine, args, thread });
+            taken?.();
+            // A bigint among them is a 64-bit caller's parameter, whole: the bridge widens it.
+            await host.callGuest({ entry: routine, args: /** @type {number[]} */ (args), thread });
         }
         return answer ? answer() : WAIT_IO_COMPLETION;
     };
@@ -144,9 +160,10 @@ export function createApcs(host){
      * @param {any} thread
      * @param {number} routine
      * @param {(number | bigint)[]} args
+     * @param {() => void} [taken]  told when it is delivered
      */
-    const queue = (thread, routine, args)=>{
-        queueOf(thread).push({ routine: routine >>> 0, args });
+    const queue = (thread, routine, args, taken)=>{
+        queueOf(thread).push({ routine: routine >>> 0, args, ...taken ? { taken } : {} });
         queued++;
         const returnTo = thread.parkedReturn;
         const resting = thread.resumeStack;
@@ -239,6 +256,71 @@ export function createApcs(host){
         return 1;
     };
 
+    /**
+     * NtQueueApcThread's answer: the routine called with all three arguments;
+     * a NULL one queues nothing and succeeds, as kernel32's sync tests read it.
+     *
+     * @param {number[]} args
+     * @param {{ busy: boolean }} [reserve]  the user APC reserve object it is
+     *        queued with, in use until it is delivered
+     */
+    const queueNative = ([handle, routine, first, second, third], reserve)=>{
+        const thread = threadOf(handle);
+        if (!thread)
+        {
+            return STATUS_INVALID_HANDLE;
+        }
+        if (ended(thread))
+        {
+            return STATUS_UNSUCCESSFUL;
+        }
+        if ((routine >>> 0) !== 0)
+        {
+            if (reserve)
+            {
+                reserve.busy = true;
+            }
+            queue(thread, routine, [first >>> 0, second >>> 0, third >>> 0],
+                reserve ? ()=>{
+                    reserve.busy = false;
+                } : undefined);
+        }
+        return STATUS_SUCCESS;
+    };
+
+    /**
+     * The reserve object a handle names, or the status that refuses it: a
+     * handle that names nothing is STATUS_INVALID_HANDLE, one that names
+     * another object (a thread's pseudo-handle among them) or a reserve of
+     * another type STATUS_OBJECT_TYPE_MISMATCH, a user APC reserve still
+     * holding an APC not yet delivered STATUS_INVALID_PARAMETER_2.
+     *
+     * @param {number} handle
+     * @returns {{ busy: boolean } | number}
+     */
+    const userApcReserve = handle=>{
+        const value = handle >>> 0;
+        if (value === CURRENT_THREAD || value === CURRENT_PROCESS)
+        {
+            return STATUS_OBJECT_TYPE_MISMATCH;
+        }
+        const type = kernel.handles.typeOf?.(value) ?? null;
+        if (type === null)
+        {
+            return STATUS_INVALID_HANDLE;
+        }
+        if (type !== 'reserve')
+        {
+            return STATUS_OBJECT_TYPE_MISMATCH;
+        }
+        const reserve = kernel.handles.resolve(value, 'reserve');
+        if (reserve.type !== MEMORY_RESERVE_USER_APC)
+        {
+            return STATUS_OBJECT_TYPE_MISMATCH;
+        }
+        return reserve.busy ? STATUS_INVALID_PARAMETER_2 : reserve;
+    };
+
     return {
         queue,
         deliver,
@@ -273,21 +355,59 @@ export function createApcs(host){
                      */
                     NtQueueApcThread: {
                         argBytes: 20,
+                        handler: queueNative,
+                    },
+
+                    /**
+                     * NTSTATUS NtQueueApcThreadEx(HANDLE Thread, HANDLE ReserveHandle,
+                     *   PNTAPCFUNC, ULONG_PTR, ULONG_PTR, ULONG_PTR)
+                     *
+                     * NtQueueApcThread, with a user APC reserve object
+                     * (NtAllocateReserveObject) when one is named: the APC
+                     * is queued in it, and it takes no other until that one
+                     * is delivered. The second argument is read as a handle
+                     * whatever it holds, as a 32-bit process on the Windows
+                     * this profile names reads it - the special user APC
+                     * flag a later 64-bit Windows takes there names no object.
+                     */
+                    NtQueueApcThreadEx: {
+                        argBytes: 24,
                         /** @param {number[]} args */
-                        handler: ([handle, routine, first, second, third])=>{
-                            const thread = threadOf(handle);
-                            if (!thread)
+                        handler: ([handle, reserve, ...rest])=>{
+                            if ((reserve >>> 0) === 0)
                             {
-                                return STATUS_INVALID_HANDLE;
+                                return queueNative([handle, ...rest]);
                             }
-                            if (ended(thread))
+                            const taken = userApcReserve(reserve);
+                            return typeof taken === 'number' ? taken
+                                : queueNative([handle, ...rest], taken);
+                        },
+                    },
+
+                    /**
+                     * NTSTATUS NtAllocateReserveObject(PHANDLE, POBJECT_ATTRIBUTES,
+                     *   MEMORY_RESERVE_TYPE)
+                     *
+                     * A reserve object, a handle to it written out: a user
+                     * APC one (NtQueueApcThreadEx) or an I/O completion one,
+                     * which nothing here takes yet. Any other type is
+                     * STATUS_INVALID_PARAMETER.
+                     */
+                    NtAllocateReserveObject: {
+                        argBytes: 12,
+                        /** @param {number[]} args */
+                        handler: ([out, , type])=>{
+                            if ((type >>> 0) !== MEMORY_RESERVE_USER_APC
+                                && (type >>> 0) !== MEMORY_RESERVE_IO_COMPLETION)
                             {
-                                return STATUS_UNSUCCESSFUL;
+                                return STATUS_INVALID_PARAMETER;
                             }
-                            if ((routine >>> 0) !== 0)
+                            if ((out >>> 0) === 0)
                             {
-                                queue(thread, routine, [first >>> 0, second >>> 0, third >>> 0]);
+                                return STATUS_ACCESS_VIOLATION;
                             }
+                            host.writeU32(out >>> 0, kernel.handles.open('reserve',
+                                { type: type >>> 0, busy: false }));
                             return STATUS_SUCCESS;
                         },
                     },

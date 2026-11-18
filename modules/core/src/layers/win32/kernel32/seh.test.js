@@ -223,6 +223,36 @@ test('a context a handler changed is what execution continues with', async()=>{
     assert.equal(result.registers?.eax, 0xabc);
 });
 
+test("a handler's context carries the thread's debug registers, and continuing gives it new ones",
+    async()=>{
+        // A handler reads Dr6 for what stopped the thread and sets Dr0-Dr3/Dr7
+        // in the record it continues from; the thread keeps what it set.
+        const m = machine({ answer: ()=>Disposition.CONTINUE_EXECUTION });
+        const thread = {
+            debugRegisters: { dr0: 0x1000, dr1: 0, dr2: 0, dr3: 0, dr6: 0x4000, dr7: 0 },
+        };
+        /** @type {any} */ (m.host).currentThread = ()=>thread;
+        m.registerFrames([0x51000]);
+        /** @type {number[]} */
+        let seen = [];
+        let flags = 0;
+        const original = m.host.callGuest;
+        m.host.callGuest = async call=>{
+            const at = call.args[2];
+            flags = m.get(at);
+            seen = [4, 8, 0xc, 0x10, 0x14, 0x18].map(offset=>m.get(at + offset));
+            m.put(at + 4, 0x42424240);
+            m.put(at + 0x18, 0x115);
+            return original(call);
+        };
+        const result = await m.seh.dispatch({ code: 0xc0000005, address: 0x401000 });
+        assert.equal(result.handled, true);
+        assert.equal(flags & 0x10010, 0x10010, 'the record names the debug registers');
+        assert.deepEqual(seen, [0x1000, 0, 0, 0, 0x4000, 0]);
+        assert.deepEqual(thread.debugRegisters,
+            { dr0: 0x42424240, dr1: 0, dr2: 0, dr3: 0, dr6: 0x4000, dr7: 0x115 });
+    });
+
 test("a handler's context carries the thread's x87 and SSE state, and continuing puts it back",
     async()=>{
         // A .NET runtime resumes a thread it redirected for a collection by
@@ -269,7 +299,8 @@ test("a handler's context carries the thread's x87 and SSE state, and continuing
             return original(call);
         };
         const first = await m.seh.dispatch({ code: 1, address: 0x401000 });
-        assert.equal(flags, 0x1002f, 'CONTEXT_FULL with the floating-point and extended groups');
+        assert.equal(flags, 0x1003f,
+            'CONTEXT_FULL with the debug, floating-point and extended groups (CONTEXT_ALL)');
         assert.equal(block[layout.x87Top], 3, 'not written where the handler returned:'
             + ' another thread may be on the processor by then');
         resume(first);

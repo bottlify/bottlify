@@ -41,6 +41,9 @@ import { privilegedAt, storeMachineStatus } from './machine-status.js';
 import {
     CONTEXT_EXTENDED_REGISTERS, CONTEXT_FLOATING_POINT, floatGroupsOf, writeFloatGroups,
 } from './fpu-context.js';
+import {
+    CONTEXT_DEBUG_REGISTERS, debugGroupOf, setDebugRegisters, writeDebugGroup,
+} from './debug-registers.js';
 
 /** EXCEPTION_RECORD, and the size the whole of one occupies. */
 export const RECORD = Object.freeze({
@@ -304,12 +307,16 @@ export function createSeh(host){
         // for a collection), gets that state back (`continuation`).
         // Read here, where the exception is met: the registers on the
         // processor are the thread's own.
+        // The debug registers too: a handler reads Dr6 for what stopped the
+        // thread and may set Dr0-Dr3/Dr7 in the record it continues from.
         const bytes = new Uint8Array(CONTEXT.SIZE);
         const images = host.float?.images() ?? null;
         writeFloatGroups(images, bytes, CONTEXT_FLOATING_POINT | CONTEXT_EXTENDED_REGISTERS);
+        writeDebugGroup(host.currentThread?.(), bytes, CONTEXT_DEBUG_REGISTERS);
         host.writeMemory(at, bytes);
-        writeU32(at + CONTEXT.FLAGS, images === null ? CONTEXT_FULL
-            : CONTEXT_FULL | CONTEXT_FLOATING_POINT | CONTEXT_EXTENDED_REGISTERS);
+        writeU32(at + CONTEXT.FLAGS, (images === null ? CONTEXT_FULL | CONTEXT_DEBUG_REGISTERS
+            : CONTEXT_FULL | CONTEXT_DEBUG_REGISTERS | CONTEXT_FLOATING_POINT
+                | CONTEXT_EXTENDED_REGISTERS) >>> 0);
         for (const [field, name] of [
             [CONTEXT.EDI, 'edi'], [CONTEXT.ESI, 'esi'], [CONTEXT.EBX, 'ebx'],
             [CONTEXT.EDX, 'edx'], [CONTEXT.ECX, 'ecx'], [CONTEXT.EAX, 'eax'],
@@ -356,10 +363,17 @@ export function createSeh(host){
      *
      * @param {number} at  The context.
      * @param {number | undefined} flags  The thread's at the exception.
+     * @param {any} thread  Whose exception it is, which keeps the debug
+     *        registers the record names.
      */
-    const continuation = (at, flags)=>{
+    const continuation = (at, flags, thread)=>{
         /** @type {Record<string, number>} */
         const registers = readContext(at);
+        const debug = debugGroupOf(host.readMemory(at, CONTEXT.SIZE), readU32(at + CONTEXT.FLAGS));
+        if (debug !== null && thread)
+        {
+            setDebugRegisters(thread, debug, host.divergence, 'exception');
+        }
         // The floating-point groups the record names go back with the rest,
         // where the thread resumes: by then the registers on the processor
         // may be another thread's (`resumeContextAt`'s `float`).
@@ -667,7 +681,7 @@ export function createSeh(host){
         if (await callVectored(vectored.exception, pointers, asked, flags))
         {
             await callVectored(vectored.continue, pointers, asked, flags);
-            return { handled: true, registers: continuation(at.context, flags) };
+            return { handled: true, registers: continuation(at.context, flags, asked) };
         }
 
         // The asking thread's chain: after the vectored handlers the thread on
@@ -753,7 +767,7 @@ export function createSeh(host){
                     writeU32(pointers + 4, at.context);
                     await callVectored(vectored.continue, pointers, asked, flags);
                 }
-                return { handled: true, registers: continuation(at.context, flags) };
+                return { handled: true, registers: continuation(at.context, flags, asked) };
             }
             if (answer === Disposition.NESTED_EXCEPTION
                 || answer === Disposition.COLLIDED_UNWIND)
@@ -899,7 +913,7 @@ export function createSeh(host){
             if (answer === EXCEPTION_CONTINUE_EXECUTION
                 && ((what.flags ?? 0) & EXCEPTION_NONCONTINUABLE) === 0)
             {
-                return { handled: true, registers: continuation(at.context, at.flags) };
+                return { handled: true, registers: continuation(at.context, at.flags, at.asked) };
             }
         }
         host.trace?.(`unhandled exception ${hex(what.code)} at ${hex(what.address)}`);

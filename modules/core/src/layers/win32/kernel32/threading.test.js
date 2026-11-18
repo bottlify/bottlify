@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createThreadingFunctions } from './threading.js';
+import { createThreadingFunctions, listProcesses } from './threading.js';
 import { COMPILED as SEMAPHORE_I386 } from './semaphore-guest.x86.js';
 import { COMPILED as SEMAPHORE_LONG } from './semaphore-guest.x64.js';
 import { createNamedObjects } from './named-objects.js';
@@ -1517,6 +1517,21 @@ test('a snapshot lists the children still running and every thread, each walk to
     bytes.set([28, 0, 0, 0], 0x100);
     assert.equal(fns.Thread32First.handler([processesOnly, 0x100]), 0,
         'a snapshot taken without threads has none to walk');
+});
+
+test('the run\'s processes list a process\'s threads in the order they were made', ()=>{
+    // Wine's toolhelp.c: the threads a process made, in turn, and the main one
+    // first; the scheduler rotates its own list as threads take turns.
+    const kernel = {
+        threads: ()=>[{ id: 0x18, state: 'ready' }, { id: 0x10, state: 'running' },
+            { id: 0x1c, state: 'terminated' }, { id: 0x14, state: 'blocked' }],
+        processes: { STILL_ACTIVE: 259, all: ()=>[
+            { id: 0x300, threadId: 0x304, imagePath: 'C:\\App\\child.exe', exitCode: 259 }] },
+    };
+    assert.deepEqual(listProcesses(kernel, { id: 0x2a4, parent: 0, path: 'C:\\App\\a.exe' }), [
+        { id: 0x2a4, parent: 0, path: 'C:\\App\\a.exe', threads: [0x10, 0x14, 0x18] },
+        { id: 0x300, parent: 0x2a4, path: 'C:\\App\\child.exe', threads: [0x304] },
+    ]);
 });
 
 test("OpenThread opens a live thread or a child's first, and refuses any other", ()=>{

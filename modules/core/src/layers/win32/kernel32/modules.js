@@ -39,11 +39,33 @@ const ERROR_MOD_NOT_FOUND = 126;
 const ERROR_PROC_NOT_FOUND = 127;
 const ERROR_INVALID_PARAMETER = 87;
 
+/** LoadLibraryEx's LOAD_LIBRARY_SEARCH_* flags: where a library is looked for instead. */
+const SEARCH_DLL_LOAD_DIR = 0x100;
+const SEARCH_APPLICATION_DIR = 0x200;
+const SEARCH_USER_DIRS = 0x400;
+const SEARCH_SYSTEM32 = 0x800;
+const SEARCH_DEFAULT_DIRS = 0x1000;
+const SEARCH_FLAGS = SEARCH_DLL_LOAD_DIR | SEARCH_APPLICATION_DIR | SEARCH_USER_DIRS
+    | SEARCH_SYSTEM32 | SEARCH_DEFAULT_DIRS;
+/** Which a LOAD_LIBRARY_SEARCH_* search cannot be combined with. */
+const LOAD_WITH_ALTERED_SEARCH_PATH = 0x8;
+
+/** The flags SetDefaultDllDirectories takes: all of them but DLL_LOAD_DIR. */
+const DEFAULT_DLL_DIRECTORIES = SEARCH_APPLICATION_DIR | SEARCH_USER_DIRS | SEARCH_SYSTEM32
+    | SEARCH_DEFAULT_DIRS;
+
 /**
- * The flags SetDefaultDllDirectories takes: LOAD_LIBRARY_SEARCH_APPLICATION_DIR,
- * _USER_DIRS, _SYSTEM32 and _DEFAULT_DIRS.
+ * The key under which the table answers the directories a library is looked
+ * for in, as ntdll's LdrGetDllPath hands them out: `(module, flags)` with
+ * LoadLibraryEx's flags and the library whose search it is, answering the
+ * directories in order.
  */
-const DEFAULT_DLL_DIRECTORIES = 0x200 | 0x400 | 0x800 | 0x1000;
+export const DLL_SEARCH_PATH = Symbol('dllSearchPath');
+
+/** The system's directories, as GetSystemDirectory and GetWindowsDirectory name them. */
+const SYSTEM32_DIRECTORY = 'C:\\WINDOWS\\system32';
+const SYSTEM16_DIRECTORY = 'C:\\WINDOWS\\system';
+const WINDOWS_DIRECTORY = 'C:\\WINDOWS';
 
 /** Where AddDllDirectory's cookies start: above the null page, four apart. */
 const DLL_DIRECTORY_COOKIE_BASE = 0x10000;
@@ -100,6 +122,19 @@ export function searchesBesideProgram(knownDll, mappedFromFile){
  */
 
 /**
+ * A search LoadLibraryEx's LOAD_LIBRARY_SEARCH_* flags asked for, or the
+ * default SetDefaultDllDirectories set: which of the places are looked in.
+ *
+ * @typedef {Object} LibrarySearch
+ * @property {boolean} application  The program's directory.
+ * @property {string[]} user        What AddDllDirectory and SetDllDirectory named.
+ * @property {boolean} system       The system directory: the engine's own libraries.
+ * @property {boolean} [loadDirectory]  A library's imports are looked for in its own
+ *           directory first (LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR).
+ * @property {string} [from]        That directory, for one library's imports.
+ */
+
+/**
  * @typedef {Object} ModulesHost
  * @property {(address: number, maxLength: number) => string} readCString
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
@@ -113,10 +148,15 @@ export function searchesBesideProgram(knownDll, mappedFromFile){
  * @property {() => string} imagePath  The path the running program was loaded from.
  * @property {(name: string) => string | null} [libraryHome]  The folder a library this
  *           build synthesises is installed in when it is not the system folder.
- * @property {(name: string, flags?: number) => number | Promise<number>} [load]
+ * @property {(name: string, flags?: number,
+ *           search?: LibrarySearch | null) => number | Promise<number>} [load]
  *           Brings a library in if it is not here yet, answering with its base
  *           or zero. Answers synchronously whenever it can -- see LoadLibraryA.
- *           `flags` are LoadLibraryEx's, which say how it is to be loaded.
+ *           `flags` are LoadLibraryEx's, which say how it is to be loaded;
+ *           `search` the places a LOAD_LIBRARY_SEARCH_* search looks in
+ *           instead of the standard ones.
+ * @property {(name: string) => string | undefined} [environmentVariable]  A variable
+ *           of the process's environment as it is now: PATH, the standard search's end.
  * @property {(name: string) => number | null} [loadError]
  *           Why `load` answered zero for that name, when it was not that nothing
  *           was found: ERROR_BAD_EXE_FORMAT for a file that is no image for the
@@ -207,6 +247,22 @@ export function createModuleFunctions(host){
         {
             return settle(0);
         }
+        if ((flags & SEARCH_FLAGS) !== 0 && (flags & LOAD_WITH_ALTERED_SEARCH_PATH) !== 0)
+        {
+            host.setLastError(ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+        const search = searchOf(flags);
+        if (search !== 0)
+        {
+            const found = loadOnce(name, flags & ~SEARCH_FLAGS, {
+                application: (search & SEARCH_APPLICATION_DIR) !== 0,
+                user: (search & SEARCH_USER_DIRS) !== 0 ? userSearched() : [],
+                system: (search & SEARCH_SYSTEM32) !== 0,
+                loadDirectory: (search & SEARCH_DLL_LOAD_DIR) !== 0,
+            });
+            return typeof found === 'number' ? settle(found) : found.then(base=>settle(base));
+        }
         const answer = loadOnce(name, flags);
         // The directory SetDllDirectory named, for a bare name nothing else
         // found. Windows looks there before the system directories rather
@@ -236,18 +292,50 @@ export function createModuleFunctions(host){
     };
 
     /**
+     * The places a load with these LoadLibraryEx flags looks in instead of the
+     * standard search, as LOAD_LIBRARY_SEARCH_* bits with DEFAULT_DIRS spelled
+     * out: the flags' own, or the default SetDefaultDllDirectories set for a
+     * load that names none. Zero is the standard search, which
+     * LOAD_WITH_ALTERED_SEARCH_PATH also keeps.
+     *
+     * @param {number} flags
+     */
+    const searchOf = flags=>{
+        const search = (flags & SEARCH_FLAGS) !== 0 ? flags & SEARCH_FLAGS
+            : (flags & LOAD_WITH_ALTERED_SEARCH_PATH) !== 0 ? 0 : defaultDirectories;
+        return (search & SEARCH_DEFAULT_DIRS) !== 0
+            ? search | SEARCH_APPLICATION_DIR | SEARCH_USER_DIRS | SEARCH_SYSTEM32 : search;
+    };
+
+    /** The directories SetDllDirectory and AddDllDirectory named, in that order. */
+    const userSearched = ()=>/** @type {string[]} */ ([dllDirectory, ...userDirectories.values()]
+        .filter(directory=>directory !== null && directory !== ''));
+
+    /**
      * One look for a library by the name given.
      *
      * @param {string} name @param {number} flags
+     * @param {LibrarySearch} [search]  Where a
+     *     LOAD_LIBRARY_SEARCH_* search looks instead.
      * @returns {number | Promise<number>}
      */
-    const loadOnce = (name, flags)=>{
+    const loadOnce = (name, flags, search = undefined)=>{
         // Through the loader even for a module already here: only it knows
         // whether this is the load that has to run the module's entry point.
-        const known = host.find(name);
-        const answer = host.load ? host.load(name, flags) : known?.base ?? 0;
-        return typeof answer === 'number' ? answer || known?.base || 0 : answer;
+        if (host.load)
+        {
+            const answer = search ? host.load(name, flags, search) : host.load(name, flags);
+            return typeof answer === 'number' && answer === 0 && !search
+                ? host.find(name)?.base ?? 0 : answer;
+        }
+        return host.find(name)?.base ?? 0;
     };
+
+    /**
+     * The places SetDefaultDllDirectories set for a load that names none
+     * (LOAD_LIBRARY_SEARCH_* flags), zero for the standard search.
+     */
+    let defaultDirectories = 0;
 
     /**
      * What SetDllDirectory last named: null for the default search, an empty
@@ -485,7 +573,46 @@ export function createModuleFunctions(host){
         return 1;
     };
 
+    /**
+     * The directories a library is looked for in (`DLL_SEARCH_PATH`): under
+     * LOAD_LIBRARY_SEARCH_* flags, or the default SetDefaultDllDirectories
+     * set, the library's own directory (DLL_LOAD_DIR), the program's, the
+     * user's and the system directory; otherwise the standard search, the
+     * program's directory - or the library's, for LOAD_WITH_ALTERED_SEARCH_PATH
+     * - SetDllDirectory's, the system's three, the current one (`.`, unless
+     * SetDllDirectory took it out) and PATH's.
+     *
+     * @param {string} module @param {number} flags
+     * @returns {string[]}
+     */
+    const searchPath = (module, flags)=>{
+        const image = host.imagePath();
+        const program = image.slice(0, Math.max(image.lastIndexOf(SEPARATOR), 0));
+        const own = /[\\/]/.test(module)
+            ? module.slice(0, Math.max(module.lastIndexOf(SEPARATOR), module.lastIndexOf('/')))
+            : null;
+        const search = searchOf(flags);
+        if (search !== 0)
+        {
+            return [
+                ...(search & SEARCH_DLL_LOAD_DIR) !== 0 && own !== null ? [own] : [],
+                ...(search & SEARCH_APPLICATION_DIR) !== 0 ? [program] : [],
+                ...(search & SEARCH_USER_DIRS) !== 0 ? userSearched() : [],
+                ...(search & SEARCH_SYSTEM32) !== 0 ? [SYSTEM32_DIRECTORY] : [],
+            ];
+        }
+        return [
+            (flags & LOAD_WITH_ALTERED_SEARCH_PATH) !== 0 && own !== null ? own : program,
+            ...dllDirectory ? [dllDirectory] : [],
+            SYSTEM32_DIRECTORY, SYSTEM16_DIRECTORY, WINDOWS_DIRECTORY,
+            ...dllDirectory === null ? ['.'] : [],
+            ...(host.environmentVariable?.('PATH') ?? '').split(';')
+                .filter(directory=>directory !== ''),
+        ];
+    };
+
     return {
+        [DLL_SEARCH_PATH]: searchPath,
         /**
          * HMODULE LoadLibraryA(LPCSTR lpLibFileName)
          *
@@ -557,9 +684,9 @@ export function createModuleFunctions(host){
          *
          * Narrows where LoadLibrary looks to the flags' directories, which a
          * program sets once at its start to keep its own directory and the
-         * current one out of the search. The libraries here are found by name
-         * in the engine's tables or on the volume, so the call is accepted;
-         * a flag outside the documented set is ERROR_INVALID_PARAMETER.
+         * current one out of the search: every load that names no
+         * LOAD_LIBRARY_SEARCH_* flags of its own searches as if it had named
+         * these. A flag outside the documented set is ERROR_INVALID_PARAMETER.
          */
         SetDefaultDllDirectories: {
             argBytes: 4,
@@ -570,6 +697,7 @@ export function createModuleFunctions(host){
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
+                defaultDirectories = flags >>> 0;
                 return 1;
             },
         },

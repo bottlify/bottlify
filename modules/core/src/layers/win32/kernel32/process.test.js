@@ -473,13 +473,18 @@ test('GetSystemTimeAsFileTime writes 100ns units since 1601', ()=>{
     assert.equal(u64(filetime), FILETIME_AT_UNIX_EPOCH + 10_000_000n);
 });
 
-test('GetSystemTimePreciseAsFileTime is the same clock, and a prefetch has nothing to do', ()=>{
-    const { host, fns, u64 } = setup();
-    host.clock.wallMs = 2500;
-    fns.GetSystemTimePreciseAsFileTime.handler([0x500]);
-    assert.equal(u64(0x500), FILETIME_AT_UNIX_EPOCH + 25_000_000n);
-    assert.equal(fns.PrefetchVirtualMemory.handler([-1, 1, 0x600, 0]), 1);
-});
+test('GetSystemTimePreciseAsFileTime is the same clock below the millisecond; a prefetch is a hint',
+    ()=>{
+        // Wine's time.c test_GetSystemTimePreciseAsFileTime: spinning until
+        // it changes, it changes by less than a millisecond.
+        const { host, fns, u64 } = setup();
+        host.clock.wallMs = 2500.25;
+        fns.GetSystemTimePreciseAsFileTime.handler([0x500]);
+        assert.equal(u64(0x500), FILETIME_AT_UNIX_EPOCH + 25_002_500n);
+        fns.GetSystemTimeAsFileTime.handler([0x508]);
+        assert.equal(u64(0x508), FILETIME_AT_UNIX_EPOCH + 25_000_000n, 'the coarse one: whole ms');
+        assert.equal(fns.PrefetchVirtualMemory.handler([-1, 1, 0x600, 0]), 1);
+    });
 
 test('GetSystemTimeAdjustment reports a millisecond clock nothing adjusts, a DWORD each', ()=>{
     // Three four-byte answers side by side: one written as eight would run
@@ -1212,6 +1217,7 @@ test('the unbiased interrupt time is the uptime in 100-nanosecond units', ()=>{
     assert.equal(fns.QueryUnbiasedInterruptTime.handler([0x400]), 1);
     assert.equal(u64(0x400), 15_000_000n);
     assert.equal(fns.QueryUnbiasedInterruptTime.handler([0]), 0);
+    assert.equal(fns.GetLastError.handler(), 87, 'ERROR_INVALID_PARAMETER: nowhere to write');
     fns.QueryUnbiasedInterruptTimePrecise.handler([0x408]);
     assert.equal(u64(0x408), 15_000_000n);
 });

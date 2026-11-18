@@ -487,6 +487,9 @@ export function createKernelModule(){
                     // reserve a thread gets by default.
                     const base = low ?? Math.max(0, top - 0x100000);
                     cpu.noteStack?.(base, top - base);
+                    // The stack's own top, which the thread block names as its
+                    // base: the frame below starts a little under it.
+                    const region = top;
                     // Sixteen rather than the eight the frame needs: a thread that
                     // returns pops its return address and then the stub it returns
                     // into pops again, and a stack pointer that lands exactly on
@@ -537,6 +540,7 @@ export function createKernelModule(){
                             cpu.setContextLong?.(thread.context, { gpr });
                         }
                     }
+                    thread.stackBase = region;
                     thread.handle = state.handles.open('thread', thread);
                     if (start !== undefined)
                     {

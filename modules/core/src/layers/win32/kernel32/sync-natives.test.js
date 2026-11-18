@@ -21,8 +21,12 @@ function setup(){
     const memory = new Uint8Array(0x10000);
     const view = new DataView(memory.buffer);
     let next = 0x100;
-    /** @type {Map<number, { kind: string, object: any }>} */
+    /** @type {Map<number, { kind: string, object: any, access?: number | null }>} */
     const handles = new Map();
+    /** @type {any[]} */
+    const blocked = [];
+    /** @type {((thread: any) => void) | null} */
+    let timedOut = null;
     /** @type {any[]} */
     const woken = [];
     const main = { name: 'main' };
@@ -30,13 +34,22 @@ function setup(){
     const kernel = {
         clock: { virtualTime: ()=>0, wallClock: ()=>0 },
         handles: {
-            /** @param {string} kind @param {any} object */
-            open: (kind, object)=>{
-                handles.set(next, { kind, object });
+            /** @param {string} kind @param {any} object @param {number | null} [access] */
+            open: (kind, object, access = null)=>{
+                handles.set(next, { kind, object, access });
                 return (next += 4) - 4;
             },
-            access: ()=>null,
+            /** @param {number} handle */
+            access: handle=>handles.get(handle)?.access ?? null,
         },
+        /** @param {any} options */
+        createEvent: options=>({ ...options }),
+        /** @param {(thread: any) => void} handler */
+        onTimeout: handler=>{
+            timedOut = handler;
+        },
+        /** @param {any} thread @param {() => any} wait */
+        alertably: (thread, wait)=>wait(),
         /** @param {any} event */
         setEvent: event=>{
             event.signalled = true;
@@ -63,7 +76,10 @@ function setup(){
             semaphore.count += count;
             return previous;
         },
-        block: ()=>{},
+        /** @param {any} thread @param {string} reason @param {any} [timed] */
+        block: (thread, reason, timed)=>{
+            blocked.push({ thread, timed });
+        },
         /** @param {any} thread @param {number} result */
         wake: (thread, result)=>{
             woken.push({ thread, result });
@@ -97,6 +113,15 @@ function setup(){
             /** @param {string | null} name @param {boolean} manual */
             timer: (name, manual)=>make('timer', { manualReset: manual, signalled: false,
                 due: null })(name),
+            /**
+             * @param {string | null} name @param {number} sd @param {boolean} inherit
+             * @param {number | null} granted
+             */
+            keyedEvent: (name, sd, inherit, granted)=>{
+                const object = { kind: 'keyedevent', keyed: { waiting: [], releasing: [] } };
+                named.remember(name, 'keyedevent', object, false, ()=>{});
+                return kernel.handles.open('keyedevent', object, granted);
+            },
         },
         existing: named.existing,
         reference: ()=>{},
@@ -131,7 +156,9 @@ function setup(){
     const u32 = (/** @type {number} */ at)=>view.getUint32(at, true);
     const i32 = (/** @type {number} */ at)=>view.getInt32(at, true);
     const other = { name: 'other' };
-    return { call, attributes, u32, i32, handles, woken, main, other,
+    return { call, attributes, u32, i32, handles, woken, main, other, blocked, view,
+        /** @param {any} thread */
+        timeOut: thread=>timedOut?.(thread),
         /** @param {any} thread */
         become: thread=>{
             current = thread;
@@ -218,3 +245,65 @@ test('a resource is shared beside sharers, exclusive alone, and handed to who wa
         assert.equal(call('RtlAcquireResourceShared', [0x3000, 0]), 1,
             'the exclusive holder takes it shared as once more exclusively');
     });
+
+test('a keyed event pairs a wait with a release of the same key, whichever comes first', ()=>{
+    const { call, attributes, u32, woken, become, main, other, blocked, view } = setup();
+    const name = '\\BaseNamedObjects\\keyed';
+    assert.equal(call('NtCreateKeyedEvent', [0x2000, 0xf0003, attributes(name), 1]),
+        STATUS.INVALID_PARAMETER, 'flags are reserved');
+    assert.equal(call('NtCreateKeyedEvent', [0x2000, 0xf0003, attributes(name), 0]),
+        STATUS.SUCCESS);
+    const handle = u32(0x2000);
+    assert.equal(call('NtWaitForKeyedEvent', [handle, 255, 0, 0]), 0xc00000ef,
+        'an odd key, before the handle is looked at');
+    assert.equal(call('NtReleaseKeyedEvent', [0xdeadbeef, 9, 0, 0]), 0xc00000ef);
+    assert.equal(call('NtReleaseKeyedEvent', [0xdeadbeef, 8, 0, 0]), STATUS.INVALID_HANDLE);
+
+    assert.equal(call('NtWaitForKeyedEvent', [handle, 8, 0, 0]), PARKED, 'nobody released 8');
+    become(other);
+    assert.equal(call('NtReleaseKeyedEvent', [handle, 6, 0, 0]), PARKED, 'nobody waits on 6');
+    become(main);
+    assert.equal(call('NtWaitForKeyedEvent', [handle, 6, 0, 0]), STATUS.SUCCESS,
+        'the release of 6 was parked');
+    assert.deepEqual(woken, [{ thread: other, result: STATUS.SUCCESS }]);
+    assert.equal(call('NtReleaseKeyedEvent', [handle, 8, 0, 0]), STATUS.SUCCESS);
+    assert.deepEqual(woken[1], { thread: main, result: STATUS.SUCCESS }, 'the waiter on 8');
+
+    view.setBigInt64(0x2100, -10000n, true);
+    blocked.length = 0;
+    assert.equal(call('NtWaitForKeyedEvent', [handle, 4, 0, 0x2100]), PARKED);
+    assert.equal(blocked[0].timed.deadline, 1, 'a millisecond from now');
+    assert.equal(blocked[0].timed.result, STATUS.TIMEOUT);
+    become(other);
+    view.setBigInt64(0x2108, 0n, true);
+    assert.equal(call('NtReleaseKeyedEvent', [handle, 4, 0, 0x2108]), STATUS.SUCCESS,
+        'the timed waiter on 4 is still parked');
+});
+
+test('a keyed event whose wait timed out is not released; its handle has the rights asked', ()=>{
+    const { call, attributes, u32, woken, become, main, other, view, timeOut } = setup();
+    const name = '\\BaseNamedObjects\\rights';
+    view.setBigInt64(0x2100, 0n, true);
+    call('NtCreateKeyedEvent', [0x2000, 0xf0003, attributes(name), 0]);
+    const handle = u32(0x2000);
+    assert.equal(call('NtWaitForKeyedEvent', [handle, 4, 0, 0x2100]), STATUS.TIMEOUT,
+        'a zero time-out never parks');
+    view.setBigInt64(0x2100, -10000n, true);
+    assert.equal(call('NtWaitForKeyedEvent', [handle, 4, 0, 0x2100]), PARKED);
+    timeOut(main);
+    become(other);
+    view.setBigInt64(0x2108, 0n, true);
+    assert.equal(call('NtReleaseKeyedEvent', [handle, 4, 0, 0x2108]), STATUS.TIMEOUT,
+        'the waiter that ran out of time is gone');
+    assert.deepEqual(woken, []);
+
+    call('NtCreateKeyedEvent', [0x2004, 0x1, attributes(null), 0]);
+    assert.equal(call('NtReleaseKeyedEvent', [u32(0x2004), 8, 0, 0x2108]), STATUS.ACCESS_DENIED,
+        'KEYEDEVENT_WAIT only');
+    assert.equal(call('NtWaitForKeyedEvent', [u32(0x2004), 8, 0, 0x2108]), STATUS.TIMEOUT);
+    call('NtCreateKeyedEvent', [0x2008, 0x40000000, attributes(null), 0]);
+    assert.equal(call('NtWaitForKeyedEvent', [u32(0x2008), 8, 0, 0x2108]), STATUS.ACCESS_DENIED,
+        'GENERIC_WRITE is KEYEDEVENT_WAKE');
+    assert.equal(call('NtReleaseKeyedEvent', [0, 8, 0, 0x2108]), STATUS.TIMEOUT,
+        'a NULL handle is the system\'s keyed event');
+});

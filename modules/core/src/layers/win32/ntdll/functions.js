@@ -177,7 +177,8 @@ const KERNEL32_ALIASES = Object.freeze({
  */
 
 /** The handle types a Win32 name can stand for, whose names the named table keeps. */
-const NAMED_KINDS = new Set(['event', 'mutex', 'semaphore', 'timer', 'mapping']);
+const NAMED_KINDS = new Set(['event', 'mutex', 'semaphore', 'timer', 'mapping', 'keyedevent', 'job',
+    'iocp']);
 
 /**
  * @typedef {Object} NtdllHost
@@ -186,6 +187,10 @@ const NAMED_KINDS = new Set(['event', 'mutex', 'semaphore', 'timer', 'mapping'])
  * @property {(address: number, maxLength: number) => string} readCString
  * @property {(address: number, maxLength: number) => string} readWideString
  * @property {Record<string, Entry>} kernel32  The assembled KERNEL32.dll table.
+ * @property {import('./pool.js').PoolDeletions} [pool]  The thread pool's deletions,
+ *           answered as statuses.
+ * @property {import('./loader.js').LoaderHost['notifications']} [dllNotifications]  The
+ *           loader's LdrRegisterDllNotification callbacks.
  * @property {Record<string, Entry>} crt       The assembled msvcrt.dll table.
  * @property {() => number} teb  The running thread's block.
  * @property {() => any} [currentThread]
@@ -201,6 +206,7 @@ const NAMED_KINDS = new Set(['event', 'mutex', 'semaphore', 'timer', 'mapping'])
  * @property {() => import('./query.js').SystemProcess[]} [processes]
  *           What SystemProcessInformation lists.
  * @property {(handle: number) => string | null} [handleType]
+ * @property {(handle: number) => number | null} [handleAccess]
  * @property {(handle: number) => string | null} [namedObjectName]  The Win32 name
  *     a kernel object was made or opened by, null for one made with none.
  * @property {import('./query.js').QueryHost['processOf']} [processOf]
@@ -458,11 +464,16 @@ export function createNtdllFunctions(host){
                 const out = new DataView(new ArrayBuffer(48 * count));
                 for (let one = 0; one < count; one++)
                 {
-                    // IdleTime, KernelTime, UserTime: each processor its share.
+                    // IdleTime, KernelTime, UserTime: each processor its share,
+                    // the first the remainder too, so that the shares add up to
+                    // what GetSystemTimes says - a caller comparing the sums
+                    // subtracts one from the other unsigned.
                     for (const field of [0, 1, 2])
                     {
+                        const whole = times.getBigUint64(field * 8, true);
+                        const share = whole / BigInt(count);
                         out.setBigUint64(one * 48 + field * 8,
-                            times.getBigUint64(field * 8, true) / BigInt(count), true);
+                            one === 0 ? whole - share * BigInt(count - 1) : share, true);
                     }
                 }
                 return new Uint8Array(out.buffer);
@@ -558,13 +569,15 @@ export function createNtdllFunctions(host){
 
         ...time.table,
 
-        ...(POOL_ENTRIES.every(name=>kernel32[name])
-            ? createPoolFunctions({ kernel32, writeMemory: host.writeMemory })
+        ...(host.pool && POOL_ENTRIES.every(name=>kernel32[name])
+            ? createPoolFunctions({ kernel32, deletions: host.pool,
+                writeMemory: host.writeMemory })
             : {}),
 
         ...(LOADER_ENTRIES.every(name=>kernel32[name])
             ? createLoaderFunctions({ readMemory: host.readMemory,
-                writeMemory: host.writeMemory, kernel32, allocate, free })
+                writeMemory: host.writeMemory, kernel32, allocate, free,
+                notifications: host.dllNotifications })
             : {}),
 
         ...(['GetEnvironmentStringsW', 'SetEnvironmentVariableW'].every(name=>kernel32[name])
@@ -579,6 +592,7 @@ export function createNtdllFunctions(host){
             arena: host.arena,
             version: host.windows,
             handleType: host.handleType,
+            handleAccess: host.handleAccess,
             // A file's or folder's name is its path under the volume's device,
             // as GetFinalPathNameByHandle's VOLUME_NAME_NT spells it.
             objectName: handle=>{
@@ -681,6 +695,10 @@ export function createNtdllFunctions(host){
                 teb: host.teb,
                 allocate,
                 free,
+                processes: host.processes,
+                native: name=>natives[name],
+                ...host.pointerSize ? { pointerSize: host.pointerSize } : {},
+                ...host.divergence ? { divergence: host.divergence } : {},
             })
             : {}),
 

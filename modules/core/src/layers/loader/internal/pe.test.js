@@ -136,6 +136,17 @@ test('a section maps its virtual size to the section boundary, not raw data past
         [...patched.subarray(original.rawOffset, original.rawOffset + 0x200)]);
 });
 
+test('a file no image can be laid out of is refused as a bad image, not a fault', ()=>{
+    // A section placed past SizeOfImage: Windows refuses the file as an
+    // invalid image, and LoadLibrary answers ERROR_BAD_EXE_FORMAT.
+    const patched = file.slice();
+    const view = new DataView(patched.buffer);
+    const header = view.getUint32(0x3c, true);
+    const sectionTable = header + 24 + view.getUint16(header + 20, true);
+    view.setUint32(sectionTable + 12, parsePe(file).sizeOfImage + 0x10000, true);
+    assert.throws(()=>mapImage(patched, 0x400000), { code: 'BAD_EXE_FORMAT' });
+});
+
 test('an image without relocations refuses to move', ()=>{
     const image = parsePe(file);
     assert.equal(image.relocatable, false,

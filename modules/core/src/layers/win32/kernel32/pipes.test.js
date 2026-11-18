@@ -252,6 +252,30 @@ test('a byte pipe carries bytes both ways, reads coalescing writes', ()=>{
     assert.equal(p.text(1), 'z');
 });
 
+test('a write or a read that goes through leaves the last error as it was', ()=>{
+    // A program reads it after an overlapped read that pends and a write
+    // that went through, and finds the pending one's ERROR_IO_PENDING.
+    const p = processOn(new Map());
+    const server = p.server();
+    p.as('p1:reader');
+    assert.equal(p.read(server, 10), 0);
+    assert.equal(p.error(), ERROR_PIPE_LISTENING);
+    p.as('p1:writer');
+    assert.equal(p.read(server, 10), 0);
+    const client = p.client();
+    assert.equal(p.write(client, 'ab'), 1);
+    assert.equal(p.error(), ERROR_PIPE_LISTENING, 'the write');
+    p.as('p1:reader');
+    assert.equal(p.read(server, 2), 1);
+    assert.equal(p.error(), ERROR_PIPE_LISTENING, 'the read');
+    // A reader that waited and was given its bytes, the same.
+    assert.equal(p.read(server, 2), 'parked');
+    p.as('p1:writer');
+    p.write(client, 'cd');
+    assert.deepEqual(p.woken.at(-1), { thread: 'p1:reader', result: 1 });
+    assert.equal(p.errorOf('p1:reader'), ERROR_PIPE_LISTENING, 'the read that waited');
+});
+
 test('a message pipe reads a message whole, or in parts with ERROR_MORE_DATA', ()=>{
     const p = processOn(new Map());
     const server = p.server(PIPE_ACCESS_DUPLEX, PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE);

@@ -68,6 +68,12 @@ export const TEB = Object.freeze({
 /** SameTebFlags' HasFiberData: the thread runs fibers, FiberData is the current one. */
 export const HAS_FIBER_DATA = 0x0004;
 /**
+ * SameTebFlags' SkipThreadAttach: the thread was made with
+ * THREAD_CREATE_FLAGS_SKIP_THREAD_ATTACH, and the loader tells no library of
+ * its start or end and gives it no thread-local storage array.
+ */
+export const SKIP_THREAD_ATTACH = 0x0008;
+/**
  * What NT_TIB's FiberData (its Version, the union's other half) holds for a
  * thread that runs no fiber, as Windows starts every thread.
  */
@@ -649,6 +655,13 @@ export function createProcessBlocks(options){
         ldr,
         addModule,
         removeModule,
+        /**
+         * A loaded module's LDR_DATA_TABLE_ENTRY, by its base; zero for one
+         * not on the lists.
+         *
+         * @param {number} base
+         */
+        entryOf: base=>entries.get(base >>> 0) ?? 0,
 
         /**
          * A block for one thread, with its own thread-local array and its own

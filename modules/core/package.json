@@ -95,6 +95,7 @@
     "src/layers/win32/kernel32/locale.js",
     "src/layers/win32/kernel32/locales.js",
     "src/layers/win32/kernel32/processor.js",
+    "src/layers/win32/kernel32/string-types.js",
     "src/layers/win32/kernel32/utf7.js",
     "src/layers/win32/kernel32/utf8.js",
     "src/layers/win32/kernel32/versions.js",

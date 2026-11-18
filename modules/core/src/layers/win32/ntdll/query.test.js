@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createQueryFunctions, systemProcessInformation } from './query.js';
 import { STATUS } from './status.js';
-import { PEB, TEB, createProcessBlocks } from '../kernel32/teb.js';
+import { LDR_DATA, LDR_ENTRY, PEB, TEB, createProcessBlocks } from '../kernel32/teb.js';
 import { VER, WINDOWS_VERSIONS, setCondition } from '../kernel32/versions.js';
 import { createProcessors } from '../kernel32/processor.js';
 
@@ -50,6 +50,34 @@ function fakeHost({ blocks = true, arenaSize = 64 * 1024 * 1024 } = {}){
         arena: { base: 0x400000, size: arenaSize },
     };
 }
+
+test('LdrFindEntryForAddress answers the loaded module whose image holds the address', ()=>{
+    const host = fakeHost();
+    const { view } = host;
+    const LDR = 0x2400;
+    const FIRST = 0x2500;
+    const SECOND = 0x2600;
+    const head = LDR + LDR_DATA.IN_LOAD_ORDER_MODULE_LIST;
+    view.setUint32(PEB_AT + PEB.LDR, LDR, true);
+    // head -> FIRST -> SECOND -> head, by the load-order links.
+    view.setUint32(head, FIRST + LDR_ENTRY.IN_LOAD_ORDER_LINKS, true);
+    view.setUint32(FIRST + LDR_ENTRY.IN_LOAD_ORDER_LINKS, SECOND + LDR_ENTRY.IN_LOAD_ORDER_LINKS,
+        true);
+    view.setUint32(SECOND + LDR_ENTRY.IN_LOAD_ORDER_LINKS, head, true);
+    view.setUint32(FIRST + LDR_ENTRY.DLL_BASE, 0x400000, true);
+    view.setUint32(FIRST + LDR_ENTRY.SIZE_OF_IMAGE, 0x10000, true);
+    view.setUint32(SECOND + LDR_ENTRY.DLL_BASE, 0x10000000, true);
+    view.setUint32(SECOND + LDR_ENTRY.SIZE_OF_IMAGE, 0x2000, true);
+    const fns = createQueryFunctions(host);
+    const find = (/** @type {number} */ address)=>
+        fns.LdrFindEntryForAddress.handler([address, BUFFER]);
+    assert.equal(find(0x10001fff), STATUS.SUCCESS);
+    assert.equal(view.getUint32(BUFFER, true), SECOND, 'the image\'s last byte is in it');
+    assert.equal(find(0x400000), STATUS.SUCCESS);
+    assert.equal(view.getUint32(BUFFER, true), FIRST);
+    assert.equal(find(0x10002000), STATUS.NO_MORE_ENTRIES, 'just past the image');
+    assert.equal(fns.LdrFindEntryForAddress.handler([0x400000, 0]), STATUS.INVALID_PARAMETER);
+});
 
 test('RtlGetVersion reports what the process block holds', ()=>{
     // Not constants of its own: this is where Windows keeps the version, and a
@@ -354,7 +382,9 @@ test('NtQueryObject answers the basic class for a handle that names something', 
     const host = fakeHost();
     const fns = createQueryFunctions({
         ...host,
-        handleType: handle=>(handle === 0x44 ? 'event' : null),
+        handleType: handle=>(handle === 0x44 || handle === 0x4c ? 'event' : null),
+        // 0x4c was opened for SYNCHRONIZE | EVENT_MODIFY_STATE; 0x44 with every right.
+        handleAccess: handle=>(handle === 0x4c ? 0x00100002 : null),
         divergence: (api, detail)=>said.push(`${api}: ${detail}`),
     });
     assert.equal(fns.NtQueryObject.argBytes, 20);
@@ -364,8 +394,11 @@ test('NtQueryObject answers the basic class for a handle that names something', 
     assert.equal(host.view.getUint32(RETURN_LENGTH, true), 0x38);
     assert.equal(host.view.getUint32(BUFFER + 4, true), 0x001fffff, 'every right');
     assert.equal(host.view.getUint32(BUFFER + 8, true), 1, 'one handle');
-    assert.ok(said.some(line=>line.startsWith('NtQueryObject: granted access')),
-        'the untracked access is reported');
+    assert.ok(said.some(line=>line.startsWith('NtQueryObject: handle and reference counts')),
+        'the untracked counts are reported');
+    assert.equal(fns.NtQueryObject.handler([0x4c, 0, BUFFER, 0x38, 0]), STATUS.SUCCESS);
+    assert.equal(host.view.getUint32(BUFFER + 4, true), 0x00100002,
+        'the rights the handle was granted');
 
     assert.equal(fns.NtQueryObject.handler([0xffffffff, 0, BUFFER, 0x38, 0]), STATUS.SUCCESS,
         'the current-process pseudo-handle names something without a table entry');

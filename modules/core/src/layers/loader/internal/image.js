@@ -63,11 +63,34 @@ export function buildImage(file, { resolveImport, base, missing, wide = false, b
  * @param {Uint8Array} file
  * @param {number} [base]
  * @param {{ wide?: boolean, bits?: 32 | 64 }} [options]  `wide`: a 64-bit (PE32+)
- *     image is taken; `bits`: only an image of the process's machine (`parsePe`)
+ *     image is taken; `bits`: only an image of the process's machine (`parsePe`).
+ *     A file that is no image it can lay out throws with code BAD_EXE_FORMAT.
  * @returns {{ base: number, entryPoint: number, bytes: Uint8Array, file: Uint8Array,
  *             image: import('./pe.js').PeImage }}
  */
-export function mapImage(file, base, { wide = false, bits } = {}){
+export function mapImage(file, base, options = {}){
+    try
+    {
+        return layOut(file, base, options);
+    }
+    catch (e){
+        // Everything here reads the file's bytes and nothing else: what fails
+        // - a section past the image's end, a relocation past it, one of a
+        // kind no loader knows - is the file, which Windows refuses as an
+        // invalid image, not a fault of the machine.
+        const failure = e instanceof Error ? e : new Error(String(e));
+        throw /** @type {any} */ (failure).code ? failure
+            : Object.assign(failure, { code: 'BAD_EXE_FORMAT' });
+    }
+}
+
+/**
+ * `mapImage`'s work, any failure of it thrown as it came.
+ *
+ * @param {Uint8Array} file @param {number | undefined} base
+ * @param {{ wide?: boolean, bits?: 32 | 64 }} options
+ */
+function layOut(file, base, { wide = false, bits } = {}){
     const image = parsePe(file, { wide, bits });
     const loadBase = base ?? image.imageBase;
 

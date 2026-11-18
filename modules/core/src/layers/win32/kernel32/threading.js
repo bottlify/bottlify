@@ -144,6 +144,11 @@ const DUPLICATE_CLOSE_SOURCE = 0x00000001;
  *           turn, retires nothing, and keeps whatever it was holding.
  * @property {number} [processId]      What the running process is numbered.
  * @property {number} [parentProcessId]  The process that started it, 0 for none.
+ * @property {() => import('../ntdll/query.js').SystemProcess[]} [processes]
+ *           The run's processes as a snapshot lists them, this one first and
+ *           its threads in the order they were made: the list
+ *           SystemProcessInformation answers from. Without it, `listProcesses`
+ *           of the kernel given.
  * @property {() => string} [imagePath]  Where its image is, for a snapshot's entry.
  * @property {() => { name: string, base: number, size?: number, path?: string }[]} [modules]
  *           The modules the process has loaded, the image first, for a snapshot's
@@ -237,6 +242,32 @@ const CREATE_WAITABLE_TIMER_HIGH_RESOLUTION = 0x2;
  * @typedef {{ id: number, owner: number }} SnapshotThread
  * @typedef {{ base: number, size: number, path: string }} SnapshotModule
  */
+
+/**
+ * The run's processes as a snapshot lists them: this one, its threads in the
+ * order they were made (ids are taken in that order; the scheduler's own list
+ * is rotated as threads take turns), then the children it started that are
+ * still running, each with the first thread it was told of.
+ *
+ * @param {any} kernel
+ * @param {{ id: number, parent: number, path: string }} self
+ * @returns {import('../ntdll/query.js').SystemProcess[]}
+ */
+export function listProcesses(kernel, self){
+    return [
+        { ...self, threads: (kernel.threads?.() ?? [])
+            .filter((/** @type {any} */ thread)=>thread.state !== 'terminated')
+            .map((/** @type {any} */ thread)=>thread.id >>> 0)
+            .sort((/** @type {number} */ a, /** @type {number} */ b)=>a - b) },
+        ...(kernel.processes?.all() ?? [])
+            .filter((/** @type {any} */ child)=>!child.completed
+                && child.exitCode === kernel.processes.STILL_ACTIVE)
+            .map((/** @type {any} */ child)=>({
+                id: child.id >>> 0, parent: self.id,
+                path: String(child.imagePath ?? ''), threads: [child.threadId >>> 0],
+            })),
+    ];
+}
 
 /** @param {Uint8Array} bytes @param {number} at */
 const readU32 = (bytes, at)=>
@@ -773,6 +804,32 @@ export function createThreadingFunctions(host){
             if (name === null)
             {
                 semaphore.name = `#${handle.toString(16)}`;
+            }
+            return handle;
+        },
+        /**
+         * A keyed event: always signalled to a wait on its handle, its pairings
+         * of waiters and releasers by key kept beside it (`sync-natives.js`).
+         *
+         * @param {string | null} name @param {number} sd @param {boolean} inherit
+         * @param {number | null} granted
+         */
+        keyedEvent: (name, sd, inherit, granted)=>{
+            const found = existing(name, 'keyedevent');
+            if (found === TAKEN)
+            {
+                host.setLastError(ERROR_INVALID_HANDLE);
+                return 0;
+            }
+            const keyed = found ?? Object.assign(kernel.createEvent({
+                manualReset: true, signalled: true, name: name ?? 'keyed event',
+            }), { keyed: { waiting: [], releasing: [] } });
+            keepDescriptor(sd, keyed, found);
+            remember(name, 'keyedevent', keyed, found !== null);
+            const handle = inheritIf(kernel.handles.open('keyedevent', keyed, granted), inherit);
+            if (name === null)
+            {
+                keyed.name = `#${handle.toString(16)}`;
             }
             return handle;
         },
@@ -1815,29 +1872,15 @@ export function createThreadingFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([flags])=>{
-                const self = (host.processId ?? 0x1000) >>> 0;
-                const own = (kernel.threads?.() ?? [])
-                    .filter((/** @type {any} */ thread)=>thread.state !== 'terminated');
-                const children = (kernel.processes?.all() ?? [])
-                    .filter((/** @type {any} */ child)=>!child.completed
-                        && child.exitCode === kernel.processes.STILL_ACTIVE);
+                const listed = host.processes?.() ?? listProcesses(kernel, {
+                    id: (host.processId ?? 0x1000) >>> 0,
+                    parent: (host.parentProcessId ?? 0) >>> 0, path: host.imagePath?.() ?? '' });
                 return kernel.handles.open('snapshot', {
                     flags: flags >>> 0,
-                    processes: [
-                        { id: self, parent: (host.parentProcessId ?? 0) >>> 0,
-                            threads: Math.max(own.length, 1),
-                            path: host.imagePath?.() ?? '' },
-                        ...children.map((/** @type {any} */ child)=>({
-                            id: child.id >>> 0, parent: self, threads: 1,
-                            path: String(child.imagePath ?? ''),
-                        })),
-                    ],
-                    threads: [
-                        ...own.map((/** @type {any} */ thread)=>({
-                            id: thread.id >>> 0, owner: self })),
-                        ...children.map((/** @type {any} */ child)=>({
-                            id: child.threadId >>> 0, owner: child.id >>> 0 })),
-                    ],
+                    processes: listed.map(process=>({ id: process.id, parent: process.parent,
+                        threads: Math.max(process.threads.length, 1), path: process.path })),
+                    threads: listed.flatMap(process=>process.threads
+                        .map(id=>({ id, owner: process.id }))),
                     modules: (flags & TH32CS_SNAPMODULE) === 0 ? [] : (host.modules?.() ?? [])
                         .map(module=>({
                             base: module.base >>> 0,
@@ -1897,13 +1940,23 @@ export function createThreadingFunctions(host){
         OpenThread: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([, inherit, id])=>{
+            handler: ([desired, inherit, id])=>{
                 const wanted = id >>> 0;
                 const own = (kernel.threads?.() ?? []).find((/** @type {any} */ thread)=>
                     (thread.id >>> 0) === wanted && thread.state !== 'terminated');
                 if (own)
                 {
-                    return inheritIf(kernel.handles.open('thread', own), inherit !== 0);
+                    // The handle carries the rights asked for: a wait on it
+                    // needs SYNCHRONIZE, a query of its information
+                    // THREAD_QUERY_INFORMATION or the limited form.
+                    const access = grantedAccess('thread', desired);
+                    if ('error' in access)
+                    {
+                        host.setLastError(access.error);
+                        return 0;
+                    }
+                    return inheritIf(kernel.handles.open('thread', own, access.granted),
+                        inherit !== 0);
                 }
                 const child = (kernel.processes?.all() ?? []).find((/** @type {any} */ made)=>
                     (made.threadId >>> 0) === wanted || made.threads?.has(wanted));

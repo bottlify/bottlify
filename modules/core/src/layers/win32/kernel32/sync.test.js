@@ -1274,9 +1274,9 @@ test('GetThreadContext of a thread still running on another executor answers onc
         [0x403000, 0x5f00]);
 });
 
-test('SetThreadContext of the debug registers alone, breakpoints off, is the state already', ()=>{
-    // A program clearing hardware breakpoints from its threads: none is ever
-    // set here, so it is answered; one enabling a breakpoint is not honoured.
+test('the debug registers a thread is given are the ones it reads back, its own included', ()=>{
+    // Dr0-Dr3, Dr6 and Dr7 after ContextFlags; the values kept, an enabled
+    // breakpoint said because nothing raises it.
     const host = /** @type {any} */ (fakeHost());
     const said = /** @type {string[]} */ ([]);
     host.divergence = (/** @type {string} */ api, /** @type {string} */ detail)=>
@@ -1286,21 +1286,39 @@ test('SetThreadContext of the debug registers alone, breakpoints off, is the sta
     const at = 0x400;
     const view = new DataView(host.bytes.buffer);
     const CONTEXT_DEBUG_REGISTERS = 0x10010;
-    view.setUint32(at, CONTEXT_DEBUG_REGISTERS, true);
-    for (let offset = 4; offset <= 0x18; offset += 4)
+    const given = [0x42424240, 0, 0x126bb070, 0x0badbad0, 0, 0xffff0115];
+    /** @param {number[]} values */
+    const lay = values=>{
+        view.setUint32(at, CONTEXT_DEBUG_REGISTERS, true);
+        values.forEach((value, index)=>view.setUint32(at + 4 + index * 4, value, true));
+    };
+    const read = ()=>given.map((_, index)=>view.getUint32(at + 4 + index * 4, true));
+    for (const handle of [0x20, 0xfffffffe])
     {
-        view.setUint32(at + offset, 0, true);
+        lay(given);
+        assert.equal(fns.SetThreadContext.handler([handle, at]), 1);
+        lay(given.map(()=>0xcccccccc));
+        assert.equal(fns.GetThreadContext.handler([handle, at]), 1);
+        assert.deepEqual(read(), given, `thread ${handle.toString(16)}`);
     }
+    assert.deepEqual(said, ['SetThreadContext: hardware breakpoints are kept and not raised',
+        'SetThreadContext: hardware breakpoints are kept and not raised']);
+
+    // A thread never given any reads them clear.
+    host.register(0x24, 'thread', { ...host.threads.second, debugRegisters: undefined });
+    lay(given.map(()=>0xcccccccc));
+    assert.equal(fns.GetThreadContext.handler([0x24, at]), 1);
+    assert.deepEqual(read(), [0, 0, 0, 0, 0, 0]);
+
+    // Cleared again, nothing is said.
+    said.length = 0;
+    lay([0, 0, 0, 0, 0, 0]);
     assert.equal(fns.SetThreadContext.handler([0x20, at]), 1);
     assert.deepEqual(said, []);
 
-    view.setUint32(at + 0x18, 0x1, true);
-    assert.equal(fns.SetThreadContext.handler([0x20, at]), 1);
-    assert.deepEqual(said, ['SetThreadContext: hardware breakpoints are set and not honoured']);
-
     view.setUint32(at, CONTEXT_DEBUG_REGISTERS | 0x10001, true);
     assert.equal(fns.SetThreadContext.handler([0x20, at]), 0,
-        'with the control registers, refused');
+        'with the control registers, refused where nothing resumes it');
 });
 
 test('GetThreadSelectorEntry describes the flat selectors and the thread block behind FS', ()=>{

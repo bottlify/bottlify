@@ -219,6 +219,7 @@ export const SHARED_RESOURCE_HANDLE = 'dxgk-shared-resource';
  */
 const KERNEL_TYPE_OF = Object.freeze({
     event: 'Event', mutex: 'Mutant', semaphore: 'Semaphore', timer: 'Timer',
+    keyedevent: 'KeyedEvent',
     file: 'File', pipe: 'File', 'pipe-read': 'File', 'pipe-write': 'File', mailslot: 'File',
     'mailslot-client': 'File', device: 'File', directory: 'File', socket: 'File',
     mapping: 'Section', process: 'Process', thread: 'Thread', 'process-thread': 'Thread',
@@ -254,6 +255,8 @@ const ALL_ACCESS = 0x001fffff;
 const CURRENT_PROCESS = 0xffffffff;
 /** The first argument was refused. */
 const STATUS_INVALID_PARAMETER_1 = 0xc00000ef;
+/** The most modules a walk of the loader's list visits: more than any process loads. */
+const MAX_MODULES = 0x10000;
 /** The most a child is asked to write back for one query: no class is larger. */
 const MAX_ASKED = 0x10000;
 const CURRENT_THREAD = 0xfffffffe;
@@ -291,6 +294,9 @@ const NORMAL_BASE_PRIORITY = 8;
  * @property {(handle: number) => string | null} [handleType]  What a handle
  *           names, or null when it names nothing. Without it NtQueryObject
  *           answers every handle as invalid.
+ * @property {(handle: number) => number | null} [handleAccess]  The rights a
+ *           handle was granted, null for every right (the handle table's
+ *           `access`). Without it every handle has every right.
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {() => SystemProcess[]} [processes]  The processes a Toolhelp
  *           snapshot lists, this one first. Without it SystemProcessInformation
@@ -386,7 +392,8 @@ export function systemProcessInformation(processes, base){
 export function createQueryFunctions(host){
     const machine = host.version ?? windowsVersion();
     const processors = host.processors ?? createProcessors();
-    const { pointer: pointerBytes, teb: TEB, peb: PEB } = blockLayouts(host.pointerSize);
+    const { pointer: pointerBytes, teb: TEB, peb: PEB, ldr: LDR, entry: ENTRY }
+        = blockLayouts(host.pointerSize);
 
     /** @param {number} at */
     const readU32 = at=>{
@@ -541,6 +548,44 @@ export function createQueryFunctions(host){
          * Windows 10's default, the LongPathsEnabled value unset, is FALSE.
          */
         RtlAreLongPathsEnabled: { argBytes: 0, handler: ()=>0 },
+
+        /**
+         * NTSTATUS LdrFindEntryForAddress(PVOID Address, PLDR_DATA_TABLE_ENTRY *Entry)
+         *
+         * The loaded module whose image holds the address, as its entry in
+         * PEB->Ldr's load-order list; none, STATUS_NO_MORE_ENTRIES.
+         */
+        LdrFindEntryForAddress: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([address, out])=>{
+                const block = peb();
+                if (block === 0 || (out >>> 0) === 0)
+                {
+                    return STATUS.INVALID_PARAMETER;
+                }
+                const head = readU32(block + PEB.LDR) + LDR.IN_LOAD_ORDER_MODULE_LIST;
+                const wanted = address >>> 0;
+                // Bounded by what a process can hold, so a list a program broke
+                // into a loop is not walked for ever.
+                for (let link = readU32(head), seen = 0; link !== head && link !== 0
+                    && seen < MAX_MODULES; link = readU32(link), seen++)
+                {
+                    const entry = link - ENTRY.IN_LOAD_ORDER_LINKS;
+                    const base = readU32(entry + ENTRY.DLL_BASE);
+                    if (wanted >= base && wanted - base < readU32(entry + ENTRY.SIZE_OF_IMAGE))
+                    {
+                        writeU32If(out >>> 0, entry);
+                        if (pointerBytes === 8)
+                        {
+                            writeU32If((out >>> 0) + 4, 0);
+                        }
+                        return STATUS.SUCCESS;
+                    }
+                }
+                return STATUS.NO_MORE_ENTRIES;
+            },
+        },
 
         /**
          * NTSTATUS RtlGetVersion(PRTL_OSVERSIONINFOW lpVersionInformation)
@@ -894,10 +939,10 @@ export function createQueryFunctions(host){
          *                        PVOID Information, ULONG Length, PULONG ReturnLength)
          *
          * The basic class, the type of the object a handle names, and the
-         * list of object types. The handle table
-         * keeps neither the access a handle was opened with nor how many
-         * handles share an object, so a handle is answered with every right
-         * and counts of one, and says so. The types are the system's and name
+         * list of object types. The basic class answers the rights the
+         * handle was granted, as the handle table keeps them; the table does
+         * not count how many handles share an object, so the counts are one,
+         * and that is said. The types are the system's and name
          * no handle: Windows ignores the one given, and a protection asks with
          * NULL and takes a refusal for a debugger hiding its objects.
          */
@@ -959,12 +1004,14 @@ export function createQueryFunctions(host){
                 }
                 const struct = new Uint8Array(OBJECT_BASIC.SIZE);
                 const view = new DataView(struct.buffer);
-                view.setUint32(OBJECT_BASIC.GRANTED_ACCESS, ALL_ACCESS, true);
+                const granted = named === CURRENT_PROCESS || named === CURRENT_THREAD ? null
+                    : host.handleAccess?.(named) ?? null;
+                view.setUint32(OBJECT_BASIC.GRANTED_ACCESS, granted ?? ALL_ACCESS, true);
                 view.setUint32(OBJECT_BASIC.HANDLE_COUNT, 1, true);
                 view.setUint32(OBJECT_BASIC.POINTER_COUNT, 1, true);
                 host.writeMemory(buffer >>> 0, struct);
                 host.divergence?.('NtQueryObject',
-                    'granted access and counts are not kept; every right and one handle answered');
+                    'handle and reference counts are not kept; one handle answered');
                 return STATUS.SUCCESS;
             },
         },

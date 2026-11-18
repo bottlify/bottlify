@@ -20,7 +20,8 @@
 
 import { OBJ_INHERIT, OBJ_OPENIF, readObjectAttributes, win32NameOf } from './object-attributes.js';
 import { TAKEN } from './named-objects.js';
-import { MODIFY_STATE, QUERY_STATE, allows, grantedAccess } from './access.js';
+import { KEYEDEVENT_WAIT, KEYEDEVENT_WAKE, MODIFY_STATE, QUERY_STATE, allows,
+    grantedAccess } from './access.js';
 import { dueInMs, readLargeInteger, FILETIME_EPOCH_MS } from './due-time.js';
 import { STATUS } from '../ntdll/status.js';
 
@@ -30,6 +31,9 @@ const SYNCHRONIZATION_EVENT = 1;
 /** TIMER_TYPE, the same two. */
 const NOTIFICATION_TIMER = 0;
 const SYNCHRONIZATION_TIMER = 1;
+
+/** A keyed event's key is even: its low bit is the system's own. */
+const STATUS_INVALID_PARAMETER_1 = 0xc00000ef;
 
 /** The basic information class of each query, and its record's size. */
 const BASIC_INFORMATION = 0;
@@ -43,7 +47,8 @@ const TIMER_BASIC_SIZE = 12;
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {any} kernel
- * @property {{ mutex: Function, event: Function, semaphore: Function, timer: Function }} creates
+ * @property {{ mutex: Function, event: Function, semaphore: Function, timer: Function,
+ *     keyedEvent: Function }} creates
  *     kernel32's creates over a name already read (`threading.js`)
  * @property {(name: string | null, kind: string) => any} existing
  * @property {(found: any) => void} reference  a named object's count, for a handle opened on it
@@ -287,6 +292,102 @@ export function createSyncNatives(host){
                 resource.active++;
             }
         }
+    };
+
+    /**
+     * The keyed event a NULL handle names: the one the system makes at boot
+     * (\KernelObjects\CritSecOutOfMemoryEvent) for every process to use.
+     *
+     * @type {any}
+     */
+    let systemKeyed = null;
+    /**
+     * Each thread parked on a keyed event, and the queue it waits in: a timed
+     * wait that ran out leaves it.
+     *
+     * @type {Map<any, any[]>}
+     */
+    const pairing = new Map();
+    let watchingTimeouts = false;
+
+    /**
+     * NtWaitForKeyedEvent and NtReleaseKeyedEvent, the one rendezvous seen
+     * from either side: a thread of the other side already parked on the key
+     * is woken and both go on; otherwise the caller parks until one comes, or
+     * its time-out runs out. A thread an APC took out of its wait is passed
+     * over when its entry is found.
+     *
+     * @param {number} handle @param {number} key @param {number} alertable @param {number} timeout
+     * @param {'waiting' | 'releasing'} side @param {number} right
+     */
+    const rendezvous = (handle, key, alertable, timeout, side, right)=>{
+        if ((key & 1) !== 0)
+        {
+            return STATUS_INVALID_PARAMETER_1;
+        }
+        let keyed;
+        if ((handle >>> 0) === 0)
+        {
+            systemKeyed ??= Object.assign(kernel.createEvent({ manualReset: true,
+                signalled: true, name: 'CritSecOutOfMemoryEvent' }),
+            { keyed: { waiting: [], releasing: [] } });
+            keyed = systemKeyed;
+        }
+        else
+        {
+            keyed = target(handle, 'keyedevent', right);
+            if (typeof keyed === 'number')
+            {
+                return keyed;
+            }
+        }
+        const other = keyed.keyed[side === 'waiting' ? 'releasing' : 'waiting'];
+        for (let at = other.findIndex((/** @type {any} */ entry)=>entry.key === key >>> 0);
+            at >= 0; at = other.findIndex((/** @type {any} */ entry)=>entry.key === key >>> 0))
+        {
+            const [entry] = other.splice(at, 1);
+            pairing.delete(entry.thread);
+            if (kernel.wake(entry.thread, STATUS.SUCCESS))
+            {
+                return STATUS.SUCCESS;
+            }
+        }
+        /** @type {number | undefined} */
+        let deadline;
+        if ((timeout >>> 0) !== 0)
+        {
+            const ms = dueInMs(readLargeInteger(host.readMemory, timeout),
+                kernel.clock.wallClock());
+            if (ms <= 0)
+            {
+                return STATUS.TIMEOUT;
+            }
+            deadline = kernel.clock.virtualTime() + ms;
+        }
+        if (!watchingTimeouts)
+        {
+            watchingTimeouts = true;
+            kernel.onTimeout((/** @type {any} */ thread)=>{
+                const queue = pairing.get(thread);
+                pairing.delete(thread);
+                const at = queue?.findIndex(entry=>entry.thread === thread) ?? -1;
+                if (at >= 0)
+                {
+                    queue?.splice(at, 1);
+                }
+            });
+        }
+        const thread = host.currentThread();
+        const queue = keyed.keyed[side];
+        queue.push({ thread, key: key >>> 0 });
+        pairing.set(thread, queue);
+        const park = ()=>{
+            kernel.block(thread, `keyed event ${side === 'waiting' ? 'wait' : 'release'} `
+                + `0x${(key >>> 0).toString(16)}`, deadline === undefined ? undefined
+                : { deadline, result: STATUS.TIMEOUT });
+            return host.park();
+        };
+        return (alertable & 0xff) !== 0 ? kernel.alertably(thread, park) : park();
     };
 
     return {
@@ -600,6 +701,62 @@ export function createSyncNatives(host){
                     return new Uint8Array(record.buffer);
                 });
             },
+        },
+
+        /**
+         * NTSTATUS NtCreateKeyedEvent(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, ULONG Flags)
+         *
+         * The handle carries the rights asked for: KEYEDEVENT_WAIT to wait on
+         * a key, KEYEDEVENT_WAKE to release one, SYNCHRONIZE to wait on the
+         * handle itself (which is always signalled).
+         */
+        NtCreateKeyedEvent: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([out, access, attributes, flags])=>{
+                if ((flags >>> 0) !== 0)
+                {
+                    return STATUS.INVALID_PARAMETER;
+                }
+                const granted = grantedAccess('keyedevent', access);
+                if ('error' in granted)
+                {
+                    return STATUS.ACCESS_DENIED;
+                }
+                return create('keyedevent', out, attributes, (name, sd, inherit)=>
+                    host.creates.keyedEvent(name, sd, inherit, granted.granted));
+            },
+        },
+        /** NTSTATUS NtOpenKeyedEvent(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES) */
+        NtOpenKeyedEvent: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([out, access, attributes])=>open('keyedevent', out, access, attributes),
+        },
+        /**
+         * NTSTATUS NtWaitForKeyedEvent(HANDLE, PVOID Key, BOOLEAN Alertable,
+         *                              PLARGE_INTEGER Timeout)
+         *
+         * Parks until a release names the same key, or answers at once where
+         * one is already parked on it.
+         */
+        NtWaitForKeyedEvent: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([handle, key, alertable, timeout])=>
+                rendezvous(handle, key, alertable, timeout, 'waiting', KEYEDEVENT_WAIT),
+        },
+        /**
+         * NTSTATUS NtReleaseKeyedEvent(HANDLE, PVOID Key, BOOLEAN Alertable,
+         *                              PLARGE_INTEGER Timeout)
+         *
+         * Releases one thread waiting on the key, parking until one comes.
+         */
+        NtReleaseKeyedEvent: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([handle, key, alertable, timeout])=>
+                rendezvous(handle, key, alertable, timeout, 'releasing', KEYEDEVENT_WAKE),
         },
 
         /**

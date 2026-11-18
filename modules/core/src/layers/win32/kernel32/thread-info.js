@@ -16,6 +16,7 @@
  */
 
 import { TEB, TEB64 } from './teb.js';
+import { THREAD_QUERY_INFORMATION, THREAD_QUERY_LIMITED_INFORMATION, allows } from './access.js';
 
 /** THREADINFOCLASS values answered here. */
 export const THREAD_INFO = Object.freeze({
@@ -29,8 +30,14 @@ export const THREAD_INFO = Object.freeze({
     NAME: 38,
 });
 
+/** The classes a handle with THREAD_QUERY_LIMITED_INFORMATION alone may read. */
+/** @type {Set<number>} */
+const LIMITED_CLASSES = new Set([THREAD_INFO.BASIC, THREAD_INFO.TIMES,
+    THREAD_INFO.AM_I_LAST_THREAD, THREAD_INFO.PRIORITY_BOOST, THREAD_INFO.NAME]);
+
 /** NTSTATUS codes these calls answer. */
 const STATUS_SUCCESS = 0;
+const STATUS_ACCESS_DENIED = 0xc0000022;
 const STATUS_INVALID_INFO_CLASS = 0xc0000003;
 const STATUS_INFO_LENGTH_MISMATCH = 0xc0000004;
 const STATUS_ACCESS_VIOLATION = 0xc0000005;
@@ -205,6 +212,10 @@ export function createThreadInfoFunctions(host){
             }
             case THREAD_INFO.PRIORITY_BOOST:
                 return dword(thread.priorityBoostDisabled ? 1 : 0);
+            case THREAD_INFO.HIDE_FROM_DEBUGGER:
+                // A BOOLEAN: whether the thread was hidden, by this class set
+                // or by THREAD_CREATE_FLAGS_HIDE_FROM_DEBUGGER.
+                return new Uint8Array([thread.hiddenFromDebugger ? 1 : 0]);
             case THREAD_INFO.GROUP: {
                 const bytes = new Uint8Array(GROUP_AFFINITY_SIZE);
                 new DataView(bytes.buffer).setUint32(0, processors.threadMask(thread), true);
@@ -252,6 +263,15 @@ export function createThreadInfoFunctions(host){
         {
             return STATUS_INVALID_HANDLE;
         }
+        // The limited right reads the classes anyone may read; the others
+        // need THREAD_QUERY_INFORMATION.
+        const granted = (handle >>> 0) === CURRENT_THREAD ? null
+            : kernel.handles.access?.(handle >>> 0) ?? null;
+        if (!allows(granted, LIMITED_CLASSES.has(infoClass >>> 0)
+            ? THREAD_QUERY_LIMITED_INFORMATION : THREAD_QUERY_INFORMATION))
+        {
+            return STATUS_ACCESS_DENIED;
+        }
         if ((infoClass >>> 0) === THREAD_INFO.NAME)
         {
             return queryName(thread, at >>> 0, length >>> 0, returned >>> 0);
@@ -259,7 +279,7 @@ export function createThreadInfoFunctions(host){
         /** @type {Map<number, number>} */
         const sizes = new Map([[THREAD_INFO.BASIC, BASIC_SIZE], [THREAD_INFO.TIMES, TIMES_SIZE],
             [THREAD_INFO.AM_I_LAST_THREAD, 4], [THREAD_INFO.PRIORITY_BOOST, 4],
-            [THREAD_INFO.GROUP, GROUP_AFFINITY_SIZE]]);
+            [THREAD_INFO.GROUP, GROUP_AFFINITY_SIZE], [THREAD_INFO.HIDE_FROM_DEBUGGER, 1]]);
         const size = sizes.get(infoClass >>> 0);
         if (size === undefined)
         {
@@ -267,6 +287,7 @@ export function createThreadInfoFunctions(host){
                 `information class ${infoClass >>> 0} is not answered`);
             return STATUS_INVALID_INFO_CLASS;
         }
+
         if ((length >>> 0) !== size)
         {
             return STATUS_INFO_LENGTH_MISMATCH;
@@ -375,8 +396,14 @@ export function createThreadInfoFunctions(host){
                     : setAffinity(thread, asked.mask, STATUS_SUCCESS);
             }
             case THREAD_INFO.HIDE_FROM_DEBUGGER:
-            // No debugger is told of this process's threads to hide one from.
-                return (length >>> 0) === 0 ? STATUS_SUCCESS : STATUS_INFO_LENGTH_MISMATCH;
+                // No debugger is told of this process's threads to hide one
+                // from; the thread is marked, and says so when asked.
+                if ((length >>> 0) !== 0)
+                {
+                    return STATUS_INFO_LENGTH_MISMATCH;
+                }
+                thread.hiddenFromDebugger = true;
+                return STATUS_SUCCESS;
             case THREAD_INFO.NAME: {
                 if ((length >>> 0) !== NAME_SIZE)
                 {

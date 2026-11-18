@@ -36,6 +36,7 @@
  */
 
 import { decodeAnsi, encodeAnsi } from './locale.js';
+import { createIniMapping } from './ini-mapping.js';
 
 /** Where a profile file with no directory of its own is. */
 const WINDOWS_DIRECTORY = 'C:\\WINDOWS';
@@ -55,6 +56,9 @@ const MAX_VALUE = 0x10000;
  *           What a structure is written from. Without it a structure cannot
  *           be written, and the write says so.
  * @property {(code: number) => void} [setLastError]
+ * @property {import('./ini-mapping.js').MappingRegistry} [registry]
+ *           The run's registry, where IniFileMapping sends a section
+ *           (`ini-mapping.js`). Without it every section is in its file.
  */
 
 /** Why a structure was not read back. */
@@ -182,6 +186,38 @@ const encodeIn = (encoding, text)=>{
  */
 export function createProfileFunctions(host){
     const { files } = host;
+    const mapping = host.registry ? createIniMapping(host.registry) : null;
+
+    /**
+     * Where a section of the file at `path` lives in the registry, or null
+     * when it is in the file.
+     *
+     * @param {string | null} path @param {string | null} section
+     */
+    const mappedSection = (path, section)=>(mapping && path !== null && section !== null
+        ? mapping.section(path, section)
+        : null);
+
+    /**
+     * A mapped section's entries, the registry's and, for names no mapping
+     * claims, the file's.
+     *
+     * @param {import('./ini-mapping.js').SectionMapping} mapped
+     * @param {ProfileLine[]} lines @param {string} section
+     * @returns {{ name: string, value: string }[]}
+     */
+    const mappedEntries = (mapped, lines, section)=>{
+        const listed = /** @type {NonNullable<typeof mapping>} */ (mapping).list(mapped);
+        if (!listed.file)
+        {
+            return listed.entries;
+        }
+        const span = sectionSpan(lines, section);
+        const fromFile = span === null ? [] : lines.slice(span.start + 1, span.end)
+            .flatMap(line=>(line.key === null || listed.claimed(line.key)
+                ? [] : [{ name: line.key, value: line.value }]));
+        return [...listed.entries, ...fromFile];
+    };
 
     /** @param {number} pointer @param {number} limit @returns {string | null} */
     const text = (pointer, limit)=>((pointer >>> 0) === 0
@@ -431,6 +467,38 @@ export function createProfileFunctions(host){
         : writeValue(buffer, size, answer.value, wide));
 
     /**
+     * lookUp with the registry's sections over the file's: a mapped section
+     * answers from where it is mapped, and the section list names the
+     * mapped sections before the file's.
+     *
+     * @param {string | null} path @param {ProfileLine[]} lines
+     * @param {string | null} section @param {string | null} key
+     * @param {string} fallback
+     * @returns {{ names: string[] } | { value: string }}
+     */
+    const mappedLookUp = (path, lines, section, key, fallback)=>{
+        if (section === null)
+        {
+            const mappedNames = mapping && path !== null ? mapping.sectionNames(path) : [];
+            const fromFile = /** @type {{ names: string[] }} */ (lookUp(lines, null, null, ''))
+                .names.filter(name=>!mappedNames.some(mapped=>sameName(mapped, name)));
+            return { names: [...mappedNames, ...fromFile] };
+        }
+        const mapped = mappedSection(path, section);
+        if (!mapped)
+        {
+            return lookUp(lines, section, key, fallback);
+        }
+        if (key === null)
+        {
+            return { names: mappedEntries(mapped, lines, section).map(entry=>entry.name) };
+        }
+        const value = /** @type {NonNullable<typeof mapping>} */ (mapping).get(mapped, key);
+        return value === undefined ? lookUp(lines, section, key, fallback)
+            : { value: value ?? fallback };
+    };
+
+    /**
      * The integer at the front of a value, the way the C runtime reads one:
      * blanks, a sign, digits, and nothing after the digits matters. No digits
      * is zero, whatever the default was, because the key was there.
@@ -497,7 +565,7 @@ export function createProfileFunctions(host){
         const wanted = { section, key, fallback: (fallback ?? '').replace(/\s+$/, '') };
         /** @param {ProfileLine[]} lines */
         const answer = lines=>deliver(buffer, size,
-            lookUp(lines, wanted.section, wanted.key, wanted.fallback), wide);
+            mappedLookUp(path, lines, wanted.section, wanted.key, wanted.fallback), wide);
         return withLines(path, answer);
     };
 
@@ -515,7 +583,7 @@ export function createProfileFunctions(host){
             {
                 return fallback >>> 0;
             }
-            const found = lookUp(lines, wanted.section, wanted.key, '');
+            const found = mappedLookUp(path, lines, wanted.section, wanted.key, '');
             const value = 'value' in found ? found.value : '';
             return value === '' ? fallback >>> 0 : integerOf(value);
         };
@@ -535,12 +603,38 @@ export function createProfileFunctions(host){
      */
     const putText = (path, section, key, value)=>{
         const wanted = { section, key, value };
-        // A NULL section writes nothing: on Windows it only flushes the
-        // cache, and answers that no file was named.
+        // All three NULL flushes the cache, which reads the mapping again:
+        // nothing is cached here, and the flush succeeds.
+        if (path !== null && section === null && key === null && value === null)
+        {
+            return 1;
+        }
+        // Any other NULL section writes nothing, and answers that no file
+        // was named.
         if (path === null || wanted.section === null)
         {
             host.setLastError?.(ERROR_FILE_NOT_FOUND);
             return 0;
+        }
+        const mapped = mappedSection(path, wanted.section);
+        if (mapped)
+        {
+            const registry = /** @type {NonNullable<typeof mapping>} */ (mapping);
+            if (wanted.key !== null)
+            {
+                if (registry.put(mapped, wanted.key, wanted.value))
+                {
+                    return 1;
+                }
+            }
+            else
+            {
+                registry.clear(mapped);
+                if (!registry.list(mapped).file)
+                {
+                    return 1;
+                }
+            }
         }
         /** @param {ProfileLine[]} lines */
         const answer = lines=>{
@@ -589,7 +683,7 @@ export function createProfileFunctions(host){
     const sectionNames = (path, buffer, size, wide = false)=>{
         /** @param {ProfileLine[]} lines */
         const answer = lines=>{
-            const found = lookUp(lines, null, null, '');
+            const found = mappedLookUp(path, lines, null, null, '');
             return writeList(buffer, size, 'names' in found ? found.names : [], wide, 1);
         };
         return withLines(path, answer);
@@ -613,14 +707,17 @@ export function createProfileFunctions(host){
             host.setLastError?.(ERROR_FILE_NOT_FOUND);
             return 0;
         }
+        const mapped = mappedSection(path, name);
         /** @param {ProfileLine[]} lines */
         const answer = lines=>{
             const span = sectionSpan(lines, name);
-            const entries = span === null
-                ? []
-                : lines.slice(span.start + 1, span.end)
-                    .map(line=>line.text.trim())
-                    .filter(line=>line !== '' && !line.startsWith(';'));
+            const entries = mapped
+                ? mappedEntries(mapped, lines, name).map(entry=>`${entry.name}=${entry.value}`)
+                : span === null
+                    ? []
+                    : lines.slice(span.start + 1, span.end)
+                        .map(line=>line.text.trim())
+                        .filter(line=>line !== '' && !line.startsWith(';'));
             const written = writeList(buffer, size, entries, wide);
             host.setLastError?.(ERROR_SUCCESS);
             return written;
@@ -667,6 +764,25 @@ export function createProfileFunctions(host){
         if (path === null || name === null)
         {
             return 0;
+        }
+        const mapped = mappedSection(path, name);
+        if (mapped)
+        {
+            // The registry's keys are written one by one and none taken away;
+            // a NULL list removes the section, as a NULL key does.
+            if (entries === null)
+            {
+                return putText(path, name, null, null);
+            }
+            for (const entry of entries)
+            {
+                const { key, value } = parseLine(entry);
+                if (key !== null)
+                {
+                    /** @type {NonNullable<typeof mapping>} */ (mapping).put(mapped, key, value);
+                }
+            }
+            return 1;
         }
         /** @param {ProfileLine[]} lines */
         const answer = lines=>{

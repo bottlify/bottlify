@@ -311,9 +311,59 @@ function build(id){
 }
 
 /**
+ * The spacing characters Windows' best fit writes for a combining accent, or
+ * for a character with no decomposition to go by, where neither the rules
+ * below nor a spacing form's own decomposition gives them: the tilde is the
+ * ASCII one, though the spacing tilde (U+02DC) decomposes to it too, and the
+ * ring is the degree sign (Wine's locale.c test_FoldStringA pins each).
+ *
+ * @type {ReadonlyMap<number, number>}
+ */
+const SPACING_FORMS = new Map([
+    [0x0300, 0x60], [0x0302, 0x5e], [0x0303, 0x7e], [0x030a, 0xb0], [0x2044, 0x2f],
+]);
+
+/** A combining character or a space and one: a spacing accent's decomposition. */
+const SPACED_MARK = /^ ?\p{M}$/u;
+
+/**
+ * Every character of the basic plane whose compatibility decomposition is a
+ * combining mark (with a space before it, a spacing accent) or a single other
+ * character: the forms a character with none in the page can be written as.
+ * Built once, when first asked.
+ *
+ * @type {Map<string, number[]> | null}
+ */
+let compatibilityForms = null;
+/** @param {string} character */
+const formsOf = character=>{
+    if (!compatibilityForms)
+    {
+        compatibilityForms = new Map();
+        for (let code = 0xa0; code < 0x10000; code++)
+        {
+            if (code >= 0xd800 && code < 0xe000)
+            {
+                continue;
+            }
+            const decomposed = String.fromCharCode(code).normalize('NFKD');
+            const key = SPACED_MARK.test(decomposed) ? decomposed.trim()
+                : decomposed.length === 1 && decomposed.charCodeAt(0) !== code ? decomposed : null;
+            if (key !== null)
+            {
+                compatibilityForms.set(key, [...compatibilityForms.get(key) ?? [], code]);
+            }
+        }
+    }
+    return compatibilityForms.get(character) ?? [];
+};
+
+/**
  * The character a page writes for one it lacks: the letter it decomposes
  * to, accent dropped, or the plain form of a compatibility one (a
- * full-width letter) -- when the page has that.
+ * full-width letter) -- when the page has that. A combining accent alone is
+ * its spacing form, and a character the page has a compatibility form of is
+ * that form (the micro sign for mu).
  *
  * @param {string} character
  * @param {(code: number) => number} lookup  A code unit's bytes in the page,
@@ -321,6 +371,10 @@ function build(id){
  * @returns {number | null}
  */
 export function bestFit(character, lookup){
+    const found = (/** @type {number} */ code)=>{
+        const mapped = lookup(code);
+        return mapped !== UNDEFINED && mapped !== -1 ? mapped : null;
+    };
     for (const form of /** @type {const} */ (['NFD', 'NFKD']))
     {
         const decomposed = character.normalize(form);
@@ -328,8 +382,21 @@ export function bestFit(character, lookup){
         {
             continue;
         }
-        const mapped = lookup(decomposed.charCodeAt(0));
-        if (mapped !== UNDEFINED && mapped !== -1 && /^\p{M}*$/u.test(decomposed.slice(1)))
+        const mapped = found(decomposed.charCodeAt(0));
+        if (mapped !== null && /^\p{M}*$/u.test(decomposed.slice(1)))
+        {
+            return mapped;
+        }
+    }
+    const spacing = SPACING_FORMS.get(character.charCodeAt(0));
+    if (spacing !== undefined && found(spacing) !== null)
+    {
+        return found(spacing);
+    }
+    for (const code of formsOf(character))
+    {
+        const mapped = found(code);
+        if (mapped !== null)
         {
             return mapped;
         }

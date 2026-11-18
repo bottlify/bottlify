@@ -18,6 +18,8 @@ import { createProcessPolicyFunctions } from './process-policy.js';
 import { askChild, threadArg, threadEnd } from './cross-process.js';
 import { SYNCHRONIZE, allows } from './access.js';
 import { floatGroupsOf, writeFloatGroups } from './fpu-context.js';
+import { CONTEXT_DEBUG_REGISTERS, debugGroupOf, setDebugRegisters, writeDebugGroup }
+    from './debug-registers.js';
 
 /**
  * What the export binding hands an entry that is guest code rather than a
@@ -105,7 +107,6 @@ const DEBUG_EVENT_SIZE = 96;
 const CONTEXT_CONTROL = 0x10001;
 const CONTEXT_INTEGER = 0x10002;
 const CONTEXT_SEGMENTS = 0x10004;
-const CONTEXT_DEBUG_REGISTERS = 0x10010;
 const CONTEXT_BYTES = 0x2cc;
 /** The 32-bit CONTEXT's integer and control registers, by winnt.h's offsets. */
 const CONTEXT_INTEGERS = /** @type {const} */ ([['edi', 0x9c], ['esi', 0xa0], ['ebx', 0xa4],
@@ -128,15 +129,15 @@ const RSP_INDEX = 4;
 /** The bits of ContextFlags that name a part of the context, the machine's bit aside. */
 const CONTEXT_PARTS = 0x3f;
 /** The 32-bit CONTEXT's head: its flags, then Dr0-Dr3, Dr6 and Dr7. */
-const CONTEXT_DEBUG = Object.freeze({ FLAGS: 0x00, DR7: 0x18, SIZE: 0x1c });
-/** Dr7's local and global enables of the four breakpoints. */
-const DR7_ENABLES = 0xff;
+const CONTEXT_DEBUG_BYTES = 0x1c;
 
 /** Milliseconds from the FILETIME epoch (1601) to the Unix one, for thread times. */
 const FILETIME_EPOCH_MS = 11644473600000;
 
 /**
  * @typedef {Object} SyncHost
+ * @property {ReturnType<typeof import('./named-objects.js').createNamedObjects>} [namedObjects]
+ *           the run's one namespace, where a job made by name is found again
  * @property {any} kernel                        The kernel layer's API.
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
@@ -627,21 +628,20 @@ export function createSyncFunctions(host){
 
     /**
      * Writes the groups of a CONTEXT its ContextFlags name, and nothing else;
-     * the floating-point ones from a stopped thread's state block.
+     * the floating-point ones from a stopped thread's state block, the debug
+     * registers from what the thread was given (`debug-registers.js`).
      *
      * @param {number} at @param {Record<string, number>} registers
+     * @param {any} thread
      * @param {any} [context]  The stopped thread's.
      */
-    const writeThreadContext = (at, registers, context)=>{
+    const writeThreadContext = (at, registers, thread, context)=>{
         const bytes = host.readMemory(at, CONTEXT_BYTES).slice();
         const view = new DataView(bytes.buffer);
         const flags = view.getUint32(0, true);
         /** @param {number} offset @param {number | undefined} value */
         const put = (offset, value)=>view.setUint32(offset, (value ?? 0) >>> 0, true);
-        if ((flags & CONTEXT_DEBUG_REGISTERS) === CONTEXT_DEBUG_REGISTERS)
-        {
-            bytes.fill(0, 4, 0x1c);
-        }
+        writeDebugGroup(thread, bytes, flags);
         if ((flags & CONTEXT_SEGMENTS) === CONTEXT_SEGMENTS)
         {
             put(0x8c, SELECTORS.GS);
@@ -816,6 +816,7 @@ export function createSyncFunctions(host){
             divergence: host.divergence,
             pointerSize: host.pointerSize,
             processId: host.processId,
+            namedObjects: host.namedObjects,
             threadOf,
             objectOf: object,
             processors,
@@ -1515,7 +1516,7 @@ export function createSyncFunctions(host){
                         return 1;
                     }
                     writeThreadContext(out >>> 0,
-                        own ? host.registers?.() ?? {} : stoppedRegisters(thread),
+                        own ? host.registers?.() ?? {} : stoppedRegisters(thread), thread,
                         own ? undefined : thread.context);
                     return 1;
                 };
@@ -1566,24 +1567,18 @@ export function createSyncFunctions(host){
                     host.setLastError?.(ERROR_INVALID_HANDLE);
                     return 0;
                 }
-                // The debug registers alone, every breakpoint off: the state a
-                // thread here is always in, since none is ever set -- what a
-                // program clearing hardware breakpoints from its threads asks.
-                // One that enables a breakpoint is not honoured, and says so.
-                if (handleSize === 4)
+                // The debug registers are the thread's to keep, its own
+                // included (`debug-registers.js`); a record that names nothing
+                // else is done once they are kept.
+                const head = handleSize === 4
+                    ? host.readMemory(context >>> 0, CONTEXT_DEBUG_BYTES) : null;
+                const headFlags = head === null ? 0 : new DataView(head.buffer, head.byteOffset,
+                    CONTEXT_DEBUG_BYTES).getUint32(0, true);
+                const debug = head === null ? null : debugGroupOf(head, headFlags);
+                if (debug !== null && (headFlags & CONTEXT_PARTS & ~CONTEXT_DEBUG_REGISTERS) === 0)
                 {
-                    const bytes = host.readMemory(context >>> 0, CONTEXT_DEBUG.SIZE);
-                    const view = new DataView(bytes.buffer, bytes.byteOffset, CONTEXT_DEBUG.SIZE);
-                    const flags = view.getUint32(CONTEXT_DEBUG.FLAGS, true);
-                    if ((flags & CONTEXT_PARTS & ~CONTEXT_DEBUG_REGISTERS) === 0)
-                    {
-                        if ((view.getUint32(CONTEXT_DEBUG.DR7, true) & DR7_ENABLES) !== 0)
-                        {
-                            host.divergence?.('SetThreadContext',
-                                'hardware breakpoints are set and not honoured');
-                        }
-                        return 1;
-                    }
+                    setDebugRegisters(thread, debug, host.divergence, 'SetThreadContext');
+                    return 1;
                 }
                 if (kernel.ThreadState && thread.state === kernel.ThreadState.TERMINATED)
                 {
@@ -1600,6 +1595,10 @@ export function createSyncFunctions(host){
                 const at = context >>> 0;
                 const apply = ()=>{
                     replaceContext(thread, at);
+                    if (debug !== null)
+                    {
+                        setDebugRegisters(thread, debug, host.divergence, 'SetThreadContext');
+                    }
                     return 1;
                 };
                 if (kernel.settleThread?.(thread) === false && kernel.settledThread)

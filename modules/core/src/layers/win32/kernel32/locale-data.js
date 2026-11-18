@@ -279,7 +279,10 @@ function derive(locale){
     const abbreviation = LANGUAGE_ABBREVIATIONS.get(tag)
         ?? (specific ? null : language.toUpperCase());
 
-    numbers.set(T.ILANGUAGE, locale.lcid & 0xffff);
+    // A neutral locale's language is its specific locale's: GetLocaleInfoEx
+    // asked "en" for LOCALE_ILANGUAGE answers 0x0409, its name staying "en"
+    // (kernel32's locale.c test_GetLocaleInfoEx).
+    numbers.set(T.ILANGUAGE, (locale.neutral ? locale.specific : locale.lcid) & 0xffff);
     numbers.set(T.IDEFAULTLANGUAGE, locale.specific & 0xffff);
     numbers.set(T.IDEFAULTANSICODEPAGE, locale.ansi);
     numbers.set(T.IDEFAULTCODEPAGE, locale.oem);

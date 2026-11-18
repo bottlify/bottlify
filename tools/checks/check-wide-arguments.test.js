@@ -78,7 +78,7 @@ test('a spec answering an address says so, and one answering none does not', ()=
         'a comment over no spec');
 });
 
-test('a size result is sign-extended, a pointer-sized integer either way (A270)', ()=>{
+test('a size result is sign-extended, a pointer-sized integer either way (A273)', ()=>{
     const problem = (/** @type {string} */ text)=>checkReturns(text).map(one=>one.problem);
     const mbrtowc = '/** size_t mbrtowc(wchar_t *dest, const char *s, size_t n, mbstate_t *ps) */\n';
     assert.match(String(problem(

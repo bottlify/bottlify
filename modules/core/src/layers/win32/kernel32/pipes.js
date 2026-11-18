@@ -528,8 +528,12 @@ export function createNamedPipes(host){
                 owner.setEvent?.(event);
             }
         }
-        // A part of a message is read and still FALSE, ERROR_MORE_DATA.
-        owner.setLastErrorFor(op.thread, succeeded ? ERROR_SUCCESS : error);
+        // A part of a message is read and still FALSE, ERROR_MORE_DATA; one
+        // that went through leaves the last error as it was.
+        if (!succeeded)
+        {
+            owner.setLastErrorFor(op.thread, error);
+        }
         owner.kernel.wake(op.thread, succeeded ? 1 : 0);
     };
 
@@ -1031,12 +1035,9 @@ export function createNamedPipes(host){
                 return status;
             }
             writeDwordIf(out, count);
-            if (status === STATUS.SUCCESS)
-            {
-                host.setLastError(ERROR_SUCCESS);
-                return 1;
-            }
-            return fail(toDosError(status));
+            // A transfer that succeeds leaves the last error as it was
+            // (`startWrite`).
+            return status === STATUS.SUCCESS ? 1 : fail(toDosError(status));
         };
         if (!end.canRead)
         {
@@ -1144,8 +1145,10 @@ export function createNamedPipes(host){
             writeDword(out + 4, count);
             return STATUS.SUCCESS;
         }
+        // The last error is left as it was, as WriteFile and ReadFile leave
+        // it when they succeed: a program reads it after one that is pending
+        // and another that went through (ntdll's thread pool I/O tests).
         writeDwordIf(out, count);
-        host.setLastError(ERROR_SUCCESS);
         return 1;
     };
 
@@ -1198,9 +1201,12 @@ export function createNamedPipes(host){
                 return got.status;
             }
             writeDwordIf(out, count);
-            host.setLastErrorFor(thread, got.status === STATUS.SUCCESS ? ERROR_SUCCESS
-                : toDosError(got.status));
-            return got.status === STATUS.SUCCESS ? 1 : 0;
+            if (got.status === STATUS.SUCCESS)
+            {
+                return 1;
+            }
+            host.setLastErrorFor(thread, toDosError(got.status));
+            return 0;
         };
         return typeof (/** @type {any} */ (asked)).then === 'function'
             ? /** @type {Promise<AcrossAnswer>} */ (asked).then(answered)
@@ -1246,7 +1252,6 @@ export function createNamedPipes(host){
             return STATUS.SUCCESS;
         }
         writeDwordIf(out, count);
-        host.setLastError(ERROR_SUCCESS);
         return 1;
     };
 

@@ -407,7 +407,7 @@ const NOT_TYPE = new RegExp(String.raw`\b(WINAPI|CALLBACK|APIENTRY|__stdcall|__c
     + String.raw`NTSYSAPI|WINBASEAPI|WINUSERAPI)\b`, 'g');
 
 /**
- * A size result is sign-extended (decision A270): handlers answer
+ * A size result is sign-extended (decision A273): handlers answer
  * `(size_t)-1`, `(size_t)-2` (mbrtowc's INCOMPLETE) as dwords, which only a
  * sign-extension makes the quadword a 64-bit caller compares against.
  */

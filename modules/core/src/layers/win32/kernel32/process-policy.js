@@ -20,8 +20,14 @@
 import { blockLayouts } from './teb.js';
 import { SELECTORS } from './seh.js';
 import { floatGroupsOf } from './fpu-context.js';
+import { debugGroupOf, setDebugRegisters } from './debug-registers.js';
 import { PROCESSOR } from './processor.js';
+import { TAKEN } from './named-objects.js';
+import { OBJ_OPENIF, readObjectAttributes, win32NameOf } from './object-attributes.js';
+import { STATUS } from '../ntdll/status.js';
 
+const ERROR_SUCCESS = 0;
+const ERROR_FILE_NOT_FOUND = 2;
 const ERROR_ACCESS_DENIED = 5;
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_BAD_LENGTH = 24;
@@ -29,6 +35,7 @@ const ERROR_INVALID_PARAMETER = 87;
 const ERROR_NOT_FOUND = 1168;
 const ERROR_PRIVILEGE_NOT_HELD = 1314;
 const ERROR_MORE_DATA = 234;
+const ERROR_ALREADY_EXISTS = 183;
 
 const CURRENT_PROCESS = 0xffffffff;
 const E_INVALIDARG = 0x80070057;
@@ -150,6 +157,8 @@ const HANDLE_PROBE = 1 << 20;
  * @property {(handle: number) => any} threadOf  A thread by handle, the pseudo-handle its own.
  * @property {(handle: number, type?: string) => any} objectOf  A kernel object by handle, or null.
  * @property {number} [processId]  This process's id, which a job's id list names.
+ * @property {ReturnType<typeof import('./named-objects.js').createNamedObjects>} [namedObjects]
+ *     the run's one namespace, where a job made by name is found again
  * @property {{ count: () => number, systemMask: () => number }} [processors]  The
  *     machine's processors, all of them on its one NUMA node.
  * @property {import('./fpu-context.js').FloatState | null} [float]  The processor's
@@ -316,34 +325,91 @@ export function createProcessPolicyFunctions(host){
     });
 
     /**
-     * A job named by another call shares nothing here: names of jobs are not
-     * in the namespace events and mutexes share, so a second CreateJobObject
-     * by the same name makes a job of its own.
+     * The name a Create/OpenJobObject string gives, null for none.
+     *
+     * @param {number} namePointer @param {boolean} wideName
+     * @returns {string | null}
+     */
+    const jobName = (namePointer, wideName)=>{
+        if ((namePointer >>> 0) === 0)
+        {
+            return null;
+        }
+        let name = '';
+        for (let at = namePointer >>> 0, units = 0; units < 260; units++)
+        {
+            const unit = wideName ? host.readMemory(at, 2) : host.readMemory(at, 1);
+            const code = wideName ? unit[0] | unit[1] << 8 : unit[0];
+            if (code === 0)
+            {
+                break;
+            }
+            name += String.fromCharCode(code);
+            at += wideName ? 2 : 1;
+        }
+        return name === '' ? null : name;
+    };
+
+    /**
+     * A job made, or the one its name already holds (`reused`), in the
+     * namespace every named kernel object shares; TAKEN where another kind
+     * holds the name. Answers the handle, or the object found and not opened.
+     *
+     * @param {string | null} name
+     * @returns {{ handle: number, reused: boolean } | typeof TAKEN}
+     */
+    const makeJob = name=>{
+        const found = host.namedObjects?.existing(name, 'job') ?? null;
+        if (found === TAKEN)
+        {
+            return TAKEN;
+        }
+        /** @type {Job} */
+        const job = found ?? { kind: 'job', name, processes: new Set(), terminated: false,
+            extended: new Uint8Array(EXTENDED_LIMIT_BYTES), kept: new Map() };
+        jobs.add(job);
+        host.namedObjects?.remember(name, 'job', job, found !== null, ()=>{});
+        return { handle: kernel.handles.open('job', job), reused: found !== null };
+    };
+
+    /**
+     * CreateJobObject: a name another job holds opens that job, as a
+     * mutex's does, with ERROR_ALREADY_EXISTS.
      *
      * @param {number} namePointer @param {boolean} wideName
      */
     const createJob = (namePointer, wideName)=>{
-        let name = null;
-        if ((namePointer >>> 0) !== 0)
+        const made = makeJob(jobName(namePointer, wideName));
+        if (made === TAKEN)
         {
-            name = '';
-            for (let at = namePointer >>> 0, units = 0; units < 260; units++)
-            {
-                const unit = wideName ? host.readMemory(at, 2) : host.readMemory(at, 1);
-                const code = wideName ? unit[0] | unit[1] << 8 : unit[0];
-                if (code === 0)
-                {
-                    break;
-                }
-                name += String.fromCharCode(code);
-                at += wideName ? 2 : 1;
-            }
+            return fail(ERROR_INVALID_HANDLE);
         }
-        /** @type {Job} */
-        const job = { kind: 'job', name, processes: new Set(), terminated: false,
-            extended: new Uint8Array(EXTENDED_LIMIT_BYTES), kept: new Map() };
-        jobs.add(job);
-        return kernel.handles.open('job', job);
+        host.setLastError?.(made.reused ? ERROR_ALREADY_EXISTS : ERROR_SUCCESS);
+        return made.handle;
+    };
+
+    /**
+     * OpenJobObject: the job a name holds, ERROR_FILE_NOT_FOUND for none.
+     *
+     * @param {number} namePointer @param {boolean} wideName
+     */
+    const openJob = (namePointer, wideName)=>{
+        const name = jobName(namePointer, wideName);
+        if (name === null)
+        {
+            return fail(ERROR_INVALID_PARAMETER);
+        }
+        const found = host.namedObjects?.existing(name, 'job') ?? null;
+        if (found === TAKEN)
+        {
+            return fail(ERROR_INVALID_HANDLE);
+        }
+        if (!found)
+        {
+            return fail(ERROR_FILE_NOT_FOUND);
+        }
+        host.namedObjects?.reference(found);
+        return kernel.handles.open('job', found);
     };
 
     /**
@@ -379,6 +445,85 @@ export function createProcessPolicyFunctions(host){
     /** The ids of the processes a job holds, this one's as its own. @param {Job} job */
     const jobProcessIds = job=>[...job.processes].map(process=>(process === SELF
         ? host.processId ?? 0 : process.id ?? 0) >>> 0);
+
+    /**
+     * The native calls over the same jobs, which ntdll publishes: a job one
+     * front door makes by name the other opens.
+     */
+    const jobNatives = {
+        /**
+         * NTSTATUS NtCreateJobObject(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES)
+         *
+         * CreateJobObject's job, named by a path in the object namespace: a
+         * name held already collides, or with OBJ_OPENIF is opened.
+         */
+        NtCreateJobObject: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([out, , attributes])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return STATUS.ACCESS_VIOLATION;
+                }
+                const given = readObjectAttributes(host.readMemory, attributes, wide ? 8 : 4);
+                const name = given === null || given.name === null || given.name === '' ? null
+                    : win32NameOf(given);
+                if (name === undefined)
+                {
+                    return STATUS.OBJECT_PATH_NOT_FOUND;
+                }
+                const found = host.namedObjects?.existing(name, 'job') ?? null;
+                if (found === TAKEN)
+                {
+                    return STATUS.OBJECT_TYPE_MISMATCH;
+                }
+                if (found && ((given?.attributes ?? 0) & OBJ_OPENIF) === 0)
+                {
+                    return STATUS.OBJECT_NAME_COLLISION;
+                }
+                const made = makeJob(name);
+                if (made === TAKEN)
+                {
+                    return STATUS.OBJECT_TYPE_MISMATCH;
+                }
+                writeDword(out >>> 0, made.handle);
+                return made.reused ? STATUS.OBJECT_NAME_EXISTS : STATUS.SUCCESS;
+            },
+        },
+        /** NTSTATUS NtOpenJobObject(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES) */
+        NtOpenJobObject: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([out, , attributes])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return STATUS.ACCESS_VIOLATION;
+                }
+                const given = readObjectAttributes(host.readMemory, attributes, wide ? 8 : 4);
+                if (given === null || given.name === null || given.name === '')
+                {
+                    return STATUS.OBJECT_NAME_INVALID;
+                }
+                const name = win32NameOf(given);
+                if (name === undefined)
+                {
+                    return STATUS.OBJECT_PATH_NOT_FOUND;
+                }
+                const found = host.namedObjects?.existing(name, 'job') ?? null;
+                if (found === TAKEN)
+                {
+                    return STATUS.OBJECT_TYPE_MISMATCH;
+                }
+                if (!found)
+                {
+                    return STATUS.OBJECT_NAME_NOT_FOUND;
+                }
+                host.namedObjects?.reference(found);
+                writeDword(out >>> 0, kernel.handles.open('job', found));
+                return STATUS.SUCCESS;
+            },
+        },
+    };
 
     // ---- Policies ----------------------------------------------------------
 
@@ -419,8 +564,9 @@ export function createProcessPolicyFunctions(host){
      * EIP, EFLAGS, ESP; integer: the rest), every other register is
      * left as the call found it. A runtime that unwinds by itself
      * (Mono's) captures a context, unwinds to it and continues here. A
-     * null context is refused; the floating-point state a context holds
-     * is not put back, and that is said.
+     * null context is refused. The floating-point groups go back with the
+     * rest (said where there is nothing to take them), and the debug
+     * registers become the thread's (`debug-registers.js`).
      */
     const ntContinue = {
         argBytes: 8,
@@ -445,7 +591,13 @@ export function createProcessPolicyFunctions(host){
             // The floating-point groups go back with the rest, as Windows
             // continues from the whole record.
             // On the calling thread, whose call this is: its own registers now.
-            const groups = floatGroupsOf(host.readMemory(at, CONTEXT_BYTES), flags);
+            const bytes = host.readMemory(at, CONTEXT_BYTES);
+            const debug = debugGroupOf(bytes, flags);
+            if (debug !== null)
+            {
+                setDebugRegisters(host.currentThread(), debug, host.divergence, 'NtContinue');
+            }
+            const groups = floatGroupsOf(bytes, flags);
             if (groups !== null && host.float?.restore(null, groups) !== true)
             {
                 host.divergence?.('NtContinue',
@@ -517,6 +669,19 @@ export function createProcessPolicyFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([, name])=>createJob(name, true),
+            natives: jobNatives,
+        },
+
+        /** HANDLE OpenJobObjectA/W(DWORD dwDesiredAccess, BOOL bInheritHandle, LPCSTR/LPCWSTR) */
+        OpenJobObjectA: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([, , name])=>openJob(name, false),
+        },
+        OpenJobObjectW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([, , name])=>openJob(name, true),
         },
 
         /**

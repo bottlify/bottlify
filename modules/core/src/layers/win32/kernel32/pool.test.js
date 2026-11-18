@@ -20,8 +20,11 @@ const EVENT = 0x40;
  * A machine with a clock the test moves, kernel timers it fires, and pool
  * threads the test steps through their loop by hand: `ask` is the loop's call
  * to the trap, and a RUN answer means the record now names a callback.
+ *
+ * @param {{ processHeap?: { allocate: (bytes: number) => number,
+ *     free: (address: number) => void } }} [given]
  */
-function machine(){
+function machine(given = {}){
     const memory = new Uint8Array(0x10000);
     let free = 0x1000;
     let now = 0;
@@ -43,16 +46,27 @@ function machine(){
     const clocks = [];
     /** @type {number[]} */
     const freed = [];
+    /** @type {Map<number, any>} */
+    const sinks = new Map();
+    /** @type {[string, number[]][]} */
+    const calls = [];
+    /** @type {any[]} */
+    const guestCalls = [];
 
     const pool = createThreadPool({
         kernel: {
             currentThread: ()=>current,
             createThread: (/** @type {any} */ options)=>{
-                const thread = { name: `${options.name} ${created.length}`, entry: options.entry };
+                const thread = { name: `${options.name} ${created.length}`, entry: options.entry,
+                    options };
                 created.push(thread);
                 return thread;
             },
             block: (/** @type {any} */ thread)=>blocked.push(thread),
+            alertably: (/** @type {any} */ thread, /** @type {() => any} */ wait)=>{
+                thread.alertableWaits = (thread.alertableWaits ?? 0) + 1;
+                return wait();
+            },
             wake: (/** @type {any} */ thread, /** @type {number} */ result)=>{
                 woken.push({ thread, result });
                 return true;
@@ -92,6 +106,7 @@ function machine(){
             return at;
         },
         free: address=>freed.push(address),
+        ...given.processHeap ? { processHeap: given.processHeap } : {},
         writeMemory: (address, bytes)=>memory.set(bytes, address),
         readMemory: (address, length)=>memory.slice(address, address + length),
         wallClock: ()=>1_000_000,
@@ -100,6 +115,16 @@ function machine(){
         },
         park: ()=>PARKED,
         setLastError: code=>errors.push(code),
+        call: (name, args)=>calls.push([name, args]),
+        bindIo: (file, sink)=>{
+            sinks.set(file, sink);
+            return true;
+        },
+        callGuest: async call=>{
+            guestCalls.push(call);
+            return 0;
+        },
+        imageStack: ()=>({ reserve: 0x100000, commit: 0x1000 }),
     });
     const fns = pool.table;
 
@@ -119,10 +144,10 @@ function machine(){
     };
 
     /** The loop asking for work on `thread`. @param {any} thread */
-    const ask = thread=>{
+    const ask = (thread, last = RAN)=>{
         const was = current;
         current = thread;
-        const answer = traps['<thread-pool>'].handler([recordOf(thread), RAN]);
+        const answer = traps['<thread-pool>'].handler([recordOf(thread), last]);
         current = was;
         return answer;
     };
@@ -176,20 +201,28 @@ function machine(){
         return get32(out);
     };
 
-    return { pool, fns, memory, created, woken, blocked, errors, event, freed, main,
+    return { pool, fns, memory, created, woken, blocked, errors, event, freed, main, calls, sinks,
+        guestCalls,
         ask, record, tick, as, timer, get32 };
 }
 
 test('the loop is the bytes it says it is, and both of its jumps land on the question', ()=>{
     const code = poolLoopCode(0x900, 0x200);
-    assert.equal(code.length, 51);
-    assert.deepEqual([...code.slice(0, 3)], [0x83, 0xec, 20], 'sub esp, 20: the record');
+    assert.equal(code.length, 67);
+    assert.deepEqual([...code.slice(0, 3)], [0x83, 0xec, 28], 'sub esp, 28: the record');
     assert.equal(code[14], 0xe8);
     const relative = new DataView(code.buffer).getInt32(15, true);
     assert.equal(0x200 + 19 + relative, 0x900, 'call fetch');
-    // jne at 24 and jmp at 49, each two bytes, back to the push at 8.
-    assert.equal(26 + (code[25] << 24 >> 24), 8);
-    assert.equal(51 + (code[50] << 24 >> 24), 8);
+    // jne at 28 and jmp at 59, each two bytes, back to the push at 8.
+    assert.equal(30 + (code[29] << 24 >> 24), 8);
+    assert.equal(61 + (code[60] << 24 >> 24), 8);
+    // jz at 21 to the exit at 61: the record given back, and ret 4.
+    assert.equal(code[21], 0x74);
+    assert.equal(23 + code[22], 61);
+    assert.deepEqual([...code.slice(61)], [0x83, 0xc4, 28, 0xc2, 4, 0]);
+    // Six arguments pushed from the record, last first, then call [ebx].
+    assert.deepEqual([...code.slice(32, 52)], [0xff, 0x73, 24, 0xff, 0x73, 20, 0xff, 0x73, 16,
+        0xff, 0x73, 12, 0xff, 0x73, 8, 0xff, 0x73, 4, 0xff, 0x13]);
 });
 
 test('a timer due now is handed to a pool thread before the call returns', ()=>{
@@ -345,6 +378,24 @@ test('INVALID_HANDLE_VALUE waits for the callback, and wakes the deleter with TR
     assert.deepEqual(m.woken.at(-1), { thread: m.main, result: 1 });
 });
 
+test('ntdll\'s deletions answer statuses, and wake a deleter that waited with STATUS_SUCCESS', ()=>{
+    const m = machine();
+    const queue = m.fns.CreateTimerQueue.handler();
+    const busy = m.timer(queue, 0x402000, 2, 0, 0, 0);
+    const [worker] = m.created;
+    assert.equal(m.ask(worker), RUN);
+
+    assert.equal(m.pool.native.deleteTimer(busy, 0), 0x103, 'STATUS_PENDING');
+    assert.deepEqual(m.errors, [], 'and no last error');
+    assert.equal(m.pool.native.deleteTimer(busy, 0), 0xc000000d, 'gone: STATUS_INVALID_PARAMETER');
+    assert.equal(m.pool.native.deleteTimerQueue(0x9999, 0), 0xc0000008,
+        'STATUS_INVALID_HANDLE');
+    assert.equal(m.pool.native.deleteTimerQueue(queue, INVALID_HANDLE_VALUE), PARKED,
+        'the deleted timer\'s callback still runs');
+    m.ask(worker);
+    assert.deepEqual(m.woken.at(-1), { thread: m.main, result: 0 }, 'STATUS_SUCCESS, not TRUE');
+});
+
 test('a callback deleting its own timer does not wait for itself', ()=>{
     const m = machine();
     const queue = m.fns.CreateTimerQueue.handler();
@@ -431,32 +482,51 @@ test('deleting a queue silences every timer in it and waits for all their callba
     assert.equal(m.fns.DeleteTimerQueue.handler([empty]), 1, 'an empty queue at once');
 });
 
-test('a registered wait hands its callback to the pool on each answer, until unregistered', ()=>{
-    const memory = new Uint8Array(0x10000);
+/**
+ * A pool whose wait threads the test steps by hand: `step` is a wait
+ * thread's question (the objects it waits on and for how long), `done` its
+ * answer handed back, `ask` a pool thread taking its next callback.
+ */
+/** @param {{ divergence?: (api: string, detail: string) => void }} [options] */
+function waitMachine({ divergence } = {}){
+    const memory = new Uint8Array(0x20000);
+    const view = new DataView(memory.buffer);
     let free = 0x1000;
+    let now = 0;
     /** @type {any} */
     let current = { name: 'main' };
     /** @type {Record<string, { argBytes: number, handler: Function }>} */
     const traps = {};
     /** @type {any[]} */
     const created = [];
+    /** @type {[string, number][]} */
+    const alerted = [];
     /** @type {number[]} */
     const errors = [];
-    /** @type {[number, number][]} */
+    /** @type {number[]} */
+    const freed = [];
+    /** @type {{ objects: number[], milliseconds: number }[]} */
     const waited = [];
-    let answer = 0x102;
-    const OBJECT = 0x44;
-    const CALLBACK = 0x401000;
-    const CONTEXT = 0x1234;
+    /** @type {number[]} */
+    const closed = [];
     const pool = createThreadPool({
         kernel: {
             currentThread: ()=>current,
             createThread: (/** @type {any} */ options)=>{
-                created.push(options);
-                return { name: options.name, parameter: options.parameter };
+                const thread = { name: `${options.name} ${created.length}`,
+                    parameter: options.parameter };
+                created.push(thread);
+                return thread;
             },
             block: ()=>{},
+            alertably: (/** @type {any} */ thread, /** @type {() => any} */ wait)=>wait(),
             wake: ()=>true,
+            alert: (/** @type {any} */ thread, /** @type {number} */ result)=>{
+                alerted.push([thread.name, result]);
+                return true;
+            },
+            clock: { virtualTime: ()=>now },
+            handles: { resolve: (/** @type {number} */ handle)=>(handle === 0xdead ? null : {}) },
         },
         register: (name, fn)=>{
             traps[name] = fn;
@@ -467,171 +537,211 @@ test('a registered wait hands its callback to the pool on each answer, until unr
             free += Math.max(bytes, 16);
             return at;
         },
-        writeMemory: (address, bytes)=>memory.set(bytes, address),
-        park: ()=>PARKED,
-        setLastError: code=>errors.push(code),
-        waitFor: (handle, milliseconds)=>{
-            waited.push([handle, milliseconds]);
-            return answer;
-        },
-    });
-    const fns = pool.table;
-    const handle = fns.RegisterWaitForSingleObjectEx.handler([OBJECT, CALLBACK, CONTEXT, 250, 0]);
-    assert.notEqual(handle, 0);
-    const waiter = created.find(options=>options.name === 'registered wait');
-    assert.equal(waiter.parameter, handle, 'the wait\'s thread is handed the wait');
-
-    assert.equal(traps['<registered-wait>'].handler([handle]), 0x102);
-    assert.deepEqual(waited, [[OBJECT, 250]], 'it waits on the object for the time asked');
-    assert.equal(traps['<registered-wait-done>'].handler([handle, 0x102]), 1, 'and again after');
-    const worker = created.find(options=>options.name === 'thread pool');
-    assert.ok(worker, 'the callback goes to a pool thread');
-    current = { name: 'worker' };
-    assert.equal(traps['<thread-pool>'].handler([0x8000, RAN]), RUN);
-    const get32 = (/** @type {number} */ at)=>new DataView(memory.buffer).getUint32(at, true);
-    assert.deepEqual([get32(0x8000), get32(0x8004), get32(0x8008)], [CALLBACK, CONTEXT, 1],
-        'its context, and TRUE: the time ran out');
-
-    current = { name: 'main' };
-    assert.equal(fns.UnregisterWait.handler([handle]), 0, 'a callback still running');
-    assert.deepEqual(errors, [ERROR_IO_PENDING]);
-    assert.equal(traps['<registered-wait>'].handler([handle]), 0x80, 'no wait once unregistered');
-    assert.equal(traps['<registered-wait-done>'].handler([handle, 0x80]), 0,
-        'and the thread stops');
-
-    answer = 0;
-    const once = fns.RegisterWaitForSingleObjectEx.handler([OBJECT, CALLBACK, CONTEXT,
-        0xffffffff, 0x8]);
-    assert.equal(traps['<registered-wait-done>'].handler([once, 0]), 0,
-        'WT_EXECUTEONLYONCE waits no more after its callback');
-    assert.equal(fns.RegisterWaitForSingleObjectEx.handler([OBJECT, 0, CONTEXT, 0, 0]), 0,
-        'no callback is refused');
-});
-
-test('an unregistered wait keeps its handle until its thread has left its loop', ()=>{
-    // Wine's kernel32 test_RegisterWaitForSingleObject unregisters a wait whose
-    // thread is still blocked on its object, then registers another. Its handle
-    // was freed and handed to the new wait, and when the object was set the old
-    // thread woke into the new wait and ran its callback a second time.
-    /** @type {number[]} */
-    const freed = [];
-    let next = 0x1000;
-    /** @type {Record<string, { argBytes: number, handler: Function }>} */
-    const traps = {};
-    /** @type {any[]} */
-    const created = [];
-    const pool = createThreadPool({
-        kernel: {
-            currentThread: ()=>({ name: 'main' }),
-            createThread: (/** @type {any} */ options)=>{
-                created.push(options);
-                return { name: options.name };
-            },
-            block: ()=>{},
-            wake: ()=>true,
-        },
-        register: (name, fn)=>{
-            traps[name] = fn;
-            return 0x900 + Object.keys(traps).length * 0x10;
-        },
-        // Freed blocks are handed out again first, as a heap does.
-        allocate: ()=>freed.pop() ?? (next += 16),
         free: address=>freed.push(address),
-        writeMemory: ()=>{},
-        park: ()=>PARKED,
-        setLastError: ()=>{},
-        waitFor: ()=>PARKED,
-    });
-    const fns = pool.table;
-    const pooled = ()=>created.filter(options=>options.name === 'thread pool').length;
-
-    const first = fns.RegisterWaitForSingleObjectEx.handler([0x44, 0x401000, 1, 0xffffffff,
-        8]);
-    assert.equal(traps['<registered-wait>'].handler([first]), PARKED, 'its thread blocks');
-    assert.equal(fns.UnregisterWait.handler([first]), 1, 'nothing of it is running');
-    assert.deepEqual(freed, [], 'but its thread may still come back with its handle');
-
-    const second = fns.RegisterWaitForSingleObjectEx.handler([0x44, 0x402000, 2, 0xffffffff,
-        8]);
-    assert.notEqual(second, first);
-    // The object is set: both threads wake.
-    assert.equal(traps['<registered-wait-done>'].handler([first, 0]), 0, 'the first one stops');
-    assert.equal(pooled(), 0, 'and runs no callback');
-    assert.deepEqual(freed, [first], 'and only now is its handle let go');
-    assert.equal(traps['<registered-wait-done>'].handler([second, 0]), 0);
-    assert.equal(pooled(), 1, 'the second runs its own, once');
-});
-
-test('WT_EXECUTEINWAITTHREAD callbacks run one after another on the one wait thread', ()=>{
-    // Wine's kernel32 test_RegisterWaitForSingleObject: a callback waiting
-    // for another wait's callback times out, since that one runs after it.
-    /** @type {Record<string, { argBytes: number, handler: Function }>} */
-    const traps = {};
-    /** @type {any[]} */
-    const created = [];
-    /** @type {number[]} */
-    const errors = [];
-    let next = 0x1000;
-    const memory = new Uint8Array(0x10000);
-    /** @type {any} */
-    let current = { name: 'main' };
-    const pool = createThreadPool({
-        kernel: {
-            currentThread: ()=>current,
-            createThread: (/** @type {any} */ options)=>{
-                const thread = { name: options.name };
-                created.push(thread);
-                return thread;
-            },
-            block: ()=>{},
-            wake: ()=>true,
-        },
-        register: (name, fn)=>{
-            traps[name] = fn;
-            return 0x900 + Object.keys(traps).length * 0x10;
-        },
-        allocate: ()=>(next += 16),
         writeMemory: (address, bytes)=>memory.set(bytes, address),
+        readMemory: (address, length)=>memory.slice(address, address + length),
         park: ()=>PARKED,
         setLastError: code=>errors.push(code),
-        waitFor: ()=>0,
+        ...divergence ? { divergence } : {},
+        call: (/** @type {string} */ name, /** @type {number[]} */ args)=>{
+            if (name === 'DuplicateHandle')
+            {
+                // A handle of the wait's own, the object's plus 0x1000.
+                view.setUint32(args[3], args[1] + 0x1000, true);
+                return 1;
+            }
+            if (name === 'CloseHandle')
+            {
+                closed.push(args[0]);
+            }
+            return name === 'CreateEventW' ? 0x99 : 1;
+        },
+        waitFor: (count, handles, milliseconds)=>{
+            waited.push({ objects: Array.from({ length: count },
+                (_, index)=>view.getUint32(handles + index * 4, true)), milliseconds });
+            return PARKED;
+        },
     });
-    const fns = pool.table;
-    const WT_EXECUTEINWAITTHREAD = 0x4;
-    const ONCE = 0x8;
-    const get32 = (/** @type {number} */ at)=>new DataView(memory.buffer).getUint32(at, true);
-    /** @param {any} thread */
+    /** @param {string} prefix */
+    const threads = prefix=>created.filter(thread=>thread.name.startsWith(prefix));
+    /** A wait thread's question: what it waits on, and for how long. @param {any} thread */
+    const step = thread=>{
+        traps['<registered-wait>'].handler([thread.parameter]);
+        return /** @type {{ objects: number[], milliseconds: number }} */ (waited.at(-1));
+    };
+    /** @param {any} thread @param {number} answer */
+    const done = (thread, answer)=>traps['<registered-wait-done>'].handler(
+        [thread.parameter, answer]);
+    /** A pool thread taking its next callback: its record, or null. @param {any} thread */
     const ask = thread=>{
         const was = current;
         current = thread;
         const answer = traps['<thread-pool>'].handler([0x8000, RAN]);
         current = was;
-        return answer;
+        return answer === RUN ? [0, 4, 8, 12, 16].map(at=>view.getUint32(0x8000 + at, true))
+            : null;
     };
+    /** What a pool thread woken with a callback finds in its record. */
+    const record = ()=>[0, 4, 8, 12, 16].map(at=>view.getUint32(0x8000 + at, true));
+    return { pool, fns: pool.table, view, created, alerted, errors, freed, threads, step, closed,
+        done, ask, record,
+        /** @param {number} ms */
+        tick: ms=>{
+            now += ms;
+        },
+        /** @param {any} thread */
+        as: thread=>{
+            current = thread;
+        } };
+}
 
-    const first = fns.RegisterWaitForSingleObjectEx.handler([0x44, 0x401000, 1, 0xffffffff,
+test('registered waits share a wait thread, which waits for any of their objects', ()=>{
+    const m = waitMachine();
+    const CALLBACK = 0x401000;
+    const first = m.fns.RegisterWaitForSingleObjectEx.handler([0x44, CALLBACK, 1, 250, 0]);
+    const second = m.fns.RegisterWaitForSingleObjectEx.handler([0x48, CALLBACK, 2, 0xffffffff,
+        0]);
+    assert.notEqual(first, 0);
+    const [home] = m.threads('registered waits');
+    assert.equal(m.threads('registered waits').length, 1, 'one thread for both');
+    assert.deepEqual(m.alerted.at(-1), [home.name, 0xc0],
+        'the second added starts its wait again');
+    assert.deepEqual(m.step(home), { objects: [0x44, 0x48], milliseconds: 250 },
+        'both objects, until the nearer time-out');
+
+    assert.equal(m.done(home, 1), 1, 'the second object came; the thread waits on');
+    const [worker] = m.threads('thread pool');
+    assert.deepEqual(m.ask(worker)?.slice(0, 3), [CALLBACK, 2, 0], 'its context, and FALSE');
+    m.ask(worker);
+    m.tick(100);
+    assert.deepEqual(m.step(home), { objects: [0x44, 0x48], milliseconds: 150 },
+        'the time-out counts from its registration');
+    m.tick(150);
+    assert.equal(m.done(home, 0x102), 1);
+    assert.deepEqual(m.record().slice(0, 3), [CALLBACK, 1, 1],
+        'handed to the idle pool thread: the time ran out, TRUE');
+    m.ask(worker);
+    assert.equal(m.step(home).milliseconds, 250, 'and waits its time-out again from now');
+
+    assert.equal(m.done(home, 0xc0), 1, 'routines queued to the thread ran: nothing fires');
+    assert.equal(m.ask(worker), null);
+
+    m.as(m.created[0]);
+    assert.equal(m.fns.UnregisterWait.handler([first]), 1, 'nothing of it is running');
+    // Left in its wait, the thread would take the next signal of a semaphore
+    // or an auto-reset event for a wait nobody has any more.
+    assert.deepEqual(m.alerted.at(-1), [home.name, 0xc0], 'taken out of its wait');
+    assert.deepEqual(m.step(home).objects, [0x48], 'and waits for what is left');
+    assert.ok(m.freed.includes(first), 'its handle goes at once: the thread holds the wait');
+    assert.equal(m.fns.UnregisterWait.handler([second]), 1);
+    assert.equal(m.done(home, 0xc0), 0, 'no waits left: the thread ends');
+    assert.equal(m.fns.UnregisterWait.handler([second]), 0, 'gone');
+    assert.deepEqual(m.errors, [ERROR_INVALID_HANDLE]);
+    assert.equal(m.fns.RegisterWaitForSingleObjectEx.handler([0x44, 0, 1, 0, 0]), 0,
+        'no callback is refused');
+});
+
+test('two waits on one object are one entry, and a signal fires the first of them', ()=>{
+    // Wine's ntdll test_tp_wait: a semaphore released once wakes one of the
+    // two waits set on it, released twice both.
+    const m = waitMachine();
+    const ONCE = 0x8;
+    m.fns.RegisterWaitForSingleObjectEx.handler([0x44, 0x401000, 1, 0xffffffff, ONCE]);
+    m.fns.RegisterWaitForSingleObjectEx.handler([0x44, 0x402000, 2, 0xffffffff, ONCE]);
+    const [home] = m.threads('registered waits');
+    assert.deepEqual(m.step(home).objects, [0x44], 'the object once');
+    assert.equal(m.done(home, 0), 1);
+    const [worker] = m.threads('thread pool');
+    assert.equal(m.ask(worker)?.[0], 0x401000, 'the first registered');
+    assert.deepEqual(m.step(home).objects, [0x44], 'the second still waits');
+    assert.equal(m.done(home, 0), 0, 'fired, and the thread has nothing left');
+    assert.equal(m.ask(worker)?.[0], 0x402000, 'once the first callback returned');
+});
+
+test('a wait thread has room for sixty-four objects, and another is made past them', ()=>{
+    const m = waitMachine();
+    for (let i = 0; i < 65; i++)
+    {
+        m.fns.RegisterWaitForSingleObjectEx.handler([0x1000 + i * 4, 0x401000, i, 0xffffffff,
+            0]);
+    }
+    const homes = m.threads('registered waits');
+    assert.equal(homes.length, 2);
+    assert.equal(m.step(homes[0]).objects.length, 64);
+    assert.deepEqual(m.step(homes[1]).objects, [0x1000 + 64 * 4]);
+});
+
+test('an object closed under its wait is said and dropped; the other waits go on', ()=>{
+    /** @type {string[]} */
+    const said = [];
+    const m = waitMachine({ divergence: (api, detail)=>said.push(`${api}: ${detail}`) });
+    m.fns.RegisterWaitForSingleObjectEx.handler([0xdead, 0x401000, 1, 0xffffffff, 0]);
+    m.fns.RegisterWaitForSingleObjectEx.handler([0x44, 0x401000, 2, 0xffffffff, 0]);
+    const [home] = m.threads('registered waits');
+    m.step(home);
+    assert.equal(m.done(home, 0xffffffff), 1, 'the wait for all of them failed');
+    assert.deepEqual(m.step(home).objects, [0x44]);
+    assert.equal(said.length, 1);
+    assert.match(said[0], /0xdead was closed under its wait/);
+});
+
+test('WT_EXECUTEINWAITTHREAD callbacks run one after another on the one wait thread', ()=>{
+    // Wine's kernel32 test_RegisterWaitForSingleObject: a callback waiting
+    // for another wait's callback times out, since that one runs after it.
+    const m = waitMachine();
+    const WT_EXECUTEINWAITTHREAD = 0x4;
+    const ONCE = 0x8;
+    const first = m.fns.RegisterWaitForSingleObjectEx.handler([0x44, 0x401000, 1, 0xffffffff,
         ONCE | WT_EXECUTEINWAITTHREAD]);
-    const second = fns.RegisterWaitForSingleObjectEx.handler([0x48, 0x402000, 2, 0xffffffff,
+    const second = m.fns.RegisterWaitForSingleObjectEx.handler([0x48, 0x402000, 2, 0xffffffff,
         ONCE | WT_EXECUTEINWAITTHREAD]);
-    traps['<registered-wait-done>'].handler([first, 0]);
-    traps['<registered-wait-done>'].handler([second, 0]);
-    const waitThreads = created.filter(thread=>thread.name === 'wait thread');
-    assert.equal(waitThreads.length, 1, 'one thread for both');
-    assert.equal(created.filter(thread=>thread.name === 'thread pool').length, 0,
-        'and none of the pool\'s');
+    const [home] = m.threads('registered waits');
+    m.step(home);
+    m.done(home, 0);
+    m.step(home);
+    m.done(home, 0);
+    const waitThreads = m.threads('wait thread');
+    assert.equal(waitThreads.length, 1, 'one thread for both callbacks');
+    assert.equal(m.threads('thread pool').length, 0, 'and none of the pool\'s');
 
     const [thread] = waitThreads;
-    assert.equal(ask(thread), RUN);
-    assert.equal(get32(0x8000), 0x401000, 'the first');
+    assert.equal(m.ask(thread)?.[0], 0x401000, 'the first');
     // From inside its own callback, the wait is let go at once.
-    current = thread;
-    assert.equal(fns.UnregisterWait.handler([first]), 1);
-    current = { name: 'main' };
-    assert.deepEqual(errors, []);
-    assert.equal(ask(thread), RUN);
-    assert.equal(get32(0x8000), 0x402000, 'the second only once the first returned');
-    assert.equal(ask(thread), PARKED);
-    assert.equal(fns.UnregisterWait.handler([second]), 1, 'its callback has returned');
+    m.as(thread);
+    assert.equal(m.fns.UnregisterWait.handler([first]), 1);
+    m.as(m.created[0]);
+    assert.deepEqual(m.errors, []);
+    assert.equal(m.ask(thread)?.[0], 0x402000, 'the second only once the first returned');
+    assert.equal(m.ask(thread), null);
+    assert.equal(m.fns.UnregisterWait.handler([second]), 1, 'its callback has returned');
+});
+
+test('a thread pool wait fires once with its result, and is set again to wait again', ()=>{
+    const m = waitMachine();
+    const wait = m.fns.CreateThreadpoolWait.handler([0x405000, 0x77, 0]);
+    m.view.setBigInt64(0x6000, -2500000n, true);
+    m.fns.SetThreadpoolWait.handler([wait, 0x44, 0x6000]);
+    const [home] = m.threads('registered waits');
+    assert.deepEqual(m.step(home), { objects: [0x1044], milliseconds: 250 },
+        'the object, by a handle of the wait\'s own, for its time-out');
+    assert.equal(m.done(home, 0), 0, 'once');
+    assert.deepEqual(m.closed, [0x1044], 'its own handle closed once it fired');
+    const [worker] = m.threads('thread pool');
+    assert.deepEqual(m.ask(worker)?.slice(0, 5), [0x405000, 0x8000, 0x77, wait, 0],
+        'its instance (the record, on the pool thread), its context, the wait and WAIT_OBJECT_0');
+    m.ask(worker);
+    assert.equal(m.fns.WaitForThreadpoolWaitCallbacks.handler([wait, 0]), 0, 'nothing owed');
+
+    m.fns.SetThreadpoolWait.handler([wait, 0x48, 0]);
+    const again = m.threads('registered waits').at(-1);
+    assert.deepEqual(m.step(again), { objects: [0x1048], milliseconds: 0xffffffff },
+        'no time-out waits for ever');
+    m.fns.SetThreadpoolWait.handler([wait, 0, 0]);
+    assert.deepEqual(m.alerted.at(-1), [again.name, 0xc0], 'no object: the wait is withdrawn');
+    assert.deepEqual(m.closed, [0x1044, 0x1048], 'and its handle closed');
+    assert.equal(m.done(again, 0xc0), 0);
+    m.fns.CloseThreadpoolWait.handler([wait]);
+    assert.equal(m.fns.FreeLibraryWhenCallbackReturns.handler([0, 0]), 0);
 });
 
 test('a thread pool work runs once a submission, and a wait for it waits for its callbacks', ()=>{
@@ -661,11 +771,40 @@ test('a thread pool work runs once a submission, and a wait for it waits for its
     assert.equal(m.fns.CreateThreadpoolWork.handler([0, 0, 0]), 0);
     assert.equal(m.errors.at(-1), 87);
 
-    const pool = m.fns.CreateThreadpool.handler();
+    const pool = m.fns.CreateThreadpool.handler([0]);
     assert.notEqual(pool, 0);
     m.fns.CloseThreadpool.handler([pool]);
     assert.ok(m.freed.includes(pool));
 });
+
+test('the objects a program is handed are blocks of the process heap until they are let go',
+    ()=>{
+        // Wine's ntdll threadpool test_tp_io: HeapValidate(GetProcessHeap())
+        // knows an I/O object, and not once it is released.
+        /** @type {Set<number>} */
+        const live = new Set();
+        let next = 0xa000;
+        const m = machine({ processHeap: {
+            allocate: bytes=>{
+                const at = next;
+                next += Math.max(bytes, 16);
+                live.add(at);
+                return at;
+            },
+            free: address=>{
+                live.delete(address);
+            },
+        } });
+        const pool = m.fns.CreateThreadpool.handler([0]);
+        const group = m.fns.CreateThreadpoolCleanupGroup.handler([]);
+        const work = m.fns.CreateThreadpoolWork.handler([0x403000, 0, 0]);
+        assert.deepEqual([pool, group, work].map(each=>live.has(each)), [true, true, true]);
+        m.fns.CloseThreadpoolWork.handler([work]);
+        m.fns.CloseThreadpoolCleanupGroup.handler([group]);
+        m.fns.CloseThreadpool.handler([pool]);
+        assert.deepEqual([...live], [], 'each given back');
+        assert.deepEqual(m.freed, [], 'none to the engine\'s own memory');
+    });
 
 test('an environment\'s FinalizationCallback runs on the same thread after each callback', ()=>{
     // Wine's msvcp140_atomic_wait test, test_threadpool_work: the callback,
@@ -751,77 +890,260 @@ test('a thread pool timer fires after its relative due time, then on its period'
     assert.equal(m.woken.length, before);
     m.tick(1);
     assert.equal(m.woken.at(-1)?.result, RUN, 'thirty milliseconds past the wall clock');
-    assert.equal(m.fns.IsThreadpoolTimerSet.handler([timer]), 0, 'a one-shot is spent');
+    assert.equal(m.fns.IsThreadpoolTimerSet.handler([timer]), 1,
+        'a one-shot that fired stays set until stopped, as Wine\'s ntdll test_tp_timer sees');
     assert.equal(m.fns.WaitForThreadpoolTimerCallbacks.handler([timer, 0]), PARKED);
     m.ask(m.created[0]);
     m.fns.CloseThreadpoolTimer.handler([timer]);
     assert.ok(m.freed.includes(timer), 'given back with nothing owed');
 });
 
-test('a thread pool wait fires once with its result, and is set again to wait again', ()=>{
-    const memory = new Uint8Array(0x10000);
-    let free = 0x1000;
-    /** @type {any} */
-    let current = { name: 'main' };
-    /** @type {Record<string, { argBytes: number, handler: Function }>} */
-    const traps = {};
-    /** @type {any[]} */
-    const created = [];
-    /** @type {[number, number][]} */
-    const waited = [];
-    const pool = createThreadPool({
-        kernel: {
-            currentThread: ()=>current,
-            createThread: (/** @type {any} */ options)=>{
-                created.push(options);
-                return { name: options.name, parameter: options.parameter };
-            },
-            block: ()=>{},
-            wake: ()=>true,
-        },
-        register: (name, fn)=>{
-            traps[name] = fn;
-            return 0x900 + Object.keys(traps).length * 0x10;
-        },
-        allocate: bytes=>{
-            const at = free;
-            free += Math.max(bytes, 16);
-            return at;
-        },
-        writeMemory: (address, bytes)=>memory.set(bytes, address),
-        readMemory: (address, length)=>memory.slice(address, address + length),
-        park: ()=>PARKED,
-        setLastError: ()=>{},
-        waitFor: (handle, milliseconds)=>{
-            waited.push([handle, milliseconds]);
-            return 0;
-        },
-    });
-    const fns = pool.table;
-    const view = new DataView(memory.buffer);
-    const wait = fns.CreateThreadpoolWait.handler([0x405000, 0x77, 0]);
-    view.setBigInt64(0x6000, -2500000n, true);
-    fns.SetThreadpoolWait.handler([wait, 0x44, 0x6000]);
-    const thread = created.find(options=>options.name === 'registered wait');
-    assert.ok(thread);
-    assert.equal(traps['<registered-wait>'].handler([thread.parameter]), 0);
-    assert.deepEqual(waited, [[0x44, 250]], 'the object, for its time-out');
-    assert.equal(traps['<registered-wait-done>'].handler([thread.parameter, 0]), 0, 'once');
-    current = { name: 'worker' };
-    assert.equal(traps['<thread-pool>'].handler([0x8000, RAN]), RUN);
-    assert.deepEqual([0x8000, 0x8008, 0x800c, 0x8010].map(at=>view.getUint32(at, true)),
-        [0x405000, 0x77, wait, 0], 'its context, the wait and WAIT_OBJECT_0');
-    traps['<thread-pool>'].handler([0x8000, RAN]);
-    current = { name: 'main' };
-    assert.equal(fns.WaitForThreadpoolWaitCallbacks.handler([wait, 0]), 0, 'nothing owed');
+test('an idle pool thread waits alertably; a callback handed over during an APC still runs', ()=>{
+    // Wine's ntdll test_RtlRegisterWait queues an APC to the pool thread its
+    // callback ran on and waits for it: an idle pool thread runs it, as
+    // Windows' do.
+    const m = machine();
+    m.fns.QueueUserWorkItem.handler([0x402000, 1, 0]);
+    const [thread] = m.created;
+    assert.equal(m.ask(thread), RUN);
+    assert.equal(m.ask(thread), PARKED, 'idle');
+    assert.equal(thread.alertableWaits, 1, 'and its wait alertable');
 
-    fns.SetThreadpoolWait.handler([wait, 0x48, 0]);
-    const again = created.filter(options=>options.name === 'registered wait').at(-1);
-    traps['<registered-wait>'].handler([again.parameter]);
-    assert.deepEqual(waited.at(-1), [0x48, 0xffffffff], 'no time-out waits for ever');
-    fns.SetThreadpoolWait.handler([wait, 0, 0]);
-    assert.equal(traps['<registered-wait>'].handler([again.parameter]), 0x80,
-        'no object: the wait is withdrawn');
-    fns.CloseThreadpoolWait.handler([wait]);
-    assert.equal(fns.FreeLibraryWhenCallbackReturns.handler(), 0);
+    // The APC ran and the loop asks again with WAIT_IO_COMPLETION: still
+    // idle, once, not twice.
+    assert.equal(m.ask(thread, 0xc0), PARKED);
+    m.fns.QueueUserWorkItem.handler([0x402000, 2, 0]);
+    assert.equal(m.created.length, 1, 'the idle thread took it: no second one');
+    assert.equal(m.woken.at(-1)?.thread, thread);
+    assert.equal(m.fns.QueueUserWorkItem.handler([0x402000, 3, 0]), 1);
+    assert.equal(m.created.length, 2, 'it was in the idle list once');
+
+    // Handed a callback while it was running an APC (the wake found it
+    // running): back in the loop, it runs that callback rather than counting
+    // it done.
+    const n = machine();
+    n.fns.QueueUserWorkItem.handler([0x402000, 1, 0]);
+    const [other] = n.created;
+    assert.equal(n.ask(other), RUN);
+    assert.equal(n.ask(other), PARKED);
+    n.fns.QueueUserWorkItem.handler([0x402000, 7, 0]);
+    assert.equal(n.ask(other, 0xc0), RUN, 'the callback handed over, not yet run');
+    assert.equal(n.record(other).args[0], 7);
+    assert.equal(n.ask(other), PARKED, 'run once, and idle again');
 });
+
+/**
+ * A TP_CALLBACK_ENVIRON version 1 at `at`.
+ *
+ * @param {any} m @param {number} at
+ * @param {{ pool?: number, group?: number, cancel?: number, finalization?: number }} fields
+ */
+function callbackEnvironment(m, at, { pool = 0, group = 0, cancel = 0, finalization = 0 }){
+    const view = new DataView(m.memory.buffer);
+    m.memory.fill(0, at, at + 40);
+    view.setUint32(at, 1, true);
+    view.setUint32(at + 4, pool, true);
+    view.setUint32(at + 8, group, true);
+    view.setUint32(at + 12, cancel, true);
+    view.setUint32(at + 24, finalization, true);
+    return at;
+}
+
+test('a pool of its own runs at most its maximum at once, its objects taking turns', ()=>{
+    // Wine's ntdll test_tp_work_scheduler: one object's ten callbacks do not
+    // hold up another's on a pool of one thread.
+    const m = machine();
+    const pool = m.fns.CreateThreadpool.handler([0]);
+    m.fns.SetThreadpoolThreadMaximum.handler([pool, 1]);
+    const env = callbackEnvironment(m, 0x6000, { pool });
+    const a = m.fns.CreateThreadpoolWork.handler([0x403000, 1, env]);
+    const b = m.fns.CreateThreadpoolWork.handler([0x403100, 2, env]);
+    for (let i = 0; i < 3; i++)
+    {
+        m.fns.SubmitThreadpoolWork.handler([a]);
+    }
+    m.fns.SubmitThreadpoolWork.handler([b]);
+    m.fns.SubmitThreadpoolWork.handler([b]);
+    assert.equal(m.created.length, 1, 'one thread: its maximum');
+    const [thread] = m.created;
+    /** @type {number[]} */
+    const order = [];
+    while (m.ask(thread) === RUN)
+    {
+        order.push(m.record(thread).entry);
+        assert.equal(m.record(thread).args[0], 0x8000, 'the instance is the running record');
+    }
+    assert.deepEqual(order, [0x403000, 0x403100, 0x403000, 0x403100, 0x403000]);
+    assert.equal(m.created.length, 1);
+
+    // The stack its threads are made with, the program's until set.
+    const info = 0x6100;
+    const view = new DataView(m.memory.buffer);
+    assert.equal(m.fns.QueryThreadpoolStackInformation.handler([pool, info]), 1);
+    assert.deepEqual([view.getUint32(info, true), view.getUint32(info + 4, true)],
+        [0x100000, 0x1000]);
+    view.setUint32(info, 0x40000, true);
+    view.setUint32(info + 4, 0x2000, true);
+    assert.equal(m.fns.SetThreadpoolStackInformation.handler([pool, info]), 1);
+    assert.equal(m.fns.SetThreadpoolThreadMinimum.handler([pool, 2]), 1);
+    assert.equal(m.created.length, 2, 'the minimum made now');
+    assert.deepEqual([m.created[1].options.stackReserve, m.created[1].options.stackSize],
+        [0x40000, 0x2000]);
+});
+
+test('a callback\'s instance: completion calls in order, may-run-long, and letting go', ()=>{
+    const m = machine();
+    const work = m.fns.CreateThreadpoolWork.handler([0x403000, 1, 0]);
+    m.fns.SubmitThreadpoolWork.handler([work]);
+    const [thread] = m.created;
+    assert.equal(m.ask(thread), RUN);
+    const instance = m.record(thread).args[0];
+    m.as(thread, ()=>{
+        m.fns.SetEventWhenCallbackReturns.handler([instance, 0x54]);
+        m.fns.ReleaseSemaphoreWhenCallbackReturns.handler([instance, 0x50, 2]);
+        m.fns.LeaveCriticalSectionWhenCallbackReturns.handler([instance, 0x58]);
+        m.fns.SetEventWhenCallbackReturns.handler([instance, 0x5c]);
+        assert.equal(m.fns.CallbackMayRunLong.handler([instance]), 1, 'room for more threads');
+    });
+    assert.deepEqual(m.calls, [], 'nothing until the callback returns');
+    assert.equal(m.ask(thread), PARKED);
+    assert.deepEqual(m.calls, [['LeaveCriticalSection', [0x58]],
+        ['ReleaseSemaphore', [0x50, 2, 0]], ['SetEvent', [0x5c]]],
+    'the lock first, the last event asked');
+
+    // Let go, the work's callbacks are no longer waited for while it runs.
+    m.fns.SubmitThreadpoolWork.handler([work]);
+    assert.equal(m.woken.at(-1)?.result, RUN);
+    assert.equal(m.fns.WaitForThreadpoolWorkCallbacks.handler([work, 0]), PARKED);
+    m.as(thread, ()=>m.fns.DisassociateCurrentThreadFromCallback.handler([0x8000]));
+    assert.deepEqual(m.woken.at(-1), { thread: m.main, result: 1 }, 'the wait is over');
+    assert.equal(m.fns.WaitForThreadpoolWorkCallbacks.handler([work, 0]), 0);
+    m.ask(thread);
+
+    // A pool of one busy thread has none for another callback.
+    const pool = m.fns.CreateThreadpool.handler([0]);
+    m.fns.SetThreadpoolThreadMaximum.handler([pool, 1]);
+    m.fns.TrySubmitThreadpoolCallback.handler([0x404000, 0,
+        callbackEnvironment(m, 0x6000, { pool })]);
+    const own = m.created.at(-1);
+    assert.equal(m.ask(own), RUN);
+    assert.equal(m.fns.CallbackMayRunLong.handler([0x8000 + 0x20]), 0);
+});
+
+test('a cleanup group closes its members once their callbacks returned, cancel callbacks after',
+    async()=>{
+        // Wine's ntdll test_tp_group_cancel: a cancel callback for each member
+        // the program has not released, on the closing thread, after the
+        // wait; a simple callback that ran to its end calls none.
+        const m = machine();
+        const pool = m.fns.CreateThreadpool.handler([0]);
+        m.fns.SetThreadpoolThreadMaximum.handler([pool, 1]);
+        const group = m.fns.CreateThreadpoolCleanupGroup.handler([]);
+        const env = callbackEnvironment(m, 0x6000, { pool, group, cancel: 0x409000 });
+        assert.equal(m.fns.TrySubmitThreadpoolCallback.handler([0x404000, 0x11, env]), 1);
+        assert.equal(m.fns.TrySubmitThreadpoolCallback.handler([0x404000, 0x22, env]), 1);
+        const work = m.fns.CreateThreadpoolWork.handler([0x403000, 0x33, env]);
+        const released = m.fns.CreateThreadpoolWork.handler([0x403000, 0x44, env]);
+        m.fns.CloseThreadpoolWork.handler([released]);
+        const [thread] = m.created;
+        assert.equal(m.ask(thread), RUN, 'the first simple callback runs');
+
+        const closing = m.fns.CloseThreadpoolCleanupGroupMembers.handler([group, 1, 0xabc]);
+        assert.equal(typeof closing?.then, 'function', 'waiting for the running one');
+        assert.deepEqual(m.guestCalls, [], 'not before the wait');
+        assert.equal(m.ask(thread), PARKED, 'the pending one was dropped');
+        assert.equal(await closing, 0);
+        assert.deepEqual(m.guestCalls.map((/** @type {any} */ call)=>call.args), [[0x22, 0xabc], [0x33, 0xabc]]);
+        assert.ok(m.guestCalls.every((/** @type {any} */ call)=>call.entry === 0x409000 && call.thread === m.main));
+        assert.ok(m.freed.includes(work), 'the member released');
+        assert.equal(m.fns.CloseThreadpoolCleanupGroupMembers.handler([group, 0, 0]), 0,
+            'none left');
+    });
+
+test('a closed pool\'s threads end: the idle at once, the busy once idle', ()=>{
+    const m = machine();
+    const pool = m.fns.CreateThreadpool.handler([0]);
+    const env = callbackEnvironment(m, 0x6000, { pool });
+    const work = m.fns.CreateThreadpoolWork.handler([0x403000, 1, env]);
+    m.fns.SubmitThreadpoolWork.handler([work]);
+    m.fns.SetThreadpoolThreadMinimum.handler([pool, 2]);
+    const [busy, idle] = m.created;
+    assert.equal(m.ask(busy), RUN);
+    assert.equal(m.ask(idle), PARKED);
+    m.fns.CloseThreadpoolWork.handler([work]);
+    m.fns.CloseThreadpool.handler([pool]);
+    assert.equal(m.freed.includes(pool), false, 'its work still runs');
+    assert.equal(m.ask(busy), 0, 'the busy thread ends once its callback returned');
+    assert.ok(m.freed.includes(pool));
+    assert.deepEqual(m.woken.at(-1), { thread: idle, result: 0 }, 'the idle one ends');
+});
+
+test('a wait on a pseudo-handle is its time-out alone', ()=>{
+    // Wine's ntdll test_tp_wait sets a wait on INVALID_HANDLE_VALUE, the
+    // process's own handle: no wait for many objects takes it.
+    const m = waitMachine();
+    m.fns.RegisterWaitForSingleObjectEx.handler([0xffffffff, 0x401000, 7, 50, 0]);
+    const [home] = m.threads('registered waits');
+    assert.deepEqual(m.step(home), { objects: [0x99], milliseconds: 50 },
+        'an event nobody sets, for the time-out');
+    m.tick(50);
+    assert.equal(m.done(home, 0x102), 1);
+    const [worker] = m.threads('thread pool');
+    assert.deepEqual(m.ask(worker)?.slice(0, 3), [0x401000, 7, 1], 'timed out');
+});
+
+test('a thread pool I/O object hands each expected completion of its file to its callback', ()=>{
+    // Wine's ntdll test_kernel32_tp_io and test_tp_io: started operations
+    // are waited for until their completions ran; one cancelled is not
+    // delivered.
+    const m = machine();
+    const io = m.fns.CreateThreadpoolIo.handler([0x70, 0x407000, 0xc0, 0]);
+    assert.notEqual(io, 0);
+    const sink = m.sinks.get(0x70);
+    assert.equal(typeof sink, 'function', 'the file\'s completions are its');
+    assert.equal(m.fns.WaitForThreadpoolIoCallbacks.handler([io, 0]), 0, 'none expected');
+
+    m.fns.StartThreadpoolIo.handler([io]);
+    assert.equal(m.fns.WaitForThreadpoolIoCallbacks.handler([io, 0]), PARKED,
+        'one expected: waited for before it came');
+    sink({ transferred: 1, overlapped: 0x300, key: 0 });
+    const [thread] = m.created;
+    assert.equal(m.ask(thread), RUN);
+    assert.deepEqual(m.record(thread), { entry: 0x407000, args: [0x8000, 0xc0, 0x300, 0] });
+    assert.equal(m.get32(0x8000 + 20), 1, 'the fifth: the bytes');
+    assert.equal(m.get32(0x8000 + 24), io, 'the sixth argument: the object');
+    assert.equal(m.ask(thread), PARKED);
+    assert.deepEqual(m.woken.at(-1), { thread: m.main, result: 1 });
+
+    m.fns.StartThreadpoolIo.handler([io]);
+    m.fns.CancelThreadpoolIo.handler([io]);
+    sink({ transferred: 1, overlapped: 0x300, key: 0 });
+    assert.equal(m.woken.at(-1)?.thread, m.main, 'not delivered: none expected');
+    m.fns.StartThreadpoolIo.handler([io]);
+    assert.equal(m.fns.WaitForThreadpoolIoCallbacks.handler([io, 1]), 0,
+        'cancelled with the pending callbacks');
+
+    // ntdll's form: the completion value and an IO_STATUS_BLOCK of its own.
+    const native = /** @type {number} */ (
+        m.pool.native.objects.createIo(0x74, 0x408000, 0xd0, 0, true));
+    m.pool.native.objects.startIo(native);
+    m.sinks.get(0x74)({ transferred: 5, overlapped: 0x310, status: 0xc0000120, key: 0 });
+    assert.equal(m.woken.at(-1)?.result, RUN);
+    const { args } = m.record(thread);
+    assert.deepEqual([args[1], args[2], m.get32(0x8000 + 20)], [0xd0, 0x310, native]);
+    assert.deepEqual([m.get32(args[3]), m.get32(args[3] + 4)], [0xc0000120, 5]);
+    m.ask(thread);
+    assert.ok(m.freed.includes(args[3]), 'given back once the callback returned');
+
+    // Released with an operation started and not come back (its callback
+    // cancelled above): the object lasts until it comes, and is then gone.
+    m.fns.CloseThreadpoolIo.handler([io]);
+    assert.equal(typeof m.sinks.get(0x70), 'function', 'still taking what was started');
+    assert.ok(!m.freed.includes(io));
+    const woken = m.woken.length;
+    m.sinks.get(0x70)({ transferred: 1, overlapped: 0x300, key: 0 });
+    assert.equal(m.woken.length, woken, 'not handed to the callback');
+    assert.equal(m.sinks.get(0x70), null, 'the file let go');
+    assert.ok(m.freed.includes(io), 'and the object');
+});
+

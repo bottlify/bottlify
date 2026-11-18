@@ -18,7 +18,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createModuleFunctions, searchesBesideProgram } from './modules.js';
+import { createModuleFunctions, searchesBesideProgram, DLL_SEARCH_PATH } from './modules.js';
 
 /**
  * A module record with the two lookups a load path never reaches here.
@@ -432,6 +432,71 @@ test('AddDllDirectory\'s directories are searched for a bare name until removed'
     assert.deepEqual(asked, ['fx.dll']);
 });
 
+test('LOAD_LIBRARY_SEARCH_* flags are the whole search, the default one too', ()=>{
+    /** @type {any[]} */
+    const asked = [];
+    /** @param {string} name @param {number} flags @param {any} search */
+    const loader = (name, flags, search)=>{
+        asked.push([name, flags, search]);
+        return 0;
+    };
+    const { host, say, lastError } = hostFor({ load: /** @type {any} */ (loader) });
+    const fns = createModuleFunctions(/** @type {any} */ (host));
+    say(0x100, '1\\x.dll');
+    say(0x200, 'D:\\Mine');
+    say(0x300, 'E:\\Added');
+    fns.SetDllDirectoryA.handler([0x200]);
+    fns.AddDllDirectory.handler([0x300]);
+    // A relative name under LOAD_LIBRARY_SEARCH_SYSTEM32 is looked for in
+    // the system directory alone, and not found is ERROR_MOD_NOT_FOUND.
+    assert.equal(fns.LoadLibraryExA.handler([0x100, 0, 0x800]), 0);
+    assert.equal(lastError(), 126);
+    assert.deepEqual(asked.pop(), ['1\\x.dll', 0,
+        { application: false, user: [], system: true, loadDirectory: false }]);
+    // DEFAULT_DIRS is the program's, the user's and the system directory.
+    fns.LoadLibraryExA.handler([0x100, 0, 0x1000 | 0x2]);
+    assert.deepEqual(asked.pop(), ['1\\x.dll', 0x2,
+        { application: true, user: ['D:\\Mine', 'E:\\Added'], system: true,
+            loadDirectory: false }], 'the other flags handed on');
+    assert.equal(fns.LoadLibraryExA.handler([0x100, 0, 0x800 | 0x8]), 0);
+    assert.equal(lastError(), 87, 'with LOAD_WITH_ALTERED_SEARCH_PATH: ERROR_INVALID_PARAMETER');
+    assert.equal(asked.length, 0, 'and nothing looked for');
+
+    assert.equal(fns.SetDefaultDllDirectories.handler([0x100]), 0,
+        'a flag LoadLibraryEx alone takes is not a default');
+    assert.equal(lastError(), 87);
+    fns.LoadLibraryA.handler([0x100]);
+    assert.equal(asked.pop()[2], undefined, 'the standard search until a default is set');
+    assert.equal(fns.SetDefaultDllDirectories.handler([0x200]), 1);
+    fns.LoadLibraryA.handler([0x100]);
+    assert.deepEqual(asked.pop()[2], { application: true, user: [], system: false,
+        loadDirectory: false }, 'then the default for a load that names no places');
+    fns.LoadLibraryExA.handler([0x100, 0, 0x8]);
+    assert.equal(asked.pop()[2], undefined, 'LOAD_WITH_ALTERED_SEARCH_PATH keeps the standard one');
+});
+
+test('the directories a library is looked for in, as LdrGetDllPath hands them out', ()=>{
+    const { host, say } = hostFor({});
+    const environment = /** @type {any} */ (host);
+    environment.environmentVariable = (/** @type {string} */ name)=>
+        (name === 'PATH' ? 'C:\\Tools;;D:\\Bin' : undefined);
+    const fns = createModuleFunctions(/** @type {any} */ (host));
+    const searchPath = /** @type {any} */ (fns)[DLL_SEARCH_PATH];
+    assert.deepEqual(searchPath('', 0), ['C:\\App', 'C:\\WINDOWS\\system32',
+        'C:\\WINDOWS\\system', 'C:\\WINDOWS', '.', 'C:\\Tools', 'D:\\Bin'],
+    'the standard search, the current directory as "."');
+    assert.deepEqual(searchPath('E:\\Lib\\a.dll', 0x8)[0], 'E:\\Lib',
+        'the library\'s own directory first for LOAD_WITH_ALTERED_SEARCH_PATH');
+    say(0x200, 'D:\\Mine');
+    fns.SetDllDirectoryA.handler([0x200]);
+    assert.deepEqual(searchPath('', 0).slice(1, 5), ['D:\\Mine', 'C:\\WINDOWS\\system32',
+        'C:\\WINDOWS\\system', 'C:\\WINDOWS'], 'SetDllDirectory\'s, and no current directory');
+    assert.deepEqual(searchPath('E:\\Lib\\a.dll', 0x100 | 0x800), ['E:\\Lib',
+        'C:\\WINDOWS\\system32'], 'DLL_LOAD_DIR and SYSTEM32');
+    assert.deepEqual(searchPath('', 0x1000), ['C:\\App', 'D:\\Mine', 'C:\\WINDOWS\\system32'],
+        'DEFAULT_DIRS');
+});
+
 test('SetDllDirectory adds its directory to a bare name\'s search; NULL takes it away', async()=>{
     /** @type {string[]} */
     const asked = [];
@@ -453,11 +518,6 @@ test('SetDllDirectory adds its directory to a bare name\'s search; NULL takes it
     assert.equal(fns.LoadLibraryA.handler([0x100]), 0, 'not found with the default search');
     assert.equal(lastError(), 126);
     assert.equal(fns.SetDllDirectoryW.argBytes, 4);
-    assert.equal(fns.SetDefaultDllDirectories.handler([0x1000]), 1,
-        'LOAD_LIBRARY_SEARCH_DEFAULT_DIRS is taken');
-    assert.equal(fns.SetDefaultDllDirectories.handler([0x100]), 0,
-        'a flag LoadLibraryEx alone takes is not');
-    assert.equal(lastError(), 87);
     assert.equal(fns.SetDllDirectoryA.handler([0x200]), 1);
     asked.length = 0;
     assert.equal(fns.LoadLibraryA.handler([0x100]), 0x10000000);

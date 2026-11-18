@@ -62,8 +62,10 @@
   15 ms when every thread of the child waits, measured in Node.
 - A mutex, event, semaphore or waitable timer opened by name carries the rights it was granted: no
   rights at all, or rights the kind does not have, are refused, and a handle without SYNCHRONIZE
-  cannot be waited on, nor one without the modify right set, reset or released. Handles a process
-  creates, and every other kind, have every right. Not exported, as on Windows 7: the
+  cannot be waited on, nor one without the modify right set, reset or released. A keyed event
+  carries the rights asked for when it is made as well. Other handles a process creates, and every
+  other kind, have every right. A job and a completion port made by name share the one namespace
+  of named objects. Not exported, as on Windows 7: the
   synchronization barrier, `GetProcessInformation` and job objects.
 - In `compatible` mode a child's sound is mixed into its parent's output (the engine's mixer has
   no arena to lend it a table on), and goes on after a parent that exits first.
