@@ -588,5 +588,22 @@ export function createRawInput({ host, isWindow, focus, foreground }){
         },
     };
 
-    return { table, deliver };
+    /**
+     * A registration a library of the system makes for itself - DirectInput
+     * 8's, while it holds the mouse or the keyboard: it replaces the
+     * collection's as the program's own would, and taking it away leaves the
+     * collection unregistered, the program's earlier one gone with it, as
+     * Windows leaves it (Wine's dinput device8.c test_mouse_keyboard).
+     *
+     * @param {{ page: number, usage: number, flags: number, hwnd: number }} device
+     */
+    const claim = device=>{
+        registered.set(`${device.page}:${device.usage}`, { ...device });
+    };
+    /** @param {number} page @param {number} usage */
+    const release = (page, usage)=>{
+        registered.delete(`${page}:${usage}`);
+    };
+
+    return { table, deliver, claim, release };
 }

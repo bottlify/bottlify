@@ -787,6 +787,9 @@ export function createWin32Module(){
              *     cover: (hwnd: number) => void, active: () => number, deactivated: () => boolean,
              *     deactivations: () => number,
              *     rawInput: (report: import('./user32/rawinput.js').RawInputEvent) => void,
+             *     claimRawInput?: (usage: number, flags: number, thread?: unknown)
+             *         => number | Promise<number>,
+             *     releaseRawInput?: (usage: number) => void,
              *     modalLoop: import('./user32/windows.js').WindowService['modalLoop'],
              *     painting: () => boolean, refreshContext?: (hdc: number) => void,
              *     surfaceOf?: (hwnd: number) => { hwnd: number, rect: any } | null,
@@ -6778,6 +6781,18 @@ export function createWin32Module(){
                  * @param {import('./user32/rawinput.js').RawInputEvent} report
                  */
                 rawInput: report=>windowService.rawInput(report),
+
+                /**
+                 * DirectInput 8 taking the mouse (usage 2) or the keyboard (6):
+                 * the device registered for raw input to its hidden window, as
+                 * the program's GetRegisteredRawInputDevices then sees it.
+                 *
+                 * @param {number} usage @param {number} flags @param {unknown} [thread]
+                 */
+                claimRawInput: (usage, flags, thread)=>
+                    windowService.claimRawInput?.(usage, flags, thread) ?? 0,
+                /** @param {number} usage */
+                releaseRawInput: usage=>windowService.releaseRawInput?.(usage),
 
                 /**
                  * A call its parent makes in this process (`cross-process.js`),

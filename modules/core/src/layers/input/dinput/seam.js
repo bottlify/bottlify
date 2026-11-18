@@ -40,6 +40,13 @@ const DIERR_INVALIDPARAM = 0x80070057 | 0;
 const DIERR_NOTACQUIRED = 0x8007000c | 0;
 /** A read of a device taken back from the program: another window came to the front. */
 const DIERR_INPUTLOST = 0x8007001e | 0;
+/** The generic desktop page's mouse and keyboard, as raw input names them. */
+const HID_USAGE_MOUSE = 2;
+const HID_USAGE_KEYBOARD = 6;
+const RIDEV_NOLEGACY = 0x30;
+const RIDEV_CAPTUREMOUSE = 0x200;
+const RIDEV_NOHOTKEYS = 0x200;
+const RIDEV_INPUTSINK = 0x100;
 const DIERR_ACQUIRED = 0x800700aa | 0;
 /** Another window is in the foreground of a device that reads only there. */
 const DIERR_OTHERAPPHASPRIO = 0x80070005 | 0;
@@ -798,10 +805,14 @@ export function createPublisher({ publishInterface }){
  *        exclusively: Windows hides the cursor while a program holds it so.
  * @param {() => { x: number, y: number } | null} [deps.cursor]
  *        Where the cursor is: a mouse in absolute mode starts there when taken.
+ * @param {{ claim: (usage: number, flags: number) => number | Promise<number>,
+ *     release: (usage: number) => void }} [deps.rawInput]
+ *        user32's raw input registrations, which DirectInput 8 takes a held
+ *        system mouse or keyboard into. Absent, it registers nothing.
  */
 export function createDirectInput(
     { memory, now, publishInterface, signal, allocate, callGuest, callerThread, windowKind,
-        foreground, mouseHeld, cursor,
+        foreground, mouseHeld, cursor, rawInput,
         divergence },
 )
 {
@@ -916,13 +927,52 @@ export function createDirectInput(
         {
             return true;
         }
+        letGo(device);
+        lost.add(device);
+        return false;
+    };
+
+    /**
+     * A system mouse or keyboard taken through DirectInput 8 is registered
+     * for raw input to DirectInput's hidden window while it is held, over
+     * the program's own registration of it: RIDEV_INPUTSINK, or held
+     * exclusively RIDEV_NOLEGACY with RIDEV_CAPTUREMOUSE or RIDEV_NOHOTKEYS
+     * (Wine's dinput device8.c test_mouse_keyboard). An earlier DirectInput
+     * reads the devices as it always has, without it.
+     *
+     * @param {any} device
+     * @returns {number | Promise<number> | void}
+     */
+    const registerHeld = device=>{
+        if (!rawInput || device.version < 0x0800 || (device.kind !== MOUSE
+            && device.kind !== KEYBOARD))
+        {
+            return;
+        }
+        const flags = device.exclusive
+            ? RIDEV_NOLEGACY | (device.kind === MOUSE ? RIDEV_CAPTUREMOUSE : RIDEV_NOHOTKEYS)
+            : RIDEV_INPUTSINK;
+        return rawInput.claim(device.kind === MOUSE ? HID_USAGE_MOUSE : HID_USAGE_KEYBOARD,
+            flags);
+    };
+
+    /**
+     * A held device let go of, by Unacquire or by its window losing the
+     * foreground: the mouse's cursor back, its raw input registration gone.
+     *
+     * @param {any} device
+     */
+    const letGo = device=>{
         device.unacquire();
         if (device.kind === MOUSE && device.exclusive)
         {
             mouseHeld?.(false);
         }
-        lost.add(device);
-        return false;
+        if (rawInput && device.version >= 0x0800 && (device.kind === MOUSE
+            || device.kind === KEYBOARD))
+        {
+            rawInput.release(device.kind === MOUSE ? HID_USAGE_MOUSE : HID_USAGE_KEYBOARD);
+        }
     };
     /** What a read of a device nobody holds is told. @param {any} device */
     const notHeld = device=>(lost.has(device) ? DIERR_INPUTLOST : DIERR_NOTACQUIRED);
@@ -1135,7 +1185,8 @@ export function createDirectInput(
             {
                 mouseHeld?.(true);
             }
-            return DI_OK;
+            const registered = registerHeld(device);
+            return registered instanceof Promise ? registered.then(()=>DI_OK) : DI_OK;
         },
         /** HRESULT Unacquire(void) */
         Unacquire(device){
@@ -1143,11 +1194,7 @@ export function createDirectInput(
             {
                 return DI_NOEFFECT;
             }
-            device.unacquire();
-            if (device.kind === MOUSE && device.exclusive)
-            {
-                mouseHeld?.(false);
-            }
+            letGo(device);
             return DI_OK;
         },
 

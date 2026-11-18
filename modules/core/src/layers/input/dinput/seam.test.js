@@ -158,7 +158,7 @@ function clock(){
  */
 /** @param {{ windows?: Record<number, 'top' | 'child'>, foreground?: () => number,
  *     mouseHeld?: (held: boolean) => void }} [options] */
-function fixture({ windows, foreground, mouseHeld } = {}){
+function fixture({ windows, foreground, mouseHeld, rawInput } = {}){
     const memory = guestMemory();
     const bridge = fakeBridge();
     const time = clock();
@@ -201,6 +201,7 @@ function fixture({ windows, foreground, mouseHeld } = {}){
         windowKind: windows && (hwnd=>windows[hwnd] ?? null),
         foreground,
         mouseHeld,
+        rawInput,
     });
     const root = (()=>{
         const result = dinput.libraries['DINPUT.dll']
@@ -2375,3 +2376,31 @@ test('a device with no data format is not acquired, so its format can still be s
     assert.equal(f.bridge.call(device, 'SetDataFormat', [dataFormat(f.memory, 256)]), DI_OK);
     assert.equal(f.bridge.call(device, 'Acquire', []), DI_OK);
 });
+
+test('DirectInput 8 registers a held mouse or keyboard for raw input, an earlier does not', ()=>{
+    // Wine's device8.c test_mouse_keyboard: INPUTSINK to DIEmWin while held
+    // non-exclusively, NOLEGACY with CAPTUREMOUSE or NOHOTKEYS exclusively,
+    // and nothing once let go of.
+    /** @type {string[]} */
+    const said = [];
+    const f = fixture({ windows: { 0x100: 'top' }, foreground: ()=>0x100,
+        rawInput: { claim: (usage, flags)=>{
+            said.push(`claim ${usage} ${flags.toString(16)}`);
+            return 0x77;
+        }, release: usage=>void said.push(`release ${usage}`) } });
+    const keys = device8(f, GUID_SysKeyboard, false);
+    assert.equal(f.bridge.call(keys, 'SetDataFormat', [dataFormat(f.memory, 256)]), DI_OK);
+    assert.equal(f.bridge.call(keys, 'Acquire', []), DI_OK);
+    assert.equal(f.bridge.call(keys, 'Unacquire', []), DI_OK);
+    const rat = device8(f, GUID_SysMouse, false);
+    assert.equal(f.bridge.call(rat, 'SetDataFormat', [dataFormat(f.memory, 16)]), DI_OK);
+    assert.equal(f.bridge.call(rat, 'SetCooperativeLevel', [0x100, 0x1 | 0x4]), DI_OK);
+    assert.equal(f.bridge.call(rat, 'Acquire', []), DI_OK);
+    assert.equal(f.bridge.call(rat, 'Unacquire', []), DI_OK);
+    assert.deepEqual(said, ['claim 6 100', 'release 6', 'claim 2 230', 'release 2']);
+
+    const old = keyboard(f);
+    assert.equal(f.bridge.call(old.device, 'Unacquire', []), DI_OK);
+    assert.equal(said.length, 4, 'DirectInput 7 reads without raw input');
+});
+

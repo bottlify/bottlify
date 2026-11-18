@@ -694,6 +694,13 @@ const MAX_WINDOW_TEXT = 1 << 16;
  * @property {(event: import('./rawinput.js').RawInputEvent) => void} rawInput
  *           One event of the mouse or the keyboard as the device reported it,
  *           posted as WM_INPUT to whoever registered for that device.
+ * @property {(usage: number, flags: number, thread?: unknown) => number | Promise<number>}
+ *     [claimRawInput]
+ *           DirectInput 8 holding the mouse (usage 2) or the keyboard (6):
+ *           registered for raw input to its hidden DIEmWin window, whose
+ *           handle is answered.
+ * @property {(usage: number) => void} [releaseRawInput]
+ *           That device let go of: its collection unregistered.
  * @property {(hwnd: number, options: { thread: unknown,
  *     first?: import('./dialogs.js').ModalHook }) => number | Promise<number>} modalLoop
  *           Runs a dialog another library made as DialogBox runs one, on the
@@ -6822,6 +6829,11 @@ export function createWindowFunctions(host){
     const registerLibraryClass = definition=>registerSystemClass({ ...definition, library: true });
     // The list a dropdown combo box drops, a popup of a class of its own.
     registerSystemClass({ name: 'ComboLBox', procedure: controls.procedures.ComboLBox });
+    // The hidden window DirectInput 8 has raw input sent to while it holds the
+    // mouse or the keyboard (`inputSink`), a class of that library's own.
+    registerLibraryClass({ name: 'DIEmWin', procedure: (/** @type {any} */ record,
+        /** @type {DispatchedMessage} */ message, /** @type {unknown} */ thread)=>
+        defWindowProc(record, message, thread) });
     host.registerControls?.(controlHost, controls.toolkit, registerLibraryClass);
     // The rest of the classes Windows' own libraries register, which this build
     // has no control for: each is there all the same -- GetClassInfoEx finds
@@ -7026,6 +7038,36 @@ export function createWindowFunctions(host){
         },
     });
 
+    /** HID_USAGE_PAGE_GENERIC: the page the mouse and the keyboard are on. */
+    const GENERIC_DESKTOP = 1;
+    /** The hidden window DirectInput 8 has raw input sent to, once made. */
+    let sink = 0;
+    /**
+     * DirectInput 8's hidden window, class and title DIEmWin: a top-level
+     * window never shown, made on the thread of the first Acquire that
+     * needs it and kept while it lives.
+     *
+     * @param {unknown} thread
+     * @returns {number | Promise<number>}
+     */
+    const inputSink = thread=>{
+        if (sink !== 0 && live(sink))
+        {
+            return sink;
+        }
+        const made = controlHost.popup?.('DIEmWin', { x: 0, y: 0, width: 0, height: 0 }, 0, 0,
+            WS_POPUP, thread) ?? 0;
+        return andThen(made, hwnd=>{
+            const record = live(hwnd);
+            if (record)
+            {
+                record.title = 'DIEmWin';
+                sink = hwnd;
+            }
+            return record ? hwnd : 0;
+        });
+    };
+
     host.windowService?.({
         /**
          * Brings a device context a program holds up to where its window now
@@ -7073,6 +7115,22 @@ export function createWindowFunctions(host){
          * beside the messages it has always had.
          */
         rawInput: rawInput.deliver,
+
+        /**
+         * A device DirectInput 8 takes (`usage` of the generic desktop page:
+         * 2 the mouse, 6 the keyboard), registered for raw input to its
+         * hidden DIEmWin window with the flags its cooperative level means;
+         * the window's handle, made on the caller's thread the first time.
+         */
+        claimRawInput: (usage, flags, thread)=>andThen(inputSink(thread), hwnd=>{
+            if (hwnd !== 0)
+            {
+                rawInput.claim({ page: GENERIC_DESKTOP, usage, flags, hwnd });
+            }
+            return hwnd;
+        }),
+        /** The device let go of: its collection is registered no longer. */
+        releaseRawInput: usage=>rawInput.release(GENERIC_DESKTOP, usage),
 
         /**
          * One window's client rectangle on the screen, or null for a handle
