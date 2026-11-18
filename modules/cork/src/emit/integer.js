@@ -2092,7 +2092,7 @@ export function prepare(e, operand, options){
 function wrappedFirst(e, operand, store){
     const disp = operand.disp ?? 0;
     const { ramSize } = e.layout;
-    if ((ramSize & ramSize - 1) !== 0
+    if ((ramSize & ramSize - 1) !== 0 || e.guest !== null
         || operand.addressSize === 16 || (operand.base ?? -1) < 0 && (operand.index ?? -1) < 0
         || e.memPlan?.access != null || !wrapsRead(e, store))
     {
@@ -2411,6 +2411,17 @@ function windowed(e, operand, store){
         // high half the access takes (`Body.guest`) -- the high half the test left
         // is its group's, and a block tests its groups before any access of them.
         windowAddress(e, ()=>emitAddress64(e, operand));
+        return false;
+    }
+    if (e.guest !== null && wrapsRead(e, store))
+    {
+        // A wide window's read left untested: its whole address, the quadword sum
+        // wrapped into the window as a 4 GiB one's 32-bit sum is into RAM, the low
+        // half the access's and the high half its own (`Body.guest`).
+        emitAddress64(e, operand);
+        b.i64const(BigInt(/** @type {number} */ (e.layout.window) - 1)).op(I64.and)
+            .localTee(Local.t64).op(I64.wrap).localSet(Local.addr);
+        b.localGet(Local.t64).i64const(-(2n ** 32n)).op(I64.and).localSet(e.guest.high);
         return false;
     }
     if (wrapsRead(e, store) || e.memPlan?.access != null)

@@ -238,6 +238,19 @@ export function checkAccess(e, size, { counted = true, store = false, window = f
     }
     if (wrapsRead(e, store))
     {
+        if (e.guest !== null)
+        {
+            // A wide window's read: its whole address wrapped into the window, as a
+            // 4 GiB one's is into RAM - by `windowed` already, or here from the
+            // quadword `windowAddress` left in `t64`.
+            if (window)
+            {
+                b.localGet(Local.t64).i64const(BigInt(/** @type {number} */ (e.layout.window) - 1))
+                    .op(I64.and).localTee(Local.t64).op(I64.wrap).localSet(Local.addr);
+                b.localGet(Local.t64).i64const(-(2n ** 32n)).op(I64.and).localSet(e.guest.high);
+            }
+            return;
+        }
         if (window)
         {
             windowTest(e, size, counted);
@@ -2385,6 +2398,7 @@ export function emitStreamWindow(e, streams, turns, forward = false, ranges = []
             }
             b.i32const(from | 0).op(I32.add).localSet(Local.addr);
             if (!stream.store && stream.tested !== true && readsWrapped(e.context)
+                && e.guest === null
                 && width <= ramAlways(e.layout))
             {
                 // A stream that only reads, where reads go untested: its reach
