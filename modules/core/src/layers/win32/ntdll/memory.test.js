@@ -107,17 +107,45 @@ test('NtProtectVirtualMemory with no old protection is an access violation', ()=
     assert.equal(view.getUint32(0x104, true), 0x1000);
 });
 
-test('NtFreeVirtualMemory of size zero reports the region it released', ()=>{
-    const { fns, view } = setup({
-        VirtualQueryEx: (/** @type {number[]} */ [, , buffer])=>{
-            view.setUint32(buffer + 12, 0x3000, true);
-            return 28;
-        },
-    });
-    view.setUint32(0x100, 0x10000, true);
-    view.setUint32(0x104, 0, true);
-    assert.equal(fns.NtFreeVirtualMemory.handler([SELF, 0x100, 0x104, 0x8000]), 0);
-    assert.equal(view.getUint32(0x104, true), 0x3000);
+/**
+ * VirtualQueryEx over one allocation of two regions, free memory round it.
+ *
+ * @param {() => DataView} view @param {number} base @param {number} span
+ */
+const oneAllocation = (view, base, span)=>(/** @type {number[]} */ [, where, buffer])=>{
+    const inside = where >= base && where < base + span;
+    const half = base + span / 2;
+    view().setUint32(buffer + 4, inside ? base : 0, true);
+    view().setUint32(buffer + 12, inside ? (where < half ? half : base + span) - where : 0x10000,
+        true);
+    view().setUint32(buffer + 16, inside ? 0x1000 : 0x10000, true);
+    return 28;
+};
+
+test('NtFreeVirtualMemory releases a whole allocation, named by a page of its base', ()=>{
+    /** @type {DataView} */
+    let dataView;
+    const { fns, view, calls } = setup({ VirtualQueryEx: oneAllocation(()=>dataView,
+        0x10000, 0x4000) });
+    dataView = view;
+    /** @param {number} base @param {number} size @param {number} type */
+    const free = (base, size, type)=>{
+        view.setUint32(0x100, base, true);
+        view.setUint32(0x104, size, true);
+        return fns.NtFreeVirtualMemory.handler([SELF, 0x100, 0x104, type]);
+    };
+    assert.equal(free(0x10fff, 0, 0x8000), 0, 'the page the address is in');
+    assert.deepEqual(calls.at(-1), { name: 'VirtualFreeEx', args: [SELF, 0x10000, 0, 0x8000] });
+    assert.deepEqual([view.getUint32(0x100, true), view.getUint32(0x104, true)],
+        [0x10000, 0x4000], 'both of its regions, from its base');
+    assert.equal(free(0x11001, 0, 0x8000), 0xc000009f, 'STATUS_FREE_VM_NOT_AT_BASE');
+    assert.equal(view.getUint32(0x104, true), 0, 'nothing reported');
+    assert.equal(free(0x10000, 0x4000, 0x8000), 0, 'its size is all of it');
+    assert.equal(free(0x10000, 0x2000, 0x8000), 0xc000001a, 'STATUS_UNABLE_TO_FREE_VM');
+    assert.equal(free(0x10ffe, 0, 0x4000), 0, 'a decommit of no size, from its base too');
+    assert.deepEqual([view.getUint32(0x100, true), view.getUint32(0x104, true)],
+        [0x10000, 0x4000]);
+    assert.equal(free(0x30000, 0, 0x8000), 0xc00000a0, 'nothing there');
 });
 
 test('NtQueryVirtualMemory answers basic information and nothing else', ()=>{
@@ -185,8 +213,12 @@ test('a call answered later by another process answers its status then, from its
 
         // A release of size zero asks the child how far its region runs first.
         running = caller;
-        const freed = setup({ VirtualQueryEx: later(28), VirtualFreeEx: later(1) }, 0, more);
-        freed.view.setUint32(0x1800 + 12, 0x5000, true);
+        /** @type {DataView} */
+        let freedView;
+        const answer = oneAllocation(()=>freedView, 0x30000, 0x5000);
+        const freed = setup({ VirtualQueryEx: (/** @type {number[]} */ args)=>
+            later(answer(args))(), VirtualFreeEx: later(1) }, 0, more);
+        freedView = freed.view;
         freed.view.setUint32(0x100, 0x30000, true);
         freed.view.setUint32(0x104, 0, true);
         assert.equal(await freed.fns.NtFreeVirtualMemory.handler([0x44, 0x100, 0x104, 0x8000]), 0);

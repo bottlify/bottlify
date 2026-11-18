@@ -61,6 +61,17 @@ const MEM_DECOMMIT = 0x00004000;
 const MEM_RELEASE = 0x00008000;
 const MEM_RESET = 0x00080000;
 const MEM_WRITE_WATCH = 0x00200000;
+/**
+ * VirtualAlloc2's placeholders: a reservation made to be replaced by an
+ * allocation of exactly its span (MEM_REPLACE_PLACEHOLDER), and VirtualFree's
+ * ways back - an allocation that replaced one freed back to it, or a
+ * placeholder split (MEM_PRESERVE_PLACEHOLDER), and neighbours joined
+ * (MEM_COALESCE_PLACEHOLDERS).
+ */
+const MEM_REPLACE_PLACEHOLDER = 0x00004000;
+const MEM_RESERVE_PLACEHOLDER = 0x00040000;
+const MEM_COALESCE_PLACEHOLDERS = 0x1;
+const MEM_PRESERVE_PLACEHOLDER = 0x2;
 /** GetWriteWatch's one flag: start the watch over once the pages are told. */
 const WRITE_WATCH_FLAG_RESET = 0x1;
 
@@ -1360,6 +1371,17 @@ export function createHeapFunctions(host){
     const protections = new Map();
 
     /**
+     * The reservations that are placeholders, by base, and the allocations
+     * that replaced one, which a release with MEM_PRESERVE_PLACEHOLDER turns
+     * back into it.
+     *
+     * @type {Set<number>}
+     */
+    const placeholders = new Set();
+    /** @type {Set<number>} */
+    const replaced = new Set();
+
+    /**
      * The protections VirtualProtect gave a loaded image's pages, by the
      * image's base, with the header fields that tell that image from one
      * mapped at the same base after it is gone.
@@ -1950,6 +1972,41 @@ export function createHeapFunctions(host){
         : {});
 
     /**
+     * A reservation of exactly this span at its start, committed whole when
+     * the type asks; false where any of it is taken.
+     *
+     * @param {number} start @param {number} span @param {number} kind
+     * @param {number} protection
+     * @returns {boolean}
+     */
+    const reserveAt = (start, span, kind, protection)=>{
+        if (!allocator.allocateAt(start, span, { owner: VIRTUAL, reserving: true }))
+        {
+            return false;
+        }
+        decommitted.delete(start);
+        committed.set(start, []);
+        unreadable.delete(start);
+        protections.set(start, { allocation: protection, pages: createPageRuns() });
+        // Committed with it, the whole of what was reserved: from the
+        // granule's start, which is the address answered, not from the page
+        // asked for -- a program writes from the base it was handed (Wine's
+        // virtual_alloc maps the one range both ways).
+        if ((kind & MEM_COMMIT) !== 0)
+        {
+            markCommitted(start, start, start + span, true);
+            noteProtection(start, start, start + span, protection);
+        }
+        if ((kind & MEM_WRITE_WATCH) !== 0)
+        {
+            watched.set(start, { watch: undefined, written: new Set() });
+        }
+        handOverReservation(start, span, (kind & MEM_COMMIT) !== 0);
+        settleAccess(start, start, start + span);
+        return true;
+    };
+
+    /**
      * VirtualAlloc's body, and VirtualAlloc2's: `where` is the address
      * requirements of a new reservation -- an alignment past the allocation
      * granularity, and the lowest and highest address it may take -- or null.
@@ -1994,7 +2051,7 @@ export function createHeapFunctions(host){
                 host.setLastError(ERROR_INVALID_PARAMETER);
                 return 0;
             }
-            if (!allocator.allocateAt(start, span, { owner: VIRTUAL, reserving: true }))
+            if (!reserveAt(start, span, kind, protection))
             {
                 host.setLastError(ERROR_INVALID_ADDRESS);
                 host.divergence?.('VirtualAlloc', `reservation of ${span} bytes at 0x${
@@ -2003,26 +2060,6 @@ export function createHeapFunctions(host){
                     ? 'something is already there' : 'not free in the arena'}`);
                 return 0;
             }
-            decommitted.delete(start);
-            committed.set(start, []);
-            unreadable.delete(start);
-            protections.set(start, { allocation: protection, pages: createPageRuns() });
-            // Committed with it, the whole of what was reserved: from
-            // the granule's start, which is the address answered, not
-            // from the page asked for -- a program writes from the
-            // base it was handed (Wine's virtual_alloc maps the one
-            // range both ways).
-            if ((kind & MEM_COMMIT) !== 0)
-            {
-                markCommitted(start, start, start + span, true);
-                noteProtection(start, start, start + span, protection);
-            }
-            if ((kind & MEM_WRITE_WATCH) !== 0)
-            {
-                watched.set(start, { watch: undefined, written: new Set() });
-            }
-            handOverReservation(start, span, (kind & MEM_COMMIT) !== 0);
-            settleAccess(start, start, start + span);
             return start;
         }
 
@@ -2048,7 +2085,8 @@ export function createHeapFunctions(host){
             const needed = roundUp(requested + size - page, PAGE_SIZE);
             const existing = allocator.blockContaining(requested);
             const offset = existing ? page - existing.address : 0;
-            if (!existing || existing.owner !== VIRTUAL
+            // A placeholder holds no pages until an allocation replaces it.
+            if (!existing || existing.owner !== VIRTUAL || placeholders.has(existing.address)
                     || existing.capacity - offset < needed)
             {
                 host.setLastError(ERROR_INVALID_ADDRESS);
@@ -2162,6 +2200,178 @@ export function createHeapFunctions(host){
     };
 
     /**
+     * A reservation given back to the arena, whose next owner -- a heap,
+     * another reservation -- finds it open.
+     *
+     * @param {number} address @param {number} end
+     */
+    const release = (address, end)=>{
+        host.pageAccess?.(address, end - address, true);
+        allocator.free(address);
+        decommitted.delete(address);
+        committed.delete(address);
+        unreadable.delete(address);
+        protections.delete(address);
+        watched.delete(address);
+        placeholders.delete(address);
+        replaced.delete(address);
+    };
+
+    /**
+     * A placeholder over exactly this span, nothing committed in it.
+     *
+     * @param {number} start @param {number} span
+     * @returns {boolean}
+     */
+    const reservePlaceholder = (start, span)=>{
+        if (!reserveAt(start, span, MEM_RESERVE, PAGE_NOACCESS))
+        {
+            return false;
+        }
+        placeholders.add(start);
+        return true;
+    };
+
+    /**
+     * VirtualAlloc2 with a placeholder flag: a new placeholder
+     * (MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS and nothing
+     * else), or an allocation that replaces one - at its base, of exactly its
+     * span, reserved and committed as VirtualAlloc would. Null for a type
+     * with neither flag.
+     *
+     * @param {number} pointer @param {number} bytes @param {number} type
+     * @param {number} protect
+     * @param {{ alignment: number, lowest: number, highest: number }} where
+     * @returns {number | null}
+     */
+    const placeholderAlloc = (pointer, bytes, type, protect, where)=>{
+        const kind = type >>> 0;
+        if ((kind & MEM_RESERVE_PLACEHOLDER) !== 0)
+        {
+            if (kind !== (MEM_RESERVE | MEM_RESERVE_PLACEHOLDER)
+                || (protect >>> 0) !== PAGE_NOACCESS)
+            {
+                host.setLastError(ERROR_INVALID_PARAMETER);
+                return 0;
+            }
+            const address = virtualAlloc(pointer, bytes, MEM_RESERVE, PAGE_NOACCESS, where);
+            if (address !== 0)
+            {
+                placeholders.add(address);
+            }
+            return address;
+        }
+        if ((kind & MEM_REPLACE_PLACEHOLDER) === 0)
+        {
+            return null;
+        }
+        const rest = kind & ~MEM_REPLACE_PLACEHOLDER;
+        if ((rest & MEM_RESERVE) === 0 || (rest & ~(MEM_RESERVE | MEM_COMMIT)) !== 0)
+        {
+            host.setLastError(ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+        const start = pointer >>> 0;
+        const block = allocator.blockContaining(start);
+        if (!block || !placeholders.has(block.address) || block.address !== start
+            || roundUp(bytes >>> 0, PAGE_SIZE) !== block.capacity)
+        {
+            host.setLastError(ERROR_INVALID_ADDRESS);
+            return 0;
+        }
+        if (!privateProtection(protect >>> 0))
+        {
+            host.setLastError(ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+        // Exactly the placeholder's span, which a split may have left off
+        // an allocation granule.
+        const span = block.capacity;
+        release(start, start + span);
+        reserveAt(start, span, rest, protect >>> 0);
+        replaced.add(start);
+        return start;
+    };
+
+    /**
+     * VirtualFree's placeholder releases: MEM_PRESERVE_PLACEHOLDER frees an
+     * allocation that replaced a placeholder back to it, whole, or splits a
+     * placeholder in two or three at pages; MEM_COALESCE_PLACEHOLDERS
+     * joins the neighbouring placeholders that exactly fill the range into one.
+     *
+     * @param {number} address @param {number} size @param {number} flag
+     * @returns {number}
+     */
+    const placeholderFree = (address, size, flag)=>{
+        const block = allocator.blockContaining(address);
+        if (!block || block.owner !== VIRTUAL)
+        {
+            host.setLastError(ERROR_INVALID_ADDRESS);
+            return 0;
+        }
+        const end = address + size;
+        if (flag === MEM_COALESCE_PLACEHOLDERS)
+        {
+            /** @type {number[]} */
+            const joined = [];
+            let at = address;
+            while (at < end)
+            {
+                const part = allocator.blockContaining(at);
+                if (!part || part.address !== at || !placeholders.has(at))
+                {
+                    break;
+                }
+                joined.push(at);
+                at += part.capacity;
+            }
+            if (at !== end || joined.length < 2)
+            {
+                host.setLastError(ERROR_INVALID_PARAMETER);
+                return 0;
+            }
+            for (const part of joined)
+            {
+                release(part, part + /** @type {any} */ (allocator.block(part)).capacity);
+            }
+            reservePlaceholder(address, size);
+            return 1;
+        }
+        if (!placeholders.has(block.address))
+        {
+            // Only an allocation that replaced a placeholder goes back to
+            // one, and whole; any other is in the way of one.
+            if (!replaced.has(block.address) || address !== block.address
+                || (size !== 0 && size !== block.capacity))
+            {
+                host.setLastError(ERROR_INVALID_ADDRESS);
+                return 0;
+            }
+            const span = block.capacity;
+            release(address, address + span);
+            reservePlaceholder(address, span);
+            return 1;
+        }
+        const whole = block.address + block.capacity;
+        if (size === 0 || end > whole || address % PAGE_SIZE !== 0 || size % PAGE_SIZE !== 0
+            || (address === block.address && end === whole))
+        {
+            host.setLastError(ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+        const base = block.address;
+        release(base, whole);
+        for (const [from, to] of [[base, address], [address, end], [end, whole]])
+        {
+            if (to > from)
+            {
+                reservePlaceholder(from, to - from);
+            }
+        }
+        return 1;
+    };
+
+    /**
      * VirtualAlloc2's MEM_EXTENDED_PARAMETER list, as the address
      * requirements it asks for: null for a list it cannot take -- a type
      * other than those two, an alignment not a power of two of at least the
@@ -2172,6 +2382,11 @@ export function createHeapFunctions(host){
      */
     const extendedParameters = (list, count)=>{
         const where = { alignment: 0, lowest: 0, highest: 0xffffffff };
+        // A count with no list to count is no list.
+        if ((list >>> 0) === 0 && (count >>> 0) !== 0)
+        {
+            return null;
+        }
         const pointerSize = host.pointerSize ?? 4;
         /** @param {number} at */
         const pointerAt = at=>new DataView(host.readMemory(at >>> 0, 4).slice().buffer)
@@ -2495,8 +2710,9 @@ export function createHeapFunctions(host){
          * alignment and the span it must lie in
          * (MemExtendedParameterAddressRequirements), and a NUMA node, which a
          * machine of one node has no choice of. A process is this one, as
-         * NULL or the pseudo-handle; placeholders are not kept, and their
-         * flags are refused as an unknown type is.
+         * NULL or the pseudo-handle. A placeholder is a reservation made to be
+         * replaced (`placeholderAlloc`); VirtualFree splits, joins and
+         * restores them (`placeholderFree`).
          */
         VirtualAlloc2: {
             argBytes: 28,
@@ -2515,14 +2731,16 @@ export function createHeapFunctions(host){
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                return virtualAlloc(pointer, bytes, type, protect, where);
+                return placeholderAlloc(pointer, bytes, type, protect, where)
+                    ?? virtualAlloc(pointer, bytes, type, protect, where);
             },
         },
 
         /**
          * BOOL VirtualFree(LPVOID lpAddress, SIZE_T dwSize, DWORD dwFreeType)
          *
-         * Exactly one of MEM_DECOMMIT and MEM_RELEASE. A release names the
+         * Exactly one of MEM_DECOMMIT and MEM_RELEASE, the release perhaps with
+         * a placeholder flag (`placeholderFree`). A release names the
          * reservation by its base and frees all of it, so it takes no size; a
          * decommit names pages anywhere inside one. Each failure says why
          * through the last error: an address that is not a reservation's is
@@ -2535,6 +2753,11 @@ export function createHeapFunctions(host){
                 const address = pointer >>> 0;
                 const kind = type >>> 0;
                 const size = bytes >>> 0;
+                if (kind === (MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER)
+                    || kind === (MEM_RELEASE | MEM_COALESCE_PLACEHOLDERS))
+                {
+                    return placeholderFree(address, size, kind & ~MEM_RELEASE);
+                }
                 if (kind !== MEM_DECOMMIT && kind !== MEM_RELEASE)
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
@@ -2559,15 +2782,7 @@ export function createHeapFunctions(host){
                         host.setLastError(ERROR_INVALID_ADDRESS);
                         return 0;
                     }
-                    // Back to the arena, whose next owner -- a heap, another
-                    // reservation -- finds it open.
-                    host.pageAccess?.(address, end - address, true);
-                    allocator.free(address);
-                    decommitted.delete(address);
-                    committed.delete(address);
-                    unreadable.delete(address);
-                    protections.delete(address);
-                    watched.delete(address);
+                    release(address, end);
                     return 1;
                 }
                 // Decommit keeps the reservation and closes the pages where the

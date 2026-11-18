@@ -2230,3 +2230,45 @@ test('a heap made with a maximum is fixed: no block reaches the threshold, nor t
         assert.notEqual(fns.HeapAlloc.handler([growable, 0, 0x80000]), 0,
             'a growable heap has no such limit');
     });
+
+test('a placeholder is replaced by exactly its span, split, joined and given back', ()=>{
+    const { fns, query } = arenaQuery();
+    const PLACEHOLDER = MEM_RESERVE | 0x40000;
+    const REPLACE = MEM_RESERVE | MEM_COMMIT | 0x4000;
+    const PRESERVE = MEM_RELEASE | 0x2;
+    const COALESCE = MEM_RELEASE | 0x1;
+    const alloc2 = (/** @type {number} */ at, /** @type {number} */ size,
+        /** @type {number} */ type, /** @type {number} */ protect)=>
+        fns.VirtualAlloc2.handler([0, at, size, type, protect, 0, 0]);
+
+    assert.equal(alloc2(0, GRANULARITY, PLACEHOLDER, 0x04), 0, 'a placeholder is PAGE_NOACCESS');
+    const base = alloc2(0, GRANULARITY, PLACEHOLDER, PAGE_NOACCESS);
+    assert.notEqual(base, 0);
+    assert.deepEqual(query(base), { base, allocationBase: base, size: GRANULARITY,
+        state: MEM_RESERVE, protect: 0 });
+    assert.equal(fns.VirtualAlloc.handler([base, PAGE_SIZE, MEM_COMMIT, 0x04]), 0,
+        'nothing is committed in a placeholder');
+    assert.equal(fns.VirtualAlloc.handler([0, GRANULARITY, PLACEHOLDER, PAGE_NOACCESS]), 0,
+        'VirtualAlloc knows no placeholders');
+
+    // Split at pages into three, the middle replaced and given back.
+    assert.equal(fns.VirtualFree.handler([base + 0x4000, 0x4000, PRESERVE]), 1);
+    assert.equal(query(base).size, 0x4000);
+    assert.equal(query(base + 0x8000).allocationBase, base + 0x8000);
+    assert.equal(alloc2(base + 0x4000, 0x2000, REPLACE, 0x04), 0, 'not its whole span');
+    assert.equal(alloc2(base + 0x4000, 0x4000, REPLACE, 0x04), base + 0x4000);
+    assert.equal(query(base + 0x4000).state, MEM_COMMIT);
+    assert.equal(fns.VirtualFree.handler([base + 0x4000, 0, PRESERVE]), 1, 'back to a placeholder');
+    assert.equal(query(base + 0x4000).state, MEM_RESERVE);
+
+    assert.equal(fns.VirtualFree.handler([base, 0x8000, COALESCE]), 1);
+    assert.equal(query(base).size, 0x8000, 'two joined');
+    assert.equal(fns.VirtualFree.handler([base, GRANULARITY, COALESCE]), 1);
+    assert.equal(query(base).size, GRANULARITY, 'and the third');
+    assert.equal(fns.VirtualFree.handler([base, 0, MEM_RELEASE]), 1);
+    assert.equal(query(base).state, MEM_FREE);
+
+    const plain = fns.VirtualAlloc.handler([0, GRANULARITY, MEM_RESERVE, PAGE_NOACCESS]);
+    assert.equal(fns.VirtualFree.handler([plain, 0, PRESERVE]), 0,
+        'only an allocation that replaced a placeholder goes back to one');
+});
