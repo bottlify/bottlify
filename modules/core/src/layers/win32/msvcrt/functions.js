@@ -197,6 +197,8 @@ const seededCode = (made, long, argBytes, handler)=>({
  *     the pattern: the lengths are the program's, and a clear of a megabyte
  *     through writeMemory costs an allocation and two extra passes.
  * @property {(address: number, maxLength: number) => string} readCString
+ * @property {(code: number) => void} [setLastError]  kernel32's, for what the
+ *           runtime's file calls leave there as Windows' leave it.
  * @property {(address: number, limit: number, wanted: Uint8Array) =>
  *            { index: number, byte: number }} scanCString
  *     Walks a guest string's bytes in chunks and answers with the first one a
@@ -1079,32 +1081,37 @@ export function createMsvcrtFunctions(host){
         allocate, readMemory: host.readMemory, writeMemory: host.writeMemory,
     });
 
+    // Where a runtime with an invalid-parameter handler hears what its
+    // functions refuse: every refusal sets errno through here.
+    const invalidParameters = createInvalidParameterWatch();
     /**
      * errno is the calling thread's own, as the runtime keeps it: the
      * scheduler may switch threads between a failing call and the line that
-     * reads errno after it. Without a thread to ask, there is the one.
+     * reads errno after it. Without a thread to ask, there is the one. And it
+     * is the runtime's own: a call through ucrtbase's or MSVCR80's export
+     * sets that runtime's errno, never msvcrt.dll's - a C++ library on the
+     * universal runtime failing a call leaves a program's msvcrt errno as it
+     * was, as on Windows.
      *
      * @type {WeakMap<object, string>}
      */
     const errnoOf = new WeakMap();
     let threadsSeen = 0;
     const errnoName = ()=>{
+        const runtime = invalidParameters.runtime();
         const thread = host.currentThread?.();
-        if (thread === null || typeof thread !== 'object')
+        let name = 'errno';
+        if (thread !== null && typeof thread === 'object')
         {
-            return 'errno';
+            name = errnoOf.get(thread) ?? '';
+            if (name === '')
+            {
+                name = `errno:${++threadsSeen}`;
+                errnoOf.set(thread, name);
+            }
         }
-        let name = errnoOf.get(thread);
-        if (name === undefined)
-        {
-            name = `errno:${++threadsSeen}`;
-            errnoOf.set(thread, name);
-        }
-        return name;
+        return runtime === null ? name : `${runtime}:${name}`;
     };
-    // Where a runtime with an invalid-parameter handler hears what its
-    // functions refuse: every refusal sets errno through here.
-    const invalidParameters = createInvalidParameterWatch();
     /** @param {number} code */
     const errno = code=>{
         globals.set(errnoName(), code);
@@ -1541,6 +1548,7 @@ export function createMsvcrtFunctions(host){
                 drives: host.drives,
                 files: host.files,
                 errno,
+                ...host.setLastError ? { setLastError: host.setLastError } : {},
                 getenv: name=>environment?.value(name) ?? null,
                 isLead: byte=>multiBytePage.isLead(byte),
             })

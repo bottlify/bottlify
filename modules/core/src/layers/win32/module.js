@@ -3931,6 +3931,7 @@ export function createWin32Module(){
                         fillMemory,
                         readCString,
                         scanCString,
+                        setLastError: setError,
                         // The `va_list` window stops at the end of its region: a
                         // thread formatting from just below its stack's top is
                         // entitled to, and reading off the end is the host's bug.

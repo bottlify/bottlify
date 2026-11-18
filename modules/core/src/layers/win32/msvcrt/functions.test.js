@@ -7,6 +7,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createMsvcrtFunctions } from './functions.js';
+import { INVALID_PARAMETERS, createInvalidParameterRuntime, watchedExports }
+    from './invalid-parameter.js';
 import { doubleSlots, fakeMemory, fakeVolume } from './harness.test.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import { COMPILED } from './inguest.x86.js';
@@ -945,6 +947,25 @@ test('errno is one variable: a failing call sets what _errno points at', ()=>{
 
     assert.equal(fns.strtol.handler([put(0x100, '99999999999'), 0, 10]), 0x7fffffff);
     assert.equal(u32(cell), ERANGE, 'and written through the cell after');
+});
+
+test('each runtime has its own errno: a call through another runtime leaves msvcrt\'s alone', ()=>{
+    // msvcp140 over the universal runtime fails a call while a program on
+    // msvcrt.dll keeps its errno (Wine's msvcp140 test_Current_set).
+    const { fns, put, u32 } = wholeRuntime({
+        stat: ()=>null, currentDirectory: ()=>'C:\\', setCurrentDirectory: ()=>true,
+    });
+    const seam = fns[/** @type {any} */ (INVALID_PARAMETERS)];
+    const ucrt = watchedExports(fns, seam.watch, createInvalidParameterRuntime({
+        library: 'ucrtbase.dll', callGuest: undefined, exitProcess: undefined, report: undefined,
+    }));
+    const own = fns._errno.handler([]);
+    const theirs = ucrt._errno.handler([]);
+    assert.notEqual(own, theirs, 'a cell of each');
+    fns._set_errno.handler([0xbeef]);
+    assert.equal(ucrt._chdir.handler([put(0x100, 'C:\\nowhere')]), -1);
+    assert.equal(u32(theirs), 2, 'ENOENT in the runtime the call came through');
+    assert.equal(u32(own), 0xbeef, 'and msvcrt.dll\'s as the program left it');
 });
 
 test('each thread has its own errno: another thread\'s failure does not overwrite it', ()=>{

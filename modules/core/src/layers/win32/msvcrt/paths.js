@@ -24,6 +24,12 @@
 import { EACCES, EBADF, EEXIST, EINVAL, ENOENT, ENOTEMPTY, ERANGE } from './globals.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 
+/** The last errors DeleteFile and RemoveDirectory leave. */
+const ERROR_FILE_NOT_FOUND = 2;
+const ERROR_PATH_NOT_FOUND = 3;
+const ERROR_ACCESS_DENIED = 5;
+const ERROR_DIR_NOT_EMPTY = 145;
+
 const MAX_STRING = 1 << 20;
 
 /** `struct _finddata_t` as msvcrt.dll lays it out: 32-bit times, 260 bytes of name. */
@@ -199,6 +205,10 @@ export const splitSearch = spec=>{
  * @property {any} files  The volume: stat, list, remove, rename, mkdir and the
  *           current directory.
  * @property {(code: number) => void} [errno]  Where a failure says why.
+ * @property {(code: number) => void} [setLastError]
+ *           kernel32's last error, which a removal leaves as DeleteFile and
+ *           RemoveDirectory, which the runtime calls, leave it: a C++ library
+ *           over the runtime reads its error code there.
  * @property {(address: number, length: number) => Uint8Array} [readMemory]
  *           For a wide pattern. Absent, the wide finds stay unexported.
  * @property {(name: string) => string | null} [getenv]
@@ -573,12 +583,28 @@ export function createPathFunctions(host){
 
     /**
      * Why a removal the volume refused failed: the name is not there, or it
-     * is and is not the volume's to remove.
+     * is and is not the volume's to remove. The last error is the one
+     * DeleteFile or RemoveDirectory leaves: no file, no folder on the way to
+     * it, a file the call may not remove (a folder, to DeleteFile) or a folder
+     * not empty.
      *
      * @param {string} path @param {number} refused
      */
-    const removal = (path, refused)=>
-        (host.files.remove(path) === true ? 0 : (exists(path) ? refused : ENOENT));
+    const removal = (path, refused)=>{
+        if (host.files.remove(path) === true)
+        {
+            return 0;
+        }
+        if (exists(path))
+        {
+            host.setLastError?.(refused === ENOTEMPTY ? ERROR_DIR_NOT_EMPTY : ERROR_ACCESS_DENIED);
+            return refused;
+        }
+        const parent = path.replace(/[\\/][^\\/]*$/, '');
+        host.setLastError?.(parent !== path && parent !== '' && !/^[A-Za-z]:$/.test(parent)
+            && !exists(parent) ? ERROR_PATH_NOT_FOUND : ERROR_FILE_NOT_FOUND);
+        return ENOENT;
+    };
 
     /**
      * `_mktemp`'s name of a template: null for one without six closing X's,
