@@ -214,6 +214,8 @@ const SS_ENHMETAFILE = 0x0f;
 
 /** The window styles a dialog's Tab order is read from. */
 const WS_TABSTOP = 0x00010000;
+/** A dialog that is a page inside another (a property sheet's). */
+const DS_CONTROL = 0x0400;
 const WS_DISABLED = 0x08000000;
 const WS_VISIBLE = 0x10000000;
 const WS_MINIMIZE = 0x20000000;
@@ -1523,6 +1525,14 @@ export function createControlProcedures(host){
                     {
                         state.check = wanted;
                         host.invalidate(record);
+                    }
+                    // A radio button checked is the one Tab reaches in its
+                    // group, and one unchecked is not (dialog.c test_focus:
+                    // the dialog's first tab stop is the group's checked one).
+                    if (RADIO_KINDS.has(kind))
+                    {
+                        record.style = (wanted === BST_UNCHECKED ? record.style & ~WS_TABSTOP
+                            : record.style | WS_TABSTOP) >>> 0;
                     }
                 }
                 return 0;
@@ -4676,9 +4686,21 @@ export function createControlProcedures(host){
         {
             return 0;
         }
-        const first = host.children(dialog).find(child=>(child.style
-            & (WS_TABSTOP | WS_VISIBLE | WS_DISABLED)) === (WS_TABSTOP | WS_VISIBLE));
+        const first = firstFocus(dialog);
         return first ? giveFocus(dialog, first, thread) : 0;
+    };
+
+    /**
+     * Where a dialog's focus goes when nothing says otherwise: its first
+     * visible, enabled control that stops the Tab key or, where none does,
+     * its first visible, enabled control - a label (dialog.c test_focus).
+     *
+     * @param {any} dialog @returns {any | null}
+     */
+    const firstFocus = dialog=>{
+        const reachable = host.children(dialog).filter(child=>
+            (child.style & (WS_VISIBLE | WS_DISABLED)) === WS_VISIBLE);
+        return reachable.find(child=>(child.style & WS_TABSTOP) !== 0) ?? reachable[0] ?? null;
     };
 
     /**
@@ -4849,9 +4871,17 @@ export function createControlProcedures(host){
             if (message.message === WM_INITDIALOG)
             {
                 // TRUE from WM_INITDIALOG means "give the focus to the
-                // control you chose", the first tab stop.
-                const first = message.wParam >>> 0;
-                return first !== 0 ? after(host.setFocus(first, thread), ()=>1) : 1;
+                // first tab stop" - as the procedure left the controls, so a
+                // radio button it checked is the one - or, with none, to the
+                // first control; an edit's text selected on the way in. A
+                // DS_CONTROL page its template leaves hidden takes no focus
+                // (dialog.c test_focus).
+                if ((record.style & DS_CONTROL) !== 0 && record.templateVisible === false)
+                {
+                    return 1;
+                }
+                const target = firstFocus(record);
+                return target ? after(giveFocus(record, target, thread), ()=>1) : 1;
             }
             return ANSWERED_DIRECTLY.has(message.message)
                 ? handled >>> 0

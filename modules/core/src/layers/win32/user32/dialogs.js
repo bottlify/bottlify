@@ -540,9 +540,10 @@ export function createDialogFunctions(options){
                 y: template.i16(at + item.y),
                 width: template.i16(at + item.cx),
                 height: template.i16(at + item.cy),
-                // A WORD in the old layout and a DWORD in the new, and either
-                // way the id a program passes to GetDlgItem is 16 bits wide.
-                id: extended ? template.u32(at + item.id) & 0xffff : template.u16(at + item.id),
+                // A WORD in the old layout and a DWORD in the new, kept whole:
+                // an extended template's -1 is the id GetDlgItem(-1) and
+                // GetWindowLong(GWLP_ID) answer (dialog.c test_GetDlgItem).
+                id: extended ? template.u32(at + item.id) : template.u16(at + item.id),
                 className: '',
                 title: '',
                 createName: '',
@@ -590,36 +591,15 @@ export function createDialogFunctions(options){
         message, wParam, lParam, host.callerThread?.());
 
     /**
-     * A control by identifier: an immediate child first, then any deeper
-     * one, which is where a control inside a group or a page lives.
+     * A control by identifier: the first immediate child of that id, in
+     * the order the children stand - never a grandchild, not even under a
+     * WS_EX_CONTROLPARENT child (dialog.c test_GetDlgItem).
      *
      * @param {number} hwnd @param {number} id @returns {any | null}
      */
     const controlOf = (hwnd, id)=>{
         const dialog = live(hwnd);
-        if (!dialog)
-        {
-            return null;
-        }
-        /** @param {any} parent @returns {any | null} */
-        const search = parent=>{
-            const children = host.children(parent);
-            const direct = children.find(child=>child.id === (id >>> 0));
-            if (direct)
-            {
-                return direct;
-            }
-            for (const child of children)
-            {
-                const deeper = search(child);
-                if (deeper)
-                {
-                    return deeper;
-                }
-            }
-            return null;
-        };
-        return search(dialog);
+        return dialog ? host.children(dialog).find(child=>child.id === (id >>> 0)) ?? null : null;
     };
 
     /**
@@ -646,9 +626,10 @@ export function createDialogFunctions(options){
      *     making it -- DialogBox waits on its owner's thread to take
      *     WM_ENABLE -- or the windows are the thread's then on the processor,
      *     and the modal loop never takes their messages.
+     * @param {boolean} [modal]  DialogBox's: shown by its modal loop, not here.
      */
     const createDialog = (instance, template, parent, dialogFunc, initParam, unicode = false,
-        caller = undefined)=>
+        caller = undefined, modal = false)=>
     {
         const thread = caller ?? host.callerThread?.();
         const described = (template >>> 0) === 0
@@ -755,6 +736,10 @@ export function createDialogFunctions(options){
             // Get/SetWindowLong(DWLP_DLGPROC) read and change as a window
             // procedure's.
             dialog.dlgProcUnicode = unicode === true;
+            // Whether the template asked to be shown: the window itself is
+            // made hidden until WM_INITDIALOG has run, and a hidden DS_CONTROL
+            // page takes no focus from it.
+            dialog.templateVisible = wantsVisible;
             /** @type {any[]} */
             const controls = [];
             /**
@@ -845,7 +830,7 @@ export function createDialogFunctions(options){
                     // procedure has had its say. A procedure that ended the dialog
                     // from WM_INITDIALOG has left nothing to show.
                     const standing = live(dialog.hwnd);
-                    if (wantsVisible && standing && !standing.dialogEnded)
+                    if (wantsVisible && !modal && standing && !standing.dialogEnded)
                     {
                         return after(host.show?.(dialog.hwnd, thread) ?? 0, ()=>dialog.hwnd);
                     }
@@ -1001,8 +986,14 @@ export function createDialogFunctions(options){
             {
                 return after(host.send(focused, BM_CLICK, 0, 0, thread), ()=>1);
             }
-            return after(defaultButton(dialog, thread), id=>after(command(dialog, id, thread),
-                ()=>1));
+            // A default button that is disabled presses nothing (dialog.c
+            // test_DisabledDialogTest: Enter with the OK button disabled does
+            // not end the dialog).
+            return after(defaultButton(dialog, thread), id=>{
+                const button = controlOf(dialog, id);
+                return button && (button.style & WS_DISABLED) !== 0 ? 1
+                    : after(command(dialog, id, thread), ()=>1);
+            });
         });
     };
 
@@ -1079,13 +1070,12 @@ export function createDialogFunctions(options){
         {
             return DIALOG_FAILED;
         }
-        // A modal dialog is shown by the call whether or not its template
-        // says WS_VISIBLE: most templates leave the bit off and rely on this.
-        // One its WM_INITDIALOG already ended is not shown at all.
-        if (!record.dialogEnded)
-        {
-            await host.show?.(hwnd, thread);
-        }
+        // A modal dialog is shown by its loop whether or not its template
+        // says WS_VISIBLE - most templates leave the bit off and rely on this -
+        // and only once the queue first runs dry: what WM_INITDIALOG posted
+        // finds it still hidden (dialog.c test_focus). One its WM_INITDIALOG
+        // already ended is not shown at all.
+        let shown = (record.style & WS_VISIBLE) !== 0;
         // Unattended, a dialog waiting for input is put to whoever answers for
         // the run, and the button chosen is pressed as a click presses it; one
         // that stays up after a few presses is left.
@@ -1095,9 +1085,16 @@ export function createDialogFunctions(options){
         {
             // The program's own loop would have been GetMessage, and what
             // that does as it takes a message the dialog's loop does too.
-            const entry = host.take ? await host.take(thread)
+            // Looked at without waiting until the dialog is shown.
+            const entry = shown && host.take ? await host.take(thread)
                 : host.queue.peek({ hwnd: ANY_WINDOW, first: 0, last: 0, remove: true,
                     thread: threadIdOf(thread) });
+            if (!entry && !shown)
+            {
+                shown = true;
+                await host.show?.(hwnd, thread);
+                continue;
+            }
             if (!entry)
             {
                 // Once each time the queue runs dry: the owner may end the
@@ -1219,7 +1216,7 @@ export function createDialogFunctions(options){
         /** @param {boolean} on */
         const enable = on=>(disabled !== 0 ? host.enable?.(disabled, on, thread) ?? 0 : 0);
         return once(after(enable(false), ()=>createDialog(instance, template,
-            owner ? owner.hwnd : parent, dialogFunc, initParam, unicode, thread)),
+            owner ? owner.hwnd : parent, dialogFunc, initParam, unicode, thread, true)),
         hwnd=>(hwnd === 0 ? after(enable(true), ()=>DIALOG_FAILED)
             : runModal(hwnd, thread, undefined, owner?.hwnd ?? 0)));
     };
