@@ -116,6 +116,8 @@ const WM_MOUSEACTIVATE = 0x0021;
 const WA_INACTIVE = 0;
 const WA_ACTIVE = 1;
 const WA_CLICKACTIVE = 2;
+const WM_STYLECHANGING = 0x007c;
+const WM_STYLECHANGED = 0x007d;
 const WM_NCCALCSIZE = 0x0083;
 const WM_NCPAINT = 0x0085;
 /**
@@ -3525,7 +3527,7 @@ export function createWindowFunctions(host){
      *
      * @param {number} hwnd @param {number} index @param {number} low @param {number} high
      * @param {boolean} unicode
-     * @returns {bigint}
+     * @returns {bigint | Promise<bigint>}
      */
     const setLongPtr = (hwnd, index, low, high, unicode)=>{
         const record = live(hwnd);
@@ -3537,14 +3539,46 @@ export function createWindowFunctions(host){
         const at = index | 0;
         if (at < 0)
         {
-            writeLong(record, index, low, unicode);
+            return andThen(setLong(record, index, low, unicode),
+                done=>(done === false ? 0n : previous));
         }
-        else if (at + 8 <= record.extra.byteLength)
+        if (at + 8 <= record.extra.byteLength)
         {
             record.extra.setUint32(at, low >>> 0, true);
             record.extra.setUint32(at + 4, high >>> 0, true);
         }
         return previous;
+    };
+
+    /**
+     * SetWindowLong's change, a style's asked about first: the window hears
+     * WM_STYLECHANGING with a STYLESTRUCT whose styleNew it may change, gets
+     * what it left, and hears WM_STYLECHANGED with the old style and the one
+     * it got (MSDN, WM_STYLECHANGING and WM_STYLECHANGED).
+     *
+     * @param {any} record @param {number} index @param {number} value
+     * @param {boolean} unicode
+     * @returns {boolean | undefined | Promise<boolean | undefined>} false when refused
+     */
+    const setLong = (record, index, value, unicode)=>{
+        const at = (index | 0) === GWL_STYLE || (index | 0) === GWL_EXSTYLE
+            ? host.allocate?.(8) ?? 0 : 0;
+        if (at === 0)
+        {
+            return writeLong(record, index, value, unicode);
+        }
+        const thread = host.callerThread?.();
+        const old = readLong(record, index) >>> 0;
+        writeU32s(host, at, [old, value >>> 0]);
+        return andThen(send(record.hwnd, WM_STYLECHANGING, index, at, thread), ()=>{
+            const given = new DataView(host.readMemory(at, 8).slice().buffer).getUint32(4, true);
+            writeLong(record, index, given, unicode);
+            writeU32s(host, at, [old, readLong(record, index) >>> 0]);
+            return andThen(send(record.hwnd, WM_STYLECHANGED, index, at, thread), ()=>{
+                host.release?.(at);
+                return undefined;
+            });
+        });
     };
 
     /**
@@ -3606,8 +3640,11 @@ export function createWindowFunctions(host){
                 return;
             case GWL_STYLE:
                 // A top-level window clips its siblings whatever it is given,
-                // and the window edge follows the frame it now has.
-                record.style = (record.parent === 0 ? value | WS_CLIPSIBLINGS : value) >>> 0;
+                // a minimized one stays minimized until it is restored (win.c
+                // test_set_window_style), and the window edge follows the
+                // frame it now has.
+                record.style = ((record.parent === 0 ? value | WS_CLIPSIBLINGS : value)
+                    | (record.style & WS_MINIMIZE)) >>> 0;
                 record.exStyle = edgeFor(record.style, record.exStyle);
                 tell(record);
                 return;
@@ -9065,7 +9102,8 @@ export function createWindowFunctions(host){
                     return 0;
                 }
                 const previous = readLong(record, index);
-                return writeLong(record, index, value) === false ? 0 : previous;
+                return andThen(setLong(record, index, value, false),
+                    done=>(done === false ? 0 : previous));
             },
         },
 
@@ -9128,7 +9166,8 @@ export function createWindowFunctions(host){
                     return 0;
                 }
                 const previous = readLong(record, index, true);
-                return writeLong(record, index, value, true) === false ? 0 : previous;
+                return andThen(setLong(record, index, value, true),
+                    done=>(done === false ? 0 : previous));
             },
         },
 

@@ -1311,6 +1311,67 @@ test('SetWindowLongA answers with the value it replaced', ()=>{
         'code that restores what it changed needs the old value back');
 });
 
+test('SetWindowLong of a style asks WM_STYLECHANGING, which may change it, then tells'
+    + ' WM_STYLECHANGED', ()=>{
+    // MSDN, WM_STYLECHANGING: sent when SetWindowLong is about to change
+    // a style, with a STYLESTRUCT whose styleNew the window may change;
+    // WM_STYLECHANGED after, with the old and the new.
+    const [WM_STYLECHANGING, WM_STYLECHANGED, GWL_EXSTYLE] = [0x7c, 0x7d, -20];
+    const WS_BORDER = 0x00800000;
+    /** @type {{ message: number, wParam: number, old: number, asked: number }[]} */
+    const seen = [];
+    const { fns, memory, hwnd, released } = withWindow({
+        heap: true,
+        reply: (/** @type {any} */ message)=>{
+            if (message.message === WM_STYLECHANGING || message.message === WM_STYLECHANGED)
+            {
+                seen.push({ message: message.message, wParam: message.wParam,
+                    old: memory.u32(message.lParam), asked: memory.u32(message.lParam + 4) });
+                if (message.message === WM_STYLECHANGING && message.wParam === GWL_STYLE >>> 0)
+                {
+                    // The procedure takes the border off whatever it is given.
+                    memory.putU32s(message.lParam + 4,
+                        [(memory.u32(message.lParam + 4) & ~WS_BORDER) >>> 0]);
+                }
+                return 0;
+            }
+            // WM_NCCREATE answered nonzero, so the window is made.
+            return 1;
+        },
+    });
+    const before = fns.GetWindowLongA.handler([hwnd, GWL_STYLE]) >>> 0;
+
+    assert.equal(fns.SetWindowLongA.handler([hwnd, GWL_STYLE, before | WS_BORDER | 0x4]) >>> 0,
+        before, 'answers the style it replaced');
+    const after = fns.GetWindowLongA.handler([hwnd, GWL_STYLE]) >>> 0;
+    assert.equal(after, ((before | 0x4) & ~WS_BORDER) >>> 0,
+        'what WM_STYLECHANGING left is what it gets');
+    assert.deepEqual(seen, [
+        { message: WM_STYLECHANGING, wParam: GWL_STYLE >>> 0, old: before,
+            asked: (before | WS_BORDER | 0x4) >>> 0 },
+        { message: WM_STYLECHANGED, wParam: GWL_STYLE >>> 0, old: before, asked: after },
+    ]);
+    assert.ok(released.length > 0, 'the STYLESTRUCT is given back');
+
+    seen.length = 0;
+    fns.SetWindowLongA.handler([hwnd, GWL_EXSTYLE, 0x200]);
+    assert.deepEqual(seen.map(s=>[s.message, s.wParam]),
+        [[WM_STYLECHANGING, GWL_EXSTYLE >>> 0], [WM_STYLECHANGED, GWL_EXSTYLE >>> 0]]);
+
+    seen.length = 0;
+    fns.SetWindowLongA.handler([hwnd, GWL_USERDATA, 7]);
+    assert.equal(seen.length, 0, 'only a style is asked about');
+
+    // A minimized window stays so whatever style it is given, and is told so.
+    const WS_MINIMIZE = 0x20000000;
+    fns.SetWindowLongA.handler([hwnd, GWL_STYLE, after | WS_MINIMIZE]);
+    seen.length = 0;
+    fns.SetWindowLongA.handler([hwnd, GWL_STYLE, after]);
+    assert.equal(fns.GetWindowLongA.handler([hwnd, GWL_STYLE]) >>> 0,
+        (after | WS_MINIMIZE) >>> 0);
+    assert.equal(seen.at(-1)?.asked, (after | WS_MINIMIZE) >>> 0);
+});
+
 test('SetLayeredWindowAttributes records what GetLayeredWindowAttributes reads back', async()=>{
     const { fns, memory, hwnd, errors } = withWindow();
     const GWL_EXSTYLE = -20;
