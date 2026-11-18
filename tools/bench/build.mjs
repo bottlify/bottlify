@@ -10,7 +10,11 @@
  * `serve.mjs --dir` serves, or that is published as it is (a page whose files are
  * its own, nothing fetched from elsewhere).
  *
- *     node tools/bench/build.mjs --arm NAME=REV|DIR [--arm NAME=REV|DIR ...] [--out DIR]
+ *     node tools/bench/build.mjs --arm NAME=REV|DIR[,window=GIB] [--arm ...] [--out DIR]
+ *
+ * `,window=GIB` runs that arm's 64-bit workloads over a wide window of so many GiB
+ * (cork's memory64 layout) where the others run them in the 4 GiB layout: the same
+ * build under both is what memory64 costs on the device.
  *
  * Each arm is a git revision (its `modules/core/src` and `modules/cork/src`
  * taken out of the repository) or a checkout's folder as it is, `.` this one with
@@ -77,7 +81,9 @@ const COMMON = {
 const arms = [];
 for (const spec of specs)
 {
-    const [name, source] = [spec.slice(0, spec.indexOf('=')), spec.slice(spec.indexOf('=') + 1)];
+    const [name, rest] = [spec.slice(0, spec.indexOf('=')), spec.slice(spec.indexOf('=') + 1)];
+    const wide = /^(.+),window=(\d+)$/.exec(rest);
+    const [source, window] = wide ? [wide[1], Number(wide[2])] : [rest, 0];
     const tree = treeOf(source);
     const entry = join(tree.root, '.stand-arm.js');
     writeFileSync(entry, [
@@ -89,8 +95,10 @@ for (const spec of specs)
     {
         rmSync(tree.root, { recursive: true, force: true });
     }
-    arms.push({ name, url: `./arm-${name}.js`, describe: tree.describe });
-    console.log(`arm-${name}.js  ${tree.describe}`);
+    const describe = window > 0
+        ? `${tree.describe} [64-bit over a ${window} GiB window]` : tree.describe;
+    arms.push({ name, url: `./arm-${name}.js`, describe, ...window > 0 ? { window } : {} });
+    console.log(`arm-${name}.js  ${describe}`);
 }
 await build({ ...COMMON, entryPoints: [join(HERE, 'stand.worker.js')],
     outfile: join(out, 'stand.worker.js') });
