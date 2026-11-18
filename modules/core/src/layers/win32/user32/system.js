@@ -1329,15 +1329,18 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
         // that subclassed one calls it through here with its address. An
         // address is called as a procedure of the call's own encoding; a
         // handle names one of the other, and the message is converted on
-        // its way (class.c test_wndproc_handles).
+        // its way (class.c test_wndproc_handles). A system class's entry is
+        // run as it is, in its own encoding, whichever call names it.
         const behind = host.procBehind?.(previous) ?? null;
+        /** @type {boolean} */
+        const reads = behind ? behind.unicode : host.entryReads?.(previous) ?? unicode;
         return host.callProcedure(behind ? behind.address : previous >>> 0, {
             hwnd: hwnd >>> 0,
             message: message >>> 0,
             wParam: wParam >>> 0,
             lParam: lParam >>> 0,
-            ...unicode ? { unicode } : {},
-        }, host.callerThread?.(), behind ? behind.unicode : unicode);
+            ...(behind ? unicode : reads) ? { unicode: true } : {},
+        }, host.callerThread?.(), reads);
     };
 
     /**
@@ -7152,9 +7155,17 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
                 }
                 // A change is announced, as Windows announces it: a control
                 // greys itself on WM_ENABLE, and a program watches for it.
+                // A window disabled while it has the keyboard focus loses it
+                // first, to no window (Wine's dialog.c test_DisabledDialogTest
+                // sees Windows leave the focus nowhere). The focus is the
+                // input state's, so only a thread sharing it takes it away;
+                // another thread's disabling leaves it (win.c test_enablewindow).
                 const WM_ENABLE = 0x000a;
-                return andThen(sendMessage(hwnd, WM_ENABLE, disable ? 0 : 1, 0),
-                    ()=>(wasDisabled ? 1 : 0));
+                const losing = disable && (host.focus?.() ?? 0) === (hwnd >>> 0)
+                    && callerHolds(hwnd >>> 0) !== 0
+                    ? host.setFocus(0, host.callerThread?.()) : 0;
+                return andThen(losing, ()=>andThen(sendMessage(hwnd, WM_ENABLE,
+                    disable ? 0 : 1, 0), ()=>(wasDisabled ? 1 : 0)));
             },
         },
 

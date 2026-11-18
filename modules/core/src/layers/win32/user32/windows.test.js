@@ -8004,3 +8004,109 @@ test('a mode change does not wait for ever on a window whose thread takes no mes
     await tick();
     assert.equal(await answer, 0, 'DISP_CHANGE_SUCCESSFUL, then');
 });
+
+test('CallMsgFilter shows the message to the thread\'s WH_MSGFILTER hooks; nonzero takes it', ()=>{
+    /** @type {number[][]} */
+    const heard = [];
+    let answer = 0;
+    const { fns } = setup({ hookReply: (entry, args)=>{
+        heard.push([entry, ...args]);
+        return answer;
+    } });
+    const WH_MSGFILTER = -1;
+    assert.equal(fns.CallMsgFilterA.handler([MSG_BUFFER, 0]), 0, 'no hook: not taken');
+    assert.notEqual(fns.SetWindowsHookExA.handler([WH_MSGFILTER, HOOK_PROC, HINSTANCE, 0]), 0);
+    assert.equal(fns.CallMsgFilterA.handler([MSG_BUFFER, 2]), 0);
+    assert.deepEqual(heard, [[HOOK_PROC, 2, 0, MSG_BUFFER]], 'code, 0 and the MSG');
+    answer = 1;
+    assert.equal(fns.CallMsgFilterW.handler([MSG_BUFFER, 0]), 1, 'a hook took it');
+});
+
+test('a window disabled while it has the focus leaves the focus nowhere', ()=>{
+    const { fns, hwnd, memory } = withWindow();
+    const child = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE, parent: hwnd });
+    fns.SetFocus.handler([child]);
+    assert.equal(fns.GetFocus.handler(), child);
+    fns.EnableWindow.handler([child, 0]);
+    assert.equal(fns.GetFocus.handler(), 0, 'Wine\'s dialog.c test_DisabledDialogTest');
+    fns.EnableWindow.handler([child, 1]);
+    assert.equal(fns.GetFocus.handler(), 0, 'and enabling gives nothing back');
+});
+
+test('the system classes carry the styles Windows registers them with', ()=>{
+    // Wine's class test, test_styles: GetClassInfo of each built-in class,
+    // and the atom-named ones a program can ask about by name.
+    const { memory, fns } = setup();
+    /** @param {string} name */
+    const styleOf = name=>{
+        memory.putString(CLASS_NAME, name);
+        assert.notEqual(fns.GetClassInfoA.handler([0, CLASS_NAME, TEXT_BUFFER]), 0, name);
+        return memory.u32(TEXT_BUFFER);
+    };
+    assert.equal(styleOf('Button'), 0x8b, 'CS_PARENTDC | CS_DBLCLKS | CS_HREDRAW | CS_VREDRAW');
+    assert.equal(styleOf('Edit'), 0x88, 'CS_PARENTDC | CS_DBLCLKS');
+    assert.equal(styleOf('ComboLBox'), 0x808, 'CS_SAVEBITS | CS_DBLCLKS');
+    assert.equal(styleOf('MDIClient'), 0);
+    assert.equal(styleOf('#32768'), 0x20808, 'the menu: CS_DROPSHADOW | CS_SAVEBITS | CS_DBLCLKS');
+    assert.equal(styleOf('#32769'), 0x8, 'the desktop');
+    assert.equal(styleOf('#32770'), 0x808, 'the dialog');
+    assert.equal(styleOf('#32772'), 0, 'the icon title');
+});
+
+test('a built-in procedure has an ANSI and a wide entry, each run in its own encoding', ()=>{
+    // Wine's class test, test_builtinproc: a procedure GetWindowLongPtrA and
+    // W answer is called directly by either CallWindowProc, so each entry
+    // writes its own encoding whichever call named it.
+    let stubs = 0x7f000000;
+    const { memory, fns } = setup({ registerProcedure: ()=>(stubs += 16), heap: true });
+    const GWLP_WNDPROC = -4;
+    /** @param {number} address */
+    const isHandle = address=>((address >>> 0) & 0xffff0000) >>> 0 === 0xffff0000;
+    const wide = [0x4d, 0, 0x61, 0, 0x69, 0, 0x6e, 0, 0, 0];
+    const ansi = [0x4d, 0x61, 0x69, 0x6e, 0];
+    /** @param {number} length */
+    const text = length=>[...memory.readMemory(TEXT_BUFFER, length)];
+
+    memory.putString(CLASS_NAME, 'Button');
+    const button = createWindow(fns, memory, { className: CLASS_NAME });
+    const procA = fns.GetWindowLongA.handler([button, GWLP_WNDPROC]);
+    const procW = fns.GetWindowLongW.handler([button, GWLP_WNDPROC]);
+    assert.notEqual(procA, procW, 'two entries');
+    assert.ok(!isHandle(procA) && !isHandle(procW), 'neither a handle');
+    memory.fill(TEXT_BUFFER, 16);
+    fns.CallWindowProcA.handler([procW, button, WM_GETTEXT, 120, TEXT_BUFFER]);
+    assert.deepEqual(text(10), wide, 'the wide entry writes wide text to an ANSI call');
+    memory.fill(TEXT_BUFFER, 16);
+    fns.CallWindowProcW.handler([procA, button, WM_GETTEXT, 120, TEXT_BUFFER]);
+    assert.deepEqual(text(5), ansi, 'the ANSI entry writes ANSI text to a wide call');
+
+    // An edit keeps its window's encoding: the other call's read is a handle.
+    memory.putString(CLASS_NAME, 'Edit');
+    const edit = createWindow(fns, memory, { className: CLASS_NAME });
+    assert.ok(!isHandle(fns.GetWindowLongA.handler([edit, GWLP_WNDPROC])));
+    const handle = fns.GetWindowLongW.handler([edit, GWLP_WNDPROC]);
+    assert.ok(isHandle(handle), 'an ANSI edit read through GetWindowLongW');
+    memory.fill(TEXT_BUFFER, 16);
+    fns.CallWindowProcA.handler([handle, edit, WM_GETTEXT, 120, TEXT_BUFFER]);
+    assert.deepEqual(text(5), ansi);
+    assert.ok(!isHandle(fns.GetClassLongW.handler([edit, -24])),
+        'its class answers the entry itself');
+});
+
+test('another thread disabling a window leaves its focus where it was', ()=>{
+    // The focus is the input state's: a thread not sharing it does not take
+    // it away (Wine's win.c test_enablewindow, enablewindow_thread).
+    const maker = { id: 1, name: 'maker' };
+    const another = { id: 2, name: 'another' };
+    const caller = { current: /** @type {unknown} */ (maker) };
+    const { fns, memory } = setup({ caller });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const hwnd = createWindow(fns, memory, { style: WS_VISIBLE });
+    fns.SetFocus.handler([hwnd]);
+    assert.equal(fns.GetFocus.handler(), hwnd);
+    caller.current = another;
+    fns.EnableWindow.handler([hwnd, 0]);
+    caller.current = maker;
+    assert.equal(fns.GetFocus.handler(), hwnd);
+});

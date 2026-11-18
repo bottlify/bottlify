@@ -129,10 +129,10 @@ event, an error. Neither stops the program.
 
 - Only keyboard, mouse and gamepads reach the program. The page's focus, visibility and lifecycle
   never do.
-- A DirectInput device acquired does not register raw input for itself: GetRegisteredRawInputDevices
-  shows no DirectInput keyboard or mouse, there is no `DIEmWin` window, and a program's own raw
-  input registration for those devices is not taken over while a device is held. Holding one
-  exclusively still stops the window's legacy mouse or key messages.
+- A mouse or keyboard DirectInput 8 holds is registered for raw input to its hidden `DIEmWin`
+  window as on Windows, over the program's own registration, which is gone once the device is let
+  go of. The registration is what a program reads back; the device's own reading does not go
+  through WM_INPUT. An earlier DirectInput registers nothing, as on Windows.
 - DirectInput's BuildActionMap answers no dwCRC, and a key pressed with no scan code is not kept
   as byte 0 of the keyboard's state.
 
