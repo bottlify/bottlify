@@ -6113,16 +6113,18 @@ export function createGdiFunctions(host){
             averageWidth: (/** @type {number} */ hdc)=>averageWidthOf(dcOf(hdc) ?? { font: 0 }),
 
             /**
-             * How much room a string takes in the context's font.
+             * How much room a string takes in the context's font, with the
+             * font's line height, ascent and average character width
+             * (TEXTMETRIC's tmAveCharWidth).
              *
              * @param {number} hdc @param {string} text
-             * @returns {{ width: number, height: number, ascent: number }}
+             * @returns {{ width: number, height: number, ascent: number, average: number }}
              */
             measure(hdc, text){
                 const dc = dcOf(hdc) ?? { font: 0 };
                 const metrics = currentMetrics(dc);
                 return { width: extentOf(dc, text), height: metrics.height,
-                    ascent: metrics.ascent };
+                    ascent: metrics.ascent, average: metrics.aveCharWidth };
             },
 
             /**
