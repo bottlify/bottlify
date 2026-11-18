@@ -2064,7 +2064,23 @@ export function createFileFunctions(host){
             ? 1 : fail(onReadOnlyMedia(path) ? ERROR_WRITE_PROTECT : ERROR_DIR_NOT_EMPTY);
     });
 
+    /**
+     * A pipe's name, answered as Windows' attribute query answers it: by
+     * opening the name (`pipes.query`) - a normal file while an instance
+     * listened, ERROR_PIPE_BUSY while none does.
+     *
+     * @param {number} name @param {any} text
+     * @returns {number | null}  the error, 0, or null for a name that is no pipe's
+     */
+    const pipeQuery = (name, text)=>(name !== 0 && host.pipes && isPipeName(text.raw(name))
+        ? host.pipes.query(text.raw(name)) : null);
+
     const getFileAttributes = oneName(4, ([name], text)=>{
+        const piped = pipeQuery(name, text);
+        if (piped !== null)
+        {
+            return piped === 0 ? FILE_ATTRIBUTE_NORMAL : fail(piped, INVALID_FILE_ATTRIBUTES);
+        }
         const path = text.path(name);
         const entry = files.stat(path);
         if (!entry || !entry.exists)
@@ -2079,6 +2095,18 @@ export function createFileFunctions(host){
         if ((level >>> 0) !== GET_FILE_EX_INFO_STANDARD)
         {
             return fail(ERROR_INVALID_PARAMETER);
+        }
+        const piped = pipeQuery(name, text);
+        if (piped !== null)
+        {
+            if (piped !== 0)
+            {
+                return fail(piped);
+            }
+            const data = new Uint8Array(WIN32_FILE_ATTRIBUTE_DATA_SIZE);
+            new DataView(data.buffer).setUint32(0, FILE_ATTRIBUTE_NORMAL, true);
+            host.writeMemory(out >>> 0, data);
+            return 1;
         }
         const path = text.path(name);
         const entry = files.stat(path);

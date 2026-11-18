@@ -200,6 +200,8 @@ function processOn(table, id = 1){
         server: (openMode = PIPE_ACCESS_DUPLEX, pipeMode = 0, max = 1, timeout = 0)=>
             fns.CreateNamedPipeA.handler([putString(NAME_AT, NAME), openMode, pipeMode, max,
                 1024, 1024, timeout, 0]) >>> 0,
+        /** @param {string} name */
+        query: name=>pipes.query(name),
         /** A client end of NAME. @param {number} [access] @param {number} [flags] */
         client: (access = RW, flags = 0)=>{
             const opened = pipes.open(NAME, access, flags);
@@ -279,6 +281,19 @@ test('a message pipe reads a message whole, or in parts with ERROR_MORE_DATA', (
     assert.deepEqual([p.u32(STATE), p.u32(STATE + 12)], [PIPE_TYPE_MESSAGE | 1, 1],
         'the server end of a message pipe, one instance at most');
 });
+
+test('a query of the name takes an instance that listens and lets it go, as Windows\' does',
+    ()=>{
+        // Wine's msvcp120 test_tr2_sys__Stat: a stat of a pipe's name is a
+        // regular file, and a second finds the instance busy until the
+        // server makes another.
+        const p = processOn(new Map());
+        assert.equal(p.query(NAME), ERROR_FILE_NOT_FOUND);
+        p.server();
+        assert.equal(p.query(NAME), 0);
+        assert.equal(p.query(NAME), ERROR_PIPE_BUSY, 'the one instance\'s client is gone');
+        assert.equal(p.client(), -ERROR_PIPE_BUSY, 'and CreateFile finds it so too');
+    });
 
 test('creation refuses a bad name, a busy pipe and a second first instance', ()=>{
     const p = processOn(new Map());
