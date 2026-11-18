@@ -201,6 +201,8 @@ import { refreshOf } from './user32/display.js';
 /** RT_MESSAGETABLE, and MESSAGE_RESOURCE_ENTRY's flag for UTF-16 text. */
 const RT_MESSAGETABLE = 11;
 const MESSAGE_RESOURCE_UNICODE = 0x0001;
+/** GetLocaleInfo's LCID for the user's own locale. */
+const LOCALE_USER_DEFAULT = 0x0400;
 
 /**
  * A MESSAGE_RESOURCE_ENTRY's text: its length (the header's four bytes
@@ -5549,6 +5551,25 @@ export function createWin32Module(){
                                     ?? null,
                                 setBkMode: (hdc, mode)=>libraries['GDI32.dll']?.SetBkMode
                                     ?.handler([hdc, mode]) ?? 0,
+                                // A month calendar's today is GetLocalTime's
+                                // clock, its names and first day the user's
+                                // locale's, as GetLocaleInfoW answers them.
+                                localTime: ()=>kernel.clock.wallClock(),
+                                localeText: type=>{
+                                    const length = 128;
+                                    const at = heap.allocate(length * 2);
+                                    try
+                                    {
+                                        const written = libraries['KERNEL32.dll']?.GetLocaleInfoW
+                                            ?.handler([LOCALE_USER_DEFAULT, type, at, length]) ?? 0;
+                                        return written > 1 ? new TextDecoder('utf-16le')
+                                            .decode(readMemory(at, (written - 1) * 2)) : null;
+                                    }
+                                    finally
+                                    {
+                                        heap.free(at);
+                                    }
+                                },
                                 // A control that subclasses another window -- an
                                 // up-down control its buddy -- does it with
                                 // comctl32's own SetWindowSubclass.

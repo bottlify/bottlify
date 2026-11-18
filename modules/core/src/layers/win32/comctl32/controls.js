@@ -31,6 +31,7 @@ import { HEADER_CLASS, HEADER_ATOM, createHeaderProcedure } from './header.js';
 import { LISTVIEW_CLASS, LISTVIEW_ATOM, createListViewProcedure } from './listview.js';
 import { REBAR_CLASS, REBAR_ATOM, createRebarProcedure } from './rebar.js';
 import { PAGER_CLASS, PAGER_ATOM, createPagerProcedure } from './pager.js';
+import { MONTHCAL_CLASS, MONTHCAL_ATOM, createMonthCalProcedure } from './monthcal.js';
 
 /** The face colour's brush, as a class's background names it: the index plus one. */
 const FACE_BACKGROUND = 15 + 1;
@@ -45,10 +46,12 @@ const FACE_BACKGROUND = 15 + 1;
  * @param {{ loadBitmap?: (instance: number, id: number) => number,
  *     subclassing?: import('./updown.js').Subclassing,
  *     loadString?: (instance: number, id: number) => string | null,
- *     setBkMode?: (hdc: number, mode: number) => number }} [resources]
+ *     setBkMode?: (hdc: number, mode: number) => number }
+ *     & import('./monthcal.js').CalendarSources} [resources]
  *     A module's bitmap resources, which a toolbar takes its images from,
  *     comctl32's subclassing, which an up-down control hooks its buddy with,
- *     and gdi32's SetBkMode, which a list view paints its items under.
+ *     gdi32's SetBkMode, which a list view paints its items under, and the
+ *     local clock and the user's locale a month calendar reads.
  * @returns {{ name: string, procedure: any, atom: number,
  *     windowExtra?: number, background?: number }[]}
  */
@@ -115,6 +118,11 @@ export function createCommonControls(host, toolkit, images, resources){
             name: PAGER_CLASS,
             atom: PAGER_ATOM,
             procedure: createPagerProcedure(host, toolkit),
+        },
+        {
+            name: MONTHCAL_CLASS,
+            atom: MONTHCAL_ATOM,
+            procedure: createMonthCalProcedure(host, toolkit, resources),
         },
     ];
 }
