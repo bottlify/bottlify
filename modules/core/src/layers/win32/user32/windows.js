@@ -179,20 +179,51 @@ const SYS_COLOR_BRUSH_LIMIT = 31;
 const CLOSE_BOX = 14;
 const CLOSE_GAP = 2;
 
+/** The class styles system classes are registered with. */
+const CS_VREDRAW = 0x0001;
+const CS_HREDRAW = 0x0002;
+const CS_DBLCLKS = 0x0008;
+const CS_PARENTDC = 0x0080;
+const CS_SAVEBITS = 0x0800;
+const CS_DROPSHADOW = 0x00020000;
+
 /**
  * The system classes, with their atoms as Windows numbers them, so that
  * `#128` in a dialog template and the atom in a CreateWindowEx both name the
- * same class. The dialog class carries the extra bytes a dialog keeps its
- * procedure and result in.
+ * same class, and the styles Windows registers them with, as GetClassInfo
+ * answers them (Wine's class test, test_styles). The dialog class carries the
+ * extra bytes a dialog keeps its procedure and result in. An edit keeps its
+ * text in its window's encoding, so its window's procedure read through the
+ * other encoding's call is a handle (`keepsEncoding`, class.c test_builtinproc).
  */
 const SYSTEM_CLASSES = Object.freeze([
-    { name: 'Button', atom: 0x0080, windowExtra: 0, background: 0 },
-    { name: 'Edit', atom: 0x0081, windowExtra: 0, background: 0, cursor: 32513 },
-    { name: 'Static', atom: 0x0082, windowExtra: 0, background: 0 },
-    { name: 'ListBox', atom: 0x0083, windowExtra: 0, background: 0 },
-    { name: 'ScrollBar', atom: 0x0084, windowExtra: 0, background: 0 },
-    { name: 'ComboBox', atom: 0x0085, windowExtra: 0, background: 0 },
-    { name: '#32770', atom: 0x8002, windowExtra: DLGWINDOWEXTRA, background: COLOR_3DFACE + 1 },
+    { name: 'Button', atom: 0x0080, windowExtra: 0, background: 0,
+        style: CS_PARENTDC | CS_DBLCLKS | CS_HREDRAW | CS_VREDRAW },
+    { name: 'Edit', atom: 0x0081, windowExtra: 0, background: 0, cursor: 32513,
+        style: CS_PARENTDC | CS_DBLCLKS, keepsEncoding: true },
+    { name: 'Static', atom: 0x0082, windowExtra: 0, background: 0,
+        style: CS_PARENTDC | CS_DBLCLKS },
+    { name: 'ListBox', atom: 0x0083, windowExtra: 0, background: 0,
+        style: CS_PARENTDC | CS_DBLCLKS },
+    { name: 'ScrollBar', atom: 0x0084, windowExtra: 0, background: 0,
+        style: CS_PARENTDC | CS_DBLCLKS | CS_HREDRAW | CS_VREDRAW },
+    { name: 'ComboBox', atom: 0x0085, windowExtra: 0, background: 0,
+        style: CS_PARENTDC | CS_DBLCLKS | CS_HREDRAW | CS_VREDRAW },
+    { name: '#32770', atom: 0x8002, windowExtra: DLGWINDOWEXTRA, background: COLOR_3DFACE + 1,
+        style: CS_SAVEBITS | CS_DBLCLKS },
+]);
+
+/**
+ * The other classes user32 registers under an atom-numbered name: the menu,
+ * the desktop, the task switcher and the icon title. Their windows are this
+ * build's own (a menu is not a window here, the desktop is made apart), so a
+ * window a program makes of one answers as DefWindowProc, and says so.
+ */
+const ATOM_CLASSES = Object.freeze([
+    { name: '#32768', atom: 0x8000, style: CS_DROPSHADOW | CS_SAVEBITS | CS_DBLCLKS },
+    { name: '#32769', atom: 0x8001, style: CS_DBLCLKS },
+    { name: '#32771', atom: 0x8003, style: CS_SAVEBITS | CS_HREDRAW | CS_VREDRAW },
+    { name: '#32772', atom: 0x8004, style: 0 },
 ]);
 
 /**
@@ -1174,13 +1205,30 @@ export function createWindowFunctions(host){
                 ? host.registerProcedure(`<${system.label ?? system.name}>`,
                     message=>callProcedure(address, message, host.callerThread?.()))
                 : HOST_PROCEDURE_BASE + system.atom * 16;
+            // Its wide entry: the same procedure, reading what it is handed as
+            // wide text, whoever calls it.
+            /** @type {number} */
+            const wide = host.registerProcedure
+                ? host.registerProcedure(`<${system.label ?? system.name} W>`,
+                    message=>callProcedure(wide, { ...message, unicode: true },
+                        host.callerThread?.()))
+                : address + 8;
             system.wndProc = address;
-            procedures.set(address, controlProcedures[system.name]);
-            if (system.label === undefined)
+            wideEntries.set(address, wide);
+            ansiEntries.set(wide, address);
+            if (system.keepsEncoding)
             {
-                // Only user32's own procedures mark a window's real class;
-                // a version's, comctl32's, does not.
-                procedureClasses.set(address, system.name);
+                keepsEncoding.add(address);
+            }
+            for (const entry of [address, wide])
+            {
+                procedures.set(entry, controlProcedures[system.name]);
+                if (system.label === undefined)
+                {
+                    // Only user32's own procedures mark a window's real class;
+                    // a version's, comctl32's, does not.
+                    procedureClasses.set(entry, system.name);
+                }
             }
         }
         // Asked for by a call that would use it, a library's class is
@@ -1221,6 +1269,18 @@ export function createWindowFunctions(host){
      */
     const winprocs = [];
     const WINPROC_HANDLE = 0xffff0000;
+    /**
+     * A system class's procedure has two entries on Windows, as ButtonWndProcA
+     * and ButtonWndProcW: GetWindowLongA and GetClassLongA answer the first,
+     * the wide calls the second. Here one procedure has both addresses.
+     *
+     * @type {Map<number, number>} ANSI entry -> wide entry
+     */
+    const wideEntries = new Map();
+    /** @type {Map<number, number>} wide entry -> ANSI entry */
+    const ansiEntries = new Map();
+    /** The ANSI entries of classes that keep their window's encoding. @type {Set<number>} */
+    const keepsEncoding = new Set();
     /**
      * What a window's procedure reads: the encoding it was set in, which a
      * SetWindowLong of NULL leaves although IsWindowUnicode then answers the
@@ -1263,9 +1323,40 @@ export function createWindowFunctions(host){
      * @param {number} address @param {boolean} unicode  what the procedure reads
      * @param {boolean} reader  whether the call reading it is the wide one
      */
-    const procAs = (address, unicode, reader)=>((address >>> 0) === 0
-        || procedures.has(address >>> 0) || unicode === reader
-        ? address >>> 0 : procHandle(address >>> 0, unicode));
+    const procAs = (address, unicode, reader)=>{
+        const ansi = ansiEntries.get(address >>> 0) ?? address >>> 0;
+        const wide = wideEntries.get(ansi);
+        if (wide !== undefined)
+        {
+            return reader ? wide : ansi;
+        }
+        return ansi === 0 || procedures.has(ansi) || unicode === reader
+            ? ansi : procHandle(ansi, unicode);
+    };
+    /**
+     * The encoding a system class's procedure entry reads when it is called
+     * by its address: its ANSI entry ANSI, its wide entry wide, whatever the
+     * call was (class.c test_builtinproc: CallWindowProcA of the procedure
+     * GetWindowLongPtrW answers writes wide text). Undefined for any other.
+     *
+     * @param {number} address
+     */
+    const entryReads = address=>(wideEntries.has(address >>> 0) ? false
+        : ansiEntries.has(address >>> 0) ? true : undefined);
+    /**
+     * A window's procedure as GetWindowLong of one encoding reads it: as
+     * procAs answers, save that a class keeping its window's encoding answers
+     * the other encoding's call with a handle to the entry of its own.
+     *
+     * @param {any} record @param {boolean} reader
+     */
+    const procOfWindow = (record, reader)=>{
+        const reads = procReads(record);
+        const ansi = ansiEntries.get(record.wndProc >>> 0) ?? record.wndProc >>> 0;
+        return keepsEncoding.has(ansi) && reads !== reader
+            ? procHandle(reads ? wideEntries.get(ansi) ?? ansi : ansi, reads)
+            : procAs(record.wndProc, reads, reader);
+    };
     /**
      * The procedure of each built-in class by name: the seven user32 ones and
      * whatever the common controls file beside them. Kept apart from the
@@ -3380,7 +3471,7 @@ export function createWindowFunctions(host){
     const readLong = (record, index, unicode = false)=>{
         switch (index | 0){
             case GWL_WNDPROC:
-                return procAs(record.wndProc, procReads(record), unicode);
+                return procOfWindow(record, unicode);
             case GWL_HINSTANCE:
                 return record.instance;
             case GWL_HWNDPARENT:
@@ -6812,14 +6903,14 @@ export function createWindowFunctions(host){
      * `#number`, so it is not registered as a spelling of the name.
      *
      * @param {{ name: string, procedure: any, atom?: number, windowExtra?: number,
-     *     background?: number, library?: boolean }} definition
+     *     background?: number, library?: boolean, style?: number }} definition
      */
     const registerSystemClass = definition=>{
         systemClasses.set(definition.name.toLowerCase(), {
             ...VERSION_6_CLASSES.has(definition.name.toLowerCase()) ? { since: 6 } : {},
             name: definition.name,
             atom: definition.atom ?? 0,
-            style: 0,
+            style: definition.style ?? 0,
             wndProc: 0,
             classExtra: 0,
             windowExtra: definition.windowExtra ?? 0,
@@ -6844,7 +6935,8 @@ export function createWindowFunctions(host){
      */
     const registerLibraryClass = definition=>registerSystemClass({ ...definition, library: true });
     // The list a dropdown combo box drops, a popup of a class of its own.
-    registerSystemClass({ name: 'ComboLBox', procedure: controls.procedures.ComboLBox });
+    registerSystemClass({ name: 'ComboLBox', procedure: controls.procedures.ComboLBox,
+        style: CS_SAVEBITS | CS_DBLCLKS });
     // The hidden window DirectInput 8 has raw input sent to while it holds the
     // mouse or the keyboard (`inputSink`), a class of that library's own.
     registerLibraryClass({ name: 'DIEmWin', procedure: (/** @type {any} */ record,
@@ -6869,6 +6961,11 @@ export function createWindowFunctions(host){
         }
         return defWindowProc(record, message, thread);
     };
+    // Named by their atoms, so `#32769` and the atom 0x8001 are one spelling.
+    ATOM_CLASSES.forEach(definition=>{
+        registerSystemClass({ ...definition, procedure: inertProcedure(definition.name) });
+        atoms.set(definition.atom, definition.name);
+    });
     for (const name of INERT_CLASSES)
     {
         if (!systemClasses.has(name.toLowerCase()))
@@ -6927,13 +7024,14 @@ export function createWindowFunctions(host){
         const cls = {
             name: definition.name,
             atom: definition.atom,
-            style: 0,
+            style: definition.style,
             wndProc: 0,
             classExtra: 0,
             windowExtra: definition.windowExtra,
             instance: 0,
             icon: 0,
             cursor: definition.cursor ?? IDC_ARROW,
+            ...definition.keepsEncoding ? { keepsEncoding: true } : {},
             background: definition.background,
             menuName: 0,
             className: 0,
@@ -8169,7 +8267,7 @@ export function createWindowFunctions(host){
                 focus: focusWindow, setFocus, active: activeWindow, activate,
                 activeOfThread, activateInThread,
                 capture: ()=>captured, setCapture, releaseCapture, colors: systemColors,
-                heldByCaller, lowLevelHook, winEvent, procAs, procBehind,
+                heldByCaller, lowLevelHook, winEvent, procAs, procBehind, entryReads,
                 send, sendAcross, callProcedure, geometry, windowFromPoint, askedFromPoint,
                 isChild, repaint,
                 appear, beforeChange, afterChange, eraseShown, wholeOnScreen, moveBits, dragging,
