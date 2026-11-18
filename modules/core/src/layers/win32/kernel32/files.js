@@ -41,6 +41,7 @@ import { MOUNT_MANAGER, mountManagerControl } from './mountmgr.js';
 import { isMailslotName } from './mailslots.js';
 import { isPipeName } from './pipes.js';
 import { isNameInExpression } from './name-expression.js';
+import { fullPathName } from '../ntdll/paths.js';
 
 /** Codes this surface reports through the last-error slot. */
 const ERROR_SUCCESS = 0;
@@ -2173,23 +2174,16 @@ export function createFileFunctions(host){
             }
             return result;
         }
-        const resolved = text.path(name);
-        // A caller that wrote a trailing separator meant a directory and gets
-        // one back; resolution is what removed it. The file part is NULL for
-        // exactly that case, which is how the caller tells the two apart.
-        const trailing = (asked.endsWith(SEPARATOR) || asked.endsWith('/'))
-            && !resolved.endsWith(SEPARATOR);
-        const written = trailing ? resolved + SEPARATOR : resolved;
-
+        // Devices, device paths, the last name's dots and a directory's
+        // separator are the full path's own rules (`fullPathName`); the rest
+        // is placed as every file call places it.
+        const { path: written, filePart: at } = fullPathName(asked, fullPath);
         const result = text.write(buffer >>> 0, size, written);
         if (result === written.length)
         {
-            const at = written.lastIndexOf(SEPARATOR);
             // Into the caller's own buffer, so the offset is in characters
             // scaled by however wide one is.
-            writeDwordIf(filePart >>> 0, written.endsWith(SEPARATOR)
-                ? 0
-                : (buffer >>> 0) + (at + 1) * text.unit);
+            writeDwordIf(filePart >>> 0, at === -1 ? 0 : (buffer >>> 0) + at * text.unit);
         }
         return result;
     });

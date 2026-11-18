@@ -975,7 +975,8 @@ test('a name cannot end in a dot or a space; a folder before a separator drops o
     assert.equal(full('C:/test  ....   ..   '), 'C:\\test');
     assert.equal(full('C:/test./file'), 'C:\\test\\file');
     assert.equal(full('C:/test.. /file'), 'C:\\test.. \\file', 'only a single dot goes');
-    assert.equal(full('C:\\dir\\*.'), 'C:\\dir\\*.', 'a pattern keeps its dots');
+    assert.equal(full('C:\\dir\\*.'), 'C:\\dir\\*',
+        'the full path of a pattern loses them too (FindFirstFile reads its own)');
 });
 
 test('SearchPathA walks the documented order, adds an extension, and reports the file part', ()=>{
