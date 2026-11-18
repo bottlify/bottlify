@@ -63,7 +63,10 @@
 - A mutex, event, semaphore or waitable timer opened by name carries the rights it was granted: no
   rights at all, or rights the kind does not have, are refused, and a handle without SYNCHRONIZE
   cannot be waited on, nor one without the modify right set, reset or released. A keyed event
-  carries the rights asked for when it is made as well. Other handles a process creates, and every
+  carries the rights asked for when it is made as well. A process opened by id (`OpenProcess`)
+  carries the rights asked for: its memory calls need `PROCESS_VM_OPERATION`, `PROCESS_VM_READ`,
+  `PROCESS_VM_WRITE` or `PROCESS_QUERY_INFORMATION` as on Windows, and a handle it opens to its own
+  id is this process to them. Other handles a process creates, and every
   other kind, have every right. A job and a completion port made by name share the one namespace
   of named objects. Not exported, as on Windows 7: the
   synchronization barrier, `GetProcessInformation` and job objects.

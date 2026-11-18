@@ -37,6 +37,9 @@ import { SYSTEM_DIRECTORY, systemProgramAt } from '../programs/table.js';
 import { decodeAnsi, encodeAnsi } from './locale.js';
 import { STARTUPINFO, readStartupInfo } from './startup-info.js';
 import { askChild, childThread } from './cross-process.js';
+import { grantedAccess } from './access.js';
+import { PROCESS_VM_OPERATION, PROCESS_VM_READ, PROCESS_VM_WRITE, createProcessTarget }
+    from './process-target.js';
 import { INTERACTIVE_SESSION } from './teb.js';
 
 /** Codes this surface reports. */
@@ -559,25 +562,37 @@ export function createSpawnFunctions(host){
         }
     };
 
+    /** The process a handle names, if it carries the right asked. */
+    const processTarget = createProcessTarget({ kernel,
+        processId: ()=>(host.processId ?? 0x1000) >>> 0 });
+
     /**
-     * A call made in the child a handle names, where it runs
-     * (`cross-process.js`): ERROR_INVALID_HANDLE for a handle that names no
-     * child, ERROR_ACCESS_DENIED for one the run cannot reach.
+     * A memory call on the process a handle names: `here` for this one, the
+     * same call made in a child where it runs (`cross-process.js`) for a
+     * child, ERROR_INVALID_HANDLE for a handle that names no process,
+     * ERROR_ACCESS_DENIED for one without `right` or a child the run cannot
+     * reach.
      *
-     * @param {number} handle @param {import('./cross-process.js').CrossCall} call
+     * @param {number} handle @param {number} right
+     * @param {import('./cross-process.js').CrossCall} call
      * @param {(number | null)[]} into
+     * @param {() => number} here
      */
-    const inChild = (handle, call, into)=>{
-        const target = processOf(handle);
-        if (!target)
+    const onProcess = (handle, right, call, into, here)=>{
+        const target = processTarget(handle, right);
+        if ('error' in target)
         {
-            host.setLastError(ERROR_INVALID_HANDLE);
+            host.setLastError(target.error);
             return 0;
+        }
+        if ('here' in target)
+        {
+            return here();
         }
         const asked = host.currentThread && host.setLastErrorFor ? askChild({
             askChild: host.askChild, writeMemory: host.writeMemory,
             currentThread: host.currentThread, setLastErrorFor: host.setLastErrorFor,
-        }, target, call, into) : null;
+        }, target.child, call, into) : null;
         if (asked === null)
         {
             host.setLastError(ERROR_ACCESS_DENIED);
@@ -950,16 +965,25 @@ export function createSpawnFunctions(host){
          * HANDLE OpenProcess(DWORD dwDesiredAccess, BOOL bInheritHandle, DWORD dwProcessId)
          *
          * The processes there are: the running program, and the children it
-         * asked for. Any access is granted -- there is one user -- and an
-         * identifier that names nothing is the documented invalid parameter.
+         * asked for. The handle is granted the rights asked for -- there is one
+         * user, so nothing asked for is refused -- and an identifier that names
+         * nothing is the documented invalid parameter.
          * The program's own process comes back as the pseudo-handle every
          * other call here already understands as "this process".
          */
         OpenProcess: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([, inherit, id])=>{
+            handler: ([desired, inherit, id])=>{
                 const wanted = id >>> 0;
+                // The handle carries the rights asked for, which the memory and
+                // thread calls through it check (`process-target.js`).
+                const access = grantedAccess('process', desired);
+                if ('error' in access)
+                {
+                    host.setLastError(access.error);
+                    return 0;
+                }
                 /** The handle, inheritable where bInheritHandle asked. @param {number} handle */
                 const kept = handle=>{
                     if (inherit !== 0)
@@ -979,7 +1003,7 @@ export function createSpawnFunctions(host){
                     // the pseudo-handle's object.
                     const self = kernel.processes.find?.(wanted)
                         ?? { kind: 'process', current: true, imagePath: host.imagePath?.() ?? '' };
-                    return kept(kernel.handles.open('process', self));
+                    return kept(kernel.handles.open('process', self, access.granted));
                 }
                 // A child, or any process of the run on this thread: a crash
                 // reporter opens the client that asked it for a dump.
@@ -990,7 +1014,7 @@ export function createSpawnFunctions(host){
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                return kept(kernel.handles.open('process', child));
+                return kept(kernel.handles.open('process', child, access.granted));
             },
         },
 
@@ -1156,34 +1180,32 @@ export function createSpawnFunctions(host){
                 const bytes = count === 0
                     ? new Uint8Array(0)
                     : host.readMemory(buffer >>> 0, count).slice();
-
-                if ((handle >>> 0) === CURRENT_PROCESS)
-                {
-                    if (!host.patchMemory)
-                    {
-                        host.writeMemory(base >>> 0, bytes);
-                    }
-                    else if (!host.patchMemory(base >>> 0, bytes))
-                    {
-                        host.setLastError(ERROR_NOACCESS);
-                        return 0;
-                    }
-                }
-                else
-                {
-                    // Written where the child runs, through its own protection.
-                    return inChild(handle, { call: 'WriteProcessMemory',
-                        args: [CURRENT_PROCESS, base >>> 0, { in: bytes }, count,
-                            (written >>> 0) === 0 ? 0 : { out: 4 }] },
-                    [null, null, null, null, written >>> 0]);
-                }
-
+                // Nothing written until it is: a refused handle says 0.
                 if ((written >>> 0) !== 0)
                 {
-                    writeDword(written >>> 0, count);
+                    writeDword(written >>> 0, 0);
                 }
-                host.setLastError(ERROR_SUCCESS);
-                return 1;
+                // Written where the child runs, through its own protection.
+                return onProcess(handle, PROCESS_VM_WRITE | PROCESS_VM_OPERATION,
+                    { call: 'WriteProcessMemory', args: [CURRENT_PROCESS, base >>> 0,
+                        { in: bytes }, count, (written >>> 0) === 0 ? 0 : { out: 4 }] },
+                    [null, null, null, null, written >>> 0], ()=>{
+                        if (!host.patchMemory)
+                        {
+                            host.writeMemory(base >>> 0, bytes);
+                        }
+                        else if (!host.patchMemory(base >>> 0, bytes))
+                        {
+                            host.setLastError(ERROR_NOACCESS);
+                            return 0;
+                        }
+                        if ((written >>> 0) !== 0)
+                        {
+                            writeDword(written >>> 0, count);
+                        }
+                        host.setLastError(ERROR_SUCCESS);
+                        return 1;
+                    });
             },
         },
 
@@ -1202,13 +1224,19 @@ export function createSpawnFunctions(host){
             handler: ([handle, base, buffer, size, read])=>{
                 const count = size >>> 0;
                 const from = base >>> 0;
-                /** @type {Uint8Array | null} */
-                let bytes;
-                if ((handle >>> 0) === CURRENT_PROCESS)
+                if ((read >>> 0) !== 0)
                 {
-                    // A range that leaves mapped memory is ERROR_PARTIAL_COPY, not a
-                    // fault: a crash handler walks stacks through here, reading
+                    writeDword(read >>> 0, 0);
+                }
+                return onProcess(handle, PROCESS_VM_READ, { call: 'ReadProcessMemory',
+                    args: [CURRENT_PROCESS, from, (buffer >>> 0) === 0 ? 0 : { out: count },
+                        count, (read >>> 0) === 0 ? 0 : { out: 4 }] },
+                [null, null, buffer >>> 0, null, read >>> 0], ()=>{
+                    // A range that leaves mapped memory is ERROR_PARTIAL_COPY, not
+                    // a fault: a crash handler walks stacks through here, reading
                     // wherever a frame pointer leads.
+                    /** @type {Uint8Array | null} */
+                    let bytes;
                     try
                     {
                         bytes = count === 0 ? new Uint8Array(0)
@@ -1218,32 +1246,21 @@ export function createSpawnFunctions(host){
                         void e;
                         bytes = null;
                     }
-                }
-                else
-                {
-                    return inChild(handle, { call: 'ReadProcessMemory',
-                        args: [CURRENT_PROCESS, from, (buffer >>> 0) === 0 ? 0 : { out: count },
-                            count, (read >>> 0) === 0 ? 0 : { out: 4 }] },
-                    [null, null, buffer >>> 0, null, read >>> 0]);
-                }
-                if (bytes === null)
-                {
+                    if (bytes === null)
+                    {
+                        host.setLastError(ERROR_PARTIAL_COPY);
+                        return 0;
+                    }
+                    if (count > 0)
+                    {
+                        host.writeMemory(buffer >>> 0, bytes);
+                    }
                     if ((read >>> 0) !== 0)
                     {
-                        writeDword(read >>> 0, 0);
+                        writeDword(read >>> 0, count);
                     }
-                    host.setLastError(ERROR_PARTIAL_COPY);
-                    return 0;
-                }
-                if (count > 0)
-                {
-                    host.writeMemory(buffer >>> 0, bytes);
-                }
-                if ((read >>> 0) !== 0)
-                {
-                    writeDword(read >>> 0, count);
-                }
-                return 1;
+                    return 1;
+                });
             },
         },
 

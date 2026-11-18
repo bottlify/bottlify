@@ -23,6 +23,7 @@ import { pointerArg } from '../common/pointers.js';
 import { createGlobalMemory } from './moveable.js';
 import { IMAGE_ALLOCATION_PROTECT, imageLayout } from './image-protection.js';
 import { askChild } from './cross-process.js';
+import { PROCESS_QUERY_INFORMATION, PROCESS_VM_OPERATION } from './process-target.js';
 import { guestEntry } from '../msvcrt/guest-code.js';
 import * as inGuest from './inguest.js';
 import { COMPILED } from './inguest.x86.js';
@@ -111,6 +112,7 @@ const LOW_FRAGMENTATION_HEAP = 2;
 /** Codes this surface reports. */
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_INVALID_HANDLE = 6;
+const ERROR_ACCESS_DENIED = 5;
 const ERROR_GEN_FAILURE = 31;
 const ERROR_INSUFFICIENT_BUFFER = 122;
 const ERROR_NOACCESS = 998;
@@ -1079,7 +1081,8 @@ export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT, 
  *           a buffer holding the pattern would be allocated, zeroed and copied
  *           inside the program's own call, for bytes that can be filled once.
  * @property {(code: number) => void} setLastError
- * @property {(handle: number) => any} [childOf]  The child process a handle names, or null.
+ * @property {(handle: number, right: number) => import('./process-target.js').ProcessTarget}
+ *     [processTarget]  The process a handle names, if it carries the right (`process-target.js`).
  * @property {import('./cross-process.js').AskHost['askChild']} [askChild]
  *           A call made in a child where it runs; absent, no child is reached.
  * @property {() => any} [currentThread]
@@ -3417,29 +3420,35 @@ export function createHeapFunctions(host){
         argBytes,
         /** @param {number[]} args */
         handler: ([process, ...rest])=>{
-            const child = (process >>> 0) === CURRENT_PROCESS ? null : host.childOf?.(process);
-            if (child && host.currentThread && host.setLastErrorFor)
+            // With no handle table, only the pseudo-handle names a process.
+            const target = host.processTarget ? host.processTarget(process,
+                name === 'VirtualQuery' ? PROCESS_QUERY_INFORMATION : PROCESS_VM_OPERATION)
+                : (process >>> 0) === CURRENT_PROCESS ? { here: true }
+                    : { error: ERROR_INVALID_HANDLE };
+            if ('error' in target)
+            {
+                host.setLastError(target.error);
+                return 0;
+            }
+            if ('here' in target)
+            {
+                return table[name].handler(rest);
+            }
+            if (host.currentThread && host.setLastErrorFor)
             {
                 const { args, into } = crossing[name](rest);
                 const asked = askChild({ askChild: host.askChild, writeMemory: host.writeMemory,
                     currentThread: host.currentThread, setLastErrorFor: host.setLastErrorFor },
-                child, { call: name, args }, into);
+                target.child, { call: name, args }, into);
                 if (asked)
                 {
                     return asked;
                 }
             }
-            if ((process >>> 0) !== CURRENT_PROCESS)
-            {
-                if ((process >>> 0) !== 0)
-                {
-                    host.divergence?.(`${name}Ex`, `process 0x${(process >>> 0).toString(16)}`
-                        + ' is not the running one, and no other is reachable');
-                }
-                host.setLastError(ERROR_INVALID_HANDLE);
-                return 0;
-            }
-            return table[name].handler(rest);
+            host.divergence?.(`${name}Ex`, `process 0x${(process >>> 0).toString(16)}`
+                + ' is a child the run cannot reach');
+            host.setLastError(ERROR_ACCESS_DENIED);
+            return 0;
         },
     });
 

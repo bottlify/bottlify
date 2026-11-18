@@ -35,6 +35,7 @@ import {
 } from './kernel32/environment.js';
 import { createThreadPool } from './kernel32/pool.js';
 import { serveCall } from './kernel32/cross-process.js';
+import { createProcessTarget } from './kernel32/process-target.js';
 import { reportedVersion, windowsVersion } from './kernel32/versions.js';
 import { createSystemFunctions, imageBits } from './kernel32/system.js';
 import { createActivationContexts } from './kernel32/actctx.js';
@@ -1305,22 +1306,9 @@ export function createWin32Module(){
                 }
             };
 
-            /**
-             * The child a process handle names, for a call made in it; null
-             * for this process's pseudo-handle and for anything not a child.
-             *
-             * @param {number} handle
-             */
-            const childProcessOf = handle=>{
-                try
-                {
-                    return kernel.handles.resolve(handle >>> 0, 'process');
-                }
-                catch (e){
-                    void e;
-                    return null;
-                }
-            };
+            // The process a handle names, this one or a child, if the handle
+            // carries the right a call needs (`kernel32/process-target.js`).
+            const processTarget = createProcessTarget({ kernel, processId: ()=>processId });
 
             // Built before the tables because two of them need it: the completion
             // port a program waits on, and the file calls that owe it a packet when
@@ -3442,7 +3430,7 @@ export function createWin32Module(){
                         reach: arenaReach,
                         guestHeap,
                         // A child's memory, reached where the child runs.
-                        childOf: childProcessOf,
+                        processTarget,
                         askChild,
                         currentThread: ()=>kernel.currentThread(),
                         setLastErrorFor: setErrorOn,

@@ -69,6 +69,14 @@ const KINDS = {
         execute: READ_CONTROL | SYNCHRONIZE,
         implied: [[THREAD_QUERY_INFORMATION, THREAD_QUERY_LIMITED_INFORMATION],
             [THREAD_SET_INFORMATION, THREAD_SET_LIMITED_INFORMATION]] },
+    // PROCESS_TERMINATE and on, the low word. Read is VM_READ and
+    // QUERY_INFORMATION; write CREATE_THREAD, VM_OPERATION, VM_WRITE,
+    // DUP_HANDLE, CREATE_PROCESS, SET_QUOTA, SET_INFORMATION and
+    // SUSPEND_RESUME; execute TERMINATE and QUERY_LIMITED_INFORMATION.
+    // QUERY_INFORMATION and SET_INFORMATION carry their limited forms.
+    process: { own: 0xffff, read: READ_CONTROL | 0x0410, write: READ_CONTROL | 0x0bea,
+        execute: READ_CONTROL | SYNCHRONIZE | 0x1001,
+        implied: [[0x0400, 0x1000], [0x0200, 0x2000]] },
 };
 
 /**
