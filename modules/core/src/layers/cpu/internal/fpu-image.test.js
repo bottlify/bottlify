@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import {
     doubleToExtended, extendedImage, extendedToDouble, floatSaveArea, quadwordToExtended,
     restoreExtended, restoreFloatSave,
-} from './fpu-context.js';
+} from './fpu-image.js';
 
 /** The translator's 32-bit state block, as far as the floating-point state goes. */
 const LAYOUT = { x87: 64, x87Top: 192, x87Empty: 193, x87Control: 194, x87Status: 196,

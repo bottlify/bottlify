@@ -16,6 +16,7 @@ import { describeFault, hostFault } from './internal/faults.js';
 import {
     clearGeneralRegisters, freshThreadFpu, setContextEflags, setContextLong, setThreadBase,
 } from './internal/context.js';
+import { floatImages, restoreFloatImages } from './internal/fpu-image.js';
 import {
     BUCKET_CAP, SAMPLE_COLUMNS, createSampleTable, creditSample, takeDue, topSamples,
 } from './internal/samples.js';
@@ -643,6 +644,27 @@ export function createCpuModule(){
                 mxcsr: ()=>started().readMxcsr() >>> 0,
                 /** @param {number} word */
                 setMxcsr: word=>started().writeMxcsr(word >>> 0),
+                /**
+                 * FNSAVE's and FXSAVE's images of a thread's x87 and SSE state
+                 * (`fpu-image.js`): a stopped thread's from its context, the
+                 * running thread's with none given.
+                 *
+                 * @param {any} [context]
+                 */
+                images: context=>floatImages(context ?? liveState()),
+                /**
+                 * Puts images back: into a stopped thread's context, or into
+                 * the running thread with null.
+                 *
+                 * @param {any} context
+                 * @param {import('./internal/fpu-image.js').FloatImages} images
+                 */
+                restore: (context, images)=>restoreFloatImages(context ?? liveState(), images),
+            };
+            /** The running thread's state block and its layout, live. */
+            const liveState = ()=>{
+                const host = started();
+                return { block: host.block(), layout: host.blockLayout() };
             };
 
             current = state;
@@ -1538,6 +1560,13 @@ export function createCpuModule(){
                             if (name === 'long')
                             {
                                 setContextLong(context, /** @type {any} */ (value));
+                                continue;
+                            }
+                            // The x87 and SSE state a context record carried
+                            // (`fpu.restore`), put back with the rest.
+                            if (name === 'float')
+                            {
+                                restoreFloatImages(context, /** @type {any} */ (value));
                                 continue;
                             }
                             const index = REGISTER_INDEX[/** @type {keyof typeof REGISTER_INDEX} */

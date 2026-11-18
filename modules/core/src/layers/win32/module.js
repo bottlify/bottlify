@@ -920,6 +920,14 @@ export function createWin32Module(){
             // continues execution from a changed one.
             const cpuRegisters = config?.registers ?? { read: ()=>0, write: ()=>{} };
             /**
+             * The processor's images of a thread's x87 and SSE state, where it
+             * gives them (`kernel32/fpu-context.js`).
+             *
+             * @type {import('./kernel32/fpu-context.js').FloatState | null}
+             */
+            const floatStates = config?.fpu?.images && config.fpu.restore
+                ? { images: config.fpu.images, restore: config.fpu.restore } : null;
+            /**
              * Where a C function leaves a float or a double it answers: on the
              * x87 stack in a 32-bit process, in XMM0 in a 64-bit one, as the
              * x64 convention returns every floating-point value. Absent, the
@@ -2264,7 +2272,11 @@ export function createWin32Module(){
                 // fault's does, and a handler that continues from it gets them back.
                 registers: ()=>Object.fromEntries(
                     [...registerNames, 'eflags'].map(name=>[name, cpuRegisters.read(name)])),
+                // A thread's x87 and SSE state, which an exception's context
+                // carries and a continuation from it puts back.
+                float: floatStates,
                 answerWith: (value, registers)=>bridge.answerWith(value, registers),
+                continueAt: registers=>bridge.continueAt(registers),
                 /** @param {any} call */
                 callGuest: call=>bridge.callGuest(call),
                 dispatcherHandler: ()=>(dispatcherFrameTrap ||= bridge.register(
@@ -3489,6 +3501,7 @@ export function createWin32Module(){
                         pointerSize,
                         processId,
                         kernel,
+                        float: floatStates,
                         processors,
                         // A child's first thread, reached where the child runs.
                         askChild,

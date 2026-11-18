@@ -5,19 +5,12 @@
  */
 
 /**
- * A 32-bit CONTEXT's floating-point groups, read from and written into the
- * state block a stopped thread's context keeps (the translator's layout):
- * CONTEXT_FLOATING_POINT's FLOATING_SAVE_AREA, as FNSAVE leaves it, and
- * CONTEXT_EXTENDED_REGISTERS' 512 bytes, as FXSAVE leaves them - the x87
- * registers as ten-byte extended values in stack order, the abridged tag,
- * MXCSR and XMM0 to XMM7.
- *
- * A runtime that suspends a thread to collect its garbage takes its context
- * whole, sends it to a stub, and once the collection is over puts the context
- * back, the floating-point state among it (a .NET runtime restores it itself,
- * FXRSTOR from the record it was given). Read as nothing, it put back
- * whatever the record held, and the thread went on mid-copy with XMM
- * registers that were never its own.
+ * A thread's x87 and SSE state as the processor's own images of it, read from
+ * and put back into a state block (the translator's layout): FNSAVE's 108
+ * bytes and FXSAVE's 512 - the x87 registers as ten-byte extended values in
+ * stack order, the tags, MXCSR and XMM0 to XMM7. What a Windows CONTEXT's
+ * floating-point groups hold; win32 lays them into the record
+ * (`kernel32/fpu-context.js`).
  *
  * The block keeps each x87 register as a double, and as the exact quadword
  * beside it when a `fild` left one (`x87Exact`); a register's extended value
@@ -26,9 +19,6 @@
  * keeps none.
  */
 
-/** Where the groups are in the 32-bit CONTEXT (winnt.h). */
-export const FLOAT_SAVE_AT = 0x1c;
-export const EXTENDED_AT = 0xcc;
 const FLOAT_SAVE_BYTES = 112;
 const EXTENDED_BYTES = 512;
 /** MXCSR_MASK: DAZ (bit 6) left out, as the translator's SSE model has none. */
@@ -315,9 +305,49 @@ export function restoreFloatSave(context, area){
 }
 
 /**
+ * @typedef {{ floatSave?: Uint8Array, extended?: Uint8Array }} FloatImages
+ */
+
+/**
+ * Both images of a state block's floating-point state; null where it is no
+ * state block.
+ *
+ * @param {any} context @returns {Required<FloatImages> | null}
+ */
+export function floatImages(context){
+    return hasFpuBlock(context)
+        ? { floatSave: floatSaveArea(context), extended: extendedImage(context) } : null;
+}
+
+/**
+ * Puts images back into a state block: FXSAVE's whole where it is given (the
+ * x87 registers are among it), else FNSAVE's.
+ *
+ * @param {any} context @param {FloatImages} images
+ * @returns {boolean} false where there is no block to take them
+ */
+export function restoreFloatImages(context, images){
+    if (!hasFpuBlock(context))
+    {
+        return false;
+    }
+    if (images.extended)
+    {
+        restoreExtended(context, images.extended);
+    }
+    else if (images.floatSave)
+    {
+        restoreFloatSave(context, images.floatSave);
+    }
+    return true;
+}
+
+/**
  * Whether a context keeps its registers in a state block these can read.
  *
  * @param {any} context @returns {context is FpuContext}
  */
-export const hasFpuBlock = context=>context?.block instanceof Uint8Array
-    && typeof context.layout?.x87 === 'number' && typeof context.layout?.xmm === 'number';
+export function hasFpuBlock(context){
+    return context?.block instanceof Uint8Array
+        && typeof context.layout?.x87 === 'number' && typeof context.layout?.xmm === 'number';
+}

@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createSyncFunctions } from './sync.js';
+import { floatImages, restoreFloatImages } from '../../cpu/internal/fpu-image.js';
 import { createCriticalSections, enterCode, leaveCode, tryEnterCode } from './critical.js';
 import { INTERLOCKED, INTERLOCKED_64 } from './interlocked.js';
 import { childThread } from './cross-process.js';
@@ -1194,6 +1195,7 @@ test("a stopped thread's x87 and SSE state is read into its CONTEXT and put back
         // nothing, the record put back whatever it held before.
         const host = /** @type {any} */ (fakeHost());
         host.kernel.scheduleResume = ()=>{};
+        host.float = { images: floatImages, restore: restoreFloatImages };
         const fns = createSyncFunctions(host);
         const layout = { x87: 64, x87Top: 192, x87Empty: 193, x87Control: 194, x87Status: 196,
             x87Exact: 198, xmm: 208, mxcsr: 336 };

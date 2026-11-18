@@ -38,6 +38,9 @@
  */
 
 import { privilegedAt, storeMachineStatus } from './machine-status.js';
+import {
+    CONTEXT_EXTENDED_REGISTERS, CONTEXT_FLOATING_POINT, floatGroupsOf, writeFloatGroups,
+} from './fpu-context.js';
 
 /** EXCEPTION_RECORD, and the size the whole of one occupies. */
 export const RECORD = Object.freeze({
@@ -209,6 +212,11 @@ const hex = value=>`0x${(value >>> 0).toString(16)}`;
  * @property {() => Record<string, number>} registers  EFLAGS among them
  *           (`eflags`) when the host can read them; without them a handler
  *           starts with the flags as they stand and continues with them.
+ * @property {(registers: Record<string, number>) => any} [continueAt]
+ *           An answer that sends the calling thread on at `registers`, its
+ *           `eip` and `esp` among them, instead of back to its call (the
+ *           bridge's `continueAt`): where RaiseException's caller goes once a
+ *           handler has said to continue.
  * @property {(value: number, registers: Record<string, number>) => any} answerWith
  *           An answer that returns `value` and sets `registers` on the
  *           calling thread as it resumes (the bridge's `answerWith`).
@@ -225,6 +233,9 @@ const hex = value=>`0x${(value >>> 0).toString(16)}`;
  *           that answers ExceptionContinueSearch. Without it the frame names
  *           no handler and every walk passes over it.
  * @property {() => any} [currentThread]
+ * @property {import('./fpu-context.js').FloatState | null} [float]  The processor's
+ *           images of a thread's x87 and SSE state, which a context carries.
+ * @property {(api: string, detail: string) => void} [divergence]
  * @property {(text: string) => void} [trace]
  * @property {(what: { code: number, address: number }) => void} [terminate]
  *           Ends the process for an exception nothing handled, with the
@@ -287,8 +298,18 @@ export function createSeh(host){
      * @param {Record<string, number>} registers
      */
     const writeContext = (at, registers)=>{
-        host.writeMemory(at, new Uint8Array(CONTEXT.SIZE));
-        writeU32(at + CONTEXT.FLAGS, CONTEXT_FULL);
+        // With the thread's x87 and SSE state, as Windows hands a handler the
+        // whole context: a handler that continues from the record, or from one
+        // it laid over it (a .NET runtime resuming a thread it had redirected
+        // for a collection), gets that state back (`continuation`).
+        // Read here, where the exception is met: the registers on the
+        // processor are the thread's own.
+        const bytes = new Uint8Array(CONTEXT.SIZE);
+        const images = host.float?.images() ?? null;
+        writeFloatGroups(images, bytes, CONTEXT_FLOATING_POINT | CONTEXT_EXTENDED_REGISTERS);
+        host.writeMemory(at, bytes);
+        writeU32(at + CONTEXT.FLAGS, images === null ? CONTEXT_FULL
+            : CONTEXT_FULL | CONTEXT_FLOATING_POINT | CONTEXT_EXTENDED_REGISTERS);
         for (const [field, name] of [
             [CONTEXT.EDI, 'edi'], [CONTEXT.ESI, 'esi'], [CONTEXT.EBX, 'ebx'],
             [CONTEXT.EDX, 'edx'], [CONTEXT.ECX, 'ecx'], [CONTEXT.EAX, 'eax'],
@@ -339,6 +360,20 @@ export function createSeh(host){
     const continuation = (at, flags)=>{
         /** @type {Record<string, number>} */
         const registers = readContext(at);
+        // The floating-point groups the record names go back with the rest,
+        // where the thread resumes: by then the registers on the processor
+        // may be another thread's (`resumeContextAt`'s `float`).
+        const groups = floatGroupsOf(host.readMemory(at, CONTEXT.SIZE),
+            readU32(at + CONTEXT.FLAGS));
+        if (groups !== null && host.float)
+        {
+            /** @type {any} */ (registers).float = groups;
+        }
+        else if (groups !== null)
+        {
+            host.divergence?.('exception',
+                "the floating-point registers of a handler's context are not put back");
+        }
         if (flags === undefined)
         {
             delete registers.eflags;
@@ -599,12 +634,15 @@ export function createSeh(host){
      *        when they are not the processor's right now -- a fault is
      *        reported from a stub that has already moved the stack and spent
      *        two of them.
+     * @param {Record<string, number>} [shown]  The context handlers are shown, when it
+     *        is not those registers: RaiseException shows its caller as it stands once
+     *        the call has returned.
      * @returns {Promise<{ handled: boolean, registers?: Record<string, number>,
      *     record?: number, context?: number, top?: number, asked?: any, flags?: number }>}
      *     When nothing handled it, where the record and context were built,
      *     for the last-chance filter to be handed the same ones.
      */
-    const dispatch = async(what, given)=>{
+    const dispatch = async(what, given, shown)=>{
         const registers = given ?? host.registers();
         const flags = registers.eflags;
         const at = carve(registers);
@@ -614,7 +652,7 @@ export function createSeh(host){
             address: what.address >>> 0,
             parameters: what.parameters,
         });
-        writeContext(at.context, registers);
+        writeContext(at.context, shown ?? registers);
 
         // Whose fault this is, read before the walk. Each handler is guest
         // code and the loop turns between them, so from the second one onwards
@@ -877,9 +915,11 @@ export function createSeh(host){
      * @param {{ code: number, flags?: number, address: number, parameters?: number[],
      *     raisedFrom?: number, call?: string }} what  `raisedFrom` the return address of
      *     RaiseException's caller, `call` the host function it was met in
+     * @param {Record<string, number>} [shown]  The context handlers are shown, when it
+     *     is not the registers on the processor (`dispatch`).
      */
-    const raise = async what=>{
-        const result = await dispatch(what);
+    const raise = async(what, shown)=>{
+        const result = await dispatch(what, undefined, shown);
         if (result.handled)
         {
             return result;
@@ -1057,16 +1097,30 @@ export function createSeh(host){
                     {
                         parameters.push(readU32(from + at * 4));
                     }
-                    // The context a handler continued from is the caller's to
-                    // take back when it resumes: by the time the dispatch is
-                    // done the processor may be running somebody else.
+                    // The context handlers are shown is the caller's as it
+                    // stands once the call has returned - its return address,
+                    // its stack past the four arguments - which is what
+                    // RtlRaiseException captures. A handler that continues
+                    // goes on from that context whole, wherever it points, as
+                    // NtContinue does: left as it was, back in the caller; laid
+                    // over with another (a .NET runtime resuming a thread it
+                    // redirected for a collection lays the thread's saved
+                    // context there), at that one's Eip and Esp. Returned to the
+                    // caller with only the other registers taken, such a thread
+                    // went on in the runtime's stub with the frame pointer of
+                    // the code it was redirected from.
+                    const registers = host.registers();
+                    const esp = registers.esp >>> 0;
+                    const caller = { ...registers, eip: readU32(esp), esp: esp + 4 + 16 >>> 0 };
                     return raise({
                         code: code >>> 0,
                         flags: flags >>> 0 & EXCEPTION_NONCONTINUABLE,
-                        address: host.registers().eip,
+                        address: registers.eip,
                         parameters,
-                        raisedFrom: readU32(host.registers().esp >>> 0),
-                    }).then(result=>(result.registers ? host.answerWith(0, result.registers) : 0));
+                        raisedFrom: caller.eip,
+                    }, caller).then(result=>(!result.registers ? 0
+                        : host.continueAt ? host.continueAt(result.registers)
+                            : host.answerWith(0, result.registers)));
                 },
             },
 
