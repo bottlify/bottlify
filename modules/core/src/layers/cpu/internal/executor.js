@@ -66,6 +66,8 @@ async function openWorker(url){
  * @property {number} instructions  retired
  * @property {boolean} halted
  * @property {any | null} fault  a fault no handler took, as the executor's host recorded it
+ * @property {string} [lost]  why its worker went in the middle of the slice: the thread's
+ *     state is what its block held then, the instructions what the slice had counted
  */
 
 /**
@@ -87,6 +89,14 @@ export function createBell(){
         buffer,
         /** The count now: what a wait is from. */
         rung: ()=>Atomics.load(word, Bell.RUNG),
+        /**
+         * Rings it from the process's side: an executor whose worker is gone
+         * rings no more, and the process waiting on its turn would wait for good.
+         */
+        ring(){
+            Atomics.add(word, Bell.RUNG, 1);
+            Atomics.notify(word, Bell.RUNG);
+        },
         /**
          * Waits until the bell rings past `seen`, at most `ms`.
          * @param {number} seen @param {number} [ms]
@@ -199,17 +209,48 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
         Promise.resolve(now !== undefined ? now : store.get(ask.key)).catch(()=>null)
             .then(bytes=>worker.post({ type: 'store', id: ask.id, bytes })).catch(()=>{});
     };
-    /** Whether it said it is ready: a worker lost after that is the process's to notice. */
+    /** Whether it said it is ready. */
     let ready = false;
+    /** Whether the process ended it (`close`): its worker's exit is then no loss. */
+    let closing = false;
+    /** Why its worker went after it was ready, without the process ending it. @type {string | null} */
+    let lost = null;
+    /**
+     * Told once of such a loss, when nothing of the process's is on it any
+     * more: at once, or when the end of the slice out on it is taken.
+     *
+     * @type {((reason: string) => void)[]}
+     */
+    const goneListeners = [];
+    const tellGone = ()=>{
+        for (const listener of goneListeners.splice(0))
+        {
+            listener(/** @type {string} */ (lost));
+        }
+    };
     const started = new Promise((resolve, reject)=>{
         // A worker that fails to load or dies before it is ready says
         // nothing of its own: without this the process waited for its
-        // `ready` for good, and so did its dispose.
+        // `ready` for good, and so did its dispose. One that dies after
+        // says nothing either: a slice out on it never ends, and the
+        // process waiting on the bell waited for good with its thread.
         worker.onLost(reason=>{
             if (!ready)
             {
                 failed ??= reason;
                 reject(new Error(`executor ${index}: ${reason}`));
+                return;
+            }
+            if (closing || lost !== null)
+            {
+                return;
+            }
+            lost = reason;
+            failed ??= reason;
+            bell.ring();
+            if (!running)
+            {
+                tellGone();
             }
         });
         worker.onMessage(data=>{
@@ -321,8 +362,11 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
 
     const executor = {
         index,
-        /** Whether a slice is out. */
-        busy: ()=>running,
+        /**
+         * Whether a slice is out -- or it can take none, its worker gone: a
+         * scheduler holding its list for a turn finds it busy, not free.
+         */
+        busy: ()=>running || lost !== null,
         /**
          * Whether an answer given to its slice halted or stopped the thread and
          * the slice's end has not been taken: the end is coming, and until it is
@@ -362,6 +406,17 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
             if (!running)
             {
                 return null;
+            }
+            if (lost !== null)
+            {
+                // Its worker went: the slice ends here, with what the block holds.
+                const instructions = executor.retiredSoFar();
+                running = false;
+                ending = false;
+                mine = Turn.IDLE;
+                retiredTaken += instructions;
+                tellGone();
+                return { instructions, halted: false, fault: null, lost };
             }
             const state = Atomics.load(channel.words, 0);
             if (state === mine)
@@ -490,12 +545,30 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
         },
         /** The milliseconds its translator emitted on its own thread, ever. */
         translatedHere: ()=>Atomics.load(emittedHere, 0),
+        /** Why its worker went after it was ready, the process not ending it; null while it runs. */
+        lost: ()=>lost,
+        /**
+         * Tells `listener` once if its worker goes after it was ready without the
+         * process ending it (`close`), when nothing of the process's is on it any
+         * more (a slice out on it ended by `step`); at once if that is so already.
+         *
+         * @param {(reason: string) => void} listener
+         */
+        onGone(listener){
+            if (lost !== null && !running)
+            {
+                listener(lost);
+                return;
+            }
+            goneListeners.push(listener);
+        },
         /**
          * Ends the executor; resolved once its worker can no longer touch the
          * process's memory, which a later process may then be given.
          * @returns {Promise<void>}
          */
         close(){
+            closing = true;
             channel.say(Turn.CLOSE);
             return worker.terminate();
         },

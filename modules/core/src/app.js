@@ -349,7 +349,7 @@ const hashText = (hash, text)=>{
  *           gcNudge?: boolean | { everyMs?: number, bytes?: number }, grow?: boolean,
  *           executorTranslators?: { add: (index: number, reach: any) => void,
  *               remove: (index: number) => void }, hostMemory?: number,
- *               guestCharge?: 'length' | 'given' }} [cpu]
+ *               guestCharge?: 'length' | 'given', executorWorker?: string | URL }} [cpu]
  *           The machine's processor. `cores`: how many
  *           processors the program is told it has -- by every road Windows has to say
  *           it -- and the executors that run its threads at once, each a worker past
@@ -379,6 +379,8 @@ const hashText = (hash, text)=>{
  *           `executorTranslators`: the run's own, set for each process on the thread
  *           the run's translation pool is on: its other executors are lent workers
  *           of the pool, as its own is, instead of each opening a translator.
+ *           `executorWorker`: the script an executor's worker runs, for a host that
+ *           serves the engine's files elsewhere; the file beside the engine by default.
  * @property {(eip: number, instructions: number) => void} [sample]
  *           Called with the guest's instruction pointer at every turn boundary.
  *           This is the only view of what a program is doing between host calls,
@@ -5424,6 +5426,9 @@ async function buildApp(options){
             // opened all of them at its start.
             eagerExecutors: options.cpu?.eager === true && options.startedBeside !== true,
             executorTranslators: options.cpu?.executorTranslators,
+            ...(options.cpu?.executorWorker ? { executorWorker: options.cpu.executorWorker } : {}),
+            // An executor whose worker went is a loss of the run's (`executorsLost`).
+            divergence: reportDivergence,
             learnExecutors: options.startedBeside !== true,
             // The threads holding the guest's memory bring JavaScriptCore's
             // collections forward (`gc-nudge.js`): by default there only.

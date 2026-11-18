@@ -325,6 +325,7 @@ export function createCpuModule(){
              *          awaited: (() => boolean) | null,
              *          trapTimed: ((ms: number) => void) | null,
              *          remoteFigures: Map<number, any>, executorsRefused: string | null,
+             *          executorsLost: string[], lostRemotes: any[],
              *          writes: { host: any, clock: ReturnType<typeof createWriteClock> } | null,
              *          learned: { store: any, opened: number } | null,
              *          nudge: ReturnType<typeof startGcNudge> | null, store: any }}
@@ -355,6 +356,11 @@ export function createCpuModule(){
                 remoteFigures: new Map(),
                 // Why fewer executors run than were asked, if they do.
                 executorsRefused: null,
+                // The executors whose worker went while the process ran, and why,
+                // and the executors themselves, whose blocks still hold the
+                // thread each ran last.
+                executorsLost: [],
+                lostRemotes: [],
                 // The store the executors this bundle's threads opened are kept in,
                 // and the most it holds, once read: none in a run that opens them all.
                 learned: null,
@@ -468,6 +474,8 @@ export function createCpuModule(){
                 guestCharge: config?.guestCharge,
                 // The translator's module, imported at boot for `cork`.
                 engineUrl: config?.engineUrl ?? null,
+                // The executors' worker script: the file beside this one by default.
+                executorWorker: config?.executorWorker ?? null,
                 /** @type {import('./engine.js').EngineConfig} */
                 cork: config?.cork ?? {},
                 // Addresses below this are no-access; zero closes none.
@@ -583,6 +591,28 @@ export function createCpuModule(){
                     }
                     state.remotes = [...state.remotes, remote]
                         .sort((a, b)=>a.index - b.index);
+                    // Its worker gone without the process ending it (the tab's
+                    // memory, a crash): no thread is placed on it again, the one
+                    // out on it comes back with its slice's end (`lost`), and
+                    // it is not opened again for this process.
+                    remote.onGone?.((/** @type {string} */ reason)=>{
+                        state.remotes = state.remotes
+                            .filter((/** @type {any} */ one)=>one !== remote);
+                        // Its block stays the process's to read the thread off.
+                        state.lostRemotes.push(remote);
+                        state.unopened.add(index);
+                        state.executorsLost.push(`executor ${index}: ${reason}`);
+                        const detail = `executor ${index}'s worker went (${reason}): its threads`
+                            + ' run on the others, the one it ran from its last state';
+                        if (config?.divergence)
+                        {
+                            config.divergence('cpu', detail, 'loss');
+                        }
+                        else
+                        {
+                            log?.error?.('cpu', detail);
+                        }
+                    });
                     const learned = state.learned;
                     if (learned !== null && state.remotes.length > learned.opened)
                     {
@@ -790,6 +820,8 @@ export function createCpuModule(){
                         const host = state.host;
                         const openOne = (/** @type {number} */ index)=>createRemoteExecutor({ host, index,
                             engineUrl: settings.engineUrl, bell,
+                            ...(settings.executorWorker
+                                ? { workerUrl: new URL(settings.executorWorker) } : {}),
                             unbroken: state.unbroken.buffer,
                             store: hostConfig.cork?.store ?? null,
                             config: { ...hostConfig, cork } }).then(remote=>{
@@ -1352,7 +1384,9 @@ export function createCpuModule(){
                  * @param {number} index @param {() => void} work
                  */
                 onExecutor(index, work){
-                    const remote = state.remotes.find((/** @type {any} */ one)=>one.index === index);
+                    // A lost one too: the thread it ran last is read off its block.
+                    const remote = state.remotes.find((/** @type {any} */ one)=>one.index === index)
+                        ?? state.lostRemotes.find((/** @type {any} */ one)=>one.index === index);
                     if (!remote)
                     {
                         throw new Error(`cpu: no executor ${index}`);
@@ -1756,6 +1790,7 @@ export function createCpuModule(){
                     sharedMemory: typeof SharedArrayBuffer === 'function'
                         && instance.host.wasmMemory?.()?.buffer instanceof SharedArrayBuffer,
                     executorsRefused: instance.executorsRefused,
+                    executorsLost: instance.executorsLost,
                     // The executors asked for and not open yet, by index: a worker
                     // takes some tens of milliseconds to open, and more on a busy
                     // machine, so one asked for at a run's start may still be
