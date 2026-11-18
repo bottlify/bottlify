@@ -23,7 +23,7 @@ import { floatGroupsOf } from './fpu-context.js';
 import { debugGroupOf, setDebugRegisters } from './debug-registers.js';
 import { PROCESSOR } from './processor.js';
 import { TAKEN } from './named-objects.js';
-import { OBJ_OPENIF, readObjectAttributes, win32NameOf } from './object-attributes.js';
+import { OBJ_OPENIF, nameToWalk, readObjectAttributes } from './object-attributes.js';
 import { STATUS } from '../ntdll/status.js';
 
 const ERROR_SUCCESS = 0;
@@ -466,11 +466,16 @@ export function createProcessPolicyFunctions(host){
                     return STATUS.ACCESS_VIOLATION;
                 }
                 const given = readObjectAttributes(host.readMemory, attributes, wide ? 8 : 4);
-                const name = given === null || given.name === null || given.name === '' ? null
-                    : win32NameOf(given);
-                if (name === undefined)
+                const walked = nameToWalk(given, false);
+                if ('status' in walked)
                 {
-                    return STATUS.OBJECT_PATH_NOT_FOUND;
+                    return walked.status;
+                }
+                const name = given === null || walked.name === null ? null
+                    : host.namedObjects?.keyOf(given, 'job') ?? STATUS.OBJECT_PATH_NOT_FOUND;
+                if (typeof name === 'number')
+                {
+                    return name;
                 }
                 const found = host.namedObjects?.existing(name, 'job') ?? null;
                 if (found === TAKEN)
@@ -500,14 +505,16 @@ export function createProcessPolicyFunctions(host){
                     return STATUS.ACCESS_VIOLATION;
                 }
                 const given = readObjectAttributes(host.readMemory, attributes, wide ? 8 : 4);
-                if (given === null || given.name === null || given.name === '')
+                const walked = nameToWalk(given, true);
+                if ('status' in walked || given === null)
                 {
-                    return STATUS.OBJECT_NAME_INVALID;
+                    return 'status' in walked ? walked.status : STATUS.INVALID_PARAMETER;
                 }
-                const name = win32NameOf(given);
-                if (name === undefined)
+                const name = host.namedObjects?.keyOf(given, 'job')
+                    ?? STATUS.OBJECT_PATH_NOT_FOUND;
+                if (typeof name === 'number')
                 {
-                    return STATUS.OBJECT_PATH_NOT_FOUND;
+                    return name;
                 }
                 const found = host.namedObjects?.existing(name, 'job') ?? null;
                 if (found === TAKEN)

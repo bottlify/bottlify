@@ -124,6 +124,7 @@ function setup(){
             },
         },
         existing: named.existing,
+        keyOf: named.keyOf,
         reference: ()=>{},
         object: (handle, kind)=>{
             const entry = handles.get(handle);

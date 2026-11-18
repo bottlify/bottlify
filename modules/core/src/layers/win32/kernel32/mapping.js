@@ -5,7 +5,7 @@
  */
 
 import { TAKEN } from './named-objects.js';
-import { readObjectAttributes, win32NameOf } from './object-attributes.js';
+import { nameToWalk, readObjectAttributes } from './object-attributes.js';
 import { STATUS, toDosError } from '../ntdll/status.js';
 import { mapImage } from '../../loader/internal/image.js';
 import { relocateImage } from '../../loader/internal/pe.js';
@@ -573,12 +573,10 @@ export function createMappingFunctions(host){
          * NTSTATUS NtOpenSection(PHANDLE SectionHandle, ACCESS_MASK,
          *   POBJECT_ATTRIBUTES ObjectAttributes)
          *
-         * A section made by name, as OpenFileMapping finds one: the object
-         * directory Win32 names live in (\BaseNamedObjects, or a session's)
-         * taken off, and the rest looked up as a Win32 call may have spelt it,
-         * bare or after Global\ or Local\. A name given relative to a
-         * directory handle is taken as one in that directory, the one a
-         * program opens for it. \Device\PhysicalMemory, which a hardware
+         * A section made by name, as OpenFileMapping finds one: the name is
+         * walked through the object namespace (`object-namespace.js`), and a
+         * Win32 name found looked up as a Win32 call may have spelt it, bare
+         * or after Global\ or Local\. \Device\PhysicalMemory, which a hardware
          * survey (Futuremark's SystemInfo) opens for the BIOS's tables, is
          * refused, as Windows has refused it to user mode since Server 2003
          * Service Pack 1.
@@ -592,18 +590,19 @@ export function createMappingFunctions(host){
                     return STATUS.ACCESS_VIOLATION;
                 }
                 const given = readObjectAttributes(host.readMemory, attributes);
-                if (given === null || given.name === null || given.name === '')
+                const walked = nameToWalk(given, true);
+                if ('status' in walked || given === null || walked.name === null)
                 {
-                    return STATUS.OBJECT_NAME_INVALID;
+                    return 'status' in walked ? walked.status : STATUS.INVALID_PARAMETER;
                 }
-                if (/^\\device\\physicalmemory$/i.test(given.name))
+                if (/^\\device\\physicalmemory$/i.test(walked.name))
                 {
                     return STATUS.ACCESS_DENIED;
                 }
-                const name = win32NameOf(given);
-                if (name === undefined)
+                const name = host.namedObjects.keyOf(given, 'mapping');
+                if (typeof name === 'number')
                 {
-                    return STATUS.OBJECT_PATH_NOT_FOUND;
+                    return name;
                 }
                 for (const spelt of [name, `Global\\${name}`, `Local\\${name}`])
                 {

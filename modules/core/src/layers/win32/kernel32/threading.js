@@ -12,6 +12,7 @@ import { MODIFY_STATE, SYNCHRONIZE, allows, grantedAccess } from './access.js';
 import { STATUS, toDosError } from '../ntdll/status.js';
 import { FILETIME_EPOCH_MS, dueInMs, readLargeInteger } from './due-time.js';
 import { createSyncNatives } from './sync-natives.js';
+import { createDirectoryNatives } from './object-directories.js';
 import { overlappedLayout } from '../common/overlapped.js';
 import { EVENT_SLOTS, EVENT_WORD_SLOTS, MUTEX_SLOTS, SEMAPHORE_SLOTS, eventStateCode,
     releaseMutexCode, waitOneCode } from './wait-one.js';
@@ -2186,14 +2187,17 @@ export function createThreadingFunctions(host){
     // on CreateEventW's entry, whose state they share (`sync-natives.js`).
     const natives = createSyncNatives({
         readMemory: host.readMemory, writeMemory: host.writeMemory, kernel, creates,
-        existing, reference: found=>host.namedObjects.reference(found), object,
+        existing, keyOf: (given, kind)=>host.namedObjects.keyOf(given, kind),
+        reference: found=>host.namedObjects.reference(found), object,
         currentThread: host.currentThread, park: host.park, queueApc: host.queueApc,
         divergence: host.divergence,
     });
 
     return {
         ...table,
-        CreateEventW: { ...table.CreateEventW, natives },
+        CreateEventW: { ...table.CreateEventW, natives: { ...natives,
+            ...createDirectoryNatives({ readMemory: host.readMemory,
+                writeMemory: host.writeMemory, kernel, namedObjects: host.namedObjects }) } },
         CreateRemoteThread: {
             argBytes: 28,
             /** @param {number[]} args */
