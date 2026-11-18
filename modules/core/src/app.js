@@ -6190,6 +6190,12 @@ async function buildApp(options){
                 mxcsr: ()=>core.api('cpu').fpu.mxcsr(),
                 /** @param {number} word */
                 setMxcsr: word=>core.api('cpu').fpu.setMxcsr(word),
+                // A thread's x87 and SSE state as FNSAVE's and FXSAVE's images,
+                // which a CONTEXT's floating-point groups are.
+                /** @param {any} [context] */
+                images: context=>core.api('cpu').fpu.images?.(context) ?? null,
+                /** @param {any} context @param {any} images */
+                restore: (context, images)=>core.api('cpu').fpu.restore?.(context, images) ?? false,
             },
             // In a gone process's memory, where the bytes it left end: each block
             // zeroed below it as it is handed out (`createHeapAllocator`).

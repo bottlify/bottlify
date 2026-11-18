@@ -22,7 +22,8 @@ export const DEVICE = Object.freeze({
     CreateTexture: 23, CreateVolumeTexture: 24, CreateCubeTexture: 25,
     CreateVertexBuffer: 26,
     CreateIndexBuffer: 27, CreateRenderTarget: 28,
-    CreateDepthStencilSurface: 29, UpdateTexture: 31, SetRenderTarget: 37, GetRenderTarget: 38,
+    CreateDepthStencilSurface: 29, UpdateSurface: 30, UpdateTexture: 31,
+    CreateOffscreenPlainSurface: 36, SetRenderTarget: 37, GetRenderTarget: 38,
     SetDepthStencilSurface: 39, GetDepthStencilSurface: 40, BeginScene: 41, EndScene: 42,
     SetTransform: 44, SetViewport: 47, GetViewport: 48, SetRenderState: 57,
     CreateStateBlock: 59, SetTexture: 65, SetTextureStageState: 67, SetSamplerState: 69,
@@ -52,7 +53,7 @@ export const INDEX_BUFFER = Object.freeze({ Lock: 11, Unlock: 12 });
 export const VERTEX_BUFFER = INDEX_BUFFER;
 
 /** IDirect3DSurface9's slots. */
-export const SURFACE = Object.freeze({ GetDesc: 12, LockRect: 13, UnlockRect: 14 });
+export const SURFACE = Object.freeze({ GetDevice: 3, GetDesc: 12, LockRect: 13, UnlockRect: 14 });
 
 /**
  * @typedef {Object} DeviceHost

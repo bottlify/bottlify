@@ -19,6 +19,7 @@
 
 import { blockLayouts } from './teb.js';
 import { SELECTORS } from './seh.js';
+import { floatGroupsOf } from './fpu-context.js';
 import { PROCESSOR } from './processor.js';
 
 const ERROR_ACCESS_DENIED = 5;
@@ -40,8 +41,8 @@ const CONTEXT_CAPTURED_END = 0xcc;
 /** CONTEXT_i386's groups, each a bit beside the i386 one. */
 const CONTEXT_CONTROL = 0x1;
 const CONTEXT_INTEGER = 0x2;
-const CONTEXT_FLOATING_POINT = 0x8;
-const CONTEXT_EXTENDED_REGISTERS = 0x20;
+/** The 32-bit CONTEXT's size. */
+const CONTEXT_BYTES = 0x2cc;
 /** Where each register a context restores stands in it, by group. */
 const CONTEXT_INTEGERS = /** @type {const} */ ([['edi', 0x9c], ['esi', 0xa0], ['ebx', 0xa4],
     ['edx', 0xa8], ['ecx', 0xac], ['eax', 0xb0]]);
@@ -151,6 +152,8 @@ const HANDLE_PROBE = 1 << 20;
  * @property {number} [processId]  This process's id, which a job's id list names.
  * @property {{ count: () => number, systemMask: () => number }} [processors]  The
  *     machine's processors, all of them on its one NUMA node.
+ * @property {import('./fpu-context.js').FloatState | null} [float]  The processor's
+ *           images of a thread's x87 and SSE state.
  * @property {(values: Record<string, number>) => void} [setRegisters]  The running
  *           thread's registers, EIP and ESP among them: where it goes on from.
  * @property {(api: string, detail: string) => void} [divergence]
@@ -439,7 +442,11 @@ export function createProcessPolicyFunctions(host){
                     values[name] = readDword(at + offset);
                 }
             }
-            if ((flags & (CONTEXT_FLOATING_POINT | CONTEXT_EXTENDED_REGISTERS)) !== 0)
+            // The floating-point groups go back with the rest, as Windows
+            // continues from the whole record.
+            // On the calling thread, whose call this is: its own registers now.
+            const groups = floatGroupsOf(host.readMemory(at, CONTEXT_BYTES), flags);
+            if (groups !== null && host.float?.restore(null, groups) !== true)
             {
                 host.divergence?.('NtContinue',
                     'the floating-point registers of a context are not put back');

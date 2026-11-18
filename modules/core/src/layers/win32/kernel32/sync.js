@@ -17,10 +17,7 @@ import { createThreadInfoFunctions } from './thread-info.js';
 import { createProcessPolicyFunctions } from './process-policy.js';
 import { askChild, threadArg, threadEnd } from './cross-process.js';
 import { SYNCHRONIZE, allows } from './access.js';
-import {
-    EXTENDED_AT, FLOAT_SAVE_AT, extendedImage, floatSaveArea, hasFpuBlock, restoreExtended,
-    restoreFloatSave,
-} from './fpu-context.js';
+import { floatGroupsOf, writeFloatGroups } from './fpu-context.js';
 
 /**
  * What the export binding hands an entry that is guest code rather than a
@@ -109,8 +106,6 @@ const CONTEXT_CONTROL = 0x10001;
 const CONTEXT_INTEGER = 0x10002;
 const CONTEXT_SEGMENTS = 0x10004;
 const CONTEXT_DEBUG_REGISTERS = 0x10010;
-const CONTEXT_FLOATING_POINT = 0x10008;
-const CONTEXT_EXTENDED_REGISTERS = 0x10020;
 const CONTEXT_BYTES = 0x2cc;
 /** The 32-bit CONTEXT's integer and control registers, by winnt.h's offsets. */
 const CONTEXT_INTEGERS = /** @type {const} */ ([['edi', 0x9c], ['esi', 0xa0], ['ebx', 0xa4],
@@ -163,6 +158,8 @@ const FILETIME_EPOCH_MS = 11644473600000;
  *   Credits the guest clock for time a wait was supposed to spend. See the
  *   timeout note on WaitForMultipleObjects.
  * @property {(code: number) => void} [setLastError]
+ * @property {import('./fpu-context.js').FloatState | null} [float]  the processor's
+ *           images of a thread's x87 and SSE state
  * @property {() => Record<string, number>} [registers]  the running thread's
  * @property {(values: Record<string, number>) => void} [setRegisters]  the running
  *           thread's, where it goes on from (NtContinue)
@@ -574,22 +571,11 @@ export function createSyncFunctions(host){
                     values[name] = view.getUint32(offset, true);
                 }
             }
-            const extended = (flags & CONTEXT_EXTENDED_REGISTERS) === CONTEXT_EXTENDED_REGISTERS;
-            const x87 = (flags & CONTEXT_FLOATING_POINT) === CONTEXT_FLOATING_POINT;
-            if ((extended || x87) && !hasFpuBlock(thread.context))
+            const groups = floatGroupsOf(bytes, flags);
+            if (groups !== null && host.float?.restore(thread.context, groups) !== true)
             {
                 host.divergence?.('SetThreadContext',
                     'the floating-point registers of a context are not put back');
-            }
-            else if (extended)
-            {
-                // The whole of it, the x87 registers with the SSE state.
-                restoreExtended(thread.context, bytes.subarray(EXTENDED_AT, EXTENDED_AT + 512));
-            }
-            else if (x87)
-            {
-                restoreFloatSave(thread.context,
-                    bytes.subarray(FLOAT_SAVE_AT, FLOAT_SAVE_AT + 112));
             }
         }
         else
@@ -678,17 +664,8 @@ export function createSyncFunctions(host){
             put(0xc4, registers.esp);
             put(0xc8, SELECTORS.DATA);
         }
-        if (hasFpuBlock(context))
-        {
-            if ((flags & CONTEXT_FLOATING_POINT) === CONTEXT_FLOATING_POINT)
-            {
-                bytes.set(floatSaveArea(context), FLOAT_SAVE_AT);
-            }
-            if ((flags & CONTEXT_EXTENDED_REGISTERS) === CONTEXT_EXTENDED_REGISTERS)
-            {
-                bytes.set(extendedImage(context), EXTENDED_AT);
-            }
-        }
+        // The calling thread's own as they stand, another's from where it stopped.
+        writeFloatGroups(host.float?.images(context) ?? null, bytes, flags);
         host.writeMemory(at, bytes);
     };
 
@@ -835,6 +812,7 @@ export function createSyncFunctions(host){
             currentThread: host.currentThread,
             registers: host.registers,
             setRegisters: host.setRegisters,
+            float: host.float,
             divergence: host.divergence,
             pointerSize: host.pointerSize,
             processId: host.processId,
