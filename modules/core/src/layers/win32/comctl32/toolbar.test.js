@@ -13,7 +13,8 @@ import { setupBars as setupWith, OUT, ITEM, HINSTANCE } from './bars.fixture.js'
 import {
     TOOLBAR_CLASS, TBSTATE_ENABLED, TBSTATE_CHECKED, TBSTYLE_SEP, TBSTYLE_CHECK,
     TBSTYLE_CHECKGROUP, TBSTYLE_FLAT,
-    TB_BUTTONSTRUCTSIZE, TB_SETBITMAPSIZE, TB_SETBUTTONSIZE, TB_GETBUTTONSIZE, TB_ADDBITMAP,
+    TB_BUTTONSTRUCTSIZE, TB_GETIMAGELIST, TB_SETBITMAPSIZE, TB_SETBUTTONSIZE,
+    TB_GETBUTTONSIZE, TB_ADDBITMAP,
     TB_ADDBUTTONSA, TB_INSERTBUTTONA, TB_DELETEBUTTON, TB_BUTTONCOUNT, TB_GETBUTTON,
     TB_GETITEMRECT, TB_COMMANDTOINDEX, TB_ISBUTTONENABLED, TB_ISBUTTONCHECKED,
     TB_ISBUTTONPRESSED, TB_CHECKBUTTON, TB_ENABLEBUTTON, TB_SETPARENT, TB_GETSTATE,
@@ -284,4 +285,33 @@ test('TBBUTTONINFO reads and sets a button by command or by index, and is refuse
     assert.deepEqual(itemRect(context, hwnd, 1).rect.slice(0, 1), [40],
         'the next button follows a button of its own width');
     assert.equal(context.send([hwnd, TB_GETBUTTONINFOA, 999, info(32, 0x20)]) | 0, -1);
+});
+
+test('WM_SETFONT is taken and answered 1, its font then WM_GETFONT\'s', async()=>{
+    // Wine's toolbar and rebar tests build every toolbar with this check.
+    const context = setupBars();
+    await context.makeParent();
+    const { hwnd } = await toolbar(context, MFC_STYLE, [{ command: 100 }]);
+    const WM_SETFONT = 0x0030;
+    const WM_GETFONT = 0x0031;
+    assert.equal(context.send([hwnd, WM_SETFONT, 0x1d0, 0]), 1);
+    assert.equal(context.send([hwnd, WM_GETFONT, 0, 0]), 0x1d0);
+});
+
+test('a standard strip into an empty toolbar makes its list: square, 16 or 24 pixels, '
+    + 'as many images as the strip holds', async()=>{
+    for (const [id, side, count] of [[0, 16, 15], [1, 24, 15], [6, 16, 12], [9, 24, 5]])
+    {
+        const context = setupBars();
+        await context.makeParent();
+        const hwnd = await context.control(TOOLBAR_CLASS, MFC_STYLE, [0, 0, 0, 0]);
+        context.send([hwnd, TB_BUTTONSTRUCTSIZE, 20, 0]);
+        context.memory.put32s(ITEM, [0xffffffff, id]);
+        assert.equal(context.send([hwnd, TB_ADDBITMAP, 0, ITEM]), 0, `strip ${id}`);
+        const list = context.send([hwnd, TB_GETIMAGELIST, 0, 0]);
+        assert.notEqual(list, 0);
+        context.lists.ImageList_GetIconSize.handler([list, OUT, OUT + 4]);
+        assert.deepEqual([context.memory.i32(OUT), context.memory.i32(OUT + 4)], [side, side]);
+        assert.equal(context.lists.ImageList_GetImageCount.handler([list]), count);
+    }
 });

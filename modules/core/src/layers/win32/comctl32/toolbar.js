@@ -65,6 +65,7 @@ export const TBSTYLE_LIST = 0x1000;
 
 /** Messages, numbered off WM_USER as the header numbers them. */
 const WM_USER = 0x0400;
+const WM_SETFONT = 0x0030;
 export const TB_ENABLEBUTTON = WM_USER + 1;
 export const TB_CHECKBUTTON = WM_USER + 2;
 export const TB_PRESSBUTTON = WM_USER + 3;
@@ -147,7 +148,14 @@ const TBIF_BYINDEX = 0x80000000;
 const TBBUTTON_SIZE = 20;
 /** TBADDBITMAP's hInst for comctl32's own strips, and how many images each holds. */
 const HINST_COMMCTRL = 0xffffffff;
-const STANDARD_COUNTS = Object.freeze({ 0: 15, 1: 15, 4: 12, 5: 12, 8: 5, 9: 5 });
+/**
+ * comctl32's standard strips by IDB_ number: how many images each holds -
+ * fifteen standard, twelve view, five history - its odd numbers the large
+ * ones, 24 pixels square, its even ones 16 (Wine's toolbar test, test_add_bitmap,
+ * with the numbers between the named ones answering as their neighbours).
+ */
+const STANDARD_COUNTS = Object.freeze({ 0: 15, 1: 15, 2: 15, 3: 15, 4: 12, 5: 12, 6: 12, 7: 12,
+    8: 5, 9: 5 });
 const ILC_MASK_COLOR32 = 0x0021;
 /** The first row's distance from the top, and a separator's width when it gives none. */
 const TOP_MARGIN = 2;
@@ -354,9 +362,11 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
      * blank, any the bitmap has past `count` dropped.
      *
      * @param {any} record @param {number} bitmap @param {number} count
+     * @param {number} [blank]  images to add with nothing in them, for a strip
+     *     whose pixels this build does not have
      * @returns {number} the first image's index
      */
-    const addImages = (record, bitmap, count)=>{
+    const addImages = (record, bitmap, count, blank = 0)=>{
         const held = state(record);
         const first = held.images;
         if (!images)
@@ -377,6 +387,11 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
         if (bitmap !== 0)
         {
             imageCall('ImageList_AddMasked', held.list, bitmap, tk.color(COLOR_3DFACE));
+        }
+        if (blank > 0)
+        {
+            imageCall('ImageList_SetImageCount', held.list,
+                imageCall('ImageList_GetImageCount', held.list) + blank);
         }
         const added = imageCall('ImageList_GetImageCount', held.list) - first;
         const kept = count > 0 ? count : Math.max(0, added);
@@ -404,10 +419,19 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
         const instance = view.getUint32(0, true);
         const id = view.getUint32(4, true);
         let bitmap = 0;
+        let blank = 0;
         if (instance === HINST_COMMCTRL)
         {
             host.divergence?.('TB_ADDBITMAP', `comctl32's standard bitmap ${id} is left blank`);
-            count = /** @type {any} */ (STANDARD_COUNTS)[id] ?? count;
+            blank = /** @type {any} */ (STANDARD_COUNTS)[id] ?? count;
+            count = blank;
+            const held = state(record);
+            if (held.list === 0 && held.images === 0)
+            {
+                // A first strip sizes the list it makes, as its own images are.
+                const side = (id & 1) !== 0 ? 24 : 16;
+                held.bitmap = { cx: side, cy: side };
+            }
         }
         else
         {
@@ -417,7 +441,7 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
                 return -1;
             }
         }
-        const first = addImages(record, bitmap, count);
+        const first = addImages(record, bitmap, count, blank);
         state(record).sources.push({ instance, id, bitmap, count: state(record).images - first });
         host.invalidate(record);
         return first;
@@ -661,6 +685,15 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
                 }
                 held.pressed = -1;
                 return 0;
+            // The toolbar keeps the font for its text and answers that it
+            // took it (Wine's toolbar and rebar tests, rebuild_toolbar).
+            case WM_SETFONT:
+                record.font = wParam;
+                if ((lParam & 0xffff) !== 0)
+                {
+                    host.invalidate(record);
+                }
+                return 1;
             case TB_BUTTONSTRUCTSIZE:
                 held.structSize = wParam;
                 return 0;
