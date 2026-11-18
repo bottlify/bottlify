@@ -254,13 +254,14 @@ export function createGraphicsLibraries(
 )
 {
     // A 64-bit process runs no i386: of the guest code here only Direct3D 9's
-    // is built for its width, routine by routine (`routines/assemble.js`,
-    // `Width`), and every other routine and count is a trap there.
+    // routines are built for its width, routine by routine
+    // (`routines/assemble.js`, `Width`), and the counts (`createVtables`'s
+    // x86-64 AddRef and Release); every other routine is a trap there.
     const guestCode = guestCodeAsked && pointerSize === 4;
     const guestCode9 = guestCodeAsked;
     const publisher = shared ?? createPublisher({
         publishInterface, unpublishInterface, currentThread,
-        cells: guestCode && !guestTraps.includes('counts') && allocate && memory?.readU32
+        cells: guestCodeAsked && !guestTraps.includes('counts') && allocate && memory?.readU32
             && memory.writeU32
             ? createCountCells({ allocate, memory }) : undefined,
     });

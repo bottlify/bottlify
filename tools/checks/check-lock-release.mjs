@@ -25,19 +25,9 @@
  */
 
 import { MODE_64, decode } from '../../modules/cork/src/decode/decoder.js';
-import { commandCode } from '../../modules/core/src/layers/graphics/seam/routines/command.js';
-import {
-    getRenderStateCode, getSamplerStateCode, getShaderCode, getSurfaceDescCode, getSurfaceLevelCode,
-    getTargetCode, getTextureStageStateCode, getTransformCode, getViewportCode,
-} from '../../modules/core/src/layers/graphics/seam/routines/getters.js';
-import {
-    lock7Code, lockCode, lockLevelCode, moveCopyCode, unlockCode, unlockLevelCode,
-} from '../../modules/core/src/layers/graphics/seam/routines/locks.js';
-import { COMMANDS as D3D9_COMMANDS, commandSlot as d3d9Slot }
-    from '../../modules/core/src/layers/graphics/d3d9/commands.js';
-import { D3D8_COMMANDS } from '../../modules/core/src/layers/graphics/d3d8/commands.js';
-import { D3D7_COMMANDS } from '../../modules/core/src/layers/graphics/d3d7/commands.js';
-import { GL_COMMANDS } from '../../modules/core/src/layers/graphics/opengl/commands.js';
+import { I386, X64 } from '../../modules/core/src/layers/graphics/seam/routines/assemble.js';
+import { routinesFor }
+    from '../../modules/core/src/layers/graphics/seam/routines/catalog.fixture.js';
 import {
     callocCode, freeCode, globalAllocCode, globalFreeCode, heapAllocCode, heapFreeCode,
     heapReAllocCode, heapSizeCode, mallocCode, msizeCode, reallocCode,
@@ -107,29 +97,14 @@ const sameWord = (a, b)=>(a.base ?? -1) === (b.base ?? -1) && (a.index ?? -1) ==
     || ((a.disp ?? 0) >= FAR && (a.disp ?? 0) === (b.disp ?? 0) && (a.index ?? -1) < 0
         && (b.index ?? -1) < 0);
 
-/** @type {[string, Uint8Array][]} */
+/**
+ * The graphics seam's routines (`routines/catalog.fixture.js`), then the
+ * kernel's and the CRT's.
+ *
+ * @type {[string, Uint8Array][]}
+ */
 const routines = [
-    ['Lock', lockCode(AT, TRAP)],
-    ['Lock with moves', lockCode(AT, TRAP, 0x7f, AT + 0x1000)],
-    ['the copy of a move', moveCopyCode()],
-    ['Lock (Direct3D 7)', lock7Code(AT, TRAP)],
-    ['Unlock', unlockCode(AT, TRAP)],
-    ['texture LockRect', lockLevelCode(AT, TRAP, { find: 'texture' })],
-    ['texture LockBox', lockLevelCode(AT, TRAP, { find: 'texture', box: true })],
-    ['surface LockRect', lockLevelCode(AT, TRAP, { find: 'surface' })],
-    ['texture UnlockRect', unlockLevelCode(AT, TRAP, { find: 'texture' })],
-    ['surface UnlockRect', unlockLevelCode(AT, TRAP, { find: 'surface' })],
-    ['GetRenderTarget', getTargetCode(AT, TRAP, { depth: false, indexed: true })],
-    ['GetDepthStencilSurface', getTargetCode(AT, TRAP, { depth: true, indexed: false })],
-    ['GetRenderState', getRenderStateCode(AT, TRAP)],
-    ['GetTransform', getTransformCode(AT, TRAP)],
-    ['GetTextureStageState', getTextureStageStateCode(AT, TRAP, 0xffffffff)],
-    ['GetViewport', getViewportCode(AT, TRAP)],
-    ['GetVertexShader', getShaderCode(AT, TRAP, 0)],
-    ['GetPixelShader', getShaderCode(AT, TRAP, 1)],
-    ['GetSurfaceDesc', getSurfaceDescCode(AT, TRAP)],
-    ['GetSamplerState', getSamplerStateCode(AT, TRAP)],
-    ['GetSurfaceLevel', getSurfaceLevelCode(AT, TRAP)],
+    ...routinesFor(I386).map(({ name, code })=>/** @type {[string, Uint8Array]} */ ([name, code])),
     ['HeapAlloc', heapAllocCode(PLACED, AT, TRAP)],
     ['malloc', mallocCode(PLACED, AT, TRAP, 0x500000)],
     ['calloc', callocCode(PLACED, AT, TRAP, 0x500000)],
@@ -162,6 +137,7 @@ const routines = [
 ];
 /** The x86-64 a 64-bit process runs instead, decoded at 64 bits. @type {[string, Uint8Array][]} */
 const longRoutines = [
+    ...routinesFor(X64).map(({ name, code })=>/** @type {[string, Uint8Array]} */ ([name, code])),
     ['HeapAlloc', heapAllocLongCode(PLACED).code],
     ['malloc', mallocLongCode(PLACED, 0x500000).code],
     ['calloc', callocLongCode(PLACED, 0x500000).code],
@@ -182,22 +158,6 @@ const longRoutines = [
     ['InterlockedExchange', LONG_EXCHANGE_CODE],
     ['InterlockedIncrement', LONG_INCREMENT_CODE],
 ];
-/**
- * @param {string} family @param {Record<string, any>} table
- * @param {(name: string) => number} slotOf @param {Record<string, any>} [more]
- */
-const commands = (family, table, slotOf, more = {})=>{
-    for (const [name, shape] of Object.entries(table))
-    {
-        routines.push([`${family} ${name}`,
-            commandCode(AT, TRAP, { ...shape, slot: slotOf(name), ...more })]);
-    }
-};
-commands('Direct3D 9', D3D9_COMMANDS, d3d9Slot);
-commands('Direct3D 8', D3D8_COMMANDS.COMMANDS, D3D8_COMMANDS.commandSlot);
-commands('Direct3D 7', D3D7_COMMANDS.COMMANDS, D3D7_COMMANDS.commandSlot);
-commands('OpenGL', GL_COMMANDS.COMMANDS, GL_COMMANDS.commandSlot, { thread: true });
-
 /** @type {string[]} */
 const problems = [];
 let locking = 0;
