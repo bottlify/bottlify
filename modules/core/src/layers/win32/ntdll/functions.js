@@ -460,11 +460,16 @@ export function createNtdllFunctions(host){
                 const out = new DataView(new ArrayBuffer(48 * count));
                 for (let one = 0; one < count; one++)
                 {
-                    // IdleTime, KernelTime, UserTime: each processor its share.
+                    // IdleTime, KernelTime, UserTime: each processor its share,
+                    // the first the remainder too, so that the shares add up to
+                    // what GetSystemTimes says - a caller comparing the sums
+                    // subtracts one from the other unsigned.
                     for (const field of [0, 1, 2])
                     {
+                        const whole = times.getBigUint64(field * 8, true);
+                        const share = whole / BigInt(count);
                         out.setBigUint64(one * 48 + field * 8,
-                            times.getBigUint64(field * 8, true) / BigInt(count), true);
+                            one === 0 ? whole - share * BigInt(count - 1) : share, true);
                     }
                 }
                 return new Uint8Array(out.buffer);

@@ -572,3 +572,29 @@ test('NtOpenKeyEx is NtOpenKey with the open options it knows', async()=>{
         STATUS.INVALID_PARAMETER);
     assert.equal(fns.ZwOpenKeyEx, fns.NtOpenKeyEx);
 });
+
+test('the processors\' performance records add up to GetSystemTimes\' times', ()=>{
+    // Wine's kernel32 time.c test_GetSystemTimes subtracts GetSystemTimes'
+    // times from the records' sums, unsigned: a share rounded down made the
+    // sum the smaller and the difference enormous.
+    const host = fakeHost();
+    const times = [1_000_003n, 1_000_003n, 7n];
+    const kernel32 = { ...host.kernel32, GetSystemTimes: { argBytes: 12,
+        handler: (/** @type {number[]} */ pointers)=>{
+            pointers.forEach((at, field)=>new DataView(host.bytes.buffer)
+                .setBigUint64(at, times[field], true));
+            return 1;
+        } } };
+    const fns = createNtdllFunctions({ ...host, kernel32, processors: { count: ()=>4 } });
+    assert.equal(fns.NtQuerySystemInformation.handler([8, 0x100, 48 * 4, 0]), STATUS.SUCCESS);
+    const view = new DataView(host.bytes.buffer);
+    for (const [field, whole] of times.entries())
+    {
+        let sum = 0n;
+        for (let one = 0; one < 4; one++)
+        {
+            sum += view.getBigUint64(0x100 + one * 48 + field * 8, true);
+        }
+        assert.equal(sum, whole);
+    }
+});
