@@ -23,6 +23,7 @@ const ERROR_INVALID_PARAMETER = 87;
 const ERROR_NEGATIVE_SEEK = 131;
 const ERROR_ALREADY_EXISTS = 183;
 const ERROR_FILENAME_EXCED_RANGE = 206;
+const ERROR_DIRECTORY = 267;
 const ERROR_NOT_SUPPORTED = 50;
 
 /** What the old file family answers with when it fails. */
@@ -877,7 +878,23 @@ test('directories are made one level at a time and removed only when empty', ()=
     files.put('C:\\GAME\\DATA\\A.DAT', 'a');
     assert.equal(fns.RemoveDirectoryA.handler([at(NAME, 'C:\\GAME\\DATA')]), 0);
     files.nodes.delete('C:\\GAME\\DATA\\A.DAT');
+
+    // What the volume refuses to remove - the current directory, held open -
+    // is a sharing violation, not a directory that is not empty.
+    Object.assign(files, { removalRefused: ()=>'SHARING_VIOLATION' });
+    assert.equal(fns.RemoveDirectoryA.handler([at(NAME, 'C:\\GAME\\DATA')]), 0);
+    assert.equal(error.code, ERROR_SHARING_VIOLATION);
+    Object.assign(files, { removalRefused: ()=>null });
     assert.equal(fns.RemoveDirectoryA.handler([at(NAME, 'C:\\GAME\\DATA')]), 1);
+
+    // No directory is called by a wildcard, so none is made or looked for.
+    for (const name of ['C:\\GAME\\DATA?', 'C:\\GAME\\DATA*'])
+    {
+        assert.equal(fns.CreateDirectoryA.handler([at(NAME, name), 0]), 0);
+        assert.equal(error.code, ERROR_INVALID_NAME);
+        assert.equal(fns.RemoveDirectoryA.handler([at(NAME, name)]), 0);
+        assert.equal(error.code, ERROR_INVALID_NAME);
+    }
 });
 
 test('attributes say what a path is, and 0xffffffff says it is not there', ()=>{
@@ -1033,8 +1050,14 @@ test('the current directory is read and set through the same two-call protocol',
     assert.equal(fns.GetCurrentDirectoryA.handler([0x40, OUT_TEXT]), 'C:\\GAME'.length);
     assert.equal(memory.string(OUT_TEXT), 'C:\\GAME');
 
+    // Not there is told apart as everywhere else: the last name, or the way to it.
     assert.equal(fns.SetCurrentDirectoryA.handler([at(NAME, 'C:\\NOWHERE')]), 0);
+    assert.equal(error.code, ERROR_FILE_NOT_FOUND);
+    assert.equal(fns.SetCurrentDirectoryA.handler([at(NAME, 'C:\\NOWHERE\\SUB')]), 0);
     assert.equal(error.code, ERROR_PATH_NOT_FOUND);
+    files.put('C:\\GAME\\FILE.DAT', 'a file');
+    assert.equal(fns.SetCurrentDirectoryA.handler([at(NAME, 'C:\\GAME\\FILE.DAT')]), 0);
+    assert.equal(error.code, ERROR_DIRECTORY);
 
     files.mkdir('C:\\GAME\\DATA');
     assert.equal(fns.SetCurrentDirectoryA.handler([at(NAME, 'DATA')]), 1);
@@ -1061,6 +1084,52 @@ test('GetTempPathA ends in a separator, because callers concatenate onto it', ()
     assert.ok(memory.string(OUT_TEXT).endsWith('\\'));
     assert.equal(written, memory.string(OUT_TEXT).length);
 });
+
+test('GetTempPath is the first of TMP, TEMP and USERPROFILE set, else the Windows directory,'
+    + ' as a full path', ()=>{
+    /** @type {Record<string, string>} */
+    const variables = { TEMP: 'C:\\SCRATCH', USERPROFILE: 'C:\\Users\\User' };
+    const { memory, fns } = setup({
+        /** @param {string} name */
+        environmentVariable: name=>variables[name],
+    });
+    const asked = ()=>{
+        fns.GetTempPathA.handler([0x40, OUT_TEXT]);
+        return memory.string(OUT_TEXT);
+    };
+    assert.equal(asked(), 'C:\\SCRATCH\\');
+    variables.TMP = 'C:';
+    assert.equal(asked(), 'C:\\GAME\\', 'a drive alone is its current directory');
+    variables.TMP = 'C:\\';
+    assert.equal(asked(), 'C:\\');
+    delete variables.TMP;
+    delete variables.TEMP;
+    assert.equal(asked(), 'C:\\Users\\User\\');
+    delete variables.USERPROFILE;
+    assert.equal(asked(), 'C:\\WINDOWS\\');
+});
+
+test('the path calls refuse no name and a wildcard, and a temporary name needs its directory',
+    ()=>{
+        const { error, fns, at } = setup();
+        assert.equal(fns.GetFullPathNameA.handler([0, 260, BUFFER, 0]), 0);
+        assert.equal(error.code, ERROR_INVALID_NAME, 'Windows from 7 on');
+        assert.equal(fns.GetFullPathNameA.handler([at(NAME, ''), 260, BUFFER, 0]), 0);
+        assert.equal(error.code, ERROR_INVALID_NAME);
+        assert.equal(fns.GetLongPathNameA.handler([0, BUFFER, 260]), 0);
+        assert.equal(error.code, ERROR_INVALID_PARAMETER);
+        for (const form of ['GetLongPathNameA', 'GetShortPathNameA'])
+        {
+            assert.equal(fns[form].handler([at(NAME, 'C:\\GAME\\*'), BUFFER, 260]), 0);
+            assert.equal(error.code, ERROR_INVALID_NAME, form);
+        }
+        for (const unique of [0, 1])
+        {
+            assert.equal(fns.GetTempFileNameA.handler(
+                [at(NAME, 'C:\\GAME\\NOWHERE'), at(NAME2, 'tfn'), unique, BUFFER]), 0);
+            assert.equal(error.code, ERROR_DIRECTORY);
+        }
+    });
 
 test('a search with nothing to match is not the same as nowhere to look', ()=>{
     const { error, fns, at } = setup();

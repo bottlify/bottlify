@@ -61,6 +61,24 @@ const MAX_VALUE = 0x10000;
 const ERROR_INVALID_DATA = 13;
 const ERROR_BAD_LENGTH = 24;
 const ERROR_INVALID_FUNCTION = 1;
+const ERROR_SUCCESS = 0;
+const ERROR_FILE_NOT_FOUND = 2;
+const ERROR_ACCESS_DENIED = 5;
+const ERROR_SHARING_VIOLATION = 32;
+const ERROR_INVALID_PARAMETER = 87;
+
+/**
+ * How the file is opened: to read, by anyone who lets it be read, and
+ * sharing it with whoever reads or writes it; to write, read and written,
+ * sharing the same. A program that holds its own profile open with
+ * FILE_SHARE_READ | FILE_SHARE_WRITE can therefore still have it read and
+ * written, and one that shares less sees the call refused with
+ * ERROR_SHARING_VIOLATION, as Windows answers it.
+ */
+const READING = Object.freeze({ read: true, shareRead: true, shareWrite: true });
+const WRITING = Object.freeze({
+    read: true, write: true, create: true, truncate: true, shareRead: true, shareWrite: true,
+});
 
 /** @param {string} left @param {string} right */
 const sameName = (left, right)=>left.toLowerCase() === right.toLowerCase();
@@ -207,11 +225,21 @@ export function createProfileFunctions(host){
     const encodings = new Map();
 
     /**
-     * The file's lines, or none when it is not there. A file whose bytes are
-     * not resident is answered late, which the bridge turns into a wait.
+     * The Win32 error a profile open that answered null stands for.
      *
      * @param {string} path
-     * @returns {ProfileLine[] | Promise<ProfileLine[]>}
+     */
+    const openError = path=>(files.openRefusal?.() === 'SHARING_VIOLATION'
+        ? ERROR_SHARING_VIOLATION
+        : files.stat(path)?.isDirectory ? ERROR_ACCESS_DENIED : ERROR_FILE_NOT_FOUND);
+
+    /**
+     * The file's lines, none when it is not there, or null when it is there
+     * and could not be opened, the last error saying why. A file whose bytes
+     * are not resident is answered late, which the bridge turns into a wait.
+     *
+     * @param {string} path
+     * @returns {ProfileLine[] | null | Promise<ProfileLine[]>}
      */
     const load = path=>{
         const entry = files.stat(path);
@@ -219,10 +247,11 @@ export function createProfileFunctions(host){
         {
             return [];
         }
-        const node = files.open(path, { read: true });
+        const node = files.open(path, READING);
         if (!node)
         {
-            return [];
+            host.setLastError?.(openError(path));
+            return null;
         }
         /** @param {Uint8Array} bytes */
         const parse = bytes=>{
@@ -238,7 +267,9 @@ export function createProfileFunctions(host){
             const end = decoded === null ? body.indexOf(0) : decoded.indexOf('\0');
             const whole = decoded === null ? decodeAnsi(end < 0 ? body : body.subarray(0, end))
                 : end < 0 ? decoded : decoded.slice(0, end);
-            const lines = whole.split(/\r?\n/);
+            // A line ends at CR, LF or the pair: a file written with bare
+            // CRs reads as one written with CRLF.
+            const lines = whole.split(/\r\n|\r|\n/);
             // A trailing newline is the end of the last line, not an empty one.
             if (lines.length > 0 && lines[lines.length - 1] === '')
             {
@@ -252,15 +283,35 @@ export function createProfileFunctions(host){
 
     /** @param {string} path @param {ProfileLine[]} lines */
     const store = (path, lines)=>{
-        const node = files.open(path, { write: true, create: true, truncate: true });
+        const node = files.open(path, WRITING);
         if (!node)
         {
+            host.setLastError?.(openError(path));
             return false;
         }
         const body = lines.map(line=>`${line.text}\r\n`).join('');
         files.write(node, 0, encodeIn(encodings.get(path.toLowerCase()) ?? 'ansi', body));
         files.close(node);
         return true;
+    };
+
+    /**
+     * The answer a call gives from the file's lines: `answer` on them (none
+     * for no file or no name), `refused` when the file is there and could
+     * not be opened. A read answers as if the file were empty; a write fails.
+     *
+     * @template T
+     * @param {string | null} path @param {(lines: ProfileLine[]) => T}
+     * answer @param {() => T} [refused]
+     * @returns {T | Promise<T>}
+     */
+    const withLines = (path, answer, refused = ()=>answer([]))=>{
+        const loaded = path === null ? [] : load(path);
+        if (loaded === null)
+        {
+            return refused();
+        }
+        return loaded instanceof Promise ? loaded.then(answer) : answer(loaded);
     };
 
     /**
@@ -302,9 +353,12 @@ export function createProfileFunctions(host){
      *
      * @param {number} buffer @param {number} size @param {string[]} names
      * @param {boolean} [wide]
+     * @param {number} [spare]  Room past the list's last NUL that it needs to
+     *        count as fitting: GetPrivateProfileSectionNames wants one more,
+     *        and a list that fits it exactly is answered as cut.
      * @returns {number} what the call answers
      */
-    const writeList = (buffer, size, names, wide = false)=>{
+    const writeList = (buffer, size, names, wide = false, spare = 0)=>{
         const encode = wide ? encodeWide : encodeAnsi;
         const room = size >>> 0;
         if (room === 0)
@@ -312,7 +366,7 @@ export function createProfileFunctions(host){
             return 0;
         }
         const whole = names.map(name=>`${name}\0`).join('');
-        if (whole.length + 1 <= room)
+        if (whole.length + 1 + spare <= room)
         {
             host.writeMemory(buffer >>> 0, encode(`${whole}\0`));
             return whole.length;
@@ -444,8 +498,7 @@ export function createProfileFunctions(host){
         /** @param {ProfileLine[]} lines */
         const answer = lines=>deliver(buffer, size,
             lookUp(lines, wanted.section, wanted.key, wanted.fallback), wide);
-        const loaded = path === null ? [] : load(path);
-        return loaded instanceof Promise ? loaded.then(answer) : answer(loaded);
+        return withLines(path, answer);
     };
 
     /**
@@ -466,8 +519,7 @@ export function createProfileFunctions(host){
             const value = 'value' in found ? found.value : '';
             return value === '' ? fallback >>> 0 : integerOf(value);
         };
-        const loaded = path === null ? [] : load(path);
-        return loaded instanceof Promise ? loaded.then(answer) : answer(loaded);
+        return withLines(path, answer);
     };
 
     /**
@@ -483,18 +535,25 @@ export function createProfileFunctions(host){
      */
     const putText = (path, section, key, value)=>{
         const wanted = { section, key, value };
+        // A NULL section writes nothing: on Windows it only flushes the
+        // cache, and answers that no file was named.
         if (path === null || wanted.section === null)
         {
+            host.setLastError?.(ERROR_FILE_NOT_FOUND);
             return 0;
         }
         /** @param {ProfileLine[]} lines */
         const answer = lines=>{
             const changed = edit(lines, /** @type {string} */ (wanted.section),
                 wanted.key, wanted.value);
-            return changed === null || store(path, changed) ? 1 : 0;
+            // Even a write that changes nothing leaves the file there.
+            if (changed === null && files.stat(path)?.exists)
+            {
+                return 1;
+            }
+            return store(path, changed ?? lines) ? 1 : 0;
         };
-        const loaded = load(path);
-        return loaded instanceof Promise ? loaded.then(answer) : answer(loaded);
+        return withLines(path, answer, ()=>0);
     };
 
     /**
@@ -529,9 +588,11 @@ export function createProfileFunctions(host){
      */
     const sectionNames = (path, buffer, size, wide = false)=>{
         /** @param {ProfileLine[]} lines */
-        const answer = lines=>deliver(buffer, size, lookUp(lines, null, null, ''), wide);
-        const loaded = path === null ? [] : load(path);
-        return loaded instanceof Promise ? loaded.then(answer) : answer(loaded);
+        const answer = lines=>{
+            const found = lookUp(lines, null, null, '');
+            return writeList(buffer, size, 'names' in found ? found.names : [], wide, 1);
+        };
+        return withLines(path, answer);
     };
 
     /**
@@ -542,18 +603,29 @@ export function createProfileFunctions(host){
      * @param {number} buffer @param {number} size @param {boolean} [wide]
      */
     const readSection = (path, name, buffer, size, wide = false)=>{
+        if (name === null || (buffer >>> 0) === 0 || (size >>> 0) === 0)
+        {
+            host.setLastError?.(ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+        if (path === null)
+        {
+            host.setLastError?.(ERROR_FILE_NOT_FOUND);
+            return 0;
+        }
         /** @param {ProfileLine[]} lines */
         const answer = lines=>{
-            const span = name === null ? null : sectionSpan(lines, name);
+            const span = sectionSpan(lines, name);
             const entries = span === null
                 ? []
                 : lines.slice(span.start + 1, span.end)
                     .map(line=>line.text.trim())
                     .filter(line=>line !== '' && !line.startsWith(';'));
-            return writeList(buffer, size, entries, wide);
+            const written = writeList(buffer, size, entries, wide);
+            host.setLastError?.(ERROR_SUCCESS);
+            return written;
         };
-        const loaded = path === null ? [] : load(path);
-        return loaded instanceof Promise ? loaded.then(answer) : answer(loaded);
+        return withLines(path, answer, ()=>0);
     };
 
     /**
@@ -611,8 +683,7 @@ export function createProfileFunctions(host){
                 : [...lines.slice(0, span.start), ...body, ...lines.slice(span.end)];
             return store(path, next) ? 1 : 0;
         };
-        const loaded = load(path);
-        return loaded instanceof Promise ? loaded.then(answer) : answer(loaded);
+        return withLines(path, answer, ()=>0);
     };
 
     const WIN_INI = `${WINDOWS_DIRECTORY}\\win.ini`;
@@ -794,8 +865,7 @@ export function createProfileFunctions(host){
                     host.writeMemory(buffer >>> 0, data);
                     return 1;
                 };
-                const loaded = path === null ? [] : load(path);
-                return loaded instanceof Promise ? loaded.then(answer) : answer(loaded);
+                return withLines(path, answer);
             },
         },
 

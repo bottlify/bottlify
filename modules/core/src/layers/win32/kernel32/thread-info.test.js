@@ -251,3 +251,28 @@ test('a thread description is set and read through either spelling', ()=>{
     assert.equal(fns.GetThreadDescription.handler([THREAD_HANDLE, 0x1f00]), DONE);
     assert.equal(wide(view.getUint32(0x1f00, true)), 'other', 'each thread has its own');
 });
+
+test('SetThreadStackGuarantee keeps whole pages in the thread block, only grows, answers the'
+    + ' one it had, and refuses one the stack cannot hold', ()=>{
+    const { fns, view, errors } = setup();
+    const TEB_AT = 0x3000;
+    view.setUint32(TEB_AT + TEB.STACK_BASE, 0x00130000, true);
+    view.setUint32(TEB_AT + TEB.DEALLOCATION_STACK, 0x00030000, true);
+    const SIZE = 0x1800;
+    /** @param {number} asked */
+    const guarantee = asked=>{
+        view.setUint32(SIZE, asked, true);
+        const done = fns.SetThreadStackGuarantee.handler([SIZE]);
+        return [done, view.getUint32(SIZE, true),
+            view.getUint32(TEB_AT + TEB.GUARANTEED_STACK_BYTES, true)];
+    };
+    // Wine's thread test, in the order it asks.
+    assert.deepEqual(guarantee(0), [1, 0, 0]);
+    assert.deepEqual(guarantee(0xdeadbef), [0, 0, 0]);
+    assert.deepEqual(errors, [ERROR_INVALID_PARAMETER]);
+    assert.deepEqual(guarantee(200), [1, 0, 4096]);
+    assert.deepEqual(guarantee(5000), [1, 4096, 8192]);
+    assert.deepEqual(guarantee(2000), [1, 8192, 8192]);
+    assert.deepEqual(guarantee(10000), [1, 8192, 12288]);
+    assert.deepEqual(guarantee(12288), [1, 12288, 12288]);
+});

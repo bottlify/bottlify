@@ -15,7 +15,7 @@
  * process's `Processors`, so the three spellings cannot disagree.
  */
 
-import { TEB } from './teb.js';
+import { TEB, TEB64 } from './teb.js';
 
 /** THREADINFOCLASS values answered here. */
 export const THREAD_INFO = Object.freeze({
@@ -43,6 +43,8 @@ const STATUS_PENDING = 0x103;
 /** The Win32 errors kernel32's spellings turn those into. */
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_PARAMETER = 87;
+/** The page a stack guarantee is counted in. */
+const PAGE = 0x1000;
 const ERROR_NOACCESS = 998;
 
 /** THREAD_BASIC_INFORMATION, 32-bit. */
@@ -85,6 +87,7 @@ const errorOf = status=>(status === STATUS_INVALID_HANDLE ? ERROR_INVALID_HANDLE
  * @property {() => any} currentThread
  * @property {(thread?: any) => any} park
  * @property {(code: number) => void} [setLastError]
+ * @property {number} [pointerSize]  8 in a 64-bit process; absent, 4.
  * @property {(bytes: number) => number} allocate  A block LocalFree releases.
  * @property {import('./processor.js').Processors} processors
  * @property {(handle: number, at: number) => void} threadTimes
@@ -407,34 +410,43 @@ export function createThreadInfoFunctions(host){
         }
     };
 
-    /** What SetThreadStackGuarantee was given, by thread. @type {WeakMap<object, number>} */
-    const stackGuarantees = new WeakMap();
-
     return {
         /**
          * BOOL SetThreadStackGuarantee(PULONG StackSizeInBytes)
          *
-         * The calling thread's guarantee becomes the size asked for unless it
-         * is smaller than the one it has, and the size comes back as the one
-         * it had (0 at first). The guarantee is what a stack overflow leaves
-         * for its handler; a thread's stack here is committed whole, so it is
-         * kept and answered back.
+         * The guarantee is what a stack overflow leaves the handler, kept
+         * where Windows keeps it, in the thread block's GuaranteedStackBytes.
+         * A size asked is rounded up to whole pages, and to at least a page
+         * per four bytes of a pointer; the guarantee only grows; and the size
+         * comes back as the guarantee it had (0 at first, and 0 asks only
+         * that). One as large as the stack's whole reservation is refused
+         * with ERROR_INVALID_PARAMETER, the size still answered. A thread's
+         * stack here is committed whole, so nothing more is reserved for it.
          */
         SetThreadStackGuarantee: {
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>{
                 const thread = host.currentThread();
+                const fields = host.pointerSize === 8 ? TEB64 : TEB;
+                const teb = thread?.tebAddress ?? 0;
                 const bytes = host.readMemory(pointer >>> 0, 4);
                 const asked = new DataView(bytes.buffer, bytes.byteOffset, 4).getUint32(0, true);
-                const had = (thread && stackGuarantees.get(thread)) ?? 0;
-                if (thread && asked > had)
+                const had = teb === 0 ? 0 : tebDword(thread, fields.GUARANTEED_STACK_BYTES);
+                host.writeMemory(pointer >>> 0, dword(had));
+                const pointerBytes = host.pointerSize === 8 ? 8 : 4;
+                const reserved = teb === 0 ? 0 : tebDword(thread, fields.STACK_BASE)
+                    - tebDword(thread, fields.DEALLOCATION_STACK);
+                if (asked >= reserved && asked !== 0)
                 {
-                    stackGuarantees.set(thread, asked);
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
                 }
-                const previous = new Uint8Array(4);
-                new DataView(previous.buffer).setUint32(0, had, true);
-                host.writeMemory(pointer >>> 0, previous);
+                const pages = Math.max(Math.ceil(asked / PAGE) * PAGE, PAGE * pointerBytes / 4);
+                if (asked !== 0 && pages > had)
+                {
+                    host.writeMemory(teb + fields.GUARANTEED_STACK_BYTES, dword(pages));
+                }
                 return 1;
             },
         },

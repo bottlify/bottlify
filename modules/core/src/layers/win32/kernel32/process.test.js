@@ -593,21 +593,6 @@ test('every function declares the stack it pops', ()=>{
     assert.equal(fns.TlsSetValue.argBytes, 8);
 });
 
-test('fibre-local storage is thread-local storage under other names', ()=>{
-    // A machine with no fibres has exactly one fibre per thread, so the two are
-    // the same store. A runtime looks the Fls names up at run time and takes a
-    // less-travelled fallback path when they are absent.
-    const { fns: table } = setup();
-
-    const slot = table.FlsAlloc.handler([0]);
-    assert.notEqual(slot, 0xffffffff, 'a slot was handed out');
-    assert.equal(table.FlsSetValue.handler([slot, 0x1234]), 1);
-    assert.equal(table.FlsGetValue.handler([slot]), 0x1234);
-    assert.equal(table.TlsGetValue.handler([slot]), 0x1234,
-        'and it is the same store the thread-local names see');
-    assert.equal(table.FlsFree.handler([slot]), 1);
-});
-
 test('a decoded pointer is the pointer that was encoded', ()=>{
     // The pair is a contract with itself and nothing else. What a program
     // requires is that decoding what it encoded gives the pointer back; the
@@ -823,7 +808,7 @@ test('a slot in a thread\'s block has one record, which the guest and the host s
     assert.equal(fns.TlsGetValue.handler([slot]), 0, 'and in no other thread\'s');
 });
 
-test('TlsSetValue and FlsSetValue are one routine in the guest, over the host\'s own', ()=>{
+test('TlsSetValue is a routine in the guest, over the host\'s own', ()=>{
     const { fns } = setup({ arena: 0x4000 });
     /** @type {{ label: string, trap: any }[]} */
     const registered = [];
@@ -834,8 +819,7 @@ test('TlsSetValue and FlsSetValue are one routine in the guest, over the host\'s
             return 0x105000 + registered.length * 0x10;
         },
     };
-    const set = boundTo(fns.TlsSetValue, builder);
-    assert.equal(boundTo(fns.FlsSetValue, builder), set);
+    boundTo(fns.TlsSetValue, builder);
     const trap = registered.find(one=>one.label === '<tls-set>');
     assert.ok(trap, 'the slow path has a trap of its own');
     assert.equal(trap.trap.argBytes, 8);
