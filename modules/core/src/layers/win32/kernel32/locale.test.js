@@ -1436,7 +1436,10 @@ test('a neutral name answers as itself: a culture\'s parents end at the invarian
         assert.equal(info(name, SPARENT), parent, `${name}: LOCALE_SPARENT`);
         assert.equal(info(name, INEUTRAL), name.includes('-') ? '0' : '1', `${name}: neutral`);
     }
-    assert.equal(info('en', ILANGUAGE), '0009', 'the neutral LCID');
+    // Its language is its default's, as Windows answers it (locale.c
+    // test_GetLocaleInfoEx: "en" is 0x0409, "zh" 0x0804).
+    assert.equal(info('en', ILANGUAGE), '0409', 'the default specific language');
+    assert.equal(info('zh', ILANGUAGE), '0804');
     // The walk ends: from en-US through its parents to the invariant locale.
     const walked = [];
     for (let name = 'en-US'; name !== ''; name = /** @type {string} */ (info(name, SPARENT)))
