@@ -189,8 +189,13 @@ flowchart TD
   `system32`'s. `LdrGetDllPath` answers that list. Static imports are looked up the same way, without the current folder. For
   a name the engine has a table for, the system directories are skipped: a copy an installer put
   there would be a second library of the name in the process beside the engine's.
-- **A file that is no image** (a section or relocation past the image's end) fails `LoadLibrary`
-  with `ERROR_BAD_EXE_FORMAT`; a library file is read sharing reading and deletion, as Windows'
+- **A file that is no image** (no optional header, a `SizeOfImage` of zero, a file alignment
+  coarser than its section alignment, a section or relocation past the image's end) fails
+  `LoadLibrary` and `NtCreateSection(SEC_IMAGE)` alike with `ERROR_BAD_EXE_FORMAT`
+  (`loader/internal/image.js`). An image is mapped in whole pages, one aligned below a page flat
+  (the file as it lies), and an optional header cut short has no data directory past its end.
+  A library file is read sharing
+  reading and deletion, as Windows'
   loader opens it. `LdrRegisterDllNotification`'s callbacks hear of every library read off the
   volume after it is mapped and before its `DllMain`, and on unload after it.
 - **A DLL already loaded** is handed back with its count raised. A bare name finds the first module

@@ -85,6 +85,32 @@ export function mapImage(file, base, options = {}){
 }
 
 /**
+ * Refuses, as Windows' loader refuses with STATUS_INVALID_IMAGE_FORMAT, an
+ * image whose headers cannot describe a mapping: no optional header, no size,
+ * a file alignment coarser than the sections it aligns, or a section that ends
+ * past the image. One check for every image mapped - LoadLibrary's, a
+ * SEC_IMAGE section's, the program's own - so a file one of them refuses no
+ * other maps.
+ *
+ * @param {import('./pe.js').PeImage} image
+ */
+function refuseMalformed(image){
+    const size = image.sizeOfImage;
+    const reason = image.optionalHeaderSize === 0 ? 'it has no optional header'
+        : image.sizeOfImage === 0 ? 'its SizeOfImage is zero'
+            : image.fileAlignment > image.sectionAlignment
+                ? 'its file alignment is coarser than its section alignment'
+                : image.sections.some(section=>section.virtualAddress
+                    + Math.max(section.virtualSize, 0) > size)
+                    ? 'a section ends past its SizeOfImage' : null;
+    if (reason)
+    {
+        throw Object.assign(new Error(`not an image Windows maps: ${reason}`),
+            { code: 'BAD_EXE_FORMAT' });
+    }
+}
+
+/**
  * `mapImage`'s work, any failure of it thrown as it came.
  *
  * @param {Uint8Array} file @param {number | undefined} base
@@ -101,12 +127,18 @@ function layOut(file, base, { wide = false, bits } = {}){
         );
     }
 
+    refuseMalformed(image);
+
     // Allocated zeroed: everything not backed by file bytes — BSS tails, gaps
     // between sections, the slack inside the header page — must read as zero,
     // exactly as a fresh mapping would.
     const bytes = new Uint8Array(image.sizeOfImage);
 
-    bytes.set(file.subarray(0, Math.min(image.sizeOfHeaders, file.length)), 0);
+    // An image aligned below a page is mapped flat, as Windows maps it: the
+    // file as it is, each section at the offset it is stored at.
+    const flat = image.sectionAlignment < PAGE;
+    bytes.set(file.subarray(0, Math.min(flat ? bytes.length : image.sizeOfHeaders,
+        file.length)), 0);
 
     for (const section of image.sections)
     {
@@ -126,7 +158,7 @@ function layOut(file, base, { wide = false, bits } = {}){
         const extent = align(section.virtualSize || section.rawSize,
             image.sectionAlignment || PAGE);
         const span = Math.max(0, Math.min(source.length, extent,
-            image.sizeOfImage - section.virtualAddress));
+            bytes.length - section.virtualAddress));
         bytes.set(source.subarray(0, span), section.virtualAddress);
     }
 

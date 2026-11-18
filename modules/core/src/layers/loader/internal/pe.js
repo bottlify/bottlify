@@ -34,6 +34,8 @@ const IMAGE_FILE_DLL = 0x2000;
 const IMAGE_FILE_LARGE_ADDRESS_AWARE = 0x0020;
 
 const SECTION_MEM_EXECUTE = 0x20000000;
+/** The page an image is mapped in units of. */
+const PAGE_SIZE = 0x1000;
 const SECTION_MEM_READ = 0x40000000;
 const SECTION_MEM_WRITE = 0x80000000;
 
@@ -55,8 +57,12 @@ const SECTION_MEM_WRITE = 0x80000000;
  * @property {number} imageBase        Preferred load address.
  * @property {number} entryPointRva
  * @property {number} timeDateStamp    The linker's build timestamp, from the COFF header.
- * @property {number} sizeOfImage
+ * @property {number} sizeOfImage      SizeOfImage rounded up to the page: the span mapped.
  * @property {number} sectionAlignment
+ * @property {number} fileAlignment
+ * @property {number} optionalHeaderSize  SizeOfOptionalHeader: the fields past it are the
+ *                                     file's bytes, read as Windows reads them, but the data
+ *                                     directories only count as far as it reaches.
  * @property {number} sizeOfHeaders
  * @property {number} subsystem
  * @property {number} stackReserve     How much stack the program was linked to expect.
@@ -139,7 +145,11 @@ function parseHeaders(bytes, wide){
         : view.getUint32(at, true));
     const tail = bits === 64 ? 16 : 0;
 
-    const directoryCount = view.getUint32(optional + 92 + tail, true);
+    // The directories end with the optional header the file says it has: one
+    // cut short (SizeOfOptionalHeader below the full size) has no directory past
+    // its end, whatever NumberOfRvaAndSizes and the bytes after it hold.
+    const directoryCount = Math.max(0, Math.min(view.getUint32(optional + 92 + tail, true),
+        Math.floor((optionalSize - 96 - tail) / 8)));
     /** @type {{ address: number, size: number }[]} */
     const directories = [];
     for (let i = 0; i < directoryCount; i++)
@@ -176,8 +186,13 @@ function parseHeaders(bytes, wide){
         // Fourth COFF field, right after the two the machine check already
         // read: machine (2 bytes), section count (2), then this.
         timeDateStamp: view.getUint32(coff + 4, true),
-        sizeOfImage: view.getUint32(optional + 56, true),
+        // Whole pages: the span the image occupies, which is what every reader
+        // of it places, reserves and reads - one whose SizeOfImage ends inside
+        // a page still holds that page, as Windows maps it.
+        sizeOfImage: Math.ceil(view.getUint32(optional + 56, true) / PAGE_SIZE) * PAGE_SIZE,
         sectionAlignment: view.getUint32(optional + 32, true),
+        fileAlignment: view.getUint32(optional + 36, true),
+        optionalHeaderSize: optionalSize,
         sizeOfHeaders: view.getUint32(optional + 60, true),
         subsystem: view.getUint16(optional + 68, true),
         // What the linker reserved for the first thread. Not advice: a program
