@@ -147,15 +147,18 @@ test('diagnostics describe the run afterwards', { timeout: 15000 }, async t=>{
     // names: a drawing or a sound library is synthesised into guest memory
     // exactly as a system one is, a program reaches it the same way, and a test
     // that names the layers it knows about goes red every time another one
-    // starts exporting -- which has now happened twice.
+    // starts exporting -- which has now happened twice. An assembly's own
+    // version of a library (Common Controls 6's comctl32) is an image beside
+    // system32's of the same name, so a layer's faces count too.
     /** @param {any} layer */
     const librariesOf = layer=>{
         const libraries = layer.metrics?.libraries;
+        const faces = layer.metrics?.faces?.length ?? 0;
         if (Array.isArray(libraries))
         {
-            return libraries.length;
+            return libraries.length + faces;
         }
-        return libraries ? Object.keys(libraries).length : 0;
+        return (libraries ? Object.keys(libraries).length : 0) + faces;
     };
     const synthesised = app.diagnostics()
         .reduce((/** @type {number} */ total, /** @type {any} */ layer)=>

@@ -89,8 +89,13 @@ test('the system modules take their own images\' room in the module window, and 
         t.diagnostic(`${placed.length} system modules: ${(span / 2 ** 20).toFixed(2)} MiB of the `
             + `window's ${window / 2 ** 20} MiB, their images ${(own / 2 ** 20).toFixed(2)} MiB`);
         assert.equal(span, own, 'each module where the one before it ends, at the granule');
-        assert.ok(span <= window / 8,
-            `${(span / 2 ** 20).toFixed(2)} MiB is past an eighth of the window`);
+        // Where each module lies is held by the line above; this is the budget
+        // for how many there are, so three quarters of the window stay the
+        // program's own libraries'. Every system library is an image of its
+        // own, as on Windows (each CRT with its own copy of the guest code),
+        // so the budget grows with what is reproduced, not with a stride.
+        assert.ok(span <= window / 4,
+            `${(span / 2 ** 20).toFixed(2)} MiB is past a quarter of the window`);
     });
 
 /**
