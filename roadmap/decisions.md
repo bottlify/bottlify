@@ -1397,6 +1397,16 @@ GL_SHADER_BINARY_FORMATS lists SPIR-V's format. *2026-11-07.*
 called on it again, with other constants or another entry point. The extension forbids
 specializing a shader specialized already and says nothing of one whose specialization failed.
 *2026-11-07.*
+**A268. D3DX writes a surface that will not lock through a system-memory copy.** A render
+target's surface is not lockable (LockRect's page: a render-target texture is in D3DPOOL_DEFAULT),
+and the D3DXLoadSurfaceFrom* pages say nothing of such a destination. Windows' D3DX takes one: it
+fills an off-screen plain surface of the same format in D3DPOOL_SYSTEMMEM and has the device copy it
+onto the destination with UpdateSurface, which its page allows for exactly that pair (Wine's d3dx9
+`lock_surface` and `unlock_surface`, and its surface tests). So does ours, for every
+D3DXLoadSurfaceFrom* (`intoSurface` in `d3dx9/texture.js`); answered D3DERR_INVALIDCALL before, and
+a managed framework's SetData on a render target threw. A source that will not lock is still
+answered as its lock was: D3DX reads one through GetRenderTargetData, which is not done here.
+*2026-11-18.*
 
 ## B. From measured optimisation work
 
