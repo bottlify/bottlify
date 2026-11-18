@@ -702,8 +702,7 @@ export function createWin32Module(){
             };
             // This process's views of sections, by address: mapping.js keeps
             // them, VirtualQuery answers them as the regions they are.
-            /** @type {Map<number, { length: number, writable: boolean,
-             *     sections?: { start: number, end: number, protect: number }[] }>} */
+            /** @type {Map<number, import('./kernel32/heap.js').ViewRegion>} */
             const viewRegions = new Map();
             /** @param {number} at */
             const viewAt = at=>{
@@ -3663,6 +3662,8 @@ export function createWin32Module(){
                         setLastError: setError,
                         namedObjects,
                         viewRegions,
+                        handleAccess: (/** @type {number} */ handle)=>
+                            kernel.handles.access?.(handle) ?? null,
                         // Views of one page-file section agree at the edges of
                         // a turn, across the processes on this thread.
                         sharedViews: system?.sharedViews

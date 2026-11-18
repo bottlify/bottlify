@@ -123,6 +123,7 @@ test('every status translated here answers what Wine\'s ntdll error tests expect
         [STATUS.INVALID_FILE_FOR_SECTION, 193],
         [STATUS.OBJECT_TYPE_MISMATCH, 6],
         [STATUS.SECTION_TOO_BIG, 8],
+        [STATUS.INVALID_PAGE_PROTECTION, 87],
         [STATUS.SECTION_NOT_IMAGE, 87],
         [STATUS.MAPPED_FILE_SIZE_ZERO, 1006],
         [STATUS.INVALID_IMAGE_NOT_MZ, 193],
