@@ -153,18 +153,18 @@
      "eax": "e3dcc6dc",
      "regions": 12,
      "mechanisms": {
-      "APART_MISSED": 14,
-      "APART_UNPREDICTED": 76961,
+      "APART_MISSED": 14548,
+      "APART_UNPREDICTED": 62147,
       "CALL_FORMED": 17,
-      "CALL_INDIRECT": 76961,
-      "CALL_LEFT": 14,
-      "CALL_LINKED": 76958,
-      "CALL_PREDICTED": 578135,
-      "JUMP_LOOP": 655012,
-      "RET_FORMED": 578135,
-      "RET_LEFT": 39,
-      "RET_TO_CALL": 76958,
-      "TRANSFER": 51
+      "CALL_INDIRECT": 62147,
+      "CALL_LEFT": 14548,
+      "CALL_LINKED": 62144,
+      "CALL_PREDICTED": 578415,
+      "JUMP_LOOP": 640482,
+      "RET_FORMED": 578415,
+      "RET_LEFT": 14573,
+      "RET_TO_CALL": 62144,
+      "TRANSFER": 29119
      }
     },
     {
@@ -172,16 +172,18 @@
      "eax": "e3dcc6dc",
      "regions": 12,
      "mechanisms": {
-      "APART_UNPREDICTED": 54757,
-      "CALL_ELSEWHERE": 17,
+      "APART_MISSED": 12696,
+      "APART_UNPREDICTED": 54741,
+      "CALL_ELSEWHERE": 1,
       "CALL_FORMED": 17,
-      "CALL_INDIRECT": 54757,
-      "CALL_PREDICTED": 600353,
-      "JUMP_LOOP": 655012,
-      "RET_FORMED": 600353,
-      "RET_LEFT": 42,
+      "CALL_INDIRECT": 54741,
+      "CALL_LEFT": 12696,
+      "CALL_PREDICTED": 587673,
+      "JUMP_LOOP": 642333,
+      "RET_FORMED": 587673,
+      "RET_LEFT": 12722,
       "RET_TO_CALL": 54737,
-      "TRANSFER": 54794
+      "TRANSFER": 80154
      }
     }
    ]
@@ -537,24 +539,24 @@
      "eax": "136cc9c",
      "regions": 286,
      "mechanisms": {
-      "APART_BLOCKS": 1009507,
+      "APART_BLOCKS": 1009993,
       "APART_FULL": 101842,
-      "APART_NESTED": 208224,
-      "APART_UNPREDICTED": 32454,
-      "CALL_ELSEWHERE": 4103,
-      "CALL_FORMED": 794638,
-      "CALL_INDIRECT": 32454,
-      "CALL_LEFT": 18872,
-      "CALL_LINKED": 1331168,
-      "CALL_PREDICTED": 31760,
-      "CALL_REL": 1300701,
+      "APART_NESTED": 206368,
+      "APART_UNPREDICTED": 34979,
+      "CALL_ELSEWHERE": 4122,
+      "CALL_FORMED": 795076,
+      "CALL_INDIRECT": 34979,
+      "CALL_LEFT": 17940,
+      "CALL_LINKED": 1333255,
+      "CALL_PREDICTED": 30167,
+      "CALL_REL": 1300263,
       "JUMP_DISPATCH": 30280,
-      "JUMP_LOOP": 2761993,
-      "JUMP_OUT": 71903,
-      "RET_FORMED": 763509,
-      "RET_LEFT": 87433,
-      "RET_TO_CALL": 1328608,
-      "TRANSFER": 321299
+      "JUMP_LOOP": 2762113,
+      "JUMP_OUT": 71905,
+      "RET_FORMED": 762042,
+      "RET_LEFT": 86832,
+      "RET_TO_CALL": 1330676,
+      "TRANSFER": 319647
      }
     },
     {
@@ -562,23 +564,23 @@
      "eax": "136cc9c",
      "regions": 285,
      "mechanisms": {
-      "APART_BLOCKS": 990507,
+      "APART_BLOCKS": 988942,
       "APART_FULL": 97574,
-      "APART_NESTED": 237349,
-      "APART_UNPREDICTED": 32217,
-      "CALL_ELSEWHERE": 897446,
-      "CALL_FORMED": 788939,
-      "CALL_INDIRECT": 32217,
-      "CALL_LEFT": 23057,
-      "CALL_PREDICTED": 31833,
-      "CALL_REL": 1302373,
+      "APART_NESTED": 237993,
+      "APART_UNPREDICTED": 31709,
+      "CALL_ELSEWHERE": 886648,
+      "CALL_FORMED": 789718,
+      "CALL_INDIRECT": 31709,
+      "CALL_LEFT": 22915,
+      "CALL_PREDICTED": 32483,
+      "CALL_REL": 1301594,
       "JUMP_DISPATCH": 40801,
-      "JUMP_LOOP": 2343469,
-      "JUMP_OUT": 261408,
-      "RET_FORMED": 642866,
-      "RET_LEFT": 1099912,
-      "RET_TO_CALL": 436759,
-      "TRANSFER": 2689927
+      "JUMP_LOOP": 2346868,
+      "JUMP_OUT": 257114,
+      "RET_FORMED": 644435,
+      "RET_LEFT": 1088835,
+      "RET_TO_CALL": 446267,
+      "TRANSFER": 2677402
      }
     }
    ]
@@ -774,18 +776,18 @@
      "eax": "999fcee0",
      "regions": 11,
      "mechanisms": {
-      "APART_UNPREDICTED": 129518,
+      "APART_UNPREDICTED": 133911,
       "CALL_ELSEWHERE": 217,
       "CALL_FORMED": 17,
-      "CALL_INDIRECT": 129518,
-      "CALL_LINKED": 129288,
-      "CALL_PREDICTED": 483542,
+      "CALL_INDIRECT": 133911,
+      "CALL_LINKED": 133680,
+      "CALL_PREDICTED": 479149,
       "JUMP_LOOP": 209632,
-      "JUMP_OUT": 86,
-      "RET_FORMED": 483542,
-      "RET_LEFT": 33,
-      "RET_TO_CALL": 129288,
-      "TRANSFER": 31
+      "JUMP_OUT": 87,
+      "RET_FORMED": 479149,
+      "RET_LEFT": 34,
+      "RET_TO_CALL": 133680,
+      "TRANSFER": 32
      }
     },
     {
@@ -793,16 +795,16 @@
      "eax": "999fcee0",
      "regions": 11,
      "mechanisms": {
-      "APART_UNPREDICTED": 123715,
-      "CALL_ELSEWHERE": 123710,
+      "APART_UNPREDICTED": 135319,
+      "CALL_ELSEWHERE": 135315,
       "CALL_FORMED": 17,
-      "CALL_INDIRECT": 123715,
-      "CALL_PREDICTED": 489345,
-      "JUMP_LOOP": 164553,
-      "JUMP_OUT": 45174,
-      "RET_FORMED": 489345,
-      "RET_LEFT": 123518,
-      "TRANSFER": 246996
+      "CALL_INDIRECT": 135319,
+      "CALL_PREDICTED": 477741,
+      "JUMP_LOOP": 164531,
+      "JUMP_OUT": 45196,
+      "RET_FORMED": 477741,
+      "RET_LEFT": 135122,
+      "TRANSFER": 270204
      }
     }
    ]
@@ -978,18 +980,16 @@
      "eax": "e3dcc6dc",
      "regions": 12,
      "mechanisms": {
-      "APART_MISSED": 8209,
-      "APART_UNPREDICTED": 91659,
+      "APART_UNPREDICTED": 144405,
       "CALL_FORMED": 17,
-      "CALL_INDIRECT": 91659,
-      "CALL_LEFT": 8209,
-      "CALL_LINKED": 91656,
-      "CALL_PREDICTED": 555242,
-      "JUMP_LOOP": 646841,
-      "RET_FORMED": 555242,
-      "RET_LEFT": 8234,
-      "RET_TO_CALL": 91656,
-      "TRANSFER": 16441
+      "CALL_INDIRECT": 144405,
+      "CALL_LINKED": 144402,
+      "CALL_PREDICTED": 510705,
+      "JUMP_LOOP": 655032,
+      "RET_FORMED": 510705,
+      "RET_LEFT": 25,
+      "RET_TO_CALL": 144402,
+      "TRANSFER": 23
      }
     },
     {
@@ -997,18 +997,16 @@
      "eax": "e3dcc6dc",
      "regions": 12,
      "mechanisms": {
-      "APART_MISSED": 10405,
-      "APART_UNPREDICTED": 74079,
-      "CALL_ELSEWHERE": 3,
+      "APART_UNPREDICTED": 74094,
+      "CALL_ELSEWHERE": 18,
       "CALL_FORMED": 17,
-      "CALL_INDIRECT": 74079,
-      "CALL_LEFT": 10405,
-      "CALL_PREDICTED": 570626,
-      "JUMP_LOOP": 644642,
-      "RET_FORMED": 570626,
-      "RET_LEFT": 10433,
+      "CALL_INDIRECT": 74094,
+      "CALL_PREDICTED": 581016,
+      "JUMP_LOOP": 655032,
+      "RET_FORMED": 581016,
+      "RET_LEFT": 43,
       "RET_TO_CALL": 74073,
-      "TRANSFER": 94912
+      "TRANSFER": 74132
      }
     }
    ]
@@ -1021,18 +1019,16 @@
      "eax": "e3dcc6dc",
      "regions": 12,
      "mechanisms": {
-      "APART_MISSED": 13,
       "APART_UNPREDICTED": 84857,
       "CALL_FORMED": 17,
       "CALL_INDIRECT": 84857,
-      "CALL_LEFT": 13,
       "CALL_LINKED": 84846,
-      "CALL_PREDICTED": 570240,
+      "CALL_PREDICTED": 570253,
       "JUMP_LOOP": 655016,
-      "RET_FORMED": 570240,
-      "RET_LEFT": 46,
+      "RET_FORMED": 570253,
+      "RET_LEFT": 33,
       "RET_TO_CALL": 84846,
-      "TRANSFER": 57
+      "TRANSFER": 31
      }
     },
     {
@@ -1213,24 +1209,24 @@
      "eax": "136cc9c",
      "regions": 262,
      "mechanisms": {
-      "APART_BLOCKS": 981621,
+      "APART_BLOCKS": 982207,
       "APART_FULL": 101362,
-      "APART_NESTED": 236549,
-      "APART_UNPREDICTED": 32318,
-      "CALL_ELSEWHERE": 3969,
-      "CALL_FORMED": 782333,
-      "CALL_INDIRECT": 32318,
-      "CALL_LEFT": 18521,
-      "CALL_LINKED": 1332811,
-      "CALL_PREDICTED": 32163,
-      "CALL_REL": 1301011,
+      "APART_NESTED": 234040,
+      "APART_UNPREDICTED": 36068,
+      "CALL_ELSEWHERE": 3997,
+      "CALL_FORMED": 782916,
+      "CALL_INDIRECT": 36068,
+      "CALL_LEFT": 17181,
+      "CALL_LINKED": 1335977,
+      "CALL_PREDICTED": 29753,
+      "CALL_REL": 1300428,
       "JUMP_DISPATCH": 30519,
       "JUMP_LOOP": 2709824,
       "JUMP_OUT": 130816,
-      "RET_FORMED": 773837,
-      "RET_LEFT": 64668,
-      "RET_TO_CALL": 1328961,
-      "TRANSFER": 298483
+      "RET_FORMED": 772015,
+      "RET_LEFT": 63352,
+      "RET_TO_CALL": 1332099,
+      "TRANSFER": 295828
      }
     },
     {
@@ -1238,23 +1234,23 @@
      "eax": "136cc9c",
      "regions": 265,
      "mechanisms": {
-      "APART_BLOCKS": 1009296,
+      "APART_BLOCKS": 1010711,
       "APART_FULL": 97690,
-      "APART_NESTED": 203767,
-      "APART_UNPREDICTED": 32108,
-      "CALL_ELSEWHERE": 944664,
-      "CALL_FORMED": 791370,
-      "CALL_INDIRECT": 32108,
-      "CALL_LEFT": 22701,
-      "CALL_PREDICTED": 32222,
-      "CALL_REL": 1288052,
+      "APART_NESTED": 201938,
+      "APART_UNPREDICTED": 34391,
+      "CALL_ELSEWHERE": 940683,
+      "CALL_FORMED": 791729,
+      "CALL_INDIRECT": 34391,
+      "CALL_LEFT": 22646,
+      "CALL_PREDICTED": 29994,
+      "CALL_REL": 1287693,
       "JUMP_DISPATCH": 41793,
-      "JUMP_LOOP": 2300554,
-      "JUMP_OUT": 289553,
-      "RET_FORMED": 621824,
-      "RET_LEFT": 1170524,
-      "RET_TO_CALL": 375152,
-      "TRANSFER": 2791363
+      "JUMP_LOOP": 2300648,
+      "JUMP_OUT": 289208,
+      "RET_FORMED": 621652,
+      "RET_LEFT": 1164792,
+      "RET_TO_CALL": 381056,
+      "TRANSFER": 2787594
      }
     }
    ]
@@ -1453,17 +1449,17 @@
      "regions": 11,
      "mechanisms": {
       "APART_BYTES": 17,
-      "APART_UNPREDICTED": 131966,
+      "APART_UNPREDICTED": 137143,
       "CALL_ELSEWHERE": 297,
-      "CALL_INDIRECT": 131966,
-      "CALL_LINKED": 131694,
-      "CALL_PREDICTED": 481094,
+      "CALL_INDIRECT": 137143,
+      "CALL_LINKED": 136871,
+      "CALL_PREDICTED": 475917,
       "CALL_REL": 17,
       "JUMP_LOOP": 204606,
       "JUMP_OUT": 103,
-      "RET_FORMED": 481094,
+      "RET_FORMED": 475917,
       "RET_LEFT": 30,
-      "RET_TO_CALL": 131677,
+      "RET_TO_CALL": 136854,
       "TRANSFER": 261
      }
     },
@@ -1473,16 +1469,16 @@
      "regions": 11,
      "mechanisms": {
       "APART_BYTES": 17,
-      "APART_UNPREDICTED": 137033,
-      "CALL_ELSEWHERE": 137026,
-      "CALL_INDIRECT": 137033,
-      "CALL_PREDICTED": 476027,
+      "APART_UNPREDICTED": 137142,
+      "CALL_ELSEWHERE": 137135,
+      "CALL_INDIRECT": 137142,
+      "CALL_PREDICTED": 475918,
       "CALL_REL": 17,
-      "JUMP_LOOP": 153857,
-      "JUMP_OUT": 50865,
-      "RET_FORMED": 476027,
-      "RET_LEFT": 136774,
-      "TRANSFER": 273757
+      "JUMP_LOOP": 158918,
+      "JUMP_OUT": 45804,
+      "RET_FORMED": 475918,
+      "RET_LEFT": 136883,
+      "TRANSFER": 273975
      }
     }
    ]

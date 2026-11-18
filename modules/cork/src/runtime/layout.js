@@ -200,6 +200,9 @@ export const transferTargetAt = (layout, slot)=>mechanismAt(layout, Tables.MECHA
  */
 export const CALL_STRIDE = 64;
 
+/** What a call's count is multiplied by: one whose product's top bits are zero is kept. */
+export const CALL_HASH = 0x9e3779b1;
+
 /**
  * The block profile's slot for a block start: the top twenty bits of the
  * address times the golden ratio.

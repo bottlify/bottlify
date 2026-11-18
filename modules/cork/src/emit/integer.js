@@ -38,7 +38,7 @@ import {
     stackLow, windowAddress,
     wrapsRead, wrapMask, ramAlways, ram, ramAt, registersChanged,
 } from './memory.js';
-import { CALL_STRIDE, Mechanism, Tables, pageFlagsAt } from '../runtime/layout.js';
+import { CALL_HASH, CALL_STRIDE, Mechanism, Tables, pageFlagsAt } from '../runtime/layout.js';
 import { PageFlag, STORE_FLAGS } from '../runtime/pages.js';
 import { emitSimd } from './simd.js';
 import { SIMD } from '../wasm/simd.js';
@@ -207,7 +207,7 @@ export function profileCall(e, site, target = undefined){
     e.openIf('profile');
     atState(context, atState(context, b)).load('i32', { offset: at + 4 }).localTee(Local.t1)
         .i32const(1).op(I32.add).store('i32', { offset: at + 4 });
-    b.localGet(Local.t1).i32const(0x9e3779b1 | 0).op(I32.mul)
+    b.localGet(Local.t1).i32const(CALL_HASH | 0).op(I32.mul)
         .i32const(32 - Math.log2(CALL_STRIDE)).op(I32.shrU).op(I32.eqz);
     e.openIf('sampled');
     b.localGet(Local.t1).i32const(Math.log2(CALL_STRIDE)).op(I32.shrU).i32const(15).op(I32.and)
