@@ -22,6 +22,18 @@ test('case, one character for one', ()=>{
     assert.equal(mapText('i', LCMAP_UPPERCASE | 0x01000000, isSymbol, true), 'İ');
 });
 
+test('the simple case mapping: a titlecase capital, and the dotted and dotless i kept', ()=>{
+    // Wine's locale.c test_LCMapStringEx.
+    assert.equal(map('ᾀᾳ', LCMAP_UPPERCASE), 'ᾈᾼ');
+    assert.equal(map('ᾲ', LCMAP_UPPERCASE), 'ᾲ', 'no simple capital: kept');
+    assert.equal(map('ᾈ', LCMAP_LOWERCASE), 'ᾀ');
+    assert.equal(map('İ', LCMAP_LOWERCASE), 'İ');
+    assert.equal(map('ı', LCMAP_UPPERCASE), 'ı');
+    assert.equal(map('İ', LCMAP_LOWERCASE | 0x01000000), 'i', 'linguistic casing');
+    assert.equal(map('ı', LCMAP_UPPERCASE | 0x01000000), 'I');
+    assert.equal(map('i', LCMAP_UPPERCASE | 0x01000000), 'I', 'not Turkish');
+});
+
 test('kana and widths, the sound marks with their letters', ()=>{
     // Wine's locale.c test_lcmapstring_unicode.
     assert.equal(map('イハヴヵ', LCMAP_HIRAGANA), 'いはゔゕ');

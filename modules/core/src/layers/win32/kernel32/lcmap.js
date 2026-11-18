@@ -93,13 +93,48 @@ export function validMapFlags(flags){
 }
 
 /**
- * A character in one case, one for one; with Turkish casing the dotted and
- * dotless i are their own pairs.
+ * The titlecase letters by the small letter each is the capital of: the Greek
+ * letters with a prosgegrammeni, which are the simple capitals of the small
+ * letters with a ypogegrammeni whose full capital is two letters.
  *
- * @param {string} character @param {boolean} upper @param {boolean} turkish
+ * @type {Map<string, string>}
  */
-const caseOf = (character, upper, turkish)=>{
-    if (turkish)
+const TITLECASE_OF = new Map();
+for (let code = 0; code < 0x10000; code++)
+{
+    const character = String.fromCharCode(code);
+    if (/\p{Lt}/u.test(character) && character.toLowerCase().length === 1)
+    {
+        TITLECASE_OF.set(character.toLowerCase(), character);
+    }
+}
+
+/**
+ * A character in one case, one for one: Unicode's simple case mapping, which
+ * is what Windows' table holds. A small letter whose full capital is two
+ * letters has a titlecase letter as its simple capital, or keeps its case.
+ * The dotted capital I and the dotless small i are their own pairs except
+ * under linguistic casing, where they are the I and the i they are related to;
+ * with Turkish linguistic casing the dotted and dotless i are pairs of their
+ * own (kernel32's locale.c test_LCMapStringEx pins each).
+ *
+ * @param {string} character @param {boolean} upper @param {boolean} linguistic
+ * @param {boolean} turkish
+ */
+const caseOf = (character, upper, linguistic, turkish)=>{
+    if (character === 'İ' || character === 'ı')
+    {
+        if (!linguistic)
+        {
+            return character;
+        }
+        if (upper)
+        {
+            return character === 'ı' ? 'I' : character;
+        }
+        return character === 'İ' ? 'i' : character;
+    }
+    if (linguistic && turkish)
     {
         if (upper && character === 'i')
         {
@@ -115,10 +150,7 @@ const caseOf = (character, upper, turkish)=>{
     {
         return changed;
     }
-    // A capital whose small letter carries a mark of its own, the dotted
-    // capital I: the letter alone.
-    return !upper && [...changed.normalize('NFD')][0].length === character.length
-        ? [...changed][0] : character;
+    return upper ? TITLECASE_OF.get(character) ?? character : character;
 };
 
 /**
@@ -200,20 +232,21 @@ export function mapText(text, flags, isSymbol, turkish){
         }).join('');
     }
     const casing = flags & LCMAP_TITLECASE;
-    const linguistic = turkish && (flags & LCMAP_LINGUISTIC_CASING) !== 0;
+    const linguistic = (flags & LCMAP_LINGUISTIC_CASING) !== 0;
     if (casing === LCMAP_TITLECASE)
     {
         let start = true;
         out = [...out].map(character=>{
             const letter = /\p{L}/u.test(character);
-            const mapped = letter ? caseOf(character, start, linguistic) : character;
+            const mapped = letter ? caseOf(character, start, linguistic, turkish) : character;
             start = !letter && !/['’]/.test(character);
             return mapped;
         }).join('');
     }
     else if (casing !== 0)
     {
-        out = [...out].map(character=>caseOf(character, casing === LCMAP_UPPERCASE, linguistic))
+        out = [...out].map(character=>caseOf(character, casing === LCMAP_UPPERCASE, linguistic,
+            turkish))
             .join('');
     }
     if ((flags & LCMAP_BYTEREV) !== 0)
