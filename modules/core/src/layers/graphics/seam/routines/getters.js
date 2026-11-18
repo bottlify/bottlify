@@ -11,7 +11,8 @@
  */
 
 import {
-    EAX, ECX, EDX, I386, dword, getterPrologue, invalidTail, letHeldGo, prologue, routine, takeHeld,
+    EAX, EBX, ECX, EDI, EDX, ESI, I386, dword, getterPrologue, invalidTail, letHeldGo, prologue,
+    routine, takeHeld,
 } from './assemble.js';
 import { FLAG_SLOW_PATH, SHADOW, SURFACE, TEXTURE, WORLD_SLOT, WORLD_TYPE } from '../block.js';
 
@@ -49,9 +50,8 @@ export function getRenderStateCode(at, trap, width = I386){
         { jcc: 0x73, to: 'slow' },                               // jae slow
         [0x0f, 0xa3, 0x81, ...dword(SHADOW.RENDER_STATE_VALID)], // bt [ecx+disp], eax
         { jcc: 0x73, to: 'slow' },                               // jnc slow
-        ...width.highZero(2, 'slow'),                            // (64 bits: value below 4 GiB)
-        width.arg(EDX, 2),                                       // mov edx, [esp+12]
-        [0x85, 0xd2],                                            // test edx, edx
+        width.pointer(EDX, 2),                                       // mov edx, [esp+12]
+        width.testPointer(EDX),                                            // test edx, edx
         { jcc: 0x74, to: 'slow' },                               // jz slow
         [0x8b, 0x84, 0x81, ...dword(SHADOW.RENDER_STATES)],      // mov eax, [ecx+eax*4+disp]
         [0x89, 0x02],                                            // mov [edx], eax
@@ -131,20 +131,17 @@ export function getTransformCode(at, trap, version7 = false, width = I386){
         [0x0f, 0xa3, 0xc2],                                      // bt edx, eax
         { jcc: 0x73, to: 'slow' },                               // jnc slow
         { label: 'slot' },
-        ...width.highZero(2, 'slow'),
-        width.arg(EDX, 2),                                       // mov edx, [esp+12]
-        [0x85, 0xd2],                                            // test edx, edx
+        width.pointer(EDX, 2),                                       // mov edx, [esp+12]
+        width.testPointer(EDX),                                            // test edx, edx
         { jcc: 0x74, to: 'slow' },                               // jz slow
-        [0x56],                                                  // push esi
-        [0x57],                                                  // push edi
-        [0x89, 0xd7],                                            // mov edi, edx
+        width.save([ESI, EDI]),                                  // push esi; push edi
+        width.movePointer(EDI, EDX),                             // mov edi, edx
         [0x89, 0xc6],                                            // mov esi, eax
         [0xc1, 0xe6, 0x06],                                      // shl esi, 6
         [0x8d, 0xb4, 0x31, ...dword(SHADOW.TRANSFORMS)],         // lea esi, [ecx+esi+disp]
         [0xb9, ...dword(16)],                                    // mov ecx, 16
         [0xf3, 0xa5],                                            // rep movsd
-        [0x5f],                                                  // pop edi
-        [0x5e],                                                  // pop esi
+        width.restore([EDI, ESI]),                               // pop edi; pop esi
         [0x31, 0xc0],                                            // xor eax, eax
         width.ret(3),                                       // ret 12
     ], {}, width);
@@ -198,9 +195,8 @@ export function getTextureStageStateCode(at, trap, types, width = I386){
         { jcc: 0x73, to: 'slow' },                               // jae slow
         [0xc1, 0xe0, 0x05],                                      // shl eax, 5
         width.argOp([0x03], EAX, 2),                             // add eax, [esp+12]
-        ...width.highZero(3, 'slow'),
-        width.arg(EDX, 3),                                       // mov edx, [esp+16]
-        [0x85, 0xd2],                                            // test edx, edx
+        width.pointer(EDX, 3),                                       // mov edx, [esp+16]
+        width.testPointer(EDX),                                            // test edx, edx
         { jcc: 0x74, to: 'slow' },                               // jz slow
         [0x8b, 0x84, 0x81, ...dword(SHADOW.STAGE_STATES)],       // mov eax, [ecx+eax*4+disp]
         [0x89, 0x02],                                            // mov [edx], eax
@@ -236,16 +232,15 @@ export function getTextureStageStateCode(at, trap, types, width = I386){
 export function getViewportCode(at, trap, width = I386){
     return routine(at, trap, [
         ...getterPrologue(width),
-        ...width.highZero(1, 'slow'),
-        width.arg(EDX, 1),                                       // mov edx, [esp+8]
-        [0x85, 0xd2],                                            // test edx, edx
+        width.pointer(EDX, 1),                                       // mov edx, [esp+8]
+        width.testPointer(EDX),                                            // test edx, edx
         { jcc: 0x74, to: 'slow' },                               // jz slow
-        [0x56, 0x57],                                            // push esi; push edi
+        width.save([ESI, EDI]),                                  // push esi; push edi
         [0x8d, 0xb1, ...dword(SHADOW.VIEWPORT)],                 // lea esi, [ecx+disp]
-        [0x89, 0xd7],                                            // mov edi, edx
+        width.movePointer(EDI, EDX),                             // mov edi, edx
         [0xb9, ...dword(6)],                                     // mov ecx, 6
         [0xf3, 0xa5],                                            // rep movsd
-        [0x5f, 0x5e],                                            // pop edi; pop esi
+        width.restore([EDI, ESI]),                               // pop edi; pop esi
         [0x31, 0xc0],                                            // xor eax, eax
         width.ret(2),                                       // ret 8
     ], {}, width);
@@ -289,9 +284,8 @@ export function getShaderCode(at, trap, which, width = I386){
         ...getterPrologue(width),
         [0x83, 0xb9, ...dword(SHADOW.SHADERS_VALID), 0x00],      // cmp dword [ecx+disp], 0
         { jcc: 0x74, to: 'slow' },                               // je slow
-        ...width.highZero(1, 'slow'),
-        width.arg(EDX, 1),                                       // mov edx, [esp+8]
-        [0x85, 0xd2],                                            // test edx, edx
+        width.pointer(EDX, 1),                                       // mov edx, [esp+8]
+        width.testPointer(EDX),                                            // test edx, edx
         { jcc: 0x74, to: 'slow' },                               // jz slow
         [0x8b, 0x81, ...dword(SHADOW.SHADERS + 4 * which)],      // mov eax, [ecx+disp]
         [0x89, 0x02],                                            // mov [edx], eax
@@ -376,14 +370,13 @@ export function getTargetCode(at, trap, { depth, indexed }, width = I386){
             [...width.argOp([0x83], 7, 1), 0x00],                // cmp dword [esp+8], 0
             { jcc: 0x75, to: 'slow', near: true },               // jne slow
         ] : []),
-        ...width.highZero(out, 'slow'),
-        width.arg(EDX, out),                                     // mov edx, [esp+out]
-        [0x85, 0xd2],                                            // test edx, edx
+        width.pointer(EDX, out),                                     // mov edx, [esp+out]
+        width.testPointer(EDX),                                            // test edx, edx
         { jcc: 0x74, to: 'slow', near: true },                   // jz slow
         ...takeHeld(ECX, 'slow'),
         [0xf7, 0x81, ...dword(SHADOW.TARGETS_VALID), ...dword(depth ? 2 : 1)], // test [ecx+d], bit
         { jcc: 0x74, to: 'held', near: true },                   // jz held
-        [0x53],                                                  // push ebx
+        width.save([EBX]),                                       // push ebx
         [0x8b, 0x99, ...dword(pair + 4)],                        // mov ebx, [ecx+disp]
         [0x8b, 0x81, ...dword(pair)],                            // mov eax, [ecx+disp]
         [0x85, 0xc0],                                            // test eax, eax
@@ -398,23 +391,23 @@ export function getTargetCode(at, trap, { depth, indexed }, width = I386){
         [0xf0, 0x0f, 0xb1, 0x13],                                // lock cmpxchg [ebx], edx
         { jcc: 0x75, to: 'retry' },                              // jne retry
         [0x8b, 0x81, ...dword(pair)],                            // mov eax, [ecx+disp]
-        [0x5b],                                                  // pop ebx
+        width.restore([EBX]),                                    // pop ebx
         letHeldGo(ECX),                                          // mov dword [ecx+HELD], 0
-        width.arg(EDX, out),                                     // mov edx, [esp+out]
+        width.pointer(EDX, out),                                 // mov edx, [esp+out]
         width.storePointer(EDX, EAX, 0),                         // mov [edx], eax
         [0x31, 0xc0],                                            // xor eax, eax
         width.ret(popped / 4),                                   // ret n
         ...(depth ? [
             { label: 'none' },
-            [0x5b],                                              // pop ebx
+            width.restore([EBX]),                                // pop ebx
             letHeldGo(ECX),                                      // mov dword [ecx+HELD], 0
-            width.arg(EDX, out),                                 // mov edx, [esp+out]
+            width.pointer(EDX, out),                             // mov edx, [esp+out]
             [...(width.word === 8 ? [0x48] : []), 0xc7, 0x02, ...dword(0)], // mov [edx], 0
             [0xb8, ...dword(D3DERR_NOTFOUND)],                   // mov eax, D3DERR_NOTFOUND
             width.ret(popped / 4),                               // ret n
         ] : []),
         { label: 'busy' },
-        [0x5b],                                                  // pop ebx
+        width.restore([EBX]),                                    // pop ebx
         { label: 'held' },
         letHeldGo(ECX),                                          // mov dword [ecx+HELD], 0
     ], {}, width);
@@ -445,16 +438,15 @@ export function getTargetCode(at, trap, { depth, indexed }, width = I386){
 export function getSurfaceDescCode(at, trap, width = I386){
     return routine(at, trap, [
         ...prologue('slow', undefined, width),
-        ...width.highZero(1, 'slow'),
-        width.arg(EDX, 1),                                       // mov edx, [esp+8]
-        [0x85, 0xd2],                                            // test edx, edx
+        width.pointer(EDX, 1),                                       // mov edx, [esp+8]
+        width.testPointer(EDX),                                            // test edx, edx
         { jcc: 0x74, to: 'slow' },                               // jz slow
-        [0x56, 0x57],                                            // push esi; push edi
+        width.save([ESI, EDI]),                                  // push esi; push edi
         [0x8d, 0x71, SURFACE.DESC],                              // lea esi, [ecx+4]
-        [0x89, 0xd7],                                            // mov edi, edx
+        width.movePointer(EDI, EDX),                             // mov edi, edx
         [0xb9, ...dword(SURFACE.DESC_WORDS)],                    // mov ecx, 8
         [0xf3, 0xa5],                                            // rep movsd
-        [0x5f, 0x5e],                                            // pop edi; pop esi
+        width.restore([EDI, ESI]),                               // pop edi; pop esi
         [0x31, 0xc0],                                            // xor eax, eax
         width.ret(2),                                       // ret 8
     ], {}, width);
@@ -506,9 +498,8 @@ export function getSamplerStateCode(at, trap, width = I386){
         { jcc: 0x73, to: 'slow' },                               // jae slow
         [0xc1, 0xe0, 0x04],                                      // shl eax, 4
         width.argOp([0x03], EAX, 2),                             // add eax, [esp+12]
-        ...width.highZero(3, 'slow'),
-        width.arg(EDX, 3),                                       // mov edx, [esp+16]
-        [0x85, 0xd2],                                            // test edx, edx
+        width.pointer(EDX, 3),                                       // mov edx, [esp+16]
+        width.testPointer(EDX),                                            // test edx, edx
         { jcc: 0x74, to: 'slow' },                               // jz slow
         [0x8b, 0x84, 0x81, ...dword(SHADOW.SAMPLER_STATES)],     // mov eax, [ecx+eax*4+disp]
         [0x89, 0x02],                                            // mov [edx], eax
@@ -571,9 +562,8 @@ export function getSurfaceLevelCode(at, trap, width = I386){
         [0x8b, 0x49, TEXTURE.COUNT],                             // mov ecx, [ecx+8]
         [0x85, 0xc9],                                            // test ecx, ecx
         { jcc: 0x74, to: 'slow' },                               // jz slow
-        ...width.highZero(2, 'slow'),
-        width.arg(EAX, 2),                                       // mov eax, [esp+12]
-        [0x85, 0xc0],                                            // test eax, eax
+        width.pointer(EAX, 2),                                       // mov eax, [esp+12]
+        width.testPointer(EAX),                                            // test eax, eax
         { jcc: 0x74, to: 'slow' },                               // jz slow
         width.storePointer(EAX, EDX, 0),                         // mov [eax], edx
         [0xf0, 0xff, 0x01],                                      // lock inc dword [ecx]
@@ -638,16 +628,15 @@ export function getLevelDescCode(at, trap, width = I386){
         { jcc: 0x74, to: 'slow' },                               // jz slow
         [0xf7, 0x02, ...dword(FLAG_SLOW_PATH)],                  // test dword [edx], 1
         { jcc: 0x75, to: 'slow' },                               // jnz slow
-        ...width.highZero(2, 'slow'),
-        width.arg(EAX, 2),                                       // mov eax, [esp+12]
-        [0x85, 0xc0],                                            // test eax, eax
+        width.pointer(EAX, 2),                                       // mov eax, [esp+12]
+        width.testPointer(EAX),                                            // test eax, eax
         { jcc: 0x74, to: 'slow' },                               // jz slow
-        [0x56, 0x57],                                            // push esi; push edi
+        width.save([ESI, EDI]),                                  // push esi; push edi
         [0x8d, 0x72, SURFACE.DESC],                              // lea esi, [edx+4]
-        [0x89, 0xc7],                                            // mov edi, eax
+        width.movePointer(EDI, EAX),                             // mov edi, eax
         [0xb9, ...dword(SURFACE.DESC_WORDS)],                    // mov ecx, 8
         [0xf3, 0xa5],                                            // rep movsd
-        [0x5f, 0x5e],                                            // pop edi; pop esi
+        width.restore([EDI, ESI]),                               // pop edi; pop esi
         [0x31, 0xc0],                                            // xor eax, eax
         width.ret(3),                                       // ret 12
         ...invalidTail(12, width),
