@@ -40,6 +40,8 @@ const TEMPLATE = 0x12000;
 const MSG_BUFFER = 0x13000;
 const TEXT = 0x13100;
 const OUT = 0x13200;
+/** The class the fixture registers to keep a frame of its own. */
+const INSET_CLASS = 'InsetProbe';
 const HEAP = 0x18000;
 const HINSTANCE = 0x400000;
 const DIALOGPROC = 0x401000;
@@ -49,6 +51,7 @@ const THREAD = { name: 'main' };
 const SCREEN = { width: 240, height: 320, bitsPerPixel: 32 };
 
 const WM_CREATE = 0x0001;
+const WM_NCCALCSIZE = 0x0083;
 const WM_PAINT = 0x000f;
 const WM_CLOSE = 0x0010;
 const WM_KEYDOWN = 0x0100;
@@ -280,6 +283,8 @@ const textWidth = (text, average)=>[...text]
 function setup({ reply = ()=>0, engine = false, desktopPicture = null } = {}){
     const memory = fakeMemory();
     const handles = fakeHandles();
+    /** The client area each InsetProbe window found at WM_CREATE. @type {any[]} */
+    const insetCreated = [];
     /** The queue's clock, which a test moves on to have what is due later happen. */
     const clock = { now: 0 };
     const queue = createMessageQueue({ now: ()=>clock.now });
@@ -414,6 +419,25 @@ function setup({ reply = ()=>0, engine = false, desktopPicture = null } = {}){
             {
                 register(definition);
             }
+            // A class of the library kind keeping a frame of its own, three
+            // pixels all round, and noting the client area WM_CREATE finds.
+            /** @param {any} record @param {any} message @param {unknown} thread */
+            const inset = (record, message, thread)=>{
+                if (message.message === WM_NCCALCSIZE)
+                {
+                    const rect = new Int32Array(memory.readMemory(message.lParam, 16).slice()
+                        .buffer);
+                    memory.writeMemory(message.lParam, new Uint8Array(Int32Array.from(rect,
+                        (value, index)=>value + (index < 2 ? 3 : -3)).buffer));
+                    return 0;
+                }
+                if (message.message === WM_CREATE)
+                {
+                    insetCreated.push(controlHost.clientSize(record));
+                }
+                return toolkit.common(record, message, thread);
+            };
+            register({ name: INSET_CLASS, procedure: inset });
         },
     });
     const table = /** @type {Record<string, { argBytes: number,
@@ -471,9 +495,27 @@ function setup({ reply = ()=>0, engine = false, desktopPicture = null } = {}){
 
     return {
         memory, queue, desktop, gdi, fns: table, dispatched, keysDown, pump, mouse, key, click,
-        commands, centre, faces, presents: ()=>presents, clock, allocate,
+        commands, centre, faces, presents: ()=>presents, clock, allocate, insetCreated,
     };
 }
+
+test('a built-in class is asked WM_NCCALCSIZE before WM_CREATE, and keeps the frame it answers',
+    async()=>{
+        // MSDN, WM_NCCALCSIZE: sent when the size and position of a window's
+        // client area must be calculated; CreateWindowEx sends it between
+        // WM_NCCREATE and WM_CREATE (msg.c WmCreateOverlappedSeq). A class
+        // the window manager runs itself answers it as a program's does: a
+        // rebar with WS_BORDER has a frame two pixels wide from the start.
+        const context = setup();
+        context.memory.putString(TEXT, INSET_CLASS);
+        const hwnd = await context.fns.CreateWindowExA.handler([0, TEXT, 0, WS_POPUP, 10, 20,
+            100, 50, 0, 0, HINSTANCE, 0]);
+        assert.notEqual(hwnd, 0);
+        assert.deepEqual(context.insetCreated, [{ width: 94, height: 44 }],
+            'WM_CREATE finds the client area inside the frame it answered');
+        context.fns.GetClientRect.handler([hwnd, OUT]);
+        assert.deepEqual([0, 4, 8, 12].map(at=>context.memory.u32(OUT + at)), [0, 0, 94, 44]);
+    });
 
 /** The dialog every test starts from: a push button, a static, a check box. */
 const WIZARD_PAGE = Object.freeze({

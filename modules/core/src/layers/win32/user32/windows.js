@@ -4528,16 +4528,18 @@ export function createWindowFunctions(host){
         /** EVENT_OBJECT_CREATE, then the parents told of the child. */
         const told = ()=>andThen(made(), ()=>parentNotify(record, WM_CREATE, thread));
         // A window made on this side is not sent WM_NCCREATE; its procedure
-        // marks it as that message would have.
+        // marks it as that message would have. It is asked WM_NCCALCSIZE
+        // before WM_CREATE all the same: a control that keeps a frame of its
+        // own (a rebar's WS_BORDER is two pixels) is created with it.
         const onThisSide = ()=>{
             if (record.wndProc === 0)
             {
                 return andThen(minMaxed(), ()=>andThen(told(), activated));
             }
             markReal(record, record.wndProc, WM_NCCREATE);
-            return andThen(callProcedure(record.wndProc, {
-                hwnd: record.hwnd, message: WM_CREATE, wParam: 0, lParam: 0,
-            }, thread), created=>{
+            return andThen(andThen(calcClient(record, record, thread), ()=>callProcedure(
+                record.wndProc, { hwnd: record.hwnd, message: WM_CREATE, wParam: 0, lParam: 0 },
+                thread)), created=>{
                 if ((created | 0) === -1)
                 {
                     return andThen(destroyWindow(record.hwnd, undefined, 'ncdestroy'), ()=>0);
