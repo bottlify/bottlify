@@ -35,9 +35,13 @@
  */
 
 /**
- * The guest's memory: none of these touches the x87.
+ * The guest's memory: none of these touches the x87. An interface's block is
+ * the word after its method table's, `self + 4` in a 32-bit process and
+ * `self + 8` in a 64-bit one (`pointerBytes`), whose arrays of interfaces step
+ * by eight as well.
  *
- * @typedef {import('../../win32/msvcrt/guest-code.js').GuestMemory} Guest
+ * @typedef {import('../../win32/msvcrt/guest-code.js').GuestMemory
+ *     & Pick<import('../../win32/msvcrt/guest-code.js').Guest, 'pointerBytes'>} Guest
  */
 /** @typedef {import('../../win32/msvcrt/guest-code.js').u32} u32 */
 
@@ -112,7 +116,8 @@ const MOST = 16;
  * nothing was taken.
  *
  * @guestCode stdcall
- * @param {Pick<Guest, 'u32' | 'compareExchange'>} guest @param {u32} block @param {u32} length
+ * @param {Pick<Guest, 'u32' | 'compareExchange'>} guest @param {u32} block
+ * @param {u32} length
  * @returns {u32}
  */
 export function reserve({ u32, compareExchange }, block, length){
@@ -155,36 +160,38 @@ export function publish({ setU32, compareExchange }, block, record, slot, length
  * A record of one argument: a shader, a layout, a state, a topology.
  *
  * @guestCode stdcall
- * @param {Pick<Guest, 'u32' | 'setU32' | 'compareExchange'>} guest
+ * @param {Pick<Guest, 'u32' | 'setU32' | 'compareExchange' | 'pointerBytes'>} guest
  * @param {u32} self @param {u32} slot @param {u32} value
  * @returns {u32}
  */
-export function one({ u32, setU32, compareExchange }, self, slot, value){
-    const record = reserve({ u32, compareExchange }, u32(self + 4), ARGS + 4);
+export function one({ u32, setU32, compareExchange, pointerBytes }, self, slot, value){
+    const record = reserve({ u32, compareExchange }, u32(self + pointerBytes), ARGS + 4);
     if (record === 0)
     {
         return 1;
     }
     setU32(record + ARGS, value);
-    return publish({ setU32, compareExchange }, u32(self + 4), record, slot, ARGS + 4);
+    return publish({ setU32, compareExchange }, u32(self + pointerBytes), record, slot, ARGS + 4);
 }
 
 /**
  * A stage's slots: the first, how many, and the objects, copied.
  *
  * @guestCode stdcall
- * @param {Pick<Guest, 'u32' | 'setU32' | 'compareExchange'>} guest
+ * @param {Pick<Guest, 'u32' | 'setU32' | 'compareExchange' | 'pointerBytes'>} guest
  * @param {u32} self @param {u32} slot @param {u32} start
  * @param {u32} count @param {u32} objects
  * @returns {u32}
  */
-export function slots({ u32, setU32, compareExchange }, self, slot, start, count, objects){
+export function slots({ u32, setU32, compareExchange, pointerBytes }, self, slot, start, count,
+    objects)
+{
     if (count > MOST || (objects === 0 && count !== 0))
     {
         return 1;
     }
     const length = (ARGS + 8 + count * 4) >>> 0;
-    const record = reserve({ u32, compareExchange }, u32(self + 4), length);
+    const record = reserve({ u32, compareExchange }, u32(self + pointerBytes), length);
     if (record === 0)
     {
         return 1;
@@ -193,9 +200,9 @@ export function slots({ u32, setU32, compareExchange }, self, slot, start, count
     setU32(record + ARGS + 4, count);
     for (let index = 0; index < (count | 0); index++)
     {
-        setU32(record + ARGS + 8 + index * 4, u32(objects + index * 4));
+        setU32(record + ARGS + 8 + index * 4, u32(objects + index * pointerBytes));
     }
-    return publish({ setU32, compareExchange }, u32(self + 4), record, slot, length);
+    return publish({ setU32, compareExchange }, u32(self + pointerBytes), record, slot, length);
 }
 
 /**
@@ -205,8 +212,8 @@ export function slots({ u32, setU32, compareExchange }, self, slot, start, count
  * @param {Guest} guest @param {u32} self @param {u32} shader
  * @returns {u32}
  */
-export function VSSetShader({ u32, setU32, compareExchange, host }, self, shader){
-    if (one({ u32, setU32, compareExchange }, self, VS_SET_SHADER, shader) !== 0)
+export function VSSetShader({ u32, setU32, compareExchange, host, pointerBytes }, self, shader){
+    if (one({ u32, setU32, compareExchange, pointerBytes }, self, VS_SET_SHADER, shader) !== 0)
     {
         return host();
     }
@@ -220,8 +227,8 @@ export function VSSetShader({ u32, setU32, compareExchange, host }, self, shader
  * @param {Guest} guest @param {u32} self @param {u32} shader
  * @returns {u32}
  */
-export function PSSetShader({ u32, setU32, compareExchange, host }, self, shader){
-    if (one({ u32, setU32, compareExchange }, self, PS_SET_SHADER, shader) !== 0)
+export function PSSetShader({ u32, setU32, compareExchange, host, pointerBytes }, self, shader){
+    if (one({ u32, setU32, compareExchange, pointerBytes }, self, PS_SET_SHADER, shader) !== 0)
     {
         return host();
     }
@@ -235,8 +242,8 @@ export function PSSetShader({ u32, setU32, compareExchange, host }, self, shader
  * @param {Guest} guest @param {u32} self @param {u32} shader
  * @returns {u32}
  */
-export function GSSetShader({ u32, setU32, compareExchange, host }, self, shader){
-    if (one({ u32, setU32, compareExchange }, self, GS_SET_SHADER, shader) !== 0)
+export function GSSetShader({ u32, setU32, compareExchange, host, pointerBytes }, self, shader){
+    if (one({ u32, setU32, compareExchange, pointerBytes }, self, GS_SET_SHADER, shader) !== 0)
     {
         return host();
     }
@@ -253,10 +260,12 @@ export function GSSetShader({ u32, setU32, compareExchange, host }, self, shader
  * @param {u32} count
  * @returns {u32}
  */
-export function ContextVSSetShader({ u32, setU32, compareExchange, host }, self, shader,
+export function ContextVSSetShader({ u32, setU32, compareExchange, host, pointerBytes }, self,
+    shader,
     instances, count)
 {
-    if (count !== 0 || one({ u32, setU32, compareExchange }, self, VS_SET_SHADER, shader) !== 0)
+    if (count !== 0 || one({ u32, setU32, compareExchange, pointerBytes }, self, VS_SET_SHADER,
+        shader) !== 0)
     {
         return host();
     }
@@ -272,10 +281,12 @@ export function ContextVSSetShader({ u32, setU32, compareExchange, host }, self,
  * @param {u32} count
  * @returns {u32}
  */
-export function ContextPSSetShader({ u32, setU32, compareExchange, host }, self, shader,
+export function ContextPSSetShader({ u32, setU32, compareExchange, host, pointerBytes }, self,
+    shader,
     instances, count)
 {
-    if (count !== 0 || one({ u32, setU32, compareExchange }, self, PS_SET_SHADER, shader) !== 0)
+    if (count !== 0 || one({ u32, setU32, compareExchange, pointerBytes }, self, PS_SET_SHADER,
+        shader) !== 0)
     {
         return host();
     }
@@ -291,10 +302,12 @@ export function ContextPSSetShader({ u32, setU32, compareExchange, host }, self,
  * @param {u32} count
  * @returns {u32}
  */
-export function ContextGSSetShader({ u32, setU32, compareExchange, host }, self, shader,
+export function ContextGSSetShader({ u32, setU32, compareExchange, host, pointerBytes }, self,
+    shader,
     instances, count)
 {
-    if (count !== 0 || one({ u32, setU32, compareExchange }, self, GS_SET_SHADER, shader) !== 0)
+    if (count !== 0 || one({ u32, setU32, compareExchange, pointerBytes }, self, GS_SET_SHADER,
+        shader) !== 0)
     {
         return host();
     }
@@ -308,8 +321,11 @@ export function ContextGSSetShader({ u32, setU32, compareExchange, host }, self,
  * @param {Guest} guest @param {u32} self @param {u32} layout
  * @returns {u32}
  */
-export function IASetInputLayout({ u32, setU32, compareExchange, host }, self, layout){
-    if (one({ u32, setU32, compareExchange }, self, IA_SET_INPUT_LAYOUT, layout) !== 0)
+export function IASetInputLayout({ u32, setU32, compareExchange, host, pointerBytes }, self,
+    layout)
+{
+    if (one({ u32, setU32, compareExchange, pointerBytes }, self, IA_SET_INPUT_LAYOUT,
+        layout) !== 0)
     {
         return host();
     }
@@ -323,8 +339,11 @@ export function IASetInputLayout({ u32, setU32, compareExchange, host }, self, l
  * @param {Guest} guest @param {u32} self @param {u32} topology
  * @returns {u32}
  */
-export function IASetPrimitiveTopology({ u32, setU32, compareExchange, host }, self, topology){
-    if (one({ u32, setU32, compareExchange }, self, IA_SET_PRIMITIVE_TOPOLOGY, topology) !== 0)
+export function IASetPrimitiveTopology({ u32, setU32, compareExchange, host, pointerBytes },
+    self, topology)
+{
+    if (one({ u32, setU32, compareExchange, pointerBytes }, self, IA_SET_PRIMITIVE_TOPOLOGY,
+        topology) !== 0)
     {
         return host();
     }
@@ -338,8 +357,8 @@ export function IASetPrimitiveTopology({ u32, setU32, compareExchange, host }, s
  * @param {Guest} guest @param {u32} self @param {u32} state
  * @returns {u32}
  */
-export function RSSetState({ u32, setU32, compareExchange, host }, self, state){
-    if (one({ u32, setU32, compareExchange }, self, RS_SET_STATE, state) !== 0)
+export function RSSetState({ u32, setU32, compareExchange, host, pointerBytes }, self, state){
+    if (one({ u32, setU32, compareExchange, pointerBytes }, self, RS_SET_STATE, state) !== 0)
     {
         return host();
     }
@@ -354,10 +373,12 @@ export function RSSetState({ u32, setU32, compareExchange, host }, self, state){
  * @param {u32} buffers
  * @returns {u32}
  */
-export function VSSetConstantBuffers({ u32, setU32, compareExchange, host }, self, start, count,
+export function VSSetConstantBuffers({ u32, setU32, compareExchange, host, pointerBytes }, self,
+    start, count,
     buffers)
 {
-    if (slots({ u32, setU32, compareExchange }, self, VS_SET_CONSTANT_BUFFERS, start, count,
+    if (slots({ u32, setU32, compareExchange, pointerBytes }, self, VS_SET_CONSTANT_BUFFERS,
+        start, count,
         buffers) !== 0)
     {
         return host();
@@ -373,10 +394,12 @@ export function VSSetConstantBuffers({ u32, setU32, compareExchange, host }, sel
  * @param {u32} buffers
  * @returns {u32}
  */
-export function PSSetConstantBuffers({ u32, setU32, compareExchange, host }, self, start, count,
+export function PSSetConstantBuffers({ u32, setU32, compareExchange, host, pointerBytes }, self,
+    start, count,
     buffers)
 {
-    if (slots({ u32, setU32, compareExchange }, self, PS_SET_CONSTANT_BUFFERS, start, count,
+    if (slots({ u32, setU32, compareExchange, pointerBytes }, self, PS_SET_CONSTANT_BUFFERS,
+        start, count,
         buffers) !== 0)
     {
         return host();
@@ -392,10 +415,12 @@ export function PSSetConstantBuffers({ u32, setU32, compareExchange, host }, sel
  * @param {u32} buffers
  * @returns {u32}
  */
-export function GSSetConstantBuffers({ u32, setU32, compareExchange, host }, self, start, count,
+export function GSSetConstantBuffers({ u32, setU32, compareExchange, host, pointerBytes }, self,
+    start, count,
     buffers)
 {
-    if (slots({ u32, setU32, compareExchange }, self, GS_SET_CONSTANT_BUFFERS, start, count,
+    if (slots({ u32, setU32, compareExchange, pointerBytes }, self, GS_SET_CONSTANT_BUFFERS,
+        start, count,
         buffers) !== 0)
     {
         return host();
@@ -412,10 +437,12 @@ export function GSSetConstantBuffers({ u32, setU32, compareExchange, host }, sel
  * @param {u32} views
  * @returns {u32}
  */
-export function VSSetShaderResources({ u32, setU32, compareExchange, host }, self, start, count,
+export function VSSetShaderResources({ u32, setU32, compareExchange, host, pointerBytes }, self,
+    start, count,
     views)
 {
-    if (slots({ u32, setU32, compareExchange }, self, VS_SET_SHADER_RESOURCES, start, count,
+    if (slots({ u32, setU32, compareExchange, pointerBytes }, self, VS_SET_SHADER_RESOURCES,
+        start, count,
         views) !== 0)
     {
         return host();
@@ -432,10 +459,12 @@ export function VSSetShaderResources({ u32, setU32, compareExchange, host }, sel
  * @param {u32} views
  * @returns {u32}
  */
-export function PSSetShaderResources({ u32, setU32, compareExchange, host }, self, start, count,
+export function PSSetShaderResources({ u32, setU32, compareExchange, host, pointerBytes }, self,
+    start, count,
     views)
 {
-    if (slots({ u32, setU32, compareExchange }, self, PS_SET_SHADER_RESOURCES, start, count,
+    if (slots({ u32, setU32, compareExchange, pointerBytes }, self, PS_SET_SHADER_RESOURCES,
+        start, count,
         views) !== 0)
     {
         return host();
@@ -452,10 +481,12 @@ export function PSSetShaderResources({ u32, setU32, compareExchange, host }, sel
  * @param {u32} views
  * @returns {u32}
  */
-export function GSSetShaderResources({ u32, setU32, compareExchange, host }, self, start, count,
+export function GSSetShaderResources({ u32, setU32, compareExchange, host, pointerBytes }, self,
+    start, count,
     views)
 {
-    if (slots({ u32, setU32, compareExchange }, self, GS_SET_SHADER_RESOURCES, start, count,
+    if (slots({ u32, setU32, compareExchange, pointerBytes }, self, GS_SET_SHADER_RESOURCES,
+        start, count,
         views) !== 0)
     {
         return host();
@@ -471,10 +502,11 @@ export function GSSetShaderResources({ u32, setU32, compareExchange, host }, sel
  * @param {u32} samplers
  * @returns {u32}
  */
-export function VSSetSamplers({ u32, setU32, compareExchange, host }, self, start, count,
+export function VSSetSamplers({ u32, setU32, compareExchange, host, pointerBytes }, self, start,
+    count,
     samplers)
 {
-    if (slots({ u32, setU32, compareExchange }, self, VS_SET_SAMPLERS, start, count,
+    if (slots({ u32, setU32, compareExchange, pointerBytes }, self, VS_SET_SAMPLERS, start, count,
         samplers) !== 0)
     {
         return host();
@@ -490,10 +522,11 @@ export function VSSetSamplers({ u32, setU32, compareExchange, host }, self, star
  * @param {u32} samplers
  * @returns {u32}
  */
-export function PSSetSamplers({ u32, setU32, compareExchange, host }, self, start, count,
+export function PSSetSamplers({ u32, setU32, compareExchange, host, pointerBytes }, self, start,
+    count,
     samplers)
 {
-    if (slots({ u32, setU32, compareExchange }, self, PS_SET_SAMPLERS, start, count,
+    if (slots({ u32, setU32, compareExchange, pointerBytes }, self, PS_SET_SAMPLERS, start, count,
         samplers) !== 0)
     {
         return host();
@@ -509,10 +542,11 @@ export function PSSetSamplers({ u32, setU32, compareExchange, host }, self, star
  * @param {u32} samplers
  * @returns {u32}
  */
-export function GSSetSamplers({ u32, setU32, compareExchange, host }, self, start, count,
+export function GSSetSamplers({ u32, setU32, compareExchange, host, pointerBytes }, self, start,
+    count,
     samplers)
 {
-    if (slots({ u32, setU32, compareExchange }, self, GS_SET_SAMPLERS, start, count,
+    if (slots({ u32, setU32, compareExchange, pointerBytes }, self, GS_SET_SAMPLERS, start, count,
         samplers) !== 0)
     {
         return host();
@@ -532,7 +566,8 @@ export function GSSetSamplers({ u32, setU32, compareExchange, host }, self, star
  * @param {u32} buffers @param {u32} strides @param {u32} offsets
  * @returns {u32}
  */
-export function IASetVertexBuffers({ u32, setU32, compareExchange, host }, self, start, count,
+export function IASetVertexBuffers({ u32, setU32, compareExchange, host, pointerBytes }, self,
+    start, count,
     buffers, strides, offsets)
 {
     if (count > MOST || (count !== 0 && (buffers === 0 || strides === 0 || offsets === 0)))
@@ -540,7 +575,7 @@ export function IASetVertexBuffers({ u32, setU32, compareExchange, host }, self,
         return host();
     }
     const length = (ARGS + 8 + count * 12) >>> 0;
-    const record = reserve({ u32, compareExchange }, u32(self + 4), length);
+    const record = reserve({ u32, compareExchange }, u32(self + pointerBytes), length);
     if (record === 0)
     {
         return host();
@@ -551,11 +586,11 @@ export function IASetVertexBuffers({ u32, setU32, compareExchange, host }, self,
     const offsetsAt = (stridesAt + count * 4) >>> 0;
     for (let index = 0; index < (count | 0); index++)
     {
-        setU32(record + ARGS + 8 + index * 4, u32(buffers + index * 4));
+        setU32(record + ARGS + 8 + index * 4, u32(buffers + index * pointerBytes));
         setU32(stridesAt + index * 4, u32(strides + index * 4));
         setU32(offsetsAt + index * 4, u32(offsets + index * 4));
     }
-    return publish({ setU32, compareExchange }, u32(self + 4), record,
+    return publish({ setU32, compareExchange }, u32(self + pointerBytes), record,
         IA_SET_VERTEX_BUFFERS, length);
 }
 
@@ -567,10 +602,11 @@ export function IASetVertexBuffers({ u32, setU32, compareExchange, host }, self,
  * @param {u32} offset
  * @returns {u32}
  */
-export function IASetIndexBuffer({ u32, setU32, compareExchange, host }, self, buffer, format,
+export function IASetIndexBuffer({ u32, setU32, compareExchange, host, pointerBytes }, self,
+    buffer, format,
     offset)
 {
-    const record = reserve({ u32, compareExchange }, u32(self + 4), ARGS + 12);
+    const record = reserve({ u32, compareExchange }, u32(self + pointerBytes), ARGS + 12);
     if (record === 0)
     {
         return host();
@@ -578,7 +614,7 @@ export function IASetIndexBuffer({ u32, setU32, compareExchange, host }, self, b
     setU32(record + ARGS, buffer);
     setU32(record + ARGS + 4, format);
     setU32(record + ARGS + 8, offset);
-    return publish({ setU32, compareExchange }, u32(self + 4), record,
+    return publish({ setU32, compareExchange }, u32(self + pointerBytes), record,
         IA_SET_INDEX_BUFFER, ARGS + 12);
 }
 
@@ -593,7 +629,8 @@ export function IASetIndexBuffer({ u32, setU32, compareExchange, host }, self, b
  * @param {u32} depth
  * @returns {u32}
  */
-export function OMSetRenderTargets({ u32, setU32, compareExchange, host }, self, count, views,
+export function OMSetRenderTargets({ u32, setU32, compareExchange, host, pointerBytes }, self,
+    count, views,
     depth)
 {
     if (count > 8 || (views === 0 && count !== 0))
@@ -601,7 +638,7 @@ export function OMSetRenderTargets({ u32, setU32, compareExchange, host }, self,
         return host();
     }
     const length = (ARGS + 8 + count * 4) >>> 0;
-    const record = reserve({ u32, compareExchange }, u32(self + 4), length);
+    const record = reserve({ u32, compareExchange }, u32(self + pointerBytes), length);
     if (record === 0)
     {
         return host();
@@ -610,9 +647,9 @@ export function OMSetRenderTargets({ u32, setU32, compareExchange, host }, self,
     setU32(record + ARGS + 4, depth);
     for (let index = 0; index < (count | 0); index++)
     {
-        setU32(record + ARGS + 8 + index * 4, u32(views + index * 4));
+        setU32(record + ARGS + 8 + index * 4, u32(views + index * pointerBytes));
     }
-    return publish({ setU32, compareExchange }, u32(self + 4), record,
+    return publish({ setU32, compareExchange }, u32(self + pointerBytes), record,
         OM_SET_RENDER_TARGETS, length);
 }
 
@@ -627,10 +664,11 @@ export function OMSetRenderTargets({ u32, setU32, compareExchange, host }, self,
  * @param {u32} mask
  * @returns {u32}
  */
-export function OMSetBlendState({ u32, setU32, compareExchange, host }, self, state, factor,
+export function OMSetBlendState({ u32, setU32, compareExchange, host, pointerBytes }, self,
+    state, factor,
     mask)
 {
-    const record = reserve({ u32, compareExchange }, u32(self + 4), ARGS + 28);
+    const record = reserve({ u32, compareExchange }, u32(self + pointerBytes), ARGS + 28);
     if (record === 0)
     {
         return host();
@@ -642,7 +680,7 @@ export function OMSetBlendState({ u32, setU32, compareExchange, host }, self, st
     {
         setU32(record + ARGS + 12 + index * 4, factor === 0 ? 0 : u32(factor + index * 4));
     }
-    return publish({ setU32, compareExchange }, u32(self + 4), record,
+    return publish({ setU32, compareExchange }, u32(self + pointerBytes), record,
         OM_SET_BLEND_STATE, ARGS + 28);
 }
 
@@ -653,17 +691,19 @@ export function OMSetBlendState({ u32, setU32, compareExchange, host }, self, st
  * @param {Guest} guest @param {u32} self @param {u32} state @param {u32} reference
  * @returns {u32}
  */
-export function OMSetDepthStencilState({ u32, setU32, compareExchange, host }, self, state,
+export function OMSetDepthStencilState({ u32, setU32, compareExchange, host, pointerBytes },
+    self, state,
     reference)
 {
-    const record = reserve({ u32, compareExchange }, u32(self + 4), ARGS + 8);
+    const record = reserve({ u32, compareExchange }, u32(self + pointerBytes), ARGS + 8);
     if (record === 0)
     {
         return host();
     }
     setU32(record + ARGS, state);
     setU32(record + ARGS + 4, reference);
-    return publish({ setU32, compareExchange }, u32(self + 4), record, OM_SET_DEPTH_STENCIL_STATE,
+    return publish({ setU32, compareExchange }, u32(self + pointerBytes), record,
+        OM_SET_DEPTH_STENCIL_STATE,
         ARGS + 8);
 }
 
@@ -674,8 +714,11 @@ export function OMSetDepthStencilState({ u32, setU32, compareExchange, host }, s
  * @param {Guest} guest @param {u32} self @param {u32} count @param {u32} viewports
  * @returns {u32}
  */
-export function RSSetViewports({ u32, setU32, compareExchange, host }, self, count, viewports){
-    if (counted({ u32, setU32, compareExchange }, self, RS_SET_VIEWPORTS, count, viewports, 6)
+export function RSSetViewports({ u32, setU32, compareExchange, host, pointerBytes }, self, count,
+    viewports)
+{
+    if (counted({ u32, setU32, compareExchange, pointerBytes }, self, RS_SET_VIEWPORTS, count,
+        viewports, 6)
         !== 0)
     {
         return host();
@@ -691,10 +734,12 @@ export function RSSetViewports({ u32, setU32, compareExchange, host }, self, cou
  * @param {Guest} guest @param {u32} self @param {u32} count @param {u32} viewports
  * @returns {u32}
  */
-export function ContextRSSetViewports({ u32, setU32, compareExchange, host }, self, count,
+export function ContextRSSetViewports({ u32, setU32, compareExchange, host, pointerBytes }, self,
+    count,
     viewports)
 {
-    if (counted({ u32, setU32, compareExchange }, self, RS_SET_VIEWPORTS11, count, viewports, 6)
+    if (counted({ u32, setU32, compareExchange, pointerBytes }, self, RS_SET_VIEWPORTS11, count,
+        viewports, 6)
         !== 0)
     {
         return host();
@@ -707,19 +752,21 @@ export function ContextRSSetViewports({ u32, setU32, compareExchange, host }, se
  * 0 once written, 1 where the host has to make the call.
  *
  * @guestCode stdcall
- * @param {Pick<Guest, 'u32' | 'setU32' | 'compareExchange'>} guest
+ * @param {Pick<Guest, 'u32' | 'setU32' | 'compareExchange' | 'pointerBytes'>} guest
  * @param {u32} self @param {u32} slot @param {u32} count @param {u32} items
  * @param {u32} words
  * @returns {u32}
  */
-export function counted({ u32, setU32, compareExchange }, self, slot, count, items, words){
+export function counted({ u32, setU32, compareExchange, pointerBytes }, self, slot, count, items,
+    words)
+{
     if (count > MOST || (items === 0 && count !== 0))
     {
         return 1;
     }
     const copied = Math.imul(count, words);
     const length = (ARGS + 4 + copied * 4) >>> 0;
-    const record = reserve({ u32, compareExchange }, u32(self + 4), length);
+    const record = reserve({ u32, compareExchange }, u32(self + pointerBytes), length);
     if (record === 0)
     {
         return 1;
@@ -729,7 +776,7 @@ export function counted({ u32, setU32, compareExchange }, self, slot, count, ite
     {
         setU32(record + ARGS + 4 + index * 4, u32(items + index * 4));
     }
-    return publish({ setU32, compareExchange }, u32(self + 4), record, slot, length);
+    return publish({ setU32, compareExchange }, u32(self + pointerBytes), record, slot, length);
 }
 
 /**
@@ -739,13 +786,15 @@ export function counted({ u32, setU32, compareExchange }, self, slot, count, ite
  * @param {Guest} guest @param {u32} self @param {u32} count @param {u32} rects
  * @returns {u32}
  */
-export function RSSetScissorRects({ u32, setU32, compareExchange, host }, self, count, rects){
+export function RSSetScissorRects({ u32, setU32, compareExchange, host, pointerBytes }, self,
+    count, rects)
+{
     if (count > MOST || (rects === 0 && count !== 0))
     {
         return host();
     }
     const length = (ARGS + 4 + count * 16) >>> 0;
-    const record = reserve({ u32, compareExchange }, u32(self + 4), length);
+    const record = reserve({ u32, compareExchange }, u32(self + pointerBytes), length);
     if (record === 0)
     {
         return host();
@@ -755,7 +804,7 @@ export function RSSetScissorRects({ u32, setU32, compareExchange, host }, self, 
     {
         setU32(record + ARGS + 4 + index * 4, u32(rects + index * 4));
     }
-    return publish({ setU32, compareExchange }, u32(self + 4), record,
+    return publish({ setU32, compareExchange }, u32(self + pointerBytes), record,
         RS_SET_SCISSOR_RECTS, length);
 }
 
@@ -766,15 +815,15 @@ export function RSSetScissorRects({ u32, setU32, compareExchange, host }, self, 
  * @param {Guest} guest @param {u32} self @param {u32} count @param {u32} start
  * @returns {u32}
  */
-export function Draw({ u32, setU32, compareExchange, host }, self, count, start){
-    const record = reserve({ u32, compareExchange }, u32(self + 4), ARGS + 8);
+export function Draw({ u32, setU32, compareExchange, host, pointerBytes }, self, count, start){
+    const record = reserve({ u32, compareExchange }, u32(self + pointerBytes), ARGS + 8);
     if (record === 0)
     {
         return host();
     }
     setU32(record + ARGS, count);
     setU32(record + ARGS + 4, start);
-    return publish({ setU32, compareExchange }, u32(self + 4), record, DRAW, ARGS + 8);
+    return publish({ setU32, compareExchange }, u32(self + pointerBytes), record, DRAW, ARGS + 8);
 }
 
 /**
@@ -785,8 +834,10 @@ export function Draw({ u32, setU32, compareExchange, host }, self, count, start)
  * @param {u32} base
  * @returns {u32}
  */
-export function DrawIndexed({ u32, setU32, compareExchange, host }, self, count, start, base){
-    const record = reserve({ u32, compareExchange }, u32(self + 4), ARGS + 12);
+export function DrawIndexed({ u32, setU32, compareExchange, host, pointerBytes }, self, count,
+    start, base)
+{
+    const record = reserve({ u32, compareExchange }, u32(self + pointerBytes), ARGS + 12);
     if (record === 0)
     {
         return host();
@@ -794,7 +845,8 @@ export function DrawIndexed({ u32, setU32, compareExchange, host }, self, count,
     setU32(record + ARGS, count);
     setU32(record + ARGS + 4, start);
     setU32(record + ARGS + 8, base);
-    return publish({ setU32, compareExchange }, u32(self + 4), record, DRAW_INDEXED, ARGS + 12);
+    return publish({ setU32, compareExchange }, u32(self + pointerBytes), record, DRAW_INDEXED,
+        ARGS + 12);
 }
 
 /**
@@ -806,10 +858,11 @@ export function DrawIndexed({ u32, setU32, compareExchange, host }, self, count,
  * @param {u32} start @param {u32} first
  * @returns {u32}
  */
-export function DrawInstanced({ u32, setU32, compareExchange, host }, self, count, instances,
+export function DrawInstanced({ u32, setU32, compareExchange, host, pointerBytes }, self, count,
+    instances,
     start, first)
 {
-    const record = reserve({ u32, compareExchange }, u32(self + 4), ARGS + 16);
+    const record = reserve({ u32, compareExchange }, u32(self + pointerBytes), ARGS + 16);
     if (record === 0)
     {
         return host();
@@ -818,7 +871,8 @@ export function DrawInstanced({ u32, setU32, compareExchange, host }, self, coun
     setU32(record + ARGS + 4, instances);
     setU32(record + ARGS + 8, start);
     setU32(record + ARGS + 12, first);
-    return publish({ setU32, compareExchange }, u32(self + 4), record, DRAW_INSTANCED, ARGS + 16);
+    return publish({ setU32, compareExchange }, u32(self + pointerBytes), record, DRAW_INSTANCED,
+        ARGS + 16);
 }
 
 /**
@@ -830,10 +884,11 @@ export function DrawInstanced({ u32, setU32, compareExchange, host }, self, coun
  * @param {u32} start @param {u32} base @param {u32} first
  * @returns {u32}
  */
-export function DrawIndexedInstanced({ u32, setU32, compareExchange, host }, self, count,
+export function DrawIndexedInstanced({ u32, setU32, compareExchange, host, pointerBytes }, self,
+    count,
     instances, start, base, first)
 {
-    const record = reserve({ u32, compareExchange }, u32(self + 4), ARGS + 20);
+    const record = reserve({ u32, compareExchange }, u32(self + pointerBytes), ARGS + 20);
     if (record === 0)
     {
         return host();
@@ -843,7 +898,8 @@ export function DrawIndexedInstanced({ u32, setU32, compareExchange, host }, sel
     setU32(record + ARGS + 8, start);
     setU32(record + ARGS + 12, base);
     setU32(record + ARGS + 16, first);
-    return publish({ setU32, compareExchange }, u32(self + 4), record, DRAW_INDEXED_INSTANCED,
+    return publish({ setU32, compareExchange }, u32(self + pointerBytes), record,
+        DRAW_INDEXED_INSTANCED,
         ARGS + 20);
 }
 
@@ -854,14 +910,15 @@ export function DrawIndexedInstanced({ u32, setU32, compareExchange, host }, sel
  * @param {Guest} guest @param {u32} self @param {u32} view @param {u32} colour
  * @returns {u32}
  */
-export function ClearRenderTargetView({ u32, setU32, compareExchange, host }, self, view,
+export function ClearRenderTargetView({ u32, setU32, compareExchange, host, pointerBytes }, self,
+    view,
     colour)
 {
     if (colour === 0)
     {
         return host();
     }
-    const record = reserve({ u32, compareExchange }, u32(self + 4), ARGS + 20);
+    const record = reserve({ u32, compareExchange }, u32(self + pointerBytes), ARGS + 20);
     if (record === 0)
     {
         return host();
@@ -871,7 +928,8 @@ export function ClearRenderTargetView({ u32, setU32, compareExchange, host }, se
     {
         setU32(record + ARGS + 4 + index * 4, u32(colour + index * 4));
     }
-    return publish({ setU32, compareExchange }, u32(self + 4), record, CLEAR_RENDER_TARGET_VIEW,
+    return publish({ setU32, compareExchange }, u32(self + pointerBytes), record,
+        CLEAR_RENDER_TARGET_VIEW,
         ARGS + 20);
 }
 
@@ -884,10 +942,11 @@ export function ClearRenderTargetView({ u32, setU32, compareExchange, host }, se
  * @param {u32} depth @param {u32} stencil
  * @returns {u32}
  */
-export function ClearDepthStencilView({ u32, setU32, compareExchange, host }, self, view, flags,
+export function ClearDepthStencilView({ u32, setU32, compareExchange, host, pointerBytes }, self,
+    view, flags,
     depth, stencil)
 {
-    const record = reserve({ u32, compareExchange }, u32(self + 4), ARGS + 16);
+    const record = reserve({ u32, compareExchange }, u32(self + pointerBytes), ARGS + 16);
     if (record === 0)
     {
         return host();
@@ -896,7 +955,8 @@ export function ClearDepthStencilView({ u32, setU32, compareExchange, host }, se
     setU32(record + ARGS + 4, flags);
     setU32(record + ARGS + 8, depth);
     setU32(record + ARGS + 12, stencil & 0xff);
-    return publish({ setU32, compareExchange }, u32(self + 4), record, CLEAR_DEPTH_STENCIL_VIEW,
+    return publish({ setU32, compareExchange }, u32(self + pointerBytes), record,
+        CLEAR_DEPTH_STENCIL_VIEW,
         ARGS + 16);
 }
 
@@ -913,13 +973,20 @@ export function ClearDepthStencilView({ u32, setU32, compareExchange, host }, se
  * @param {u32} out
  * @returns {u32}
  */
-export function BufferMap({ u32, setU32, compareExchange, host }, self, type, flags, out){
-    const storage = out === 0 ? 0 : mapStorage({ u32, setU32, compareExchange }, self, type);
+export function BufferMap({ u32, setU32, compareExchange, host, pointerBytes }, self, type,
+    flags, out)
+{
+    const storage = out === 0 ? 0 : mapStorage({ u32, setU32, compareExchange, pointerBytes },
+        self, type);
     if (storage === 0)
     {
         return host();
     }
     setU32(out, storage);
+    if (pointerBytes === 8)
+    {
+        setU32(out + 4, 0);
+    }
     return 0;
 }
 
@@ -935,19 +1002,24 @@ export function BufferMap({ u32, setU32, compareExchange, host }, self, type, fl
  * @param {u32} type @param {u32} flags @param {u32} out
  * @returns {u32}
  */
-export function ContextMap({ u32, setU32, compareExchange, host }, self, resource, subresource,
-    type, flags, out)
+export function ContextMap({ u32, setU32, compareExchange, host, pointerBytes }, self, resource,
+    subresource, type, flags, out)
 {
-    const storage = out === 0 || resource === 0 || subresource !== 0 || u32(self + 4) === 0 ? 0
-        : mapStorage({ u32, setU32, compareExchange }, resource, type);
+    const storage = out === 0 || resource === 0 || subresource !== 0
+        || u32(self + pointerBytes) === 0 ? 0
+        : mapStorage({ u32, setU32, compareExchange, pointerBytes }, resource, type);
     if (storage === 0)
     {
         return host();
     }
-    const length = u32(u32(resource + 4) + B_LENGTH);
+    const length = u32(u32(resource + pointerBytes) + B_LENGTH);
     setU32(out, storage);
-    setU32(out + 4, length);
-    setU32(out + 8, length);
+    if (pointerBytes === 8)
+    {
+        setU32(out + 4, 0);
+    }
+    setU32(out + pointerBytes, length);
+    setU32(out + pointerBytes + 4, length);
     return 0;
 }
 
@@ -957,12 +1029,12 @@ export function ContextMap({ u32, setU32, compareExchange, host }, self, resourc
  * answer, so the program's pointer is written through with it free.
  *
  * @guestCode stdcall
- * @param {Pick<Guest, 'u32' | 'setU32' | 'compareExchange'>} guest
+ * @param {Pick<Guest, 'u32' | 'setU32' | 'compareExchange' | 'pointerBytes'>} guest
  * @param {u32} buffer @param {u32} type
  * @returns {u32}
  */
-export function mapStorage({ u32, setU32, compareExchange }, buffer, type){
-    const block = u32(buffer + 4);
+export function mapStorage({ u32, setU32, compareExchange, pointerBytes }, buffer, type){
+    const block = u32(buffer + pointerBytes);
     if (block === 0 || (u32(block + B_FLAGS) & FLAG_SLOW_PATH) !== 0
         || u32(block + B_MAPPED) !== 0
         || (type !== WRITE_DISCARD && type !== WRITE_NO_OVERWRITE))
@@ -1020,8 +1092,8 @@ export function letGo({ compareExchange }, device){
  * @param {Guest} guest @param {u32} self
  * @returns {u32}
  */
-export function BufferUnmap({ u32, setU32, compareExchange, host }, self){
-    if (unmapStorage({ u32, setU32, compareExchange }, self) !== 0)
+export function BufferUnmap({ u32, setU32, compareExchange, host, pointerBytes }, self){
+    if (unmapStorage({ u32, setU32, compareExchange, pointerBytes }, self) !== 0)
     {
         return host();
     }
@@ -1036,11 +1108,11 @@ export function BufferUnmap({ u32, setU32, compareExchange, host }, self){
  * @param {Guest} guest @param {u32} self @param {u32} resource @param {u32} subresource
  * @returns {u32}
  */
-export function ContextUnmap({ u32, setU32, compareExchange, host }, self, resource,
+export function ContextUnmap({ u32, setU32, compareExchange, host, pointerBytes }, self, resource,
     subresource)
 {
-    if (resource === 0 || subresource !== 0 || u32(self + 4) === 0
-        || unmapStorage({ u32, setU32, compareExchange }, resource) !== 0)
+    if (resource === 0 || subresource !== 0 || u32(self + pointerBytes) === 0
+        || unmapStorage({ u32, setU32, compareExchange, pointerBytes }, resource) !== 0)
     {
         return host();
     }
@@ -1052,11 +1124,12 @@ export function ContextUnmap({ u32, setU32, compareExchange, host }, self, resou
  * the host has to make it.
  *
  * @guestCode stdcall
- * @param {Pick<Guest, 'u32' | 'setU32' | 'compareExchange'>} guest @param {u32} buffer
+ * @param {Pick<Guest, 'u32' | 'setU32' | 'compareExchange' | 'pointerBytes'>} guest
+ * @param {u32} buffer
  * @returns {u32}
  */
-export function unmapStorage({ u32, setU32, compareExchange }, buffer){
-    const block = u32(buffer + 4);
+export function unmapStorage({ u32, setU32, compareExchange, pointerBytes }, buffer){
+    const block = u32(buffer + pointerBytes);
     if (block === 0 || (u32(block + B_FLAGS) & FLAG_SLOW_PATH) !== 0
         || u32(block + B_MAPPED) === 0)
     {
