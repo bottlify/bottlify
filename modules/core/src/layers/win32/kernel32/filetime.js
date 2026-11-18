@@ -170,9 +170,14 @@ function transitionIn(rule, year){
  * happens; a southern zone's daylight time runs across the new year, and is
  * then the part of the year outside the two.
  *
+ * The transitions are the ones of `year`, the year of the moment on the
+ * standard clock unless the caller reads it by another year's rules: then a
+ * moment past that year is after both, and one before it before both.
+ *
  * @param {DataView} zone TIME_ZONE_INFORMATION @param {number} utc
+ * @param {number} [year]
  */
-function biasAt(zone, utc){
+function biasAt(zone, utc, year){
     const bias = zone.getInt32(TIME_ZONE_INFORMATION.Bias, true);
     const standardBias = zone.getInt32(TIME_ZONE_INFORMATION.StandardBias, true);
     const daylightBias = zone.getInt32(TIME_ZONE_INFORMATION.DaylightBias, true);
@@ -185,9 +190,9 @@ function biasAt(zone, utc){
         return bias;
     }
     const minute = 60_000;
-    const year = new Date(utc - (bias + standardBias) * minute).getUTCFullYear();
-    const daylightStarts = transitionIn(daylightRule, year) + (bias + standardBias) * minute;
-    const daylightEnds = transitionIn(standardRule, year) + (bias + daylightBias) * minute;
+    const rulesYear = year ?? new Date(utc - (bias + standardBias) * minute).getUTCFullYear();
+    const daylightStarts = transitionIn(daylightRule, rulesYear) + (bias + standardBias) * minute;
+    const daylightEnds = transitionIn(standardRule, rulesYear) + (bias + daylightBias) * minute;
     const daylight = daylightStarts < daylightEnds
         ? utc >= daylightStarts && utc < daylightEnds
         : !(utc >= daylightEnds && utc < daylightStarts);
@@ -282,17 +287,21 @@ export function dosDateTimeToMs(date, time){
 
 /**
  * The reverse: the two words for a moment, or null when the moment is
- * outside the calendar DOS can write. Seconds round down to the even one.
+ * outside the calendar DOS can write. A moment between two even seconds is
+ * written as the later one, any fraction of a second rounding it up, as
+ * Windows writes it (kernel32's time.c pins 10:20:22.001 as 10:20:24 and
+ * 10:20:59 as 10:21:00).
  *
- * @param {number} ms
+ * @param {number} ms  May carry a fraction of a millisecond.
  * @returns {{ date: number, time: number } | null}
  */
 export function msToDosDateTime(ms){
-    if (!(ms >= DOS_FIRST_MS && ms <= DOS_LAST_MS))
+    const even = Math.ceil(ms / 2000) * 2000;
+    if (!(even >= DOS_FIRST_MS && even <= DOS_LAST_MS))
     {
         return null;
     }
-    const at = new Date(ms);
+    const at = new Date(even);
     return {
         date: ((at.getUTCFullYear() - 1980) << 9) | ((at.getUTCMonth() + 1) << 5)
             | at.getUTCDate(),
@@ -668,7 +677,7 @@ export function createFileTimeFunctions(host){
                 const units = readFileTime(from >>> 0);
                 const packed = units < FILETIME_EPOCH
                     ? null
-                    : msToDosDateTime(Number((units - FILETIME_EPOCH) / FILETIME_PER_MS));
+                    : msToDosDateTime(Number(units - FILETIME_EPOCH) / Number(FILETIME_PER_MS));
                 if (packed === null)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
@@ -1037,7 +1046,8 @@ export function createFileTimeFunctions(host){
                 /** @param {number} year */
                 const localBy = year=>{
                     const data = zone === 0 ? currentZone() : dynamicRules(zone >>> 0, year);
-                    return utc - biasAt(new DataView(data.buffer, data.byteOffset), utc) * 60_000;
+                    const rules = new DataView(data.buffer, data.byteOffset);
+                    return utc - biasAt(rules, utc, year) * 60_000;
                 };
                 // Windows reads a time by the rules of its own year, except
                 // that 1 January is read by the year before's first - its

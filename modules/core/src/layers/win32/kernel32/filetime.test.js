@@ -115,6 +115,26 @@ test('a DOS date and time round-trips through a FILETIME to the second it can na
         'and 1601 is before the DOS calendar');
 });
 
+test('a moment between two even seconds is written as the later one', ()=>{
+    // Wine's time.c test_FileTimeToDosDateTime: 10:20:22.001 is :24,
+    // 10:20:59 is 10:21:00, 10:20:22 and 10:20:01 stay :22 and :02.
+    const { fns, bytes } = setup();
+    const view = new DataView(bytes.buffer);
+    /** @param {number} second @param {number} ms */
+    const dos = (second, ms)=>{
+        view.setBigUint64(0x100, BigInt(Date.UTC(2000, 0, 1, 10, 20, second, ms)) * 10000n
+            + 116444736000000000n, true);
+        assert.equal(fns.FileTimeToDosDateTime.handler([0x100, 0x200, 0x202]), 1);
+        const time = view.getUint16(0x202, true);
+        return [(time >>> 5) & 0x3f, (time & 0x1f) * 2];
+    };
+    assert.deepEqual(dos(22, 1), [20, 24]);
+    assert.deepEqual(dos(59, 0), [21, 0]);
+    assert.deepEqual(dos(59, 1), [21, 0]);
+    assert.deepEqual(dos(22, 0), [20, 22]);
+    assert.deepEqual(dos(1, 0), [20, 2]);
+});
+
 test('a null pointer either side is a failure, not a silent nothing', ()=>{
     const { fns } = setup();
     assert.equal(fns.FileTimeToLocalFileTime.handler([0, 0x200]), 0);
@@ -340,6 +360,20 @@ test('SystemTimeToTzSpecificLocalTimeEx reads 1 January by the year before\'s ru
     putWords(bytes, 0x100, [2026, 1, 0, 1, 0, 15, 0, 0]);
     assert.equal(fns.SystemTimeToTzSpecificLocalTimeEx.handler([DYNAMIC, 0x100, 0x120]), 1);
     assert.deepEqual(words(bytes, 0x120), [2025, 12, 3, 31, 17, 15, 0, 0]);
+    // 1 January 2027 at 06:15 UTC is read by 2026's rules on 2026's
+    // transitions - after both - and its local year is 2027, so it is read
+    // again by 2027's: the zone's offset at that moment, whichever the
+    // platform's data says it is.
+    const moment = Date.UTC(2027, 0, 1, 6, 15);
+    const offset = new Intl.DateTimeFormat('en',
+        { timeZone: 'America/Edmonton', timeZoneName: 'longOffset' }).formatToParts(moment)
+        .find(part=>part.type === 'timeZoneName')?.value ?? '';
+    const [, sign, hours] = /GMT([+-])(\d\d)/.exec(offset) ?? [];
+    const local = new Date(moment + (sign === '-' ? -1 : 1) * Number(hours) * 3_600_000);
+    putWords(bytes, 0x100, [2027, 1, 0, 1, 6, 15, 0, 0]);
+    fns.SystemTimeToTzSpecificLocalTimeEx.handler([DYNAMIC, 0x100, 0x120]);
+    assert.deepEqual(words(bytes, 0x120).slice(0, 6), [local.getUTCFullYear(),
+        local.getUTCMonth() + 1, local.getUTCDay(), local.getUTCDate(), local.getUTCHours(), 15]);
 });
 
 test('SystemTimeToTzSpecificLocalTime refuses a time that names no moment', ()=>{
