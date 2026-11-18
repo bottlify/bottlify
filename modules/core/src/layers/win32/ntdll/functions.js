@@ -203,6 +203,7 @@ const NAMED_KINDS = new Set(['event', 'mutex', 'semaphore', 'timer', 'mapping'])
  * @property {() => import('./query.js').SystemProcess[]} [processes]
  *           What SystemProcessInformation lists.
  * @property {(handle: number) => string | null} [handleType]
+ * @property {(handle: number) => number | null} [handleAccess]
  * @property {(handle: number) => string | null} [namedObjectName]  The Win32 name
  *     a kernel object was made or opened by, null for one made with none.
  * @property {import('./query.js').QueryHost['processOf']} [processOf]
@@ -585,6 +586,7 @@ export function createNtdllFunctions(host){
             arena: host.arena,
             version: host.windows,
             handleType: host.handleType,
+            handleAccess: host.handleAccess,
             // A file's or folder's name is its path under the volume's device,
             // as GetFinalPathNameByHandle's VOLUME_NAME_NT spells it.
             objectName: handle=>{

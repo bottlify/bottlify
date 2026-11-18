@@ -354,7 +354,9 @@ test('NtQueryObject answers the basic class for a handle that names something', 
     const host = fakeHost();
     const fns = createQueryFunctions({
         ...host,
-        handleType: handle=>(handle === 0x44 ? 'event' : null),
+        handleType: handle=>(handle === 0x44 || handle === 0x4c ? 'event' : null),
+        // 0x4c was opened for SYNCHRONIZE | EVENT_MODIFY_STATE; 0x44 with every right.
+        handleAccess: handle=>(handle === 0x4c ? 0x00100002 : null),
         divergence: (api, detail)=>said.push(`${api}: ${detail}`),
     });
     assert.equal(fns.NtQueryObject.argBytes, 20);
@@ -364,8 +366,11 @@ test('NtQueryObject answers the basic class for a handle that names something', 
     assert.equal(host.view.getUint32(RETURN_LENGTH, true), 0x38);
     assert.equal(host.view.getUint32(BUFFER + 4, true), 0x001fffff, 'every right');
     assert.equal(host.view.getUint32(BUFFER + 8, true), 1, 'one handle');
-    assert.ok(said.some(line=>line.startsWith('NtQueryObject: granted access')),
-        'the untracked access is reported');
+    assert.ok(said.some(line=>line.startsWith('NtQueryObject: handle and reference counts')),
+        'the untracked counts are reported');
+    assert.equal(fns.NtQueryObject.handler([0x4c, 0, BUFFER, 0x38, 0]), STATUS.SUCCESS);
+    assert.equal(host.view.getUint32(BUFFER + 4, true), 0x00100002,
+        'the rights the handle was granted');
 
     assert.equal(fns.NtQueryObject.handler([0xffffffff, 0, BUFFER, 0x38, 0]), STATUS.SUCCESS,
         'the current-process pseudo-handle names something without a table entry');
