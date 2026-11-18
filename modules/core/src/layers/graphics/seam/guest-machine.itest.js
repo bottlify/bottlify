@@ -50,6 +50,7 @@ import { createDirect3D9 } from '../d3d9/device.js';
 import { createDirect3D8 } from '../d3d8/device.js';
 import { commandObjects as commandObjects9 } from '../d3d9/commands.js';
 import { D3D8_COMMANDS } from '../d3d8/commands.js';
+import { withPointers } from '../../memory/pointers.fixture.js';
 
 export const PROGRAM = 0x8000;
 export const STACK = 0x300000;
@@ -336,8 +337,9 @@ export function machine(version, guestCode, options = {}){
     };
     /** @param {number} at @param {number} value */
     const writeU32 = (at, value)=>writeBytes(at, new Uint8Array(u32(value >>> 0)));
-    const memory = { readBytes, writeBytes, readMemory: readBytes, writeMemory: writeBytes,
-        readU32, writeU32 };
+    const memory = withPointers({ readBytes, writeBytes, readMemory: readBytes,
+        writeMemory: writeBytes,
+        readU32, writeU32 });
 
     let heap = HEAP;
     let code = CODE;

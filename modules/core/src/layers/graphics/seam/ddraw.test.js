@@ -52,6 +52,7 @@ import {
     DDERR_ALREADYINITIALIZED, DDERR_NOPALETTEATTACHED, DDSD_ZBUFFERBITDEPTH,
     DDSCL_CREATEDEVICEWINDOW, DDSCL_SETFOCUSWINDOW, DDERR_NOFOCUSWINDOW, DDERR_NOHWND,
 } from '../ddraw/constants.js';
+import { withPointers } from '../../memory/pointers.fixture.js';
 
 const HWND = 0x00010044;
 const SCREEN = { width: 16, height: 16, bitsPerPixel: 32, displayWidth: 16, displayHeight: 16 };
@@ -67,7 +68,7 @@ const slot = (slots, name)=>{
 function machine(){
     const bytes = new Uint8Array(1 << 20);
     let next = 0x100;
-    const memory = {
+    const memory = withPointers({
         /** @param {number} at @param {number} length */
         readBytes: (at, length)=>bytes.slice(at, at + length),
         /** @param {number} at @param {Uint8Array} value */
@@ -82,7 +83,7 @@ function machine(){
             bytes[at + 2] = value >>> 16 & 0xff;
             bytes[at + 3] = value >>> 24 & 0xff;
         },
-    };
+    });
     /** @type {Map<number, any>} */
     const registered = new Map();
     let nextTrap = 1;

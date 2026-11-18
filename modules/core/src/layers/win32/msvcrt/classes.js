@@ -21,6 +21,7 @@
  */
 
 import { undecorateName, undecorateType } from './undname.js';
+import { pointerIo } from '../common/pointers.js';
 
 /**
  * A class's fields by the pointer's width. An exception: its vtable, where it
@@ -205,13 +206,7 @@ export function createClassFunctions(host){
         host.writeMemory(address, bytes);
     };
     /** A pointer written whole. @param {number} address @param {number} value */
-    const writePointer = (address, value)=>{
-        writeU32(address, value);
-        if (pointer === 8)
-        {
-            writeU32(address + 4, 0);
-        }
-    };
+    const writePointer = pointerIo(host, pointer).write;
 
     /** A copy of a C string on the runtime's heap, or 0. @param {string} text */
     const copyString = text=>{

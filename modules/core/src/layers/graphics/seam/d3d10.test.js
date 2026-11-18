@@ -64,6 +64,7 @@ import { createGraphicsLibraries } from './exports.js';
 import { PCI_VENDOR_IDS } from './adapter.js';
 import { VIDEO_ADAPTER_NAME } from '../../win32/devices.js';
 import { REFRESH_HZ, displayModes } from '../../win32/user32/display.js';
+import { withPointers } from '../../memory/pointers.fixture.js';
 
 const E_NOTIMPL = 0x80004001;
 
@@ -85,7 +86,7 @@ function machine(){
     const writeBytes = (address, value)=>{
         bytes.set(value, address);
     };
-    const memory = {
+    const memory = withPointers({
         readBytes,
         writeBytes,
         /** @param {number} address */
@@ -97,7 +98,7 @@ function machine(){
         writeU32: (address, value)=>writeBytes(address, new Uint8Array([
             value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff,
         ])),
-    };
+    });
     /** @type {Map<number, any>} */
     const registered = new Map();
     let nextTrap = 1;
@@ -120,7 +121,7 @@ function machine(){
     return {
         memory,
         allocate,
-        services: { readMemory: readBytes, writeMemory: writeBytes },
+        services: withPointers({ readMemory: readBytes, writeMemory: writeBytes }),
         /** @param {any} object @param {string} id */
         publishInterface: (object, id)=>vtables.publish(object, id),
         /** @param {any} object @param {string} id */

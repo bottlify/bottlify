@@ -83,6 +83,8 @@ const swapChainLayout = (pointerSize = 4)=>(pointerSize === 8 ? DXGI_SWAP_CHAIN_
  * @typedef {Object} GuestMemory
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {(address: number, value: number, bytes: 4 | 8) => void} writePointer
+ *     a pointer whole (the memory layer's writer)
  */
 
 /**
@@ -224,19 +226,17 @@ export function readSwapChainDesc(memory, address, pointerSize = 4){
  * @param {GuestMemory} memory
  * @param {number} address
  * @param {SwapChainFields} desc
- * @param {number} [pointerSize]  8 in a 64-bit process, the window's high half written zero
+ * @param {number} [pointerSize]  8 in a 64-bit process, whose HWND is eight bytes
  */
 export function writeSwapChainDesc(memory, address, desc, pointerSize = 4){
     const layout = swapChainLayout(pointerSize);
-    if (pointerSize === 8)
-    {
-        writeU32(memory, address + layout.OutputWindow + 4, 0);
-    }
     writeModeDesc(memory, address + layout.BufferDesc, desc.bufferDesc);
     writeSampleDesc(memory, address + layout.SampleDesc, desc.sampleDesc);
     writeU32(memory, address + layout.BufferUsage, desc.bufferUsage);
     writeU32(memory, address + layout.BufferCount, desc.bufferCount);
-    writeU32(memory, address + layout.OutputWindow, desc.outputWindow);
+    // An HWND, pointer-sized: written whole by the memory layer's writer.
+    memory.writePointer(address + layout.OutputWindow, desc.outputWindow,
+        pointerSize === 8 ? 8 : 4);
     writeU32(memory, address + layout.Windowed, desc.windowed ? 1 : 0);
     writeU32(memory, address + layout.SwapEffect, desc.swapEffect);
     writeU32(memory, address + layout.Flags, desc.flags);

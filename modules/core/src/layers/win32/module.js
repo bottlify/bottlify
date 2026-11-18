@@ -3055,16 +3055,9 @@ export function createWin32Module(){
             // fiber or a thread ends (`kernel32/fls.js`).
             const fiberStorage = createFiberLocalStorage({
                 pointerSize,
-                readPointer: address=>(pointerSize === 8
-                    ? memory.readU32(address) + memory.readU32(address + 4) * 2 ** 32
-                    : memory.readU32(address)),
-                writePointer: (address, value)=>{
-                    memory.writeU32(address, value % 2 ** 32 >>> 0);
-                    if (pointerSize === 8)
-                    {
-                        memory.writeU32(address + 4, Math.floor(value / 2 ** 32));
-                    }
-                },
+                readPointer: address=>memory.readPointer(address, pointerSize === 8 ? 8 : 4),
+                writePointer: (address, value)=>memory.writePointer(address, value,
+                    pointerSize === 8 ? 8 : 4),
                 teb: ()=>kernel.currentThread()?.tebAddress ?? 0,
                 allocate: bytes=>{
                     const at = heap.allocate(bytes);

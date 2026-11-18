@@ -18,6 +18,7 @@ import assert from 'node:assert/strict';
 import { CODE_64, KEPT_64, STACK_64, callLong, longMachine }
     from '../../../../scripts/guest-code/long.mjs';
 import { createVtables } from './vtable.js';
+import { withPointers } from '../../memory/pointers.fixture.js';
 
 const IID = '{00000000-0000-0000-c000-000000000046}';
 const RETURN = 0x0f00;
@@ -38,7 +39,7 @@ const world = cell=>{
     let code = CODE_64;
     let traps = 0;
     const table = createVtables({
-        memory: {
+        memory: withPointers({
             /** @param {number} at */
             readU32: at=>new DataView(m.bytes().buffer).getUint32(at, true),
             /** @param {number} at @param {number} value */
@@ -47,7 +48,7 @@ const world = cell=>{
             readBytes: (at, length)=>m.read(at, length),
             /** @param {number} at @param {Uint8Array} bytes */
             writeBytes: (at, bytes)=>m.write(at, bytes),
-        },
+        }),
         register: ()=>{
             const at = TRAPS + traps++ * 0x10;
             m.write(at, [0xf4]);

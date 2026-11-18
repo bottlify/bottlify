@@ -20,6 +20,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { bridgeModule } from './module.js';
+import { withPointers } from '../memory/pointers.fixture.js';
 
 /** Where a held thread spins. */
 const PARK = 0x00900000;
@@ -82,7 +83,7 @@ async function bridge(){
             /** @param {any} which @param {any} where */
             scheduleResume: (which, where)=>resumed.push({ thread: which.name, ...where }),
         },
-        memory: {
+        memory: withPointers({
             /** @param {number} at */
             readU32: at=>cells.get(at >>> 0) ?? 0,
             /** @param {number} at @param {number} value */
@@ -108,7 +109,7 @@ async function bridge(){
                 }
                 return bytes;
             },
-        },
+        }),
         log: { begin: ()=>{}, end: ()=>{} },
     };
 

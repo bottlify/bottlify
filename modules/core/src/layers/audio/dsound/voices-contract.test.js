@@ -44,6 +44,7 @@ import {
     slotHeaderOffset, slotPcmOffset, SLOT_HEADER_INT32, SLOT_BYTES, SLOTS, GLOBAL_HEADER_INT32,
     ARENA_OFFSET, ARENA_BYTES, OUTPUT_RATE, STATE, STATE_OPEN, createSeam, mixBlock,
 } from '../output/mix.js';
+import { withPointers } from '../../memory/pointers.fixture.js';
 
 const DEVICE_RATE = 48000;
 /** The quantum WebAudio asks a worklet for. */
@@ -104,14 +105,14 @@ async function machine(){
     const view = new DataView(bytes.buffer);
     let ms = 1000;
     let nextAddress = 0x10000;
-    const memory = {
+    const memory = withPointers({
         /** @param {number} address @param {number} length */
         readBytes: (address, length)=>bytes.subarray(address, address + length),
         /** @param {number} address @param {number} length */
         window: (address, length)=>bytes.subarray(address, address + length),
         /** @param {number} address @param {Uint8Array} data */
         writeBytes: (address, data)=>bytes.set(data, address),
-    };
+    });
 
     /** @type {Map<number, { object: any, id: string, methods: any[] }>} */
     const owners = new Map();

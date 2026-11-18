@@ -148,6 +148,8 @@ const I3DL2_QUALITY_DEFAULT = 2;
  * @typedef {Object} EffectsHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {(address: number, bytes: 4 | 8) => number} readPointer  a pointer whole,
+ *     the memory layer's reader
  * @property {(api: string, detail: string) => void} [divergence]
  */
 
@@ -163,7 +165,7 @@ export function readAudioType(host, at, pointerSize){
     const long = pointerSize === 8;
     const cbFormat = new DataView(host.readMemory(at + (long ? 72 : 64), 4).slice().buffer)
         .getUint32(0, true);
-    const pbFormat = readPointer(host, at + (long ? 80 : 68), pointerSize);
+    const pbFormat = host.readPointer(at + (long ? 80 : 68), pointerSize);
     if (guid(0) !== MEDIATYPE_Audio || guid(44) !== FORMAT_WaveFormatEx
         || cbFormat < 16 || pbFormat === 0)
     {
@@ -190,14 +192,6 @@ function guidText(bytes){
     const tail = [...bytes.subarray(8)].map(byte=>hex(byte, 2)).join('');
     return `{${hex(view.getUint32(0, true), 8)}-${hex(view.getUint16(4, true), 4)}-`
         + `${hex(view.getUint16(6, true), 4)}-${tail.slice(0, 4)}-${tail.slice(4)}}`;
-}
-
-/** @param {EffectsHost} host @param {number} at @param {4 | 8} pointerSize */
-function readPointer(host, at, pointerSize){
-    const view = new DataView(host.readMemory(at, pointerSize).slice().buffer);
-    return pointerSize === 8
-        ? view.getUint32(0, true) + view.getUint32(4, true) * 2 ** 32
-        : view.getUint32(0, true);
 }
 
 /**

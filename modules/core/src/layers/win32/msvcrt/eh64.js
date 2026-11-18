@@ -57,6 +57,7 @@
 
 import { EXCEPTION_NONCONTINUABLE } from '../kernel32/seh.js';
 import { Disposition } from '../kernel32/seh64.js';
+import { pointerIo } from '../common/pointers.js';
 
 /** The exception code every C++ throw raises: 0xE0 followed by "msc". */
 export const EH_EXCEPTION_NUMBER = 0xe06d7363;
@@ -484,14 +485,8 @@ export function readFuncInfo4(read, imageBase, info, begin){
  */
 export function createCxxExceptions64(host){
     const read = createTableReader(host.readMemory);
-    /** @param {number} at */
-    const readPointer = at=>read.u32(at);
-    /** @param {number} at @param {number} value */
-    const writePointer = (at, value)=>{
-        const bytes = new Uint8Array(8);
-        new DataView(bytes.buffer).setBigUint64(0, BigInt(value >>> 0), true);
-        host.writeMemory(at >>> 0, bytes);
-    };
+    /** A pointer read and written whole: eight bytes, the process being a 64-bit one. */
+    const { read: readPointer, write: writePointer } = pointerIo(host, 8);
 
     /** @type {WeakMap<object, Caught[]>} */
     const caughtBy = new WeakMap();

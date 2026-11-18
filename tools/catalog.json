@@ -650,6 +650,17 @@
    ]
   },
   {
+   "path": "tools/checks/check-pointer-writes.mjs",
+   "category": "checks",
+   "kind": "check",
+   "browser": false,
+   "question": "Every guest pointer is read and written whole by the memory layer's reader and writer (or win32's pointerIo), never as a dword and a zero made by hand",
+   "command": "npm run check:boundaries",
+   "tests": [
+    "tools/checks/check-pointer-writes.test.js"
+   ]
+  },
+  {
    "path": "tools/checks/check-decision-numbers.mjs",
    "category": "checks",
    "kind": "check",

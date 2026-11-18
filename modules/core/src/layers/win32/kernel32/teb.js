@@ -27,6 +27,8 @@
  * ones where they belong.
  */
 
+import { pointerWidth } from '../common/pointers.js';
+
 /** Field offsets in the thread block, and the size a whole one occupies. */
 export const TEB = Object.freeze({
     EXCEPTION_LIST: 0x00,
@@ -377,17 +379,8 @@ export function createProcessBlocks(options){
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
         writeMemory(at, bytes);
     };
-    /**
-     * A pointer-sized field: in a 64-bit block the high half is zero, since
-     * every address lies below 4 GiB, and is written so whatever was there.
-     *
-     * @param {number} at @param {number} value
-     */
-    const writePointer = (at, value)=>{
-        const bytes = new Uint8Array(pointer);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        writeMemory(at, bytes);
-    };
+    /** A pointer-sized field, written whole. @param {number} at @param {number} value */
+    const writePointer = (at, value)=>writeMemory(at, pointerWidth(pointer).bytes(value));
 
     writeMemory(peb, new Uint8Array(paramsOffset + paramsFields.SIZE + STRING_ARENA));
     writePointer(peb + pebFields.IMAGE_BASE_ADDRESS, imageBase);

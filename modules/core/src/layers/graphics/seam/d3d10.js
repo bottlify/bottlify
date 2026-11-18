@@ -792,13 +792,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
      *
      * @param {number} address @param {number} value
      */
-    const writePointer = (address, value)=>{
-        fields.writeU32(address, value);
-        if (long)
-        {
-            fields.writeU32((address >>> 0) + 4, 0);
-        }
-    };
+    const writePointer = (address, value)=>fields.writePointer(address, value, long ? 8 : 4);
     const SUBRESOURCE_DATA = long ? D3D10_SUBRESOURCE_DATA_64 : D3D10_SUBRESOURCE_DATA;
     const INPUT_ELEMENT_DESC = long ? D3D10_INPUT_ELEMENT_DESC_64 : D3D10_INPUT_ELEMENT_DESC;
     const ADAPTER_DESC = long ? DXGI_ADAPTER_DESC_64 : DXGI_ADAPTER_DESC;
@@ -1431,26 +1425,26 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
             return hr === S_OK ? E_INVALIDARG : hr;
         }
         writeWide(out + ADAPTER_DESC.Description, held.desc.Description, 128);
-        if (long)
-        {
-            // The memories' high halves: a gigabyte is a low half alone.
-            for (const field of /** @type {const} */ (['DedicatedVideoMemory',
-                'DedicatedSystemMemory', 'SharedSystemMemory']))
-            {
-                fields.writeU32(out + ADAPTER_DESC[field] + 4, 0);
-            }
-        }
+        const memories = {
+            DedicatedVideoMemory: videoMemory?.() ?? REPORTED_VIDEO_MEMORY,
+            DedicatedSystemMemory: 0,
+            SharedSystemMemory: videoMemory?.() ?? REPORTED_VIDEO_MEMORY,
+        };
         fields.writeStruct(out, ADAPTER_DESC, {
             VendorId: held.desc.VendorId,
             DeviceId: held.desc.DeviceId,
             SubSysId: held.desc.SubSysId,
             Revision: held.desc.Revision,
-            DedicatedVideoMemory: videoMemory?.() ?? REPORTED_VIDEO_MEMORY,
-            DedicatedSystemMemory: 0,
-            SharedSystemMemory: videoMemory?.() ?? REPORTED_VIDEO_MEMORY,
+            ...memories,
             AdapterLuidLow: held.desc.AdapterLuid?.low ?? 1,
             AdapterLuidHigh: held.desc.AdapterLuid?.high ?? 0,
         });
+        // The memories are SIZE_Ts, pointer-sized: written whole, their upper
+        // halves too in a 64-bit process.
+        for (const [field, bytes] of Object.entries(memories))
+        {
+            writePointer(out + ADAPTER_DESC[/** @type {keyof typeof memories} */ (field)], bytes);
+        }
         return S_OK;
     };
 

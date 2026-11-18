@@ -38,6 +38,41 @@ export const MEMORY_COUNTERS = ['frameWriter', 'frameWriterBytes'];
 /** The empty answer `readBytes`/`window` give once this instance is disposed. */
 const EMPTY = new Uint8Array(0);
 
+/**
+ * A number some bitwise operator made a signed dword, as the address or value it
+ * names: no guest address is negative.
+ *
+ * @param {number} value
+ */
+const unsigned = value=>(value < 0 ? value >>> 0 : value);
+
+/**
+ * Whether a pointer is a quadword: 8 bytes in a 64-bit process, 4 in a 32-bit
+ * one; any other width is a caller's mistake, refused rather than guessed.
+ *
+ * @param {number} bytes
+ */
+const pointerWide = bytes=>{
+    if (bytes !== 4 && bytes !== 8)
+    {
+        throw new Error(`memory: a pointer is 4 or 8 bytes, not ${bytes}`);
+    }
+    return bytes === 8;
+};
+
+/**
+ * Whether `bytes` at `address` lie inside a shared view of the RAM: an address
+ * past it - a wide window's past 4 GiB, where the view may not reach - goes by
+ * the accessors, never by an index that `>>>` wrapped onto another word.
+ *
+ * @param {Int32Array | BigInt64Array} view @param {number} address @param {number} bytes
+ */
+const within = (view, address, bytes)=>unsigned(address) + bytes <= view.byteLength;
+
+/** Where a quadword pointer is put together before it is written in one store. */
+const pointerBytes = new Uint8Array(8);
+const pointerScratch = new DataView(pointerBytes.buffer);
+
 /** The memory layer's module for one graph; see `defaultModules`. */
 export function createMemoryModule(){
     /**
@@ -462,12 +497,13 @@ export function createMemoryModule(){
                  */
                 wordsOver: (address, length)=>{
                     const shared = live() ? sharedWords() : null;
-                    if (shared === null || (address & 3) !== 0
-                        || (address >>> 0) + length > shared.byteLength)
+                    const at = unsigned(address);
+                    if (shared === null || (at & 3) !== 0 || at + length > shared.byteLength)
                     {
                         return null;
                     }
-                    return shared.subarray(address >>> 2, (address >>> 2) + Math.ceil(length / 4));
+                    // By division, not `>>> 2`, which names a dword below 4 GiB only.
+                    return shared.subarray(at / 4, at / 4 + Math.ceil(length / 4));
                 },
                 /**
                  * The dword at `address`, read as one indivisible step that also
@@ -485,9 +521,9 @@ export function createMemoryModule(){
                         return 0;
                     }
                     const shared = sharedWords();
-                    if (shared !== null && (address & 3) === 0)
+                    if (shared !== null && (address & 3) === 0 && within(shared, address, 4))
                     {
-                        return Atomics.load(shared, address >>> 2) >>> 0;
+                        return Atomics.load(shared, unsigned(address) / 4) >>> 0;
                     }
                     return state.accessors.readU32(address);
                 },
@@ -507,10 +543,10 @@ export function createMemoryModule(){
                         return 0;
                     }
                     const shared = sharedWords();
-                    if (shared !== null && (address & 3) === 0)
+                    if (shared !== null && (address & 3) === 0 && within(shared, address, 4))
                     {
-                        const was = Atomics.compareExchange(shared, address >>> 2, expected | 0,
-                            value | 0) >>> 0;
+                        const was = Atomics.compareExchange(shared, unsigned(address) / 4,
+                            expected | 0, value | 0) >>> 0;
                         if (was === expected >>> 0)
                         {
                             state.accessors.adopt(address, 4);
@@ -540,10 +576,11 @@ export function createMemoryModule(){
                         return 0n;
                     }
                     const shared = sharedQuads();
-                    if (shared !== null && (address & 7) === 0)
+                    if (shared !== null && (address & 7) === 0 && within(shared, address, 8))
                     {
                         const was = BigInt.asUintN(64, Atomics.compareExchange(shared,
-                            address >>> 3, BigInt.asIntN(64, expected), BigInt.asIntN(64, value)));
+                            unsigned(address) / 8, BigInt.asIntN(64, expected),
+                            BigInt.asIntN(64, value)));
                         if (was === BigInt.asUintN(64, expected))
                         {
                             state.accessors.adopt(address, 8);
@@ -559,6 +596,47 @@ export function createMemoryModule(){
                         state.accessors.writeBytes(address, bytes);
                     }
                     return was;
+                },
+                /**
+                 * A pointer of `bytes` bytes - 4 in a 32-bit process, 8 in a
+                 * 64-bit one - read whole: an address up to 2^53 as a number.
+                 * The one reader of a pointer in guest memory every layer goes
+                 * through, so that no copy of it keeps only the low dword.
+                 *
+                 * @param {number} address @param {4 | 8} bytes
+                 * @returns {number}
+                 */
+                readPointer: (address, bytes)=>{
+                    if (!live())
+                    {
+                        return 0;
+                    }
+                    const low = state.accessors.readU32(address);
+                    return pointerWide(bytes)
+                        ? low + state.accessors.readU32(unsigned(address) + 4) * 2 ** 32 : low;
+                },
+                /**
+                 * A pointer of `bytes` bytes written whole: its upper dword is
+                 * the value's own, zero for an address below 4 GiB, never left
+                 * as it was. A negative value is a dword some bitwise operator
+                 * made signed and names the same address (`unsigned`).
+                 *
+                 * @param {number} address @param {number} value @param {4 | 8} bytes
+                 */
+                writePointer: (address, value, bytes)=>{
+                    if (!live())
+                    {
+                        return;
+                    }
+                    const whole = unsigned(value);
+                    if (!pointerWide(bytes))
+                    {
+                        state.accessors.writeU32(address, whole);
+                        return;
+                    }
+                    pointerScratch.setUint32(0, whole % 2 ** 32, true);
+                    pointerScratch.setUint32(4, Math.floor(whole / 2 ** 32), true);
+                    state.accessors.writeBytes(address, pointerBytes);
                 },
                 /** @param {number} address @param {number} [limit] */
                 readCString: (address, limit)=>

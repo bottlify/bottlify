@@ -142,10 +142,12 @@ export function bindImports({ bytes, file, image }, resolveImport, missing){
     /** @type {string[]} */
     const unresolved = [];
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    // A PE32+ slot is a pointer eight bytes wide; every address here is below 4 GiB.
+    // A PE32+ slot is a pointer eight bytes wide, the address
+    // whole: an entry past 4 GiB (a wide window's image) keeps its upper half, and
+    // a dword some bitwise operator made negative is the address it names.
     /** @param {number} at @param {number} address */
     const setSlot = (at, address)=>(image.bits === 64
-        ? view.setBigUint64(at, BigInt(address >>> 0), true)
+        ? view.setBigUint64(at, BigInt(address < 0 ? address >>> 0 : address), true)
         : view.setUint32(at, address >>> 0, true));
 
     for (const { dll, entries } of readImports(file, image))
