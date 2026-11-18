@@ -66,6 +66,9 @@ const CS_UNLOCKED = -1;
 
 /** Waits with this timeout never give up. */
 const INFINITE = 0xffffffff;
+/** ContinueDebugEvent's statuses (winnt.h's DBG_*), and the one Windows 10's 1709 added. */
+const CONTINUE_STATUSES = new Set([0x00010002, 0x00010001, 0x80010001, 0x40010003, 0x40010004]);
+const DBG_REPLY_LATER = 0x40010001;
 
 /** What a wait returns. WAIT_OBJECT_0 and WAIT_ABANDONED_0 are bases, not values. */
 const WAIT_OBJECT_0 = 0x00000000;
@@ -139,6 +142,7 @@ const FILETIME_EPOCH_MS = 11644473600000;
  * @property {ReturnType<typeof import('./named-objects.js').createNamedObjects>} [namedObjects]
  *           the run's one namespace, where a job made by name is found again
  * @property {any} kernel                        The kernel layer's API.
+ * @property {{ major: number, build: number }} [windows]  The Windows the run is.
  * @property {(process: any, code: number) => any} [terminateProcess]  A job's process ended
  *           as TerminateProcess ends it, null for this one (`process-policy.js`).
  * @property {(address: number, length: number) => Uint8Array} readMemory
@@ -199,6 +203,21 @@ export function createSyncFunctions(host){
     // A HANDLE is a pointer: an array of them holds quadwords in a 64-bit
     // process, each a handle's dword in its low half.
     const handleSize = host.pointerSize ?? 4;
+
+    // A WaitForDebugEvent that ran out of time hears nothing more: it is taken
+    // off the child it waited on and says ERROR_SEM_TIMEOUT.
+    kernel.onTimeout?.((/** @type {any} */ thread)=>{
+        for (const child of kernel.processes?.all() ?? [])
+        {
+            const before = child.waiters?.length ?? 0;
+            child.waiters = (child.waiters ?? []).filter((/** @type {any} */ waiter)=>
+                !(waiter.debugWait && waiter.thread === thread));
+            if (child.waiters.length < before)
+            {
+                host.setLastErrorFor?.(thread, ERROR_SEM_TIMEOUT);
+            }
+        }
+    });
 
     /** @param {number} address @param {number} value */
     const writeI32 = (address, value)=>{
@@ -883,14 +902,46 @@ export function createSyncFunctions(host){
                     return 0;
                 }
                 const thread = host.currentThread();
-                (child.waiters ??= []).push({ thread, result: 1, settle: report });
-                kernel.block(thread, `debug event of ${child.imagePath}`);
+                (child.waiters ??= []).push({ thread, result: 1, settle: report, debugWait: true });
+                // A wait that runs out answers ERROR_SEM_TIMEOUT, as one with
+                // nothing to hear from does (`onTimeout` above takes it off).
+                kernel.block(thread, `debug event of ${child.imagePath}`,
+                    (timeout >>> 0) === INFINITE ? undefined
+                        : { deadline: kernel.clock.virtualTime() + (timeout >>> 0), result: 0 });
                 return host.park(thread);
             },
         },
 
-        /** BOOL ContinueDebugEvent(DWORD dwProcessId, DWORD dwThreadId, DWORD dwContinueStatus) */
-        ContinueDebugEvent: { argBytes: 12, handler: ()=>1 },
+        /**
+         * BOOL ContinueDebugEvent(DWORD dwProcessId, DWORD dwThreadId, DWORD dwContinueStatus)
+         *
+         * The events here stop nothing, so continuing one only checks how:
+         * a status that is none of DBG_CONTINUE, DBG_EXCEPTION_HANDLED,
+         * DBG_EXCEPTION_NOT_HANDLED, DBG_TERMINATE_THREAD and
+         * DBG_TERMINATE_PROCESS is refused as a bad parameter, and so is
+         * DBG_REPLY_LATER before Windows 10's 1709, which brought it. After,
+         * the event it asks to hear again is not heard again, and that is said.
+         */
+        ContinueDebugEvent: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([, , status])=>{
+                const value = status >>> 0;
+                if (value === DBG_REPLY_LATER
+                    && (host.windows?.major ?? 0) >= 10 && (host.windows?.build ?? 0) >= 16299)
+                {
+                    host.divergence?.('ContinueDebugEvent',
+                        'DBG_REPLY_LATER: the event is not reported again');
+                    return 1;
+                }
+                if (!CONTINUE_STATUSES.has(value))
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                return 1;
+            },
+        },
 
         /**
          * BOOL DebugActiveProcessStop(DWORD dwProcessId)

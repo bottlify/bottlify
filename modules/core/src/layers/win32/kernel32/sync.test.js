@@ -1440,3 +1440,54 @@ test('GetSystemTimes: the processors\' time since boot, user what this process r
     assert.ok(idle + user >= 10000000n);
     assert.equal(fns.GetSystemTimes.handler([0, 0, 0]), 1, 'every pointer may be null');
 });
+
+test('a WaitForDebugEvent with a time-out ends then with ERROR_SEM_TIMEOUT', ()=>{
+    // Wine's kernel32 debugger tests wait twenty seconds for an event that
+    // never comes: the wait blocked until the child ended, whatever it asked.
+    const host = fakeHost();
+    const kernel = /** @type {any} */ (host.kernel);
+    const child = { id: 0x300, threadId: 0x304, imagePath: 'C:/child.exe', exitCode: 259,
+        completed: false, debugEvents: ['exit'], waiters: /** @type {any[]} */ ([]) };
+    kernel.processes = { STILL_ACTIVE: 259, all: ()=>[child] };
+    kernel.clock = { virtualTime: ()=>1000 };
+    /** @type {any[]} */
+    const blocked = [];
+    kernel.block = (/** @type {any} */ thread, /** @type {string} */ why,
+        /** @type {any} */ timed)=>blocked.push({ thread, timed });
+    /** @type {((thread: any) => void)[]} */
+    const expiries = [];
+    kernel.onTimeout = (/** @type {(thread: any) => void} */ handler)=>expiries.push(handler);
+    /** @type {[any, number][]} */
+    const errorsFor = [];
+    host.setLastErrorFor = (/** @type {any} */ thread, /** @type {number} */ code)=>
+        errorsFor.push([thread, code]);
+    const fns = createSyncFunctions(host);
+
+    assert.equal(fns.WaitForDebugEvent.handler([0x200, 20000]), PARKED);
+    assert.deepEqual(blocked[0].timed, { deadline: 21000, result: 0 }, 'until its time is up');
+    expiries.forEach(handler=>handler(blocked[0].thread));
+    assert.deepEqual(child.waiters, [], 'taken off the child');
+    assert.deepEqual(errorsFor, [[blocked[0].thread, 121]], 'ERROR_SEM_TIMEOUT');
+
+    assert.equal(fns.WaitForDebugEvent.handler([0x200, 0xffffffff]), PARKED);
+    assert.equal(blocked[1].timed, undefined, 'INFINITE waits for the event');
+});
+
+test('ContinueDebugEvent takes the statuses Windows takes, DBG_REPLY_LATER from 1709 on', ()=>{
+    // Wine's debugger test_debugger skips its DBG_REPLY_LATER part where the
+    // call refuses it, as Windows 7 does.
+    const seven = fakeHost();
+    const fns = createSyncFunctions({ ...seven, windows: { major: 6, build: 7601 } });
+    const go = (/** @type {number} */ status)=>fns.ContinueDebugEvent.handler([0x300, 0x304, status]);
+    assert.equal(go(0x00010002), 1, 'DBG_CONTINUE');
+    assert.equal(go(0x80010001), 1, 'DBG_EXCEPTION_NOT_HANDLED');
+    assert.equal(go(0x40010001), 0, 'DBG_REPLY_LATER before Windows 10');
+    assert.equal(seven.errors.at(-1), 87);
+    assert.equal(go(0x1234), 0);
+    /** @type {string[]} */
+    const said = [];
+    const ten = createSyncFunctions({ ...fakeHost(), windows: { major: 10, build: 19045 },
+        divergence: (/** @type {string} */ api)=>said.push(api) });
+    assert.equal(ten.ContinueDebugEvent.handler([0x300, 0x304, 0x40010001]), 1);
+    assert.deepEqual(said, ['ContinueDebugEvent'], 'not reported again, and said');
+});

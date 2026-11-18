@@ -3551,6 +3551,7 @@ export function createWin32Module(){
                     ...createSyncFunctions({
                         pointerSize,
                         processId,
+                        windows,
                         kernel,
                         namedObjects,
                         float: floatStates,

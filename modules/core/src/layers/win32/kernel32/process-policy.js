@@ -1176,21 +1176,26 @@ export function createProcessPolicyFunctions(host){
         /**
          * BOOL CheckRemoteDebuggerPresent(HANDLE hProcess, PBOOL pbDebuggerPresent)
          *
-         * No debugger attaches to anything here.
+         * Whether a debugger debugs the process: a child this process started
+         * with DEBUG_PROCESS or DEBUG_ONLY_THIS_PROCESS is debugged by it, and
+         * nothing else is debugged here. No process handle, or nowhere to
+         * answer, is a bad parameter; a handle that names no process a bad
+         * handle. The last error is left alone on success.
          */
         CheckRemoteDebuggerPresent: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([process, out])=>{
-                if (!processOf(process))
-                {
-                    return fail(ERROR_INVALID_HANDLE);
-                }
-                if ((out >>> 0) === 0)
+            handler: ([handle, out])=>{
+                if ((handle >>> 0) === 0 || (out >>> 0) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                writeDword(out >>> 0, 0);
+                const process = processOf(handle);
+                if (!process)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                writeDword(out >>> 0, process !== SELF && process.debugEvents ? 1 : 0);
                 return 1;
             },
         },
