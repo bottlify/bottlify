@@ -36,6 +36,12 @@ import { DAYS, GENITIVE, HEX_TYPES, LCTYPE, MONTHS, isNumberType, localeValues }
  * the kind of fault that lands somewhere else entirely.
  */
 
+/** The locales by name, as EnumSystemLocalesEx hands them out. */
+const BY_NAME_ORDER = Object.freeze([...LOCALES].sort((left, right)=>{
+    const [a, b] = [left.name.toLowerCase(), right.name.toLowerCase()];
+    return a < b ? -1 : a > b ? 1 : 0;
+}));
+
 /** GetUserGeoID's class of a country, and the United States' number among them. */
 const GEOCLASS_NATION = 16;
 const GEOID_UNITED_STATES = 244;
@@ -3114,7 +3120,11 @@ export function createLocaleFunctions(host){
 
     /**
      * EnumSystemLocalesEx's walk: each locale's name, its LOCALE_WINDOWS
-     * kind and the caller's lParam, until the callback answers FALSE.
+     * kind and the caller's lParam, until the callback answers FALSE. The
+     * names come in their alphabetical order, a language before its
+     * regions ("zh", "zh-CN", "zh-Hans", ...): a caller that takes the first
+     * locale of a language - the C runtime's setlocale("chinese") - finds the
+     * neutral one Windows hands it.
      *
      * @param {number} proc @param {number} flags @param {number} parameter
      */
@@ -3127,7 +3137,7 @@ export function createLocaleFunctions(host){
         const LOCALE_NEUTRALDATA = 0x10;
         const LOCALE_SPECIFICDATA = 0x20;
         const wanted = flags & (LOCALE_WINDOWS | LOCALE_NEUTRALDATA | LOCALE_SPECIFICDATA);
-        const listed = LOCALES.filter(locale=>wanted === 0 || (wanted & LOCALE_WINDOWS) !== 0
+        const listed = BY_NAME_ORDER.filter(locale=>wanted === 0 || (wanted & LOCALE_WINDOWS) !== 0
             || (wanted & (locale.neutral ? LOCALE_NEUTRALDATA : LOCALE_SPECIFICDATA)) !== 0);
         const call = host.call;
         const thread = host.callerThread?.();

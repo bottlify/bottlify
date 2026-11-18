@@ -135,6 +135,27 @@ test('getenv_s and _putenv_s answer and refuse as the secure calls do', ()=>{
     assert.deepEqual(errno, [34, 22, 22, 22]);
 });
 
+test('_dupenv_s and _wdupenv_s copy a value to the heap, its length with the terminator', ()=>{
+    // Wine's msvcr80 test_dupenv_s and test_wdupenv_s: a variable not set
+    // is a null pointer and a length of none.
+    const { memory, errno, u32, call } = build();
+    const [copy, length] = [memory.allocate(4), memory.allocate(4)];
+    assert.equal(call('_dupenv_s', copy, length, memory.put('path')), 0);
+    assert.deepEqual([memory.text(u32(copy)), u32(length)], ['C:\\WINDOWS', 11]);
+    assert.equal(call('_wdupenv_s', copy, length, memory.putWide('appdata')), 0);
+    assert.deepEqual([memory.wide(u32(copy)), u32(length)], ['C:\\Users\\a', 11]);
+    for (const [name, missing] of /** @type {[string, number][]} */ ([
+        ['_dupenv_s', memory.put('none')], ['_wdupenv_s', memory.putWide('none')]]))
+    {
+        memory.writeMemory(copy, Uint8Array.of(0xef, 0xbe, 0xad, 0xde));
+        memory.writeMemory(length, Uint8Array.of(0xef, 0xbe, 0xad, 0xde));
+        assert.equal(call(name, copy, length, missing), 0);
+        assert.deepEqual([u32(copy), u32(length)], [0, 0], name);
+    }
+    assert.equal(call('_wdupenv_s', 0, length, memory.putWide('path')), 22);
+    assert.deepEqual(errno, [22]);
+});
+
 test('the accessors hand out the exports\' own addresses, or cells holding the same', ()=>{
     const { memory, environment, placed, u32, call } = build();
     assert.equal(call('__p__environ'), placed.get('_environ'));
