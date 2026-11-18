@@ -5,7 +5,7 @@
  */
 
 import { createConsoleFunctions, HANDLE_STDOUT, HANDLE_STDERR } from './kernel32/console.js';
-import { createThreadingFunctions } from './kernel32/threading.js';
+import { createThreadingFunctions, listProcesses } from './kernel32/threading.js';
 import { createFiberFunctions } from './kernel32/fibers.js';
 import { createFiberLocalStorage } from './kernel32/fls.js';
 import { createNamedObjects, createRemoteNamedObjects } from './kernel32/named-objects.js';
@@ -852,6 +852,14 @@ export function createWin32Module(){
                 find: ()=>null, byBase: ()=>null, imagePath: ()=>'',
             };
             const idle = config?.idle ?? (()=>Promise.resolve());
+            /**
+             * The processes a Toolhelp snapshot and SystemProcessInformation
+             * list, one list for both (`listProcesses`).
+             *
+             * @returns {import('./ntdll/query.js').SystemProcess[]}
+             */
+            const runProcesses = ()=>listProcesses(kernel, { id: processId,
+                parent: (config?.parentProcessId ?? 0) >>> 0, path: modules.imagePath() });
             /**
              * nvapi under its name: the library a program links for it starts
              * the driver's interface, and loads it again at every call while
@@ -3351,6 +3359,7 @@ export function createWin32Module(){
                     ...createThreadingFunctions({
                         pointerSize,
                         kernel,
+                        processes: runProcesses,
                         pipes,
                         handleFlags,
                         // A thread made in a child, and one waited on there.
@@ -3621,6 +3630,7 @@ export function createWin32Module(){
                         readWideString,
                         files: volume,
                         setLastError: setError,
+                        registry: hive,
                     }),
                     ...createDriveFunctions({
                         readCString, readWideString, readMemory, writeMemory,
@@ -6429,6 +6439,7 @@ export function createWin32Module(){
                 setRegisters,
                 windows,
                 handleType: (/** @type {number} */ handle)=>kernel.handles.typeOf(handle),
+                handleAccess: (/** @type {number} */ handle)=>kernel.handles.access(handle),
                 // The name the run's namespace keeps for the object a handle opens.
                 namedObjectName: (/** @type {number} */ handle)=>
                     runObjects.nameOf(kernel.handles.resolve(handle)),
@@ -6436,24 +6447,7 @@ export function createWin32Module(){
                     (kernel.handles.typeOf(handle) === 'process'
                         ? kernel.handles.resolve(handle, 'process') : null),
                 askChild,
-                // The processes a Toolhelp snapshot lists: this one and the
-                // children it started that are still running.
-                processes: ()=>[
-                    {
-                        id: processId, parent: (config?.parentProcessId ?? 0) >>> 0,
-                        path: modules.imagePath(),
-                        threads: (kernel.threads?.() ?? [])
-                            .filter((/** @type {any} */ thread)=>thread.state !== 'terminated')
-                            .map((/** @type {any} */ thread)=>thread.id >>> 0),
-                    },
-                    ...(kernel.processes?.all() ?? [])
-                        .filter((/** @type {any} */ child)=>!child.completed
-                            && child.exitCode === kernel.processes.STILL_ACTIVE)
-                        .map((/** @type {any} */ child)=>({
-                            id: child.id >>> 0, parent: processId,
-                            path: String(child.imagePath ?? ''), threads: [child.threadId >>> 0],
-                        })),
-                ],
+                processes: runProcesses,
                 divergence: config?.divergence,
                 advapi32: libraries['ADVAPI32.dll'],
                 processors,

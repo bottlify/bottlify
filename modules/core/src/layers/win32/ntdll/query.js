@@ -281,6 +281,9 @@ const NORMAL_BASE_PRIORITY = 8;
  * @property {(handle: number) => string | null} [handleType]  What a handle
  *           names, or null when it names nothing. Without it NtQueryObject
  *           answers every handle as invalid.
+ * @property {(handle: number) => number | null} [handleAccess]  The rights a
+ *           handle was granted, null for every right (the handle table's
+ *           `access`). Without it every handle has every right.
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {() => SystemProcess[]} [processes]  The processes a Toolhelp
  *           snapshot lists, this one first. Without it SystemProcessInformation
@@ -922,10 +925,10 @@ export function createQueryFunctions(host){
          *                        PVOID Information, ULONG Length, PULONG ReturnLength)
          *
          * The basic class, the type of the object a handle names, and the
-         * list of object types. The handle table
-         * keeps neither the access a handle was opened with nor how many
-         * handles share an object, so a handle is answered with every right
-         * and counts of one, and says so. The types are the system's and name
+         * list of object types. The basic class answers the rights the
+         * handle was granted, as the handle table keeps them; the table does
+         * not count how many handles share an object, so the counts are one,
+         * and that is said. The types are the system's and name
          * no handle: Windows ignores the one given, and a protection asks with
          * NULL and takes a refusal for a debugger hiding its objects.
          */
@@ -987,12 +990,14 @@ export function createQueryFunctions(host){
                 }
                 const struct = new Uint8Array(OBJECT_BASIC.SIZE);
                 const view = new DataView(struct.buffer);
-                view.setUint32(OBJECT_BASIC.GRANTED_ACCESS, ALL_ACCESS, true);
+                const granted = named === CURRENT_PROCESS || named === CURRENT_THREAD ? null
+                    : host.handleAccess?.(named) ?? null;
+                view.setUint32(OBJECT_BASIC.GRANTED_ACCESS, granted ?? ALL_ACCESS, true);
                 view.setUint32(OBJECT_BASIC.HANDLE_COUNT, 1, true);
                 view.setUint32(OBJECT_BASIC.POINTER_COUNT, 1, true);
                 host.writeMemory(buffer >>> 0, struct);
                 host.divergence?.('NtQueryObject',
-                    'granted access and counts are not kept; every right and one handle answered');
+                    'handle and reference counts are not kept; one handle answered');
                 return STATUS.SUCCESS;
             },
         },
