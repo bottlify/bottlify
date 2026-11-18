@@ -575,12 +575,12 @@ export function createNtdllFunctions(host){
                     const peb = teb === 0 ? 0 : word(teb + layout.teb.PEB);
                     return [...loadOrder(word, peb, layout)].map(entry=>{
                         const name = entry + layout.entry.FULL_DLL_NAME;
-                        const length = word(name) & 0xffff;
+                        const units = (word(name) & 0xffff) >>> 1;
                         return {
                             base: word(entry + layout.entry.DLL_BASE),
                             size: word(entry + layout.entry.SIZE_OF_IMAGE),
-                            path: length === 0 ? ''
-                                : host.readWideString(word(name + 4), length / 2),
+                            path: units === 0 ? ''
+                                : host.readWideString(word(name + 4), units * 2),
                         };
                     });
                 },
