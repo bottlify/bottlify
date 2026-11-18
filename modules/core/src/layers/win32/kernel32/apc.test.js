@@ -271,3 +271,17 @@ test('NtQueueApcThread hands its routine three arguments, and NtTestAlert runs i
     assert.deepEqual(m.guest, [{ entry: 0x00406000, args: [1, 2, 3], thread: 'main' }]);
     assert.deepEqual([natives.NtQueueApcThread.argBytes, natives.NtTestAlert.argBytes], [20, 0]);
 });
+
+test('NtQueueApcThreadEx without a reserve object is NtQueueApcThread', async()=>{
+    const m = machine();
+    const natives = m.apcs.table.QueueUserAPC.natives;
+    assert.equal(natives.NtQueueApcThreadEx.handler([0xfffffffe, 1, 0x00406000, 1, 2, 3]),
+        0xc00000bb, 'QUEUE_USER_APC_FLAGS_SPECIAL_USER_APC: STATUS_NOT_SUPPORTED, 32-bit');
+    assert.equal(natives.NtQueueApcThreadEx.handler([0xfffffffe, 0x88, 0x00406000, 1, 2, 3]),
+        0xc0000008, 'a reserve object nothing made: STATUS_INVALID_HANDLE');
+    assert.equal(m.apcs.pending(m.main), 0);
+    assert.equal(natives.NtQueueApcThreadEx.handler([0xfffffffe, 0, 0x00406000, 4, 5, 6]), 0);
+    assert.equal(await natives.NtTestAlert.handler(), 0);
+    assert.deepEqual(m.guest, [{ entry: 0x00406000, args: [4, 5, 6], thread: 'main' }]);
+    assert.equal(natives.NtQueueApcThreadEx.argBytes, 24);
+});

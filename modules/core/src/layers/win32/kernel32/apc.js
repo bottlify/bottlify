@@ -56,6 +56,7 @@ const QUEUE_USER_APC_FLAGS_SPECIAL_USER_APC = 1;
 const STATUS_SUCCESS = 0;
 const STATUS_UNSUCCESSFUL = 0xc0000001;
 const STATUS_INVALID_HANDLE = 0xc0000008;
+const STATUS_NOT_SUPPORTED = 0xc00000bb;
 
 /**
  * @typedef {Object} ApcHost
@@ -235,6 +236,29 @@ export function createApcs(host){
         return 1;
     };
 
+    /**
+     * NtQueueApcThread's answer: the routine called with all three arguments;
+     * a NULL one queues nothing and succeeds, as kernel32's sync tests read it.
+     *
+     * @param {number[]} args
+     */
+    const queueNative = ([handle, routine, first, second, third])=>{
+        const thread = threadOf(handle);
+        if (!thread)
+        {
+            return STATUS_INVALID_HANDLE;
+        }
+        if (ended(thread))
+        {
+            return STATUS_UNSUCCESSFUL;
+        }
+        if ((routine >>> 0) !== 0)
+        {
+            queue(thread, routine, [first >>> 0, second >>> 0, third >>> 0]);
+        }
+        return STATUS_SUCCESS;
+    };
+
     return {
         queue,
         deliver,
@@ -269,22 +293,31 @@ export function createApcs(host){
                      */
                     NtQueueApcThread: {
                         argBytes: 20,
+                        handler: queueNative,
+                    },
+
+                    /**
+                     * NTSTATUS NtQueueApcThreadEx(HANDLE Thread, HANDLE ReserveHandle,
+                     *   PNTAPCFUNC, ULONG_PTR, ULONG_PTR, ULONG_PTR)
+                     *
+                     * NtQueueApcThread with no reserve object. The second
+                     * argument is a reserve object's handle, or since
+                     * Windows 10 2004 QUEUE_USER_APC_FLAGS: special user APCs
+                     * are a 64-bit facility, STATUS_NOT_SUPPORTED to a 32-bit
+                     * process as QueueUserAPC2 is refused; no reserve object
+                     * is ever made here (NtAllocateReserveObject), so any other
+                     * value names none.
+                     */
+                    NtQueueApcThreadEx: {
+                        argBytes: 24,
                         /** @param {number[]} args */
-                        handler: ([handle, routine, first, second, third])=>{
-                            const thread = threadOf(handle);
-                            if (!thread)
+                        handler: ([handle, reserve, ...rest])=>{
+                            if ((reserve >>> 0) === QUEUE_USER_APC_FLAGS_SPECIAL_USER_APC)
                             {
-                                return STATUS_INVALID_HANDLE;
+                                return STATUS_NOT_SUPPORTED;
                             }
-                            if (ended(thread))
-                            {
-                                return STATUS_UNSUCCESSFUL;
-                            }
-                            if ((routine >>> 0) !== 0)
-                            {
-                                queue(thread, routine, [first >>> 0, second >>> 0, third >>> 0]);
-                            }
-                            return STATUS_SUCCESS;
+                            return (reserve >>> 0) !== 0 ? STATUS_INVALID_HANDLE
+                                : queueNative([handle, ...rest]);
                         },
                     },
 
