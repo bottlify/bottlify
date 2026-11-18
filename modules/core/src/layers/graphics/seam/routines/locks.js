@@ -11,11 +11,17 @@
  * onto another storage while draws still read the one it held.
  */
 
-import { EBX, EDX, assemble, dword, letHeldGo, prologue, routine, takeHeld } from './assemble.js';
+import {
+    EAX, EBX, ECX, EDX, I386, assemble, dword, letHeldGo, prologue, routine, takeHeld,
+} from './assemble.js';
 import {
     BUFFER, COMMAND, D3DLOCK_DISCARD, D3DLOCK_NOOVERWRITE, D3DLOCK_READONLY, FLAG_SLOW_PATH, LEVEL,
     LOCK_IN_PLACE, SHADOW, SURFACE, TEXTURE,
 } from '../block.js';
+
+/** ModR/M register numbers the assembler's own list leaves out. */
+const ESI = 6;
+const EDI = 7;
 
 /**
  * HRESULT Lock(this, UINT offset, UINT size, BYTE** out, DWORD flags), as
@@ -204,9 +210,10 @@ import {
  * @param {number} [renameSlot]  `Buffer.Rename`'s slot in the device's ring; without it a
  *     DISCARD under draws or over lent bytes is always the host's
  * @param {number} [copyAt]  where `moveCopyCode` is, with `renameSlot`
+ * @param {import('./assemble.js').Width} [width]
  * @returns {Uint8Array}
  */
-export function lockCode(at, trap, renameSlot, copyAt){
+export function lockCode(at, trap, renameSlot, copyAt, width = I386){
     if (renameSlot !== undefined && copyAt === undefined)
     {
         throw new Error('shadow: a lock routine that moves a buffer needs the copy it goes on to');
@@ -217,20 +224,23 @@ export function lockCode(at, trap, renameSlot, copyAt){
         { jcc: 0x75, to: 'held' },                               // jne held
         [0xf7, 0x41, BUFFER.LOCK_FLAGS, ...dword(LOCK_IN_PLACE)], // test dword [ecx+24], imm
         { jcc: 0x75, to: 'held' },                               // jnz held
-        [0x8b, 0x44, 0x24, 0x0c],                                // mov eax, [esp+12]
+        width.arg(EAX, 2),                                       // mov eax, [esp+12]
         [0x85, 0xc0],                                            // test eax, eax
         { jcc: 0x75, to: 'sizedMove' },                          // jnz sizedMove
         [0x8b, 0x41, BUFFER.LENGTH],                             // mov eax, [ecx+8]
-        [0x2b, 0x44, 0x24, 0x08],                                // sub eax, [esp+8]
+        width.argOp([0x2b], EAX, 1),                             // sub eax, [esp+8]
         { label: 'sizedMove' },
         [0x85, 0xc0],                                            // test eax, eax
         { jcc: 0x74, to: 'held' },                               // jz held
-        [0x03, 0x44, 0x24, 0x08],                                // add eax, [esp+8]
+        width.argOp([0x03], EAX, 1),                             // add eax, [esp+8]
         { jcc: 0x72, to: 'held' },                               // jc held
         [0x3b, 0x41, BUFFER.LENGTH],                             // cmp eax, [ecx+8]
         { jcc: 0x77, to: 'held' },                               // ja held
-        [0x83, 0x7c, 0x24, 0x10, 0x00],                          // cmp dword [esp+16], 0
+        [...width.argOp([0x83], 7, 3), 0x00],                    // cmp dword [esp+16], 0
         { jcc: 0x74, to: 'held' },                               // je held
+        // A 64-bit out-pointer the routine cannot write is the host's, before
+        // the move: past it no way leads to the trap.
+        ...width.highZero(3, 'held'),
         [0x83, 0x79, BUFFER.SPARE_FREE, 0x00],                   // cmp dword [ecx+48], 0
         { jcc: 0x75, to: 'first' },                              // jne first
         [0x83, 0x79, BUFFER.SPARE_FREE + 4, 0x00],               // cmp dword [ecx+52], 0
@@ -253,19 +263,19 @@ export function lockCode(at, trap, renameSlot, copyAt){
         { jcc: 0x75, to: 'reserve' },                            // jne reserve
         [0x03, 0x82, ...dword(SHADOW.COMMANDS)],                 // add eax, [edx+disp]
         [0xc7, 0x40, COMMAND.SLOT, ...dword(renameSlot)],        // mov dword [eax], slot
-        [0x8b, 0x74, 0x24, 0x0c],                                // mov esi, [esp+12]
+        width.arg(ESI, 0, 2),                                    // mov esi, [esp+12]
         [0x89, 0x70, COMMAND.ARGS],                              // mov [eax+8], esi
         [0x8b, 0x74, 0x19, BUFFER.SPARES],                       // mov esi, [ecx+ebx+40]
         [0x89, 0x70, COMMAND.ARGS + 4],                          // mov [eax+12], esi
         [0x87, 0x71, BUFFER.BASE],                               // xchg esi, [ecx+4]
         [0x89, 0x74, 0x19, BUFFER.SPARES],                       // mov [ecx+ebx+40], esi
-        [0x89, 0x74, 0x24, 0x0c],                                // mov [esp+12], esi
+        width.argOp([0x89], ESI, 0, 2),                          // mov [esp+12], esi
         [0xc7, 0x44, 0x19, BUFFER.SPARE_FREE, ...dword(0)],      // mov dword [ecx+ebx+48], 0
         [0xc7, 0x41, BUFFER.LENT, ...dword(0)],                  // mov dword [ecx+32], 0
         // The record whole, published with `xchg` as every record's length is.
         [0xbe, ...dword(COMMAND.ARGS + 8)],                      // mov esi, 16
         [0x87, 0x70, COMMAND.BYTES],                             // xchg [eax+4], esi
-        [0xc7, 0x44, 0x24, 0x1c, ...dword(D3DLOCK_NOOVERWRITE)], // mov dword [esp+28], 0x1000
+        [...width.argOp([0xc7], 0, 4, 2), ...dword(D3DLOCK_NOOVERWRITE)], // [esp+28] = imm
         [0x5e, 0x5b],                                            // pop esi; pop ebx
         { jcc: 0xeb, to: 'free' },                               // jmp free
         { label: 'full' },
@@ -273,7 +283,7 @@ export function lockCode(at, trap, renameSlot, copyAt){
         { jcc: 0xeb, to: 'held' },                               // jmp held
     ];
     const parts = [
-        ...prologue('early'),
+        ...prologue('early', FLAG_SLOW_PATH, width),
         { jcc: 0xeb, to: 'body' },                               // jmp body
         { label: 'early' },
         { jcc: 0xeb, to: 'slow', near: true },                   // jmp slow
@@ -282,21 +292,21 @@ export function lockCode(at, trap, renameSlot, copyAt){
         ...takeHeld(EDX, 'slow'),
         [0x83, 0x79, BUFFER.LOCKED, 0x00],                       // cmp dword [ecx+12], 0
         { jcc: 0x75, to: 'held' },                               // jne held
-        [0xf7, 0x44, 0x24, 0x14, ...dword(D3DLOCK_READONLY)],    // test dword [esp+20], 0x10
+        [...width.argOp([0xf7], 0, 4), ...dword(D3DLOCK_READONLY)], // test dword [esp+20], 0x10
         { jcc: 0x75, to: 'held' },                               // jnz held
         [0x83, 0xba, ...dword(SHADOW.DRAWS_PENDING), 0x00],      // cmp dword [edx+disp], 0
         { jcc: 0x75, to: 'guarded' },                            // jne guarded
         [0x83, 0x79, BUFFER.LENT, 0x00],                         // cmp dword [ecx+32], 0
         { jcc: 0x74, to: 'free' },                               // je free
         { label: 'guarded' },
-        [0x8b, 0x44, 0x24, 0x14],                                // mov eax, [esp+20]
+        width.arg(EAX, 4),                                       // mov eax, [esp+20]
         [0x25, ...dword(D3DLOCK_NOOVERWRITE | D3DLOCK_DISCARD)], // and eax, 0x3000
         [0xa9, ...dword(D3DLOCK_NOOVERWRITE)],                   // test eax, 0x1000
         { jcc: 0x75, to: 'free' },                               // jnz free
         ...move,
         { label: 'free' },
-        [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
-        [0x8b, 0x54, 0x24, 0x0c],                                // mov edx, [esp+12]
+        width.arg(EAX, 1),                                       // mov eax, [esp+8]
+        width.arg(EDX, 2),                                       // mov edx, [esp+12]
         [0x85, 0xd2],                                            // test edx, edx
         { jcc: 0x75, to: 'sized' },                              // jnz sized
         [0x8b, 0x51, BUFFER.LENGTH],                             // mov edx, [ecx+8]
@@ -308,8 +318,9 @@ export function lockCode(at, trap, renameSlot, copyAt){
         { jcc: 0x72, to: 'held' },                               // jc held
         [0x3b, 0x51, BUFFER.LENGTH],                             // cmp edx, [ecx+8]
         { jcc: 0x77, to: 'held' },                               // ja held
-        [0x83, 0x7c, 0x24, 0x10, 0x00],                          // cmp dword [esp+16], 0
+        [...width.argOp([0x83], 7, 3), 0x00],                    // cmp dword [esp+16], 0
         { jcc: 0x74, to: 'held' },                               // je held
+        ...width.highZero(3, 'held'),
         { jcc: 0xeb, to: 'take' },                               // jmp take
         { label: 'held' },
         [0x8b, 0x41, BUFFER.DEVICE],                             // mov eax, [ecx+28]
@@ -332,7 +343,7 @@ export function lockCode(at, trap, renameSlot, copyAt){
         { jcc: 0x76, to: 'merged' },                             // jbe merged
         [0x89, 0x51, BUFFER.TO],                                 // mov [ecx+20], edx
         { label: 'merged' },
-        [0x8b, 0x5c, 0x24, 0x18],                                // mov ebx, [esp+24]
+        width.arg(EBX, 4, 1),                                    // mov ebx, [esp+24]
         [0xf7, 0xc3, ...dword(D3DLOCK_NOOVERWRITE)],             // test ebx, 0x1000
         { jcc: 0x74, to: 'inPlace' },                            // jz inPlace
         [0x81, 0xe3, ...dword(~D3DLOCK_DISCARD >>> 0)],          // and ebx, ~0x2000
@@ -349,27 +360,27 @@ export function lockCode(at, trap, renameSlot, copyAt){
         [0x89, 0x8c, 0x93, ...dword(SHADOW.LOCK_RING)],          // mov [ebx+edx*4+disp], ecx
         [0xff, 0x83, ...dword(SHADOW.LOCK_CALLS)],               // inc dword [ebx+disp]
         letHeldGo(EBX),                                          // mov dword [ebx+HELD], 0
-        [0x8b, 0x5c, 0x24, 0x14],                                // mov ebx, [esp+20]
-        [0x89, 0x03],                                            // mov [ebx], eax
+        width.arg(EBX, 3, 1),                                    // mov ebx, [esp+20]
+        width.storePointer(EBX, EAX, 0),                         // mov [ebx], eax
         [0x5b],                                                  // pop ebx
         ...(renameSlot === undefined ? [] : [
-            [0x8b, 0x54, 0x24, 0x04],                            // mov edx, [esp+4]
+            width.arg(EDX, 0),                                   // mov edx, [esp+4]
             [0x3b, 0x51, BUFFER.SPARES],                         // cmp edx, [ecx+40]
             { jcc: 0x74, to: 'moved' },                          // je moved
             [0x3b, 0x51, BUFFER.SPARES + 4],                     // cmp edx, [ecx+44]
             { jcc: 0x74, to: 'moved' },                          // je moved
         ]),
         [0x31, 0xc0],                                            // xor eax, eax
-        [0xc2, 0x14, 0x00],                                      // ret 20
+        width.ret(5),                                            // ret 20
     ];
     if (renameSlot === undefined)
     {
-        return routine(at, trap, parts);
+        return routine(at, trap, parts, {}, width);
     }
     // The move puts the checks further from their targets than a byte reaches.
     return routine(at, trap, parts.map(part=>(
         'jcc' in part && part.jcc !== 0xeb ? { ...part, near: true } : part)),
-    { moved: /** @type {number} */ (copyAt) });
+    { moved: /** @type {number} */ (copyAt) }, width);
 }
 
 /**
@@ -382,7 +393,8 @@ export function lockCode(at, trap, renameSlot, copyAt){
  * storage while the program holds the lock, and the new one's pages are the
  * GPU's to upload from here as draws reach them, whenever the ring's move is
  * made. Entered with EAX the address handed out, ECX the buffer's block, and
- * the storage left in the slot of `this`.
+ * the storage left in the slot of `this` - in a 64-bit process the home
+ * slot of RCX, which the routine's entry filled and the move wrote over.
  *
  *     push esi
  *     push edi
@@ -417,38 +429,39 @@ export function lockCode(at, trap, renameSlot, copyAt){
  *     xor eax, eax
  *     ret 20
  *
+ * @param {import('./assemble.js').Width} [width]  the routine's that goes on to it
  * @returns {Uint8Array}
  */
-export function moveCopyCode(){
+export function moveCopyCode(width = I386){
     return assemble([
         [0x56, 0x57, 0x53],                                      // push esi; push edi; push ebx
         [0x8b, 0x51, BUFFER.LENGTH],                             // mov edx, [ecx+8]
-        [0x8b, 0x5c, 0x24, 0x18],                                // mov ebx, [esp+24]
+        width.arg(EBX, 2, 3),                                    // mov ebx, [esp+24]
         [0x85, 0xdb],                                            // test ebx, ebx
         { jcc: 0x75, to: 'sized' },                              // jnz sized
         [0x89, 0xd3],                                            // mov ebx, edx
-        [0x2b, 0x5c, 0x24, 0x14],                                // sub ebx, [esp+20]
+        width.argOp([0x2b], EBX, 1, 3),                          // sub ebx, [esp+20]
         { label: 'sized' },
         [0x89, 0xc7],                                            // mov edi, eax
-        [0x2b, 0x7c, 0x24, 0x14],                                // sub edi, [esp+20]
-        [0x8b, 0x74, 0x24, 0x10],                                // mov esi, [esp+16]
+        width.argOp([0x2b], EDI, 1, 3),                          // sub edi, [esp+20]
+        width.arg(ESI, 0, 3),                                    // mov esi, [esp+16]
         [0x29, 0xda],                                            // sub edx, ebx
         [0x8b, 0x41, BUFFER.DEVICE],                             // mov eax, [ecx+28]
         [0xf0, 0x01, 0x90, ...dword(SHADOW.MOVE_COPIED)],        // lock add [eax+disp], edx
         { jcc: 0x73, to: 'counted' },                            // jnc counted
         [0xf0, 0xff, 0x80, ...dword(SHADOW.MOVE_COPIED + 4)],    // lock inc dword [eax+disp]
         { label: 'counted' },
-        [0x8b, 0x4c, 0x24, 0x14],                                // mov ecx, [esp+20]
+        width.arg(ECX, 1, 3),                                    // mov ecx, [esp+20]
         [0xfc],                                                  // cld
         [0xf3, 0xa4],                                            // rep movsb
         [0x01, 0xde],                                            // add esi, ebx
         [0x01, 0xdf],                                            // add edi, ebx
         [0x89, 0xd1],                                            // mov ecx, edx
-        [0x2b, 0x4c, 0x24, 0x14],                                // sub ecx, [esp+20]
+        width.argOp([0x2b], ECX, 1, 3),                          // sub ecx, [esp+20]
         [0xf3, 0xa4],                                            // rep movsb
         [0x5b, 0x5f, 0x5e],                                      // pop ebx; pop edi; pop esi
         [0x31, 0xc0],                                            // xor eax, eax
-        [0xc2, 0x14, 0x00],                                      // ret 20
+        width.ret(5),                                            // ret 20
     ]);
 }
 
@@ -603,12 +616,12 @@ export function lock7Code(at, trap){
  *   held:
  *     mov dword [edx+HELD], 0     ; and on to the host
  *
- * @param {number} at @param {number} trap
+ * @param {number} at @param {number} trap @param {import('./assemble.js').Width} [width]
  * @returns {Uint8Array}
  */
-export function unlockCode(at, trap){
+export function unlockCode(at, trap, width = I386){
     return routine(at, trap, [
-        ...prologue(),
+        ...prologue('slow', FLAG_SLOW_PATH, width),
         [0x8b, 0x51, BUFFER.DEVICE],                             // mov edx, [ecx+28]
         // A Direct3D 7 buffer no device's block has taken yet: the host's.
         [0x85, 0xd2],                                            // test edx, edx
@@ -629,10 +642,10 @@ export function unlockCode(at, trap){
         [0xff, 0x82, ...dword(SHADOW.UNLOCK_CALLS)],             // inc dword [edx+disp]
         letHeldGo(EDX),                                          // mov dword [edx+HELD], 0
         [0x31, 0xc0],                                            // xor eax, eax
-        [0xc2, 0x04, 0x00],                                      // ret 4
+        width.ret(1),                                            // ret 4
         { label: 'held' },
         letHeldGo(EDX),                                          // mov dword [edx+HELD], 0
-    ]);
+    ], {}, width);
 }
 
 /**
@@ -657,12 +670,13 @@ export function unlockCode(at, trap){
  *     jnz slow
  *
  * @param {'texture' | 'surface'} find @param {string} slow
+ * @param {import('./assemble.js').Width} width
  * @returns {(number[] | { jcc: number, to: string })[]}
  */
-const findLevel = (find, slow)=>[
+const findLevel = (find, slow, width)=>[
     ...(find === 'texture'
         ? [
-            [0x8b, 0x44, 0x24, 0x08],                            // mov eax, [esp+8]
+            width.arg(EAX, 1),                                   // mov eax, [esp+8]
             [0x3b, 0x41, TEXTURE.LEVEL_COUNT],                   // cmp eax, [ecx+4]
             { jcc: 0x73, to: slow },                             // jae slow
             [0x3d, ...dword(TEXTURE.LEVEL_SLOTS)],               // cmp eax, 16
@@ -754,18 +768,19 @@ const findLevel = (find, slow)=>[
  *
  * @param {number} at @param {number} trap
  * @param {{ find: 'texture' | 'surface', box?: boolean }} kind  a box only for a texture
+ * @param {import('./assemble.js').Width} [width]
  * @returns {Uint8Array}
  */
-export function lockLevelCode(at, trap, { find, box = false }){
-    // Where the out-pointer, the rectangle or box and the flags are on entry.
-    const out = find === 'texture' ? 12 : 8;
-    const rect = out + 4;
-    const flags = out + 8;
+export function lockLevelCode(at, trap, { find, box = false }, width = I386){
+    // Which arguments the out-pointer, the rectangle or box and the flags are.
+    const out = find === 'texture' ? 2 : 1;
+    const rect = out + 1;
+    const flags = out + 2;
     /** `mov eax, [esi+from]; mov [ecx+to], eax`. @param {number} from @param {number} to */
     const copy = (from, to)=>[[0x8b, 0x46, from], [0x89, 0x41, to]];
     return routine(at, trap, [
-        ...prologue('early'),
-        ...findLevel(find, 'early'),
+        ...prologue('early', FLAG_SLOW_PATH, width),
+        ...findLevel(find, 'early', width),
         { jcc: 0xeb, to: 'body' },                               // jmp body
         { label: 'early' },
         { jcc: 0xeb, to: 'slow', near: true },                   // jmp slow
@@ -788,10 +803,12 @@ export function lockLevelCode(at, trap, { find, box = false }){
         [0x81, 0xba, ...dword(SHADOW.RING_HEAD), ...dword(SHADOW.RING_CAPACITY)], // cmp [edx+d], 64
         { jcc: 0x73, to: 'held', near: true },                   // jae held
         { label: 'room' },
-        [0x83, 0x7c, 0x24, out, 0x00],                           // cmp dword [esp+out], 0
+        [...width.argOp([0x83], 7, out), 0x00],                  // cmp dword [esp+out], 0
         { jcc: 0x74, to: 'held', near: true },                   // je held
+        ...width.highZero(out, 'held'),
+        ...width.highZero(rect, 'held'),
         [0x53, 0x56, 0x57],                                      // push ebx; push esi; push edi
-        [0x8b, 0x74, 0x24, rect + 12],                           // mov esi, [esp+rect+12]
+        width.arg(ESI, rect, 3),                                 // mov esi, [esp+rect+12]
         [0x31, 0xdb],                                            // xor ebx, ebx
         [0x89, 0x59, LEVEL.BOXED],                               // mov [ecx+60], ebx
         [0x85, 0xf6],                                            // test esi, esi
@@ -836,7 +853,7 @@ export function lockLevelCode(at, trap, { find, box = false }){
             ]),
         [0xc7, 0x41, LEVEL.BOXED, ...dword(1)],                  // mov dword [ecx+60], 1
         { label: 'take' },
-        [0x8b, 0x44, 0x24, flags + 12],                          // mov eax, [esp+flags+12]
+        width.arg(EAX, flags, 3),                                // mov eax, [esp+flags+12]
         [0x89, 0x41, LEVEL.LOCK_FLAGS],                          // mov [ecx+24], eax
         [0xc7, 0x41, LEVEL.LOCKED, ...dword(1)],                 // mov dword [ecx+12], 1
         [0xc7, 0x41, LEVEL.TAKEN, ...dword(1)],                  // mov dword [ecx+16], 1
@@ -851,25 +868,27 @@ export function lockLevelCode(at, trap, { find, box = false }){
         letHeldGo(EDX),                                          // mov dword [edx+HELD], 0
         [0x89, 0xd8],                                            // mov eax, ebx
         [0x03, 0x41, LEVEL.BASE],                                // add eax, [ecx+4]
-        [0x8b, 0x7c, 0x24, out + 12],                            // mov edi, [esp+out+12]
+        width.arg(EDI, out, 3),                                  // mov edi, [esp+out+12]
         [0x8b, 0x51, LEVEL.ROW_PITCH],                           // mov edx, [ecx+20]
         [0x89, 0x17],                                            // mov [edi], edx
+        // pBits after the pitch, or after the two of a box: a pointer, at 4 in a
+        // 32-bit process's D3DLOCKED_RECT and at 8, aligned, in a 64-bit one's.
         ...(box
             ? [
                 [0x8b, 0x51, LEVEL.SLICE_PITCH],                 // mov edx, [ecx+32]
                 [0x89, 0x57, 0x04],                              // mov [edi+4], edx
-                [0x89, 0x47, 0x08],                              // mov [edi+8], eax
+                width.storePointer(EDI, EAX, 8),                 // mov [edi+8], eax
             ]
-            : [[0x89, 0x47, 0x04]]),                             // mov [edi+4], eax
+            : [width.storePointer(EDI, EAX, width.word)]),       // mov [edi+4], eax
         [0x5f, 0x5e, 0x5b],                                      // pop edi; pop esi; pop ebx
         [0x31, 0xc0],                                            // xor eax, eax
-        [0xc2, flags, 0x00],                                     // ret: this and the arguments
+        width.ret(flags + 1),                                    // ret: this and the arguments
         { label: 'refused' },
         [0x5f, 0x5e, 0x5b],                                      // pop edi; pop esi; pop ebx
         { label: 'held' },
         [0x8b, 0x41, LEVEL.DEVICE],                              // mov eax, [ecx+28]
         letHeldGo(0),                                            // mov dword [eax+HELD], 0
-    ]);
+    ], {}, width);
 }
 
 /**
@@ -880,12 +899,13 @@ export function lockLevelCode(at, trap, { find, box = false }){
  *
  * @param {number} at @param {number} trap
  * @param {{ find: 'texture' | 'surface' }} kind
+ * @param {import('./assemble.js').Width} [width]
  * @returns {Uint8Array}
  */
-export function unlockLevelCode(at, trap, { find }){
+export function unlockLevelCode(at, trap, { find }, width = I386){
     return routine(at, trap, [
-        ...prologue('early'),
-        ...findLevel(find, 'early'),
+        ...prologue('early', FLAG_SLOW_PATH, width),
+        ...findLevel(find, 'early', width),
         { jcc: 0xeb, to: 'body' },                               // jmp body
         { label: 'early' },
         { jcc: 0xeb, to: 'slow', near: true },                   // jmp slow
@@ -908,9 +928,9 @@ export function unlockLevelCode(at, trap, { find }){
         [0xc7, 0x41, LEVEL.LOCKED, ...dword(0)],                 // mov dword [ecx+12], 0
         letHeldGo(EDX),                                          // mov dword [edx+HELD], 0
         [0x31, 0xc0],                                            // xor eax, eax
-        [0xc2, find === 'texture' ? 8 : 4, 0x00],                // ret 8 or 4
+        width.ret(find === 'texture' ? 2 : 1),                   // ret 8 or 4
         { label: 'held' },
         letHeldGo(EDX),                                          // mov dword [edx+HELD], 0
-    ]);
+    ], {}, width);
 }
 

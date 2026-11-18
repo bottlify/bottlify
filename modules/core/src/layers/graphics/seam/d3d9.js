@@ -544,7 +544,7 @@ export function createDirect3D9Seam(
     const moveCopy = ()=>{
         if (moveCopyAt === 0)
         {
-            moveCopyAt = placeCode(()=>moveCopyCode(), false);
+            moveCopyAt = placeCode(()=>moveCopyCode(routineWidth), false);
         }
         return moveCopyAt;
     };
@@ -822,10 +822,10 @@ export function createDirect3D9Seam(
         const unlock = box ? 'UnlockBox' : 'UnlockRect';
         const dirty = box ? 'VolumeTexture.AddDirtyBox' : 'Texture.AddDirtyRect';
         return {
-            [lock]: (/** @type {{ trap: number }} */ { trap })=>
-                placeCode(at=>lockLevelCode(at, trap, { find, box })),
-            [unlock]: (/** @type {{ trap: number }} */ { trap })=>
-                placeCode(at=>unlockLevelCode(at, trap, { find })),
+            [lock]: builtWide((/** @type {{ trap: number }} */ { trap })=>
+                placeCode(at=>lockLevelCode(at, trap, { find, box }, routineWidth))),
+            [unlock]: builtWide((/** @type {{ trap: number }} */ { trap })=>
+                placeCode(at=>unlockLevelCode(at, trap, { find }, routineWidth))),
             ...(find === 'texture'
                 ? { [box ? 'AddDirtyBox' : 'AddDirtyRect']: (/** @type {{ trap: number }} */
                     { trap })=>placeCode(at=>commandCode(at, trap,
@@ -1264,9 +1264,10 @@ export function createDirect3D9Seam(
         ? {
             // `moves` kept as a trap: a DISCARD under draws comes to the host
             // instead of moving the buffer onto a spare storage in the guest.
-            Lock: ({ trap })=>placeCode(at=>(traps.has('moves') ? lockCode(at, trap)
-                : lockCode(at, trap, commandSlot('Buffer.Rename'), moveCopy()))),
-            Unlock: ({ trap })=>placeCode(at=>unlockCode(at, trap)),
+            Lock: builtWide(({ trap })=>placeCode(at=>(traps.has('moves')
+                ? lockCode(at, trap, undefined, undefined, routineWidth)
+                : lockCode(at, trap, commandSlot('Buffer.Rename'), moveCopy(), routineWidth)))),
+            Unlock: builtWide(({ trap })=>placeCode(at=>unlockCode(at, trap, routineWidth))),
         }
         : {});
     /**
