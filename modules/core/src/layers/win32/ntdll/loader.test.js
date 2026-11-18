@@ -206,8 +206,13 @@ test('the loader lock is taken with a cookie; a try with nowhere to answer is re
     const { view, call } = machine();
     assert.equal(call('LdrLockLoaderLock', 0, OUT, OUT + 4), STATUS.SUCCESS);
     assert.equal(view.getUint32(OUT, true), 1);
-    assert.notEqual(view.getUint32(OUT + 4, true), 0);
+    const cookie = view.getUint32(OUT + 4, true);
+    assert.notEqual(cookie, 0);
     assert.equal(call('LdrLockLoaderLock', 2, 0, OUT + 4), 0xc00000f0);
-    assert.equal(call('LdrUnlockLoaderLock', 0, view.getUint32(OUT + 4, true)), STATUS.SUCCESS);
+    assert.equal(view.getUint32(OUT + 4, true), 0, 'the cookie cleared, by a refusal too');
+    view.setUint32(OUT, 10, true);
+    assert.equal(call('LdrLockLoaderLock', 0, OUT, 0), 0xc00000f1, 'no cookie');
+    assert.equal(view.getUint32(OUT, true), 0, 'the disposition cleared');
+    assert.equal(call('LdrUnlockLoaderLock', 0, cookie), STATUS.SUCCESS);
     assert.equal(call('LdrUnlockLoaderLock', 0, 0), 0xc00000f0);
 });
