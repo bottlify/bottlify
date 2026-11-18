@@ -2475,7 +2475,7 @@ SetWindowPos's flags: the child is then placed at once, inside the message that 
 the pager recalculates its frame with SWP_FRAMECHANGED and places its child at once, which hears
 WM_CHILDACTIVATE, inside the message that asked. No PGM_PLACECHILD is posted.
 
-**A268. Temporary: a device's guest routines built for x86-64 change RBX, RSI and RDI without
+**A271. Temporary: a device's guest routines built for x86-64 change RBX, RSI and RDI without
 unwind data.** A 64-bit program's frames are unwound by the function table of the image they run in
 (RUNTIME_FUNCTION and its UNWIND_INFO); code with no entry is taken for a leaf: its return address at
 RSP and every register the convention has a callee keep as the caller left it. Direct3D 9's routines
