@@ -108,6 +108,8 @@ export function synthesiseProcessInit(options){
     const code = prelude
         ? [0xb8, ...u32(prelude), 0xff, 0xd0] // mov eax, prelude; call eax
         : [];
+    /** What runs under the loader lock: the attaches and the TLS set-up. @type {number[]} */
+    const body = [];
     /** @type {string[]} */
     const attached = [];
     let tlsImages = 0;
@@ -119,8 +121,6 @@ export function synthesiseProcessInit(options){
             0xff, 0xd0, //                       call eax
         ]
         : []);
-    code.push(...locked(loaderLock?.enter ?? 0));
-
     for (const library of libraries)
     {
         // Thread-local storage first: a library's initialisers and its DllMain
@@ -129,7 +129,7 @@ export function synthesiseProcessInit(options){
         // already names; a later thread is given its own copy as it is made.
         if (library.tls)
         {
-            code.push(
+            body.push(
                 0x64, 0xa1, ...u32(TLS_POINTER), // mov eax, fs:[0x2c]
                 // mov dword [eax+index*4], block
                 0xc7, 0x80, ...u32(library.tls.index * 4), ...u32(library.tls.blockAddress),
@@ -137,7 +137,7 @@ export function synthesiseProcessInit(options){
             for (const callback of library.tls.callbacks)
             {
                 // A TLS callback takes exactly DllMain's three arguments.
-                code.push(
+                body.push(
                     0x6a, LOADED_STATICALLY, //        push 1
                     0x6a, DLL_PROCESS_ATTACH, //       push 1
                     0x68, ...u32(library.base), //     push hinstDLL
@@ -154,7 +154,7 @@ export function synthesiseProcessInit(options){
         }
         // BOOL WINAPI DllMain(HINSTANCE, DWORD, LPVOID) -- stdcall, so it pops
         // its own three arguments and nothing is cleaned up here.
-        code.push(
+        body.push(
             0x6a, LOADED_STATICALLY, //    push 1            (lpvReserved)
             0x6a, DLL_PROCESS_ATTACH, //    push 1            (fdwReason)
             0x68, ...u32(library.base), //  push hinstDLL
@@ -167,8 +167,13 @@ export function synthesiseProcessInit(options){
         attached.push(library.name);
     }
 
+    // The lock only around work: a start that attaches nothing - a prelude
+    // alone - takes no lock, as a start with no stub at all takes none.
+    if (body.length > 0)
+    {
+        code.push(...locked(loaderLock?.enter ?? 0), ...body, ...locked(loaderLock?.leave ?? 0));
+    }
     code.push(
-        ...locked(loaderLock?.leave ?? 0),
         0xb8, ...u32(entryPoint), // mov eax, entry
         0xff, 0xe0, //               jmp eax
     );
@@ -221,20 +226,21 @@ function longProcessInit({ libraries, entryPoint, loaderLock, prelude = 0 }){
     {
         code.push(...call(prelude));
     }
-    code.push(...locked(loaderLock?.enter ?? 0));
+    /** What runs under the loader lock. @type {number[]} */
+    const body = [];
 
     for (const library of libraries)
     {
         if (library.tls)
         {
-            code.push(
+            body.push(
                 0x65, 0x48, 0x8b, 0x04, 0x25, ...u32(TLS_POINTER_LONG), // mov rax, gs:[0x58]
                 0xba, ...u32(library.tls.blockAddress), //              mov edx, block
                 0x48, 0x89, 0x90, ...u32(library.tls.index * 8), //     mov [rax+index*8], rdx
             );
             for (const callback of library.tls.callbacks)
             {
-                code.push(...attach(library.base, callback));
+                body.push(...attach(library.base, callback));
             }
             tlsImages++;
         }
@@ -242,12 +248,15 @@ function longProcessInit({ libraries, entryPoint, loaderLock, prelude = 0 }){
         {
             continue;
         }
-        code.push(...attach(library.base, library.entryPoint));
+        body.push(...attach(library.base, library.entryPoint));
         attached.push(library.name);
     }
 
+    if (body.length > 0)
+    {
+        code.push(...locked(loaderLock?.enter ?? 0), ...body, ...locked(loaderLock?.leave ?? 0));
+    }
     code.push(
-        ...locked(loaderLock?.leave ?? 0),
         0x48, 0x83, 0xc4, 0x28, //              add rsp, 40
         0x48, 0xb8, ...u64(entryPoint), //      mov rax, entry
         0xff, 0xe0, //                          jmp rax

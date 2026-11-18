@@ -117,6 +117,24 @@ test('the loader lock is held from before the first DllMain to the jump into the
     assert.equal(u32At(bytes, bytes.length - 6), 0x00401000);
 });
 
+test('a start that attaches nothing takes no loader lock, a prelude or not, in either width',
+    ()=>{
+        const lock = { address: 0x00500000, enter: 0x00600000, leave: 0x00600100 };
+        for (const long of [false, true])
+        {
+            const { bytes } = synthesiseProcessInit({ libraries: [], entryPoint: 0x00401000,
+                loaderLock: lock, prelude: 0x7ff01000, long });
+            const text = [...bytes].map(byte=>byte.toString(16).padStart(2, '0')).join('');
+            for (const routine of [lock.enter, lock.leave])
+            {
+                const le = [0, 8, 16, 24].map(shift=>((routine >>> shift) & 0xff)
+                    .toString(16).padStart(2, '0')).join('');
+                assert.equal(text.includes(le), false,
+                    `${long ? 'x86-64' : 'i386'}: no call to 0x${routine.toString(16)}`);
+            }
+        }
+    });
+
 test('a refused start calls ExitProcess with the status and nothing else', ()=>{
     const bytes = synthesiseStartRefused({ exitProcess: 0x7b801234, status: 0xc0000135 });
     // push status / mov eax, ExitProcess / call eax / jmp $.
