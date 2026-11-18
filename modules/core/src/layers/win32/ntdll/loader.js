@@ -63,8 +63,10 @@ export const LOADER_ENTRIES = ['GetModuleHandleExW', 'LoadLibraryW', 'LoadLibrar
  * @param {LoaderHost} host
  * @returns {Record<string, { argBytes: number, handler: Function }>}
  */
-export function createLoaderFunctions({ readMemory, writeMemory, kernel32, allocate, free,
-    notifications }){
+export function createLoaderFunctions({
+    readMemory, writeMemory, kernel32, allocate, free, notifications,
+})
+{
     /** How many times the loader lock was taken: each a cookie of its own. */
     let locks = 0;
     /** @param {number} address */

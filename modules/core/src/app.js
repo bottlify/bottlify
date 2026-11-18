@@ -7348,7 +7348,8 @@ async function buildApp(options){
             {
                 for (const { callback, context } of [...dllNotifications.values()])
                 {
-                    await bridge.callGuest({ entry: callback, args: [reason, data, context], thread });
+                    await bridge.callGuest({ entry: callback, args: [reason, data, context],
+                        thread });
                 }
             }
             finally
