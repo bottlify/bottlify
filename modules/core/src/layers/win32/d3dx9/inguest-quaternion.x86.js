@@ -12,7 +12,7 @@ export const COMPILED = /** @type {const} */ ({
     D3DXQuaternionMultiply: {
         convention: 'stdcall',
         params: ['u32', 'u32', 'u32'],
-        returns: 'u32',
+        returns: 'ptr',
         uses: ['f32', 'setF32'],
         code: Uint8Array.of(
             0x53, 0x56, 0x83, 0xec, 0x40, 0x8b, 0x74, 0x24, 0x4c, 0x8b, 0x5c, 0x24,
@@ -43,7 +43,7 @@ export const COMPILED = /** @type {const} */ ({
     D3DXQuaternionNormalize: {
         convention: 'stdcall',
         params: ['u32', 'u32'],
-        returns: 'u32',
+        returns: 'ptr',
         uses: ['f32', 'setF32'],
         code: Uint8Array.of(
             0x53, 0x83, 0xec, 0x20, 0x8b, 0x5c, 0x24, 0x28, 0x8b, 0x54, 0x24, 0x2c,
@@ -65,7 +65,7 @@ export const COMPILED = /** @type {const} */ ({
     D3DXQuaternionInverse: {
         convention: 'stdcall',
         params: ['u32', 'u32'],
-        returns: 'u32',
+        returns: 'ptr',
         uses: ['f32', 'setF32'],
         code: Uint8Array.of(
             0x53, 0x83, 0xec, 0x18, 0x8b, 0x5c, 0x24, 0x20, 0x8b, 0x54, 0x24, 0x24,
@@ -85,7 +85,7 @@ export const COMPILED = /** @type {const} */ ({
     D3DXQuaternionLn: {
         convention: 'stdcall',
         params: ['u32', 'u32'],
-        returns: 'u32',
+        returns: 'ptr',
         uses: ['f32', 'setU32', 'setF32'],
         code: Uint8Array.of(
             0x53, 0x83, 0xec, 0x18, 0x8b, 0x5c, 0x24, 0x20, 0x8b, 0x54, 0x24, 0x24,
@@ -106,7 +106,7 @@ export const COMPILED = /** @type {const} */ ({
     D3DXQuaternionExp: {
         convention: 'stdcall',
         params: ['u32', 'u32'],
-        returns: 'u32',
+        returns: 'ptr',
         uses: ['f32', 'setF32'],
         code: Uint8Array.of(
             0x53, 0x83, 0xec, 0x28, 0xe8, 0x00, 0x00, 0x00, 0x00, 0x5b, 0x8b, 0x54,
@@ -137,7 +137,7 @@ export const COMPILED = /** @type {const} */ ({
     D3DXQuaternionRotationAxis: {
         convention: 'stdcall',
         params: ['u32', 'u32', 'f32'],
-        returns: 'u32',
+        returns: 'ptr',
         uses: ['f32', 'setF32'],
         code: Uint8Array.of(
             0x53, 0x83, 0xec, 0x40, 0xe8, 0x00, 0x00, 0x00, 0x00, 0x5b, 0x8b, 0x54,
@@ -169,7 +169,7 @@ export const COMPILED = /** @type {const} */ ({
     D3DXQuaternionRotationYawPitchRoll: {
         convention: 'stdcall',
         params: ['u32', 'f32', 'f32', 'f32'],
-        returns: 'u32',
+        returns: 'ptr',
         uses: ['setF32'],
         code: Uint8Array.of(
             0x53, 0x83, 0xec, 0x60, 0xe8, 0x00, 0x00, 0x00, 0x00, 0x5b, 0x8b, 0x54,
@@ -212,7 +212,7 @@ export const COMPILED = /** @type {const} */ ({
     D3DXQuaternionRotationMatrix: {
         convention: 'stdcall',
         params: ['u32', 'u32'],
-        returns: 'u32',
+        returns: 'ptr',
         uses: ['f32', 'setF32'],
         code: Uint8Array.of(
             0x53, 0x56, 0x83, 0xec, 0x48, 0xe8, 0x00, 0x00, 0x00, 0x00, 0x5b, 0x8b,
@@ -282,7 +282,7 @@ export const COMPILED = /** @type {const} */ ({
     D3DXQuaternionSlerp: {
         convention: 'stdcall',
         params: ['u32', 'u32', 'u32', 'f32'],
-        returns: 'u32',
+        returns: 'ptr',
         uses: ['f32', 'setF32'],
         code: Uint8Array.of(
             0x53, 0x56, 0x57, 0x81, 0xec, 0x80, 0x00, 0x00, 0x00, 0xe8, 0x00, 0x00,
@@ -336,7 +336,7 @@ export const COMPILED = /** @type {const} */ ({
     D3DXQuaternionSquad: {
         convention: 'stdcall',
         params: ['u32', 'u32', 'u32', 'u32', 'u32', 'f32'],
-        returns: 'u32',
+        returns: 'ptr',
         uses: ['f32', 'setF32'],
         code: Uint8Array.of(
             0x53, 0x56, 0x57, 0x55, 0x81, 0xec, 0x68, 0x01, 0x00, 0x00, 0xe8, 0x00,
@@ -502,7 +502,7 @@ export const COMPILED = /** @type {const} */ ({
     D3DXQuaternionBaryCentric: {
         convention: 'stdcall',
         params: ['u32', 'u32', 'u32', 'u32', 'f32', 'f32'],
-        returns: 'u32',
+        returns: 'ptr',
         uses: ['f32', 'setF32'],
         code: Uint8Array.of(
             0x53, 0x56, 0x57, 0x55, 0x81, 0xec, 0x60, 0x01, 0x00, 0x00, 0xe8, 0x00,

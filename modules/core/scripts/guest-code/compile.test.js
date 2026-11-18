@@ -1394,7 +1394,7 @@ test('everything outside the subset is refused where it is written', ()=>{
     refused(one(p, 'return 0;').replace('@guestCode cdecl', '@guestCode'),
         /names its convention/);
     refused(one(p, 'return a;', '@param {i32} a @param {u32} c @param {f64} x\n * @returns {f16}'),
-        /is not i32, u32, f64, f32, i64 or void/);
+        /is not i32, u32, ptr, f64, f32, i64 or void/);
     const q = '{ host }, a, c, x';
     refused(one(q, 'return host(a);'), /host\(\) takes no arguments/);
     refused(one(q, 'const v = host();\n    return v;'), /only returned: return host\(\)/);
@@ -1506,4 +1506,49 @@ export function sum({ doubleHigh }, x){
     return doubleHigh(x * 2);
 }
 `), /doubleHigh: at 32 bits a double variable/);
+});
+
+const ANSWERS = `
+/**
+ * @guestCode cdecl
+ * @param {u32} a
+ * @returns {u32}
+ */
+export function unsignedPast(a){
+    return (a + 0x80000000) >>> 0;
+}
+
+/**
+ * @guestCode cdecl
+ * @param {u32} a
+ * @returns {ptr}
+ */
+export function pointerPast(a){
+    return (a + 0x80000000) >>> 0;
+}
+
+/**
+ * @guestCode cdecl
+ * @param {i32} a
+ * @returns {i32}
+ */
+export function signedBelow(a){
+    return (a - 0x7fffffff) | 0;
+}
+`;
+
+test('a result in RAX at 64 bits: an i32 by its sign, a u32 and a pointer by zeros', async()=>{
+    const { same, sameAt64, compiled, long } = await load(ANSWERS);
+    for (const a of [0, 1, 0x10, 0x7fffffff, 0x80000000, 0xfffffffe])
+    {
+        for (const name of ['unsignedPast', 'pointerPast', 'signedBelow'])
+        {
+            same(name, { stack: [a] });
+            sameAt64(name, { stack: [a] });
+        }
+    }
+    assert.equal(compiled.pointerPast.returns, 'ptr', 'the record keeps the declared pointer');
+    assert.deepEqual(compiled.pointerPast.code, compiled.unsignedPast.code,
+        'a pointer result is a u32 in the i386');
+    assert.equal(long.pointerPast.returns, 'ptr');
 });

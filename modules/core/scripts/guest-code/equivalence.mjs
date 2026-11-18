@@ -151,6 +151,16 @@ export function doubleWords(value){
     return [view.getUint32(0, true), view.getUint32(4, true)];
 }
 
+/**
+ * A dword answer as RAX holds it at 64 bits, by the type the function
+ * declares: an i32 extended by its sign; a u32 (a size_t, a DWORD) and a
+ * pointer by zeros, which is the whole value a Win64 caller of either reads.
+ *
+ * @param {string} returns @param {number} eax
+ */
+const wholeAnswer = (returns, eax)=>(returns === 'i32'
+    ? BigInt.asUintN(64, BigInt(eax | 0)) : BigInt(eax >>> 0));
+
 /** @param {number} a @param {number} b */
 const sameDouble = (a, b)=>Object.is(a, b) || Number.isNaN(a) && Number.isNaN(b);
 
@@ -339,10 +349,11 @@ export function equivalence(compiled, sources, model, long){
                     : [Number(BigInt.asUintN(32, bits))];
             });
             const answer = double.host(memory, trapWords, []);
-            // The trap answers as the bridge does: the dword extended by its sign, a
+            // The trap answers as the bridge does for the declared type: an i32
+            // extended by its sign, an unsigned dword and a pointer by zeros, a
             // double's or a float's answer in XMM0.
             return {
-                rax: BigInt.asUintN(64, BigInt(typeof answer === 'number' ? answer | 0 : 0)),
+                rax: typeof answer !== 'number' ? 0n : wholeAnswer(fn.returns, answer),
                 rsp: BigInt(STACK_64 + 8), kept, given, df,
                 data: memory.slice(DATA, DATA + data.length), handedOver: true,
                 ...typeof answer === 'number' ? {} : { xmm0: fn.returns === 'f32'
@@ -405,8 +416,8 @@ export function equivalence(compiled, sources, model, long){
         }
         else if (fn.returns !== 'void')
         {
-            assert.equal(x64.rax, BigInt.asUintN(64, BigInt(judge.eax | 0)),
-                `${at64}: RAX, EAX extended by its sign`);
+            assert.equal(x64.rax, wholeAnswer(fn.returns, judge.eax),
+                `${at64}: RAX, EAX extended as an ${fn.returns} is`);
         }
         const at = firstDifference(x64.data, judge.data);
         if (at >= 0)

@@ -27,7 +27,8 @@ export function D3DXVec2Normalize({ f32, setF32 }, out, v){ ... }
 - **Convention**: the tag names `cdecl`, `stdcall` or `thiscall`. A thiscall function's first
   parameter is `this`, which arrives in ECX.
 - **Types**: `i32`/`u32` (a stack slot, EAX as a result), `f64`, `f32`, `x87` (a double the
-  caller left on the x87 stack), `i64` (EDX:EAX), `void`.
+  caller left on the x87 stack), `i64` (EDX:EAX), `void`; and as a result `ptr`, a pointer: a
+  `u32` in the i386, the whole of RAX at 64 bits.
 - **Guest memory**: through the helpers taken from the first parameter: the loads `u8` `i8`
   `u16` `i16` `u32` `i32` `f32` `f64`, the stores `setU8` `setU16` `setU32` `setF32` `setF64`,
   `copyUp`/`copyDown`/`fill`, `call(fn, ...)` for a cdecl function pointer, and
@@ -59,8 +60,10 @@ the i386 one: `inguest.js` into `inguest.x64.js` (and so `inguest-math.js`, `ing
 `REFUSED` names each function with none and why.
 
 - **Convention**: the arguments in RCX, RDX, R8 and R9 and the stack past the 32 bytes of home
-  space, read as their low halves; the result in RAX, an `i32` or `u32` extended by its sign as
-  the bridge's 64-bit trap answers one. The tag's convention means nothing at 64 bits.
+  space, read as their low halves; the result in RAX, an `i32` extended by its sign, a `u32`
+  (a `size_t`, a `DWORD`) and a `ptr` by zeros - the whole value a Win64 caller of a `size_t`
+  or a pointer reads; the bridge's 64-bit trap answers a handed-over call by the same declared
+  type. The tag's convention means nothing at 64 bits.
 - **Registers**: the same 32-bit integers, over RAX..RDI and R8..R11 (named through a REX
   prefix). Variables take RDX and R8 to R11 first, which the callee may change, then the
   slots of the home space no argument holds, and only past those RBX, RSI, RDI or RBP, which

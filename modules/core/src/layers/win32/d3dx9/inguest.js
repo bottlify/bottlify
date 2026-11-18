@@ -24,6 +24,7 @@
 
 /** @typedef {import('../msvcrt/guest-code.js').Guest} Guest */
 /** @typedef {import('../msvcrt/guest-code.js').u32} u32 */
+/** @typedef {import('../msvcrt/guest-code.js').ptr} ptr */
 /** @typedef {import('../msvcrt/guest-code.js').f32} f32 */
 
 /** 1.0f's bits. */
@@ -34,7 +35,7 @@ const ONE = 0x3f800000;
  *
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {u32} a @param {u32} b
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXMatrixMultiply({ f32, setF32 }, out, a, b){
     const m00 = f32(a) * f32(b) + f32(a + 4) * f32(b + 16)
@@ -94,7 +95,7 @@ export function D3DXMatrixMultiply({ f32, setF32 }, out, a, b){
  *
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {u32} m
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXMatrixTranspose({ u32, setU32 }, out, m){
     const t0 = u32(m);
@@ -142,7 +143,7 @@ export function D3DXMatrixTranspose({ u32, setU32 }, out, m){
  *
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {u32} determinant @param {u32} m
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXMatrixInverse({ f32, setF32 }, out, determinant, m){
     const e0 = f32(m);
@@ -228,7 +229,7 @@ export function D3DXMatrixInverse({ f32, setF32 }, out, determinant, m){
  *
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {u32} x @param {u32} y @param {u32} z
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXMatrixTranslation({ setU32 }, out, x, y, z){
     setU32(out, ONE);
@@ -256,7 +257,7 @@ export function D3DXMatrixTranslation({ setU32 }, out, x, y, z){
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {f32} w @param {f32} h @param {f32} zn
  * @param {f32} zf
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXMatrixOrthoLH({ setU32, setF32 }, out, w, h, zn, zf){
     setF32(out, 2 / w);
@@ -284,7 +285,7 @@ export function D3DXMatrixOrthoLH({ setU32, setF32 }, out, w, h, zn, zf){
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {f32} w @param {f32} h @param {f32} zn
  * @param {f32} zf
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXMatrixPerspectiveLH({ setU32, setF32 }, out, w, h, zn, zf){
     setF32(out, 2 * zn / w);
@@ -311,7 +312,7 @@ export function D3DXMatrixPerspectiveLH({ setU32, setF32 }, out, w, h, zn, zf){
  *
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {u32} v @param {u32} m
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXVec4Transform({ f32, setF32 }, out, v, m){
     const vx = f32(v);
@@ -339,7 +340,7 @@ export function D3DXVec4Transform({ f32, setF32 }, out, v, m){
  *
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {u32} v @param {u32} m
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXVec3Transform({ f32, setF32 }, out, v, m){
     const vx = f32(v);
@@ -366,7 +367,7 @@ export function D3DXVec3Transform({ f32, setF32 }, out, v, m){
  *
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {u32} v @param {u32} m
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXVec3TransformNormal({ f32, setF32 }, out, v, m){
     const vx = f32(v);
@@ -391,7 +392,7 @@ export function D3DXVec3TransformNormal({ f32, setF32 }, out, v, m){
  *
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {u32} v @param {u32} m
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXVec3TransformCoord({ f32, setF32 }, out, v, m){
     const vx = f32(v);
@@ -420,7 +421,7 @@ export function D3DXVec3TransformCoord({ f32, setF32 }, out, v, m){
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {u32} outStride @param {u32} v
  * @param {u32} vStride @param {u32} m @param {u32} n
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXVec3TransformCoordArray({ f32, setF32 }, out, outStride, v, vStride, m, n){
     const e0 = f32(m);
@@ -468,7 +469,7 @@ export function D3DXVec3TransformCoordArray({ f32, setF32 }, out, outStride, v, 
  *
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {u32} v
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXVec3Normalize({ f32, setF32 }, out, v){
     const x = f32(v);

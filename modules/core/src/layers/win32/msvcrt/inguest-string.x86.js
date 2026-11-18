@@ -12,7 +12,7 @@ export const COMPILED = /** @type {const} */ ({
     stringConstruct: {
         convention: 'thiscall',
         params: ['u32'],
-        returns: 'u32',
+        returns: 'ptr',
         uses: ['setU8', 'setU32', 'pointerBytes'],
         code: Uint8Array.of(
             0x58, 0x51, 0x50, 0x8b, 0x54, 0x24, 0x04, 0xc7, 0x42, 0x18, 0x0f, 0x00,
@@ -23,7 +23,7 @@ export const COMPILED = /** @type {const} */ ({
     stringFromText: {
         convention: 'thiscall',
         params: ['u32', 'u32'],
-        returns: 'u32',
+        returns: 'ptr',
         uses: ['u8', 'setU32', 'copyUp', 'host', 'pointerBytes'],
         host: 115,
         code: Uint8Array.of(
@@ -42,7 +42,7 @@ export const COMPILED = /** @type {const} */ ({
     stringCopy: {
         convention: 'thiscall',
         params: ['u32', 'u32'],
-        returns: 'u32',
+        returns: 'ptr',
         uses: ['u32', 'setU32', 'copyUp', 'host', 'pointerBytes'],
         host: 136,
         code: Uint8Array.of(
@@ -76,7 +76,7 @@ export const COMPILED = /** @type {const} */ ({
     stringText: {
         convention: 'thiscall',
         params: ['u32'],
-        returns: 'u32',
+        returns: 'ptr',
         uses: ['u32', 'pointerBytes'],
         code: Uint8Array.of(
             0x58, 0x51, 0x50, 0x8b, 0x54, 0x24, 0x04, 0x8b, 0x42, 0x18, 0x83, 0xf8,
@@ -87,7 +87,7 @@ export const COMPILED = /** @type {const} */ ({
     stringAt: {
         convention: 'thiscall',
         params: ['u32', 'u32'],
-        returns: 'u32',
+        returns: 'ptr',
         uses: ['u32', 'pointerBytes'],
         code: Uint8Array.of(
             0x58, 0x51, 0x50, 0x83, 0xec, 0x04, 0x8b, 0x54, 0x24, 0x08, 0x8b, 0x42,
@@ -109,7 +109,7 @@ export const COMPILED = /** @type {const} */ ({
     stringAppendChar: {
         convention: 'thiscall',
         params: ['u32', 'u32'],
-        returns: 'u32',
+        returns: 'ptr',
         uses: ['u32', 'setU8', 'setU32', 'host', 'pointerBytes'],
         host: 75,
         code: Uint8Array.of(

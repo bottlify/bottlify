@@ -21,6 +21,7 @@
 /** @typedef {import('./guest-code.js').Guest} Guest */
 /** @typedef {import('./guest-code.js').i32} i32 */
 /** @typedef {import('./guest-code.js').u32} u32 */
+/** @typedef {import('./guest-code.js').ptr} ptr */
 /** @typedef {import('./guest-code.js').f64} f64 */
 /** @typedef {import('./guest-code.js').f32} f32 */
 /** @typedef {import('./guest-code.js').x87} x87 */
@@ -703,7 +704,7 @@ export function atoi({ u8 }, text){
  * @guestCode cdecl
  * @param {Guest} guest @param {u32} key @param {u32} base @param {u32} num @param {u32} width
  * @param {u32} compare
- * @returns {u32}
+ * @returns {ptr}
  */
 export function bsearch({ call }, key, base, num, width, compare){
     let low = 0;
@@ -740,7 +741,7 @@ export function bsearch({ call }, key, base, num, width, compare){
  *
  * @guestCode cdecl
  * @param {Guest} guest @param {u32} destination @param {u32} source @param {u32} count
- * @returns {u32}
+ * @returns {ptr}
  */
 export function memmove({ copyUp, copyDown }, destination, source, count){
     if ((destination - source) >>> 0 < count)
@@ -759,7 +760,7 @@ export function memmove({ copyUp, copyDown }, destination, source, count){
  *
  * @guestCode cdecl
  * @param {Guest} guest @param {u32} destination @param {u32} value @param {u32} count
- * @returns {u32}
+ * @returns {ptr}
  */
 export function memset({ fill }, destination, value, count){
     fill(destination, value, count);
@@ -822,7 +823,7 @@ export function strlen({ u8 }, text){
  *
  * @guestCode cdecl
  * @param {Guest} guest @param {u32} destination @param {u32} source
- * @returns {u32}
+ * @returns {ptr}
  */
 export function strcpy({ u8, copyUp, copyDown }, destination, source){
     /** @type {u32} */
@@ -1105,7 +1106,7 @@ export function fabs(x){
  *
  * @guestCode cdecl
  * @param {Guest} guest @param {u32} text @param {u32} c
- * @returns {u32}
+ * @returns {ptr}
  */
 export function strchr({ u8 }, text, c){
     const wanted = c & 0xff;
@@ -1130,7 +1131,7 @@ export function strchr({ u8 }, text, c){
  *
  * @guestCode cdecl
  * @param {Guest} guest @param {u32} text @param {u32} c
- * @returns {u32}
+ * @returns {ptr}
  */
 export function strrchr({ u8 }, text, c){
     const wanted = c & 0xff;
@@ -1158,7 +1159,7 @@ export function strrchr({ u8 }, text, c){
  *
  * @guestCode cdecl
  * @param {Guest} guest @param {u32} haystack @param {u32} needle
- * @returns {u32}
+ * @returns {ptr}
  */
 export function strstr({ u8 }, haystack, needle){
     for (/** @type {u32} */ let at = haystack; ; at++)
@@ -1188,7 +1189,7 @@ export function strstr({ u8 }, haystack, needle){
  *
  * @guestCode cdecl
  * @param {Guest} guest @param {u32} destination @param {u32} source
- * @returns {u32}
+ * @returns {ptr}
  */
 export function strcat({ u8, copyUp, copyDown }, destination, source){
     /** @type {u32} */
@@ -1223,7 +1224,7 @@ export function strcat({ u8, copyUp, copyDown }, destination, source){
  *
  * @guestCode cdecl
  * @param {Guest} guest @param {u32} destination @param {u32} source @param {u32} count
- * @returns {u32}
+ * @returns {ptr}
  */
 export function strncpy({ u8, copyUp, copyDown, fill }, destination, source, count){
     /** @type {u32} */
@@ -1251,7 +1252,7 @@ export function strncpy({ u8, copyUp, copyDown, fill }, destination, source, cou
  *
  * @guestCode cdecl
  * @param {Guest} guest @param {u32} text
- * @returns {u32}
+ * @returns {ptr}
  */
 export function _strlwr({ u8, setU8 }, text){
     for (/** @type {u32} */ let at = text; ; at++)
@@ -1273,7 +1274,7 @@ export function _strlwr({ u8, setU8 }, text){
  *
  * @guestCode cdecl
  * @param {Guest} guest @param {u32} text
- * @returns {u32}
+ * @returns {ptr}
  */
 export function _strupr({ u8, setU8 }, text){
     for (/** @type {u32} */ let at = text; ; at++)
@@ -1339,7 +1340,7 @@ export function wcscmp({ u16 }, left, right){
  *
  * @guestCode cdecl
  * @param {Guest} guest @param {u32} destination @param {u32} source
- * @returns {u32}
+ * @returns {ptr}
  */
 export function wcscpy({ u16, copyUp, copyDown }, destination, source){
     /** @type {u32} */
@@ -1410,7 +1411,7 @@ export function _mbclen({ u8, host }, at){
  *
  * @guestCode cdecl
  * @param {Guest} guest @param {u32} at
- * @returns {u32}
+ * @returns {ptr}
  */
 export function _mbsinc({ u8, host }, at){
     if (u8(at) >= 0x80)
@@ -1428,7 +1429,7 @@ export function _mbsinc({ u8, host }, at){
  *
  * @guestCode cdecl
  * @param {Guest} guest @param {u32} start @param {u32} at
- * @returns {u32}
+ * @returns {ptr}
  */
 export function _mbsdec({ u8, host }, start, at){
     if (at <= start)
@@ -1463,7 +1464,7 @@ export function _ismbblead({ host }, c){
  *
  * @guestCode cdecl
  * @param {Guest} guest @param {u32} text @param {u32} c
- * @returns {u32}
+ * @returns {ptr}
  */
 export function _mbschr({ u8, host }, text, c){
     if (c > 0x7f)
@@ -1493,7 +1494,7 @@ export function _mbschr({ u8, host }, text, c){
  *
  * @guestCode cdecl
  * @param {Guest} guest @param {u32} text @param {u32} c
- * @returns {u32}
+ * @returns {ptr}
  */
 export function _mbsrchr({ u8, host }, text, c){
     if (c > 0x7f)
@@ -1528,7 +1529,7 @@ export function _mbsrchr({ u8, host }, text, c){
  *
  * @guestCode cdecl
  * @param {Guest} guest @param {u32} haystack @param {u32} needle
- * @returns {u32}
+ * @returns {ptr}
  */
 export function _mbsstr({ u8, host }, haystack, needle){
     for (/** @type {u32} */ let at = haystack; ; at++)
@@ -1691,7 +1692,7 @@ export function _mbsnicmp({ u8, host }, left, right, count){
  *
  * @guestCode cdecl
  * @param {Guest} guest @param {u32} destination @param {u32} source @param {u32} count
- * @returns {u32}
+ * @returns {ptr}
  */
 export function _mbsncpy({ u8, copyUp, copyDown, fill, host }, destination, source, count){
     if (count === 0)
@@ -1736,7 +1737,7 @@ export function _mbsncpy({ u8, copyUp, copyDown, fill, host }, destination, sour
  *
  * @guestCode cdecl
  * @param {Guest} guest @param {u32} text
- * @returns {u32}
+ * @returns {ptr}
  */
 export function _mbslwr({ u8, setU8, host }, text){
     for (/** @type {u32} */ let at = text; u8(at) !== 0; at++)
@@ -1765,7 +1766,7 @@ export function _mbslwr({ u8, setU8, host }, text){
  *
  * @guestCode cdecl
  * @param {Guest} guest @param {u32} text
- * @returns {u32}
+ * @returns {ptr}
  */
 export function _mbsupr({ u8, setU8, host }, text){
     for (/** @type {u32} */ let at = text; u8(at) !== 0; at++)
@@ -1799,7 +1800,7 @@ export function _mbsupr({ u8, setU8, host }, text){
  *
  * @guestCode cdecl
  * @param {u32} pointer
- * @returns {u32}
+ * @returns {ptr}
  */
 export function encodePointer(pointer){
     return pointer;
@@ -1809,7 +1810,7 @@ export function encodePointer(pointer){
  * void *_encoded_null(void) -- NULL as `_encode_pointer` encodes it.
  *
  * @guestCode cdecl
- * @returns {u32}
+ * @returns {ptr}
  */
 export function encodedNull(){
     return 0;
@@ -1879,7 +1880,7 @@ export function strcspn({ u8 }, text, reject){
  *
  * @guestCode cdecl
  * @param {Guest} guest @param {u32} text @param {u32} accept
- * @returns {u32}
+ * @returns {ptr}
  */
 export function strpbrk({ u8 }, text, accept){
     for (/** @type {u32} */ let at = text; ; at++)
@@ -2158,7 +2159,7 @@ export function fmodf({ host }, x, y){
  *
  * @guestCode cdecl
  * @param {Guest} guest @param {u32} buffer @param {u32} value @param {u32} count
- * @returns {u32}
+ * @returns {ptr}
  */
 export function memchr({ u8 }, buffer, value, count){
     const wanted = value & 0xff;
@@ -2181,7 +2182,7 @@ export function memchr({ u8 }, buffer, value, count){
  *
  * @guestCode cdecl
  * @param {Guest} guest @param {u32} destination @param {u32} source @param {u32} count
- * @returns {u32}
+ * @returns {ptr}
  */
 export function strncat({ u8, setU8, copyUp, copyDown }, destination, source, count){
     /** @type {u32} */
@@ -2215,7 +2216,7 @@ export function strncat({ u8, setU8, copyUp, copyDown }, destination, source, co
  *
  * @guestCode cdecl
  * @param {Guest} guest @param {u32} text @param {u32} c
- * @returns {u32}
+ * @returns {ptr}
  */
 export function wcschr({ u16 }, text, c){
     const wanted = c & 0xffff;
@@ -2240,7 +2241,7 @@ export function wcschr({ u16 }, text, c){
  *
  * @guestCode cdecl
  * @param {Guest} guest @param {u32} text @param {u32} c
- * @returns {u32}
+ * @returns {ptr}
  */
 export function wcsrchr({ u16 }, text, c){
     const wanted = c & 0xffff;
@@ -2295,7 +2296,7 @@ export function wcsncmp({ u16 }, left, right, count){
  *
  * @guestCode cdecl
  * @param {Guest} guest @param {u32} destination @param {u32} source
- * @returns {u32}
+ * @returns {ptr}
  */
 export function wcscat({ u16, copyUp, copyDown }, destination, source){
     /** @type {u32} */
@@ -2329,7 +2330,7 @@ export function wcscat({ u16, copyUp, copyDown }, destination, source){
  *
  * @guestCode cdecl
  * @param {Guest} guest @param {u32} destination @param {u32} source @param {u32} count
- * @returns {u32}
+ * @returns {ptr}
  */
 export function wcsncat({ u16, setU16, copyUp, copyDown }, destination, source, count){
     /** @type {u32} */
@@ -2364,7 +2365,7 @@ export function wcsncat({ u16, setU16, copyUp, copyDown }, destination, source, 
  *
  * @guestCode cdecl
  * @param {Guest} guest @param {u32} haystack @param {u32} needle
- * @returns {u32}
+ * @returns {ptr}
  */
 export function wcsstr({ u16 }, haystack, needle){
     for (/** @type {u32} */ let at = haystack; ; at += 2)
@@ -2449,7 +2450,7 @@ export function wcscspn({ u16 }, text, reject){
  *
  * @guestCode cdecl
  * @param {Guest} guest @param {u32} text @param {u32} accept
- * @returns {u32}
+ * @returns {ptr}
  */
 export function wcspbrk({ u16 }, text, accept){
     for (/** @type {u32} */ let at = text; ; at += 2)
@@ -2837,7 +2838,7 @@ const rendersRadix = (/** @type {number} */ radix)=>(radix === 10 || radix === 2
  * @guestCode cdecl
  * @param {Pick<Guest, 'setU8' | 'setU16'>} guest @param {u32} value @param {u32} buffer
  * @param {i32} radix @param {i32} signed @param {i32} wide
- * @returns {u32}
+ * @returns {ptr}
  */
 export function radixText({ setU8, setU16 }, value, buffer, radix, signed, wide){
     const step = wide !== 0 ? 2 : 1;
@@ -2927,7 +2928,7 @@ export function radixText({ setU8, setU16 }, value, buffer, radix, signed, wide)
  *
  * @guestCode cdecl
  * @param {Guest} guest @param {u32} value @param {u32} buffer @param {i32} radix
- * @returns {u32}
+ * @returns {ptr}
  */
 export function _itoa({ setU8, setU16, host }, value, buffer, radix){
     if (rendersRadix(radix) === 0)
@@ -2943,7 +2944,7 @@ export function _itoa({ setU8, setU16, host }, value, buffer, radix){
  *
  * @guestCode cdecl
  * @param {Guest} guest @param {u32} value @param {u32} buffer @param {i32} radix
- * @returns {u32}
+ * @returns {ptr}
  */
 export function _ultoa({ setU8, setU16, host }, value, buffer, radix){
     if (rendersRadix(radix) === 0)
@@ -2959,7 +2960,7 @@ export function _ultoa({ setU8, setU16, host }, value, buffer, radix){
  *
  * @guestCode cdecl
  * @param {Guest} guest @param {u32} value @param {u32} buffer @param {i32} radix
- * @returns {u32}
+ * @returns {ptr}
  */
 export function _itow({ setU8, setU16, host }, value, buffer, radix){
     if (rendersRadix(radix) === 0)
@@ -2974,7 +2975,7 @@ export function _itow({ setU8, setU16, host }, value, buffer, radix){
  *
  * @guestCode cdecl
  * @param {Guest} guest @param {u32} value @param {u32} buffer @param {i32} radix
- * @returns {u32}
+ * @returns {ptr}
  */
 export function _ultow({ setU8, setU16, host }, value, buffer, radix){
     if (rendersRadix(radix) === 0)
