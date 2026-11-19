@@ -133,6 +133,7 @@ import { createIphlpapiFunctions } from './iphlpapi/functions.js';
 import { createCrypt32Functions } from './crypt32/functions.js';
 import { createAdvpackFunctions } from './advpack/functions.js';
 import { SFC_ORDINALS, createSfcFunctions } from './sfc/functions.js';
+import { OLEDLG_ORDINALS, createOledlgFunctions } from './oledlg/functions.js';
 import { createFaultrepFunctions } from './faultrep/functions.js';
 import { MSCOREE_ORDINALS, createMscoreeFunctions } from './mscoree/functions.js';
 import { createHttpapiFunctions } from './httpapi/functions.js';
@@ -292,7 +293,8 @@ const CDECL_LIBRARIES =
  * of the universal runtime loads ucrtbase and never msvcrt, and its standard
  * streams were records at address zero.
  */
-const CRT_IMAGES = ['msvcrt.dll', 'ucrtbase.dll', 'MSVCR80.dll', 'MSVCR71.dll', 'CRTDLL.dll'];
+const CRT_IMAGES = ['msvcrt.dll', 'ucrtbase.dll', 'MSVCR80.dll', 'MSVCR90.dll', 'MSVCR71.dll',
+    'CRTDLL.dll'];
 
 /**
  * The runtimes that export each 64-bit language handler the dispatcher reads
@@ -310,6 +312,7 @@ const C_HANDLERS = [
 const CXX_HANDLERS3 = [
     ['msvcrt.dll', ['__CxxFrameHandler', '__CxxFrameHandler2', '__CxxFrameHandler3']],
     ['MSVCR80.dll', ['__CxxFrameHandler', '__CxxFrameHandler2', '__CxxFrameHandler3']],
+    ['MSVCR90.dll', ['__CxxFrameHandler', '__CxxFrameHandler2', '__CxxFrameHandler3']],
     ['VCRUNTIME140.dll', ['__CxxFrameHandler', '__CxxFrameHandler2', '__CxxFrameHandler3']],
 ];
 /** @type {[string, string[]][]} */
@@ -5042,6 +5045,9 @@ export function createWin32Module(){
                 'msasn1.dll': {},
 
                 'SFC.dll': createSfcFunctions({ writeMemory, readCString, files: volume }),
+                // The OLE dialogs MFC's library imports by number, embedding or not.
+                'OLEDLG.dll': createOledlgFunctions({ readMemory, writeMemory, pointerSize,
+                    user32: ()=>libraries['USER32.dll'], lent, divergence: config?.divergence }),
                 'faultrep.dll': createFaultrepFunctions({ reported: ()=>{
                     faultReported = true;
                 } }),
@@ -6868,6 +6874,18 @@ export function createWin32Module(){
                     __CxxFrameHandler4: cxx64.table.__CxxFrameHandler4,
                 };
             }
+            // Visual C++ 2008's: the 2005 runtime's table under its own name,
+            // with its own invalid-parameter handler, and the C++ library over
+            // it, whose string is laid out as 2005's. A program whose setup put
+            // no copy in the bottle finds them here, as on a Windows the
+            // redistributable was installed on.
+            libraries['MSVCR90.dll'] = createMsvcr80Functions(libraries['msvcrt.dll'],
+                { readMemory, writeMemory, pointerSize, library: 'MSVCR90.dll',
+                    callGuest: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
+                    currentThread: ()=>kernel.currentThread() });
+            libraries['MSVCP90.dll'] = createMsvcp80Functions(libraries['MSVCR90.dll'],
+                { readMemory, writeMemory, fillMemory, pointerSize,
+                    ...floatResults ? { fpu: floatResults } : {} });
             libraries['MSVCR71.dll'] = { ...libraries['msvcrt.dll'],
                 __CppXcptFilter: libraries['msvcrt.dll']._XcptFilter };
             libraries['MSVCP71.dll'] = createMsvcp80Functions(libraries['MSVCR71.dll'],
@@ -7199,6 +7217,7 @@ export function createWin32Module(){
                     'COMCTL32.dll': COMCTL32_ORDINALS,
                     'WINMM.dll': WINMM_ORDINALS,
                     'SFC.dll': SFC_ORDINALS,
+                    'OLEDLG.dll': OLEDLG_ORDINALS,
                     'ODBC32.dll': ODBC32_ORDINALS,
                     'MSI.dll': MSI_ORDINALS,
                     'CABINET.dll': CABINET_ORDINALS,

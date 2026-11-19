@@ -34,7 +34,8 @@ test('an x86-64 console program prints its line and exits with 0', { timeout: 12
     // or a variable -- but these, i386 alone: a new export that is i386
     // guest code and nothing else shows here, before a program calls it.
     const app64 = app.diagnostics().find((/** @type {any} */ layer)=>layer.name === 'app');
-    const crt = ['msvcrt.dll', 'CRTDLL.dll', 'MSVCR71.dll', 'MSVCR80.dll', 'ucrtbase.dll'];
+    const crt = ['msvcrt.dll', 'CRTDLL.dll', 'MSVCR71.dll', 'MSVCR80.dll', 'MSVCR90.dll',
+        'ucrtbase.dll'];
     assert.deepEqual([...app64.metrics.leftOutAt64].sort(), [
         ...crt.flatMap(dll=>[`${dll}!_EH_prolog`, `${dll}!_chkesp`]),
         'ntdll.dll!RtlActivateActivationContextUnsafeFast',

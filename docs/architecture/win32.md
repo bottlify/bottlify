@@ -189,6 +189,10 @@ flowchart TD
   runtimes the engine stands in for whoever's copy it is (`DSETUP.dll`, `MSVCR80.dll`,
   `Mp3dec.asi` for sound and `ijl15.dll` for media), and the C runtime's API sets
   (`api-ms-win-crt-*`), which are `ucrtbase.dll` under the names they are imported by.
+- **Ours when the bottle has no copy:** the other runtimes the engine has a table for - Visual
+  C++ 2008's `MSVCR90.dll` and `MSVCP90.dll`, 2003's `MSVCR71.dll` and `MSVCP71.dll` - and the
+  libraries Windows ships that a setup never installs, among them `OLEDLG.dll`, which every MFC
+  program imports: its dialogs are not shown and answer Cancel, each said as a loss.
 - **The C runtimes share msvcrt's functions** and differ where Windows' do: an argument a function
   of `MSVCR80.dll` or `ucrtbase.dll` refuses calls that runtime's invalid-parameter handler, or
   with none set ends the process with 0xC0000417 and an error naming the call; msvcrt.dll answers

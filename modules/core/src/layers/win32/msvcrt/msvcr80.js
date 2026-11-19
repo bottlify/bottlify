@@ -39,6 +39,8 @@ const TRUNCATE = 0xffffffff;
  * @property {(entry: number, args: number[], thread?: unknown) => any} [callGuest]
  *           What calls the program's invalid-parameter handler.
  * @property {() => unknown} [currentThread]
+ * @property {string} [library]  The DLL's name, MSVCR80.dll unless said: the
+ *           2008 runtime, MSVCR90.dll, is the same table under its own name.
  */
 
 /**
@@ -65,7 +67,7 @@ export function createMsvcr80Functions(crt, host){
     // This runtime's own handler, apart from the universal runtime's: each
     // DLL keeps the one its own `_set_invalid_parameter_handler` was given.
     const invalid = createInvalidParameterRuntime({
-        library: 'MSVCR80.dll',
+        library: host.library ?? 'MSVCR80.dll',
         callGuest: host.callGuest,
         currentThread: host.currentThread,
         exitProcess: seam?.exitProcess,
@@ -386,7 +388,7 @@ export function createMsvcr80Functions(crt, host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: args=>{
-                seam?.report?.('MSVCR80.dll', `_invoke_watson(${args.map(value=>
+                seam?.report?.(host.library ?? 'MSVCR80.dll', `_invoke_watson(${args.map(value=>
                     `0x${(value >>> 0).toString(16)}`).join(', ')}): the process ends (0xC0000417)`,
                 'loss');
                 return seam?.exitProcess?.(INVALID_CRUNTIME_PARAMETER) ?? 0;
