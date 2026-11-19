@@ -2536,7 +2536,7 @@ before reading a short message it wrote would wait for ever. So a 0 is the defau
 an anonymous pipe has; GetNamedPipeInfo still answers the 0 that was asked. Revisit when a
 measurement on Windows shows what a 0 holds. *2026-11-19.*
 
-**A274. The address space outside a process's arena answers MEM_RESERVE, never MEM_FREE.** On
+**A274. A page of the arena nothing holds answers MEM_RESERVE, never MEM_FREE.** On
 Windows the page after a loaded image, or any page no allocation holds, is free and VirtualQuery
 answers MEM_FREE. Here a process's memory is one arena the engine reserves at its start, and every
 address in it that no allocation, view or image holds is still the arena's, so VirtualQuery answers
