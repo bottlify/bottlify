@@ -2350,6 +2350,81 @@ test('NtCreateFile names what is missing, and takes only object names', ()=>{
         'and its handle closes as any other');
 });
 
+test('NtCreateFile checks its options before the name, and a name before the volume', ()=>{
+    const { fns, memory, files } = setup();
+    const native = /** @type {any} */ (fns.CreateFileW).natives.NtCreateFile;
+    const SYNCHRONIZE = 0x100000;
+    const FILE_SUPERSEDE = 0;
+    const FILE_OVERWRITE_IF = 5;
+    const FILE_SYNCHRONOUS_IO_NONALERT = 0x20;
+    /**
+     * @param {string} name @param {number} access @param {number} disposition
+     * @param {number} options
+     */
+    const open = (name, access, disposition, options)=>
+        native.handler([NT_HANDLE, access, objectAttributes(memory, name), NT_STATUS,
+            0, 0, 7, disposition, options, 0, 0]) >>> 0;
+
+    assert.equal(open('\\SystemRoot\\nowhere', GENERIC_READ, FILE_OPEN,
+        FILE_SYNCHRONOUS_IO_NONALERT), 0xc000000d,
+    'synchronous I/O without SYNCHRONIZE asked: refused before the name is looked for');
+    assert.equal(open('\\??\\C:\\GAME', GENERIC_READ | SYNCHRONIZE, FILE_SUPERSEDE,
+        FILE_DIRECTORY_FILE), 0xc000000d, 'a directory is only opened or made');
+    assert.equal(open('\\??\\C:\\GAME', GENERIC_READ, FILE_OVERWRITE_IF, 0), 0xc0000022,
+        'nor is one emptied as a file');
+    for (const name of ['\\??\\C:\\GAME\\a?b', '\\??\\C:\\GAME\\a|b', '\\??\\', '\\\\?\\'])
+    {
+        assert.equal(open(name, GENERIC_READ | SYNCHRONIZE, FILE_CREATE, FILE_DIRECTORY_FILE),
+            0xc0000033, `${name}: STATUS_OBJECT_NAME_INVALID`);
+    }
+    assert.equal(files.stat('C:\\GAME\\a?b')?.exists ?? false, false, 'nothing made');
+
+    // A directory has no bytes: reading it is no request its file system takes.
+    assert.equal(open('\\??\\C:\\GAME', GENERIC_READ | SYNCHRONIZE, FILE_OPEN,
+        FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT), 0);
+    const read = /** @type {any} */ (fns.CreateFileW).natives.NtReadFile;
+    assert.equal(read.handler([memory.dword(NT_HANDLE), 0, 0, 0, 0x300, 0x400, 4, 0, 0]) >>> 0,
+        0xc0000010, 'STATUS_INVALID_DEVICE_REQUEST');
+});
+
+test('a handle keeps the I/O mode it was opened in, and an asynchronous one has no pointer',
+    ()=>{
+        const { fns, memory, files } = setup();
+        const native = /** @type {any} */ (fns.CreateFileW).natives;
+        const SYNCHRONIZE = 0x100000;
+        files.put('C:\\GAME\\M.DAT', 'abcdef');
+        /** @param {number} options */
+        const open = options=>{
+            assert.equal(native.NtCreateFile.handler([NT_HANDLE, GENERIC_READ | GENERIC_WRITE
+                | SYNCHRONIZE, objectAttributes(memory, '\\??\\C:\\GAME\\M.DAT'), NT_STATUS,
+            0, 0, 7, FILE_OPEN, options, 0, 0]), 0);
+            return memory.dword(NT_HANDLE);
+        };
+        /** @param {number} handle */
+        const mode = handle=>{
+            assert.equal(native.NtQueryInformationFile.handler([handle, 0x300, 0x400, 4, 16]), 0);
+            return memory.dword(0x400);
+        };
+        // FILE_WRITE_THROUGH, FILE_SEQUENTIAL_ONLY, FILE_SYNCHRONOUS_IO_ALERT kept;
+        // FILE_DELETE_ON_CLOSE and FILE_RANDOM_ACCESS act at the open and are gone.
+        assert.equal(mode(open(0x2 | 0x4 | 0x10 | 0x800)), 0x16);
+        assert.equal(mode(open(0)), 0, 'opened for asynchronous I/O');
+
+        const handle = open(0);
+        const write = native.NtWriteFile;
+        assert.equal(write.handler([handle, 0, 0, 0, 0x300, 0x500, 2, 0, 0]) >>> 0, 0xc000000d,
+            'an asynchronous request says where');
+        memory.putDword(0x600, 0xfffffffe);
+        memory.putDword(0x604, 0xffffffff);
+        assert.equal(write.handler([handle, 0, 0, 0, 0x300, 0x500, 2, 0x600, 0]) >>> 0,
+            0xc000000d, 'and the file pointer it has none of is no place');
+        memory.putDword(0x600, 2);
+        memory.putDword(0x604, 0);
+        assert.equal(write.handler([handle, 0, 0, 0, 0x300, 0x500, 2, 0x600, 0]), 0);
+        assert.equal(native.NtQueryInformationFile.handler([handle, 0x300, 0x400, 8, 14]), 0);
+        assert.equal(memory.dword(0x400), 0, 'FilePositionInformation: the pointer stays');
+    });
+
 const ERROR_SHARING_VIOLATION = 32;
 const ERROR_INVALID_NAME = 123;
 const ERROR_REQUEST_ABORTED = 1235;

@@ -401,6 +401,37 @@ const FILE_USE_FILE_POINTER_POSITION = 0xfffffffe;
 /** FILE_MODE_INFORMATION's bits a handle's mode may be set to. */
 const FILE_WRITE_THROUGH = 0x2;
 const FILE_SYNCHRONOUS_IO_ALERT = 0x10;
+/** The last of the open options FileModeInformation reports back. */
+const FILE_NO_INTERMEDIATE_BUFFERING = 0x8;
+/** The open options a handle's mode keeps: the rest act at the open and are gone. */
+const FILE_MODE_OPTIONS = FILE_WRITE_THROUGH | FILE_SEQUENTIAL_ONLY
+    | FILE_NO_INTERMEDIATE_BUFFERING | FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT;
+/** CreateFile's flags that are the same hints: write-through and no buffering. */
+const FILE_FLAG_WRITE_THROUGH = 0x80000000;
+const FILE_FLAG_NO_BUFFERING = 0x20000000;
+
+/** The two modes a handle waits in for its I/O. */
+const SYNCHRONOUS_MODES = FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT;
+
+/**
+ * A file handle's FILE_MODE_INFORMATION: what its open kept, or, for one
+ * made without (a directory's), synchronous unless overlapped.
+ *
+ * @param {{ mode?: number, overlapped?: boolean }} file
+ */
+const modeOf = file=>file.mode ?? (file.overlapped ? 0 : FILE_SYNCHRONOUS_IO_NONALERT);
+
+/**
+ * The mode a handle CreateFile opens has: synchronous unless it asked for
+ * overlapped I/O, with the hints its flags give.
+ *
+ * @param {number} flags
+ */
+const modeOfFlags = flags=>(((flags >>> 0) & FILE_FLAG_OVERLAPPED) !== 0
+    ? 0 : FILE_SYNCHRONOUS_IO_NONALERT)
+    | (((flags >>> 0) & FILE_FLAG_SEQUENTIAL_SCAN) !== 0 ? FILE_SEQUENTIAL_ONLY : 0)
+    | (((flags >>> 0) & FILE_FLAG_WRITE_THROUGH) !== 0 ? FILE_WRITE_THROUGH : 0)
+    | (((flags >>> 0) & FILE_FLAG_NO_BUFFERING) !== 0 ? FILE_NO_INTERMEDIATE_BUFFERING : 0);
 const FILE_DISPOSITION_FLAG_DELETE = 0x1;
 /** The name goes as the handle that asked closes, other opens or not. */
 const FILE_DISPOSITION_FLAG_POSIX_SEMANTICS = 0x2;
@@ -2421,7 +2452,8 @@ export function createFileFunctions(host){
      * it closes, and a file whose deletion is pending.
      *
      * @param {string} path
-     * @param {{ access: number, share: number, disposition: number, flags: number }} request
+     * @param {{ access: number, share: number, disposition: number, flags: number,
+     *     mode?: number }} request
      * @param {number} [implied]  rights the handle is granted beside those asked
      * @returns {{ handle: number, existed: boolean } | { error: number, cannotDelete?: boolean,
      *     deletePending?: boolean }}
@@ -2438,12 +2470,13 @@ export function createFileFunctions(host){
      * `openPath` without the account of what it refused.
      *
      * @param {string} path
-     * @param {{ access: number, share: number, disposition: number, flags: number }} request
+     * @param {{ access: number, share: number, disposition: number, flags: number,
+     *     mode?: number }} request
      * @param {number} implied
      * @returns {{ handle: number, existed: boolean }
      *     | { error: number, cannotDelete?: boolean, deletePending?: boolean }}
      */
-    const openPathOnce = (path, { access, share, disposition, flags }, implied)=>{
+    const openPathOnce = (path, { access, share, disposition, flags, mode: kept }, implied)=>{
         const mode = openModes[disposition >>> 0];
         if (!mode)
         {
@@ -2549,14 +2582,14 @@ export function createFileFunctions(host){
         // A handle opened for overlapped I/O keeps no file pointer of its
         // own that a read or write moves: each says where in its OVERLAPPED.
         const overlapped = ((flags >>> 0) & FILE_FLAG_OVERLAPPED) !== 0;
-        const sequential = ((flags >>> 0) & FILE_FLAG_SEQUENTIAL_SCAN) !== 0;
         const writeAttributes = (rights
             & (GENERIC_WRITE | GENERIC_ALL | FILE_WRITE_ATTRIBUTES)) !== 0;
         // FILE_FLAG_DELETE_ON_CLOSE asks for DELETE with it, as CreateFile does.
         const handle = host.handles.open('file', {
             path, node, read, write, writeAttributes, position: 0,
+            mode: kept ?? modeOfFlags(flags),
             ...deleteOnClose ? { deleteOnClose } : {},
-            ...overlapped ? { overlapped } : {}, ...sequential ? { sequential } : {},
+            ...overlapped ? { overlapped } : {},
         }, mappedAccess('file', rights | implied | (deleteOnClose ? DELETE : 0)));
         return { handle, existed: exists };
     };
@@ -2690,6 +2723,18 @@ export function createFileFunctions(host){
      * @returns {{ path: string, status?: undefined } | { status: number, path?: undefined }}
      */
     const resolveNative = (root, name)=>{
+        // A name holding a character no file name may is refused as a name
+        // before any part of it is looked for; so is a namespace prefix
+        // with nothing after it.
+        const prefix = /^\\(\?\?|DosDevices|GLOBAL\?\?)\\/i.exec(name);
+        const names = prefix ? name.slice(prefix[0].length).replace(/^[A-Za-z]:/, '') : name;
+        const rooted = root !== 0 || name.startsWith(SEPARATOR);
+        const unnamable = [...names].some(character=>character < ' '
+            || '"*/:<>?|'.includes(character));
+        if ((rooted && unnamable) || (prefix && names === ''))
+        {
+            return { status: STATUS_OBJECT_NAME_INVALID };
+        }
         if (root !== 0)
         {
             const directory = object(root, 'directory');
@@ -2702,7 +2747,6 @@ export function createFileFunctions(host){
                 : { path: fullPath(name === '' ? directory.path
                     : `${directory.path.replace(/\\$/, '')}${SEPARATOR}${name}`) };
         }
-        const prefix = /^\\(\?\?|DosDevices|GLOBAL\?\?)\\/i.exec(name);
         if (!prefix)
         {
             return { status: name.startsWith(SEPARATOR)
@@ -2768,6 +2812,17 @@ export function createFileFunctions(host){
      */
     const ntCreateFile = ([out, access, attributes, status, , givenAttributes, share,
         disposition, options])=>{
+        // The I/O manager checks the options before it looks at the name:
+        // synchronous I/O waits on the file object, so it needs SYNCHRONIZE
+        // asked in so many words, and a directory is only opened or made.
+        const synchronous = ((options >>> 0)
+            & (FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT)) !== 0;
+        if ((synchronous && ((access >>> 0) & SYNCHRONIZE) === 0)
+            || (((options >>> 0) & FILE_DIRECTORY_FILE) !== 0
+                && ![FILE_CREATE, FILE_OPEN, FILE_OPEN_IF].includes(disposition >>> 0)))
+        {
+            return STATUS_INVALID_PARAMETER;
+        }
         // A pipe's name opens a client end, with the rights asked and no more.
         const given = givenName(attributes >>> 0);
         const pipeName = given && given.root === 0 && host.pipes ? pipeNameOf(given.name) : null;
@@ -2830,6 +2885,11 @@ export function createFileFunctions(host){
             {
                 return STATUS_OBJECT_NAME_COLLISION;
             }
+            // A directory is not replaced or emptied as a file is.
+            if (creation === CREATE_ALWAYS || creation === TRUNCATE_EXISTING)
+            {
+                return STATUS_ACCESS_DENIED;
+            }
             return opened(host.handles.open('directory',
                 { path, ...deleteOnClose ? { deleteOnClose } : {} }), FILE_OPENED);
         }
@@ -2843,6 +2903,10 @@ export function createFileFunctions(host){
             {
                 return STATUS_OBJECT_NAME_NOT_FOUND;
             }
+            if (wildcardName(path))
+            {
+                return STATUS_OBJECT_NAME_INVALID;
+            }
             if (!files.mkdir(path))
             {
                 return onReadOnlyMedia(path)
@@ -2854,6 +2918,7 @@ export function createFileFunctions(host){
         const result = openPath(path, {
             access, share, disposition: creation,
             flags: (givenAttributes >>> 0) | (deleteOnClose ? FILE_FLAG_DELETE_ON_CLOSE : 0),
+            mode: wanted & FILE_MODE_OPTIONS,
         });
         if ('error' in result)
         {
@@ -3145,9 +3210,7 @@ export function createFileFunctions(host){
             }
         };
         const name = String(file.path).replace(/^[A-Za-z]:/, '');
-        const mode = (file.overlapped ? 0 : FILE_SYNCHRONOUS_IO_NONALERT)
-            | (file.sequential ? FILE_SEQUENTIAL_ONLY : 0)
-            | (file.deleteOnClose ? FILE_DELETE_ON_CLOSE : 0);
+        const mode = modeOf(file);
         const access = handle !== 0 ? rightsOf(handle)
             : (file.read ? FILE_GENERIC_READ : 0) | (file.write ? FILE_GENERIC_WRITE : 0);
         // A file's number on its volume, GetFileInformationByHandle's: the
@@ -3486,9 +3549,12 @@ export function createFileFunctions(host){
                 }
             }
             const file = object(handle, 'file');
-            if (!file)
+            if (!file || file.directory)
             {
-                return STATUS_INVALID_HANDLE;
+                // A directory is a file object with no bytes: the file system
+                // has no read or write for it.
+                return file || object(handle, 'directory') ? STATUS_INVALID_DEVICE_REQUEST
+                    : STATUS_INVALID_HANDLE;
             }
             if (writing ? !writes(handle, file) : !reads(handle, file))
             {
@@ -3504,6 +3570,13 @@ export function createFileFunctions(host){
             {
                 return writing ? STATUS_INVALID_USER_BUFFER : STATUS_ACCESS_VIOLATION;
             }
+            // A handle opened for asynchronous I/O has no file pointer: each
+            // request says where, and the pointer it does not have stays put.
+            const asynchronous = (modeOf(file) & SYNCHRONOUS_MODES) === 0;
+            if (asynchronous && (offset >>> 0) === 0)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
             let at = file.position;
             if ((offset >>> 0) !== 0)
             {
@@ -3517,7 +3590,8 @@ export function createFileFunctions(host){
                 {
                     at = sizeOf(file);
                 }
-                else if (upper !== 0xffffffff || lower !== FILE_USE_FILE_POINTER_POSITION)
+                else if (asynchronous || upper !== 0xffffffff
+                    || lower !== FILE_USE_FILE_POINTER_POSITION)
                 {
                     // A negative offset is none of the two the call names
                     // (the end, the file pointer): refused before anything
@@ -3527,7 +3601,10 @@ export function createFileFunctions(host){
             }
             /** @param {number} done @param {number} code */
             const finish = (done, code)=>{
-                file.position = at + done;
+                if (!asynchronous)
+                {
+                    file.position = at + done;
+                }
                 writeDword(block >>> 0, code);
                 writeDword((block >>> 0) + 4, done);
                 return status(code);
@@ -4075,11 +4152,11 @@ export function createFileFunctions(host){
                             | FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT)) !== 0
                             || synchronous === (FILE_SYNCHRONOUS_IO_ALERT
                                 | FILE_SYNCHRONOUS_IO_NONALERT)
-                            || (synchronous !== 0) !== !file.overlapped)
+                            || (synchronous !== 0) !== (modeOf(file) & SYNCHRONOUS_MODES) > 0)
                         {
                             return settled(block >>> 0, STATUS_INVALID_PARAMETER, 0);
                         }
-                        file.sequential = (mode & FILE_SEQUENTIAL_ONLY) !== 0;
+                        file.mode = mode;
                         return settled(block >>> 0, STATUS_SUCCESS, 0);
                     }
                     case FILE_VALID_DATA_LENGTH_INFORMATION:
