@@ -5,7 +5,7 @@
  */
 
 import { STATUS } from './status.js';
-import { memoryBasicInformation } from '../kernel32/heap.js';
+import { RELEASE_PART, memoryBasicInformation } from '../kernel32/heap.js';
 
 /**
  * The native virtual-memory calls, over kernel32's.
@@ -358,30 +358,50 @@ export function createMemoryFunctions(host){
                 {
                     return free(base, size, size);
                 }
-                // The range is whole pages, the address rounded down. No size
-                // is the whole allocation, named by a page of its base; a
-                // release names all of it, by size or by none.
+                // The range is whole pages, the address rounded down, inside
+                // one allocation, else STATUS_UNABLE_TO_FREE_VM. No size is the
+                // whole allocation, named by a page of its base. A release of
+                // part of one splits it: what is left either side is an
+                // allocation of its own (Wine's ntdll virtual.c
+                // test_NtFreeVirtualMemory).
                 const page = (base & ~(PAGE - 1)) >>> 0;
                 const release = (type & MEM_RELEASE) !== 0;
-                if (size !== 0 && !release)
-                {
-                    return free(base, size, size);
-                }
+                const to = Math.ceil((base + size) / PAGE) * PAGE;
                 return after(allocationOf(process, page), whole=>{
                     if (!whole)
                     {
                         return STATUS_MEMORY_NOT_ALLOCATED;
                     }
-                    if (size === 0 && page !== whole.base)
+                    if (size === 0)
                     {
-                        return STATUS_FREE_VM_NOT_AT_BASE;
+                        return page !== whole.base ? STATUS_FREE_VM_NOT_AT_BASE
+                            : free(whole.base, 0, whole.span);
                     }
-                    if (size !== 0 && (page !== whole.base
-                        || Math.ceil((base + size) / PAGE) * PAGE - page !== whole.span))
+                    if (to > whole.base + whole.span)
                     {
                         return STATUS_UNABLE_TO_FREE_VM;
                     }
-                    return free(whole.base, 0, whole.span);
+                    if (!release)
+                    {
+                        return free(base, size, size);
+                    }
+                    if (page === whole.base && to - page === whole.span)
+                    {
+                        return free(whole.base, 0, whole.span);
+                    }
+                    const part = /** @type {any} */ (kernel32)[RELEASE_PART];
+                    if ((process >>> 0) !== CURRENT_PROCESS || !part)
+                    {
+                        host.divergence?.('NtFreeVirtualMemory',
+                            'part of another process\'s allocation is not released');
+                        return STATUS_UNABLE_TO_FREE_VM;
+                    }
+                    if (!part(page, to - page))
+                    {
+                        return STATUS_MEMORY_NOT_ALLOCATED;
+                    }
+                    report(baseOut, sizeOut, page, to);
+                    return STATUS.SUCCESS;
                 });
             },
         },

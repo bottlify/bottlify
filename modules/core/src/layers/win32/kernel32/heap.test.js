@@ -9,8 +9,8 @@ import { createWriteClock } from '../../cpu/internal/write-clock.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    GUARD_PAGES, IMAGE_MAPPED, TABLES, arenaRegion, createAddressIndex, createHeapAllocator,
-    createHeapFunctions,
+    GUARD_PAGES, IMAGE_MAPPED, RELEASE_PART, TABLES, arenaRegion, createAddressIndex,
+    createHeapAllocator, createHeapFunctions,
 } from './heap.js';
 
 const HEAP_ZERO_MEMORY = 0x8;
@@ -627,6 +627,34 @@ test('VirtualFree releases whole reservations only', ()=>{
     assert.equal(fns.VirtualFree.handler([address, PAGE_SIZE, MEM_DECOMMIT]), 1);
     assert.equal(fns.VirtualFree.handler([address, 0, MEM_RELEASE]), 1);
     assert.equal(fns.VirtualFree.handler([address, 0, MEM_RELEASE]), 0, 'released once, no more');
+});
+
+test('a release of part of an allocation splits it, what is left keeping its pages', ()=>{
+    // Wine's ntdll virtual.c test_NtFreeVirtualMemory: the pages released
+    // go, each side is an allocation of its own, committed, protected and
+    // holding what it held.
+    const { fns, host } = recording();
+    const base = fns.VirtualAlloc.handler([0, 0x10000, MEM_COMMIT | MEM_RESERVE, 0x04]);
+    assert.equal(fns.VirtualProtect.handler([base + 0x3000, PAGE_SIZE, 0x02, base]), 1);
+    host.bytes[base + 0x2000] = 0x5a;
+    const part = /** @type {any} */ (fns)[RELEASE_PART];
+    assert.equal(part(base + 0x1000, PAGE_SIZE), 1);
+    /** @param {number} address */
+    const query = address=>{
+        assert.equal(fns.VirtualQuery.handler([address, 0x100, MBI.SIZE]), MBI.SIZE);
+        const view = new DataView(host.bytes.buffer);
+        return [MBI.AllocationBase, MBI.RegionSize, MBI.State, MBI.Protect]
+            .map(field=>view.getUint32(0x100 + field, true));
+    };
+    assert.deepEqual(query(base), [base, PAGE_SIZE, 0x1000, 0x04], 'its own allocation');
+    assert.equal(query(base + 0x1000)[2], 0x10000, 'the released page is free');
+    assert.deepEqual(query(base + 0x2000), [base + 0x2000, PAGE_SIZE, 0x1000, 0x04]);
+    assert.deepEqual(query(base + 0x3000), [base + 0x2000, PAGE_SIZE, 0x1000, 0x02],
+        'its protection kept');
+    assert.equal(host.bytes[base + 0x2000], 0x5a, 'and what it held');
+    assert.equal(fns.VirtualFree.handler([base, 0, MEM_RELEASE]), 1, 'the first part, whole');
+    assert.equal(fns.VirtualFree.handler([base + 0x2000, 0, MEM_RELEASE]), 1, 'the rest');
+    assert.equal(part(base, 0x20000), 0, 'nothing allocated there any more');
 });
 
 test('VirtualAlloc at a chosen address only succeeds where we already have it', ()=>{
