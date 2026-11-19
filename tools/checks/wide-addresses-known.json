@@ -97,6 +97,7 @@
   "USER32.dll!GetKeyNameTextA": "faults at one base only: argument 3 a pointer: threw GUEST_ACCESS low, nothing high",
   "USER32.dll!GetKeyNameTextW": "faults at one base only: argument 3 a pointer: threw GUEST_ACCESS low, nothing high",
   "USER32.dll!GetMenuStringW": "faults at one base only: argument 4 a pointer: threw GUEST_ACCESS low, nothing high",
+  "USER32.dll!LookupIconIdFromDirectoryEx": "RAX differs: argument 1 a pointer: RAX 0x181 low, 0x0 high (the probe's string read as a directory of 0x7874 entries runs into the arena, whose stored pointers differ by the base)",
   "USER32.dll!RegisterClassA": "RAX differs: argument 1 a pointer: RAX 0x0 low, 0x10 high",
   "WSOCK32.dll!gethostname": "faults at one base only: argument 2 a pointer: threw GUEST_ACCESS low, nothing high",
   "WSOCK32.dll!htonl": "RAX differs: argument 1 a pointer: RAX 0x1100 low, 0x1190 high",

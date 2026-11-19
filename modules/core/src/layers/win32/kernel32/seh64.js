@@ -110,6 +110,58 @@ const CONTEXT_FULL64 = 0x0010000b;
 /** Frames a walk takes at most before the stack is taken as damaged. */
 const WALK_LIMIT = 4096;
 
+/** What the x64 runtime's longjmp names its unwind: the record's first parameter is the buffer. */
+export const STATUS_LONGJUMP = 0x80000026;
+
+/**
+ * The x64 runtime's _JUMP_BUFFER: the establisher frame setjmp was called
+ * with, the registers a callee keeps, where setjmp returns to and the stack
+ * as that return leaves it, the two control words, then XMM6 to XMM15.
+ */
+export const JUMP_BUFFER64 = Object.freeze({
+    FRAME: 0x00, RBX: 0x08, RSP: 0x10, RBP: 0x18, RSI: 0x20, RDI: 0x28,
+    R12: 0x30, R13: 0x38, R14: 0x40, R15: 0x48, RIP: 0x50,
+    MXCSR: 0x58, FPCSR: 0x5c, XMM6: 0x60, SIZE: 0x100,
+});
+
+/** The registers of a buffer by their number in a context: RBX, RSP, RBP, RSI, RDI, R12-R15. */
+const JUMP_REGISTERS = Object.freeze([
+    [3, JUMP_BUFFER64.RBX], [4, JUMP_BUFFER64.RSP], [5, JUMP_BUFFER64.RBP],
+    [6, JUMP_BUFFER64.RSI], [7, JUMP_BUFFER64.RDI], [12, JUMP_BUFFER64.R12],
+    [13, JUMP_BUFFER64.R13], [14, JUMP_BUFFER64.R14], [15, JUMP_BUFFER64.R15],
+]);
+
+/**
+ * `_setjmp` and `_setjmpex` of a 64-bit process as the guest runs them: a
+ * setjmp is stores of registers the caller already holds, and an interpreter
+ * sets one at every protected call - a script engine tens of them a frame,
+ * each a crossing into the host otherwise. The handler writes the same buffer
+ * and is the reference the code is gated against.
+ *
+ *     mov [rcx], rdx                      ; the frame
+ *     mov [rcx+8], rbx
+ *     lea rax, [rsp+8] ; mov [rcx+10h], rax
+ *     mov [rcx+18h], rbp ; ... rsi, rdi, r12-r15
+ *     mov rax, [rsp] ; mov [rcx+50h], rax ; the return address
+ *     stmxcsr [rcx+58h] ; fnstcw [rcx+5Ch]
+ *     movups [rcx+60h+16n], xmm6..xmm15
+ *     xor eax, eax ; ret
+ */
+export const SETJMP64_CODE = Uint8Array.from([
+    0x48, 0x89, 0x11,
+    0x48, 0x89, 0x59, 0x08,
+    0x48, 0x8d, 0x44, 0x24, 0x08, 0x48, 0x89, 0x41, 0x10,
+    0x48, 0x89, 0x69, 0x18, 0x48, 0x89, 0x71, 0x20, 0x48, 0x89, 0x79, 0x28,
+    0x4c, 0x89, 0x61, 0x30, 0x4c, 0x89, 0x69, 0x38,
+    0x4c, 0x89, 0x71, 0x40, 0x4c, 0x89, 0x79, 0x48,
+    0x48, 0x8b, 0x04, 0x24, 0x48, 0x89, 0x41, 0x50,
+    0x0f, 0xae, 0x59, 0x58, 0xd9, 0x79, 0x5c,
+    0x0f, 0x11, 0x71, 0x60, 0x0f, 0x11, 0x79, 0x70,
+    ...[0x81, 0x89, 0x91, 0x99, 0xa1, 0xa9, 0xb1, 0xb9].flatMap((modrm, index)=>
+        [0x44, 0x0f, 0x11, modrm, 0x80 + index * 16, 0, 0, 0]),
+    0x31, 0xc0, 0xc3,
+]);
+
 /**
  * How far below the point an exception was raised at its funclets start:
  * clear of the raising call's own frame, 16-aligned.
@@ -237,6 +289,8 @@ const LONG_NAMES = ['rax', 'rcx', 'rdx', 'rbx', 'rsp', 'rbp', 'rsi', 'rdi',
  *     long: { gpr: bigint[], xmm: Uint8Array, mxcsr: number } }) => any} continueAt
  *     Sends the thread on at a whole 64-bit context, abandoning the calls below.
  * @property {() => any} currentThread
+ * @property {() => number} [controlWord]  The x87's control word, which a setjmp keeps.
+ * @property {(word: number) => void} [setControlWord]  And a longjmp puts back.
  * @property {(thread: any, stack: number) => { rip: number, rsp: number } | null}
  *     [callbackCaller]  Where a routine the host called back returns to on the
  *     guest side: the call into the host that made the callback, by the stack
@@ -1000,6 +1054,61 @@ export function createSeh64(host){
     };
 
     /**
+     * `_setjmp`'s buffer, written from the registers its caller stands at.
+     *
+     * @param {number} buffer @param {number} frame  The caller's establisher
+     *     frame, or zero for a mark a longjmp takes without unwinding.
+     */
+    const setJump = (buffer, frame)=>{
+        const context = callerContext();
+        const head = new Uint8Array(JUMP_BUFFER64.FPCSR + 2);
+        const view = new DataView(head.buffer);
+        view.setBigUint64(JUMP_BUFFER64.FRAME, BigInt(frame), true);
+        for (const [register, at] of JUMP_REGISTERS)
+        {
+            view.setBigUint64(at, BigInt.asUintN(64, context.gpr[register]), true);
+        }
+        view.setBigUint64(JUMP_BUFFER64.RIP, BigInt(context.rip >>> 0), true);
+        view.setUint32(JUMP_BUFFER64.MXCSR, context.mxcsr >>> 0, true);
+        view.setUint16(JUMP_BUFFER64.FPCSR, host.controlWord?.() ?? 0x27f, true);
+        host.writeMemory(buffer, head);
+        host.writeMemory(buffer + JUMP_BUFFER64.XMM6, context.xmm.subarray(6 * 16, 16 * 16));
+        return 0;
+    };
+
+    /**
+     * `longjmp`: back to the mark with `value` as what setjmp answers there,
+     * one for a zero. A mark that kept its frame is reached by an unwind, so
+     * the `__finally` blocks and destructors between run first, as
+     * RtlUnwindEx does for STATUS_LONGJUMP; the registers are the buffer's
+     * either way.
+     *
+     * @param {number} buffer @param {number} value
+     */
+    const longJump = async(buffer, value)=>{
+        const bytes = host.readMemory(buffer, JUMP_BUFFER64.SIZE);
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        const frame = Number(view.getBigUint64(JUMP_BUFFER64.FRAME, true) & 0xffffffffn);
+        const rip = Number(view.getBigUint64(JUMP_BUFFER64.RIP, true) & 0xffffffffn);
+        const context = callerContext();
+        const thread = host.currentThread();
+        const pass = passFor({ code: STATUS_LONGJUMP, flags: EH_UNWINDING, address: context.rip,
+            parameters: [buffer] }, context, thread);
+        const resume = frame === 0 ? copyContext(context)
+            : copyContext(await unwindFrames(pass, { frame, ip: rip }));
+        for (const [register, at] of JUMP_REGISTERS)
+        {
+            resume.gpr[register] = view.getBigUint64(at, true);
+        }
+        resume.rip = rip;
+        resume.gpr[0] = BigInt(((value | 0) === 0 ? 1 : value) >>> 0);
+        resume.mxcsr = view.getUint32(JUMP_BUFFER64.MXCSR, true);
+        resume.xmm.set(bytes.subarray(JUMP_BUFFER64.XMM6, JUMP_BUFFER64.SIZE), 6 * 16);
+        host.setControlWord?.(view.getUint16(JUMP_BUFFER64.FPCSR, true));
+        return pass.continueAt(resume);
+    };
+
+    /**
      * The walk a dispatcher context the program's handler was handed
      * belongs to, for a runtime handler it hands the frame on to; with the
      * floor moved below where that handler stands now. Null for a
@@ -1077,6 +1186,54 @@ export function createSeh64(host){
                 return { handled: false };
             }
             return lastChance({ code, address: faultContext.rip, parameters }, faultContext);
+        },
+
+        /**
+         * The C runtime's marks at 64 bits, which stand over the 32-bit
+         * runtime's in a 64-bit process (`msvcrt/seh.js`).
+         */
+        crt: {
+            /**
+             * int _setjmp(_JUMP_BUFFER *env, void *frame)
+             *
+             * What the compiler makes of `setjmp(env)`: the frame is the
+             * caller's establisher frame, which a longjmp unwinds to.
+             */
+            _setjmp: {
+                convention: 'cdecl', argBytes: 8, addresses: [0, 1],
+                long: ()=>SETJMP64_CODE,
+                /** @param {number[]} args */
+                handler: ([buffer, frame])=>setJump(buffer, frame),
+            },
+
+            /** int _setjmpex(_JUMP_BUFFER *env, void *frame) - the same mark. */
+            _setjmpex: {
+                convention: 'cdecl', argBytes: 8, addresses: [0, 1],
+                long: ()=>SETJMP64_CODE,
+                /** @param {number[]} args */
+                handler: ([buffer, frame])=>setJump(buffer, frame),
+            },
+
+            /** vcruntime140's names for the two. */
+            __intrinsic_setjmp: {
+                convention: 'cdecl', argBytes: 8, addresses: [0, 1],
+                long: ()=>SETJMP64_CODE,
+                /** @param {number[]} args */
+                handler: ([buffer, frame])=>setJump(buffer, frame),
+            },
+            __intrinsic_setjmpex: {
+                convention: 'cdecl', argBytes: 8, addresses: [0, 1],
+                long: ()=>SETJMP64_CODE,
+                /** @param {number[]} args */
+                handler: ([buffer, frame])=>setJump(buffer, frame),
+            },
+
+            /** void longjmp(_JUMP_BUFFER *env, int value) */
+            longjmp: {
+                convention: 'cdecl', argBytes: 8, addresses: [0],
+                /** @param {number[]} args */
+                handler: ([buffer, value])=>longJump(buffer, value),
+            },
         },
 
         /** The host half a 64-bit process binds. */

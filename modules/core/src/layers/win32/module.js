@@ -319,7 +319,8 @@ const CXX_HANDLERS4 = [['VCRUNTIME140_1.dll', ['__CxxFrameHandler4']]];
 const VCRUNTIME_EXPORTS = [
     '_CxxThrowException', '__CxxFrameHandler', '__CxxFrameHandler2', '__CxxFrameHandler3',
     '__C_specific_handler', '_except_handler3', '_except_handler4_common',
-    '__uncaught_exception', '_purecall', '_setjmp3', 'longjmp', 'memchr', 'memcmp', 'memcpy',
+    '__uncaught_exception', '_purecall', '_setjmp3', '__intrinsic_setjmp', '__intrinsic_setjmpex',
+    'longjmp', 'memchr', 'memcmp', 'memcpy',
     'memmove', 'memset', 'strchr', 'strrchr', 'strstr', 'wcschr', 'wcsrchr', 'wcsstr',
 ];
 
@@ -2362,6 +2363,8 @@ export function createWin32Module(){
                     continueAt: where=>bridge.continueAt({ eip: where.rip, esp: where.rsp,
                         long: where.long }, { below: where.rsp }),
                     currentThread: ()=>kernel.currentThread(),
+                    controlWord: config?.fpu?.controlWord,
+                    setControlWord: config?.fpu?.setControlWord,
                     // The stub addresses of this engine's own C language
                     // handler, so a frame naming it has its scope table read
                     // rather than the handler run; resolved once the synthetic
@@ -4024,6 +4027,9 @@ export function createWin32Module(){
                         unwind: seh.unwind,
                         divergence: config?.divergence,
                     }).table,
+                    // A 64-bit process's marks are its own: the registers whole,
+                    // the frame an unwind reaches (`kernel32/seh64.js`).
+                    ...seh64 ? seh64.crt : {},
                     ...createMsvcrtFunctions({
                         pointerSize,
                         readMemory,
@@ -6342,6 +6348,8 @@ export function createWin32Module(){
             {
                 libraries['WINMM.dll'].timeGetTime = {
                     ...libraries['WINMM.dll'].timeGetTime, guest: ticks.guest,
+                    // And at 64 bits where GetTickCount's routine is.
+                    ...ticks.guestLong ? { guestLong: true } : {},
                 };
             }
 

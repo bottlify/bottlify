@@ -124,6 +124,41 @@ __declspec(noinline) int via_guest_handler(void)
     return r;
 }
 
+/* The x64 runtime's mark: sixteen 16-byte parts, which the compiler hands
+ * `_setjmp` with the calling frame beside it. */
+typedef struct { unsigned long long part[2]; } __declspec(align(16)) jmp_part;
+typedef jmp_part jmp_buf[16];
+int __cdecl _setjmp(jmp_buf);
+__declspec(noreturn) void __cdecl longjmp(jmp_buf, int);
+
+static jmp_buf mark;
+static int jump_finally = 0;
+
+__declspec(noinline) static void jump_back(int value)
+{
+    __try
+    {
+        longjmp(mark, value);
+    }
+    __finally
+    {
+        jump_finally++;
+    }
+}
+
+/* Registers a callee keeps hold these across the jump: the mark has them. */
+__declspec(noinline) static int marked(int value, int a, int b, int c, int d, double e)
+{
+    volatile int reached = 0;
+    int r = _setjmp(mark);
+    if (r == 0)
+    {
+        reached = 1;
+        jump_back(value);
+    }
+    return r * 1000 + reached * 100 + (a + b + c + d == 10) * 10 + (e == 2.5);
+}
+
 int mainCRTStartup(void)
 {
     volatile int r = 0;
@@ -231,6 +266,12 @@ int mainCRTStartup(void)
     check("a frame whose handler hands on to the runtime's reaches its __except",
         r == 10 && seen == 0xe0004321 && forwarded >= 2);
     check("and its __finally runs on the way, once", guarded_finally == 1);
+
+    r = marked(7, 1, 2, 3, 4, 2.5);
+    check("a longjmp returns to its mark with its value and the registers kept", r == 7111);
+    check("through the __finally between", jump_finally == 1);
+    r = marked(0, 1, 2, 3, 4, 2.5);
+    check("a longjmp of zero arrives as one", r == 1111 && jump_finally == 2);
 
     ExitProcess(failures);
     return 0;
