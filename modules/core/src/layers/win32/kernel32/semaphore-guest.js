@@ -29,6 +29,7 @@
  * @typedef {import('../msvcrt/guest-code.js').GuestMemory} Guest
  */
 /** @typedef {import('../msvcrt/guest-code.js').u32} u32 */
+/** @typedef {import('../msvcrt/guest-code.js').ptr} ptr */
 
 /** Handles below four times this have a word (`wait-one.js`'s EVENT_SLOTS). */
 const SLOTS = 0x4000;
@@ -86,7 +87,7 @@ export function waitSemaphore({ u32, compareExchange, host }, handle, timeout){
  * BOOL ReleaseSemaphore(HANDLE, LONG lReleaseCount, LPLONG lpPreviousCount)
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} handle @param {u32} count @param {u32} previous
+ * @param {Guest} guest @param {u32} handle @param {u32} count @param {ptr} previous
  * @returns {u32}
  */
 export function ReleaseSemaphore({ u32, setU32, compareExchange, host }, handle, count, previous){

@@ -30,6 +30,7 @@
 
 /** @typedef {import('../msvcrt/guest-code.js').Guest} Guest */
 /** @typedef {import('../msvcrt/guest-code.js').u32} u32 */
+/** @typedef {import('../msvcrt/guest-code.js').ptr} ptr */
 
 /**
  * The table's block: whether the shader is a pixel shader, the scratch, and
@@ -83,7 +84,7 @@ const SET_PS_F = 109;
  * lanes past its shape zero, as many registers as it has up to its rows or columns.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} self @param {u32} device @param {u32} h @param {u32} m
+ * @param {Guest} guest @param {ptr} self @param {ptr} device @param {ptr} h @param {ptr} m
  * @returns {u32}
  */
 export function SetMatrix({ u32, setU32, callStd, host, pointerBytes }, self, device, h, m){
@@ -140,7 +141,7 @@ export function SetMatrix({ u32, setU32, callStd, host, pointerBytes }, self, de
  * as SetMatrix, the matrix read by its columns.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} self @param {u32} device @param {u32} h @param {u32} m
+ * @param {Guest} guest @param {ptr} self @param {ptr} device @param {ptr} h @param {ptr} m
  * @returns {u32}
  */
 export function SetMatrixTranspose({ u32, setU32, callStd, host, pointerBytes }, self, device, h,
@@ -199,7 +200,7 @@ export function SetMatrixTranspose({ u32, setU32, callStd, host, pointerBytes },
  * one register, the lanes past the constant's columns zero.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} self @param {u32} device @param {u32} h @param {u32} v
+ * @param {Guest} guest @param {ptr} self @param {ptr} device @param {ptr} h @param {ptr} v
  * @returns {u32}
  */
 export function SetVector({ u32, setU32, callStd, host, pointerBytes }, self, device, h, v){
@@ -241,7 +242,7 @@ export function SetVector({ u32, setU32, callStd, host, pointerBytes }, self, de
  * the first lane of one register.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} self @param {u32} device @param {u32} h @param {u32} f
+ * @param {Guest} guest @param {ptr} self @param {ptr} device @param {ptr} h @param {u32} f
  * @returns {u32}
  */
 export function SetFloat({ u32, setU32, callStd, host, pointerBytes }, self, device, h, f){
@@ -278,7 +279,7 @@ export function SetFloat({ u32, setU32, callStd, host, pointerBytes }, self, dev
  * answer the last one's, a twin skipped once the set before it failed.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} self @param {u32} device
+ * @param {Guest} guest @param {ptr} self @param {ptr} device
  * @returns {u32}
  */
 export function SetDefaults({ u32, callStd, host, pointerBytes }, self, device){
@@ -317,7 +318,7 @@ export function SetDefaults({ u32, callStd, host, pointerBytes }, self, device){
  * the description the record carries, one of it.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} self @param {u32} h @param {u32} out @param {u32} countAt
+ * @param {Guest} guest @param {ptr} self @param {ptr} h @param {ptr} out @param {ptr} countAt
  * @returns {u32}
  */
 export function GetConstantDesc({ u32, setU32, host, pointerBytes }, self, h, out, countAt){
@@ -346,7 +347,7 @@ export function GetConstantDesc({ u32, setU32, host, pointerBytes }, self, h, ou
  * the host made for that element the first time it was asked for.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} self @param {u32} h @param {u32} index
+ * @param {Guest} guest @param {ptr} self @param {ptr} h @param {u32} index
  * @returns {u32}
  */
 export function GetConstantElement({ u32, host, pointerBytes }, self, h, index){

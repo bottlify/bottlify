@@ -35,7 +35,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     ReleaseSemaphore: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32'],
+        params: ['u32', 'u32', 'ptr'],
         returns: 'u32',
         uses: ['u32', 'setU32', 'compareExchange', 'host'],
         host: 175,

@@ -36,6 +36,7 @@
  *     & Pick<import('../../win32/msvcrt/guest-code.js').Guest, 'pointerBytes'>} Guest
  */
 /** @typedef {import('../../win32/msvcrt/guest-code.js').u32} u32 */
+/** @typedef {import('../../win32/msvcrt/guest-code.js').ptr} ptr */
 
 /** `SHADOW.COOPERATIVE`: zero while the device answers D3D_OK. */
 const COOPERATIVE = 5352;
@@ -65,7 +66,7 @@ const FLAG_SLOW_PATH = 1;
  * HRESULT TestCooperativeLevel(this)
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} self
+ * @param {Guest} guest @param {ptr} self
  * @returns {u32}
  */
 export function TestCooperativeLevel({ u32, host, pointerBytes }, self){
@@ -81,7 +82,7 @@ export function TestCooperativeLevel({ u32, host, pointerBytes }, self){
  * D3DQUERYTYPE GetType(this), from the query's block.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} self
+ * @param {Guest} guest @param {ptr} self
  * @returns {u32}
  */
 export function QueryGetType({ u32, host, pointerBytes }, self){
@@ -98,7 +99,7 @@ export function QueryGetType({ u32, host, pointerBytes }, self){
  * the device makes.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} self
+ * @param {Guest} guest @param {ptr} self
  * @returns {u32}
  */
 export function QueryGetDataSize({ u32, host, pointerBytes }, self){
@@ -114,7 +115,7 @@ export function QueryGetDataSize({ u32, host, pointerBytes }, self){
  * device refuses, and every other query are the host's.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} self @param {u32} flags
+ * @param {Guest} guest @param {ptr} self @param {u32} flags
  * @returns {u32}
  */
 export function QueryIssue({ u32, host, pointerBytes }, self, flags){
@@ -136,7 +137,7 @@ export function QueryIssue({ u32, host, pointerBytes }, self, flags){
  * and an occlusion count the host has not asked for, is the host's.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} self @param {u32} data @param {u32} size
+ * @param {Guest} guest @param {ptr} self @param {ptr} data @param {u32} size
  * @param {u32} flags
  * @returns {u32}
  */

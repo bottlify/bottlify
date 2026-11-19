@@ -73,7 +73,7 @@ const mulW = (ax, ay, az, aw, bx, by, bz, bw)=>bw * aw - bx * ax - by * ay - bz 
  *     const D3DXQUATERNION *a, const D3DXQUATERNION *b) -- a then b: b a.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} a @param {u32} b
+ * @param {Guest} guest @param {ptr} out @param {ptr} a @param {ptr} b
  * @returns {ptr}
  */
 export function D3DXQuaternionMultiply({ f32, setF32 }, out, a, b){
@@ -101,7 +101,7 @@ export function D3DXQuaternionMultiply({ f32, setF32 }, out, a, b){
  *     const D3DXQUATERNION *q)
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} q
+ * @param {Guest} guest @param {ptr} out @param {ptr} q
  * @returns {ptr}
  */
 export function D3DXQuaternionNormalize({ f32, setF32 }, out, q){
@@ -122,7 +122,7 @@ export function D3DXQuaternionNormalize({ f32, setF32 }, out, q){
  *     const D3DXQUATERNION *q) -- the conjugate over the squared length.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} q
+ * @param {Guest} guest @param {ptr} out @param {ptr} q
  * @returns {ptr}
  */
 export function D3DXQuaternionInverse({ f32, setF32 }, out, q){
@@ -142,7 +142,7 @@ export function D3DXQuaternionInverse({ f32, setF32 }, out, q){
  * D3DXQUATERNION *D3DXQuaternionLn(D3DXQUATERNION *out, const D3DXQUATERNION *q)
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} q
+ * @param {Guest} guest @param {ptr} out @param {ptr} q
  * @returns {ptr}
  */
 export function D3DXQuaternionLn({ f32, setU32, setF32 }, out, q){
@@ -162,7 +162,7 @@ export function D3DXQuaternionLn({ f32, setU32, setF32 }, out, q){
  * D3DXQUATERNION *D3DXQuaternionExp(D3DXQUATERNION *out, const D3DXQUATERNION *q)
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} q
+ * @param {Guest} guest @param {ptr} out @param {ptr} q
  * @returns {ptr}
  */
 export function D3DXQuaternionExp({ f32, setF32 }, out, q){
@@ -185,7 +185,7 @@ export function D3DXQuaternionExp({ f32, setF32 }, out, q){
  * sine of half the angle, and its cosine.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} v @param {f32} angle
+ * @param {Guest} guest @param {ptr} out @param {ptr} v @param {f32} angle
  * @returns {ptr}
  */
 export function D3DXQuaternionRotationAxis({ f32, setF32 }, out, v, angle){
@@ -209,7 +209,7 @@ export function D3DXQuaternionRotationAxis({ f32, setF32 }, out, v, angle){
  * D3DXMatrixRotationYawPitchRoll makes, from the halves of the three.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {f32} yaw @param {f32} pitch @param {f32} roll
+ * @param {Guest} guest @param {ptr} out @param {f32} yaw @param {f32} pitch @param {f32} roll
  * @returns {ptr}
  */
 export function D3DXQuaternionRotationYawPitchRoll({ setF32 }, out, yaw, pitch, roll){
@@ -238,7 +238,7 @@ export function D3DXQuaternionRotationYawPitchRoll({ setF32 }, out, yaw, pitch, 
  * pairs.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} m
+ * @param {Guest} guest @param {ptr} out @param {ptr} m
  * @returns {ptr}
  */
 export function D3DXQuaternionRotationMatrix({ f32, setF32 }, out, m){
@@ -292,7 +292,7 @@ export function D3DXQuaternionRotationMatrix({ f32, setF32 }, out, m){
  * arccosine of w; either pointer may be NULL.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} q @param {u32} axis @param {u32} angle
+ * @param {Guest} guest @param {ptr} q @param {ptr} axis @param {ptr} angle
  * @returns {void}
  */
 export function D3DXQuaternionToAxisAngle({ f32, u32, setU32, setF32 }, q, axis, angle){
@@ -317,7 +317,7 @@ export function D3DXQuaternionToAxisAngle({ f32, u32, setU32, setF32 }, q, axis,
  *     const D3DXQUATERNION *q1, const D3DXQUATERNION *q2, FLOAT t)
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} q1 @param {u32} q2 @param {f32} t
+ * @param {Guest} guest @param {ptr} out @param {ptr} q1 @param {ptr} q2 @param {f32} t
  * @returns {ptr}
  */
 export function D3DXQuaternionSlerp({ f32, setF32 }, out, q1, q2, t){
@@ -368,8 +368,8 @@ export function D3DXQuaternionSlerp({ f32, setF32 }, out, q1, q2, t){
  * Slerp(Slerp(q1, c, t), Slerp(a, b, t), 2t(1 - t)).
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} q1 @param {u32} a @param {u32} b
- * @param {u32} c @param {f32} t
+ * @param {Guest} guest @param {ptr} out @param {ptr} q1 @param {ptr} a @param {ptr} b
+ * @param {ptr} c @param {f32} t
  * @returns {ptr}
  */
 export function D3DXQuaternionSquad({ f32, setF32 }, out, q1, a, b, c, t){
@@ -480,7 +480,7 @@ export function D3DXQuaternionSquad({ f32, setF32 }, out, q1, a, b, c, t){
  * where f + g is 0, the limit of the two.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} q1 @param {u32} q2 @param {u32} q3
+ * @param {Guest} guest @param {ptr} out @param {ptr} q1 @param {ptr} q2 @param {ptr} q3
  * @param {f32} f @param {f32} g
  * @returns {ptr}
  */
@@ -601,8 +601,8 @@ export function D3DXQuaternionBaryCentric({ f32, setF32 }, out, q1, q2, q3, f, g
  * true ones (the conjugate over the squared length).
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} aOut @param {u32} bOut @param {u32} cOut @param {u32} q0
- * @param {u32} q1 @param {u32} q2 @param {u32} q3
+ * @param {Guest} guest @param {ptr} aOut @param {ptr} bOut @param {ptr} cOut @param {ptr} q0
+ * @param {ptr} q1 @param {ptr} q2 @param {ptr} q3
  * @returns {void}
  */
 export function D3DXQuaternionSquadSetup({ f32, setF32 }, aOut, bOut, cOut, q0, q1, q2, q3){

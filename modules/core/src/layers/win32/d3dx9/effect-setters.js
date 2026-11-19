@@ -31,6 +31,7 @@
 
 /** @typedef {import('../msvcrt/guest-code.js').Guest} Guest */
 /** @typedef {import('../msvcrt/guest-code.js').u32} u32 */
+/** @typedef {import('../msvcrt/guest-code.js').ptr} ptr */
 
 /**
  * The effect block's words for names (`EFFECT_BLOCK`): the table of the
@@ -59,7 +60,7 @@ const PC_STRUCT = 5;
  * matrix's rows and columns from the matrix's top left, row by row.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} self @param {u32} h @param {u32} m
+ * @param {Guest} guest @param {ptr} self @param {u32} h @param {ptr} m
  * @returns {u32}
  */
 export function SetMatrix({ u32, setU32, callStd, host, pointerBytes }, self, h, m){
@@ -115,7 +116,7 @@ export function SetMatrix({ u32, setU32, callStd, host, pointerBytes }, self, h,
  * as SetMatrix, the matrix read by its columns.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} self @param {u32} h @param {u32} m
+ * @param {Guest} guest @param {ptr} self @param {u32} h @param {ptr} m
  * @returns {u32}
  */
 export function SetMatrixTranspose({ u32, setU32, callStd, host, pointerBytes }, self, h, m){
@@ -171,7 +172,7 @@ export function SetMatrixTranspose({ u32, setU32, callStd, host, pointerBytes },
  * scalar's or vector's columns.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} self @param {u32} h @param {u32} v
+ * @param {Guest} guest @param {ptr} self @param {u32} h @param {ptr} v
  * @returns {u32}
  */
 export function SetVector({ u32, setU32, callStd, host, pointerBytes }, self, h, v){
@@ -220,7 +221,7 @@ export function SetVector({ u32, setU32, callStd, host, pointerBytes }, self, h,
  * columns of a vector.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} self @param {u32} h @param {u32} v @param {u32} count
+ * @param {Guest} guest @param {ptr} self @param {u32} h @param {u32} v @param {u32} count
  * @returns {u32}
  */
 export function SetVectorArray({ u32, setU32, callStd, host, pointerBytes }, self, h, v, count){
@@ -269,7 +270,7 @@ export function SetVectorArray({ u32, setU32, callStd, host, pointerBytes }, sel
  * HRESULT SetFloat(D3DXHANDLE hParameter, FLOAT f): a float scalar.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} self @param {u32} h @param {u32} f
+ * @param {Guest} guest @param {ptr} self @param {u32} h @param {u32} f
  * @returns {u32}
  */
 export function SetFloat({ u32, setU32, callStd, host, pointerBytes }, self, h, f){
@@ -305,7 +306,7 @@ export function SetFloat({ u32, setU32, callStd, host, pointerBytes }, self, h, 
  * HRESULT SetInt(D3DXHANDLE hParameter, INT n): an int scalar.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} self @param {u32} h @param {u32} n
+ * @param {Guest} guest @param {ptr} self @param {u32} h @param {u32} n
  * @returns {u32}
  */
 export function SetInt({ u32, setU32, callStd, host, pointerBytes }, self, h, n){
@@ -341,7 +342,7 @@ export function SetInt({ u32, setU32, callStd, host, pointerBytes }, self, h, n)
  * HRESULT SetBool(D3DXHANDLE hParameter, BOOL b): a bool scalar, the word as given.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} self @param {u32} h @param {u32} b
+ * @param {Guest} guest @param {ptr} self @param {u32} h @param {u32} b
  * @returns {u32}
  */
 export function SetBool({ u32, setU32, callStd, host, pointerBytes }, self, h, b){
@@ -378,7 +379,7 @@ export function SetBool({ u32, setU32, callStd, host, pointerBytes }, self, h, b
  * texture parameter's pointer; the host's setter takes no reference either.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} self @param {u32} h @param {u32} texture
+ * @param {Guest} guest @param {ptr} self @param {u32} h @param {u32} texture
  * @returns {u32}
  */
 export function SetTexture({ u32, setU32, callStd, host, pointerBytes }, self, h, texture){
@@ -416,7 +417,7 @@ export function SetTexture({ u32, setU32, callStd, host, pointerBytes }, self, h
  * parameter's words, a structure's, or a texture's pointers, as given.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} self @param {u32} h @param {u32} data @param {u32} bytes
+ * @param {Guest} guest @param {ptr} self @param {u32} h @param {ptr} data @param {u32} bytes
  * @returns {u32}
  */
 export function SetValue({ u32, setU32, callStd, host, pointerBytes }, self, h, data, bytes){
@@ -468,7 +469,7 @@ export function SetValue({ u32, setU32, callStd, host, pointerBytes }, self, h, 
  * array of them -- holds, from its start.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} self @param {u32} h @param {u32} n @param {u32} count
+ * @param {Guest} guest @param {ptr} self @param {u32} h @param {ptr} n @param {u32} count
  * @returns {u32}
  */
 export function SetIntArray({ u32, setU32, callStd, host, pointerBytes }, self, h, n, count){
@@ -511,7 +512,7 @@ export function SetIntArray({ u32, setU32, callStd, host, pointerBytes }, self, 
  * SetIntArray, for a float parameter.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} self @param {u32} h @param {u32} f @param {u32} count
+ * @param {Guest} guest @param {ptr} self @param {u32} h @param {ptr} f @param {u32} count
  * @returns {u32}
  */
 export function SetFloatArray({ u32, setU32, callStd, host, pointerBytes }, self, h, f, count){
@@ -554,7 +555,7 @@ export function SetFloatArray({ u32, setU32, callStd, host, pointerBytes }, self
  * SetIntArray, for a bool parameter, each word one when it is not zero.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} self @param {u32} h @param {u32} b @param {u32} count
+ * @param {Guest} guest @param {ptr} self @param {u32} h @param {ptr} b @param {u32} count
  * @returns {u32}
  */
 export function SetBoolArray({ u32, setU32, callStd, host, pointerBytes }, self, h, b, count){
@@ -598,7 +599,7 @@ export function SetBoolArray({ u32, setU32, callStd, host, pointerBytes }, self,
  * each as SetMatrix sets one, from matrices one after another.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} self @param {u32} h @param {u32} m @param {u32} count
+ * @param {Guest} guest @param {ptr} self @param {u32} h @param {u32} m @param {u32} count
  * @returns {u32}
  */
 export function SetMatrixArray({ u32, setU32, callStd, host, pointerBytes }, self, h, m, count){
@@ -654,7 +655,7 @@ export function SetMatrixArray({ u32, setU32, callStd, host, pointerBytes }, sel
  * *pMatrix, UINT Count): as SetMatrixArray, each matrix read by its columns.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} self @param {u32} h @param {u32} m @param {u32} count
+ * @param {Guest} guest @param {ptr} self @param {u32} h @param {u32} m @param {u32} count
  * @returns {u32}
  */
 export function SetMatrixTransposeArray({ u32, setU32, callStd, host, pointerBytes }, self, h, m,
@@ -713,7 +714,7 @@ export function SetMatrixTransposeArray({ u32, setU32, callStd, host, pointerByt
  * says; a null pointer among them is the host's.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} self @param {u32} h @param {u32} m @param {u32} count
+ * @param {Guest} guest @param {ptr} self @param {u32} h @param {ptr} m @param {u32} count
  * @returns {u32}
  */
 export function SetMatrixPointerArray({ u32, setU32, callStd, host, pointerBytes }, self, h, m,
@@ -778,7 +779,7 @@ export function SetMatrixPointerArray({ u32, setU32, callStd, host, pointerBytes
  * **ppMatrix, UINT Count): as SetMatrixPointerArray, each matrix read by its columns.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} self @param {u32} h @param {u32} m @param {u32} count
+ * @param {Guest} guest @param {ptr} self @param {u32} h @param {ptr} m @param {u32} count
  * @returns {u32}
  */
 export function SetMatrixTransposePointerArray({ u32, setU32, callStd, host, pointerBytes },
@@ -846,7 +847,7 @@ export function SetMatrixTransposePointerArray({ u32, setU32, callStd, host, poi
  * block's RESOLVE.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} block @param {u32} name
+ * @param {Guest} guest @param {ptr} block @param {ptr} name
  * @returns {u32}
  */
 export function Resolve({ u8, u32 }, block, name){

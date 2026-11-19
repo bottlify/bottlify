@@ -11,7 +11,7 @@
 export const COMPILED = /** @type {const} */ ({
     MultiByteToWideChar: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32', 'u32', 'u32'],
+        params: ['u32', 'u32', 'ptr', 'u32', 'ptr', 'u32'],
         returns: 'i32',
         uses: ['u8', 'setU16', 'host'],
         host: 239,
@@ -41,7 +41,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     WideCharToMultiByte: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32', 'u32', 'u32', 'u32', 'u32'],
+        params: ['u32', 'u32', 'ptr', 'u32', 'ptr', 'u32', 'u32', 'ptr'],
         returns: 'i32',
         uses: ['u16', 'setU8', 'setU32', 'host'],
         host: 280,

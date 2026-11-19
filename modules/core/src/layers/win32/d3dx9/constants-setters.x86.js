@@ -11,7 +11,7 @@
 export const COMPILED = /** @type {const} */ ({
     SetMatrix: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32'],
+        params: ['ptr', 'ptr', 'ptr', 'ptr'],
         returns: 'u32',
         uses: ['u32', 'setU32', 'callStd', 'host', 'pointerBytes'],
         host: 577,
@@ -69,7 +69,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     SetMatrixTranspose: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32'],
+        params: ['ptr', 'ptr', 'ptr', 'ptr'],
         returns: 'u32',
         uses: ['u32', 'setU32', 'callStd', 'host', 'pointerBytes'],
         host: 577,
@@ -127,7 +127,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     SetVector: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32'],
+        params: ['ptr', 'ptr', 'ptr', 'ptr'],
         returns: 'u32',
         uses: ['u32', 'setU32', 'callStd', 'host', 'pointerBytes'],
         host: 368,
@@ -167,7 +167,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     SetFloat: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32'],
+        params: ['ptr', 'ptr', 'ptr', 'u32'],
         returns: 'u32',
         uses: ['u32', 'setU32', 'callStd', 'host', 'pointerBytes'],
         host: 310,
@@ -203,7 +203,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     SetDefaults: {
         convention: 'stdcall',
-        params: ['u32', 'u32'],
+        params: ['ptr', 'ptr'],
         returns: 'u32',
         uses: ['u32', 'callStd', 'host', 'pointerBytes'],
         host: 220,
@@ -231,7 +231,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     GetConstantDesc: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32'],
+        params: ['ptr', 'ptr', 'ptr', 'ptr'],
         returns: 'u32',
         uses: ['u32', 'setU32', 'host', 'pointerBytes'],
         host: 124,
@@ -251,7 +251,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     GetConstantElement: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32'],
+        params: ['ptr', 'ptr', 'u32'],
         returns: 'u32',
         uses: ['u32', 'host', 'pointerBytes'],
         host: 89,

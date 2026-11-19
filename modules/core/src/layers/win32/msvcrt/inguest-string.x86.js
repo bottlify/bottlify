@@ -11,7 +11,7 @@
 export const COMPILED = /** @type {const} */ ({
     stringConstruct: {
         convention: 'thiscall',
-        params: ['u32'],
+        params: ['ptr'],
         returns: 'ptr',
         uses: ['setU8', 'setU32', 'pointerBytes'],
         code: Uint8Array.of(
@@ -22,7 +22,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     stringFromText: {
         convention: 'thiscall',
-        params: ['u32', 'u32'],
+        params: ['ptr', 'ptr'],
         returns: 'ptr',
         uses: ['u8', 'setU32', 'copyUp', 'host', 'pointerBytes'],
         host: 115,
@@ -41,7 +41,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     stringCopy: {
         convention: 'thiscall',
-        params: ['u32', 'u32'],
+        params: ['ptr', 'ptr'],
         returns: 'ptr',
         uses: ['u32', 'setU32', 'copyUp', 'host', 'pointerBytes'],
         host: 136,
@@ -62,7 +62,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     stringDestroy: {
         convention: 'thiscall',
-        params: ['u32'],
+        params: ['ptr'],
         returns: 'u32',
         uses: ['u32', 'setU8', 'setU32', 'host', 'pointerBytes'],
         host: 39,
@@ -75,7 +75,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     stringText: {
         convention: 'thiscall',
-        params: ['u32'],
+        params: ['ptr'],
         returns: 'ptr',
         uses: ['u32', 'pointerBytes'],
         code: Uint8Array.of(
@@ -86,7 +86,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     stringAt: {
         convention: 'thiscall',
-        params: ['u32', 'u32'],
+        params: ['ptr', 'u32'],
         returns: 'ptr',
         uses: ['u32', 'pointerBytes'],
         code: Uint8Array.of(
@@ -98,7 +98,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     stringSize: {
         convention: 'thiscall',
-        params: ['u32'],
+        params: ['ptr'],
         returns: 'u32',
         uses: ['u32', 'pointerBytes'],
         code: Uint8Array.of(
@@ -108,7 +108,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     stringAppendChar: {
         convention: 'thiscall',
-        params: ['u32', 'u32'],
+        params: ['ptr', 'u32'],
         returns: 'ptr',
         uses: ['u32', 'setU8', 'setU32', 'host', 'pointerBytes'],
         host: 75,
@@ -124,7 +124,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     stringResize: {
         convention: 'thiscall',
-        params: ['u32', 'u32'],
+        params: ['ptr', 'u32'],
         returns: 'u32',
         uses: ['u32', 'setU8', 'setU32', 'host', 'pointerBytes'],
         host: 77,
@@ -140,7 +140,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     stringReserve: {
         convention: 'thiscall',
-        params: ['u32', 'u32'],
+        params: ['ptr', 'u32'],
         returns: 'u32',
         uses: ['u32', 'host', 'pointerBytes'],
         host: 60,

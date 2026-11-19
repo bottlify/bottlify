@@ -428,7 +428,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     strtod: {
         convention: 'cdecl',
-        params: ['u32', 'u32'],
+        params: ['u32', 'ptr'],
         returns: 'f64',
         uses: ['u8', 'setU32', 'controlWord', 'setControlWord', 'host', 'pointerBytes'],
         host: 872,
@@ -618,7 +618,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     _dtest: {
         convention: 'cdecl',
-        params: ['u32'],
+        params: ['ptr'],
         returns: 'i32',
         uses: ['u32'],
         code: Uint8Array.of(
@@ -635,7 +635,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     _fdtest: {
         convention: 'cdecl',
-        params: ['u32'],
+        params: ['ptr'],
         returns: 'i32',
         uses: ['u32'],
         code: Uint8Array.of(
@@ -671,7 +671,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     wcstod: {
         convention: 'cdecl',
-        params: ['u32', 'u32'],
+        params: ['u32', 'ptr'],
         returns: 'f64',
         uses: ['u16', 'setU32', 'controlWord', 'setControlWord', 'host', 'pointerBytes'],
         host: 877,
