@@ -123,6 +123,8 @@ export const STATUS = Object.freeze({
     INVALID_READ_MODE: 0xc00000b4,
     /** A name that cannot be spelled for its object: an unnamed pipe's. */
     OBJECT_PATH_INVALID: 0xc0000039,
+    /** A class of a process that has ended, which only a live process answers. */
+    PROCESS_IS_TERMINATING: 0xc000010a,
     CANCELLED: 0xc0000120,
     /** A success: a create with OBJ_OPENIF opened an object its name held already. */
     OBJECT_NAME_EXISTS: 0x40000000,
@@ -292,6 +294,7 @@ const TO_DOS_ERROR = new Map([
     [STATUS.PIPE_BUSY, ERROR.PIPE_BUSY],
     [STATUS.INVALID_READ_MODE, ERROR.BAD_PIPE],
     [STATUS.OBJECT_PATH_INVALID, ERROR.BAD_PATHNAME],
+    [STATUS.PROCESS_IS_TERMINATING, ERROR.ACCESS_DENIED],
     [STATUS.CANCELLED, ERROR.OPERATION_ABORTED],
     [STATUS.NOT_A_REPARSE_POINT, ERROR.NOT_A_REPARSE_POINT],
     [STATUS.IO_REPARSE_TAG_INVALID, ERROR.REPARSE_TAG_INVALID],

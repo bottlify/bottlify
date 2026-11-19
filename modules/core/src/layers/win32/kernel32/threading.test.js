@@ -1696,6 +1696,18 @@ test('a handle reads back the flags a duplicate or SetHandleInformation gave it'
     assert.deepEqual(errors.slice(-2), [6, 6]);
     assert.deepEqual([fns.GetHandleInformation.argBytes, fns.SetHandleInformation.argBytes],
         [8, 12]);
+
+    // DUPLICATE_SAME_ATTRIBUTES: the source's flags, whatever bInheritHandle says
+    // (process.c test_DuplicateHandle).
+    const duplicated = (/** @type {number} */ source)=>{
+        assert.equal(fns.DuplicateHandle.handler([0xffffffff, source, 0xffffffff, 0x100, 0, 1,
+            2 | 4]), 1);
+        return bytes[0x100] | bytes[0x101] << 8 | bytes[0x102] << 16;
+    };
+    assert.equal(read(duplicated(event)), 0, 'none, though bInheritHandle asked');
+    assert.equal(fns.SetHandleInformation.handler([event, 3, 3]), 1);
+    assert.equal(read(duplicated(event)), 3, 'both flags');
+    assert.equal(read(duplicated(0xffffffff)), 0, 'a pseudo-handle has none');
 });
 
 test('a socket takes handle flags as a kernel object does', ()=>{

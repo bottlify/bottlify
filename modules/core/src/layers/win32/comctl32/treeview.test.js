@@ -24,7 +24,8 @@ import {
     TVN_GETDISPINFOA, TVN_ITEMEXPANDINGA, TVN_ITEMEXPANDEDA,
     TVM_SETTEXTCOLOR, TVM_GETTEXTCOLOR, TVM_SETBKCOLOR, TVM_GETBKCOLOR, TVM_GETLINECOLOR,
     TVM_SETSCROLLTIME, TVM_GETSCROLLTIME, TVM_GETITEMSTATE, TVN_ITEMCHANGINGW, TVN_ITEMCHANGEDW,
-    TVM_SORTCHILDREN,
+    TVM_SORTCHILDREN, TVM_EDITLABELA, TVM_EDITLABELW, TVM_GETEDITCONTROL,
+    TVN_BEGINLABELEDITA, TVN_ENDLABELEDITA,
 } from './treeview.js';
 
 /**
@@ -236,6 +237,11 @@ function setup(){
                 if (code === TVN_ITEMCHANGINGW)
                 {
                     return blocked.has(memory.u32(message.lParam + 16)) ? 1 : 0;
+                }
+                // A label typed in is kept.
+                if (code === TVN_ENDLABELEDITA)
+                {
+                    return 1;
                 }
                 return 0;
             }
@@ -787,4 +793,36 @@ test('version 6 asks before an item\'s selection changes, and the parent can kee
         assert.equal(send(TVM_GETITEMSTATE, two, TVIS_SELECTED), 0, 'kept unselected');
         assert.equal(send(TVM_GETITEMSTATE, one, TVIS_SELECTED), 0, 'the old one let go');
         assert.equal(send(TVM_GETNEXTITEM, TVGN_CARET, 0), two);
+    });
+
+test('a label edited in place is a Unicode edit the item takes its text from as it loses the focus',
+    async()=>{
+        const context = setup();
+        await context.makeHost();
+        const tree = await context.tree(0);
+        const item = context.insert(tree, TVI_ROOT, { text: 'Root' });
+        const send = (/** @type {number[]} */ args)=>context.fns.SendMessageA.handler(args);
+        assert.equal(await send([tree, TVM_EDITLABELA, 0, 0]), 0, 'no item, no edit');
+        const edit = await send([tree, TVM_EDITLABELA, 0, item]) >>> 0;
+        assert.notEqual(edit, 0);
+        assert.equal(context.fns.IsWindowUnicode.handler([edit]), 1);
+        assert.equal(await send([tree, TVM_GETEDITCONTROL, 0, 0]) >>> 0, edit);
+        assert.deepEqual(context.notifications().slice(-1), [TVN_BEGINLABELEDITA],
+            'the parent hears of it once the edit exists');
+        context.memory.putString(TEXT, 'Renamed');
+        await send([edit, 0x000c, 0, TEXT]);
+        // EN_KILLFOCUS from another window is not the edit's.
+        await send([tree, 0x0111, 0x0200 << 16, tree]);
+        assert.equal(context.fns.IsWindow.handler([edit]), 1);
+        await send([tree, 0x0111, 0x0200 << 16, edit]);
+        assert.equal(context.fns.IsWindow.handler([edit]), 0, 'the edit is gone');
+        assert.equal(context.notifications().at(-1), TVN_ENDLABELEDITA);
+        context.memory.put32(OUT + TVITEM.hItem, item);
+        context.memory.put32(OUT + TVITEM.mask, TVIF_TEXT);
+        context.memory.put32(OUT + TVITEM.pszText, OUT + 64);
+        context.memory.put32(OUT + TVITEM.cchTextMax, 32);
+        await send([tree, TVM_GETITEMA, 0, OUT]);
+        assert.equal(context.memory.readCString(OUT + 64, 32), 'Renamed');
+        const wide = await send([tree, TVM_EDITLABELW, 0, item]) >>> 0;
+        assert.equal(context.fns.IsWindowUnicode.handler([wide]), 1);
     });

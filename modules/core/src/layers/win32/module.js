@@ -6942,6 +6942,7 @@ export function createWin32Module(){
                     const win32 = modules.imagePath();
                     return { win32, native: nativePathOf(win32) ?? win32 };
                 },
+                nativePath: nativePathOf,
                 divergence: config?.divergence,
                 advapi32: libraries['ADVAPI32.dll'],
                 processors,

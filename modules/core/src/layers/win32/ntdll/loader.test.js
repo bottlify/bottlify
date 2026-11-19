@@ -169,6 +169,12 @@ test('a search path is the directories looked in alone; low bit set, it is searc
     counted('C:\\Full\\x.dll');
     await call('LdrLoadDll', PATH, 0, NAME, OUT);
     assert.deepEqual(loads.splice(0), ['C:\\Full\\x.dll'], 'a full path is not searched for');
+    // LDR_DONT_RESOLVE_REFS among the characteristics: DONT_RESOLVE_DLL_REFERENCES
+    // (Wine's loader.c test_image_mapping case 7).
+    const CHARACTERISTICS = OUT + 8;
+    view.setUint32(CHARACTERISTICS, 2, true);
+    await call('LdrLoadDll', 0, CHARACTERISTICS, NAME, OUT);
+    assert.deepEqual(loads.splice(0), [['C:\\Full\\x.dll', 1]], 'mapped, its imports left alone');
 });
 
 test('a library found and refused ends the search: its section\'s status, or its failed start',

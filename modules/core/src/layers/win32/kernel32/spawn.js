@@ -40,7 +40,7 @@ import { childThread } from './cross-process.js';
 import { createProcessMemory } from './process-memory.js';
 import { debuggeeFor } from './debug-events.js';
 import { grantedAccess } from './access.js';
-import { createProcessTarget } from './process-target.js';
+import { createProcessTarget, PROCESS_QUERY_LIMITED_INFORMATION } from './process-target.js';
 import { INTERACTIVE_SESSION } from './teb.js';
 import { dropUnclaimed } from './pipes.js';
 import { HANDLE_STDERR, HANDLE_STDIN, HANDLE_STDOUT } from './console.js';
@@ -57,7 +57,7 @@ const ERROR_INSUFFICIENT_BUFFER = 122;
 const ERROR_BAD_LENGTH = 24;
 const ERROR_NOT_SUPPORTED = 50;
 const ERROR_GEN_FAILURE = 31;
-const ERROR_OBJECT_NAME_EXISTS = 5010;
+const ERROR_OBJECT_NAME_EXISTS = 698;
 /** QueryFullProcessImageName's one flag: the path in the object manager's terms. */
 const PROCESS_NAME_NATIVE = 1;
 /** CreateProcess's flag saying the environment block is UTF-16. */
@@ -107,8 +107,12 @@ export function writeThroughProtection(memory, address, bytes){
 /** A PROC_THREAD_ATTRIBUTE_LIST's header and each attribute after it, in bytes. */
 const ATTRIBUTE_LIST_HEADER = 20;
 const ATTRIBUTE_ENTRY = 12;
+/** The attribute that names the process a child is made as if by: its parent. */
+const PROC_THREAD_ATTRIBUTE_PARENT_PROCESS = 0x20000;
 /** The attribute that names the handles a child inherits, and none else. */
 const PROC_THREAD_ATTRIBUTE_HANDLE_LIST = 0x20002;
+/** The right a process handle needs to stand as a child's parent. */
+const PROCESS_CREATE_PROCESS = 0x0080;
 /** The jobs a child is made in besides those it inherits (Windows 10 on). */
 const PROC_THREAD_ATTRIBUTE_JOB_LIST = 0x2000d;
 /** CreateProcess's flag: the STARTUPINFO is a STARTUPINFOEX, its attribute list behind it. */
@@ -146,9 +150,6 @@ const STARTF_USESTDHANDLES = 0x00000100;
  */
 const STARTUP = Object.freeze({ flags: 44, input: 56, output: 60, error: 64 });
 const STARTUP64 = Object.freeze({ flags: 60, input: 80, output: 88, error: 96 });
-
-/** The pseudo-handle for the running process; -1 on every Windows. */
-const CURRENT_PROCESS = 0xffffffff;
 
 /**
  * WinExec answers above 31 on success, and with an error code below it on
@@ -569,18 +570,6 @@ export function createSpawnFunctions(host){
         ]));
     };
 
-    /** @param {number} handle @returns {any} */
-    const processOf = handle=>{
-        try
-        {
-            return kernel.handles.resolve(handle >>> 0, 'process');
-        }
-        catch (e){
-            void e;
-            return null;
-        }
-    };
-
     /** The process a handle names, if it carries the right asked. */
     const processTarget = createProcessTarget({ kernel,
         processId: ()=>(host.processId ?? 0x1000) >>> 0 });
@@ -645,12 +634,22 @@ export function createSpawnFunctions(host){
     };
 
     /**
-     * The image a process handle names: this process's, or a child's.
+     * The image a process handle names, this process's or a child's, through
+     * the one rule every process call goes by (`process-target.js`): a handle
+     * OpenProcess gave for this process's own id is this process, and either
+     * query right reads the name. A refusal is left as the last error.
      *
      * @param {number} handle @returns {string | null}
      */
-    const imagePathOf = handle=>((handle >>> 0) === CURRENT_PROCESS ? host.imagePath()
-        : processOf(handle)?.imagePath ?? null);
+    const imagePathOf = handle=>{
+        const target = processTarget(handle, PROCESS_QUERY_LIMITED_INFORMATION);
+        if ('error' in target)
+        {
+            host.setLastError(target.error);
+            return null;
+        }
+        return 'here' in target ? host.imagePath() : target.child.imagePath ?? null;
+    };
 
     /**
      * GetProcessImageFileName in either width.
@@ -664,7 +663,6 @@ export function createSpawnFunctions(host){
             const named = imagePathOf(handle);
             if (named === null)
             {
-                host.setLastError(ERROR_INVALID_HANDLE);
                 return 0;
             }
             const path = host.nativePath?.(named) ?? null;
@@ -715,7 +713,6 @@ export function createSpawnFunctions(host){
             const named = imagePathOf(handle);
             if (named === null)
             {
-                host.setLastError(ERROR_INVALID_HANDLE);
                 return 0;
             }
             if ((flags >>> 0) & ~PROCESS_NAME_NATIVE)
@@ -948,7 +945,26 @@ export function createSpawnFunctions(host){
             host.setLastError(ERROR_INVALID_HANDLE);
             return 0;
         }
-        const inheritedHandles = inherit && host.inheritedHandles
+        // A parent named in the attribute list stands as the child's parent:
+        // its id is the child's parent's, and the handles it inherits are
+        // that process's (Windows refuses a handle that names no process, or
+        // one without PROCESS_CREATE_PROCESS, before anything is made).
+        const parentNamed = attributeHandles(startup >>> 0, flags,
+            PROC_THREAD_ATTRIBUTE_PARENT_PROCESS);
+        const parent = parentNamed ? processTarget(parentNamed[0] ?? 0, PROCESS_CREATE_PROCESS)
+            : { here: /** @type {const} */ (true) };
+        if ('error' in parent)
+        {
+            host.setLastError(parent.error);
+            return 0;
+        }
+        const substitute = 'child' in parent ? parent.child : null;
+        if (substitute && inherit)
+        {
+            host.divergence?.('CreateProcess', 'a child made with another process as its parent'
+                + ' inherits none of that process\'s handles');
+        }
+        const inheritedHandles = inherit && !substitute && host.inheritedHandles
             ? host.inheritedHandles(handleList(startup >>> 0, flags)) : [];
         const standard = standardOf(startup >>> 0, inherit, flags >>> 0);
         const made = record(named ?? '', line, flags, directory, {
@@ -961,8 +977,9 @@ export function createSpawnFunctions(host){
                 address=>(wide ? host.readWideString(address, WHOLE_NAME * 2)
                     : host.readCString(address, WHOLE_NAME)),
                 host.startup?.()?.desktop ?? null),
-            // The process that started it, which its own snapshot names.
-            parentId: (host.processId ?? 0) >>> 0,
+            // The process that started it, which its own snapshot names, or
+            // the one its attribute list named.
+            parentId: substitute ? substitute.id >>> 0 : (host.processId ?? 0) >>> 0,
             // The block asked for, or this process's variables as they are now.
             environment: (environment >>> 0) === 0 ? host.environment?.() ?? null
                 : environmentBlock(environment >>> 0, (flags & CREATE_UNICODE_ENVIRONMENT) !== 0),

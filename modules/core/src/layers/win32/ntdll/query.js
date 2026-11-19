@@ -126,6 +126,10 @@ const SYSTEM_THREAD = {
 /** KTHREAD_STATE: the idle thread runs; every other one waits. */
 const THREAD_STATE_RUNNING = 2;
 const THREAD_STATE_WAITING = 5;
+/** The right that reads every process class, and the classes the limited right reads alone. */
+const PROCESS_QUERY_INFORMATION = 0x0400;
+const LIMITED_PROCESS_CLASSES = new Set([0, 1, 2, 3, 4, 12, 18, 20, 22, 26, 27, 28, 33, 37,
+    38, 39, 43]);
 const PROCESS_BASIC_INFORMATION = 0;
 const PROCESS_DEBUG_PORT = 7;
 /** A handle to the debug object that debugs a process; its NoDebugInherit, inverted. */
@@ -143,6 +147,9 @@ const PROCESS_IMAGE_FILE_NAME = 27;
 const PROCESS_IMAGE_INFORMATION = 37;
 const SECTION_IMAGE_INFORMATION_SIZE = 48;
 const PROCESS_IMAGE_FILE_NAME_WIN32 = 43;
+/** ProcessPriorityClass, and the class a process runs at unless it asks otherwise. */
+const PROCESS_PRIORITY_CLASS = 18;
+const PRIORITY_CLASS_NORMAL = 2;
 
 /**
  * The process's execute flags: data runs as code, and that cannot be changed.
@@ -360,6 +367,8 @@ const NORMAL_BASE_PRIORITY = 8;
  * @property {() => { win32: string, native: string }} [imagePath]  The program's
  *           path, and as the object manager names it: ProcessImageFileName's
  *           answers. Without it those classes are unknown.
+ * @property {(path: string) => string | null} [nativePath]  A path as the object
+ *           manager names it, null where it has no drive: an ended child's image name.
  * @property {() => SystemProcess[]} [processes]  The processes a Toolhelp
  *           snapshot lists, this one first. Without it SystemProcessInformation
  *           is an unknown class.
@@ -720,6 +729,31 @@ export function createQueryFunctions(host){
      * @param {number} buffer @param {number} length @param {number} returned
      */
     const recorded = (child, wanted, buffer, length, returned)=>{
+        // An ended process keeps its name and priority class; its image is
+        // gone with its memory (Wine's process.c test_dead_process).
+        if (wanted === PROCESS_IMAGE_FILE_NAME || wanted === PROCESS_IMAGE_FILE_NAME_WIN32)
+        {
+            const path = String(child.imagePath ?? '');
+            const named = wanted === PROCESS_IMAGE_FILE_NAME_WIN32 ? path
+                : host.nativePath?.(path) ?? null;
+            return named === null ? STATUS.INVALID_INFO_CLASS
+                : writeName(named, buffer, length, returned);
+        }
+        if (wanted === PROCESS_PRIORITY_CLASS)
+        {
+            writeU32If(returned, 2);
+            if (length < 2 || buffer === 0)
+            {
+                return STATUS.INFO_LENGTH_MISMATCH;
+            }
+            // Not in the foreground, PROCESS_PRIORITY_CLASS_NORMAL.
+            host.writeMemory(buffer, Uint8Array.of(0, PRIORITY_CLASS_NORMAL));
+            return STATUS.SUCCESS;
+        }
+        if (wanted === PROCESS_IMAGE_INFORMATION && child.completed)
+        {
+            return STATUS.PROCESS_IS_TERMINATING;
+        }
         if (wanted !== PROCESS_BASIC_INFORMATION)
         {
             return STATUS.INVALID_INFO_CLASS;
@@ -1087,6 +1121,17 @@ export function createQueryFunctions(host){
                     }
                     return (length >>> 0) < (fixed.get(wanted) ?? 0)
                         ? STATUS.INFO_LENGTH_MISMATCH : STATUS.INVALID_HANDLE;
+                }
+                // A handle opened with PROCESS_QUERY_LIMITED_INFORMATION alone
+                // reads the classes Windows lets it, this process's own
+                // included; the rest are refused (Wine's process.c
+                // test_process_info on such a handle).
+                const access = (handle >>> 0) === CURRENT_PROCESS ? null
+                    : host.handleAccess?.(handle >>> 0) ?? null;
+                if (access !== null && (access & PROCESS_QUERY_INFORMATION) === 0
+                    && !LIMITED_PROCESS_CLASSES.has(wanted))
+                {
+                    return STATUS.ACCESS_DENIED;
                 }
                 const child = (handle >>> 0) === CURRENT_PROCESS ? null
                     : host.processOf?.(handle >>> 0) ?? null;

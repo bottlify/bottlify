@@ -1154,7 +1154,9 @@ export function createProcessPolicyFunctions(host){
                         break;
                     }
                     case JOB.BASIC_PROCESS_ID_LIST: {
-                        if (room < 8)
+                        // The structure is its two counts and one id: a buffer
+                        // of the counts alone is too short for it.
+                        if (room < 12)
                         {
                             return fail(ERROR_BAD_LENGTH);
                         }

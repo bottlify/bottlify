@@ -166,6 +166,7 @@ test('every status translated here answers what Wine\'s ntdll error tests expect
         [STATUS.PIPE_BUSY, 231],
         [STATUS.INVALID_READ_MODE, 230],
         [STATUS.OBJECT_PATH_INVALID, 161],
+        [STATUS.PROCESS_IS_TERMINATING, 5],
         [STATUS.CANCELLED, 995],
         [STATUS.OBJECT_NAME_EXISTS, 698],
         [STATUS.MUTANT_NOT_OWNED, 288],

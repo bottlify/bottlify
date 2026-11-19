@@ -40,6 +40,7 @@ import {
 import { encodeAnsi } from '../kernel32/locale.js';
 import { notifyWindow } from './notify.js';
 import { stableSort } from './stable-sort.js';
+import { createLabelEditing, LABEL_ROOM } from './label-edit.js';
 
 /** The class name a program creates the control by. */
 export const TREEVIEW_CLASS = 'SysTreeView32';
@@ -69,9 +70,12 @@ export const TVM_SELECTITEM = TVM_FIRST + 11;
 export const TVM_GETITEMA = TVM_FIRST + 12;
 export const TVM_SETITEMA = TVM_FIRST + 13;
 export const TVM_GETVISIBLECOUNT = TVM_FIRST + 16;
+export const TVM_EDITLABELA = TVM_FIRST + 14;
+export const TVM_GETEDITCONTROL = TVM_FIRST + 15;
 export const TVM_HITTEST = TVM_FIRST + 17;
 export const TVM_SORTCHILDREN = TVM_FIRST + 19;
 export const TVM_ENSUREVISIBLE = TVM_FIRST + 20;
+export const TVM_ENDEDITLABELNOW = TVM_FIRST + 22;
 export const TVM_SORTCHILDRENCB = TVM_FIRST + 21;
 export const TVM_SETBKCOLOR = TVM_FIRST + 29;
 export const TVM_SETTEXTCOLOR = TVM_FIRST + 30;
@@ -84,6 +88,7 @@ export const TVM_GETINSERTMARKCOLOR = TVM_FIRST + 38;
 export const TVM_GETITEMSTATE = TVM_FIRST + 39;
 export const TVM_SETLINECOLOR = TVM_FIRST + 40;
 export const TVM_GETLINECOLOR = TVM_FIRST + 41;
+export const TVM_EDITLABELW = TVM_FIRST + 65;
 /** A colour the tree takes from the system: -1 for text and background. */
 const SYSTEM_COLOR = 0xffffffff;
 const CLR_DEFAULT = 0xff000000;
@@ -111,6 +116,7 @@ const TVI_ROOT = 0xffff0000;
 const TVIF_HANDLE = 0x0010;
 /** The window message a tree hands its items to the parent for the last time on. */
 const WM_DESTROY = 0x0002;
+const WM_COMMAND = 0x0111;
 const TVI_FIRST = 0xffff0001;
 const TVI_LAST = 0xffff0002;
 const TVI_SORT = 0xffff0003;
@@ -152,6 +158,8 @@ export const TVN_GETDISPINFOA = TVN_FIRST - 3;
 export const TVN_ITEMEXPANDINGA = TVN_FIRST - 5;
 export const TVN_ITEMEXPANDEDA = TVN_FIRST - 6;
 export const TVN_DELETEITEMA = TVN_FIRST - 9;
+export const TVN_BEGINLABELEDITA = TVN_FIRST - 10;
+export const TVN_ENDLABELEDITA = TVN_FIRST - 11;
 
 /** Structure layouts, in bytes, as the guest compiled them. */
 export const TVITEM = Object.freeze({
@@ -219,10 +227,13 @@ const stringBytes = text=>encodeAnsi(`${text}\0`);
  *
  * @param {ControlHost} host
  * @param {any} tk  The drawing helpers the system classes share.
+ * @param {import('./updown.js').Subclassing} [subclassing]  comctl32's
+ *     SetWindowSubclass, which a label's edit is hooked with.
  * @returns {(record: any, message: ControlMessage, thread?: unknown)
  *     => number | Promise<number>}
  */
-export function createTreeViewProcedure(host, tk){
+export function createTreeViewProcedure(host, tk, subclassing){
+    const labels = createLabelEditing(host, tk, subclassing);
     /**
      * @typedef {Object} TreeNode
      * @property {number} handle
@@ -820,6 +831,68 @@ export function createTreeViewProcedure(host, tk){
     };
 
     /**
+     * TVM_EDITLABEL: an edit over the item's label, the parent told with
+     * TVN_BEGINLABELEDIT once it exists and TVN_ENDLABELEDIT as it ends; the
+     * text it ends with is the item's when the parent answers that nonzero,
+     * read through the item's pszText as the parent left it. The item is
+     * not selected by it (Wine's treeview test_itemedit).
+     *
+     * @param {any} record @param {number} handle @param {unknown} [thread]
+     * @returns {number | Promise<number>} the edit, or 0
+     */
+    const editLabel = (record, handle, thread)=>{
+        const item = node(record, handle);
+        if (!item)
+        {
+            return 0;
+        }
+        const height = measureHeight(record);
+        const listed = rows(record);
+        const index = Math.max(0, listed.findIndex(row=>row.item === item));
+        const area = tk.clientRect(record);
+        const at = rowAt(record, area, index, listed[index]?.depth ?? 0, height);
+        const dispInfo = ()=>{
+            const bytes = new Uint8Array(NMTVDISPINFO.SIZE);
+            writeItem(bytes, NMTVDISPINFO.item, item, 0, 0);
+            return bytes;
+        };
+        return labels.begin(record, {
+            text: item.text,
+            rect: { x: at.x, y: at.y, width: Math.max(1, area.right - at.x), height },
+            begin: ()=>notify(record, TVN_BEGINLABELEDITA, dispInfo(), thread),
+            end: text=>{
+                const bytes = dispInfo();
+                const view = new DataView(bytes.buffer);
+                const buffer = text === null ? 0 : host.allocate?.(LABEL_ROOM) ?? 0;
+                if (text !== null && buffer !== 0)
+                {
+                    host.writeMemory(buffer, stringBytes(text));
+                    view.setUint32(NMTVDISPINFO.item + TVITEM.mask,
+                        view.getUint32(NMTVDISPINFO.item + TVITEM.mask, true) | TVIF_TEXT, true);
+                    view.setUint32(NMTVDISPINFO.item + TVITEM.pszText, buffer, true);
+                    view.setInt32(NMTVDISPINFO.item + TVITEM.cchTextMax, LABEL_ROOM, true);
+                }
+                return after(notify(record, TVN_ENDLABELEDITA, bytes, thread), kept=>{
+                    const address = state(record).notifyAddress;
+                    const pointer = address ? readU32(address + NMTVDISPINFO.item
+                        + TVITEM.pszText) : 0;
+                    if (kept !== 0 && buffer !== 0 && pointer !== 0)
+                    {
+                        item.text = host.readCString(pointer, LABEL_ROOM - 1);
+                        item.textCallback = false;
+                        host.invalidate(record);
+                    }
+                    if (buffer !== 0)
+                    {
+                        host.release?.(buffer);
+                    }
+                    return 0;
+                });
+            },
+        }, thread);
+    };
+
+    /**
      * Where a row sits in client coordinates, for hit testing: a click arrives
      * relative to the client area, not the screen.
      *
@@ -1182,6 +1255,16 @@ export function createTreeViewProcedure(host, tk){
             case WM_DESTROY:
                 // A tree that goes away gives its items back the same way.
                 return after(deleteAll(record, thread), ()=>tk.common(record, message, thread));
+            case TVM_EDITLABELA:
+            case TVM_EDITLABELW:
+                return editLabel(record, message.lParam, thread);
+            case TVM_GETEDITCONTROL:
+                return labels.editOf(record);
+            case TVM_ENDEDITLABELNOW:
+                return after(/** @type {any} */ (labels.finish(record, message.wParam === 0,
+                    thread)), ()=>1);
+            case WM_COMMAND:
+                return labels.command(record, message.wParam, message.lParam, thread);
             case TVM_EXPAND: {
                 const item = node(record, message.lParam);
                 if (!item)

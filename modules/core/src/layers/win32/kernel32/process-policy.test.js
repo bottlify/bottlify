@@ -199,6 +199,8 @@ test('a job holds processes, keeps its limits and reads them back', ()=>{
     assert.equal(call('QueryInformationJobObject', job, 9, 0x2500, 100, 0), 0);
     assert.equal(errors.at(-1), ERROR_BAD_LENGTH);
 
+    assert.equal(call('QueryInformationJobObject', job, 3, 0x2600, 8, 0), 0);
+    assert.equal(errors.at(-1), ERROR_BAD_LENGTH, 'the counts alone: no room for the structure');
     assert.equal(call('QueryInformationJobObject', job, 3, 0x2600, 12, 0), 0);
     assert.equal(errors.at(-1), ERROR_MORE_DATA, 'room for one id of two');
     assert.deepEqual([0, 4, 8].map(at=>view.getUint32(0x2600 + at, true)), [2, 1, 0x2a0]);
