@@ -178,7 +178,7 @@ test('a process on the run\'s volume from afar makes a junction the run\'s volum
     far.write(made, bytes('lib'));
     far.close(made);
     far.createDirectory('C:\\Cache');
-    far.setJunction('C:\\Cache', 'C:\\Store');
+    far.setReparse('C:\\Cache', { tag: 0xa0000003, data: null, target: 'C:\\Store' });
     assert.equal(local.stat('C:\\Cache').junction, 'Store');
     assert.equal(far.stat('C:\\Cache\\a.dll')?.size, 3, 'read through it from afar');
     await farLayer.dispose();

@@ -2350,6 +2350,81 @@ test('NtCreateFile names what is missing, and takes only object names', ()=>{
         'and its handle closes as any other');
 });
 
+test('NtCreateFile checks its options before the name, and a name before the volume', ()=>{
+    const { fns, memory, files } = setup();
+    const native = /** @type {any} */ (fns.CreateFileW).natives.NtCreateFile;
+    const SYNCHRONIZE = 0x100000;
+    const FILE_SUPERSEDE = 0;
+    const FILE_OVERWRITE_IF = 5;
+    const FILE_SYNCHRONOUS_IO_NONALERT = 0x20;
+    /**
+     * @param {string} name @param {number} access @param {number} disposition
+     * @param {number} options
+     */
+    const open = (name, access, disposition, options)=>
+        native.handler([NT_HANDLE, access, objectAttributes(memory, name), NT_STATUS,
+            0, 0, 7, disposition, options, 0, 0]) >>> 0;
+
+    assert.equal(open('\\SystemRoot\\nowhere', GENERIC_READ, FILE_OPEN,
+        FILE_SYNCHRONOUS_IO_NONALERT), 0xc000000d,
+    'synchronous I/O without SYNCHRONIZE asked: refused before the name is looked for');
+    assert.equal(open('\\??\\C:\\GAME', GENERIC_READ | SYNCHRONIZE, FILE_SUPERSEDE,
+        FILE_DIRECTORY_FILE), 0xc000000d, 'a directory is only opened or made');
+    assert.equal(open('\\??\\C:\\GAME', GENERIC_READ, FILE_OVERWRITE_IF, 0), 0xc0000022,
+        'nor is one emptied as a file');
+    for (const name of ['\\??\\C:\\GAME\\a?b', '\\??\\C:\\GAME\\a|b', '\\??\\', '\\\\?\\'])
+    {
+        assert.equal(open(name, GENERIC_READ | SYNCHRONIZE, FILE_CREATE, FILE_DIRECTORY_FILE),
+            0xc0000033, `${name}: STATUS_OBJECT_NAME_INVALID`);
+    }
+    assert.equal(files.stat('C:\\GAME\\a?b')?.exists ?? false, false, 'nothing made');
+
+    // A directory has no bytes: reading it is no request its file system takes.
+    assert.equal(open('\\??\\C:\\GAME', GENERIC_READ | SYNCHRONIZE, FILE_OPEN,
+        FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT), 0);
+    const read = /** @type {any} */ (fns.CreateFileW).natives.NtReadFile;
+    assert.equal(read.handler([memory.dword(NT_HANDLE), 0, 0, 0, 0x300, 0x400, 4, 0, 0]) >>> 0,
+        0xc0000010, 'STATUS_INVALID_DEVICE_REQUEST');
+});
+
+test('a handle keeps the I/O mode it was opened in, and an asynchronous one has no pointer',
+    ()=>{
+        const { fns, memory, files } = setup();
+        const native = /** @type {any} */ (fns.CreateFileW).natives;
+        const SYNCHRONIZE = 0x100000;
+        files.put('C:\\GAME\\M.DAT', 'abcdef');
+        /** @param {number} options */
+        const open = options=>{
+            assert.equal(native.NtCreateFile.handler([NT_HANDLE, GENERIC_READ | GENERIC_WRITE
+                | SYNCHRONIZE, objectAttributes(memory, '\\??\\C:\\GAME\\M.DAT'), NT_STATUS,
+            0, 0, 7, FILE_OPEN, options, 0, 0]), 0);
+            return memory.dword(NT_HANDLE);
+        };
+        /** @param {number} handle */
+        const mode = handle=>{
+            assert.equal(native.NtQueryInformationFile.handler([handle, 0x300, 0x400, 4, 16]), 0);
+            return memory.dword(0x400);
+        };
+        // FILE_WRITE_THROUGH, FILE_SEQUENTIAL_ONLY, FILE_SYNCHRONOUS_IO_ALERT kept;
+        // FILE_DELETE_ON_CLOSE and FILE_RANDOM_ACCESS act at the open and are gone.
+        assert.equal(mode(open(0x2 | 0x4 | 0x10 | 0x800)), 0x16);
+        assert.equal(mode(open(0)), 0, 'opened for asynchronous I/O');
+
+        const handle = open(0);
+        const write = native.NtWriteFile;
+        assert.equal(write.handler([handle, 0, 0, 0, 0x300, 0x500, 2, 0, 0]) >>> 0, 0xc000000d,
+            'an asynchronous request says where');
+        memory.putDword(0x600, 0xfffffffe);
+        memory.putDword(0x604, 0xffffffff);
+        assert.equal(write.handler([handle, 0, 0, 0, 0x300, 0x500, 2, 0x600, 0]) >>> 0,
+            0xc000000d, 'and the file pointer it has none of is no place');
+        memory.putDword(0x600, 2);
+        memory.putDword(0x604, 0);
+        assert.equal(write.handler([handle, 0, 0, 0, 0x300, 0x500, 2, 0x600, 0]), 0);
+        assert.equal(native.NtQueryInformationFile.handler([handle, 0x300, 0x400, 8, 14]), 0);
+        assert.equal(memory.dword(0x400), 0, 'FilePositionInformation: the pointer stays');
+    });
+
 const ERROR_SHARING_VIOLATION = 32;
 const ERROR_INVALID_NAME = 123;
 const ERROR_REQUEST_ABORTED = 1235;
@@ -2802,22 +2877,25 @@ test('a directory handle sets, reads and deletes a mount point through DeviceIoC
     const { memory, files, fns, error, at } = setup();
     const anyFiles = /** @type {any} */ (files);
     files.mkdir('C:\\GAME\\LIB');
-    /** @type {[string, string | null][]} */
+    /** @type {[string, any][]} */
     const asked = [];
-    let junction = /** @type {string | null} */ (null);
+    /** @type {{ tag: number, data: Uint8Array | null, target: string | null } | null} */
+    let point = null;
     let refusal = /** @type {string | null} */ (null);
-    anyFiles.setJunction = (/** @type {string} */ path, /** @type {string | null} */ target)=>{
-        asked.push([path, target]);
+    anyFiles.setReparse = (/** @type {string} */ path, /** @type {any} */ given)=>{
+        asked.push([path, given && { tag: given.tag, target: given.target }]);
         if (refusal === null)
         {
-            junction = target;
+            point = given;
         }
         return refusal;
     };
+    anyFiles.reparseOf = ()=>point && { tag: point.tag, data: point.data };
     const stat = anyFiles.stat.bind(files);
     anyFiles.stat = (/** @type {string} */ path)=>{
         const entry = stat(path);
-        return entry && junction ? { ...entry, junction } : entry;
+        return entry && point && path === 'C:\\GAME\\LIB'
+            ? { ...entry, reparseTag: point.tag, junction: point.target?.slice(3) } : entry;
     };
     const folder = fns.CreateFileA.handler([at(NAME, 'C:\\GAME\\LIB'), GENERIC_READ, 0, 0,
         OPEN_EXISTING, 0x02200000, 0]);
@@ -2841,22 +2919,26 @@ test('a directory handle sets, reads and deletes a mount point through DeviceIoC
     memory.writeMemory(input, buffer);
     assert.equal(fns.DeviceIoControl.handler(
         [folder, SET, input, buffer.length, 0, 0, 0x500, 0]), 1);
-    assert.deepEqual(asked, [['C:\\GAME\\LIB', 'C:\\SXS\\LIB']], 'the NT prefix is taken off');
+    assert.deepEqual(asked, [['C:\\GAME\\LIB', { tag: 0xa0000003, target: 'C:\\SXS\\LIB' }]],
+        'the NT prefix is taken off');
 
     assert.equal(fns.DeviceIoControl.handler([folder, GET, 0, 0, 0x800, 4, 0x500, 0]), 0);
-    assert.equal(error.code, 122, 'smaller than the header: ERROR_INSUFFICIENT_BUFFER');
+    assert.equal(error.code, 122, 'smaller than a GUID buffer\'s head: ERROR_INSUFFICIENT_BUFFER');
     assert.equal(fns.DeviceIoControl.handler([folder, GET, 0, 0, 0x800, 0x100, 0x500, 0]), 1);
-    assert.equal(memory.dword(0x800), 0xa0000003);
-    const length = memory.bytes[0x800 + 10] | memory.bytes[0x800 + 11] << 8;
-    const read = String.fromCharCode(...new Uint16Array(
-        memory.readMemory(0x800 + 16, length).slice().buffer));
-    assert.equal(read, target, 'the substitute name comes back with its prefix');
-    assert.equal(memory.dword(0x500), 8 + (memory.bytes[0x804] | memory.bytes[0x805] << 8));
+    assert.deepEqual(memory.readMemory(0x800, buffer.length), buffer, 'handed back as it was set');
+    assert.equal(memory.dword(0x500), buffer.length);
     assert.equal(fns.GetFileAttributesA.handler([NAME]) & 0x410, 0x410,
         'a junction is a directory and a reparse point');
 
-    memory.writeMemory(input, new Uint8Array([3, 0, 0, 0xa0, 0, 0, 0, 0]));
-    assert.equal(fns.DeviceIoControl.handler([folder, UNSET, input, 8, 0, 0, 0x500, 0]), 1);
+    // A delete hands the header alone, at the size of REPARSE_GUID_DATA_BUFFER's head.
+    memory.writeMemory(input, new Uint8Array([3, 0, 0, 0xa0, ...new Array(20).fill(0)]));
+    assert.equal(fns.DeviceIoControl.handler([folder, UNSET, input, 8, 0, 0, 0x500, 0]), 0);
+    assert.equal(error.code, 4392, 'a header too short: ERROR_INVALID_REPARSE_DATA');
+    memory.writeMemory(input, new Uint8Array([0x0c, 0, 0, 0xa0]));
+    assert.equal(fns.DeviceIoControl.handler([folder, UNSET, input, 24, 0, 0, 0x500, 0]), 0);
+    assert.equal(error.code, 4394, 'another tag than the one set: ERROR_REPARSE_TAG_MISMATCH');
+    memory.writeMemory(input, new Uint8Array([3, 0, 0, 0xa0]));
+    assert.equal(fns.DeviceIoControl.handler([folder, UNSET, input, 24, 0, 0, 0x500, 0]), 1);
     assert.deepEqual(asked.at(-1), ['C:\\GAME\\LIB', null]);
     assert.equal(fns.DeviceIoControl.handler([folder, GET, 0, 0, 0x800, 0x100, 0x500, 0]), 0);
     assert.equal(error.code, 4390, 'ERROR_NOT_A_REPARSE_POINT');
@@ -2866,9 +2948,9 @@ test('a directory handle sets, reads and deletes a mount point through DeviceIoC
     assert.equal(fns.DeviceIoControl.handler(
         [folder, SET, input, buffer.length, 0, 0, 0x500, 0]), 0);
     assert.equal(error.code, 145, 'ERROR_DIR_NOT_EMPTY');
-    memory.writeMemory(input, new Uint8Array([0x0c, 0, 0, 0xa0, 0, 0, 0, 0]));
+    memory.writeMemory(input, new Uint8Array([0, 0, 0, 0, 0, 0, 0, 0]));
     assert.equal(fns.DeviceIoControl.handler([folder, SET, input, 8, 0, 0, 0x500, 0]), 0);
-    assert.equal(error.code, 4393, 'a symbolic link tag: ERROR_REPARSE_TAG_INVALID');
+    assert.equal(error.code, 4393, 'tag 0: ERROR_REPARSE_TAG_INVALID');
 });
 
 test('GetFileAttributesEx fills the head a find would, and nothing past it', ()=>{

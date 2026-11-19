@@ -31,6 +31,10 @@ function mounted(){
     return { source, writable, tree: createOverlay({ source, writable }) };
 }
 
+/** The reparse tags the tests set: a junction's and a symbolic link's. */
+const MOUNT_POINT = 0xa0000003;
+const SYMLINK = 0xa000000c;
+
 test('both layers are one volume, and case is no obstacle to finding a file', ()=>{
     const { tree } = mounted();
 
@@ -283,9 +287,10 @@ test('a junction shows the directory it stands for; removing it leaves that dire
     tree.createFile(['Store', 'Lib', 'A.DLL']);
     tree.write(['Store', 'Lib', 'A.DLL'], 0, bytes('lib'));
     tree.createDirectory(['Cache']);
-    tree.setJunction(['Cache'], ['Store', 'Lib']);
+    tree.setReparse(['Cache'], { tag: MOUNT_POINT, data: null, target: ['Store', 'Lib'] });
 
     assert.equal(tree.stat(['Cache'])?.junction, 'Store\\Lib');
+    assert.equal(tree.stat(['Cache'])?.reparseTag, MOUNT_POINT);
     assert.equal(tree.stat(['Cache'])?.directory, true);
     assert.equal(text(tree.read(['cache', 'a.dll'], 0, 3)), 'lib', 'a path goes through it');
     assert.deepEqual(tree.list(['Cache']).map(entry=>entry.name), ['A.DLL'],
@@ -294,7 +299,8 @@ test('a junction shows the directory it stands for; removing it leaves that dire
     assert.ok(tree.stat(['Store', 'Lib', 'B.DLL']), 'what is made through it is the target\'s');
 
     const records = tree.links();
-    assert.deepEqual(records, [{ owner: 'Store\\Lib', names: ['Cache'], junction: true }]);
+    assert.deepEqual(records, [{ owner: 'Store\\Lib', names: ['Cache'], junction: true,
+        reparse: { tag: MOUNT_POINT } }]);
     tree.removeDirectory(['Cache']);
     assert.equal(tree.stat(['Cache']), null);
     assert.ok(tree.stat(['Store', 'Lib', 'A.DLL']), 'the target stays');
@@ -302,20 +308,52 @@ test('a junction shows the directory it stands for; removing it leaves that dire
     tree.createDirectory(['Cache']);
     tree.restoreLinks(records);
     assert.equal(text(tree.read(['Cache', 'A.DLL'], 0, 3)), 'lib', 'a session gives it back');
-    tree.setJunction(['Cache'], null);
+    tree.setReparse(['Cache'], null);
     assert.deepEqual(tree.list(['Cache']), [], 'undone, an empty directory again');
+    assert.equal(tree.stat(['Cache'])?.reparseTag, 0);
 });
 
-test('a junction is made of an empty directory only, and undone only of a junction', ()=>{
+test('a reparse point is set on an empty directory or a file, and taken off only of one', ()=>{
     const { tree } = mounted();
+    const point = (/** @type {string[]} */ target)=>({ tag: MOUNT_POINT, data: null, target });
     tree.createDirectory(['Full']);
     tree.createFile(['Full', 'X.TXT']);
-    assert.throws(()=>tree.setJunction(['Full'], ['Game']), { code: 'DIRECTORY_NOT_EMPTY' });
-    assert.throws(()=>tree.setJunction(['Readme.TXT'], ['Game']), { code: 'NOT_A_DIRECTORY' });
-    assert.throws(()=>tree.setJunction(['Full'], null), { code: 'NOT_A_REPARSE_POINT' });
+    assert.throws(()=>tree.setReparse(['Full'], point(['Game'])), { code: 'DIRECTORY_NOT_EMPTY' });
+    assert.throws(()=>tree.setReparse(['Full'], null), { code: 'NOT_A_REPARSE_POINT' });
     tree.createDirectory(['Loop']);
-    tree.setJunction(['Loop'], ['Loop']);
+    tree.setReparse(['Loop'], point(['Loop']));
     assert.equal(tree.stat(['Loop', 'X']), null, 'a junction to itself stands for nothing');
+
+    // A tag of a program's own on a file: kept as set, its bytes untouched.
+    const data = Uint8Array.from([0xef, 0xbe, 0, 0, 5, 0, 0, 0, 1, 2, 3, 4, 5]);
+    tree.setReparse(['Readme.TXT'], { tag: 0xbeef, data, target: null });
+    data[8] = 9;
+    assert.deepEqual(tree.reparseOf(['Readme.TXT']),
+        { tag: 0xbeef, data: Uint8Array.from([0xef, 0xbe, 0, 0, 5, 0, 0, 0, 1, 2, 3, 4, 5]) });
+    assert.equal(text(tree.read(['Readme.TXT'], 0, 7)), 'read me', 'the file\'s bytes stay');
+    assert.equal(tree.reparseOf(['Game']), null);
+});
+
+test('a session carries every reparse point, and a junction recorded alone still loads', ()=>{
+    const { tree } = mounted();
+    const data = Uint8Array.from([0xef, 0xbe, 0, 0, 1, 0, 0, 0, 7]);
+    tree.setReparse(['Readme.TXT'], { tag: 0xbeef, data, target: null });
+    tree.createFile(['Link.TXT']);
+    tree.setReparse(['Link.TXT'], { tag: SYMLINK, data: null, target: ['Readme.TXT'] });
+    const records = JSON.parse(JSON.stringify(tree.links()));
+
+    const again = mounted().tree;
+    again.createFile(['Link.TXT']);
+    again.createDirectory(['Old']);
+    again.restoreLinks([...records,
+        // A session saved before reparse buffers were kept.
+        { owner: 'Game', names: ['Old'], junction: true }]);
+    assert.deepEqual(again.reparseOf(['Readme.TXT']), { tag: 0xbeef, data });
+    assert.equal(again.stat(['Link.TXT'])?.junction, 'Readme.TXT');
+    assert.equal(again.stat(['Link.TXT'])?.reparseTag, SYMLINK);
+    assert.deepEqual(again.reparseOf(['Old']), { tag: MOUNT_POINT, data: null },
+        'read back as the mount point it was');
+    assert.equal(again.stat(['Old', 'Data'])?.directory, true, 'and gone through');
 });
 
 test('a drive remounted from its files and links has the same names', ()=>{

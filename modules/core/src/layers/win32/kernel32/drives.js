@@ -136,7 +136,10 @@ const FS_UNICODE_STORED_ON_DISK = 0x00000004;
 // NTFS keeps ACLs, and so does this volume: a program that reads a file's
 // descriptor gets a real one and can set it (advapi32's file security).
 const FS_PERSISTENT_ACLS = 0x00000008;
-const FILE_SYSTEM_FLAGS = FS_CASE_IS_PRESERVED | FS_UNICODE_STORED_ON_DISK | FS_PERSISTENT_ACLS;
+// It keeps reparse points: mount points, symbolic links, tags of a program's own.
+const FILE_SUPPORTS_REPARSE_POINTS = 0x00000080;
+const FILE_SYSTEM_FLAGS = FS_CASE_IS_PRESERVED | FS_UNICODE_STORED_ON_DISK | FS_PERSISTENT_ACLS
+    | FILE_SUPPORTS_REPARSE_POINTS;
 
 /**
  * A disc, as the CD-ROM file system describes one: 2048-byte sectors, one to

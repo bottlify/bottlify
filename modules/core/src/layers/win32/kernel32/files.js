@@ -43,6 +43,11 @@ import { isMailslotName } from './mailslots.js';
 import { isPipeName, pipeNameOf } from './pipes.js';
 import { isNameInExpression, win32Expression } from './name-expression.js';
 import { fullPathName } from '../ntdll/paths.js';
+import { STATUS, toDosError } from '../ntdll/status.js';
+import {
+    FSCTL_DELETE_REPARSE_POINT, FSCTL_GET_REPARSE_POINT, FSCTL_SET_REPARSE_POINT,
+    IO_REPARSE_TAG_MOUNT_POINT, IO_REPARSE_TAG_SYMLINK, reparseRequest,
+} from './reparse.js';
 
 /** Codes this surface reports through the last-error slot. */
 const ERROR_SUCCESS = 0;
@@ -75,17 +80,14 @@ const WIN32_FILE_ATTRIBUTE_DATA_SIZE = 36;
 const ERROR_NEGATIVE_SEEK = 131;
 const ERROR_NOT_SUPPORTED = 50;
 const ERROR_DIR_NOT_EMPTY = 145;
-/** FSCTL_SET_REPARSE_POINT, FSCTL_GET_REPARSE_POINT, FSCTL_DELETE_REPARSE_POINT. */
-const FSCTL_SET_REPARSE_POINT = 0x900a4;
-const FSCTL_GET_REPARSE_POINT = 0x900a8;
-const FSCTL_DELETE_REPARSE_POINT = 0x900ac;
-/** A junction's reparse tag: a mount point. */
-const IO_REPARSE_TAG_MOUNT_POINT = 0xa0000003;
-/** The NT prefix a mount point's substitute name carries before its path. */
-const NT_PREFIX = '\\??\\';
-const ERROR_INSUFFICIENT_BUFFER_FOR_REPARSE = 122;
-const ERROR_REPARSE_TAG_INVALID = 4393;
-const ERROR_NOT_A_REPARSE_POINT_FILE = 4390;
+/** A reparse point of a tag nothing answers, and one standing for what cannot be reached. */
+const ERROR_CANT_ACCESS_FILE = 1920;
+const ERROR_CANT_RESOLVE_FILENAME = 1921;
+/** How many reparse points one open may pass through before it is a loop. */
+const LINK_HOPS = 31;
+/** CreateFile's flag and NtCreateFile's option for the reparse point itself. */
+const FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
+const FILE_OPEN_REPARSE_POINT = 0x00200000;
 const ERROR_ALREADY_EXISTS = 183;
 const ERROR_SHARING_VIOLATION = 32;
 const ERROR_USER_MAPPED_FILE = 1224;
@@ -338,7 +340,8 @@ export const WIN32_FIND_DATAA = Object.freeze({
  * @property {number} [links]  How many names the file has; one when absent.
  * @property {string} [identity]  What the file is known by whatever its names:
  *           its own path unless it has others.
- * @property {string} [junction]  For a junction, the directory it stands for.
+ * @property {string} [junction]  For a reparse point naming a place on its drive, that place.
+ * @property {number} [reparseTag]  The tag of the reparse point it is.
  */
 
 /**
@@ -352,6 +355,7 @@ export const WIN32_FIND_DATAA = Object.freeze({
  * @property {number} [attributes]
  * @property {number} [links]
  * @property {string} [identity]
+ * @property {number} [reparseTag]  The tag of the reparse point it is.
  */
 
 /** The handle kinds that are file objects: what CancelIo takes. */
@@ -401,6 +405,37 @@ const FILE_USE_FILE_POINTER_POSITION = 0xfffffffe;
 /** FILE_MODE_INFORMATION's bits a handle's mode may be set to. */
 const FILE_WRITE_THROUGH = 0x2;
 const FILE_SYNCHRONOUS_IO_ALERT = 0x10;
+/** The last of the open options FileModeInformation reports back. */
+const FILE_NO_INTERMEDIATE_BUFFERING = 0x8;
+/** The open options a handle's mode keeps: the rest act at the open and are gone. */
+const FILE_MODE_OPTIONS = FILE_WRITE_THROUGH | FILE_SEQUENTIAL_ONLY
+    | FILE_NO_INTERMEDIATE_BUFFERING | FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT;
+/** CreateFile's flags that are the same hints: write-through and no buffering. */
+const FILE_FLAG_WRITE_THROUGH = 0x80000000;
+const FILE_FLAG_NO_BUFFERING = 0x20000000;
+
+/** The two modes a handle waits in for its I/O. */
+const SYNCHRONOUS_MODES = FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT;
+
+/**
+ * A file handle's FILE_MODE_INFORMATION: what its open kept, or, for one
+ * made without (a directory's), synchronous unless overlapped.
+ *
+ * @param {{ mode?: number, overlapped?: boolean }} file
+ */
+const modeOf = file=>file.mode ?? (file.overlapped ? 0 : FILE_SYNCHRONOUS_IO_NONALERT);
+
+/**
+ * The mode a handle CreateFile opens has: synchronous unless it asked for
+ * overlapped I/O, with the hints its flags give.
+ *
+ * @param {number} flags
+ */
+const modeOfFlags = flags=>(((flags >>> 0) & FILE_FLAG_OVERLAPPED) !== 0
+    ? 0 : FILE_SYNCHRONOUS_IO_NONALERT)
+    | (((flags >>> 0) & FILE_FLAG_SEQUENTIAL_SCAN) !== 0 ? FILE_SEQUENTIAL_ONLY : 0)
+    | (((flags >>> 0) & FILE_FLAG_WRITE_THROUGH) !== 0 ? FILE_WRITE_THROUGH : 0)
+    | (((flags >>> 0) & FILE_FLAG_NO_BUFFERING) !== 0 ? FILE_NO_INTERMEDIATE_BUFFERING : 0);
 const FILE_DISPOSITION_FLAG_DELETE = 0x1;
 /** The name goes as the handle that asked closes, other opens or not. */
 const FILE_DISPOSITION_FLAG_POSIX_SEMANTICS = 0x2;
@@ -449,8 +484,12 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write', 'p
  * @property {(path: string) => string | null} [mappedAs]  how a section maps the file
  * @property {(path: string, existing: string) => string | null} [link]
  *           Gives a file one more name: null, or the volume's code for why not.
- * @property {(path: string, target: string | null) => string | null} [setJunction]
- *           Makes an empty directory a junction (null target: a directory again).
+ * @property {(path: string,
+ *     point: { tag: number, data: Uint8Array | null, target: string | null } | null)
+ *     => string | null | { away: true }} [setReparse]
+ *           Sets a reparse point (null: takes it off): null, or the volume's code for why not.
+ * @property {(path: string) => { tag: number, data: Uint8Array | null } | null} [reparseOf]
+ *           The reparse point as it was set.
  * @property {(path: string, mode: OpenMode) => any} open   Opaque node, or null.
  * @property {(node: any, offset: number, length: number, onlyCopied?: boolean) =>
  *     Uint8Array | Promise<Uint8Array>} read
@@ -1053,9 +1092,51 @@ export function createFileFunctions(host){
      */
     const missing = path=>{
         const parent = files.stat(parentOf(path));
+        // A directory that is a reparse point of a tag no filter here
+        // answers holds nothing a path can reach.
+        if (parent?.exists && unhandledTag(parent.reparseTag ?? 0))
+        {
+            return ERROR_CANT_ACCESS_FILE;
+        }
         return parent && parent.exists && parent.isDirectory
             ? ERROR_FILE_NOT_FOUND
             : ERROR_PATH_NOT_FOUND;
+    };
+
+    /**
+     * Where an open of `path` lands past the reparse points it is, unless
+     * asked for the reparse point itself: a mount point or a symbolic link
+     * stands for the place it names - followed to the end of a chain of
+     * them, a loop or a chain too long not resolved - and any other tag is
+     * one no filter here answers. A link to a directory is opened as itself,
+     * whose contents are the target's; one to a file opens that file, and a
+     * dangling one the place it names, which a create then makes.
+     *
+     * @param {string} path @param {any} entry  `files.stat(path)`
+     * @returns {{ path: string, error?: undefined } | { error: number, path?: undefined }}
+     */
+    const throughReparse = (path, entry)=>{
+        let at = path;
+        let here = entry;
+        for (let hop = 0; hop <= LINK_HOPS; hop++)
+        {
+            const tag = here?.exists ? here.reparseTag ?? 0 : 0;
+            if (tag === 0)
+            {
+                return { path: here?.isDirectory ? path : at };
+            }
+            if (unhandledTag(tag))
+            {
+                return { error: ERROR_CANT_ACCESS_FILE };
+            }
+            if (!here.junction)
+            {
+                return { error: ERROR_FILE_NOT_FOUND };
+            }
+            at = `${path.slice(0, 2)}${SEPARATOR}${here.junction}`;
+            here = files.stat(at);
+        }
+        return { error: ERROR_CANT_RESOLVE_FILENAME };
     };
 
     /**
@@ -1066,6 +1147,15 @@ export function createFileFunctions(host){
      * @param {string} path
      */
     const wildcardName = path=>/[*?]/.test(path.slice(path.lastIndexOf(SEPARATOR) + 1));
+
+    /**
+     * Whether a reparse tag is one no filter here answers: every tag but
+     * the two that name a place, a mount point and a symbolic link.
+     *
+     * @param {number} tag
+     */
+    const unhandledTag = tag=>tag !== 0 && tag !== IO_REPARSE_TAG_MOUNT_POINT
+        && tag !== IO_REPARSE_TAG_SYMLINK;
 
     /**
      * Fails a call with a code, returning whatever that function's failure
@@ -1235,6 +1325,8 @@ export function createFileFunctions(host){
         const size = entry.size ?? 0;
         view.setUint32(WIN32_FIND_DATAA.nFileSizeHigh, high(size), true);
         view.setUint32(WIN32_FIND_DATAA.nFileSizeLow, low(size), true);
+        // A reparse point's tag goes where the structure keeps it.
+        view.setUint32(WIN32_FIND_DATAA.dwReserved0, entry.reparseTag ?? 0, true);
         return data;
     };
 
@@ -1709,96 +1801,35 @@ export function createFileFunctions(host){
         INVALID_PATH: ERROR_INVALID_NAME, NO_SUCH_DRIVE: ERROR_PATH_NOT_FOUND,
     });
 
-    /** The file-system controls a directory's handle answers: its reparse point. */
+    /** The file-system controls a file's or a directory's handle answers: its reparse point. */
     const REPARSE_CONTROLS = new Set([FSCTL_SET_REPARSE_POINT, FSCTL_GET_REPARSE_POINT,
         FSCTL_DELETE_REPARSE_POINT]);
 
     /**
-     * A directory's reparse point through DeviceIoControl: a mount point (a
-     * junction) set, read back or taken off. The REPARSE_DATA_BUFFER is the
-     * tag, the data's length, then four offsets and lengths into the names
-     * after them, the substitute name (\??\C:\...) and the printed one.
-     * Only a mount point is a reparse point this volume keeps; another tag
-     * is said and refused.
+     * A reparse control on the file or directory at `path`, through the one
+     * set of rules (`reparseRequest`), with the bytes it hands back written
+     * to `output`.
      *
      * @param {string} path @param {number} code @param {number} input
      * @param {number} inLength @param {number} output @param {number} outLength
-     * @param {number} returned
+     * @returns {{ status: number, information: number }}
      */
-    const reparseControl = (path, code, input, inLength, output, outLength, returned)=>{
-        const refusedBy = (/** @type {string | null} */ refused)=>(refused === null
-            ? (host.setLastError(ERROR_SUCCESS), 1)
-            : fail(refused === 'DIRECTORY_NOT_EMPTY' ? ERROR_DIR_NOT_EMPTY
-                : refused === 'NOT_A_REPARSE_POINT' ? ERROR_NOT_A_REPARSE_POINT_FILE
-                    : LINK_ERRORS[/** @type {keyof typeof LINK_ERRORS} */ (refused)]
-                        ?? ERROR_ACCESS_DENIED));
-        if (!files.setJunction)
+    const reparseControl = (path, code, input, inLength, output, outLength)=>{
+        if (!files.setReparse || !files.reparseOf)
         {
-            host.divergence?.('DeviceIoControl', `the volume keeps no junctions; ${path} not made`);
-            return fail(ERROR_INVALID_FUNCTION);
+            host.divergence?.('FSCTL_SET_REPARSE_POINT', `the volume keeps no reparse points;`
+                + ` ${path} not made one`);
+            return { status: STATUS_INVALID_DEVICE_REQUEST, information: 0 };
         }
-        if (code === FSCTL_GET_REPARSE_POINT)
+        const given = input === 0 || inLength === 0 ? null
+            : host.readMemory(input, inLength).slice();
+        const answer = reparseRequest(/** @type {any} */ (files), path, code, given,
+            output !== 0, outLength, host);
+        if (answer.output)
         {
-            const target = files.stat(path)?.junction;
-            if (!target)
-            {
-                return fail(ERROR_NOT_A_REPARSE_POINT_FILE);
-            }
-            const substitute = utf16(`${NT_PREFIX}${target}`);
-            const printed = utf16(target);
-            const data = new Uint8Array(8 + 8 + substitute.length + 2 + printed.length + 2);
-            const view = new DataView(data.buffer);
-            view.setUint32(0, IO_REPARSE_TAG_MOUNT_POINT, true);
-            view.setUint16(4, data.length - 8, true);
-            view.setUint16(8, 0, true);
-            view.setUint16(10, substitute.length, true);
-            view.setUint16(12, substitute.length + 2, true);
-            view.setUint16(14, printed.length, true);
-            data.set(substitute, 16);
-            data.set(printed, 16 + substitute.length + 2);
-            if (outLength < 8)
-            {
-                return fail(ERROR_INSUFFICIENT_BUFFER_FOR_REPARSE);
-            }
-            host.writeMemory(output, data.subarray(0, Math.min(outLength, data.length)));
-            if (returned !== 0)
-            {
-                writeDword(returned, Math.min(outLength, data.length));
-            }
-            return outLength < data.length ? fail(ERROR_MORE_DATA)
-                : (host.setLastError(ERROR_SUCCESS), 1);
+            host.writeMemory(output, answer.output);
         }
-        if (input === 0 || inLength < 8)
-        {
-            return fail(ERROR_INVALID_PARAMETER);
-        }
-        const head = new DataView(host.readMemory(input, 8).slice().buffer);
-        if (head.getUint32(0, true) !== IO_REPARSE_TAG_MOUNT_POINT)
-        {
-            host.divergence?.('DeviceIoControl', `reparse tag 0x${head.getUint32(0, true)
-                .toString(16)} on ${path}: only a mount point is kept`);
-            return fail(ERROR_REPARSE_TAG_INVALID);
-        }
-        if (code === FSCTL_DELETE_REPARSE_POINT)
-        {
-            return refusedBy(files.setJunction(path, null));
-        }
-        if (inLength < 16)
-        {
-            return fail(ERROR_INVALID_PARAMETER);
-        }
-        const fields = new DataView(host.readMemory(input + 8, 8).slice().buffer);
-        const at = fields.getUint16(0, true);
-        const length = fields.getUint16(2, true);
-        if (16 + at + length > inLength)
-        {
-            return fail(ERROR_INVALID_PARAMETER);
-        }
-        // The names need not end in a NUL inside their lengths, so they are read as counted.
-        const name = String.fromCharCode(...new Uint16Array(
-            host.readMemory(input + 16 + at, length & ~1).slice().buffer));
-        const target = name.startsWith(NT_PREFIX) ? name.slice(NT_PREFIX.length) : name;
-        return refusedBy(files.setJunction(path, target));
+        return answer;
     };
 
     /**
@@ -2421,7 +2452,8 @@ export function createFileFunctions(host){
      * it closes, and a file whose deletion is pending.
      *
      * @param {string} path
-     * @param {{ access: number, share: number, disposition: number, flags: number }} request
+     * @param {{ access: number, share: number, disposition: number, flags: number,
+     *     mode?: number }} request
      * @param {number} [implied]  rights the handle is granted beside those asked
      * @returns {{ handle: number, existed: boolean } | { error: number, cannotDelete?: boolean,
      *     deletePending?: boolean }}
@@ -2438,12 +2470,13 @@ export function createFileFunctions(host){
      * `openPath` without the account of what it refused.
      *
      * @param {string} path
-     * @param {{ access: number, share: number, disposition: number, flags: number }} request
+     * @param {{ access: number, share: number, disposition: number, flags: number,
+     *     mode?: number }} request
      * @param {number} implied
      * @returns {{ handle: number, existed: boolean }
      *     | { error: number, cannotDelete?: boolean, deletePending?: boolean }}
      */
-    const openPathOnce = (path, { access, share, disposition, flags }, implied)=>{
+    const openPathOnce = (path, { access, share, disposition, flags, mode: kept }, implied)=>{
         const mode = openModes[disposition >>> 0];
         if (!mode)
         {
@@ -2465,7 +2498,19 @@ export function createFileFunctions(host){
             return { error: ERROR_WRITE_PROTECT };
         }
 
-        const existing = files.stat(path);
+        const named = files.stat(path);
+        const landed = named?.reparseTag && ((flags >>> 0) & FILE_FLAG_OPEN_REPARSE_POINT) === 0
+            ? throughReparse(path, named) : { path };
+        if (landed.error !== undefined)
+        {
+            return { error: landed.error };
+        }
+        if (landed.path !== path)
+        {
+            return openPathOnce(landed.path, { access, share, disposition,
+                flags: (flags >>> 0) | FILE_FLAG_OPEN_REPARSE_POINT, mode: kept }, implied);
+        }
+        const existing = named;
         const exists = Boolean(existing && existing.exists);
         // A file whose deletion is pending opens no more, whatever is asked.
         if (exists && deletePending.has(path.toLowerCase()))
@@ -2549,14 +2594,14 @@ export function createFileFunctions(host){
         // A handle opened for overlapped I/O keeps no file pointer of its
         // own that a read or write moves: each says where in its OVERLAPPED.
         const overlapped = ((flags >>> 0) & FILE_FLAG_OVERLAPPED) !== 0;
-        const sequential = ((flags >>> 0) & FILE_FLAG_SEQUENTIAL_SCAN) !== 0;
         const writeAttributes = (rights
             & (GENERIC_WRITE | GENERIC_ALL | FILE_WRITE_ATTRIBUTES)) !== 0;
         // FILE_FLAG_DELETE_ON_CLOSE asks for DELETE with it, as CreateFile does.
         const handle = host.handles.open('file', {
             path, node, read, write, writeAttributes, position: 0,
+            mode: kept ?? modeOfFlags(flags),
             ...deleteOnClose ? { deleteOnClose } : {},
-            ...overlapped ? { overlapped } : {}, ...sequential ? { sequential } : {},
+            ...overlapped ? { overlapped } : {},
         }, mappedAccess('file', rights | implied | (deleteOnClose ? DELETE : 0)));
         return { handle, existed: exists };
     };
@@ -2690,6 +2735,18 @@ export function createFileFunctions(host){
      * @returns {{ path: string, status?: undefined } | { status: number, path?: undefined }}
      */
     const resolveNative = (root, name)=>{
+        // A name holding a character no file name may is refused as a name
+        // before any part of it is looked for; so is a namespace prefix
+        // with nothing after it.
+        const prefix = /^\\(\?\?|DosDevices|GLOBAL\?\?)\\/i.exec(name);
+        const names = prefix ? name.slice(prefix[0].length).replace(/^[A-Za-z]:/, '') : name;
+        const rooted = root !== 0 || name.startsWith(SEPARATOR);
+        const unnamable = [...names].some(character=>character < ' '
+            || '"*/:<>?|'.includes(character));
+        if ((rooted && unnamable) || (prefix && names === ''))
+        {
+            return { status: STATUS_OBJECT_NAME_INVALID };
+        }
         if (root !== 0)
         {
             const directory = object(root, 'directory');
@@ -2702,7 +2759,6 @@ export function createFileFunctions(host){
                 : { path: fullPath(name === '' ? directory.path
                     : `${directory.path.replace(/\\$/, '')}${SEPARATOR}${name}`) };
         }
-        const prefix = /^\\(\?\?|DosDevices|GLOBAL\?\?)\\/i.exec(name);
         if (!prefix)
         {
             return { status: name.startsWith(SEPARATOR)
@@ -2734,6 +2790,8 @@ export function createFileFunctions(host){
         [ERROR_BAD_LENGTH]: STATUS_INFO_LENGTH_MISMATCH,
         // A pipe none of whose instances listens.
         [ERROR_PIPE_BUSY]: STATUS_PIPE_NOT_AVAILABLE,
+        [ERROR_CANT_ACCESS_FILE]: STATUS.IO_REPARSE_TAG_NOT_HANDLED,
+        [ERROR_CANT_RESOLVE_FILENAME]: STATUS.REPARSE_POINT_NOT_RESOLVED,
     };
 
     /**
@@ -2768,6 +2826,17 @@ export function createFileFunctions(host){
      */
     const ntCreateFile = ([out, access, attributes, status, , givenAttributes, share,
         disposition, options])=>{
+        // The I/O manager checks the options before it looks at the name:
+        // synchronous I/O waits on the file object, so it needs SYNCHRONIZE
+        // asked in so many words, and a directory is only opened or made.
+        const synchronous = ((options >>> 0)
+            & (FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT)) !== 0;
+        if ((synchronous && ((access >>> 0) & SYNCHRONIZE) === 0)
+            || (((options >>> 0) & FILE_DIRECTORY_FILE) !== 0
+                && ![FILE_CREATE, FILE_OPEN, FILE_OPEN_IF].includes(disposition >>> 0)))
+        {
+            return STATUS_INVALID_PARAMETER;
+        }
         // A pipe's name opens a client end, with the rights asked and no more.
         const given = givenName(attributes >>> 0);
         const pipeName = given && given.root === 0 && host.pipes ? pipeNameOf(given.name) : null;
@@ -2819,7 +2888,20 @@ export function createFileFunctions(host){
             return STATUS_SUCCESS;
         };
 
-        const existing = files.stat(path);
+        const found = files.stat(path);
+        const literal = (wanted & FILE_OPEN_REPARSE_POINT) !== 0;
+        // A reparse point reopened through its own handle by an empty name
+        // has nothing left to reparse: Windows calls its data invalid.
+        if (found?.reparseTag && !literal && given?.root && given.name === '')
+        {
+            return STATUS.IO_REPARSE_DATA_INVALID;
+        }
+        const landed = found?.reparseTag && !literal ? throughReparse(path, found) : { path };
+        if (landed.error !== undefined)
+        {
+            return NATIVE_FAILURES[landed.error] ?? STATUS_UNSUCCESSFUL;
+        }
+        const existing = landed.path === path ? found : files.stat(landed.path);
         if (existing?.exists && existing.isDirectory)
         {
             if (fileOnly)
@@ -2829,6 +2911,11 @@ export function createFileFunctions(host){
             if (creation === CREATE_NEW)
             {
                 return STATUS_OBJECT_NAME_COLLISION;
+            }
+            // A directory is not replaced or emptied as a file is.
+            if (creation === CREATE_ALWAYS || creation === TRUNCATE_EXISTING)
+            {
+                return STATUS_ACCESS_DENIED;
             }
             return opened(host.handles.open('directory',
                 { path, ...deleteOnClose ? { deleteOnClose } : {} }), FILE_OPENED);
@@ -2843,17 +2930,24 @@ export function createFileFunctions(host){
             {
                 return STATUS_OBJECT_NAME_NOT_FOUND;
             }
-            if (!files.mkdir(path))
+            if (wildcardName(path))
+            {
+                return STATUS_OBJECT_NAME_INVALID;
+            }
+            if (!files.mkdir(landed.path))
             {
                 return onReadOnlyMedia(path)
                     ? STATUS_MEDIA_WRITE_PROTECTED : STATUS_OBJECT_PATH_NOT_FOUND;
             }
-            return opened(host.handles.open('directory', { path }), FILE_CREATED);
+            return opened(host.handles.open('directory', { path: landed.path }), FILE_CREATED);
         }
 
-        const result = openPath(path, {
+        // The reparse points on the way are behind it: the file is opened as it is.
+        const result = openPath(landed.path, {
             access, share, disposition: creation,
-            flags: (givenAttributes >>> 0) | (deleteOnClose ? FILE_FLAG_DELETE_ON_CLOSE : 0),
+            flags: (givenAttributes >>> 0) | (deleteOnClose ? FILE_FLAG_DELETE_ON_CLOSE : 0)
+                | FILE_FLAG_OPEN_REPARSE_POINT,
+            mode: wanted & FILE_MODE_OPTIONS,
         });
         if ('error' in result)
         {
@@ -3145,9 +3239,7 @@ export function createFileFunctions(host){
             }
         };
         const name = String(file.path).replace(/^[A-Za-z]:/, '');
-        const mode = (file.overlapped ? 0 : FILE_SYNCHRONOUS_IO_NONALERT)
-            | (file.sequential ? FILE_SEQUENTIAL_ONLY : 0)
-            | (file.deleteOnClose ? FILE_DELETE_ON_CLOSE : 0);
+        const mode = modeOf(file);
         const access = handle !== 0 ? rightsOf(handle)
             : (file.read ? FILE_GENERIC_READ : 0) | (file.write ? FILE_GENERIC_WRITE : 0);
         // A file's number on its volume, GetFileInformationByHandle's: the
@@ -3215,8 +3307,11 @@ export function createFileFunctions(host){
                     view.setUint32(48, attributes, true);
                 });
             case FILE_ATTRIBUTE_TAG_INFORMATION:
-                // The attributes, and no reparse tag: there are no reparse points.
-                return record(8, view=>view.setUint32(0, attributes, true));
+                // The attributes, and the tag of the reparse point it is.
+                return record(8, view=>{
+                    view.setUint32(0, attributes, true);
+                    view.setUint32(4, entry?.reparseTag ?? 0, true);
+                });
             default:
                 return null;
         }
@@ -3486,9 +3581,12 @@ export function createFileFunctions(host){
                 }
             }
             const file = object(handle, 'file');
-            if (!file)
+            if (!file || file.directory)
             {
-                return STATUS_INVALID_HANDLE;
+                // A directory is a file object with no bytes: the file system
+                // has no read or write for it.
+                return file || object(handle, 'directory') ? STATUS_INVALID_DEVICE_REQUEST
+                    : STATUS_INVALID_HANDLE;
             }
             if (writing ? !writes(handle, file) : !reads(handle, file))
             {
@@ -3504,6 +3602,13 @@ export function createFileFunctions(host){
             {
                 return writing ? STATUS_INVALID_USER_BUFFER : STATUS_ACCESS_VIOLATION;
             }
+            // A handle opened for asynchronous I/O has no file pointer: each
+            // request says where, and the pointer it does not have stays put.
+            const asynchronous = (modeOf(file) & SYNCHRONOUS_MODES) === 0;
+            if (asynchronous && (offset >>> 0) === 0)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
             let at = file.position;
             if ((offset >>> 0) !== 0)
             {
@@ -3517,7 +3622,8 @@ export function createFileFunctions(host){
                 {
                     at = sizeOf(file);
                 }
-                else if (upper !== 0xffffffff || lower !== FILE_USE_FILE_POINTER_POSITION)
+                else if (asynchronous || upper !== 0xffffffff
+                    || lower !== FILE_USE_FILE_POINTER_POSITION)
                 {
                     // A negative offset is none of the two the call names
                     // (the end, the file pointer): refused before anything
@@ -3527,7 +3633,10 @@ export function createFileFunctions(host){
             }
             /** @param {number} done @param {number} code */
             const finish = (done, code)=>{
-                file.position = at + done;
+                if (!asynchronous)
+                {
+                    file.position = at + done;
+                }
                 writeDword(block >>> 0, code);
                 writeDword((block >>> 0) + 4, done);
                 return status(code);
@@ -3682,7 +3791,7 @@ export function createFileFunctions(host){
         NtFsControlFile: {
             argBytes: 40,
             /** @param {number[]} args */
-            handler: ([handle, event, apc, context, block, code, , , output, room])=>{
+            handler: ([handle, event, apc, context, block, code, input, inLength, output, room])=>{
                 // The request's event is cleared as it is made, whether it
                 // then finishes, waits or is refused.
                 if ((event >>> 0) !== 0 && host.pipes?.isPipe(handle))
@@ -3717,9 +3826,17 @@ export function createFileFunctions(host){
                     }
                     return settled(block >>> 0, piped.status, piped.information);
                 }
-                if (!object(handle, 'file'))
+                const held = object(handle, 'file') ?? object(handle, 'directory');
+                if (!held)
                 {
                     return report(block >>> 0, STATUS_INVALID_HANDLE, 0);
+                }
+                if (REPARSE_CONTROLS.has(code >>> 0) && files.setReparse)
+                {
+                    const { status, information } = reparseControl(held.path, code >>> 0,
+                        input >>> 0, inLength >>> 0, output >>> 0, room >>> 0);
+                    return (status >>> 0) < 0xc0000000 ? settled(block >>> 0, status, information)
+                        : status;
                 }
                 host.divergence?.('NtFsControlFile',
                     `control code 0x${(code >>> 0).toString(16)} is not one this volume answers`);
@@ -3779,7 +3896,11 @@ export function createFileFunctions(host){
                 const slot = piped ?? (fileObject && (kind >>> 0) === FILE_ACCESS_INFORMATION
                     ? dwordOf(rightsOf(handle))
                     : host.mailslots?.information(handle, kind >>> 0) ?? null);
-                const file = slot === null ? object(handle, 'file') : null;
+                // A directory the native open made is a file object as any
+                // other, its information the directory's.
+                const folder = slot === null ? object(handle, 'directory') : null;
+                const file = slot === null ? object(handle, 'file')
+                    ?? (folder && { ...folder, directory: true, position: 0 }) : null;
                 if (slot === null && !file)
                 {
                     return report(block >>> 0, held !== null && !fileObject
@@ -4075,11 +4196,11 @@ export function createFileFunctions(host){
                             | FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT)) !== 0
                             || synchronous === (FILE_SYNCHRONOUS_IO_ALERT
                                 | FILE_SYNCHRONOUS_IO_NONALERT)
-                            || (synchronous !== 0) !== !file.overlapped)
+                            || (synchronous !== 0) !== (modeOf(file) & SYNCHRONOUS_MODES) > 0)
                         {
                             return settled(block >>> 0, STATUS_INVALID_PARAMETER, 0);
                         }
-                        file.sequential = (mode & FILE_SEQUENTIAL_ONLY) !== 0;
+                        file.mode = mode;
                         return settled(block >>> 0, STATUS_SUCCESS, 0);
                     }
                     case FILE_VALID_DATA_LENGTH_INFORMATION:
@@ -5806,10 +5927,17 @@ export function createFileFunctions(host){
             handler: ([handle, code, input, inLength, output, outLength, returned])=>{
                 const opened = object(handle, 'file');
                 const folder = opened?.directory ? opened : object(handle, 'directory');
-                if (folder && REPARSE_CONTROLS.has(code >>> 0))
+                const holder = folder ?? opened;
+                if (holder && REPARSE_CONTROLS.has(code >>> 0))
                 {
-                    return reparseControl(folder.path, code >>> 0, input >>> 0, inLength >>> 0,
-                        output >>> 0, outLength >>> 0, returned >>> 0);
+                    const { status, information } = reparseControl(holder.path, code >>> 0,
+                        input >>> 0, inLength >>> 0, output >>> 0, outLength >>> 0);
+                    if (returned >>> 0 !== 0 && (status >>> 0) < 0xc0000000)
+                    {
+                        writeDword(returned >>> 0, information);
+                    }
+                    return status === STATUS_SUCCESS ? (host.setLastError(ERROR_SUCCESS), 1)
+                        : fail(toDosError(status));
                 }
                 if (object(handle, 'device') === null)
                 {

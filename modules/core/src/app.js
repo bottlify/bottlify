@@ -4549,7 +4549,7 @@ async function openSession(deps){
  * @returns {{ blocks: any, eager: any[] }}
  */
 function sessionUnder(blocks, seeded){
-    const linked = new Set((seeded.links ?? []).filter(record=>!record.junction)
+    const linked = new Set((seeded.links ?? []).filter(record=>!record.junction && !record.reparse)
         .map(record=>foldName(record.owner)));
     /** @type {{ path: string, file: any }[]} */
     const lazy = [];
