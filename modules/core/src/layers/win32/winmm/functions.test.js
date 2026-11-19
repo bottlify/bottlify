@@ -1134,8 +1134,8 @@ test('the wide MCI string calls answer as the ANSI ones do, in UTF-16', ()=>{
     m.memory.fill(0x55, 0x600, 0x640);
     assert.equal(m.winmm.mciSendStringW.handler([putWide('sysinfo all quantity', 0x400),
         0x600, 0x20, 0]), 0);
-    assert.deepEqual([...m.memory.slice(0x600, 0x605)], [0x30, 0, 0, 0, 0x55],
-        '"0" and a wide terminator');
+    assert.deepEqual([...m.memory.slice(0x600, 0x605)], [0x31, 0, 0, 0, 0x55],
+        '"1", the waveaudio driver, and a wide terminator');
     assert.equal(m.winmm.mciSendStringW.handler([putWide('open cdaudio alias cd', 0x400),
         0x600, 0x20, 0]), MCIERR_CANNOT_LOAD_DRIVER);
     assert.deepEqual([...m.memory.slice(0x600, 0x602)], [0, 0], 'emptied on an error');
@@ -1166,14 +1166,14 @@ test('an MCI string ending just short of the end of its memory is read without r
         [...command, '\0'].forEach((c, index)=>
             m.memory.set([c.charCodeAt(0), 0], wide + index * 2));
         assert.equal(m.winmm.mciSendStringW.handler([wide, 0x600, 0x20, 0]), 0);
-        assert.deepEqual([...m.memory.slice(0x600, 0x604)], [0x30, 0, 0, 0]);
+        assert.deepEqual([...m.memory.slice(0x600, 0x604)], [0x31, 0, 0, 0]);
         m.memory.set([...'all'].map(c=>c.charCodeAt(0)).concat([0]), end - 8 - 4);
         assert.equal(m.winmm.mciGetDeviceIDA.handler([end - 8 - 4]), 0xffffffff);
     });
 
-test('MCI answers a command string as a machine with no MCI device does', ()=>{
+test('MCI parses a command string, and a device with no driver here fails to load', ()=>{
     // mci.c test_mciParser for the parse errors; mcicda.c for what opening the
-    // CD player gives where it cannot load; and nothing ever opens here.
+    // CD player gives where it cannot load.
     const m = machine();
     const MCIERR_UNRECOGNIZED_COMMAND = 261;
     const MCIERR_INVALID_DEVICE_NAME = 263;
@@ -1195,19 +1195,22 @@ test('MCI answers a command string as a machine with no MCI device does', ()=>{
     assert.equal(send('open'), MCIERR_MISSING_DEVICE_NAME);
     assert.equal(send('open cdaudio alias c notify shareable'), MCIERR_CANNOT_LOAD_DRIVER);
     assert.equal(returned(), '', 'the return buffer is emptied on an error');
-    assert.equal(send('OPEN new type waveaudio alias mysound'), MCIERR_CANNOT_LOAD_DRIVER);
+    assert.equal(send('OPEN new type waveaudio alias mysound'), 0, 'a new wave file');
+    assert.equal(returned(), '1', 'its device id');
+    assert.equal(send('close mysound'), 0);
     assert.equal(send('open "C:\\Music\\track one.mid" alias music'), MCIERR_CANNOT_LOAD_DRIVER,
         'a sequence, by its extension');
     assert.equal(send('open C:\\data\\thing.xyz'), MCIERR_EXTENSION_NOT_FOUND);
     assert.equal(send('open nosuchdevice'), MCIERR_INVALID_DEVICE_NAME);
     assert.equal(send('play cdaudio from 1 to 2'), MCIERR_CANNOT_LOAD_DRIVER,
         'a command to a device by its type opens it first');
+    assert.equal(send('play nosound.wav'), 275, 'a file by its name, not found');
     assert.equal(send('play c'), MCIERR_INVALID_DEVICE_NAME, 'an alias nothing opened');
     assert.equal(send('status all time format'), MCIERR_CANNOT_USE_ALL);
     assert.equal(send('frobnicate c'), MCIERR_UNRECOGNIZED_COMMAND);
     assert.equal(send('close all'), 0, 'nothing open is nothing to close');
     assert.equal(send('sysinfo all quantity'), 0);
-    assert.equal(returned(), '0');
+    assert.equal(returned(), '1');
     assert.equal(send('sysinfo cdaudio quantity open'), 0);
     assert.equal(returned(), '0');
 

@@ -38,6 +38,13 @@ import { expandG711, parseWave } from './wave.js';
 import { MAX_PERIOD } from './timers.js';
 import { SOUND_ADAPTER_NAME, SOUND_DEVICE_INTERFACE } from '../devices.js';
 import { createMciVideo } from './mci-video.js';
+import { createMci, mciWords } from './mci.js';
+import { createMciWave } from './mci-wave.js';
+
+/** The MCI errors answered here, before a command reaches MCI. */
+const MCIERR_MISSING_COMMAND_STRING = 267;
+const MCIERR_PARAM_OVERFLOW = 268;
+const MCIERR_UNSUPPORTED_FUNCTION = 274;
 import { charactersOf, readToTerminator } from '../common/scan-windows.js';
 
 /** Success, and the errors a caller distinguishes. */
@@ -103,62 +110,6 @@ const MIDI_ERROR_TEXT = new Map([
     [70, 'The operation is not possible in the mode the device was opened in.'],
     [71, 'The MIDI message is not to be passed on.'],
 ]);
-
-/** MCI's error space begins above the shared one. */
-const MCIERR_INVALID_DEVICE_ID = 257;
-const MCIERR_UNRECOGNIZED_COMMAND = 261;
-const MCIERR_INVALID_DEVICE_NAME = 263;
-const MCIERR_CANNOT_LOAD_DRIVER = 266;
-const MCIERR_MISSING_COMMAND_STRING = 267;
-const MCIERR_CANNOT_USE_ALL = 279;
-const MCIERR_EXTENSION_NOT_FOUND = 281;
-const MCIERR_OUTOFRANGE = 282;
-const MCIERR_MISSING_DEVICE_NAME = 292;
-const MCIERR_NULL_PARAMETER_BLOCK = 297;
-
-/** The id `all` names: every open device at once. */
-const MCI_ALL_DEVICE_ID = 0xffffffff;
-
-/**
- * mciGetDeviceID's answer for a name no device of the video driver
- * (`mci-video.js`) has: only `all` names one.
- *
- * @param {string} name
- */
-const deviceIdOf = name=>(name.trim().toLowerCase() === 'all' ? MCI_ALL_DEVICE_ID : 0);
-
-/**
- * The MCI device types Windows registers a driver for. Naming one opens that
- * driver, and there being no hardware behind it here is what makes it fail
- * to load -- the answer a machine with no CD drive gives for `cdaudio`.
- */
-const MCI_DEVICE_TYPES = new Set([
-    'animation', 'avivideo', 'cdaudio', 'dat', 'digitalvideo', 'mpegvideo', 'other',
-    'overlay', 'scanner', 'sequencer', 'vcr', 'videodisc', 'waveaudio',
-]);
-
-/** The file extensions a registered MCI driver would open by itself. */
-const MCI_EXTENSIONS = new Set([
-    'aif', 'aifc', 'aiff', 'asf', 'au', 'avi', 'cda', 'm1v', 'mid', 'midi', 'mp2', 'mp3',
-    'mpa', 'mpe', 'mpeg', 'mpg', 'rmi', 'snd', 'wav', 'wma', 'wmv',
-]);
-
-/** The command verbs MCI's parser knows, for any device. */
-const MCI_COMMANDS = new Set([
-    'break', 'capability', 'capture', 'close', 'configure', 'copy', 'cue', 'cut', 'delete',
-    'escape', 'freeze', 'info', 'list', 'load', 'monitor', 'open', 'paste', 'pause', 'play',
-    'put', 'quality', 'realize', 'record', 'reserve', 'restore', 'resume', 'save', 'seek',
-    'set', 'setaudio', 'setvideo', 'signal', 'sound', 'spin', 'status', 'step', 'stop',
-    'sysinfo', 'undo', 'unfreeze', 'update', 'where', 'window',
-]);
-
-/** MCI_OPEN, its flags, and the device-type ids MCI_OPEN_TYPE_ID names. */
-const MCI_OPEN = 0x0803;
-const MCI_OPEN_ELEMENT = 0x0200;
-const MCI_OPEN_TYPE_ID = 0x1000;
-const MCI_OPEN_TYPE = 0x2000;
-const MCI_DEVTYPE_FIRST = 0x0201;
-const MCI_DEVTYPE_LAST = 0x020b;
 
 /**
  * What mciGetErrorString says for each MCI error, MCIERR_BASE (256) up, in
@@ -243,87 +194,6 @@ const MCI_ERROR_TEXT = new Map([
     [349, 'The file could not be written.'],
     [350, 'The device identity could not be established.'],
 ]);
-
-/**
- * What opening an MCI device or file answers on a machine that has none: a
- * type a driver is registered for, or a file of an extension one opens, fails
- * to load its driver; anything else names no device at all. A `type!element`
- * name is its type.
- *
- * @param {string} name
- */
-const openFailure = name=>{
-    const lower = name.toLowerCase();
-    const type = lower.includes('!') ? lower.slice(0, lower.indexOf('!')) : lower;
-    if (MCI_DEVICE_TYPES.has(type))
-    {
-        return MCIERR_CANNOT_LOAD_DRIVER;
-    }
-    const dot = lower.lastIndexOf('.');
-    if (dot > Math.max(lower.lastIndexOf('\\'), lower.lastIndexOf('/')))
-    {
-        return MCI_EXTENSIONS.has(lower.slice(dot + 1))
-            ? MCIERR_CANNOT_LOAD_DRIVER : MCIERR_EXTENSION_NOT_FOUND;
-    }
-    return MCIERR_INVALID_DEVICE_NAME;
-};
-
-/**
- * A command string's words, quotes taken off.
- *
- * @param {string} command
- */
-const mciWords = command=>(command.trim().match(/"[^"]*"|\S+/g) ?? [])
-    .map(word=>word.replace(/^"(.*)"$/, '$1'));
-
-/**
- * mciSendString's answer and the text it returns, for a command no device of
- * the video driver (`mci-video.js`) takes: there is no other driver here, so
- * every command that needs a device opens one first, as the string interface
- * does for a device named by type or file -- and that open is where it fails.
- * Closing everything and counting devices are the two things that succeed.
- *
- * @param {string} command
- * @returns {{ error: number, text: string }}
- */
-const mciString = command=>{
-    const words = mciWords(command);
-    if (words.length === 0)
-    {
-        return { error: MCIERR_MISSING_COMMAND_STRING, text: '' };
-    }
-    const verb = words[0].toLowerCase();
-    const device = words[1];
-    const rest = words.slice(2).map(word=>word.toLowerCase());
-    if (!MCI_COMMANDS.has(verb))
-    {
-        return { error: MCIERR_UNRECOGNIZED_COMMAND, text: '' };
-    }
-    if (device === undefined)
-    {
-        return { error: MCIERR_MISSING_DEVICE_NAME, text: '' };
-    }
-    const all = device.toLowerCase() === 'all';
-    if (verb === 'sysinfo')
-    {
-        return rest.includes('quantity')
-            ? { error: 0, text: '0' }
-            : { error: MCIERR_OUTOFRANGE, text: '' };
-    }
-    if (verb === 'close')
-    {
-        return { error: all ? 0 : MCIERR_INVALID_DEVICE_NAME, text: '' };
-    }
-    if (all)
-    {
-        return { error: MCIERR_CANNOT_USE_ALL, text: '' };
-    }
-    const type = verb === 'open' ? rest.indexOf('type') : -1;
-    return {
-        error: openFailure(type >= 0 && words[type + 3] !== undefined ? words[type + 3] : device),
-        text: '',
-    };
-};
 
 /** joyGetDevCaps/joyGetPosEx on an id no device answers to. */
 const JOYERR_PARMS = 165;
@@ -599,6 +469,8 @@ const MMTIME_SIZE = 12;
  * @property {(path: string) => Promise<Uint8Array | null> | Uint8Array | null} [readFile]
  *           A whole file, its name resolved as the file calls resolve one;
  *           null when there is none. Absent, PlaySound finds no file.
+ * @property {(hwnd: number, message: number, wParam: number, lParam: number) => void}
+ *           [postMessage]  Posts a message to a window: MCI's MM_MCINOTIFY.
  * @property {(module: number, name: number | string, type: string) =>
  *               Uint8Array | null} [resource]
  *           A resource's bytes from a module, the program's own for 0; null
@@ -782,73 +654,111 @@ export function createWinmmFunctions(host){
         : null;
 
     /**
-     * mciSendString, for either width. A command the video driver takes may
-     * answer later -- an open reads the file, a `play ... wait` lasts the film
-     * -- and the calling thread waits for it, as it does on Windows.
+     * The video driver behind MCI's device table. It reads its own words
+     * (`mci-video.js`), so a device of it is its alias, and an `avivideo`
+     * opened with no file is a device with no film: it closes and says its
+     * version, and answers nothing else.
+     */
+    const videoDriver = video && {
+        /** @param {string} file @param {string[]} words */
+        open: (file, words)=>{
+            const at = words.findIndex(word=>word.toLowerCase() === 'alias');
+            const alias = at >= 0 ? words[at + 1] : undefined;
+            if (file === '')
+            {
+                return { error: 0, device: { alias: alias ?? 'avivideo', film: false } };
+            }
+            const answer = video.command(['open', file, ...words]) ?? { error: 266 };
+            /** @param {{ error: number }} opened */
+            const done = opened=>(opened.error === 0
+                ? { error: 0, device: { alias: alias ?? file, film: true } } : opened);
+            return 'then' in answer ? answer.then(done) : done(answer);
+        },
+        /**
+         * @param {string} verb @param {{ alias: string, film: boolean }} device
+         * @param {string[]} words @param {{ wait: boolean, original: string[] }} how
+         */
+        command: (verb, device, words, how)=>{
+            if (!device.film)
+            {
+                return verb === 'info' && words[0] === 'version' ? { error: 0, text: '1.1' }
+                    : { error: MCIERR_UNSUPPORTED_FUNCTION };
+            }
+            return video.command([verb, device.alias, ...how.original,
+                ...how.wait ? ['wait'] : []]) ?? { error: MCIERR_UNSUPPORTED_FUNCTION };
+        },
+        /** @param {{ alias: string, film: boolean }} device */
+        close: device=>{
+            if (device.film)
+            {
+                video.command(['close', device.alias]);
+            }
+        },
+    };
+
+    /** MCI's device table, over the waveaudio and video drivers. */
+    const mci = createMci({
+        drivers: {
+            waveaudio: createMciWave({ now: host.now, readFile: host.readFile,
+                output: host.output, divergence: host.divergence }),
+            video: videoDriver || null,
+        },
+        post: host.postMessage,
+    });
+
+    /**
+     * mciSendString, for either width. A command a driver answers later --
+     * an open reads the file, a `play ... wait` lasts the sound or the film
+     * -- keeps the calling thread waiting for it, as it does on Windows.
      *
      * @param {boolean} wide
      */
     const sendString = wide=>({
         argBytes: 16,
         /** @param {number[]} args */
-        handler: ([command, buffer, room])=>{
+        handler: ([command, buffer, room, callback])=>{
             if ((command >>> 0) === 0)
             {
+                writeText(buffer, room, '', wide);
                 return MCIERR_MISSING_COMMAND_STRING;
             }
             const text = wide ? wideAt(command, 1024) : ansiAt(command, 1024);
-            /** @param {{ error: number, text?: string }} answer */
+            /** @param {{ error: number, text?: string, mustFit?: boolean }} answer */
             const answered = answer=>{
-                writeText(buffer, room, answer.text ?? '', wide);
+                const reply = answer.error === 0 ? answer.text ?? '' : '';
+                if (answer.mustFit && answer.error === 0
+                    && ((buffer >>> 0) === 0 || (room >>> 0) <= reply.length))
+                {
+                    return MCIERR_PARAM_OVERFLOW;
+                }
+                writeText(buffer, room, reply, wide);
                 return answer.error;
             };
-            const ours = video?.command(mciWords(text)) ?? null;
-            if (ours === null)
-            {
-                return answered(mciString(text));
-            }
-            return 'then' in ours ? ours.then(answered) : answered(ours);
+            const answer = mci.send(mciWords(text), callback >>> 0);
+            return 'then' in answer ? answer.then(answered) : answered(answer);
         },
     });
 
     /**
-     * mciSendCommand, for either width: MCI_OPEN_PARMS is one layout, its
-     * strings of the call's width.
+     * mciSendCommand, for either width: the blocks are one layout, their
+     * strings of the call's width, and `dwRetSize` counts characters.
      *
      * @param {boolean} wide
      */
     const sendCommand = wide=>({
         argBytes: 16,
         /** @param {number[]} args */
-        handler: ([, message, flags, parameters])=>{
-            if ((message >>> 0) !== MCI_OPEN)
-            {
-                return MCIERR_INVALID_DEVICE_ID;
-            }
-            if ((parameters >>> 0) === 0)
-            {
-                return MCIERR_NULL_PARAMETER_BLOCK;
-            }
-            /** @param {number} offset */
-            const field = offset=>u32(host.readMemory((parameters >>> 0) + offset, 4), 0);
-            /** @param {number} address @param {number} limit */
-            const text = (address, limit)=>(wide ? wideAt(address, limit) : ansiAt(address, limit));
-            if ((flags & MCI_OPEN_TYPE) !== 0)
-            {
-                const type = field(8);
-                if ((flags & MCI_OPEN_TYPE_ID) !== 0)
-                {
-                    const id = type & 0xffff;
-                    return id >= MCI_DEVTYPE_FIRST && id <= MCI_DEVTYPE_LAST
-                        ? MCIERR_CANNOT_LOAD_DRIVER : MCIERR_INVALID_DEVICE_NAME;
-                }
-                return openFailure(text(type, 128));
-            }
-            if ((flags & MCI_OPEN_ELEMENT) !== 0)
-            {
-                return openFailure(text(field(12), 260));
-            }
-            return MCIERR_MISSING_DEVICE_NAME;
+        handler: ([id, message, flags, parameters])=>{
+            const address = parameters >>> 0;
+            return mci.command(id >>> 0, message >>> 0, flags >>> 0, {
+                address,
+                u32: offset=>u32(host.readMemory(address + offset, 4), 0),
+                setU32: (offset, value)=>host.writeMemory(address + offset, dword(value >>> 0)),
+                putU32: (at, value)=>host.writeMemory(at >>> 0, dword(value >>> 0)),
+                text: (at, limit)=>((at >>> 0) === 0 ? ''
+                    : wide ? wideAt(at, limit) : ansiAt(at, limit)),
+                write: (at, room, text)=>writeText(at, room, text, wide),
+            });
         },
     });
 
@@ -1954,14 +1864,12 @@ export function createWinmmFunctions(host){
         mciGetDeviceIDA: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([name])=>((name >>> 0) === 0 ? 0 : deviceIdOf(ansiAt(name, 128))
-                || (video?.deviceId(ansiAt(name, 128)) ?? 0)),
+            handler: ([name])=>((name >>> 0) === 0 ? 0 : mci.deviceId(ansiAt(name, 128))),
         },
         mciGetDeviceIDW: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([name])=>((name >>> 0) === 0 ? 0 : deviceIdOf(wideAt(name, 128))
-                || (video?.deviceId(wideAt(name, 128)) ?? 0)),
+            handler: ([name])=>((name >>> 0) === 0 ? 0 : mci.deviceId(wideAt(name, 128))),
         },
         /**
          * MCIDEVICEID mciGetDeviceIDFromElementIDA(DWORD dwElementID, LPCSTR lpstrType)
@@ -2027,6 +1935,7 @@ export function createWinmmFunctions(host){
                 settle(device);
                 flush(device, MMSYSERR_NOERROR, false);
             }
+            mci.tick();
             // A looped sound is fed a copy ahead of the one being heard, so
             // the seam between two falls where the file's own end is.
             if (playing?.loop && playing.track && playing.track.pending() < playing.frames)

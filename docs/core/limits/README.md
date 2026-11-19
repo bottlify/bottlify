@@ -120,6 +120,13 @@ event, an error. Neither stops the program.
   with `SND_ALIAS_ID`) is not looked up in the registry: an alias is played only as a file of
   that name, and the default sound is never played. A call without `SND_ASYNC` returns at once
   instead of when the sound ends. Each is said once.
+- MCI has two drivers: `waveaudio`, which plays a WAVE file (or a device named by the file, as
+  `play sound.wav` opens and closes one) from and to a position, in milliseconds, bytes or
+  samples, with `notify` and `wait`; and the digital-video devices. Every other type a Windows
+  install registers (`cdaudio`, `sequencer`, `mpegvideo`) fails to load its driver, as on a
+  machine without that hardware. With no capture device, `record` answers
+  `MCIERR_WAVE_INPUTSUNSUITABLE`; `save` and `delete` are refused and said, and `sound` answers
+  `MCIERR_HARDWARE`, as with no default sound.
 - WASAPI (`IMMDevice::Activate` for `IAudioClient`) plays in shared mode only, as XAudio2's
   redistributable and FMOD do on Vista and later: exclusive mode answers
   `AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED`, as on a machine whose user has not allowed it, and a

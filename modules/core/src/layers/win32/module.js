@@ -2442,6 +2442,9 @@ export function createWin32Module(){
                 keyDown: key=>((config?.asyncKeyState?.(key) ?? 0) & 0x8001) !== 0,
                 // A sound PlaySound or MCI names: a file found as the file calls
                 // find one, or a resource of a loaded module.
+                // MCI's notifications, posted to the window a command named.
+                postMessage: (hwnd, message, wParam, lParam)=>
+                    queue.post({ hwnd, message, wParam, lParam }),
                 // A name no path can be made of names no file.
                 readFile: path=>{
                     try

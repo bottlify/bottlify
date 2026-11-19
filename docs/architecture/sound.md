@@ -70,5 +70,8 @@ flowchart TB
   buffer's cursor follows the clock here.
 
 Where to look in the code: [`core/src/layers/audio/`](../../modules/core/src/layers/audio/): `output/mixer.js`, `output/mix.js`,
-`output/worklet.js`, `dsound/buffers.js`, `asi/provider.js`; waveOut is
-[`core/src/layers/win32/winmm/functions.js`](../../modules/core/src/layers/win32/winmm/functions.js).
+`output/worklet.js`, `dsound/buffers.js`, `asi/provider.js`; waveOut and PlaySound are
+[`core/src/layers/win32/winmm/functions.js`](../../modules/core/src/layers/win32/winmm/functions.js),
+and MCI's `waveaudio` device plays to the same output through
+[`mci-wave.js`](../../modules/core/src/layers/win32/winmm/mci-wave.js), its device table and
+command strings in [`mci.js`](../../modules/core/src/layers/win32/winmm/mci.js).
