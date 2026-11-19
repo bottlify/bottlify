@@ -593,7 +593,7 @@
    "category": "checks",
    "kind": "check",
    "browser": false,
-   "question": "A 64-bit process's graphics routine is a leaf to the unwinder",
+   "question": "A 64-bit process's graphics routine, and each compiled function the build marks one, is a leaf to the unwinder",
    "command": "npm run check:boundaries",
    "tests": [
     "tools/checks/check-routine-leaves.test.js"

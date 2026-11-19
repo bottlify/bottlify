@@ -5745,6 +5745,7 @@ class FunctionCompiler {
         const valueAt = /** @type {number} */ (this.held.at(-1));
         a.emit(0x52);                                                      // push edx
         this.grew(this.word);
+        this.pushedAny = true;
         if (valueAt < 0)
         {
             a.emit(0x8b, 0x54, 0x24, this.word);                           // mov edx, [esp+word]

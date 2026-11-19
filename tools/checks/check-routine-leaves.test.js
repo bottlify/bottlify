@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { leafFaults } from './check-routine-leaves.mjs';
+import { compiledLeaves, leafFaults, reachedLeafFaults } from './check-routine-leaves.mjs';
 
 /** @param {number[]} bytes */
 const faults = bytes=>leafFaults(new Uint8Array(bytes), 0);
@@ -44,4 +44,42 @@ test('each way out of being a leaf is found', ()=>{
         const found = faults(bytes);
         assert.ok(found.some(one=>fault.test(one)), `${what}: ${found.join('; ') || 'no fault'}`);
     }
+});
+
+test('compiled code is read as its entry reaches it: a table after the code is no instruction, '
+    + 'a push past a branch is found, the hand-over\'s jump leaves', ()=>{
+    const table = [0x53, 0x53, 0x0f, 0xff];                 // push rbx twice, then nothing known
+    assert.deepEqual(reachedLeafFaults(new Uint8Array([
+        0x85, 0xc9,                                         // test ecx, ecx
+        0x75, 0x03,                                         // jne +3
+        0x31, 0xc0,                                         // xor eax, eax
+        0xc3,                                               // ret
+        0x8b, 0xc1,                                         // mov eax, ecx
+        0xc3,                                               // ret
+        ...table,
+    ]), 0), []);
+    assert.deepEqual(reachedLeafFaults(new Uint8Array([
+        0x85, 0xc9,                                         // test ecx, ecx
+        0x75, 0x01,                                         // jne +1
+        0xc3,                                               // ret
+        0x52,                                               // push rdx
+        0x5a,                                               // pop rdx
+        0xc3,                                               // ret
+    ]), 0), ['+5: push', '+6: pop']);
+    const handing = new Uint8Array([
+        0x85, 0xc9,                                         // test ecx, ecx
+        0x74, 0x01,                                         // je +1
+        0xc3,                                               // ret
+        0xe9, 0x00, 0x00, 0x00, 0x00,                       // jmp the trap: not yet bound
+        ...table,
+    ]);
+    assert.deepEqual(reachedLeafFaults(handing, 0, 6), []);
+    assert.ok(reachedLeafFaults(handing, 0).length > 0, 'followed, an unbound jump reads the table');
+});
+
+test('every function the build marks a leaf is one, and the rest are counted', async()=>{
+    const { leaves, faults, others } = await compiledLeaves();
+    assert.deepEqual(faults, []);
+    assert.ok(leaves > 50, `${leaves} leaves`);
+    assert.ok(others.size > 5, 'the functions that call or keep registers are named by module');
 });

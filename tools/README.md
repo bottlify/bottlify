@@ -416,7 +416,7 @@ From `arg-bytes-audit.mjs dbg/wine-specs`. Every stdcall entry of the win32 laye
 - [`checks/check-lock-release.mjs`](checks/check-lock-release.mjs) - A locked word is not released by a plain store (`npm run check:boundaries`)
 - [`checks/check-overlapped-layout.mjs`](checks/check-overlapped-layout.mjs) - OVERLAPPED's offsets are written in one file (`npm run check:boundaries`)
 - [`checks/check-package-files.mjs`](checks/check-package-files.mjs) - Core's package ships what its files import (`npm run check:boundaries`)
-- [`checks/check-routine-leaves.mjs`](checks/check-routine-leaves.mjs) - A 64-bit process's graphics routine is a leaf to the unwinder (`npm run check:boundaries`)
+- [`checks/check-routine-leaves.mjs`](checks/check-routine-leaves.mjs) - A 64-bit process's graphics routine, and each compiled function the build marks one, is a leaf to the unwinder (`npm run check:boundaries`)
 - [`checks/check-scan-windows.mjs`](checks/check-scan-windows.mjs) - A scan of guest memory stays in its region (`npm run check:boundaries`)
 - [`checks/check-store-protocol.mjs`](checks/check-store-protocol.mjs) - A store's protocol is spoken only in GameHub (`npm run check:boundaries`)
 - [`checks/check-volume-spread.mjs`](checks/check-volume-spread.mjs) - No volume is copied by object spread (`npm run check:boundaries`)
