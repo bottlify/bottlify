@@ -1038,6 +1038,7 @@ export function createSpawnFunctions(host){
          */
         UpdateProcThreadAttribute: {
             argBytes: 28,
+            sizes: [4],
             /** @param {number[]} args */
             handler: ([list, , attribute, value, size])=>{
                 const wanted = attribute >>> 0;
@@ -1150,6 +1151,7 @@ export function createSpawnFunctions(host){
          */
         WriteProcessMemory: {
             argBytes: 20,
+            sizes: [3],
             /** @param {number[]} args */
             handler: ([handle, base, buffer, size, written])=>{
                 const count = size >>> 0;
@@ -1198,6 +1200,7 @@ export function createSpawnFunctions(host){
          */
         ReadProcessMemory: {
             argBytes: 20,
+            sizes: [3],
             /** @param {number[]} args */
             handler: ([handle, base, buffer, size, read])=>{
                 const count = size >>> 0;

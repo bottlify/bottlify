@@ -545,6 +545,9 @@ export function createBridgeModule(){
                  *     into a 64-bit caller's RAX (`HostFunction.returns`).
                  * @param {number[]} [fn.addresses]  The dwords that carry an address the
                  *     handler takes whole from a 64-bit caller (`HostFunction.addresses`).
+                 * @param {number[]} [fn.sizes]  The dwords that carry a size, which a
+                 *     64-bit caller's past a dword makes the largest dword
+                 *     (`HostFunction.sizes`).
                  * @returns {number} the guest address that calls it, or 0 once
                  *     this instance is disposed -- there is no guest left to place
                  *     one in.
@@ -554,7 +557,7 @@ export function createBridgeModule(){
                     {
                         convention = Convention.STDCALL, argBytes, handler,
                         preserveResult = false, lastError = true, quadwords, floats, structs,
-                        returns, addresses,
+                        returns, addresses, sizes,
                     })
                 {
                     if (convention === Convention.FASTCALL)
@@ -576,7 +579,7 @@ export function createBridgeModule(){
                     state.dispatcher.register(id, { name, convention, argBytes, handler, lastError,
                         ...quadwords ? { quadwords } : {}, ...floats ? { floats } : {},
                         ...structs ? { structs } : {}, ...returns ? { returns } : {},
-                        ...addresses ? { addresses } : {} });
+                        ...addresses ? { addresses } : {}, ...sizes ? { sizes } : {} });
                     state.dispatcher.placed(address, name);
                     return address;
                 },

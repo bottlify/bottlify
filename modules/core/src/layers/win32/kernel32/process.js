@@ -1264,7 +1264,7 @@ export function createProcessFunctions(host){
     /**
      * @type {Record<string, { argBytes: number, handler: Function,
      *     guest?: (builder: import('./sync.js').GuestBuilder) => number,
-     *     code?: () => Uint8Array, quadwords?: number[], returns?: string }>}
+     *     code?: () => Uint8Array, quadwords?: number[], sizes?: number[], returns?: string }>}
      */
     const table = {
         /** VOID SetLastError(DWORD dwErrCode) */
@@ -1826,6 +1826,7 @@ export function createProcessFunctions(host){
          */
         SetProcessWorkingSetSize: {
             argBytes: 12,
+            sizes: [1, 2],
             handler: ()=>1,
         },
 

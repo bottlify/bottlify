@@ -998,6 +998,7 @@ export function createConversionFunctions(host){
         _gcvt_s: {
             convention: 'cdecl',
             argBytes: 20,
+            sizes: [1],
             floats: { 2: 'f64' },
             /** @param {number[]} args */
             handler: ([buffer, size, low, high, digits])=>{

@@ -266,6 +266,7 @@ export function createMemoryFunctions(host){
          */
         NtQueryVirtualMemory: {
             argBytes: 24,
+            sizes: [4],
             /** @param {number[]} args */
             handler: ([process, base, infoClass, buffer, length, returned])=>{
                 if (infoClass !== MEMORY_BASIC_INFORMATION)
@@ -297,6 +298,7 @@ export function createMemoryFunctions(host){
          */
         NtReadVirtualMemory: {
             argBytes: 20,
+            sizes: [3],
             /** @param {number[]} args */
             handler: args=>settled(kernel32.ReadProcessMemory.handler(args),
                 (read, error)=>(read ? STATUS.SUCCESS : failure(error))),
@@ -308,6 +310,7 @@ export function createMemoryFunctions(host){
          */
         NtWriteVirtualMemory: {
             argBytes: 20,
+            sizes: [3],
             /** @param {number[]} args */
             handler: args=>settled(kernel32.WriteProcessMemory.handler(args),
                 (wrote, error)=>(wrote ? STATUS.SUCCESS : failure(error))),

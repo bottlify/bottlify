@@ -66,6 +66,11 @@ __declspec(dllimport) int __stdcall DestroyWindow(HWND hwnd);
 __declspec(dllimport) LONG_PTR __stdcall SetWindowLongPtrA(HWND hwnd, int index, LONG_PTR value);
 __declspec(dllimport) LONG_PTR __stdcall GetWindowLongPtrA(HWND hwnd, int index);
 __declspec(dllimport) char *strchr(const char *text, int c);
+__declspec(dllimport) void *malloc(SIZE_T size);
+__declspec(dllimport) void *calloc(SIZE_T count, SIZE_T size);
+__declspec(dllimport) void *realloc(void *block, SIZE_T size);
+__declspec(dllimport) void free(void *block);
+__declspec(dllimport) void *__stdcall GlobalAlloc(UINT flags, SIZE_T bytes);
 __declspec(dllimport) LRESULT __stdcall SendMessageA(HWND hwnd, UINT message, WPARAM w, LPARAM l);
 __declspec(dllimport) int __stdcall PostMessageA(HWND hwnd, UINT message, WPARAM w, LPARAM l);
 __declspec(dllimport) int __stdcall PeekMessageA(void *message, HWND hwnd, UINT first, UINT last,
@@ -448,6 +453,19 @@ void mainCRTStartup(void)
         heapSigned += block >> 32 != 0;
     }
     check("HeapAlloc answers no upper half", (unsigned long long)heapSigned, 0);
+    /* A size past a dword is one no request here meets: refused, never its low half taken. */
+    SIZE_T tooLarge = 0x100000010ull;
+    check("HeapAlloc of 4 GiB and sixteen bytes is refused",
+        (unsigned long long)HeapAlloc(GetProcessHeap(), 0, tooLarge), 0);
+    check("malloc of 4 GiB and sixteen bytes is refused", (unsigned long long)malloc(tooLarge), 0);
+    check("calloc of 4 GiB and one element is refused",
+        (unsigned long long)calloc(0x100000001ull, 1), 0);
+    void *small = malloc(64);
+    check("realloc to 4 GiB and sixteen bytes is refused",
+        (unsigned long long)realloc(small, tooLarge), 0);
+    free(small);
+    check("GlobalAlloc of 4 GiB and sixteen bytes is refused",
+        (unsigned long long)GlobalAlloc(0, tooLarge), 0);
     /* A pointer past 2 GiB, the one reserved where there is one. */
     void *beyond = high != 0 ? (void *)high : (void *)0x90001000ull;
     check("a thread's parameter past 2 GiB", (unsigned long long)threadParameter(beyond),

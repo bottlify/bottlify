@@ -1942,6 +1942,22 @@ test('a 64-bit caller finds an address zero-extended in RAX, any other dword sig
     assert.equal(r.get('rax'), 0x1000n);
 });
 
+test('a size past a dword reaches its handler as the largest dword, never as its low half', ()=>{
+    // malloc(4 GiB + 16) in a 64-bit program: sixteen bytes handed back would be
+    // written past at once. The handler refuses the largest dword as too large.
+    const { dispatcher } = longMachine({ rcx: 0x1_0000_0010n, r11: 0x40n, r8: 0x1_0000_0000n });
+    /** @type {number[][]} */
+    const seen = [];
+    dispatcher.register(1, { name: 'X!Alloc', ...STDCALL, argBytes: 12, sizes: [0, 1],
+        /** @param {number[]} args */
+        handler: args=>(seen.push(args.map(each=>each >>> 0)), 0) });
+    dispatcher.dispatch(1);
+    assert.deepEqual(seen, [[0xffffffff, 0x40, 0]],
+        'a declared size past a dword, one within it, and an undeclared argument as ever');
+    assert.throws(()=>dispatcher.register(2, { name: 'X!Both', ...STDCALL, argBytes: 8,
+        addresses: [1], sizes: [1], handler: ()=>0 }), /sizes/, 'an address is no size');
+});
+
 test('a call that waits says whether its answer is an address, for the resume to widen it', ()=>{
     // An allocation that waits (a file mapped once its blocks are fetched):
     // the answer comes after the dispatcher has gone on, and RAX must take it

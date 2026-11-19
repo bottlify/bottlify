@@ -33,7 +33,7 @@ const BLOCK_LIMIT = 0x100000;
 
 /**
  * @param {EnvironmentHost} host
- * @returns {Record<string, { argBytes: number, handler: Function }>}
+ * @returns {Record<string, { argBytes: number, sizes?: number[], handler: Function }>}
  */
 export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, allocate, free }){
     /** @param {number} address */
@@ -187,6 +187,7 @@ export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, 
          */
         RtlQueryEnvironmentVariable: {
             argBytes: 24,
+            sizes: [2, 4],
             /** @param {number[]} args */
             handler: ([block, name, nameLength, value, valueLength, returned])=>{
                 const found = lookup(block >>> 0, readUnits(name >>> 0, nameLength >>> 0));
@@ -243,6 +244,7 @@ export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, 
          */
         RtlExpandEnvironmentStrings: {
             argBytes: 24,
+            sizes: [2, 4],
             /** @param {number[]} args */
             handler: ([block, source, sourceLength, destination, destinationLength, returned])=>{
                 const expanded = expand(block >>> 0, readUnits(source >>> 0, sourceLength >>> 0));

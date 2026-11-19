@@ -186,6 +186,7 @@ export function createWideFunctions(host){
             returns: 'pointer',
             convention: 'cdecl',
             argBytes: 12,
+            sizes: [2],
             /** @param {number[]} args */
             handler: ([destination, source, count])=>{
                 const length = count >>> 0;
@@ -208,6 +209,7 @@ export function createWideFunctions(host){
         wcsxfrm: {
             convention: 'cdecl',
             argBytes: 12,
+            sizes: [2],
             /** @param {number[]} args */
             handler: ([destination, source, count])=>{
                 const room = count >>> 0;
@@ -369,6 +371,7 @@ export function createWideFunctions(host){
         mbstowcs: {
             convention: 'cdecl',
             argBytes: 12,
+            sizes: [2],
             /** @param {number[]} args */
             handler: ([destination, source, count])=>{
                 if ((source >>> 0) === 0)
@@ -401,6 +404,7 @@ export function createWideFunctions(host){
         wcstombs: {
             convention: 'cdecl',
             argBytes: 12,
+            sizes: [2],
             /** @param {number[]} args */
             handler: ([destination, source, count])=>{
                 const text = readWide(source);
@@ -458,6 +462,7 @@ export function createWideFunctions(host){
         mbrtowc: {
             convention: 'cdecl',
             argBytes: 16,
+            sizes: [2],
             /** @param {number[]} args */
             handler: ([destination, source, count])=>{
                 if ((source >>> 0) === 0)
@@ -481,6 +486,7 @@ export function createWideFunctions(host){
         mbrlen: {
             convention: 'cdecl',
             argBytes: 12,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([source, count])=>{
                 if ((source >>> 0) === 0)
@@ -532,6 +538,7 @@ export function createWideFunctions(host){
         mbsrtowcs: {
             convention: 'cdecl',
             argBytes: 16,
+            sizes: [2],
             /** @param {number[]} args */
             handler: ([destination, from, count])=>{
                 const source = width.get(new DataView(host.readMemory(from >>> 0, width.size)
@@ -560,6 +567,7 @@ export function createWideFunctions(host){
         wcsrtombs: {
             convention: 'cdecl',
             argBytes: 16,
+            sizes: [2],
             /** @param {number[]} args */
             handler: ([destination, from, count])=>{
                 const source = width.get(new DataView(host.readMemory(from >>> 0, width.size)
@@ -594,6 +602,7 @@ export function createWideFunctions(host){
         mbtowc: {
             convention: 'cdecl',
             argBytes: 12,
+            sizes: [2],
             /** @param {number[]} args */
             handler: ([destination, source, count])=>{
                 if ((source >>> 0) === 0 || (count >>> 0) === 0)
@@ -845,6 +854,7 @@ export function createMultiByteFunctions(narrow, host){
         mblen: {
             convention: 'cdecl',
             argBytes: 8,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([text, count])=>{
                 if ((text >>> 0) === 0)

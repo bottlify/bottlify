@@ -181,6 +181,7 @@ export function createGdiplusFunctions(host){
         GdipAlloc: {
             returns: 'pointer',
             argBytes: 4,
+            sizes: [0],
             /** @param {number[]} args */
             handler: ([size])=>host.allocate(Math.max(1, size >>> 0)),
         },

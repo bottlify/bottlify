@@ -307,6 +307,7 @@ export function createStringFunctions(host){
         strxfrm: {
             convention: 'cdecl',
             argBytes: 12,
+            sizes: [2],
             /** @param {number[]} args */
             handler: ([destination, source, count])=>{
                 const room = count >>> 0;

@@ -210,8 +210,9 @@ export function createMfplatFunctions(host){
          *
          * The process heap's: the file, line and type are a debugging aid.
          */
-        MFHeapAlloc: { returns: 'pointer', argBytes: 20, handler: (/** @type {number[]} */ [size])=>
-            host.heap.allocate(Math.max(size >>> 0, 1)) >>> 0 },
+        MFHeapAlloc: { returns: 'pointer', argBytes: 20, sizes: [0],
+            handler: (/** @type {number[]} */ [size])=>
+                host.heap.allocate(Math.max(size >>> 0, 1)) >>> 0 },
         /** void MFHeapFree(void *block) */
         MFHeapFree: { argBytes: 4, handler: (/** @type {number[]} */ [block])=>{
             if ((block >>> 0) !== 0)

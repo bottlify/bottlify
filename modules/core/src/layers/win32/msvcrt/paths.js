@@ -719,6 +719,7 @@ export function createPathFunctions(host){
         _makepath_s: {
             convention: 'cdecl',
             argBytes: 24,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([path, size, drive, directory, name, extension])=>{
                 const read = (/** @type {number} */ pointer)=>(
@@ -818,6 +819,7 @@ export function createPathFunctions(host){
                 returns: 'pointer',
                 convention: 'cdecl',
                 argBytes: 12,
+                sizes: [2],
                 /** @param {number[]} args */
                 handler: ([destination, relative, max])=>{
                     const text = fullPath(readWide(relative), host.files.currentDirectory());
@@ -855,6 +857,7 @@ export function createPathFunctions(host){
             _wmakepath_s: {
                 convention: 'cdecl',
                 argBytes: 24,
+                sizes: [1],
                 /** @param {number[]} args */
                 handler: ([path, size, drive, directory, name, extension])=>{
                     const read = (/** @type {number} */ pointer)=>(
@@ -905,6 +908,7 @@ export function createPathFunctions(host){
             returns: 'pointer',
             convention: 'cdecl',
             argBytes: 12,
+            sizes: [2],
             /** @param {number[]} args */
             handler: ([destination, relative, max])=>{
                 const text = fullPath(readString(relative), host.files.currentDirectory());

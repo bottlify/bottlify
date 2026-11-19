@@ -498,6 +498,7 @@ export function createNtdllFunctions(host){
             RtlCreateHeap: {
                 returns: 'pointer',
                 argBytes: 24,
+                sizes: [2, 3],
                 /** @param {number[]} args */
                 handler: ([flags, base, reserve, commit])=>{
                     if ((base >>> 0) !== 0)
@@ -971,6 +972,7 @@ export function createNtdllFunctions(host){
          */
         RtlZeroMemory: {
             argBytes: 8,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([destination, length])=>crt.memset.handler([destination, 0, length]),
         },
@@ -978,6 +980,7 @@ export function createNtdllFunctions(host){
         /** VOID RtlFillMemory(VOID UNALIGNED *Destination, SIZE_T Length, UCHAR Fill) */
         RtlFillMemory: {
             argBytes: 12,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([destination, length, fill])=>
                 crt.memset.handler([destination, fill, length]),
@@ -992,6 +995,7 @@ export function createNtdllFunctions(host){
          */
         RtlMoveMemory: {
             argBytes: 12,
+            sizes: [2],
             /** @param {number[]} args */
             handler: ([destination, source, length])=>
                 crt.memmove.handler([destination, source, length]),
@@ -1007,6 +1011,7 @@ export function createNtdllFunctions(host){
          */
         RtlCompareMemory: {
             argBytes: 12,
+            sizes: [2],
             /** @param {number[]} args */
             handler: ([left, right, length])=>{
                 const total = length >>> 0;
@@ -1029,6 +1034,7 @@ export function createNtdllFunctions(host){
          */
         RtlCompareMemoryUlong: {
             argBytes: 12,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([source, length, pattern])=>{
                 const words = (length >>> 0) >>> 2;
@@ -1047,6 +1053,7 @@ export function createNtdllFunctions(host){
         /** VOID RtlFillMemoryUlong(PVOID Destination, SIZE_T Length, ULONG Pattern) */
         RtlFillMemoryUlong: {
             argBytes: 12,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([destination, length, pattern])=>{
                 const words = (length >>> 0) >>> 2;

@@ -644,6 +644,7 @@ export function createProcessFunctions(host){
          */
         NtCreateThreadEx: {
             argBytes: 44,
+            sizes: [7, 8, 9],
             /** @param {number[]} args */
             handler: ([out, , , process, start, argument, flags, , commit, reserve])=>{
                 if ((out >>> 0) === 0 || (start >>> 0) === 0)
@@ -699,6 +700,7 @@ export function createProcessFunctions(host){
          */
         RtlCreateUserThread: {
             argBytes: 40,
+            sizes: [4, 5],
             /** @param {number[]} args */
             handler: ([process, , suspended, , reserve, commit, start, argument, out,
                 client])=>{

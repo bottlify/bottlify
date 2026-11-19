@@ -1104,6 +1104,7 @@ export function createThreadingFunctions(host){
         /** HANDLE CreateThread(LPSECURITY_ATTRIBUTES, SIZE_T, LPTHREAD_START_ROUTINE, LPVOID, DWORD, LPDWORD) */
         CreateThread: {
             argBytes: 24,
+            sizes: [1],
             addresses: [2, 3],
             /** @param {number[]} args */
             handler: ([, stackSize, start, parameter, flags, threadIdOut])=>{

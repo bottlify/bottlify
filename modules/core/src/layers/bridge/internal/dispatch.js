@@ -48,6 +48,11 @@ import { isDriven } from './drive.js';
  *     an address (not zero, below 2^21), and as its dword otherwise, so a
  *     process in 4 GiB sees what it always saw. A handler that declares one
  *     must not cut it with `>>> 0` or `| 0`.
+ * @property {number[]} [sizes]  The dwords that carry a `size_t` / `SIZE_T`: a
+ *     64-bit caller's is eight bytes, and one past a dword is handed as the
+ *     largest dword (0xFFFFFFFF) - a request no handler can meet, which it
+ *     refuses as it refuses any too large - never as its low half, which
+ *     would answer a request of 4 GiB + 16 bytes with sixteen.
  * @property {string} [returns]  The answer is an address or an unsigned
  *     size (a pointer, an HMODULE, a SIZE_T): a 64-bit caller finds it in RAX
  *     zero-extended. Every other dword answer is sign-extended there, as a
@@ -134,6 +139,7 @@ import { isDriven } from './drive.js';
  * @property {number} sampledCalls  How many of them were timed.
  * @property {number[] | null} quadwords  Of `fn`, checked; null for none.
  * @property {number[] | null} addresses  Of `fn`, checked; null for none.
+ * @property {number[] | null} sizes  Of `fn`, checked; null for none.
  * @property {boolean} zeroExtends  `fn.returns` is 'pointer': RAX takes the answer zero-extended.
  * @property {LongSlot[] | null} longSlots  Where each x64 slot's argument goes
  *     in `args`, for a function with quadwords or floating-point arguments;
@@ -362,6 +368,26 @@ const wholeAddresses = (addresses, args, high)=>{
         if (upper !== 0 && upper < ADDRESS_HIGH)
         {
             args[at] = upper * 2 ** 32 + (args[at] >>> 0);
+        }
+    }
+};
+
+/**
+ * Makes each declared size argument the largest dword where a 64-bit caller's
+ * is past one (`HostFunction.sizes`).
+ *
+ * @param {number[] | null} sizes @param {any[]} args @param {number[]} high
+ */
+const largestSizes = (sizes, args, high)=>{
+    if (sizes === null)
+    {
+        return;
+    }
+    for (let i = 0; i < sizes.length; i++)
+    {
+        if (high[sizes[i]] !== 0)
+        {
+            args[sizes[i]] = -1;
         }
     }
 };
@@ -1156,6 +1182,7 @@ class Dispatcher {
                 }
             }
             wholeAddresses(entry.addresses, args, high);
+            largestSizes(entry.sizes, args, high);
             return this.longReturn(rsp);
         }
         // An argument the signature counts as two dwords is one slot here,
@@ -1209,6 +1236,7 @@ class Dispatcher {
             }
         }
         wholeAddresses(entry.addresses, args, high);
+        largestSizes(entry.sizes, args, high);
         return this.longReturn(rsp);
     }
 
@@ -1852,6 +1880,14 @@ class Dispatcher {
             throw new Error(`bridge: ${fn.name}'s addresses ${addresses.join(', ')} are not dwords`
                 + ' of its arguments that hold one value each');
         }
+        const sizes = fn.sizes !== undefined && fn.sizes.length > 0 ? [...fn.sizes] : null;
+        if (sizes?.some(at=>!Number.isInteger(at) || at < 0 || at >= words
+            || quadwords?.includes(at) || quadwords?.includes(at - 1) || floats?.[at]
+            || addresses?.includes(at)))
+        {
+            throw new Error(`bridge: ${fn.name}'s sizes ${sizes.join(', ')} are not dwords`
+                + ' of its arguments that hold one value each');
+        }
         this.functions[id] = {
             fn,
             name: fn.name,
@@ -1875,6 +1911,7 @@ class Dispatcher {
             readsError: this.errorReader && fn.lastError !== false,
             quadwords,
             addresses,
+            sizes,
             zeroExtends: zeroExtendsOf(fn),
             longSlots: quadwords || floats || structs
                 ? longSlotsOf(words, quadwords, floats, structs) : null,

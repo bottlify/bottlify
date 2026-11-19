@@ -872,6 +872,7 @@ export function createProcessPolicyFunctions(host){
          */
         GetProcessMitigationPolicy: {
             argBytes: 16,
+            sizes: [3],
             /** @param {number[]} args */
             handler: ([process, policy, to, length])=>{
                 if (!processOf(process))
@@ -904,6 +905,7 @@ export function createProcessPolicyFunctions(host){
          */
         SetProcessMitigationPolicy: {
             argBytes: 12,
+            sizes: [2],
             /** @param {number[]} args */
             handler: ([policy, from, length])=>{
                 const which = policy >>> 0;

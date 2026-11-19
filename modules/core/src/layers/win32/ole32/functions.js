@@ -4252,6 +4252,7 @@ export function createOleFunctions(host){
         CoTaskMemAlloc: {
             returns: 'pointer',
             argBytes: 4,
+            sizes: [0],
             /** @param {number[]} args */
             // A zero-byte request still yields a pointer that is not NULL, which
             // is what the caller tests for.
@@ -4303,6 +4304,7 @@ export function createOleFunctions(host){
         CoTaskMemRealloc: {
             returns: 'pointer',
             argBytes: 8,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([pointer, size])=>reallocate(host.heap, host, pointer, size),
         },

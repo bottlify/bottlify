@@ -5437,6 +5437,7 @@ export function createGdiFunctions(host){
          */
         GetFontFileInfo: {
             argBytes: 20,
+            sizes: [3],
             /** @param {number[]} args */
             handler: ([instance, index, out, size, needed])=>{
                 if (!isRealization(instance) || (index >>> 0) !== 0)

@@ -342,6 +342,7 @@ export function createIdListFunctions(host){
         SHAlloc: {
             returns: 'pointer',
             argBytes: 4,
+            sizes: [0],
             /** @param {number[]} args */
             handler: ([bytes])=>host.allocate?.(Math.max(bytes >>> 0, 1)) ?? 0,
         },

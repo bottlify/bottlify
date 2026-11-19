@@ -244,6 +244,7 @@ export function createMsvcr80Functions(crt, host){
         _vswprintf_c_l: {
             convention: 'cdecl',
             argBytes: 20,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([buffer, count, format, , list])=>
                 crt._vsnwprintf.handler([buffer, count, format, list]),

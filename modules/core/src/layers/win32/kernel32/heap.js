@@ -1251,6 +1251,19 @@ export function createHeapFunctions(host){
     };
 
     /**
+     * The sizes an export declares (`sizes`), for a trap of a guest routine to
+     * declare as the export does.
+     *
+     * @param {string} name
+     * @returns {{ sizes?: number[] }}
+     */
+    const sizesOf = name=>{
+        const { sizes } = /** @type {{ sizes?: number[] }} */ (
+            /** @type {Record<string, any>} */ (table)[name]);
+        return sizes ? { sizes } : {};
+    };
+
+    /**
      * A SIZE_T argument whole: in a 64-bit process its high dword comes beside
      * the low one (`pointerArg`), and a size past 4 GiB is one no request in
      * this address space meets - refused, not its low half taken.
@@ -1908,6 +1921,7 @@ export function createHeapFunctions(host){
         const place = (label, name, code)=>{
             const trap = builder.register(label, {
                 argBytes: table[name].argBytes,
+                ...sizesOf(name),
                 /** @param {number[]} args */
                 handler: args=>table[name].handler(args),
             });
@@ -1973,6 +1987,7 @@ export function createHeapFunctions(host){
                 return bindLong(builder, placement === null ? null : make(placement), {
                     argBytes: table[name].argBytes,
                     returns: /** @type {{ returns?: string }} */ (table[name]).returns,
+                    ...sizesOf(name),
                     /** @param {number[]} args */
                     handler: args=>table[name].handler(args),
                 });
@@ -2264,6 +2279,7 @@ export function createHeapFunctions(host){
         HeapCreate: {
             returns: 'pointer',
             argBytes: 12,
+            sizes: [1, 2],
             /** @param {number[]} [args] */
             handler: ([options, initial, maximum] = [0, 0, 0])=>{
                 // A heap with a maximum is fixed: it is a handle of its own,
@@ -2306,6 +2322,7 @@ export function createHeapFunctions(host){
          */
         HeapSetInformation: {
             argBytes: 16,
+            sizes: [3],
             /** @param {number[]} args */
             handler: ([handle, kind, information, length])=>{
                 const heap = handle >>> 0;
@@ -2354,6 +2371,7 @@ export function createHeapFunctions(host){
          */
         HeapQueryInformation: {
             argBytes: 20,
+            sizes: [3],
             /** @param {number[]} args */
             handler: ([handle, kind, information, length, returned])=>{
                 const heap = handle >>> 0;
@@ -2669,6 +2687,7 @@ export function createHeapFunctions(host){
          */
         GetWriteWatch: {
             argBytes: 24,
+            sizes: [2],
             /** @param {number[]} args */
             handler: ([flags, base, bytes, addresses, count, granularity])=>{
                 const address = base >>> 0;
@@ -2742,6 +2761,7 @@ export function createHeapFunctions(host){
          */
         ResetWriteWatch: {
             argBytes: 8,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([base, bytes])=>{
                 const address = base >>> 0;
@@ -2763,15 +2783,16 @@ export function createHeapFunctions(host){
         },
 
         /**
+         * HGLOBAL GlobalAlloc(UINT uFlags, SIZE_T dwBytes)
+         *
          * The global family (`moveable.js`): a fixed block is its own handle,
          * a moveable one an entry of the process's handle table that GlobalLock
          * turns into a pointer.
-         *
-         * HGLOBAL GlobalAlloc(UINT uFlags, SIZE_T dwBytes)
          */
         GlobalAlloc: {
             returns: 'pointer',
             argBytes: 8,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([flags, bytes])=>globals.global.allocate(flags >>> 0, bytes >>> 0),
             ...routine('globalAlloc'),
@@ -2781,6 +2802,7 @@ export function createHeapFunctions(host){
         GlobalReAlloc: {
             returns: 'pointer',
             argBytes: 12,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([handle, bytes, flags])=>
                 globals.global.reallocate(handle >>> 0, bytes >>> 0, flags >>> 0),
@@ -2876,6 +2898,7 @@ export function createHeapFunctions(host){
         LocalAlloc: {
             returns: 'pointer',
             argBytes: 8,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([flags, bytes])=>globals.local.allocate(flags >>> 0, bytes >>> 0),
         },
@@ -3047,6 +3070,7 @@ export function createHeapFunctions(host){
          */
         VirtualProtect: {
             argBytes: 16,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([address, size, protect, oldProtect])=>{
                 if (address === 0 || (size >>> 0) === 0)
@@ -3250,6 +3274,7 @@ export function createHeapFunctions(host){
          */
         DiscardVirtualMemory: {
             argBytes: 8,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([address, size])=>{
                 const at = address >>> 0;
@@ -3271,6 +3296,7 @@ export function createHeapFunctions(host){
          */
         VirtualLock: {
             argBytes: 8,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([address, size])=>address !== 0 && (size >>> 0) !== 0 ? 1 : 0,
         },
@@ -3278,6 +3304,7 @@ export function createHeapFunctions(host){
         /** BOOL VirtualUnlock(LPVOID lpAddress, SIZE_T dwSize) */
         VirtualUnlock: {
             argBytes: 8,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([address, size])=>address !== 0 && (size >>> 0) !== 0 ? 1 : 0,
         },
@@ -3544,7 +3571,7 @@ export function createHeapFunctions(host){
             return { state: answer[4], protect: answer[5] };
         },
         /** LPVOID VirtualAllocEx(HANDLE, LPVOID, SIZE_T, DWORD, DWORD) */
-        VirtualAllocEx: { ...inProcess('VirtualAlloc', 20), returns: 'pointer' },
+        VirtualAllocEx: { ...inProcess('VirtualAlloc', 20), returns: 'pointer', sizes: [2] },
         /**
          * PVOID VirtualAlloc2FromApp(...): VirtualAlloc2 under the name a
          * packaged app may call, whose limits -- no executable pages without
@@ -3561,6 +3588,7 @@ export function createHeapFunctions(host){
         LocalReAlloc: {
             returns: 'pointer',
             argBytes: 12,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([handle, bytes, flags])=>
                 globals.local.reallocate(handle >>> 0, bytes >>> 0, flags >>> 0),
@@ -3611,6 +3639,7 @@ export function createHeapFunctions(host){
          */
         RtlMoveMemory: {
             argBytes: 12,
+            sizes: [2],
             /** @param {number[]} args */
             handler: ([destination, source, length])=>{
                 if ((length >>> 0) !== 0)

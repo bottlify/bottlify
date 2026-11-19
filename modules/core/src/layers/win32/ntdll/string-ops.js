@@ -479,6 +479,7 @@ export function createStringOperations(host){
          */
         RtlCompareUnicodeStrings: {
             argBytes: 20,
+            sizes: [1, 3],
             /** @param {number[]} args */
             handler: ([first, firstLength, second, secondLength, insensitive])=>compare(
                 textUnits(unitsText(host.readMemory(first >>> 0, (firstLength >>> 0) * 2))),

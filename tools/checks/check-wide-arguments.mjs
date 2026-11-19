@@ -513,7 +513,7 @@ export const ADDRESS_HANDLES = new Map([
 const SIZES = new Set(['size_t', 'SIZE_T', 'ULONG_PTR', 'UINT_PTR', 'DWORD_PTR', 'uintptr_t',
     'WPARAM']);
 
-export function pointersOf(list, { addresses = false } = {}){
+export function pointersOf(list, { addresses = false, sizes = false } = {}){
     const params = list.split(',').map(each=>each.trim()).filter(Boolean);
     if (params.length === 1 && /^void$/i.test(params[0]))
     {
@@ -530,7 +530,8 @@ export function pointersOf(list, { addresses = false } = {}){
         }
         const type = param.replace(/\b(IN|OUT|OPTIONAL)\b|_In\w*_|_Out\w*_/g, ' ').trim();
         const named = type.replace(NOT_TYPE, ' ').trim().split(/\s+/)[0] ?? '';
-        if (type.includes('*') || type.includes('[')
+        if (sizes ? (named === 'size_t' || named === 'SIZE_T') && !type.includes('*')
+            : type.includes('*') || type.includes('[')
             || (returnsPointer(named) && !(addresses && SIZES.has(named)))
             // A routine of the program's (WNDPROC, TIMERPROC, an ...ENUMPROCA) is an
             // address to call, whole or not at all.
@@ -684,12 +685,31 @@ export function checkAddresses(text){
         const next = text.indexOf('/**', end);
         const spec = text.slice(end + 2, next < 0 ? text.length : next);
         const declared = /\baddresses\s*:\s*\[([^\]]*)\]/.exec(spec);
-        if (end < 0 || !declared)
+        const sized = /\bsizes\s*:\s*\[([^\]]*)\]/.exec(spec);
+        if (end < 0 || (!declared && !sized))
         {
             continue;
         }
         const params = paramsAfter(text,
             Object.assign([match[0], '', match[1]], { index: match.index }));
+        if (sized)
+        {
+            // A dword declared a size (`sizes`, made the largest dword past one):
+            // one the signature has a size_t or a SIZE_T in.
+            const are = params === null ? null : new Set(pointersOf(params, { sizes: true }));
+            const asked = sized[1].split(',').map(each=>each.trim()).filter(Boolean).map(Number);
+            const off = are === null ? asked : asked.filter(word=>!are.has(word));
+            if (off.length > 0)
+            {
+                found.push({ name: match[1], line: line0(text, match.index) + 1,
+                    problem: `sizes names dword ${off.join(', ')}, which the signature has no`
+                        + ' size_t or SIZE_T in' });
+            }
+        }
+        if (!declared)
+        {
+            continue;
+        }
         const shift = /invoke\s*:|name\s*:\s*['"]/.test(spec) ? 1 : 0;
         const has = params === null ? null
             : new Set(pointersOf(params, { addresses: true }).map(word=>word + shift));

@@ -966,6 +966,7 @@ export function createMsvcrtFunctions(host){
         _vswprintf_c: {
             convention: 'cdecl',
             argBytes: 16,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([buffer, size, format, list])=>
                 cutWide(buffer, size, wideText(format, varargsAt(list))),
@@ -1011,6 +1012,7 @@ export function createMsvcrtFunctions(host){
         _vsnwprintf_s: {
             convention: 'cdecl',
             argBytes: 20,
+            sizes: [1, 2],
             /** @param {number[]} args */
             handler: ([buffer, size, count, format, list])=>{
                 const room = size >>> 0;
@@ -1042,6 +1044,7 @@ export function createMsvcrtFunctions(host){
         _vsprintf_p: {
             convention: 'cdecl',
             argBytes: 16,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([buffer, size, format, list])=>{
                 if ((buffer >>> 0) === 0 || (format >>> 0) === 0 || (size >>> 0) === 0)

@@ -233,6 +233,7 @@ export function createFiberFunctions(host){
         CreateFiber: {
             returns: 'pointer',
             argBytes: 12,
+            sizes: [0],
             /** @param {number[]} args */
             handler: ([size, start, parameter])=>create(size >>> 0, 0, start >>> 0, parameter),
         },
@@ -248,6 +249,7 @@ export function createFiberFunctions(host){
         CreateFiberEx: {
             returns: 'pointer',
             argBytes: 20,
+            sizes: [0, 1],
             /** @param {number[]} args */
             handler: ([commit, reserve, , start, parameter])=>
                 create(commit >>> 0, reserve >>> 0, start >>> 0, parameter),

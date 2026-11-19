@@ -154,3 +154,12 @@ test('a handler that cuts an address it takes whole back to a dword is found', (
     assert.deepEqual(cutAddresses(
         '{ addresses: [0], handler: ([start])=>run(wholeAddress(start)) }', [0]), []);
 });
+
+test('a dword declared a size is one the signature has a size in', ()=>{
+    const good = `/** void *realloc(void *block, size_t size) */
+        realloc: { returns: 'pointer', argBytes: 8, sizes: [1], handler: ()=>0 },`;
+    assert.deepEqual(checkAddresses(good).filter(one=>one.problem !== null), []);
+    const bad = `/** HGLOBAL GlobalAlloc(UINT uFlags, SIZE_T dwBytes) */
+        GlobalAlloc: { returns: 'pointer', argBytes: 8, sizes: [0], handler: ()=>0 },`;
+    assert.match(checkAddresses(bad)[0].problem ?? '', /sizes names dword 0/);
+});

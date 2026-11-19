@@ -631,6 +631,7 @@ export function createMappingFunctions(host){
          */
         NtQuerySection: {
             argBytes: 20,
+            sizes: [3],
             /** @param {number[]} args */
             handler: ([handle, kind, buffer, length, returned])=>{
                 const section = sectionOf(handle);
@@ -684,6 +685,7 @@ export function createMappingFunctions(host){
          */
         NtMapViewOfSection: {
             argBytes: 40,
+            sizes: [4],
             /** @param {number[]} args */
             handler: ([handle, process, base, , , offsetAt, sizeAt, , , page])=>{
                 const section = sectionOf(handle);
@@ -766,6 +768,7 @@ export function createMappingFunctions(host){
         MapViewOfFile: {
             returns: 'pointer',
             argBytes: 20,
+            sizes: [4],
             /** @param {number[]} args */
             handler: ([handle, access, offsetHigh, offsetLow, length, base = 0])=>{
                 if (offsetHigh !== 0)
@@ -941,6 +944,7 @@ export function createMappingFunctions(host){
         MapViewOfFileEx: {
             returns: 'pointer',
             argBytes: 24,
+            sizes: [4],
             /** @param {number[]} args */
             handler: args=>table.MapViewOfFile.handler(args),
         },
@@ -994,6 +998,7 @@ export function createMappingFunctions(host){
          */
         FlushViewOfFile: {
             argBytes: 8,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([address, count])=>{
                 const at = address >>> 0;

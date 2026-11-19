@@ -2721,6 +2721,7 @@ export function createWinsockFunctions(host){
         inet_ntop: {
             returns: 'pointer',
             argBytes: 16,
+            sizes: [3],
             /** @param {number[]} args */
             handler: ([family, address, buffer, size])=>{
                 if (family !== AF_INET && family !== AF_INET6)

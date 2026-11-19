@@ -994,6 +994,7 @@ export function createUcrtbaseFunctions(crt, host){
         fread_s: {
             convention: 'cdecl',
             argBytes: 20,
+            sizes: [1, 2, 3],
             /** @param {number[]} args */
             handler: ([buffer, size, elementSize, count, stream])=>{
                 const wanted = (elementSize >>> 0) * (count >>> 0);
@@ -1034,6 +1035,7 @@ export function createUcrtbaseFunctions(crt, host){
         _Wcsftime: {
             convention: 'cdecl',
             argBytes: 20,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([buffer, size, format, time])=>
                 (standardTime?.wcsftime ?? crt.wcsftime).handler([buffer, size, format, time]),

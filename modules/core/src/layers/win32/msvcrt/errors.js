@@ -141,6 +141,7 @@ export function createErrorFunctions(host){
         strerror_s: {
             convention: 'cdecl',
             argBytes: 12,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([buffer, size, code])=>{
                 const room = size >>> 0;

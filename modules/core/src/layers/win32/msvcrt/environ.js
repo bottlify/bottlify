@@ -448,6 +448,7 @@ export function createEnvironment(host){
         getenv_s: {
             convention: 'cdecl',
             argBytes: 16,
+            sizes: [2],
             /** @param {number[]} args */
             handler: ([length, buffer, size, name])=>getenvInto(length, buffer, size,
                 (name >>> 0) === 0 ? null : readNarrow(name), 1),
@@ -457,6 +458,7 @@ export function createEnvironment(host){
         _wgetenv_s: {
             convention: 'cdecl',
             argBytes: 16,
+            sizes: [2],
             /** @param {number[]} args */
             handler: ([length, buffer, size, name])=>getenvInto(length, buffer, size,
                 (name >>> 0) === 0 ? null : readWide(name), 2),

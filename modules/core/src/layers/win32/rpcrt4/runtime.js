@@ -872,6 +872,7 @@ export function createRuntime(host){
         NdrOleAllocate: {
             returns: 'pointer',
             argBytes: 4,
+            sizes: [0],
             /** @param {number[]} args */
             handler: ([size])=>host.allocate(size >>> 0),
         },

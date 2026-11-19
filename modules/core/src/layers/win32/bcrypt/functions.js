@@ -770,6 +770,7 @@ export function createBcryptPrimitivesFunctions(host){
         /** BOOL ProcessPrng(PBYTE pbData, SIZE_T cbData) */
         ProcessPrng: {
             argBytes: 8,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([buffer, count])=>{
                 if ((count >>> 0) > 0)

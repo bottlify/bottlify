@@ -1946,6 +1946,7 @@ export function createActivationContexts(host){
         /** NTSTATUS RtlQueryInformationActiveActivationContext(ULONG, PVOID, SIZE_T, SIZE_T *) */
         RtlQueryInformationActiveActivationContext: {
             argBytes: 16,
+            sizes: [2],
             /** @param {number[]} args */
             handler: ([kind, buffer, size, written])=>query([QUERY_ACTCTX_FLAG_USE_ACTIVE_ACTCTX, 0,
                 0, kind, buffer, size, written]),
@@ -1953,6 +1954,7 @@ export function createActivationContexts(host){
         /** NTSTATUS RtlQueryInformationActivationContext(ULONG, HANDLE, PVOID, ULONG, PVOID, SIZE_T, SIZE_T *) */
         RtlQueryInformationActivationContext: {
             argBytes: 28,
+            sizes: [5],
             /** @param {number[]} args */
             handler: args=>query(args),
         },
@@ -2130,6 +2132,7 @@ export function createActivationContexts(host){
          */
         QueryActCtxW: {
             argBytes: 28,
+            sizes: [5],
             /** @param {number[]} args */
             handler: args=>{
                 const status = query(args);
