@@ -410,7 +410,7 @@ From `arg-bytes-audit.mjs dbg/wine-specs`. Every stdcall entry of the win32 laye
 - [`checks/check-budget-writes.mjs`](checks/check-budget-writes.mjs) - The emitter writes a region's budget only as a count (`npm run check:boundaries`)
 - [`checks/check-emit-options.mjs`](checks/check-emit-options.mjs) - Every emit option reaches the cache key (`npm run check:boundaries`)
 - [`checks/check-guest-pointers.mjs`](checks/check-guest-pointers.mjs) - A handler faults on a bad guest pointer only as Windows does (`npm run check:boundaries`)
-- [`checks/check-wide-addresses.mjs`](checks/check-wide-addresses.mjs) - A 64-bit process's handler answers the same call the same wherever its memory lies: RAX whole, what it writes, what it faults on (`node tools/checks/check-wide-addresses.mjs [--list] [--high 0x90100000]`)
+- [`checks/check-wide-addresses.mjs`](checks/check-wide-addresses.mjs) - A 64-bit process's handler answers the same call the same wherever its memory lies: RAX whole, what it writes, what it faults on (`node tools/checks/check-wide-addresses.mjs [--list] [--high 0x90100000] [--known FILE] [--write-known] [--trace]`)
 - [`checks/check-is-main.mjs`](checks/check-is-main.mjs) - No script decides it was started by comparing paths itself (`npm run check:boundaries`)
 - [`checks/check-link-slots.mjs`](checks/check-link-slots.mjs) - One machine a slot of a process's link (`npm run check:boundaries`)
 - [`checks/check-lock-release.mjs`](checks/check-lock-release.mjs) - A locked word is not released by a plain store (`npm run check:boundaries`)
