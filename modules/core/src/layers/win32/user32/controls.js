@@ -700,11 +700,12 @@ export const imagePlace = (record, rect, shape)=>{
  *           Where its client area is on the screen.
  * @property {(className: string, rect: { x: number, y: number, width: number,
  *     height: number }, owner: number, exStyle: number, style: number,
- *     thread?: unknown, id?: number) => number | Promise<number>} [popup]
+ *     thread?: unknown, id?: number, wide?: boolean) => number | Promise<number>} [popup]
  *           A window of a system class, made by name: a combo box's list,
  *           a popup on the screen or a child (WS_CHILD) in its parent with
  *           the control id `id`, a child of the desktop for an owner of
- *           zero. Absent, a combo box has no list window.
+ *           zero; a Unicode window when `wide`, as CreateWindowExW makes it.
+ *           Absent, a combo box has no list window.
  * @property {(hwnd: number, command: number) => number | Promise<number>} [show]
  * @property {(hwnd: number) => number | Promise<number>} [destroy]
  * @property {(hwnd: number, address: number) => number} [comboBoxInfo]

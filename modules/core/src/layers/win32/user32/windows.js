@@ -6907,18 +6907,23 @@ export function createWindowFunctions(host){
         // A window of a system class a control makes for itself -- a combo
         // box's dropped list -- by name, as a program's CreateWindowEx
         // names one; the name lives in guest memory for the call.
-        popup: (className, rect, owner, exStyle, style, thread, id = 0)=>{
-            const name = (host.allocate?.(className.length + 1) ?? 0) >>> 0;
+        popup: (className, rect, owner, exStyle, style, thread, id = 0, wide = false)=>{
+            // The class name in the width the window is made in, terminated.
+            const unit = wide ? 2 : 1;
+            const bytes = new Uint8Array((className.length + 1) * unit);
+            [...className].forEach((c, at)=>{
+                bytes[at * unit] = c.charCodeAt(0);
+            });
+            const name = (host.allocate?.(bytes.length) ?? 0) >>> 0;
             if (name === 0)
             {
                 return 0;
             }
-            host.writeMemory(name, Uint8Array.from([...className].map(c=>c.charCodeAt(0))));
-            host.writeMemory(name + className.length, new Uint8Array(1));
+            host.writeMemory(name, bytes);
             const parent = owner === 0 && (style & (WS_CHILD | WS_POPUP)) === WS_CHILD
                 ? desktopWindow().hwnd : owner;
             return andThen(createWindow([exStyle, name, 0, style, rect.x, rect.y, rect.width,
-                rect.height, parent, id, 0, 0], false, thread), hwnd=>{
+                rect.height, parent, id, 0, 0], wide, thread), hwnd=>{
                 host.release?.(name);
                 return hwnd >>> 0;
             });

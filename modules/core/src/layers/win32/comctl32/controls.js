@@ -68,7 +68,7 @@ export function createCommonControls(host, toolkit, images, resources){
         {
             name: TREEVIEW_CLASS,
             atom: TREEVIEW_ATOM,
-            procedure: createTreeViewProcedure(host, toolkit),
+            procedure: createTreeViewProcedure(host, toolkit, resources?.subclassing),
         },
         {
             name: TAB_CLASS,
