@@ -614,3 +614,78 @@ test('a synthesised module\'s variables are a writable region beside its read-on
         assert.equal(regions[0].base + regions[0].size, data.base, 'the two are one image');
         assert.equal(data.base + data.size, base + placed.size);
     });
+
+test('a module placed later writes the bytes it would have written at once, its span held',
+    async()=>{
+        /** A guest memory of a megabyte at 0x70000000, its regions and its writes. @param {string[]} log */
+        const memoryWith = log=>{
+            const bytes = new Uint8Array(0x100000);
+            /** @type {{ name: string, base: number, size: number, kind: string, access: string }[]} */
+            const regions = [];
+            return {
+                bytes,
+                regions,
+                /** @param {any} region */
+                register: region=>{
+                    if (regions.some(other=>region.base < other.base + other.size
+                        && other.base < region.base + region.size))
+                    {
+                        throw new Error(`${region.name} overlaps a region`);
+                    }
+                    regions.push({ ...region });
+                    log.push(`register ${region.name}`);
+                },
+                /** @param {string} name */
+                unregister: name=>{
+                    regions.splice(regions.findIndex(region=>region.name === name), 1);
+                    log.push(`unregister ${name}`);
+                },
+                /** @param {number} at @param {Uint8Array} written */
+                writeBytes: (at, written)=>bytes.set(written, at - 0x70000000),
+                /** @param {string} name @param {string} access */
+                protect(name, access){
+                    const region = regions.find(entry=>entry.name === name);
+                    if (region)
+                    {
+                        region.access = access;
+                    }
+                },
+                RegionKind: { IMAGE: 'image', RESERVED: 'reserved' },
+                Access: { NONE: 'none', READ_WRITE_EXECUTE: 'rwx', READ_EXECUTE: 'rx',
+                    READ_WRITE: 'rw' },
+            };
+        };
+        const exports = ()=>[{ name: 'exit', target: 0x2000 },
+            { name: 'printf', code: new Uint8Array([0x55, 0x89, 0xe5, 0xc3]) },
+            { name: '_iob', data: new Uint8Array(640).fill(7) }];
+        /** @param {boolean} later */
+        const synthesised = async later=>{
+            /** @type {string[]} */
+            const log = [];
+            const memory = memoryWith(log);
+            const host = /** @type {any} */ ({
+                requireApi: /** @param {string} name */ name=>({ memory })[name] });
+            const loader = await loaderModule.create({}, host);
+            const placed = loader.synthesise({ name: 'MSVCRT.dll', base: 0x70000000,
+                exports: exports(), later });
+            return { memory, log, placed };
+        };
+        const now = await synthesised(false);
+        const later = await synthesised(true);
+        assert.equal(later.placed.placed(), false);
+        assert.ok(later.memory.bytes.every(byte=>byte === 0), 'nothing written before placing');
+        assert.deepEqual(later.memory.regions.map(({ name, kind, size })=>({ name, kind, size })),
+            [{ name: 'MSVCRT.dll (not placed)', kind: 'reserved', size: now.placed.size }]);
+        assert.throws(()=>later.memory.register({ name: 'heap', base: 0x70001000, size: 0x1000,
+            kind: 'heap', access: 'rw' }), /overlaps/, 'its span is given to nothing else');
+        assert.equal(later.placed.addressOf('printf'), now.placed.addressOf('printf'),
+            'its addresses are known before it is placed');
+        later.placed.place();
+        later.placed.place();
+        assert.equal(later.placed.placed(), true);
+        assert.deepEqual(later.memory.bytes, now.memory.bytes, 'the same bytes, byte for byte');
+        assert.deepEqual(later.memory.regions, now.memory.regions, 'the same regions and access');
+        assert.equal(later.log.filter(line=>line === 'unregister MSVCRT.dll (not placed)').length,
+            1,
+            'placed once');
+    });
