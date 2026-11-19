@@ -4549,7 +4549,10 @@ async function openSession(deps){
  * @returns {{ blocks: any, eager: any[] }}
  */
 function sessionUnder(blocks, seeded){
-    const linked = new Set((seeded.links ?? []).filter(record=>!record.junction && !record.reparse)
+    // A file a further name is given: the record of a file's number or
+    // attributes alone gives none, and its file stays lazy.
+    const linked = new Set((seeded.links ?? [])
+        .filter(record=>!record.junction && !record.reparse && record.names.length > 0)
         .map(record=>foldName(record.owner)));
     /** @type {{ path: string, file: any }[]} */
     const lazy = [];

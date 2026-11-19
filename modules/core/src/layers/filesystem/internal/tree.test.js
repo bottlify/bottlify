@@ -543,7 +543,7 @@ test('a file\'s number is its own: kept across renames, shared by its names, nev
     tree.createDirectory(['Dir']);
     const dir = tree.fileId(['Dir']);
     tree.createDirectory(['Dir2']);
-    tree.carryId(['Dir'], ['Dir2']);
+    tree.carryFile(['Dir'], ['Dir2']);
     tree.removeDirectory(['Dir']);
     assert.equal(tree.fileId(['Dir2']), dir, 'a directory moved by remaking it');
 });
@@ -570,4 +570,70 @@ test('a file\'s number goes with the session, and a session without numbers stil
     old.restoreLinks(records.filter((/** @type {any} */ record)=>record.id === undefined));
     assert.equal(old.stat(['B.DAT'])?.links, 2, 'a session saved before numbers');
     assert.equal(old.fileId(['A.DAT']), old.fileId(['B.DAT']), 'numbered when asked');
+});
+
+test('a file\'s attributes are the file\'s: every name shows them, a rename keeps them', ()=>{
+    const { tree } = mounted();
+    tree.createFile(['A.DAT']);
+    assert.equal(tree.stat(['A.DAT'])?.attributes, null, 'none set: as the volume reports it');
+    tree.setAttributes(['A.DAT'], 0x21);
+    tree.link(['A.DAT'], ['B.DAT']);
+    assert.equal(tree.stat(['B.DAT'])?.attributes, 0x21, 'a name given later shows them');
+    tree.setAttributes(['B.DAT'], 0x23);
+    assert.equal(tree.stat(['A.DAT'])?.attributes, 0x23, 'set through one name, seen through all');
+    assert.equal(tree.list([]).find(entry=>entry.name === 'A.DAT')?.attributes, 0x23,
+        'and listed');
+    tree.moveFile(['A.DAT'], ['C.DAT']);
+    assert.equal(tree.stat(['C.DAT'])?.attributes, 0x23, 'a name renamed keeps them');
+    tree.removeFile(['C.DAT']);
+    tree.removeFile(['B.DAT']);
+    tree.createFile(['B.DAT']);
+    assert.equal(tree.stat(['B.DAT'])?.attributes, null, 'a file made anew has none');
+
+    tree.setAttributes(['Readme.TXT'], 0x01);
+    tree.moveFile(['Readme.TXT'], ['Read.TXT']);
+    assert.equal(tree.stat(['Read.TXT'])?.attributes, 0x01, 'a source file renamed keeps them');
+    tree.createFile(['Readme.TXT']);
+    assert.equal(tree.stat(['Readme.TXT'])?.attributes, null,
+        'and the name it left, made again, has none');
+});
+
+test('a file\'s attributes go with the session, and a session without them still loads', ()=>{
+    const { tree, writable } = mounted();
+    tree.createFile(['A.DAT']);
+    tree.link(['A.DAT'], ['B.DAT']);
+    tree.setAttributes(['B.DAT'], 0x22);
+    tree.setAttributes(['Readme.TXT'], 0x01);
+    const id = tree.fileId(['Readme.TXT']);
+    const records = JSON.parse(JSON.stringify(tree.links()));
+    const files = records.filter((/** @type {any} */ record)=>record.names.length === 0);
+    assert.equal(files.length, 2, 'one record a file, a number and attributes in one');
+
+    const again = createOverlay({ source: mounted().source, writable });
+    again.restoreLinks(records);
+    assert.equal(again.stat(['A.DAT'])?.attributes, 0x22);
+    assert.equal(again.stat(['B.DAT'])?.attributes, 0x22, 'under its other name too');
+    assert.equal(again.stat(['Readme.TXT'])?.attributes, 0x01, 'and a file from the source');
+    assert.equal(again.fileId(['Readme.TXT']), id, 'its number beside them');
+
+    const old = createOverlay({ source: mounted().source, writable });
+    old.restoreLinks(records.map((/** @type {any} */ record)=>
+        Object.fromEntries(Object.entries(record).filter(([key])=>key !== 'attributes'))));
+    assert.equal(old.stat(['A.DAT'])?.attributes, null, 'a session saved before attributes');
+    assert.equal(old.stat(['B.DAT'])?.links, 2);
+});
+
+test('a number given out and attributes set are changes the session hears', ()=>{
+    /** @type {{ path: string, kind: string }[]} */
+    const heard = [];
+    const { source } = mounted();
+    const tree = createOverlay({ source, writable: createMemoryStore(),
+        onChanged: change=>heard.push(change) });
+    tree.fileId(['Readme.TXT']);
+    tree.fileId(['Readme.TXT']);
+    assert.deepEqual(heard, [{ path: 'Readme.TXT', kind: 'named' }], 'once, when it is given');
+    heard.length = 0;
+    tree.setAttributes(['Readme.TXT'], 0x01);
+    tree.setAttributes(['Readme.TXT'], 0x01);
+    assert.deepEqual(heard, [{ path: 'Readme.TXT', kind: 'named' }], 'once, when they change');
 });

@@ -362,7 +362,8 @@ export function createFilesystemModule(){
              * @param {string} key @param {any} change
              */
             const changed = (key, change)=>{
-                if (!quiet)
+                // A record of the file changed, not its bytes: nothing to hand out.
+                if (!quiet && change.kind !== 'named')
                 {
                     touched.set(`${key}:${change.path}`,
                         { key, path: change.path, generation: ++generation });
@@ -1059,6 +1060,22 @@ export function createFilesystemModule(){
                 },
 
                 /**
+                 * Sets the attribute bits of the file or directory at `path`,
+                 * or forgets them with null: kept on the volume for every name
+                 * of the file, and in the session.
+                 *
+                 * @param {string} path @param {number | null} attributes
+                 */
+                setAttributes(path, attributes){
+                    if (!live())
+                    {
+                        return;
+                    }
+                    const at = locate(path);
+                    at.tree.setAttributes(at.components, attributes);
+                },
+
+                /**
                  * The reparse point at `path` as it was set, null for none.
                  *
                  * @param {string} path
@@ -1104,6 +1121,8 @@ export function createFilesystemModule(){
                                 ...record.junction ? { junction: true } : {},
                                 ...record.reparse ? { reparse: record.reparse } : {},
                                 ...record.id !== undefined ? { id: record.id } : {},
+                                ...record.attributes !== undefined
+                                    ? { attributes: record.attributes } : {},
                                 ...record.target
                                     ? { target: formatPath(key, splitComponents(record.target)) }
                                     : {} });
@@ -1140,6 +1159,8 @@ export function createFilesystemModule(){
                                 ...record.junction ? { junction: true } : {},
                                 ...record.reparse ? { reparse: record.reparse } : {},
                                 ...record.id !== undefined ? { id: record.id } : {},
+                                ...record.attributes !== undefined
+                                    ? { attributes: record.attributes } : {},
                                 ...target && target.tree === owner.tree
                                     ? { target: target.components.join('\\') } : {} }]);
                         }
@@ -1295,7 +1316,7 @@ export function createFilesystemModule(){
                         this.createDirectory(to);
                         if (locate(from).tree === locate(to).tree)
                         {
-                            locate(from).tree.carryId(locate(from).components,
+                            locate(from).tree.carryFile(locate(from).components,
                                 locate(to).components);
                         }
                         for (const child of this.list(from))

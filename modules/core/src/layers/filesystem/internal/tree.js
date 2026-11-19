@@ -85,6 +85,8 @@ export function inIndexOrder(entries){
  * @property {ReparsePoint | null} reparse  The reparse point set on it, as set.
  * @property {number} id          Its number on the volume once anyone asked for it, 0
  *                                before: every name of a file has the same one.
+ * @property {number | null} attributes  The attribute bits a program set on the file,
+ *                                null for none: every name of a file has the same.
  */
 
 /**
@@ -112,6 +114,9 @@ export function inIndexOrder(entries){
  * @property {{ tag: number, data?: string }} [reparse]
  * @property {string} [target]
  * @property {number} [id]  A file's number on the volume (`owner`, no further names).
+ * @property {number} [attributes]  The attribute bits a program set on the file
+ *           (`owner`, no further names); a session saved before they were kept
+ *           has none, and its files read as never set.
  */
 
 /**
@@ -140,6 +145,7 @@ export function inIndexOrder(entries){
  * @property {string} identity  What the file is known by under any of its names.
  * @property {string | null} [junction]  For a junction, the directory it stands for.
  * @property {number} [reparseTag]  The tag of the reparse point it is, 0 for none.
+ * @property {number | null} [attributes]  The attribute bits a program set, null for none.
  */
 
 /**
@@ -190,6 +196,7 @@ function makeNode(parent, name){
         junction: null,
         reparse: null,
         id: 0,
+        attributes: null,
     };
 }
 
@@ -215,7 +222,7 @@ const FIRST_FILE_ID = 64;
 /** What changes a drive: everything else of it only reads. */
 const CHANGES = /** @type {const} */ (['setModified', 'replace', 'write', 'truncate', 'createFile',
     'createDirectory', 'moveFile', 'removeFile', 'removeDirectory', 'link', 'setReparse',
-    'restoreLinks']);
+    'setAttributes', 'restoreLinks']);
 
 /**
  * @param {Object} options
@@ -241,9 +248,11 @@ export function createOverlay({
      * hundreds of small writes, and carrying the bytes on each of them would
      * mean copying the file once per write to deliver something already stale
      * by the next one. Whoever listens reads the file when it settles.
+     * 'named' is a change to what is recorded of the file - its number, its
+     * attributes - and not to its bytes.
      *
      * @param {string} path
-     * @param {'written' | 'removed'} kind
+     * @param {'written' | 'removed' | 'named'} kind
      */
     const changed = (path, kind)=>onChanged?.({ path, kind });
     const root = makeNode(null, '');
@@ -283,18 +292,28 @@ export function createOverlay({
                 name.id = id;
             }
             numbered.set(id, node);
+            // The number is the file's for good, a run after this one as well:
+            // the session saves it as it saves what was written ('named', no
+            // bytes changed).
+            changed(storePath(node), 'named');
         }
         return node.id;
     };
 
     /**
-     * Hands a name's number to the name that takes its place (`to`: a rename,
-     * a recreated directory), or gives it up when the file has no other name
-     * left: a deleted file's number is never another file's.
+     * Hands what a name holds of the file - its number and its attributes -
+     * to the name that takes its place (`to`: a rename, a recreated
+     * directory), or gives them up when the file has no other name left: a
+     * deleted file's number is never another file's.
      *
      * @param {Node} node @param {Node | null} to
      */
-    const passId = (node, to)=>{
+    const passFile = (node, to)=>{
+        if (to)
+        {
+            to.attributes = node.attributes;
+        }
+        node.attributes = null;
         const id = node.id;
         if (id === 0)
         {
@@ -617,6 +636,7 @@ export function createOverlay({
             // rather than uncover it.
             existing.children.clear();
             existing.tombstone = false;
+            existing.attributes = null;
             existing.name = name;
             existing.path = joinPath(parent.path, name);
         }
@@ -631,7 +651,7 @@ export function createOverlay({
      */
     const forget = node=>{
         copying.delete(node);
-        passId(node, null);
+        passFile(node, null);
         if (node.body)
         {
             unname(node);
@@ -709,6 +729,7 @@ export function createOverlay({
         target.body = body;
         target.modified = node.modified;
         target.id = node.id;
+        target.attributes = node.attributes;
         // A reparse point is the file's, so every name of it is one.
         target.reparse = node.reparse;
         target.junction = node.junction;
@@ -749,7 +770,7 @@ export function createOverlay({
         target.modified = node.modified;
         target.body = body;
         body.names.add(target);
-        passId(node, target);
+        passFile(node, target);
         if (body.owner === node)
         {
             body.owner = target;
@@ -789,8 +810,31 @@ export function createOverlay({
                     identity: storePath(node),
                     junction: node.junction ? node.junction.join('\\') : null,
                     reparseTag: tagOf(node),
+                    attributes: node.attributes,
                 }
                 : null;
+        },
+
+        /**
+         * Sets the attribute bits of the file or directory at `components`,
+         * or forgets them with null, which leaves it as the volume reports
+         * it: every name of a file shows them, and the session keeps them.
+         *
+         * @param {string[]} components @param {number | null} attributes
+         */
+        setAttributes(components, attributes){
+            mustBeWritable(components);
+            const node = mustFind(components);
+            const bits = attributes === null ? null : attributes >>> 0;
+            if (node.attributes === bits)
+            {
+                return;
+            }
+            for (const name of namesOf(node))
+            {
+                name.attributes = bits;
+            }
+            changed(storePath(node), 'named');
         },
 
         /**
@@ -844,6 +888,7 @@ export function createOverlay({
                     identity: storePath(child),
                     junction: child.junction ? child.junction.join('\\') : null,
                     reparseTag: tagOf(child),
+                    attributes: child.attributes,
                 });
             }
             return inIndexOrder(entries);
@@ -1095,7 +1140,7 @@ export function createOverlay({
             target.directory = false;
             target.inWritable = true;
             target.modified = node.modified;
-            passId(node, target);
+            passFile(node, target);
             node.inWritable = false;
             forget(node);
             changed(node.path, 'removed');
@@ -1264,18 +1309,18 @@ export function createOverlay({
         },
 
         /**
-         * Gives the directory at `to` the number the one at `from` had: a
-         * directory is moved by making it anew and moving what it holds, and
-         * on NTFS it stays the same file.
+         * Gives the directory at `to` the number and the attributes the one
+         * at `from` had: a directory is moved by making it anew and moving
+         * what it holds, and on NTFS it stays the same file.
          *
          * @param {string[]} from @param {string[]} to
          */
-        carryId(from, to){
+        carryFile(from, to){
             const leaving = find(from);
             const arriving = find(to);
             if (leaving && arriving && arriving.id === 0)
             {
-                passId(leaving, arriving);
+                passFile(leaving, arriving);
             }
         },
 
@@ -1325,16 +1370,45 @@ export function createOverlay({
                         junctions.push({ owner: child.path, names: [child.path], ...data,
                             ...child.junction ? { target: child.junction.join('\\') } : {} });
                     }
+                    // A file's attributes once, under the name its bytes are kept at.
+                    if (child.attributes !== null && !child.tombstone
+                        && (!child.body || child.body.owner === child))
+                    {
+                        marked.set(child, child.attributes);
+                    }
                     if (child.directory)
                     {
                         walk(child);
                     }
                 }
             };
+            /** @type {Map<Node, number>} */
+            const marked = new Map();
             walk(root);
-            // Numbers last: a restored file is given its names before its number.
-            const numbers = [...numbered].filter(([id])=>id !== ROOT_ID)
-                .map(([id, node])=>({ owner: storePath(node), names: [], id }));
+            // Numbers and attributes last: a restored file is given its names
+            // first. One record a file, whichever of the two it has.
+            /** @type {Map<Node, LinkRecord>} */
+            const files = new Map();
+            for (const [id, node] of numbered)
+            {
+                if (id !== ROOT_ID)
+                {
+                    files.set(node, { owner: storePath(node), names: [], id });
+                }
+            }
+            for (const [node, attributes] of marked)
+            {
+                const record = files.get(node);
+                if (record)
+                {
+                    record.attributes = attributes;
+                }
+                else
+                {
+                    files.set(node, { owner: storePath(node), names: [], attributes });
+                }
+            }
+            const numbers = [...files.values()];
             return [...[...bodies].map(body=>({ owner: body.owner.path,
                 names: [...body.names].filter(name=>name !== body.owner).map(name=>name.path) })),
             ...junctions, ...numbers];
@@ -1353,10 +1427,10 @@ export function createOverlay({
                 data: record.reparse.data ? fromBase64(record.reparse.data) : null } : null);
             for (const record of records)
             {
-                if (typeof record.id === 'number')
+                if (typeof record.id === 'number' || typeof record.attributes === 'number')
                 {
                     const node = find(record.owner.split('\\').filter(part=>part.length > 0));
-                    const id = record.id >>> 0;
+                    const id = (record.id ?? 0) >>> 0;
                     if (node && node.id === 0 && id >= FIRST_FILE_ID && !numbered.has(id))
                     {
                         for (const name of namesOf(node))
@@ -1365,6 +1439,13 @@ export function createOverlay({
                         }
                         numbered.set(id, node);
                         nextId = Math.max(nextId, id + 1);
+                    }
+                    if (node && typeof record.attributes === 'number')
+                    {
+                        for (const name of namesOf(node))
+                        {
+                            name.attributes = record.attributes >>> 0;
+                        }
                     }
                     continue;
                 }

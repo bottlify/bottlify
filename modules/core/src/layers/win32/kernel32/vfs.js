@@ -308,19 +308,6 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now } = {}){
     });
 
     /**
-     * The attributes programs set, by name folded to one case as the volume
-     * folds it. The filesystem below keeps no attribute bits, and read-only
-     * is not decoration: a program marks a file read-only and expects the
-     * delete and the write it did not mean to allow to be refused. Kept for
-     * the life of the process, following a name through a rename, a delete
-     * and a directory's removal.
-     *
-     * @type {Map<string, number>}
-     */
-    const recorded = new Map();
-    /** @param {string} path */
-    const keyOf = path=>path.toLowerCase();
-    /**
      * A file with more than one name says how many and what it is known by;
      * one with its own alone says nothing of either.
      *
@@ -329,32 +316,14 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now } = {}){
      */
     const linked = entry=>(entry.links > 1 ? { links: entry.links, identity: entry.identity } : {});
 
-    /** @param {string} path */
-    const setBy = path=>{
-        const attributes = recorded.get(keyOf(path));
-        return attributes === undefined ? {} : { attributes };
-    };
     /**
-     * Moves what was recorded under one name, and under every name below it,
-     * to another; with no destination, forgets it.
+     * The attributes a program set on the file, which the volume keeps for
+     * every name it has; none recorded leaves it as the volume reports it.
      *
-     * @param {string} from @param {string | null} to
+     * @param {any} entry
      */
-    const carry = (from, to)=>{
-        const key = keyOf(from);
-        for (const [name, attributes] of [...recorded])
-        {
-            if (name !== key && !name.startsWith(`${key}\\`))
-            {
-                continue;
-            }
-            recorded.delete(name);
-            if (to !== null)
-            {
-                recorded.set(keyOf(to) + name.slice(key.length), attributes);
-            }
-        }
-    };
+    const setBy = entry=>(typeof entry.attributes === 'number'
+        ? { attributes: entry.attributes } : {});
 
     /**
      * The watches FindFirstChangeNotification set, each a directory, whether
@@ -521,13 +490,12 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now } = {}){
     };
 
     /**
-     * What follows a name moved: its open files and recorded attributes go
-     * with it, and the watches are told.
+     * What follows a name moved: the watches are told. Its attributes are the
+     * volume's, and go with it there.
      *
      * @param {string} from @param {string} to
      */
     const moved = (from, to)=>{
-        carry(from, to);
         if (watches.size > 0)
         {
             const kind = attempt(()=>fs.stat(to), null)?.directory
@@ -550,7 +518,7 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now } = {}){
             return entry
                 ? { exists: true, isDirectory: Boolean(entry.directory), size: entry.size,
                     modified: entry.modified ?? 0, ...linked(entry), ...marks(entry),
-                    ...setBy(path) }
+                    ...setBy(entry) }
                 : null;
         },
 
@@ -568,18 +536,10 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now } = {}){
             }
             changed(path, CHANGE_ATTRIBUTES, FILE_ACTION_MODIFIED);
             // The attributes are the file's: every name it has shows them.
-            for (const name of attempt(()=>fs.namesOf?.(path), null) ?? [path])
-            {
-                if (attributes === null)
-                {
-                    recorded.delete(keyOf(name));
-                }
-                else
-                {
-                    recorded.set(keyOf(name), attributes >>> 0);
-                }
-            }
-            return true;
+            return attempt(()=>{
+                fs.setAttributes(path, attributes === null ? null : attributes >>> 0);
+                return true;
+            }, false);
         },
 
         /**
@@ -690,11 +650,6 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now } = {}){
                     throw error;
                 }
                 return error.code;
-            }
-            const attributes = recorded.get(keyOf(existing));
-            if (attributes !== undefined)
-            {
-                recorded.set(keyOf(path), attributes);
             }
             changed(path, CHANGE_FILE_NAME, FILE_ACTION_ADDED);
             return null;
@@ -943,7 +898,6 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now } = {}){
                 {
                     fs.deleteFile(path);
                 }
-                carry(path, null);
                 changed(path, entry.directory ? CHANGE_DIR_NAME : CHANGE_FILE_NAME,
                     FILE_ACTION_REMOVED);
                 return true;
@@ -1140,7 +1094,7 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now } = {}){
                 modified: entry.modified ?? 0,
                 ...linked(entry),
                 ...marks(entry),
-                ...setBy(`${path.replace(/\\$/, '')}\\${entry.name}`),
+                ...setBy(entry),
             })), []),
 
         /**

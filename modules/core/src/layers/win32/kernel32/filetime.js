@@ -337,7 +337,8 @@ const FILE_ATTRIBUTE_REPARSE_POINT = 0x400;
  * alone: a directory set to it is just a directory.
  *
  * A reparse point - a junction, a symbolic link, a tag of a program's own -
- * has the reparse-point bit, whatever else it is.
+ * has the reparse-point bit, whatever else it is: a file one beside the
+ * archive bit it carries as any file does.
  *
  * @param {{ isDirectory: boolean, readOnly?: boolean, hidden?: boolean,
  *           attributes?: number, junction?: string, reparseTag?: number }
@@ -359,7 +360,9 @@ export function fileAttributes(entry){
     {
         return kind | hidden | media;
     }
-    return (kind || FILE_ATTRIBUTE_ARCHIVE) | hidden;
+    // A file is archived until a program clears it; a directory is not, a
+    // reparse point or not.
+    return (entry?.isDirectory ? kind : kind | FILE_ATTRIBUTE_ARCHIVE) | hidden;
 }
 
 /**
