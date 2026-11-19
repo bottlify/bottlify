@@ -3235,8 +3235,10 @@ export function createNamedPipes(host){
             }
             if (device)
             {
-                return { handle: host.handles.open('pipe', { device },
-                    mappedAccess('pipe', access >>> 0)) };
+                // The mode it was opened in is FileModeInformation's.
+                return { handle: host.handles.open('pipe', { device,
+                    mode: (options >>> 0) & FILE_SYNCHRONOUS_IO },
+                mappedAccess('pipe', access >>> 0)) };
             }
             if (instance)
             {

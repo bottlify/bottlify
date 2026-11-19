@@ -4014,3 +4014,29 @@ test('a file handle reads and writes by the rights it holds: a second handle ont
         'CreateFile grants what it was asked, generic rights mapped, with SYNCHRONIZE and'
         + ' FILE_READ_ATTRIBUTES');
 });
+
+test('a device that holds no files opens as itself, in the mode it was opened in', ()=>{
+    const { memory, fns } = setup();
+    const native = /** @type {any} */ (fns.CreateFileW).natives;
+    const SYNCHRONIZE = 0x100000;
+    const FILE_SYNCHRONOUS_IO_ALERT = 0x10;
+    for (const name of ['\\??\\MAILSLOT\\', '\\??\\MountPointManager',
+        '\\Device\\MountPointManager'])
+    {
+        for (const mode of [0, FILE_SYNCHRONOUS_IO_ALERT])
+        {
+            assert.equal(native.NtCreateFile.handler([NT_HANDLE, SYNCHRONIZE,
+                objectAttributes(memory, name), NT_STATUS, 0, 0, 0, FILE_OPEN, mode, 0, 0]), 0,
+            name);
+            const device = memory.dword(NT_HANDLE);
+            memory.putDword(0x400, 0xcccccccc);
+            assert.equal(native.NtQueryInformationFile.handler([device, 0x300, 0x400, 4, 16]), 0,
+                'FileModeInformation');
+            assert.equal(memory.dword(0x400), mode, `${name} opened in mode ${mode}`);
+            assert.equal(fns.CloseHandle.handler([device]), 1);
+        }
+    }
+    assert.equal(native.NtCreateFile.handler([NT_HANDLE, SYNCHRONIZE,
+        objectAttributes(memory, '\\??\\MountPointManager'), NT_STATUS, 0, 0, 0, FILE_CREATE, 0,
+        0, 0]) >>> 0, 0xc000000d, 'a device is opened, never made');
+});

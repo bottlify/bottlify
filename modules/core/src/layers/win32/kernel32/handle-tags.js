@@ -55,4 +55,5 @@ export function isStandardHandle(handle){
  * wait on one is satisfied at once - as Windows answers a wait on a file whose
  * I/O is done.
  */
-export const FILE_OBJECT_KINDS = new Set(['file', 'directory', 'mailslot', 'mailslot-client']);
+export const FILE_OBJECT_KINDS = new Set(['file', 'directory', 'mailslot', 'mailslot-client',
+    'device']);

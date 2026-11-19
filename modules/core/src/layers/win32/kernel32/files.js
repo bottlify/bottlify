@@ -446,6 +446,26 @@ const FILE_FLAG_NO_BUFFERING = 0x20000000;
 const SYNCHRONOUS_MODES = FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT;
 
 /**
+ * The devices a name opens that hold no files here, by their names in the
+ * object namespace (`\??\` links to `\Device\`): the mailslot file
+ * system's root and the mount point manager. The pipe device is the pipes'
+ * own (`pipes.nativeOpen`).
+ */
+const NT_DEVICES = [
+    { device: 'mailslot', names: ['\\??\\mailslot\\', '\\device\\mailslot\\'] },
+    { device: 'mountmgr', names: ['\\??\\mountpointmanager', '\\device\\mountpointmanager'] },
+];
+
+/**
+ * Which of NT_DEVICES a native name opens itself, null for none.
+ *
+ * @param {string} name
+ * @returns {string | null}
+ */
+const deviceNamed = name=>NT_DEVICES.find(({ names })=>names.includes(name.toLowerCase()))
+    ?.device ?? null;
+
+/**
  * A file handle's FILE_MODE_INFORMATION: what its open kept, or, for one
  * made without (a directory's), synchronous unless overlapped.
  *
@@ -3157,6 +3177,24 @@ export function createFileFunctions(host){
             }
             return STATUS_SUCCESS;
         }
+        // A device the volume does not hold opens as itself: a handle with
+        // the mode it was opened in and nothing to read or write.
+        const device = given && given.root === 0 ? deviceNamed(given.name) : null;
+        if (device)
+        {
+            if (![FILE_OPEN, FILE_OPEN_IF].includes(disposition >>> 0))
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+            writeDword(out >>> 0, host.handles.open('device',
+                { device, mode: (options >>> 0) & SYNCHRONOUS_MODES }, access >>> 0));
+            if ((status >>> 0) !== 0)
+            {
+                writeDword(status >>> 0, STATUS_SUCCESS);
+                writeDword((status >>> 0) + 4, FILE_OPENED);
+            }
+            return STATUS_SUCCESS;
+        }
         const named = ((options >>> 0) & FILE_OPEN_BY_FILE_ID) !== 0 && given
             ? byFileId(given) : nativeName(attributes >>> 0);
         if ('status' in named)
@@ -3548,6 +3586,22 @@ export function createFileFunctions(host){
      */
     const heldKind = handle=>((handle >>> 0) >= CURRENT_THREAD_HANDLE ? 'process'
         : host.handles.typeOf?.(handle >>> 0) ?? null);
+
+    /**
+     * The device a handle opens as itself - the pipe device, or one of
+     * NT_DEVICES - with the mode it was opened in; null for any other.
+     *
+     * @param {number} handle @returns {{ mode?: number } | null}
+     */
+    const deviceObject = handle=>{
+        const kind = heldKind(handle);
+        if (kind !== 'device' && kind !== 'pipe')
+        {
+            return null;
+        }
+        const held = host.handles.resolve(handle, kind);
+        return kind === 'device' || held?.device ? held : null;
+    };
 
     /**
      * One FILE_INFORMATION_CLASS record of an open file, as NtQueryInformationFile
@@ -4247,9 +4301,12 @@ export function createFileFunctions(host){
                 {
                     return report(block >>> 0, piped.status, 0);
                 }
+                // A device opened as itself answers the mode it was opened in.
+                const device = deviceObject(handle >>> 0);
                 const slot = piped ?? (fileObject && (kind >>> 0) === FILE_ACCESS_INFORMATION
                     ? dwordOf(rightsOf(handle))
-                    : host.mailslots?.information(handle, kind >>> 0) ?? null);
+                    : device && (kind >>> 0) === FILE_MODE_INFORMATION ? dwordOf(device.mode ?? 0)
+                        : host.mailslots?.information(handle, kind >>> 0) ?? null);
                 // A directory the native open made is a file object as any
                 // other, its information the directory's.
                 const folder = slot === null ? object(handle, 'directory') : null;
