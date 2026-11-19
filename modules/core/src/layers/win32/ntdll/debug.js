@@ -31,6 +31,52 @@ const STATUS_BREAKPOINT = 0x80000003;
 /** `int3; ret`: DbgBreakPoint as the system's own library has it. */
 const BREAK_CODE = Uint8Array.of(0xcc, 0xc3);
 
+/**
+ * DbgUiRemoteBreakin in i386: when the process block says the process is
+ * debugged, an exception frame is pushed whose handler resumes after the
+ * call with the frame's stack, DbgBreakPoint (its address from a trap) is
+ * called, the frame comes off, and the routine returns 0 to the thread's
+ * start, which ends the thread. The handler declines an unwind and takes
+ * every exception: Eip and Esp of the context it is handed set to the
+ * resume point and the frame, ExceptionContinueExecution.
+ */
+const REMOTE_BREAKIN = Uint8Array.of(
+    0x64, 0xa1, 0x30, 0x00, 0x00, 0x00,         // 0   mov eax, fs:[30h]
+    0x80, 0x78, 0x02, 0x00,                     // 6   cmp byte [eax+2], 0 (BeingDebugged)
+    0x74, 0x2e,                                 // 10  je end
+    0xe8, 0x00, 0x00, 0x00, 0x00,               // 12  call here
+    0x58,                                       // 17  here: pop eax
+    0x8d, 0x80, 0x00, 0x00, 0x00, 0x00,         // 18  lea eax, [eax + handler - here]
+    0x50,                                       // 24  push eax
+    0x64, 0xff, 0x35, 0x00, 0x00, 0x00, 0x00,   // 25  push dword fs:[0]
+    0x64, 0x89, 0x25, 0x00, 0x00, 0x00, 0x00,   // 32  mov fs:[0], esp
+    0xe8, 0x00, 0x00, 0x00, 0x00,               // 39  call <DbgBreakPoint's address>
+    0xff, 0xd0,                                 // 44  call eax
+    0x8b, 0x04, 0x24,                           // 46  resume: mov eax, [esp]
+    0x64, 0xa3, 0x00, 0x00, 0x00, 0x00,         // 49  mov fs:[0], eax
+    0x83, 0xc4, 0x08,                           // 55  add esp, 8
+    0x31, 0xc0,                                 // 58  end: xor eax, eax
+    0xc2, 0x04, 0x00,                           // 60  ret 4
+    0x8b, 0x44, 0x24, 0x04,                     // 63  handler: mov eax, [esp+4] (record)
+    0xf6, 0x40, 0x04, 0x06,                     // 67  test byte [eax+4], 6 (unwinding)
+    0x75, 0x23,                                 // 71  jnz decline
+    0x8b, 0x44, 0x24, 0x0c,                     // 73  mov eax, [esp+12] (context)
+    0x8b, 0x4c, 0x24, 0x08,                     // 77  mov ecx, [esp+8] (frame)
+    0x89, 0x88, 0xc4, 0x00, 0x00, 0x00,         // 81  mov [eax+Esp], ecx
+    0xe8, 0x00, 0x00, 0x00, 0x00,               // 87  call there
+    0x5a,                                       // 92  there: pop edx
+    0x8d, 0x92, 0x00, 0x00, 0x00, 0x00,         // 93  lea edx, [edx + resume - there]
+    0x89, 0x90, 0xb8, 0x00, 0x00, 0x00,         // 99  mov [eax+Eip], edx
+    0x31, 0xc0,                                 // 105 xor eax, eax (ContinueExecution)
+    0xc3,                                       // 107 ret
+    0xb8, 0x01, 0x00, 0x00, 0x00,               // 108 decline: mov eax, 1 (ContinueSearch)
+    0xc3);                                      // 113 ret
+const REMOTE_BREAKIN_HANDLER_AT = 20;
+const REMOTE_BREAKIN_HANDLER_FROM = 63 - 17;
+const REMOTE_BREAKIN_CALL_AT = 40;
+const REMOTE_BREAKIN_RESUME_AT = 95;
+const REMOTE_BREAKIN_RESUME_FROM = 46 - 92;
+
 /** The most DbgPrint formats: the system's own buffer. */
 const DBG_PRINT_LIMIT = 512;
 
@@ -49,6 +95,8 @@ const VARIADIC_SLOTS = 32;
  * @property {(bytes: number) => number} allocate
  * @property {(address: number) => boolean} free
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {() => number} [breakPoint]  DbgBreakPoint's address, which
+ *           DbgUiRemoteBreakin calls.
  */
 
 /** @param {number} value */
@@ -245,6 +293,30 @@ export function createDebugFunctions(host){
                 }
                 return 0;
             },
+        },
+
+        /**
+         * VOID DbgUiRemoteBreakin(PVOID Context)
+         *
+         * The routine a debugger's break-in thread runs: DbgBreakPoint when
+         * the process is debugged, inside a frame that takes whatever it
+         * raises - so a debugger that declines the breakpoint
+         * (DBG_EXCEPTION_NOT_HANDLED) sees the thread end, not the process
+         * die of it - then the thread's end (`REMOTE_BREAKIN`). A 64-bit
+         * process runs the breakpoint alone.
+         */
+        DbgUiRemoteBreakin: {
+            argBytes: 4,
+            code: (/** @type {import('../msvcrt/guest-code.js').CodeBuilder} */ builder)=>{
+                const code = REMOTE_BREAKIN.slice();
+                const view = new DataView(code.buffer);
+                view.setInt32(REMOTE_BREAKIN_HANDLER_AT, REMOTE_BREAKIN_HANDLER_FROM, true);
+                view.setInt32(REMOTE_BREAKIN_RESUME_AT, REMOTE_BREAKIN_RESUME_FROM, true);
+                builder?.jump(REMOTE_BREAKIN_CALL_AT, builder.register({ convention: 'stdcall',
+                    argBytes: 0, handler: ()=>host.breakPoint?.() ?? 0 }));
+                return code;
+            },
+            handler: ()=>host.kernel32.RaiseException?.handler([STATUS_BREAKPOINT, 0, 0, 0]) ?? 0,
         },
 
         /** NTSTATUS DbgUiIssueRemoteBreakin(HANDLE Process) */

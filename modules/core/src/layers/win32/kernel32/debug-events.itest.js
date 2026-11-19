@@ -204,6 +204,16 @@ test('a debugger that attaches to its running child hears what it is, its break-
         assert.equal(heard.exit, 7, 'EXIT_PROCESS_DEBUG_EVENT with its code');
     });
 
+test('a break-in the debugger declines ends its thread, and the child goes on',
+    { timeout: 120_000 }, async()=>{
+        // DbgUiRemoteBreakin's own frame takes the breakpoint: no second
+        // chance, no end of the process.
+        const heard = unpack(await run(debuggerOf(DBG_EXCEPTION_NOT_HANDLED, true), sleeping));
+        assert.equal(heard.created, 1);
+        assert.equal(heard.exceptions, 1, 'the breakpoint once, declined');
+        assert.equal(heard.exit, 7, 'the child\'s own exit');
+    });
+
 /** Where the counting child keeps its count: read off its build. */
 let countAt = 0;
 /**

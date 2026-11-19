@@ -200,7 +200,9 @@ const NAMED_KINDS = new Set(['event', 'mutex', 'semaphore', 'timer', 'mapping', 
  *           loader's LdrRegisterDllNotification callbacks.
  * @property {import('./loader.js').LoaderHost['shutdown']} [processShutdown]  The
  *           process's shutdown: whether it began, and LdrShutdownProcess's beginning.
- * @property {Record<string, Entry>} crt      The assembled msvcrt.dll table.
+ * @property {Record<string, Entry>} crt       The assembled msvcrt.dll table.
+ * @property {(library: string, name: string) => number} [exportAddress]  Where a
+ *           system library's export was placed, 0 for none.
  * @property {() => number} teb  The running thread's block.
  * @property {() => any} [currentThread]
  * @property {(thread: any) => number} [lastErrorOf]  A thread's last error, which a call
@@ -510,7 +512,8 @@ export function createNtdllFunctions(host){
             writeMemory: host.writeMemory, teb: host.teb }),
         ...alias(crt, Object.fromEntries(CRT_EXPORTS.map(name=>[name, name]))),
         // Where ntdll's own runtime answers otherwise than msvcrt (`crt.js`).
-        ...createNtdllCrt({ readMemory: host.readMemory, writeMemory: host.writeMemory }),
+        ...createNtdllCrt({ readMemory: host.readMemory, writeMemory: host.writeMemory,
+            crt }),
 
         ...createCountedStringFunctions({
             readMemory: host.readMemory,
@@ -720,6 +723,7 @@ export function createNtdllFunctions(host){
             allocate,
             free,
             ...host.divergence ? { divergence: host.divergence } : {},
+            breakPoint: ()=>host.exportAddress?.('ntdll.dll', 'DbgBreakPoint') ?? 0,
         }),
 
         ...(PROCESS_ENTRIES.every(name=>kernel32[name])

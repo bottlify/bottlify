@@ -78,6 +78,10 @@ const BASIC_LIMIT_BYTES = 48;
 /** Its LimitFlags, and the one limit kept to: the job's processes end with its last handle. */
 const LIMIT_FLAGS = 16;
 const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000;
+/** A child may leave the job when it asks to (CREATE_BREAKAWAY_FROM_JOB). */
+const JOB_OBJECT_LIMIT_BREAKAWAY_OK = 0x800;
+/** A child leaves the job without asking. */
+const JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK = 0x1000;
 /**
  * The messages a job posts to its completion port (winnt.h's JOB_OBJECT_MSG_*),
  * each as the packet's byte count, with the job's key as the completion key
@@ -188,8 +192,11 @@ const HANDLE_PROBE = 1 << 20;
  * @property {(port: any, packet: { transferred: number, key: number, overlapped: number })
  *     => void} [postCompletion]  A packet posted to a completion port object.
  * @property {(events: { exited: (process: any, code: number) => void,
- *     closed: (job: any) => void }) => void} [listen]  Where a job is told of a process
- *     of this one's that has exited, and of a job's handle closed.
+ *     closed: (job: any) => void, started: (process: any) => void,
+ *     refusesBreakaway: () => boolean }) => void} [listen]
+ *     Where a job is told of a process of this one's that has exited, of a job's
+ *     handle closed, and of a child this one started, and asked whether a child
+ *     may break away.
  */
 
 /** @param {ProcessPolicyHost} host */
@@ -337,6 +344,9 @@ export function createProcessPolicyFunctions(host){
     const jobOf = handle=>host.objectOf(handle >>> 0, 'job');
     /** Every job made, a closed one let go when it is next looked through. @type {Set<Job>} */
     const jobs = new Set();
+    /** When this process joined each job it is in: a later one is nested in the earlier. */
+    const selfJoined = /** @type {Map<Job, number>} */ (new Map());
+    let joins = 0;
 
     /**
      * Whether a process a job holds is still running: this one is.
@@ -534,7 +544,45 @@ export function createProcessPolicyFunctions(host){
     // A process of this one's has exited: each job holding it tells its port,
     // and that its last running process has gone. A code with an error's
     // severity, an exception's, is an abnormal end.
+    /** @param {Job} job */
+    const limitFlags = job=>new DataView(job.extended.buffer).getUint32(LIMIT_FLAGS, true);
+    /**
+     * Whether a child leaves a job: always where the job says
+     * SILENT_BREAKAWAY_OK, when it asked where it says BREAKAWAY_OK.
+     *
+     * @param {Job} job @param {boolean} asked
+     */
+    const letsGo = (job, asked)=>(limitFlags(job) & JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK) !== 0
+        || asked && (limitFlags(job) & JOB_OBJECT_LIMIT_BREAKAWAY_OK) !== 0;
+    /** The jobs this process is in, the one it joined last - the innermost - first. */
+    const nesting = ()=>jobsHolding(SELF).sort((a, b)=>(selfJoined.get(b) ?? 0)
+        - (selfJoined.get(a) ?? 0));
     host.listen?.({
+        // CREATE_BREAKAWAY_FROM_JOB is refused while the innermost job this
+        // process is in keeps its children.
+        refusesBreakaway(){
+            const innermost = nesting()[0];
+            return innermost !== undefined && !letsGo(innermost, true);
+        },
+
+        // A child this process starts is in each job this process is in, but
+        // those it breaks away from: from the innermost out, each that lets
+        // it go, until one keeps it - that one and those around it hold it.
+        started(process){
+            const holding = nesting();
+            let kept = 0;
+            while (kept < holding.length && letsGo(holding[kept], process.breakaway === true))
+            {
+                kept++;
+            }
+            for (const job of holding.slice(kept))
+            {
+                job.processes.add(process);
+                job.total++;
+                tell(job, JOB_OBJECT_MSG.NEW_PROCESS, idOf(process));
+            }
+        },
+
         exited(process, code){
             for (const job of jobsHolding(process))
             {
@@ -844,6 +892,10 @@ export function createProcessPolicyFunctions(host){
                     job.processes.add(process);
                     job.total++;
                     tell(job, JOB_OBJECT_MSG.NEW_PROCESS, idOf(process));
+                    if (process === SELF)
+                    {
+                        selfJoined.set(job, ++joins);
+                    }
                 }
                 return 1;
             },

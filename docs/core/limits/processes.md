@@ -74,7 +74,11 @@
   job associated with a completion port tells it of each process it takes (those it already runs
   as it is associated), of each child that exits (an exception's code as an abnormal exit) and of
   its last running process gone; with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` its last handle closed
-  ends its processes. The job's other limits are kept and read back, not enforced, and this
+  ends its processes. A child of a process in a job is in the job too, unless the job lets it
+  break away (`JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK`, or `JOB_OBJECT_LIMIT_BREAKAWAY_OK` and a
+  `CREATE_BREAKAWAY_FROM_JOB` child), and `CREATE_BREAKAWAY_FROM_JOB` from a job that allows
+  neither is refused (`ERROR_ACCESS_DENIED`). The job's other limits are kept and read back, not
+  enforced, and this
   process's own exit is told to no port. Not exported, as on Windows 7: the
   synchronization barrier, `GetProcessInformation` and job objects.
 - In `compatible` mode a child's sound is mixed into its parent's output (the engine's mixer has
@@ -152,8 +156,10 @@
   its parent, each stopping the whole child until `ContinueDebugEvent`. `DebugActiveProcess`
   attaches to a running child the parent hears - one run beside it, as every child is at
   concurrency 1: it is told the process, ntdll, its threads and its libraries, the child stopped
-  until each is continued, then breaks in on a thread of its own at `DbgBreakPoint`, as
-  `DebugBreakProcess` breaks into a debuggee. A debuggee belongs to a debug object - the
+  until each is continued, then breaks in on a thread of its own running `DbgUiRemoteBreakin`,
+  as `DebugBreakProcess` breaks into a debuggee: its `DbgBreakPoint` is what the debugger hears,
+  and a breakpoint the debugger declines ends that thread, not the process (a 64-bit process's
+  thread runs `DbgBreakPoint` alone, with no such frame). A debuggee belongs to a debug object - the
   debugging thread's, made at its first `DEBUG_PROCESS` or attach (`DbgUiConnectToDbg`), or one
   made by `NtCreateDebugObject` and attached through (`NtDebugActiveProcess`); when its last
   handle closes, or its process ends, the debuggees end (`STATUS_DEBUGGER_INACTIVE`) where it
