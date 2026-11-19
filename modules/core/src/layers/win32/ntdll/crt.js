@@ -15,11 +15,18 @@
  * know ASCII letters only; the character classes answer the class bits
  * themselves, from the Latin-1 table below for the wide ones and its ASCII
  * half for the narrow; toupper is the ANSI page's own upper case of the low
- * byte. Everything else ntdll exports of the runtime is msvcrt's own entry
+ * byte. The wide integer readings skip the Latin-1 blanks alone (U+00A0 is
+ * one, U+2002 and U+3000 are not), sscanf reads no floating-point field, and
+ * qsort orders equal elements as msvcrt.dll's own sort does: each is msvcrt's
+ * reading given ntdll's rule (`WIDE_READINGS`, `KERNEL_SCAN`, `WINDOWS_SORT`).
+ * Everything else ntdll exports of the runtime is msvcrt's own entry
  * (`functions.js`).
  */
 
 import { decodeAnsi, encodeAnsi, upcaseUnit } from '../kernel32/locale.js';
+import { WIDE_READINGS } from '../msvcrt/convert.js';
+import { KERNEL_SCAN } from '../msvcrt/scan.js';
+import { WINDOWS_SORT } from '../msvcrt/sort.js';
 
 /**
  * The CT_CTYPE1 classes ntdll's wide classifiers answer for the first 256
@@ -82,9 +89,20 @@ const wideType = value=>(value >= 0 && value < 0x100 ? LATIN1_TYPES[value] : 0);
 const asciiLower = unit=>(unit >= 0x41 && unit <= 0x5a ? unit + 32 : unit);
 
 /**
+ * The white space ntdll's wide readings skip: the Latin-1 characters its
+ * classifiers call space.
+ *
+ * @param {string | undefined} character
+ */
+const isLatin1Space = character=>character !== undefined
+    && (wideType(character.charCodeAt(0)) & C1_SPACE) !== 0;
+
+/**
  * @typedef {Object} CrtHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {Record<string | symbol, any>} [crt]  msvcrt.dll's table, whose
+ *     readings these give ntdll's rules.
  */
 
 /**
@@ -234,7 +252,12 @@ export function createNtdllCrt(host){
         },
     });
 
+    const crt = host.crt ?? {};
     return {
+        ...crt[WIDE_READINGS]?.(isLatin1Space) ?? {},
+        ...crt[KERNEL_SCAN] ? { sscanf: crt[KERNEL_SCAN] } : {},
+        ...crt[WINDOWS_SORT] ? { qsort: crt[WINDOWS_SORT] } : {},
+
         _itoa: toText(1, true, false),
         _ltoa: toText(1, true, false),
         _ultoa: toText(1, false, false),
