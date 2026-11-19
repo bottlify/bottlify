@@ -1054,3 +1054,30 @@ test('a region formed through an import\'s thunk takes the thunk\'s bytes: a thu
     assert.ok(region.blocks.some(block=>block.instructions.some(one=>one.op === 'crt')),
         'formed as the operation');
 });
+
+test('a region formed through an import slot hashes apart when the slot names the same function'
+    + ' at another address', ()=>{
+    // The emitted call compares the slot with the address formed in, so a stored
+    // translation made while the runtime's function lay elsewhere must not be this
+    // region's: its test of the slot would fail at every call.
+    const code = [0x6a, 64, 0x53, 0x68, ...u32(DATA), 0xff, 0x15, ...u32(SLOT), 0xc3];
+    const moved = HELPER_AT + 0x100;
+    /** @param {number} at */
+    const hashWith = at=>{
+        /** @type {Map<number, number>} */
+        const bytes = new Map();
+        /** @param {number} address @param {number[]} values */
+        const put = (address, values)=>values.forEach((value, i)=>bytes.set(address + i, value));
+        put(PROGRAM, code);
+        put(HELPER_AT, FILLER);
+        put(moved, FILLER);
+        put(SLOT, u32(at));
+        const region = formRegion(address=>bytes.get(address) ?? 0, PROGRAM,
+            { helpers: [helperOf('memset')] });
+        assert.ok(region.blocks.some(block=>block.instructions.some(one=>one.crtTarget === at)),
+            'formed through the slot');
+        return region.hash;
+    };
+    assert.equal(hashWith(HELPER_AT), hashWith(HELPER_AT));
+    assert.notEqual(hashWith(HELPER_AT), hashWith(moved));
+});

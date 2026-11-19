@@ -95,6 +95,7 @@ export const SEGMENTS = Object.freeze(['es', 'cs', 'ss', 'ds', 'fs', 'gs']);
  * @property {number} [crtSlot]  of a `crt` formed for a `call [slot]`: that slot, which
  *           must still hold `crtTarget`, the function's address, as it runs
  * @property {number} [crtTarget]
+ * @property {number} [crtSlotBytes]  The slot's bytes: 4, or 8 in long mode.
  * @property {boolean} [crtPrecise]  of a `crt`: its helper's `precise`
  * @property {number} [crtLead]  of a `crt`: the instructions formed for the call before it
  *           (`RuntimeHelper.lead`), uncounted where it leaves before the call

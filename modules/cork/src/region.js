@@ -1480,6 +1480,7 @@ export function formRegion(read, entry,
                     ? { name: 'thunk', address: called, length: thunk.length } : undefined;
                 block.instructions.push(...helperInstructions(through, decoded, slotted, read)
                     .map(one=>(one.op === 'crt' ? { ...one, crtSlot: slot, crtTarget: slotted,
+                        crtSlotBytes: wide ? 8 : 4,
                         ...stub ? { stub } : {} } : one)));
                 took(decoded.length);
                 eip = wide ? eip + decoded.length : (eip + decoded.length) >>> 0;
@@ -1793,6 +1794,29 @@ function helpersOf(blocks){
 }
 
 /**
+ * The import slots the region's calls were formed through, each once, by
+ * address, with its bytes: a dword, a quadword in long mode.
+ *
+ * @param {Block[]} blocks
+ * @returns {[number, number][]}
+ */
+function slotsOf(blocks){
+    /** @type {Map<number, number>} */
+    const found = new Map();
+    for (const block of blocks)
+    {
+        for (const instruction of block.instructions)
+        {
+            if (instruction.crtSlot !== undefined)
+            {
+                found.set(instruction.crtSlot, instruction.crtSlotBytes ?? 4);
+            }
+        }
+    }
+    return [...found].sort((a, b)=>a[0] - b[0]);
+}
+
+/**
  * A region's hash, over what decides its code: its blocks' bytes in address
  * order, the callees its predictions name, its quiet calls and its switch
  * tables' entries. Two FNV lanes, 64 bits: the hash is what a stored
@@ -1835,8 +1859,11 @@ export function hashPlan({ blocks, tables = [] }){
         // which no call is predicted to.
         named: blocks.flatMap(block=>[...block.exit.predicted ? block.exit.targets : [],
             ...block.exit.quiet ? [0] : []]),
-        tables: tables.map(table=>[table.address,
-            table.entries.length * (table.entrySize ?? 4)]),
+        // And the import slots its calls were formed through (`crtSlot`): the code
+        // holds the function each named, so a slot that names another - the same
+        // bytes placed elsewhere, a runtime library laid out anew - is another code.
+        tables: [...tables.map(table=>/** @type {[number, number]} */ ([table.address,
+            table.entries.length * (table.entrySize ?? 4)])), ...slotsOf(blocks)],
         helpers: helpersOf(blocks).map(({ address, length })=>[address, length]),
     };
 }
