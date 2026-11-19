@@ -24,6 +24,9 @@ import { WM_CREATE, WM_PAINT, WM_ERASEBKGND, COLOR_3DFACE, COLOR_BTNTEXT, after 
 import { notifyWindow } from './notify.js';
 import { LPSTR_TEXTCALLBACK, MAX_TEXT, readText, writeText } from './strings.js';
 import { CCM_GETVERSION, CCM_SETVERSION, answerVersion } from './version.js';
+import {
+    EVENT_OBJECT_CREATE, EVENT_OBJECT_DESTROY, EVENT_OBJECT_REORDER, CHILDID_SELF, raiseEvent,
+} from './winevents.js';
 
 /** The class name a program creates the control by. */
 export const HEADER_CLASS = 'SysHeader32';
@@ -527,7 +530,10 @@ export function createHeaderProcedure(host, tk){
                 held.order = held.order.map((/** @type {number} */ i)=>(i >= index ? i + 1 : i));
                 held.order.splice(order, 0, index);
                 host.invalidate(record);
-                return index;
+                // Accessibility hears of the item made (Wine's header tests,
+                // insertItem sequence).
+                return after(raiseEvent(host, record, EVENT_OBJECT_CREATE, index + 1, thread),
+                    ()=>index);
             }
             case HDM.DELETEITEM: {
                 const index = wParam | 0;
@@ -539,7 +545,8 @@ export function createHeaderProcedure(host, tk){
                 held.order = held.order.filter((/** @type {number} */ i)=>i !== index)
                     .map((/** @type {number} */ i)=>(i > index ? i - 1 : i));
                 host.invalidate(record);
-                return 1;
+                return after(raiseEvent(host, record, EVENT_OBJECT_DESTROY, index + 1, thread),
+                    ()=>1);
             }
             case HDM.GETITEMA:
             case HDM.GETITEMW: {
@@ -713,7 +720,8 @@ export function createHeaderProcedure(host, tk){
                 }
                 held.order = order;
                 host.invalidate(record);
-                return 1;
+                return after(raiseEvent(host, record, EVENT_OBJECT_REORDER, CHILDID_SELF, thread),
+                    ()=>1);
             }
             case HDM.SETIMAGELIST: {
                 const which = wParam >>> 0;
