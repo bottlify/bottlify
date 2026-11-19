@@ -435,6 +435,11 @@ const FILE_WRITE_THROUGH = 0x2;
 const FILE_SYNCHRONOUS_IO_ALERT = 0x10;
 /** The last of the open options FileModeInformation reports back. */
 const FILE_NO_INTERMEDIATE_BUFFERING = 0x8;
+/** FILE_IO_COMPLETION_NOTIFICATION_INFORMATION's flags, as winbase.h names them. */
+const FILE_SKIP_COMPLETION_PORT_ON_SUCCESS = 0x1;
+const COMPLETION_MODES = 0x7;
+/** An overlapped transfer the call answers as begun, its work done all the same. */
+const ERROR_IO_PENDING = 997;
 /** The open options a handle's mode keeps: the rest act at the open and are gone. */
 const FILE_MODE_OPTIONS = FILE_WRITE_THROUGH | FILE_SEQUENTIAL_ONLY
     | FILE_NO_INTERMEDIATE_BUFFERING | FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT;
@@ -672,7 +677,8 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write', 'p
  *           been parked -- by then the running thread is somebody else.
  * @property {(thread: any, code: number) => void} [setLastErrorFor]
  * @property {{ offsetOf: (overlapped: number) => number,
- *              completed: (file: number, transferred: number, overlapped: number) => boolean,
+ *              completed: (file: number, transferred: number, overlapped: number,
+ *                  status?: number, skip?: { port?: boolean, event?: boolean }) => boolean,
  *              closed: (handle: number, object: any) => void,
  *              bind?: (file: number, port: number, key: number)
  *                  => boolean | 'synchronous',
@@ -3457,6 +3463,28 @@ export function createFileFunctions(host){
     };
 
     /**
+     * An overlapped ReadFile or WriteFile of a file, done in its own call:
+     * the OVERLAPPED, its event and the port, less the packet a success at
+     * once skips when the handle's completion modes say so
+     * (FILE_SKIP_COMPLETION_PORT_ON_SUCCESS). On a handle that caches nothing
+     * (FILE_FLAG_NO_BUFFERING) Windows answers the call pending whatever: the
+     * work is done, and the call says ERROR_IO_PENDING, its packet posted;
+     * a read of nothing past the end is then the end (STATUS_END_OF_FILE).
+     *
+     * @param {number} handle @param {any} file @param {number} count @param {number} pointer
+     * @param {boolean} [pastEnd]  a read that found nothing past the end
+     * @returns {number} the call's answer
+     */
+    const finishOverlapped = (handle, file, count, pointer, pastEnd = false)=>{
+        const pending = file.overlapped === true
+            && (modeOf(file) & FILE_NO_INTERMEDIATE_BUFFERING) !== 0;
+        host.ports?.completed(handle >>> 0, count, pointer,
+            pending && pastEnd ? STATUS_END_OF_FILE : 0, {
+            port: !pending && (host.pipes?.skipsPortOnSuccess?.(handle >>> 0) ?? false) });
+        return pending ? fail(ERROR_IO_PENDING) : 1;
+    };
+
+    /**
      * Closes a handle of any kind, and whatever it held here with it: the
      * volume's node, its locks, a file it was to delete.
      *
@@ -4556,8 +4584,17 @@ export function createFileFunctions(host){
                     {
                         return settled(block >>> 0, STATUS_INFO_LENGTH_MISMATCH, 0);
                     }
-                    const error = host.pipes.completionModes.set(handle >>> 0,
-                        readDword(from >>> 0));
+                    // The native call keeps the flags it knows and passes over
+                    // the rest; skipping the port is for a handle whose I/O
+                    // can finish later, not a synchronous file's.
+                    const flags = readDword(from >>> 0) & COMPLETION_MODES;
+                    const opened = object(handle, 'file');
+                    if (opened && (flags & FILE_SKIP_COMPLETION_PORT_ON_SUCCESS) !== 0
+                        && (modeOf(opened) & SYNCHRONOUS_MODES) !== 0)
+                    {
+                        return settled(block >>> 0, STATUS_INVALID_PARAMETER, 0);
+                    }
+                    const error = host.pipes.completionModes.set(handle >>> 0, flags);
                     return settled(block >>> 0, error === 0 ? STATUS_SUCCESS
                         : error === ERROR_INVALID_PARAMETER ? STATUS_INVALID_PARAMETER
                             : STATUS_INVALID_HANDLE, 0);
@@ -5441,11 +5478,8 @@ export function createFileFunctions(host){
                     // Written even when nothing was read: a program that checks
                     // it is exactly the one that has reached the end of a file.
                     writeDwordIf(read >>> 0, bytes.length);
-                    if (pointer !== 0)
-                    {
-                        host.ports?.completed(handle >>> 0, bytes.length, pointer);
-                    }
-                    return 1;
+                    return pointer !== 0 ? finishOverlapped(handle, file, bytes.length, pointer,
+                        bytes.length === 0 && (length >>> 0) !== 0) : 1;
                 };
 
                 const bytes = files.read(file.node, at, length >>> 0);
@@ -5542,11 +5576,7 @@ export function createFileFunctions(host){
                     writeDwordIf(written >>> 0, stored);
                     // The same debt an overlapped read owes: a save written through
                     // a pool hangs if the packet its worker waits on never arrives.
-                    if (pointer !== 0)
-                    {
-                        host.ports?.completed(handle >>> 0, stored, pointer);
-                    }
-                    return 1;
+                    return pointer !== 0 ? finishOverlapped(handle, file, stored, pointer) : 1;
                 };
                 const stored = (files.writeOrFetch ?? files.write)
                     .call(files, file.node, at, bytes);

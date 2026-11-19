@@ -4296,8 +4296,12 @@ export function createWin32Module(){
                         ports: {
                             /** @param {number} overlapped */
                             offsetOf: overlapped=>ports.offsetOf(overlapped),
-                            /** @param {number} file @param {number} n @param {number} overlapped */
-                            completed: (file, n, overlapped)=>ports.completed(file, n, overlapped),
+                            /**
+                             * @param {number} file @param {number} n @param {number} overlapped
+                             * @param {number} [status] @param {{ port?: boolean }} [skip]
+                             */
+                            completed: (file, n, overlapped, status, skip)=>
+                                ports.completed(file, n, overlapped, status, skip),
                             /** @param {number} handle @param {any} object */
                             closed: (handle, object)=>ports.closed(handle, object),
                             /** @param {number} file @param {number} port @param {number} key */

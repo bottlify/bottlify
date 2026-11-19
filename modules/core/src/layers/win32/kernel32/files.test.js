@@ -4075,3 +4075,41 @@ test('NtCreateFile overwrites without write access, and supersedes a read-only f
     assert.equal(create('\\??\\C:\\GAME\\dir\\', 2, 0), 0xc0000033,
         'a name ending in a separator is no file\'s');
 });
+
+test('an overlapped transfer done at once skips the port as the handle says, and an unbuffered'
+    + ' one answers pending', ()=>{
+    /** @type {any[][]} */
+    const done = [];
+    let skipping = false;
+    const { memory, files, fns, open, error } = setup({
+        ports: {
+            offsetOf: ()=>0,
+            /**
+             * @param {number} handle @param {number} count @param {number} pointer
+             * @param {number} [status] @param {{ port?: boolean }} [skip]
+             */
+            completed: (handle, count, pointer, status, skip)=>done.push([count, status ?? 0,
+                skip?.port === true]),
+        },
+        pipes: /** @type {any} */ ({ skipsPortOnSuccess: ()=>skipping }),
+    });
+    const FILE_FLAG_OVERLAPPED = 0x40000000;
+    const FILE_FLAG_NO_BUFFERING = 0x20000000;
+    files.put('C:\\GAME\\SAVE.DAT', 'abcd');
+    const plain = open('C:\\GAME\\SAVE.DAT', OPEN_EXISTING, GENERIC_READ, FILE_FLAG_OVERLAPPED);
+    assert.equal(fns.ReadFile.handler([plain, BUFFER, 4, OUT_COUNT, 0x500]), 1);
+    skipping = true;
+    assert.equal(fns.ReadFile.handler([plain, BUFFER, 4, OUT_COUNT, 0x500]), 1);
+    assert.deepEqual(done, [[4, 0, false], [4, 0, true]], 'the packet skipped once the modes say');
+
+    const unbuffered = open('C:\\GAME\\SAVE.DAT', OPEN_EXISTING, GENERIC_READ,
+        FILE_FLAG_OVERLAPPED | FILE_FLAG_NO_BUFFERING);
+    assert.equal(fns.ReadFile.handler([unbuffered, BUFFER, 4, OUT_COUNT, 0x500]), 0);
+    assert.equal(error.code, 997, 'ERROR_IO_PENDING, its work done');
+    assert.deepEqual(done.at(-1), [4, 0, false], 'and its packet posted');
+    files.put('C:\\GAME\\EMPTY.DAT', '');
+    const empty = open('C:\\GAME\\EMPTY.DAT', OPEN_EXISTING, GENERIC_READ,
+        FILE_FLAG_OVERLAPPED | FILE_FLAG_NO_BUFFERING);
+    assert.equal(fns.ReadFile.handler([empty, BUFFER, 4, OUT_COUNT, 0x500]), 0);
+    assert.deepEqual(done.at(-1), [0, 0xc0000011, false], 'nothing past the end: the end');
+});
