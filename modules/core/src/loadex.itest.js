@@ -386,3 +386,49 @@ test('a load that cannot be answers why: a path not there, an empty file, a name
         const code = await app.run({ timeoutMs: 40000 });
         assert.equal(code, EVERY, `missing bits 0x${(EVERY & ~code).toString(16)}`);
     });
+
+test('a library loaded as an exclusive data file keeps writers off it until it is freed',
+    { timeout: 60000 }, async t=>{
+        // Wine's kernel32:loader: after LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE an
+        // open for writing is a sharing violation; after FreeLibrary it opens.
+        const held = buildExe({ dll: true, imports: { 'KERNEL32.dll': ['GetLastError'] },
+            codeSize: 0x10, code: ()=>[0xb8, 1, 0, 0, 0, 0xc2, 0x0c, 0x00] });
+        const executable = buildExe({
+            imports: { 'KERNEL32.dll': ['LoadLibraryExA', 'FreeLibrary', 'CreateFileA',
+                'CloseHandle', 'GetLastError', 'ExitProcess'] },
+            data: { path: cString('C:\\App\\held.dll') },
+            codeSize: 0x100,
+            code: ({ iat, at })=>{
+                /** @param {string} fn */
+                const call = fn=>[0xff, 0x15, ...u32(iat(fn))];
+                const push = (/** @type {number} */ value)=>[0x68, ...u32(value)];
+                const flag = (/** @type {number} */ bit)=>[0x81, 0xcb, ...u32(bit)];
+                const JNE = 0x75;
+                // CreateFileA(path, GENERIC_WRITE, FILE_SHARE_READ, 0, OPEN_EXISTING, 0, 0)
+                const openForWriting = [...push(0), ...push(0), ...push(3), ...push(0),
+                    ...push(1), ...push(0x40000000), ...push(at('path')), ...call('CreateFileA')];
+                return [
+                    0x31, 0xdb, //                                   xor ebx, ebx
+                    ...push(0x40), ...push(0), ...push(at('path')), ...call('LoadLibraryExA'),
+                    0x89, 0xc6, //                                   mov esi, eax
+                    ...openForWriting,
+                    0x83, 0xf8, 0xff, JNE, 6, ...flag(0x1), //      cmp eax, -1
+                    ...call('GetLastError'),
+                    0x83, 0xf8, 32, JNE, 6, ...flag(0x2), //        ERROR_SHARING_VIOLATION
+                    0x56, ...call('FreeLibrary'), //                 push esi
+                    ...openForWriting,
+                    0x83, 0xf8, 0xff, 0x74, 13, //                   je over
+                    0x50, ...call('CloseHandle'), //                 push eax
+                    ...flag(0x4),
+                    0x53, ...call('ExitProcess'), //                 push ebx
+                ];
+            },
+        });
+        const app = await createApp({
+            executable, imagePath: 'C:\\App\\exclusive.exe',
+            files: [{ path: 'C:\\App\\held.dll', bytes: held }],
+        });
+        t.after(()=>app.dispose());
+        const code = await app.run({ timeoutMs: 40000 });
+        assert.equal(code, 0x7, `missing bits 0x${(0x7 & ~code).toString(16)}`);
+    });

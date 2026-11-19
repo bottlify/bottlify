@@ -217,7 +217,9 @@ flowchart TD
   answers that section's refusal, a failed `DllMain` `STATUS_DLL_INIT_FAILED`. A load as data
   (`LOAD_LIBRARY_AS_DATAFILE`) is of a file: a path not there is `ERROR_FILE_NOT_FOUND` even when
   a module of its name is loaded (one of the engine's answers its path in `system32`), an empty
-  file `ERROR_FILE_INVALID`, any other that is no image `ERROR_BAD_EXE_FORMAT`. `LdrRegisterDllNotification`'s callbacks hear of every library read off the
+  file `ERROR_FILE_INVALID`, any other that is no image `ERROR_BAD_EXE_FORMAT`. One made
+  `LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE` holds the file open against writers until its last
+  `FreeLibrary`. `LdrRegisterDllNotification`'s callbacks hear of every library read off the
   volume after it is mapped and before its `DllMain`, and on unload after it.
 - **`GetProcAddress(NULL, ...)`** looks in the program's own image; what it does not export is
   `ERROR_PROC_NOT_FOUND`.

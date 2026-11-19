@@ -8277,6 +8277,10 @@ async function buildApp(options){
         if (held.references === 0)
         {
             dataFiles.delete(handle);
+            if (held.hold)
+            {
+                filesystem.close(held.hold);
+            }
             if (held.region)
             {
                 memory.unregister(held.region);
@@ -8378,6 +8382,23 @@ async function buildApp(options){
                 events.emit('library-missing', { name, path: wanted, reason: 'not an image' });
                 return 0;
             }
+            // LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE keeps writers off the file
+            // while it is loaded: an open of it, reading and sharing all but
+            // writing, held until its last FreeLibrary.
+            let hold = null;
+            if ((flags & LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE) !== 0)
+            {
+                try
+                {
+                    hold = filesystem.open(wanted, { read: true, shareRead: true,
+                        shareWrite: false, shareDelete: true });
+                }
+                catch (e){
+                    loadErrors.set(key, /** @type {any} */ (e)?.code === 'SHARING_VIOLATION'
+                        ? ERROR_SHARING_VIOLATION : ERROR_FILE_NOT_FOUND);
+                    return 0;
+                }
+            }
             const bytes = layout === 1 ? file
                 : mapImage(file, image.imageBase, { wide: true }).bytes;
             const size = Math.ceil(bytes.length / PAGE_SIZE) * PAGE_SIZE;
@@ -8385,6 +8406,10 @@ async function buildApp(options){
                 { next: nextLibraryBase, ...librarySpace });
             if ('refused' in place)
             {
+                if (hold)
+                {
+                    filesystem.close(hold);
+                }
                 events.emit('libraries-missing', { names: [name], reason: place.refused });
                 return 0;
             }
@@ -8399,7 +8424,7 @@ async function buildApp(options){
             // Its resources are read where it lies (`resourceLookup`): a flat
             // view is the file's own layout, as long as the file.
             return record({ name, base: place.base, image, flat: layout === 1,
-                fileSize: file.length, region, path: wanted });
+                fileSize: file.length, region, path: wanted, hold });
         })();
     };
 
