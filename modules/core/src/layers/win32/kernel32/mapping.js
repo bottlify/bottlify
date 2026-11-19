@@ -11,6 +11,8 @@ import { mapImage } from '../../loader/internal/image.js';
 import { imageKind, relocateImage } from '../../loader/internal/pe.js';
 import { copyOnWrite, sectionRights, viewProtection } from './view-rights.js';
 import { sectionProtection } from './image-protection.js';
+import { askChild } from './cross-process.js';
+import { PROCESS_VM_OPERATION } from './process-target.js';
 
 /**
  * How far a name a program hands these is read: whole, as Windows reads it, up to
@@ -205,6 +207,11 @@ const pageRound = bytes=>Math.ceil(bytes / PAGE_SIZE) * PAGE_SIZE;
  *           The error of a thread that is not the one running: a map that
  *           waited for its bytes answers on somebody else's turn.
  * @property {() => any} [currentThread]
+ * @property {(handle: number, right: number) =>
+ *     import('./process-target.js').ProcessTarget} [processTarget]
+ *           The process a handle names, if it carries the right (`process-target.js`).
+ * @property {import('./cross-process.js').AskHost['askChild']} [askChild]
+ *           A call made in a child, where it runs.
  * @property {{ peek: (args: number[]) => number | null,
  *     anonymous?: (attributes: number, size: number) => { read: number, write: number } | null }}
  *     [pipes]  CreatePipe's pair as the named pipes make it, and PeekNamedPipe of a
@@ -397,6 +404,48 @@ export function createMappingFunctions(host){
      *                      unwatch?: (() => void) | null }>}
      */
     const views = new Map();
+
+    /**
+     * The base of the view that holds an address, null for none: a native
+     * unmap names a view by any address inside it.
+     *
+     * @param {number} address
+     * @returns {number | null}
+     */
+    const viewHolding = address=>{
+        if (views.has(address))
+        {
+            return address;
+        }
+        for (const [base, view] of views)
+        {
+            if (address > base && address < base + view.length)
+            {
+                return base;
+            }
+        }
+        return null;
+    };
+
+    /**
+     * The process a native call on a view names, by the handle it was given:
+     * this one (the pseudo-handle, or a handle opened for its own id) or a
+     * child; a handle naming no process, or one without PROCESS_VM_OPERATION,
+     * answered as the status Windows gives.
+     *
+     * @param {number} process
+     * @returns {number | { here: true } | { child: any }}
+     */
+    const processNamed = process=>{
+        /** @type {import('./process-target.js').ProcessTarget} */
+        const target = host.processTarget ? host.processTarget(process, PROCESS_VM_OPERATION)
+            : (process >>> 0) === CURRENT_PROCESS ? { here: true } : { error: 6 };
+        if ('error' in target)
+        {
+            return target.error === 5 ? STATUS.ACCESS_DENIED : STATUS.INVALID_HANDLE;
+        }
+        return target;
+    };
 
     /** @param {number} handle @param {string} [type] */
     const object = (handle, type)=>{
@@ -869,9 +918,15 @@ export function createMappingFunctions(host){
                 {
                     return section;
                 }
-                if ((process >>> 0) !== CURRENT_PROCESS)
+                const target = processNamed(process);
+                if (typeof target === 'number')
                 {
-                    host.divergence?.('NtMapViewOfSection', 'a view maps into this process only');
+                    return target;
+                }
+                if (!('here' in target))
+                {
+                    host.divergence?.('NtMapViewOfSection',
+                        'a view maps into this process only, not a child\'s');
                     return STATUS.NOT_SUPPORTED;
                 }
                 if ((base >>> 0) === 0 || (sizeAt >>> 0) === 0)
@@ -905,21 +960,41 @@ export function createMappingFunctions(host){
             },
         },
 
-        /** NTSTATUS NtUnmapViewOfSection(HANDLE ProcessHandle, PVOID BaseAddress) */
+        /**
+         * NTSTATUS NtUnmapViewOfSection(HANDLE ProcessHandle, PVOID BaseAddress)
+         *
+         * Any address inside a view names it, not only its base. In a child
+         * the call is made there, over its own views (`cross-process.js`).
+         */
         NtUnmapViewOfSection: {
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([process, address])=>{
-                if ((process >>> 0) !== CURRENT_PROCESS)
+                const target = processNamed(process);
+                if (typeof target === 'number')
                 {
-                    host.divergence?.('NtUnmapViewOfSection', 'a view maps into this process only');
-                    return STATUS.NOT_SUPPORTED;
+                    return target;
                 }
-                if (!views.has(address >>> 0))
+                if (!('here' in target))
+                {
+                    const asked = askChild({ askChild: host.askChild, writeMemory: host.writeMemory,
+                        currentThread: host.currentThread ?? (()=>null),
+                        setLastErrorFor: host.setLastErrorFor ?? (()=>{}) },
+                    target.child, { call: 'NtUnmapViewOfSection',
+                        args: [CURRENT_PROCESS, address >>> 0] }, []);
+                    if (asked === null)
+                    {
+                        host.divergence?.('NtUnmapViewOfSection', 'a child the run cannot reach');
+                        return STATUS.NOT_SUPPORTED;
+                    }
+                    return asked;
+                }
+                const base = viewHolding(address >>> 0);
+                if (base === null)
                 {
                     return STATUS.NOT_MAPPED_VIEW;
                 }
-                table.UnmapViewOfFile.handler([address]);
+                table.UnmapViewOfFile.handler([base]);
                 return STATUS.SUCCESS;
             },
         },

@@ -54,8 +54,10 @@
   ended, its id, parent and exit status remain and its PEB address does not. `SetThreadContext` replaces
   another thread's registers where it next runs, after the wait it may be in, as Windows does at its
   return to user mode; the calling thread's own and the x87 state of a 32-bit context are not
-  replaced. Not yet: `OpenThread` of a child's
-  thread the parent was not told of, and reading another process's TEB. Any process of the
+  replaced. `NtUnmapViewOfSection` on a child's handle unmaps the view there, named by any address
+  inside it. Not yet: `OpenThread` of a child's thread the parent was not told of, mapping a view
+  into a child (`NtMapViewOfSection` on its handle is refused, said once), and unmapping a child's
+  image. Any process of the
   run opens another by its id (`OpenProcess`) wherever each of them runs: a wait on that handle
   ends with the other's exit and `GetExitCodeProcess` reads its code; nothing else of it is asked
   across a link. A call made in a

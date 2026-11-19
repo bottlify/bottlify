@@ -3925,6 +3925,9 @@ export function createWin32Module(){
                     }),
                     ...createMappingFunctions({
                         readMemory,
+                        // A child's views, unmapped where the child runs.
+                        processTarget,
+                        askChild,
                         pointerSize,
                         machine64,
                         pipes,
@@ -7349,6 +7352,7 @@ export function createWin32Module(){
                             libraries['ntdll.dll']?.NtQueryInformationProcess,
                         NtQueryInformationThread:
                             libraries['ntdll.dll']?.NtQueryInformationThread,
+                        NtUnmapViewOfSection: libraries['ntdll.dll']?.NtUnmapViewOfSection,
                         [DEBUG_ATTACH]: { handler: debugAttached },
                         [DEBUG_BREAK]: { handler: breakIn },
                         .../** @type {any} */ (libraries['KERNEL32.dll'])?.[VIRTUAL_MEMORY]
