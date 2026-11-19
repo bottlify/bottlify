@@ -105,6 +105,8 @@ const CREATE_SUSPENDED = 0x4;
 /** DuplicateHandle's options: close the source, and give the copy the source's rights. */
 const DUPLICATE_CLOSE_SOURCE = 0x00000001;
 const DUPLICATE_SAME_ACCESS = 0x00000002;
+/** DuplicateHandle's option: the duplicate takes the source handle's flags, not bInheritHandle. */
+const DUPLICATE_SAME_ATTRIBUTES = 0x00000004;
 
 /**
  * @typedef {Object} ThreadingHost
@@ -1544,6 +1546,12 @@ export function createThreadingFunctions(host){
                 // duplicate onto a mutex is a real handle onto it, the same
                 // as the one DuplicateHandle was given.
                 host.namedObjects.reference(held);
+                // DUPLICATE_SAME_ATTRIBUTES: the source's flags (none for a
+                // pseudo-handle) and not bInheritHandle, read before the
+                // source may go.
+                const flags = (options >>> 0 & DUPLICATE_SAME_ATTRIBUTES) === 0
+                    ? (inherit !== 0 ? HANDLE_FLAG_INHERIT : 0)
+                    : pseudo(source) ? 0 : handleFlags.get(untagged(source >>> 0)) ?? 0;
                 // A handle protected from close is not closed by
                 // DUPLICATE_CLOSE_SOURCE either: both stay, as on Windows.
                 const closesSource = (options >>> 0 & DUPLICATE_CLOSE_SOURCE) !== 0
@@ -1578,8 +1586,8 @@ export function createThreadingFunctions(host){
                 }
                 if (!into)
                 {
-                    handleFlags.set(duplicate, inherit !== 0 ? HANDLE_FLAG_INHERIT : 0);
-                    host.pipes?.setInheritable(duplicate, inherit !== 0);
+                    handleFlags.set(duplicate, flags);
+                    host.pipes?.setInheritable(duplicate, (flags & HANDLE_FLAG_INHERIT) !== 0);
                 }
                 host.writeMemory(target >>> 0, new Uint8Array([
                     duplicate & 0xff, duplicate >>> 8 & 0xff,

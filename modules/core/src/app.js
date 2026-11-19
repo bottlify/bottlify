@@ -424,7 +424,7 @@ const hashText = (hash, text)=>{
  *           standard handles, duplicated for it (`consoleOnly`), its own when it
  *           is a console program; a window program has none (`handedDown`).
  * @property {{ handle: number, side: 'server' | 'client', canRead: boolean, canWrite: boolean,
- *     messages: boolean }[]} [pipeEnds]
+ *     messages: boolean, consoleOnly?: boolean, flags?: number }[]} [pipeEnds]
  *           The pipe ends a child in a worker of its own inherits, under the
  *           parent's numbers: served where the parent holds them, across the
  *           link (`system.pipes`), and held here as stand-ins.
@@ -4847,7 +4847,8 @@ function handedDown(options){
     /** @type {any[]} */
     const all = options.inheritedHandles ?? [
         ...(options.pipeEnds ?? []).map((/** @type {any} */ end)=>({
-            handle: end.handle, type: 'pipe', object: pipeStandIn(end.handle, end) })),
+            handle: end.handle, type: 'pipe', object: pipeStandIn(end.handle, end),
+            ...end.consoleOnly ? { consoleOnly: true, flags: end.flags ?? 0 } : {} })),
         ...options.inheritedFiles ?? []];
     if (!options.consoleHandles && !options.standardHandles)
     {

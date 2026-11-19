@@ -32,6 +32,9 @@ const GET_MODULE_HANDLE_EX_FROM_ADDRESS = 0x4;
 const LDR_UNCHANGED_REFCOUNT = 0x1;
 const LDR_PIN = 0x2;
 const LDR_ADDREF_DLL_PIN = 0x1;
+/** LdrLoadDll's characteristic that maps without resolving imports, and LoadLibraryEx's flag for it. */
+const LDR_DONT_RESOLVE_REFS = 0x2;
+const DONT_RESOLVE_DLL_REFERENCES = 0x1;
 /** LdrLockLoaderLock's: raise no exception, and only try. */
 const LDR_LOCK_RAISE_ON_ERRORS = 0x1;
 const LDR_LOCK_TRY_ONLY = 0x2;
@@ -307,11 +310,16 @@ export function createLoaderFunctions({
         LdrLoadDll: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([path, , name, out])=>{
+            handler: ([path, characteristics, name, out])=>{
                 if ((out >>> 0) === 0 || (name >>> 0) === 0)
                 {
                     return STATUS.INVALID_PARAMETER;
                 }
+                // The characteristics asked of the load: LDR_DONT_RESOLVE_REFS
+                // is LoadLibraryEx's DONT_RESOLVE_DLL_REFERENCES.
+                const resolveNone = (characteristics >>> 0) !== 0
+                    && (u32(characteristics >>> 0) & LDR_DONT_RESOLVE_REFS) !== 0
+                    ? DONT_RESOLVE_DLL_REFERENCES : 0;
                 const counted = terminated(name >>> 0, 2);
                 const asked = wideAt(counted);
                 free(counted);
@@ -354,8 +362,9 @@ export function createLoaderFunctions({
                         setU32(out >>> 0, base >>> 0);
                         return STATUS.SUCCESS;
                     };
-                    const base = (path & 1) !== 0
-                        ? kernel32.LoadLibraryExW.handler([text, 0, (path >>> 0) & ~1])
+                    const flags = ((path & 1) !== 0 ? (path >>> 0) & ~1 : 0) | resolveNone;
+                    const base = flags !== 0
+                        ? kernel32.LoadLibraryExW.handler([text, 0, flags])
                         : kernel32.LoadLibraryW.handler([text]);
                     return typeof base?.then === 'function' ? base.then(settle) : settle(base);
                 };

@@ -26,12 +26,15 @@ import { claimInherited } from './layers/win32/kernel32/pipes.js';
 const STATUS_INVALID_HANDLE = 0xc0000008;
 
 /**
- * @param {{ handle: number, type: string, object: any }[] | undefined} inherited
+ * @param {{ handle: number, type: string, object: any, consoleOnly?: boolean,
+ *     flags?: number }[] | undefined} inherited
  *     the handles the child inherits, as its parent's CreateProcess found them
  */
 export function pipeHandlers(inherited){
     /** @type {Map<number, import('./layers/win32/kernel32/pipes.js').EndAcross>} */
     const ends = new Map();
+    /** @type {Map<number, { consoleOnly: true, flags: number }>} */
+    const marks = new Map();
     for (const entry of inherited ?? [])
     {
         const { handle, type, object } = entry;
@@ -43,13 +46,19 @@ export function pipeHandlers(inherited){
                 object.retain();
             }
             ends.set(handle >>> 0, object.across());
+            if (entry.consoleOnly)
+            {
+                // A duplicate only a console program keeps, as a file's is (`handedDown`).
+                marks.set(handle >>> 0, { consoleOnly: true, flags: entry.flags ?? 0 });
+            }
         }
     }
     /** @param {number} id */
     const at = id=>ends.get(id >>> 0) ?? null;
     return {
         /** What the child is told of each: its number, and what it can do. */
-        described: [...ends].map(([handle, end])=>({ handle, ...end.describe() })),
+        described: [...ends].map(([handle, end])=>({ handle, ...end.describe(),
+            ...marks.get(handle) })),
         pipes: {
             /** @param {number} id @param {number} length */
             read: (id, length)=>at(id)?.read(length) ?? { status: STATUS_INVALID_HANDLE },

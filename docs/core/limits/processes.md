@@ -89,7 +89,10 @@
   (`ERROR_ACCESS_DENIED`). `PROC_THREAD_ATTRIBUTE_JOB_LIST` makes a child in the jobs it names,
   each nested under the one before; a handle that names no job fails `CreateProcess`
   (`ERROR_INVALID_HANDLE`), a job of another hierarchy refuses the child (`ERROR_ACCESS_DENIED`)
-  after the jobs before it heard it come and go. The job's other limits are kept and read back, not
+  after the jobs before it heard it come and go. `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS` makes the
+  process it names the child's parent (its id is the one the child reads); a handle that names no
+  process fails `CreateProcess` (`ERROR_INVALID_HANDLE`), and a child made with another process as
+  its parent inherits none of that process's handles (said once). The job's other limits are kept and read back, not
   enforced, and this
   process's own exit is told to no port. Not exported, as on Windows 7: the
   synchronization barrier, `GetProcessInformation` and job objects.
@@ -141,7 +144,8 @@
   `DuplicateHandle` puts into another process of the run. A child in a worker of its own
   inherits pipe ends and open files: a file there is opened on the same terms, its pointer the
   parent's open's, read and moved across the link on each read and write, and the parent's hold
-  on it lasts until that child ends. A file handed as a standard handle is one of these, so it
+  on it lasts until that child ends, as does a duplicated pipe end a window program there does
+  not keep. A file handed as a standard handle is one of these, so it
   must be inheritable, as on Windows. A child's standard handles are the ones its STARTUPINFO names with
   `STARTF_USESTDHANDLES`, or else its parent's own, copied as they are when it inherits handles
   (one it does not inherit names nothing there) and NULL when it inherits none; a console child
