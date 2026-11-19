@@ -57,6 +57,11 @@ const MMIO_DELETE = 0x0200;
 const MMIO_EXIST = 0x4000;
 const MMIO_ALLOCBUF = 0x10000;
 const MMIO_GETTEMP = 0x20000;
+/** The sharing bits, as OpenFile's OF_SHARE_* has them. */
+const MMIO_SHAREMODE = 0x0070;
+const MMIO_EXCLUSIVE = 0x0010;
+const MMIO_DENYWRITE = 0x0020;
+const MMIO_DENYREAD = 0x0030;
 const MMIO_DIRTY = 0x10000000;
 
 /** The open flags that ask for something once rather than describe the file. */
@@ -97,12 +102,12 @@ const MMSYSERR_NOERROR = 0;
 const MMSYSERR_INVALHANDLE = 5;
 const MMIOERR_FILENOTFOUND = 257;
 const MMIOERR_OUTOFMEMORY = 258;
-const MMIOERR_CANNOTOPEN = 260;
+const MMIOERR_CANNOTOPEN = 259;
 const MMIOERR_CANNOTWRITE = 262;
 const MMIOERR_CANNOTEXPAND = 264;
 const MMIOERR_UNBUFFERED = 266;
 const MMIOERR_ACCESSDENIED = 268;
-const MMIOERR_CHUNKNOTFOUND = 275;
+const MMIOERR_CHUNKNOTFOUND = 265;
 
 /** MMIOINFO, eighteen dwords. */
 const MMIOINFO = Object.freeze({
@@ -137,6 +142,8 @@ const FOURCC_RIFF = 0x46464952;
 const FOURCC_LIST = 0x5453494c;
 
 const MAX_PATH = 260;
+/** The characters MMIO_PARSE takes the caller's name buffer to hold. */
+const PARSED_NAME = 128;
 
 /**
  * @typedef {Object} MmioHost
@@ -159,6 +166,11 @@ const MAX_PATH = 260;
  *           Absent, a file through such a procedure is refused.
  * @property {() => unknown} [callerThread]  Whose call is being handled.
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {(name: string, search: boolean) => string} [locate]
+ *           A file name as the file calls resolve it, against the current
+ *           directory; with `search`, a bare name is first looked for where
+ *           OpenFile looks (`kernel32/files.js` searchDirectories). Absent,
+ *           names are taken as the volume reads them.
  */
 
 /**
@@ -920,16 +932,27 @@ export function createMmioFunctions(host){
         }
         else if (procedure === null && !memory)
         {
+            // A file mmio is to make, or is asked whether it exists, is where
+            // the name says; one it opens is found as OpenFile finds it,
+            // searched for when bare.
+            const name = path ?? '';
+            path = host.locate?.(name, (flags & (MMIO_CREATE | MMIO_EXIST)) === 0) ?? name;
             if ((flags & MMIO_EXIST) !== 0)
             {
                 return host.files.stat(path) ? 1 : refuse(MMIOERR_FILENOTFOUND);
             }
             const mode = flags & MMIO_RWMODE;
+            // What the open lets others do: exclusive shares nothing, the
+            // deny modes keep back what they name, and compatibility mode and
+            // deny-none share reading and writing.
+            const share = flags & MMIO_SHAREMODE;
             node = host.files.open(path, {
                 read: mode === MMIO_READ || mode === MMIO_READWRITE,
                 write: mode === MMIO_WRITE || mode === MMIO_READWRITE,
                 create: (flags & MMIO_CREATE) !== 0,
                 truncate: (flags & MMIO_CREATE) !== 0,
+                shareRead: share !== MMIO_EXCLUSIVE && share !== MMIO_DENYREAD,
+                shareWrite: share !== MMIO_EXCLUSIVE && share !== MMIO_DENYWRITE,
             });
             if (!node)
             {
@@ -975,12 +998,17 @@ export function createMmioFunctions(host){
             }
         };
 
-        // The buffer: the caller's when it gave one with a size, one mmio
-        // makes when it gave a size and no buffer or asked for one, none
-        // otherwise -- the pointer it passed is still reported.
+        // The buffer: the caller's when it gave one with a size, or one with
+        // no size and MMIO_ALLOCBUF (the default size of it); one mmio makes
+        // when it gave a size and no buffer or asked for one; none otherwise
+        // -- the pointer it passed is still reported.
         let buffer = record === 0 ? 0 : field(record, MMIOINFO.pchBuffer);
         let size = record === 0 ? 0 : field(record, MMIOINFO.cchBuffer);
         let owned = false;
+        if (size === 0 && buffer !== 0 && (flags & MMIO_ALLOCBUF) !== 0)
+        {
+            size = MMIO_DEFAULTBUFFER;
+        }
         const allocating = (size > 0 && buffer === 0)
             || (size === 0 && (flags & MMIO_ALLOCBUF) !== 0);
         if (allocating && host.allocate)
@@ -1213,29 +1241,63 @@ export function createMmioFunctions(host){
         return MMSYSERR_NOERROR;
     };
 
+    /**
+     * MMIO_PARSE: the name made whole, written back over the caller's, which
+     * the call takes to hold 128 characters. A whole name that does not fit
+     * is answered MMIOERR_OUTOFMEMORY, and the wide call leaves it cut to 127
+     * where the ANSI one leaves the caller's name as it was.
+     *
+     * @param {number} address @param {string} name @param {number} info
+     * @param {boolean} wide
+     */
+    const parseName = (address, name, info, wide)=>{
+        const whole = host.locate?.(name, false) ?? name;
+        const fits = whole.length < PARSED_NAME;
+        if (fits || wide)
+        {
+            host.writeMemory(address, encode(whole.slice(0, PARSED_NAME - 1), wide));
+        }
+        if (fits)
+        {
+            return 1;
+        }
+        if ((info >>> 0) !== 0)
+        {
+            host.writeMemory((info >>> 0) + MMIOINFO.wErrorRet, dword(MMIOERR_OUTOFMEMORY));
+        }
+        return 0;
+    };
+
+    /**
+     * mmioOpen's front for either width: the name read, MMIO_PARSE answered
+     * here, anything else opened.
+     *
+     * @param {boolean} wide
+     */
+    const opener = wide=>({
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [name, info, flags])=>{
+            const text = (name >>> 0) === 0 ? null
+                : wide ? wideAt(name >>> 0, MAX_PATH) : host.readCString(name >>> 0, WHOLE_NAME);
+            if (((flags >>> 0) & MMIO_PARSE) !== 0 && text !== null)
+            {
+                return parseName(name >>> 0, text, info, wide);
+            }
+            return openFile(text, info, flags >>> 0, wide);
+        },
+    });
+
     return {
         /**
          * HMMIO mmioOpenA(LPSTR szFilename, LPMMIOINFO lpmmioinfo, DWORD dwOpenFlags)
+         * HMMIO mmioOpenW(LPWSTR szFilename, LPMMIOINFO lpmmioinfo, DWORD dwOpenFlags)
          *
          * Null when the file cannot be opened, with the reason in the
          * caller's MMIOINFO when it passed one.
          */
-        mmioOpenA: {
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([name, info, flags])=>openFile(
-                (name >>> 0) === 0 ? null : host.readCString(name >>> 0, WHOLE_NAME),
-                info, flags >>> 0, false),
-        },
-
-        /** HMMIO mmioOpenW(LPWSTR szFilename, LPMMIOINFO lpmmioinfo, DWORD dwOpenFlags) */
-        mmioOpenW: {
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([name, info, flags])=>openFile(
-                (name >>> 0) === 0 ? null : wideAt(name >>> 0, MAX_PATH), info, flags >>> 0,
-                true),
-        },
+        mmioOpenA: opener(false),
+        mmioOpenW: opener(true),
 
         /**
          * MMRESULT mmioClose(HMMIO hmmio, UINT wFlags)

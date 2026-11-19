@@ -314,6 +314,22 @@ const SYSTEM_DIRECTORY = 'C:\\WINDOWS\\system32';
 const PROGRAM_FILES = 'C:\\Program Files';
 
 /**
+ * Where a bare file name is looked for when the caller names no path list,
+ * in order: the program's own directory, the current one, then the system
+ * and Windows directories - SearchPath's order, and OpenFile's, which mmio
+ * opens a sound through.
+ *
+ * @param {string} imagePath  The program's own file.
+ * @param {string} currentDirectory
+ * @returns {string[]}
+ */
+export function searchDirectories(imagePath, currentDirectory){
+    const at = imagePath.lastIndexOf('\\');
+    const own = at < 0 ? '' : at <= 2 ? imagePath.slice(0, at + 1) : imagePath.slice(0, at);
+    return [own, currentDirectory, SYSTEM_DIRECTORY, WINDOWS_DIRECTORY];
+}
+
+/**
  * WIN32_FIND_DATAA, laid out the way the guest compiled it.
  *
  * The three FILETIMEs are eight bytes each and the two names are fixed arrays,
@@ -2330,8 +2346,7 @@ export function createFileFunctions(host){
             ? ['']
             : (pathList >>> 0) !== 0
                 ? text.list(pathList).split(';')
-                : [parentOf(host.imagePath?.() ?? ''), files.currentDirectory(),
-                    SYSTEM_DIRECTORY, WINDOWS_DIRECTORY];
+                : searchDirectories(host.imagePath?.() ?? '', files.currentDirectory());
         for (const directory of directories)
         {
             const candidate = fullPath(directory === ''

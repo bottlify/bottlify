@@ -20,7 +20,7 @@ const MMIO_FINDCHUNK = 0x10;
 const MMIO_FINDRIFF = 0x20;
 const MMIO_FINDLIST = 0x40;
 const MMIO_CREATERIFF = 0x20;
-const MMIOERR_CHUNKNOTFOUND = 275;
+const MMIOERR_CHUNKNOTFOUND = 265;
 const MMIOERR_UNBUFFERED = 266;
 const MMIO_DEFAULTBUFFER = 8192;
 const SEEK_SET = 0;
@@ -57,7 +57,8 @@ function waveFile(){
 
 /**
  * @param {{ late?: boolean, allocator?: boolean, end?: number,
- *           call?: (entry: number, args: number[], thread?: unknown) => Promise<number> }}
+ *           call?: (entry: number, args: number[], thread?: unknown) => Promise<number>,
+ *           locate?: (name: string, search: boolean) => string }}
  *        [options]  `call` runs the program's code, for its own I/O procedures; `end` is
  *        where an allocation ends and nothing may lie past it: memory refuses a read
  *        across it.
@@ -83,6 +84,7 @@ function build(options = {}){
         handles,
         ...(options.call ? { call: options.call, callerThread: ()=>'the caller' } : {}),
         divergence: (api, detail)=>diverged.push(`${api}: ${detail}`),
+        ...(options.locate ? { locate: options.locate } : {}),
         ...(options.allocator === false ? {} : {
             allocate: memory.allocate,
             free: (/** @type {number} */ address)=>{
@@ -287,7 +289,69 @@ test('a buffer is the caller\'s, mmio\'s own, or none, and says which', ()=>{
         answer = open(0, 0, MMIO_READ | MMIO_ALLOCBUF);
         assert.deepEqual([answer.dwFlags, answer.cchBuffer],
             [MMIO_READ | MMIO_ALLOCBUF, MMIO_DEFAULTBUFFER], `${label}: the default size`);
+        answer = open(0, theirs, MMIO_READ | MMIO_ALLOCBUF);
+        assert.deepEqual([answer.dwFlags, answer.cchBuffer, answer.pchBuffer],
+            [MMIO_READ, MMIO_DEFAULTBUFFER, theirs],
+            `${label}: a buffer given with no size and MMIO_ALLOCBUF is the default size of it`);
     }
+});
+
+test('a name is made whole as the file calls make it, searched for when opened bare', ()=>{
+    // mmio.c test_mmioOpen_create: MMIO_PARSE writes the whole name back
+    // (cut to 127 characters with MMIOERR_OUTOFMEMORY when it is longer), and
+    // a bare name opened without MMIO_CREATE is found where OpenFile looks.
+    /** @type {[string, boolean][]} */
+    const asked = [];
+    const { memory, fns } = build({
+        locate: (name, search)=>{
+            asked.push([name, search]);
+            return search && name === 'click.wav' ? 'C:\\click.wav' : `C:\\TEMP\\${name}`;
+        },
+    });
+    const name = memory.put('sound.wav');
+    assert.equal(fns.mmioOpenA.handler([name, 0, 0x100]), 1, 'MMIO_PARSE');
+    assert.equal(memory.text(name), 'C:\\TEMP\\sound.wav');
+    const info = memory.allocate(INFO.size);
+    const long = memory.put('x'.repeat(130));
+    assert.equal(fns.mmioOpenA.handler([long, info, 0x100]), 0);
+    assert.equal(memory.u32(info + INFO.wErrorRet), 258, 'MMIOERR_OUTOFMEMORY');
+    assert.equal(memory.text(long), 'x'.repeat(130), 'the ANSI call leaves a long name as it was');
+    const wide = memory.allocate(300);
+    memory.writeMemory(wide,
+        new Uint8Array([...'x'.repeat(130), '\0'].flatMap(c=>[c.charCodeAt(0), 0])));
+    assert.equal(fns.mmioOpenW.handler([wide, info, 0x100]), 0);
+    const units = new Uint16Array(memory.readMemory(wide, 254).slice().buffer);
+    assert.equal(String.fromCharCode(...units),
+        `C:\\TEMP\\${'x'.repeat(119)}`, 'the wide one cuts it to 127 characters');
+
+    const handle = fns.mmioOpenA.handler([memory.put('click.wav'), 0, MMIO_READ]);
+    assert.notEqual(handle, 0, 'a bare name found by the search');
+    assert.deepEqual(asked.at(-1), ['click.wav', true]);
+    fns.mmioClose.handler([handle, 0]);
+    fns.mmioOpenA.handler([memory.put('new.wav'), 0, MMIO_CREATE | MMIO_WRITE]);
+    assert.deepEqual(asked.at(-1), ['new.wav', false], 'a file to be made is not searched for');
+    fns.mmioOpenA.handler([memory.put('click.wav'), info, 0x4000]);
+    assert.deepEqual(asked.at(-1), ['click.wav', false], 'nor one asked after with MMIO_EXIST');
+});
+
+test('a file mmio opens is shared as its mode says', ()=>{
+    // mmio.c test_mmioOpen_create: MMIO_EXCLUSIVE keeps every other open out,
+    // MMIO_DENYNONE lets them in.
+    const { memory, fns, files } = build();
+    /** @type {any[]} */
+    const terms = [];
+    const open = files.open.bind(files);
+    files.open = (/** @type {string} */ path, /** @type {any} */ mode)=>{
+        terms.push([mode.shareRead, mode.shareWrite]);
+        return open(path, mode);
+    };
+    for (const share of [0, 0x10, 0x20, 0x30, 0x40])
+    {
+        const handle = fns.mmioOpenA.handler([memory.put('C:\\click.wav'), 0, MMIO_READ | share]);
+        fns.mmioClose.handler([handle, 0]);
+    }
+    assert.deepEqual(terms, [[true, true], [false, false], [true, false], [false, true],
+        [true, true]], 'compatibility, exclusive, deny write, deny read, deny none');
 });
 
 test('a program reads a chunk straight out of the buffer, advancing at its end', async()=>{
@@ -468,7 +532,7 @@ test('an installed I/O procedure is found by its code until it is removed', ()=>
     const record = memory.allocate(INFO.size);
     const name = memory.put('file+name.xyz+one.two');
     assert.equal(fns.mmioOpenA.handler([name, record, MMIO_READ]), 0);
-    assert.equal(memory.u32(record + INFO.wErrorRet), 260, 'MMIOERR_CANNOTOPEN');
+    assert.equal(memory.u32(record + INFO.wErrorRet), 259, 'MMIOERR_CANNOTOPEN');
     memory.setU32(record + INFO.fccIOProc, fourcc('XYZ '));
     assert.equal(fns.mmioOpenA.handler([memory.put('C:\\click.wav'), record, MMIO_READ]), 0);
     assert.equal(diverged.length, 2, 'and said so');
@@ -1019,7 +1083,7 @@ test('mmioFlush, and a close with bytes still in the buffer, send MMIOM_WRITEFLU
 
 test('a procedure that refuses the open leaves nothing open, and a wide one gets UTF-16', async()=>{
     const { memory, fns, freed, state } = withProcedure(riffImage());
-    const MMIOERR_CANNOTOPEN = 260;
+    const MMIOERR_CANNOTOPEN = 259;
     fns.mmioInstallIOProcW.handler([fourcc('XYZ '), PROCEDURE, MMIO_INSTALLPROC]);
     const record = memory.allocate(INFO.size);
     memory.setU32(record + INFO.fccIOProc, fourcc('XYZ '));

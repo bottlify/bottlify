@@ -20,7 +20,7 @@ import { createProcessFunctions, createThreadState, PERFORMANCE_FREQUENCY }
     from './kernel32/process.js';
 import { SKIP_THREAD_ATTACH, TEB, blockLayouts } from './kernel32/teb.js';
 import { createModuleFunctions } from './kernel32/modules.js';
-import { createFileFunctions, withSystemLibraries } from './kernel32/files.js';
+import { createFileFunctions, searchDirectories, withSystemLibraries } from './kernel32/files.js';
 import { createRichEditControls } from './riched/richedit.js';
 import { createRichedLibraries } from './riched/libraries.js';
 import { createSyncFunctions } from './kernel32/sync.js';
@@ -4670,6 +4670,26 @@ export function createWin32Module(){
                         call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
                         callerThread: ()=>bridge.callerThread(),
                         divergence: config?.divergence,
+                        // A name as the file calls take one; a bare one opened
+                        // is looked for where OpenFile looks.
+                        locate: (name, search)=>{
+                            try
+                            {
+                                const bare = !/[\\/:]/.test(name);
+                                const found = search && bare
+                                    ? searchDirectories(modules.imagePath(),
+                                        filesystem.currentDirectory())
+                                        .map(directory=>filesystem.resolve(
+                                            `${directory.replace(/\\$/, '')}\\${name}`).path)
+                                        .find(path=>volume.stat(path)?.exists)
+                                    : null;
+                                return found ?? (filesystem.resolve(name).path || name);
+                            }
+                            catch (e){
+                                void e;
+                                return name;
+                            }
+                        },
                     }),
                 },
 
