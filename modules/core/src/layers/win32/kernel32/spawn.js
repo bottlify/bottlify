@@ -43,6 +43,7 @@ import { grantedAccess } from './access.js';
 import { createProcessTarget } from './process-target.js';
 import { INTERACTIVE_SESSION } from './teb.js';
 import { dropUnclaimed } from './pipes.js';
+import { HANDLE_STDERR, HANDLE_STDIN, HANDLE_STDOUT } from './console.js';
 
 /** Codes this surface reports. */
 const ERROR_SUCCESS = 0;
@@ -535,6 +536,9 @@ export function createSpawner(host){
  *     every inheritable one, or of those the ones a handle list names.
  * @property {(which: number) => number} [standardHandle]  What this process's
  *     GetStdHandle answers for STD_INPUT_HANDLE, STD_OUTPUT_HANDLE or STD_ERROR_HANDLE.
+ * @property {(handles: number[]) => { handle: number, type: string, object: any }[]}
+ *     [duplicates]  Of these handles, the open files and pipe ends a child is handed
+ *     duplicates of whether inheritable or not, each with the flags it has here.
  * @property {(handle: number) => void} [inheritable]  Marks a handle inheritable, as
  *     OpenProcess's bInheritHandle asks.
  * @property {() => Record<string, string>} [environment]
@@ -760,37 +764,83 @@ export function createSpawnFunctions(host){
 
     /** GetStdHandle's numbers for the three standard handles. */
     const STANDARD_HANDLES = { input: -10, output: -11, error: -12 };
+    /** A child handed no standard handles: NULL in each. */
+    const NO_STANDARD = { input: 0, output: 0, error: 0 };
+    /** CreateProcess's flag for a console child that has no console. */
+    const DETACHED_PROCESS = 0x00000008;
+    /** The console's own standard handles, which a child with no console has none of. */
+    const CONSOLE_HANDLES = new Set([HANDLE_STDIN, HANDLE_STDOUT, HANDLE_STDERR]);
     /**
-     * The standard handles the child starts with, of those it inherits: the
-     * ones a STARTUPINFO hands it with STARTF_USESTDHANDLES, or else this
-     * process's own (GetStdHandle), as Windows hands a child its parent's
-     * standard handles when none are named. The child's GetStdHandle answers
-     * those numbers, and what it writes to its output is the parent's to read.
+     * The standard handles a child starts with, as Windows hands them. With
+     * STARTF_USESTDHANDLES, the values the STARTUPINFO names, copied as they
+     * are when the child inherits handles (one it does not hold names
+     * nothing there) and NULL when it inherits none. Without it, this
+     * process's own (GetStdHandle) copied for a child that inherits; for one
+     * that inherits nothing, duplicates of them made for it (`consoleOnly`),
+     * which it takes as its own only if it is a console program
+     * (`consoleHandles`, decided by its image's subsystem where it starts).
      *
-     * @param {number} startup @param {{ handle: number }[]} inherited
-     * @returns {{ input?: number, output?: number, error?: number } | undefined}
+     * A child started DETACHED_PROCESS has no console, so none of the
+     * console's handles: NULL in their place.
+     *
+     * @param {number} startup @param {boolean} inherit @param {number} flags
+     * @returns {{ standardHandles?: { input?: number, output?: number, error?: number },
+     *     consoleHandles?: { input?: number, output?: number, error?: number },
+     *     duplicates: { handle: number, type: string, object: any }[] }}
      */
-    const standardPipes = (startup, inherited)=>{
+    const standardOf = (startup, inherit, flags)=>{
+        const chosen = standardChosen(startup, inherit);
+        if ((flags & DETACHED_PROCESS) === 0)
+        {
+            return chosen;
+        }
+        /** @param {Record<string, number> | undefined} named */
+        const consoleless = named=>named && Object.fromEntries(Object.entries(named)
+            .map(([which, handle])=>[which, CONSOLE_HANDLES.has(handle) ? 0 : handle]));
+        return { ...chosen, standardHandles: consoleless(chosen.standardHandles),
+            consoleHandles: consoleless(chosen.consoleHandles) };
+    };
+    /**
+     * @param {number} startup @param {boolean} inherit
+     * @returns {{ standardHandles?: { input?: number, output?: number, error?: number },
+     *     consoleHandles?: { input?: number, output?: number, error?: number },
+     *     duplicates: { handle: number, type: string, object: any }[] }}
+     */
+    const standardChosen = (startup, inherit)=>{
         const named = startup !== 0
             && (readDword(startup + STARTUP_.flags) & STARTF_USESTDHANDLES) !== 0;
-        if (!named && !host.standardHandle)
+        if (named)
         {
-            return undefined;
-        }
-        const held = new Set(inherited.map(one=>one.handle >>> 0));
-        /** @type {{ input?: number, output?: number, error?: number }} */
-        const out = {};
-        for (const which of /** @type {const} */ (['input', 'output', 'error']))
-        {
-            const handle = named ? readDword(startup + STARTUP_[which]) >>> 0
-                : /** @type {(which: number) => number} */ (host.standardHandle)(
-                    STANDARD_HANDLES[which]) >>> 0;
-            if (held.has(handle))
+            if (!inherit)
             {
-                out[which] = handle;
+                return { standardHandles: NO_STANDARD, duplicates: [] };
             }
+            return { duplicates: [], standardHandles: {
+                input: readDword(startup + STARTUP_.input) >>> 0,
+                output: readDword(startup + STARTUP_.output) >>> 0,
+                error: readDword(startup + STARTUP_.error) >>> 0 } };
         }
-        return Object.keys(out).length > 0 ? out : undefined;
+        if (!host.standardHandle)
+        {
+            return { duplicates: [] };
+        }
+        const own = /** @type {(which: number) => number} */ (host.standardHandle);
+        const values = { input: own(STANDARD_HANDLES.input) >>> 0,
+            output: own(STANDARD_HANDLES.output) >>> 0, error: own(STANDARD_HANDLES.error) >>> 0 };
+        if (inherit)
+        {
+            return { standardHandles: values, duplicates: [] };
+        }
+        const duplicates = (host.duplicates?.([...new Set(Object.values(values))]) ?? [])
+            .map(one=>Object.assign(one, { consoleOnly: true }));
+        // A handle duplicated, or the console's own, which a console child
+        // has as well; anything else (INVALID_HANDLE_VALUE, a value naming
+        // nothing) is NULL there.
+        const kept = new Set([...duplicates.map(one=>one.handle),
+            HANDLE_STDIN, HANDLE_STDOUT, HANDLE_STDERR]);
+        const consoleHandles = Object.fromEntries(Object.entries(values)
+            .map(([which, handle])=>[which, kept.has(handle) ? handle : 0]));
+        return { consoleHandles, duplicates };
     };
 
     /**
@@ -900,8 +950,10 @@ export function createSpawnFunctions(host){
         }
         const inheritedHandles = inherit && host.inheritedHandles
             ? host.inheritedHandles(handleList(startup >>> 0, flags)) : [];
+        const standard = standardOf(startup >>> 0, inherit, flags >>> 0);
         const made = record(named ?? '', line, flags, directory, {
-            standardHandles: standardPipes(startup >>> 0, inheritedHandles),
+            ...standard.standardHandles ? { standardHandles: standard.standardHandles } : {},
+            ...standard.consoleHandles ? { consoleHandles: standard.consoleHandles } : {},
             // What the child's GetStartupInfo answers: values, since the child
             // may be built on another thread from what crosses to it.
             startup: (startup >>> 0) === 0 ? null : readStartupInfo(
@@ -915,15 +967,16 @@ export function createSpawnFunctions(host){
             environment: (environment >>> 0) === 0 ? host.environment?.() ?? null
                 : environmentBlock(environment >>> 0, (flags & CREATE_UNICODE_ENVIRONMENT) !== 0),
             // The handles it inherits, under the numbers this process has
-            // them by: the pipes' ends, which every process of the run on this
-            // thread holds alike. A child in a worker of its own takes none.
-            inheritedHandles,
+            // them by, and the duplicates of its standard handles a console
+            // child takes; a child in a worker of its own takes its open
+            // files of them as values (system/inherited-files.js).
+            inheritedHandles: [...inheritedHandles, ...standard.duplicates],
             jobList,
         });
         if (!made || made.completed)
         {
             // A child that never runs takes nothing it was handed.
-            dropUnclaimed(inheritedHandles);
+            dropUnclaimed([...inheritedHandles, ...standard.duplicates]);
         }
         if (!made)
         {

@@ -143,8 +143,11 @@
   parent's open's, read and moved across the link on each read and write, and the parent's hold
   on it lasts until that child ends. A file handed as a standard handle is one of these, so it
   must be inheritable, as on Windows. A child's standard handles are the ones its STARTUPINFO names with
-  `STARTF_USESTDHANDLES`, or else its parent's own, of those it inherits; a console child that
-  inherits nothing is not handed its parent's standard handles, as Windows hands them. A process in a worker of its own makes and opens none (`CreateNamedPipe` is refused, as
+  `STARTF_USESTDHANDLES`, or else its parent's own, copied as they are when it inherits handles
+  (one it does not inherit names nothing there) and NULL when it inherits none; a console child
+  that inherits nothing is handed duplicates of its parent's standard handles, a window program
+  none, and a window program or a `DETACHED_PROCESS` child has no console handles. `CONIN$` and
+  `CONOUT$` open as the console's own standard handles, which duplicate as themselves. A process in a worker of its own makes and opens none (`CreateNamedPipe` is refused, as
   Windows 9x refuses it), but the ends a parent on the engine's thread hands it (its standard
   handles redirected to pipes, or any inherited end) it reads, writes, peeks and closes as its
   own: they are served where the parent holds them, and a wait on such a handle itself fails

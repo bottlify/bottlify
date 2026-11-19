@@ -1241,6 +1241,17 @@ test('DuplicateHandle accepts the pseudo-handles wherever a handle is taken', ()
     assert.ok(writtenU32(written, 0x308) > 0);
 });
 
+test('DuplicateHandle of the console\'s own handle is that handle', ()=>{
+    // Wine's process.c test_DuplicateHandle: CONIN$ duplicated with
+    // DUPLICATE_CLOSE_SOURCE; Windows 7 hands a console handle back as is.
+    const { fns, written } = setup();
+    for (const [at, handle] of [[0x300, 1], [0x304, 2], [0x308, 3]])
+    {
+        assert.equal(fns.DuplicateHandle.handler([0xffffffff, handle, 0xffffffff, at, 0, 0, 3]), 1);
+        assert.equal(writtenU32(written, at), handle);
+    }
+});
+
 test('DuplicateHandle that closes its source takes the source\'s number, unless it is protected',
     ()=>{
         // Wine's process.c test_DuplicateHandle: the duplicate is f again.

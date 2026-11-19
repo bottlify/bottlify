@@ -26,8 +26,8 @@ import { createPresenter } from './layers/graphics/webgpu/internal/presenter.js'
 import { baseOf, compositionPlan, needsComposing } from './layers/graphics/webgpu/internal/compose.js';
 import { connectGraphicsWorker, portEnd } from './layers/graphics/remote/connect.js';
 import { openBundle } from './layers/filesystem/internal/bundle/format.js';
-import { DIR_EXCEPTION, DIR_EXPORT, parseExportDirectory, parsePe, readExports, readImports,
-    rvaToFileOffset }
+import { DIR_EXCEPTION, DIR_EXPORT, imageKind, parseExportDirectory, parsePe, readExports,
+    readImports, rvaToFileOffset }
     from './layers/loader/internal/pe.js';
 import { planDependencies } from './layers/loader/internal/dependencies.js';
 import { WINDOWS_LIBRARIES } from './layers/loader/internal/windows-libraries.js';
@@ -87,6 +87,7 @@ import { createWindowDirectory } from './layers/win32/user32/directory.js';
 import { shareTransport } from './layers/win32/wsock32/transport.js';
 import { createSharedViews } from './layers/win32/kernel32/shared-views.js';
 import { pipeStandIn } from './layers/win32/kernel32/pipes.js';
+import { HANDLE_STDERR, HANDLE_STDIN, HANDLE_STDOUT } from './layers/win32/kernel32/console.js';
 import { pipeHandlers } from './system-pipes.js';
 import { createMixer } from './layers/audio/output/mixer.js';
 import { objectHandlers } from './system-objects.js';
@@ -416,7 +417,12 @@ const hashText = (hash, text)=>{
  *           each the parent's open as values, its position asked across the link
  *           (`system/inherited-files.js`).
  * @property {{ input?: number, output?: number, error?: number }} [standardHandles]
- *           Which of those its parent's STARTUPINFO made its standard handles.
+ *           Which handles are its standard ones: those its parent's STARTUPINFO
+ *           named, or the parent's own, as a child that inherits holds them.
+ * @property {{ input?: number, output?: number, error?: number }} [consoleHandles]
+ *           For a child that inherited nothing and was named none: the parent's
+ *           standard handles, duplicated for it (`consoleOnly`), its own when it
+ *           is a console program; a window program has none (`handedDown`).
  * @property {{ handle: number, side: 'server' | 'client', canRead: boolean, canWrite: boolean,
  *     messages: boolean }[]} [pipeEnds]
  *           The pipe ends a child in a worker of its own inherits, under the
@@ -4820,6 +4826,50 @@ export function journalEvents(events, into, { shaders = false } = {}){
  * last-chance filter's are a few lines each, and a wait's repeated warning many more. */
 const TRACED_KEPT = 200;
 
+/** The Subsystem of a console program's image. */
+const IMAGE_SUBSYSTEM_WINDOWS_CUI = 3;
+/** The console's own standard handles, which a window program has none of. */
+const CONSOLE_STANDARD = new Set([HANDLE_STDIN, HANDLE_STDOUT, HANDLE_STDERR]);
+
+/**
+ * The handles a child's parent handed down, as this process holds them, and
+ * its standard handles. A child that inherited nothing and was named no
+ * standard handles is handed its parent's own when it is a console program,
+ * duplicates of them (`consoleOnly`), and none when it is a window program,
+ * as Windows decides by the image's subsystem; a window program has no
+ * console, so a console handle handed it is NULL there.
+ *
+ * @param {any} options
+ * @returns {{ inherited: { handle: number, type: string, object: any }[],
+ *     standard: { input?: number, output?: number, error?: number } | undefined }}
+ */
+function handedDown(options){
+    /** @type {any[]} */
+    const all = options.inheritedHandles ?? [
+        ...(options.pipeEnds ?? []).map((/** @type {any} */ end)=>({
+            handle: end.handle, type: 'pipe', object: pipeStandIn(end.handle, end) })),
+        ...options.inheritedFiles ?? []];
+    if (!options.consoleHandles && !options.standardHandles)
+    {
+        return { inherited: all, standard: undefined };
+    }
+    const kind = options.executable ? imageKind(options.executable) : null;
+    const consoleProgram = kind?.kind === 'pe' && kind.subsystem === IMAGE_SUBSYSTEM_WINDOWS_CUI;
+    for (const one of all)
+    {
+        if (one.consoleOnly && !consoleProgram)
+        {
+            one.drop?.();
+        }
+    }
+    /** @type {Record<string, number>} */
+    const named = options.standardHandles
+        ?? (consoleProgram ? options.consoleHandles : { input: 0, output: 0, error: 0 });
+    return { inherited: all.filter(one=>consoleProgram || !one.consoleOnly),
+        standard: consoleProgram ? named : Object.fromEntries(Object.entries(named)
+            .map(([which, handle])=>[which, CONSOLE_STANDARD.has(handle) ? 0 : handle])) };
+}
+
 /**
  * One machine, running one image.
  *
@@ -4852,6 +4902,8 @@ const TRACED_KEPT = 200;
  * @returns {Promise<any>} an AppController
  */
 async function buildApp(options){
+    // What its parent handed it, and which are its standard handles.
+    const handed = handedDown(options);
     /**
      * The libraries this build synthesises, once their table is made: a file
      * call the modules make while they are being built (the standard
@@ -6145,11 +6197,8 @@ async function buildApp(options){
             // The handles a parent's CreateProcess handed down: the objects
             // themselves on this thread; across, stand-ins of its pipe ends and
             // its open files as values, their position the parent's.
-            inheritedHandles: options.inheritedHandles ?? [
-                ...(options.pipeEnds ?? []).map(end=>({
-                    handle: end.handle, type: 'pipe', object: pipeStandIn(end.handle, end) })),
-                ...options.inheritedFiles ?? []],
-            standardHandles: options.standardHandles,
+            inheritedHandles: handed.inherited,
+            standardHandles: handed.standard,
             startup: options.startup,
             // A child's variables, as its parent handed them on; absent, the
             // machine's own.
@@ -9007,9 +9056,9 @@ async function buildApp(options){
         currentDirectory: filesystem.currentDirectory(),
         // The standard handles its parent handed it, which RTL_USER_PROCESS_
         // PARAMETERS carries as GetStdHandle answers them; none otherwise.
-        standardHandles: { input: options.standardHandles?.input ?? 0,
-            output: options.standardHandles?.output ?? 0,
-            error: options.standardHandles?.error ?? 0 },
+        standardHandles: { input: handed.standard?.input ?? 0,
+            output: handed.standard?.output ?? 0,
+            error: handed.standard?.error ?? 0 },
         // Every module loaded by the time the first instruction runs: the
         // system libraries it imports and theirs, everything the program
         // shipped, and the program's own image -- PEB->Ldr walked before a
@@ -13478,6 +13527,7 @@ export async function createApp(options){
                         // Its pipe ends by number, and which are its standard handles.
                         pipeEnds,
                         standardHandles: request.standardHandles,
+                        consoleHandles: request.consoleHandles,
                         // The run tells the player the game is over, once.
                         exitNotice: false,
                         log: { categories: options.log?.categories,
@@ -13731,10 +13781,12 @@ export async function createApp(options){
             handle=>link.callWaiting('parent', 'position', [asked.id, handle]),
             (handle, at)=>link.callWaiting('parent', 'setPosition', [asked.id, handle, at]));
         const crossed = new Set(files.map(one=>one.handle));
+        /** @param {Record<string, number> | undefined} named */
+        const crossedOf = named=>named && Object.fromEntries(Object.entries(named)
+            .filter(([, handle])=>crossed.has(handle)));
         const request = { ...asked, inheritedHandles: files, inheritedFiles: undefined,
-            standardHandles: asked.standardHandles && Object.fromEntries(
-                Object.entries(asked.standardHandles)
-                    .filter(([, handle])=>crossed.has(handle))) };
+            standardHandles: crossedOf(asked.standardHandles),
+            consoleHandles: crossedOf(asked.consoleHandles) };
         startAcross({
             // Read from the run's volume, where the parent found it: a launcher
             // that starts its game and exits is gone before the game's image
@@ -13835,6 +13887,7 @@ export async function createApp(options){
                 // of its handles are its standard ones.
                 inheritedFiles: crossingFiles(request.inheritedHandles),
                 standardHandles: request.standardHandles,
+                consoleHandles: request.consoleHandles,
                 arena: sound?.options.beside.arena ?? null,
             });
             if (placed)
@@ -13901,6 +13954,7 @@ export async function createApp(options){
                         // Objects, which only a child on this thread can hold.
                         inheritedHandles: request.inheritedHandles,
                         standardHandles: request.standardHandles,
+                        consoleHandles: request.consoleHandles,
                         startDirectory: request.startDirectory,
                         startup: request.startup ?? null,
                         parentProcessId: request.parentId ?? 0,

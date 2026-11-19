@@ -3673,11 +3673,14 @@ export function createNamedPipes(host){
          * child's handle is taken here, held until the child claims it
          * (`claimInherited`) or never starts (`dropUnclaimed`).
          *
-         * @param {number[] | null} only
+         * With `every`, those `only` names whether inheritable or not: the
+         * standard handles a console child is handed duplicates of.
+         *
+         * @param {number[] | null} only @param {boolean} [every]
          * @returns {InheritedEnd[]}
          */
-        inherited(only){
-            return [...inheritable].filter(([handle, on])=>on
+        inherited(only, every = false){
+            return [...inheritable].filter(([handle, on])=>(on || every)
                 && (only === null || only.includes(handle)))
                 .flatMap(([handle])=>{
                     const end = endOf(handle);

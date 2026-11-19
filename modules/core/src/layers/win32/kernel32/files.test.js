@@ -3578,6 +3578,19 @@ test('CopyFile reads sharing everything and writes sharing all but deletion, ref
     assert.equal(error.code, 32, 'ERROR_SHARING_VIOLATION');
 });
 
+test('CONIN$ and CONOUT$ open as the console\'s own input and output', ()=>{
+    // A program that opens the console by name (a runtime does when its
+    // standard handles were redirected) writes to the same console its
+    // GetStdHandle answers for; it failed with INVALID_HANDLE_VALUE.
+    const { fns, at } = setup();
+    for (const [name, expected] of /** @type {[string, number][]} */ ([['CONIN$', 1],
+        ['conout$', 2], ['\\\\.\\CONOUT$', 2], ['C:\\App\\CONIN$', 1]]))
+    {
+        assert.equal(fns.CreateFileA.handler([at(NAME, name), GENERIC_READ | GENERIC_WRITE,
+            0, 0, OPEN_EXISTING, 0, 0]), expected, name);
+    }
+});
+
 test('NUL opens anywhere, reads as its end, swallows writes, and is found as itself', ()=>{
     const { memory, error, fns, at, files } = setup();
     const handle = fns.CreateFileA.handler([at(NAME, '\\\\.\\NUL'), GENERIC_READ | GENERIC_WRITE,

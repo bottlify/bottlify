@@ -17,6 +17,7 @@ import { overlappedLayout } from '../common/overlapped.js';
 import { EVENT_SLOTS, EVENT_WORD_SLOTS, MUTEX_SLOTS, SEMAPHORE_SLOTS, eventStateCode,
     releaseMutexCode, waitOneCode } from './wait-one.js';
 import { COMPILED as SEMAPHORE_CODE } from './semaphore-guest.x86.js';
+import { HANDLE_STDERR, HANDLE_STDIN, HANDLE_STDOUT } from './console.js';
 
 /**
  * The kernel32 surface a threaded program calls.
@@ -38,6 +39,9 @@ import { COMPILED as SEMAPHORE_CODE } from './semaphore-guest.x86.js';
  * @typedef {{ register: (name: string, fn: { argBytes: number, handler: Function }) => number }}
  *     PollBuilder
  */
+
+/** The console's own handles (`console.js`), which duplicate as themselves. */
+const CONSOLE_HANDLES = new Set([HANDLE_STDIN, HANDLE_STDOUT, HANDLE_STDERR]);
 
 /** Waits with this timeout never give up. */
 const INFINITE = 0xffffffff;
@@ -1504,6 +1508,14 @@ export function createThreadingFunctions(host){
                     host.writeMemory(target >>> 0, new Uint8Array([
                         taken & 0xff, taken >>> 8 & 0xff, taken >>> 16 & 0xff, taken >>> 24 & 0xff,
                     ]));
+                    return 1;
+                }
+                // The console's own handles are the console wherever they are
+                // held: a duplicate is the same handle, as Windows 7 hands a
+                // console handle (a pseudo value) back.
+                if (CONSOLE_HANDLES.has(source >>> 0) && target !== 0)
+                {
+                    host.writeMemory(target >>> 0, new Uint8Array([source >>> 0, 0, 0, 0]));
                     return 1;
                 }
                 const held = object(source >>> 0);

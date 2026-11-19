@@ -94,12 +94,13 @@ const NE_EXETYPE = 0x36;
  * 'not-mz' for none at all, 'unreadable' for a new header that is not in the
  * file or carries no signature it knows, 'ne' (with its target system) for a
  * 16-bit one, 'pe' for a PE image - with `bits` from its optional header's
- * magic, null when the magic is neither. What a section refuses an image with
- * follows from it (kernel32/mapping.js).
+ * magic, null when the magic is neither, and its Subsystem (null past the
+ * file's end). What a section refuses an image with follows from it
+ * (kernel32/mapping.js).
  *
  * @param {Uint8Array} bytes
  * @returns {{ kind: 'not-mz' | 'unreadable' } | { kind: 'ne', system: number }
- *     | { kind: 'pe', bits: 32 | 64 | null, machine: number }}
+ *     | { kind: 'pe', bits: 32 | 64 | null, machine: number, subsystem: number | null }}
  */
 export function imageKind(bytes){
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -121,8 +122,10 @@ export function imageKind(bytes){
         return { kind: 'unreadable' };
     }
     const magic = view.getUint16(at + 24, true);
+    // The optional header's Subsystem, at one offset in both widths.
+    const subsystem = at + 24 + 70 <= bytes.length ? view.getUint16(at + 24 + 68, true) : null;
     return { kind: 'pe', machine: view.getUint16(at + 4, true),
-        bits: magic === PE32_MAGIC ? 32 : magic === PE32_PLUS_MAGIC ? 64 : null };
+        bits: magic === PE32_MAGIC ? 32 : magic === PE32_PLUS_MAGIC ? 64 : null, subsystem };
 }
 
 /**

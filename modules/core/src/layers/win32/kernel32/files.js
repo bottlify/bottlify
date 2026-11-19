@@ -2909,6 +2909,16 @@ export function createFileFunctions(host){
             host.setLastError(ERROR_SUCCESS);
             return host.handles.open('device', { device: 'mountmgr' });
         }
+        // The console's input and output by their names (CONIN$, CONOUT$, in
+        // any directory or as \\.\CONIN$): the console's own handles, the ones
+        // GetStdHandle answers for a process that was handed none.
+        const consoleDevice = name === 0 ? null
+            : /^(?:\\\\\.\\|.*\\)?(CONIN|CONOUT)\$$/i.exec(text.raw(name));
+        if (consoleDevice)
+        {
+            host.setLastError(ERROR_SUCCESS);
+            return consoleDevice[1].toUpperCase() === 'CONIN' ? HANDLE_STDIN : HANDLE_STDOUT;
+        }
         // The null device, by its name in any directory or as \\.\NUL: what
         // is written to it goes nowhere, and reading it is the end at once.
         if (name !== 0 && (/^\\\\\.\\nul$/i.test(text.raw(name))

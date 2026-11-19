@@ -1652,7 +1652,7 @@ export function createWin32Module(){
                 {
                     pipes.adopted(inherited.handle, inherited.object, inherited);
                     // Inheritable again, as GetHandleInformation reads it.
-                    handleFlags.set(inherited.handle, 1);
+                    handleFlags.set(inherited.handle, /** @type {any} */ (inherited).flags ?? 1);
                 }
                 // The parent's open file, under its number and rights: the
                 // reference its CreateProcess took is this handle's.
@@ -1662,7 +1662,7 @@ export function createWin32Module(){
                     if (mine && kernel.handles.adopt(inherited.handle, 'file', mine,
                         inherited.access ?? null))
                     {
-                        handleFlags.set(inherited.handle, 1);
+                        handleFlags.set(inherited.handle, /** @type {any} */ (inherited).flags ?? 1);
                     }
                     else if (mine)
                     {
@@ -1675,7 +1675,7 @@ export function createWin32Module(){
                 else if (INHERITED_KINDS.has(inherited.type)
                     && kernel.handles.adopt(inherited.handle, inherited.type, inherited.object))
                 {
-                    handleFlags.set(inherited.handle, 1);
+                    handleFlags.set(inherited.handle, /** @type {any} */ (inherited).flags ?? 1);
                 }
             }
 
@@ -4246,6 +4246,15 @@ export function createWin32Module(){
                         inheritable: handle=>void handleFlags.set(handle, 1),
                         standardHandle: which=>/** @type {any} */ (libraries['KERNEL32.dll'])
                             .GetStdHandle.handler([which]),
+                        // The open files and pipe ends among these, inheritable or
+                        // not, each with its flags: duplicates a console child takes.
+                        duplicates: asked=>asked.flatMap(handle=>{
+                            const type = kernel.handles.typeOf(handle);
+                            const flags = handleFlags.get(handle) ?? 0;
+                            const found = type === 'file' ? [inheritedFile(handle)]
+                                : pipes.inherited([handle], true);
+                            return found.map(one=>Object.assign(one, { flags }));
+                        }),
                         kernel,
                         processId,
                         readMemory,
