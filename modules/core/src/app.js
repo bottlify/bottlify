@@ -2644,6 +2644,12 @@ const ERROR_BAD_EXE_FORMAT = 193;
 const ERROR_NOT_ENOUGH_MEMORY = 8;
 /** LoadLibrary's error for a library whose initialisation failed or raised. */
 const ERROR_DLL_INIT_FAILED = 1114;
+/** A data file named by a path that is not there, as CreateFile answers it. */
+const ERROR_FILE_NOT_FOUND = 2;
+/** A file another holds open without sharing reading. */
+const ERROR_SHARING_VIOLATION = 32;
+/** An empty file, which no view can be made of. */
+const ERROR_FILE_INVALID = 1006;
 /** A page: a view of a file is mapped in whole ones. */
 const PAGE_SIZE = 0x1000;
 
@@ -3005,15 +3011,21 @@ export const WHOLE_READ_BYTES = HEAP_POOLS.blockCache / 4;
  * @param {any} blocks
  * @param {string} path
  * @param {number} [piece]  the most one read asks for
+ * @param {(code: string | undefined) => void} [refused]  Told why a file was
+ *     not opened (the volume's error code: SHARING_VIOLATION for one held open
+ *     for writing), for a caller that answers each reason apart.
  * @returns {Promise<Uint8Array | null>}
  */
-export async function readWholeFile(filesystem, blocks, path, piece = WHOLE_READ_BYTES){
+export async function readWholeFile(filesystem, blocks, path, piece = WHOLE_READ_BYTES,
+    refused = undefined)
+{
     let handle;
     try
     {
         handle = filesystem.open(path, { shareDelete: true });
     }
-    catch {
+    catch (e){
+        refused?.(/** @type {any} */ (e)?.code);
         return null;
     }
 
@@ -5100,6 +5112,22 @@ async function buildApp(options){
         }
         return (/[\\/]/.test(name) ? moduleAtPath(name) : null)
             ?? byName.get(moduleKeyOf(name)) ?? null;
+    };
+
+    /**
+     * Whether a file, not a directory, stands at a path on the volume.
+     *
+     * @param {string} path
+     */
+    const standsAt = path=>{
+        try
+        {
+            const entry = core.api('filesystem').stat(path);
+            return Boolean(entry && !entry.directory);
+        }
+        catch {
+            return false;
+        }
     };
 
     /**
@@ -7651,7 +7679,13 @@ async function buildApp(options){
             if (wanted !== undefined)
             {
                 return (async()=>{
-                    const file = await readWholeFile(filesystem, blocks, wanted);
+                    const file = await readWholeFile(filesystem, blocks, wanted,
+                        undefined, code=>{
+                            if (code === 'SHARING_VIOLATION')
+                            {
+                                loadErrors.set(key, ERROR_SHARING_VIOLATION);
+                            }
+                        });
                     if (!file)
                     {
                         events.emit('library-missing', { name, path: wanted });
@@ -8046,8 +8080,16 @@ async function buildApp(options){
      * @returns {number | Promise<number>}
      */
     const loadAsData = (name, flags, only = undefined)=>{
+        const key = name.toLowerCase().replace(/\.dll$/, '');
+        loadErrors.delete(key);
         const named = findModule(name);
-        const loaded = answersPath(name, named, only) ? named : null;
+        // A path is a file: one of ours answers it in the system directory,
+        // where Windows has it, or where a file of it stands.
+        const directory = name.slice(0,
+            Math.max(name.lastIndexOf('\\'), name.lastIndexOf('/')) + 1);
+        const loaded = answersPath(name, named, only)
+            && (!/[\\/]/.test(name) || named?.fromFile || standsAt(name)
+                || pathKey(directory) === pathKey(SYSTEM_LIBRARY_DIRECTORIES[0])) ? named : null;
         if (loaded && loaded.loaded !== false)
         {
             loaded.references = (loaded.references ?? 0) + 1;
@@ -8066,17 +8108,7 @@ async function buildApp(options){
             return handle;
         };
         const wanted = libraryCandidates(name, options.imagePath ?? 'C:\\app.exe',
-            filesystem.currentDirectory(), { only })
-            .find(candidate=>{
-                try
-                {
-                    const entry = filesystem.stat(candidate);
-                    return entry && !entry.directory;
-                }
-                catch {
-                    return false;
-                }
-            });
+            filesystem.currentDirectory(), { only }).find(standsAt);
         if (wanted === undefined)
         {
             // One of ours nothing has loaded: there is no file to view, and
@@ -8086,11 +8118,21 @@ async function buildApp(options){
                 return record({ name, base: loaded.base, image: null,
                     flat: false, region: null });
             }
+            // A path names its file, which CreateFile does not find.
+            if (/[\\/]/.test(name))
+            {
+                loadErrors.set(key, ERROR_FILE_NOT_FOUND);
+            }
             events.emit('library-missing', { name, path: 'as data' });
             return 0;
         }
         return (async()=>{
-            const file = await readWholeFile(filesystem, blocks, wanted);
+            const file = await readWholeFile(filesystem, blocks, wanted, undefined, code=>{
+                if (code === 'SHARING_VIOLATION')
+                {
+                    loadErrors.set(key, ERROR_SHARING_VIOLATION);
+                }
+            });
             let image;
             try
             {
@@ -8102,6 +8144,13 @@ async function buildApp(options){
             }
             if (!file || !image)
             {
+                // An empty file is no view; any other that is no image is
+                // refused as Windows refuses its format.
+                if (file)
+                {
+                    loadErrors.set(key, file.length === 0 ? ERROR_FILE_INVALID
+                        : ERROR_BAD_EXE_FORMAT);
+                }
                 events.emit('library-missing', { name, path: wanted, reason: 'not an image' });
                 return 0;
             }

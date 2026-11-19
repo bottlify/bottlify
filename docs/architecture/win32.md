@@ -200,9 +200,16 @@ flowchart TD
   A `DllMain` (or TLS callback) that raises on `DLL_PROCESS_ATTACH` is ended by the loader's
   own frame, and one that answers FALSE is told `DLL_PROCESS_DETACH`: either way the library is
   unloaded and `LoadLibrary` fails with `ERROR_DLL_INIT_FAILED`. A library file is read sharing
-  reading and deletion, as Windows'
-  loader opens it. `LdrRegisterDllNotification`'s callbacks hear of every library read off the
+  reading and deletion, as Windows' loader opens it: one held open for writing fails the load with
+  `ERROR_SHARING_VIOLATION`. A name's trailing spaces are dropped (`"kernel32   "` is kernel32).
+  `LdrLoadDll` with a search path ends at the first file it finds: a file no image section takes
+  answers that section's refusal, a failed `DllMain` `STATUS_DLL_INIT_FAILED`. A load as data
+  (`LOAD_LIBRARY_AS_DATAFILE`) is of a file: a path not there is `ERROR_FILE_NOT_FOUND` even when
+  a module of its name is loaded (one of the engine's answers its path in `system32`), an empty
+  file `ERROR_FILE_INVALID`, any other that is no image `ERROR_BAD_EXE_FORMAT`. `LdrRegisterDllNotification`'s callbacks hear of every library read off the
   volume after it is mapped and before its `DllMain`, and on unload after it.
+- **`GetProcAddress(NULL, ...)`** looks in the program's own image; what it does not export is
+  `ERROR_PROC_NOT_FOUND`.
 - **A DLL already loaded** is handed back with its count raised. A bare name finds the first module
   of that name; a path finds only the module read from that file, so a second file of a loaded
   module's name is a module of its own (the .NET Framework loads a mixed assembly's native image
