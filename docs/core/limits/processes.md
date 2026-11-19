@@ -154,9 +154,11 @@
   handle closes, or its process ends, the debuggees end (`STATUS_DEBUGGER_INACTIVE`) where it
   says `DEBUG_KILL_ON_CLOSE` (`DebugSetProcessKillOnExit`, `NtSetInformationDebugObject`) and
   go on otherwise. A child in a worker of its own cannot be attached to (refused). A breakpoint
-  shows its debugger the thread past the `int3`. Not done: waiting and continuing natively
-  (`NtWaitForDebugEvent`, `NtDebugContinue`, the `DbgUi` state changes), and
-  `WaitForDebugEvent` hears every debuggee of the process, not only those of the calling
-  thread's debug object; a debuggee's own children are not debugged under `DEBUG_PROCESS`;
+  shows its debugger the thread past the `int3`. A wait hears only the debuggees of the debug
+  object it waits on - `WaitForDebugEvent` and `ContinueDebugEvent` the calling thread's, as
+  `DbgUiWaitStateChange` and `DbgUiContinue`, `NtWaitForDebugEvent` and `NtDebugContinue` the one
+  named - and hands out the state change `DbgUiConvertStateChangeStructure` converts. Not done:
+  an alertable native wait is not ended by an APC; a debuggee's own children are not debugged
+  under `DEBUG_PROCESS`;
   hardware breakpoints and the trap flag raise nothing; a 64-bit debuggee reports neither its
   start nor its exceptions; `hFile` and `lpImageName` are always null.

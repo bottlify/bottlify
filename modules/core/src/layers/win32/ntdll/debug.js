@@ -8,12 +8,11 @@
  * The debugging interface's own calls: the thread's debug object in its
  * thread block, the breakpoint and the debug print.
  *
- * The debug objects themselves - made, set, attached through, removed - are
+ * The debug objects themselves - made, set, attached through, waited on,
+ * continued through, removed, and the state changes DbgUi converts - are
  * kernel32's (`kernel32/debug-events.js`, published as natives), one with
- * its debuggers' and debuggees' records. Waiting on one and continuing
- * through it natively (NtWaitForDebugEvent, NtDebugContinue and the state
- * changes DbgUi converts) is not made, and the system's own debug channel
- * is not implemented.
+ * its debuggers' and debuggees' records. The system's own debug channel is
+ * not implemented.
  *
  * Two calls are real. DbgBreakPoint is the processor's breakpoint -- an
  * `int3` in the library's own code, raised through the same fault path any
@@ -251,31 +250,6 @@ export function createDebugFunctions(host){
         /** NTSTATUS DbgUiIssueRemoteBreakin(HANDLE Process) */
         DbgUiIssueRemoteBreakin: refuse('DbgUiIssueRemoteBreakin',
             { argBytes: 4, answer: STATUS.NOT_IMPLEMENTED, why }),
-
-        /**
-         * NTSTATUS DbgUiConvertStateChangeStructure(PDBGUI_WAIT_STATE_CHANGE,
-         *                                           LPDEBUG_EVENT)
-         *
-         * Nothing here ever hands out a state change, so whatever is passed
-         * is not one: the system's answer for a state it does not know.
-         */
-        DbgUiConvertStateChangeStructure: refuse('DbgUiConvertStateChangeStructure',
-            { argBytes: 8, answer: STATUS.UNSUCCESSFUL, why }),
-
-        // The waits and answers through a debug object, not made: a handle
-        // is answered as none. kernel32's WaitForDebugEvent and
-        // ContinueDebugEvent are the debugger's way here.
-
-        /** NTSTATUS NtDebugContinue(HANDLE DebugObject, PCLIENT_ID, NTSTATUS) */
-        NtDebugContinue: refuse('NtDebugContinue',
-            { argBytes: 12, answer: STATUS.INVALID_HANDLE, why }),
-
-        /**
-         * NTSTATUS NtWaitForDebugEvent(HANDLE DebugObject, BOOLEAN Alertable,
-         *   PLARGE_INTEGER Timeout, PDBGUI_WAIT_STATE_CHANGE StateChange)
-         */
-        NtWaitForDebugEvent: refuse('NtWaitForDebugEvent',
-            { argBytes: 16, answer: STATUS.INVALID_HANDLE, why }),
 
         /**
          * NTSTATUS NtSystemDebugControl(SYSDBG_COMMAND, PVOID, ULONG, PVOID, ULONG,

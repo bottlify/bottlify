@@ -13,14 +13,21 @@
  * The child reports an event as values (`DebugReport`) through the way its
  * parent hears from it wherever it runs - on this thread, or in a worker of
  * its own - and waits for the answer: the status ContinueDebugEvent gave.
- * Here each debuggee has a queue; WaitForDebugEvent takes the first event of a
- * debuggee with none outstanding, writes its DEBUG_EVENT with handles opened
- * in this process, and ContinueDebugEvent answers it. A debuggee's exit is
- * reported here when its parent hears of it, and needs no answer.
+ * Here each debuggee has a queue and the debug object it reports to. A wait
+ * through a debug object - NtWaitForDebugEvent, DbgUiWaitStateChange on the
+ * calling thread's, WaitForDebugEvent through it - takes the first event of
+ * one of that object's debuggees with none outstanding, as the state change
+ * Windows' kernel hands out (DBGUI_WAIT_STATE_CHANGE, with handles opened in
+ * this process); WaitForDebugEvent writes it as DEBUG_EVENT through the one
+ * conversion DbgUiConvertStateChangeStructure makes. A continue through the
+ * same object (NtDebugContinue, DbgUiContinue, ContinueDebugEvent) answers
+ * it. A debuggee's exit is reported here when its parent hears of it, and
+ * needs no answer.
  */
 
 import { DEBUG_ATTACH, DEBUG_BREAK, askChild, childThread } from './cross-process.js';
 import { untagged } from './handle-tags.js';
+import { dueInMs, readLargeInteger } from './due-time.js';
 
 /** dwDebugEventCode (winbase.h). */
 export const DEBUG_EVENT = /** @type {const} */ ({
@@ -47,6 +54,31 @@ const UNION = 12;
 /** EXCEPTION_RECORD's size, after which EXCEPTION_DEBUG_INFO keeps dwFirstChance. */
 const EXCEPTION_RECORD_SIZE = 80;
 const EXCEPTION_MAXIMUM_PARAMETERS = 15;
+
+/**
+ * A 32-bit DBGUI_WAIT_STATE_CHANGE: its state, the client id, then the union,
+ * of which DBGKM_EXCEPTION (the record and FirstChance) is the largest.
+ */
+const STATE_CHANGE_SIZE = 96;
+/** DBG_STATE (ntdbg.h). */
+const DBG_STATE = /** @type {const} */ ({
+    CREATE_THREAD: 2,
+    CREATE_PROCESS: 3,
+    EXIT_THREAD: 4,
+    EXIT_PROCESS: 5,
+    EXCEPTION: 6,
+    BREAKPOINT: 7,
+    SINGLE_STEP: 8,
+    LOAD_DLL: 9,
+    UNLOAD_DLL: 10,
+});
+const STATUS_BREAKPOINT = 0x80000003;
+const STATUS_SINGLE_STEP = 0x80000004;
+/** The exceptions OutputDebugString raises, which the conversion makes its event. */
+const DBG_PRINTEXCEPTION_C = 0x40010006;
+const DBG_PRINTEXCEPTION_WIDE_C = 0x4001000a;
+const STATUS_TIMEOUT = 0x102;
+const STATUS_UNSUCCESSFUL = 0xc0000001;
 
 const INFINITE = 0xffffffff;
 /** GetCurrentProcess()'s pseudo-handle. */
@@ -178,6 +210,82 @@ export function mergeContextGroups(into, given){
 }
 
 /**
+ * A 32-bit DBGUI_WAIT_STATE_CHANGE as the DEBUG_EVENT it stands for
+ * (DbgUiConvertStateChangeStructure): the exception OutputDebugString raises
+ * becomes OUTPUT_DEBUG_STRING_EVENT, a breakpoint and a single step are
+ * exceptions again; null for a state that is no event.
+ *
+ * @param {Uint8Array} state
+ * @returns {Uint8Array | null}
+ */
+export function convertStateChange(state){
+    const from = new DataView(state.buffer, state.byteOffset, STATE_CHANGE_SIZE);
+    const event = new Uint8Array(DEBUG_EVENT_SIZE);
+    const to = new DataView(event.buffer);
+    /** @param {number} at */
+    const read = at=>from.getUint32(UNION + at, true);
+    /** @param {number} at @param {number} value */
+    const put = (at, value)=>to.setUint32(UNION + at, value >>> 0, true);
+    to.setUint32(4, from.getUint32(4, true), true);
+    to.setUint32(8, from.getUint32(8, true), true);
+    switch (from.getUint32(0, true))
+    {
+        case DBG_STATE.CREATE_THREAD:
+            to.setUint32(0, DEBUG_EVENT.CREATE_THREAD, true);
+            put(0, read(0));
+            put(8, read(8));
+            break;
+        case DBG_STATE.CREATE_PROCESS:
+            to.setUint32(0, DEBUG_EVENT.CREATE_PROCESS, true);
+            put(0, read(12));
+            put(4, read(0));
+            put(8, read(4));
+            put(12, read(16));
+            put(16, read(20));
+            put(20, read(24));
+            put(28, read(32));
+            break;
+        case DBG_STATE.EXIT_THREAD:
+        case DBG_STATE.EXIT_PROCESS:
+            to.setUint32(0, from.getUint32(0, true) === DBG_STATE.EXIT_THREAD
+                ? DEBUG_EVENT.EXIT_THREAD : DEBUG_EVENT.EXIT_PROCESS, true);
+            put(0, read(0));
+            break;
+        case DBG_STATE.LOAD_DLL:
+            to.setUint32(0, DEBUG_EVENT.LOAD_DLL, true);
+            put(0, read(0));
+            put(4, read(4));
+            put(8, read(8));
+            put(12, read(12));
+            put(16, read(16));
+            break;
+        case DBG_STATE.UNLOAD_DLL:
+            to.setUint32(0, DEBUG_EVENT.UNLOAD_DLL, true);
+            put(0, read(0));
+            break;
+        case DBG_STATE.EXCEPTION:
+        case DBG_STATE.BREAKPOINT:
+        case DBG_STATE.SINGLE_STEP: {
+            const code = read(0);
+            if (code === DBG_PRINTEXCEPTION_C || code === DBG_PRINTEXCEPTION_WIDE_C)
+            {
+                to.setUint32(0, DEBUG_EVENT.OUTPUT_DEBUG_STRING, true);
+                put(0, read(24));
+                to.setUint16(UNION + 4, code === DBG_PRINTEXCEPTION_WIDE_C ? 1 : 0, true);
+                to.setUint16(UNION + 6, Math.min(read(20), 0xffff), true);
+                break;
+            }
+            to.setUint32(0, DEBUG_EVENT.EXCEPTION, true);
+            event.set(state.subarray(UNION, UNION + EXCEPTION_RECORD_SIZE + 4), UNION);
+            break;
+        }
+        default:
+            return null;
+    }
+    return event;
+}
+
+/**
  * @typedef {Object} DebuggerHost
  * @property {any} kernel
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
@@ -205,16 +313,22 @@ export function mergeContextGroups(into, given){
  */
 export function createDebuggerFunctions(host){
     const { kernel } = host;
-    /** The threads waiting in WaitForDebugEvent, with where each wants its event. */
-    /** @type {{ thread: any, out: number }[]} */
+    /**
+     * The threads waiting on a debug object, each with how its event is
+     * written and what it wakes with; `win32` for WaitForDebugEvent, which
+     * says a time-out as ERROR_SEM_TIMEOUT.
+     *
+     * @type {{ thread: any, object: DebugObject,
+     *     write: (state: Uint8Array) => void, woken: number, win32: boolean }[]}
+     */
     let waiting = [];
 
-    // A WaitForDebugEvent that ran out of time hears nothing more and says
-    // ERROR_SEM_TIMEOUT.
+    // A wait that ran out of time hears nothing more: WaitForDebugEvent says
+    // ERROR_SEM_TIMEOUT, the native wait answers STATUS_TIMEOUT.
     kernel.onTimeout?.((/** @type {any} */ thread)=>{
-        const before = waiting.length;
+        const gone = waiting.find(waiter=>waiter.thread === thread);
         waiting = waiting.filter(waiter=>waiter.thread !== thread);
-        if (waiting.length < before)
+        if (gone?.win32)
         {
             host.setLastErrorFor?.(thread, ERROR_SEM_TIMEOUT);
         }
@@ -353,17 +467,20 @@ export function createDebuggerFunctions(host){
         kernel.handles.open('process-thread', childThread(child, threadId));
 
     /**
-     * Writes a debuggee's event as DEBUG_EVENT at `out`, opening here the
-     * handles it carries.
+     * A debuggee's event as the state change a wait through its debug object
+     * hands out (DBGUI_WAIT_STATE_CHANGE), opening here the handles it
+     * carries. OutputDebugString's string is the exception it raises.
      *
-     * @param {number} out @param {any} child @param {DebugReport} report
+     * @param {any} child @param {DebugReport} report
+     * @returns {Uint8Array}
      */
-    const writeEvent = (out, child, report)=>{
-        const bytes = new Uint8Array(DEBUG_EVENT_SIZE);
+    const stateChangeOf = (child, report)=>{
+        const bytes = new Uint8Array(STATE_CHANGE_SIZE);
         const view = new DataView(bytes.buffer);
         /** @param {number} at @param {number} value */
         const put = (at, value)=>view.setUint32(UNION + at, value >>> 0, true);
-        view.setUint32(0, report.code, true);
+        /** @param {number} value */
+        const state = value=>view.setUint32(0, value, true);
         view.setUint32(4, child.id >>> 0, true);
         view.setUint32(8, report.threadId >>> 0, true);
         switch (report.code)
@@ -372,7 +489,10 @@ export function createDebuggerFunctions(host){
                 const exception = /** @type {NonNullable<DebugReport['exception']>} */ (
                     report.exception);
                 const parameters = exception.parameters.slice(0, EXCEPTION_MAXIMUM_PARAMETERS);
-                put(0, exception.code);
+                const code = exception.code >>> 0;
+                state(code === STATUS_BREAKPOINT ? DBG_STATE.BREAKPOINT
+                    : code === STATUS_SINGLE_STEP ? DBG_STATE.SINGLE_STEP : DBG_STATE.EXCEPTION);
+                put(0, code);
                 put(4, exception.flags);
                 put(12, exception.address);
                 put(16, parameters.length);
@@ -380,51 +500,65 @@ export function createDebuggerFunctions(host){
                 put(EXCEPTION_RECORD_SIZE, exception.firstChance ? 1 : 0);
                 break;
             }
+            case DEBUG_EVENT.OUTPUT_DEBUG_STRING:
+                state(DBG_STATE.EXCEPTION);
+                put(0, report.string?.unicode ? DBG_PRINTEXCEPTION_WIDE_C : DBG_PRINTEXCEPTION_C);
+                put(16, 2);
+                put(20, report.string?.length ?? 0);
+                put(24, report.string?.address ?? 0);
+                put(EXCEPTION_RECORD_SIZE, 1);
+                break;
             case DEBUG_EVENT.CREATE_THREAD:
+                state(DBG_STATE.CREATE_THREAD);
                 put(0, threadHandle(child, report.threadId));
                 put(8, report.start ?? 0);
                 break;
             case DEBUG_EVENT.CREATE_PROCESS:
-            // No file is handed over (hFile NULL, which the structure allows);
-            // the process and thread are handles of the debugger's own.
-                put(4, kernel.handles.open('process', child));
-                put(8, threadHandle(child, report.threadId));
-                put(12, report.base ?? 0);
-                put(28, report.start ?? 0);
+                // No file is handed over (FileHandle NULL, which the
+                // structure allows); the process and thread are handles of
+                // the debugger's own.
+                state(DBG_STATE.CREATE_PROCESS);
+                put(0, kernel.handles.open('process', child));
+                put(4, threadHandle(child, report.threadId));
+                put(16, report.base ?? 0);
+                put(32, report.start ?? 0);
                 break;
             case DEBUG_EVENT.EXIT_THREAD:
             case DEBUG_EVENT.EXIT_PROCESS:
+                state(report.code === DEBUG_EVENT.EXIT_THREAD ? DBG_STATE.EXIT_THREAD
+                    : DBG_STATE.EXIT_PROCESS);
                 put(0, report.exitCode ?? 0);
                 break;
             case DEBUG_EVENT.LOAD_DLL:
+                state(DBG_STATE.LOAD_DLL);
                 put(4, report.base ?? 0);
                 break;
             case DEBUG_EVENT.UNLOAD_DLL:
+                state(DBG_STATE.UNLOAD_DLL);
                 put(0, report.base ?? 0);
-                break;
-            case DEBUG_EVENT.OUTPUT_DEBUG_STRING:
-                put(0, report.string?.address ?? 0);
-                view.setUint16(UNION + 4, report.string?.unicode ? 1 : 0, true);
-                view.setUint16(UNION + 6, Math.min(report.string?.length ?? 0, 0xffff), true);
                 break;
             default:
                 break;
         }
-        host.writeMemory(out >>> 0, bytes);
+        return bytes;
     };
 
     /**
-     * The first event of a debuggee with none outstanding, made its
-     * outstanding one; null when there is none to take.
+     * The first event of one of a debug object's debuggees with none
+     * outstanding, made its outstanding one, as its state change; null when
+     * there is none to take.
+     *
+     * @param {DebugObject} object
      */
-    const take = ()=>{
+    const take = object=>{
         for (const child of debuggees())
         {
             const { debugged } = child;
-            if (debugged.current === null && debugged.events.length > 0)
+            if (debugged.object === object && debugged.current === null
+                && debugged.events.length > 0)
             {
                 debugged.current = debugged.events.shift();
-                return { child, report: debugged.current.report };
+                return stateChangeOf(child, debugged.current.report);
             }
         }
         return null;
@@ -432,17 +566,117 @@ export function createDebuggerFunctions(host){
 
     /** Hands the events there are to the threads waiting for one. */
     const serve = ()=>{
-        while (waiting.length > 0)
+        for (const waiter of [...waiting])
         {
-            const taken = take();
-            if (!taken)
+            const state = take(waiter.object);
+            if (state)
             {
-                return;
+                waiting = waiting.filter(each=>each !== waiter);
+                waiter.write(state);
+                kernel.wake(waiter.thread, waiter.woken);
             }
-            const waiter = /** @type {{ thread: any, out: number }} */ (waiting.shift());
-            writeEvent(waiter.out, taken.child, taken.report);
-            kernel.wake(waiter.thread, 1);
         }
+    };
+
+    /**
+     * Waits through a debug object for its next event, written by `write`:
+     * at once when there is one, else for as long as `timeout` (milliseconds,
+     * INFINITE for ever) allows.
+     *
+     * @param {DebugObject} object @param {number} timeout
+     * @param {(state: Uint8Array) => void} write
+     * @param {{ woken: number, expired: number, win32: boolean }} answers
+     *        what the wait answers with an event and without one
+     * @returns {number | Promise<number>}
+     */
+    const waitOn = (object, timeout, write, { woken, expired, win32 })=>{
+        const state = take(object);
+        if (state)
+        {
+            write(state);
+            return woken;
+        }
+        if (timeout === 0)
+        {
+            if (win32)
+            {
+                host.setLastError?.(ERROR_SEM_TIMEOUT);
+            }
+            return expired;
+        }
+        const thread = host.currentThread();
+        waiting.push({ thread, object, write, woken, win32 });
+        kernel.block(thread, 'debug event', timeout === INFINITE ? undefined
+            : { deadline: kernel.clock.virtualTime() + timeout, result: expired });
+        return host.park(thread);
+    };
+
+    /**
+     * Continues the outstanding event of a debuggee of `object` that this
+     * process and thread reported, with `status`; false when there is none.
+     *
+     * @param {DebugObject} object @param {number} processId @param {number} threadId
+     * @param {number} status
+     */
+    const continueEvent = (object, processId, threadId, status)=>{
+        const child = debuggees().find(each=>each.debugged.object === object
+            && (each.id >>> 0) === (processId >>> 0)
+            && each.debugged.current?.report.threadId === (threadId >>> 0));
+        if (!child)
+        {
+            return false;
+        }
+        const { answer } = child.debugged.current;
+        child.debugged.current = null;
+        answer(status);
+        serve();
+        return true;
+    };
+
+    /** @param {number} address @param {number} length */
+    const read = (address, length)=>/** @type {NonNullable<DebuggerHost['readMemory']>} */ (
+        host.readMemory)(address >>> 0, length).slice();
+
+    /**
+     * A native timeout (a LARGE_INTEGER, NULL for none) in milliseconds.
+     *
+     * @param {number} pointer
+     */
+    const timeoutAt = pointer=>((pointer >>> 0) === 0 ? INFINITE
+        : Math.min(Math.ceil(dueInMs(readLargeInteger(read, pointer),
+            kernel.clock.wallClock?.() ?? 0)), INFINITE - 1));
+
+    /**
+     * NtWaitForDebugEvent's wait, on a debug object: STATUS_SUCCESS with the
+     * state change written, STATUS_TIMEOUT when none came in time. An
+     * alertable wait waits as one that is not, which is said.
+     *
+     * @param {DebugObject} object @param {number} alertable @param {number} timeout
+     * @param {number} out
+     */
+    const nativeWait = (object, alertable, timeout, out)=>{
+        if ((alertable & 0xff) !== 0)
+        {
+            host.divergence?.('NtWaitForDebugEvent', 'an alertable wait is not ended by an APC');
+        }
+        return waitOn(object, timeoutAt(timeout), state=>host.writeMemory(out >>> 0, state),
+            { woken: STATUS_SUCCESS, expired: STATUS_TIMEOUT, win32: false });
+    };
+
+    /**
+     * NtDebugContinue's continue, through a debug object, of the event the
+     * CLIENT_ID at `client` names.
+     *
+     * @param {DebugObject} object @param {number} client @param {number} status
+     */
+    const nativeContinue = (object, client, status)=>{
+        if (!CONTINUE_STATUSES.has(status >>> 0) || (client >>> 0) === 0)
+        {
+            return STATUS_INVALID_PARAMETER;
+        }
+        const view = new DataView(read(client, 8).buffer);
+        return continueEvent(object, view.getUint32(0, true), view.getUint32(4, true),
+            status >>> 0) ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
     };
 
     /**
@@ -512,32 +746,30 @@ export function createDebuggerFunctions(host){
             /**
              * BOOL WaitForDebugEvent(LPDEBUG_EVENT lpDebugEvent, DWORD dwMilliseconds)
              *
-             * The next event of a debuggee with none outstanding, waited for
-             * as long as asked. Nothing within the time answers
-             * ERROR_SEM_TIMEOUT.
+             * DbgUiWaitStateChange on the calling thread's debug object, its
+             * state change converted to DEBUG_EVENT: the next event of one of
+             * that object's debuggees with none outstanding, waited for as
+             * long as asked. Nothing within the time answers ERROR_SEM_TIMEOUT;
+             * a thread with no debug object has none to wait on.
              */
             WaitForDebugEvent: {
                 argBytes: 8,
                 /** @param {number[]} args */
                 handler: ([out, timeout])=>{
-                    const taken = (out >>> 0) === 0 ? null : take();
-                    if (taken)
+                    const object = threadObject();
+                    if (!object)
                     {
-                        writeEvent(out >>> 0, taken.child, taken.report);
-                        return 1;
+                        host.setLastError?.(ERROR_INVALID_HANDLE);
+                        return 0;
                     }
-                    if ((out >>> 0) === 0 || (timeout >>> 0) === 0 || debuggees().length === 0)
+                    if ((out >>> 0) === 0)
                     {
                         host.setLastError?.(ERROR_SEM_TIMEOUT);
                         return 0;
                     }
-                    const thread = host.currentThread();
-                    waiting.push({ thread, out: out >>> 0 });
-                    kernel.block(thread, 'debug event',
-                        (timeout >>> 0) === INFINITE ? undefined
-                            : { deadline: kernel.clock.virtualTime() + (timeout >>> 0),
-                                result: 0 });
-                    return host.park(thread);
+                    return waitOn(object, timeout >>> 0, state=>host.writeMemory(out >>> 0,
+                        /** @type {Uint8Array} */ (convertStateChange(state))),
+                    { woken: 1, expired: 0, win32: true });
                 },
             },
 
@@ -545,12 +777,14 @@ export function createDebuggerFunctions(host){
              * BOOL ContinueDebugEvent(DWORD dwProcessId, DWORD dwThreadId,
              *     DWORD dwContinueStatus)
              *
-             * Lets the debuggee's thread that reported the outstanding event
-             * go on with the status. A status that is none of winnt.h's DBG_*
-             * is a bad parameter, and so is DBG_REPLY_LATER before Windows
-             * 10's 1709, which brought it; after, it is taken as DBG_CONTINUE
-             * and that is said. No outstanding event of that process and
-             * thread is a bad parameter too.
+             * DbgUiContinue on the calling thread's debug object: lets the
+             * debuggee's thread that reported the outstanding event go on
+             * with the status. A status that is none of winnt.h's DBG_* is a
+             * bad parameter, and so is DBG_REPLY_LATER before Windows 10's
+             * 1709, which brought it; after, it is taken as DBG_CONTINUE and
+             * that is said. No outstanding event of that process and thread
+             * is a bad parameter too, and a thread with no debug object has
+             * none to continue through.
              */
             ContinueDebugEvent: {
                 argBytes: 12,
@@ -569,17 +803,17 @@ export function createDebuggerFunctions(host){
                         host.setLastError?.(ERROR_INVALID_PARAMETER);
                         return 0;
                     }
-                    const child = debuggees().find(each=>(each.id >>> 0) === (processId >>> 0)
-                        && each.debugged.current?.report.threadId === (threadId >>> 0));
-                    if (!child)
+                    const object = threadObject();
+                    if (!object)
+                    {
+                        host.setLastError?.(ERROR_INVALID_HANDLE);
+                        return 0;
+                    }
+                    if (!continueEvent(object, processId, threadId, value))
                     {
                         host.setLastError?.(ERROR_INVALID_PARAMETER);
                         return 0;
                     }
-                    const { answer } = child.debugged.current;
-                    child.debugged.current = null;
-                    answer(value);
-                    serve();
                     return 1;
                 },
             },
@@ -649,8 +883,9 @@ export function createDebuggerFunctions(host){
              * BOOL DebugActiveProcessStop(DWORD dwProcessId)
              *
              * A debuggee stops reporting and goes on: what it reported and
-             * was not continued is continued. A process not debugged here is
-             * refused as one with no debug object between them, an id naming
+             * was not continued is continued. A process the calling thread's
+             * debug object does not debug is refused as one with no debug
+             * object between them, an id naming
              * no process as a bad parameter.
              */
             DebugActiveProcessStop: {
@@ -664,7 +899,7 @@ export function createDebuggerFunctions(host){
                         host.setLastError?.(ERROR_INVALID_PARAMETER);
                         return 0;
                     }
-                    if (!child.debugged)
+                    if (!child.debugged || child.debugged.object !== threadObject())
                     {
                         host.setLastError?.(ERROR_INVALID_HANDLE);
                         return 0;
@@ -830,6 +1065,88 @@ export function createDebuggerFunctions(host){
                                 return STATUS_PORT_NOT_SET;
                             }
                             release(child, false);
+                            return STATUS_SUCCESS;
+                        },
+                    },
+
+                    /**
+                     * NTSTATUS NtWaitForDebugEvent(HANDLE DebugObject, BOOLEAN Alertable,
+                     *   PLARGE_INTEGER Timeout, PDBGUI_WAIT_STATE_CHANGE StateChange)
+                     */
+                    NtWaitForDebugEvent: {
+                        argBytes: 16,
+                        /** @param {number[]} args */
+                        handler: ([handle, alertable, timeout, out])=>{
+                            const object = objectOf(handle);
+                            return object ? nativeWait(object, alertable, timeout, out)
+                                : STATUS_INVALID_HANDLE;
+                        },
+                    },
+
+                    /**
+                     * NTSTATUS DbgUiWaitStateChange(PDBGUI_WAIT_STATE_CHANGE StateChange,
+                     *   PLARGE_INTEGER Timeout)
+                     *
+                     * NtWaitForDebugEvent, alertable, on the calling thread's
+                     * debug object.
+                     */
+                    DbgUiWaitStateChange: {
+                        argBytes: 8,
+                        /** @param {number[]} args */
+                        handler: ([out, timeout])=>{
+                            const object = threadObject();
+                            return object ? nativeWait(object, 1, timeout, out)
+                                : STATUS_INVALID_HANDLE;
+                        },
+                    },
+
+                    /**
+                     * NTSTATUS NtDebugContinue(HANDLE DebugObject, PCLIENT_ID ClientId,
+                     *   NTSTATUS ContinueStatus)
+                     */
+                    NtDebugContinue: {
+                        argBytes: 12,
+                        /** @param {number[]} args */
+                        handler: ([handle, client, status])=>{
+                            const object = objectOf(handle);
+                            return object ? nativeContinue(object, client, status)
+                                : STATUS_INVALID_HANDLE;
+                        },
+                    },
+
+                    /**
+                     * NTSTATUS DbgUiContinue(PCLIENT_ID AppClientId, NTSTATUS ContinueStatus)
+                     *
+                     * NtDebugContinue through the calling thread's debug object.
+                     */
+                    DbgUiContinue: {
+                        argBytes: 8,
+                        /** @param {number[]} args */
+                        handler: ([client, status])=>{
+                            const object = threadObject();
+                            return object ? nativeContinue(object, client, status)
+                                : STATUS_INVALID_HANDLE;
+                        },
+                    },
+
+                    /**
+                     * NTSTATUS DbgUiConvertStateChangeStructure(
+                     *   PDBGUI_WAIT_STATE_CHANGE StateChange, LPDEBUG_EVENT DebugEvent)
+                     *
+                     * The state change as the DEBUG_EVENT WaitForDebugEvent
+                     * answers (`convertStateChange`); a state that is no event
+                     * is unsuccessful.
+                     */
+                    DbgUiConvertStateChangeStructure: {
+                        argBytes: 8,
+                        /** @param {number[]} args */
+                        handler: ([state, out])=>{
+                            const event = convertStateChange(read(state, STATE_CHANGE_SIZE));
+                            if (!event)
+                            {
+                                return STATUS_UNSUCCESSFUL;
+                            }
+                            host.writeMemory(out >>> 0, event);
                             return STATUS_SUCCESS;
                         },
                     },

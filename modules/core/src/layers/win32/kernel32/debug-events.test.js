@@ -76,15 +76,27 @@ function debuggerOf(children, extra = {}, table = new Map()){
         ...extra,
     });
     const fns = /** @type {any} */ (side.functions);
+    // The children the helper made debug to this thread's debug object, as
+    // CreateProcess with DEBUG_PROCESS attaches them.
+    for (const each of children)
+    {
+        if (each.debugged?.object === UNBOUND)
+        {
+            each.debugged.object = side.connect();
+        }
+    }
     /** @param {number} at */
     const u32 = at=>view.getUint32(at, true);
     return { side, fns, errors, opened, blocked, woken, expiries, errorsFor, thread, u32, view,
         table, slot: ()=>slot };
 }
 
+/** The debug object a helper child reports to until `debuggerOf` binds it. */
+const UNBOUND = { killOnClose: true };
+
 /** @param {number} [flags] */
 const child = (flags = 1)=>({ id: 0x300, threadId: 0x304, exitCode: 259,
-    debugged: debuggeeFor(flags) });
+    debugged: debuggeeFor(flags, ()=>UNBOUND) });
 
 test('a child is a debuggee when started with DEBUG_PROCESS or DEBUG_ONLY_THIS_PROCESS', ()=>{
     assert.equal(debuggeeFor(0), null);
@@ -106,8 +118,8 @@ test('an event stops the debuggee until ContinueDebugEvent answers it with its s
     assert.equal(fns.WaitForDebugEvent.handler([0x200, 0]), 1);
     assert.deepEqual([u32(0x200), u32(0x204), u32(0x208)], [3, 0x300, 0x304]);
     assert.deepEqual([u32(0x20c), u32(0x210), u32(0x214), u32(0x218), u32(0x228)],
-        [0, 0x104, 0x108, 0x400000, 0x401000], 'no file; the process and thread opened here');
-    assert.deepEqual(opened.map(each=>each.type), ['process', 'process-thread']);
+        [0, 0x108, 0x10c, 0x400000, 0x401000], 'no file; the process and thread opened here');
+    assert.deepEqual(opened.map(each=>each.type), ['debug-object', 'process', 'process-thread']);
     await Promise.resolve();
     assert.equal(settled, null, 'stopped until continued');
     assert.equal(fns.ContinueDebugEvent.handler([0x300, 0x304, DBG_CONTINUE]), 1);
@@ -194,8 +206,7 @@ test('the exit is the debuggee\'s last event; then it is debugged no more', ()=>
     assert.deepEqual([u32(0x200), u32(0x204), u32(0x208), u32(0x20c)], [5, 0x300, 0x304, 7]);
     assert.equal(fns.ContinueDebugEvent.handler([0x300, 0x304, DBG_CONTINUE]), 1);
     assert.equal(debuggee.debugged, null);
-    assert.equal(fns.WaitForDebugEvent.handler([0x200, 0xffffffff]), 0,
-        'nobody left to hear from');
+    assert.equal(fns.WaitForDebugEvent.handler([0x200, 0]), 0, 'nothing left to hear');
     assert.equal(errors.at(-1), ERROR_SEM_TIMEOUT);
     side.exited({ id: 0x400, debugged: null });
 });
@@ -221,12 +232,13 @@ test('DebugActiveProcessStop lets the debuggee go; DebugSetProcessKillOnExit nee
     async()=>{
         const debuggee = child();
         const plain = { id: 0x310, debugged: null };
+        const none = debuggerOf([]);
+        assert.equal(none.fns.DebugSetProcessKillOnExit.handler([0]), 0, 'the thread has none');
+        assert.equal(none.errors.at(-1), ERROR_INVALID_HANDLE);
         const { side, fns, errors } = debuggerOf([debuggee, plain]);
         assert.deepEqual([fns.WaitForDebugEvent.argBytes, fns.ContinueDebugEvent.argBytes,
             fns.DebugActiveProcessStop.argBytes, fns.DebugSetProcessKillOnExit.argBytes],
         [8, 12, 4, 4]);
-        assert.equal(fns.DebugSetProcessKillOnExit.handler([0]), 0, 'the thread has none');
-        assert.equal(errors.at(-1), ERROR_INVALID_HANDLE);
         const object = side.connect();
         assert.equal(fns.DebugSetProcessKillOnExit.handler([0]), 1);
         assert.equal(object.killOnClose, false, 'set on the thread\'s debug object');
@@ -399,4 +411,76 @@ test('DebugBreakProcess breaks into a debugged process and does nothing to anoth
     assert.deepEqual(asked, [DEBUG_BREAK], 'only the debugged child is asked');
     assert.equal(fns.DebugBreakProcess.handler([0x58]), 0, 'an event is no process');
     assert.equal(errors.at(-1), ERROR_INVALID_HANDLE);
+});
+
+test('a wait hears only the debuggees of its own debug object', ()=>{
+    const ours = child();
+    const theirs = { ...child(), id: 0x320 };
+    /** @type {any} */ (theirs.debugged).object = { killOnClose: true };
+    const { side, fns, u32, errors } = debuggerOf([theirs, ours]);
+    side.deliver(theirs, { code: DEBUG_EVENT.LOAD_DLL, threadId: 0x324, base: 0x50000000 });
+    assert.equal(fns.WaitForDebugEvent.handler([0x200, 0]), 0, 'another object\'s event');
+    assert.equal(errors.at(-1), ERROR_SEM_TIMEOUT);
+    assert.equal(fns.ContinueDebugEvent.handler([0x320, 0x324, DBG_CONTINUE]), 0);
+    side.deliver(ours, { code: DEBUG_EVENT.LOAD_DLL, threadId: 0x304, base: 0x60000000 });
+    assert.equal(fns.WaitForDebugEvent.handler([0x200, 0]), 1);
+    assert.deepEqual([u32(0x204), u32(0x210)], [0x300, 0x60000000]);
+
+    const none = debuggerOf([]);
+    assert.equal(none.fns.WaitForDebugEvent.handler([0x200, 0]), 0, 'a thread with no object');
+    assert.equal(none.errors.at(-1), ERROR_INVALID_HANDLE);
+    assert.equal(none.fns.ContinueDebugEvent.handler([0x300, 0x304, DBG_CONTINUE]), 0);
+    assert.equal(none.errors.at(-1), ERROR_INVALID_HANDLE);
+});
+
+test('the native wait hands out the state change DbgUi converts to the event', async()=>{
+    const STATUS_TIMEOUT = 0x102;
+    const debuggee = child();
+    const { side, fns, u32, view, slot, blocked, woken, expiries, errorsFor, thread } =
+        debuggerOf([debuggee]);
+    const natives = fns.DebugSetProcessKillOnExit.natives;
+    const answered = side.deliver(debuggee, { code: DEBUG_EVENT.EXCEPTION, threadId: 0x304,
+        exception: { code: 0x80000003, flags: 0, address: 0x401000, parameters: [0],
+            firstChance: true } });
+    assert.equal(natives.NtWaitForDebugEvent.handler([slot(), 0, 0, 0x300]), 0);
+    assert.deepEqual([u32(0x300), u32(0x304), u32(0x308), u32(0x30c), u32(0x318), u32(0x35c)],
+        [7, 0x300, 0x304, 0x80000003, 0x401000, 1], 'DbgBreakpointStateChange');
+    assert.equal(natives.DbgUiConvertStateChangeStructure.handler([0x300, 0x400]), 0);
+    assert.deepEqual([u32(0x400), u32(0x404), u32(0x40c), u32(0x418), u32(0x45c)],
+        [1, 0x300, 0x80000003, 0x401000, 1], 'EXCEPTION_DEBUG_EVENT');
+    view.setUint32(0x500, 0x300, true);
+    view.setUint32(0x504, 0x304, true);
+    assert.equal(natives.NtDebugContinue.handler([slot(), 0x500, 0x1234]),
+        STATUS_INVALID_PARAMETER, 'no DBG_* status');
+    assert.equal(natives.DbgUiContinue.handler([0x500, DBG_EXCEPTION_NOT_HANDLED]), 0);
+    assert.equal(await answered, DBG_EXCEPTION_NOT_HANDLED);
+    assert.equal(natives.NtDebugContinue.handler([slot(), 0x500, DBG_CONTINUE]),
+        STATUS_INVALID_PARAMETER, 'nothing outstanding');
+    assert.equal(natives.NtWaitForDebugEvent.handler([0x999, 0, 0, 0x300]), STATUS_INVALID_HANDLE);
+
+    // OutputDebugString's exception converts to OUTPUT_DEBUG_STRING_EVENT.
+    side.deliver(debuggee, { code: DEBUG_EVENT.OUTPUT_DEBUG_STRING, threadId: 0x304,
+        string: { address: 0x700, length: 6, unicode: false } });
+    view.setBigInt64(0x600, -10_000n * 50n, true);
+    assert.equal(natives.DbgUiWaitStateChange.handler([0x300, 0x600]), 0);
+    assert.deepEqual([u32(0x300), u32(0x30c), u32(0x31c), u32(0x320), u32(0x324)],
+        [6, 0x40010006, 2, 6, 0x700]);
+    natives.DbgUiConvertStateChangeStructure.handler([0x300, 0x400]);
+    assert.deepEqual([u32(0x400), u32(0x40c), view.getUint16(0x410, true),
+        view.getUint16(0x412, true)], [8, 0x700, 0, 6]);
+    natives.DbgUiContinue.handler([0x500, DBG_CONTINUE]);
+    view.setUint32(0x300, 0, true);
+    assert.equal(natives.DbgUiConvertStateChangeStructure.handler([0x300, 0x400]), 0xc0000001,
+        'DbgIdle is no event');
+
+    // A wait with nothing to hand out parks; its time-out is STATUS_TIMEOUT, no last error.
+    assert.equal(natives.NtWaitForDebugEvent.handler([slot(), 0, 0x600, 0x300]), PARKED);
+    assert.deepEqual(blocked.at(-1).timed, { deadline: 1050, result: STATUS_TIMEOUT });
+    expiries.forEach(handler=>handler(thread));
+    assert.deepEqual(errorsFor, []);
+    assert.equal(natives.NtWaitForDebugEvent.handler([slot(), 0, 0, 0x300]), PARKED,
+        'NULL: for ever');
+    side.deliver(debuggee, { code: DEBUG_EVENT.UNLOAD_DLL, threadId: 0x304, base: 0x10000000 });
+    assert.deepEqual(woken.at(-1), [thread, 0], 'STATUS_SUCCESS');
+    assert.deepEqual([u32(0x300), u32(0x30c)], [10, 0x10000000], 'DbgUnloadDllStateChange');
 });

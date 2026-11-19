@@ -119,8 +119,10 @@ thread waits on an exception's answer the exception's context is its context, so
 `GetThreadContext` and `SetThreadContext` read and change the context it goes on from
 ([`kernel32/debug-events.js`](../../modules/core/src/layers/win32/kernel32/debug-events.js)). A
 debuggee belongs to its debugger's debug object, a kernel object kept in the debugging thread's
-block; with the object's last handle, or the debugger's end, its debuggees end where it says
-`DEBUG_KILL_ON_CLOSE` and go on otherwise. A child run beside its parent always carries its parent's ear and is heard only while
+block; a wait through an object hears only its debuggees, the event handed out as the state
+change the native wait gives and `WaitForDebugEvent` converted from it, and with the object's last
+handle, or the debugger's end, its debuggees end where it says `DEBUG_KILL_ON_CLOSE` and go on
+otherwise. A child run beside its parent always carries its parent's ear and is heard only while
 its record says it is debugged, so `DebugActiveProcess` attaches by marking it and asking it, as
 a cross-process call no program can name, to tell what it already is and break in on a thread of
 its own. The engine
